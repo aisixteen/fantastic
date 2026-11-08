@@ -623,7 +623,7 @@ pub fn parse_call(block: &str) -> Result<Option<ToolCall>, Malformed> {
     if !TOOLS.contains(&name.as_str()) {
         return Err(Malformed::new(format!(
             "`{name}` is not a tool — the tools are {}. A VERB goes in `<type>`: \
-             `<call name=\"send\"><target_id>…</target_id><type>{name}</type></call>`",
+             `<call name=\"send\"><routing><target_id>…</target_id></routing><payload><type>{name}</type></payload></call>`",
             TOOLS.join(", ")
         )));
     }

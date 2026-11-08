@@ -87,8 +87,8 @@ awaited. Make the call you were waiting on, or end the chain with \
 /// the system prompt instead. Every other error on this path states the fix; so
 /// does this one.
 pub const NO_TARGET_ERROR: &str = "no target_id, so nothing was dispatched — a \
-send must name the AGENT it goes to. Shape: <call name=\"send\"><target_id>agent\
-</target_id><type>verb</type></call>. Send `kernel` <type>reflect</type> for the \
+send must name the AGENT it goes to. Shape: <call name=\"send\"><routing><target_id>agent\
+</target_id></routing><payload><type>verb</type></payload></call>. Send `kernel` <type>reflect</type> for the \
 list of agent ids.";
 
 /// What a send with no payload gets told, `{target}` filled in.
@@ -2132,8 +2132,8 @@ mod tests {
         assert_eq!(
             NO_TARGET_ERROR,
             "no target_id, so nothing was dispatched — a send must name the AGENT \
-             it goes to. Shape: <call name=\"send\"><target_id>agent</target_id>\
-             <type>verb</type></call>. Send `kernel` <type>reflect</type> for the \
+             it goes to. Shape: <call name=\"send\"><routing><target_id>agent</target_id>\
+             </routing><payload><type>verb</type></payload></call>. Send `kernel` <type>reflect</type> for the \
              list of agent ids."
         );
         assert_eq!(

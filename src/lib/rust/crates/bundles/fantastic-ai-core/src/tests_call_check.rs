@@ -21,8 +21,8 @@ fn the_measured_shape_is_reported_with_the_form_to_write() {
         check(E59, 0),
         vec![format!(
             "[malformed call — nothing ran] line 3, col 1:\n  <function=call name=\"send\">\n  \
-             ^~~~~~~~~~~~~~~~~~~~~~~~~~~ not a call tag\nwrite it as:\n<call name=\"send\">\n<target_id>files</target_id>\n\
-             <type>reflect</type>\n</call>\nalso: line 2 `<tool_call>` — drop the wrapper.\n{TAIL}"
+             ^~~~~~~~~~~~~~~~~~~~~~~~~~~ not a call tag\nwrite it as:\n<call name=\"send\">\n<routing><target_id>files</target_id></routing>\n\
+             <payload><type>reflect</type></payload>\n</call>\nalso: line 2 `<tool_call>` — drop the wrapper.\n{TAIL}"
         )]
     );
 }
@@ -36,7 +36,7 @@ fn a_call_name_as_a_tag_next_to_a_good_call_says_the_good_one_ran() {
         vec![format!(
             "[malformed call — nothing ran] line 2, col 1:\n  \
              <send><target_id>b</target_id><type>read</type></send>\n  ^~~~~~ not a call tag\n\
-             write it as:\n<call name=\"send\">\n<target_id>b</target_id>\n<type>read</type>\n</call>\n\
+             write it as:\n<call name=\"send\">\n<routing><target_id>b</target_id></routing>\n<payload><type>read</type></payload>\n</call>\n\
              also: `</send>` — close with </call>.\n{TAIL}\nThe other call of this answer ran — its \
              reply is in this batch; do not write it again."
         )]
@@ -60,8 +60,8 @@ fn a_json_call_is_shown_as_tags() {
     );
     assert!(
         r.contains(
-            "write it as:\n<call name=\"send\">\n<target_id>files</target_id>\n<type>list</type>\n\
-             <path>.</path>\n</call>\n"
+            "write it as:\n<call name=\"send\">\n<routing><target_id>files</target_id></routing>\n\
+             <payload><type>list</type><path>.</path></payload>\n</call>\n"
         ),
         "{r}"
     );
@@ -80,7 +80,7 @@ fn qwen_coder_parameters_become_child_tags() {
         ),
         "{r}"
     );
-    assert!(r.contains("<call name=\"send\">\n<target_id>files</target_id>\n<type>reflect</type>"));
+    assert!(r.contains("<call name=\"send\">\n<routing><target_id>files</target_id></routing>\n<payload><type>reflect</type>"));
     assert!(
         r.contains(
             "also: `<parameter=target_id>` — one child tag per argument: <target_id>…</target_id>; \
@@ -110,7 +110,7 @@ fn arguments_with_no_call_open() {
         r.contains("^~~~~~~~~~~ an argument outside a call — open the call above it"),
         "{r}"
     );
-    assert!(r.contains("<call name=\"send\">\n<target_id>notes</target_id>\n<type>read</type>"));
+    assert!(r.contains("<call name=\"send\">\n<routing><target_id>notes</target_id></routing>\n<payload><type>read</type>"));
 }
 
 #[test]
@@ -203,9 +203,9 @@ fn the_verbs_own_arguments_carry_into_the_form_to_write() {
         .unwrap_or_default();
     assert_eq!(
         form,
-        "<call name=\"send\">\n<target_id>ai_fold</target_id>\n\
-         <title>grep for checksum</title>\n<type>grep</type>\n\
-         <query>checksum</query>\n<ids><item>32</item></ids>\n</call>",
+        "<call name=\"send\">\n<routing><target_id>ai_fold</target_id>\
+         <title>grep for checksum</title></routing>\n<payload><type>grep</type>\
+         <query>checksum</query><ids><item>32</item></ids></payload>\n</call>",
         "{}",
         r[0]
     );
@@ -249,8 +249,8 @@ fn a_call_inside_a_tool_call_wrapper_is_refused_with_the_bare_rewrite() {
         vec![format!(
             "[malformed call — nothing ran] line 2, col 1:\n  \
              <tool_call>‹call name=\"send\"><target_id>files</target_id><type>reflect</type>‹/call›</tool_call>\n  \
-             ^~~~~~~~~~~ {DROP}\nwrite it as:\n<call name=\"send\">\n<target_id>files</target_id>\n\
-             <type>reflect</type>\n</call>\n{TAIL}"
+             ^~~~~~~~~~~ {DROP}\nwrite it as:\n<call name=\"send\">\n<routing><target_id>files</target_id></routing>\n\
+             <payload><type>reflect</type></payload>\n</call>\n{TAIL}"
         )]
     );
 }
@@ -264,7 +264,7 @@ fn a_call_inside_an_arbitrary_tag_is_refused() {
         "{r}"
     );
     assert!(r.contains(&format!("  ^~~~~ {DROP}\n")), "{r}");
-    assert!(r.contains("write it as:\n<call name=\"send\">\n<target_id>files</target_id>"));
+    assert!(r.contains("write it as:\n<call name=\"send\">\n<routing><target_id>files</target_id>"));
 }
 
 /// A wrapped call with a fault inside is refused too, and the fault is named.
@@ -336,7 +336,7 @@ fn a_wrapped_exec_call_that_stashes_is_not_rewritten_ready_to_run() {
         "{r}"
     );
     assert!(
-        form.contains("<target_id>exec</target_id>\n<type>start</type>"),
+        form.contains("<routing><target_id>exec</target_id></routing>\n<payload><type>start</type>"),
         "{r}"
     );
 }
@@ -405,7 +405,7 @@ fn an_empty_wrapper_gets_the_wrapper_report() {
             "[malformed call — nothing ran] line 1, col 1:\n  <tool_call>\n  ^~~~~~~~~~~ \
              `<tool_call>` holds no call — write one at the top level, as \
              <call name=\"…\">…</call>\nwrite it as:\n<call name=\"send\">\n\
-             <target_id>agent id</target_id>\n<type>verb</type>\n</call>\n\
+             <routing><target_id>agent id</target_id></routing>\n<payload><type>verb</type></payload>\n</call>\n\
              If it is finished, end the chain explicitly: <call name=\"done\"></call>\n{TAIL}"
         )]
     );

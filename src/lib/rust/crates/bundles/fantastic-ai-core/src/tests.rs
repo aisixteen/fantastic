@@ -7280,7 +7280,7 @@ async fn a_broken_call_is_reported_instead_of_the_no_call_reminder() {
         "{nxt}"
     );
     assert!(
-        nxt.contains("<call name=\"send\">\n<target_id>files</target_id>"),
+        nxt.contains("<call name=\"send\">\n<routing><target_id>files</target_id>"),
         "{nxt}"
     );
 }
@@ -7391,7 +7391,7 @@ async fn an_empty_wrapper_is_reported_by_name_not_only_reminded() {
         "{nxt}"
     );
     assert!(
-        nxt.contains("<call name=\"send\">\n<target_id>agent id</target_id>"),
+        nxt.contains("<call name=\"send\">\n<routing><target_id>agent id</target_id>"),
         "{nxt}"
     );
 }

@@ -456,16 +456,27 @@ fn expected(name: &str, args: &[(String, Value)]) -> String {
     if args.is_empty() {
         return format!("<call name=\"{name}\"></call>");
     }
-    let mut lines = vec![format!("<call name=\"{name}\">")];
-    for (k, v) in args {
-        let inner = match v {
+    let tag = |k: &str, v: &Value| {
+        let inner: String = match v {
             Value::Array(xs) => xs
                 .iter()
                 .map(|x| format!("<item>{}</item>", py_str(x)))
                 .collect(),
             other => py_str(other),
         };
-        lines.push(format!("<{k}>{inner}</{k}>"));
+        format!("<{k}>{inner}</{k}>")
+    };
+    let mut lines = vec![format!("<call name=\"{name}\">")];
+    if name == "send" {
+        // the routing form: routing names in `<routing>`, the rest in `<payload>`
+        let (routing, payload): (Vec<_>, Vec<_>) =
+            args.iter().partition(|(k, _)| ROUTING.contains(&k.as_str()));
+        let r: String = routing.iter().map(|(k, v)| tag(k, v)).collect();
+        let p: String = payload.iter().map(|(k, v)| tag(k, v)).collect();
+        lines.push(format!("<routing>{r}</routing>"));
+        lines.push(format!("<payload>{p}</payload>"));
+    } else {
+        lines.extend(args.iter().map(|(k, v)| tag(k, v)));
     }
     lines.push("</call>".to_string());
     lines.join("\n")
