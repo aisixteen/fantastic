@@ -120,6 +120,7 @@
 pub mod agent_loop;
 pub mod assembly;
 pub mod caching;
+pub mod chat_bundle;
 pub mod call_check;
 pub mod constants;
 pub mod context;
@@ -135,6 +136,7 @@ pub mod pause;
 pub mod projection;
 pub mod prompt_file;
 pub mod provider;
+pub mod remote_provider;
 pub mod retrieval;
 pub mod route;
 pub mod schema;

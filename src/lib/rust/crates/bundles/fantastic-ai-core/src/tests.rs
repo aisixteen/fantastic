@@ -5321,6 +5321,10 @@ fn verb_docs_match_python_docstrings() {
         o.keys().cloned().collect::<Vec<_>>(),
         vec![
             "reflect",
+            // the provider half of the ai_chat split: Rust first, the python port is its own ticket
+            "complete",
+            "models",
+            "default_model",
             "send",
             "stop",
             "pause",
@@ -8132,4 +8136,121 @@ async fn rows_of_other_agents_are_untouched() {
         search_as(&kernel, &bystander, "zq-bystander-3").await,
     );
     assert_eq!(before, after, "another agent's memory changed");
+}
+
+// ---- THE SPLIT: an ai_chat completes through a provider agent ----------------------------
+
+/// A provider agent whose every `complete` streams "hel" + "lo".
+struct EchoProvider;
+
+/// Says "hel" + "lo" + the model it was built on.
+struct EchoWords(String);
+
+#[async_trait]
+impl Provider for EchoWords {
+    async fn chat(&self, _m: &[Value], _x: Option<i64>) -> Result<ProviderStream, ProviderError> {
+        let toks: Vec<Result<ProviderEvent, ProviderError>> = vec![
+            Ok(ProviderEvent::Token("hel".into())),
+            Ok(ProviderEvent::Token("lo".into())),
+            Ok(ProviderEvent::Token(format!(" from {}", self.0))),
+        ];
+        Ok(Box::pin(futures_util::stream::iter(toks)))
+    }
+    fn model(&self) -> String {
+        self.0.clone()
+    }
+}
+
+#[async_trait]
+impl Bundle for EchoProvider {
+    fn name(&self) -> &str {
+        "echo_provider"
+    }
+    async fn handle(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
+        let build = |m: Map<String, Value>| -> Arc<dyn Provider> {
+            Arc::new(EchoWords(m.get("model").and_then(Value::as_str).unwrap_or("").to_string()))
+        };
+        Ok(crate::remote_provider::provider_verbs(id, payload, kernel, build, crate::remote_provider::NO_LIVE).await)
+    }
+}
+
+#[tokio::test]
+async fn an_ai_chat_holds_the_conversation_and_completes_through_its_provider() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = base_kernel(&tmp, |k| {
+        k.bundles.register("echo_provider.tools", EchoProvider);
+        k.bundles.register(crate::chat_bundle::HANDLER_MODULE, crate::chat_bundle::AiChatBundle);
+    })
+    .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "echo_provider.tools",
+                   "id": "prov", "callable_by": {"chat1": "*"}, "models": ["m-small", "m-big"],
+                   "default_model": "m-small"}),
+        )])
+        .await;
+    let memory = fantastic_ram_store::test_support::memory_meta(&kernel, "chat1", json!({"cli": "*", "prov": ["complete", "watch"]})).await;
+    let mut create = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "ai_chat.tools",
+                            "id": "chat1", "provider_id": "prov", "context_window": 32768});
+    for (k, v) in memory {
+        create[k] = v;
+    }
+    let made = kernel.send(vec![Item::new(AgentId::from("kernel_state"), create)]).await.remove(0).result;
+    assert_eq!(made["id"], "chat1", "{made}");
+    let r = kernel
+        .send(vec![Item::new(AgentId::from("chat1"), json!({"type": "send", "text": "hi"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["response"], "hello from m-small", "no model on the chat: the provider's default: {r}");
+    let rec = kernel.agents.get(&AgentId::from("chat1")).unwrap().record();
+    assert!(rec.meta.get("model").is_none(), "the chat's record holds no provider field: {:?}", rec.meta);
+    let rows = kernel
+        .send(vec![Item::new(AgentId::from("chat1"), json!({"type": "rows"}))])
+        .await
+        .remove(0)
+        .result;
+    let text = rows.to_string();
+    assert!(text.contains("hi") && text.contains("hello"), "the chat holds both sides: {rows}");
+    let refl = kernel.send(vec![Item::new(AgentId::from("chat1"), json!({"type": "reflect"}))]).await.remove(0).result;
+    assert_eq!(refl["provider_id"], "prov", "{refl}");
+
+    // the chat names its own model: the next pass runs on it, the conversation stays
+    kernel.update(&AgentId::from("chat1"), json!({"model": "m-big"}).as_object().unwrap().clone());
+    let r = kernel
+        .send(vec![Item::new(AgentId::from("chat1"), json!({"type": "send", "text": "again"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["response"], "hello from m-big", "{r}");
+    let rows = kernel.send(vec![Item::new(AgentId::from("chat1"), json!({"type": "rows"}))]).await.remove(0).result;
+    assert!(rows.to_string().contains("hi"), "the first turn is still the chat's: {rows}");
+}
+
+#[tokio::test]
+async fn a_provider_lists_its_models_and_gets_and_sets_its_default() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = base_kernel(&tmp, |k| {
+        k.bundles.register("echo_provider.tools", EchoProvider);
+    })
+    .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "echo_provider.tools",
+                   "id": "prov", "models": ["m-small", {"id": "m-big"}], "default_model": "m-small"}),
+        )])
+        .await;
+    let call = |p: Value| {
+        let k = Arc::clone(&kernel);
+        async move { k.send(vec![Item::new(AgentId::from("prov"), p)]).await.remove(0).result }
+    };
+    let m = call(json!({"type": "models"})).await;
+    assert_eq!(m, json!({"models": ["m-small", "m-big"], "default": "m-small"}));
+    assert_eq!(call(json!({"type": "default_model"})).await, json!({"default": "m-small"}));
+    assert_eq!(call(json!({"type": "default_model", "model": "m-big"})).await, json!({"default": "m-big"}));
+    assert_eq!(call(json!({"type": "default_model"})).await, json!({"default": "m-big"}));
+    let no = call(json!({"type": "default_model", "model": "m-huge"})).await;
+    assert_eq!(no["reason"], "bad_arg", "not one of its models: {no}");
 }

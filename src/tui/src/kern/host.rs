@@ -137,6 +137,9 @@ fn registry_with(cwd: &std::path::Path, extras: &[crate::Extra]) -> BundleRegist
     // (`kern/bundle_watch` reloads it when its folder changes).
     reg.register(fantastic_py_agent::HANDLER_MODULE, fantastic_py_agent::PyAgentBundle);
     reg.register(fantastic_mcp_client::HANDLER_MODULE, fantastic_mcp_client::McpClientBundle::default());
+    // The AI agent apart from any provider (`ai_chat.tools`): it completes through
+    // the provider agent its record names (`provider_id`). Always linked.
+    reg.register(fantastic_ai_core::chat_bundle::HANDLER_MODULE, fantastic_ai_core::chat_bundle::AiChatBundle);
     // The vLLM backend: linked by default (feature `vllm`).
     #[cfg(feature = "vllm")]
     reg.register(fantastic_vllm_backend::HANDLER_MODULE, fantastic_vllm_backend::VllmBundle);
@@ -705,6 +708,7 @@ mod tests {
         got.sort_unstable();
         #[allow(unused_mut)]
         let mut want: Vec<&str> = vec![
+            "ai_chat.tools",
             "canvas.tools",
             "canvas_page.tools",
             "credential_store.tools",

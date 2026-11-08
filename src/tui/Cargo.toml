@@ -83,6 +83,7 @@ fantastic-responses-backend = { path = "../lib/rust/crates/bundles/fantastic-res
 fantastic-py-agent = { path = "../lib/rust/crates/bundles/fantastic-py-agent" }
 # one remote MCP server as an agent: its tools are its verbs (the canvas's "MCP server")
 fantastic-mcp-client = { path = "../lib/rust/crates/bundles/fantastic-mcp-client" }
+fantastic-ai-core = { path = "../lib/rust/crates/bundles/fantastic-ai-core" }
 fantastic-vllm-backend = { path = "../lib/rust/crates/bundles/fantastic-vllm-backend", optional = true }
 fantastic-ollama-backend = { path = "../lib/rust/crates/bundles/fantastic-ollama-backend", optional = true }
 fantastic-anthropic-backend = { path = "../lib/rust/crates/bundles/fantastic-anthropic-backend", optional = true }
