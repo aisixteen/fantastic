@@ -40,16 +40,57 @@ stream as {type:'provider_token', rid, text} (a watcher reads them); the reply i
 completion_tokens, stop_reason} or {rid, error, transport}. An AI chat (`ai_chat.tools`) calls it through its \
 `provider_id`.";
 
-/// The record field holding a provider's default model.
+/// The name of a provider's default-model setting (in its memory store).
 pub const DEFAULT_FIELD: &str = "default_model";
 
-/// A provider's default: its `default_model` (a plain `model` on its record does not count).
-#[must_use]
-pub fn default_of(meta: &Map<String, Value>) -> Option<String> {
-    meta.get(DEFAULT_FIELD)
+/// A PROVIDER'S SETTINGS live in its memory store (`memory_store_id`), as `setting` rows
+/// under its own key — `{kind: "setting", name, value}`, the newest of a name wins. Its
+/// record holds the connection only.
+const SETTING: &str = "setting";
+
+/// The store a provider keeps its settings in.
+fn store_of(agent_id: &AgentId, kernel: &Kernel) -> Option<AgentId> {
+    crate::helpers::agent_meta(agent_id, kernel)
+        .get("memory_store_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(AgentId::from)
+}
+
+/// A provider's default model: the newest `default_model` setting in its store.
+pub async fn default_of(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Option<String> {
+    let store = store_of(agent_id, kernel)?;
+    let r = kernel
+        .send(vec![Item::new(
+            store,
+            json!({"type": "read", "kinds": [SETTING], "match": {"name": DEFAULT_FIELD}, "order": "desc", "limit": 1}),
+        )])
+        .await;
+    r.first()?
+        .result
+        .get("rows")?
+        .as_array()?
+        .first()?
+        .get("value")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(String::from)
+}
+
+/// Keep `model` as the provider's default (a `setting` row in its store). `Err` names why.
+async fn set_default(agent_id: &AgentId, kernel: &Arc<Kernel>, model: &str) -> Result<(), String> {
+    let store = store_of(agent_id, kernel).ok_or("the provider names no memory_store_id to keep its default in")?;
+    let r = kernel
+        .send(vec![Item::new(
+            store,
+            json!({"type": "append", "rows": [{"kind": SETTING, "name": DEFAULT_FIELD, "value": model}]}),
+        )])
+        .await;
+    match r.first().map(|o| &o.result) {
+        Some(res) if res.get("error").is_none() => Ok(()),
+        Some(res) => Err(res["error"].as_str().unwrap_or("the store refused").to_string()),
+        None => Err("the store did not answer".to_string()),
+    }
 }
 
 /// The `models` verb's doc.
@@ -109,7 +150,7 @@ where
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .map(String::from)
-                .or_else(|| default_of(&meta));
+                .or(default_of(agent_id, kernel).await);
             let mut over = meta.clone();
             over.remove("model");
             if let Some(m) = &chosen {
@@ -120,9 +161,8 @@ where
                 match r.get("model").and_then(Value::as_str).filter(|s| !s.is_empty()) {
                     // the server named it: it is the default from now on
                     Some(m) => {
-                        let mut patch = Map::new();
-                        patch.insert(DEFAULT_FIELD.into(), json!(m));
-                        kernel.update(agent_id, patch);
+                        let m = m.to_string();
+                        let _ = set_default(agent_id, kernel, &m).await;
                     }
                     None if r.get("kind").and_then(Value::as_str) == Some("ValueError") => {
                         r["error"] = json!(format!(
@@ -142,11 +182,11 @@ where
                 if let Some(l) = live {
                     match l().await {
                         Ok(n) => names = n,
-                        Err(e) => return Some(json!({"error": e, "reason": "unhandled", "default": default_of(&meta)})),
+                        Err(e) => return Some(json!({"error": e, "reason": "unhandled", "default": default_of(agent_id, kernel).await})),
                     }
                 }
             }
-            Some(json!({"models": names, "default": default_of(&meta)}))
+            Some(json!({"models": names, "default": default_of(agent_id, kernel).await}))
         }
         "set_default_model" => match payload.get("model").and_then(Value::as_str).filter(|s| !s.is_empty()) {
             None => Some(json!({"error": "set_default_model: model required — a model name", "reason": "bad_arg"})),
@@ -156,10 +196,10 @@ where
                     return Some(json!({"error": format!("set_default_model: `{m}` is not one of this provider's models {names:?}"),
                                        "reason": "bad_arg"}));
                 }
-                let mut patch = Map::new();
-                patch.insert(DEFAULT_FIELD.into(), json!(m));
-                kernel.update(agent_id, patch);
-                Some(json!({"default": m}))
+                match set_default(agent_id, kernel, m).await {
+                    Ok(()) => Some(json!({"default": m})),
+                    Err(e) => Some(json!({"error": format!("set_default_model: {e}"), "reason": "unhandled"})),
+                }
             }
         },
         _ => None,

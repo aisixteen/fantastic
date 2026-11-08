@@ -51,7 +51,7 @@ async fn a_chat_completes_through_its_provider_agent_by_id() {
     let root = fantastic_kernel::Agent::new(AgentId::from("kernel_state"), None, None, Map::new(), tmp.path().join(".fantastic"), false);
     k.register(Arc::clone(&root));
     k.set_root(Arc::clone(&root));
-    agent(&k, &root, "p", json!({"callable_by": {"chat": "*"}, "default_model": "echo-1"}), tmp.path());
+    agent(&k, &root, "p", json!({"callable_by": {"chat": "*"}}), tmp.path());
     agent(&k, &root, "chat", json!({"can_call": {"p": ["complete", "watch"]}}), tmp.path());
     let rp = RemoteProvider::new(&k, &AgentId::from("chat"), "p");
     let text: Vec<String> = fantastic_kernel::send::as_agent(&AgentId::from("chat"), async {
