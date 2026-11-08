@@ -122,6 +122,9 @@ pub fn load_bundle(kernel: &Kernel, root: &Path, name: &str) -> Option<String> {
             let mut r = row;
             r["base"] = json!(base);
             r["sentence"] = json!(sentence);
+            // the fields every instance inherits, the same way for every source
+            // (`BundleRegistry::defaults`): the base checked that it is a mapping
+            r["record"] = spec.get("record").filter(|v| v.is_object()).cloned().unwrap_or(json!({}));
             kernel.bundles.register_folder(name, built, r);
             None
         }

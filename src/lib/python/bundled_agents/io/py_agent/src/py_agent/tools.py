@@ -196,7 +196,9 @@ async def _start(id: str, name: str, folder: str, spec: dict, kernel) -> dict | 
     run = _RUN.get(id)
     if run is not None and run["state"] in ("starting", "running"):
         return None
-    record = {**(spec.get("record") or {}), **(kernel.get(id) or {})}
+    # the instance's record holds what it inherits from this folder's `record` (the
+    # kernel lays it under its own fields at `create_agent` and at load: `kernel._inherit`)
+    record = dict(kernel.get(id) or {})
     env = _child_env(record)
     parent, child = proc.ctrl_pair()
     env["FANTASTIC_CTRL_FD"] = str(child.fileno())

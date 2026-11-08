@@ -30,6 +30,7 @@ pub mod docs;
 pub mod errors;
 pub mod executions;
 pub mod inbox;
+pub mod inherit;
 pub mod jsonsafe;
 pub mod kernel;
 pub mod ledger;

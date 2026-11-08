@@ -131,3 +131,34 @@ async def test_a_meta_bundle_is_refused_naming_the_field(kernel):
     assert "record: must be a mapping" in rows["badrec"]["error"], rows["badrec"]
     assert "base:" in rows["loop_a"]["error"] and "base:" in rows["loop_b"]["error"], rows
     assert _bundles.meta_chain("nobase") == []
+
+
+async def test_a_record_loaded_from_disk_inherits_like_a_create(kernel):
+    _load(kernel, {"notes": NOTES})
+    root = dict(kernel.record)
+    kernel.ctx.load(
+        [root, {"id": "n9", "handler_module": "notes", "parent_id": root["id"], "root": "mine"}]
+    )
+    m = dict(kernel.ctx.agents["n9"]._meta)
+    assert m["root"] == "mine", "the record's own field wins"
+    assert m["allow"] == ["."], "the bundle's fills the rest"
+
+
+async def test_a_bundle_on_another_base_keeps_that_handler_and_names_the_bundle(kernel):
+    import file_bridge.tools as fb
+
+    _bundles.register_unlisted("files_two.tools", fb)
+    try:
+        _load(kernel, {"notes": NOTES})
+        r = await _create(kernel, id="o1", handler_module="files_two.tools", bundle="notes")
+        assert r.get("id") == "o1", r
+        a = kernel.ctx.agents["o1"]
+        assert a.handler_module == "files_two.tools", "it runs the base it named"
+        assert a._meta["bundle"] == "notes", "and names the bundle it inherits from"
+        assert a._meta["root"] == "notes"
+        _bundle(kernel, "notes", "base: file_bridge.tools\nsentence: s\nrecord:\n  root: notes3\n")
+        r = await _call(kernel, kernel.id, {"type": "reload_bundle", "name": "notes"})
+        assert r["instances"] == ["o1"], r
+        assert a._meta["root"] == "notes3", "a reload reaches it too"
+    finally:
+        _bundles._UNLISTED.pop("files_two.tools", None)

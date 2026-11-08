@@ -75,6 +75,13 @@ record:                        # the fields every instance inherits
   `notes`; the kernel runs it on `file_bridge.tools` with the bundle's `record`
   under the payload's fields. `create_agent {handler_module: file_bridge.tools,
   bundle: notes}` is the same create.
+- **on another base**: `create_agent {handler_module: <another bundle>, bundle:
+  notes}` keeps that handler and records `bundle: notes`; it inherits the same
+  fields (an AI role on whichever backend its spawner runs).
+- **loaded from disk**: a record names its kind and what it changes; the kernel
+  lays the bundle's fields under it at load, as at `create_agent`. Every bundle
+  source is the same here: a compiled bundle gives no fields, a folder bundle its
+  `record:`, a meta bundle the chain.
 - **override**: any field the create (or a later `update_agent`) names is the
   instance's own and wins.
 - **inherit**: a meta bundle may extend another (`base: notes`); the nearest

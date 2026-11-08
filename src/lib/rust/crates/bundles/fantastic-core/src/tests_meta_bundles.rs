@@ -141,3 +141,43 @@ async fn a_meta_bundle_is_refused_naming_the_field() {
     let r = create(&kernel, json!({"id": "x", "handler_module": "nobase"})).await;
     assert!(kernel.bundles.get("nobase").is_none(), "a refused meta bundle resolves to nothing: {r}");
 }
+
+#[tokio::test]
+async fn a_record_loaded_from_disk_inherits_like_a_create() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = kernel_with_bundles(&tmp, &[("notes", NOTES)]).await;
+    let root = kernel.root().unwrap().record();
+    let root_map = match serde_json::to_value(&root).unwrap() {
+        serde_json::Value::Object(m) => m,
+        _ => unreachable!(),
+    };
+    let child = json!({"id": "n9", "handler_module": "notes", "parent_id": root.id, "root": "mine"});
+    kernel
+        .load_records(vec![root_map, child.as_object().unwrap().clone()])
+        .unwrap();
+    let m = meta(&kernel, "n9");
+    assert_eq!(m["root"], json!("mine"), "the record's own field wins");
+    assert_eq!(m["allow"], json!(["."]), "the bundle's fills the rest");
+}
+
+#[tokio::test]
+async fn a_bundle_on_another_base_keeps_that_handler_and_names_the_bundle() {
+    let tmp = TempDir::new().unwrap();
+    write_bundle(&tmp, "notes", NOTES);
+    let mut reg = BundleRegistry::new();
+    reg.register(HANDLER_MODULE, KernelStateBundle::default());
+    reg.register("file_bridge.tools", fantastic_file::FileBundle::default());
+    reg.register("files_two.tools", fantastic_file::FileBundle::default());
+    let kernel = bootstrap(reg, BootstrapOptions::daemon(tmp.path())).expect("boot").kernel;
+    crate::folders::load_bundles(&kernel, &tmp.path().join(".fantastic"));
+    let r = create(&kernel, json!({"id": "o1", "handler_module": "files_two.tools", "bundle": "notes"})).await;
+    assert_eq!(r["id"], json!("o1"), "{r}");
+    let rec = kernel.agents.get(&AgentId::from("o1")).unwrap().record();
+    assert_eq!(rec.handler_module.as_deref(), Some("files_two.tools"), "it runs the base it named");
+    assert_eq!(rec.meta["bundle"], json!("notes"), "and names the bundle it inherits from");
+    assert_eq!(rec.meta["root"], json!("notes"));
+    write_bundle(&tmp, "notes", "base: file_bridge.tools\nsentence: s\nrecord:\n  root: notes3\n");
+    let r = root_reflect(&kernel, json!({"type": "reload_bundle", "name": "notes"})).await;
+    assert_eq!(r["instances"], json!(["o1"]), "{r}");
+    assert_eq!(meta(&kernel, "o1")["root"], json!("notes3"), "a reload reaches it too");
+}

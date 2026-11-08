@@ -52,7 +52,6 @@ from kernel import CURRENT_VERSION
 from kernel._bundles import (
     _find_bundle_module,
     clashes,
-    defaults as bundle_defaults,
     folder_rows,
     handler_of,
     import_handler,
@@ -61,7 +60,7 @@ from kernel._bundles import (
     register_folder,
     register_meta,
 )
-from kernel import current_origin
+from kernel import _inherit, current_origin
 from kernel._kernel import BUNDLE_ENTRY_GROUP
 from kernel._refusal import (
     BAD_ARG,
@@ -209,7 +208,12 @@ def load_bundle(root_dir: fs.Root, name: str) -> str | None:
     built = base_mod.folder_bundle(name, str(fs.resolve(root_dir, rel)), spec)
     if isinstance(built, str):
         return refuse(built)
-    register_folder(name, built, {**row, "base": base, "sentence": sentence.strip()})
+    # the fields every instance inherits, the same way for every source
+    # (`_bundles.defaults`): the base checked that `record` is a mapping
+    record = spec.get("record") if isinstance(spec.get("record"), dict) else {}
+    register_folder(
+        name, built, {**row, "base": base, "sentence": sentence.strip(), "record": record}
+    )
     return None
 
 
@@ -1177,42 +1181,16 @@ async def _reload_bundle(id, payload, agent):
             f"reload_bundle: no folder {Path(str(root_dir.rel)).name}/{rel}",
             hint="a bundle is a folder under .fantastic/bundles/ with a bundle.yaml",
         )
-    # the fields each instance inherits BEFORE the reload: one it still holds
-    # unchanged is inherited, and takes the new value (or goes, when the bundle
-    # dropped it); one it changed is its own and stays
-    inheriting = [
-        (a, bundle_defaults(a.handler_module))
-        for a in agent.ctx.agents.values()
-        if isinstance(a.handler_module, str) and name in meta_chain(a.handler_module)
-    ]
+    # the fields each instance inherits BEFORE the reload (`kernel._inherit`)
+    before = _inherit.inheriting(agent.ctx.agents, name)
     err = load_bundle(root_dir, name)
     if err is not None:
         return refusal(INVALID_META, err)
+    changed = _inherit.reapply(agent.ctx, before)
     if meta_chain(name):
-        # A META BUNDLE: no program to restart — its instances' inherited fields are
-        # written again, and each one reads them on its next call or turn
-        ids = []
-        for a, old in inheriting:
-            new = bundle_defaults(a.handler_module)
-            mine = dict(a._meta)
-            patch = {}
-            gone = []
-            for k, v in old.items():
-                if k in mine and mine[k] == v:
-                    if k not in new:
-                        gone.append(k)
-                    elif new[k] != v:
-                        patch[k] = new[k]
-            for k, v in new.items():
-                if k not in old and k not in mine:
-                    patch[k] = v
-            if not patch and not gone:
-                continue
-            for k in gone:
-                a._meta.pop(k, None)
-            agent.ctx.update(a.id, **patch)  # the `updated` event re-persists the record
-            ids.append(a.id)
-        return {"reloaded": name, "instances": sorted(ids)}
+        # a META BUNDLE has no program to restart: each instance reads its fields on
+        # its next call or turn
+        return {"reloaded": name, "instances": changed}
     live = sorted(
         (a for a in agent.ctx.agents.values() if a.handler_module == name),
         key=lambda a: a.id,

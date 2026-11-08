@@ -1698,7 +1698,8 @@ class Kernel:
         (Agent never touches disk); fires no `boot` — the bootstrap
         does that after, which is when a loader subscribes + persists."""
         from kernel._agent import Agent  # local import — Agent imports this module
-        from kernel._bundles import import_handler  # local — it imports this module
+        from kernel import _inherit  # local — it imports this module
+        from kernel._bundles import import_handler
 
         if isinstance(snapshot, dict):
             version = snapshot.get("version", CURRENT_VERSION)
@@ -1745,6 +1746,10 @@ class Kernel:
                 for k, v in rec.items()
                 if k not in ("id", "handler_module", "parent_id")
             }
+            # the bundle's fields under the record's own, as at `create_agent`
+            # (`_inherit`): a record names its kind and what it changes
+            if hm:
+                meta = _inherit.apply(hm, meta)
             agent = Agent(
                 id=rec["id"],
                 root_path=root_path if parent is None else None,

@@ -767,65 +767,16 @@ async fn reload_bundle(
             "a bundle is a folder under .fantastic/bundles/ with a bundle.yaml",
         ));
     }
-    // the fields each instance inherits BEFORE the reload: one it still holds
-    // unchanged is inherited, and takes the new value (or goes, when the bundle
-    // dropped it); one it changed is its own and stays
-    let inheriting: Vec<(Arc<Agent>, Map<String, Value>)> = kernel
-        .agents
-        .iter()
-        .filter_map(|e| {
-            let hm = e.value().handler_module.clone()?;
-            kernel
-                .bundles
-                .meta_chain(&hm)
-                .iter()
-                .any(|m| m == name)
-                .then(|| (Arc::clone(e.value()), kernel.bundles.defaults(&hm)))
-        })
-        .collect();
+    // the fields each instance inherits BEFORE the reload (`fantastic_kernel::inherit`)
+    let before = fantastic_kernel::inherit::inheriting(kernel, name);
     if let Some(err) = crate::folders::load_bundle(kernel, &root, name) {
         return Ok(refusal(INVALID_META, err));
     }
+    let changed = fantastic_kernel::inherit::reapply(kernel, &before);
     if !kernel.bundles.meta_chain(name).is_empty() {
-        // A META BUNDLE: no program to restart — its instances' inherited fields
-        // are written again, and each one reads them on its next call or turn
-        let mut ids: Vec<String> = Vec::new();
-        for (a, old) in &inheriting {
-            let hm = a.handler_module.clone().unwrap_or_default();
-            let new = kernel.bundles.defaults(&hm);
-            let mine = a.meta.read().expect("meta").clone();
-            let mut patch = Map::new();
-            let mut gone = Vec::new();
-            for (k, v) in old {
-                if mine.get(k) == Some(v) {
-                    match new.get(k) {
-                        Some(n) if n != v => {
-                            patch.insert(k.clone(), n.clone());
-                        }
-                        Some(_) => {}
-                        None => gone.push(k.clone()),
-                    }
-                }
-            }
-            for (k, v) in &new {
-                if !old.contains_key(k) && !mine.contains_key(k) {
-                    patch.insert(k.clone(), v.clone());
-                }
-            }
-            if patch.is_empty() && gone.is_empty() {
-                continue;
-            }
-            {
-                let mut m = a.meta.write().expect("meta");
-                for k in &gone {
-                    m.remove(k);
-                }
-            }
-            kernel.update(&a.id, patch);
-            ids.push(a.id.0.clone());
-        }
-        ids.sort();
-        return Ok(json!({"reloaded": name, "instances": ids}));
+        // a META BUNDLE has no program to restart: each instance reads its fields on
+        // its next call or turn
+        return Ok(json!({"reloaded": name, "instances": changed}));
     }
     let mut live: Vec<Arc<Agent>> = kernel
         .agents

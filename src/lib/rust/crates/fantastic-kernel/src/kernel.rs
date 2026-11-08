@@ -990,8 +990,13 @@ impl Kernel {
         validate_records(&records)?;
         let mut agents: Vec<crate::agent::AgentRecord> = Vec::with_capacity(records.len());
         for r in records {
-            let rec: crate::agent::AgentRecord = serde_json::from_value(Value::Object(r))
+            let mut rec: crate::agent::AgentRecord = serde_json::from_value(Value::Object(r))
                 .map_err(|e| KernelError::InvalidSnapshot(e.to_string()))?;
+            // the bundle's fields under the record's own, as at `create_agent`
+            // (`crate::inherit`): a record names its kind and what it changes
+            if let Some(hm) = rec.handler_module.clone() {
+                crate::inherit::apply(&self.bundles, &hm, &mut rec.meta);
+            }
             agents.push(rec);
         }
         let state = KernelState {
