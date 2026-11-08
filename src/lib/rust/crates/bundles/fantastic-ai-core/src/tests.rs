@@ -8167,8 +8167,9 @@ impl Bundle for EchoProvider {
         "echo_provider"
     }
     async fn handle(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
+        // no model on the pass: the "server" names its own, `srv-1`
         let build = |m: Map<String, Value>| -> Arc<dyn Provider> {
-            Arc::new(EchoWords(m.get("model").and_then(Value::as_str).unwrap_or("").to_string()))
+            Arc::new(EchoWords(m.get("model").and_then(Value::as_str).unwrap_or("srv-1").to_string()))
         };
         Ok(crate::remote_provider::provider_verbs(id, payload, kernel, build, crate::remote_provider::NO_LIVE).await)
     }
@@ -8252,7 +8253,8 @@ async fn a_provider_completes_on_its_default_model_field_and_lists_and_sets_it()
     let r = call("prov", json!({"type": "complete", "messages": msg, "rid": "r2", "model": "m-big"})).await;
     assert_eq!(r["model"], "m-big", "{r}");
     let r = call("bare", json!({"type": "complete", "messages": msg, "rid": "r3"})).await;
-    assert_eq!(r["model"], "", "no model anywhere: the provider runs as its record is: {r}");
+    assert_eq!(r["model"], "srv-1", "no user model, no default: the server's: {r}");
+    assert_eq!(call("bare", json!({"type": "models"})).await["default"], "srv-1", "which is the default from now on");
     assert_eq!(call("prov", json!({"type": "models"})).await, json!({"models": ["m-small", "m-big"], "default": "m-small"}));
     assert_eq!(call("prov", json!({"type": "set_default_model", "model": "m-big"})).await, json!({"default": "m-big"}));
     assert_eq!(call("prov", json!({"type": "models"})).await["default"], "m-big");

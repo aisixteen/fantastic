@@ -383,7 +383,7 @@ fn rec(extra: Value) -> Map<String, Value> {
 }
 
 #[test]
-fn endpoint_model_and_a_store_are_all_a_record_needs() {
+fn an_endpoint_and_a_store_are_all_a_record_needs() {
     let required: Vec<&str> = record_schema()["fields"]
         .as_array()
         .unwrap()
@@ -391,7 +391,8 @@ fn endpoint_model_and_a_store_are_all_a_record_needs() {
         .filter(|f| f["required"] == json!(true))
         .filter_map(|f| f["name"].as_str())
         .collect();
-    assert_eq!(required, ["endpoint", "model", "memory_store_id"]);
+    // the model is the chat's or the provider's `default_model`, not a required field
+    assert_eq!(required, ["endpoint", "memory_store_id"]);
     assert_eq!(validate(&rec(json!({})), &Map::new()), None);
 }
 

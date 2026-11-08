@@ -1379,7 +1379,7 @@ fn the_schema_is_what_the_write_enforces() {
         r["error"]
             .as_str()
             .unwrap()
-            .contains("missing: endpoint, model, credentials, memory_store_id"),
+            .contains("missing: endpoint, credentials, memory_store_id"),
         "{r}"
     );
     let r = create(&[

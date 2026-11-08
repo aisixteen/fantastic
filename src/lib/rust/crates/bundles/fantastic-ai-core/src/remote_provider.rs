@@ -43,11 +43,10 @@ completion_tokens, stop_reason} or {rid, error, transport}. An AI chat (`ai_chat
 /// The record field holding a provider's default model.
 pub const DEFAULT_FIELD: &str = "default_model";
 
-/// A provider's default: `default_model`, else the record's `model`.
+/// A provider's default: its `default_model` (a plain `model` on its record does not count).
 #[must_use]
 pub fn default_of(meta: &Map<String, Value>) -> Option<String> {
     meta.get(DEFAULT_FIELD)
-        .or_else(|| meta.get("model"))
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(String::from)
@@ -102,18 +101,40 @@ where
     let meta = crate::helpers::agent_meta(agent_id, kernel);
     match verb {
         "complete" => {
-            let model = payload
+            // THE MODEL OF A PASS: the user's (the chat's `model`, sent with the call), else the
+            // provider's `default_model`; neither, the server's own (a vLLM or ollama server reads
+            // the one it serves), which becomes the default. Nothing anywhere: refused by name.
+            let chosen = payload
                 .get("model")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .map(String::from)
                 .or_else(|| default_of(&meta));
-            // no model anywhere: the provider runs as its record is (an on-device engine names none)
             let mut over = meta.clone();
-            if let Some(m) = model {
+            over.remove("model");
+            if let Some(m) = &chosen {
                 over.insert("model".into(), json!(m));
             }
-            Some(complete(agent_id, payload, kernel, build(over)).await)
+            let mut r = complete(agent_id, payload, kernel, build(over)).await;
+            if chosen.is_none() {
+                match r.get("model").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                    // the server named it: it is the default from now on
+                    Some(m) => {
+                        let mut patch = Map::new();
+                        patch.insert(DEFAULT_FIELD.into(), json!(m));
+                        kernel.update(agent_id, patch);
+                    }
+                    None if r.get("kind").and_then(Value::as_str) == Some("ValueError") => {
+                        r["error"] = json!(format!(
+                            "complete: no model — the chat names none, this provider has no {DEFAULT_FIELD}, \
+                             and its server names none ({})",
+                            r["error"].as_str().unwrap_or("")
+                        ));
+                    }
+                    None => {}
+                }
+            }
+            Some(r)
         }
         "models" => {
             let mut names = listed_models(&meta);
@@ -458,6 +479,10 @@ pub async fn pair_chat(kernel: &Arc<Kernel>, provider: &AgentId) -> AgentId {
     let mut create = json!({"type": "create_agent", "parent_id": parent, "handler_module": crate::chat_bundle::HANDLER_MODULE,
                             "id": chat.as_str(), PROVIDER_FIELD: provider.as_str(), "can_call": can_call,
                             "callable_by": pm.get("callable_by").cloned().unwrap_or(json!({"$self": "*"}))});
+    // a provider record that names a `model` (a test's): the chat runs it, as a user's choice
+    if let Some(m) = pm.get("model").filter(|m| m.as_str().is_some_and(|s| !s.is_empty())) {
+        create["model"] = m.clone();
+    }
     for k in ["memory_store_id", "file_bridge_id", "context_window", "context_strategy", "caching"] {
         if let Some(v) = pm.get(k) {
             create[k] = v.clone();

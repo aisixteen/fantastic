@@ -674,7 +674,7 @@ pub fn record_schema() -> &'static Value {
                 "the full Responses API URL (…/v1/responses)",
             )
             .required(),
-            Field::new("model", "str", "the model name").required(),
+            Field::new("model", "str", "the model name (absent: the call's `model`, else `default_model`)"),
             Field::new(
                 "stream_idle_seconds",
                 "float",

@@ -1383,7 +1383,7 @@ pub fn record_schema() -> &'static Value {
                 "the Messages API URL, e.g. https://api.anthropic.com/v1/messages",
             )
             .required(),
-            Field::new("model", "str", "the model id, e.g. claude-sonnet-5").required(),
+            Field::new("model", "str", "the model id, e.g. claude-sonnet-5 (absent: the call's `model`, else `default_model`)"),
             Field::new(
                 "max_tokens",
                 "int",
