@@ -21,7 +21,7 @@ use std::time::Duration;
 /// The fields a record may leave to the API, in the order they are read.
 pub const INFERRED: [&str; 2] = ["max_tokens", "context_window"];
 /// The verbs that run a turn of the model — the ones the API is read for.
-pub const TURN_VERBS: [&str; 3] = ["send", "inquiry", "context_recall"];
+pub const TURN_VERBS: [&str; 4] = ["send", "inquiry", "context_recall", "complete"];
 /// Seconds to wait on the model entry.
 pub const READ_TIMEOUT: f64 = 30.0;
 

@@ -289,6 +289,13 @@ impl Bundle for FoundationModelsBackendBundle {
         {
             return Ok(Some(r));
         }
+        // A PROVIDER ONLY: a chat verb belongs to an `ai_chat` agent that names this one
+        {
+            let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
+            if fantastic_ai_core::remote_provider::is_chat_verb(verb) {
+                return Ok(Some(fantastic_ai_core::remote_provider::chat_refusal(NAME, verb)));
+            }
+        }
         let provider = |_client: &str| self.build_provider(agent_id, kernel);
         if let Some(reply) =
             verbs::handle_common(agent_id, payload, kernel, self.cfg(), provider).await?

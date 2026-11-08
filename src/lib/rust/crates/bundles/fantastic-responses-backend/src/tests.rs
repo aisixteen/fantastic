@@ -434,6 +434,8 @@ async fn mk_kernel_with(
     extra: Value,
 ) -> (Arc<Kernel>, AgentId) {
     let mut kernel = Kernel::new();
+
+    kernel.bundles.register(fantastic_ai_core::chat_bundle::HANDLER_MODULE, fantastic_ai_core::chat_bundle::AiChatBundle);
     kernel.bundles.register(HANDLER_MODULE, ResponsesBundle);
     kernel.bundles.register(
         fantastic_ram_store::HANDLER_MODULE,
@@ -522,6 +524,7 @@ async fn send_streams_tokens_raw_on_both_channels() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, id) = mk_kernel(&tmp, &format!("{}/v1/responses", server.uri())).await;
     set_key(&kernel, &tmp, &id, "sk-x").await;
+    let id = fantastic_ai_core::remote_provider::pair_chat(&kernel, &id).await; // the chat streams to its caller
     let mut rx = kernel.ensure_inbox(&id);
     let k2 = Arc::clone(&kernel);
     let id2 = id.clone();
@@ -599,7 +602,7 @@ async fn sampling_may_not_override_what_the_provider_owns() {
         .await;
     let r = kernel
         .send(vec![Item::new(
-            id,
+            fantastic_ai_core::remote_provider::pair_chat(&kernel, &id).await,
             json!({"type": "send", "text": "hi", "client_id": "t"}),
         )])
         .await
@@ -735,7 +738,7 @@ fn raw_header(head: &str, name: &str) -> Option<String> {
 async fn send_once(kernel: &Arc<Kernel>, id: &AgentId) -> Value {
     kernel
         .send(vec![Item::new(
-            id.clone(),
+            fantastic_ai_core::remote_provider::pair_chat(&kernel, &id).await,
             json!({"type": "send", "text": "go", "client_id": "t", "reply_to": null}),
         )])
         .await
