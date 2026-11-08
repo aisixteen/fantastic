@@ -16,7 +16,7 @@
 use fantastic_bundle::py_str;
 use serde_json::{Map, Value};
 
-use super::grammar::ROUTING;
+use super::grammar::{PAYLOAD_TAG, ROUTING, ROUTING_TAG};
 
 /// A call as the ONE grammar's text. `send` arguments are the parser's own shape
 /// (`target_id`/`to` + routing + `payload`) and come back out inline, in the
@@ -29,6 +29,22 @@ pub fn render_call(name: &str, arguments: &Map<String, Value>) -> String {
             Some(Value::Object(p)) => p,
             _ => Map::new(),
         };
+        // A payload that carries a routing name can only be written in the routing
+        // form: inline, the parser would lift that name out of it.
+        if payload
+            .keys()
+            .any(|k| ROUTING.contains(&k.as_str()) || k == ROUTING_TAG)
+        {
+            let mut routing = Map::new();
+            for key in ROUTING {
+                if let Some(v) = args.get(key) {
+                    routing.insert(key.to_string(), v.clone());
+                }
+            }
+            let body = render_field(ROUTING_TAG, &Value::Object(routing))
+                + &render_field(PAYLOAD_TAG, &Value::Object(payload));
+            return format!("<call name=\"{name}\">\n{body}</call>");
+        }
         let mut flat = Map::new();
         for key in ROUTING {
             if let Some(v) = args.get(key) {

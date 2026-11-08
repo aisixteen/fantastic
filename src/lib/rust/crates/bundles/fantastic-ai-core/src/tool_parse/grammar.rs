@@ -638,6 +638,12 @@ pub fn parse_call(block: &str) -> Result<Option<ToolCall>, Malformed> {
     if name != "send" {
         return Ok(Some(ToolCall::new(name, fields)));
     }
+    // THE ROUTING FORM: `<routing>` holds how the call travels, `<payload>` is the
+    // target's message, taken whole — nothing inside it is read or reserved (a
+    // `<title>` or a nested `<payload>` in it reaches the target as written).
+    if fields.contains_key(ROUTING_TAG) {
+        return routed(fields).map(Some);
+    }
     // python `fields.pop(...)` keeps the SURVIVORS in insertion order. serde_json
     // `Map::remove` is `swap_remove` under `preserve_order` — it drags the LAST key
     // into the hole, so `{target_id, type, pid, offset}` became `{offset, type, pid}`.
@@ -669,6 +675,79 @@ pub fn parse_call(block: &str) -> Result<Option<ToolCall>, Malformed> {
     }
     args.insert("payload".to_string(), Value::Object(fields));
     Ok(Some(ToolCall::new("send", args)))
+}
+
+/// The tag that holds a call's routing in the routing form (see [`parse_call`]).
+pub const ROUTING_TAG: &str = "routing";
+/// The tag that holds the target's message, whole, in the routing form.
+pub const PAYLOAD_TAG: &str = "payload";
+
+/// A `send` in the routing form: `<routing>` (the [`ROUTING`] names only) and
+/// `<payload>` (any content), nothing else beside them.
+fn routed(mut fields: Map<String, Value>) -> Result<ToolCall, Malformed> {
+    let form = "a routed call is `<call name=\"send\"><routing><target_id>agent id</target_id>…\
+                </routing><payload><type>verb</type>…</payload></call>`";
+    if let Some(k) = fields
+        .keys()
+        .find(|k| *k != ROUTING_TAG && *k != PAYLOAD_TAG)
+    {
+        return Err(Malformed::new(format!(
+            "`<{k}>` beside `<routing>` — every argument goes inside `<payload>`; {form}"
+        )));
+    }
+    let mut routing = match fields.shift_remove(ROUTING_TAG) {
+        Some(Value::Object(m)) => m,
+        _ => {
+            return Err(Malformed::new(format!(
+                "`<routing>` holds tags such as `<target_id>`; {form}"
+            )))
+        }
+    };
+    let payload = match fields.shift_remove(PAYLOAD_TAG) {
+        Some(Value::Object(m)) => m,
+        None => Map::new(),
+        Some(Value::String(s)) if py_strip(&s).is_empty() => Map::new(),
+        Some(_) => {
+            return Err(Malformed::new(format!(
+                "`<payload>` holds the message as tags (`<type>verb</type>…`); {form}"
+            )))
+        }
+    };
+    if let Some(k) = routing.keys().find(|k| !ROUTING.contains(&k.as_str())) {
+        return Err(Malformed::new(format!(
+            "`<{k}>` is not a routing field — the routing fields are {}; an argument of \
+             the verb goes inside `<payload>`",
+            ROUTING.join(", ")
+        )));
+    }
+    let target = routing
+        .shift_remove("target_id")
+        .as_ref()
+        .and_then(Value::as_str)
+        .map(py_strip)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
+    let to = normalize_to(routing.shift_remove("to"));
+    if target.is_none() && !to.as_ref().is_some_and(py_truthy) {
+        return Err(Malformed::new(
+            "a routed send names its target in `<routing>`: `<target_id>agent id</target_id>`, \
+             or several recipients as `<to><item>id</item><item>id</item></to>`",
+        ));
+    }
+    let mut args = Map::new();
+    if let Some(t) = target {
+        args.insert("target_id".to_string(), Value::String(t));
+    }
+    if let Some(list) = to.filter(py_truthy) {
+        args.insert("to".to_string(), list);
+    }
+    for key in &ROUTING[2..] {
+        if let Some(v) = routing.shift_remove(*key) {
+            args.insert((*key).to_string(), v);
+        }
+    }
+    args.insert(PAYLOAD_TAG.to_string(), Value::Object(payload));
+    Ok(ToolCall::new("send", args))
 }
 
 /// `to` as python leaves it — and python leaves MOST of it alone.
