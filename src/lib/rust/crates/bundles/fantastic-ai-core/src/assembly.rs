@@ -110,19 +110,16 @@ A verb that takes a body (a file, a patch, a program) names it `bytes`: write th
 between `<bytes>` and `</bytes>` exactly as it should land — real newlines and quotes,
 nothing escaped, no fence. The body ends at the first `</bytes>`.
 <call name="send">
-<target_id>notes</target_id>
-<type>write</type>
-<path>notes.md</path>
-<bytes>line one
+<routing><target_id>notes</target_id></routing>
+<payload><type>write</type><path>notes.md</path><bytes>line one
 line two, with "quotes"
-</bytes>
+</bytes></payload>
 </call>
 
 ## How to call an agent — `docs`
 <call name="send">
-<target_id>kernel</target_id>
-<type>docs</type>
-<of>notes</of>
+<routing><target_id>kernel</target_id></routing>
+<payload><type>docs</type><of>notes</of></payload>
 </call>
 `docs` is a KERNEL verb: the target is always `kernel` and the agent you ask about goes
 in `<of>` (an agent id — `<guid>|<agent>` for one on a connected kernel — a bundle by its
@@ -137,9 +134,9 @@ one-line stub — act on it then, or ask again. Reflect only agents you are gran
 id and `pruned: <n>`).
 
 ## Several recipients
-`<to><item>a</item><item>b</item></to>` in place of `<target_id>` sends each a copy
+`<to><item>a</item><item>b</item></to>` in `<routing>`, in place of `<target_id>`, sends each a copy
 headed `[from <you> · to a, b · msg N]` (N = the sending turn, the same in every copy).
-Answer a group with the SAME `<to>` (minus yourself) and `<re>N</re>`; fewer recipients
+Answer a group with the SAME `<to>` (minus yourself) and `<re>N</re>`, both in `<routing>`; fewer recipients
 fork a private thread. Tell peers facts in words — your ids mean nothing to them.
 
 ## Turns

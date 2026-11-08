@@ -18,11 +18,9 @@ fn the_hint_is_verbatim() {
     assert_eq!(
         HINT,
         "The shape: <call name=\"send\">\n\
-         <target_id>agent id</target_id>\n\
-         <type>verb</type>\n\
-         <path>a.md</path>\n\
-         <bytes>document, verbatim, to the first </bytes>\n\
-         </bytes>\n\
+         <routing><target_id>agent id</target_id></routing>\n\
+         <payload><type>verb</type><path>a.md</path>\
+         <bytes>document, verbatim, to the first </bytes></bytes></payload>\n\
          </call> — one child tag per argument, a list is one tag whose children \
          are all <item>, nothing is escaped."
     );
