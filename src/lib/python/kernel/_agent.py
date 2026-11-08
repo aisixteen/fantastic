@@ -103,6 +103,7 @@ from kernel._bundles import (
     _in_catalog,
     bundle_enabled,
     bundle_package,
+    defaults as bundle_defaults,
     folder_rows,
     import_handler,
     is_folder,
@@ -168,7 +169,10 @@ _SYSTEM_VERB_DOCS = {
     "create_agent": (
         "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. "
         "Creates a CHILD OF `parent_id` — any agent you name (your own id grows "
-        "your own subtree); 'kernel_state' for top-level. No default parent."
+        "your own subtree); 'kernel_state' for top-level. No default parent. A "
+        "handler_module that is a meta bundle (`bundles/<name>/bundle.yaml` with a base "
+        "and no program) runs its base, with the `record` of the bundle under your fields; "
+        "`bundle:<name>` beside the base is the same."
     ),
     "update_agent": (
         "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED "
@@ -366,6 +370,26 @@ class RemoteTarget:
         # one identity diverge, the other replies are dropped unseen. Must be
         # solved (later).
         return next(c for c in calls if c in done).result()
+
+
+def _with_bundle_defaults(payload: dict) -> dict:
+    """The create payload with its META BUNDLE's fields under it: an instance inherits
+    its bundle's `record` (each meta bundle on the way to the compiled base) and
+    overrides any field it names. `bundle: X` beside the base's handler_module is the
+    same create as `handler_module: X`. Unchanged when it names no meta bundle."""
+    out = dict(payload)
+    b = out.pop("bundle", None)
+    if isinstance(b, str) and b:
+        out["handler_module"] = b
+    elif "bundle" not in payload:
+        out = payload
+    hm = out.get("handler_module")
+    if not isinstance(hm, str):
+        return out
+    inherited = bundle_defaults(hm)
+    if not inherited:
+        return out
+    return {**inherited, **out}
 
 
 class Agent:
@@ -2792,6 +2816,7 @@ class Agent:
         addressed agent is never the implicit parent. There is no implicit parent — an
         agent building its own subtree names itself, which is one word and
         cannot be confused with "wherever this happened to be sent"."""
+        payload = _with_bundle_defaults(payload)
         handler_module = payload.get("handler_module")
         if not isinstance(handler_module, str) or not handler_module:
             return missing("create_agent", "handler_module")

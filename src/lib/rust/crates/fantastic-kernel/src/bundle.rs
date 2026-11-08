@@ -378,7 +378,14 @@ impl BundleRegistry {
     /// Look up a bundle by `handler_module` key. Returns `None` for
     /// unknown — caller decides whether that's a hard error (live
     /// dispatch) or a weak-load skip (rehydration).
+    ///
+    /// A META BUNDLE (a `bundle.yaml` with a `base` and no program) resolves to its
+    /// base's bundle: an instance of it IS an instance of the base, with the meta
+    /// bundle's fields under its own ([`Self::defaults`]).
     pub fn get(&self, handler_module: &str) -> Option<Arc<dyn Bundle>> {
+        if let Some(base) = self.meta_base(handler_module) {
+            return self.get(&base);
+        }
         self.by_handler.get(handler_module).cloned().or_else(|| {
             self.folders
                 .read()
@@ -410,6 +417,7 @@ impl BundleRegistry {
             .read()
             .expect("folders poisoned")
             .contains_key(name)
+            || self.meta_base(name).is_some()
         {
             return;
         }
@@ -419,15 +427,93 @@ impl BundleRegistry {
             .insert(name.to_string(), row);
     }
 
-    /// Every folder bundle this kernel read — loaded and refused — by name.
+    /// Every folder bundle this kernel read — loaded and refused — by name. A meta
+    /// bundle's row is listed without its `record` (the fields, a directive among
+    /// them, are the instances' business, not the catalog's).
     #[must_use]
     pub fn folder_rows(&self) -> Vec<Value> {
         self.folder_rows
             .read()
             .expect("folder rows poisoned")
             .values()
-            .cloned()
+            .map(|r| {
+                let mut r = r.clone();
+                if let Some(o) = r.as_object_mut() {
+                    o.remove("record");
+                }
+                r
+            })
             .collect()
+    }
+
+    /// Load a META BUNDLE: a `bundle.yaml` with a `base` (a registered
+    /// `handler_module`, or another meta bundle) and no program. Its row, with the
+    /// `base` and the `record` its instances inherit, is all there is of it: nothing
+    /// is built or registered, and [`Self::get`] resolves `name` to the base.
+    pub fn register_meta(&self, name: &str, row: Value) {
+        self.folders.write().expect("folders poisoned").remove(name);
+        self.folder_rows
+            .write()
+            .expect("folder rows poisoned")
+            .insert(name.to_string(), row);
+    }
+
+    /// The meta bundles `handler_module` goes through on its way to the compiled
+    /// base, itself first. Empty for anything that is not a meta bundle.
+    #[must_use]
+    pub fn meta_chain(&self, handler_module: &str) -> Vec<String> {
+        let mut chain = Vec::new();
+        let mut at = handler_module.to_string();
+        while let Some(base) = self.meta_base(&at) {
+            if chain.contains(&at) || chain.len() > 16 {
+                break;
+            }
+            chain.push(at.clone());
+            at = base;
+        }
+        chain
+    }
+
+    /// The `base` of the loaded meta bundle `name`, if it is one.
+    fn meta_base(&self, name: &str) -> Option<String> {
+        let rows = self.folder_rows.read().expect("folder rows poisoned");
+        let row = rows.get(name)?;
+        if row.get("error").is_some() || row.get("record").is_none() {
+            return None;
+        }
+        row.get("base").and_then(Value::as_str).map(str::to_string)
+    }
+
+    /// The fields an instance of `handler_module` inherits: each meta bundle's
+    /// `record` on its way to the compiled base, the nearest one winning. Empty for
+    /// anything that is not a meta bundle.
+    #[must_use]
+    pub fn defaults(&self, handler_module: &str) -> serde_json::Map<String, Value> {
+        let chain = self.meta_chain(handler_module);
+        let rows = self.folder_rows.read().expect("folder rows poisoned");
+        let mut out = serde_json::Map::new();
+        for name in chain.iter().rev() {
+            if let Some(Value::Object(rec)) = rows.get(name).and_then(|r| r.get("record")) {
+                for (k, v) in rec {
+                    out.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// The handler module a `base:` names: a registered `handler_module`, a loaded
+    /// meta bundle, or an installed bundle's name (`anthropic_backend` →
+    /// `anthropic_backend.tools`).
+    #[must_use]
+    pub fn handler_of(&self, base: &str) -> Option<String> {
+        if self.get(base).is_some() {
+            return Some(base.to_string());
+        }
+        self.by_handler
+            .iter()
+            .find(|(_, b)| b.name() == base)
+            .map(|(hm, _)| hm.clone())
     }
 
     /// Is `handler_module` a loaded folder bundle?

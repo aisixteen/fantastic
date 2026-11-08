@@ -1687,7 +1687,7 @@ async fn a_literal_dotted_key_summarizes_at_that_key() {
 /// python `_SYSTEM_VERB_DOCS`, in declaration order, verbatim
 /// (`P/kernel/_agent.py`).
 const PY_KERNEL_VERB_DOCS: [(&str, &str); 14] = [
-    ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent."),
+    ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent. A handler_module that is a meta bundle (`bundles/<name>/bundle.yaml` with a base and no program) runs its base, with the `record` of the bundle under your fields; `bundle:<name>` beside the base is the same."),
     ("update_agent", "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT. Whoever holds update_agent on the root updates any agent, itself included."),
     ("delete_agent", "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`. Whoever holds delete_agent on the root deletes any agent."),
     ("list_agents", "No args. Every agent's record, flat. Paged."),

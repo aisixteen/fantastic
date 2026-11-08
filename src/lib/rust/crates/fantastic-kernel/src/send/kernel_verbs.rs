@@ -57,7 +57,10 @@ pub fn kernel_verb_docs() -> Value {
     json!({
         "create_agent": "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. \
     Creates a CHILD OF `parent_id` — any agent you name (your own id grows \
-    your own subtree); 'kernel_state' for top-level. No default parent.",
+    your own subtree); 'kernel_state' for top-level. No default parent. A \
+    handler_module that is a meta bundle (`bundles/<name>/bundle.yaml` with a base \
+    and no program) runs its base, with the `record` of the bundle under your fields; \
+    `bundle:<name>` beside the base is the same.",
         "update_agent": "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED \
     (a field you do not name is untouched), so a dict field must be sent \
     WHOLE — `can_call`/`callable_by` included: restate every key you want \

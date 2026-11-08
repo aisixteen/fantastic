@@ -104,6 +104,13 @@ pub fn load_bundle(kernel: &Kernel, root: &Path, name: &str) -> Option<String> {
     else {
         return refuse("sentence: required — one line saying what it is".to_string());
     };
+    // A META BUNDLE: no program, a `base` that is any registered bundle (or another
+    // meta bundle). It is the yaml over its base, in RAM: its row holds the fields
+    // its instances inherit, and nothing is built or registered.
+    let folder_base = kernel.bundles.by_name(base).is_some_and(|b| b.folder_base());
+    if !folder_base && spec.get("command").is_none() {
+        return load_meta(kernel, name, base, sentence, &spec, row.clone(), refuse);
+    }
     let Some(base_bundle) = kernel.bundles.by_name(base).filter(|b| b.folder_base()) else {
         return refuse(format!(
             "base: {} is no bundled agent a folder can extend in this kernel — known: {known}",
@@ -120,6 +127,65 @@ pub fn load_bundle(kernel: &Kernel, root: &Path, name: &str) -> Option<String> {
         }
         Err(why) => refuse(why),
     }
+}
+
+/// A meta bundle's load: its `base` must resolve to a registered bundle (through
+/// meta bundles, never back to itself), and `record` is a mapping of the fields its
+/// instances inherit.
+fn load_meta(
+    kernel: &Kernel,
+    name: &str,
+    base: &str,
+    sentence: &str,
+    spec: &Value,
+    row: Value,
+    refuse: impl Fn(String) -> Option<String>,
+) -> Option<String> {
+    let record = match spec.get("record") {
+        None | Some(Value::Null) => Value::Object(serde_json::Map::new()),
+        Some(r @ Value::Object(_)) => r.clone(),
+        Some(_) => {
+            return refuse(
+                "record: must be a mapping of the fields every instance inherits".to_string(),
+            )
+        }
+    };
+    let Some(handler) = kernel.bundles.handler_of(base) else {
+        let bases = kernel.bundles.folder_bases().join(", ");
+        return refuse(format!(
+            "base: {} is no bundle of this kernel — a folder extends a registered \
+             handler_module or another folder bundle (folder bases with a program — \
+             known: {})",
+            fantastic_bundle::py_repr(base),
+            if bases.is_empty() { "none" } else { &bases }
+        ));
+    };
+    // no cycle: following the bases from `base` never comes back to this folder
+    let mut at = handler.clone();
+    for _ in 0..17 {
+        if at == name {
+            return refuse(format!(
+                "base: {} leads back to {} — a meta bundle cannot extend itself",
+                fantastic_bundle::py_repr(base),
+                fantastic_bundle::py_repr(name)
+            ));
+        }
+        let rows = kernel.bundles.folder_rows();
+        match rows
+            .iter()
+            .find(|r| r.get("name").and_then(Value::as_str) == Some(at.as_str()))
+            .and_then(|r| r.get("base").and_then(Value::as_str))
+        {
+            Some(next) => at = next.to_string(),
+            None => break,
+        }
+    }
+    let mut r = row;
+    r["base"] = json!(handler);
+    r["sentence"] = json!(sentence);
+    r["record"] = record;
+    kernel.bundles.register_meta(name, r);
+    None
 }
 
 /// Load every folder under `<root>/bundles/` — the cold read at boot. `root` is
@@ -139,7 +205,14 @@ pub fn load_bundles(kernel: &Kernel, root: &Path) {
         .filter(|n| fantastic_fs::is_dir(root, &format!("{BUNDLES_DIR}/{n}")).unwrap_or(true))
         .collect();
     names.sort();
-    for n in names {
-        let _ = load_bundle(kernel, root, &n);
+    // a meta bundle may extend one whose folder sorts after it: load again what
+    // failed, while each pass loads at least one more
+    let mut todo = names;
+    loop {
+        let before = todo.len();
+        todo.retain(|n| load_bundle(kernel, root, n).is_some());
+        if todo.is_empty() || todo.len() == before {
+            break;
+        }
     }
 }

@@ -52,9 +52,14 @@ from kernel import CURRENT_VERSION
 from kernel._bundles import (
     _find_bundle_module,
     clashes,
+    defaults as bundle_defaults,
+    folder_rows,
+    handler_of,
     import_handler,
+    meta_chain,
     refuse_folder,
     register_folder,
+    register_meta,
 )
 from kernel import current_origin
 from kernel._kernel import BUNDLE_ENTRY_GROUP
@@ -191,6 +196,11 @@ def load_bundle(root_dir: fs.Root, name: str) -> str | None:
             base_mod = import_handler(module)
         except Exception:  # noqa: BLE001
             base_mod = None
+    # A META BUNDLE: no program, a `base` that is any registered bundle (or another
+    # meta bundle). It is the yaml over its base, in RAM: its row holds the fields
+    # its instances inherit, and nothing is built or registered.
+    if not (base_mod is not None and hasattr(base_mod, "folder_bundle")) and "command" not in spec:
+        return _load_meta(name, base, sentence.strip(), spec, row, refuse)
     if base_mod is None or not hasattr(base_mod, "folder_bundle"):
         return refuse(
             f"base: {base!r} is no bundled agent a folder can extend in this "
@@ -203,13 +213,50 @@ def load_bundle(root_dir: fs.Root, name: str) -> str | None:
     return None
 
 
+def _load_meta(name: str, base: str, sentence: str, spec: dict, row: dict, refuse) -> str | None:
+    """A meta bundle's load: its `base` must resolve to a registered bundle (through
+    meta bundles, never back to itself), and `record` is a mapping of the fields its
+    instances inherit."""
+    record = spec.get("record")
+    if record is None:
+        record = {}
+    if not isinstance(record, dict):
+        return refuse("record: must be a mapping of the fields every instance inherits")
+    handler = handler_of(base)
+    if handler is None:
+        return refuse(
+            f"base: {base!r} is no bundle of this kernel — a folder extends a registered "
+            "handler_module or another folder bundle (folder bases with a program — "
+            f"known: {', '.join(_known_bases()) or 'none'})"
+        )
+    # no cycle: following the bases from `base` never comes back to this folder
+    rows = {r["name"]: r for r in folder_rows()}
+    at = handler
+    for _ in range(17):
+        if at == name:
+            return refuse(
+                f"base: {base!r} leads back to {name!r} — a meta bundle cannot extend itself"
+            )
+        nxt = (rows.get(at) or {}).get("base")
+        if not isinstance(nxt, str):
+            break
+        at = nxt
+    register_meta(name, {**row, "base": handler, "sentence": sentence, "record": record})
+    return None
+
+
 def load_bundles(root_dir: fs.Root) -> None:
-    """Load every folder under `<root>/bundles/` — the cold read at boot."""
+    """Load every folder under `<root>/bundles/` — the cold read at boot. A meta
+    bundle may extend one whose folder sorts after it: what failed loads again, while
+    each pass loads at least one more."""
     if not (fs.exists(root_dir, _BUNDLES_DIR) and fs.is_dir(root_dir, _BUNDLES_DIR)):
         return
-    for entry in fs.list_dir(root_dir, _BUNDLES_DIR):
-        if entry.is_dir():
-            load_bundle(root_dir, entry.name)
+    todo = sorted(e.name for e in fs.list_dir(root_dir, _BUNDLES_DIR) if e.is_dir())
+    while todo:
+        left = [n for n in todo if load_bundle(root_dir, n) is not None]
+        if len(left) == len(todo):
+            break
+        todo = left
 
 
 def _walk(
@@ -1130,9 +1177,42 @@ async def _reload_bundle(id, payload, agent):
             f"reload_bundle: no folder {Path(str(root_dir.rel)).name}/{rel}",
             hint="a bundle is a folder under .fantastic/bundles/ with a bundle.yaml",
         )
+    # the fields each instance inherits BEFORE the reload: one it still holds
+    # unchanged is inherited, and takes the new value (or goes, when the bundle
+    # dropped it); one it changed is its own and stays
+    inheriting = [
+        (a, bundle_defaults(a.handler_module))
+        for a in agent.ctx.agents.values()
+        if isinstance(a.handler_module, str) and name in meta_chain(a.handler_module)
+    ]
     err = load_bundle(root_dir, name)
     if err is not None:
         return refusal(INVALID_META, err)
+    if meta_chain(name):
+        # A META BUNDLE: no program to restart — its instances' inherited fields are
+        # written again, and each one reads them on its next call or turn
+        ids = []
+        for a, old in inheriting:
+            new = bundle_defaults(a.handler_module)
+            mine = dict(a._meta)
+            patch = {}
+            gone = []
+            for k, v in old.items():
+                if k in mine and mine[k] == v:
+                    if k not in new:
+                        gone.append(k)
+                    elif new[k] != v:
+                        patch[k] = new[k]
+            for k, v in new.items():
+                if k not in old and k not in mine:
+                    patch[k] = v
+            if not patch and not gone:
+                continue
+            for k in gone:
+                a._meta.pop(k, None)
+            agent.ctx.update(a.id, **patch)  # the `updated` event re-persists the record
+            ids.append(a.id)
+        return {"reloaded": name, "instances": sorted(ids)}
     live = sorted(
         (a for a in agent.ctx.agents.values() if a.handler_module == name),
         key=lambda a: a.id,

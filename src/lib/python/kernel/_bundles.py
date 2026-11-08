@@ -73,14 +73,70 @@ def refuse_folder(name: str, row: dict) -> None:
     """A folder that could not load: listed (with its `error`), never resolvable —
     unless an earlier load stands: a failed RELOAD keeps it (module and row), so its
     live instances keep running it; the error goes to the reload's caller."""
-    if name in _FOLDER:
+    if name in _FOLDER or _meta_base(name) is not None:
         return
     _FOLDER_ROWS[name] = row
 
 
 def folder_rows() -> list[dict]:
-    """Every folder bundle this kernel read — loaded and refused — by name."""
-    return [dict(_FOLDER_ROWS[n]) for n in sorted(_FOLDER_ROWS)]
+    """Every folder bundle this kernel read — loaded and refused — by name. A meta
+    bundle's row is listed without its `record` (the fields, a directive among them,
+    are the instances' business, not the catalog's)."""
+    return [
+        {k: v for k, v in _FOLDER_ROWS[n].items() if k != "record"} for n in sorted(_FOLDER_ROWS)
+    ]
+
+
+def register_meta(name: str, row: dict) -> None:
+    """Load a META BUNDLE: a `bundle.yaml` with a `base` (a registered
+    `handler_module`, or another meta bundle) and no program. Its row, with the
+    `base` and the `record` its instances inherit, is all there is of it: nothing is
+    built or registered, and `import_handler` resolves `name` to the base."""
+    _FOLDER.pop(name, None)
+    _FOLDER_ROWS[name] = row
+
+
+def _meta_base(name: str) -> str | None:
+    """The `base` of the loaded meta bundle `name`, if it is one."""
+    row = _FOLDER_ROWS.get(name)
+    if row is None or "error" in row or "record" not in row:
+        return None
+    base = row.get("base")
+    return base if isinstance(base, str) else None
+
+
+def meta_chain(handler_module: str) -> list[str]:
+    """The meta bundles `handler_module` goes through on its way to the compiled
+    base, itself first. Empty for anything that is not a meta bundle."""
+    chain: list[str] = []
+    at = handler_module
+    while (base := _meta_base(at)) is not None:
+        if at in chain or len(chain) > 16:
+            break
+        chain.append(at)
+        at = base
+    return chain
+
+
+def defaults(handler_module: str) -> dict:
+    """The fields an instance of `handler_module` inherits: each meta bundle's
+    `record` on its way to the compiled base, the nearest one winning. Empty for
+    anything that is not a meta bundle."""
+    out: dict = {}
+    for name in reversed(meta_chain(handler_module)):
+        out.update(_FOLDER_ROWS[name].get("record") or {})
+    return out
+
+
+def handler_of(base: str) -> str | None:
+    """The handler module a `base:` names: a registered `handler_module`, a loaded
+    meta bundle, or an installed bundle's name (`file_bridge` → `file_bridge.tools`)."""
+    if base in _UNLISTED or base in _FOLDER or _meta_base(base) is not None or _in_catalog(base):
+        return base
+    for ep in entry_points(group=BUNDLE_ENTRY_GROUP):
+        if ep.name == base and bundle_enabled(ep.value):
+            return ep.value
+    return None
 
 
 def is_folder(handler_module: str) -> bool:
@@ -109,6 +165,11 @@ def import_handler(handler_module: str) -> ModuleType:
     A name outside the catalog is, to this kernel, a module that does not exist:
     `ModuleNotFoundError: No module named '<top-level package>'` — rust's
     text for an unregistered name, so every runtime says one thing."""
+    # a META BUNDLE resolves to its base: an instance of it IS an instance of the
+    # base, with the meta bundle's fields under its own (`defaults`)
+    base = _meta_base(handler_module)
+    if base is not None:
+        return import_handler(base)
     mod = _UNLISTED.get(handler_module) or _FOLDER.get(handler_module)
     if mod is not None:
         return mod
@@ -136,6 +197,9 @@ def bundle_package(handler_module: str) -> str | None:
     read from — for a CATALOG bundle, or a `register_unlisted` one whose package
     is already imported — else None: reading a package's resources imports its
     `__init__`, so a name outside the catalog is never imported to read nothing."""
+    base = _meta_base(handler_module)
+    if base is not None:
+        return bundle_package(base)  # a meta bundle reads its base's resources
     top = handler_module.split(".")[0]
     if handler_module in _FOLDER:
         return None  # a folder bundle ships no package resources

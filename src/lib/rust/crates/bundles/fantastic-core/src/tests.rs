@@ -513,6 +513,10 @@ async fn a_session_loader_persists_a_canvas_that_survives_a_restart() {
 #[path = "tests_nested_records.rs"]
 mod nested_records;
 
+/// Meta bundles: a yaml over a compiled base (python `test_meta_bundles.py`).
+#[path = "tests_meta_bundles.rs"]
+mod meta_bundles;
+
 // ─── loud persistence ──────────────────────────────────────────────────
 
 /// A kernel with the root loader AND the real file_bridge, NOT yet booted.
