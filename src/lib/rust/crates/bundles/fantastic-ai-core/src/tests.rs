@@ -8175,6 +8175,31 @@ impl Bundle for EchoProvider {
     }
 }
 
+/// A provider on the echo bundle with its own key in the shared test store, its default
+/// seeded the way a user sets it (`set_default_model`, a `setting` row in the store).
+async fn make_provider(kernel: &Arc<Kernel>, id: &str, extra: Value, default: Option<&str>) {
+    let memory = fantastic_ram_store::test_support::memory_meta(kernel, id, json!({})).await;
+    let mut c = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "echo_provider.tools", "id": id});
+    for (k, v) in memory {
+        c[k] = v;
+    }
+    for (k, v) in extra.as_object().unwrap() {
+        if k == "callable_by" {
+            for (who, verbs) in v.as_object().unwrap() {
+                c["callable_by"][who] = verbs.clone();
+            }
+        } else {
+            c[k] = v.clone();
+        }
+    }
+    let made = kernel.send(vec![Item::new(AgentId::from("kernel_state"), c)]).await.remove(0).result;
+    assert_eq!(made["id"], id, "{made}");
+    if let Some(m) = default {
+        let r = kernel.send(vec![Item::new(AgentId::from(id), json!({"type": "set_default_model", "model": m}))]).await.remove(0).result;
+        assert_eq!(r["default"], m, "{r}");
+    }
+}
+
 #[tokio::test]
 async fn an_ai_chat_holds_the_conversation_and_completes_through_its_provider() {
     let tmp = TempDir::new().unwrap();
@@ -8183,14 +8208,7 @@ async fn an_ai_chat_holds_the_conversation_and_completes_through_its_provider() 
         k.bundles.register(crate::chat_bundle::HANDLER_MODULE, crate::chat_bundle::AiChatBundle);
     })
     .await;
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "echo_provider.tools",
-                   "id": "prov", "callable_by": {"chat1": "*"}, "models": ["m-small", "m-big"],
-                   "default_model": "m-small"}),
-        )])
-        .await;
+    make_provider(&kernel, "prov", json!({"callable_by": {"chat1": "*", "$self": "*"}, "models": ["m-small", "m-big"]}), Some("m-small")).await;
     let memory = fantastic_ram_store::test_support::memory_meta(&kernel, "chat1", json!({"cli": "*", "prov": ["complete", "watch"]})).await;
     let mut create = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "ai_chat.tools",
                             "id": "chat1", "provider_id": "prov", "context_window": 32768});
@@ -8236,13 +8254,8 @@ async fn a_provider_completes_on_its_default_model_field_and_lists_and_sets_it()
         k.bundles.register("echo_provider.tools", EchoProvider);
     })
     .await;
-    for (id, extra) in [("prov", json!({"models": ["m-small", "m-big"], "default_model": "m-small"})), ("bare", json!({}))] {
-        let mut c = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "echo_provider.tools", "id": id});
-        for (k, v) in extra.as_object().unwrap() {
-            c[k] = v.clone();
-        }
-        let _ = kernel.send(vec![Item::new(AgentId::from("kernel_state"), c)]).await;
-    }
+    make_provider(&kernel, "prov", json!({"models": ["m-small", "m-big"]}), Some("m-small")).await;
+    make_provider(&kernel, "bare", json!({}), None).await;
     let call = |to: &str, p: Value| {
         let (k, to) = (Arc::clone(&kernel), to.to_string());
         async move { k.send(vec![Item::new(AgentId::from(to.as_str()), p)]).await.remove(0).result }
