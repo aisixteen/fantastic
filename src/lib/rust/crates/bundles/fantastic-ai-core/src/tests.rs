@@ -7668,6 +7668,83 @@ async fn a_routing_name_the_verb_documents_is_refused_loud() {
     );
 }
 
+/// The same verb in the ROUTING FORM: `<payload>` is taken whole, so its `title`
+/// reaches the target, and the routing `title` still labels the call. No refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_routing_name_in_the_payload_of_a_routed_call_is_delivered() {
+    struct Store(Arc<std::sync::Mutex<Vec<Value>>>);
+    #[async_trait]
+    impl Bundle for Store {
+        fn name(&self) -> &str {
+            "clash_store2"
+        }
+        fn verb_docs(&self) -> Value {
+            json!({"create": "args: title:str (req), body:str (req). A page → {created}."})
+        }
+        async fn handle(
+            &self,
+            _agent_id: &AgentId,
+            payload: &Value,
+            _kernel: &Arc<Kernel>,
+        ) -> Result<Reply, BundleError> {
+            let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
+            if matches!(verb, "boot" | "shutdown") {
+                return Ok(None);
+            }
+            self.0.lock().unwrap().push(payload.clone());
+            Ok(Some(json!({"created": true})))
+        }
+    }
+
+    let got = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let g = Arc::clone(&got);
+    let tmp = TempDir::new().unwrap();
+    let kernel = base_kernel(&tmp, move |k| {
+        k.bundles.register("clash_store2.tools", Store(g))
+    })
+    .await;
+    let backend_id = id_for(&tmp, "rt_routed");
+    let file_id = format!("ff_{backend_id}");
+    add_file_bridge(
+        &kernel,
+        &file_id,
+        &tmp.path().join(".fantastic"),
+        &backend_id,
+    )
+    .await;
+    let backend = add_backend(&kernel, &backend_id, &file_id).await;
+    let kb = format!("{backend_id}_kb");
+    let _ = kernel
+        .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "clash_store2.tools", "id": kb, "callable_by": {backend_id.as_str(): "*"}}))])
+        .await;
+    let _ = kernel
+        .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "update_agent", "id": backend_id.as_str(), "can_call": {"$self": "*", "$parent": "*", "$subtree": "*", file_id.as_str(): "*", "cli": "*", MEMORY: "*", kb.as_str(): "*"}}))])
+        .await;
+    let call = format!(
+        "<call name=\"send\"><routing><target_id>{kb}</target_id><title>make notes</title></routing>\
+         <payload><type>create</type><title>Notes</title><body>b</body></payload></call>"
+    );
+    let s = script(
+        &backend,
+        vec![pass(call), pass("saw it <call name=\"done\"></call>")],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await;
+    assert!(until_passes(&s, 2).await, "the reply must reach the model");
+    let turn = s.request(1);
+    assert!(!turn.contains("call routing, never sent"), "{turn}");
+    assert!(turn.contains("make notes"), "the routing title labels the reply: {turn}");
+    assert_eq!(
+        *got.lock().unwrap(),
+        vec![json!({"type": "create", "title": "Notes", "body": "b"})]
+    );
+}
+
 /// #203: the SECOND wrapped answer in a row escalates its report — the first is
 /// only named, the second says plainly that nothing has run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

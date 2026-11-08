@@ -562,3 +562,106 @@ fn a_backtick_in_thinking_does_not_hide_the_think_close() {
     assert_eq!(raw.len(), stripped.len());
     assert!(envelopes_in(text)[0].wrapper.is_none());
 }
+
+// ── the routing form: `<routing>` travels, `<payload>` is the target's, whole ──
+
+/// The measured break (battle1, #512): `pr_create` takes a `title`, and inline the
+/// parser lifts `<title>` out as routing. In the routing form the payload keeps it,
+/// and the routing `title` still labels the call.
+#[test]
+fn the_routing_form_delivers_a_payload_title_and_keeps_the_routing_one() {
+    let c = one(
+        "<call name=\"send\"><routing><target_id>github</target_id><title>open the PR</title>\
+         <timeout>60</timeout></routing><payload><type>pr_create</type><repo>a/b</repo>\
+         <title>TUI composer: Backspace</title><timeout>5</timeout></payload></call>",
+    );
+    assert_eq!(c.arguments["target_id"], json!("github"));
+    assert_eq!(c.arguments["title"], json!("open the PR"));
+    assert_eq!(c.arguments["timeout"], json!(60));
+    assert_eq!(
+        Value::Object(payload(&c).clone()),
+        json!({"type": "pr_create", "repo": "a/b", "title": "TUI composer: Backspace", "timeout": 5})
+    );
+}
+
+/// Nothing inside `<payload>` is read: a nested `<payload>` (a forward's argument),
+/// `<target_id>` and `<routing>` are the target's content as written.
+#[test]
+fn the_routing_form_payload_is_taken_whole() {
+    let c = one(
+        "<call name=\"send\"><routing><target_id>remote</target_id></routing>\
+         <payload><type>forward</type><target>user</target><payload><type>run</type>\
+         <target_id>x</target_id></payload><routing>kept</routing></payload></call>",
+    );
+    assert_eq!(c.arguments["target_id"], json!("remote"));
+    assert_eq!(
+        Value::Object(payload(&c).clone()),
+        json!({"type": "forward", "target": "user",
+               "payload": {"type": "run", "target_id": "x"}, "routing": "kept"})
+    );
+}
+
+#[test]
+fn the_routing_form_takes_to_and_an_empty_payload() {
+    let c = one(
+        "<call name=\"send\"><routing><to><item>a</item><item>b</item></to></routing>\
+         <payload></payload></call>",
+    );
+    assert_eq!(c.arguments["to"], json!(["a", "b"]));
+    assert_eq!(c.arguments["payload"], json!({}));
+}
+
+#[test]
+fn the_routing_form_refuses_what_it_cannot_route() {
+    for (text, says) in [
+        (
+            "<call name=\"send\"><routing><title>t</title></routing><payload><type>x</type></payload></call>",
+            "names its target in `<routing>`",
+        ),
+        (
+            "<call name=\"send\"><routing><target_id>a</target_id><type>x</type></routing></call>",
+            "`<type>` is not a routing field",
+        ),
+        (
+            "<call name=\"send\"><routing><target_id>a</target_id></routing><type>x</type></call>",
+            "`<type>` beside `<routing>`",
+        ),
+        (
+            "<call name=\"send\"><routing>a</routing><payload><type>x</type></payload></call>",
+            "`<routing>` holds tags",
+        ),
+    ] {
+        assert!(extract_tool_calls(text).is_empty(), "{text}");
+        let bad = malformed_calls(text);
+        assert_eq!(bad.len(), 1, "{text}");
+        assert!(bad[0].error.contains(says), "{text}: {}", bad[0].error);
+    }
+}
+
+/// Inline is unchanged: a call with no `<routing>` reads as before, a `<payload>`
+/// argument included.
+#[test]
+fn a_call_without_routing_reads_inline_as_before() {
+    let c = one(
+        "<call name=\"send\"><target_id>remote</target_id><title>t</title><type>forward</type>\
+         <payload><type>run</type></payload></call>",
+    );
+    assert_eq!(c.arguments["title"], json!("t"));
+    assert_eq!(
+        Value::Object(payload(&c).clone()),
+        json!({"type": "forward", "payload": {"type": "run"}})
+    );
+}
+
+/// A payload that carries a routing name renders in the routing form and parses back
+/// to the same call.
+#[test]
+fn render_call_writes_the_routing_form_when_the_payload_needs_it() {
+    let mut args = Map::new();
+    args.insert("target_id".into(), json!("github"));
+    args.insert("title".into(), json!("label"));
+    args.insert("payload".into(), json!({"type": "pr_create", "title": "X"}));
+    let text = render_call("send", &args);
+    assert!(text.contains("<routing>"), "{text}");
+    assert_eq!(one(&text).arguments, args);
+}

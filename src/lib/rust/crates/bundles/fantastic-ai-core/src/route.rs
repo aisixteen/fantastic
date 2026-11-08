@@ -1448,7 +1448,8 @@ async fn route_reply_gated(
             let used: Vec<&str> = crate::tool_parse::grammar::ROUTING
                 .iter()
                 .copied()
-                .filter(|k| *k != "target_id" && args.contains_key(*k))
+                // a name the payload ALSO carries reaches the target (the routing form)
+                .filter(|k| *k != "target_id" && args.contains_key(*k) && !payload.contains_key(*k))
                 .collect();
             if !used.is_empty() {
                 let clash = routing_clash(&kernel, target, vt, &used, &mut doc_args);
@@ -1458,8 +1459,10 @@ async fn route_reply_gated(
                         "error": format!(
                             "{names} on this call {} call routing, never sent to the target \
                              — but {target}'s `{vt}` documents an argument named {names}, \
-                             which no call can deliver; nothing was dispatched. Call it \
-                             without that argument, or have the verb's owner rename it.",
+                             which an inline call cannot deliver; nothing was dispatched. Write \
+                             the call in the routing form, where the payload is taken whole: \
+                             <call name=\"send\"><routing><target_id>{target}</target_id>…\
+                             </routing><payload><type>{vt}</type>…</payload></call>.",
                             if clash.len() == 1 { "is" } else { "are" }
                         ),
                         "target": target,
