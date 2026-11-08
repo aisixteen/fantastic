@@ -1560,7 +1560,12 @@ impl Bundle for AnthropicBundle {
         // A verb that runs a turn first reads what the record leaves to the API; an
         // API that does not answer refuses the verb, naming the field.
         if server::TURN_VERBS.contains(&verb) {
-            if let Some(refused) = server::resolve(agent_id, kernel).await {
+            // the model of the pass, as `complete` resolves it: the call's, else the default
+            let model = match payload.get("model").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                Some(m) => Some(m.to_string()),
+                None => fantastic_ai_core::remote_provider::default_of(agent_id, kernel).await,
+            };
+            if let Some(refused) = server::resolve(agent_id, kernel, model).await {
                 return Ok(Some(refused));
             }
         }

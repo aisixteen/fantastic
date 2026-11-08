@@ -224,8 +224,12 @@ pub async fn read(
 
 /// Read the record's absent fields from the API and write them back. `None` when
 /// nothing is absent or all were written; otherwise the verb's refusal.
-pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Option<Value> {
-    let rec = helpers::agent_meta(agent_id, kernel);
+pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>, model: Option<String>) -> Option<Value> {
+    // the model of the pass (a provider's record names none: the chat's, else its default)
+    let mut rec = helpers::agent_meta(agent_id, kernel);
+    if let Some(m) = model {
+        rec.insert("model".into(), json!(m));
+    }
     let named = |k: &str| {
         rec.get(k)
             .and_then(Value::as_str)
