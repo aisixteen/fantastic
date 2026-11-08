@@ -132,9 +132,8 @@ pub fn load_bundle(kernel: &Kernel, root: &Path, name: &str) -> Option<String> {
     }
 }
 
-/// A meta bundle's load: its `base` must resolve to a registered bundle (through
-/// meta bundles, never back to itself), and `record` is a mapping of the fields its
-/// instances inherit.
+/// A meta bundle's load: checked the one way every source is
+/// ([`fantastic_kernel::bundle::BundleRegistry::meta_row`]), then registered.
 fn load_meta(
     kernel: &Kernel,
     name: &str,
@@ -144,51 +143,13 @@ fn load_meta(
     row: Value,
     refuse: impl Fn(String) -> Option<String>,
 ) -> Option<String> {
-    let record = match spec.get("record") {
-        None | Some(Value::Null) => Value::Object(serde_json::Map::new()),
-        Some(r @ Value::Object(_)) => r.clone(),
-        Some(_) => {
-            return refuse(
-                "record: must be a mapping of the fields every instance inherits".to_string(),
-            )
+    match kernel.bundles.meta_row(name, base, sentence, spec, row) {
+        Ok(r) => {
+            kernel.bundles.register_meta(name, r);
+            None
         }
-    };
-    let Some(handler) = kernel.bundles.handler_of(base) else {
-        let bases = kernel.bundles.folder_bases().join(", ");
-        return refuse(format!(
-            "base: {} is no bundle of this kernel — a folder extends a registered \
-             handler_module or another folder bundle (folder bases with a program — \
-             known: {})",
-            fantastic_bundle::py_repr(base),
-            if bases.is_empty() { "none" } else { &bases }
-        ));
-    };
-    // no cycle: following the bases from `base` never comes back to this folder
-    let mut at = handler.clone();
-    for _ in 0..17 {
-        if at == name {
-            return refuse(format!(
-                "base: {} leads back to {} — a meta bundle cannot extend itself",
-                fantastic_bundle::py_repr(base),
-                fantastic_bundle::py_repr(name)
-            ));
-        }
-        let rows = kernel.bundles.folder_rows();
-        match rows
-            .iter()
-            .find(|r| r.get("name").and_then(Value::as_str) == Some(at.as_str()))
-            .and_then(|r| r.get("base").and_then(Value::as_str))
-        {
-            Some(next) => at = next.to_string(),
-            None => break,
-        }
+        Err(why) => refuse(why),
     }
-    let mut r = row;
-    r["base"] = json!(handler);
-    r["sentence"] = json!(sentence);
-    r["record"] = record;
-    kernel.bundles.register_meta(name, r);
-    None
 }
 
 /// Load every folder under `<root>/bundles/` — the cold read at boot. `root` is

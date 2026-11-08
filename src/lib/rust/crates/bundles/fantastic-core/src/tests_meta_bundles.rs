@@ -181,3 +181,75 @@ async fn a_bundle_on_another_base_keeps_that_handler_and_names_the_bundle() {
     assert_eq!(r["instances"], json!(["o1"]), "{r}");
     assert_eq!(meta(&kernel, "o1")["root"], json!("notes3"), "a reload reaches it too");
 }
+
+// ---- EMBEDDED META BUNDLES: a product's own bundle.yaml texts, in RAM ----------------------
+
+#[tokio::test]
+async fn an_embedded_meta_bundle_is_inherited_with_nothing_written_to_a_folder() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = kernel_with_bundles(&tmp, &[]).await;
+    kernel.bundles.register_meta_yaml("notes", NOTES).unwrap();
+    let r = create(&kernel, json!({"id": "e1", "handler_module": "notes"})).await;
+    assert_eq!(r["id"], json!("e1"), "{r}");
+    assert_eq!(meta(&kernel, "e1")["root"], json!("notes"));
+    assert!(!tmp.path().join(".fantastic").join("bundles").join("notes").exists(), "no folder is written");
+    let rows = kernel.bundles.folder_rows();
+    let row = rows.iter().find(|r| r["name"] == json!("notes")).unwrap();
+    assert_eq!(row["source"], json!("embedded"), "{row}");
+    assert!(row.get("record").is_none(), "{row}");
+}
+
+#[tokio::test]
+async fn a_folder_bundle_overrides_an_embedded_one_of_the_same_name() {
+    let tmp = TempDir::new().unwrap();
+    write_bundle(&tmp, "notes", "base: file_bridge.tools\nsentence: Mine.\nrecord:\n  root: mine\n");
+    let kernel = with_file(&tmp);
+    kernel.bundles.register_meta_yaml("notes", NOTES).unwrap();
+    crate::folders::load_bundles(&kernel, &tmp.path().join(".fantastic"));
+    create(&kernel, json!({"id": "e2", "handler_module": "notes"})).await;
+    assert_eq!(meta(&kernel, "e2")["root"], json!("mine"), "the folder's wins");
+    let rows = kernel.bundles.folder_rows();
+    let row = rows.iter().find(|r| r["name"] == json!("notes")).unwrap();
+    assert_eq!(row["source"], json!("folder"), "{row}");
+}
+
+#[tokio::test]
+async fn a_refused_folder_leaves_the_embedded_one_live_and_says_why() {
+    let tmp = TempDir::new().unwrap();
+    write_bundle(&tmp, "notes", "base: file_bridge.tools\nsentence: Bad.\nrecord: [1]\n");
+    let kernel = with_file(&tmp);
+    kernel.bundles.register_meta_yaml("notes", NOTES).unwrap();
+    crate::folders::load_bundles(&kernel, &tmp.path().join(".fantastic"));
+    create(&kernel, json!({"id": "e3", "handler_module": "notes"})).await;
+    assert_eq!(meta(&kernel, "e3")["root"], json!("notes"), "the embedded one stands");
+    let rows = kernel.bundles.folder_rows();
+    let row = rows.iter().find(|r| r["name"] == json!("notes")).unwrap();
+    assert_eq!(row["source"], json!("embedded"), "{row}");
+    assert!(row["folder_error"].as_str().unwrap_or("").contains("record"), "{row}");
+}
+
+#[tokio::test]
+async fn an_embedded_meta_bundle_is_refused_naming_the_field() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = kernel_with_bundles(&tmp, &[]).await;
+    let b = &kernel.bundles;
+    assert!(b.register_meta_yaml("x", "sentence: s\n").unwrap_err().contains("base: required"));
+    assert!(b.register_meta_yaml("x", "base: no_such.tools\nsentence: s\n").unwrap_err().contains("is no bundle"));
+    assert!(b.register_meta_yaml("x", "base: file_bridge.tools\n").unwrap_err().contains("sentence: required"));
+    assert!(b.register_meta_yaml("x", "base: file_bridge.tools\nsentence: s\nrecord: [1]\n").unwrap_err().contains("record:"));
+    b.register_meta_yaml("a", "base: file_bridge.tools\nsentence: s\n").unwrap();
+    b.register_meta_yaml("b", "base: a\nsentence: s\n").unwrap();
+    assert!(b.register_meta_yaml("a", "base: b\nsentence: s\n").unwrap_err().contains("leads back"));
+}
+
+#[tokio::test]
+async fn an_embedded_meta_bundle_extends_an_embedded_one() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = kernel_with_bundles(&tmp, &[]).await;
+    kernel.bundles.register_meta_yaml("notes", NOTES).unwrap();
+    kernel.bundles.register_meta_yaml("drafts", "base: notes\nsentence: Drafts.\nrecord:\n  root: drafts\n").unwrap();
+    create(&kernel, json!({"id": "e4", "handler_module": "drafts"})).await;
+    let m = meta(&kernel, "e4");
+    assert_eq!(m["root"], json!("drafts"), "the nearer wins");
+    assert_eq!(m["ingress_rule"], json!("allow_all_ingress"), "the farther fills the rest");
+}
