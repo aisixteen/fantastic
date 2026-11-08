@@ -627,6 +627,9 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         "state_unsubscribe": _on_state_unsubscribe,
     }
 
+    # THE LEG SAYS A SOCKET OPENED, on its own inbox: whoever watches the leg (a
+    # program on a box a master dials) learns its link is up without asking.
+    await kernel.emit(web_agent_id, {"type": "socket_open", "client_id": client_id})
     try:
         # THE CONNECT-TIME AUTO-WATCH of the endpoint the socket named — through
         # the one watch path, so a refusal is an `error` frame, never silence.
@@ -723,3 +726,9 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
             fn()
         state_unsubs.clear()
         kernel.ctx.inboxes.pop(client_id, None)
+        # THE LEG SAYS THE SOCKET CLOSED, after its calls settled: a closed peer,
+        # a dead tunnel or a keepalive timeout alike. The side that was dialed
+        # cannot dial back; its watchers wait for the next `socket_open`.
+        await kernel.emit(
+            web_agent_id, {"type": "socket_closed", "client_id": client_id, "guid": peer["guid"]}
+        )

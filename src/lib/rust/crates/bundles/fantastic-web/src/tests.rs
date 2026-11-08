@@ -3179,6 +3179,10 @@ mod host_guard;
 #[path = "tests_watch_path.rs"]
 mod watch_path;
 
+/// The leg's socket_open / socket_closed events.
+#[path = "tests_socket_events.rs"]
+mod socket_events;
+
 /// Literal routes before patterns (python `test_mount.py`).
 #[path = "tests_route_order.rs"]
 mod route_order;

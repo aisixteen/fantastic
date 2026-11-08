@@ -289,6 +289,11 @@ async fn emit_page(
 }
 
 impl PeerLink {
+    /// The guid this connection's hello pinned, if it said one.
+    pub(super) fn guid(&self) -> Option<String> {
+        self.pinned.as_ref().map(|(g, _)| g.clone())
+    }
+
     /// No peer yet: the connection `me` to `kernel`.
     pub(super) fn new(kernel: &Arc<Kernel>, me: String) -> Self {
         let mut nonce = [0u8; 6];

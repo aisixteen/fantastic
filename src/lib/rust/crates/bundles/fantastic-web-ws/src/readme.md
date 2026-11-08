@@ -5,6 +5,9 @@ denies all frames. Open: `update_agent <id> ingress_rule=allow_all_ingress`.
 Token on frame **envelope** (`auth_token`, sibling of `type`/`target` — never inside payload).
 
 Frames: `call` · `emit` · `watch` · `unwatch` · `state_subscribe` · `state_unsubscribe` · `hello`
+Emits (on this leg): `socket_open {client_id}` when a socket connects, `socket_closed {client_id, guid}`
+when it closes (peer closed, tunnel died, keepalive timeout), after its waiting calls settled. The dialed
+side never dials back: a program that needs the link watches the leg and waits for the next `socket_open`.
 Binary frames supported (4-byte-BE-length header + JSON envelope + raw bytes): the
 envelope holds `null` where the bytes belong and `_binary_path`, the steps to them — a
 JSON array, a key as a string (taken literally: `["payload","a.b"]` is the key `"a.b"`),

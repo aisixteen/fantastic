@@ -447,6 +447,13 @@ pub(crate) async fn ws_loop(
         }
     });
 
+    // THE LEG SAYS A SOCKET OPENED, on its own inbox: whoever watches the leg (a
+    // program on a box a master dials) learns its link is up without asking.
+    state
+        .kernel
+        .emit(&leg_agent_id, json!({"type": "socket_open", "client_id": client_id.0}))
+        .await;
+
     // THE CONNECT-TIME AUTO-WATCH of the endpoint the socket named — through the
     // one watch path, so a refusal is an `error` frame, never silence.
     if admits_autowatch {
@@ -802,6 +809,7 @@ pub(crate) async fn ws_loop(
     // ─── Cleanup on disconnect (python's `finally` block) ──────────
     // 0. The page is gone: drop its address and settle every host call still
     //    waiting on it (python does this first, before anything is cancelled).
+    let peer_guid = peer.guid();
     peer.close(&state.kernel);
     // 1. Cancel any in-flight `call` handlers so kernel.send tasks unwind.
     {
@@ -837,6 +845,16 @@ pub(crate) async fn ws_loop(
     state.kernel.cancel_task(&drain_task).await;
     drop(out_tx);
     let _ = send_task.await;
+    // 5. THE LEG SAYS THE SOCKET CLOSED, after its calls settled: a closed peer,
+    //    a dead tunnel or a keepalive timeout alike. The side that was dialed
+    //    cannot dial back; its watchers wait for the next `socket_open`.
+    state
+        .kernel
+        .emit(
+            &leg_agent_id,
+            json!({"type": "socket_closed", "client_id": client_id.0, "guid": peer_guid}),
+        )
+        .await;
 }
 
 /// THE ONE WATCH PATH — the connect-time auto-watch and an explicit `watch`

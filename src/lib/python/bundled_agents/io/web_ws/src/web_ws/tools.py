@@ -99,6 +99,11 @@ async def _get_routes(id, payload, kernel):
 # ─── dispatch ───────────────────────────────────────────────────
 
 
+EMITS = {
+    "socket_open": "{type:'socket_open', client_id} — emitted on this leg when a socket connects",
+    "socket_closed": "{type:'socket_closed', client_id, guid} — emitted on this leg when a socket closes (peer closed, tunnel died, keepalive timeout), after its waiting calls settled; `guid` is the peer kernel's when it said hello, else null. The dialed side never dials back: watch the leg and wait for the next socket_open",
+}
+
 VERBS = {
     "reflect": _reflect,
     "boot": _boot,
