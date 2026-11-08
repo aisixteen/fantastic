@@ -346,6 +346,11 @@ pub struct BundleRegistry {
     /// What `reflect bundles=all` lists for each folder — a refused one too, with
     /// its `error`.
     folder_rows: std::sync::RwLock<std::collections::BTreeMap<String, Value>>,
+    /// EMBEDDED META BUNDLES: a product's own `bundle.yaml` texts, registered from
+    /// its code ([`Self::register_meta_yaml`]) and held in RAM only — nothing is
+    /// written to a folder. A folder bundle of the same name wins over one; delete
+    /// the folder and the embedded one stands again.
+    embedded: std::sync::RwLock<std::collections::BTreeMap<String, Value>>,
 }
 
 impl BundleRegistry {
@@ -417,7 +422,7 @@ impl BundleRegistry {
             .read()
             .expect("folders poisoned")
             .contains_key(name)
-            || self.meta_base(name).is_some()
+            || self.folder_meta(name).is_some()
         {
             return;
         }
@@ -430,20 +435,107 @@ impl BundleRegistry {
     /// Every folder bundle this kernel read — loaded and refused — by name. A meta
     /// bundle's row is listed without its `record` (the fields, a directive among
     /// them, are the instances' business, not the catalog's).
+    ///
+    /// Embedded meta bundles are listed too (`source: embedded`), a folder's
+    /// (`source: folder`) in place of an embedded one of the same name — unless the
+    /// folder was refused: then the embedded one is live, listed with the folder's
+    /// `folder_error`.
     #[must_use]
     pub fn folder_rows(&self) -> Vec<Value> {
-        self.folder_rows
-            .read()
-            .expect("folder rows poisoned")
-            .values()
-            .map(|r| {
-                let mut r = r.clone();
+        let folders = self.folder_rows.read().expect("folder rows poisoned");
+        let embedded = self.embedded.read().expect("embedded poisoned");
+        let mut out: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+        for (name, r) in embedded.iter() {
+            let mut r = r.clone();
+            r["source"] = Value::from("embedded");
+            out.insert(name.clone(), r);
+        }
+        for (name, r) in folders.iter() {
+            let mut r = r.clone();
+            match (r.get("error").cloned(), out.get_mut(name)) {
+                (Some(err), Some(live)) => {
+                    live["folder_error"] = err;
+                }
+                _ => {
+                    r["source"] = Value::from("folder");
+                    out.insert(name.clone(), r);
+                }
+            }
+        }
+        out.into_values()
+            .map(|mut r| {
                 if let Some(o) = r.as_object_mut() {
                     o.remove("record");
                 }
                 r
             })
             .collect()
+    }
+
+    /// The SHAPE of a meta bundle, whatever its source (a folder's `bundle.yaml`, or
+    /// a text a product embeds): `record` a mapping, `base` a bundle of this registry
+    /// (a registered `handler_module`, a meta bundle, an installed bundle's name) that
+    /// never leads back to `name`. `Ok` is the row to register, `base` resolved to its
+    /// handler module; `Err` names the field.
+    pub fn meta_row(&self, name: &str, base: &str, sentence: &str, spec: &Value, row: Value) -> Result<Value, String> {
+        let record = match spec.get("record") {
+            None | Some(Value::Null) => Value::Object(serde_json::Map::new()),
+            Some(r @ Value::Object(_)) => r.clone(),
+            Some(_) => return Err("record: must be a mapping of the fields every instance inherits".to_string()),
+        };
+        let Some(handler) = self.handler_of(base) else {
+            let bases = self.folder_bases().join(", ");
+            return Err(format!(
+                "base: {} is no bundle of this kernel — a folder extends a registered \
+                 handler_module or another folder bundle (folder bases with a program — \
+                 known: {})",
+                fantastic_bundle::py_repr(base),
+                if bases.is_empty() { "none" } else { &bases }
+            ));
+        };
+        // no cycle: following the bases from `base` never comes back to `name`
+        let mut at = handler.clone();
+        for _ in 0..17 {
+            if at == name {
+                return Err(format!(
+                    "base: {} leads back to {} — a meta bundle cannot extend itself",
+                    fantastic_bundle::py_repr(base),
+                    fantastic_bundle::py_repr(name)
+                ));
+            }
+            match self.meta_base(&at) {
+                Some(next) => at = next,
+                None => break,
+            }
+        }
+        let mut r = row;
+        r["base"] = Value::from(handler);
+        r["sentence"] = Value::from(sentence);
+        r["record"] = record;
+        Ok(r)
+    }
+
+    /// Register an EMBEDDED META BUNDLE: `yaml` is a `bundle.yaml` text (`base`,
+    /// `sentence`, `record`) a product ships in its code. It is checked like a
+    /// folder's ([`Self::meta_row`]) and held in RAM — nothing is written to a folder;
+    /// a folder bundle of the same name overrides it. Register its base first.
+    pub fn register_meta_yaml(&self, name: &str, yaml: &str) -> Result<(), String> {
+        let spec = crate::yaml_io::load(yaml).map_err(|e| format!("{name}: {e}"))?;
+        let base = spec
+            .get("base")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("{name}: base: required — the bundle it extends"))?;
+        let sentence = spec
+            .get("sentence")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("{name}: sentence: required — one line saying what it is"))?;
+        let row = serde_json::json!({"name": name, "handler_module": name});
+        let row = self.meta_row(name, base, sentence, &spec, row).map_err(|e| format!("{name}: {e}"))?;
+        self.embedded.write().expect("embedded poisoned").insert(name.to_string(), row);
+        Ok(())
     }
 
     /// Load a META BUNDLE: a `bundle.yaml` with a `base` (a registered
@@ -485,18 +577,31 @@ impl BundleRegistry {
             .unwrap_or_else(|| name.to_string())
     }
 
-    /// The `base` of the loaded meta bundle `name`, if it is one (a folder with no
-    /// program: its row holds its `record`, and no built bundle stands for it).
+    /// The `base` of the loaded meta bundle `name`, if it is one: its folder's (a
+    /// folder with no program — its row holds its `record`, and no built bundle
+    /// stands for it), else its embedded one.
     fn meta_base(&self, name: &str) -> Option<String> {
+        self.meta_row_of(name)?.get("base").and_then(Value::as_str).map(str::to_string)
+    }
+
+    /// The live row of the meta bundle `name`: a loaded folder meta bundle wins over
+    /// an embedded one. `None`: no meta bundle by that name (or a program folder).
+    fn meta_row_of(&self, name: &str) -> Option<Value> {
         if self.folders.read().expect("folders poisoned").contains_key(name) {
             return None;
         }
+        self.folder_meta(name)
+            .or_else(|| self.embedded.read().expect("embedded poisoned").get(name).cloned())
+    }
+
+    /// A FOLDER meta bundle's row: loaded, no error, a `record`.
+    fn folder_meta(&self, name: &str) -> Option<Value> {
         let rows = self.folder_rows.read().expect("folder rows poisoned");
         let row = rows.get(name)?;
         if row.get("error").is_some() || row.get("record").is_none() {
             return None;
         }
-        row.get("base").and_then(Value::as_str).map(str::to_string)
+        Some(row.clone())
     }
 
     /// The fields an instance of `handler_module` inherits, whatever its source: a
@@ -511,10 +616,13 @@ impl BundleRegistry {
         if self.is_folder(&last) {
             chain.push(last);
         }
-        let rows = self.folder_rows.read().expect("folder rows poisoned");
         let mut out = serde_json::Map::new();
         for name in chain.iter().rev() {
-            if let Some(Value::Object(rec)) = rows.get(name).and_then(|r| r.get("record")) {
+            // a meta bundle's live row (folder over embedded), or a program folder's own
+            let row = self.meta_row_of(name).or_else(|| {
+                self.folder_rows.read().expect("folder rows poisoned").get(name).cloned()
+            });
+            if let Some(Value::Object(rec)) = row.as_ref().and_then(|r| r.get("record")) {
                 for (k, v) in rec {
                     out.insert(k.clone(), v.clone());
                 }

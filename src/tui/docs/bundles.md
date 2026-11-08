@@ -90,7 +90,13 @@ record:                        # the fields every instance inherits
   values (a field the bundle dropped goes), its own fields stay. There is no
   program, so nothing restarts.
 - An AI agent's directive is a field like any other (`post_system_prompt: |`),
-  so a role is a meta bundle over an AI backend.
+  so a role is a meta bundle over the AI agent (`base: ai_chat.tools`): its
+  provider and model are the chat's own fields, never the role's.
+- **embedded**: a product registers its own meta bundles from code
+  (`BundleRegistry::register_meta_yaml(name, yaml)`), checked like a folder's and
+  held in RAM — nothing is written to a folder. A folder bundle of the same name
+  overrides it; a refused folder leaves the embedded one live (`folder_error` in
+  its row). `reflect bundles=all` says which is live: `source: embedded | folder`.
 
 ## Live panels
 
