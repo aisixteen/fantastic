@@ -465,6 +465,7 @@ dependencies = [
 name = "fantastic-cli"
 version = "0.1.0"
 dependencies = [
+ "fantastic-ai-core",
  "fantastic-anthropic-backend",
  "fantastic-bridge",
  "fantastic-bundle",

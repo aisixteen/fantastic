@@ -517,6 +517,18 @@ impl Bundle for OllamaBackendBundle {
             }
         }
         // EVERY OTHER ai_core VERB, one table for every backend (python `build`).
+        // THE PROVIDER VERBS (`complete`, `models`, `default_model`): an AI chat completes here
+        if let Some(r) = fantastic_ai_core::remote_provider::provider_verbs(
+            agent_id,
+            payload,
+            kernel,
+            |m| build_provider_with(agent_id, kernel, m),
+            fantastic_ai_core::remote_provider::NO_LIVE,
+        )
+        .await
+        {
+            return Ok(Some(r));
+        }
         let provider = |_client: &str| build_provider(agent_id, kernel);
         if let Some(reply) = verbs::handle_common(agent_id, payload, kernel, CFG, provider).await? {
             return Ok(Some(reply));
@@ -561,7 +573,11 @@ impl Bundle for OllamaBackendBundle {
 /// record without them builds a provider whose every pass raises, naming the
 /// field (python `required_meta`).
 fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider> {
-    let meta = helpers::agent_meta(agent_id, kernel);
+    build_provider_with(agent_id, kernel, helpers::agent_meta(agent_id, kernel))
+}
+
+/// [`build_provider`] from a record (`complete` lays the pass's `model` over the agent's).
+fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<String, Value>) -> Arc<dyn Provider> {
     let (endpoint, model) = match (
         helpers::required_meta(&meta, "endpoint", BACKEND),
         helpers::required_meta(&meta, "model", BACKEND),

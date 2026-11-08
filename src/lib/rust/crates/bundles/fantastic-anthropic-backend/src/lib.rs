@@ -1076,7 +1076,11 @@ fn required_int(meta: &Map<String, Value>, key: &str) -> Result<i64, ProviderErr
 }
 
 fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider> {
-    let meta = helpers::agent_meta(agent_id, kernel);
+    build_provider_with(agent_id, kernel, helpers::agent_meta(agent_id, kernel))
+}
+
+/// [`build_provider`] from a record (`complete` lays the pass's `model` over the agent's).
+fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<String, Value>) -> Arc<dyn Provider> {
     let built = (|| -> Result<AnthropicProvider, ProviderError> {
         Ok(AnthropicProvider {
             endpoint: helpers::required_meta(&meta, "endpoint", NAME)?
@@ -1553,25 +1557,30 @@ impl Bundle for AnthropicBundle {
         if verb == "usage_reset" {
             return Ok(Some(usage_reset_reply(agent_id, kernel)));
         }
-        if verb == "models" {
-            let meta = helpers::agent_meta(agent_id, kernel);
-            let endpoint = meta.get("endpoint").and_then(Value::as_str).unwrap_or("");
-            match server::list(endpoint, &key_reader(agent_id, kernel, NAME, false)).await {
-                Ok(models) => return Ok(Some(json!({"models": models}))),
-                Err(e) => {
-                    return Ok(Some(fantastic_kernel::refusal::refusal(
-                        fantastic_kernel::refusal::UNHANDLED,
-                        e,
-                    )));
-                }
-            }
-        }
         // A verb that runs a turn first reads what the record leaves to the API; an
         // API that does not answer refuses the verb, naming the field.
         if server::TURN_VERBS.contains(&verb) {
             if let Some(refused) = server::resolve(agent_id, kernel).await {
                 return Ok(Some(refused));
             }
+        }
+        // THE PROVIDER VERBS (`complete`, `models`, `default_model`): an AI chat completes here
+        if let Some(r) = fantastic_ai_core::remote_provider::provider_verbs(
+            agent_id,
+            payload,
+            kernel,
+            |m| build_provider_with(agent_id, kernel, m),
+            Some(|| async {
+            let meta = helpers::agent_meta(agent_id, kernel);
+            let endpoint = meta.get("endpoint").and_then(Value::as_str).unwrap_or("").to_string();
+            server::list(&endpoint, &key_reader(agent_id, kernel, NAME, false))
+                .await
+                .map(|ms| ms.iter().filter_map(|m| m.get("id").and_then(Value::as_str).map(String::from)).collect())
+        }),
+        )
+        .await
+        {
+            return Ok(Some(r));
         }
         let provider = |_client: &str| build_provider(agent_id, kernel);
         if let Some(reply) = verbs::handle_common(agent_id, payload, kernel, CFG, provider).await? {

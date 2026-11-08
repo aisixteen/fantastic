@@ -140,6 +140,11 @@ fn register_default_bundles() -> BundleRegistry {
         fantastic_anthropic_backend::HANDLER_MODULE,
         fantastic_anthropic_backend::AnthropicBundle,
     );
+    // the AI agent apart from any provider: it completes through `provider_id`
+    reg.register(
+        fantastic_ai_core::chat_bundle::HANDLER_MODULE,
+        fantastic_ai_core::chat_bundle::AiChatBundle,
+    );
     // a remote MCP server (protocol 2026-07-28) as an agent: its tools are the
     // agent's verbs
     reg.register(

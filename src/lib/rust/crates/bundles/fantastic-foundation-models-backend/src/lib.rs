@@ -122,7 +122,11 @@ impl FoundationModelsBackendBundle {
     /// before the context is projected — so the caller reads why, not a window
     /// failure on a model that could never have answered.
     fn build_provider(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider> {
-        let meta = helpers::agent_meta(agent_id, kernel);
+        self.build_provider_with(agent_id, kernel, helpers::agent_meta(agent_id, kernel))
+    }
+
+    /// [`Self::build_provider`] from a record (`complete` lays the pass's `model` over the agent's).
+    fn build_provider_with(&self, _agent_id: &AgentId, _kernel: &Arc<Kernel>, meta: Map<String, Value>) -> Arc<dyn Provider> {
         let refusal = self
             .engine
             .availability()
@@ -273,6 +277,18 @@ impl Bundle for FoundationModelsBackendBundle {
             return Ok(Some(self.reflect_reply(agent_id, kernel)));
         }
         // EVERY OTHER ai_core VERB, one table for every backend.
+        // THE PROVIDER VERBS (`complete`, `models`, `default_model`): an AI chat completes here
+        if let Some(r) = fantastic_ai_core::remote_provider::provider_verbs(
+            agent_id,
+            payload,
+            kernel,
+            |m| self.build_provider_with(agent_id, kernel, m),
+            fantastic_ai_core::remote_provider::NO_LIVE,
+        )
+        .await
+        {
+            return Ok(Some(r));
+        }
         let provider = |_client: &str| self.build_provider(agent_id, kernel);
         if let Some(reply) =
             verbs::handle_common(agent_id, payload, kernel, self.cfg(), provider).await?

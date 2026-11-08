@@ -929,6 +929,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "crossterm 0.29.0",
+ "fantastic-ai-core",
  "fantastic-anthropic-backend",
  "fantastic-bridge",
  "fantastic-canvas-page",

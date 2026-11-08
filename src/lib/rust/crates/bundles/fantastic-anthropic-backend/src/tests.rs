@@ -1654,16 +1654,8 @@ async fn the_models_verb_lists_the_keys_models() {
     let ep = format!("{}/v1/messages", srv.uri());
     let kernel = mk(&tmp, &ep).await;
     let r = call(&kernel, "a1", json!({"type": "models"})).await;
-    let models = r["models"].as_array().cloned().unwrap_or_default();
-    assert_eq!(models.len(), 2, "{r}");
-    assert_eq!(models[0]["id"], json!("claude-haiku-5-5"), "{r}");
-    assert_eq!(models[0]["display_name"], json!("Haiku"), "{r}");
-    assert_eq!(models[0]["max_input_tokens"], json!(200000), "{r}");
-    assert_eq!(models[0]["max_tokens"], json!(64000), "{r}");
-    assert_eq!(models[1]["id"], json!("x"), "{r}");
-    assert!(models[1]["display_name"].is_null(), "{r}");
-    assert!(models[1]["max_input_tokens"].is_null(), "{r}");
-    assert!(models[1]["max_tokens"].is_null(), "{r}");
+    // a record that lists no models: the provider asks its API, and answers the names
+    assert_eq!(r["models"], json!(["claude-haiku-5-5", "x"]), "{r}");
     let reqs = srv.received_requests().await.unwrap_or_default();
     assert!(
         reqs[0]
