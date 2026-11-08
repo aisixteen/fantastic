@@ -126,7 +126,6 @@ pub struct FolderBundle {
     sentence: String,
     emits: Option<Value>,
     notes: String,
-    record: Map<String, Value>,
 }
 
 impl FolderBundle {
@@ -168,9 +167,10 @@ impl FolderBundle {
                 taken.join(", ")
             ));
         }
-        let record = match spec.get("record") {
-            None | Some(Value::Null) => Map::new(),
-            Some(Value::Object(m)) => m.clone(),
+        // `record` is checked here; its fields reach each instance through the kernel
+        // (`fantastic_kernel::inherit`), as every bundle's do
+        match spec.get("record") {
+            None | Some(Value::Null | Value::Object(_)) => {}
             Some(_) => {
                 return Err(
                     "record: must be a mapping of defaults for each instance's record".to_string(),
@@ -198,7 +198,6 @@ impl FolderBundle {
                 .to_string(),
             emits: spec.get("emits").filter(|v| !v.is_null()).cloned(),
             notes,
-            record,
         })
     }
 }
@@ -283,12 +282,13 @@ impl FolderBundle {
                 return Value::Null;
             }
         }
-        let mut record = self.record.clone();
-        if let Some(a) = kernel.agents.get(id) {
-            for (k, v) in a.meta.read().expect("meta").iter() {
-                record.insert(k.clone(), v.clone());
-            }
-        }
+        // the instance's record holds what it inherits from this folder's `record`
+        // (the kernel lays it under its own fields at `create_agent` and at load)
+        let record = kernel
+            .agents
+            .get(id)
+            .map(|a| a.meta.read().expect("meta").clone())
+            .unwrap_or_default();
         let env = fantastic_exec_bridge::child_env(&record);
         let cwd = self.folder.to_string_lossy().to_string();
         let spawned = match spawn_job(&self.command, id.as_str(), &env, &cwd) {

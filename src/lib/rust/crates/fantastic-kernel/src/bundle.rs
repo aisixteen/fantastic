@@ -474,8 +474,23 @@ impl BundleRegistry {
         chain
     }
 
-    /// The `base` of the loaded meta bundle `name`, if it is one.
+    /// The compiled (or program folder) bundle a meta bundle runs on, at the end of its
+    /// chain; `name` itself when it is no meta bundle.
+    #[must_use]
+    pub fn base_of(&self, name: &str) -> String {
+        let chain = self.meta_chain(name);
+        chain
+            .last()
+            .and_then(|m| self.meta_base(m))
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    /// The `base` of the loaded meta bundle `name`, if it is one (a folder with no
+    /// program: its row holds its `record`, and no built bundle stands for it).
     fn meta_base(&self, name: &str) -> Option<String> {
+        if self.folders.read().expect("folders poisoned").contains_key(name) {
+            return None;
+        }
         let rows = self.folder_rows.read().expect("folder rows poisoned");
         let row = rows.get(name)?;
         if row.get("error").is_some() || row.get("record").is_none() {
@@ -484,12 +499,18 @@ impl BundleRegistry {
         row.get("base").and_then(Value::as_str).map(str::to_string)
     }
 
-    /// The fields an instance of `handler_module` inherits: each meta bundle's
-    /// `record` on its way to the compiled base, the nearest one winning. Empty for
-    /// anything that is not a meta bundle.
+    /// The fields an instance of `handler_module` inherits, whatever its source: a
+    /// compiled bundle gives none; a folder bundle its `record`; a meta bundle its
+    /// own and each bundle's on the way to the compiled base — the nearest winning.
     #[must_use]
     pub fn defaults(&self, handler_module: &str) -> serde_json::Map<String, Value> {
-        let chain = self.meta_chain(handler_module);
+        let mut chain = self.meta_chain(handler_module);
+        let last = chain.last().map_or(handler_module.to_string(), |m| {
+            self.meta_base(m).unwrap_or_default()
+        });
+        if self.is_folder(&last) {
+            chain.push(last);
+        }
         let rows = self.folder_rows.read().expect("folder rows poisoned");
         let mut out = serde_json::Map::new();
         for name in chain.iter().rev() {

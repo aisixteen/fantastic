@@ -98,6 +98,8 @@ def register_meta(name: str, row: dict) -> None:
 
 def _meta_base(name: str) -> str | None:
     """The `base` of the loaded meta bundle `name`, if it is one."""
+    if name in _FOLDER:
+        return None
     row = _FOLDER_ROWS.get(name)
     if row is None or "error" in row or "record" not in row:
         return None
@@ -119,13 +121,24 @@ def meta_chain(handler_module: str) -> list[str]:
 
 
 def defaults(handler_module: str) -> dict:
-    """The fields an instance of `handler_module` inherits: each meta bundle's
-    `record` on its way to the compiled base, the nearest one winning. Empty for
-    anything that is not a meta bundle."""
+    """The fields an instance of `handler_module` inherits, whatever its source: a
+    compiled bundle gives none; a folder bundle its `record`; a meta bundle its own
+    and each bundle's on the way to the compiled base — the nearest winning."""
+    chain = meta_chain(handler_module)
+    last = _meta_base(chain[-1]) if chain else handler_module
+    if last in _FOLDER:
+        chain.append(last)
     out: dict = {}
-    for name in reversed(meta_chain(handler_module)):
+    for name in reversed(chain):
         out.update(_FOLDER_ROWS[name].get("record") or {})
     return out
+
+
+def base_of(name: str) -> str:
+    """The compiled (or program folder) bundle a meta bundle runs on, at the end of its
+    chain; `name` itself when it is no meta bundle."""
+    chain = meta_chain(name)
+    return (_meta_base(chain[-1]) or name) if chain else name
 
 
 def handler_of(base: str) -> str | None:

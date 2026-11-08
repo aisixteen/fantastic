@@ -103,12 +103,11 @@ from kernel._bundles import (
     _in_catalog,
     bundle_enabled,
     bundle_package,
-    defaults as bundle_defaults,
     folder_rows,
     import_handler,
     is_folder,
 )
-from kernel import _await, _docs, _secret, _sys
+from kernel import _await, _docs, _inherit, _secret, _sys
 
 
 _KEEP_MEMORY = "_keep_memory"
@@ -370,26 +369,6 @@ class RemoteTarget:
         # one identity diverge, the other replies are dropped unseen. Must be
         # solved (later).
         return next(c for c in calls if c in done).result()
-
-
-def _with_bundle_defaults(payload: dict) -> dict:
-    """The create payload with its META BUNDLE's fields under it: an instance inherits
-    its bundle's `record` (each meta bundle on the way to the compiled base) and
-    overrides any field it names. `bundle: X` beside the base's handler_module is the
-    same create as `handler_module: X`. Unchanged when it names no meta bundle."""
-    out = dict(payload)
-    b = out.pop("bundle", None)
-    if isinstance(b, str) and b:
-        out["handler_module"] = b
-    elif "bundle" not in payload:
-        out = payload
-    hm = out.get("handler_module")
-    if not isinstance(hm, str):
-        return out
-    inherited = bundle_defaults(hm)
-    if not inherited:
-        return out
-    return {**inherited, **out}
 
 
 class Agent:
@@ -2816,7 +2795,7 @@ class Agent:
         addressed agent is never the implicit parent. There is no implicit parent — an
         agent building its own subtree names itself, which is one word and
         cannot be confused with "wherever this happened to be sent"."""
-        payload = _with_bundle_defaults(payload)
+        payload = _inherit.create_payload(payload)  # the bundle's fields under the payload's
         handler_module = payload.get("handler_module")
         if not isinstance(handler_module, str) or not handler_module:
             return missing("create_agent", "handler_module")
