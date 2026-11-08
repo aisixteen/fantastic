@@ -214,9 +214,12 @@ try:
     # the job runs in its OWN subprocess, so this doesn't touch the host's modules.
     _sys.modules["kernel"] = kernel
 except Exception as _e:
+    # python clears `_e` when this block ends; `_dead` runs later, so it keeps its own copy
+    _setup_error = _e
+
     class _Kernel:
         def _dead(self, *a, **k):
-            raise RuntimeError("fantastic: kernel channel unavailable: %r" % (_e,))
+            raise RuntimeError("fantastic: kernel channel unavailable: %r" % (_setup_error,))
 
         send = emit = reflect = watch = on_message = onMessage = _dead
 
