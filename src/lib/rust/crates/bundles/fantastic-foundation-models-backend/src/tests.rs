@@ -69,6 +69,8 @@ async fn kernel(engine: &Arc<FakeEngine>, meta: Value) -> Fx {
     );
     let tmp = TempDir::new().unwrap();
     let mut k = Kernel::new();
+
+    k.bundles.register(fantastic_ai_core::chat_bundle::HANDLER_MODULE, fantastic_ai_core::chat_bundle::AiChatBundle);
     k.bundles.register(
         HANDLER_MODULE,
         FoundationModelsBackendBundle::new(Arc::clone(engine) as Arc<dyn FmEngine>),
@@ -108,7 +110,14 @@ async fn kernel(engine: &Arc<FakeEngine>, meta: Value) -> Fx {
 }
 
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    k.send(vec![Item::new(AgentId::from(target), payload)])
+    // a chat verb goes to an ai_chat completing through this provider
+    let verb = payload.get("type").and_then(Value::as_str).unwrap_or("").to_string();
+    let to = if fantastic_ai_core::remote_provider::is_chat_verb(&verb) {
+        fantastic_ai_core::remote_provider::pair_chat(k, &AgentId::from(target)).await
+    } else {
+        AgentId::from(target)
+    };
+    k.send(vec![Item::new(to, payload)])
         .await
         .remove(0)
         .result
@@ -182,6 +191,8 @@ fn the_schema_is_two_knobs_then_the_ai_fields_with_the_models_window() {
 async fn the_catalog_carries_the_schema_with_no_agent_existing() {
     let engine = Arc::new(FakeEngine::new().context_size(4096));
     let mut k = Kernel::new();
+
+    k.bundles.register(fantastic_ai_core::chat_bundle::HANDLER_MODULE, fantastic_ai_core::chat_bundle::AiChatBundle);
     k.bundles.register(
         HANDLER_MODULE,
         FoundationModelsBackendBundle::new(Arc::clone(&engine) as Arc<dyn FmEngine>),
@@ -718,13 +729,14 @@ async fn a_kernel_cancel_of_the_send_cancels_the_on_device_stream() {
     let fx2 = Arc::clone(&fx);
     let join =
         tokio::spawn(async move { fx2.send("hi", json!({"system_prompt": "Be terse."})).await });
-    // wait for the generation to be in flight
+    // wait for the generation to be in flight: the chat's turn (its provider completes it)
+    let chat = fantastic_ai_core::remote_provider::pair_chat(&fx.k, &AgentId::from(fx.id.as_str())).await;
     let mut task_id = None;
     for _ in 0..200 {
         let table = call(&fx.k, "kernel", json!({"type": "ps"})).await;
         task_id = table["tasks"].as_array().and_then(|ts| {
             ts.iter()
-                .find(|t| t["agent"] == json!(fx.id) && t["verb"] == json!("send"))
+                .find(|t| t["agent"] == json!(chat.as_str()) && t["verb"] == json!("send"))
                 .and_then(|t| t["id"].as_i64())
         });
         if task_id.is_some() && !engine.requests().is_empty() {

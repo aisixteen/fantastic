@@ -50,7 +50,7 @@ impl Bundle for AiChatBundle {
     fn verb_docs(&self) -> Value {
         let mut docs = verbs::verb_docs();
         if let Some(m) = docs.as_object_mut() {
-            for v in ["complete", "models", "default_model"] {
+            for v in ["complete", "models", "set_default_model"] {
                 m.remove(v); // a provider's verbs, not a chat's
             }
         }
@@ -81,7 +81,7 @@ impl Bundle for AiChatBundle {
             out.insert(PROVIDER_FIELD.into(), meta.get(PROVIDER_FIELD).cloned().unwrap_or(Value::Null));
             return Ok(Some(Value::Object(out)));
         }
-        if matches!(verb, "complete" | "models" | "default_model") {
+        if matches!(verb, "complete" | "models" | "set_default_model") {
             return Ok(Some(fantastic_kernel::refusal::refusal(
                 fantastic_kernel::refusal::UNHANDLED,
                 format!("{NAME}: `{verb}` is a provider's verb; this chat completes through its {PROVIDER_FIELD} (ask it there)"),
@@ -100,5 +100,16 @@ impl Bundle for AiChatBundle {
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
         verbs::on_delete(agent_id, kernel).await;
         Ok(())
+    }
+
+    /// A cancel of this chat's turn closes it (the provider's pass, a call of the turn,
+    /// is cancelled with it).
+    async fn on_cancel(
+        &self,
+        agent_id: &AgentId,
+        task_id: &fantastic_kernel::TaskId,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel).await
     }
 }

@@ -5324,7 +5324,7 @@ fn verb_docs_match_python_docstrings() {
             // the provider half of the ai_chat split: Rust first, the python port is its own ticket
             "complete",
             "models",
-            "default_model",
+            "set_default_model",
             "send",
             "stop",
             "pause",
@@ -8229,28 +8229,35 @@ async fn an_ai_chat_holds_the_conversation_and_completes_through_its_provider() 
 }
 
 #[tokio::test]
-async fn a_provider_lists_its_models_and_gets_and_sets_its_default() {
+async fn a_provider_completes_on_its_default_model_field_and_lists_and_sets_it() {
     let tmp = TempDir::new().unwrap();
     let kernel = base_kernel(&tmp, |k| {
         k.bundles.register("echo_provider.tools", EchoProvider);
     })
     .await;
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "echo_provider.tools",
-                   "id": "prov", "models": ["m-small", {"id": "m-big"}], "default_model": "m-small"}),
-        )])
-        .await;
-    let call = |p: Value| {
-        let k = Arc::clone(&kernel);
-        async move { k.send(vec![Item::new(AgentId::from("prov"), p)]).await.remove(0).result }
+    for (id, extra) in [("prov", json!({"models": ["m-small", "m-big"], "default_model": "m-small"})), ("bare", json!({}))] {
+        let mut c = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "echo_provider.tools", "id": id});
+        for (k, v) in extra.as_object().unwrap() {
+            c[k] = v.clone();
+        }
+        let _ = kernel.send(vec![Item::new(AgentId::from("kernel_state"), c)]).await;
+    }
+    let call = |to: &str, p: Value| {
+        let (k, to) = (Arc::clone(&kernel), to.to_string());
+        async move { k.send(vec![Item::new(AgentId::from(to.as_str()), p)]).await.remove(0).result }
     };
-    let m = call(json!({"type": "models"})).await;
-    assert_eq!(m, json!({"models": ["m-small", "m-big"], "default": "m-small"}));
-    assert_eq!(call(json!({"type": "default_model"})).await, json!({"default": "m-small"}));
-    assert_eq!(call(json!({"type": "default_model", "model": "m-big"})).await, json!({"default": "m-big"}));
-    assert_eq!(call(json!({"type": "default_model"})).await, json!({"default": "m-big"}));
-    let no = call(json!({"type": "default_model", "model": "m-huge"})).await;
+    let msg = json!([{"role": "user", "content": "hi"}]);
+    let r = call("prov", json!({"type": "complete", "messages": msg, "rid": "r1"})).await;
+    assert_eq!(r["model"], "m-small", "no model named: the record's default_model: {r}");
+    let r = call("prov", json!({"type": "complete", "messages": msg, "rid": "r2", "model": "m-big"})).await;
+    assert_eq!(r["model"], "m-big", "{r}");
+    let r = call("bare", json!({"type": "complete", "messages": msg, "rid": "r3"})).await;
+    assert_eq!(r["model"], "", "no model anywhere: the provider runs as its record is: {r}");
+    assert_eq!(call("prov", json!({"type": "models"})).await, json!({"models": ["m-small", "m-big"], "default": "m-small"}));
+    assert_eq!(call("prov", json!({"type": "set_default_model", "model": "m-big"})).await, json!({"default": "m-big"}));
+    assert_eq!(call("prov", json!({"type": "models"})).await["default"], "m-big");
+    let no = call("prov", json!({"type": "set_default_model", "model": "m-huge"})).await;
     assert_eq!(no["reason"], "bad_arg", "not one of its models: {no}");
+    let r = call("prov", json!({"type": "complete", "messages": msg, "rid": "r4"})).await;
+    assert_eq!(r["model"], "m-big", "the new default: {r}");
 }

@@ -40,19 +40,29 @@ stream as {type:'provider_token', rid, text} (a watcher reads them); the reply i
 completion_tokens, stop_reason} or {rid, error, transport}. An AI chat (`ai_chat.tools`) calls it through its \
 `provider_id`.";
 
+/// The record field holding a provider's default model.
+pub const DEFAULT_FIELD: &str = "default_model";
+
+/// A provider's default: `default_model`, else the record's `model`.
+#[must_use]
+pub fn default_of(meta: &Map<String, Value>) -> Option<String> {
+    meta.get(DEFAULT_FIELD)
+        .or_else(|| meta.get("model"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
 /// The `models` verb's doc.
 pub const MODELS_DOC: &str = "No args. The models this provider serves and its default: {models:[name, …], default}. \
-The list is the record's `models` (names); a provider that can ask its API lists those when the record names none.";
+The list is the record's `models`; a provider that can ask its API lists those when the record names none.";
 
-/// The `default_model` verb's doc.
-pub const DEFAULT_MODEL_DOC: &str = "args: model:str? — absent: GET the default ({default}); given: SET it (one of `models` when \
-the list is known, else refused) and answer {default}. A chat that names no `model` completes on the default.";
+/// The `set_default_model` verb's doc.
+pub const SET_DEFAULT_DOC: &str = "args: model:str (req). Sets this provider's default model (one of `models` when the list \
+is known, else refused); a chat that names no `model` completes on it. Returns {default}.";
 
 /// For a provider that cannot ask its API for its models: `provider_verbs(…, NO_LIVE)`.
 pub const NO_LIVE: Option<fn() -> std::future::Ready<Result<Vec<String>, String>>> = None;
-
-/// The record field holding a provider's default model.
-pub const DEFAULT_FIELD: &str = "default_model";
 
 /// The names a provider's record lists in `models` (strings, or `{id|name}` objects).
 #[must_use]
@@ -71,20 +81,11 @@ pub fn listed_models(meta: &Map<String, Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// A provider's default: `default_model`, else the record's `model`.
-#[must_use]
-pub fn default_of(meta: &Map<String, Value>) -> Option<String> {
-    meta.get(DEFAULT_FIELD)
-        .or_else(|| meta.get("model"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-}
-
-/// THE PROVIDER VERBS every backend serves the same way: `complete`, `models` (from the
-/// record; `live` lists the API's when the record names none) and `default_model`.
-/// `build` makes the backend's provider from a record (the pass's `model` laid over
-/// the agent's). `None`: not a provider verb.
+/// THE PROVIDER VERBS every backend serves the same way: `complete` (on the call's
+/// `model`, else the record's `default_model`), `models` (the record's list, or the
+/// API's through `live` when the record names none, and the default) and
+/// `set_default_model`. `build` makes the backend's provider from a record (the pass's
+/// `model` laid over the agent's). `None`: not a provider verb.
 pub async fn provider_verbs<B, L, Fut>(
     agent_id: &AgentId,
     payload: &Value,
@@ -107,13 +108,11 @@ where
                 .filter(|s| !s.is_empty())
                 .map(String::from)
                 .or_else(|| default_of(&meta));
-            let Some(model) = model else {
-                let rid = payload.get("rid").cloned().unwrap_or(Value::Null);
-                return Some(json!({"rid": rid, "error": "complete: no model — the call names none and this provider has no default_model",
-                                   "kind": "ValueError", "transport": false}));
-            };
+            // no model anywhere: the provider runs as its record is (an on-device engine names none)
             let mut over = meta.clone();
-            over.insert("model".into(), json!(model));
+            if let Some(m) = model {
+                over.insert("model".into(), json!(m));
+            }
             Some(complete(agent_id, payload, kernel, build(over)).await)
         }
         "models" => {
@@ -128,12 +127,12 @@ where
             }
             Some(json!({"models": names, "default": default_of(&meta)}))
         }
-        "default_model" => match payload.get("model") {
-            None | Some(Value::Null) => Some(json!({"default": default_of(&meta)})),
-            Some(Value::String(m)) if !m.is_empty() => {
+        "set_default_model" => match payload.get("model").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            None => Some(json!({"error": "set_default_model: model required — a model name", "reason": "bad_arg"})),
+            Some(m) => {
                 let names = listed_models(&meta);
-                if !names.is_empty() && !names.contains(m) {
-                    return Some(json!({"error": format!("default_model: `{m}` is not one of this provider's models {names:?}"),
+                if !names.is_empty() && !names.iter().any(|n| n == m) {
+                    return Some(json!({"error": format!("set_default_model: `{m}` is not one of this provider's models {names:?}"),
                                        "reason": "bad_arg"}));
                 }
                 let mut patch = Map::new();
@@ -141,10 +140,31 @@ where
                 kernel.update(agent_id, patch);
                 Some(json!({"default": m}))
             }
-            Some(_) => Some(json!({"error": "default_model: model must be a model name", "reason": "bad_arg"})),
         },
         _ => None,
     }
+}
+
+/// A provider answers no chat: `send`, `history`, `fork` … belong to an AI chat
+/// (`ai_chat.tools`) that names it (`provider_id`). `reflect` and `boot` are its own.
+#[must_use]
+pub fn is_chat_verb(verb: &str) -> bool {
+    !matches!(verb, "reflect" | "boot" | "complete" | "models" | "set_default_model")
+        && crate::verbs::verb_docs().get(verb).is_some()
+}
+
+/// The refusal a provider answers a chat verb with.
+#[must_use]
+pub fn chat_refusal(name: &str, verb: &str) -> Value {
+    let mut r = fantastic_kernel::refusal::refusal(
+        fantastic_kernel::refusal::UNHANDLED,
+        format!(
+            "{name}: `{verb}` is a chat's verb, and this agent is a provider — it holds no conversation. \
+             Chat with an `ai_chat.tools` agent whose {PROVIDER_FIELD} names this one; it completes here (`complete`)."
+        ),
+    );
+    fantastic_kernel::refusal::with(&mut r, "verb", json!(verb));
+    r
 }
 
 /// THE PROVIDER SIDE: run one pass of `provider` for `payload` and stream its
@@ -287,47 +307,65 @@ impl Provider for RemoteProvider {
         if let Some(m) = max_tokens {
             payload.insert("max_tokens".into(), json!(m));
         }
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<ProviderEvent, ProviderError>>();
-        let (kernel, chat, provider) = (Arc::clone(&self.kernel), self.chat.clone(), self.provider.clone());
-        let (report, model) = (Arc::clone(&self.report), Arc::clone(&self.model));
-        // the call runs as the chat (its grants are judged), beside the reader
-        tokio::spawn(async move { let me = chat.clone(); fantastic_kernel::send::as_agent(&me, async move {
-            let call = kernel.send(vec![Item::new(provider.clone(), Value::Object(payload))]);
-            tokio::pin!(call);
-            let outcome = loop {
+        // The call runs INSIDE the chat's turn (no spawn): it is the chat's send, judged
+        // by its grants, and a cancel of the turn cancels the provider's pass with it.
+        let call = {
+            let kernel = Arc::clone(&self.kernel);
+            let provider = self.provider.clone();
+            Box::pin(async move { kernel.send(vec![Item::new(provider, Value::Object(payload))]).await })
+        };
+        let guard = Unwatch { kernel: Arc::clone(&self.kernel), provider: self.provider.clone(), reader, done: false };
+        let st = Pass { call: Some(call), inbox, rid, guard, queued: std::collections::VecDeque::new(),
+                        report: Arc::clone(&self.report), model: Arc::clone(&self.model), ended: false };
+        let stream = futures_util::stream::unfold(st, |mut st| async move {
+            loop {
+                if let Some(ev) = st.queued.pop_front() {
+                    return Some((ev, st));
+                }
+                if st.ended {
+                    return None;
+                }
+                let Some(call) = st.call.as_mut() else {
+                    st.ended = true;
+                    continue;
+                };
                 tokio::select! {
-                    out = &mut call => break out,
-                    item = inbox.recv() => match item {
-                        Some(it) => if let Some(t) = token_of(&it.payload, &rid) {
-                            let _ = tx.send(Ok(ProviderEvent::Token(t)));
-                        },
-                        None => {}
-                    },
-                }
-            };
-            // tokens emitted before the reply are already queued: drain them
-            while let Some(it) = inbox.try_recv() {
-                if let Some(t) = token_of(&it.payload, &rid) {
-                    let _ = tx.send(Ok(ProviderEvent::Token(t)));
+                    out = call => {
+                        st.call = None;
+                        // tokens emitted before the reply are already queued: drain them
+                        while let Some(it) = st.inbox.try_recv() {
+                            if let Some(t) = token_of(&it.payload, &st.rid) {
+                                st.queued.push_back(Ok(ProviderEvent::Token(t)));
+                            }
+                        }
+                        st.guard.release().await;
+                        let settled = match out.into_iter().next() {
+                            // the provider's own answer, a failed pass included: its error as it wrote it
+                            Some(o) if o.status == Status::Completed || o.result.get("rid").is_some() => {
+                                settle(&o.result, &st.report, &st.model)
+                            }
+                            Some(o) => Err(ProviderError::raised(format!(
+                                "ai_chat: complete on `{}` ended {:?}: {}",
+                                st.guard.provider.as_str(),
+                                o.status,
+                                o.result
+                            ))),
+                            None => Err(ProviderError::raised("ai_chat: complete returned nothing")),
+                        };
+                        if let Err(e) = settled {
+                            st.queued.push_back(Err(e));
+                        }
+                        st.ended = true;
+                    }
+                    item = st.inbox.recv() => {
+                        if let Some(t) = item.and_then(|it| token_of(&it.payload, &st.rid)) {
+                            return Some((Ok(ProviderEvent::Token(t)), st));
+                        }
+                    }
                 }
             }
-            kernel.unwatch(&provider, &reader).await;
-            kernel.remove_inbox(&reader);
-            let settled = match outcome.into_iter().next() {
-                Some(o) if o.status == Status::Completed => settle(&o.result, &report, &model),
-                Some(o) => Err(ProviderError::raised(format!(
-                    "ai_chat: complete on `{}` ended {:?}: {}",
-                    provider.as_str(),
-                    o.status,
-                    o.result
-                ))),
-                None => Err(ProviderError::raised("ai_chat: complete returned nothing")),
-            };
-            if let Err(e) = settled {
-                let _ = tx.send(Err(e));
-            }
-        }).await });
-        Ok(Box::pin(tokio_stream_of(rx)))
+        });
+        Ok(Box::pin(stream))
     }
 
     fn model(&self) -> String {
@@ -347,13 +385,114 @@ impl Provider for RemoteProvider {
     }
 }
 
-/// An unbounded receiver as a stream (no tokio-stream dependency).
-fn tokio_stream_of<T: Send + 'static>(
-    rx: tokio::sync::mpsc::UnboundedReceiver<T>,
-) -> impl futures_util::Stream<Item = T> + Send + 'static {
-    futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|v| (v, rx)) })
+type Call = std::pin::Pin<Box<dyn std::future::Future<Output = Vec<fantastic_kernel::Outcome>> + Send>>;
+
+/// One pass in flight: the `complete` call, the reader's inbox, what is still to yield.
+struct Pass {
+    call: Option<Call>,
+    inbox: fantastic_kernel::inbox::InboxReceiver,
+    rid: String,
+    guard: Unwatch,
+    queued: std::collections::VecDeque<Result<ProviderEvent, ProviderError>>,
+    report: Arc<Mutex<ProviderReport>>,
+    model: Arc<Mutex<String>>,
+    ended: bool,
+}
+
+/// The reader's watch of the provider: released when the pass ends, or — the turn
+/// dropped or cancelled mid-pass — when the pass is dropped.
+struct Unwatch {
+    kernel: Arc<Kernel>,
+    provider: AgentId,
+    reader: AgentId,
+    done: bool,
+}
+
+impl Unwatch {
+    async fn release(&mut self) {
+        if !self.done {
+            self.done = true;
+            self.kernel.unwatch(&self.provider, &self.reader).await;
+            self.kernel.remove_inbox(&self.reader);
+        }
+    }
+}
+
+impl Drop for Unwatch {
+    fn drop(&mut self) {
+        if !self.done {
+            let (k, p, r) = (Arc::clone(&self.kernel), self.provider.clone(), self.reader.clone());
+            if let Ok(h) = tokio::runtime::Handle::try_current() {
+                h.spawn(async move {
+                    k.unwatch(&p, &r).await;
+                    k.remove_inbox(&r);
+                });
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 #[path = "tests_remote_provider.rs"]
 mod tests_remote_provider;
+
+/// TESTS AND TOOLS: an `ai_chat` agent completing through `provider` — `<provider>_ai`,
+/// under the same parent, on the provider's memory store (its `memory_store_id`), with
+/// both ends of the edge granted (the chat may `complete` and `watch` the provider, and
+/// call what the provider may; the provider and the store admit it). The chat holds the
+/// conversation; the provider keeps answering `complete`. Returns the chat's id. A
+/// provider's own tests drive a whole turn through it.
+pub async fn pair_chat(kernel: &Arc<Kernel>, provider: &AgentId) -> AgentId {
+    let chat = AgentId::from(format!("{}_ai", provider.as_str()));
+    if kernel.agents.contains_key(&chat) {
+        return chat;
+    }
+    let pm = crate::helpers::agent_meta(provider, kernel);
+    let parent = kernel
+        .agents
+        .get(provider)
+        .and_then(|a| a.parent_id.clone())
+        .map_or_else(|| "kernel".to_string(), |p| p.as_str().to_string());
+    let mut can_call = pm.get("can_call").and_then(Value::as_object).cloned().unwrap_or_default();
+    can_call.insert(provider.as_str().to_string(), json!(["complete", "watch"]));
+    let mut create = json!({"type": "create_agent", "parent_id": parent, "handler_module": crate::chat_bundle::HANDLER_MODULE,
+                            "id": chat.as_str(), PROVIDER_FIELD: provider.as_str(), "can_call": can_call,
+                            "callable_by": pm.get("callable_by").cloned().unwrap_or(json!({"$self": "*"}))});
+    for k in ["memory_store_id", "file_bridge_id", "context_window", "context_strategy", "caching"] {
+        if let Some(v) = pm.get(k) {
+            create[k] = v.clone();
+        }
+    }
+    if create.get("context_window").is_none() {
+        // the model's own window, as the provider reports it
+        let r = kernel.send(vec![Item::new(provider.clone(), json!({"type": "reflect"}))]).await;
+        if let Some(w) = r.first().and_then(|o| o.result.get("context_window")).filter(|w| w.is_number()) {
+            create["context_window"] = w.clone();
+        }
+    }
+    let root = kernel.root().map_or_else(|| AgentId::from("kernel"), |r| r.id.clone());
+    let _ = kernel.send(vec![Item::new(root, create)]).await;
+    // the other ends: the provider admits the chat, and so does everything that admits the provider
+    let me = chat.as_str().to_string();
+    let _ = kernel.edit_callable_by(provider, |m| {
+        m.insert(me.clone(), json!(["complete", "watch"]));
+        true
+    });
+    let all: Vec<Arc<fantastic_kernel::Agent>> = kernel.agents.iter().map(|e| Arc::clone(e.value())).collect();
+    for a in all {
+        let admits = a
+            .meta
+            .read()
+            .ok()
+            .and_then(|m| m.get("callable_by").and_then(Value::as_object).map(|c| c.get(provider.as_str()).cloned()))
+            .flatten();
+        if let Some(verbs) = admits {
+            let me = me.clone();
+            let _ = kernel.edit_callable_by(&a.id, move |m| {
+                m.insert(me, verbs);
+                true
+            });
+        }
+    }
+    chat
+}

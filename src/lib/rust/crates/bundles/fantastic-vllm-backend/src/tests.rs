@@ -937,6 +937,8 @@ fn unique_id(tmp: &TempDir) -> String {
 
 async fn mk_kernel(tmp: &TempDir) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
+
+    kernel.bundles.register(fantastic_ai_core::chat_bundle::HANDLER_MODULE, fantastic_ai_core::chat_bundle::AiChatBundle);
     kernel.bundles.register(HANDLER_MODULE, VllmBundle);
     kernel.bundles.register(
         fantastic_ram_store::HANDLER_MODULE,
@@ -1200,7 +1202,7 @@ async fn the_last_budget_is_per_agent_and_freed_on_delete() {
     };
     let out = kernel
         .send(vec![Item::new(
-            AgentId::from(id.as_str()),
+            fantastic_ai_core::remote_provider::pair_chat(&kernel, &AgentId::from(id.as_str())).await,
             json!({"type": "send", "text": "hi", "client_id": "t", "reply_to": null}),
         )])
         .await
@@ -1214,7 +1216,7 @@ async fn the_last_budget_is_per_agent_and_freed_on_delete() {
     for _ in 0..500 {
         let st = kernel
             .send(vec![Item::new(
-                AgentId::from(id.as_str()),
+                fantastic_ai_core::remote_provider::pair_chat(&kernel, &AgentId::from(id.as_str())).await,
                 json!({"type": "status"}),
             )])
             .await

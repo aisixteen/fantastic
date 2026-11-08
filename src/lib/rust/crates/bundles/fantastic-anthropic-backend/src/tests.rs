@@ -509,6 +509,8 @@ async fn mk_with(tmp: &TempDir, endpoint: &str, extra: Value) -> Arc<Kernel> {
 
 async fn mk_with_id(tmp: &TempDir, endpoint: &str, extra: Value, id: &str) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
+
+    kernel.bundles.register(fantastic_ai_core::chat_bundle::HANDLER_MODULE, fantastic_ai_core::chat_bundle::AiChatBundle);
     kernel.bundles.register(HANDLER_MODULE, AnthropicBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
@@ -533,8 +535,15 @@ async fn mk_with_id(tmp: &TempDir, endpoint: &str, extra: Value, id: &str) -> Ar
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
+    // a chat verb goes to an ai_chat completing through this provider
+    let verb = payload.get("type").and_then(Value::as_str).unwrap_or("").to_string();
+    let to = if fantastic_ai_core::remote_provider::is_chat_verb(&verb) {
+        fantastic_ai_core::remote_provider::pair_chat(kernel, &AgentId::from(target)).await
+    } else {
+        AgentId::from(target)
+    };
     kernel
-        .send(vec![Item::new(AgentId::from(target), payload)])
+        .send(vec![Item::new(to, payload)])
         .await
         .remove(0)
         .result
@@ -549,16 +558,18 @@ async fn a_send_reads_the_api_first_and_a_no_turn_verb_reads_nothing() {
         call(&kernel, "a1", json!({"type": verb})).await;
     }
     assert!(srv.received_requests().await.unwrap_or_default().is_empty());
+    // the provider's turn (`complete`) reads the API first
     call(
         &kernel,
         "a1",
-        json!({"type": "send", "text": "hi", "client_id": "t"}),
+        json!({"type": "complete", "messages": [{"role": "user", "content": "hi"}], "rid": "r"}),
     )
     .await;
     let rec = helpers::agent_meta(&AgentId::from("a1"), &kernel);
     assert_eq!(
         (&rec["max_tokens"], &rec["context_window"]),
-        (&json!(16384), &json!(200_000))
+        (&json!(16384), &json!(200_000)),
+        "{rec:?}"
     );
 }
 
@@ -632,6 +643,8 @@ async fn sent_max_tokens(model: &str, extra: Value, max: i64) -> Value {
 /// `max_tokens` unless `extra` names one.
 async fn mk_unbounded_store(tmp: &TempDir, endpoint: &str, id: &str, extra: Value) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
+
+    kernel.bundles.register(fantastic_ai_core::chat_bundle::HANDLER_MODULE, fantastic_ai_core::chat_bundle::AiChatBundle);
     kernel.bundles.register(HANDLER_MODULE, AnthropicBundle);
     kernel.bundles.register(
         fantastic_ram_store::HANDLER_MODULE,
@@ -1544,6 +1557,8 @@ fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
 /// included (#177).
 async fn mk_with_store(tmp: &TempDir, endpoint: &str, extra: Value) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
+
+    kernel.bundles.register(fantastic_ai_core::chat_bundle::HANDLER_MODULE, fantastic_ai_core::chat_bundle::AiChatBundle);
     kernel.bundles.register(HANDLER_MODULE, AnthropicBundle);
     kernel.bundles.register(
         fantastic_ram_store::HANDLER_MODULE,

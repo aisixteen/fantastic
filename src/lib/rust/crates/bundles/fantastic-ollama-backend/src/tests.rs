@@ -39,6 +39,8 @@ async fn mk_kernel_with(
     extra: Value,
 ) -> (Arc<Kernel>, AgentId) {
     let mut kernel = Kernel::new();
+
+    kernel.bundles.register(fantastic_ai_core::chat_bundle::HANDLER_MODULE, fantastic_ai_core::chat_bundle::AiChatBundle);
     kernel.bundles.register(HANDLER_MODULE, OllamaBackendBundle);
     kernel
         .bundles
@@ -176,6 +178,8 @@ async fn send_streams_tokens_and_emits_done() {
         .await;
 
     let (kernel, backend) = mk_kernel(&tmp, "tok", &server.uri()).await;
+    // the chat holds the turn and streams to its caller; the provider completes it
+    let backend = fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await;
     let mut rx = rebind_backend_inbox(&kernel, &backend);
     let client_id = "browser_tok";
 
@@ -240,7 +244,7 @@ async fn an_envelope_dispatches_and_streams_verbatim() {
     let client_id = "browser_tool";
     let reply = kernel
         .send(vec![Item::new(
-            backend.clone(),
+            fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
             json!({"type": "send", "text": "go", "client_id": client_id}),
         )])
         .await
@@ -330,7 +334,7 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
     let _rx = rebind_backend_inbox(&kernel, &backend);
     let reply = kernel
         .send(vec![Item::new(
-            backend.clone(),
+            fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
             json!({"type": "send", "text": "hi", "client_id": "c_think"}),
         )])
         .await
@@ -342,7 +346,7 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
     );
     let h = kernel
         .send(vec![Item::new(
-            backend.clone(),
+            fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
             json!({"type": "history", "client_id": "c_think"}),
         )])
         .await
@@ -371,7 +375,7 @@ async fn sends_temperature_default_and_override() {
     // default: reflect + the actual request both carry 0.3.
     let _ = kernel
         .send(vec![Item::new(
-            backend.clone(),
+            fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
             json!({"type":"send","text":"hi","client_id":"c"}),
         )])
         .await
@@ -404,7 +408,7 @@ async fn sends_temperature_default_and_override() {
     assert_eq!(r2["temperature"], json!(0.15));
     let _ = kernel
         .send(vec![Item::new(
-            backend.clone(),
+            fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
             json!({"type":"send","text":"hi2","client_id":"c"}),
         )])
         .await
@@ -505,7 +509,7 @@ async fn history_persists_and_round_trips() {
     let client_id = "browser_hist";
     let _reply = kernel
         .send(vec![Item::new(
-            backend.clone(),
+            fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
             json!({"type": "send", "text": "ping", "client_id": client_id}),
         )])
         .await
@@ -514,7 +518,7 @@ async fn history_persists_and_round_trips() {
 
     let h = kernel
         .send(vec![Item::new(
-            backend.clone(),
+            fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
             json!({"type": "history", "client_id": client_id}),
         )])
         .await
@@ -528,11 +532,19 @@ async fn history_persists_and_round_trips() {
     assert_eq!(last["role"], "assistant");
     assert_eq!(last["head"], "ack");
 
-    // The turns live in the agent's MEMORY STORE (`memory_store_id`) — agent id
-    // IS conversation id; the kernel keeps no conversation.
-    let rows = fantastic_kernel::test_support::as_agent(
+    // The turns live in the CHAT's memory store (`memory_store_id`) — the chat's id IS
+    // the conversation's; the provider and the kernel keep none.
+    let chat = fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await;
+    let none = fantastic_kernel::test_support::as_agent(
         backend.clone(),
         fantastic_ai_core::memory::load_history(&backend, &kernel, true),
+    )
+    .await
+    .expect("store read");
+    assert!(none.is_empty(), "the provider holds no conversation: {none:#?}");
+    let rows = fantastic_kernel::test_support::as_agent(
+        chat.clone(),
+        fantastic_ai_core::memory::load_history(&chat, &kernel, true),
     )
     .await
     .expect("store read");
@@ -827,7 +839,7 @@ fn full_response(content_type: &str, body: &str) -> (Vec<u8>, bool) {
 async fn send_once(kernel: &Arc<Kernel>, backend: &AgentId, client: &str) -> Value {
     kernel
         .send(vec![Item::new(
-            backend.clone(),
+            fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
             json!({"type": "send", "text": "hi", "client_id": client, "reply_to": null}),
         )])
         .await
