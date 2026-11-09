@@ -1,7 +1,7 @@
 //! The CALL CHECKER — python `tests/test_call_check.py`, case for case and string
 //! for string (the reports are the parity proof).
 
-use super::{check, repair, risky, MAX_REPORTS};
+use super::{check, foreign_cut, repair, risky, MAX_REPORTS};
 use crate::think::without_thinking;
 use crate::tool_parse::extract_tool_calls;
 use serde_json::json;
@@ -563,4 +563,64 @@ fn a_whole_call_quoted_in_an_argument_reports_nothing() {
         "<call name=\"send\"><target_id>kernel</target_id><type>spawn</type><task>{q}</task></call>"
     );
     assert!(check(&answer, 1).is_empty());
+}
+
+/// The text a stream has delivered after each char: where the first cut lands (#499).
+fn streamed_cut(text: &str) -> Option<usize> {
+    let mut end = 0;
+    for c in text.chars() {
+        end += c.len_utf8();
+        if let Some(cut) = foreign_cut(&text[..end]) {
+            return Some(cut);
+        }
+    }
+    None
+}
+
+/// Each foreign form is cut right after its opening token is complete.
+#[test]
+fn each_foreign_form_is_cut_after_its_first_tag() {
+    let cases = [
+        (
+            "ok <invoke name=\"send\"> junk",
+            "ok <invoke name=\"send\">",
+        ),
+        ("<tool_call>\n<call name=\"send\">", "<tool_call>"),
+        (
+            "x <function=call name=\"send\"> y",
+            "x <function=call name=\"send\">",
+        ),
+        ("hi <send><target_id>a</target_id>", "hi <send>"),
+        ("hi <b>bold", "hi <b>"),
+        ("call name=\"await\">more", "call name=\"await\">"),
+        (
+            "go {\"name\": \"send\", \"arguments\": {}}",
+            "go {\"name\": \"send\"",
+        ),
+        ("<function_calls>\n<invoke name=\"x\">", "<function_calls>"),
+    ];
+    for (text, kept) in cases {
+        let cut = streamed_cut(text).unwrap_or_else(|| panic!("not cut: {text}"));
+        assert_eq!(&text[..cut], kept, "{text}");
+    }
+}
+
+/// A correct call, a quoted complete call inside an argument (#543), the routing
+/// form, code and prose that only names a tag are never cut.
+#[test]
+fn a_correct_or_quoted_call_is_not_cut() {
+    let ok = [
+        SEND,
+        "text then <call name=\"done\"></call>",
+        "<call name=\"send\"><target_id>a</target_id><type>say</type><text>write <call \
+         name=\"done\"></call> to end</text></call>",
+        "<call name=\"send\"><routing><target_id>a</target_id></routing><payload><type>read\
+         </type></payload></call>",
+        "use `<invoke name=\"x\">` never, and the word invoke is fine",
+        "```\n<invoke name=\"x\">\n```\nok",
+        "a < b and c > d",
+    ];
+    for text in ok {
+        assert_eq!(streamed_cut(text), None, "{text}");
+    }
 }

@@ -7086,6 +7086,9 @@ mod stream_parts;
 
 #[path = "tests_stall.rs"]
 mod stall;
+/// The call checker on the stream (#499).
+#[path = "tests_stream_cut.rs"]
+mod stream_cut;
 /// Inline agent views in a chat (#339).
 #[path = "tests_embed.rs"]
 mod tests_embed;
@@ -7280,10 +7283,8 @@ async fn a_broken_call_is_reported_instead_of_the_no_call_reminder() {
         nxt.contains("[malformed call — nothing ran] line 3, col 1:"),
         "{nxt}"
     );
-    assert!(
-        nxt.contains("<call name=\"send\">\n<routing><target_id>files</target_id>"),
-        "{nxt}"
-    );
+    // CUT AT THE FIRST FOREIGN TAG (#499): the arguments after it are never read
+    assert!(nxt.contains("<call name=\"send\"></call>"), "{nxt}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7352,13 +7353,10 @@ async fn a_wrapped_call_is_not_dispatched_and_the_top_level_one_runs() {
         batch.contains("[malformed call — nothing ran] line 1, col 1:"),
         "{batch}"
     );
-    assert!(batch.contains("drop the wrapper"), "{batch}");
-    assert!(
-        batch.contains("The other call of this answer ran"),
-        "{batch}"
-    );
-    // One reflect reply: the top-level call ran, the wrapped copy did not.
-    assert_eq!(batch.matches("kernel reflect").count(), 1, "{batch}");
+    // CUT AT THE WRAPPER (#499): nothing after the first foreign tag is read, so
+    // neither the wrapped call nor the top-level one beside it ran.
+    assert!(batch.contains("holds no call"), "{batch}");
+    assert_eq!(batch.matches("kernel reflect").count(), 0, "{batch}");
 }
 
 /// An answer whose only markup is an open wrapper with no call in it gets the
@@ -7772,7 +7770,7 @@ async fn a_second_wrapped_answer_in_a_row_escalates() {
         .result;
     assert!(until_passes(&s, 3).await, "the chain did not finish");
     let first = s.request(1);
-    assert!(first.contains("drop the wrapper"), "{first}");
+    assert!(first.contains("holds no call"), "{first}");
     assert!(!first.contains("[no progress"), "{first}");
     let second = s.request(2);
     assert!(
@@ -7810,7 +7808,7 @@ async fn a_call_that_runs_resets_the_escalation() {
         .result;
     assert!(until_passes(&s, 4).await, "the chain did not finish");
     let report = s.request(3);
-    assert!(report.contains("drop the wrapper"), "{report}");
+    assert!(report.contains("holds no call"), "{report}");
     assert!(!report.contains("[no progress"), "{report}");
 }
 
