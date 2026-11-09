@@ -810,10 +810,19 @@ fn scan(answer: &str) -> Vec<(usize, String)> {
 /// on the text received so far (thinking already excluded by the caller). A complete
 /// `<call` envelope (quoted calls inside an argument included, see `find_close`) is
 /// masked, so a correct call is never cut. A tag after an unmatched backtick of its
-/// paragraph waits: the span may still close and make it code.
+/// paragraph waits: the span may still close and make it code. A run whose first
+/// token is a call opener that lost its `<` (`call name="X">`) is never cut: when the
+/// answer ends, `repair` restores it, or `check` reports it.
 #[must_use]
 pub fn foreign_cut(answer: &str) -> Option<usize> {
-    let mut at = scan(answer).first()?.0;
+    let bare_starts: Vec<usize> = bare(&mask(answer))
+        .iter()
+        .map(|c| c.get(0).expect("match").start())
+        .collect();
+    let mut at = scan(answer)
+        .into_iter()
+        .map(|(at, _)| at)
+        .find(|at| !bare_starts.contains(at))?;
     // A call written inside a wrapper is reported at its own opener; the foreign tag
     // is the wrapper before it.
     if let Some(w) = envelopes_in(answer)

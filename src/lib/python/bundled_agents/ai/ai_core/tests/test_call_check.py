@@ -10,7 +10,7 @@ from _testkit import memory_meta
 import asyncio
 
 from ai_core import core
-from ai_core.call_check import MAX_REPORTS, _risky, check, repair
+from ai_core.call_check import MAX_REPORTS, _risky, check, foreign_cut, repair
 
 E59 = """I'll look at the files agent.
 <tool_call>
@@ -244,7 +244,8 @@ async def test_a_broken_call_is_reported_instead_of_the_no_call_reminder(
         nxt = fp.incoming[1]
         assert "[no call was dispatched]" not in nxt, nxt
         assert "[malformed call — nothing ran] line 3, col 1:" in nxt, nxt
-        assert '<call name="send">\n<routing><target_id>files</target_id>' in nxt, nxt
+        # the arguments after the first foreign tag are never read (#554)
+        assert '<call name="send"></call>' in nxt, nxt
     finally:
         fake_providers.pop(aid, None)
 
@@ -482,3 +483,55 @@ def test_a_backtick_inside_a_call_argument_does_not_hide_a_wrapper_after_it():
         "The other call of this answer ran — its reply is in this batch; do not "
         "write it again."
     ), r[0]
+
+
+# ─── the stream-time cut (#499) ──────────────────────────────────────────────
+
+
+def _streamed_cut(text):
+    """Where the first cut lands when the text arrives a char at a time."""
+    for end in range(1, len(text) + 1):
+        cut = foreign_cut(text[:end])
+        if cut is not None:
+            return cut
+    return None
+
+
+def test_each_foreign_form_is_cut_after_its_first_tag():
+    cases = [
+        ('ok <invoke name="send"> junk', 'ok <invoke name="send">'),
+        ('<tool_call>\n<call name="send">', "<tool_call>"),
+        ('x <function=call name="send"> y', 'x <function=call name="send">'),
+        ("hi <send><target_id>a</target_id>", "hi <send>"),
+        ("hi <b>bold", "hi <b>"),
+        ('go {"name": "send", "arguments": {}}', 'go {"name": "send"'),
+        ('<function_calls>\n<invoke name="x">', "<function_calls>"),
+    ]
+    for text, kept in cases:
+        cut = _streamed_cut(text)
+        assert cut is not None, text
+        assert text[:cut] == kept, text
+
+
+def test_a_correct_or_quoted_call_is_not_cut():
+    ok = [
+        '<call name="send"><target_id>a</target_id><type>say</type></call>',
+        'text then <call name="done"></call>',
+        '<call name="send"><routing><target_id>a</target_id></routing><payload>'
+        "<type>read</type></payload></call>",
+        'use `<invoke name="x">` never, and the word invoke is fine',
+        '```\n<invoke name="x">\n```\nok',
+        "a < b and c > d",
+        'call name="await">more',
+    ]
+    for text in ok:
+        assert _streamed_cut(text) is None, text
+
+
+def test_a_bare_opener_run_is_not_cut_but_a_foreign_tag_after_it_is():
+    text = (
+        'call name="send"><target_id>a</target_id></call>\n'
+        'then <invoke name="send"> junk'
+    )
+    cut = _streamed_cut(text)
+    assert cut is not None and text[:cut].endswith('<invoke name="send">')

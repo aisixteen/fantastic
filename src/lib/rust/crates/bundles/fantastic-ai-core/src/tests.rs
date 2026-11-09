@@ -7407,7 +7407,10 @@ async fn broken_only_turns_count_toward_giving_up() {
     let (kernel, backend) = mk_kernel(&tmp, "cc_c").await;
     let s = script(
         &backend,
-        (0..cap + 5).map(|_| pass(E59_ANSWER)).collect(),
+        // Broken, but no foreign tag: a stream-cut turn gives up sooner (#499).
+        (0..cap + 5)
+            .map(|_| pass("<call name=\"send\">oops<target_id>files</target_id></call>"))
+            .collect(),
         Duration::ZERO,
     );
     let _ = kernel

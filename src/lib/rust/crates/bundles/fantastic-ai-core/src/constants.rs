@@ -192,6 +192,11 @@ pub const FOLD_RUN: usize = 3;
 /// would never end).
 pub const MAX_SILENT_TURNS: usize = 10;
 
+/// A chain that has had this many turns in a row cut at a foreign call tag (#499)
+/// gives up through the silent give-up path. A turn that is not a cut turn resets
+/// the count, and so does any turn that dispatches a call.
+pub const MAX_CUT_TURNS: usize = 9;
+
 // ─── inline agent views (#339) ──────────────────────────────────────────────
 
 /// The tallest a chat card may be, in CSS px. A card fills the chat column's

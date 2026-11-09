@@ -130,6 +130,11 @@ FOLD_RUN = 3
 # dead turn ending a long chain nor an unbounded reminder loop).
 MAX_SILENT_TURNS = 10
 
+# A chain that has had this many turns in a row cut at a foreign call tag (#499) gives
+# up through the silent give-up path. A turn that is not a cut turn resets the count,
+# and so does any turn that dispatches a call.
+MAX_CUT_TURNS = 9
+
 # ─── inline agent views (#339) ──────────────────────────────────────────
 
 # The tallest a chat card may be, CSS px (the column's full width is the card's width).

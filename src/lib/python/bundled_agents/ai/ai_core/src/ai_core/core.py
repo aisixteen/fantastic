@@ -75,6 +75,7 @@ from ai_core.strategies.fold import (
 # routing path, not just a read-model. `_derive_reaction` is the other
 # consumer, scanning the durable transcript for a recall/persist reaction.
 from ai_core.call_check import check as check_calls
+from ai_core.call_check import foreign_cut
 from ai_core.call_check import repair as repair_calls
 from ai_core.stream_parts import PartSplitter, cut_marker, stop_rows
 from ai_core.tool_parse import (
@@ -99,6 +100,7 @@ from ai_core.constants import (  # noqa: F401 — re-exported seams
     DEFAULT_CLIENT_ID,
     MAX_MARKS,
     MAX_CALL_DEPTH,
+    MAX_CUT_TURNS,
     MAX_SILENT_TURNS,
     RECALL_EVERY,
     RECENT_N,
@@ -1592,6 +1594,24 @@ def without_thinking(text: str) -> str:
     return "".join(out).strip()
 
 
+def _stream_cut(raw: str) -> int | None:
+    """Where the answer received so far must be cut (#499): the length of the raw text
+    to keep, just past its first foreign call tag, or None. The check reads the answer
+    without its thinking; the cut is mapped back to the raw text by its tail. Rust
+    `stream_cut`."""
+    stripped = without_thinking(raw)
+    end = foreign_cut(stripped)
+    if end is None:
+        return None
+    tail = stripped[end:]
+    body = raw.rstrip()
+    if not tail:
+        return len(body)
+    if body.endswith(tail):
+        return len(body) - len(tail)
+    return len(raw)
+
+
 #: Characters of a generation's thinking kept on its assistant row (`thinking`);
 #: what is past them is counted in `thinking_cut`.
 THINKING_CAP = 32000
@@ -1664,6 +1684,9 @@ _EMPTY_AWAIT_NOTE = (
 
 # The silent streak per chain `(agent id, client id)` — see `_route_reply`.
 _silent: dict[tuple[str, str], int] = {}
+# The cut streak per chain: turns in a row the stream checker cut at a foreign call
+# tag (#499). At MAX_CUT_TURNS the chain gives up. Rust `cuts`.
+_cuts: dict[tuple[str, str], int] = {}
 
 # OPEN INQUIRIES (fully async). An `inquiry` an AI received is
 # accepted at once and runs as its own chain `(receiver, client_id)`; the answer the
@@ -1690,6 +1713,14 @@ def _gave_up(limit: int) -> str:
     return (
         f"The LLM was not able to answer — {limit} turns in a row produced "
         "no call. Reiterate the inquiry."
+    )
+
+
+def _cut_gave_up(limit: int) -> str:
+    """What a caller is told when a chain gives up after `limit` cut turns (#499)."""
+    return (
+        f"The LLM was not able to answer — {limit} turns in a row were cut at a "
+        "foreign call syntax. Reiterate the inquiry."
     )
 
 
@@ -1782,8 +1813,39 @@ async def _silent_turn(kernel, self_id, client_id, send_to, system_prompt) -> bo
     limit = _misfire_limit(kernel, self_id)
     if streak < limit:
         return False
+    await _give_up(
+        kernel, self_id, client_id, send_to, system_prompt, _gave_up(limit), streak
+    )
+    return True
+
+
+async def _cut_turn(kernel, self_id, client_id, send_to, system_prompt) -> bool:
+    """Count one turn the stream checker cut (#499). At MAX_CUT_TURNS in a row the
+    chain GIVES UP, naming the cut, and True is returned."""
+    chain = (self_id, client_id)
+    streak = _cuts[chain] = _cuts.get(chain, 0) + 1
+    if streak < MAX_CUT_TURNS:
+        return False
+    await _give_up(
+        kernel,
+        self_id,
+        client_id,
+        send_to,
+        system_prompt,
+        _cut_gave_up(MAX_CUT_TURNS),
+        streak,
+    )
+    return True
+
+
+async def _give_up(
+    kernel, self_id, client_id, send_to, system_prompt, gave_up: str, streak: int
+) -> None:
+    """The give-up tail: forget both streaks, say so in the status, close the inquiry
+    and tell the caller."""
+    chain = (self_id, client_id)
     _silent.pop(chain, None)
-    gave_up = _gave_up(limit)
+    _cuts.pop(chain, None)
     await _emit_status(
         kernel,
         self_id,
@@ -1796,7 +1858,6 @@ async def _silent_turn(kernel, self_id, client_id, send_to, system_prompt) -> bo
     await _close_inquiry(kernel, self_id, client_id, {"error": gave_up})
     if send_to is not None:
         _deliver_soon(kernel, send_to, gave_up, client_id, system_prompt)
-    return True
 
 
 def _origin_line(result, target: str, verb: str, payload) -> str:
@@ -2017,6 +2078,9 @@ async def _route_reply(
     # open sends NOTHING — its earlier closed calls included; the turn's marker names
     # every one as not sent. ONLY THE ANSWER ACTS: calls written inside thinking are read as thinking.
     answer = repair_calls(without_thinking(text or ""))
+    # A stream-cut answer ends at its first foreign tag; a finished answer holding one
+    # was always cut. So this is true exactly for a turn the stream checker cut.
+    foreign = not cut and foreign_cut(answer) is not None
     for call, body in [] if cut else terminated_calls(answer):
         i = next((n for n, (_sid, b) in enumerate(streams) if b == body), None)
         if i is not None:
@@ -2066,6 +2130,8 @@ async def _route_reply(
     chain = (self_id, client_id)
     if calls:
         _silent.pop(chain, None)
+    if calls or not foreign:
+        _cuts.pop(chain, None)
     # ONE MESSAGE, SEVERAL RECIPIENTS. A send with `to` fans out here into one item
     # per recipient — the kernel's batch is already one-to-many — and every copy
     # carries the whole list (`to`), the sending turn's id (`msg`, the same number in
@@ -2372,6 +2438,10 @@ async def _route_reply(
     if not calls and units:
         # Only broken calls: their reports are the next turn — unless this chain
         # has now been silent MAX_SILENT_TURNS in a row, and gives up.
+        if foreign and await _cut_turn(
+            kernel, self_id, client_id, send_to, system_prompt
+        ):
+            return False
         if await _silent_turn(kernel, self_id, client_id, send_to, system_prompt):
             return False
     # ONE CHAIN PER AGENT (#227): the chain goes on only when a reply batch lands
@@ -3339,8 +3409,25 @@ async def _run(
         _current[self_id]["parts"] = (splitter, parts_out)
     # GENERATION TIME — from the request to the stream's end (the `done` detail).
     gen_started = time.monotonic()
+    stream = provider.chat(model_messages)
+    cut_stream = False
     try:
-        async for chunk in provider.chat(model_messages):
+        async for chunk in stream:
+            # THE CALL CHECKER RUNS ON THE STREAM (#499): at the first foreign call
+            # tag the generation is cut, the rest is never read, and the turn ends as
+            # if the answer had ended there. Checked only when this delta can complete
+            # a tag or a JSON call head (Rust agent_loop).
+            if ">" in chunk or '"' in chunk:
+                text = "".join(content_parts) + chunk
+                keep = _stream_cut(text)
+                if keep is not None:
+                    cut_stream = True
+                    before = len(text) - len(chunk)
+                    if keep >= before:
+                        chunk = chunk[: keep - before]
+                    else:
+                        content_parts = [text[:keep]]
+                        chunk = ""
             if first_chunk:
                 # First text chunk — phase transitions thinking → streaming.
                 await _emit_status(kernel, self_id, client_id, "streaming")
@@ -3359,12 +3446,17 @@ async def _run(
                 {"type": "token", "text": chunk, "source": self_id},
             )
             await parts_out.push(splitter.feed(chunk))
+            if cut_stream:
+                break
+        aclose = getattr(stream, "aclose", None)
+        if aclose:
+            await aclose()
     except Exception:
         await parts_out.push(splitter.stop("error"), final=True)
         raise
     # A block still open when the model stopped generating is CUT: an open call is
     # never dispatched (`extract_tool_calls` skips it) and the turn's row says so.
-    cut_call = splitter.open_call
+    cut_call = None if cut_stream else splitter.open_call
     await parts_out.push(splitter.finish(), final=True)
     last_text = "".join(content_parts)
     # THE PASS ENDED: the provider's prompt cache is warm from here (`fork_points`).
@@ -4327,6 +4419,8 @@ async def on_delete(agent) -> None:
     _recall_due.discard(id)
     for chain in [c for c in _silent if c[0] == id]:
         del _silent[chain]
+    for chain in [c for c in _cuts if c[0] == id]:
+        del _cuts[chain]
     for chain in [c for c in _open_inquiries if c[0] == id]:
         del _open_inquiries[chain]
     _awaiting.pop(id, None)
