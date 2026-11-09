@@ -741,7 +741,15 @@ async fn ws_upgrade(
     req: Request<Body>,
 ) -> Response {
     use fantastic_io_bridge::ws_deflate::{self, Refused};
-    let host = AgentId::from(caps.first().map(String::as_str).unwrap_or(""));
+    // a literal route names its host the way the catch-all would
+    let host = AgentId::from(match caps.first() {
+        Some(c) => c.clone(),
+        None => routes::percent_decode(req.uri().path())
+            .split('/')
+            .find(|s| !s.is_empty())
+            .unwrap_or("")
+            .to_string(),
+    });
     let (mut parts, _body) = req.into_parts();
     // the upgrade handle is shared (an `Arc`): axum takes its own copy to check
     // the request is upgradable, and this one carries the socket

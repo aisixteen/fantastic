@@ -143,3 +143,114 @@ async fn a_literal_route_beats_a_catch_all_mounted_before_it() {
     );
     stop(&kernel, web_id).await;
 }
+
+/// A `web_ws` leg whose record names a `route` mounts ONLY that literal, beside
+/// the one catch-all leg of the host; each answers as itself (#559).
+#[tokio::test]
+async fn a_web_ws_route_leg_beside_a_catch_all_leg_gets_its_own_url() {
+    use tokio_tungstenite::tungstenite::Message as TMessage;
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let web_id = "web_ws_route";
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(HANDLER_MODULE, WebBundle);
+    kernel
+        .bundles
+        .register("web_ws.tools", fantastic_web_ws::WebWsBundle);
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    for rec in [
+        json!({"parent_id": "kernel", "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id,
+               "port": port}),
+        json!({"parent_id": web_id, "handler_module": "web_ws.tools", "can_call": {"$parent": ["watch"]}, "callable_by": {"$parent": ["get_routes"]}, "id": "a_ws",
+               "ingress_rule": "allow_all_ingress"}),
+        json!({"parent_id": web_id, "handler_module": "web_ws.tools", "route": "/z_page_ws/ws", "callable_by": {"$parent": ["get_routes"]}, "id": "z_page_ws",
+               "ingress_rule": "allow_all_ingress"}),
+    ] {
+        let mut p = json!({"type": "create_agent"});
+        for (k, v) in rec.as_object().unwrap() {
+            p[k] = v.clone();
+        }
+        let r = kernel
+            .send(vec![Item::new(AgentId::from("kernel"), p)])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["id"], rec["id"], "{r}");
+    }
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["running"], true, "boot: {r}");
+    let table = SERVERS
+        .lock()
+        .get(&AgentId::from(web_id))
+        .map(|h| Arc::clone(&h.table))
+        .expect("a running host");
+    {
+        let t = table.read().await;
+        let (path, handler) = first_ws_match(&t, "/z_page_ws/ws").expect("a full match");
+        assert_eq!(path, "/z_page_ws/ws");
+        assert!(
+            matches!(handler, Handler::Ws(ref leg) if leg.0 == "z_page_ws"),
+            "{handler:?}"
+        );
+        let (path, handler) = first_ws_match(&t, "/user/ws").expect("a full match");
+        assert_eq!(path, "/{host_id}/ws");
+        assert!(
+            matches!(handler, Handler::Ws(ref leg) if leg.0 == "a_ws"),
+            "{handler:?}"
+        );
+        assert_eq!(t.iter().filter(|r| r.path == "/{host_id}/ws").count(), 1);
+    }
+
+    let reflect = |target: &str, id: &str| {
+        json!({"type": "call", "target": target, "id": id, "payload": {"type": "reflect"}})
+            .to_string()
+    };
+    // the literal leg answers as ITSELF
+    let (mut ws, _) =
+        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/z_page_ws/ws"))
+            .await
+            .expect("ws connect");
+    let (text, _) = round_trip(&mut ws, TMessage::Text(reflect("z_page_ws", "r1"))).await;
+    let reply = text.iter().find(|v| v["id"] == "r1").expect("a reply");
+    assert_eq!(reply["data"]["id"], "z_page_ws", "{reply}");
+    assert_eq!(reply["data"]["path_pattern"], "/z_page_ws/ws", "{reply}");
+    // the host label is the URL's first segment, as the catch-all would capture
+    kernel
+        .emit(
+            &AgentId::from("z_page_ws"),
+            json!({"type": "output", "data": "hi"}),
+        )
+        .await;
+    let (text, _) = drain_frames(&mut ws, 600).await;
+    assert!(
+        text.iter()
+            .any(|v| v["type"] == "event" && v["src"] == "z_page_ws"),
+        "{text:?}"
+    );
+    // the catch-all leg still answers every other host
+    let (mut ws2, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/a_ws/ws"))
+        .await
+        .expect("ws connect");
+    let (text, _) = round_trip(&mut ws2, TMessage::Text(reflect("a_ws", "r2"))).await;
+    let reply = text.iter().find(|v| v["id"] == "r2").expect("a reply");
+    assert_eq!(reply["data"]["id"], "a_ws", "{reply}");
+    assert_eq!(reply["data"]["path_pattern"], "/{host_id}/ws", "{reply}");
+    stop(&kernel, web_id).await;
+}

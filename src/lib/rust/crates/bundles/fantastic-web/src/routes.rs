@@ -42,7 +42,7 @@ pub(crate) enum Handler {
     RestReflectRoot(AgentId),
     /// `GET /<rest_id>/_reflect/{target_id}`.
     RestReflectTarget(AgentId),
-    /// `WS /{host_id}/ws`, carrying the web_ws LEG that declared it — the
+    /// `WS /{host_id}/ws` (or a leg's literal route), carrying the web_ws LEG that declared it — the
     /// record the frame gate reads and the identity every frame runs as.
     Ws(AgentId),
 }
@@ -228,10 +228,27 @@ impl RouteTable {
 
     /// A literal `(kind, method, path)` this child declares that ANOTHER mounted
     /// child already holds: resolution is first-match-wins, so the second
-    /// declaration could never answer. Patterns (`{`) are by design shared (every
-    /// `web_ws` leg declares `/{host_id}/ws`); base routes are not checked; a
-    /// websocket route and an http route, or two methods, never shadow each other.
+    /// declaration could never answer. One catch-all websocket pattern per host —
+    /// a second could never answer; http patterns are not checked; base routes are
+    /// not checked; a websocket route and an http route, or two methods, never
+    /// shadow each other.
     pub(crate) fn conflict(&self, child: &AgentId, routes: &[Route]) -> Option<String> {
+        for route in routes
+            .iter()
+            .filter(|r| r.method.is_none() && r.path.contains('{'))
+        {
+            for (other, theirs) in self.children.iter().filter(|(c, _)| c != child) {
+                if theirs
+                    .iter()
+                    .any(|t| t.method.is_none() && t.path == route.path)
+                {
+                    return Some(format!(
+                        "web: a second catch-all WS {} declared by {child}; {other} already holds it — only one catch-all WS leg per host (give one leg a literal route)",
+                        route.path
+                    ));
+                }
+            }
+        }
         for route in routes.iter().filter(|r| !r.path.contains('{')) {
             for (other, theirs) in self.children.iter().filter(|(c, _)| c != child) {
                 if theirs

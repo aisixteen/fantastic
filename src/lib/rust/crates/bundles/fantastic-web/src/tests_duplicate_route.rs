@@ -1,7 +1,8 @@
 //! TWO CHILDREN, ONE LITERAL ROUTE: refused, never silently shadowed. Route
 //! resolution is first-match-wins, so the second declaration of the same literal
-//! `(kind, method, path)` could never answer. Catch-all patterns such as
-//! `/{host_id}/ws` (one per `web_ws` leg) stay allowed. The twin of python
+//! `(kind, method, path)` could never answer. ONE catch-all websocket
+//! pattern per host: a second `/{host_id}/ws` leg is refused the same way,
+//! naming both legs (#559). The twin of python
 //! `web/tests/test_mount.py::test_two_children_declaring_the_same_literal_route_path_are_refused_at_boot`
 //! and the four tests beside it.
 
@@ -205,9 +206,53 @@ async fn a_duplicate_literal_route_is_refused_on_mount_too() {
 }
 
 #[tokio::test]
-async fn the_same_catch_all_pattern_on_two_ws_legs_is_still_allowed() {
+async fn a_second_catch_all_ws_leg_is_refused_at_boot_naming_both() {
     let tmp = TempDir::new().unwrap();
     let web_id = "web_dup_pattern";
+    let (kernel, port) = host_with(
+        &tmp,
+        web_id,
+        vec![
+            ("dup_a.tools", ws("/{host_id}/ws")),
+            ("dup_b.tools", ws("/{host_id}/ws")),
+        ],
+        false,
+    )
+    .await;
+    make(&kernel, leg_rec(web_id, "a_dup", "dup_a.tools")).await;
+    make(&kernel, leg_rec(web_id, "b_dup", "dup_b.tools")).await;
+    give_port(&kernel, web_id, port).await;
+    let r = verb(&kernel, web_id, json!({"type": "boot"})).await;
+    let text = r.to_string();
+    assert!(r.get("running").is_none(), "boot must refuse: {r}");
+    for needle in [
+        "RuntimeError",
+        "/{host_id}/ws",
+        "a_dup",
+        "b_dup",
+        "catch-all",
+    ] {
+        assert!(text.contains(needle), "{needle} missing: {r}");
+    }
+    let serving = SERVERS
+        .lock()
+        .get(&AgentId::from(web_id))
+        .map(|h| h.task.is_some())
+        .unwrap_or(false);
+    assert!(!serving, "no serving task may start");
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_err(),
+        "nothing may answer on the port"
+    );
+    stop(&kernel, web_id).await;
+}
+
+#[tokio::test]
+async fn a_second_catch_all_ws_leg_is_refused_on_mount_too() {
+    let tmp = TempDir::new().unwrap();
+    let web_id = "web_dup_pattern_mount";
     let (kernel, _) = host(
         &tmp,
         web_id,
@@ -218,9 +263,31 @@ async fn the_same_catch_all_pattern_on_two_ws_legs_is_still_allowed() {
     )
     .await;
     make(&kernel, leg_rec(web_id, "a_dup", "dup_a.tools")).await;
-    make(&kernel, leg_rec(web_id, "b_dup", "dup_b.tools")).await;
     let r = verb(&kernel, web_id, json!({"type": "boot"})).await;
     assert_eq!(r["running"], true, "boot: {r}");
+    make(&kernel, leg_rec(web_id, "b_dup", "dup_b.tools")).await;
+    let r = verb(
+        &kernel,
+        web_id,
+        json!({"type": "mount", "child_id": "b_dup"}),
+    )
+    .await;
+    let err = r["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no error: {r}"));
+    for needle in ["/{host_id}/ws", "a_dup", "b_dup"] {
+        assert!(err.contains(needle), "{needle} missing: {r}");
+    }
+    let table = table_of(web_id);
+    let t = table.read().await;
+    assert!(t.paths_for(&AgentId::from("b_dup")).is_empty());
+    match resolve(&t, "/anything/ws", &axum::http::Method::GET, true) {
+        Resolved::Full(route, _) => {
+            assert!(matches!(route.handler, crate::routes::Handler::Ws(ref l) if l.0 == "a_dup"))
+        }
+        _ => panic!("the first leg must still answer"),
+    }
+    drop(t);
     stop(&kernel, web_id).await;
 }
 

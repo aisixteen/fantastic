@@ -8,6 +8,7 @@
 //! - `reflect` — identity + the URL pattern this surface mounts + leg posture
 //! - `boot` — no-op; the parent web agent owns the route
 //! - `get_routes` — declares `{routes:[{kind:"websocket", path:"/{host_id}/ws"}]}`
+//!   (the catch-all), or the record's `route` literal when set
 //! - `inbound_call` / `inbound_emit` / `inbound_watch` / `inbound_state_subscribe`
 //!   — the INBOUND half (`fantastic_io_bridge::inbound`): the socket loop hands
 //!   each admitted frame to this leg, which acts AS ITSELF, gated as the leg
@@ -30,7 +31,8 @@ pub const README: &str = include_str!("readme.md");
 
 /// The path pattern this leg mounts on its parent `web` host. A literal —
 /// python bakes the same `{host_id}` placeholder, and the WS proxy reads the
-/// matched segment as the host label.
+/// matched segment as the host label. This is the catch-all a leg mounts when
+/// its record names no `route`.
 pub const PATH_PATTERN: &str = "/{host_id}/ws";
 
 /// The WS verb-channel bundle.
@@ -81,10 +83,12 @@ impl Bundle for WebWsBundle {
         meta: &Map<String, Value>,
         _record: &Map<String, Value>,
     ) -> Option<String> {
-        fantastic_io_bridge::authorizer::ingress::unknown_refusal(
-            meta,
-            &fantastic_io_bridge::authorizer::ingress::REGISTRY,
-        )
+        route_refusal(meta).or_else(|| {
+            fantastic_io_bridge::authorizer::ingress::unknown_refusal(
+                meta,
+                &fantastic_io_bridge::authorizer::ingress::REGISTRY,
+            )
+        })
     }
 
     /// The INBOUND verbs (`fantastic_io_bridge::inbound`) first — an admitted
@@ -119,7 +123,7 @@ impl Bundle for WebWsBundle {
             "get_routes" => json!({
                 "routes": [{
                     "kind": "websocket",
-                    "path": PATH_PATTERN,
+                    "path": mount_path(agent_id, kernel),
                 }]
             }),
             _ => {
@@ -136,6 +140,37 @@ impl Bundle for WebWsBundle {
     }
 }
 
+/// The record's optional `route` — a literal mount path; empty reads as unset.
+fn route_of(agent_id: &AgentId, kernel: &Kernel) -> Option<String> {
+    let a = kernel.agents.get(agent_id)?;
+    let meta = a.meta.read().expect("meta poisoned");
+    meta.get("route")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The path this leg mounts: its `route` literal, else the catch-all.
+fn mount_path(agent_id: &AgentId, kernel: &Kernel) -> String {
+    route_of(agent_id, kernel).unwrap_or_else(|| PATH_PATTERN.to_string())
+}
+
+/// `route` must be a literal path: a pattern sent as `route` would be a
+/// disguised second catch-all.
+fn route_refusal(meta: &Map<String, Value>) -> Option<String> {
+    let v = meta.get("route")?;
+    if v.is_null() {
+        return None;
+    }
+    match v.as_str() {
+        Some(s) if s.starts_with('/') && !s.contains('{') && !s.contains('}') => None,
+        _ => Some(format!(
+            "route={} is not a literal mount path — a string starting with \"/\", with no \"{{\" or \"}}\"",
+            py_repr_value(v)
+        )),
+    }
+}
+
 /// python `web_ws/tools.py::_reflect` — identity, the mounted URL pattern and
 /// this leg's auth posture, in python's key order.
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
@@ -145,7 +180,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "sentence".into(),
         json!("WS verb-invocation surface; mounts /<host_id>/ws on the parent web."),
     );
-    out.insert("path_pattern".into(), json!(PATH_PATTERN));
+    out.insert("path_pattern".into(), json!(mount_path(agent_id, kernel)));
     // The leg is a CHANNEL — surface its auth posture so discovery-through-denial
     // has something to discover (the door + the pointer to how to open it).
     let meta = kernel
