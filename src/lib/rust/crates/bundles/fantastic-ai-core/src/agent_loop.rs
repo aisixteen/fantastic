@@ -294,6 +294,7 @@ pub async fn run_generation(
     };
     let mut content_parts: Vec<String> = Vec::new();
     let mut first_text_chunk = true;
+    let mut cut_stream = false;
     while let Some(ev) = stream.next().await {
         let ev = match ev {
             Ok(ev) => ev,
@@ -301,6 +302,32 @@ pub async fn run_generation(
         };
         match ev {
             ProviderEvent::Token(t) => {
+                // THE CALL CHECKER RUNS ON THE STREAM (#499): at the first foreign call
+                // tag the generation is cut, the rest is never read, and the turn ends
+                // as if the answer had ended there — the router then gives the usual
+                // correction. Checked only when this delta can complete a tag or a
+                // JSON call head; thinking is excluded as `without_thinking` does.
+                let t = if t.contains('>') || t.contains('"') {
+                    let mut text = content_parts.concat();
+                    text.push_str(&t);
+                    match stream_cut(&text) {
+                        Some(keep) => {
+                            let before = text.len() - t.len();
+                            cut_stream = true;
+                            if keep >= before {
+                                t[..keep - before].to_string()
+                            } else {
+                                // a tag held back (an open backtick) is now complete
+                                // behind earlier deltas: drop their tail too
+                                content_parts = vec![text[..keep].to_string()];
+                                String::new()
+                            }
+                        }
+                        None => t,
+                    }
+                } else {
+                    t
+                };
                 if first_text_chunk {
                     first_text_chunk = false;
                     emit_status(kernel, state, self_id, client_id, "streaming", Map::new()).await;
@@ -324,9 +351,14 @@ pub async fn run_generation(
                     p.publisher.push(evs, false).await;
                 }
                 content_parts.push(t);
+                if cut_stream {
+                    break;
+                }
             }
         }
     }
+    // The cut drops the provider stream: the request ends here.
+    drop(stream);
     // A block still open when the model stopped generating is CUT: an open call
     // is never dispatched (`extract_tool_calls` skips it) and the turn's row says
     // so.
@@ -335,7 +367,9 @@ pub async fn run_generation(
     // lists every call of the pass as not sent.
     let (cut_calls, call_streams) = {
         let mut p = parts.lock().await;
-        let cut = p.splitter.open_call().is_some();
+        // A stream the checker cut (#499) is not a stopped generation: its answer
+        // ends at the foreign tag and the router corrects it like any finished one.
+        let cut = p.splitter.open_call().is_some() && !cut_stream;
         let evs = p.splitter.finish();
         p.publisher.push(evs, true).await;
         let calls: Vec<_> = p
@@ -548,4 +582,22 @@ mod usage_tests {
         assert_eq!(d["completion_tokens_estimated"], json!(true));
         assert!(d["prompt_tokens"].as_i64().is_some_and(|n| n > 0));
     }
+}
+
+/// Where the answer received so far must be cut (#499): the byte length of the raw
+/// text to keep, just past its first foreign call tag, or `None`. The check reads the
+/// answer without its thinking ([`without_thinking`]); the cut is mapped back to the
+/// raw text by its tail, which the last delta wrote.
+fn stream_cut(raw: &str) -> Option<usize> {
+    let stripped = without_thinking(raw);
+    let end = crate::call_check::foreign_cut(&stripped)?;
+    let tail = &stripped[end..];
+    let body = raw.trim_end();
+    Some(if tail.is_empty() {
+        body.len()
+    } else if body.ends_with(tail) {
+        body.len() - tail.len()
+    } else {
+        raw.len()
+    })
 }

@@ -470,8 +470,9 @@ fn expected(name: &str, args: &[(String, Value)]) -> String {
     let mut lines = vec![format!("<call name=\"{name}\">")];
     if name == "send" {
         // the routing form: routing names in `<routing>`, the rest in `<payload>`
-        let (routing, payload): (Vec<_>, Vec<_>) =
-            args.iter().partition(|(k, _)| ROUTING.contains(&k.as_str()));
+        let (routing, payload): (Vec<_>, Vec<_>) = args
+            .iter()
+            .partition(|(k, _)| ROUTING.contains(&k.as_str()));
         let r: String = routing.iter().map(|(k, v)| tag(k, v)).collect();
         let p: String = payload.iter().map(|(k, v)| tag(k, v)).collect();
         lines.push(format!("<routing>{r}</routing>"));
@@ -764,15 +765,10 @@ fn unsupported(answer: &str, covered: &[(usize, usize)]) -> Vec<(usize, String)>
     out
 }
 
-/// One report per call the answer wrote wrongly, in document order (at most
-/// [`MAX_REPORTS`], then a count); empty when there is none. A wrongly written call is
-/// either markup outside every `<call` envelope, or a complete `<call` envelope inside
-/// a wrapper tag (refused by the scanner, see [`envelopes_in`]). An answer with
-/// nothing but an open wrapper gets one report naming it. `ran` is how many of the
-/// answer's calls were dispatched — said in each report, so the model knows its
-/// well-formed calls are not to be written again.
-#[must_use]
-pub fn check(answer: &str, ran: usize) -> Vec<String> {
+/// Every malformed call of the answer with where it starts, in document order,
+/// unbounded. [`check`] reports the first [`MAX_REPORTS`]; [`foreign_cut`] needs only
+/// the first position.
+fn scan(answer: &str) -> Vec<(usize, String)> {
     let masked = mask(answer);
     // What a report below already names: byte ranges, and the tag names opened in
     // them (so their closes are not reported again).
@@ -805,6 +801,55 @@ pub fn check(answer: &str, ran: usize) -> Vec<String> {
     }
     found.extend(unsupported(answer, &covered));
     found.sort_by_key(|(at, _)| *at);
+    found
+}
+
+/// Where a STREAMING answer must be cut (#499): the byte offset just past the first
+/// foreign call tag — whatever [`check`] would report, once its opening token is
+/// complete — or `None` while the text so far holds none. Same rules as [`check`], run
+/// on the text received so far (thinking already excluded by the caller). A complete
+/// `<call` envelope (quoted calls inside an argument included, see `find_close`) is
+/// masked, so a correct call is never cut. A tag after an unmatched backtick of its
+/// paragraph waits: the span may still close and make it code.
+#[must_use]
+pub fn foreign_cut(answer: &str) -> Option<usize> {
+    let mut at = scan(answer).first()?.0;
+    // A call written inside a wrapper is reported at its own opener; the foreign tag
+    // is the wrapper before it.
+    if let Some(w) = envelopes_in(answer)
+        .into_iter()
+        .find(|e| e.start == at)
+        .and_then(|e| e.wrapper)
+    {
+        at = w.start;
+    }
+    let para = answer[..at].rfind("\n\n").map_or(0, |i| i + 2);
+    if answer[para..at].matches('`').count() % 2 == 1 {
+        return None;
+    }
+    let rest = &answer[at..];
+    let len = if rest.starts_with('<') {
+        rest.find('>').map(|i| i + 1)
+    } else {
+        json_re()
+            .find(rest)
+            .map(|m| m.end())
+            .or_else(|| rest.find('>').map(|i| i + 1))
+    }
+    .unwrap_or_else(|| rest.chars().next().map_or(0, char::len_utf8));
+    Some(at + len)
+}
+
+/// One report per call the answer wrote wrongly, in document order (at most
+/// [`MAX_REPORTS`], then a count); empty when there is none. A wrongly written call is
+/// either markup outside every `<call` envelope, or a complete `<call` envelope inside
+/// a wrapper tag (refused by the scanner, see [`envelopes_in`]). An answer with
+/// nothing but an open wrapper gets one report naming it. `ran` is how many of the
+/// answer's calls were dispatched — said in each report, so the model knows its
+/// well-formed calls are not to be written again.
+#[must_use]
+pub fn check(answer: &str, ran: usize) -> Vec<String> {
+    let found = scan(answer);
     let total = found.len();
     let mut reports: Vec<String> = found
         .into_iter()
