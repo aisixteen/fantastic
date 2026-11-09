@@ -357,15 +357,14 @@ async fn provider_cache_flags_the_primer_end_and_the_last_fold_and_the_fold_move
             .filter_map(|m| m["id"].as_i64())
             .collect()
     };
-    assert_eq!(
-        flagged(&msgs, "cache_primer"),
-        vec![a1],
-        "M2 at the primer's end"
+    assert!(
+        msgs[0].get("cache_mark").is_some(),
+        "the system message is marked"
     );
     assert_eq!(
-        flagged(&msgs, "cache_fold"),
-        vec![f2],
-        "M3 at the last fold's end"
+        flagged(&msgs, "cache_mark"),
+        vec![a1, f2],
+        "the primer's end and the last fold's end"
     );
     assert!(
         msgs.iter().any(|m| m["id"] == json!(f1)),
@@ -378,11 +377,10 @@ async fn provider_cache_flags_the_primer_end_and_the_last_fold_and_the_fold_move
     let f3 = fold(&kernel, &agent, u4, a4, "fold three").await;
     let mut msgs = view_with(&kernel, &agent, Caching::ProviderCache).await;
     crate::caching::mark(&mut msgs, Some(a1));
-    assert_eq!(flagged(&msgs, "cache_primer"), vec![a1], "M2 stays");
     assert_eq!(
-        flagged(&msgs, "cache_fold"),
-        vec![f3],
-        "M3 moves to the new fold"
+        flagged(&msgs, "cache_mark"),
+        vec![a1, f3],
+        "the primer's mark stays, the fold's moves to the new fold"
     );
 }
 
@@ -396,29 +394,21 @@ async fn no_primer_field_flags_no_primer_and_no_fold_flags_no_fold() {
 
     let mut msgs = view_with(&kernel, &agent, Caching::ProviderCache).await;
     crate::caching::mark(&mut msgs, None);
-    assert!(
-        msgs.iter().all(|m| m.get("cache_primer").is_none()),
-        "no primer, no M2"
-    );
-    assert!(
-        msgs.iter().all(|m| m.get("cache_fold").is_none()),
-        "no fold, no M3"
+    let at = |msgs: &[Value]| -> Vec<usize> {
+        (0..msgs.len())
+            .filter(|i| msgs[*i].get("cache_mark") == Some(&json!(true)))
+            .collect()
+    };
+    assert_eq!(
+        at(&msgs),
+        vec![0, msgs.len() - 1],
+        "no primer and no fold: the system message and the tail: {msgs:?}"
     );
 
-    // the primer is named, but no fold exists: M2 only
+    // the primer is named, but no fold exists: the primer's mark and the tail
     let mut msgs = view_with(&kernel, &agent, Caching::ProviderCache).await;
     crate::caching::mark(&mut msgs, Some(a1));
-    assert_eq!(
-        msgs.iter()
-            .filter(|m| m.get("cache_primer").is_some())
-            .count(),
-        1,
-        "{msgs:?}"
-    );
-    assert!(
-        msgs.iter().all(|m| m.get("cache_fold").is_none()),
-        "no fold, no M3"
-    );
+    assert_eq!(at(&msgs), vec![0, 1, msgs.len() - 1], "{msgs:?}");
 }
 
 #[tokio::test]
@@ -441,7 +431,8 @@ async fn a_primer_outside_the_view_flags_nothing_and_pins_nothing() {
     let mut msgs = view_with(&kernel, &agent, Caching::ProviderCache).await;
     crate::caching::mark(&mut msgs, Some(a1));
     assert!(
-        msgs.iter().all(|m| m.get("cache_primer").is_none()),
+        msgs.iter()
+            .all(|m| m["id"] != json!(a1) || m.get("cache_mark").is_none()),
         "{msgs:?}"
     );
     // with the primer out of the view, a fold may start at the view's first row
@@ -553,21 +544,22 @@ async fn a_provider_cache_turn_hands_the_provider_the_primer_and_the_last_fold_f
     fold(&kernel, &agent, u3, a3, "fold two").await;
 
     let msgs = turn_messages(&kernel, &agent, "live").await;
-    assert_eq!(
-        flagged_contents(&msgs, "cache_primer"),
-        vec!["a1".to_string()],
-        "M2 on the primer row's message only: {msgs:?}"
-    );
-    let folds = flagged_contents(&msgs, "cache_fold");
-    assert_eq!(folds.len(), 1, "M3 on one message: {msgs:?}");
+    assert_eq!(msgs[0]["role"], json!("system"));
+    assert_eq!(msgs[0]["cache_mark"], json!(true), "the system message");
+    let marked: Vec<String> = flagged_contents(&msgs, "cache_mark").split_off(1);
+    assert_eq!(marked.len(), 3, "primer, last fold, tail: {msgs:?}");
+    assert_eq!(marked[0], "a1", "the primer row's message: {msgs:?}");
     assert!(
-        folds[0].contains("\"fold two\""),
-        "M3 is on the LAST fold: {folds:?}"
+        marked[1].contains("\"fold two\""),
+        "the LAST fold: {marked:?}"
     );
+    assert_eq!(marked[2], "live", "the tail");
     assert!(
-        msgs.iter()
-            .any(|m| m["content"].as_str().unwrap_or("").contains("\"fold one\"")),
-        "the earlier fold stays in the view, unflagged: {msgs:?}"
+        msgs.iter().any(|m| {
+            let c = m["content"].as_str().unwrap_or("");
+            c.contains("\"fold one\"") && m.get("cache_mark").is_none()
+        }),
+        "the earlier fold stays in the view, unmarked: {msgs:?}"
     );
 }
 
@@ -585,9 +577,8 @@ async fn a_cleanup_or_none_turn_hands_the_provider_no_flag_even_with_a_primer_an
         set(&kernel, &agent, json!({"caching": mode})).await;
         let msgs = turn_messages(&kernel, &agent, "live").await;
         assert!(
-            msgs.iter()
-                .all(|m| m.get("cache_primer").is_none() && m.get("cache_fold").is_none()),
-            "{mode}: no flag reaches the provider: {msgs:?}"
+            msgs.iter().all(|m| m.get("cache_mark").is_none()),
+            "{mode}: no mark reaches the provider: {msgs:?}"
         );
         assert!(msgs.len() > 3, "{mode}: the view is sent: {msgs:?}");
     }
@@ -695,9 +686,11 @@ async fn a_provider_cache_turn_marks_before_the_large_body_and_the_next_turn_kee
     );
     let msgs1 = turn_messages(&kernel, &agent, &text).await;
     let len1 = msgs1.len();
-    assert!(msgs1[len1 - 1].get("cache_tail").is_none(), "{len1}");
-    assert_eq!(flagged_contents(&msgs1, "cache_tail").len(), 1);
-    assert_eq!(msgs1[len1 - 2]["cache_tail"], json!(true));
+    assert!(msgs1[len1 - 1].get("cache_mark").is_none(), "{len1}");
+    let at: Vec<usize> = (0..len1)
+        .filter(|i| msgs1[*i].get("cache_mark") == Some(&json!(true)))
+        .collect();
+    assert_eq!(at, vec![0, len1 - 2], "the system message and the tail");
     // let the first turn finish before the next send
     tokio::time::sleep(Duration::from_millis(300)).await;
     let msgs2 = turn_messages(&kernel, &agent, "next").await;
@@ -713,5 +706,5 @@ async fn a_provider_cache_turn_marks_before_the_large_body_and_the_next_turn_kee
         "{}",
         msgs2[len1 - 1]
     );
-    assert_eq!(msgs2.last().unwrap()["cache_tail"], json!(true));
+    assert_eq!(msgs2.last().unwrap()["cache_mark"], json!(true));
 }

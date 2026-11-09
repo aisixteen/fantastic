@@ -38,22 +38,25 @@ To show a host agent's panel inline in a chat, `embed {id}` it (and `unembed {id
 ## Caching
 
 `caching` is ai_core's mode: `none` | `cleanup` (default) | `provider_cache`, and this
-backend can run all three. `none` and `cleanup` send no marker: `system` a plain
-string, no `cache_control`, the body as it always was.
+backend can run all three. The AI agent places the marks, in `provider_cache` only;
+this backend forwards them and adds none. A request with no marked message sends no
+marker: `system` a plain string, no `cache_control`, the body as it always was.
 
-`provider_cache` sends ephemeral `cache_control` markers (`{"type": "ephemeral"}`, the
-5-minute TTL, the only one sent) on EVERY request — main turns and side calls such as
-fold summaries alike — at most four:
-- `system` as one text block carrying the marker (absent when the system string is
+A message the agent marks (`cache_mark`) gets an ephemeral `cache_control`
+(`{"type": "ephemeral"}`, the 5-minute TTL, the only one sent) at the end of its text.
+In `provider_cache` the agent marks, at most four places:
+- its system message (`system` then becomes one marked text block, and is absent when
   empty, as always);
-- the end of the primer row — the row `cache_primer_until` names, when it is in view;
+- the end of the primer row, the row `cache_primer_until` names, when it is in view;
 - the end of the last fold (or clear) row in view;
-- a top-level marker, which caches the conversation tail automatically.
+- the end of the row before the first row that will fold, else the last row.
+
+A side call such as a fold summary carries no mark.
 
 A turn holding a marked row is sent as text blocks cut at the end of that row's text,
 so the marker lands there and not at the end of the merged turn; the blocks join to
 exactly the merged string. A row with no text carries no marker, and no block is blank
-(the API refuses one). A primer and a fold on one row send one marker. Nothing else in
+(the API refuses one). A row marked for several reasons sends one marker. Nothing else in
 the body changes: order, merging, thinking and `max_tokens` are as in the other modes.
 
 The cache is a server-side PREFIX match. A turn whose system block changed re-writes

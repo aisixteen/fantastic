@@ -2,9 +2,11 @@
 
 none — every stored row, in order, never trimmed (append-only).
 cleanup — trim superseded reads, repeated reply bodies and used docs from the view.
-provider_cache — none's history plus the provider's cache markers (the end of the
-primer row named by cache_primer_until, the end of the last fold, and the TAIL: the
-row before the first row that will fold, else the last row).
+provider_cache — none's history plus the cache marks the agent places: its own
+system message, the end of the primer row named by cache_primer_until, the end of the
+last fold, and the TAIL: the row before the first row that will fold, else the last
+row. ai_core sets ONE flag, `cache_mark`, on each message it wants marked; the
+backend forwards it and reads no mode.
 
 cleanup and provider_cache also AUTOFOLD the view: a thought, a cut answer and a large
 or recalled reply show as an anchor, never stored.
@@ -18,6 +20,8 @@ from ai_core.autofold import will_fold
 MODES: tuple[str, ...] = ("none", "cleanup", "provider_cache")
 #: The mode a record without `caching` runs in.
 DEFAULT_MODE = "cleanup"
+#: The one message flag the agent hands a backend: put a cache mark after this message.
+CACHE_MARK = "cache_mark"
 
 #: The `caching` field's hint (verbatim from the Rust).
 CACHING_HINT = (
@@ -111,20 +115,24 @@ def unsupported(name: str) -> ValueError:
 
 
 def mark(messages: list[dict], primer: int | None) -> list[dict]:
-    """A NEW list with the primer's end, the last fold's end and the tail flagged. The
-    tail (`cache_tail`) is the agent's own mark: the message before the first user
-    message after the last assistant one that will fold, else the last message; never the
-    system message. Never mutates a message: the messages can be the cached store rows
+    """A NEW list with `cache_mark` set on the system message (when it opens the list),
+    the primer's end, the last fold's end and the tail. The tail is the message before
+    the first user message after the last assistant one that will fold, else the last
+    message; never the system message. A message hit by several reasons carries one
+    flag. Never mutates a message: the messages can be the cached store rows
     themselves."""
     out = list(messages)
+    at: set[int] = set()
+    if out and out[0].get("role") == "system":
+        at.add(0)
     if primer is not None:
         for i, m in enumerate(out):
             if m.get("id") == primer:
-                out[i] = {**m, "cache_primer": True}
+                at.add(i)
                 break
     for i in range(len(out) - 1, -1, -1):
         if out[i].get("kind") in ("fold", "clear"):
-            out[i] = {**out[i], "cache_fold": True}
+            at.add(i)
             break
     last = max((i for i, m in enumerate(out) if m.get("role") == "assistant"), default=-1)
     pending = next(
@@ -138,5 +146,7 @@ def mark(messages: list[dict], primer: int | None) -> list[dict]:
     )
     tail = len(out) - 1 if pending is None else pending - 1
     if tail >= 0 and out[tail].get("role") != "system":
-        out[tail] = {**out[tail], "cache_tail": True}
+        at.add(tail)
+    for i in at:
+        out[i] = {**out[i], CACHE_MARK: True}
     return out

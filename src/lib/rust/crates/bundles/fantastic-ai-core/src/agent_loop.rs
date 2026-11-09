@@ -124,11 +124,9 @@ pub(crate) fn render_for_model(messages: &[Value]) -> Vec<Value> {
             let role = m.get("role").cloned().unwrap_or(Value::Null);
             let content = m.get("content").cloned().unwrap_or_else(|| json!(""));
             let mut out = json!({"role": role, "content": content});
-            // the cache flags travel with their message; nothing else does
-            for flag in ["cache_primer", "cache_fold", "cache_tail"] {
-                if let Some(v) = m.get(flag) {
-                    out[flag] = v.clone();
-                }
+            // the agent's cache_mark travels with its message; nothing else does
+            if let Some(v) = m.get(crate::caching::CACHE_MARK) {
+                out[crate::caching::CACHE_MARK] = v.clone();
             }
             out
         })
@@ -251,9 +249,8 @@ pub async fn run_generation(
         }
     };
 
-    // THE PROVIDER'S MARKERS, flagged on the list it is handed: the primer's end, the
-    // last fold's, and the tail's (the row before the first that will fold, else the
-    // last). Only `provider_cache` asks for them.
+    // THE AGENT'S CACHE MARKS (`cache_mark`): its system message, the primer's end, the
+    // last fold's, the tail. Only `provider_cache` places them; the backend forwards.
     if caching.marks() {
         crate::caching::mark(&mut model_messages, primer);
     }

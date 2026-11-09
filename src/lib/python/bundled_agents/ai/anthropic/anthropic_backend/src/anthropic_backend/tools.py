@@ -306,7 +306,6 @@ def make_provider(id, kernel):
         thinking_budget=rec.get("thinking_budget") or None,
         effort=rec.get("effort"),
         thinking_display=rec.get("thinking_display"),
-        caching=caching.mode_of(rec),
         usage=usage_of(id),
         base=base_of(id, kernel),
         persist_to=usage_file_of(id, kernel),

@@ -15,11 +15,11 @@
 //!   finish. An `error` event is raised with the API's own type and message.
 //! - THE KEY: the record's optional `credentials` ref, sent as `x-api-key` (with
 //!   `anthropic-version`); none, no key header.
-//! - CACHING (ai-core's `caching`): `provider_cache` sends ephemeral `cache_control`
-//!   markers: on the `system` block, and on the block that ends each flagged row
-//!   (`cache_primer`, `cache_fold`, `cache_tail`). The backend adds no mark of its own
-//!   beyond the system block: where the conversation is marked is the agent's choice.
-//!   At most four. Every other mode sends none, and the body is unchanged.
+//! - CACHING: the backend forwards the agent's marks. A message carrying `cache_mark`
+//!   gets an ephemeral `cache_control` at the end of its text. A marked system message
+//!   makes `system` one marked text block. The backend adds no mark of its own and
+//!   reads no caching mode, so it sends at most the four the agent places. With no
+//!   mark, the body is the plain one.
 //! - USAGE: each stream's token counts accumulate into the agent's [`Usage`], side
 //!   calls included. The counts persist: every change rewrites the agent's own
 //!   `usage.json` with the running total, so a restart keeps them (#308). The
@@ -28,7 +28,7 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_ai_core::caching::{self, Caching};
+use fantastic_ai_core::caching;
 use fantastic_ai_core::credentials::{key_reader, KeySource};
 use fantastic_ai_core::provider::{
     stream_idle_of, within, Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream,
@@ -86,31 +86,16 @@ const CFG: BackendConfig = BackendConfig {
 
 /// ai-core's messages → (`system`, the user/assistant turns): every system message
 /// joins the one `system` string; consecutive turns of one role merge, blank-line
-/// separated. Python `to_messages`. The cache flags are not read: see [`to_wire`].
+/// separated. Python `to_messages`. The cache marks are not read: see [`to_wire`].
 #[must_use]
 pub fn to_messages(messages: &[Value]) -> (String, Vec<Value>) {
-    to_wire(messages, false)
+    let (system, _, turns) = to_wire(messages, false);
+    (system, turns)
 }
 
-/// The cache flags ai-core sets on a message (`provider_cache` only).
-#[derive(Clone, Copy, Default)]
-struct Flags {
-    /// The message holds the row the record's primer names: its end is marked.
-    primer: bool,
-    /// The message holds the last fold or clear row: its end is marked.
-    fold: bool,
-    /// The message is the agent's own mark: its end is marked.
-    tail: bool,
-}
-
-impl Flags {
-    fn any(self) -> bool {
-        self.primer || self.fold || self.tail
-    }
-}
-
-/// ai-core's messages → (`system`, the turns as the request sends them). `marks` reads
-/// the cache flags; off, they are ignored and the turns are the plain merged strings.
+/// ai-core's messages → (`system`, whether a non-empty system message carried
+/// `cache_mark`, the turns as the request sends them). `marks` reads `cache_mark`; off,
+/// it is ignored and the turns are the plain merged strings.
 ///
 /// With `marks`, a merged turn whose rows carry flags is cut into text blocks at the
 /// end of each flagged row's text, so the marker lands there, not at the end of the
@@ -118,9 +103,10 @@ impl Flags {
 /// line that joins two rows opens the next block, and is never dropped. The one
 /// exception is a trailing blank line with no row after it, which closes the block
 /// before it (see [`cut_blocks`]), so that marker sits a blank line after its text.
-fn to_wire(messages: &[Value], marks: bool) -> (String, Vec<Value>) {
+fn to_wire(messages: &[Value], marks: bool) -> (String, bool, Vec<Value>) {
+    let mut system_marked = false;
     let mut systems: Vec<String> = Vec::new();
-    let mut turns: Vec<(String, Vec<(String, Flags)>)> = Vec::new();
+    let mut turns: Vec<(String, Vec<(String, bool)>)> = Vec::new();
     for m in messages {
         let role = m.get("role").and_then(Value::as_str).unwrap_or("");
         let content = match m.get("content") {
@@ -128,21 +114,17 @@ fn to_wire(messages: &[Value], marks: bool) -> (String, Vec<Value>) {
             Some(Value::Null) | None => String::new(),
             Some(v) => fantastic_bundle::py_str(v),
         };
-        let flag = |key: &str| marks && m.get(key).and_then(Value::as_bool) == Some(true);
-        let flags = Flags {
-            primer: flag("cache_primer"),
-            fold: flag("cache_fold"),
-            tail: flag("cache_tail"),
-        };
+        let marked = marks && m.get(caching::CACHE_MARK).and_then(Value::as_bool) == Some(true);
         match role {
             "system" => {
                 if !content.is_empty() {
+                    system_marked |= marked;
                     systems.push(content);
                 }
             }
             "user" | "assistant" => match turns.last_mut() {
-                Some((r, rows)) if r == role => rows.push((content, flags)),
-                _ => turns.push((role.to_string(), vec![(content, flags)])),
+                Some((r, rows)) if r == role => rows.push((content, marked)),
+                _ => turns.push((role.to_string(), vec![(content, marked)])),
             },
             _ => {}
         }
@@ -151,13 +133,13 @@ fn to_wire(messages: &[Value], marks: bool) -> (String, Vec<Value>) {
         .into_iter()
         .map(|(role, rows)| json!({"role": role, "content": turn_content(&rows)}))
         .collect();
-    (systems.join("\n\n"), turns)
+    (systems.join("\n\n"), system_marked, turns)
 }
 
 /// One merged turn's `content`: the plain string when no row in it is flagged, else
 /// its text blocks, the marked ones carrying the cache marker.
-fn turn_content(rows: &[(String, Flags)]) -> Value {
-    if !rows.iter().any(|(_, f)| f.any()) {
+fn turn_content(rows: &[(String, bool)]) -> Value {
+    if !rows.iter().any(|(_, m)| *m) {
         let plain: Vec<&str> = rows.iter().map(|(t, _)| t.as_str()).collect();
         return json!(plain.join("\n\n"));
     }
@@ -185,15 +167,15 @@ fn turn_content(rows: &[(String, Flags)]) -> Value {
 /// be blank separators only (a flagged row followed by empty rows): those separators
 /// join the block before them. The marker then sits after the blank line that followed
 /// the flagged row, not on its last character; the bytes are unchanged.
-fn cut_blocks(rows: &[(String, Flags)]) -> Vec<(String, bool)> {
+fn cut_blocks(rows: &[(String, bool)]) -> Vec<(String, bool)> {
     let mut out: Vec<(String, bool)> = Vec::new();
     let mut cur = String::new();
-    for (i, (text, flags)) in rows.iter().enumerate() {
+    for (i, (text, marked)) in rows.iter().enumerate() {
         if i > 0 {
             cur.push_str("\n\n");
         }
         cur.push_str(text);
-        if flags.any() && !text.is_empty() && !cur.trim().is_empty() {
+        if *marked && !text.is_empty() && !cur.trim().is_empty() {
             out.push((std::mem::take(&mut cur), true));
         }
     }
@@ -851,7 +833,6 @@ struct AnthropicProvider {
     thinking_budget: Option<i64>,
     effort: Option<String>,
     thinking_display: Option<String>,
-    caching: Caching,
     /// The since-boot counts this process adds to.
     usage: Arc<Mutex<Usage>>,
     /// The counts from before this process, which the sidecar keeps.
@@ -875,9 +856,8 @@ struct AnthropicProvider {
 impl AnthropicProvider {
     /// The request body. Python `AnthropicProvider.body`.
     fn body(&self, messages: &[Value], max_tokens: Option<i64>) -> Value {
-        // Markers only in `provider_cache`: every other mode's body is the plain one.
-        let marks = self.caching.marks();
-        let (system, turns) = to_wire(messages, marks);
+        // the agent's marks, exactly: none of the backend's own
+        let (system, system_marked, turns) = to_wire(messages, true);
         let call_max = max_tokens.unwrap_or(self.max_tokens);
         let mut body = Map::new();
         body.insert("model".into(), json!(self.model));
@@ -885,8 +865,7 @@ impl AnthropicProvider {
         body.insert("messages".into(), Value::Array(turns));
         body.insert("stream".into(), json!(true));
         if !system.is_empty() {
-            // M1: the system block
-            let system = if marks {
+            let system = if system_marked {
                 json!([{"type": "text", "text": system, "cache_control": cache_control()}])
             } else {
                 json!(system)
@@ -1418,7 +1397,6 @@ fn build_provider_with(
                 .get("thinking_display")
                 .and_then(Value::as_str)
                 .map(String::from),
-            caching: caching::mode_of(&meta).map_err(ProviderError::value_error)?,
             usage: usage_of(agent_id),
             base: base_of(agent_id, kernel),
             usage_file: usage_file_of(agent_id, kernel),

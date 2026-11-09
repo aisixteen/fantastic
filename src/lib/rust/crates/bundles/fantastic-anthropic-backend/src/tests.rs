@@ -123,7 +123,6 @@ fn provider_idle(
         thinking_budget: None,
         effort: None,
         thinking_display: None,
-        caching: Caching::Cleanup,
         usage: Arc::new(Mutex::new(Usage::default())),
         base: Arc::new(Mutex::new(Usage::default())),
         usage_file: None,
@@ -603,6 +602,12 @@ impl wiremock::Respond for Asked {
 /// `model`) is sent to: the record is created, `send` reads the entry, and the POST's
 /// body is read back off the wire.
 async fn sent_max_tokens(model: &str, extra: Value, max: i64) -> Value {
+    sent_body(model, extra, max, json!({})).await["max_tokens"].clone()
+}
+
+/// The whole POST body a turn sends. A non-empty `chat` object is set on the paired
+/// ai_chat first (its `caching` places the marks).
+async fn sent_body(model: &str, extra: Value, max: i64, chat: Value) -> Value {
     let tmp = TempDir::new().unwrap();
     let srv = MockServer::start().await;
     Mock::given(method("GET"))
@@ -630,6 +635,17 @@ async fn sent_max_tokens(model: &str, extra: Value, max: i64) -> Value {
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
     let kernel = mk_unbounded_store(&tmp, &ep, &id, extra).await;
+    if chat.as_object().is_some_and(|o| !o.is_empty()) {
+        let c = fantastic_ai_core::remote_provider::pair_chat(&kernel, &AgentId::from(id.as_str()))
+            .await;
+        let mut payload = json!({"type": "update_agent", "id": c.as_str()});
+        payload
+            .as_object_mut()
+            .expect("object")
+            .extend(chat.as_object().expect("object").clone());
+        let r = call(&kernel, "kernel_state", payload).await;
+        assert!(r.get("error").is_none(), "update_agent refused: {r}");
+    }
     call(
         &kernel,
         &id,
@@ -644,8 +660,7 @@ async fn sent_max_tokens(model: &str, extra: Value, max: i64) -> Value {
         .iter()
         .find(|r| r.method.as_str() == "POST")
         .expect("a request was sent");
-    let body: Value = serde_json::from_slice(&post.body).expect("json body");
-    body["max_tokens"].clone()
+    serde_json::from_slice(&post.body).expect("json body")
 }
 
 /// `mk_with`, with a memory store the agent may use — a turn needs one to run — and no
@@ -687,6 +702,33 @@ async fn mk_unbounded_store(tmp: &TempDir, endpoint: &str, id: &str, extra: Valu
 
 /// A model whose id the budget-thinking refusal does not cover.
 const OLD: &str = "claude-3-5-sonnet";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_chats_caching_places_the_marks_and_the_provider_forwards_them() {
+    // the provider record is in cleanup, the chat in provider_cache: the chat decides
+    let b = sent_body(
+        MODEL,
+        json!({}),
+        64000,
+        json!({"caching": "provider_cache"}),
+    )
+    .await;
+    assert_eq!(
+        b["system"][0]["cache_control"],
+        json!({"type": "ephemeral"}),
+        "{b}"
+    );
+    // the provider record is in provider_cache, the chat in none: no mark is sent
+    let b = sent_body(
+        MODEL,
+        json!({"caching": "provider_cache"}),
+        64000,
+        json!({"caching": "none"}),
+    )
+    .await;
+    assert!(b["system"].is_string(), "{b}");
+    assert_eq!(markers(&b), 0, "{b}");
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_record_with_no_max_tokens_sends_the_bounded_default() {
@@ -802,7 +844,8 @@ fn markers(body: &Value) -> usize {
     body.to_string().matches("\"cache_control\"").count()
 }
 
-/// The conversation's `messages` as ai-core flags them, with a system row first.
+/// The conversation's `messages` as ai-core flags them, with an unmarked system row
+/// first. A flag names the key set to true on a row (`cache_mark`).
 fn flagged(rows: &[(&str, &str, Option<&str>)]) -> Vec<Value> {
     let mut out = vec![json!({"role": "system", "content": "S"})];
     for (role, text, flag) in rows {
@@ -815,44 +858,45 @@ fn flagged(rows: &[(&str, &str, Option<&str>)]) -> Vec<Value> {
     out
 }
 
-#[test]
-fn cleanup_and_none_send_no_marker_even_when_a_message_is_flagged() {
-    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
-    let expected = json!({"model": MODEL, "max_tokens": 8000, "messages": [{"role": "user", "content": "hi"}],
-                          "stream": true, "system": "s"});
-    assert_eq!(p.body(&plain(), None), expected);
-    let flags = flagged(&[
-        ("user", "a", Some("cache_primer")),
-        ("assistant", "b", Some("cache_fold")),
-    ]);
-    for mode in [Caching::Cleanup, Caching::None] {
-        p.caching = mode;
-        let b = p.body(&flags, None);
-        assert_eq!(markers(&b), 0, "{mode:?}: {b}");
-        assert_eq!(b["system"], json!("S"), "{mode:?}: the plain system string");
-        assert_eq!(
-            b["messages"],
-            json!([
-                {"role": "user", "content": "a"},
-                {"role": "assistant", "content": "b"},
-            ]),
-            "{mode:?}: the flags do not reach the wire"
-        );
-    }
+/// `flagged`, with `cache_mark` on the system row.
+fn flagged_sys(rows: &[(&str, &str, Option<&str>)]) -> Vec<Value> {
+    let mut out = flagged(rows);
+    out[0]["cache_mark"] = json!(true);
+    out
 }
 
 #[test]
-fn provider_cache_splits_the_merged_turns_at_the_flagged_rows() {
+fn the_backend_adds_no_mark_of_its_own() {
+    let p = provider("http://x/v1/messages", Arc::new(NoKey));
+    let expected = json!({"model": MODEL, "max_tokens": 8000, "messages": [{"role": "user", "content": "hi"}],
+                          "stream": true, "system": "s"});
+    assert_eq!(p.body(&plain(), None), expected);
+    let b = p.body(
+        &flagged(&[("user", "a", None), ("assistant", "b", None)]),
+        None,
+    );
+    assert_eq!(markers(&b), 0, "{b}");
+    assert_eq!(b["system"], json!("S"), "the plain system string");
+    assert_eq!(
+        b["messages"],
+        json!([
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+        ])
+    );
+}
+
+#[test]
+fn every_agent_mark_is_forwarded_where_it_was_put() {
     // [primer rows][fold][fold][task rows]: the primer's row is the assistant turn
     // "p2"; the fold rows and the task rows are one merged user turn, and the marker
     // lands at the end of the last fold's text, not at the end of that merged turn.
-    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
-    p.caching = Caching::ProviderCache;
-    let msgs = flagged(&[
+    let p = provider("http://x/v1/messages", Arc::new(NoKey));
+    let msgs = flagged_sys(&[
         ("user", "p1", None),
-        ("assistant", "p2", Some("cache_primer")),
+        ("assistant", "p2", Some("cache_mark")),
         ("user", "f1", None),
-        ("user", "f2", Some("cache_fold")),
+        ("user", "f2", Some("cache_mark")),
         ("user", "t1", None),
         ("assistant", "t2", None),
         ("user", "live", None),
@@ -886,30 +930,30 @@ fn the_split_turns_concatenate_to_exactly_the_merged_string() {
     // the API refuses a whitespace-only text block, so a flagged row followed by empty
     // rows must not leave a trailing "\n\n" block of its own.
     let cases: [(&[&str], &[Option<&str>]); 12] = [
-        (&["one", "", "three"], &[Some("cache_primer"), None, None]),
-        (&["one", "", "three"], &[None, Some("cache_fold"), None]),
+        (&["one", "", "three"], &[Some("cache_mark"), None, None]),
+        (&["one", "", "three"], &[None, Some("cache_mark"), None]),
         (
             &["one", "", "three"],
-            &[None, Some("cache_primer"), Some("cache_fold")],
+            &[None, Some("cache_mark"), Some("cache_mark")],
         ),
         (
             &["one", "", "three"],
-            &[Some("cache_fold"), Some("cache_fold"), None],
+            &[Some("cache_mark"), Some("cache_mark"), None],
         ),
-        (&["one", "", "three"], &[None, None, Some("cache_primer")]),
-        (&["one", ""], &[Some("cache_primer"), None]),
-        (&["one", "", ""], &[Some("cache_fold"), None, None]),
-        (&["", "one", ""], &[None, Some("cache_fold"), None]),
-        (&["one", ""], &[Some("cache_primer"), Some("cache_fold")]),
+        (&["one", "", "three"], &[None, None, Some("cache_mark")]),
+        (&["one", ""], &[Some("cache_mark"), None]),
+        (&["one", "", ""], &[Some("cache_mark"), None, None]),
+        (&["", "one", ""], &[None, Some("cache_mark"), None]),
+        (&["one", ""], &[Some("cache_mark"), Some("cache_mark")]),
         // a flagged row that is only whitespace, first in its turn, opens no block
         // of its own (the API refuses a blank block): it joins the next text
-        (&[" ", "two"], &[Some("cache_primer"), None]),
+        (&[" ", "two"], &[Some("cache_mark"), None]),
         (
             &[" ", "two", "three"],
-            &[Some("cache_fold"), Some("cache_primer"), None],
+            &[Some("cache_mark"), Some("cache_mark"), None],
         ),
         // ...and after text, it closes the block it is part of, bytes unchanged
-        (&["one", " "], &[None, Some("cache_fold")]),
+        (&["one", " "], &[None, Some("cache_mark")]),
     ];
     for (texts, shape) in cases {
         let rows: Vec<(&str, &str, Option<&str>)> = texts
@@ -918,8 +962,7 @@ fn the_split_turns_concatenate_to_exactly_the_merged_string() {
             .map(|(t, f)| ("user", *t, *f))
             .collect();
         let msgs = flagged(&rows);
-        let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
-        p.caching = Caching::ProviderCache;
+        let p = provider("http://x/v1/messages", Arc::new(NoKey));
         let b = p.body(&msgs, None);
         let plain = to_messages(&msgs).1;
         let merged = plain[0]["content"]
@@ -950,9 +993,8 @@ fn the_split_turns_concatenate_to_exactly_the_merged_string() {
 fn a_flagged_row_followed_by_empty_rows_keeps_its_marker_and_no_blank_block() {
     // The trailing blank separator joins the flagged row's block: the marker lands
     // after the "\n\n" that followed "one", and the bytes are the merged string.
-    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
-    p.caching = Caching::ProviderCache;
-    let msgs = flagged(&[("user", "one", Some("cache_primer")), ("user", "", None)]);
+    let p = provider("http://x/v1/messages", Arc::new(NoKey));
+    let msgs = flagged(&[("user", "one", Some("cache_mark")), ("user", "", None)]);
     let b = p.body(&msgs, None);
     assert_eq!(
         b["messages"],
@@ -961,48 +1003,28 @@ fn a_flagged_row_followed_by_empty_rows_keeps_its_marker_and_no_blank_block() {
         ]}]),
         "{b}"
     );
-    assert_eq!(markers(&b), 2, "M1 and M2: {b}");
+    assert_eq!(markers(&b), 1, "{b}");
 }
 
 #[test]
 fn a_flagged_row_with_no_text_carries_no_marker() {
     // An empty block is refused by the API, so an empty flagged row opens none.
-    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
-    p.caching = Caching::ProviderCache;
-    let msgs = flagged(&[("user", "a", None), ("user", "", Some("cache_primer"))]);
+    let p = provider("http://x/v1/messages", Arc::new(NoKey));
+    let msgs = flagged(&[("user", "a", None), ("user", "", Some("cache_mark"))]);
     let b = p.body(&msgs, None);
     assert_eq!(
         b["messages"],
         json!([{"role": "user", "content": [{"type": "text", "text": "a\n\n"}]}]),
         "{b}"
     );
-    assert_eq!(markers(&b), 1, "M1 only: {b}");
+    assert_eq!(markers(&b), 0, "{b}");
 }
 
 #[test]
-fn a_primer_and_a_fold_on_one_message_send_one_marker() {
-    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
-    p.caching = Caching::ProviderCache;
-    let mut msgs = flagged(&[
-        ("user", "only", None),
-        ("assistant", "both", Some("cache_primer")),
-    ]);
-    msgs[2]["cache_fold"] = json!(true);
-    let b = p.body(&msgs, None);
-    assert_eq!(
-        b["messages"][1]["content"],
-        json!([{"type": "text", "text": "both", "cache_control": {"type": "ephemeral"}}]),
-        "{b}"
-    );
-    assert_eq!(markers(&b), 2, "M1 and the one shared block: {b}");
-}
-
-#[test]
-fn provider_cache_with_no_primer_and_no_fold_marks_only_the_system() {
-    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
-    p.caching = Caching::ProviderCache;
+fn a_marked_system_message_marks_only_the_system_block() {
+    let p = provider("http://x/v1/messages", Arc::new(NoKey));
     let b = p.body(
-        &flagged(&[("user", "a", None), ("assistant", "b", None)]),
+        &flagged_sys(&[("user", "a", None), ("assistant", "b", None)]),
         None,
     );
     assert_eq!(
@@ -1013,13 +1035,16 @@ fn provider_cache_with_no_primer_and_no_fold_marks_only_the_system() {
 }
 
 #[test]
-fn provider_cache_marks_the_system_block() {
+fn a_marked_system_message_is_one_marked_block() {
     let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
-    p.caching = Caching::ProviderCache;
     p.temperature = Some(0.2);
     p.thinking_budget = Some(2048);
+    let msgs = vec![
+        json!({"role": "system", "content": "s", "cache_mark": true}),
+        json!({"role": "user", "content": "hi"}),
+    ];
     assert_eq!(
-        p.body(&plain(), None),
+        p.body(&msgs, None),
         json!({
             "model": MODEL,
             "max_tokens": 8000,
@@ -1031,28 +1056,49 @@ fn provider_cache_marks_the_system_block() {
         })
     );
     // a side call's own bound is marked the same way
-    let b = p.body(&plain(), Some(1500));
+    let b = p.body(&msgs, Some(1500));
     assert_eq!(b["max_tokens"], json!(1500));
     assert_eq!(markers(&b), 1, "{b}");
 }
 
 #[test]
-fn provider_cache_sends_no_system_block_when_the_system_is_empty() {
-    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
-    p.caching = Caching::ProviderCache;
-    let b = p.body(&[json!({"role": "user", "content": "hi"})], None);
+fn two_system_messages_one_marked_send_one_marked_block() {
+    let p = provider("http://x/v1/messages", Arc::new(NoKey));
+    let b = p.body(
+        &[
+            json!({"role": "system", "content": "a"}),
+            json!({"role": "system", "content": "b", "cache_mark": true}),
+            json!({"role": "user", "content": "hi"}),
+        ],
+        None,
+    );
+    assert_eq!(
+        b["system"],
+        json!([{"type": "text", "text": "a\n\nb", "cache_control": {"type": "ephemeral"}}])
+    );
+}
+
+#[test]
+fn an_empty_marked_system_sends_no_system_block() {
+    let p = provider("http://x/v1/messages", Arc::new(NoKey));
+    let b = p.body(
+        &[
+            json!({"role": "system", "content": "", "cache_mark": true}),
+            json!({"role": "user", "content": "hi"}),
+        ],
+        None,
+    );
     assert!(b.get("system").is_none(), "{b}");
     assert_eq!(markers(&b), 0, "{b}");
 }
 
 #[test]
 fn a_tail_flagged_row_is_marked_and_the_backend_adds_no_mark_of_its_own() {
-    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
-    p.caching = Caching::ProviderCache;
+    let p = provider("http://x/v1/messages", Arc::new(NoKey));
     let b = p.body(
         &flagged(&[
             ("user", "t1", None),
-            ("assistant", "t2", Some("cache_tail")),
+            ("assistant", "t2", Some("cache_mark")),
             ("user", "live", None),
         ]),
         None,
@@ -1062,7 +1108,7 @@ fn a_tail_flagged_row_is_marked_and_the_backend_adds_no_mark_of_its_own() {
         json!([{"type": "text", "text": "t2", "cache_control": {"type": "ephemeral"}}]),
         "{b}"
     );
-    assert_eq!(markers(&b), 2, "M1 and the tail row: {b}");
+    assert_eq!(markers(&b), 1, "the tail row only: {b}");
 }
 
 #[tokio::test]

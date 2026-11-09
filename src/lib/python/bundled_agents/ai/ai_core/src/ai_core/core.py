@@ -448,13 +448,13 @@ def _lock_for(self_id: str) -> asyncio.Lock:
 
 def _render_for_model(messages: list[dict]) -> list[dict]:
     """Project the message list to what the model actually reads — its role and
-    its text; every other key is stripped. The cache flags travel with their message."""
+    its text; every other key is stripped. The agent's `cache_mark` travels with its
+    message."""
     out = []
     for m in messages:
         r = {"role": m.get("role"), "content": m.get("content", "")}
-        for flag in ("cache_primer", "cache_fold", "cache_tail"):
-            if m.get(flag):
-                r[flag] = True
+        if m.get(caching.CACHE_MARK):
+            r[caching.CACHE_MARK] = True
         out.append(r)
     return out
 
@@ -3389,8 +3389,8 @@ async def _run(
     if isinstance(projected, dict):  # too_small failsafe / config error
         return projected
     messages = projected
-    # THE PROVIDER'S MARKERS, flagged on the list it is handed: the primer's end and
-    # the last fold's. Only provider_cache asks for them.
+    # THE AGENT'S CACHE MARKS (`cache_mark`): its system message, the primer's end, the
+    # last fold's, the tail. Only provider_cache places them; the backend forwards.
     if caching.marks(mode):
         messages = caching.mark(messages, primer)
     # ONE provider pass — no tool loop. The provider streams pure text; every chunk
