@@ -23,7 +23,7 @@ imports from this package.
 from __future__ import annotations
 
 from kernel._agent import Agent
-from kernel._bundles import _find_bundle_module, register_unlisted
+from kernel._bundles import _find_bundle_module, register_meta_yaml, register_unlisted
 from kernel._env import _load_dotenv
 from kernel.modes import dispatch_argv
 from kernel._kernel import (
@@ -75,6 +75,7 @@ __all__ = [
     # Bundles
     "_find_bundle_module",
     "register_unlisted",
+    "register_meta_yaml",
     # CLI modes
     "dispatch_argv",
 ]

@@ -21,6 +21,7 @@ from ai_core import build, on_cancel, on_delete, required_meta  # noqa: F401 —
 from ai_core import ProviderError, caching, stream_idle_of
 from ai_core.constants import DEFAULT_TURN_TOKENS
 from ai_core.credentials import key_reader
+from ai_core.remote_provider import chat_refusal, is_chat_verb, provider_verbs
 from ai_core.schema import credentials_field, field, schema, validate
 
 from ollama_backend import server
@@ -74,13 +75,17 @@ def validate_meta(meta: dict, record: dict) -> str | None:
 
 
 def make_provider(id, kernel):
-    """Build an OllamaProvider from the agent record
+    """Build an OllamaProvider from the agent's live record."""
+    return make_provider_with(id, kernel, kernel.get(id) or {})
+
+
+def make_provider_with(id, kernel, rec):
+    """Build an OllamaProvider from `rec`
     (endpoint/model/num_ctx/temperature/num_predict)."""
     from ollama_backend.provider import (
         OllamaProvider,
     )
 
-    rec = kernel.get(id) or {}
     num_ctx = rec.get("num_ctx")
     temperature = rec.get("temperature")
     num_predict = rec.get("num_predict")
@@ -129,6 +134,13 @@ def _build():
             )
             if refused is not None:
                 return refused
+        r = await provider_verbs(
+            id, payload, kernel, lambda rec: make_provider_with(id, kernel, rec)
+        )
+        if r is not None:
+            return r
+        if is_chat_verb(payload.get("type")):
+            return chat_refusal(NAME, payload.get("type"))
         return await core(id, payload, kernel)
 
     return verbs, handler

@@ -725,7 +725,7 @@ async def test_context_clear_starts_a_new_thread_without_deleting(seeded_kernel)
 
     k = seeded_kernel
     aid = "ai_clear"
-    k.create("ollama_backend.tools", id=aid, **memory_meta(k, aid, {"cli": "*"}))
+    k.create("ai_chat.tools", id=aid, **memory_meta(k, aid, {"cli": "*"}))
     await core._save_history(
         aid,
         k,

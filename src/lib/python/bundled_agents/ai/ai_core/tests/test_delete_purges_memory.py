@@ -19,7 +19,7 @@ def _sqlite_store(root, store: str = "mem") -> str:
 
 def _ai(root, aid: str, store: str = "mem") -> None:
     meta = memory_meta(root, aid, {"cli": "*", "kernel": "*"}, store=store)
-    root.create("ollama_backend.tools", id=aid, context_window=32768, **meta)
+    root.create("ai_chat.tools", id=aid, context_window=32768, **meta)
 
 
 async def _plant(root, aid: str, store: str = "mem") -> None:

@@ -1,7 +1,7 @@
 """kernel/await_set — a lead waits for a SET of workers and wakes ONCE. NO MODEL.
 
 Four local OpenAI-compatible servers (`e2e/mocks/vllm.py`) play the model of a lead
-and of three workers; the kernel's own AI agents (python: `vllm_backend` agents; rust:
+and of three workers; the kernel's own AI agents (on both runtimes:
 `ai_chat.tools` chats each naming its own `vllm_backend` provider, `provider_id`, #521) run on
 the PACKAGED host of `RUNTIME` (python | rust), every call from the test through
 `web_rest`. Tool calling is the prompt-taught `<call name>` tag grammar.
@@ -51,7 +51,7 @@ LEAD = "lead"
 WORKERS = ["w1", "w2", "w3"]
 LABEL = "E128"
 TOKEN = "E128-" + secrets.token_hex(4)
-PROVS = {a: f"{a}_prov" for a in (LEAD, *WORKERS)}  # rust: each chat's provider
+PROVS = {a: f"{a}_prov" for a in (LEAD, *WORKERS)}  # each chat's provider
 
 
 def last_user(req: dict) -> str:
@@ -140,24 +140,19 @@ def main() -> int:
         def make(aid, mock, model, can, by):
             fields = dict(endpoint=mock.url, model=model, max_tokens=8192,
                           context_window=262144, memory_store_id="memory")
-            if RUNTIME == "rust":
-                # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it:
-                # a `send` to a provider is refused (#521)
-                pv = PROVS[aid]
-                rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=pv,
-                                kv_slots=4, kv_overflow="evict",
-                                can_call={"$self": "*", "memory": "*"},
-                                callable_by={"$self": "*", "$parent": "*", aid: "*"},
-                                **fields)
-                need(rec.get("id") == pv, f"create {pv}: {str(rec)[:200]}")
-                rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
-                                provider_id=pv, model=model, max_tokens=8192,
-                                context_window=262144, memory_store_id="memory",
-                                can_call={**can, pv: ["complete", "watch"]}, callable_by=by)
-            else:
-                rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=aid,
-                                kv_slots=4, kv_overflow="evict", can_call=can,
-                                callable_by=by, **fields)
+            # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it:
+            # a `send` to a provider is refused (#521)
+            pv = PROVS[aid]
+            rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=pv,
+                            kv_slots=4, kv_overflow="evict",
+                            can_call={"$self": "*", "memory": "*"},
+                            callable_by={"$self": "*", "$parent": "*", aid: "*"},
+                            **fields)
+            need(rec.get("id") == pv, f"create {pv}: {str(rec)[:200]}")
+            rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
+                            provider_id=pv, model=model, max_tokens=8192,
+                            context_window=262144, memory_store_id="memory",
+                            can_call={**can, pv: ["complete", "watch"]}, callable_by=by)
             need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")
 
         for w in WORKERS:

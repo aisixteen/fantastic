@@ -246,7 +246,7 @@ async def test_a_docs_body_is_held_and_its_first_line_names_the_grep(
 
     mind = _Mind()
     k.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id="rm_docs",
         context_window=32768,
         **memory_meta(k, "rm_docs", {"kernel_state": ["docs"], "cli": "*"}),

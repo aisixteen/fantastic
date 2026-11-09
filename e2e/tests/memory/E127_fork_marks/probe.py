@@ -66,8 +66,8 @@ async def main():
         WRAPS["ai"] = replace_with(_Stub())
         r = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent", "parent_id": home(root), "id": "ai",
-            "handler_module": "ollama_backend.tools", "model": "stub",
-            "endpoint": "http://stub.invalid",  # never dialled: WRAPS seats the stub
+            "handler_module": "ai_chat.tools", "model": "stub",
+            "provider_id": "stub",  # never reached: WRAPS seats the stub
             "context_window": 32000, "context_strategy": "fold",
             **memory.ai_memory_meta({"cli": "*"})}}]))[0]["result"]
         assert not r.get("error"), r

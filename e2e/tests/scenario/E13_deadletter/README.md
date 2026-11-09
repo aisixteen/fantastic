@@ -44,7 +44,7 @@ cd src/lib/python && uv run python ../../../e2e/run.py --group scenario
 
 `test.yaml` + `probe.py` sit beside `scenario.yaml` and run with NO MODEL: two
 scripted OpenAI-compatible servers play a lead and a worker (the kernel's own
-`vllm_backend` agents), and the root record carries `send_timeout: 3`. The worker
+`ai_chat.tools` chats over `vllm_backend` providers), and the root record carries `send_timeout: 3`. The worker
 is busy on a slow answer; the lead's message to it is HELD, then passes its 3 s
 deadline. The probe proves, on python and rust alike:
 

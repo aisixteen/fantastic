@@ -44,6 +44,7 @@ from mocks.vllm import VllmMock
 REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
 AI, STORE = "bot", "hist"
+PROV = f"{AI}_prov"  # the provider the chat completes through
 DB = "stores/hist.db"
 MODEL = "mock-scripted"
 Q1, A1 = "E136-q-" + secrets.token_hex(4), "E136-a-" + secrets.token_hex(4)
@@ -75,7 +76,7 @@ def main() -> int:
     m = VllmMock(model=MODEL).start()
     m.responder = recall_only
     work = Path(tempfile.mkdtemp(prefix="e2e-sqlite-history-"))
-    hk = HostKernel(spec, work, reach=[AI, STORE]).boot()
+    hk = HostKernel(spec, work, reach=[AI, STORE, PROV]).boot()
     bad: list[str] = []
 
     def need(cond: bool, what: str) -> None:
@@ -104,14 +105,20 @@ def main() -> int:
 
     try:
         rec = hk.create(parent_id="rest", handler_module="sqlite_store.tools", id=STORE,
-                        path=DB, callable_by={AI: "*", "$parent": "*"})
+                        path=DB, callable_by={AI: "*", PROV: "*", "$parent": "*"})
         need(rec.get("id") == STORE and not rec.get("error"),
              f"create the sqlite store from its record's path: {str(rec)[:200]}")
-        rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=AI,
+        # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it
+        rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
                         endpoint=m.url, model=MODEL, max_tokens=8192,
                         context_window=262144, kv_slots=4, kv_overflow="evict",
-                        memory_store_id=STORE,
-                        can_call={"$self": "*", STORE: "*"},
+                        memory_store_id=STORE, can_call={"$self": "*", STORE: "*"},
+                        callable_by={"$self": "*", "$parent": "*", AI: "*"})
+        need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
+        rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
+                        provider_id=PROV, model=MODEL, max_tokens=8192,
+                        context_window=262144, memory_store_id=STORE,
+                        can_call={"$self": "*", STORE: "*", PROV: ["complete", "watch"]},
                         callable_by={"$self": "*", "$parent": "*", "rest": "*"})
         need(rec.get("id") == AI, f"create the agent on that store: {str(rec)[:200]}")
 

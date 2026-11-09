@@ -54,14 +54,14 @@ def _pair(
     a, r = _Script(asker_turns), _Script(rcv_turns, hold=hold)
     back = {"ia_asker": ["send"]} if answer_grant else {}
     k.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=rcv,
         context_window=32768,
         callable_by={"ia_asker": "*"},
         **memory_meta(k, rcv, {"cli": "*", **back}),
     )
     k.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id="ia_asker",
         context_window=32768,
         callable_by={rcv: ["send"]} if answer_grant else {},
@@ -189,7 +189,7 @@ async def test_an_answer_with_nothing_open_is_told_so(seeded_kernel, fake_provid
     k = seeded_kernel
     s = _Script([_answer("ship it"), DONE])
     k.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id="ia_lone",
         context_window=32768,
         **memory_meta(k, "ia_lone", {"cli": "*"}),
@@ -216,7 +216,7 @@ async def test_an_answer_after_registration_still_clears_the_owed_pid(
 
     aid = "ia_owed"
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),

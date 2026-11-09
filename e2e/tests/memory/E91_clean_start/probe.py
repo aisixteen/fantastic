@@ -29,13 +29,13 @@ class _Stub:
 async def main():
     root, core, close = await open_kernel(prefix="memory_clean_", reach=["ai", "cli"])
     try:
-        import ollama_backend.tools  # noqa: F401 — the bundle the AI runs
+        import ai_chat.tools  # noqa: F401 — the bundle the AI runs
 
         r = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent", "parent_id": home(root), "id": "ai",
-            "handler_module": "ollama_backend.tools", "model": "stub",
-            # required at the write; never dialled — the provider is stubbed below
-            "endpoint": "http://127.0.0.1:9",
+            "handler_module": "ai_chat.tools", "model": "stub",
+            # never reached — the provider is stubbed below
+            "provider_id": "stub",
             **memory.ai_memory_meta({"cli": "*"})}}]))[0]["result"]
         assert not r.get("error"), r
         await memory.open_ingress(root, memory.MEMORY, "ai")

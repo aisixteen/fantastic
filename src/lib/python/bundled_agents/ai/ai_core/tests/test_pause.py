@@ -46,7 +46,7 @@ class _Streamer:
 
 def _agent(kernel, aid):
     kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(kernel, aid, {"cli": "*"}),
@@ -238,7 +238,7 @@ async def test_resume_has_no_registry_gate(seeded_kernel, fake_providers):
     aid = "pause_nogate"
     fp = _Recorder()
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         spawned_by="reg_nogate",

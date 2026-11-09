@@ -56,7 +56,7 @@ async def _until(cond, what, timeout=5.0):
 
 def _agent(kernel, aid, can_call=None):
     kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(kernel, aid, {"cli": "*", **(can_call or {})}),

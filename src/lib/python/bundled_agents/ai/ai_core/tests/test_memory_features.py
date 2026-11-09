@@ -161,11 +161,11 @@ def test_the_mechanical_index_keeps_files_ids_and_the_users_words():
 
 
 async def _pair(kernel):
-    import ollama_backend.tools  # noqa: F401
+    import ai_chat.tools  # noqa: F401
 
     for aid, peer in (("alice", "bob"), ("bob", "alice")):
         kernel.create(
-            "ollama_backend.tools",
+            "ai_chat.tools",
             id=aid,
             callable_by={peer: "*"},
             **memory_meta(kernel, aid, {"cli": "*", peer: "*"}),

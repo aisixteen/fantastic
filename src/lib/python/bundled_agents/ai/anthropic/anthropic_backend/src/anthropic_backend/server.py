@@ -31,7 +31,7 @@ INFERRED = ("max_tokens", "context_window")
 #: The entry field each one is read from.
 SOURCE = {"max_tokens": "max_tokens", "context_window": "max_input_tokens"}
 #: The verbs that run a turn of the model — the ones the API is read for.
-TURN_VERBS = ("send", "inquiry", "context_recall")
+TURN_VERBS = ("send", "inquiry", "context_recall", "complete")
 #: Seconds to wait on the model entry.
 READ_TIMEOUT = 30.0
 
@@ -160,10 +160,16 @@ async def list_models(endpoint: str, *, key: str, transport=None) -> list[dict] 
     ]
 
 
-async def resolve(id: str, kernel, *, key, validate, transport=None) -> dict | None:
+async def resolve(
+    id: str, kernel, *, key, validate, transport=None, model=None
+) -> dict | None:
     """Read the record's absent fields from the API and write them back. None when
-    nothing is absent or all were written; otherwise the verb's refusal."""
-    rec = kernel.get(id) or {}
+    nothing is absent or all were written; otherwise the verb's refusal. `model` is
+    the pass's own (a `complete`'s, or the provider's default): it stands in for the
+    record's, so the API read is of that model."""
+    rec = dict(kernel.get(id) or {})
+    if model:
+        rec["model"] = model
     if not missing(rec) or not rec.get("model") or not rec.get("endpoint"):
         # nothing to read, or nothing to read it with — the provider names a
         # missing `model` / `endpoint` when it is built

@@ -61,7 +61,7 @@ def _agent(kernel, aid, retries=None):
     meta = {"context_window": 32768, **memory_meta(kernel, aid, {"cli": "*"})}
     if retries is not None:
         meta["transport_retries"] = retries
-    kernel.create("ollama_backend.tools", id=aid, **meta)
+    kernel.create("ai_chat.tools", id=aid, **meta)
 
 
 async def _say(kernel, aid, text):

@@ -42,10 +42,8 @@ class _Fake:
 
 def _ai(k, aid: str, **meta) -> None:
     rec = k.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
-        endpoint="http://127.0.0.1:9/stub",
-        model="stub",
         context_window=32768,
         **meta,
         **memory_meta(k, aid, {"cli": "*"}),
@@ -151,7 +149,15 @@ async def test_a_bad_value_is_refused_at_the_write(seeded_kernel, bad):
         },
     )
     assert out.get("error") == SYSTEM_PROMPT_REFUSAL, out
-    _ai(k, "sp_ok", system_prompt="FINE")
+    # on a backend: the write-time refusal of an ai_core field is every record's
+    k.create(
+        "ollama_backend.tools",
+        id="sp_ok",
+        endpoint="http://127.0.0.1:9/stub",
+        model="stub",
+        system_prompt="FINE",
+        **memory_meta(k, "sp_ok", {"cli": "*"}),
+    )
     out = await _op(k, {"type": "update_agent", "id": "sp_ok", "system_prompt": bad})
     assert out.get("error") == SYSTEM_PROMPT_REFUSAL, out
     assert k.get("sp_ok")["system_prompt"] == "FINE"

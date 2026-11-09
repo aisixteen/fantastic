@@ -2,7 +2,7 @@
 
 Free: no model. A local OpenAI-compatible server (`e2e/mocks/vllm.py`, extended in
 `probe.py` with vLLM's thought channel `reasoning_content`) answers from a fixed
-script; the kernel's own `vllm_backend` agent (ai_core) runs the chain on the
+script; the kernel's own `ai_chat.tools` chat (ai_core), completing through a `vllm_backend` provider, runs the chain on the
 PACKAGED host of `RUNTIME`, driven over `web_rest`. Every record field the backend
 needs is set explicitly (`endpoint`, `model`, `max_tokens`, `context_window`,
 `kv_slots`, `kv_overflow`), so nothing is read from the server.

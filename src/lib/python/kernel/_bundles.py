@@ -18,6 +18,8 @@ import sys
 from importlib.metadata import entry_points
 from types import ModuleType
 
+import yaml
+
 from kernel._kernel import BUNDLE_ENTRY_GROUP, Kernel
 
 #: Test/probe bundles that DISPATCH but are not installed (`register_unlisted`).
@@ -35,6 +37,10 @@ _MISSING: set[str] = set()
 #: lists — a refused folder too, with its `error`, never loaded.
 _FOLDER: dict[str, ModuleType] = {}
 _FOLDER_ROWS: dict[str, dict] = {}
+#: EMBEDDED META BUNDLES: a product's own `bundle.yaml` text compiled into the host
+#: (`register_meta_yaml`) — the same rows as a folder's meta bundle, read from no
+#: folder. A folder of the same name overrides it.
+_EMBEDDED: dict[str, dict] = {}
 
 
 #: Bundles that load ONLY when the host turns them on: handler module -> the
@@ -73,18 +79,24 @@ def refuse_folder(name: str, row: dict) -> None:
     """A folder that could not load: listed (with its `error`), never resolvable —
     unless an earlier load stands: a failed RELOAD keeps it (module and row), so its
     live instances keep running it; the error goes to the reload's caller."""
-    if name in _FOLDER or _meta_base(name) is not None:
+    if name in _FOLDER or _folder_meta(name) is not None:
         return
     _FOLDER_ROWS[name] = row
 
 
 def folder_rows() -> list[dict]:
-    """Every folder bundle this kernel read — loaded and refused — by name. A meta
-    bundle's row is listed without its `record` (the fields, a directive among them,
-    are the instances' business, not the catalog's)."""
-    return [
-        {k: v for k, v in _FOLDER_ROWS[n].items() if k != "record"} for n in sorted(_FOLDER_ROWS)
-    ]
+    """Every bundle this kernel read from a folder or has embedded — loaded and
+    refused — by name, each with its `source`. A folder's refusal over an embedded
+    bundle of the same name rides on the embedded row as `folder_error` (the embedded
+    one stays live). A meta bundle's row is listed without its `record` (the fields, a
+    directive among them, are the instances' business, not the catalog's)."""
+    out: dict[str, dict] = {n: {**r, "source": "embedded"} for n, r in _EMBEDDED.items()}
+    for n, row in _FOLDER_ROWS.items():
+        if "error" in row and n in out:
+            out[n]["folder_error"] = row["error"]
+        else:
+            out[n] = {**row, "source": "folder"}
+    return [{k: v for k, v in out[n].items() if k != "record"} for n in sorted(out)]
 
 
 def register_meta(name: str, row: dict) -> None:
@@ -96,15 +108,93 @@ def register_meta(name: str, row: dict) -> None:
     _FOLDER_ROWS[name] = row
 
 
-def _meta_base(name: str) -> str | None:
-    """The `base` of the loaded meta bundle `name`, if it is one."""
-    if name in _FOLDER:
-        return None
+def folder_bases() -> list[str]:
+    """The installed bundled agents a folder can extend (they build `folder_bundle`)."""
+    out = []
+    for ep in entry_points(group=BUNDLE_ENTRY_GROUP):
+        try:
+            mod = import_handler(ep.value)
+        except Exception:  # noqa: BLE001 — a bundle that cannot import is no base
+            continue
+        if hasattr(mod, "folder_bundle"):
+            out.append(ep.name)
+    return sorted(out)
+
+
+def _folder_meta(name: str) -> dict | None:
+    """The loaded FOLDER meta bundle `name`'s row, if it is one."""
     row = _FOLDER_ROWS.get(name)
     if row is None or "error" in row or "record" not in row:
         return None
-    base = row.get("base")
+    return row
+
+
+def _meta_row_of(name: str) -> dict | None:
+    """The row of the meta bundle `name` — a folder's over an embedded one's."""
+    if name in _FOLDER:
+        return None
+    return _folder_meta(name) or _EMBEDDED.get(name)
+
+
+def _meta_base(name: str) -> str | None:
+    """The `base` of the loaded meta bundle `name`, if it is one."""
+    row = _meta_row_of(name)
+    base = row.get("base") if row else None
     return base if isinstance(base, str) else None
+
+
+def meta_row(name: str, base: str, sentence: str, spec: dict, row: dict) -> dict:
+    """The one shape check of a meta bundle, whichever way it arrives (a folder's
+    `bundle.yaml`, an embedded text): `record` is a mapping, `base` resolves to a
+    registered bundle and leads back to nothing of this name. → its row; raises
+    ValueError saying why not."""
+    record = spec.get("record")
+    if record is None:
+        record = {}
+    if not isinstance(record, dict):
+        raise ValueError("record: must be a mapping of the fields every instance inherits")
+    handler = handler_of(base)
+    if handler is None:
+        raise ValueError(
+            f"base: {base!r} is no bundle of this kernel — a folder extends a registered "
+            "handler_module or another folder bundle (folder bases with a program — "
+            f"known: {', '.join(folder_bases()) or 'none'})"
+        )
+    # no cycle: following the bases from `base` never comes back to this bundle
+    at = handler
+    for _ in range(17):
+        if at == name:
+            raise ValueError(
+                f"base: {base!r} leads back to {name!r} — a meta bundle cannot extend itself"
+            )
+        nxt = _meta_base(at)
+        if nxt is None:
+            break
+        at = nxt
+    return {**row, "base": handler, "sentence": sentence, "record": record}
+
+
+def register_meta_yaml(name: str, text: str) -> None:
+    """Embed a META BUNDLE from its `bundle.yaml` text: a product's own bundle,
+    compiled in, read from no folder. A folder bundle of the same name overrides it.
+    Raises ValueError saying why it is refused."""
+    try:
+        spec = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        raise ValueError(f"{name}: {e}") from e
+    base = spec.get("base") if isinstance(spec, dict) else None
+    if not isinstance(base, str) or not base:
+        raise ValueError(f"{name}: base: required — the bundle it extends")
+    sentence = spec.get("sentence")
+    if not isinstance(sentence, str) or not sentence.strip():
+        raise ValueError(f"{name}: sentence: required — one line saying what it is")
+    try:
+        row = meta_row(
+            name, base, sentence.strip(), spec, {"name": name, "handler_module": name}
+        )
+    except ValueError as e:
+        raise ValueError(f"{name}: {e}") from e
+    _EMBEDDED[name] = row
 
 
 def meta_chain(handler_module: str) -> list[str]:
@@ -130,7 +220,8 @@ def defaults(handler_module: str) -> dict:
         chain.append(last)
     out: dict = {}
     for name in reversed(chain):
-        out.update(_FOLDER_ROWS[name].get("record") or {})
+        row = _meta_row_of(name) or _FOLDER_ROWS.get(name) or {}
+        out.update(row.get("record") or {})
     return out
 
 

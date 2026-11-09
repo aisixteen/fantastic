@@ -30,7 +30,7 @@ async def test_stopped_turn_stores_partial_answer_and_notice_apart(
     aid = "stop_rows_a"
     fp = _Streamer("half an answer")
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),

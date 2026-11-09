@@ -251,7 +251,7 @@ async def _wire(
                     "payload": {
                         "type": "create_agent",
                         "parent_id": kernel.id,
-                        "handler_module": "ollama_backend.tools",
+                        "handler_module": "ai_chat.tools",
                         # required at the write (the schema); the provider is faked, never dialled
                         "endpoint": "http://127.0.0.1:9/stub",
                         "model": "stub",
@@ -457,7 +457,7 @@ async def test_the_gate_stands_between_a_model_and_a_person(
                     "payload": {
                         "type": "create_agent",
                         "parent_id": seeded_kernel.id,
-                        "handler_module": "ollama_backend.tools",
+                        "handler_module": "ai_chat.tools",
                         # required at the write (the schema); the provider is faked, never dialled
                         "endpoint": "http://127.0.0.1:9/stub",
                         "model": "stub",

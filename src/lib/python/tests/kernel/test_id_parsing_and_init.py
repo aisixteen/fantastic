@@ -170,10 +170,8 @@ async def test_ai_history_fold_forms(seeded_kernel):
     k = seeded_kernel
     meta = memory_meta(k, "hai")
     rec = k.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id="hai",
-        endpoint="http://127.0.0.1:9/stub",
-        model="stub",
         **meta,
     )
     assert rec.get("id") == "hai", rec

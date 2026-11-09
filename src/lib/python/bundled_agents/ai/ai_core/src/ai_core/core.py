@@ -60,6 +60,7 @@ from ai_core.autofold import autofold_row
 from ai_core import prompt_file
 from ai_core import embed as _embed_mod
 from ai_core.provider import ProviderError
+from ai_core.remote_provider import COMPLETE_DOC, MODELS_DOC, SET_DEFAULT_DOC
 from ai_core.folds import anchors_of, is_fold, member_anchor
 from ai_core.folds import expand_ids as expand_fold_ids
 from ai_core.strategies import DEFAULT_STRATEGY, get_strategy, strategy_names
@@ -5934,6 +5935,16 @@ async def _unwatch(id, payload, kernel):
 # ─── the closure factory ────────────────────────────────────────
 
 
+def _provider_verb(verb: str, doc: str, name: str):
+    """A provider's verb as core's table lists it: documented, never handled here."""
+
+    async def fn(id, payload, kernel):
+        return refusal(UNHANDLED, f"{name}: unknown type {verb!r}", verb=verb)
+
+    fn.__doc__ = doc
+    return fn
+
+
 def build(
     *,
     sentence: str,
@@ -5982,6 +5993,13 @@ def build(
 
     verbs: dict[str, Callable] = {
         "reflect": _make_reflect(cfg),
+        # A provider's verbs: documented here, answered by a backend before it reaches
+        # core (`remote_provider.provider_verbs`); an `ai_chat` refuses them.
+        "complete": _provider_verb("complete", COMPLETE_DOC, name),
+        "models": _provider_verb("models", MODELS_DOC, name),
+        "set_default_model": _provider_verb(
+            "set_default_model", SET_DEFAULT_DOC, name
+        ),
         "send": _make_send(cfg),
         "stop": _stop,
         # Hold every incoming message in the store; release them, in order, after a

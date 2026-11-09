@@ -199,7 +199,7 @@ async def test_the_schema_is_what_the_write_enforces(seeded_kernel):
 
     r = await create(id="a1")
     assert r.get("reason") == "invalid_meta", r
-    assert "missing: endpoint, model, credentials, memory_store_id" in r["error"], r
+    assert "missing: endpoint, credentials, memory_store_id" in r["error"], r
     r = await create(
         id="a2",
         endpoint="http://127.0.0.1:9/stub",

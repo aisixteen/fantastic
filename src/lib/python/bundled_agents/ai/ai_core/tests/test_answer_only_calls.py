@@ -40,7 +40,7 @@ def _status() -> str:
 async def _drive(k, fake_providers, turns, want: int) -> list[str]:
     s = _Script(turns)
     k.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=AID,
         context_window=32768,
         **memory_meta(k, AID, {"cli": "*"}),

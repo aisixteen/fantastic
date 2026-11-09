@@ -260,7 +260,7 @@ async def _settle(fp, want, timeout=5.0):
 
 def _agent(kernel, aid):
     kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(kernel, aid, {"cli": "*", "kernel": "*"}),

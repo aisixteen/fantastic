@@ -59,7 +59,7 @@ async def test_a_failed_handoff_is_a_status_event_with_detail(
     aid, leg = "fh_ai", "fh_leg"
     k.create("ram_store.tools", id=leg)
     k.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(k, aid, {"cli": "*", "kernel_state": "*", leg: "*"}),

@@ -158,7 +158,7 @@ def wired(seeded_kernel, store_agent, fake_providers):
         callable_by={"ua_leg": ["buy"]},  # the click is the ONLY caller
     )
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id="ua_ai",
         context_window=32768,
         # The conversation lives in the agent's MEMORY STORE — the refusal message

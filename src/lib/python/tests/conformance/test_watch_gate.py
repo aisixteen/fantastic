@@ -196,10 +196,10 @@ async def test_an_operator_may_tap_the_state_stream(wired):
 async def _ai_with_watcher(kernel):
     from _testkit import memory_meta
 
-    import ollama_backend.tools  # noqa: F401 — the bundle the AI runs
+    import ai_chat.tools  # noqa: F401 — the bundle the AI runs
 
     kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id="talker",
         callable_by={"viewer": ["watch", "unwatch"]},
         **memory_meta(kernel, "talker", {"cli": "*"}),

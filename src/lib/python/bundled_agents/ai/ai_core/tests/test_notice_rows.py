@@ -35,7 +35,7 @@ def _agent(kernel, aid, extra_callers=None):
     meta = memory_meta(kernel, aid, {"cli": "*", "kernel": "*"})
     if extra_callers:
         meta["callable_by"] = {**(meta.get("callable_by") or {}), **extra_callers}
-    kernel.create("ollama_backend.tools", id=aid, context_window=32768, **meta)
+    kernel.create("ai_chat.tools", id=aid, context_window=32768, **meta)
 
 
 async def _rows(kernel, aid) -> list[dict]:

@@ -2,7 +2,7 @@
 
 Free: no model. A scripted OpenAI-compatible server (`e2e/mocks/vllm.py`; the probe
 adds a stream cut with `finish_reason: length`) plays a provider that fails, on the
-PACKAGED host of `RUNTIME`, over `web_rest`: on the python lane one `vllm_backend` agent; on the rust lane an `ai_chat.tools` chat naming a `vllm_backend` provider (`provider_id`, #521).
+PACKAGED host of `RUNTIME`, over `web_rest`: on both runtimes an `ai_chat.tools` chat naming a `vllm_backend` provider (`provider_id`, #521).
 
 1. HTTP 500 once, then a plain `done`: the next request is the agent's own next turn
    and its last user turn carries `[turn failed]` and the provider's error text; the

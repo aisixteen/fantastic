@@ -7,6 +7,7 @@ import asyncio
 
 
 import ollama_backend.tools as ot
+from ai_core.remote_provider import pair_chat
 from ai_core import core
 
 
@@ -61,7 +62,13 @@ async def _make_ollama(kernel):
     # Two-sided deny-all: open the callee's reciprocal `callable_by` for each edge.
     for target in can_call:
         await _accept(kernel, target, aid)
-    return aid
+    # the provider stays the provider; the chat that completes through it is the agent a test drives
+    return await pair_chat(kernel, aid)
+
+
+def _provider_of(chat: str) -> str:
+    """The provider a `_make_ollama` chat completes through (`<provider>_ai`)."""
+    return chat[: -len("_ai")]
 
 
 async def _accept(kernel, target: str, caller: str, verbs="*") -> None:
@@ -89,7 +96,7 @@ async def test_docs_list_send(seeded_kernel, store_agent):
     oid = await _make_ollama(seeded_kernel)
     r = (
         await seeded_kernel.send(
-            [{"target": "kernel", "payload": {"type": "docs", "of": oid}}]
+            [{"target": "kernel", "payload": {"type": "docs", "of": _provider_of(oid)}}]
         )
     )[0]["result"]
     assert r["bundle"] == "ollama_backend.tools" and "send" in r["verbs"]
@@ -208,9 +215,7 @@ async def test_system_prompt_override_replaces_auto_prompt(
 async def test_a_send_with_no_memory_store_fails_loud(seeded_kernel, fake_providers):
     """No `memory_store_id` ⇒ no turn: the send refuses up front, naming the fix —
     the conversation has nowhere to live, and nothing falls back to RAM."""
-    rec = seeded_kernel.create(
-        "ollama_backend.tools", id="storeless", can_call={"cli": "*"}
-    )
+    rec = seeded_kernel.create("ai_chat.tools", id="storeless", can_call={"cli": "*"})
     assert rec.get("id") == "storeless", rec
     fake_providers["storeless"] = _FakeProvider([["never"]])
     try:
@@ -1127,7 +1132,7 @@ async def test_status_event_includes_send_id(
 async def test_a_bad_system_prompt_is_refused_at_the_write(seeded_kernel, store_agent):
     from ai_core.schema import SYSTEM_PROMPT_REFUSAL
 
-    aid = await _make_ollama(seeded_kernel)
+    aid = _provider_of(await _make_ollama(seeded_kernel))
 
     async def upd(v):
         return (
@@ -1337,7 +1342,7 @@ async def _update(kernel, oid, **fields):
 async def test_unknown_type_wire_shape_is_byte_exact(seeded_kernel, store_agent):
     import json
 
-    oid = await _make_ollama(seeded_kernel)
+    oid = _provider_of(await _make_ollama(seeded_kernel))
     r = (
         await seeded_kernel.send([{"target": oid, "payload": {"type": "frob"}}])
     )[0]["result"]
@@ -1348,7 +1353,7 @@ async def test_unknown_type_wire_shape_is_byte_exact(seeded_kernel, store_agent)
 
 
 async def test_list_models_is_unknown_type(seeded_kernel, store_agent):
-    oid = await _make_ollama(seeded_kernel)
+    oid = _provider_of(await _make_ollama(seeded_kernel))
     reply = (
         await seeded_kernel.send([{"target": oid, "payload": {"type": "list_models"}}])
     )[0]["result"]
@@ -1365,7 +1370,7 @@ async def test_list_models_is_unknown_type(seeded_kernel, store_agent):
 
 
 async def test_reflect_extras_match_python(seeded_kernel, store_agent):
-    oid = await _make_ollama(seeded_kernel)
+    oid = _provider_of(await _make_ollama(seeded_kernel))
     r = await _reflect_of(seeded_kernel, oid)
     assert list(r)[:13] == [
         "id",
@@ -1400,6 +1405,7 @@ async def test_sends_temperature_default_and_override(seeded_kernel, store_agent
     from unittest.mock import AsyncMock, MagicMock, patch
 
     oid = await _make_ollama(seeded_kernel)
+    prov = _provider_of(oid)
     client = MagicMock()
     client.chat = AsyncMock(side_effect=lambda **kw: _async_iter([_chunk("ok")]))
     client.__aenter__ = AsyncMock(return_value=client)
@@ -1414,11 +1420,11 @@ async def test_sends_temperature_default_and_override(seeded_kernel, store_agent
 
     with patch("ollama.AsyncClient", return_value=client):
         await send("hi")
-        assert (await _reflect_of(seeded_kernel, oid))["temperature"] == 0.3
+        assert (await _reflect_of(seeded_kernel, prov))["temperature"] == 0.3
         assert client.chat.call_args_list[0].kwargs["options"]["temperature"] == 0.3
 
-        await _update(seeded_kernel, oid, temperature=0.15)
-        assert (await _reflect_of(seeded_kernel, oid))["temperature"] == 0.15
+        await _update(seeded_kernel, prov, temperature=0.15)
+        assert (await _reflect_of(seeded_kernel, prov))["temperature"] == 0.15
         await send("hi2")
         assert client.chat.call_args_list[-1].kwargs["options"]["temperature"] == 0.15
 

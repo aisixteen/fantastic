@@ -59,10 +59,8 @@ async def test_a_routing_name_the_verb_documents_is_refused_loud(
     k.create("clash_store", id="kb", callable_by={"rc_ai": "*"})
     meta = memory_meta(k, "rc_ai", {"cli": "*", "kb": "*", "kernel_state": ["docs"]})
     k.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id="rc_ai",
-        endpoint="http://127.0.0.1:9/stub",
-        model="stub",
         context_window=32768,
         **meta,
     )
@@ -100,10 +98,8 @@ async def test_a_routing_name_in_the_payload_of_a_routed_call_is_delivered(
     k.create("clash_store", id="kb2", callable_by={"rc_ai2": "*"})
     meta = memory_meta(k, "rc_ai2", {"cli": "*", "kb2": "*", "kernel_state": ["docs"]})
     k.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id="rc_ai2",
-        endpoint="http://127.0.0.1:9/stub",
-        model="stub",
         context_window=32768,
         **meta,
     )

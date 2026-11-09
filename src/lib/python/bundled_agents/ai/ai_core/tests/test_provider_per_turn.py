@@ -5,8 +5,8 @@ A cached provider captures endpoint, model and sampling when it is built: after
 `update_agent` moves an agent to another endpoint, every later turn would still post
 the conversation (and the key, when its ref still bound the old host) to the old
 one, and a deleted id re-created later would inherit it.
-These drive the REAL turn path (`send` → `_run` → `_build_provider` →
-`make_provider`), with the provider CLASS recorded instead of dialled."""
+These drive the REAL provider path (`complete` → `make_provider_with`), with the
+provider CLASS recorded instead of dialled."""
 
 from __future__ import annotations
 
@@ -61,6 +61,25 @@ async def _turn(k, aid: str):
     assert out["status"] == "completed", out
 
 
+async def _complete(k, aid: str, model: str, rid: str):
+    out = (
+        await k.send(
+            [
+                {
+                    "target": aid,
+                    "payload": {
+                        "type": "complete",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "rid": rid,
+                        "model": model,
+                    },
+                }
+            ]
+        )
+    )[0]
+    assert out["status"] == "completed" and "error" not in out["result"], out
+
+
 async def _op(k, payload):
     return (await k.send([{"target": "kernel", "payload": payload}]))[0]["result"]
 
@@ -72,7 +91,7 @@ async def test_each_turn_builds_from_the_live_record(seeded_kernel, monkeypatch)
     _Recorded.built = []
     k = seeded_kernel
     _ai(k, "pt_ai", "http://first.invalid:1", "model-1")
-    await _turn(k, "pt_ai")
+    await _complete(k, "pt_ai", "model-1", "r1")
     up = await _op(
         k,
         {
@@ -83,7 +102,7 @@ async def test_each_turn_builds_from_the_live_record(seeded_kernel, monkeypatch)
         },
     )
     assert up.get("updated") is True, up
-    await _turn(k, "pt_ai")
+    await _complete(k, "pt_ai", "model-2", "r2")
     assert _Recorded.built[0] == ("http://first.invalid:1", "model-1")
     assert _Recorded.built[-1] == ("http://second.invalid:2", "model-2"), (
         "the turn after update_agent posts where the record now says"
@@ -91,7 +110,7 @@ async def test_each_turn_builds_from_the_live_record(seeded_kernel, monkeypatch)
     # a deleted id re-created later builds from ITS record, never the old one's
     assert (await _op(k, {"type": "delete_agent", "id": "pt_ai"})).get("deleted")
     _ai(k, "pt_ai", "http://third.invalid:3", "model-3")
-    await _turn(k, "pt_ai")
+    await _complete(k, "pt_ai", "model-3", "r3")
     assert _Recorded.built[-1] == ("http://third.invalid:3", "model-3")
 
 
@@ -106,7 +125,12 @@ async def test_delete_drops_every_row_but_the_incarnation(
 
     k = seeded_kernel
     fake_providers["pt_del"] = _Recorded(endpoint="e", model="m")
-    _ai(k, "pt_del", "http://e.invalid:1", "m")
+    k.create(
+        "ai_chat.tools",
+        id="pt_del",
+        context_window=32768,
+        **memory_meta(k, "pt_del", {"cli": "*"}),
+    )
     await _turn(k, "pt_del")
     core._calib["pt_del"] = 2.0
     core._reported["pt_del"] = 10

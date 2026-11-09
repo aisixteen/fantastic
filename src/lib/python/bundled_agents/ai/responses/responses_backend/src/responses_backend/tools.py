@@ -19,6 +19,7 @@ from __future__ import annotations
 from ai_core import build, on_cancel, on_delete, required_meta  # noqa: F401 — the hooks
 from ai_core import ProviderError, caching, stream_idle_of
 from ai_core.credentials import key_reader
+from ai_core.remote_provider import chat_refusal, is_chat_verb, provider_verbs
 from ai_core.schema import credentials_field, field, schema, validate
 
 from responses_backend.provider import MAX_TOKENS
@@ -37,7 +38,11 @@ RECORD_SCHEMA = schema(
             "the full Responses API URL (…/v1/responses)",
             required=True,
         ),
-        field("model", "str", "the model name", required=True),
+        field(
+            "model",
+            "str",
+            "the model name (absent: the call's `model`, else `default_model`)",
+        ),
         field(
             "stream_idle_seconds",
             "float",
@@ -68,10 +73,14 @@ def validate_meta(meta: dict, record: dict) -> str | None:
 
 
 def make_provider(id, kernel):
-    """Build a ResponsesProvider from the agent record (endpoint/model/max_tokens/sampling)."""
+    """Build a ResponsesProvider from the agent's live record."""
+    return make_provider_with(id, kernel, kernel.get(id) or {})
+
+
+def make_provider_with(id, kernel, rec):
+    """Build a ResponsesProvider from `rec` (endpoint/model/max_tokens/sampling)."""
     from responses_backend.provider import ResponsesProvider
 
-    rec = kernel.get(id) or {}
     return ResponsesProvider(
         endpoint=required_meta(rec, "endpoint", NAME),
         model=required_meta(rec, "model", NAME),
@@ -85,12 +94,23 @@ def make_provider(id, kernel):
 
 
 def _build():
-
-    return build(
+    verbs, core = build(
         sentence="OpenAI Responses-API LLM agent (raw prompt-and-parse tool-calling).",
         make_provider=make_provider,
         name=NAME,
     )
+
+    async def handler(id: str, payload: dict, kernel) -> dict | None:
+        r = await provider_verbs(
+            id, payload, kernel, lambda rec: make_provider_with(id, kernel, rec)
+        )
+        if r is not None:
+            return r
+        if is_chat_verb(payload.get("type")):
+            return chat_refusal(NAME, payload.get("type"))
+        return await core(id, payload, kernel)
+
+    return verbs, handler
 
 
 VERBS, handler = _build()

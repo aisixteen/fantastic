@@ -100,7 +100,7 @@ async def test_a_send_cancelled_while_queued_leaves_no_phantom_queue_entry(
 ):
     aid = "cid_queue"
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),

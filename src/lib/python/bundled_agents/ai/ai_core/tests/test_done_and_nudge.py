@@ -74,7 +74,7 @@ async def test_silent_chain_turns_are_nudged_until_a_call_or_done(
     )
     aid = "nd_a"
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),
@@ -104,7 +104,7 @@ async def test_a_done_call_ends_the_chain_without_a_nudge(seeded_kernel, fake_pr
     )
     aid = "nd_b"
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),
@@ -128,7 +128,7 @@ async def test_a_first_turn_with_no_call_is_nudged_too(seeded_kernel, fake_provi
     fp = _Script(["just an answer, no calls", DONE])
     aid = "nd_c"
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),
@@ -164,7 +164,7 @@ async def test_await_with_nothing_in_flight_ends_the_chain_with_a_visible_note(
     fp = _Script(['waiting <call name="await"></call>', DONE])
     aid = "nd_aw"
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),
@@ -196,7 +196,7 @@ async def test_await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it(
     fp = _Script(['waiting <call name="await"></call>', DONE], delay=0.3)
     aid = "nd_aw2"
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),
@@ -237,7 +237,7 @@ async def test_two_thinking_only_turns_escalate_the_nudge(
     fp = _Script([dead, dead, DONE])
     aid = "dead_think_esc"
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),
@@ -265,7 +265,7 @@ async def test_a_dead_turn_is_discarded_and_rerolled(seeded_kernel, fake_provide
     fp = _Script([f"{core.THINK_OPEN}hmm{core.THINK_CLOSE}\n\n", DONE])
     aid = "dead_think"
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),
@@ -305,7 +305,7 @@ async def test_a_chain_gives_up_after_max_silent_turns(
     fp = _Script(["just prose"] * 10)
     aid = "gives_up"
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),
@@ -349,7 +349,7 @@ async def test_a_chain_gives_up_after_its_misfire_limit(seeded_kernel, fake_prov
     fp = _Script(["just prose"] * 10)
     aid = "gives_up_ml"
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         misfire_limit=3,
@@ -414,7 +414,7 @@ async def test_the_done_detail_carries_the_token_usage(seeded_kernel, fake_provi
         ("usage_est", _Script([_done()]), True),
     ]:
         seeded_kernel.create(
-            "ollama_backend.tools",
+            "ai_chat.tools",
             id=aid,
             context_window=32768,
             **memory_meta(seeded_kernel, aid, {"cli": "*"}),
@@ -474,7 +474,7 @@ async def test_a_turn_a_host_stop_cut_is_resumed_once_on_the_next_boot(
     fp = _Script(["…", DONE], delay=5.0)
     aid = "resumer"
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),
@@ -537,7 +537,7 @@ async def test_the_thinking_is_kept_on_its_row_and_never_shown_to_the_model(
     fp = _Script([f"<think>{thought}</think>the answer", DONE])
     aid = "thinker"
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(seeded_kernel, aid, {"cli": "*"}),

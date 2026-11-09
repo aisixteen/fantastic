@@ -157,21 +157,17 @@ def main() -> int:
 
         def make_ai(aid: str, mock: VllmMock, can_call: dict, cb: dict) -> None:
             common = dict(max_tokens=8192, context_window=262144, memory_store_id="memory")
-            if RUNTIME == "rust":  # a provider (the vllm_backend) and the chat naming it
-                prov = f"{aid}_prov"
-                rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=prov,
-                                endpoint=mock.url, model=mock.model, kv_slots=4,
-                                kv_overflow="evict", **common,
-                                can_call={"$self": "*", "memory": "*"},
-                                callable_by={"$self": "*", "$parent": "*", aid: "*"})
-                need(rec.get("id") == prov, f"create {prov}: {str(rec)[:200]}")
-                rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
-                                provider_id=prov, model=mock.model, **common,
-                                can_call={**can_call, prov: ["complete", "watch"]}, callable_by=cb)
-            else:
-                rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=aid,
-                                endpoint=mock.url, model=mock.model, kv_slots=4,
-                                kv_overflow="evict", **common, can_call=can_call, callable_by=cb)
+            # a provider (the vllm_backend) and the chat naming it
+            prov = f"{aid}_prov"
+            rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=prov,
+                            endpoint=mock.url, model=mock.model, kv_slots=4,
+                            kv_overflow="evict", **common,
+                            can_call={"$self": "*", "memory": "*"},
+                            callable_by={"$self": "*", "$parent": "*", aid: "*"})
+            need(rec.get("id") == prov, f"create {prov}: {str(rec)[:200]}")
+            rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
+                            provider_id=prov, model=mock.model, **common,
+                            can_call={**can_call, prov: ["complete", "watch"]}, callable_by=cb)
             need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")
 
         make_ai(WORKER, work_m, {"$self": "*", "memory": "*"},

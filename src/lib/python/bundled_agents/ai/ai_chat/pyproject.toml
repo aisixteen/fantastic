@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-ai-chat"
+version = "0.1.0"
+description = "Fantastic ai_chat — the AI agent apart from any provider: holds its conversation and completes each turn through its provider agent (provider_id)."
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.11"
+dependencies = ["fantastic-ai-core"]
+
+[project.entry-points."fantastic.bundles"]
+ai_chat = "ai_chat.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_chat"]

@@ -1,6 +1,6 @@
 # WHAT to measure and HOW LONG to allow. NO MODEL: scripted OpenAI-compatible servers
-# play the model of a lead and three workers (the kernel's own AI agents: python,
-# vllm_backend agents; rust, ai_chat.tools chats over vllm_backend providers, #521),
+# play the model of a lead and three workers (the kernel's own AI agents, on both
+# runtimes: ai_chat.tools chats over vllm_backend providers, #521),
 # driven over web_rest.
 id: await_set
 group: kernel
