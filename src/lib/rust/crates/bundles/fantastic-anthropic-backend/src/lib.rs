@@ -16,9 +16,10 @@
 //! - THE KEY: the record's optional `credentials` ref, sent as `x-api-key` (with
 //!   `anthropic-version`); none, no key header.
 //! - CACHING (ai-core's `caching`): `provider_cache` sends ephemeral `cache_control`
-//!   markers: on the `system` block, on the block that ends the primer row, on the
-//!   block that ends the last fold, and the top-level automatic one. At most four.
-//!   Every other mode sends none, and the body is unchanged.
+//!   markers: on the `system` block, and on the block that ends each flagged row
+//!   (`cache_primer`, `cache_fold`, `cache_tail`). The backend adds no mark of its own
+//!   beyond the system block: where the conversation is marked is the agent's choice.
+//!   At most four. Every other mode sends none, and the body is unchanged.
 //! - USAGE: each stream's token counts accumulate into the agent's [`Usage`], side
 //!   calls included. The counts persist: every change rewrites the agent's own
 //!   `usage.json` with the running total, so a restart keeps them (#308). The
@@ -98,11 +99,13 @@ struct Flags {
     primer: bool,
     /// The message holds the last fold or clear row: its end is marked.
     fold: bool,
+    /// The message is the agent's own mark: its end is marked.
+    tail: bool,
 }
 
 impl Flags {
     fn any(self) -> bool {
-        self.primer || self.fold
+        self.primer || self.fold || self.tail
     }
 }
 
@@ -129,6 +132,7 @@ fn to_wire(messages: &[Value], marks: bool) -> (String, Vec<Value>) {
         let flags = Flags {
             primer: flag("cache_primer"),
             fold: flag("cache_fold"),
+            tail: flag("cache_tail"),
         };
         match role {
             "system" => {
@@ -888,10 +892,6 @@ impl AnthropicProvider {
                 json!(system)
             };
             body.insert("system".into(), system);
-        }
-        if marks {
-            // auto: the conversation tail, cached by the API itself
-            body.insert("cache_control".into(), cache_control());
         }
         if let Some(t) = self.temperature {
             body.insert("temperature".into(), json!(t));

@@ -7092,6 +7092,9 @@ mod stall;
 /// The call checker on the stream (#499).
 #[path = "tests_stream_cut.rs"]
 mod stream_cut;
+/// Autofold: thoughts, large replies and recall by id (#556).
+#[path = "tests_autofold.rs"]
+mod autofold;
 /// Inline agent views in a chat (#339).
 #[path = "tests_embed.rs"]
 mod tests_embed;

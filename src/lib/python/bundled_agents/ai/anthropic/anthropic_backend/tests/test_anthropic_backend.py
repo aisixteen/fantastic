@@ -514,8 +514,7 @@ def test_provider_cache_splits_the_merged_turns_at_the_flagged_rows():
         {"role": "assistant", "content": "t2"},
         {"role": "user", "content": "live"},
     ], b
-    assert b["cache_control"] == marked, b
-    assert _markers(b) == 4, b
+    assert _markers(b) == 3, b
 
 
 _SPLIT_CASES = [
@@ -570,7 +569,18 @@ def test_a_flagged_row_followed_by_empty_rows_keeps_its_marker_and_no_blank_bloc
             ],
         }
     ], b
-    assert _markers(b) == 3, b
+    assert _markers(b) == 2, b
+
+
+def test_a_tail_flagged_row_is_marked_and_the_backend_adds_no_mark_of_its_own():
+    msgs = _flagged(
+        [("user", "t1", None), ("assistant", "t2", "cache_tail"), ("user", "live", None)]
+    )
+    b = _provider(None, caching="provider_cache").body(msgs, None)
+    assert b["messages"][1]["content"] == [
+        {"type": "text", "text": "t2", "cache_control": {"type": "ephemeral"}},
+    ], b
+    assert _markers(b) == 2, b
 
 
 def test_a_flagged_row_with_no_text_carries_no_marker():
@@ -579,7 +589,7 @@ def test_a_flagged_row_with_no_text_carries_no_marker():
     assert b["messages"] == [
         {"role": "user", "content": [{"type": "text", "text": "a\n\n"}]}
     ], b
-    assert _markers(b) == 2, b
+    assert _markers(b) == 1, b
 
 
 def test_a_primer_and_a_fold_on_one_message_send_one_marker():
@@ -589,10 +599,10 @@ def test_a_primer_and_a_fold_on_one_message_send_one_marker():
     assert b["messages"][1]["content"] == [
         {"type": "text", "text": "both", "cache_control": {"type": "ephemeral"}},
     ], b
-    assert _markers(b) == 3, b
+    assert _markers(b) == 2, b
 
 
-def test_provider_cache_with_no_primer_and_no_fold_marks_only_the_system_and_the_tail():
+def test_provider_cache_with_no_primer_and_no_fold_marks_only_the_system():
     b = _provider(None, caching="provider_cache").body(
         _flagged([("user", "a", None), ("assistant", "b", None)]), None
     )
@@ -600,10 +610,10 @@ def test_provider_cache_with_no_primer_and_no_fold_marks_only_the_system_and_the
         {"role": "user", "content": "a"},
         {"role": "assistant", "content": "b"},
     ]
-    assert _markers(b) == 2, b
+    assert _markers(b) == 1, b
 
 
-def test_provider_cache_marks_the_system_block_and_the_tail():
+def test_provider_cache_marks_the_system_block():
     p = _provider(None, caching="provider_cache", temperature=0.2, thinking_budget=2048)
     assert p.body(PLAIN, None) == {
         "model": MODEL,
@@ -611,20 +621,19 @@ def test_provider_cache_marks_the_system_block_and_the_tail():
         "messages": [{"role": "user", "content": "hi"}],
         "stream": True,
         "system": [{"type": "text", "text": "s", "cache_control": CACHED}],
-        "cache_control": CACHED,
         "temperature": 0.2,
         "thinking": {"type": "enabled", "budget_tokens": 2048},
     }
     # a side call's own bound is marked the same way
     b = p.body(PLAIN, 1500)
-    assert b["max_tokens"] == 1500 and b["cache_control"] == CACHED
+    assert b["max_tokens"] == 1500 and _markers(b) == 1
 
 
 def test_provider_cache_sends_no_system_block_when_the_system_is_empty():
     p = _provider(None, caching="provider_cache")
     b = p.body([{"role": "user", "content": "hi"}], None)
     assert "system" not in b
-    assert b["cache_control"] == CACHED
+    assert _markers(b) == 0, b
 
 
 async def test_provider_cache_marks_every_request_a_provider_sends():
@@ -633,7 +642,6 @@ async def test_provider_cache_marks_every_request_a_provider_sends():
         _transport(_sse(START, _text("ok"), *_stop()), seen), caching="provider_cache"
     )
     await _drain(p, PLAIN)
-    assert json.loads(seen[0].content)["cache_control"] == CACHED
     assert json.loads(seen[0].content)["system"][0]["cache_control"] == CACHED
 
 
@@ -915,7 +923,7 @@ def test_make_provider_reads_the_caching_mode(
     from anthropic_backend import tools
 
     p = tools.make_provider("a1", seeded_kernel)
-    assert p.body(PLAIN, None)["cache_control"] == CACHED
+    assert p.body(PLAIN, None)["system"][0]["cache_control"] == CACHED
 
 
 def test_the_backend_declares_provider_cache(monkeypatch):

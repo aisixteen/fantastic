@@ -109,6 +109,9 @@ KEEP_TAIL = 6  # rows at the end of the view that never fold — the live tail
 # foldable rows, by tokens, until the view lands at LOW or under. A fixed row count
 # folds a chat a few rows at a time into fold rows nearly as big as the rows.
 FOLD_AT = 0.95
+#: Tokens per body over which an answered reply folds to an anchor in the model's view
+#: (#556); start there and watch the behaviour.
+AUTOFOLD_AT = 16_000
 #: Adjacent folds at the head of the view before they fold as a group.
 #:
 #: THREE, not four. A real run folds at most once per turn — each projection

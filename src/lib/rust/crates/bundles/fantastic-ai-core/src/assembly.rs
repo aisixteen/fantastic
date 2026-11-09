@@ -222,6 +222,7 @@ Your view is finite: when it overflows, older turns are compacted and a
 `<type>recall</type>` (`<query>`, `<limit>`) to page dropped turns back, and
 `<type>context_status</type>` for your budget. Facts that must outlive this window
 (names, decisions, preferences) belong in a memory agent.
+A [folded …], [thought …] or [cut …] anchor stands for a body you already saw in full; `recall` with its id to read it again — it folds back after your next answer.
 "#;
 
 /// The fields of an agent's own reflect its system block shows — python `_SELF_KEYS`.
@@ -535,7 +536,13 @@ pub async fn assemble_messages(
     messages.extend(
         render_history(&store, listed.as_deref(), caching.cleans())
             .into_iter()
-            .map(|r| r.msg),
+            .map(|r| {
+                if caching.folds() && r.res == "full" {
+                    crate::history_view::autofold(&store, r.idx, &r.msg, Some(user_text))
+                } else {
+                    r.msg
+                }
+            }),
     );
     messages.push(json!({"role": "user", "content": user_text}));
     Ok((messages, store_len))

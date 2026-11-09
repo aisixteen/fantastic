@@ -170,6 +170,9 @@ pub const KEEP_TAIL: usize = 6;
 /// fold rows nearly as big as the rows: many folds, several levels, and a long
 /// wait before the first answer.
 pub const FOLD_AT: f64 = 0.95;
+/// Tokens per body over which an answered reply folds to an anchor in the model's
+/// view (#556); start there and watch the behaviour.
+pub const AUTOFOLD_AT: usize = 16_000;
 /// Adjacent folds at the head of the view before they fold as a group.
 ///
 /// THREE, not four. A real run folds at most once per turn — each projection

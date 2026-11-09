@@ -876,8 +876,7 @@ fn provider_cache_splits_the_merged_turns_at_the_flagged_rows() {
         ]),
         "M2 ends the primer's text, M3 ends the last fold's text: {b}"
     );
-    assert_eq!(b["cache_control"], marked, "auto: {b}");
-    assert_eq!(markers(&b), 4, "M1, M2, M3 and auto: {b}");
+    assert_eq!(markers(&b), 3, "M1, M2 and M3: {b}");
 }
 
 #[test]
@@ -962,7 +961,7 @@ fn a_flagged_row_followed_by_empty_rows_keeps_its_marker_and_no_blank_block() {
         ]}]),
         "{b}"
     );
-    assert_eq!(markers(&b), 3, "M1, M2 and auto: {b}");
+    assert_eq!(markers(&b), 2, "M1 and M2: {b}");
 }
 
 #[test]
@@ -977,7 +976,7 @@ fn a_flagged_row_with_no_text_carries_no_marker() {
         json!([{"role": "user", "content": [{"type": "text", "text": "a\n\n"}]}]),
         "{b}"
     );
-    assert_eq!(markers(&b), 2, "M1 and auto only: {b}");
+    assert_eq!(markers(&b), 1, "M1 only: {b}");
 }
 
 #[test]
@@ -995,11 +994,11 @@ fn a_primer_and_a_fold_on_one_message_send_one_marker() {
         json!([{"type": "text", "text": "both", "cache_control": {"type": "ephemeral"}}]),
         "{b}"
     );
-    assert_eq!(markers(&b), 3, "M1, the one shared block, auto: {b}");
+    assert_eq!(markers(&b), 2, "M1 and the one shared block: {b}");
 }
 
 #[test]
-fn provider_cache_with_no_primer_and_no_fold_marks_only_the_system_and_the_tail() {
+fn provider_cache_with_no_primer_and_no_fold_marks_only_the_system() {
     let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
     p.caching = Caching::ProviderCache;
     let b = p.body(
@@ -1010,11 +1009,11 @@ fn provider_cache_with_no_primer_and_no_fold_marks_only_the_system_and_the_tail(
         b["messages"],
         json!([{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}])
     );
-    assert_eq!(markers(&b), 2, "M1 and auto: {b}");
+    assert_eq!(markers(&b), 1, "M1: {b}");
 }
 
 #[test]
-fn provider_cache_marks_the_system_block_and_the_tail() {
+fn provider_cache_marks_the_system_block() {
     let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
     p.caching = Caching::ProviderCache;
     p.temperature = Some(0.2);
@@ -1027,7 +1026,6 @@ fn provider_cache_marks_the_system_block_and_the_tail() {
             "messages": [{"role": "user", "content": "hi"}],
             "stream": true,
             "system": [{"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}}],
-            "cache_control": {"type": "ephemeral"},
             "temperature": 0.2,
             "thinking": {"type": "enabled", "budget_tokens": 2048},
         })
@@ -1035,7 +1033,7 @@ fn provider_cache_marks_the_system_block_and_the_tail() {
     // a side call's own bound is marked the same way
     let b = p.body(&plain(), Some(1500));
     assert_eq!(b["max_tokens"], json!(1500));
-    assert_eq!(b["cache_control"], json!({"type": "ephemeral"}));
+    assert_eq!(markers(&b), 1, "{b}");
 }
 
 #[test]
@@ -1044,7 +1042,27 @@ fn provider_cache_sends_no_system_block_when_the_system_is_empty() {
     p.caching = Caching::ProviderCache;
     let b = p.body(&[json!({"role": "user", "content": "hi"})], None);
     assert!(b.get("system").is_none(), "{b}");
-    assert_eq!(b["cache_control"], json!({"type": "ephemeral"}));
+    assert_eq!(markers(&b), 0, "{b}");
+}
+
+#[test]
+fn a_tail_flagged_row_is_marked_and_the_backend_adds_no_mark_of_its_own() {
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.caching = Caching::ProviderCache;
+    let b = p.body(
+        &flagged(&[
+            ("user", "t1", None),
+            ("assistant", "t2", Some("cache_tail")),
+            ("user", "live", None),
+        ]),
+        None,
+    );
+    assert_eq!(
+        b["messages"][1]["content"],
+        json!([{"type": "text", "text": "t2", "cache_control": {"type": "ephemeral"}}]),
+        "{b}"
+    );
+    assert_eq!(markers(&b), 2, "M1 and the tail row: {b}");
 }
 
 #[tokio::test]

@@ -638,3 +638,80 @@ async fn a_mode_switch_keeps_the_rows_a_cleanup_left_out_of_the_view_array() {
     );
     assert!(switched.iter().any(|(_, c)| c.contains("new state")));
 }
+
+// ─── autofold (#556) ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn autofold_runs_in_cleanup_and_provider_cache_and_none_stays_append_only() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, agent) = mk_kernel(&tmp, "cm_autofold").await;
+    put(&kernel, &agent, "user", "hello").await;
+    put_row(
+        &kernel,
+        &agent,
+        json!({"role": "assistant", "content": "answer", "thinking": "t".repeat(40)}),
+    )
+    .await;
+    let body = format!(
+        "head\n{}",
+        "x".repeat(crate::constants::AUTOFOLD_AT * 4 + 40)
+    );
+    put(&kernel, &agent, "user", &reply(12, "read", &body)).await;
+    put(&kernel, &agent, "assistant", "ok").await;
+    let before = stored_turns(&kernel, &agent).await;
+    let none = view_with(&kernel, &agent, Caching::None).await;
+    assert_eq!(history(&none), before);
+    for mode in [Caching::Cleanup, Caching::ProviderCache] {
+        let seen = history(&view_with(&kernel, &agent, mode).await)
+            .iter()
+            .map(|(_, c)| c.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(seen.contains("[thought ~"), "{mode:?}: {seen}");
+        assert!(
+            seen.contains("[folded · read reply from notes · ~"),
+            "{mode:?}: {seen}"
+        );
+        assert!(!seen.contains("xxxxxxxxxx"), "{mode:?}");
+    }
+    assert_eq!(
+        stored_turns(&kernel, &agent).await,
+        before,
+        "the store is whole"
+    );
+}
+
+#[tokio::test]
+async fn a_provider_cache_turn_marks_before_the_large_body_and_the_next_turn_keeps_that_prefix() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, agent) = mk_caching_kernel(&tmp, "cm_tail").await;
+    set(&kernel, &agent, json!({"caching": "provider_cache"})).await;
+    put(&kernel, &agent, "user", "hi").await;
+    put(&kernel, &agent, "assistant", "yo").await;
+    let text = reply(
+        5,
+        "read",
+        &"x".repeat(crate::constants::AUTOFOLD_AT * 4 + 40),
+    );
+    let msgs1 = turn_messages(&kernel, &agent, &text).await;
+    let len1 = msgs1.len();
+    assert!(msgs1[len1 - 1].get("cache_tail").is_none(), "{len1}");
+    assert_eq!(flagged_contents(&msgs1, "cache_tail").len(), 1);
+    assert_eq!(msgs1[len1 - 2]["cache_tail"], json!(true));
+    // let the first turn finish before the next send
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let msgs2 = turn_messages(&kernel, &agent, "next").await;
+    let pair = |m: &Value| (m["role"].clone(), m["content"].clone());
+    let cached: Vec<_> = msgs1[..=len1 - 2].iter().map(pair).collect();
+    let again: Vec<_> = msgs2[..=len1 - 2].iter().map(pair).collect();
+    assert_eq!(cached, again, "the cached prefix bytes do not change");
+    assert!(
+        msgs2[len1 - 1]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("[folded · read reply from notes"),
+        "{}",
+        msgs2[len1 - 1]
+    );
+    assert_eq!(msgs2.last().unwrap()["cache_tail"], json!(true));
+}

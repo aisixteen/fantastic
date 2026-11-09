@@ -13,7 +13,8 @@ written wrong, cut at its first foreign tag (#499: the compiler-style report com
 back, nothing after the tag is stored; nothing runs) → an envelope with text outside
 a tag (its fault comes back) → a call only inside the thought (not dispatched; the
 no-call reminder comes back; the stored history has no thought) → a plain answer with
-`done` (no further request). The checks are listed in `probe.py`'s docstring.
+`done` (no further request). A cut answer and a thought show in the next request as their
+autofold anchors (`[cut · …]`, `[thought ~N tokens · id N]`, #556). The checks are listed in `probe.py`'s docstring.
 
 ```sh
 cd src/lib/python

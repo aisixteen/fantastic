@@ -3,10 +3,16 @@
 none — every stored row, in order, never trimmed (append-only).
 cleanup — trim superseded reads, repeated reply bodies and used docs from the view.
 provider_cache — none's history plus the provider's cache markers (the end of the
-primer row named by cache_primer_until, and the end of the last fold).
+primer row named by cache_primer_until, the end of the last fold, and the TAIL: the
+row before the first row that will fold, else the last row).
+
+cleanup and provider_cache also AUTOFOLD the view: a thought, a cut answer and a large
+or recalled reply show as an anchor, never stored.
 """
 
 from __future__ import annotations
+
+from ai_core.autofold import will_fold
 
 #: The legal values of `caching`, in the order the schema lists them.
 MODES: tuple[str, ...] = ("none", "cleanup", "provider_cache")
@@ -18,8 +24,9 @@ CACHING_HINT = (
     "how the conversation is kept in the model's view: none = every stored row, in "
     "order, never trimmed (append-only); cleanup = trim superseded reads, repeated "
     "reply bodies and used docs from the view; provider_cache = none's history plus "
-    "the provider's cache markers (the end of the primer row named by "
-    "cache_primer_until, and the end of the last fold); provider_cache is refused by "
+    "marks, with autofold (the provider's cache markers: the end of the primer row "
+    "named by cache_primer_until, the end of the last fold, and the end of the row "
+    "before the first row that will fold); provider_cache is refused by "
     "a backend that cannot cache. A switch keeps the view already written: a row a "
     "cleanup left out of it stays out until a context_clear starts a new thread"
 )
@@ -41,6 +48,11 @@ def cleans(mode: str) -> bool:
 def marks(mode: str) -> bool:
     """True when the provider is asked for its cache markers (caching=provider_cache)."""
     return mode == "provider_cache"
+
+
+def folds(mode: str) -> bool:
+    """True when the view is autofolded: anchors for thoughts, cuts and large replies."""
+    return mode != "none"
 
 
 def mode_of(meta: dict) -> str:
@@ -99,8 +111,11 @@ def unsupported(name: str) -> ValueError:
 
 
 def mark(messages: list[dict], primer: int | None) -> list[dict]:
-    """A NEW list with the primer's end and the last fold's end flagged. Never mutates
-    a message: the messages can be the cached store rows themselves."""
+    """A NEW list with the primer's end, the last fold's end and the tail flagged. The
+    tail (`cache_tail`) is the agent's own mark: the message before the first user
+    message after the last assistant one that will fold, else the last message; never the
+    system message. Never mutates a message: the messages can be the cached store rows
+    themselves."""
     out = list(messages)
     if primer is not None:
         for i, m in enumerate(out):
@@ -111,4 +126,17 @@ def mark(messages: list[dict], primer: int | None) -> list[dict]:
         if out[i].get("kind") in ("fold", "clear"):
             out[i] = {**out[i], "cache_fold": True}
             break
+    last = max((i for i, m in enumerate(out) if m.get("role") == "assistant"), default=-1)
+    pending = next(
+        (
+            i
+            for i in range(last + 1, len(out))
+            if out[i].get("role") == "user"
+            and will_fold(str(out[i].get("content") or ""))
+        ),
+        None,
+    )
+    tail = len(out) - 1 if pending is None else pending - 1
+    if tail >= 0 and out[tail].get("role") != "system":
+        out[tail] = {**out[tail], "cache_tail": True}
     return out

@@ -222,6 +222,9 @@ def main() -> int:
              f"request 4 carries the compiler-style report: {u[3][:200]!r}")
         need("bad.txt" not in json.dumps(turns[3]["body"]["messages"] if len(turns) > 3 else []),
              "the cut: nothing after the first foreign tag was stored or quoted")
+        need(any("[cut · you wrote " in m.get("content", "") and "ACTION: " in m.get("content", "")
+                 for m in turns[3]["body"]["messages"] if m.get("role") == "assistant"),
+             "request 4 shows the cut answer as its anchor")
         need("call NOT dispatched: text outside a tag (`oops`)" in u[4],
              "request 5 carries the broken envelope's fault")
         # 4 → 5
@@ -231,6 +234,9 @@ def main() -> int:
         need("Thinking it over." in hist and "think.txt" not in hist,
              "the thought is stripped before the turn is stored: request 6 holds the "
              "answer, not the thought")
+        need(any("[thought ~" in m.get("content", "")
+                 for m in turns[5]["body"]["messages"] if m.get("role") == "assistant"),
+             "request 6 shows the thought as its anchor")
         need("[no call was dispatched]" in u[5],
              f"request 6 carries the no-call reminder: {u[5][:160]!r}")
         # across the run

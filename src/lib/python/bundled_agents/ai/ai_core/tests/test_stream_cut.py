@@ -149,6 +149,13 @@ async def test_a_cut_after_thinking_keeps_it_in_the_store_not_the_view(
         seen = str(fp.seen[1])
         assert "Sending." in seen
         assert "native tool" not in seen and "<think>" not in seen, seen
+        # the cut answer is its anchor in the next request, at once
+        cut = next(m for m in fp.seen[1] if m["role"] == "assistant")["content"]
+        assert cut.startswith(
+            'Sending.\n[cut · you wrote <invoke name="send"> after thinking ~7 tokens'
+            " · nothing ran · ACTION: "
+        ), cut
+        assert cut.endswith(f" · full: {said[0]['id']}]"), cut
     finally:
         fake_providers.pop(aid, None)
 
