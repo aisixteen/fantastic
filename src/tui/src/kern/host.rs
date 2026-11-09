@@ -8,8 +8,8 @@
 //! root — which mints the guid and installs the record writer — then the MEMORY
 //! STORE the root names in `memory_store_id`, probes that it serves the operator,
 //! and starts flushing execution rows into it. Without a store it refuses, loud.
-//! Everyone else is booted by this shell afterwards, in registration order, so a
-//! persisted `web` host is booted only by a mode that serves the browser.
+//! Everyone else is booted by this shell afterwards, in registration order. A recorded
+//! `web` host is booted in every mode: it is the core listener whose routes every agent shares.
 //!
 //! THE KERNEL KEEPS NO CONVERSATION. An AI agent's rows live in the memory store
 //! under its own key; the kernel's execution rows (call / settle / task) live
@@ -114,8 +114,9 @@ fn registry_with(cwd: &std::path::Path, extras: &[crate::Extra]) -> BundleRegist
             std::path::absolute(cwd).unwrap_or_else(|_| cwd.to_path_buf()),
         ),
     );
-    // THE CANVAS: the HTTP host, its embedded page and its socket leg. Only ever
-    // created by `fantastic canvas`; registered so they rehydrate.
+    // THE WEB HOST (the one HTTP/WS listener: a recorded one listens in every mode, and
+    // agents add routes to it), the canvas's page and its socket leg. `fantastic canvas`
+    // creates them when missing; registered so they rehydrate.
     reg.register(fantastic_web::HANDLER_MODULE, fantastic_web::WebBundle);
     reg.register(fantastic_canvas_page::HANDLER_MODULE, fantastic_canvas_page::CanvasPageBundle);
     reg.register(fantastic_web_ws::HANDLER_MODULE, fantastic_web_ws::WebWsBundle);
@@ -195,17 +196,48 @@ async fn set_web_bind(kernel: &Arc<Kernel>, id: &AgentId, addr: &str, notes: &mu
     }
 }
 
+/// Boot every agent the kernel's start did not (`done`), in registration order. A recorded
+/// `web` host boots too, in every mode: it is the one HTTP/WS listener, and every agent with
+/// a route reuses it. `web_port`/`web_bind` (`canvas`'s `--port`/`--host`) are set on it before
+/// it listens. A tree with no `web` record binds no port. A failure is a note, and the boot
+/// goes on.
+async fn boot_the_rest(kernel: &Arc<Kernel>, done: &[String], web_port: Option<u16>, web_bind: Option<&str>) -> Vec<String> {
+    let mut notes = Vec::new();
+    for id in kernel.agent_ids() {
+        if done.contains(&id.0) {
+            continue;
+        }
+        let is_web = kernel.agents.get(&id).is_some_and(|a| {
+            a.value().record().handler_module.as_deref() == Some(fantastic_web::HANDLER_MODULE)
+        });
+        if is_web {
+            if let Some(p) = web_port {
+                set_web_field(kernel, &id, "port", "--port", json!(p), &mut notes).await;
+            }
+            if let Some(addr) = web_bind {
+                set_web_bind(kernel, &id, addr, &mut notes).await;
+            }
+        }
+        let reply = kernel
+            .send(vec![Item::new(id.clone(), json!({"type": "boot"}))])
+            .await
+            .remove(0)
+            .result;
+        if let Some(err) = reply.get("error").and_then(Value::as_str) {
+            notes.push(format!("{id}: boot failed: {err}"));
+        }
+    }
+    notes
+}
+
 impl Host {
     /// Boot over `paths.cwd`. Acquires the directory lock, so a second shell in
     /// the same directory fails here rather than corrupting the store.
     ///
-    /// `serve_web`: whether a persisted `web` host starts listening. Only a mode
-    /// that serves the canvas opens the port; `fantastic` and `fantastic
-    /// mcp` leave a `web` record on disk untouched (not booted).
     /// `web_port`: `--port` — a recorded `web` on another port is set to it
     /// BEFORE its listener boots (nothing runs here yet, so it is the user's to
     /// overwrite). `web_bind`: `--host`, set on the record the same way.
-    pub async fn boot(paths: &Paths, serve_web: bool, web_port: Option<u16>, web_bind: Option<String>) -> Result<Self, KernelErr> {
+    pub async fn boot(paths: &Paths, web_port: Option<u16>, web_bind: Option<String>) -> Result<Self, KernelErr> {
         let booted = bootstrap::bootstrap(registry(&paths.cwd), BootstrapOptions::daemon(&paths.cwd))
             .map_err(|e| KernelErr::Boot(format!("{e}")))?;
         let kernel = Arc::clone(&booted.kernel);
@@ -263,34 +295,7 @@ impl Host {
 
         // Everyone else, in registration order. A failure is logged and
         // skipped: one bundle refusing must not take the shell down with it.
-        let mut notes = Vec::new();
-        for id in kernel.agent_ids() {
-            if done.contains(&id.0) {
-                continue;
-            }
-            let is_web = kernel.agents.get(&id).is_some_and(|a| {
-                a.value().record().handler_module.as_deref() == Some(fantastic_web::HANDLER_MODULE)
-            });
-            if is_web && !serve_web {
-                continue;
-            }
-            if is_web {
-                if let Some(p) = web_port {
-                    set_web_field(&kernel, &id, "port", "--port", json!(p), &mut notes).await;
-                }
-                if let Some(addr) = &web_bind {
-                    set_web_bind(&kernel, &id, addr, &mut notes).await;
-                }
-            }
-            let reply = kernel
-                .send(vec![Item::new(id.clone(), json!({"type": "boot"}))])
-                .await
-                .remove(0)
-                .result;
-            if let Some(err) = reply.get("error").and_then(Value::as_str) {
-                notes.push(format!("{id}: boot failed: {err}"));
-            }
-        }
+        let mut notes = boot_the_rest(&kernel, &done, web_port, web_bind.as_deref()).await;
 
         let host = Self {
             kernel,
@@ -800,6 +805,97 @@ mod tests {
 
     async fn send(k: &Arc<Kernel>, to: &str, payload: Value) -> Value {
         k.send(vec![Item::new(AgentId::from(to), payload)]).await.remove(0).result
+    }
+
+    fn free_port() -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        l.local_addr().expect("addr").port()
+    }
+
+    async fn accepts(port: u16) -> bool {
+        for _ in 0..50 {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    /// The web host table is process-wide and keyed by agent id, so each test names its own.
+    async fn make_web(k: &Arc<Kernel>, id: &str, root: &str, port: u16) {
+        let made = send(
+            k,
+            "kernel",
+            json!({"type": "create_agent", "parent_id": root, "id": id,
+                   "handler_module": fantastic_web::HANDLER_MODULE, "port": port}),
+        )
+        .await;
+        assert_eq!(made["id"], id, "{made}");
+        // create_agent boots it; stop it, so a boot is what brings it back (as after a rehydrate)
+        send(k, id, json!({"type": "stop"})).await;
+    }
+
+    /// #560: `--headless`, the terminal UI and `fantastic mcp` pass no port; a recorded `web` still listens.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recorded_web_listens_with_no_port_given() {
+        let k = host_kernel("g560a");
+        let root = k.root().expect("root").id.0.clone();
+        let p = free_port();
+        make_web(&k, "web560a", &root, p).await;
+        assert!(!accepts(p).await, "nothing listens before the boot");
+        let notes = boot_the_rest(&k, &[root], None, None).await;
+        assert!(notes.is_empty(), "{notes:?}");
+        assert!(accepts(p).await, "the recorded web must listen");
+        send(&k, "web560a", json!({"type": "stop"})).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn canvas_still_sets_the_port_before_the_web_listens() {
+        let k = host_kernel("g560b");
+        let root = k.root().expect("root").id.0.clone();
+        let (a, b) = (free_port(), free_port());
+        make_web(&k, "web560b", &root, a).await;
+        assert!(!accepts(a).await, "stopped before the boot");
+        let notes = boot_the_rest(&k, &[root], Some(b), None).await;
+        assert!(notes.is_empty(), "{notes:?}");
+        let got = k
+            .agents
+            .get(&AgentId::from("web560b"))
+            .expect("web")
+            .value()
+            .record()
+            .meta["port"]
+            .clone();
+        assert_eq!(got, json!(b));
+        assert!(accepts(b).await, "the web listens on the given port");
+        assert!(!accepts(a).await, "not on the recorded one");
+        send(&k, "web560b", json!({"type": "stop"})).await;
+    }
+
+    /// #560: a folder with no `web` record binds no port.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tree_without_a_web_record_boots_no_web() {
+        let k = host_kernel("g560c");
+        let root = k.root().expect("root").id.0.clone();
+        let made = send(
+            &k,
+            "kernel",
+            json!({"type": "create_agent", "parent_id": root, "id": "st", "handler_module": "ram_store.tools"}),
+        )
+        .await;
+        assert_eq!(made["id"], "st", "{made}");
+        let notes = boot_the_rest(&k, &[root], None, None).await;
+        assert!(notes.is_empty(), "{notes:?}");
+        let any_web = k.agent_ids().iter().any(|id| {
+            k.agents.get(id).is_some_and(|a| {
+                a.value().record().handler_module.as_deref() == Some(fantastic_web::HANDLER_MODULE)
+            })
+        });
+        assert!(!any_web, "no web agent exists");
     }
 
     /// #469: a CLI host kernel makes a `ws_bridge` and `forward` reaches an agent on the

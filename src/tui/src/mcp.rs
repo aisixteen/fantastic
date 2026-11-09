@@ -168,7 +168,7 @@ fn fatal(err_out: &mut std::fs::File, msg: &str) -> i32 {
 
 async fn serve(paths: Paths, std_out: std::fs::File, err_out: &mut std::fs::File) -> i32 {
     // ── boot / rehydrate ─────────────────────────────────────────────────────
-    let host = match Host::boot(&paths, false, None, None).await {
+    let host = match Host::boot(&paths, None, None).await {
         Ok(h) => Arc::new(h),
         Err(e) => return fatal(err_out, &format!("{e}")),
     };

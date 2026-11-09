@@ -17,7 +17,7 @@ arguments. Register it once as a stdio server — command `fantastic`, args
 
 - a kernel already runs here (the terminal UI, the canvas, `--headless`,
   another `fantastic mcp`) → it ATTACHES over `.fantastic/cli/mcp.sock`;
-- none → it RUNS the kernel itself and opens that socket for others.
+- none → it RUNS the kernel itself and opens that socket for others (a recorded `web` host listens too, as in every mode).
 
 The client is the `mcp` agent (a child of the root, created on first
 connection), with god-mode grants on every agent; the human reshapes them with

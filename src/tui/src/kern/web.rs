@@ -37,6 +37,8 @@
 //! `port`: the first `fantastic canvas` takes `--port N`, or picks a free port; later runs read it
 //! from `web`'s record, and a different `--port` overwrites it (only when no
 //! kernel runs here — a running one refuses every argument, `run.rs`).
+//!
+//! `web` is the core listener: once recorded it listens in every mode (`Host::boot`); `fantastic canvas` only adds the canvas's agents here and sets `--port`/`--host`.
 
 use serde_json::{json, Map, Value};
 

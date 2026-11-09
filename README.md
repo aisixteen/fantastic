@@ -286,7 +286,7 @@ the kernel's own.
 ```sh
 fantastic                         # the terminal UI; a fresh folder is seeded on launch
 fantastic canvas [--port N] [--host ADDR]  # the browser canvas, headless; the kernel's message stream on stdout
-fantastic --headless              # no UI, no canvas: the message stream only
+fantastic --headless              # no UI: the message stream; a recorded `web` host still serves its routes
 fantastic [canvas] ai BACKEND     # the root AI `ai`: vllm -p PORT | ollama -p PORT | responses|anthropic --model M
 fantastic [canvas] run CMD [ARGS] # your own program from $PATH in a terminal (with canvas: a terminal cell)
 fantastic mcp                     # MCP over stdio (tools `reflect`, `send`); attaches to a running kernel, or runs it
@@ -300,6 +300,7 @@ runs them. `--port` is recorded on the first `canvas` and reused after that.
 `--host` is the address the canvas binds (`127.0.0.1` unless named; `0.0.0.0`
 publishes it, as the server container does), recorded on `web` as its `bind`. The canvas
 has terminals: bind a public interface only on a machine you trust.
+`web` is the core listener: once recorded, it serves every agent's routes in every mode (the terminal UI, `--headless`, `fantastic mcp`); `canvas` adds its own agents and sets `--port`/`--host`. A folder with no `web` record binds no port.
 
 ### The canvas
 

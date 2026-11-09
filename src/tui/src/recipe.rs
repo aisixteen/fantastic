@@ -25,7 +25,8 @@
 //!
 //! `canvas` IS HEADLESS (owner, 2026-10-15): no terminal UI — the browser is
 //! its View — and the kernel's message stream goes to stdout. `--headless`: the
-//! same with no canvas. Both together are refused: `canvas` says it already.
+//! same with no canvas recipe (a recorded `web` host still listens: it is the core
+//! listener, booted in every mode). Both together are refused: `canvas` says it already.
 //! `--port N` belongs to `canvas`; a new one overwrites the recorded. The first
 //! `canvas` without one picks a free port and records it; later runs reuse it.
 //! `--host ADDR` (the bind address, `127.0.0.1` unless named) belongs to `canvas`
