@@ -427,7 +427,7 @@ pub fn record_schema() -> &'static Value {
             Field::new(
                 "num_predict",
                 "int",
-                "a turn's output budget (tokens); unset, 16384",
+                "a turn's output budget (tokens); unset, 260000",
             ),
             Field::new(
                 "think",

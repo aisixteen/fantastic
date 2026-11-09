@@ -585,7 +585,7 @@ async fn asked_max_tokens(window: i64, meta: Value) -> Option<i64> {
 #[tokio::test]
 async fn a_record_with_no_max_tokens_asks_for_the_bounded_default() {
     // no `max_tokens` on the record (#495): bounded, never above the model's window
-    assert_eq!(asked_max_tokens(32768, json!({})).await, Some(16384));
+    assert_eq!(asked_max_tokens(32768, json!({})).await, Some(32768));
     assert_eq!(asked_max_tokens(8192, json!({})).await, Some(8192));
     // the record's own wins, even above the default
     assert_eq!(

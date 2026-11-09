@@ -11,7 +11,7 @@
 //! - `model` — the ONE model the server serves (`GET {endpoint}/models`); a server
 //!   serving several names them, and the record must pick one.
 //! - `context_window` — that model's `max_model_len` (same list). `max_tokens` —
-//!   16384, plus the record's `thinking_token_budget` when it sets one, never above
+//!   260000, plus the record's `thinking_token_budget` when it sets one, never above
 //!   `max_model_len` (#495). A main turn whose `max_tokens` could overrun the window
 //!   sends NO `max_tokens`, so the server bounds the reply by what the prompt
 //!   leaves.

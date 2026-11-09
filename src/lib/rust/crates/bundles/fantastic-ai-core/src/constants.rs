@@ -60,7 +60,7 @@ pub const SEND_TIMEOUT_SECS: f64 = 180.0;
 /// The output budget a request carries when the record names no `max_tokens`
 /// (#495): bounded, so a degenerate generation is cut by the model's own stop
 /// long before [`SEND_TIMEOUT_SECS`] instead of asking for the model's maximum.
-pub const DEFAULT_TURN_TOKENS: i64 = 16384;
+pub const DEFAULT_TURN_TOKENS: i64 = 260_000;
 
 /// The default `max_tokens` for a record that names none: [`DEFAULT_TURN_TOKENS`],
 /// plus the record's thinking budget when it sets one (thinking is spent out of
@@ -215,8 +215,9 @@ mod default_max_tokens_tests {
 
     #[test]
     fn the_default_is_bounded_grows_with_thinking_and_stops_at_the_models_maximum() {
-        assert_eq!(default_max_tokens(None, 64000), 16384);
-        assert_eq!(default_max_tokens(Some(2048), 64000), 2048 + 16384);
+        assert_eq!(default_max_tokens(None, 64000), 64000);
+        assert_eq!(default_max_tokens(None, 1_000_000), 260_000);
+        assert_eq!(default_max_tokens(Some(2048), 1_000_000), 2048 + 260_000);
         assert_eq!(default_max_tokens(None, 8000), 8000);
         assert_eq!(default_max_tokens(Some(4000), 10000), 10000);
         assert_eq!(default_max_tokens(Some(i64::MAX), i64::MAX), i64::MAX);

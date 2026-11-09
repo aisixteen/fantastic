@@ -443,11 +443,11 @@ async fn sent_num_predict(tag: &str, extra: Value) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_record_with_no_num_predict_sends_the_bounded_default() {
-    assert_eq!(sent_num_predict("npd", json!({})).await, json!(16384));
+    assert_eq!(sent_num_predict("npd", json!({})).await, json!(260_000));
     // 0 reads as unset (as in reflect): the default bounds it too
     assert_eq!(
         sent_num_predict("np0", json!({"num_predict": 0})).await,
-        json!(16384)
+        json!(260_000)
     );
     // the record's own wins, above or below the default
     assert_eq!(
