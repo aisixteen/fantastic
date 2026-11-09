@@ -1,7 +1,7 @@
-# `foreign_cut_give_up` (E138) — the stream cut and its give-up (#499)
+# `foreign_cut_give_up` (E140) — the stream cut and its give-up (#499)
 
 Free: no model. Scripted OpenAI-compatible servers (the thought channel as in E119)
-play the model for two `vllm_backend` agents on the PACKAGED host of `RUNTIME`.
+play the model for two AI agents on the PACKAGED host of `RUNTIME`: on the python lane two `vllm_backend` agents; on the rust lane two `ai_chat.tools` chats, each naming a `vllm_backend` provider (#521).
 
 - A: a foreign `<invoke name="send">` followed by a loop of closers, 12 times: each
   answer is cut at the tag (never stored whole), the correction is the next request,

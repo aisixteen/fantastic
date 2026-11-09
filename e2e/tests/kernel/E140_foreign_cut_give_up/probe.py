@@ -2,7 +2,8 @@
 SCRIPTED model. NO MODEL.
 
 A local OpenAI-compatible server plays the model (two: `m` for the AI, `mb` for the
-BOSS it hands its text to); the kernel's own `vllm_backend` agents (ai_core) on the
+BOSS it hands its text to); the kernel's own AI agents (python:
+`vllm_backend` agents; rust: `ai_chat.tools` chats naming a `vllm_backend` provider, #521) on the
 PACKAGED host of `RUNTIME` (python | rust) run the chains, driven through `web_rest`.
 
   A. the BOSS asks the AI (`inquiry`); the model writes a foreign call tag (`<invoke name="send">` followed by a loop of
@@ -41,7 +42,7 @@ RUNTIME = os.environ.get("RUNTIME", "")
 AI, BOSS = "ai", "boss"
 PROVS = {AI: "ai_prov", BOSS: "boss_prov"}
 MODEL = "mock-scripted"
-TOKEN = "E138-" + secrets.token_hex(4)
+TOKEN = "E140-" + secrets.token_hex(4)
 FOREIGN = 'Sending it.\n<invoke name="send">\n' + '</invoke>\n' * 400
 DONE = '<call name="done"></call>'
 AWAIT = '<call name="await"></call>'
