@@ -1,0 +1,8 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: ws_route
+group: canvas
+title: "the canvas's catch-all socket and a second page's literal web_ws route connect and call on one host"
+runner: probe.py
+costs: free
+limits: {seconds: 120}
+env: {}

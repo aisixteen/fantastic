@@ -1,6 +1,7 @@
 //! Unit tests for this bundle crate.
 
 use super::*;
+use fantastic_kernel::Agent;
 
 /// The readme is python's file, byte for byte
 /// (`PB/io/web_ws/src/web_ws/readme.md`).
@@ -139,4 +140,85 @@ fn validate_meta_refuses_an_unknown_or_malformed_ingress_rule() {
     let mut meta = Map::new();
     meta.insert("ingress_rule".into(), json!("password_ingress"));
     assert_eq!(WebWsBundle.validate_meta(&meta, &Map::new()), None);
+}
+
+/// A kernel holding one `web_ws` leg "ws" with the given record fields.
+fn kernel_with_leg(meta: Value) -> Arc<Kernel> {
+    let kernel = Arc::new(Kernel::new());
+    kernel.register(Agent::new(
+        AgentId::from("ws"),
+        Some("web_ws.tools".into()),
+        None,
+        meta.as_object().cloned().unwrap_or_default(),
+        std::path::PathBuf::new(),
+        false,
+    ));
+    kernel
+}
+
+async fn ask(kernel: &Arc<Kernel>, verb: &str) -> Value {
+    WebWsBundle
+        .handle(&AgentId::from("ws"), &json!({"type": verb}), kernel)
+        .await
+        .expect("handled")
+        .expect("reply")
+}
+
+/// No `route` (absent or null): the leg keeps the catch-all.
+#[tokio::test]
+async fn a_leg_without_route_keeps_the_catch_all() {
+    for meta in [json!({}), json!({"route": null})] {
+        let kernel = kernel_with_leg(meta);
+        assert_eq!(
+            ask(&kernel, "get_routes").await,
+            json!({"routes": [{"kind": "websocket", "path": "/{host_id}/ws"}]})
+        );
+        assert_eq!(
+            ask(&kernel, "reflect").await["path_pattern"],
+            json!("/{host_id}/ws")
+        );
+    }
+}
+
+/// A `route` mounts only that literal.
+#[tokio::test]
+async fn a_route_mounts_only_its_literal() {
+    let kernel = kernel_with_leg(json!({"route": "/page_ws/ws"}));
+    assert_eq!(
+        ask(&kernel, "get_routes").await,
+        json!({"routes": [{"kind": "websocket", "path": "/page_ws/ws"}]})
+    );
+    assert_eq!(
+        ask(&kernel, "reflect").await["path_pattern"],
+        json!("/page_ws/ws")
+    );
+}
+
+/// A `route` that is not a literal path is refused at the write.
+#[test]
+fn validate_meta_refuses_a_route_that_is_not_a_literal_path() {
+    for bad in [json!("/{x}/ws"), json!("page/ws"), json!(""), json!(7)] {
+        let mut meta = Map::new();
+        meta.insert("route".into(), bad.clone());
+        let text = WebWsBundle
+            .validate_meta(&meta, &Map::new())
+            .unwrap_or_else(|| panic!("{bad} must be refused"));
+        assert!(text.starts_with("route="), "{text}");
+        assert!(text.contains("is not a literal mount path"), "{text}");
+    }
+    let mut meta = Map::new();
+    meta.insert("route".into(), json!(7));
+    assert_eq!(
+        WebWsBundle.validate_meta(&meta, &Map::new()),
+        Some(
+            "route=7 is not a literal mount path — a string starting with \"/\", with no \"{\" or \"}\""
+                .to_string()
+        )
+    );
+    for ok in [json!("/page_ws/ws"), Value::Null] {
+        let mut meta = Map::new();
+        meta.insert("ingress_rule".into(), json!("allow_all_ingress"));
+        meta.insert("route".into(), ok);
+        assert_eq!(WebWsBundle.validate_meta(&meta, &Map::new()), None);
+    }
 }

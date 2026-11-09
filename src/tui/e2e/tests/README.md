@@ -47,6 +47,7 @@ with `src/tui/e2e/wipe.sh`.
 | E78 `fit` | scripted: the view's `fit` sizes an html cell to what it draws — a 640×360 box (sandboxed and trusted) and a paragraph wrapped at `max_width: 400` — the frame that size, nothing overflowing, the layout holding it; an unknown id refused | owner 2026-10-13: fit to content, a verb an AI can call | scripted |
 | E133 `import_drop` | scripted: a blueprint folder dragged from the file tree onto the canvas or a cell opens the `import blueprint` dialog (`would create 3 agents`) and creates nothing; Cancel sends nothing more; Approve imports under the canvas host (a cell: its backend) and a toast names the ids; a port asks for the agent (`import: bind ports`) and previews again; code is refused as a toast naming `allow_code` | #269: import a blueprint | scripted |
 | E138 `headless_web` | scripted: after one `canvas` run, `fantastic --headless` in the same folder serves the recorded `web` on its port: the canvas page, the `canvas_ws` socket (a host call answers) and a second agent's route (`static_files`) on the one host | #560: the web host is the core listener | scripted |
+| E139 `ws_route` | scripted: the canvas's `canvas_ws` (catch-all, `/user/ws`) and a second `web_ws` leg with `route: /page_ws/ws` on one host both connect and call; the second answers as itself | #559: a literal route per page | scripted |
 
 The `home` group drives the HOME (`_lib/home_live.py`, `HomeRig`): the test-only
 host `fantastic-home-host`, the `fantastic canvas` processes it lists, and Chrome
