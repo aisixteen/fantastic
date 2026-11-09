@@ -43,15 +43,14 @@ def filler(n: int) -> str:
 
 
 def tag(target: str, verb: str, title=None, **args) -> str:
-    inner = f"<target_id>{target}</target_id><type>{verb}</type>"
+    inner = f"<type>{verb}</type>"
     for k, v in args.items():
         if isinstance(v, list):
             inner += f"<{k}>" + "".join(f"<item>{x}</item>" for x in v) + f"</{k}>"
         else:
             inner += f"<{k}>{v}</{k}>"
-    if title:
-        inner += f"<title>{title}</title>"
-    return f'<call name="send">{inner}</call>'
+    routing = f"<target_id>{target}</target_id>" + (f"<title>{title}</title>" if title else "")
+    return f'<call name="send"><routing>{routing}</routing><payload>{inner}</payload></call>'
 
 
 def main_turn(n: int, me: str, pid: str) -> str:

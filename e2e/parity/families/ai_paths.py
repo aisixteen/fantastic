@@ -32,14 +32,23 @@ DONE = '<call name="done"></call>'
 FILL = ("The pump log is unremarkable and the valve is closed. " * 2000)[:AI_FILL_CHARS]
 
 
+ROUTING = ("to", "re", "reply_to", "title", "timeout", "retries", "exec_id")
+
+
 def tag(target: str, verb: str, **args) -> str:
-    inner = f"<target_id>{target}</target_id><type>{verb}</type>"
+    routing = f"<target_id>{target}</target_id>"
+    inner = f"<type>{verb}</type>"
     for k, v in args.items():
         if isinstance(v, list):
-            inner += f"<{k}>" + "".join(f"<item>{x}</item>" for x in v) + f"</{k}>"
+            part = f"<{k}>" + "".join(f"<item>{x}</item>" for x in v) + f"</{k}>"
         else:
-            inner += f"<{k}>{v}</{k}>"
-    return f'<call name="send">{inner}</call>'
+            part = f"<{k}>{v}</{k}>"
+        if k in ROUTING:
+            routing += part
+        else:
+            inner += part
+    return f'<call name="send"><routing>{routing}</routing><payload>{inner}</payload></call>'
+
 
 
 #: Every case: the script the stub answers with, in order. A dict entry asks the

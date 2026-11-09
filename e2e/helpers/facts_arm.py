@@ -674,8 +674,9 @@ def planted_reads(mint, goal: str, reads: list[tuple[str, str]], *, target: str 
     for n, (path, text) in enumerate(reads):
         call_id = mint()
         rows.append({"role": "assistant", "id": call_id, "parent": prev,
-                     "content": f'Reading {path}. <call name="send"><target_id>{target}</target_id>'
-                                f"<title>read {path}</title><type>read</type><path>{path}</path></call>"})
+                     "content": f'Reading {path}. <call name="send">'
+                                f"<routing><target_id>{target}</target_id><title>read {path}</title></routing>"
+                                f"<payload><type>read</type><path>{path}</path></payload></call>"})
         if tail and n == len(reads) - 1:
             break
         reply = {"role": "user", "id": mint(), "parent": call_id,
