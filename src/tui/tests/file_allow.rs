@@ -66,7 +66,11 @@ fn seed(dir: &std::path::Path) {
 }
 
 async fn boot(dir: &std::path::Path) -> std::sync::Arc<Kernel> {
-    let booted = bootstrap::bootstrap(registry(), BootstrapOptions::daemon(dir)).expect("boots");
+    let booted = bootstrap::bootstrap(
+        registry(),
+        BootstrapOptions::daemon(dir.join(".fantastic"), dir),
+    )
+    .expect("boots");
     let kernel = std::sync::Arc::clone(&booted.kernel);
     kernel
         .send(vec![Item::new(
@@ -125,7 +129,7 @@ async fn a_file_leg_is_widened_and_narrowed_and_it_persists() {
 
     // …and it survives a restart (the record is persisted through the store).
     kernel.shutdown().await;
-    bootstrap::shutdown(&dir).unwrap();
+    bootstrap::shutdown(&dir.join(".fantastic")).unwrap();
     drop(kernel);
     let kernel = boot(&dir).await;
     assert!(!refused(&call(&kernel, "term", read("b.txt")).await), "after a restart");
@@ -134,13 +138,13 @@ async fn a_file_leg_is_widened_and_narrowed_and_it_persists() {
     expose(&kernel, json!(["b.txt"])).await;
     assert!(refused(&call(&kernel, "term", read("a.txt")).await), "a.txt is no longer served");
     kernel.shutdown().await;
-    bootstrap::shutdown(&dir).unwrap();
+    bootstrap::shutdown(&dir.join(".fantastic")).unwrap();
     drop(kernel);
     let kernel = boot(&dir).await;
     assert!(refused(&call(&kernel, "term", read("a.txt")).await), "after the second restart");
     assert!(!refused(&call(&kernel, "term", read("b.txt")).await));
     kernel.shutdown().await;
-    bootstrap::shutdown(&dir).unwrap();
+    bootstrap::shutdown(&dir.join(".fantastic")).unwrap();
     std::env::set_current_dir(std::env::temp_dir()).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

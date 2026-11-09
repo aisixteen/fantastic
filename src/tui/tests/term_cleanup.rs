@@ -102,7 +102,11 @@ async fn shell_with_children(tag: &str) -> (std::sync::Arc<Kernel>, std::path::P
     std::fs::create_dir_all(&dir).unwrap();
     seed(&dir);
     std::env::set_current_dir(&dir).unwrap();
-    let booted = bootstrap::bootstrap(registry(), BootstrapOptions::daemon(&dir)).expect("boots");
+    let booted = bootstrap::bootstrap(
+        registry(),
+        BootstrapOptions::daemon(dir.join(".fantastic"), &dir),
+    )
+    .expect("boots");
     let kernel = std::sync::Arc::clone(&booted.kernel);
     kernel
         .send(vec![Item::new(

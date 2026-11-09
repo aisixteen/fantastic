@@ -21,7 +21,10 @@ fn free_port() -> u16 {
 /// Build a kernel with web (+ optionally child surface bundles)
 /// registered, with a root agent set as `kernel_state`.
 fn mk_kernel(tmp: &TempDir, register_ws: bool, register_rest: bool) -> Arc<Kernel> {
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel.bundles.register(HANDLER_MODULE, WebBundle);
     if register_ws {
         kernel
@@ -875,7 +878,10 @@ async fn call_frame_without_id_or_payload_replies_like_python() {
 async fn web_rest_octet_leg_edit_and_read_stream() {
     // Kernel with web + web_rest + file_bridge registered.
     let tmp = TempDir::new().unwrap();
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel.bundles.register(HANDLER_MODULE, WebBundle);
     kernel
         .bundles
@@ -1277,7 +1283,10 @@ async fn stage_host(
     rest_id: &str,
     fb_id: &str,
 ) -> Arc<Kernel> {
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel.bundles.register(HANDLER_MODULE, WebBundle);
     kernel
         .bundles
@@ -2267,7 +2276,10 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
 #[tokio::test]
 async fn boot_announces_say_to_cli() {
     let tmp = TempDir::new().unwrap();
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel.bundles.register(HANDLER_MODULE, WebBundle);
     kernel.bundles.register("cli_probe.tools", SayProbe);
     let kernel = Arc::new(kernel);
@@ -2322,7 +2334,10 @@ async fn boot_announces_say_to_cli() {
 #[tokio::test]
 async fn boot_announces_the_bound_host() {
     let tmp = TempDir::new().unwrap();
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel.bundles.register(HANDLER_MODULE, WebBundle);
     kernel.bundles.register("cli_probe.tools", SayProbe);
     let kernel = Arc::new(kernel);
@@ -3285,7 +3300,10 @@ impl fantastic_kernel::bundle::Bundle for OddSource {
 async fn the_file_proxy_reads_on_until_a_truthy_eof() {
     let tmp = TempDir::new().unwrap();
     let port = free_port();
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel.bundles.register(HANDLER_MODULE, WebBundle);
     kernel.bundles.register("odd_source.tools", OddSource);
     let kernel = Arc::new(kernel);

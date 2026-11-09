@@ -126,7 +126,7 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
         return refusal_hint(UNAUTHORIZED, BOOT_REFUSED, BOOT_REFUSED_HINT);
     }
     let agents = match kernel
-        .workdir()
+        .work_dir()
         .and_then(|base| load_manifest(agent, &base))
     {
         Ok(a) => a,

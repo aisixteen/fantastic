@@ -1961,7 +1961,10 @@ async fn boot_disk(tmp: &TempDir) -> Arc<Kernel> {
     reg.register(HANDLER_MODULE, AnthropicBundle);
     let mut booted = fantastic_kernel::bootstrap::bootstrap(
         reg,
-        fantastic_kernel::bootstrap::BootstrapOptions::one_shot(tmp.path()),
+        fantastic_kernel::bootstrap::BootstrapOptions::one_shot(
+            tmp.path().join(".fantastic"),
+            tmp.path(),
+        ),
     )
     .expect("boot");
     booted.write_seed().expect("seed");

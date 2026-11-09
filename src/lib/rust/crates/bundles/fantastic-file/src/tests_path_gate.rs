@@ -16,7 +16,10 @@ async fn bridge(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
     std::fs::write(served.join("other.txt"), "secret\n").unwrap();
     std::fs::create_dir_all(served.join("priv")).unwrap();
     std::fs::write(served.join("priv/p.txt"), "p\n").unwrap();
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel
         .bundles
         .register(HANDLER_MODULE, FileBundle::default());

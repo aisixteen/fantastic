@@ -784,3 +784,36 @@ async fn a_bundle_that_declares_shutdown_is_still_the_one_told() {
         "the shutdown is the kernel's bookkeeping, not a call"
     );
 }
+
+#[test]
+fn an_in_memory_kernel_has_no_folders() {
+    let k = Kernel::new();
+    assert!(k.state_dir().is_err());
+    assert!(k.work_dir().is_err());
+}
+
+#[test]
+fn record_root_follows_the_one_rule() {
+    let k = Kernel::with_storage(StorageMode::Disk {
+        state_dir: PathBuf::from("/s"),
+        work_dir: PathBuf::from("/w"),
+    });
+    let own = Path::new("/s/agents/me");
+    let at = |raw: &str| k.record_root(raw, own).unwrap();
+    assert_eq!(at("@state"), (PathBuf::from("/s"), ".".to_string()));
+    assert_eq!(at("@state/web"), (PathBuf::from("/s"), "web".to_string()));
+    assert_eq!(at("@self"), (own.to_path_buf(), ".".to_string()));
+    assert_eq!(at("@self/x/y"), (own.to_path_buf(), "x/y".to_string()));
+    assert_eq!(at("sub"), (PathBuf::from("/w"), "sub".to_string()));
+    assert_eq!(at(""), (PathBuf::from("/w"), String::new()));
+    assert_eq!(at("/abs/p"), (PathBuf::from("/w"), "/abs/p".to_string()));
+    assert_eq!(at("@statex"), (PathBuf::from("/w"), "@statex".to_string()));
+    assert_eq!(
+        at("@selfish/x"),
+        (PathBuf::from("/w"), "@selfish/x".to_string())
+    );
+    assert_eq!(
+        k.record_root("@self", Path::new("")),
+        Err("@self: the agent has no folder".to_string())
+    );
+}

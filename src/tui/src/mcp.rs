@@ -72,7 +72,7 @@ pub fn main(argv: &[String]) -> ! {
         std::process::exit(2);
     }
     // the OS lock, not the pid in the file: a stale lock.yaml naming a reused pid is not held
-    match fantastic_kernel::lock::held(&paths.cwd) {
+    match fantastic_kernel::lock::held(&paths.store) {
         Ok(Some(pid)) if pid != std::process::id() => attach(pid),
         Ok(_) => own(paths),
         Err(e) => {

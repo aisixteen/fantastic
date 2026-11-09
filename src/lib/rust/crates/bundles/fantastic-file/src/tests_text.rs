@@ -12,7 +12,10 @@ use serde_json::Map as JsonMap;
 /// A kernel with ONE file_bridge `fb` rooted at `tmp/served` (running dir =
 /// `tmp`), open, exposing everything — `extra` overrides (a `null` removes).
 async fn mk(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel
         .bundles
         .register(HANDLER_MODULE, FileBundle::default());

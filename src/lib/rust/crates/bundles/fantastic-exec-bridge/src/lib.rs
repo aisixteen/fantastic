@@ -888,6 +888,26 @@ fn stop_reply(agent_id: &AgentId, payload: &Value) -> Value {
 const START_WAKE_HINT: &str = "absent — `start` sends no one anything; to be told what the job \
      prints (or when it ends), `monitor` it: job_id, notify, match, every";
 
+/// The agent's own folder (empty when it is gone).
+fn agent_own_root(kernel: &Kernel, id: &AgentId) -> std::path::PathBuf {
+    kernel
+        .agents
+        .get(id)
+        .map(|a| a.root_path.clone())
+        .unwrap_or_default()
+}
+
+/// A `cwd` the kernel's rule cannot place, as a refusal naming it.
+fn cwd_refusal(cwd: &str, why: &str) -> Value {
+    let mut v = refusal_hint(
+        MISSING_ARG,
+        format!("exec_bridge: cwd {cwd:?}: {why}"),
+        "set `cwd` to a folder under the work folder, or @state/…",
+    );
+    with(&mut v, "arg", json!("cwd"));
+    v
+}
+
 async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     let meta = snapshot_meta(agent_id, kernel);
     // EVERY refusal on this verb carries a CODE, so nothing has to tell a typo
@@ -1047,6 +1067,21 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
         );
         with(&mut v, "arg", json!("cwd"));
         return v;
+    };
+    // The kernel's one record-path rule: `@state`/`@self` under their folders,
+    // anything else (relative or absolute) under the work folder.
+    // An absolute path needs no base: it is its own place, so the answer is the
+    // same with or without a folder to join it to.
+    let cwd = if std::path::Path::new(&cwd).is_absolute() {
+        cwd
+    } else {
+        match kernel.record_root(&cwd, &agent_own_root(kernel, agent_id)) {
+            Ok((base, rel)) => match std::path::absolute(base.join(rel)) {
+                Ok(p) => p.to_string_lossy().into_owned(),
+                Err(e) => return cwd_refusal(&cwd, &e.to_string()),
+            },
+            Err(e) => return cwd_refusal(&cwd, &e),
+        }
     };
 
     let spawned = match dims {

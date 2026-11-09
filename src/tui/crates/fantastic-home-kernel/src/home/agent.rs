@@ -113,9 +113,9 @@ impl HomeBundle {
     }
 
     fn reflect(&self, agent_id: &AgentId, kernel: &Kernel, payload: &Value) -> Value {
-        // The home kernel's running dir is always `<home>/app`.
+        // The home kernel's state folder is always `<home>/app`.
         let home = kernel
-            .workdir()
+            .state_dir()
             .ok()
             .and_then(|w| w.parent().map(|h| h.display().to_string()));
         reflect_call(&self.runner, agent_id.as_str(), home, payload)

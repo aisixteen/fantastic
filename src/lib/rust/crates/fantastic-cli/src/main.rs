@@ -14,7 +14,7 @@
 //!    Acquires the lock; refuses with python's `[call] …` line if a daemon
 //!    already holds it.
 //! 4. exactly ONE remaining word — python's 4-line usage on stderr, exit 2.
-//! 5. `fantastic_kernel` (no args) — daemon mode. Bootstrap the workdir,
+//! 5. `fantastic_kernel` (no args) — daemon mode. Bootstrap the state folder,
 //!    dispatch `boot` on every loaded agent, then block until
 //!    SIGINT/SIGTERM (only while a web daemon is serving), then
 //!    `shutdown` gracefully. With nothing to serve it boots, reports, exits.
@@ -66,7 +66,7 @@ fn register_default_bundles() -> BundleRegistry {
         fantastic_ram_store::RamStoreBundle::default(),
     );
     // THE DURABLE STORE — the same verbs over one SQLite file. Which file is
-    // CONFIG: the record's `path` (relative to the workdir), never hardcoded.
+    // CONFIG: the record's `path` (relative to the work folder), never hardcoded.
     reg.register(
         fantastic_sqlite_store::HANDLER_MODULE,
         fantastic_sqlite_store::SqliteStoreBundle::default(),
@@ -230,12 +230,13 @@ async fn main() -> ExitCode {
 /// is alive but holds no flock (a reused pid) is stale, and taken over. Python
 /// `modes/dispatch.py:_lock_or_exit`.
 fn one_shot_bootstrap(
-    workdir: &Path,
+    state_dir: &Path,
+    work_dir: &Path,
     refusal: impl FnOnce(u32) -> String,
 ) -> Result<Option<BootedKernel>, Box<dyn std::error::Error>> {
     match bootstrap::bootstrap(
         register_default_bundles(),
-        BootstrapOptions::daemon(workdir),
+        BootstrapOptions::daemon(state_dir, work_dir),
     ) {
         Ok(booted) => Ok(Some(booted)),
         Err(KernelError::LockHeld { pid }) => {
@@ -396,7 +397,8 @@ async fn dispatch(
     args: Vec<String>,
     cap: Option<Option<usize>>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let workdir = std::env::current_dir()?;
+    let work_dir = std::env::current_dir()?;
+    let state_dir = bootstrap::state_dir_for(None, Some(&work_dir))?;
 
     // Mode 1: `help` / `-h` / `--help` as the FIRST word — later words are
     // IGNORED (`P/kernel/modes/dispatch.py:19-21`). The bootstrap here takes no
@@ -405,7 +407,7 @@ async fn dispatch(
         args.first().map(String::as_str),
         Some("-h") | Some("--help") | Some("help")
     ) {
-        let opts = BootstrapOptions::one_shot(&workdir);
+        let opts = BootstrapOptions::one_shot(&state_dir, &work_dir);
         let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
         apply_ledger_cap(&booted, cap);
         // python `print(src.read_text(...).rstrip())` — rstripped, one newline.
@@ -422,7 +424,7 @@ async fn dispatch(
     // root); remaining `k=v` compose the reflect payload — `tree=ids`,
     // `bundles=all`, `readme=true`, etc. (mirrors the Python CLI).
     if args.first().map(String::as_str) == Some("reflect") {
-        let opts = BootstrapOptions::one_shot(&workdir);
+        let opts = BootstrapOptions::one_shot(&state_dir, &work_dir);
         let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
         apply_ledger_cap(&booted, cap);
         let rest = &args[1..];
@@ -460,7 +462,7 @@ async fn dispatch(
         let rest = &args[1..];
         if rest.len() < 2 {
             // lockless: the usage error writes nothing
-            let opts = BootstrapOptions::one_shot(&workdir);
+            let opts = BootstrapOptions::one_shot(&state_dir, &work_dir);
             let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
             apply_ledger_cap(&booted, cap);
             eprintln!(
@@ -474,7 +476,7 @@ async fn dispatch(
         let manifest = rest[1].clone();
         // THE DAEMON'S OWN LOCK — the flock the bootstrap takes; a live holder
         // refuses with `init`'s line (see [`one_shot_bootstrap`]).
-        let Some(booted) = one_shot_bootstrap(&workdir, |pid| {
+        let Some(booted) = one_shot_bootstrap(&state_dir, &work_dir, |pid| {
             format!("[init] another fantastic owns this dir (pid={pid}). Stop it first.")
         })?
         else {
@@ -513,7 +515,7 @@ async fn dispatch(
         booted.kernel.flush_records().await;
         // The lock release, THEN the kernel shutdown — see the same
         // note on Mode 3 below.
-        bootstrap::shutdown(&workdir)?;
+        bootstrap::shutdown(&state_dir)?;
         stop_kernel(&booted.kernel).await;
         return Ok(ExitCode::SUCCESS);
     }
@@ -533,7 +535,7 @@ async fn dispatch(
         // THE DAEMON'S OWN LOCK, the flock the bootstrap takes; a live
         // holder refuses with python's `[call]` line, not the kernel's LockHeld
         // text (see [`one_shot_bootstrap`]).
-        let Some(booted) = one_shot_bootstrap(&workdir, |pid| {
+        let Some(booted) = one_shot_bootstrap(&state_dir, &work_dir, |pid| {
             format!(
                 "[call] another fantastic owns this dir (pid={pid}). Stop it, or forward \
                  your call over the WS bridge (see ws_bridge bundle)."
@@ -569,7 +571,7 @@ async fn dispatch(
         // order: the `with FantasticLock()` block's `__exit__` releases the
         // lock synchronously inside `call()`/`init()`, and `Kernel.shutdown()`
         // runs LAST, from the process's atexit handler.
-        bootstrap::shutdown(&workdir)?;
+        bootstrap::shutdown(&state_dir)?;
         stop_kernel(&booted.kernel).await;
         return Ok(ExitCode::SUCCESS);
     }
@@ -578,7 +580,7 @@ async fn dispatch(
     // usage on stderr, exit 2 (`P/kernel/modes/dispatch.py:34-41`). The workdir
     // is seeded first, as it is for every other mode.
     if !args.is_empty() {
-        let opts = BootstrapOptions::one_shot(&workdir);
+        let opts = BootstrapOptions::one_shot(&state_dir, &work_dir);
         let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
         apply_ledger_cap(&booted, cap);
         eprintln!("{USAGE}");
@@ -595,7 +597,7 @@ async fn dispatch(
     // stays headless on a tty, exactly as its own doc comment declares —
     // the `has_repl` half of python's composition decision has no rust
     // counterpart here, only the web-daemon half.
-    let opts = BootstrapOptions::one_shot(&workdir);
+    let opts = BootstrapOptions::one_shot(&state_dir, &work_dir);
     let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
     apply_ledger_cap(&booted, cap);
     let kernel = Arc::clone(&booted.kernel);
@@ -613,7 +615,7 @@ async fn dispatch(
     // LOCK-FIRST, before booting — python: "so port binds don't happen on
     // conflict." `?` surfaces `KernelError::LockHeld` through main()'s
     // `[kernel] {e}` printer.
-    lock::acquire(&workdir)?;
+    lock::acquire(&state_dir)?;
     // A fresh root's record lands only now, under the lock.
     let mut booted = booted;
     booted.write_seed()?;
@@ -635,7 +637,7 @@ async fn dispatch(
             msg.push_str(&format!("\n  hint: {}", fantastic_bundle::py_str(hint)));
         }
         stop_kernel(&kernel).await;
-        bootstrap::shutdown(&workdir)?;
+        bootstrap::shutdown(&state_dir)?;
         return Err(msg.into());
     }
 
@@ -647,7 +649,7 @@ async fn dispatch(
         Ok(s) => s,
         Err(e) => {
             stop_kernel(&kernel).await;
-            bootstrap::shutdown(&workdir)?;
+            bootstrap::shutdown(&state_dir)?;
             return Err(format!("cannot install the stop-signal handlers: {e}").into());
         }
     };
@@ -691,7 +693,7 @@ async fn dispatch(
     // Lock release LAST — python's `with FantasticLock():` wraps the whole
     // boot-through-teardown body, so `release_lock()` runs as that block
     // exits, AFTER the teardown prints above.
-    bootstrap::shutdown(&workdir)?;
+    bootstrap::shutdown(&state_dir)?;
     Ok(ExitCode::SUCCESS)
 }
 

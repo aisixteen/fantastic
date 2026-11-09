@@ -33,7 +33,8 @@ async fn embedder_agents_hydrate_under_their_written_ids_and_disk_parents() {
     reg.register(fantastic_ram_store::HANDLER_MODULE, fantastic_ram_store::RamStoreBundle::default());
     reg.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
 
-    let booted = bootstrap::bootstrap(reg, BootstrapOptions::daemon(&dir)).expect("boots over the seeded dir");
+    let booted = bootstrap::bootstrap(reg, BootstrapOptions::daemon(dir.join(".fantastic"), &dir))
+        .expect("boots over the seeded dir");
     let kernel = std::sync::Arc::clone(&booted.kernel);
     let parent_of = |id: &str| {
         kernel
@@ -48,7 +49,7 @@ async fn embedder_agents_hydrate_under_their_written_ids_and_disk_parents() {
     assert_eq!(parent_of("probe2"), Some("user".to_string()));
     assert_eq!(parent_of("user"), Some(bootstrap::DEFAULT_ROOT_ID.to_string()));
 
-    let _ = bootstrap::shutdown(&dir);
+    let _ = bootstrap::shutdown(&dir.join(".fantastic"));
     std::env::set_current_dir(std::env::temp_dir()).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

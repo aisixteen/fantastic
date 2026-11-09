@@ -187,7 +187,7 @@ fn reply_of(row: &Value) -> Result<Value, String> {
 pub fn main(argv: &[String]) -> ! {
     let a = parse(argv).unwrap_or_else(|e| die(2, format!("{e}\nusage: {USAGE}")));
     let paths = Paths::here().unwrap_or_else(|e| die(2, format!("no working directory: {e}")));
-    match fantastic_kernel::lock::held(&paths.cwd) {
+    match fantastic_kernel::lock::held(&paths.store) {
         Ok(Some(pid)) if pid != std::process::id() => {}
         Ok(_) => die(
             1,

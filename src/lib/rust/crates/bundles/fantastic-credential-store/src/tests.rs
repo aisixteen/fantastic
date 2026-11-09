@@ -486,9 +486,12 @@ async fn the_file_is_an_absolute_path_a_relative_one_is_refused() {
     let mut reg = BundleRegistry::new();
     register_root_loader(&mut reg);
     reg.register(HANDLER_MODULE, crate::test_support::bundle());
-    let k = bootstrap(reg, BootstrapOptions::one_shot(tmp.path()))
-        .expect("boot")
-        .kernel;
+    let k = bootstrap(
+        reg,
+        BootstrapOptions::one_shot(tmp.path().join(".fantastic"), tmp.path()),
+    )
+    .expect("boot")
+    .kernel;
     let root = k.root().unwrap().id.clone();
     for rel in ["creds.yaml", "sub/creds.yaml", "./creds.yaml"] {
         let r = op(
@@ -560,7 +563,7 @@ async fn the_file_is_an_absolute_path_a_relative_one_is_refused() {
             relative("creds.yaml")
         ))
     );
-    assert!(!k.workdir().unwrap().join("creds.yaml").exists());
+    assert!(!k.work_dir().unwrap().join("creds.yaml").exists());
     assert!(!tmp.path().join("creds.yaml").exists());
 }
 

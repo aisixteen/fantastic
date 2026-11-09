@@ -154,7 +154,10 @@ fn fresh_workdir() -> TempDir {
 /// noop + FakeStore bundles registered. The store is NOT wired yet — callers
 /// wire it through the real `create_agent` verb when they want persistence.
 fn kernel_at(store_root: &Path) -> Arc<Kernel> {
-    let mut kernel = Kernel::with_storage(StorageMode::disk(store_root.to_path_buf()));
+    let mut kernel = Kernel::with_storage(StorageMode::Disk {
+        state_dir: store_root.to_path_buf().join(".fantastic"),
+        work_dir: store_root.to_path_buf(),
+    });
     let mut reg = BundleRegistry::new();
     reg.register("noop.tools", NoopBundle);
     reg.register("readme_bundle.tools", ReadmeBundle);
@@ -309,7 +312,10 @@ fn boot_staged(workdir: &Path) -> Arc<Kernel> {
     fantastic_kernel::test_support::register_root_loader(&mut reg);
     fantastic_kernel::bootstrap::bootstrap(
         reg,
-        fantastic_kernel::bootstrap::BootstrapOptions::one_shot(workdir),
+        fantastic_kernel::bootstrap::BootstrapOptions::one_shot(
+            workdir.join(".fantastic"),
+            workdir,
+        ),
     )
     .expect("boot")
     .kernel
@@ -596,7 +602,10 @@ impl Bundle for PagingStore {
 async fn store_sink_merge_keeps_unknown_keys_past_one_chunk() {
     let tmp = fresh_workdir();
     let store_root = tmp.path();
-    let mut kernel = Kernel::with_storage(StorageMode::disk(store_root.to_path_buf()));
+    let mut kernel = Kernel::with_storage(StorageMode::Disk {
+        state_dir: store_root.to_path_buf().join(".fantastic"),
+        work_dir: store_root.to_path_buf(),
+    });
     let mut reg = BundleRegistry::new();
     reg.register("noop.tools", NoopBundle);
     let store = Arc::new(PagingStore {
@@ -814,7 +823,10 @@ impl Bundle for RefusingStore {
 async fn a_failed_record_write_seeds_no_readme() {
     let tmp = fresh_workdir();
     let store_root = tmp.path();
-    let mut kernel = Kernel::with_storage(StorageMode::disk(store_root.to_path_buf()));
+    let mut kernel = Kernel::with_storage(StorageMode::Disk {
+        state_dir: store_root.to_path_buf().join(".fantastic"),
+        work_dir: store_root.to_path_buf(),
+    });
     let mut reg = BundleRegistry::new();
     reg.register("readme_bundle.tools", ReadmeBundle);
     reg.register("file_bridge.tools", RefusingStore);
@@ -858,4 +870,69 @@ async fn a_failed_record_write_seeds_no_readme() {
         !paths.iter().any(|p| p.ends_with("readme.md")),
         "a failed write still seeded the readme: {paths:?}"
     );
+}
+
+/// Boot `daemon(state, work)` with the fake store rooted at `state`, wire a
+/// store whose record says `store_root`, and create the child `kid`.
+async fn persist_kid_with_store_root(state: &Path, work: &Path, store_root: &str) {
+    let mut reg = BundleRegistry::new();
+    reg.register("noop.tools", NoopBundle);
+    reg.register(
+        "file_bridge.tools",
+        FakeStore {
+            root: state.to_path_buf(),
+        },
+    );
+    fantastic_kernel::test_support::register_root_loader(&mut reg);
+    let booted = fantastic_kernel::bootstrap::bootstrap(
+        reg,
+        fantastic_kernel::bootstrap::BootstrapOptions::daemon(state, work),
+    )
+    .expect("boot");
+    let kernel = booted.kernel;
+    fantastic_kernel::test_support::boot_root(&kernel).await;
+    let made = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({
+                "type": "create_agent", "parent_id": "kernel",
+                "handler_module": "file_bridge.tools", "allow": ["."],
+                "id": "store", "root": store_root,
+                "ingress_rule": "allow_all_ingress",
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(made["id"], "store", "{made}");
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "parent_id": "kernel",
+                   "handler_module": "noop.tools", "id": "kid"}),
+        )])
+        .await;
+    kernel.flush_records().await;
+    fantastic_kernel::bootstrap::shutdown(state).unwrap();
+}
+
+#[tokio::test]
+async fn a_store_at_state_persists_into_a_state_folder_far_from_work() {
+    let tmp = fresh_workdir();
+    let state = tmp.path().join("far/s");
+    let work = tmp.path().join("w");
+    std::fs::create_dir_all(&work).unwrap();
+    persist_kid_with_store_root(&state, &work, "@state").await;
+    assert!(state.join("agents/kid/agent.yaml").exists());
+    assert!(!work.join(".fantastic").exists());
+}
+
+#[tokio::test]
+async fn a_legacy_relative_store_root_is_found_with_the_defaults() {
+    let tmp = fresh_workdir();
+    let work = tmp.path().join("w");
+    let state = work.join(".fantastic");
+    std::fs::create_dir_all(&work).unwrap();
+    persist_kid_with_store_root(&state, &work, ".fantastic").await;
+    assert!(state.join("agents/kid/agent.yaml").exists());
 }

@@ -21,6 +21,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::Notify;
 
+/// A record path under the kernel's state folder: `@state` or `@state/<rel>`.
+pub const STATE_PLACEHOLDER: &str = "@state";
+/// A record path under the agent's own folder: `@self` or `@self/<rel>`.
+pub const SELF_PLACEHOLDER: &str = "@self";
+
 /// Bounded inbox capacity per agent — matches Python's `INBOX_BOUND`.
 /// 256 fits a chat-paced workload comfortably and bounds memory on a
 /// runaway emitter. Tunable via [`Kernel::new_with_inbox_bound`].
@@ -800,46 +805,57 @@ impl Kernel {
         self.root.store(Some(root));
     }
 
-    /// The kernel's RUNNING DIR — the dir holding its root's `.fantastic`
-    /// (python `Kernel.workdir`). The ONE source of the disk clamp base; a
-    /// relative root address is resolved the way any relative path is.
-    /// A disk kernel's running dir is its storage mode's `workdir`, which a
-    /// host with its own state dir ([`crate::bootstrap::BootstrapOptions::daemon_at`])
-    /// names; for a project it is the root's parent, as before.
+    /// The state folder this kernel was booted with: exactly what boot was
+    /// given (nothing derived, absolutized or checked).
     ///
     /// # Errors
-    /// No root ⇒ no running dir to clamp disk to.
-    pub fn workdir(&self) -> Result<PathBuf, String> {
-        if let StorageMode::Disk { workdir, .. } = &self.storage {
-            if self.root().is_none() {
-                return Err("kernel has no root — no running dir to clamp disk to".to_string());
-            }
-            return Ok(if workdir.is_absolute() {
-                workdir.clone()
+    /// An in-memory kernel has no state folder.
+    pub fn state_dir(&self) -> Result<PathBuf, String> {
+        match &self.storage {
+            StorageMode::Disk { state_dir, .. } => Ok(state_dir.clone()),
+            StorageMode::InMemory => Err("an in-memory kernel has no state folder".to_string()),
+        }
+    }
+
+    /// The work folder this kernel was booted with: exactly what boot was
+    /// given. The base of every non-state disk path.
+    ///
+    /// # Errors
+    /// An in-memory kernel has no work folder.
+    pub fn work_dir(&self) -> Result<PathBuf, String> {
+        match &self.storage {
+            StorageMode::Disk { work_dir, .. } => Ok(work_dir.clone()),
+            StorageMode::InMemory => Err("an in-memory kernel has no work folder".to_string()),
+        }
+    }
+
+    /// THE ONE RULE for a record path `raw` (a `root`, a `cwd`, a store `path`):
+    /// the base folder and the path relative to it. `@state[/rel]` is under
+    /// the state folder, `@self[/rel]` under the agent's own folder `own`,
+    /// anything else (`""` and absolute paths included) under the work
+    /// folder, with `raw` as written. The caller clamps `rel` inside `base`.
+    ///
+    /// # Errors
+    /// No folder for the base (in-memory kernel, or `@self` with no `own`).
+    pub fn record_root(&self, raw: &str, own: &Path) -> Result<(PathBuf, String), String> {
+        fn under<'a>(raw: &'a str, token: &str) -> Option<&'a str> {
+            let rest = raw.strip_prefix(token)?;
+            if rest.is_empty() {
+                Some(".")
             } else {
-                std::env::current_dir()
-                    .map_err(|e| e.to_string())?
-                    .join(workdir)
-            });
+                rest.strip_prefix('/')
+            }
         }
-        let root = self
-            .root()
-            .ok_or_else(|| "kernel has no root — no running dir to clamp disk to".to_string())?;
-        if root.root_path.as_os_str().is_empty() {
-            return Err(
-                "the kernel root has no disk address — no running dir to clamp disk to".to_string(),
-            );
+        if let Some(rel) = under(raw, STATE_PLACEHOLDER) {
+            return Ok((self.state_dir()?, rel.to_string()));
         }
-        let at = if root.root_path.is_absolute() {
-            root.root_path.clone()
-        } else {
-            std::env::current_dir()
-                .map_err(|e| e.to_string())?
-                .join(&root.root_path)
-        };
-        at.parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| format!("root address {} has no parent dir", at.display()))
+        if let Some(rel) = under(raw, SELF_PLACEHOLDER) {
+            if own.as_os_str().is_empty() {
+                return Err("@self: the agent has no folder".to_string());
+            }
+            return Ok((own.to_path_buf(), rel.to_string()));
+        }
+        Ok((self.work_dir()?, raw.to_string()))
     }
 
     /// Push a state event to every subscriber. Keep callbacks short —
@@ -1028,7 +1044,7 @@ impl Kernel {
         self.root.store(None);
 
         // Compute the per-agent on-disk root_path. Disk mode roots at the
-        // storage mode's state dir (`<workdir>/.fantastic/` for a project);
+        // storage mode's state dir (the state folder boot was given);
         // children nest under `agents/<id>/`. InMemory mode uses an empty
         // PathBuf (never read).
         let disk_root: Option<PathBuf> = self.storage.state_dir().map(Path::to_path_buf);

@@ -333,7 +333,10 @@ fn id_for(tmp: &TempDir, tag: &str) -> String {
 /// whatever `extra` registers), an unbooted `kernel_state` root handed a guid, and
 /// the shared test memory store under it.
 async fn base_kernel(tmp: &TempDir, extra: impl FnOnce(&mut Kernel)) -> Arc<Kernel> {
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel
         .bundles
         .register(HANDLER_MODULE, MockBundle { cfg: CFG });

@@ -45,7 +45,10 @@ fn agent(k: &Arc<Kernel>, root: &Arc<fantastic_kernel::Agent>, id: &str, meta: V
 #[tokio::test]
 async fn a_chat_completes_through_its_provider_agent_by_id() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mut k = Kernel::new();
+    let mut k = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     k.bundles.register("echo.tools", Echo);
     let k = Arc::new(k);
     let root = fantastic_kernel::Agent::new(AgentId::from("kernel_state"), None, None, Map::new(), tmp.path().join(".fantastic"), false);
@@ -70,7 +73,10 @@ async fn a_chat_completes_through_its_provider_agent_by_id() {
 #[tokio::test]
 async fn a_chat_without_the_grant_is_refused_by_name() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mut k = Kernel::new();
+    let mut k = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     k.bundles.register("echo.tools", Echo);
     let k = Arc::new(k);
     let root = fantastic_kernel::Agent::new(AgentId::from("kernel_state"), None, None, Map::new(), tmp.path().join(".fantastic"), false);

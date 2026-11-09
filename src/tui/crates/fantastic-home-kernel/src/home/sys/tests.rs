@@ -23,9 +23,9 @@ fn lock_holder_none_without_a_lock_and_self_with_one() {
     let (_d, dir) = temp();
     let path = dir.display().to_string();
     assert_eq!(lock_holder(&path), None);
-    lock::acquire(&dir).expect("the lock");
+    lock::acquire(&dir.join(".fantastic")).expect("the lock");
     assert_eq!(lock_holder(&path), Some(std::process::id()));
-    lock::release(&dir).expect("released");
+    lock::release(&dir.join(".fantastic")).expect("released");
     assert_eq!(lock_holder(&path), None);
     // a stale file whose pid is dead is no holder
     std::fs::write(dir.join(".fantastic/lock.yaml"), "pid: 2147483646\n").unwrap();
@@ -36,8 +36,8 @@ fn lock_holder_none_without_a_lock_and_self_with_one() {
 fn a_lock_that_cannot_be_read_is_an_error_naming_why() {
     let (_d, dir) = temp();
     let path = dir.display().to_string();
-    lock::acquire(&dir).expect("the lock");
-    lock::release(&dir).expect("released");
+    lock::acquire(&dir.join(".fantastic")).expect("the lock");
+    lock::release(&dir.join(".fantastic")).expect("released");
     std::fs::write(dir.join(".fantastic/lock.yaml"), "not: [a lock").unwrap();
     let error = lock_holder_checked(&path).expect_err("a malformed lock");
     assert!(error.starts_with(&format!("{path}: the lock: ")), "{error}");

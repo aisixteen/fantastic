@@ -67,12 +67,12 @@ pub enum KernelError {
     /// A disk bootstrap was asked to keep the kernel's state in the
     /// fantastic home ([`crate::bootstrap::refuse_home_as_state_dir`]).
     #[error(
-        "{}: its .fantastic is the fantastic home ({}) — run fantastic in a project folder",
+        "{}: the fantastic home ({}) is never a kernel's state folder — run fantastic in a project folder",
         dir.display(),
         home.display()
     )]
     HomeAsStateDir {
-        /// The workdir the kernel was booted in.
+        /// The state folder the kernel was booted with.
         dir: PathBuf,
         /// The fantastic home.
         home: PathBuf,

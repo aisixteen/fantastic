@@ -95,7 +95,10 @@ impl Bundle for FakeStore {
 }
 
 fn kernel_at(store_root: &Path) -> Arc<Kernel> {
-    let mut kernel = Kernel::with_storage(StorageMode::disk(store_root.to_path_buf()));
+    let mut kernel = Kernel::with_storage(StorageMode::Disk {
+        state_dir: store_root.to_path_buf().join(".fantastic"),
+        work_dir: store_root.to_path_buf(),
+    });
     let mut reg = BundleRegistry::new();
     reg.register("counting.tools", CountingBundle);
     reg.register(

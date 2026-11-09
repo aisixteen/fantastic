@@ -37,7 +37,10 @@ fn fake_shell(tmp: &TempDir) -> String {
 /// A kernel with only the root; agents are created per test with exactly the
 /// record fields the case is about.
 fn kernel(tmp: &TempDir) -> Arc<Kernel> {
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel.bundles.register(HANDLER_MODULE, ExecBridgeBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
@@ -471,4 +474,33 @@ async fn reflect_advertises_the_shell_permission() {
         call(&k, "login", json!({"type": "reflect"})).await["shell"],
         json!("login")
     );
+}
+
+/// A relative `cwd` is the work folder's, not the process's.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relative_cwd_runs_in_the_work_folder() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = kernel(&tmp);
+    let made = mk(
+        &kernel,
+        &tmp,
+        "rel",
+        json!({"cwd": ".", "allowed": [".*"], "inherit_env": ["PATH"]}),
+    )
+    .await;
+    assert_eq!(made["id"], "rel", "{made}");
+    let r = call(
+        &kernel,
+        "rel",
+        json!({"type": "run", "command": "pwd", "wait_s": 30}),
+    )
+    .await;
+    let want = std::fs::canonicalize(tmp.path()).unwrap();
+    let want = want.to_string_lossy();
+    let ran_there = r["lines"]
+        .as_array()
+        .is_some_and(|l| l.iter().any(|row| row["line"].as_str() == Some(&want)));
+    teardown("rel");
+    assert!(ran_there, "{r}");
 }

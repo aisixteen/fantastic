@@ -445,8 +445,18 @@ async fn run(
     }
     app.seen.flush();
     if let Some(h) = &host {
-        let second = async { tokio::select! { _ = term_sig.recv() => {}, _ = int_sig.recv() => {} } };
-        match crate::kern::host::stop_bounded(h.shutdown(&paths), second, crate::kern::host::STOP_GRACE, &paths.cwd).await {
+        let second = async {
+            tokio::select! { _ = term_sig.recv() => {}, _ = int_sig.recv() => {} }
+        };
+        match crate::kern::host::stop_bounded(
+            h.shutdown(&paths),
+            second,
+            crate::kern::host::STOP_GRACE,
+            &paths.store,
+            &paths.cwd,
+        )
+        .await
+        {
             crate::kern::host::Stopped::Clean => {
                 crate::mcp::close_socket();
                 crate::share::close();

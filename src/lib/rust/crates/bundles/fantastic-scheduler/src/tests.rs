@@ -111,7 +111,10 @@ async fn mk_probed(
     with_store: bool,
 ) -> (Arc<Kernel>, AgentId, Hits) {
     let hits = Hits::default();
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel.bundles.register(HANDLER_MODULE, SchedulerBundle);
     // THE ROOT LOADER serves `persist_blob`/`load_blob` now (they left the
     // kernel-verb set), so a kernel whose root answers them must have it.

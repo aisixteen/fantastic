@@ -26,9 +26,19 @@ const VERBS: [&str; 2] = ["read_stream", "write"];
 async fn setup(dir: &std::path::Path, grant: bool, meta: Value) -> (Arc<Kernel>, Value) {
     let mut reg = BundleRegistry::new();
     reg.register(HANDLER_MODULE, WebMcpBundle);
-    reg.register(fantastic_file::HANDLER_MODULE, fantastic_file::FileBundle::default());
-    reg.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
-    let k = Arc::clone(&bootstrap(reg, BootstrapOptions::one_shot(dir)).expect("boots").kernel);
+    reg.register(
+        fantastic_file::HANDLER_MODULE,
+        fantastic_file::FileBundle::default(),
+    );
+    reg.register(
+        fantastic_core::HANDLER_MODULE,
+        fantastic_core::KernelStateBundle::default(),
+    );
+    let k = Arc::clone(
+        &bootstrap(reg, BootstrapOptions::one_shot(dir.join(".fantastic"), dir))
+            .expect("boots")
+            .kernel,
+    );
     let root = k.root().expect("root").id.0.clone();
     let cb = if grant { json!({"$self": "*", "mcp": VERBS}) } else { json!({"$self": "*"}) };
     let r = op(&k, &root, json!({"type": "create_agent", "parent_id": root, "id": "cfg",

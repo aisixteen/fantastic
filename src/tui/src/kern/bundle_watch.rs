@@ -318,8 +318,14 @@ mod tests {
         std::fs::create_dir_all(&bundle).unwrap();
         write_bundle(&bundle, view);
         std::fs::write(bundle.join("panel.html"), "<p>one</p>").unwrap();
-        let mut kernel = Kernel::new();
-        kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+        let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+            state_dir: dir.join(".fantastic"),
+            work_dir: dir.to_path_buf(),
+        });
+        kernel.bundles.register(
+            fantastic_core::HANDLER_MODULE,
+            fantastic_core::KernelStateBundle::default(),
+        );
         let kernel = Arc::new(kernel);
         kernel.bundles.register_folder("board", Arc::new(Plain), json!({}));
         let root = Agent::new(

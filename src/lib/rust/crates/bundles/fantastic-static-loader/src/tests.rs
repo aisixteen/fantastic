@@ -43,7 +43,11 @@ agents:
 "#;
 
 fn mk_kernel() -> Arc<Kernel> {
-    let mut kernel = Kernel::new();
+    let cwd = std::env::current_dir().unwrap();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: cwd.join(".fantastic"),
+        work_dir: cwd,
+    });
     kernel.bundles.register("mock.tools", MockBundle);
     kernel.bundles.register(HANDLER_MODULE, StaticLoaderBundle);
     let kernel = Arc::new(kernel);

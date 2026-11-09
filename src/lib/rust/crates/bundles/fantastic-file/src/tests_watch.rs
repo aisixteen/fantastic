@@ -10,7 +10,10 @@ use std::time::Duration;
 
 async fn kernel(tmp: &tempfile::TempDir, allow: Value) -> Arc<Kernel> {
     std::fs::create_dir_all(tmp.path().join("served")).unwrap();
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel
         .bundles
         .register(HANDLER_MODULE, FileBundle::default());

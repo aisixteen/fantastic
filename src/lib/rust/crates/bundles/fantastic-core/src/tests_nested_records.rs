@@ -35,9 +35,12 @@ fn booted_with_legs(tmp: &TempDir) -> Arc<Kernel> {
     let mut reg = BundleRegistry::new();
     reg.register(HANDLER_MODULE, KernelStateBundle::default());
     reg.register(LEG, Leg);
-    bootstrap(reg, BootstrapOptions::daemon(tmp.path()))
-        .expect("boot")
-        .kernel
+    bootstrap(
+        reg,
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
+    )
+    .expect("boot")
+    .kernel
 }
 
 /// The session loader's root (python's `.fantastic/web`).

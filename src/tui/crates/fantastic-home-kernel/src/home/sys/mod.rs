@@ -167,7 +167,8 @@ pub fn read_registry(home: &Path) -> Result<Vec<(String, String)>, String> {
 /// Does `path/.fantastic/` exist as a directory. Absent is `Ok(false)`; any
 /// other failure to look is an `Err` naming it.
 pub fn is_fantastic(path: &str) -> Result<bool, String> {
-    let dir = Path::new(path).join(".fantastic");
+    let dir = fantastic_kernel::bootstrap::state_dir_for(None, Some(Path::new(path)))
+        .map_err(|e| format!("{path}: {e}"))?;
     match std::fs::metadata(&dir) {
         Ok(meta) => Ok(meta.is_dir()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -179,10 +180,11 @@ pub fn is_fantastic(path: &str) -> Result<bool, String> {
 /// stale file (its pid dead) is not asked for its flock: a probe's shared flock
 /// on it would refuse a kernel taking it over at that moment.
 pub fn lock_holder_checked(path: &str) -> Result<Option<u32>, String> {
-    let p = Path::new(path);
-    match lock::current_holder(p) {
+    let s = fantastic_kernel::bootstrap::state_dir_for(None, Some(Path::new(path)))
+        .map_err(|e| format!("{path}: {e}"))?;
+    match lock::current_holder(&s) {
         Ok(Some(pid)) if lock::pid_alive(pid) => {
-            lock::held(p).map_err(|e| format!("{path}: the lock: {e}"))
+            lock::held(&s).map_err(|e| format!("{path}: the lock: {e}"))
         }
         Ok(_) => Ok(None),
         Err(e) => Err(format!("{path}: the lock: {e}")),

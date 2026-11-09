@@ -98,14 +98,17 @@ pub fn refusal(l: &Layout, moves: &[Move]) -> Result<(), String> {
             ));
         }
     }
-    if let Some(pid) = held(fantastic_kernel::lock::held_at(&l.home.join("app")))? {
+    if let Some(pid) = held(fantastic_kernel::lock::held(&l.home.join("app")))? {
         return Err(format!(
             "the app holds {} (pid {pid}) — quit it first; nothing was moved",
             l.home.join("app").display()
         ));
     }
     for project in registered(&l.old_home.join("fantastics"))? {
-        if let Some(pid) = held(fantastic_kernel::lock::held(&project))? {
+        if let Some(pid) = held(fantastic_kernel::lock::held(
+            &fantastic_kernel::bootstrap::state_dir_for(None, Some(&project))
+                .map_err(|e| e.to_string())?,
+        ))? {
             return Err(format!(
                 "a fantastic runs in {} (pid {pid}) — stop it first; nothing was moved",
                 project.display()
@@ -360,19 +363,19 @@ mod tests {
         let project = t.path().join("proj");
         std::fs::create_dir_all(&project).unwrap();
         let l = old_tree(t.path(), &project);
-        fantastic_kernel::lock::acquire(&project).unwrap();
+        fantastic_kernel::lock::acquire(&project.join(".fantastic")).unwrap();
         let e = run(&l, false, &mut |_| {}).unwrap_err();
         assert!(
             e.contains("a fantastic runs in") && e.contains("proj"),
             "{e}"
         );
-        fantastic_kernel::lock::release(&project).unwrap();
+        fantastic_kernel::lock::release(&project.join(".fantastic")).unwrap();
 
         let app = l.home.join("app");
-        fantastic_kernel::lock::acquire_at(&app).unwrap();
+        fantastic_kernel::lock::acquire(&app).unwrap();
         let e = run(&l, false, &mut |_| {}).unwrap_err();
         assert!(e.contains("the app holds"), "{e}");
-        fantastic_kernel::lock::release_at(&app).unwrap();
+        fantastic_kernel::lock::release(&app).unwrap();
         assert!(
             l.old_home.join("agents/ai_agent/keys/mode").is_file(),
             "nothing moved"

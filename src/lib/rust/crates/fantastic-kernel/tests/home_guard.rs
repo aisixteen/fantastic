@@ -10,12 +10,12 @@ fn a_kernel_booted_in_the_homes_parent_is_refused() {
     let home = tmp.path().join(".fantastic");
     std::env::set_var("FANTASTIC_HOME", &home);
     for opts in [
-        BootstrapOptions::daemon(tmp.path()),
-        BootstrapOptions::one_shot(tmp.path()),
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
+        BootstrapOptions::one_shot(tmp.path().join(".fantastic"), tmp.path()),
     ] {
         match bootstrap(BundleRegistry::new(), opts) {
             Err(KernelError::HomeAsStateDir { dir, home: h }) => {
-                assert_eq!(dir, tmp.path());
+                assert_eq!(dir, tmp.path().join(".fantastic"));
                 assert_eq!(h, home);
             }
             Err(e) => panic!("refused for the wrong reason: {e}"),

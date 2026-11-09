@@ -168,7 +168,12 @@ async fn a_bundle_on_another_base_keeps_that_handler_and_names_the_bundle() {
     reg.register(HANDLER_MODULE, KernelStateBundle::default());
     reg.register("file_bridge.tools", fantastic_file::FileBundle::default());
     reg.register("files_two.tools", fantastic_file::FileBundle::default());
-    let kernel = bootstrap(reg, BootstrapOptions::daemon(tmp.path())).expect("boot").kernel;
+    let kernel = bootstrap(
+        reg,
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
+    )
+    .expect("boot")
+    .kernel;
     crate::folders::load_bundles(&kernel, &tmp.path().join(".fantastic"));
     let r = create(&kernel, json!({"id": "o1", "handler_module": "files_two.tools", "bundle": "notes"})).await;
     assert_eq!(r["id"], json!("o1"), "{r}");

@@ -112,7 +112,10 @@ fn seed(path: &Path, text: &str) {
 }
 
 fn boot_err(work: &Path) -> String {
-    match bootstrap(BundleRegistry::new(), BootstrapOptions::one_shot(work)) {
+    match bootstrap(
+        BundleRegistry::new(),
+        BootstrapOptions::one_shot(work.join(".fantastic"), work),
+    ) {
         Ok(_) => panic!("the boot must refuse"),
         Err(e) => e.to_string(),
     }
@@ -162,7 +165,11 @@ fn cold_walk_follows_an_inward_symlinked_entry() {
     seed(&fdir.join("stash/a/agent.yaml"), "id: a\n");
     std::fs::create_dir_all(fdir.join("agents")).unwrap();
     symlink(fdir.join("stash/a"), fdir.join("agents/a")).unwrap();
-    let booted = bootstrap(BundleRegistry::new(), BootstrapOptions::one_shot(&work)).unwrap();
+    let booted = bootstrap(
+        BundleRegistry::new(),
+        BootstrapOptions::one_shot(work.join(".fantastic"), &work),
+    )
+    .unwrap();
     let a = booted
         .kernel
         .agents

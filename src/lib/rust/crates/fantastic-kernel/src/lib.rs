@@ -1,8 +1,8 @@
 //! Recursive `Agent` substrate + `Kernel` shared context.
 //!
 //! Stable surface: `send`, `emit`, `watch`, `create`/`delete`/`update`,
-//! `reflect`, on-disk `.fantastic/` layout. One runtime is active per
-//! workdir at a time, locked by `.fantastic/lock.yaml`. Agents whose
+//! `reflect`, on-disk state-folder layout. One runtime is active per
+//! state folder at a time, locked by `<state>/lock.yaml`. Agents whose
 //! bundle isn't installed in this runtime are skipped + logged at boot.
 //!
 //! ## Sub-phase A scope (current commit)
@@ -11,7 +11,7 @@
 //! - [`kernel::Kernel`] context (agents/inboxes/state subs/root)
 //! - [`bundle::Bundle`] trait + [`bundle::BundleRegistry`]
 //! - [`persistence`] load/persist with weak-load skip+log
-//! - [`lock`] PID-keyed workdir lock
+//! - [`lock`] PID-keyed state-folder lock
 //! - [`errors::KernelError`]
 //!
 //! Sub-phase B (next commit) adds the verb dispatch path (`send`,
@@ -59,7 +59,10 @@ pub use agent::{Agent, AgentId, AgentRecord, RESERVED_RECORD_KEYS};
 pub use authz::{authorize_call, default_callable_by, default_can_call, Decision, FROM_ABOVE};
 pub use bundle::{Bundle, BundleRegistry, Reply};
 pub use errors::{KernelError, KernelResult};
-pub use kernel::{Kernel, StateSubscriber, SubscriberToken, DEFAULT_INBOX_BOUND};
+pub use kernel::{
+    Kernel, StateSubscriber, SubscriberToken, DEFAULT_INBOX_BOUND, SELF_PLACEHOLDER,
+    STATE_PLACEHOLDER,
+};
 pub use outcome::{body_at, Blob, Item, Outcome, Status, Step};
 pub use paging::page;
 pub use peers::{PeerCallFuture, PeerEmitFuture, PeerReply, PeerRoute};

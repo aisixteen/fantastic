@@ -43,7 +43,10 @@ async fn bridge(k: &Arc<Kernel>, tmp: &tempfile::TempDir, id: &str, meta: Value)
 /// G holds a file; C may call F's `pump` and `read_stream`; F reaches G only when
 /// `f_reaches_g` — both halves of the F→G edge.
 async fn wire(tmp: &tempfile::TempDir, f_reaches_g: bool) -> Arc<Kernel> {
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel
         .bundles
         .register(HANDLER_MODULE, FileBundle::default());

@@ -74,7 +74,11 @@ async fn the_switch_and_the_name_are_on_disk_when_the_verbs_answer() {
     seed(&dir);
     std::env::set_current_dir(&dir).unwrap();
 
-    let booted = bootstrap::bootstrap(registry(&home, &dir), BootstrapOptions::daemon(&dir)).expect("boots");
+    let booted = bootstrap::bootstrap(
+        registry(&home, &dir),
+        BootstrapOptions::daemon(dir.join(".fantastic"), &dir),
+    )
+    .expect("boots");
     let kernel = std::sync::Arc::clone(&booted.kernel);
     kernel
         .send(vec![Item::new(
@@ -112,7 +116,7 @@ async fn the_switch_and_the_name_are_on_disk_when_the_verbs_answer() {
     assert!(!home.join("fantastics/durable").exists());
 
     kernel.shutdown().await;
-    let _ = bootstrap::shutdown(&dir);
+    let _ = bootstrap::shutdown(&dir.join(".fantastic"));
     std::env::set_current_dir(std::env::temp_dir()).unwrap();
     let _ = std::fs::remove_dir_all(&base);
 }

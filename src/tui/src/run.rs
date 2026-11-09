@@ -20,7 +20,7 @@ pub async fn main_loop(opts: Opts) -> Result<()> {
     }
     // A KERNEL ALREADY RUNS HERE: this is a THIN CLIENT of its shell (`share`)
     // — the owner drives recipes, so a thin client takes none.
-    if let Ok(Some(pid)) = fantastic_kernel::lock::held(&paths.cwd) {
+    if let Ok(Some(pid)) = fantastic_kernel::lock::held(&paths.store) {
         if pid != std::process::id() {
             // ANY argument is refused, even one that would change nothing: a
             // command silently swallowed would confuse more than a refusal.

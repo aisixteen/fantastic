@@ -45,7 +45,7 @@ fn mk_kernel_with_storage(
         .register("counting.tools", CountingBundle { deletes });
     // Disk mode persists THROUGH a provider — register the fake `file_bridge`
     // store rooted at the workdir so a test can wire one (see `wire_fake_store`).
-    if let Some(wd) = storage.workdir() {
+    if let Some(wd) = storage.work_dir() {
         crate::test_support::register_fake_store(&mut kernel.bundles, wd);
     }
     // The ROOT LOADER — its `boot` is what subscribes the record writer, which
@@ -91,7 +91,10 @@ async fn create_then_delete_unregisters_and_calls_hook() {
     // agent.yaml files (the assertions below rely on that).
     let kernel = mk_kernel_with_storage(
         Arc::clone(&deletes),
-        crate::storage::StorageMode::disk(tmp.path().to_path_buf()),
+        crate::storage::StorageMode::Disk {
+            state_dir: tmp.path().to_path_buf().join(".fantastic"),
+            work_dir: tmp.path().to_path_buf(),
+        },
     );
     // Stand up a root pointing at the tempdir.
     let root = Agent::new(

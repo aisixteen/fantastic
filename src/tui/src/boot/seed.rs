@@ -465,8 +465,12 @@ mod tests {
         write_all(&p).unwrap();
         let s = rec(&p, "user/agents/store/agent.yaml");
         assert_eq!(s["handler_module"], "file_bridge.tools");
-        assert_eq!(s["allow"], json!(["."]), "a bridge is deny-all per path: the store exposes its whole dir");
-        assert_eq!(s["root"], ".fantastic");
+        assert_eq!(
+            s["allow"],
+            json!(["."]),
+            "a bridge is deny-all per path: the store exposes its whole dir"
+        );
+        assert_eq!(s["root"], "@state");
         let _ = std::fs::remove_dir_all(&p.cwd);
     }
 

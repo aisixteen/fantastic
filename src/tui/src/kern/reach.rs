@@ -439,8 +439,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fc-reach-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let mut kernel = Kernel::new();
-        kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+        let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+            state_dir: dir.join(".fantastic"),
+            work_dir: dir.to_path_buf(),
+        });
+        kernel.bundles.register(
+            fantastic_core::HANDLER_MODULE,
+            fantastic_core::KernelStateBundle::default(),
+        );
         more(&mut kernel);
         let kernel = std::sync::Arc::new(kernel);
         let root = Agent::new(

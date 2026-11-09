@@ -99,8 +99,11 @@ async fn the_human_drives_the_specified_set_in_process() {
     // Both bundles clamp against the process cwd, so this is required, not tidy.
     std::env::set_current_dir(&dir).unwrap();
 
-    let booted = bootstrap::bootstrap(registry(), BootstrapOptions::daemon(&dir))
-        .expect("the kernel boots over a seeded directory");
+    let booted = bootstrap::bootstrap(
+        registry(),
+        BootstrapOptions::daemon(dir.join(".fantastic"), &dir),
+    )
+    .expect("the kernel boots over a seeded directory");
     let kernel = std::sync::Arc::clone(&booted.kernel);
     // The shell's start: the root names the store, the KERNEL starts (root,
     // store, flusher), then everyone else boots.
@@ -205,7 +208,7 @@ async fn the_human_drives_the_specified_set_in_process() {
     assert!(dir.join(".fantastic").join("memory.db").is_file(), "one SQLite file");
 
     kernel.shutdown().await;
-    let _ = bootstrap::shutdown(&dir);
+    let _ = bootstrap::shutdown(&dir.join(".fantastic"));
     // Leave the cwd somewhere that exists, then clean up.
     std::env::set_current_dir(std::env::temp_dir()).unwrap();
     let _ = std::fs::remove_dir_all(&dir);

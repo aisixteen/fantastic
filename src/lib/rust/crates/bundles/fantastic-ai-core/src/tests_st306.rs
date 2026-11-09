@@ -177,7 +177,10 @@ async fn create_one(kernel: &Arc<Kernel>, create: Value) {
 /// A kernel with the mock backend, the fake exec agent and the given agents on it.
 /// Each agent may call the exec agent; the exec agent takes calls from each agent.
 async fn setup(tmp: &TempDir, agents: &[&str], exec: &str) -> Arc<Kernel> {
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel.bundles.register(HANDLER, MockBundle);
     kernel.bundles.register(EXEC, FakeExec);
     kernel.bundles.register(

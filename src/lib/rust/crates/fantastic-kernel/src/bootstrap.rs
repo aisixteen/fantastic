@@ -5,8 +5,8 @@
 //! identical:
 //!
 //! - **Disk mode** ([`StorageMode::Disk`]):
-//!   1. Acquire `.fantastic/lock.yaml` (PID-keyed; stale → overwritten).
-//!   2. Read the tree — `.fantastic/agent.yaml` (the root record) and every
+//!   1. Acquire `<state>/lock.yaml` (PID-keyed; stale → overwritten).
+//!   2. Read the tree — `<state>/agent.yaml` (the root record) and every
 //!      record under its children dir — into a flat record list; seed a root
 //!      on a virgin workdir (or over a missing/corrupt root record).
 //!   3. [`Kernel::load_records`] it, python's `kernel.load(read_tree(…))`:
@@ -65,23 +65,13 @@ pub struct BootstrapOptions {
 }
 
 impl BootstrapOptions {
-    /// Disk-backed daemon bootstrap (acquires lock; root id `"kernel_state"`).
-    pub fn daemon(workdir: impl Into<PathBuf>) -> Self {
-        Self {
-            storage: StorageMode::disk(workdir.into()),
-            acquire_lock: true,
-            root_id: DEFAULT_ROOT_ID.to_string(),
-        }
-    }
-
-    /// Disk-backed daemon bootstrap whose state lives in `state_dir`, not in
-    /// `<workdir>/.fantastic` (acquires lock; root id `"kernel_state"`). The
-    /// on-disk format is the same; only its place is the host's choice.
-    pub fn daemon_at(workdir: impl Into<PathBuf>, state_dir: impl Into<PathBuf>) -> Self {
+    /// Disk-backed daemon bootstrap (acquires lock; root id `"kernel_state"`):
+    /// the kernel keeps its records in `state_dir` and runs against `work_dir`.
+    pub fn daemon(state_dir: impl Into<PathBuf>, work_dir: impl Into<PathBuf>) -> Self {
         Self {
             storage: StorageMode::Disk {
-                workdir: workdir.into(),
                 state_dir: state_dir.into(),
+                work_dir: work_dir.into(),
             },
             acquire_lock: true,
             root_id: DEFAULT_ROOT_ID.to_string(),
@@ -89,9 +79,12 @@ impl BootstrapOptions {
     }
 
     /// Disk-backed one-shot read (no lock).
-    pub fn one_shot(workdir: impl Into<PathBuf>) -> Self {
+    pub fn one_shot(state_dir: impl Into<PathBuf>, work_dir: impl Into<PathBuf>) -> Self {
         Self {
-            storage: StorageMode::disk(workdir.into()),
+            storage: StorageMode::Disk {
+                state_dir: state_dir.into(),
+                work_dir: work_dir.into(),
+            },
             acquire_lock: false,
             root_id: DEFAULT_ROOT_ID.to_string(),
         }
@@ -144,18 +137,21 @@ pub fn bootstrap(bundles: BundleRegistry, opts: BootstrapOptions) -> KernelResul
     let kernel = Arc::new(kernel);
 
     match &opts.storage {
-        StorageMode::Disk { workdir, state_dir } => boot_disk(&kernel, workdir, state_dir, &opts),
+        StorageMode::Disk {
+            state_dir,
+            work_dir,
+        } => boot_disk(&kernel, state_dir, work_dir, &opts),
         StorageMode::InMemory => boot_in_memory(&kernel, &opts.root_id),
     }
 }
 
 fn boot_disk(
     kernel: &Arc<Kernel>,
-    workdir: &Path,
     state_dir: &Path,
+    _work_dir: &Path,
     opts: &BootstrapOptions,
 ) -> KernelResult<BootedKernel> {
-    refuse_home_as_state_dir(workdir, state_dir, fantastic_home().as_deref())?;
+    refuse_home_as_state_dir(state_dir, fantastic_home().as_deref())?;
     let fantastic_dir = state_dir.to_path_buf();
     // A LOCKLESS boot (`--help`, `reflect`) creates nothing on disk; the lock
     // lives in `.fantastic`, so a locked one makes the dir first.
@@ -164,7 +160,7 @@ fn boot_disk(
             path: fantastic_dir.clone(),
             source: e,
         })?;
-        lock::acquire_at(state_dir)?;
+        lock::acquire(state_dir)?;
     }
 
     // THE TREE, python `_bootstrap`: `records = read_tree(.fantastic)`. A
@@ -320,19 +316,30 @@ fn boot_in_memory(kernel: &Arc<Kernel>, root_id: &str) -> KernelResult<BootedKer
     })
 }
 
-/// Release the lock the bootstrap call acquired. Idempotent.
-/// No-op on a workdir that was never used in Disk mode.
-pub fn shutdown(workdir: &Path) -> KernelResult<()> {
-    lock::release(workdir)
+/// Release the lock the bootstrap call acquired, in `state_dir`. Idempotent.
+/// No-op on a state folder that was never used in Disk mode.
+pub fn shutdown(state_dir: &Path) -> KernelResult<()> {
+    lock::release(state_dir)
 }
 
-/// [`shutdown`] for a kernel booted with [`BootstrapOptions::daemon_at`]:
-/// releases the lock in its `state_dir`.
+/// The folder name of a project's state folder.
+pub const STATE_DIR_NAME: &str = ".fantastic";
+
+/// THE ONE derivation of a kernel's state folder: `statedir` when given
+/// (absolutized), else `<workdir>/.fantastic` with `workdir` (default: the
+/// current dir) absolutized.
 ///
 /// # Errors
-/// As [`shutdown`].
-pub fn shutdown_at(state_dir: &Path) -> KernelResult<()> {
-    lock::release_at(state_dir)
+/// The current dir cannot be read.
+pub fn state_dir_for(statedir: Option<&Path>, workdir: Option<&Path>) -> std::io::Result<PathBuf> {
+    if let Some(s) = statedir {
+        return std::path::absolute(s);
+    }
+    let work = match workdir {
+        Some(w) => std::path::absolute(w)?,
+        None => std::env::current_dir()?,
+    };
+    Ok(work.join(STATE_DIR_NAME))
 }
 
 /// The variable naming the fantastic home.
@@ -374,21 +381,17 @@ pub fn home_spelled() -> std::io::Result<String> {
 ///
 /// # Errors
 /// [`KernelError::HomeAsStateDir`] when `state_dir` is `home`.
-pub fn refuse_home_as_state_dir(
-    workdir: &Path,
-    state_dir: &Path,
-    home: Option<&Path>,
-) -> KernelResult<()> {
+pub fn refuse_home_as_state_dir(state_dir: &Path, home: Option<&Path>) -> KernelResult<()> {
     let Some(home) = home else {
         return Ok(());
     };
     let cwd = std::env::current_dir().map_err(|e| KernelError::Persistence {
-        path: workdir.to_path_buf(),
+        path: state_dir.to_path_buf(),
         source: e,
     })?;
     if fold(&cwd, state_dir) == fold(&cwd, home) {
         return Err(KernelError::HomeAsStateDir {
-            dir: workdir.to_path_buf(),
+            dir: state_dir.to_path_buf(),
             home: home.to_path_buf(),
         });
     }

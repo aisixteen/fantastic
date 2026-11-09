@@ -107,7 +107,12 @@ fn registry(dir: &Path) -> BundleRegistry {
 }
 
 fn boot(dir: &Path) -> Arc<Kernel> {
-    bootstrap(registry(dir), BootstrapOptions::one_shot(dir)).expect("bootstrap").kernel
+    bootstrap(
+        registry(dir),
+        BootstrapOptions::one_shot(dir.join(".fantastic"), dir),
+    )
+    .expect("bootstrap")
+    .kernel
 }
 
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Outcome {

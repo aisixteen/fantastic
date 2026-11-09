@@ -122,7 +122,10 @@ impl Bundle for LimitRegistry {
 }
 
 async fn setup_with(tmp: &TempDir, tag: &str, extra: Value) -> (Arc<Kernel>, AgentId) {
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel.bundles.register(HANDLER, PauseBundle);
     kernel
         .bundles

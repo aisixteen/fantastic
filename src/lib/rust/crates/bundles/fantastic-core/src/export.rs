@@ -875,10 +875,10 @@ pub async fn export_subtree(kernel: &Arc<Kernel>, p: &Value, who: &str) -> Value
     if rel.components().any(|c| c == Component::ParentDir) {
         return refuse("bad_arg", format!("{who}: path may not hold `..`"));
     }
-    let base = kernel
-        .workdir()
-        .or_else(|_| std::env::current_dir().map_err(|e| e.to_string()))
-        .unwrap_or_default();
+    let base = match kernel.work_dir() {
+        Ok(b) => b,
+        Err(e) => return refuse("failed", format!("{who}: {e}")),
+    };
     let out = absolute(&base, rel);
     if out.exists() {
         let empty = out.is_dir()

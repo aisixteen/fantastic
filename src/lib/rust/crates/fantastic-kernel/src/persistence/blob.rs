@@ -67,7 +67,8 @@ fn blob_reldir(kernel: &Arc<Kernel>, loader: &Agent, aid: &str) -> Result<String
         Some(agent) => agent.root_path.clone(),
         None => super::RecordPlaces::new(
             kernel,
-            super::loader_dir(loader),
+            super::loader_dir(kernel, loader)
+                .map_err(|e| -> BundleError { format!("RuntimeError: {e}").into() })?,
             super::loader_children(loader),
             loader.id.0.clone(),
         )

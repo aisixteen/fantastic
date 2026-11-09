@@ -51,9 +51,9 @@ use fantastic_bundle::{
 
 use crate::sys;
 
-/// python `fs.resolve_root` — clamp `root` to the running dir `base` (the
-/// kernel's [`fantastic_kernel::Kernel::workdir`], python's `fs.Root.base` — the
-/// ONE source). A relative root resolves under `base`; an absolute root is
+/// python `fs.resolve_root` — clamp `root` to `base` (the folder the kernel's
+/// [`fantastic_kernel::Kernel::record_root`] names: the state folder for `@state`/`@self`,
+/// the work folder otherwise — python's `fs.Root.base`). A relative root resolves under `base`; an absolute root is
 /// allowed only if it lies inside `base`; `..`/symlink escapes refuse.
 ///
 /// # Errors

@@ -135,7 +135,7 @@ pub fn done(cli: &Path, id: &str) -> Result<(), String> {
 pub async fn apply_to_root(
     kernel: &std::sync::Arc<fantastic_kernel::Kernel>,
 ) -> Result<(), String> {
-    let cli = crate::env::Paths::at(&kernel.workdir()?).cli;
+    let cli = kernel.state_dir()?.join("cli");
     let key = fantastic_kernel::bootstrap::DEFAULT_ROOT_ID;
     let Some(g) = pending(&cli, key)? else {
         return Ok(());
@@ -286,8 +286,11 @@ mod tests {
             )
         };
 
-        let booted =
-            bootstrap::bootstrap(registry(), BootstrapOptions::daemon(&dir)).expect("boots");
+        let booted = bootstrap::bootstrap(
+            registry(),
+            BootstrapOptions::daemon(dir.join(".fantastic"), &dir),
+        )
+        .expect("boots");
         start(&booted.kernel).await;
         apply_to_root(&booted.kernel).await.unwrap();
         assert_eq!(
@@ -300,11 +303,14 @@ mod tests {
             None,
             "forgotten once carried"
         );
-        bootstrap::shutdown(&dir).unwrap();
+        bootstrap::shutdown(&dir.join(".fantastic")).unwrap();
         drop(booted);
 
-        let again =
-            bootstrap::bootstrap(registry(), BootstrapOptions::daemon(&dir)).expect("boots again");
+        let again = bootstrap::bootstrap(
+            registry(),
+            BootstrapOptions::daemon(dir.join(".fantastic"), &dir),
+        )
+        .expect("boots again");
         start(&again.kernel).await;
         apply_to_root(&again.kernel).await.unwrap();
         assert_eq!(
@@ -312,7 +318,7 @@ mod tests {
             (json!(["get"]), json!("*"), json!("*")),
             "on disk, so a later boot still has them"
         );
-        bootstrap::shutdown(&dir).unwrap();
+        bootstrap::shutdown(&dir.join(".fantastic")).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

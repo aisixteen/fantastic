@@ -40,9 +40,14 @@ fn agent(id: &str, hm: Option<&str>, parent: Option<&str>, meta: Value) -> Arc<A
 /// ram_store's `store()` fixture, for either bundle.
 fn store(handler: &str, tag: &str) -> Arc<Kernel> {
     let dir = work();
-    let mut k = Kernel::with_storage(fantastic_kernel::StorageMode::disk(dir.clone()));
-    k.bundles.register(RAM, fantastic_ram_store::RamStoreBundle::default());
-    k.bundles.register(SQL, fantastic_sqlite_store::SqliteStoreBundle::default());
+    let mut k = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: dir.clone().join(".fantastic"),
+        work_dir: dir.clone(),
+    });
+    k.bundles
+        .register(RAM, fantastic_ram_store::RamStoreBundle::default());
+    k.bundles
+        .register(SQL, fantastic_sqlite_store::SqliteStoreBundle::default());
     let k = Arc::new(k);
     let root = agent("kernel_state", None, None, json!({"guid": "g1"}));
     k.register(Arc::clone(&root));

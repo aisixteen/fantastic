@@ -133,10 +133,12 @@ pub struct KernelStateBundle {
 }
 
 /// The loader's own disk dir: a `root` meta overrides the agent's address, so a
-/// SESSION loader can serve a sub-namespace. Python `_root`. Unclamped — every
-/// disk touch goes through [`clamp`] first.
-fn loader_root(agent: &Arc<Agent>) -> PathBuf {
-    persistence::loader_dir(agent)
+/// SESSION loader can serve a sub-namespace. Python `_root`. Its `root` meta
+/// follows the one record-path rule (`@state`, `@self`, else the work folder).
+/// Unchecked here — every disk touch goes through [`clamp`] first.
+fn loader_root(kernel: &Kernel, agent: &Arc<Agent>) -> Result<PathBuf, BundleError> {
+    persistence::loader_dir(kernel, agent)
+        .map_err(|e| -> BundleError { format!("RuntimeError: {e}").into() })
 }
 
 /// python `_root`'s override: the loader's `root` meta when it is a non-empty
@@ -153,29 +155,23 @@ fn root_meta(agent: &Agent) -> Option<String> {
 /// `str(_root(agent))` as the loader's reflect reports it. A `root` meta is
 /// reported AS GIVEN (`Path(r)`: an absolute meta stays absolute, a relative one
 /// stays relative). With no meta python reports `_root_path`, the agent's
-/// address RELATIVE to the running dir (`.fantastic/agents/…`); the port's
-/// address is absolute, so it is shown relative to [`Kernel::workdir`] — and a
-/// kernel with no running dir RAISES, as `clamp` does.
+/// address relative to the store; the port's address is absolute, so it is shown
+/// relative to [`Kernel::state_dir`] (the root loader reports `.`, a child
+/// `agents/<id>`) — and a kernel with no state folder RAISES, as `clamp` does.
 fn reported_root(agent: &Arc<Agent>, kernel: &Kernel) -> Result<String, BundleError> {
     let shown = match root_meta(agent) {
         Some(r) => PathBuf::from(r),
         None => {
             let base = kernel
-                .workdir()
+                .state_dir()
                 .map_err(|e| -> BundleError { format!("RuntimeError: {e}").into() })?;
-            // Resolved the way `Kernel::workdir` resolves the root's address.
-            let at = if agent.root_path.is_absolute() {
-                agent.root_path.clone()
-            } else {
-                std::env::current_dir()
-                    .map_err(|e| -> BundleError { format!("RuntimeError: {e}").into() })?
-                    .join(&agent.root_path)
-            };
-            at.strip_prefix(&base)
+            agent
+                .root_path
+                .strip_prefix(&base)
                 .map_err(|_| -> BundleError {
                     format!(
-                        "RuntimeError: loader address {} is outside the running dir {}",
-                        at.display(),
+                        "RuntimeError: loader address {} is outside the state folder {}",
+                        agent.root_path.display(),
                         base.display()
                     )
                     .into()
@@ -215,11 +211,12 @@ fn raise_fs(msg: String) -> BundleError {
 }
 
 /// python `fs.Root(agent.ctx.workdir, dir)`, resolved: `dir` clamped to the
-/// running dir (relative ⇒ under it; absolute ⇒ only inside it; `..`/symlink
-/// escapes refused with python's text, raised).
+/// state folder (relative ⇒ under it; absolute ⇒ only inside it; `..`/symlink
+/// escapes refused with python's text, raised). A loader folder is never
+/// checked against the work folder.
 fn clamp(kernel: &Kernel, dir: &Path) -> Result<PathBuf, BundleError> {
     let base = kernel
-        .workdir()
+        .state_dir()
         .map_err(|e| -> BundleError { format!("RuntimeError: {e}").into() })?;
     fantastic_fs::resolve_root(&dir.to_string_lossy(), &base).map_err(raise_fs)
 }
@@ -343,7 +340,7 @@ impl KernelStateBundle {
         agent: &Arc<Agent>,
         kernel: &Arc<Kernel>,
     ) -> Result<Value, BundleError> {
-        let root_dir = loader_root(agent);
+        let root_dir = loader_root(kernel, agent)?;
         let live = if root_dir == agent.root_path {
             None
         } else {
@@ -495,7 +492,7 @@ impl<'a> Places<'a> {
             return Ok((true, live.parent_id.as_ref().map(|p| p.0.clone())));
         }
         if self.disk.is_none() {
-            let root = clamp(self.kernel, &loader_root(self.agent))?;
+            let root = clamp(self.kernel, &loader_root(self.kernel, self.agent)?)?;
             self.disk = Some(
                 persistence::disk_parents(&root, &children_name(self.agent), &self.agent.id.0)
                     .map_err(raise_fs)?,
@@ -528,7 +525,7 @@ impl<'a> Places<'a> {
             pid = self.locate(&p)?.1;
         }
         let children_dir = children_name(self.agent);
-        let mut path = loader_root(self.agent);
+        let mut path = loader_root(self.kernel, self.agent)?;
         for part in parts.iter().rev() {
             path = path.join(&children_dir).join(part);
         }
@@ -757,7 +754,7 @@ async fn reload_bundle(
             "a folder under .fantastic/bundles/",
         ));
     };
-    let root = clamp(kernel, &loader_root(agent))?;
+    let root = clamp(kernel, &loader_root(kernel, agent)?)?;
     let shown = fantastic_fs::file_name(&root);
     let rel = format!("{}/{name}", crate::folders::BUNDLES_DIR);
     if !(crate::folders::is_folder_name(name) && root.join(&rel).exists()) {
@@ -806,7 +803,7 @@ fn read_bundles(
 ) -> Result<Value, BundleError> {
     use crate::folders::{is_folder_name, BUNDLES_DIR, BUNDLE_FILE};
     use fantastic_kernel::refusal::{bad, refusal_hint, NOT_FOUND};
-    let root = clamp(kernel, &loader_root(agent))?;
+    let root = clamp(kernel, &loader_root(kernel, agent)?)?;
     let shown = fantastic_fs::file_name(&root);
     let names: Vec<String> = match payload.get("name") {
         None | Some(Value::Null) => {

@@ -27,7 +27,7 @@ fn pid_zero_is_not_alive() {
 #[test]
 fn acquire_writes_lock_file() {
     let tmp = TempDir::new().unwrap();
-    let path = acquire(tmp.path()).unwrap();
+    let path = acquire(&tmp.path().join(".fantastic")).unwrap();
     assert!(path.exists());
     let raw = std::fs::read_to_string(&path).unwrap();
     let lock: LockFile = parse_lock(&raw).unwrap();
@@ -38,8 +38,8 @@ fn acquire_writes_lock_file() {
 fn acquire_refuses_when_live_pid_holds() {
     let tmp = TempDir::new().unwrap();
     // Pretend a live process (ourselves) owns the lock.
-    acquire(tmp.path()).unwrap();
-    let err = acquire(tmp.path()).unwrap_err();
+    acquire(&tmp.path().join(".fantastic")).unwrap();
+    let err = acquire(&tmp.path().join(".fantastic")).unwrap_err();
     match err {
         KernelError::LockHeld { pid } => assert_eq!(pid, std::process::id()),
         other => panic!("expected LockHeld, got {other:?}"),
@@ -55,10 +55,10 @@ fn a_live_pid_without_the_flock_is_taken_over() {
     let lock_path = tmp.path().join(crate::persistence::LOCK_PATH);
     std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     std::fs::write(&lock_path, format!("pid: {}\n", std::process::id())).unwrap();
-    acquire(tmp.path()).unwrap();
+    acquire(&tmp.path().join(".fantastic")).unwrap();
     let raw = std::fs::read_to_string(&lock_path).unwrap();
     assert_eq!(raw, format!("pid: {}\n", std::process::id()));
-    release(tmp.path()).unwrap();
+    release(&tmp.path().join(".fantastic")).unwrap();
 }
 
 #[test]
@@ -72,20 +72,20 @@ fn acquire_leaves_no_staged_file() {
         v.sort();
         v
     };
-    acquire(tmp.path()).unwrap();
+    acquire(&tmp.path().join(".fantastic")).unwrap();
     assert_eq!(names(), ["lock.yaml"]);
-    assert!(acquire(tmp.path()).is_err());
+    assert!(acquire(&tmp.path().join(".fantastic")).is_err());
     assert_eq!(names(), ["lock.yaml"]);
-    release(tmp.path()).unwrap();
+    release(&tmp.path().join(".fantastic")).unwrap();
 }
 
 #[test]
 fn release_lets_the_next_acquire_in() {
     let tmp = TempDir::new().unwrap();
-    acquire(tmp.path()).unwrap();
-    release(tmp.path()).unwrap();
-    acquire(tmp.path()).unwrap();
-    release(tmp.path()).unwrap();
+    acquire(&tmp.path().join(".fantastic")).unwrap();
+    release(&tmp.path().join(".fantastic")).unwrap();
+    acquire(&tmp.path().join(".fantastic")).unwrap();
+    release(&tmp.path().join(".fantastic")).unwrap();
 }
 
 #[test]
@@ -111,7 +111,7 @@ fn two_racing_acquisitions_exactly_one_wins() {
                     .map(|_| {
                         s.spawn(|| {
                             gate.wait();
-                            acquire(tmp.path())
+                            acquire(&tmp.path().join(".fantastic"))
                         })
                     })
                     .collect();
@@ -128,7 +128,7 @@ fn two_racing_acquisitions_exactly_one_wins() {
                     );
                 }
             }
-            release(tmp.path()).unwrap();
+            release(&tmp.path().join(".fantastic")).unwrap();
         }
     }
 }
@@ -140,7 +140,7 @@ fn acquire_overwrites_stale_lock() {
     let lock_path = tmp.path().join(crate::persistence::LOCK_PATH);
     std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     std::fs::write(&lock_path, r#"{"pid": 4294967294}"#).unwrap();
-    let acquired = acquire(tmp.path()).unwrap();
+    let acquired = acquire(&tmp.path().join(".fantastic")).unwrap();
     assert_eq!(acquired, lock_path);
     let raw = std::fs::read_to_string(&lock_path).unwrap();
     let lock: LockFile = parse_lock(&raw).unwrap();
@@ -150,16 +150,16 @@ fn acquire_overwrites_stale_lock() {
 #[test]
 fn release_removes_file() {
     let tmp = TempDir::new().unwrap();
-    let path = acquire(tmp.path()).unwrap();
+    let path = acquire(&tmp.path().join(".fantastic")).unwrap();
     assert!(path.exists());
-    release(tmp.path()).unwrap();
+    release(&tmp.path().join(".fantastic")).unwrap();
     assert!(!path.exists());
 }
 
 #[test]
 fn release_when_missing_is_noop() {
     let tmp = TempDir::new().unwrap();
-    release(tmp.path()).unwrap();
+    release(&tmp.path().join(".fantastic")).unwrap();
 }
 
 #[test]
@@ -172,7 +172,7 @@ fn release_keeps_a_malformed_lock() {
     let lock_path = tmp.path().join(crate::persistence::LOCK_PATH);
     std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     std::fs::write(&lock_path, "{NOT_JSON").unwrap();
-    release(tmp.path()).unwrap();
+    release(&tmp.path().join(".fantastic")).unwrap();
     assert!(lock_path.exists(), "a malformed lock survives release()");
 }
 
@@ -193,7 +193,7 @@ fn lock_held_text_is_python_verbatim() {
 fn lock_bytes_are_python_yaml_dump() {
     // python `yaml.dump({"pid": os.getpid()}, CSafeDumper, sort_keys=False)`.
     let tmp = TempDir::new().unwrap();
-    let path = acquire(tmp.path()).unwrap();
+    let path = acquire(&tmp.path().join(".fantastic")).unwrap();
     let raw = std::fs::read_to_string(&path).unwrap();
     assert_eq!(raw, format!("pid: {}\n", std::process::id()));
 }
@@ -201,25 +201,40 @@ fn lock_bytes_are_python_yaml_dump() {
 #[test]
 fn current_holder_returns_pid() {
     let tmp = TempDir::new().unwrap();
-    assert!(current_holder(tmp.path()).unwrap().is_none());
-    acquire(tmp.path()).unwrap();
-    let pid = current_holder(tmp.path()).unwrap().expect("locked");
+    assert!(current_holder(&tmp.path().join(".fantastic"))
+        .unwrap()
+        .is_none());
+    acquire(&tmp.path().join(".fantastic")).unwrap();
+    let pid = current_holder(&tmp.path().join(".fantastic"))
+        .unwrap()
+        .expect("locked");
     assert_eq!(pid, std::process::id());
 }
 
 #[test]
 fn held_names_the_holder_while_the_flock_is_held() {
     let tmp = TempDir::new().unwrap();
-    assert_eq!(held(tmp.path()).unwrap(), None, "no lock file");
-    acquire(tmp.path()).unwrap();
-    assert_eq!(held(tmp.path()).unwrap(), Some(std::process::id()));
+    assert_eq!(
+        held(&tmp.path().join(".fantastic")).unwrap(),
+        None,
+        "no lock file"
+    );
+    acquire(&tmp.path().join(".fantastic")).unwrap();
+    assert_eq!(
+        held(&tmp.path().join(".fantastic")).unwrap(),
+        Some(std::process::id())
+    );
     // the probe took nothing: the holder still holds, a second acquire is refused
     assert!(matches!(
-        acquire(tmp.path()).unwrap_err(),
+        acquire(&tmp.path().join(".fantastic")).unwrap_err(),
         KernelError::LockHeld { .. }
     ));
-    release(tmp.path()).unwrap();
-    assert_eq!(held(tmp.path()).unwrap(), None, "after release");
+    release(&tmp.path().join(".fantastic")).unwrap();
+    assert_eq!(
+        held(&tmp.path().join(".fantastic")).unwrap(),
+        None,
+        "after release"
+    );
 }
 
 #[test]
@@ -230,8 +245,8 @@ fn held_is_none_for_a_live_pid_without_the_flock() {
     std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     std::fs::write(&lock_path, format!("pid: {}\n", std::process::id())).unwrap();
     assert!(pid_alive(std::process::id()));
-    assert_eq!(held(tmp.path()).unwrap(), None);
+    assert_eq!(held(&tmp.path().join(".fantastic")).unwrap(), None);
     // and the probe left it takeable
-    acquire(tmp.path()).unwrap();
-    release(tmp.path()).unwrap();
+    acquire(&tmp.path().join(".fantastic")).unwrap();
+    release(&tmp.path().join(".fantastic")).unwrap();
 }
