@@ -233,7 +233,7 @@ test("DIAGNOSTIC: can the active LLM wire the panel demo from the readme alone?"
   for (const x of trace) {
     log(`${x.n}. \`${x.target}.${x.verb}\`(${x.args})${x.reply ? ` → ${x.reply}` : ""}`);
   }
-  log(`\n**Final text:**\n\n> ${String(run.final?.["final"] ?? run.final?.["response"] ?? "(none)").replace(/\n/g, "\n> ")}`);
+  log(`\n**Final text:**\n\n> ${String(run.final?.["response"] ?? "(none)").replace(/\n/g, "\n> ")}`);
 
   // ── full dialog recovery: the agent's VERBATIM emit stream (every token of the
   //    model's reasoning + each tool call/result), captured by runLLM. Ground

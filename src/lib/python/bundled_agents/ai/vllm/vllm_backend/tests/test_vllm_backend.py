@@ -1152,7 +1152,7 @@ async def test_the_last_budget_is_per_agent_and_freed_on_delete(
     await make("v1")
     await make("v1_sib")
     out = (await call("v1", {"type": "send", "text": "hi"}))[0]["result"]
-    assert out.get("final") == "ok", out
+    assert out.get("response") == "ok", out
     # the call-less answer is rerolled in the background; let it settle so a late
     # reroll cannot record a budget for the re-created id
     quiet = 0

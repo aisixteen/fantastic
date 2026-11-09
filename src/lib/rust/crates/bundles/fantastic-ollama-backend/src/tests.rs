@@ -193,7 +193,6 @@ async fn send_streams_tokens_and_emits_done() {
         .result;
     assert_eq!(reply["client_id"], client_id);
     assert_eq!(reply["response"], "Hello world");
-    assert_eq!(reply["final"], "Hello world");
 
     let events = drain(&mut rx).await;
     let token_count = events

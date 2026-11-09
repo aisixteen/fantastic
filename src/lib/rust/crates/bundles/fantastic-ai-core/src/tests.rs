@@ -582,7 +582,6 @@ async fn send_streams_tokens_and_emits_done() {
         .result;
     assert_eq!(reply["client_id"], client_id);
     assert_eq!(reply["response"], "Hello world");
-    assert_eq!(reply["final"], "Hello world");
 
     let events = drain(&mut rx).await;
     let token_count = events
@@ -660,7 +659,6 @@ async fn thinking_is_streamed_raw_but_neither_dispatched_nor_persisted() {
     // The REPLY is raw — markers intact.
     let raw = reply["response"].as_str().expect("response text");
     assert!(raw.contains(crate::think::THINK_OPEN), "raw reply: {raw:?}");
-    assert_eq!(reply["final"], reply["response"]);
 
     // The token stream is raw too — it concatenates to the reply.
     let events = drain(&mut rx).await;
@@ -904,7 +902,7 @@ async fn status_current_shape_matches_python() {
 }
 
 /// The `send` reply names the row this turn produced. python `_send`
-/// returns `{response, final, client_id, message_id}` (the closed call parts
+/// returns `{response, client_id, message_id}` (the closed call parts
 /// feed routing only, never the reply); rust minted the id (routing
 /// needs it to parent the next turn) and then dropped it from the reply, so a
 /// caller could not name the row its own send wrote.
@@ -923,7 +921,7 @@ async fn send_reply_carries_message_id() {
         .result;
     assert_eq!(
         r.as_object().unwrap().keys().collect::<Vec<_>>(),
-        vec!["response", "final", "client_id", "message_id"],
+        vec!["response", "client_id", "message_id"],
         "{r:#?}"
     );
     let message_id = r["message_id"].as_i64().expect("message_id is a row id");
@@ -2407,6 +2405,11 @@ async fn a_dead_turn_is_discarded_and_rerolled() {
         .remove(0)
         .result;
     assert_eq!(r["dead_turn"], json!(true), "{r:#?}");
+    assert_eq!(
+        r.as_object().unwrap().keys().collect::<Vec<_>>(),
+        vec!["response", "client_id", "dead_turn"],
+        "{r:#?}"
+    );
     assert!(until_passes(&s, 2).await, "the dead turn was not rerolled");
     let incoming = s.request_messages(1);
     let last = incoming

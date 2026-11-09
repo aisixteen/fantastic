@@ -34,7 +34,7 @@
 //! ### Verbs (caller → backend, via `kernel.send`)
 //!
 //! - `send` args `{text:str, client_id:str?, system_prompt:str?, send_to:str?}` →
-//!   `{response:str, final:str, client_id:str}` on success,
+//!   `{response:str, client_id:str}` on success,
 //!   `{error:str, client_id:str}` on failure. ONE pass, then [`route`] honours
 //!   where its output was addressed: the model's own `<call>`s first, else
 //!   `send_to` hands the pass's TEXT to that agent id once (no propagation). A

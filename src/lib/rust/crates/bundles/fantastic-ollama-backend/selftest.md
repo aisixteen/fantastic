@@ -83,18 +83,18 @@ Default caller is `client_id="cli"`. The thread is rows in the memory store
 (`mem`) — the AI writes no disk itself. Read it back with the `history` verb.
 
 ```bash
-call ob '{"type":"send","text":"reply with the single word: ok"}' | jq -e '.final'
+call ob '{"type":"send","text":"reply with the single word: ok"}' | jq -e '.response'
 call ob '{"type":"history"}' \
   | jq -e '.messages | length >= 2 and (.[-1].content | ascii_downcase | contains("ok"))'
 ```
-Expect: a `final`; `history` has ≥ 2 messages, last contains "ok".
+Expect: a `response`; `history` has ≥ 2 messages, last contains "ok".
 
 ### Test 3: history persists across calls
 
 ```bash
 call ob '{"type":"send","text":"my favorite color is teal, remember it"}' >/dev/null
 call ob '{"type":"send","text":"what color did I just say?"}' \
-  | jq -e '.final | ascii_downcase | contains("teal")'
+  | jq -e '.response | ascii_downcase | contains("teal")'
 ```
 Expect: response mentions "teal" — proves the thread round-trip via `mem`.
 

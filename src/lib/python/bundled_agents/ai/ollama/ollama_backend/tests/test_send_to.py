@@ -133,7 +133,7 @@ async def test_done_means_one_pass(seeded_kernel, store_agent, fake_providers):
                 [{"target": oid, "payload": {"type": "send", "text": "hi"}}]
             )
         )[0]["result"]
-        assert "the answer" in r["final"]
+        assert "the answer" in r["response"]
         await asyncio.sleep(0.3)
         assert fp.calls == 1, f"done must end the turn, got {fp.calls} passes"
     finally:
