@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 
 from families import save_kernel_log  # noqa: F401 - kept for symmetry of imports
-from spec import _dump, free_port, kernel_cmd, kernel_env, read_rec, write_rec
+from spec import _dump, free_port, kernel_cmd, kernel_env, read_rec, root_from_reflect, write_rec, write_root
 
 NAME = "cli"
 
@@ -316,15 +316,10 @@ def run(ctx) -> None:  # noqa: C901 - a case list is a list
         log = {"reflect": cli.one_shot(wd, ["reflect"], timeout=60)}
         log["reflect"].pop("_out", None)
         log["reflect"].pop("_err", None)
+        root = root_from_reflect(log["reflect"]["stdout"], ctx.runtime)
         log["reflect"]["stdout"] = log["reflect"]["stdout"][:400]
         w = wd / ".fantastic"
-        if not (w / "agent.yaml").exists():
-            d = Daemon(cli, wd)
-            for _ in range(100):
-                if (w / "agent.yaml").exists():
-                    break
-                time.sleep(0.1)
-            log["daemon_seed"] = d.stop()
+        write_root(w, root)
         log["root_id"] = read_rec(w / "agent.yaml").get("id")
         return log
 
