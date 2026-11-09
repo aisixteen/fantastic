@@ -1,0 +1,12 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: a scripted OpenAI-compatible server
+# (python Part B: the Anthropic mock) plays the model for the kernel's own AI agents,
+# driven over web_rest.
+id: fold_cache
+group: kernel
+title: "fold cycle under caching (#556): cleanup erases an answered docs reply to its stub; provider_cache folds a large read reply and a large docs reply to anchors, recall by row id gives the body back and refolds, grep finds a word inside a folded body, every anchor is byte-identical in later requests and each request carries the agent's cache mark"
+runner: probe.py
+runtimes: [python, rust]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300
