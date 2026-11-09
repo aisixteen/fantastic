@@ -10,8 +10,9 @@ current.
 THE ROOT ID IS MEASURED, NEVER LOOKED UP. `HostKernel` reads it out of the
 driver's `RUNTIMES` row; a row is a claim about a binary, and a claim can go
 stale. Here the
-kernel seeds `.fantastic/agent.yaml` first and the id is READ OFF IT, with the
-branch that produced the seed recorded in `meta.json`. A capture can then never
+id and handler_module are READ OFF the binary's own lockless `reflect` reply,
+the harness writes the root record from them, and `meta.json` records that
+branch (`reflect_reply`). A capture can then never
 grant against an id the binary does not use.
 """
 
@@ -250,12 +251,38 @@ class Ports:
         return {r: list(v) for r, v in self.by_role.items()}
 
 
+def root_from_reflect(stdout: str, rt: str) -> dict:
+    """The root record a fresh tree boots from, measured off the binary's own
+    lockless `reflect` reply (it answers for the in-memory fresh root).
+    """
+    try:
+        reply = json.loads(stdout)
+    except ValueError:
+        reply = None
+    if not isinstance(reply, dict):
+        raise SystemExit(f"{rt}: the lockless reflect printed no reply: {stdout[:400]!r}")
+    rid, mod = reply.get("id"), reply.get("handler_module")
+    if not (isinstance(rid, str) and rid and isinstance(mod, str) and mod):
+        raise SystemExit(
+            f"{rt}: the reflect reply names no root id/handler_module: {reply!r}"[:600]
+        )
+    return {"id": rid, "handler_module": mod}
+
+
+def write_root(state: Path, root: dict) -> None:
+    """Write the root record unless the tree already has one (a reboot)."""
+    state.mkdir(parents=True, exist_ok=True)
+    if (state / "agent.yaml").exists():
+        return
+    write_rec(state / "agent.yaml", root)
+
+
 class CaptureKernel(HostKernel):
     """A spawned kernel with the WHOLE transport recorded.
 
     It carries the three things every family needs:
 
-      * the root id MEASURED off the seeded tree (see the module docstring);
+      * the root id MEASURED off the lockless reflect's reply (see the module docstring);
       * a scrubbed env (`kernel_env`), never the operator's;
       * the FULL reply — status line, every header in order, the raw body — so a
         refusal is data instead of `driver.py:376`'s 300-character head.
@@ -298,38 +325,23 @@ class CaptureKernel(HostKernel):
         `HostKernel.seed` writes `web`/`rest`/`ws` using the root id its spec row
         claims. That order cannot work when the id is unknown: the grants have to
         name the id the binary actually wrote.
+
+        A lockless run writes nothing, and a daemon with no web agent exits
+        before it takes the lock. So the harness writes the root record itself,
+        from the reflect reply, before the daemon starts.
         """
         port = self.preset_port or free_port()
         w = self.workdir / ".fantastic"
-        subprocess.run(
+        r = subprocess.run(
             [*self.cmd, "reflect"],
             cwd=self.workdir,
             env=self.env,
             capture_output=True,
+            text=True,
             check=False,
         )
-        self.seed_branch = "one_shot_reflect"
-        if not (w / "agent.yaml").exists():
-            self.seed_branch = "brief_daemon"
-            seed = subprocess.Popen(
-                self.cmd,
-                cwd=self.workdir,
-                env=self.env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            for _ in range(100):
-                if (w / "agent.yaml").exists():
-                    break
-                time.sleep(0.1)
-            seed.terminate()
-            try:
-                seed.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                seed.kill()
-        if not (w / "agent.yaml").exists():
-            raise SystemExit(f"{self.rt}: kernel never seeded {w}/agent.yaml")
+        write_root(w, root_from_reflect(r.stdout, self.rt))
+        self.seed_branch = "reflect_reply"
 
         root = read_rec(w / "agent.yaml")
         measured = root.get("id")
