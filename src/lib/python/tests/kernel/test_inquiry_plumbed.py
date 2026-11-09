@@ -307,8 +307,8 @@ async def test_an_inquiry_is_a_call_and_the_answer_is_its_reply(
         held = asyncio.Event()
         push_held = core._push_held_or_wake
 
-        def holding(kernel, self_id, *rest):
-            push_held(kernel, self_id, *rest)
+        def holding(kernel, self_id, *rest, **kw):
+            push_held(kernel, self_id, *rest, **kw)
             if self_id == "asker":
                 held.set()
 
