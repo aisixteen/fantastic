@@ -51,7 +51,7 @@ pub fn pid_alive(pid: u32) -> bool {
 }
 
 /// Acquire the state folder lock for the current process: take the flock on
-/// `.fantastic/lock.yaml` and keep its descriptor open until [`release`].
+/// `<state>/lock.yaml` and keep its descriptor open until [`release`].
 ///
 /// If a live process holds it, returns [`KernelError::LockHeld`] naming the
 /// pid in the file. A lock whose holder died is taken over.

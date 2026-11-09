@@ -53,7 +53,7 @@ fn subst_root(v: &Value) -> Value {
 }
 
 /// `$workdir` in a loader's `manifest` — a string VALUE that is `$workdir` or
-/// starts with `$workdir/` — means the kernel's running dir, ABSOLUTE (the test's
+/// starts with `$workdir/` — means the kernel's work folder, ABSOLUTE (the test's
 /// own tmp dir). It is how a config names an absolute path that is still the
 /// test's: a credential_store's `file` is refused relative, and the user's home is
 /// never touched. Substituted when the manifest is written — the one moment the
@@ -208,13 +208,16 @@ struct Hydration {
 /// Write each loader's manifest and create the loader — `create_agent` boots it,
 /// which hydrates the roster.
 ///
-/// The manifest lands UNDER THE RUNNING DIR: `fs` is the one disk surface and a
+/// The manifest lands UNDER THE KERNEL'S STATE FOLDER (`<cwd>/.fantastic`),
+/// where a loader's manifest is read (Q-C): `fs` is the one disk surface and a
 /// cold bring-up read is not exempt, so a manifest under `/tmp` is refused.
 async fn hydrate(sc: &Scenario) -> Hydration {
     let kernel = mk_kernel();
+    let state = std::env::current_dir().unwrap().join(".fantastic");
+    std::fs::create_dir_all(&state).unwrap();
     let fixture = tempfile::Builder::new()
         .prefix(".agentic_")
-        .tempdir_in(std::env::current_dir().unwrap())
+        .tempdir_in(&state)
         .unwrap();
     let mut creates = BTreeMap::new();
     let mut boots = BTreeMap::new();
@@ -232,7 +235,7 @@ async fn hydrate(sc: &Scenario) -> Hydration {
         // `missing_manifest: true` writes NOTHING — the loader points at a path
         // that is not there, and refusing that is the assertion.
         let rel = path
-            .strip_prefix(std::env::current_dir().unwrap())
+            .strip_prefix(&state)
             .unwrap_or(&path)
             .to_string_lossy()
             .to_string();
@@ -1049,7 +1052,7 @@ fn the_hydration_verdict_matches_the_declaration(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_shared_agentic_corpus_holds_on_this_runtime() {
-    // RUN INSIDE A TEMP DIR. The manifest read obeys the running-dir law (`fs`
+    // RUN INSIDE A TEMP DIR. The manifest is read under the state folder `<cwd>/.fantastic` (`fs`
     // is the one disk surface, and a cold bring-up read is not exempt), and the
     // discovered store roots at `<cwd>/.fantastic` — so a runner left in the
     // crate directory writes `.fantastic` INTO THE SOURCE TREE on every run.

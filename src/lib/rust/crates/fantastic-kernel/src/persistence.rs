@@ -145,9 +145,10 @@ pub fn loader_dir(kernel: &Kernel, loader: &Agent) -> Result<PathBuf, String> {
             Ok(normalize_lexical(&base, Path::new(&rel)))
         }
         // Folded like the candidates in `find_store_for`, so a relative or `..`
-        // state folder still compares and strips consistently.
+        // state folder still compares and strips consistently. `root_path`
+        // already holds the state folder: joining it again doubled a relative one.
         None => Ok(match kernel.state_dir() {
-            Ok(state) => normalize_lexical(&state, &loader.root_path),
+            Ok(_) => normalize_lexical(Path::new(""), &loader.root_path),
             Err(_) => loader.root_path.clone(),
         }),
     }
@@ -224,11 +225,11 @@ pub fn find_store_for(kernel: &Kernel, loader: &Agent) -> Option<AgentId> {
 
 /// An agent's dir RELATIVE to a loader's store root — python
 /// `_store_reldir(agent, abs_path)`. Both sides are absolutized against the
-/// state folder first, so a relative `root` meta and an absolute agent address
-/// compare.
+/// folded lexically (the state folder is not joined: an agent's address already
+/// holds it), so a relative `root` meta and an absolute agent address compare.
 pub(crate) fn loader_reldir(kernel: &Kernel, loader: &Agent, abs: &Path) -> String {
     match (loader_dir(kernel, loader), kernel.state_dir()) {
-        (Ok(dir), Ok(state)) => store_reldir(&dir, &normalize_lexical(&state, abs)),
+        (Ok(dir), Ok(_)) => store_reldir(&dir, &normalize_lexical(Path::new(""), abs)),
         _ => store_reldir(&loader.root_path, abs),
     }
 }

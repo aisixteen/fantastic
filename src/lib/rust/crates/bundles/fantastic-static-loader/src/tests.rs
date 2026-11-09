@@ -42,10 +42,18 @@ agents:
       memory: [set, read]
 "#;
 
+/// The kernel's state folder, `<cwd>/.fantastic` (git-ignored). Idempotent, so
+/// parallel tests are safe.
+fn state() -> std::path::PathBuf {
+    let dir = std::env::current_dir().unwrap().join(".fantastic");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 fn mk_kernel() -> Arc<Kernel> {
     let cwd = std::env::current_dir().unwrap();
     let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
-        state_dir: cwd.join(".fantastic"),
+        state_dir: state(),
         work_dir: cwd,
     });
     kernel.bundles.register("mock.tools", MockBundle);
@@ -56,8 +64,8 @@ fn mk_kernel() -> Arc<Kernel> {
         None,
         None,
         Map::new(),
-        // the running dir is the cwd — manifests are written under it
-        std::env::current_dir().unwrap().join(".fantastic"),
+        // the state folder holds the manifests
+        state(),
         false,
     );
     kernel.register(Arc::clone(&root));
@@ -65,26 +73,26 @@ fn mk_kernel() -> Arc<Kernel> {
     kernel
 }
 
-/// A manifest file inside a temp dir UNDER the running dir, and the guard that
-/// deletes it.
+/// A manifest file inside a temp dir UNDER the kernel's STATE FOLDER, and the
+/// guard that deletes it.
 ///
-/// Inside, because the manifest read obeys the RUNNING-DIR LAW: `fs` is the one
-/// disk surface and a cold bring-up read is not exempt, so a manifest under
-/// `/tmp` is refused. Python's tests get the same effect by `chdir`-ing into
-/// tmp_path (safe there — xdist forks a process per worker); rust test threads
-/// share one cwd, so the file comes to the cwd instead of the cwd going to it.
+/// Inside the state folder, because a loader folder and its manifest are read
+/// against the state folder: `fs` is the one disk surface and a cold bring-up
+/// read is not exempt, so a manifest under `/tmp` is refused. Rust test threads
+/// share one cwd, so the file comes to the state folder instead of the cwd
+/// going to it.
 ///
 /// The TempDir is RETURNED, never `forget`-ten: a leaked fixture is a file that
 /// reappears on every run and lands in `git status` forever.
 fn write_manifest(text: &str) -> (tempfile::TempDir, String) {
     let dir = tempfile::Builder::new()
         .prefix(".sl_fixture_")
-        .tempdir_in(std::env::current_dir().unwrap())
+        .tempdir_in(state())
         .unwrap();
     let path = dir.path().join("fantastic.yaml");
     std::fs::write(&path, text).unwrap();
     let rel = path
-        .strip_prefix(std::env::current_dir().unwrap())
+        .strip_prefix(state())
         .unwrap_or(&path)
         .to_string_lossy()
         .to_string();
@@ -216,7 +224,7 @@ async fn boot_loader(kernel: &Arc<Kernel>, id: &str) -> Value {
 #[tokio::test]
 async fn the_manifest_shape_is_judged_at_write_time() {
     // `validate_meta` is SHAPE-ONLY: a named manifest must be a non-empty path
-    // string. Readability is boot's question (it reads through the workdir).
+    // string. Readability is boot's question (it reads under the state folder).
     let kernel = mk_kernel();
     for (i, bad) in [json!(""), json!(7), json!(["a.yaml"]), json!(null)]
         .into_iter()
@@ -244,7 +252,7 @@ async fn an_unreadable_manifest_is_reported_at_boot() {
     let rec = create_loader(&kernel, "sl2", json!("nope.yaml")).await;
     assert!(rec.get("error").is_none(), "{rec}");
     let r = boot_loader(&kernel, "sl2").await;
-    let abs = fantastic_bundle::realpath(&std::env::current_dir().unwrap())
+    let abs = fantastic_bundle::realpath(&state())
         .unwrap()
         .join("nope.yaml");
     assert_eq!(
@@ -258,6 +266,21 @@ async fn an_unreadable_manifest_is_reported_at_boot() {
             "booted": false,
         })
     );
+}
+
+#[tokio::test]
+async fn the_manifest_is_read_against_the_state_folder() {
+    let kernel = mk_kernel();
+    let (_fx, rel) = write_manifest(MANIFEST);
+    let rec = create_loader(&kernel, "sl_state", json!(rel)).await;
+    assert!(rec.get("error").is_none(), "{rec}");
+    for id in ["memory", "worker"] {
+        assert_eq!(
+            record(&kernel, id).parent_id,
+            Some("sl_state".to_string()),
+            "{id}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -391,14 +414,14 @@ fn an_empty_manifest_string_is_no_manifest() {
     // Python tests `isinstance(path, str) and path`.
     let agent = loader_with_meta(meta_of(&[("manifest", json!(""))]));
     assert_eq!(
-        load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err(),
+        load_manifest(&agent, &state()).unwrap_err(),
         "static_loader: no 'manifest' path on the record"
     );
 }
 
 #[tokio::test]
-async fn a_manifest_outside_the_running_dir_is_refused_at_boot() {
-    // The cold bring-up read is not exempt from the running-dir law, and
+async fn a_manifest_outside_the_state_folder_is_refused_at_boot() {
+    // The cold bring-up read is not exempt from the state-folder law, and
     // the tail is python's own `fs` ValueError.
     let kernel = mk_kernel();
     let rec = create_loader(&kernel, "sl3", json!("/etc/hosts")).await;
@@ -416,12 +439,12 @@ async fn a_manifest_outside_the_running_dir_is_refused_at_boot() {
 }
 
 #[test]
-fn an_absolute_manifest_inside_cwd_is_refused() {
+fn an_absolute_manifest_inside_the_state_folder_is_refused() {
     // `fs.resolve` refuses ANY leading '/', re-rooting nothing.
     let (fixture, rel) = write_manifest(MANIFEST);
-    let abs = std::env::current_dir().unwrap().join(&rel);
+    let abs = state().join(&rel);
     let agent = loader_with_meta(meta_of(&[("manifest", json!(abs.display().to_string()))]));
-    let err = load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err();
+    let err = load_manifest(&agent, &state()).unwrap_err();
     assert!(
         err.starts_with(&format!(
             "static_loader: cannot read manifest {q}: fs: path {q} escapes root",
@@ -433,15 +456,18 @@ fn an_absolute_manifest_inside_cwd_is_refused() {
 }
 
 #[test]
-fn a_symlinked_manifest_escaping_cwd_is_refused() {
+fn a_symlinked_manifest_escaping_the_state_folder_is_refused() {
     // The clamp resolves symlinks, and the escape is reported
     // under the `cannot read manifest` prefix.
     let (fixture, rel) = write_manifest(MANIFEST);
-    let link = std::path::Path::new(&rel).with_file_name("link.yaml");
+    let link = state().join(&rel).with_file_name("link.yaml");
     symlink("/etc/hosts", &link).unwrap();
-    let rel_link = link.display().to_string();
+    let rel_link = std::path::Path::new(&rel)
+        .with_file_name("link.yaml")
+        .display()
+        .to_string();
     let agent = loader_with_meta(meta_of(&[("manifest", json!(rel_link.clone()))]));
-    let err = load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err();
+    let err = load_manifest(&agent, &state()).unwrap_err();
     assert!(
         err.starts_with(&format!(
             "static_loader: cannot read manifest {q}: fs: path {q} escapes root",
@@ -459,7 +485,7 @@ fn a_falsy_yaml_document_boots_empty() {
         let (fixture, rel) = write_manifest(doc);
         let agent = loader_with_meta(meta_of(&[("manifest", json!(rel))]));
         assert_eq!(
-            load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap(),
+            load_manifest(&agent, &state()).unwrap(),
             Vec::<Value>::new(),
             "{doc:?}"
         );
@@ -468,7 +494,7 @@ fn a_falsy_yaml_document_boots_empty() {
     let (fixture, rel) = write_manifest("[1]");
     let agent = loader_with_meta(meta_of(&[("manifest", json!(rel.clone()))]));
     assert_eq!(
-        load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err(),
+        load_manifest(&agent, &state()).unwrap_err(),
         format!(
             "static_loader: manifest {} must be a mapping with `agents:`",
             fantastic_bundle::py_repr(&rel)
@@ -679,7 +705,7 @@ fn an_unhashable_mapping_key_is_invalid_yaml() {
     for doc in ["? [a]\n: 1", "? {a: 1}\n: 1\n", "[a]: 1\n"] {
         let (fixture, rel) = write_manifest(doc);
         let agent = loader_with_meta(meta_of(&[("manifest", json!(rel.clone()))]));
-        let err = load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err();
+        let err = load_manifest(&agent, &state()).unwrap_err();
         assert!(
             err.starts_with(&format!(
                 "static_loader: manifest {} is not valid YAML: ",

@@ -48,7 +48,7 @@ requirements: [C20, C23]           # ids from _engine.REQUIREMENTS; a typo raise
 
 loaders:                           # one or more static_loader agents
   - id: static_loader              # REQUIRED — it is the loader's agent id
-    file: fantastic.yaml           # the manifest's name in the test cwd; defaults to <id>.yaml
+    file: fantastic.yaml           # the manifest's file name; the runner writes it where its runtime reads manifests (rust: the kernel's state folder; python: the test cwd); defaults to <id>.yaml
     meta: {display_name: roster}   # extra meta for the loader's OWN create_agent
     manifest:                      # ← exactly ONE of these three:
       agents:

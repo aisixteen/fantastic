@@ -772,6 +772,29 @@ async fn load_tree_is_rooted_at_the_live_session_record() {
     );
 }
 
+/// A state folder with `..` folds the same on both sides, so the root loader
+/// reads its DISK record, not the live one.
+#[tokio::test]
+async fn load_tree_reads_the_disk_root_record_when_the_state_folder_has_dotdot() {
+    let tmp = TempDir::new().unwrap();
+    let work = tmp.path().join("w");
+    std::fs::create_dir_all(&work).unwrap();
+    let state = work.join("../x/.fantastic");
+    let mut reg = BundleRegistry::new();
+    reg.register(HANDLER_MODULE, KernelStateBundle::default());
+    let kernel = bootstrap(reg, BootstrapOptions::daemon(&state, &work))
+        .expect("boot")
+        .kernel;
+    let yaml = tmp.path().join("x/.fantastic/agent.yaml");
+    let mut text = std::fs::read_to_string(&yaml).unwrap();
+    text.push_str("display_name: on disk\n");
+    std::fs::write(&yaml, text).unwrap();
+    let tree = root_reflect(&kernel, json!({"type": "load_tree"})).await;
+    let recs = tree["records"].as_array().expect("records");
+    assert_eq!(recs[0]["id"], "kernel_state", "{tree}");
+    assert_eq!(recs[0]["display_name"], "on disk", "{tree}");
+}
+
 /// python: `persist_record` runs `_guard_parent_chain` on a non-None
 /// `parent_id` (a non-string is `bad_arg`), and `forget_record` with a truthy
 /// non-string id is the id guard's `bad_arg`, not `missing_arg`.

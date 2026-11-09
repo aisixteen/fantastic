@@ -61,7 +61,8 @@ fn manifest_meta(agent: &Agent) -> Value {
 }
 
 /// Read + parse the manifest into the declared agent specs. Cold read, clamped
-/// to the kernel's running dir `base` ([`Kernel::workdir`]) — the same one-time
+/// to the kernel's state folder `base` ([`Kernel::state_dir`]); a loader's
+/// manifest is never read against the work folder — the same one-time
 /// bring-up path as the root loader's tree read (before any file_bridge agent
 /// can exist), and through the SAME disk surface: `fantastic_file::fs`, as
 /// python imports `file_bridge.fs`.
@@ -126,7 +127,7 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
         return refusal_hint(UNAUTHORIZED, BOOT_REFUSED, BOOT_REFUSED_HINT);
     }
     let agents = match kernel
-        .work_dir()
+        .state_dir()
         .and_then(|base| load_manifest(agent, &base))
     {
         Ok(a) => a,

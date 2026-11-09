@@ -341,7 +341,10 @@ impl KernelStateBundle {
         kernel: &Arc<Kernel>,
     ) -> Result<Value, BundleError> {
         let root_dir = loader_root(kernel, agent)?;
-        let live = if root_dir == agent.root_path {
+        let root = clamp(kernel, &root_dir)?;
+        // The loader reads its disk record when its folder is its own address;
+        // both sides are compared resolved (a `..` state folder folds alike).
+        let live = if clamp(kernel, &agent.root_path).is_ok_and(|own| own == root) {
             None
         } else {
             match persistence::record_map(&agent.record()) {
@@ -349,7 +352,6 @@ impl KernelStateBundle {
                 _ => None,
             }
         };
-        let root = clamp(kernel, &root_dir)?;
         Ok(json!({
             "records": read_tree(&root, live)?,
             "version": fantastic_kernel::CURRENT_VERSION,

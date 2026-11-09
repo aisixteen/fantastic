@@ -760,7 +760,11 @@ fn one_shots_take_over_a_lock_whose_pid_holds_no_flock() {
         "released"
     );
     stale();
-    std::fs::write(tmp.path().join("fantastic.yaml"), "agents: []\n").unwrap();
+    std::fs::write(
+        tmp.path().join(".fantastic").join("fantastic.yaml"),
+        "agents: []\n",
+    )
+    .unwrap();
     let out = Command::new(fantastic_bin())
         .args(["init", "static_loader", "./fantastic.yaml"])
         .current_dir(tmp.path())
@@ -821,8 +825,10 @@ fn the_root_is_the_kernel_state_loader_and_boots_before_the_roster() {
 fn init_creates_the_loader_under_the_root() {
     let tmp = tempfile::TempDir::new().unwrap();
     // An empty document boots an empty roster (`static_loader`'s own rule) —
-    // this test is about `init`'s own routing, not the loader's YAML.
-    std::fs::write(tmp.path().join("fantastic.yaml"), "").unwrap();
+    // this test is about `init`'s own routing, not the loader's YAML. The
+    // manifest is read under the state folder.
+    std::fs::create_dir_all(tmp.path().join(".fantastic")).unwrap();
+    std::fs::write(tmp.path().join(".fantastic").join("fantastic.yaml"), "").unwrap();
     let out = Command::new(fantastic_bin())
         .args(["init", "static_loader", "./fantastic.yaml"])
         .current_dir(tmp.path())
