@@ -57,7 +57,7 @@ pub const README: &str = include_str!("readme.md");
 const NAME: &str = "anthropic_backend";
 
 /// The `usage` verb's doc — python `_usage`'s docstring, the verb's own.
-const USAGE_DOC: &str = "usage — args: reset? (bool). The agent's token usage since it was created:\nrequests, input, cache write and read, output, the derived prompt_tokens, hit_rate\nand saved_tokens (cost_usd and saved_usd when the record has both prices), and\nusage_since_boot: the same counts over this kernel process only. by_model: a map from model name to {requests, input, cache_write, cache_read, output, hit_rate, saved_tokens}, counted from each response's model; usage_since_boot carries it too. reset: true returns\nthe counts, then zeroes the since-boot counts (the total is kept: see usage_reset).";
+const USAGE_DOC: &str = "usage — args: reset? (bool). The agent's token usage since it was created:\nrequests, input, cache write and read, output, the derived prompt_tokens, hit_rate\nand saved_tokens (cost_usd and saved_usd when the record's prices name a model it served), and\nusage_since_boot: the same counts over this kernel process only. by_model: a map from model name to {requests, input, cache_write, cache_read, output, hit_rate, saved_tokens, cost_usd}, counted from each response's model; a model with no entry in the record's prices carries unpriced: true instead of cost_usd, and unpriced_models lists them beside the total cost_usd (the sum over the priced models). by_agent: a map from the calling chat's id to {requests, input, cache_write, cache_read, output, cost_usd?}, counted from the chat that sent each complete and kept after that chat is deleted. usage_since_boot carries both. reset: true returns\nthe counts, then zeroes the since-boot counts (the total is kept: see usage_reset).";
 /// The `usage_reset` verb's doc.
 const USAGE_RESET_DOC: &str = "usage_reset — no args. Returns the agent's token usage since it was created (as\n`usage` does), then zeroes it for good: the counts in the agent's usage.json are\nrewritten as zeros. Deleting the agent drops them too.";
 /// The agent's sidecar of persisted counts, in its own dir beside `agent.yaml`.
@@ -336,6 +336,86 @@ struct Usage {
     log_error: Option<String>,
     /// The twelve counts of each model that spent them, keyed by the response's model.
     by_model: std::collections::BTreeMap<String, Usage>,
+    /// The counts of each calling chat, keyed by its id, each with its own `by_model`
+    /// (so its cost can be priced per model). Kept after the chat is deleted.
+    by_agent: std::collections::BTreeMap<String, Usage>,
+}
+
+/// One model's prices, USD per million tokens: the entry of the record's `prices`.
+#[derive(Clone, Copy)]
+struct ModelPrice {
+    input: f64,
+    output: f64,
+    cache_read: Option<f64>,
+    cache_write_5m: Option<f64>,
+}
+
+/// The record's price list: `prices` by model, and the long-context and 1-hour prices
+/// that apply to every model in it.
+#[derive(Default)]
+struct PriceBook {
+    models: std::collections::BTreeMap<String, ModelPrice>,
+    input_long: Option<f64>,
+    output_long: Option<f64>,
+    cache_write_1h: Option<f64>,
+}
+
+impl PriceBook {
+    /// The book of a record. An entry without a numeric `input` and `output` is no entry.
+    fn of(meta: &Map<String, Value>) -> PriceBook {
+        let price = |k: &str| meta.get(k).and_then(Value::as_f64);
+        let models = meta
+            .get("prices")
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(name, e)| {
+                        let n = |k: &str| e.get(k).and_then(Value::as_f64);
+                        Some((
+                            name.clone(),
+                            ModelPrice {
+                                input: n("input")?,
+                                output: n("output")?,
+                                cache_read: n("cache_read"),
+                                cache_write_5m: n("cache_write_5m"),
+                            },
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        PriceBook {
+            models,
+            input_long: price("price_input_long_per_mtok"),
+            output_long: price("price_output_long_per_mtok"),
+            cache_write_1h: price("price_cache_write_1h_per_mtok"),
+        }
+    }
+
+    /// `model`'s prices: its own entry, else the entry of the id it is a dated form of
+    /// (the longest); none = the model is unpriced.
+    fn prices_for(&self, model: &str) -> Option<Prices> {
+        let entry = self.models.get(model).or_else(|| {
+            self.models
+                .iter()
+                .filter(|(id, _)| {
+                    model
+                        .strip_prefix(id.as_str())
+                        .is_some_and(|rest| rest.starts_with('-'))
+                })
+                .max_by_key(|(id, _)| id.len())
+                .map(|(_, p)| p)
+        })?;
+        Some(Prices {
+            input: Some(entry.input),
+            output: Some(entry.output),
+            input_long: self.input_long,
+            output_long: self.output_long,
+            cache_read: entry.cache_read,
+            cache_write_5m: entry.cache_write_5m,
+            cache_write_1h: self.cache_write_1h,
+        })
+    }
 }
 
 /// The sidecar's keys, in the order [`Usage::counters`] lists the counts.
@@ -406,14 +486,31 @@ impl Usage {
             if by_model.contains_key(m) {
                 continue;
             }
-            let a = self.by_model.get(m).map_or_else(Usage::default, Usage::plain);
-            let b = other.by_model.get(m).map_or_else(Usage::default, Usage::plain);
+            let a = self
+                .by_model
+                .get(m)
+                .map_or_else(Usage::default, Usage::plain);
+            let b = other
+                .by_model
+                .get(m)
+                .map_or_else(Usage::default, Usage::plain);
             by_model.insert(m.clone(), a.plus(&b));
+        }
+        let mut by_agent = std::collections::BTreeMap::new();
+        let none = Usage::default();
+        for c in self.by_agent.keys().chain(other.by_agent.keys()) {
+            if by_agent.contains_key(c) {
+                continue;
+            }
+            let a = self.by_agent.get(c).unwrap_or(&none);
+            let b = other.by_agent.get(c).unwrap_or(&none);
+            by_agent.insert(c.clone(), a.plus(b));
         }
         Usage {
             cur_long: other.cur_long,
             log_error: other.log_error.clone(),
             by_model,
+            by_agent,
             ..Usage::from_counters(sum)
         }
     }
@@ -427,7 +524,8 @@ impl Usage {
             .collect()
     }
 
-    /// The sidecar's JSON: the twelve counts, and `by_model` (each model's twelve counts).
+    /// The sidecar's JSON: the twelve counts, `by_model` (each model's twelve counts) and
+    /// `by_agent` (each calling chat's counts, with its own `by_model`).
     fn to_json(&self) -> Value {
         let mut out = self.counts_json();
         let models: Map<String, Value> = self
@@ -436,19 +534,155 @@ impl Usage {
             .map(|(m, u)| (m.clone(), Value::Object(u.counts_json())))
             .collect();
         out.insert("by_model".into(), Value::Object(models));
+        if !self.by_agent.is_empty() {
+            let agents: Map<String, Value> = self
+                .by_agent
+                .iter()
+                .map(|(c, u)| (c.clone(), u.to_json()))
+                .collect();
+            out.insert("by_agent".into(), Value::Object(agents));
+        }
         Value::Object(out)
     }
 
     /// The counts a sidecar holds. A missing or non-integer key reads as 0; `by_model`
-    /// is read when present (an old sidecar has none).
+    /// and `by_agent` are read when present (an old sidecar has none).
     fn from_json(v: &Value) -> Usage {
-        let mut u = Usage::from_counters(FIELDS.map(|k| v.get(k).and_then(Value::as_i64).unwrap_or(0)));
+        let mut u =
+            Usage::from_counters(FIELDS.map(|k| v.get(k).and_then(Value::as_i64).unwrap_or(0)));
         u.by_model = v
             .get("by_model")
             .and_then(Value::as_object)
-            .map(|m| m.iter().map(|(k, x)| (k.clone(), Usage::from_json(x))).collect())
+            .map(|m| {
+                m.iter()
+                    .map(|(k, x)| (k.clone(), Usage::from_json(x)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        u.by_agent = v
+            .get("by_agent")
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .map(|(k, x)| (k.clone(), Usage::from_json(x)))
+                    .collect()
+            })
             .unwrap_or_default();
         u
+    }
+
+    /// Applies `f` to the total and to `model`'s counts, and, when the request has a
+    /// `caller`, to the caller's counts and the caller's `model` counts.
+    fn bump(&mut self, model: &str, caller: Option<&str>, f: impl Fn(&mut Usage)) {
+        f(self);
+        f(self.by_model.entry(model.to_string()).or_default());
+        if let Some(c) = caller {
+            let agent = self.by_agent.entry(c.to_string()).or_default();
+            f(agent);
+            f(agent.by_model.entry(model.to_string()).or_default());
+        }
+    }
+
+    /// The cost and saving in USD of these counts at `prices`, when BOTH base prices are
+    /// set (USD per million tokens); `model` picks the default cache rates.
+    fn cost_of(&self, model: &str, prices: &Prices) -> Option<(f64, f64)> {
+        let (pin, pout) = (prices.input?, prices.output?);
+        let lin = prices.input_long.unwrap_or(pin);
+        let lout = prices.output_long.unwrap_or(pout);
+        let base = Tally {
+            input: self.input,
+            write_5m: self.cache_write,
+            write_1h: self.cache_write_1h,
+            read: self.cache_read,
+            output: self.output,
+        };
+        let long = Tally {
+            input: self.long_input,
+            write_5m: self.long_cache_write,
+            write_1h: self.long_cache_write_1h,
+            read: self.long_cache_read,
+            output: self.long_output,
+        };
+        let (c1, s1) = bucket_cost(model, base, pin, pout, pin, prices);
+        let (c2, s2) = bucket_cost(model, long, lin, lout, pin, prices);
+        Some((c1 + c2, s1 + s2))
+    }
+
+    /// The cost and saving of the models in `by_model` at the book's prices, and the
+    /// models with no entry (unpriced, never $0). The sum is `None` when the book is
+    /// empty, or when every model that spent is unpriced.
+    fn cost_by_model(&self, book: &PriceBook) -> (Option<(f64, f64)>, Vec<String>) {
+        let (mut sum, mut priced, mut unpriced) = ((0.0, 0.0), 0, Vec::new());
+        for (m, u) in &self.by_model {
+            match book.prices_for(m).and_then(|p| u.cost_of(m, &p)) {
+                Some((c, s)) => {
+                    sum = (sum.0 + c, sum.1 + s);
+                    priced += 1;
+                }
+                None => unpriced.push(m.clone()),
+            }
+        }
+        let known = !book.models.is_empty() && (priced > 0 || unpriced.is_empty());
+        (known.then_some(sum), unpriced)
+    }
+
+    /// [`Usage::snapshot`] with the record's per-model prices: `cost_usd` and
+    /// `saved_usd` are the sums over `by_model`, each model carries its `cost_usd` (or
+    /// `unpriced`), and `by_agent` holds each calling chat's counts and cost.
+    fn snapshot_priced(&self, book: &PriceBook) -> Value {
+        let mut out = self.snapshot("", &Prices::default());
+        let priced = !book.models.is_empty();
+        let (sum, unpriced) = self.cost_by_model(book);
+        if let Some((cost, saved)) = sum {
+            out["cost_usd"] = json!(cost);
+            out["saved_usd"] = json!(saved);
+        }
+        if !unpriced.is_empty() && priced {
+            out["unpriced_models"] = json!(unpriced);
+        }
+        let models: Map<String, Value> = self
+            .by_model
+            .iter()
+            .map(|(m, u)| {
+                let mut v = u.model_snapshot();
+                if priced {
+                    match book.prices_for(m).and_then(|p| u.cost_of(m, &p)) {
+                        Some((c, _)) => v["cost_usd"] = json!(c),
+                        None => v["unpriced"] = json!(true),
+                    }
+                }
+                (m.clone(), v)
+            })
+            .collect();
+        out["by_model"] = Value::Object(models);
+        let agents: Map<String, Value> = self
+            .by_agent
+            .iter()
+            .map(|(c, u)| (c.clone(), u.agent_snapshot(book)))
+            .collect();
+        out["by_agent"] = Value::Object(agents);
+        out
+    }
+
+    /// One calling chat's counts for `by_agent`: requests, input, cache write and read,
+    /// output, and `cost_usd` when a model it used is priced (`unpriced_models` names the
+    /// ones that are not).
+    fn agent_snapshot(&self, book: &PriceBook) -> Value {
+        let mut v = json!({
+            "requests": self.requests + self.long_requests,
+            "input": self.input + self.long_input,
+            "cache_write": self.cache_write + self.cache_write_1h + self.long_cache_write + self.long_cache_write_1h,
+            "cache_read": self.cache_read + self.long_cache_read,
+            "output": self.output + self.long_output,
+        });
+        let (sum, unpriced) = self.cost_by_model(book);
+        if let Some((cost, _)) = sum {
+            v["cost_usd"] = json!(cost);
+        }
+        if !unpriced.is_empty() && !book.models.is_empty() {
+            v["unpriced_models"] = json!(unpriced);
+        }
+        v
     }
 
     /// What the counts derive to, with the record's prices when BOTH base prices are set
@@ -481,27 +715,9 @@ impl Usage {
         if let Some(e) = &self.log_error {
             out.insert("usage_log_error".into(), json!(e));
         }
-        if let (Some(pin), Some(pout)) = (prices.input, prices.output) {
-            let lin = prices.input_long.unwrap_or(pin);
-            let lout = prices.output_long.unwrap_or(pout);
-            let base = Tally {
-                input: self.input,
-                write_5m: self.cache_write,
-                write_1h: self.cache_write_1h,
-                read: self.cache_read,
-                output: self.output,
-            };
-            let long = Tally {
-                input: self.long_input,
-                write_5m: self.long_cache_write,
-                write_1h: self.long_cache_write_1h,
-                read: self.long_cache_read,
-                output: self.long_output,
-            };
-            let (c1, s1) = bucket_cost(model, base, pin, pout, pin, prices);
-            let (c2, s2) = bucket_cost(model, long, lin, lout, pin, prices);
-            out.insert("cost_usd".into(), json!(c1 + c2));
-            out.insert("saved_usd".into(), json!(s1 + s2));
+        if let Some((cost, saved)) = self.cost_of(model, prices) {
+            out.insert("cost_usd".into(), json!(cost));
+            out.insert("saved_usd".into(), json!(saved));
         }
         let models: Map<String, Value> = self
             .by_model
@@ -513,10 +729,13 @@ impl Usage {
     }
 
     /// One model's counts for `by_model`: requests, input, cache write and read, output,
-    /// hit_rate and saved_tokens. No prices: the record's prices are the totals' alone.
+    /// hit_rate and saved_tokens. The prices are added by [`Usage::snapshot_priced`].
     fn model_snapshot(&self) -> Value {
         let input = self.input + self.long_input;
-        let cache_write = self.cache_write + self.cache_write_1h + self.long_cache_write + self.long_cache_write_1h;
+        let cache_write = self.cache_write
+            + self.cache_write_1h
+            + self.long_cache_write
+            + self.long_cache_write_1h;
         let cache_read = self.cache_read + self.long_cache_read;
         let prompt = input + cache_write + cache_read;
         let hit_rate = if prompt > 0 {
@@ -645,6 +864,8 @@ struct AnthropicProvider {
     usage_log: Option<std::path::PathBuf>,
     /// The agent id, written into each usage line.
     agent_id: String,
+    /// The chat that sent this `complete` (the `rid`'s prefix); its counts go to `by_agent`.
+    caller: Option<String>,
 }
 
 impl AnthropicProvider {
@@ -784,6 +1005,7 @@ impl Provider for AnthropicProvider {
                 path: self.usage_log.clone(),
                 agent_id: self.agent_id.clone(),
                 model: self.model.clone(),
+                caller: self.caller.clone(),
                 base: Arc::clone(&self.base),
                 persist_to: self.usage_file.clone(),
             },
@@ -881,6 +1103,8 @@ struct StreamLog {
     path: Option<std::path::PathBuf>,
     agent_id: String,
     model: String,
+    /// The chat that sent the `complete`, when it names itself in the `rid`.
+    caller: Option<String>,
     /// The counts from before this process: the sidecar's total is this plus the
     /// since-boot counts.
     base: Arc<Mutex<Usage>>,
@@ -980,9 +1204,10 @@ impl SseState {
                 };
                 let mut usage = self.usage.lock().expect("usage poisoned");
                 usage.cur_long = long;
-                add_prompt(&mut usage, long, input, write, write_1h, read);
-                let per_model = usage.by_model.entry(self.cur_model.clone()).or_default();
-                add_prompt(per_model, long, input, write, write_1h, read);
+                let caller = self.log.caller.as_deref();
+                usage.bump(&self.cur_model, caller, |u| {
+                    add_prompt(u, long, input, write, write_1h, read);
+                });
                 drop(usage);
                 self.persist();
             }
@@ -1027,17 +1252,14 @@ impl SseState {
                     let step = n - self.billed_out;
                     {
                         let mut usage = self.usage.lock().expect("usage poisoned");
-                        if self.cur.long {
-                            usage.long_output += step;
-                        } else {
-                            usage.output += step;
-                        }
-                        let per_model = usage.by_model.entry(self.cur_model.clone()).or_default();
-                        if self.cur.long {
-                            per_model.long_output += step;
-                        } else {
-                            per_model.output += step;
-                        }
+                        let long = self.cur.long;
+                        usage.bump(&self.cur_model, self.log.caller.as_deref(), |u| {
+                            if long {
+                                u.long_output += step;
+                            } else {
+                                u.output += step;
+                            }
+                        });
                     }
                     self.cur.output += step;
                     self.billed_out = n;
@@ -1158,11 +1380,29 @@ fn required_int(meta: &Map<String, Value>, key: &str) -> Result<i64, ProviderErr
 }
 
 fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider> {
-    build_provider_with(agent_id, kernel, helpers::agent_meta(agent_id, kernel))
+    build_provider_with(
+        agent_id,
+        kernel,
+        helpers::agent_meta(agent_id, kernel),
+        None,
+    )
 }
 
-/// [`build_provider`] from a record (`complete` lays the pass's `model` over the agent's).
-fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<String, Value>) -> Arc<dyn Provider> {
+/// The chat that sent a `complete`: its `rid` is `<chat id>~<n>`.
+fn caller_of(payload: &Value) -> Option<String> {
+    let rid = payload.get("rid").and_then(Value::as_str)?;
+    let (chat, _) = rid.rsplit_once('~')?;
+    (!chat.is_empty()).then(|| chat.to_string())
+}
+
+/// [`build_provider`] from a record (`complete` lays the pass's `model` over the agent's),
+/// for the `caller` chat whose spend `by_agent` keeps.
+fn build_provider_with(
+    agent_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    meta: Map<String, Value>,
+    caller: Option<String>,
+) -> Arc<dyn Provider> {
     let built = (|| -> Result<AnthropicProvider, ProviderError> {
         Ok(AnthropicProvider {
             endpoint: helpers::required_meta(&meta, "endpoint", NAME)?
@@ -1191,6 +1431,7 @@ fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<Strin
                 .filter(|s| !s.is_empty())
                 .map(std::path::PathBuf::from),
             agent_id: agent_id.as_str().to_string(),
+            caller,
         })
     })();
     match built {
@@ -1201,21 +1442,7 @@ fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<Strin
 
 /// A count's snapshot with the record's prices applied (python `_usage_now`).
 fn priced(counts: &Usage, meta: &Map<String, Value>) -> Value {
-    let price = |k: &str| meta.get(k).and_then(Value::as_f64);
-    let model = meta
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let prices = Prices {
-        input: price("price_input_per_mtok"),
-        output: price("price_output_per_mtok"),
-        input_long: price("price_input_long_per_mtok"),
-        output_long: price("price_output_long_per_mtok"),
-        cache_read: price("price_cache_read_per_mtok"),
-        cache_write_5m: price("price_cache_write_5m_per_mtok"),
-        cache_write_1h: price("price_cache_write_1h_per_mtok"),
-    };
-    counts.snapshot(model, &prices)
+    counts.snapshot_priced(&PriceBook::of(meta))
 }
 
 /// The agent's counts since it was created: the sidecar's base plus this process's.
@@ -1338,6 +1565,44 @@ pub fn budget_thinking_refused(model: &str) -> bool {
     major == 4 && minor.is_some_and(|m| m >= 7)
 }
 
+/// Why `prices` is not `{<model>: {input, output, cache_read?, cache_write_5m?}}` with
+/// numbers of zero or more, or `None`.
+fn prices_refusal(prices: &Value) -> Option<String> {
+    let Some(map) = prices.as_object() else {
+        return Some(
+            "prices must be a map of model to {input, output, cache_read?, cache_write_5m?}"
+                .to_string(),
+        );
+    };
+    for (model, entry) in map {
+        let Some(e) = entry.as_object() else {
+            return Some(format!(
+                "prices.{model} must be {{input, output, cache_read?, cache_write_5m?}}"
+            ));
+        };
+        for key in ["input", "output"] {
+            if !e
+                .get(key)
+                .is_some_and(|v| v.as_f64().is_some_and(|n| n >= 0.0))
+            {
+                return Some(format!(
+                    "prices.{model}.{key} must be a number, zero or more"
+                ));
+            }
+        }
+        for key in ["cache_read", "cache_write_5m"] {
+            if let Some(v) = e.get(key).filter(|v| !v.is_null()) {
+                if !v.as_f64().is_some_and(|n| n >= 0.0) {
+                    return Some(format!(
+                        "prices.{model}.{key} must be a number, zero or more"
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Refuse a write this backend cannot honour, AT THE WRITE, on the MERGED record —
 /// then every required field, named at once. Python `validate_meta`, text for text.
 #[must_use]
@@ -1359,18 +1624,19 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
         }
     }
     for key in [
-        "price_input_per_mtok",
-        "price_output_per_mtok",
         "price_input_long_per_mtok",
         "price_output_long_per_mtok",
-        "price_cache_read_per_mtok",
-        "price_cache_write_5m_per_mtok",
         "price_cache_write_1h_per_mtok",
     ] {
         if let Some(p) = meta.get(key).filter(|v| !v.is_null()) {
             if !p.is_number() || p.as_f64().unwrap_or(0.0) < 0.0 {
                 return Some(format!("{key} must be a number, zero or more"));
             }
+        }
+    }
+    if let Some(p) = meta.get("prices").filter(|v| !v.is_null()) {
+        if let Some(bad) = prices_refusal(p) {
+            return Some(bad);
         }
     }
     if let Some(t) = meta.get("long_context_tokens").filter(|v| !v.is_null()) {
@@ -1505,42 +1771,28 @@ pub fn record_schema() -> &'static Value {
             )
             .one_of(&["summarized", "omitted"]),
             Field::new(
-                "price_input_per_mtok",
-                "float",
-                "USD per million input tokens — with price_output_per_mtok, reflect and \
-                 usage report cost_usd and saved_usd; no default price",
-            ),
-            Field::new(
-                "price_output_per_mtok",
-                "float",
-                "USD per million output tokens — with price_input_per_mtok, reflect and \
-                 usage report cost_usd and saved_usd; no default price",
+                "prices",
+                "map",
+                "USD per million tokens by model: {<model>: {input, output, cache_read?, \
+                 cache_write_5m?}} — cache rates unset = the model defaults from input (0.05x \
+                 read for claude-sonnet-5-5 and claude-opus-5-5, else 0.1x; 1.25x 5-minute \
+                 write). reflect and usage report cost_usd per model and in total; a model \
+                 with no entry is unpriced (never $0); a dated id uses its base id's entry",
             ),
             Field::new(
                 "price_input_long_per_mtok",
                 "float",
-                "USD per million input tokens for a long-context request; unset = the base price",
+                "USD per million input tokens for a long-context request, for every model in prices; unset = the model's input price",
             ),
             Field::new(
                 "price_output_long_per_mtok",
                 "float",
-                "USD per million output tokens for a long-context request; unset = the base price",
-            ),
-            Field::new(
-                "price_cache_read_per_mtok",
-                "float",
-                "USD per million cache-read input tokens; unset = the model default (0.05x input for \
-                 claude-sonnet-5-5 and claude-opus-5-5, else 0.1x)",
-            ),
-            Field::new(
-                "price_cache_write_5m_per_mtok",
-                "float",
-                "USD per million 5-minute cache-write input tokens; unset = 1.25x input",
+                "USD per million output tokens for a long-context request, for every model in prices; unset = the model's output price",
             ),
             Field::new(
                 "price_cache_write_1h_per_mtok",
                 "float",
-                "USD per million 1-hour cache-write input tokens; unset = 2x input",
+                "USD per million 1-hour cache-write input tokens, for every model in prices; unset = 2x input",
             ),
             Field::new(
                 "long_context_tokens",
@@ -1643,7 +1895,11 @@ impl Bundle for AnthropicBundle {
         // API that does not answer refuses the verb, naming the field.
         if server::TURN_VERBS.contains(&verb) {
             // the model of the pass, as `complete` resolves it: the call's, else the default
-            let model = match payload.get("model").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            let model = match payload
+                .get("model")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
                 Some(m) => Some(m.to_string()),
                 None => fantastic_ai_core::remote_provider::default_of(agent_id, kernel).await,
             };
@@ -1656,14 +1912,22 @@ impl Bundle for AnthropicBundle {
             agent_id,
             payload,
             kernel,
-            |m| build_provider_with(agent_id, kernel, m),
+            |m| build_provider_with(agent_id, kernel, m, caller_of(payload)),
             Some(|| async {
-            let meta = helpers::agent_meta(agent_id, kernel);
-            let endpoint = meta.get("endpoint").and_then(Value::as_str).unwrap_or("").to_string();
-            server::list(&endpoint, &key_reader(agent_id, kernel, NAME, false))
-                .await
-                .map(|ms| ms.iter().filter_map(|m| m.get("id").and_then(Value::as_str).map(String::from)).collect())
-        }),
+                let meta = helpers::agent_meta(agent_id, kernel);
+                let endpoint = meta
+                    .get("endpoint")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                server::list(&endpoint, &key_reader(agent_id, kernel, NAME, false))
+                    .await
+                    .map(|ms| {
+                        ms.iter()
+                            .filter_map(|m| m.get("id").and_then(Value::as_str).map(String::from))
+                            .collect()
+                    })
+            }),
         )
         .await
         {
@@ -1673,7 +1937,9 @@ impl Bundle for AnthropicBundle {
         {
             let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
             if fantastic_ai_core::remote_provider::is_chat_verb(verb) {
-                return Ok(Some(fantastic_ai_core::remote_provider::chat_refusal(NAME, verb)));
+                return Ok(Some(fantastic_ai_core::remote_provider::chat_refusal(
+                    NAME, verb,
+                )));
             }
         }
         let provider = |_client: &str| build_provider(agent_id, kernel);

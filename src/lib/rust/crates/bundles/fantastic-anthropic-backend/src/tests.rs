@@ -132,6 +132,7 @@ fn provider_idle(
         long_context_tokens: None,
         usage_log: None,
         agent_id: "a1".into(),
+        caller: None,
     }
 }
 
@@ -511,7 +512,10 @@ async fn mk_with(tmp: &TempDir, endpoint: &str, extra: Value) -> Arc<Kernel> {
 async fn mk_with_id(tmp: &TempDir, endpoint: &str, extra: Value, id: &str) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
 
-    kernel.bundles.register(fantastic_ai_core::chat_bundle::HANDLER_MODULE, fantastic_ai_core::chat_bundle::AiChatBundle);
+    kernel.bundles.register(
+        fantastic_ai_core::chat_bundle::HANDLER_MODULE,
+        fantastic_ai_core::chat_bundle::AiChatBundle,
+    );
     kernel.bundles.register(HANDLER_MODULE, AnthropicBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
@@ -537,7 +541,11 @@ async fn mk_with_id(tmp: &TempDir, endpoint: &str, extra: Value, id: &str) -> Ar
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     // a chat verb goes to an ai_chat completing through this provider
-    let verb = payload.get("type").and_then(Value::as_str).unwrap_or("").to_string();
+    let verb = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let to = if fantastic_ai_core::remote_provider::is_chat_verb(&verb) {
         fantastic_ai_core::remote_provider::pair_chat(kernel, &AgentId::from(target)).await
     } else {
@@ -645,7 +653,10 @@ async fn sent_max_tokens(model: &str, extra: Value, max: i64) -> Value {
 async fn mk_unbounded_store(tmp: &TempDir, endpoint: &str, id: &str, extra: Value) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
 
-    kernel.bundles.register(fantastic_ai_core::chat_bundle::HANDLER_MODULE, fantastic_ai_core::chat_bundle::AiChatBundle);
+    kernel.bundles.register(
+        fantastic_ai_core::chat_bundle::HANDLER_MODULE,
+        fantastic_ai_core::chat_bundle::AiChatBundle,
+    );
     kernel.bundles.register(HANDLER_MODULE, AnthropicBundle);
     kernel.bundles.register(
         fantastic_ram_store::HANDLER_MODULE,
@@ -680,7 +691,10 @@ const OLD: &str = "claude-3-5-sonnet";
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_record_with_no_max_tokens_sends_the_bounded_default() {
     assert_eq!(sent_max_tokens(MODEL, json!({}), 64000).await, json!(64000));
-    assert_eq!(sent_max_tokens(MODEL, json!({}), 1_000_000).await, json!(260_000));
+    assert_eq!(
+        sent_max_tokens(MODEL, json!({}), 1_000_000).await,
+        json!(260_000)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1397,10 +1411,15 @@ async fn a_one_hour_cache_write_is_counted_apart_from_the_five_minute_one() {
     );
 }
 
+/// Adds counts to `model`'s share of the agent's since-boot usage, and to the total.
+fn spend(id: &AgentId, model: &str, f: impl Fn(&mut Usage)) {
+    usage_of(id).lock().unwrap().bump(model, None, f);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_record_without_cache_prices_uses_the_model_defaults() {
     let tmp = TempDir::new().unwrap();
-    let base = json!({"model": "claude-sonnet-5-5", "price_input_per_mtok": 3.0, "price_output_per_mtok": 15.0});
+    let base = json!({"model": "claude-sonnet-5-5", "prices": {"claude-sonnet-5-5": {"input": 3.0, "output": 15.0}}});
     let kernel = mk_with_id(
         &tmp,
         "http://unused.test/v1/messages",
@@ -1408,7 +1427,9 @@ async fn a_record_without_cache_prices_uses_the_model_defaults() {
         "f314a",
     )
     .await;
-    usage_of(&AgentId::from("f314a")).lock().unwrap().cache_read = 1_000_000;
+    spend(&AgentId::from("f314a"), "claude-sonnet-5-5", |u| {
+        u.cache_read = 1_000_000
+    });
     let got = call(&kernel, "f314a", json!({"type": "usage"})).await;
     assert!(
         (got["cost_usd"].as_f64().unwrap() - 0.15).abs() < 1e-12,
@@ -1417,9 +1438,11 @@ async fn a_record_without_cache_prices_uses_the_model_defaults() {
     // an explicit cache-read price on the record wins over the model default
     let tmp2 = TempDir::new().unwrap();
     let mut explicit = base;
-    explicit["price_cache_read_per_mtok"] = json!(0.30);
+    explicit["prices"]["claude-sonnet-5-5"]["cache_read"] = json!(0.30);
     let kernel = mk_with_id(&tmp2, "http://unused.test/v1/messages", explicit, "f314b").await;
-    usage_of(&AgentId::from("f314b")).lock().unwrap().cache_read = 1_000_000;
+    spend(&AgentId::from("f314b"), "claude-sonnet-5-5", |u| {
+        u.cache_read = 1_000_000
+    });
     let got = call(&kernel, "f314b", json!({"type": "usage"})).await;
     assert!(
         (got["cost_usd"].as_f64().unwrap() - 0.30).abs() < 1e-12,
@@ -1433,14 +1456,12 @@ async fn the_usage_verb_returns_the_counts_and_reset_zeroes_them() {
     let kernel = mk_with(
         &tmp,
         "http://unused.test/v1/messages",
-        json!({"price_input_per_mtok": 3.0, "price_output_per_mtok": 15.0}),
+        json!({"prices": {MODEL: {"input": 3.0, "output": 15.0}}}),
     )
     .await;
-    {
-        let counts = usage_of(&AgentId::from("a1"));
-        let mut u = counts.lock().unwrap();
+    spend(&AgentId::from("a1"), MODEL, |u| {
         (u.requests, u.input, u.cache_write, u.cache_read) = (1, 100, 400, 1000);
-    }
+    });
     let got = call(&kernel, "a1", json!({"type": "usage"})).await;
     assert_eq!(got["cache_read_tokens"], json!(1000));
     assert_eq!(got["saved_tokens"], json!(800));
@@ -1521,7 +1542,10 @@ fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
     assert_eq!(check(json!({"caching": "provider_cache"})), None);
     assert_eq!(check(json!({"caching": "none"})), None);
     assert_eq!(check(json!({"cache_primer_until": 12})), None);
-    assert_eq!(check(json!({"price_input_per_mtok": 3})), None);
+    assert_eq!(
+        check(json!({"prices": {"m": {"input": 3, "output": 15}}})),
+        None
+    );
     assert_eq!(
         check(json!({"caching": "always"})).as_deref(),
         Some("caching='always' is not one of the legal values: none, cleanup, provider_cache")
@@ -1539,15 +1563,28 @@ fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
         None,
         "retired: an unknown key is not this backend's to refuse"
     );
-    assert!(check(json!({"price_output_per_mtok": "x"}))
+    assert!(check(json!({"prices": {"m": {"input": 3, "output": "x"}}}))
         .unwrap()
         .contains("must be a number"));
-    assert!(check(json!({"price_input_per_mtok": true}))
-        .unwrap()
-        .contains("must be a number"));
-    assert!(check(json!({"price_input_per_mtok": -1}))
+    assert!(
+        check(json!({"prices": {"m": {"input": true, "output": 1}}}))
+            .unwrap()
+            .contains("must be a number")
+    );
+    assert!(check(json!({"prices": {"m": {"input": -1, "output": 1}}}))
         .unwrap()
         .contains("zero or more"));
+    assert!(check(json!({"prices": {"m": {"input": 1}}}))
+        .unwrap()
+        .contains("prices.m.output"));
+    assert!(
+        check(json!({"prices": {"m": {"input": 1, "output": 1, "cache_read": -1}}}))
+            .unwrap()
+            .contains("prices.m.cache_read")
+    );
+    assert!(check(json!({"prices": [1]}))
+        .unwrap()
+        .contains("prices must be a map"));
     let names: Vec<&str> = record_schema()["fields"]
         .as_array()
         .unwrap()
@@ -1557,7 +1594,15 @@ fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
     assert!(names.contains(&"caching") && names.contains(&"cache_primer_until"));
     assert!(names.contains(&"effort") && names.contains(&"thinking_display"));
     assert!(!names.contains(&"prompt_cache"));
-    assert!(names.contains(&"price_input_per_mtok") && names.contains(&"price_output_per_mtok"));
+    assert!(names.contains(&"prices"));
+    for gone in [
+        "price_input_per_mtok",
+        "price_output_per_mtok",
+        "price_cache_read_per_mtok",
+        "price_cache_write_5m_per_mtok",
+    ] {
+        assert!(!names.contains(&gone), "{gone} is replaced by prices");
+    }
 }
 
 /// A kernel with the agent [`STALL_AGENT`] on a memory store, its record naming `endpoint` and
@@ -1566,7 +1611,10 @@ fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
 async fn mk_with_store(tmp: &TempDir, endpoint: &str, extra: Value) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
 
-    kernel.bundles.register(fantastic_ai_core::chat_bundle::HANDLER_MODULE, fantastic_ai_core::chat_bundle::AiChatBundle);
+    kernel.bundles.register(
+        fantastic_ai_core::chat_bundle::HANDLER_MODULE,
+        fantastic_ai_core::chat_bundle::AiChatBundle,
+    );
     kernel.bundles.register(HANDLER_MODULE, AnthropicBundle);
     kernel.bundles.register(
         fantastic_ram_store::HANDLER_MODULE,
@@ -1620,7 +1668,12 @@ async fn a_stalled_api_stream_ends_the_turn_with_an_error_row() {
     let (ep, server) = stalling_endpoint(Some(sse(&[start(), text("half")]))).await;
     let tmp = TempDir::new().unwrap();
     // `misfire_limit: 2`: the failed turn is retried once (#533), then the chain gives up
-    let kernel = mk_with_store(&tmp, &ep, json!({"stream_idle_seconds": 0.2, "misfire_limit": 2})).await;
+    let kernel = mk_with_store(
+        &tmp,
+        &ep,
+        json!({"stream_idle_seconds": 0.2, "misfire_limit": 2}),
+    )
+    .await;
     let started = std::time::Instant::now();
     let r = call(
         &kernel,
@@ -1898,7 +1951,7 @@ async fn turn(kernel: &Arc<Kernel>, id: &str) {
 }
 
 fn priced() -> Value {
-    json!({"price_input_per_mtok": 3.0, "price_output_per_mtok": 15.0})
+    json!({"prices": {"claude-test-5": {"input": 3.0, "output": 15.0}}})
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2028,9 +2081,18 @@ async fn two_models_count_apart_and_sum_to_the_totals() {
     p.endpoint = ep2;
     drain(&p, None).await.unwrap();
     let u = usage.lock().unwrap();
-    let (s, h) = (&u.by_model["claude-sonnet-5-5"], &u.by_model["claude-haiku-5-5"]);
-    assert_eq!((s.requests, s.input, s.cache_write, s.cache_read, s.output), (1, 100, 400, 0, 10));
-    assert_eq!((h.requests, h.input, h.cache_write, h.cache_read, h.output), (1, 50, 0, 900, 20));
+    let (s, h) = (
+        &u.by_model["claude-sonnet-5-5"],
+        &u.by_model["claude-haiku-5-5"],
+    );
+    assert_eq!(
+        (s.requests, s.input, s.cache_write, s.cache_read, s.output),
+        (1, 100, 400, 0, 10)
+    );
+    assert_eq!(
+        (h.requests, h.input, h.cache_write, h.cache_read, h.output),
+        (1, 50, 0, 900, 20)
+    );
     assert_eq!(u.by_model.len(), 2);
     assert_eq!(u.requests, s.requests + h.requests);
     assert_eq!(u.input, s.input + h.input);
@@ -2054,11 +2116,31 @@ async fn cache_counts_land_on_the_model_that_spent_them() {
     p.endpoint = ep2;
     drain(&p, None).await.unwrap();
     let s = usage.lock().unwrap().snapshot("", &Prices::default());
-    assert_eq!(s["by_model"]["claude-haiku-5-5"]["cache_read"], json!(80), "{s}");
-    assert_eq!(s["by_model"]["claude-haiku-5-5"]["hit_rate"].as_f64(), Some(0.8), "{s}");
-    assert_eq!(s["by_model"]["claude-sonnet-5-5"]["cache_read"], json!(0), "{s}");
-    assert_eq!(s["by_model"]["claude-sonnet-5-5"]["cache_write"], json!(0), "{s}");
-    assert_eq!(s["by_model"]["claude-sonnet-5-5"]["hit_rate"].as_f64(), Some(0.0), "{s}");
+    assert_eq!(
+        s["by_model"]["claude-haiku-5-5"]["cache_read"],
+        json!(80),
+        "{s}"
+    );
+    assert_eq!(
+        s["by_model"]["claude-haiku-5-5"]["hit_rate"].as_f64(),
+        Some(0.8),
+        "{s}"
+    );
+    assert_eq!(
+        s["by_model"]["claude-sonnet-5-5"]["cache_read"],
+        json!(0),
+        "{s}"
+    );
+    assert_eq!(
+        s["by_model"]["claude-sonnet-5-5"]["cache_write"],
+        json!(0),
+        "{s}"
+    );
+    assert_eq!(
+        s["by_model"]["claude-sonnet-5-5"]["hit_rate"].as_f64(),
+        Some(0.0),
+        "{s}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2072,7 +2154,11 @@ async fn by_model_survives_a_restart() {
     let kernel = restart(&tmp, "m_restart").await;
     let after = call(&kernel, "m_restart", json!({"type": "usage"})).await;
     assert_eq!(after["by_model"], before["by_model"], "{after}");
-    assert_eq!(after["by_model"]["claude-haiku-5-5"]["requests"], json!(1), "{after}");
+    assert_eq!(
+        after["by_model"]["claude-haiku-5-5"]["requests"],
+        json!(1),
+        "{after}"
+    );
     // an old-format sidecar, without by_model, still loads
     let file = tmp.path().join(".fantastic/agents/m_restart/usage.json");
     let mut old: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
@@ -2095,13 +2181,25 @@ async fn usage_reset_true_zeroes_the_boot_counts_per_model() {
     let kernel = restart(&tmp, "m_reset").await;
     turn(&kernel, "m_reset").await;
     let got = call(&kernel, "m_reset", json!({"type": "usage", "reset": true})).await;
-    assert_eq!(got["by_model"]["claude-haiku-5-5"]["requests"], json!(2), "{got}");
-    assert_eq!(got["usage_since_boot"]["by_model"]["claude-haiku-5-5"]["requests"], json!(1), "{got}");
+    assert_eq!(
+        got["by_model"]["claude-haiku-5-5"]["requests"],
+        json!(2),
+        "{got}"
+    );
+    assert_eq!(
+        got["usage_since_boot"]["by_model"]["claude-haiku-5-5"]["requests"],
+        json!(1),
+        "{got}"
+    );
     let after = call(&kernel, "m_reset", json!({"type": "usage"})).await;
     assert_eq!(after["usage_since_boot"]["by_model"], json!({}), "{after}");
     // the total keeps the base (the turn before the restart): only the boot counts went
     assert_eq!(after["requests"], json!(1), "{after}");
-    assert_eq!(after["by_model"]["claude-haiku-5-5"]["requests"], json!(1), "{after}");
+    assert_eq!(
+        after["by_model"]["claude-haiku-5-5"]["requests"],
+        json!(1),
+        "{after}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2112,10 +2210,281 @@ async fn usage_reset_verb_zeroes_by_model_and_the_file() {
     create_disk_agent(&kernel, "m_zero", &ep, json!({})).await;
     turn(&kernel, "m_zero").await;
     let pre = call(&kernel, "m_zero", json!({"type": "usage_reset"})).await;
-    assert_eq!(pre["by_model"]["claude-haiku-5-5"]["requests"], json!(1), "{pre}");
+    assert_eq!(
+        pre["by_model"]["claude-haiku-5-5"]["requests"],
+        json!(1),
+        "{pre}"
+    );
     let after = call(&kernel, "m_zero", json!({"type": "usage"})).await;
     assert_eq!(after["by_model"], json!({}), "{after}");
     let kernel = restart(&tmp, "m_zero").await;
     let got = call(&kernel, "m_zero", json!({"type": "usage"})).await;
     assert_eq!(got["by_model"], json!({}), "{got}");
+}
+
+fn books(prices: Value) -> PriceBook {
+    PriceBook::of(prices.as_object().unwrap())
+}
+
+#[tokio::test]
+async fn two_models_price_apart_and_an_unpriced_one_is_never_zero() {
+    let mut first = vec![usage_start_as("claude-sonnet-5-5", 100, 0, 0), text("a")];
+    first.extend(usage_stop(10));
+    let mut second = vec![usage_start_as("claude-haiku-5-5", 1000, 0, 0), text("b")];
+    second.extend(usage_stop(20));
+    let (_s1, ep1) = api(200, sse(&first)).await;
+    let (_s2, ep2) = api(200, sse(&second)).await;
+    let usage = fresh_usage();
+    let mut p = provider(&ep1, Arc::new(NoKey));
+    p.usage = Arc::clone(&usage);
+    drain(&p, None).await.unwrap();
+    p.endpoint = ep2;
+    drain(&p, None).await.unwrap();
+    let u = usage.lock().unwrap();
+    // only sonnet has an entry
+    let one = u.snapshot_priced(&books(
+        json!({"prices": {"claude-sonnet-5-5": {"input": 3.0, "output": 15.0}}}),
+    ));
+    let sonnet = (100.0 * 3.0 + 10.0 * 15.0) / 1e6;
+    assert!(
+        (one["by_model"]["claude-sonnet-5-5"]["cost_usd"]
+            .as_f64()
+            .unwrap()
+            - sonnet)
+            .abs()
+            < 1e-12,
+        "{one}"
+    );
+    assert!(
+        one["by_model"]["claude-haiku-5-5"]
+            .get("cost_usd")
+            .is_none(),
+        "{one}"
+    );
+    assert_eq!(
+        one["by_model"]["claude-haiku-5-5"]["unpriced"],
+        json!(true),
+        "{one}"
+    );
+    assert!(
+        (one["cost_usd"].as_f64().unwrap() - sonnet).abs() < 1e-12,
+        "{one}"
+    );
+    assert_eq!(one["unpriced_models"], json!(["claude-haiku-5-5"]), "{one}");
+    // both priced: the total is the sum, nothing unpriced
+    let both = u.snapshot_priced(&books(json!({"prices": {
+        "claude-sonnet-5-5": {"input": 3.0, "output": 15.0},
+        "claude-haiku-5-5": {"input": 1.0, "output": 5.0, "cache_read": 0.5}}})));
+    let haiku = (1000.0 * 1.0 + 20.0 * 5.0) / 1e6;
+    assert!(
+        (both["by_model"]["claude-haiku-5-5"]["cost_usd"]
+            .as_f64()
+            .unwrap()
+            - haiku)
+            .abs()
+            < 1e-12,
+        "{both}"
+    );
+    assert!(
+        (both["cost_usd"].as_f64().unwrap() - (sonnet + haiku)).abs() < 1e-12,
+        "{both}"
+    );
+    assert!(both.get("unpriced_models").is_none(), "{both}");
+    // no prices at all: no cost anywhere
+    let none = u.snapshot_priced(&PriceBook::default());
+    assert!(
+        none.get("cost_usd").is_none()
+            && none["by_model"]["claude-haiku-5-5"]
+                .get("unpriced")
+                .is_none(),
+        "{none}"
+    );
+    // every model that spent is unpriced: no total, not $0
+    let other = u.snapshot_priced(&books(
+        json!({"prices": {"claude-opus-5-5": {"input": 5.0, "output": 25.0}}}),
+    ));
+    assert!(other.get("cost_usd").is_none(), "{other}");
+    // a dated response id uses its base id's entry
+    let dated = Usage::default();
+    let mut d = dated;
+    d.bump("claude-sonnet-5-5-20260101", None, |x| x.input = 1_000_000);
+    let s = d.snapshot_priced(&books(
+        json!({"prices": {"claude-sonnet-5-5": {"input": 3.0, "output": 15.0}}}),
+    ));
+    assert!((s["cost_usd"].as_f64().unwrap() - 3.0).abs() < 1e-12, "{s}");
+}
+
+#[tokio::test]
+async fn two_calling_chats_count_apart_in_by_agent() {
+    let mut first = vec![usage_start_as("claude-sonnet-5-5", 100, 400, 0), text("a")];
+    first.extend(usage_stop(10));
+    let mut second = vec![usage_start_as("claude-haiku-5-5", 50, 0, 900), text("b")];
+    second.extend(usage_stop(20));
+    let (_s1, ep1) = api(200, sse(&first)).await;
+    let (_s2, ep2) = api(200, sse(&second)).await;
+    let usage = fresh_usage();
+    let mut p = provider(&ep1, Arc::new(NoKey));
+    p.usage = Arc::clone(&usage);
+    p.caller = Some("chat_a".into());
+    drain(&p, None).await.unwrap();
+    drain(&p, None).await.unwrap();
+    p.endpoint = ep2;
+    p.caller = Some("chat_b".into());
+    drain(&p, None).await.unwrap();
+    let u = usage.lock().unwrap();
+    let book = books(json!({"prices": {
+        "claude-sonnet-5-5": {"input": 3.0, "output": 15.0},
+        "claude-haiku-5-5": {"input": 1.0, "output": 5.0}}}));
+    let s = u.snapshot_priced(&book);
+    let (a, b) = (&s["by_agent"]["chat_a"], &s["by_agent"]["chat_b"]);
+    assert_eq!(
+        (
+            &a["requests"],
+            &a["input"],
+            &a["cache_write"],
+            &a["cache_read"],
+            &a["output"]
+        ),
+        (&json!(2), &json!(200), &json!(800), &json!(0), &json!(20)),
+        "{s}"
+    );
+    assert_eq!(
+        (
+            &b["requests"],
+            &b["input"],
+            &b["cache_write"],
+            &b["cache_read"],
+            &b["output"]
+        ),
+        (&json!(1), &json!(50), &json!(0), &json!(900), &json!(20)),
+        "{s}"
+    );
+    let sonnet = (200.0 * 3.0 + 800.0 * 3.75 + 20.0 * 15.0) / 1e6;
+    assert!(
+        (a["cost_usd"].as_f64().unwrap() - sonnet).abs() < 1e-12,
+        "{s}"
+    );
+    // the agents' counts and costs sum to the totals
+    assert_eq!(s["requests"].as_i64().unwrap(), 3);
+    let sum_cost = a["cost_usd"].as_f64().unwrap() + b["cost_usd"].as_f64().unwrap();
+    assert!(
+        (s["cost_usd"].as_f64().unwrap() - sum_cost).abs() < 1e-12,
+        "{s}"
+    );
+    // an unpriced model leaves the agent's cost out: absent, not $0
+    let bare = u.snapshot_priced(&books(
+        json!({"prices": {"claude-sonnet-5-5": {"input": 3.0, "output": 15.0}}}),
+    ));
+    assert!(
+        bare["by_agent"]["chat_b"].get("cost_usd").is_none(),
+        "{bare}"
+    );
+    // a call with no caller counts in the totals alone
+    drop(u);
+    p.caller = None;
+    let (_s3, ep3) = api(200, sse(&first)).await;
+    p.endpoint = ep3;
+    drain(&p, None).await.unwrap();
+    let s = usage.lock().unwrap().snapshot_priced(&book);
+    assert_eq!(s["requests"], json!(4), "{s}");
+    assert_eq!(s["by_agent"].as_object().unwrap().len(), 2, "{s}");
+}
+
+#[test]
+fn the_caller_is_the_rid_prefix() {
+    assert_eq!(
+        caller_of(&json!({"rid": "chat_ai~7"})).as_deref(),
+        Some("chat_ai")
+    );
+    assert_eq!(caller_of(&json!({"rid": "a~b~7"})).as_deref(), Some("a~b"));
+    assert_eq!(caller_of(&json!({"rid": "7"})), None);
+    assert_eq!(caller_of(&json!({"rid": "~7"})), None);
+    assert_eq!(caller_of(&json!({})), None);
+}
+
+async fn complete_as(kernel: &Arc<Kernel>, provider: &str, chat: &str) {
+    let r = call(
+        kernel,
+        provider,
+        json!({"type": "complete", "rid": format!("{chat}~1"), "model": MODEL,
+               "messages": [{"role": "user", "content": "hi"}]}),
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn by_agent_keeps_a_deleted_agent_survives_a_restart_and_resets() {
+    let tmp = TempDir::new().unwrap();
+    let (_srv, ep) = api(200, turn_events(35)).await;
+    let kernel = boot_disk(&tmp).await;
+    let extra = json!({"context_window": 200000, "prices": {"claude-test-5": {"input": 3.0, "output": 15.0}}});
+    create_disk_agent(&kernel, "g_prov", &ep, extra).await;
+    create_disk_agent(&kernel, "g_chat", &ep, json!({})).await;
+    complete_as(&kernel, "g_prov", "g_chat").await;
+    complete_as(&kernel, "g_prov", "g_other").await;
+    complete_as(&kernel, "g_prov", "g_other").await;
+    let got = call(&kernel, "g_prov", json!({"type": "usage"})).await;
+    assert_eq!(got["by_agent"]["g_chat"]["requests"], json!(1), "{got}");
+    assert_eq!(got["by_agent"]["g_chat"]["output"], json!(35), "{got}");
+    assert_eq!(got["by_agent"]["g_other"]["requests"], json!(2), "{got}");
+    assert!(
+        (got["by_agent"]["g_chat"]["cost_usd"].as_f64().unwrap() - 0.002625).abs() < 1e-9,
+        "{got}"
+    );
+    assert_eq!(
+        got["usage_since_boot"]["by_agent"]["g_other"]["requests"],
+        json!(2),
+        "{got}"
+    );
+    // the caller is deleted: its spend stays
+    let r = call(
+        &kernel,
+        "kernel_state",
+        json!({"type": "delete_agent", "id": "g_chat"}),
+    )
+    .await;
+    assert_eq!(r["deleted"], json!(true), "{r}");
+    let after = call(&kernel, "g_prov", json!({"type": "usage"})).await;
+    assert_eq!(after["by_agent"], got["by_agent"], "{after}");
+    // a restart keeps it, from the usage file
+    kernel.flush_records().await;
+    let file = tmp.path().join(".fantastic/agents/g_prov/usage.json");
+    let written: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(
+        written["by_agent"]["g_chat"]["requests"],
+        json!(1),
+        "{written}"
+    );
+    let kernel = restart(&tmp, "g_prov").await;
+    let back = call(&kernel, "g_prov", json!({"type": "usage"})).await;
+    assert_eq!(back["by_agent"], got["by_agent"], "{back}");
+    assert_eq!(back["usage_since_boot"]["by_agent"], json!({}), "{back}");
+    // an old sidecar without by_agent still loads
+    let mut old = written.clone();
+    old.as_object_mut().unwrap().remove("by_agent");
+    std::fs::write(&file, old.to_string()).unwrap();
+    let kernel = restart(&tmp, "g_prov").await;
+    let old_got = call(&kernel, "g_prov", json!({"type": "usage"})).await;
+    assert_eq!(old_got["by_agent"], json!({}), "{old_got}");
+    assert_eq!(old_got["requests"], json!(3), "{old_got}");
+    // usage_reset zeroes it, and the file
+    complete_as(&kernel, "g_prov", "g_other").await;
+    let pre = call(&kernel, "g_prov", json!({"type": "usage_reset"})).await;
+    assert_eq!(pre["by_agent"]["g_other"]["requests"], json!(1), "{pre}");
+    let zero = call(&kernel, "g_prov", json!({"type": "usage"})).await;
+    assert_eq!(zero["by_agent"], json!({}), "{zero}");
+    let kernel = restart(&tmp, "g_prov").await;
+    let zero = call(&kernel, "g_prov", json!({"type": "usage"})).await;
+    assert_eq!(zero["by_agent"], json!({}), "{zero}");
+    // usage reset:true zeroes the since-boot by_agent, as it does the counts
+    complete_as(&kernel, "g_prov", "g_other").await;
+    let got = call(&kernel, "g_prov", json!({"type": "usage", "reset": true})).await;
+    assert_eq!(
+        got["usage_since_boot"]["by_agent"]["g_other"]["requests"],
+        json!(1),
+        "{got}"
+    );
+    let after = call(&kernel, "g_prov", json!({"type": "usage"})).await;
+    assert_eq!(after["usage_since_boot"]["by_agent"], json!({}), "{after}");
 }
