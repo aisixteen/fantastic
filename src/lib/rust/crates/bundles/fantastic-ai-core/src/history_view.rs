@@ -173,9 +173,9 @@ pub fn example_verb(body: &str) -> Option<String> {
 #[must_use]
 pub fn docs_head(pid: i64, verb: &str) -> String {
     format!(
-        "[erased from your view after your next message — decide now which verbs you need \
-         and keep them in this same turn: send yourself <type>grep</type> \
-         <ids><item>{pid}</item></ids> <query>{verb}</query> <width>1000</width>]\n"
+        "[this reply is shortened to one line after your next message; to get lines back \
+         later, a grep with <ids><item>{pid}</item></ids> <query>{verb}</query> \
+         <width>1000</width> returns them]\n"
     )
 }
 

@@ -70,8 +70,10 @@ fn inflight_count(self_id: &str) -> u64 {
 /// the model reads it on its next turn and the operator reads it in the history.
 const EMPTY_AWAIT_NOTE: &str = "[await: nothing to wait for] Nothing of yours is in \
 flight and nothing is queued for you, so this chain ends here and nothing was \
-awaited. Make the call you were waiting on, or end the chain with \
-<call name=\"done\"></call>.";
+awaited. Agents you started that have not reported yet reach you through your \
+check-ins: keep your schedule live, and end the chain only when every agent you \
+started has reported or been stopped. Otherwise make the call you were waiting on, \
+or end the chain with <call name=\"done\"></call>.";
 
 /// What a call that named a VERB but no agent gets told.
 ///

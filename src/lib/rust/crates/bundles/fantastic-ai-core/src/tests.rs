@@ -3580,6 +3580,8 @@ async fn await_with_nothing_in_flight_ends_the_chain_with_a_visible_note() {
         "{content}"
     );
     assert!(content.contains("nothing was awaited"), "{content}");
+    assert!(content.contains("reach you through your check-ins"), "{content}");
+    assert!(content.contains("has reported or been stopped"), "{content}");
 }
 
 /// The honest wait: something is QUEUED for the agent, so `await` ends the turn
@@ -7116,7 +7118,7 @@ fn a_docs_reply_is_cut_to_a_stub_naming_its_held_pid() {
     );
     assert_eq!(blocks[1], sibling);
     assert!(crate::history_view::docs_head(12, "start").starts_with(
-        "[erased from your view after your next message — decide now which verbs you need"
+        "[this reply is shortened to one line after your next message; to get lines back"
     ));
 }
 
