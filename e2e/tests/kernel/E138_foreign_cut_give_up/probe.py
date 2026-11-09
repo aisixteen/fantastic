@@ -5,10 +5,11 @@ A local OpenAI-compatible server plays the model (two: `m` for the AI, `mb` for 
 BOSS it hands its text to); the kernel's own `vllm_backend` agents (ai_core) on the
 PACKAGED host of `RUNTIME` (python | rust) run the chains, driven through `web_rest`.
 
-  A. the model writes a foreign call tag (`<invoke name="send">` followed by a loop of
+  A. the BOSS asks the AI (`inquiry`); the model writes a foreign call tag (`<invoke name="send">` followed by a loop of
      closers) turn after turn: each answer is CUT at the tag, the correction
      (`[malformed call — nothing ran]`) is the next request, the loop is never stored,
-     and after exactly 9 cut turns in a row the chain gives up — no 10th request;
+     and after exactly 9 cut turns in a row the chain gives up — no 10th request —
+     and the BOSS, the sender, is told the cut error;
   B. 8 cut turns, a real call, 8 cut turns, done: the call resets the count — 18
      requests, no give-up;
   C. a cut after thinking: the thought is kept in the store (`has_thinking`) and is
@@ -38,10 +39,12 @@ from mocks.vllm import VllmMock
 REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
 AI, BOSS = "ai", "boss"
+PROVS = {AI: "ai_prov", BOSS: "boss_prov"}
 MODEL = "mock-scripted"
 TOKEN = "E138-" + secrets.token_hex(4)
 FOREIGN = 'Sending it.\n<invoke name="send">\n' + '</invoke>\n' * 400
 DONE = '<call name="done"></call>'
+AWAIT = '<call name="await"></call>'
 GAVE_UP = ("The LLM was not able to answer — 9 turns in a row were cut at a foreign "
            "call syntax. Reiterate the inquiry.")
 
@@ -87,22 +90,13 @@ def last_user(req: dict) -> str:
     return ""
 
 
-def last_user(req: dict) -> str:
-    """The last user message of a chat request, as text."""
-    for m in reversed(req.get("messages") or []):
-        if m.get("role") == "user":
-            c = m.get("content")
-            return c if isinstance(c, str) else json.dumps(c)
-    return ""
-
-
 def main() -> int:
     name, _ = runtime(REPO, RUNTIME)
     spec = ensure_runtime(REPO, name)
     m = ThinkingVllm(model=MODEL).start()
     mb = ThinkingVllm(model=MODEL).start()
     work = Path(tempfile.mkdtemp(prefix="e2e-foreign-cut-"))
-    hk = HostKernel(spec, work, reach=[AI, BOSS]).boot()
+    hk = HostKernel(spec, work, reach=[AI, BOSS, *PROVS.values()]).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -139,29 +133,50 @@ def main() -> int:
         h = hk.send(AI, {"type": "history", "limit": 500})
         return h.get("rows") or h.get("history") or h.get("messages") or []
 
+    ask = (f'<call name="send"><routing><target_id>{AI}</target_id></routing>'
+           '<payload><type>inquiry</type><text>go A</text></payload></call>')
     reflect = (f'Looking around.\n<call name="send">\n<routing><target_id>{root}</target_id>'
                '</routing>\n<payload><type>reflect</type>\n<tree>none</tree></payload>\n</call>')
     try:
         r = hk.send(root, {"type": "update_agent", "id": "memory",
-                           "callable_by": {**callable_by("memory"), AI: "*", BOSS: "*"}})
+                           "callable_by": {**callable_by("memory"), AI: "*", BOSS: "*",
+                                           **{p: "*" for p in PROVS.values()}}})
         need(r.get("updated") is True, f"memory accepts both agents: {str(r)[:200]}")
         for aid, mock, can in (
             (AI, m, {"$self": "*", "memory": "*", root: ["reflect"], BOSS: ["send"]}),
-            (BOSS, mb, {"$self": "*", "memory": "*"}),
+            (BOSS, mb, {"$self": "*", "memory": "*", AI: ["inquiry"]}),
         ):
             by = {"$self": "*", "$parent": "*", "rest": "*"}
             if aid == BOSS:
                 by[AI] = ["send"]
-            rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=aid,
-                            endpoint=mock.url, model=MODEL, max_tokens=8192,
-                            context_window=262144, kv_slots=4, kv_overflow="evict",
-                            memory_store_id="memory", can_call=can, callable_by=by)
+            else:
+                by[BOSS] = ["inquiry"]
+            fields = dict(endpoint=mock.url, model=MODEL, max_tokens=8192,
+                          context_window=262144, memory_store_id="memory")
+            if RUNTIME == "rust":
+                # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it:
+                # a `send` to a provider is refused (#521)
+                pv = PROVS[aid]
+                rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=pv,
+                                kv_slots=4, kv_overflow="evict",
+                                can_call={"$self": "*", "memory": "*"},
+                                callable_by={"$self": "*", "$parent": "*", aid: "*"},
+                                **fields)
+                need(rec.get("id") == pv, f"create {pv}: {str(rec)[:200]}")
+                rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
+                                provider_id=pv, model=MODEL, max_tokens=8192,
+                                context_window=262144, memory_store_id="memory",
+                                can_call={**can, pv: ["complete", "watch"]}, callable_by=by)
+            else:
+                rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=aid,
+                                kv_slots=4, kv_overflow="evict", can_call=can,
+                                callable_by=by, **fields)
             need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")
 
         # ── A · nine cut turns in a row give up ───────────────────────────────
         m.reply(*[FOREIGN] * 12)
-        mb.reply(*[DONE] * 12)
-        out = hk.send(AI, {"type": "send", "text": "go A", "send_to": BOSS})
+        mb.reply(ask, AWAIT, DONE)
+        out = hk.send(BOSS, {"type": "send", "text": "go A"})
         need(not out.get("error"), f"the send is accepted: {str(out)[:200]}")
         turns_at_least(m, 9)
         need(idle(), "A: the chains settle")
@@ -173,6 +188,9 @@ def main() -> int:
         rows = [r for r in history() if r.get("role") == "assistant"]
         need(bool(rows) and all(int(r.get("bytes") or 0) < 60 for r in rows),
              f"A: the loop was never stored: {[r.get('bytes') for r in rows]}")
+        need(any(GAVE_UP in last_user(t["body"]) for t in mb.turns()),
+             "A: the sender (BOSS) was told the cut error: "
+             f"{[last_user(t['body'])[:120] for t in mb.turns()]}")
 
         # ── B · 8 cuts, a call, 8 cuts, done: no give-up ──────────────────────
         m.clear()

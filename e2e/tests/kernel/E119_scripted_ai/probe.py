@@ -55,7 +55,7 @@ from mocks.vllm import VllmMock
 
 REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
-AI, FILES = "ai", "files"
+AI, FILES, PROV = "ai", "files", "ai_prov"
 MODEL = "mock-scripted"
 TOKEN = "E119-" + secrets.token_hex(4)
 
@@ -107,7 +107,7 @@ def main() -> int:
     m = ThinkingVllm(model=MODEL).start()
     work = Path(tempfile.mkdtemp(prefix="e2e-scripted-ai-"))
     (work / "files").mkdir()
-    hk = HostKernel(spec, work, reach=[AI, FILES]).boot()
+    hk = HostKernel(spec, work, reach=[AI, FILES, PROV]).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -162,19 +162,32 @@ def main() -> int:
     ]
     try:
         r = hk.send(root, {"type": "update_agent", "id": "memory",
-                           "callable_by": {**callable_by("memory"), AI: "*"}})
+                           "callable_by": {**callable_by("memory"), AI: "*", PROV: "*"}})
         need(r.get("updated") is True, f"memory accepts the AI: {str(r)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="file_bridge.tools", id=FILES,
                         root="files", allow=["."], ingress_rule="allow_all_ingress",
                         callable_by={"$self": "*", "$parent": "*", AI: "*"})
         need(rec.get("id") == FILES, f"create {FILES}: {str(rec)[:200]}")
-        rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=AI,
-                        endpoint=m.url, model=MODEL, max_tokens=8192,
-                        context_window=262144, kv_slots=4, kv_overflow="evict",
-                        memory_store_id="memory",
-                        can_call={"$self": "*", "memory": "*", root: ["reflect"],
-                                  FILES: "*"},
-                        callable_by={"$self": "*", "$parent": "*", "rest": "*"})
+        can = {"$self": "*", "memory": "*", root: ["reflect"], FILES: "*"}
+        by = {"$self": "*", "$parent": "*", "rest": "*"}
+        if RUNTIME == "rust":
+            # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it:
+            # a `send` to a provider is refused (#521)
+            rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
+                            endpoint=m.url, model=MODEL, max_tokens=8192,
+                            context_window=262144, kv_slots=4, kv_overflow="evict",
+                            memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
+                            callable_by={"$self": "*", "$parent": "*", AI: "*"})
+            need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
+            rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
+                            provider_id=PROV, model=MODEL, max_tokens=8192,
+                            context_window=262144, memory_store_id="memory",
+                            can_call={**can, PROV: ["complete", "watch"]}, callable_by=by)
+        else:
+            rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=AI,
+                            endpoint=m.url, model=MODEL, max_tokens=8192,
+                            context_window=262144, kv_slots=4, kv_overflow="evict",
+                            memory_store_id="memory", can_call=can, callable_by=by)
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:200]}")
         guid = hk.send(root, {"type": "reflect", "tree": "none"}).get("guid")
 

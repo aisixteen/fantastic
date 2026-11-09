@@ -193,6 +193,37 @@ async fn nine_cut_turns_in_a_row_give_up() {
     );
 }
 
+/// The give-up reaches the sender: a peer's `inquiry` to a chain that is cut nine
+/// turns in a row is answered with the cut error (`close_inquiry`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cut_give_up_is_told_to_the_asker() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp, "rt_cut_ask").await;
+    let b = add_peer(&kernel, &tmp, &a).await;
+    let ask = call_envelope(a.as_str(), json!({"type": "inquiry", "text": "go"}), None);
+    let fb = script(
+        &b,
+        vec![
+            pass(ask),
+            pass(r#"<call name="await"></call>"#),
+            pass(r#"<call name="done"></call>"#),
+        ],
+        Duration::ZERO,
+    );
+    let s = script(&a, (0..12).map(|_| pass(FOREIGN)).collect(), Duration::ZERO);
+    let _ = kernel
+        .send(vec![Item::new(
+            b.clone(),
+            json!({"type": "send", "text": "ask", "client_id": "probe"}),
+        )])
+        .await;
+    assert!(until_passes(&fb, 3).await, "the asker never got the answer");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.passes_served(), crate::constants::MAX_CUT_TURNS);
+    let seen = fb.request(2);
+    assert!(seen.contains(&crate::route::cut_gave_up_text(9)), "{seen}");
+}
+
 /// Run `passes` on a fresh chain and report whether any done status gave up.
 async fn gave_up_after(
     tag: &str,
