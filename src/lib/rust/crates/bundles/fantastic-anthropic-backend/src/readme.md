@@ -79,6 +79,11 @@ the since-boot counts (the total is kept; `reset` must be a boolean). The
 `{type: "usage_reset"}` verb returns the total, then zeroes it for good: the counts and
 the `usage.json` file. Deleting the agent drops them too.
 
+`by_model` beside the totals (and inside `usage_since_boot`) counts the same way per model,
+keyed by the model each response names: `{requests, input, cache_write, cache_read,
+output, hit_rate, saved_tokens}`. It persists in `usage.json`; `reset` and `usage_reset`
+zero it with the counts. Per-model prices are not set yet.
+
 - `requests` — responses counted (side calls too)
 - `input_tokens` — the uncached remainder of the prompt
 - `cache_write_tokens` — prompt tokens written to the cache

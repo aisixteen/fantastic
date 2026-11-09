@@ -2093,3 +2093,19 @@ async fn usage_reset_true_zeroes_the_boot_counts_per_model() {
     assert_eq!(after["requests"], json!(1), "{after}");
     assert_eq!(after["by_model"]["claude-haiku-5-5"]["requests"], json!(1), "{after}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_reset_verb_zeroes_by_model_and_the_file() {
+    let tmp = TempDir::new().unwrap();
+    let (_srv, ep) = api(200, turn_events_as("claude-haiku-5-5", 35)).await;
+    let kernel = boot_disk(&tmp).await;
+    create_disk_agent(&kernel, "m_zero", &ep, json!({})).await;
+    turn(&kernel, "m_zero").await;
+    let pre = call(&kernel, "m_zero", json!({"type": "usage_reset"})).await;
+    assert_eq!(pre["by_model"]["claude-haiku-5-5"]["requests"], json!(1), "{pre}");
+    let after = call(&kernel, "m_zero", json!({"type": "usage"})).await;
+    assert_eq!(after["by_model"], json!({}), "{after}");
+    let kernel = restart(&tmp, "m_zero").await;
+    let got = call(&kernel, "m_zero", json!({"type": "usage"})).await;
+    assert_eq!(got["by_model"], json!({}), "{got}");
+}
