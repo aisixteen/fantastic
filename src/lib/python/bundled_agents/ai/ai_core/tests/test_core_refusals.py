@@ -370,8 +370,9 @@ async def test_the_model_facing_error_strings_are_verbatim(seeded_kernel, monkey
         text = await _turn_text(k, "kp_vb", "go")
     assert (
         "no target_id, so nothing was dispatched — a send must name the AGENT it "
-        'goes to. Shape: <call name="send"><target_id>agent</target_id>'
-        "<type>verb</type></call>. Send `kernel` <type>reflect</type> for the "
+        'goes to. Shape: <call name="send"><routing><target_id>agent'
+        "</target_id></routing><payload><type>verb</type></payload></call>. "
+        "Send `kernel` <type>reflect</type> for the "
         "list of agent ids."
     ) in text, text
     # no payload

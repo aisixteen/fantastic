@@ -447,11 +447,9 @@ def test_reply_scalars_are_python_str():
 def test_the_hint_is_verbatim():
     assert _HINT == (
         'The shape: <call name="send">\n'
-        "<target_id>agent id</target_id>\n"
-        "<type>verb</type>\n"
-        "<path>a.md</path>\n"
-        "<bytes>document, verbatim, to the first </bytes>\n"
-        "</bytes>\n"
+        "<routing><target_id>agent id</target_id></routing>\n"
+        "<payload><type>verb</type><path>a.md</path>"
+        "<bytes>document, verbatim, to the first </bytes></bytes></payload>\n"
         "</call> — one child tag per argument, a list is one tag whose children "
         "are all <item>, nothing is escaped."
     )
@@ -510,3 +508,104 @@ def test_a_truthy_non_list_to_is_kept_raw():
     bad = malformed_calls('<call name="send"><to>0</to><type>reflect</type></call>')
     assert len(bad) == 1, bad
     assert "a send names its target" in bad[0]["error"]
+
+
+# ── the routing form: `<routing>` travels, `<payload>` is the target's, whole ──
+
+
+def test_the_routing_form_delivers_a_payload_title_and_keeps_the_routing_one():
+    """The measured break (battle1, #512): `pr_create` takes a `title`, and inline
+    the parser lifts `<title>` out as routing."""
+    a = _one(
+        '<call name="send"><routing><target_id>github</target_id>'
+        "<title>open the PR</title><timeout>60</timeout></routing>"
+        "<payload><type>pr_create</type><repo>a/b</repo>"
+        "<title>TUI composer: Backspace</title><timeout>5</timeout></payload></call>"
+    )["arguments"]
+    assert a["target_id"] == "github"
+    assert a["title"] == "open the PR"
+    assert a["timeout"] == 60
+    assert a["payload"] == {
+        "type": "pr_create",
+        "repo": "a/b",
+        "title": "TUI composer: Backspace",
+        "timeout": 5,
+    }
+
+
+def test_the_routing_form_payload_is_taken_whole():
+    a = _one(
+        '<call name="send"><routing><target_id>remote</target_id></routing>'
+        "<payload><type>forward</type><target>user</target><payload><type>run</type>"
+        "<target_id>x</target_id></payload><routing>kept</routing></payload></call>"
+    )["arguments"]
+    assert a["target_id"] == "remote"
+    assert a["payload"] == {
+        "type": "forward",
+        "target": "user",
+        "payload": {"type": "run", "target_id": "x"},
+        "routing": "kept",
+    }
+
+
+def test_the_routing_form_takes_to_and_an_empty_payload():
+    a = _one(
+        '<call name="send"><routing><to><item>a</item><item>b</item></to></routing>'
+        "<payload></payload></call>"
+    )["arguments"]
+    assert a["to"] == ["a", "b"]
+    assert a["payload"] == {}
+
+
+def test_the_routing_form_refuses_what_it_cannot_route():
+    for text, says in [
+        (
+            '<call name="send"><routing><title>t</title></routing>'
+            "<payload><type>x</type></payload></call>",
+            "names its target in `<routing>`",
+        ),
+        (
+            '<call name="send"><routing><target_id>a</target_id><type>x</type>'
+            "</routing></call>",
+            "`<type>` is not a routing field",
+        ),
+        (
+            '<call name="send"><routing><target_id>a</target_id></routing>'
+            "<type>x</type></call>",
+            "`<type>` beside `<routing>`",
+        ),
+        (
+            '<call name="send"><routing>a</routing>'
+            "<payload><type>x</type></payload></call>",
+            "`<routing>` holds tags",
+        ),
+        (
+            '<call name="send"><routing><target_id>a</target_id></routing>'
+            "<payload>words</payload></call>",
+            "`<payload>` holds the message as tags",
+        ),
+    ]:
+        assert extract_tool_calls(text) == [], text
+        bad = malformed_calls(text)
+        assert len(bad) == 1, text
+        assert says in bad[0]["error"], (text, bad[0]["error"])
+
+
+def test_a_call_without_routing_reads_inline_as_before():
+    a = _one(
+        '<call name="send"><target_id>remote</target_id><title>t</title>'
+        "<type>forward</type><payload><type>run</type></payload></call>"
+    )["arguments"]
+    assert a["title"] == "t"
+    assert a["payload"] == {"type": "forward", "payload": {"type": "run"}}
+
+
+def test_render_call_writes_the_routing_form_when_the_payload_needs_it():
+    args = {
+        "target_id": "github",
+        "title": "label",
+        "payload": {"type": "pr_create", "title": "X"},
+    }
+    text = render_call("send", args)
+    assert "<routing>" in text, text
+    assert _one(text)["arguments"] == args

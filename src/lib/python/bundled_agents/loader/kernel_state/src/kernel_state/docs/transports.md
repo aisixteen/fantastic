@@ -8,8 +8,9 @@ model's prompt). `reflect` is universal; per-verb signatures come from `docs` (s
 
 - in_process  — `send(target_id, payload)` from code inside the kernel.
 - in_prompt   — an AI agent emits a `<call>` element, one child tag per
-                argument, NO JSON: `<call name="send"><target_id>x</target_id>
-                <type>verb</type><path>a.md</path><bytes>…</bytes></call>`.
+                argument, NO JSON: `<call name="send"><routing><target_id>x</target_id>
+                </routing><payload><type>verb</type><path>a.md</path>
+                <bytes>…</bytes></payload></call>`.
 - cli         — `fantastic <agent_id> <verb> [k=v ...]`; shorthand
                 `fantastic reflect [<agent_id>]`. One-shot; refused while a
                 daemon owns the dir (use the web surface then).

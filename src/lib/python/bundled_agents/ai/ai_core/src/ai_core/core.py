@@ -994,12 +994,10 @@ def _clean_title(t) -> str | None:
 
 
 _TITLES_HOWTO = """## Titling your calls
-Every call carries a one-sentence `<title>` beside its `<target_id>`:
+Every call carries a one-sentence `<title>` in its `<routing>`:
 <call name="send">
-<target_id>notes</target_id>
-<title>read filler_2 — looking for the audit marker</title>
-<type>read</type>
-<path>filler_2.txt</path>
+<routing><target_id>notes</target_id><title>read filler_2 — looking for the audit marker</title></routing>
+<payload><type>read</type><path>filler_2.txt</path></payload>
 </call>
 The title rides on the reply's tag and is what remains once the reply BODY is stripped
 from your view (bodies stay fetchable by pid). Title the INTENT ("read filler_2 — looking
@@ -1038,15 +1036,16 @@ _SEND_TO_HOWTO = """## Reaching other agents
 Everything is an agent with a string id; `send` reaches any of them. A call is a
 `<call>` element, one child tag per argument — no JSON, no quotes, no escaping:
 <call name="send">
-<target_id>notes</target_id>
-<type>reflect</type>
+<routing><target_id>notes</target_id></routing>
+<payload><type>reflect</type></payload>
 </call>
-`<target_id>` names the agent, `<type>` the verb, every other child is an argument. A
+`<routing>` is how the call travels: `<target_id>` names the agent. `<payload>` is
+delivered whole: `<type>` the verb, every other child an argument. A
 value is text as written (`true`, `12`, a path); a list is `<item>` children
 (`<ids><item>12</item><item>15</item></ids>`); an object is child tags
 (`<edits><item><path>a.py</path><hunks>2</hunks></item></edits>`); a map's keys are its
 tags, `$` included (`<callable_by><$self>*</$self><web><item>read</item></web></callable_by>`).
-`<reply_to>` picks
+`<reply_to>` in `<routing>` picks
 where the reply goes: you by default (your next message), another id hands it to them,
 `null` discards it. `reflect` goes to the agent itself (`<target_id>runner</target_id>`)
 and says what it IS (sentence, state, tree); how to CALL it is `docs` (below). Text outside calls is your message to whoever asked — keep it
@@ -1065,19 +1064,16 @@ A verb that takes a body (a file, a patch, a program) names it `bytes`: write th
 between `<bytes>` and `</bytes>` exactly as it should land — real newlines and quotes,
 nothing escaped, no fence. The body ends at the first `</bytes>`.
 <call name="send">
-<target_id>notes</target_id>
-<type>write</type>
-<path>notes.md</path>
-<bytes>line one
+<routing><target_id>notes</target_id></routing>
+<payload><type>write</type><path>notes.md</path><bytes>line one
 line two, with "quotes"
-</bytes>
+</bytes></payload>
 </call>
 
 ## How to call an agent — `docs`
 <call name="send">
-<target_id>kernel</target_id>
-<type>docs</type>
-<of>notes</of>
+<routing><target_id>kernel</target_id></routing>
+<payload><type>docs</type><of>notes</of></payload>
 </call>
 `docs` is a KERNEL verb: the target is always `kernel` and the agent you ask about goes
 in `<of>` (an agent id — `<guid>|<agent>` for one on a connected kernel — a bundle by its
@@ -1092,9 +1088,9 @@ one-line stub — act on it then, or ask again. Reflect only agents you are gran
 id and `pruned: <n>`).
 
 ## Several recipients
-`<to><item>a</item><item>b</item></to>` in place of `<target_id>` sends each a copy
+`<to><item>a</item><item>b</item></to>` in `<routing>`, in place of `<target_id>`, sends each a copy
 headed `[from <you> · to a, b · msg N]` (N = the sending turn, the same in every copy).
-Answer a group with the SAME `<to>` (minus yourself) and `<re>N</re>`; fewer recipients
+Answer a group with the SAME `<to>` (minus yourself) and `<re>N</re>`, both in `<routing>`; fewer recipients
 fork a private thread. Tell peers facts in words — your ids mean nothing to them.
 
 ## Turns
@@ -2182,8 +2178,9 @@ async def _route_reply(
                                 "error": (
                                     "no target_id, so nothing was dispatched — a "
                                     "send must name the AGENT it goes to. Shape: "
-                                    '<call name="send"><target_id>agent</target_id>'
-                                    "<type>verb</type></call>. Send `kernel` "
+                                    '<call name="send"><routing><target_id>agent'
+                                    "</target_id></routing><payload><type>verb</type>"
+                                    "</payload></call>. Send `kernel` "
                                     "<type>reflect</type> for the list of agent ids."
                                 ),
                                 "you_sent": {
@@ -2262,7 +2259,12 @@ async def _route_reply(
         # to the target. A verb that documents an argument of the same name can never
         # receive it from a model call, and the model retries and blames the target.
         # The target's `docs` names the verb's arguments; a clash refuses the call, loud.
-        used = [k for k in _ROUTING if k != "target_id" and k in args]
+        # a name the payload ALSO carries reaches the target (the routing form)
+        used = [
+            k
+            for k in _ROUTING
+            if k != "target_id" and k in args and k not in payload
+        ]
         if used and isinstance(payload.get("type"), str):
             clash = _routing_clash(kernel, target, payload["type"], used, doc_args)
             if clash:
@@ -2279,10 +2281,13 @@ async def _route_reply(
                                     + ("is" if len(clash) == 1 else "are")
                                     + " call routing, never sent to the target — but "
                                     f"{target}'s `{payload['type']}` documents an "
-                                    f"argument named {', '.join(clash)}, which no call "
-                                    "can deliver; nothing was dispatched. Call it "
-                                    "without that argument, or have the verb's owner "
-                                    "rename it."
+                                    f"argument named {', '.join(clash)}, which an "
+                                    "inline call cannot deliver; nothing was "
+                                    "dispatched. Write the call in the routing form, "
+                                    "where the payload is taken whole: "
+                                    f'<call name="send"><routing><target_id>{target}'
+                                    "</target_id>…</routing><payload><type>"
+                                    f"{payload['type']}</type>…</payload></call>."
                                 ),
                                 "target": target,
                                 "clash": clash,
