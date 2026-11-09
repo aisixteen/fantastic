@@ -2,7 +2,8 @@
 
 Lives as a child of a `web` agent. Declares one route via the
 duck-typed `get_routes` verb: a WebSocket endpoint at
-`/{host_id}/ws` that any browser / ws_bridge / curl-WS client
+`/{host_id}/ws` (the host's one catch-all; or the record's `route` literal
+when set) that any browser / ws_bridge / curl-WS client
 opens to invoke verbs (`call` frames) and stream events (`watch` /
 `state_subscribe` frames).
 
@@ -45,16 +46,39 @@ from kernel._refusal import UNHANDLED, refusal
 
 
 def _make_endpoint(self_id: str, kernel):
-    async def _ws_endpoint(websocket: WebSocket, host_id: str):
+    async def _ws_endpoint(websocket: WebSocket):
         await websocket.accept()
+        # The catch-all carries `{host_id}`; a literal route names its host by
+        # the URL's first non-empty segment.
+        host_label = websocket.path_params.get("host_id")
+        if not host_label:
+            host_label = next(
+                (s for s in websocket.scope["path"].split("/") if s), ""
+            )
         # `web_agent_id` is the surface's own id (this web_ws instance): every
         # admitted frame is handed to it, and it acts as itself.
-        await _proxy_run(websocket, kernel, host_id, self_id)
+        await _proxy_run(websocket, kernel, host_label, self_id)
 
     return _ws_endpoint
 
 
 PATH_PATTERN = "/{host_id}/ws"
+
+
+def _mount_path(rec: dict) -> str:
+    """The path a leg mounts: its record's `route` literal, else `PATH_PATTERN`
+    (the catch-all a leg mounts when its record names no `route`)."""
+    v = rec.get("route")
+    return v if isinstance(v, str) and v else PATH_PATTERN
+
+
+def _route_refusal(meta: dict) -> str | None:
+    v = meta.get("route")
+    if v is None:
+        return None
+    if isinstance(v, str) and v.startswith("/") and "{" not in v and "}" not in v:
+        return None
+    return f'route={v!r} is not a literal mount path — a string starting with "/", with no "{{" or "}}"'
 
 
 def route_endpoints(agent):
@@ -63,7 +87,7 @@ def route_endpoints(agent):
     endpoint}` for every path `get_routes` declared. The callable is an
     in-process object — it travels this way, NOT inside a verb reply, so the
     reply stays JSON."""
-    return {PATH_PATTERN: _make_endpoint(agent.id, agent)}
+    return {_mount_path(agent.record): _make_endpoint(agent.id, agent)}
 
 
 # ─── verbs ──────────────────────────────────────────────────────
@@ -76,7 +100,7 @@ async def _reflect(id, payload, kernel):
     return {
         "id": id,
         "sentence": "WS verb-invocation surface; mounts /<host_id>/ws on the parent web.",
-        "path_pattern": PATH_PATTERN,
+        "path_pattern": _mount_path(kernel.get(id) or {}),
         # The leg is a CHANNEL — surface its auth posture so discovery-through-denial
         # has something to discover (the door + the pointer to how to open it).
         **_describe(kernel.get(id) or {}),
@@ -93,7 +117,7 @@ async def _get_routes(id, payload, kernel):
     {routes:[{kind:'websocket', path}]} — pure data. The parent `web` host gets
     the live endpoint for each path from this module's `route_endpoints(agent)`
     hook, in-process."""
-    return {"routes": [{"kind": "websocket", "path": PATH_PATTERN}]}
+    return {"routes": [{"kind": "websocket", "path": _mount_path(kernel.get(id) or {})}]}
 
 
 # ─── dispatch ───────────────────────────────────────────────────
@@ -116,9 +140,9 @@ VERBS = {
 
 
 def validate_meta(meta: dict, record: dict) -> str | None:
-    """The leg's `ingress_rule`, refused at the WRITE when no rule implements it
-    — the one check every leg makes (`io_bridge.unknown_ingress_refusal`)."""
-    return unknown_ingress_refusal(meta)
+    """Refused at the WRITE: a `route` that is not a literal mount path, then an
+    `ingress_rule` no rule implements (`io_bridge.unknown_ingress_refusal`)."""
+    return _route_refusal(meta) or unknown_ingress_refusal(meta)
 
 
 async def handler(id: str, payload: dict, kernel) -> dict | None:

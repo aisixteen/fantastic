@@ -1,6 +1,6 @@
 # web_ws — inbound WebSocket leg
 
-Mounts `ws://host/<id>/ws` on a parent `web` agent. **Sealed by default** — a bare leg
+Mounts `ws://host/<id>/ws` on a parent `web` agent: the host's one catch-all `/{host_id}/ws`. `route` (optional record field): a literal mount path such as `/page_ws/ws` — the leg then mounts only that path, and the URL's first segment names the host it watches. A second catch-all leg on the same host fails web boot; a `route` that is not a string starting with `/` with no `{` or `}` is refused at the write. **Sealed by default** — a bare leg
 denies all frames. Open: `update_agent <id> ingress_rule=allow_all_ingress`.
 Token on frame **envelope** (`auth_token`, sibling of `type`/`target` — never inside payload).
 

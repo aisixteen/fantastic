@@ -289,8 +289,8 @@ async def test_a_duplicate_literal_route_is_refused_on_mount_too(seeded_kernel, 
     assert first in handle.routes_by_child["a_dup"]
 
 
-# twin: the_same_catch_all_pattern_on_two_ws_legs_is_still_allowed
-async def test_the_same_catch_all_pattern_on_two_ws_legs_is_still_allowed(
+# twin: a_second_catch_all_ws_leg_is_refused_at_boot_naming_both
+async def test_a_second_catch_all_ws_leg_is_refused_at_boot_naming_both(
     seeded_kernel, host
 ):
     for aid in ("a_ws", "b_ws"):
@@ -302,8 +302,114 @@ async def test_the_same_catch_all_pattern_on_two_ws_legs_is_still_allowed(
             ingress_rule="allow_all_ingress",
         )
     handle = await _spawn(host, seeded_kernel)
+    with pytest.raises(RuntimeError) as exc:
+        await _mount_all_surfaces(handle, seeded_kernel, host)
+    msg = str(exc.value)
+    for part in ("/{host_id}/ws", "a_ws", "b_ws", "catch-all"):
+        assert part in msg, msg
+    assert "b_ws" not in handle.routes_by_child
+    assert handle.task is None
+
+
+# twin: a_second_catch_all_ws_leg_is_refused_on_mount_too
+async def test_a_second_catch_all_ws_leg_is_refused_on_mount_too(seeded_kernel, host):
+    from starlette.routing import Match
+
+    _dup_leg("dup_a", _ws("/{host_id}/ws"))
+    _dup_leg("dup_b", _ws("/{host_id}/ws"))
+    await _mk(seeded_kernel, "dup_a.tools", "a_dup", parent_id=host, **_VIA_HOST(host))
+    await _host_may_ask(seeded_kernel, host, "a_dup", "b_dup")
+    handle = await _spawn(host, seeded_kernel)
     await _mount_all_surfaces(handle, seeded_kernel, host)
-    assert set(handle.routes_by_child) == {"a_ws", "b_ws"}
+    await _mk(seeded_kernel, "dup_b.tools", "b_dup", parent_id=host, **_VIA_HOST(host))
+    out = (
+        await seeded_kernel.send(
+            [{"target": host, "payload": {"type": "mount", "child_id": "b_dup"}}]
+        )
+    )[0]["result"]
+    err = out["error"]
+    assert "/{host_id}/ws" in err and "a_dup" in err and "b_dup" in err, out
+    assert "b_dup" not in handle.routes_by_child
+    scope = {"type": "websocket", "path": "/anything/ws", "path_params": {}}
+    first = next(
+        r for r in handle.app.router.routes if r.matches(scope)[0] == Match.FULL
+    )
+    assert first in handle.routes_by_child["a_dup"]
+
+
+# twin: tests_route_order.rs (fantastic-web)
+async def test_a_web_ws_route_leg_beside_a_catch_all_leg_gets_its_own_url(
+    seeded_kernel, host
+):
+    import json
+
+    from fastapi.testclient import TestClient
+    from starlette.routing import Match
+
+    from _testkit import wire
+
+    await _mk(
+        seeded_kernel,
+        "web_ws.tools",
+        "a_ws",
+        parent_id=host,
+        ingress_rule="allow_all_ingress",
+    )
+    await _mk(
+        seeded_kernel,
+        "web_ws.tools",
+        "z_page_ws",
+        parent_id=host,
+        ingress_rule="allow_all_ingress",
+        route="/z_page_ws/ws",
+    )
+    handle = await _spawn(host, seeded_kernel)
+    await _mount_all_surfaces(handle, seeded_kernel, host)
+
+    def first(path):
+        scope = {"type": "websocket", "path": path, "path_params": {}}
+        return next(
+            r for r in handle.app.router.routes if r.matches(scope)[0] == Match.FULL
+        )
+
+    r = first("/z_page_ws/ws")
+    assert r.path == "/z_page_ws/ws" and r in handle.routes_by_child["z_page_ws"]
+    r = first("/user/ws")
+    assert r.path == "/{host_id}/ws" and r in handle.routes_by_child["a_ws"]
+    assert (
+        sum(1 for r in handle.app.router.routes if getattr(r, "path", "") == "/{host_id}/ws")
+        == 1
+    )
+
+    wire(seeded_kernel, "z_page_ws", "z_page_ws")
+    wire(seeded_kernel, "a_ws", "a_ws")
+
+    def reply(ws, call_id):
+        for _ in range(10):
+            msg = json.loads(ws.receive_text())
+            if msg.get("type") == "reply" and msg.get("id") == call_id:
+                return msg["data"]
+        raise AssertionError(f"no reply for id={call_id}")
+
+    def ask(c, path, target, call_id):
+        with c.websocket_connect(path) as ws:
+            ws.send_text(
+                json.dumps(
+                    {
+                        "type": "call",
+                        "target": target,
+                        "payload": {"type": "reflect"},
+                        "id": call_id,
+                    }
+                )
+            )
+            return reply(ws, call_id)
+
+    with TestClient(handle.app, headers={"host": "127.0.0.1:8999"}) as c:
+        d = ask(c, "/z_page_ws/ws", "z_page_ws", "r1")
+        assert d["id"] == "z_page_ws" and d["path_pattern"] == "/z_page_ws/ws", d
+        d = ask(c, "/a_ws/ws", "a_ws", "r2")
+        assert d["id"] == "a_ws" and d["path_pattern"] == "/{host_id}/ws", d
 
 
 # twin: the_same_literal_path_with_different_kinds_or_methods_is_allowed

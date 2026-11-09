@@ -124,9 +124,24 @@ async def _mount_surface(handle: _ServerHandle, kernel, child_id: str) -> None:
                 "hands over no endpoint for it"
             )
         resolved.append((spec, path, endpoint))
+    # One catch-all WS pattern per host: a second could never answer. http
+    # patterns are not checked. Rust `conflict` agrees.
+    for spec, path, _endpoint in resolved:
+        if "{" not in path or _route_key(spec) != ("websocket", None):
+            continue
+        for other, theirs in handle.routes_by_child.items():
+            if other != child_id and any(
+                getattr(r, "path", None) == path
+                and _route_kind(r)[0] == "websocket"
+                for r in theirs
+            ):
+                raise RuntimeError(
+                    f"web: a second catch-all WS {path} declared by {child_id}; "
+                    f"{other} already holds it — only one catch-all WS leg per "
+                    "host (give one leg a literal route)"
+                )
     # A literal (kind, method, path) another child already holds could never
-    # answer — first match wins — so refuse it. Patterns (`{`) are shared by
-    # design (every web_ws leg declares `/{host_id}/ws`). Rust `conflict` agrees.
+    # answer — first match wins — so refuse it.
     for _spec, path, _endpoint in resolved:
         if "{" in path:
             continue
@@ -460,7 +475,7 @@ async def _mount(id, payload, kernel):
     try:
         await _mount_surface(handle, kernel, child_id)
     except RuntimeError as e:
-        if "is already declared by" not in str(e):
+        if "is already declared by" not in str(e) and "a second catch-all" not in str(e):
             raise
         return {"error": str(e)}
     return {
