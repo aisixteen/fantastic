@@ -44,9 +44,11 @@ def test_a_top_level_call_beside_a_wrapped_one_runs_and_the_report_says_so():
 
 
 def test_a_call_after_a_closed_tag_is_not_wrapped():
-    answer = f"<tool_call>x</tool_call>\n{SEND}"
+    answer = f"<b>x</b> {SEND}"
     assert len(extract_tool_calls(answer)) == 1
-    assert check(answer, ran=1) == []
+    reports = check(answer, ran=1)
+    assert len(reports) == 1
+    assert reports[0].startswith("[unsupported tag — not read] line 1, col 1:")
 
 
 def test_a_call_after_think_runs_and_one_inside_think_does_not():
@@ -71,8 +73,27 @@ def test_an_open_wrapper_after_prose_is_named():
     assert len(reports) == 1 and "`<function_calls>`" in reports[0]
 
 
-def test_a_closed_empty_wrapper_is_not_reported():
-    assert check("<tool_call></tool_call>", ran=0) == []
+def test_a_closed_empty_wrapper_is_an_unsupported_tag():
+    reports = check("<tool_call></tool_call>", ran=0)
+    assert len(reports) == 1
+    assert reports[0].startswith("[unsupported tag — not read] line 1, col 1:")
+
+
+def test_a_call_after_a_type_in_inline_code_runs_with_no_report():
+    answer = "The helper returns `Vec<String>`.\n" + SEND
+    assert len(extract_tool_calls(answer)) == 1
+    assert check(answer, ran=1) == []
+
+
+def test_prose_angle_brackets_that_are_not_tags_do_not_wrap_a_call():
+    for prose in ["if a<b and c>d then", "line `line<br>` ends"]:
+        answer = prose + "\n" + SEND
+        assert len(extract_tool_calls(answer)) == 1, prose
+        assert check(answer, ran=1) == [], prose
+
+
+def test_a_code_span_is_not_an_open_wrapper_in_the_report():
+    assert check("returns `Vec<String>` and nothing else", ran=0) == []
 
 
 def test_a_call_after_a_fenced_div_runs_with_no_report():

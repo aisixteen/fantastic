@@ -8,6 +8,8 @@ retried. Port of the Rust #198 tests (fantastic-ai-core `tests_retries.rs`)."""
 
 from __future__ import annotations
 
+import asyncio
+
 from _testkit import memory_meta
 
 from ai_core import core
@@ -45,6 +47,14 @@ class _Script:
             if isinstance(item, Exception):
                 raise item
             yield item
+
+
+async def _until_calls(fp, n, seconds=5.0):
+    """Wait for the failed turn's own retry (#533) to be served."""
+    for _ in range(int(seconds / 0.02)):
+        if fp.calls >= n:
+            break
+        await asyncio.sleep(0.02)
 
 
 def _agent(kernel, aid, retries=None):
@@ -111,20 +121,21 @@ async def test_retries_run_out_and_the_turn_fails(
 ):
     monkeypatch.setattr(core, "RETRY_BACKOFF_BASE", 0.005)
     aid = "rt_runout"
-    fp = _Script([[_link("connect failed")], [_link("connect failed again")]])
+    fp = _Script([[_link("connect failed")], [_link("connect failed again")], [DONE]])
     _agent(seeded_kernel, aid, retries=1)
     _watch(seeded_kernel, aid)
     fake_providers[aid] = fp
     try:
         reply = await _say(seeded_kernel, aid, "hello")
-        assert fp.calls == 2, f"passes served: {fp.calls}"
+        await _until_calls(fp, 3)
+        assert fp.calls == 3, f"passes served: {fp.calls}"
         assert "[retry 1/1]" in str(fp.seen[1]), fp.seen[1]
         assert "[retry 2/" not in str(fp.seen[1]), fp.seen[1]
         assert reply.get("error"), reply
         done = [
             s for s in await _statuses(seeded_kernel, aid) if s.get("phase") == "done"
         ]
-        assert done and done[-1]["detail"]["reason"] == "error", done
+        assert any(d["detail"]["reason"] == "error" for d in done), done
     finally:
         fake_providers.pop(aid, None)
 
@@ -134,13 +145,15 @@ async def test_a_model_error_is_never_retried(
 ):
     monkeypatch.setattr(core, "RETRY_BACKOFF_BASE", 0.005)
     aid = "rt_model"
-    fp = _Script([[ProviderError("boom")]])
+    fp = _Script([[ProviderError("boom")], [DONE]])
     _agent(seeded_kernel, aid, retries=3)
     fake_providers[aid] = fp
     try:
         await _say(seeded_kernel, aid, "hello")
-        assert fp.calls == 1, f"passes served: {fp.calls}"
+        await _until_calls(fp, 2)
+        assert fp.calls == 2, f"passes served: {fp.calls}"
         assert "[retry" not in str(fp.seen[0]), fp.seen[0]
+        assert "[retry" not in str(fp.seen[1]), fp.seen[1]
     finally:
         fake_providers.pop(aid, None)
 
@@ -153,7 +166,9 @@ async def test_retries_are_off_by_default(seeded_kernel, fake_providers, monkeyp
     fake_providers[aid] = fp
     try:
         await _say(seeded_kernel, aid, "hello")
-        assert fp.calls == 1, f"passes served: {fp.calls}"
+        await _until_calls(fp, 2)
+        assert fp.calls == 2, f"passes served: {fp.calls}"
+        assert "[retry" not in str(fp.seen[1]), fp.seen[1]
     finally:
         fake_providers.pop(aid, None)
 

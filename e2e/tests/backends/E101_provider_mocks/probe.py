@@ -55,14 +55,14 @@ DONE = '<call name="done"></call>'
 #: fields the backend reads from the server)
 PROVIDERS = {
     "vllm": (VllmMock, "vllm_backend.tools", {"kv_overflow": "evict"},
-             {"model": "mock-vllm", "max_tokens": 262144, "context_window": 262144,
+             {"model": "mock-vllm", "max_tokens": 260000, "context_window": 262144,
               "kv_slots": 4}),
     "ollama": (OllamaMock, "ollama_backend.tools", {"context_window": 32768},
                {"model": "mock-ollama"}),
     "responses": (ResponsesMock, "responses_backend.tools",
                   {"model": "mock-responses", "context_window": 32768}, {}),
     "anthropic": (AnthropicMock, "anthropic_backend.tools", {"model": "mock-anthropic"},
-                  {"max_tokens": 262144, "context_window": 262144}),
+                  {"max_tokens": 260000, "context_window": 262144}),
 }
 
 
@@ -194,9 +194,21 @@ def main() -> int:
 
             # 3 · an HTTP 500 on every try fails the turn loud (a backend may retry
             #     a 5xx: the tries are counted, not assumed); the next turn works
+            #     A failed turn is retried on its own (#533): the error stays until the
+            #     retried failures run out (gave_up), so the next turn is a fresh chain.
+            def idle(who: str, bound: float = 60) -> bool:
+                end = time.monotonic() + bound
+                while time.monotonic() < end:
+                    tasks = hk.send("kernel", {"type": "ps"}).get("tasks") or []
+                    if not any(t.get("agent") == who for t in tasks):
+                        return True
+                    time.sleep(0.05)
+                return False
+
             before = len(m.turns())
             m.error(500, times=None)
             out = hk.send(aid, {"type": "send", "text": "again"})
+            idle(aid)
             m.error(None)
             need(bool(out.get("error")) and "500" in json.dumps(out),
                  f"{p}: HTTP 500 → the turn fails naming it "

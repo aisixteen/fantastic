@@ -45,7 +45,7 @@ SEND_TIMEOUT = float(
 # The output budget a request carries when the record names no `max_tokens` (#495):
 # bounded, so a degenerate generation is cut at the model's own stop long before
 # SEND_TIMEOUT instead of asking for the model's maximum.
-DEFAULT_TURN_TOKENS = 16384
+DEFAULT_TURN_TOKENS = 260000
 
 
 def default_max_tokens(thinking_budget: int | None, model_max: int) -> int:

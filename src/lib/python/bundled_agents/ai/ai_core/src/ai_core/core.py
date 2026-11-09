@@ -1412,7 +1412,17 @@ async def _deliver(
             if isinstance(reply, dict) and reply.get("error")
             else out["status"]
         )
-        if notice:
+        # A failed provider pass that was RETRIED (#533) has already delivered the
+        # chain's next turn and counted itself into the streak: resetting the chain
+        # here would drop that turn's token and make it a late row.
+        retried = (
+            notice
+            and isinstance(reply, dict)
+            and reply.get("raised") is True
+            and not str(reply.get("error", "")).startswith("ValueError")
+            and _silent.get((target, client_id), 0) > 0
+        )
+        if notice and not retried:
             _reset_chain(
                 target, "send: the turn that was to read this message did not run"
             )
@@ -1492,12 +1502,12 @@ _DOCS_DROPPED = (
     "[docs of={of} tier={tier} — dropped from your view; held this run: send yourself "
     "<type>grep</type> <ids><item>{pid}</item></ids> <query>{verb}</query>]"
 )
-# The FIRST line of a docs body: it is erased after the next message, and how to keep
-# what the model will need.
+# The FIRST line of a docs body: it is shortened after the next message, and how to
+# get lines back later.
 _DOCS_HEAD = (
-    "[erased from your view after your next message — decide now which verbs you need "
-    "and keep them in this same turn: send yourself <type>grep</type> "
-    "<ids><item>{pid}</item></ids> <query>{verb}</query> <width>1000</width>]\n"
+    "[this reply is shortened to one line after your next message; to get lines back "
+    "later, a grep with <ids><item>{pid}</item></ids> <query>{verb}</query> "
+    "<width>1000</width> returns them]\n"
 )
 _DOCS_VERBS = re.compile(r"^<verbs>\n(.*?)^</verbs>", re.S | re.M)
 _DOCS_ENTRY = re.compile(r"^<([A-Za-z_]\w*)>.*?</\1>", re.S | re.M)
@@ -1756,9 +1766,11 @@ _inflight: dict[str, int] = {}
 
 _EMPTY_AWAIT_NOTE = (
     "[await: nothing to wait for] Nothing of yours is in flight and nothing is "
-    "queued for you, so this chain ends here and nothing was awaited. Make the "
-    "call you were waiting on, or end the chain with "
-    '<call name="done"></call>.'
+    "queued for you, so this chain ends here and nothing was awaited. Agents you "
+    "started that have not reported yet reach you through your check-ins: keep your "
+    "schedule live, and end the chain only when every agent you started has reported "
+    "or been stopped. Otherwise make the call you were waiting on, or end the chain "
+    'with <call name="done"></call>.'
 )
 
 # The silent streak per chain `(agent id, client id)` — see `_route_reply`.
@@ -1887,14 +1899,53 @@ async def _silent_turn(kernel, self_id, client_id, send_to, system_prompt) -> bo
     """Count one silent turn of the chain (a turn that ran nothing). At
     MAX_SILENT_TURNS in a row the chain GIVES UP — the status says so, an open
     inquiry is closed, a `send_to` is told — and True is returned."""
+    return await _count_silent_turn(kernel, self_id, client_id, send_to, system_prompt)
+
+
+async def _failed_turn_retry(
+    kernel, self_id, client_id, send_to, system_prompt, reason: str
+) -> bool:
+    """A FAILED turn (the provider errored, or the answer was cut at `max_tokens`) is
+    counted like a silent one (#533): True when the chain has now failed or been
+    silent MAX_SILENT_TURNS in a row and GAVE UP, naming the error. Otherwise the
+    agent's own next turn is delivered, carrying the `[turn failed]` text, and the
+    chain stays alive — held messages wait for it and are answered by it."""
+    if await _count_silent_turn(
+        kernel, self_id, client_id, send_to, system_prompt, failure=reason
+    ):
+        return True
+    _deliver_soon(
+        kernel,
+        self_id,
+        f"[turn failed] {reason}. Your last turn produced no answer, and nothing it "
+        "meant to send was dispatched. Try again.",
+        client_id,
+        system_prompt,
+        notice=True,
+    )
+    return False
+
+
+async def _count_silent_turn(
+    kernel,
+    self_id,
+    client_id,
+    send_to,
+    system_prompt,
+    failure: str | None = None,
+) -> bool:
     chain = (self_id, client_id)
     streak = _silent[chain] = _silent.get(chain, 0) + 1
     limit = _misfire_limit(kernel, self_id)
     if streak < limit:
         return False
-    await _give_up(
-        kernel, self_id, client_id, send_to, system_prompt, _gave_up(limit), streak
+    gave_up = (
+        _gave_up(limit)
+        if failure is None
+        else f"The LLM was not able to answer — {limit} turns in a row failed or "
+        f"produced no call. Last failure: {failure}"
     )
+    await _give_up(kernel, self_id, client_id, send_to, system_prompt, gave_up, streak)
     return True
 
 
@@ -4098,7 +4149,7 @@ def _make_send(cfg: Backend):
                 traceback.print_exc()
                 # A FAILED PASS stores its own error row (#177): nothing ends
                 # silently. A refused record (the branches above) opened no pass.
-                message = str(e)
+                message = reason = str(e)
                 stored = await _store_failed_turn(
                     id, kernel, text, bool(entry.get("notice")), message
                 )
@@ -4115,7 +4166,13 @@ def _make_send(cfg: Backend):
                     # a link or provider failure: the existing transport code
                     held_answer["reason"] = TRANSPORT_ERROR
                 _answer_held(answering, held_answer)
-                _chain_ended(kernel, id, system_prompt)
+                # A FAILED TURN IS RETRIED (#533): the chain stays alive and its own
+                # next turn is delivered, under the silent-turn bound; at the bound
+                # the chain gives up.
+                if isinstance(e, ValueError) or await _failed_turn_retry(
+                    kernel, id, client_id, send_to, system_prompt, reason
+                ):
+                    _chain_ended(kernel, id, system_prompt)
                 raise
             finally:
                 # Idempotent: on the cancel path `on_cancel` already took the

@@ -430,7 +430,7 @@ async def test_a_caller_send_to_hands_off_once(
 
 
 async def test_an_error_reply_does_not_route(seeded_kernel, store_agent, fake_providers):
-    """A failed pass is terminal — a broken chain must not keep spending turns."""
+    """A failed pass routes nothing (#533): it is retried as its own turn, and that retry ends the chain."""
     oid = await _make_ollama(seeded_kernel)
 
     class _Boom:
@@ -438,8 +438,9 @@ async def test_an_error_reply_does_not_route(seeded_kernel, store_agent, fake_pr
 
         async def chat(self, messages, max_tokens=None):
             _Boom.calls += 1
-            raise RuntimeError("provider exploded")
-            yield  # pragma: no cover - generator marker
+            if _Boom.calls == 1:
+                raise RuntimeError("provider exploded")
+            yield '<call name="done"></call>'
 
     fake_providers[oid] = _Boom()
     try:
@@ -461,7 +462,7 @@ async def test_an_error_reply_does_not_route(seeded_kernel, store_agent, fake_pr
         except RuntimeError:
             pass
         await asyncio.sleep(0.3)
-        assert _Boom.calls == 1
+        assert _Boom.calls == 2
     finally:
         fake_providers.pop(oid, None)
 

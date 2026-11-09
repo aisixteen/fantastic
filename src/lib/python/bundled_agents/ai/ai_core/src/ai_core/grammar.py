@@ -30,21 +30,56 @@ TAG = re.compile(
 )
 
 
+def opens_call(rest: str) -> bool | None:
+    """Whether `rest` (the text right after the opener) opens a call: whitespace,
+    then `name`. None while `rest` is too short to tell (a stream still arriving)."""
+    if not rest:
+        return None
+    if not rest[0].isspace():
+        return False
+    head = rest.lstrip()
+    if head.startswith("name"):
+        return True
+    if head == "" or "name".startswith(head):
+        return None
+    return False
+
+
 def find_close(text: str, start: int) -> int | None:
     """Index of the closer of a call whose body starts at `start`, skipping any
-    closer inside a `<bytes>` value; None when the envelope is unterminated."""
+    closer inside a `<bytes>` value and pairing a nested `<call name…>` with its own
+    closer (a quoted whole call is text); a lone closer still ends the call. None
+    when the envelope is unterminated."""
     i = start
+    depth = 1
     while True:
-        c = text.find(CLOSE, i)
-        b = text.find(BYTES_OPEN, i)
-        if b == -1:
-            return c if c != -1 else None
-        if c != -1 and c < b:
-            return c
-        e = text.find(BYTES_CLOSE, b + len(BYTES_OPEN))
-        if e == -1:
-            return None  # an open document runs to the end: unterminated
-        i = e + len(BYTES_CLOSE)
+        found = [
+            (p, k)
+            for k, p in (
+                (0, text.find(CLOSE, i)),
+                (1, text.find(BYTES_OPEN, i)),
+                (2, text.find(OPEN, i)),
+            )
+            if p != -1
+        ]
+        if not found:
+            return None
+        pos, kind = min(found)
+        if kind == 0:
+            depth -= 1
+            if depth == 0:
+                return pos
+            i = pos + len(CLOSE)
+        elif kind == 1:
+            e = text.find(BYTES_CLOSE, pos + len(BYTES_OPEN))
+            if e == -1:
+                return None  # an open document runs to the end: unterminated
+            i = e + len(BYTES_CLOSE)
+        else:
+            after = pos + len(OPEN)
+            if opens_call(text[after:]) is True:
+                depth += 1
+            i = after
 
 
 def envelopes(text: str) -> list[tuple[int, int, int | None]]:
@@ -265,6 +300,16 @@ def envelopes_in(text: str) -> list[Envelope]:
         out.append(Envelope(start, body, end, open_tags[0] if open_tags else None))
         at = len(text) if end is None else end + len(CLOSE)
     return out
+
+
+def tags_outside(text: str) -> list[tuple[OpenTag, bool]]:
+    """Every tag outside every call envelope and outside code, in document order, as
+    `(tag, closing)`. Nothing in the call grammar is markup but the envelopes."""
+    masked = code_masked(_blank_envelopes(text, envelopes(text)))
+    return [
+        (OpenTag(m.start(), m.end(), m.group(2) or ""), bool(m.group(1)))
+        for m in TAG.finditer(masked)
+    ]
 
 
 def open_tags(text: str) -> list[OpenTag]:

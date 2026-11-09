@@ -5,7 +5,10 @@ senders. Twin of the Rust `tests_deadline.rs`."""
 from __future__ import annotations
 
 import asyncio
+import os
 import time
+
+import pytest
 
 from _testkit import as_agent, memory_meta, wire
 
@@ -263,3 +266,15 @@ async def test_a_send_past_its_deadline_tells_the_sender_its_dead_letter_and_can
         seeded_kernel._meta.pop("send_timeout", None)
         fake_providers.pop(aid, None)
         fake_providers.pop(peer, None)
+
+
+@pytest.mark.skipif(
+    "FANTASTIC_AI_SEND_TIMEOUT" in os.environ, reason="the ceiling is overridden"
+)
+def test_the_default_send_ceiling_is_a_python_float():
+    """Pin (#538): the default per-send ceiling is 600 s, a float. Twin of the Rust
+    `the_default_send_ceiling_is_a_python_float`; it fails if the value is lowered."""
+    from ai_core import constants
+
+    assert constants.SEND_TIMEOUT == 600.0
+    assert repr(constants.SEND_TIMEOUT) == "600.0"

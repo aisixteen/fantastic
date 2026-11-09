@@ -460,11 +460,17 @@ async def test_watch_announces_each_appended_row_until_unwatch(seeded_kernel):
 
 
 class _Boom:
-    """A provider whose stream dies with an error no layer maps."""
+    """A provider whose stream dies with an error no layer maps, on its first call
+    only (the failed turn is retried on its own, #533, and that retry answers)."""
+
+    def __init__(self):
+        self.calls = 0
 
     async def chat(self, messages, max_tokens=None):
-        raise RuntimeError("provider exploded")
-        yield  # pragma: no cover — makes this an async generator
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("provider exploded")
+        yield '<call name="done"></call>'
 
 
 def _watch(k, aid: str) -> asyncio.Queue:
@@ -497,9 +503,12 @@ async def test_unmapped_provider_error_settles_raised(seeded_kernel):
     assert r["error"] == "RuntimeError: provider exploded", r
     assert r["raised"] is True, r
     assert "client_id" not in r, r
-    done = _done_statuses(_drain(q))
+    done = [
+        d
+        for d in _done_statuses(_drain(q))
+        if d["detail"].get("reason") == "error"
+    ]
     assert len(done) == 1, done
-    assert done[0]["detail"]["reason"] == "error", done
     assert done[0]["detail"]["error"] == "provider exploded", done
 
 

@@ -209,3 +209,11 @@ def test_prose_mention_does_not_swallow_a_real_call():
     text = 'the <call names are listed> and <call name="send">x</call>'
     spans = envelopes(text)
     assert [s for s, _, _ in spans] == [text.index('<call name="send">')]
+
+
+def test_a_lone_close_still_ends_the_call():
+    done = OPEN + ' name="done">' + CLOSE
+    text = done + " tail " + CLOSE
+    spans = envelopes(text)
+    assert len(spans) == 1
+    assert spans[0][2] == text.find(CLOSE)

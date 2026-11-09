@@ -108,10 +108,12 @@ async def test_the_queue_moves_on_and_the_next_turn_reads_the_failure(
     fake_providers[aid] = fp
     try:
         await _say(seeded_kernel, aid, "one")
-        await _say(seeded_kernel, aid, "two")
-        assert len(fp.seen) == 2, len(fp.seen)
-        prompt = str(fp.seen[1])
-        assert "[turn failed]" in prompt and "two" in prompt, fp.seen[1]
+        for _ in range(250):
+            if len(fp.seen) >= 2:
+                break
+            await asyncio.sleep(0.02)
+        assert len(fp.seen) >= 2, len(fp.seen)
+        assert "[turn failed]" in str(fp.seen[1]), fp.seen[1]
     finally:
         fake_providers.pop(aid, None)
 
@@ -133,8 +135,9 @@ async def test_a_stalled_api_stream_ends_the_turn_with_an_error_row(
             ev = q.get_nowait()
             if ev.get("type") == "status" and ev.get("phase") == "done":
                 done.append(ev)
-        assert done and done[-1]["detail"]["reason"] == "error", done
-        assert "stream_stalled" in done[-1]["detail"]["error"], done
+        errs = [e for e in done if e["detail"].get("reason") == "error"]
+        assert errs, done
+        assert "stream_stalled" in errs[0]["detail"]["error"], done
     finally:
         fake_providers.pop(aid, None)
 
@@ -326,8 +329,10 @@ async def test_a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_windo
             and e.get("phase") == "done"
             and e.get("client_id") == "probe_a"
         ]
-        assert done and done[-1]["detail"]["reason"] == "error", done
-        assert endpoint in done[-1]["detail"]["error"], done
+        # the retried turn (#533) closes with its own `ok`: pick the failed one
+        errs = [e for e in done if e["detail"].get("reason") == "error"]
+        assert errs, done
+        assert endpoint in errs[0]["detail"]["error"], done
         assert len(_errors(await _rows(seeded_kernel, aid))) == 1
     finally:
         fake_providers.pop(aid, None)
@@ -487,3 +492,163 @@ async def test_a_parent_awaiting_a_child_that_times_out_is_handed_the_timeout(
     finally:
         fake_providers.pop(parent, None)
         fake_providers.pop(child, None)
+
+
+# ─── a failed turn is retried on its own (#533) ─────────────────────────────
+
+
+async def _poll(cond, seconds=5.0):
+    for _ in range(int(seconds / 0.02)):
+        if cond():
+            return True
+        await asyncio.sleep(0.02)
+    return False
+
+
+async def test_a_failed_pass_is_retried_on_its_own_and_its_answer_is_stored(
+    seeded_kernel, fake_providers
+):
+    aid = "ft_retry_once"
+    _agent(seeded_kernel, aid)
+    fake_providers[aid] = _Script(
+        [[ProviderError("mock_backend: boom")], ["RETRIED-ANSWER " + DONE]]
+    )
+    try:
+        out = await _say(seeded_kernel, aid, "go")
+        assert out["raised"] is True, out
+        rows: list[dict] = []
+        for _ in range(250):
+            rows = await _rows(seeded_kernel, aid)
+            if any("RETRIED-ANSWER" in str(r.get("content")) for r in rows):
+                break
+            await asyncio.sleep(0.02)
+        incoming = next(i for i, r in enumerate(rows) if r.get("content") == "go")
+        error = next(i for i, r in enumerate(rows) if r.get("kind") == "error")
+        answer = next(
+            i for i, r in enumerate(rows) if "RETRIED-ANSWER" in str(r.get("content"))
+        )
+        assert incoming < error < answer, rows
+    finally:
+        fake_providers.pop(aid, None)
+
+
+async def test_a_pass_cut_at_max_tokens_gets_the_next_turn_with_the_failure_text(
+    seeded_kernel, fake_providers
+):
+    aid = "ft_retry_cut"
+    _agent(seeded_kernel, aid)
+    fp = _Script(
+        [
+            [
+                RuntimeError(
+                    "mock_backend: the turn was cut at max_tokens=16384 and is NOT complete"
+                )
+            ],
+            [DONE],
+        ]
+    )
+    fake_providers[aid] = fp
+    try:
+        await _say(seeded_kernel, aid, "go")
+        assert await _poll(lambda: len(fp.seen) >= 2), len(fp.seen)
+        seen = str(fp.seen[1])
+        assert "[turn failed]" in seen and "cut at max_tokens=16384" in seen, seen
+    finally:
+        fake_providers.pop(aid, None)
+
+
+async def test_failures_in_a_row_end_in_gave_up_not_a_loop(
+    seeded_kernel, fake_providers
+):
+    aid = "ft_retry_bound"
+    _agent(seeded_kernel, aid)
+    seeded_kernel.ctx.ensure_inbox("watch_rb")
+    seeded_kernel.watch(aid, "watch_rb")
+    fp = _Script(
+        [[ProviderError("mock_backend: boom")]] * core.MAX_SILENT_TURNS + [[DONE]]
+    )
+    fake_providers[aid] = fp
+    seen: list[dict] = []
+
+    def gave_up():
+        q = seeded_kernel.ctx.inboxes["watch_rb"]
+        while not q.empty():
+            ev = q.get_nowait()
+            if ev.get("type") == "status" and ev.get("phase") == "done":
+                seen.append(ev)
+        return [e for e in seen if e["detail"].get("reason") == "gave_up"]
+
+    try:
+        await _say(seeded_kernel, aid, "go")
+        assert await _poll(lambda: bool(gave_up()), 15), seen
+        assert gave_up()[0]["detail"]["error"] == (
+            "The LLM was not able to answer — 10 turns in a row failed or produced "
+            "no call. Last failure: mock_backend: boom"
+        )
+        await asyncio.sleep(0.3)
+        assert len(fp.seen) == core.MAX_SILENT_TURNS, len(fp.seen)
+    finally:
+        fake_providers.pop(aid, None)
+
+
+async def test_a_cancelled_turn_is_not_retried(seeded_kernel, fake_providers):
+    aid = "ft_retry_cancel"
+    _agent(seeded_kernel, aid)
+    fp = _Hang()
+    fake_providers[aid] = fp
+    try:
+        turn = asyncio.ensure_future(_say(seeded_kernel, aid, "go"))
+        assert await _poll(lambda: fp.calls >= 1)
+        await seeded_kernel.send([{"target": aid, "payload": {"type": "stop"}}])
+        await asyncio.wait_for(turn, 5)
+        await asyncio.sleep(0.9)
+        assert fp.calls == 1, "a cancelled turn was retried"
+        assert _errors(await _rows(seeded_kernel, aid)) == []
+    finally:
+        fake_providers.pop(aid, None)
+
+
+async def test_a_held_message_is_answered_by_the_retried_turn(
+    seeded_kernel, fake_providers
+):
+    aid = "ft_retry_held"
+    _agent(seeded_kernel, aid)
+
+    class _FailThenAnswer:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, messages, max_tokens=None):
+            self.calls += 1
+            await asyncio.sleep(0.4)
+            if self.calls == 1:
+                raise ProviderError("mock_backend: boom")
+            yield "HELD-ANSWER " + DONE
+
+    fp = fake_providers[aid] = _FailThenAnswer()
+
+    def send(text, cid):
+        return asyncio.ensure_future(
+            seeded_kernel.send(
+                [
+                    {
+                        "target": aid,
+                        "payload": {"type": "send", "text": text, "client_id": cid},
+                    }
+                ]
+            )
+        )
+
+    try:
+        first = send("one", "probe_a")
+        assert await _poll(lambda: fp.calls >= 1)
+        second = send("two", "probe_b")
+        assert await _poll(lambda: len(core._chain_of(aid)["held"]) >= 1)
+        first_out = (await asyncio.wait_for(first, 10))[0]["result"]
+        assert first_out["raised"] is True, first_out
+        second_out = (await asyncio.wait_for(second, 10))[0]["result"]
+        assert "error" not in second_out, second_out
+        assert "HELD-ANSWER" in second_out["response"], second_out
+        assert fp.calls == 2
+    finally:
+        fake_providers.pop(aid, None)

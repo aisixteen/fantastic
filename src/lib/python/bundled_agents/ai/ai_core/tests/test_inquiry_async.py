@@ -264,3 +264,24 @@ async def test_an_instant_answer_wakes_the_asker_once_and_leaves_nothing_owed(
     finally:
         fake_providers.pop("ia_asker", None)
         fake_providers.pop("ia_rcv", None)
+
+
+async def test_a_cut_give_up_is_told_to_the_asker(seeded_kernel, fake_providers):
+    """The receiver's every pass is a foreign tag, cut each time (#499): at
+    MAX_CUT_TURNS the chain gives up, and its asker is told why."""
+    from ai_core import core
+
+    k = seeded_kernel
+    foreign = 'Sending.\n<invoke name="send">'
+    a, r = _pair(
+        k, fake_providers, [_ask("ia_rcv"), AWAIT, DONE], [foreign] * 12, hold=0
+    )
+    try:
+        await _go(k)
+        await _until(lambda: len(a.incoming) >= 3, timeout=15)
+        await asyncio.sleep(0.3)
+        assert len(r.incoming) == core.MAX_CUT_TURNS
+        assert core._cut_gave_up(core.MAX_CUT_TURNS) in a.incoming[2], a.incoming[2]
+    finally:
+        fake_providers.pop("ia_asker", None)
+        fake_providers.pop("ia_rcv", None)

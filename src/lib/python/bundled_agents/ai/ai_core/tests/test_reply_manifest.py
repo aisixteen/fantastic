@@ -265,7 +265,9 @@ async def test_a_docs_body_is_held_and_its_first_line_names_the_grep(
             await asyncio.sleep(0.02)
         docs_turn, grep_turn = mind.incoming[1], mind.incoming[2]
         head = docs_turn.split("\n")[1]
-        assert head.startswith("[erased from your view after your next message"), (
+        assert head.startswith(
+            "[this reply is shortened to one line after your next message; to get lines back"
+        ), (
             docs_turn
         )
         assert "<query>create_agent</query>" in head, (

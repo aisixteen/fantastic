@@ -10,6 +10,7 @@ from _testkit import memory_meta
 import asyncio
 
 from ai_core import core
+from ai_core.tool_parse import extract_tool_calls
 from ai_core.call_check import MAX_REPORTS, _risky, check, foreign_cut, repair
 
 E59 = """I'll look at the files agent.
@@ -161,14 +162,51 @@ def test_a_stray_close_after_a_good_call():
     assert "write it as" not in r, r
 
 
-def test_prose_and_foreign_markup_without_our_vocabulary_are_not_calls():
+def test_prose_without_tags_and_good_calls_get_no_report():
     for answer in [
         "All done, the file is written.",
-        "Use <b>bold</b> and a <div class='x'>box</div>; 3 < 4 > 2.",
-        "<tool_call>\n</tool_call>",
+        "3 < 4 > 2, and a<b and c>d.",
         '<call name="done"></call>',
     ]:
         assert check(answer, ran=0) == [], answer
+
+
+def test_any_tag_outside_a_call_is_reported():
+    for answer, tag in [
+        ("Use <b>bold</b>.", "<b>"),
+        ("a <div class='x'>box</div>", "<div class='x'>"),
+        ("<tool_call>\n</tool_call>", "<tool_call>"),
+        ("<br/>", "<br/>"),
+        ("stray </invoke>", "</invoke>"),
+    ]:
+        r = check(answer, ran=0)
+        assert len(r) == 1, (answer, r)
+        assert r[0].startswith("[unsupported tag — not read] line 1, col "), r[0]
+        assert f"`{tag}` is not part of the call grammar — delete it\n" in r[0], r[0]
+        assert r[0].endswith(TAIL), r[0]
+
+
+def test_an_empty_invoke_before_good_calls_is_reported_and_the_calls_run():
+    send = '<call name="send"><target_id>files</target_id><type>reflect</type></call>'
+    answer = '<invoke name="x">\n</invoke>\n' + send + "\n" + send
+    assert len(extract_tool_calls(answer)) == 2
+    assert check(answer, ran=2) == [
+        "[unsupported tag — not read] line 1, col 1:\n"
+        '  <invoke name="x">\n'
+        '  ^~~~~~~~~~~~~~~~~ `<invoke name="x">` is not part of the call grammar — '
+        "delete it\n" + TAIL + "\n"
+        "The other 2 calls of this answer ran — their replies are in this batch; do "
+        "not write them again."
+    ]
+
+
+def test_a_whole_call_quoted_in_an_argument_reports_nothing():
+    q = '<call name="send"><target_id>x</target_id><type>y</type></call>'
+    answer = (
+        '<call name="send"><target_id>kernel</target_id><type>spawn</type>'
+        f"<task>{q}</task></call>"
+    )
+    assert check(answer, ran=1) == []
 
 
 def test_what_a_call_envelope_holds_is_never_checked():
@@ -523,6 +561,8 @@ def test_a_correct_or_quoted_call_is_not_cut():
         '```\n<invoke name="x">\n```\nok',
         "a < b and c > d",
         'call name="await">more',
+        '<call name="send"><target_id>a</target_id><type>say</type><text>write '
+        '<call name="done"></call> to end</text></call>',
     ]
     for text in ok:
         assert _streamed_cut(text) is None, text

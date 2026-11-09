@@ -247,3 +247,21 @@ async def test_a_prose_turn_breaks_the_cut_run(seeded_kernel, fake_providers):
     assert not await _gave_up_after(
         seeded_kernel, fake_providers, "sc_prose", turns, misfire_limit=20
     )
+
+
+async def test_a_quoted_call_in_an_argument_is_not_cut(seeded_kernel, fake_providers):
+    text = (
+        '<call name="send"><target_id>probe</target_id><type>say</type>'
+        '<text>end with <call name="done"></call> then</text></call>'
+    )
+    fp = _Stream([_chars(text), [DONE]])
+    aid = "sc_quoted"
+    _agent(seeded_kernel, aid)
+    fake_providers[aid] = fp
+    try:
+        await _go(seeded_kernel, aid)
+        await _settle(fp, 1)
+        said = await _said(aid, seeded_kernel)
+        assert said[0]["content"] == text, said
+    finally:
+        fake_providers.pop(aid, None)
