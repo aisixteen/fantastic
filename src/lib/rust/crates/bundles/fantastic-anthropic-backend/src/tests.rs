@@ -766,6 +766,12 @@ fn usage_start(input: i64, write: i64, read: i64) -> Value {
     }}})
 }
 
+fn usage_start_as(model: &str, input: i64, write: i64, read: i64) -> Value {
+    let mut v = usage_start(input, write, read);
+    v["message"]["model"] = json!(model);
+    v
+}
+
 fn usage_stop(out: i64) -> [Value; 2] {
     [
         json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": out}}),
@@ -1999,4 +2005,117 @@ fn the_sidecar_keeps_the_one_hour_write_count() {
     let old = Usage::from_json(&json!({"requests": 3, "cache_write": 5}));
     assert_eq!((old.requests, old.cache_write), (3, 5));
     assert_eq!((old.cache_write_1h, old.long_cache_write_1h), (0, 0));
+}
+
+fn turn_events_as(model: &str, out: i64) -> String {
+    let mut ev = vec![usage_start_as(model, 100, 400, 1000), text("ok")];
+    ev.extend(usage_stop(out));
+    sse(&ev)
+}
+
+#[tokio::test]
+async fn two_models_count_apart_and_sum_to_the_totals() {
+    let mut first = vec![usage_start_as("claude-sonnet-5-5", 100, 400, 0), text("a")];
+    first.extend(usage_stop(10));
+    let mut second = vec![usage_start_as("claude-haiku-5-5", 50, 0, 900), text("b")];
+    second.extend(usage_stop(20));
+    let (_s1, ep1) = api(200, sse(&first)).await;
+    let (_s2, ep2) = api(200, sse(&second)).await;
+    let usage = fresh_usage();
+    let mut p = provider(&ep1, Arc::new(NoKey));
+    p.usage = Arc::clone(&usage);
+    drain(&p, None).await.unwrap();
+    p.endpoint = ep2;
+    drain(&p, None).await.unwrap();
+    let u = usage.lock().unwrap();
+    let (s, h) = (&u.by_model["claude-sonnet-5-5"], &u.by_model["claude-haiku-5-5"]);
+    assert_eq!((s.requests, s.input, s.cache_write, s.cache_read, s.output), (1, 100, 400, 0, 10));
+    assert_eq!((h.requests, h.input, h.cache_write, h.cache_read, h.output), (1, 50, 0, 900, 20));
+    assert_eq!(u.by_model.len(), 2);
+    assert_eq!(u.requests, s.requests + h.requests);
+    assert_eq!(u.input, s.input + h.input);
+    assert_eq!(u.cache_write, s.cache_write + h.cache_write);
+    assert_eq!(u.cache_read, s.cache_read + h.cache_read);
+    assert_eq!(u.output, s.output + h.output);
+}
+
+#[tokio::test]
+async fn cache_counts_land_on_the_model_that_spent_them() {
+    let mut first = vec![usage_start_as("claude-haiku-5-5", 20, 0, 80), text("a")];
+    first.extend(usage_stop(5));
+    let mut second = vec![usage_start_as("claude-sonnet-5-5", 100, 0, 0), text("b")];
+    second.extend(usage_stop(5));
+    let (_s1, ep1) = api(200, sse(&first)).await;
+    let (_s2, ep2) = api(200, sse(&second)).await;
+    let usage = fresh_usage();
+    let mut p = provider(&ep1, Arc::new(NoKey));
+    p.usage = Arc::clone(&usage);
+    drain(&p, None).await.unwrap();
+    p.endpoint = ep2;
+    drain(&p, None).await.unwrap();
+    let s = usage.lock().unwrap().snapshot("", &Prices::default());
+    assert_eq!(s["by_model"]["claude-haiku-5-5"]["cache_read"], json!(80), "{s}");
+    assert_eq!(s["by_model"]["claude-haiku-5-5"]["hit_rate"].as_f64(), Some(0.8), "{s}");
+    assert_eq!(s["by_model"]["claude-sonnet-5-5"]["cache_read"], json!(0), "{s}");
+    assert_eq!(s["by_model"]["claude-sonnet-5-5"]["cache_write"], json!(0), "{s}");
+    assert_eq!(s["by_model"]["claude-sonnet-5-5"]["hit_rate"].as_f64(), Some(0.0), "{s}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn by_model_survives_a_restart() {
+    let tmp = TempDir::new().unwrap();
+    let (_srv, ep) = api(200, turn_events_as("claude-haiku-5-5", 35)).await;
+    let kernel = boot_disk(&tmp).await;
+    create_disk_agent(&kernel, "m_restart", &ep, json!({})).await;
+    turn(&kernel, "m_restart").await;
+    let before = call(&kernel, "m_restart", json!({"type": "usage"})).await;
+    let kernel = restart(&tmp, "m_restart").await;
+    let after = call(&kernel, "m_restart", json!({"type": "usage"})).await;
+    assert_eq!(after["by_model"], before["by_model"], "{after}");
+    assert_eq!(after["by_model"]["claude-haiku-5-5"]["requests"], json!(1), "{after}");
+    // an old-format sidecar, without by_model, still loads
+    let file = tmp.path().join(".fantastic/agents/m_restart/usage.json");
+    let mut old: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("by_model");
+    std::fs::write(&file, old.to_string()).unwrap();
+    let kernel = restart(&tmp, "m_restart").await;
+    let got = call(&kernel, "m_restart", json!({"type": "usage"})).await;
+    assert_eq!(got["requests"], json!(1), "{got}");
+    assert_eq!(got["by_model"], json!({}), "{got}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_reset_true_zeroes_the_boot_counts_per_model() {
+    let tmp = TempDir::new().unwrap();
+    let (_srv, ep) = api(200, turn_events_as("claude-haiku-5-5", 35)).await;
+    let kernel = boot_disk(&tmp).await;
+    create_disk_agent(&kernel, "m_reset", &ep, json!({})).await;
+    turn(&kernel, "m_reset").await;
+    // a restart: that turn becomes the base; the next one is this boot's own
+    let kernel = restart(&tmp, "m_reset").await;
+    turn(&kernel, "m_reset").await;
+    let got = call(&kernel, "m_reset", json!({"type": "usage", "reset": true})).await;
+    assert_eq!(got["by_model"]["claude-haiku-5-5"]["requests"], json!(2), "{got}");
+    assert_eq!(got["usage_since_boot"]["by_model"]["claude-haiku-5-5"]["requests"], json!(1), "{got}");
+    let after = call(&kernel, "m_reset", json!({"type": "usage"})).await;
+    assert_eq!(after["usage_since_boot"]["by_model"], json!({}), "{after}");
+    // the total keeps the base (the turn before the restart): only the boot counts went
+    assert_eq!(after["requests"], json!(1), "{after}");
+    assert_eq!(after["by_model"]["claude-haiku-5-5"]["requests"], json!(1), "{after}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_reset_verb_zeroes_by_model_and_the_file() {
+    let tmp = TempDir::new().unwrap();
+    let (_srv, ep) = api(200, turn_events_as("claude-haiku-5-5", 35)).await;
+    let kernel = boot_disk(&tmp).await;
+    create_disk_agent(&kernel, "m_zero", &ep, json!({})).await;
+    turn(&kernel, "m_zero").await;
+    let pre = call(&kernel, "m_zero", json!({"type": "usage_reset"})).await;
+    assert_eq!(pre["by_model"]["claude-haiku-5-5"]["requests"], json!(1), "{pre}");
+    let after = call(&kernel, "m_zero", json!({"type": "usage"})).await;
+    assert_eq!(after["by_model"], json!({}), "{after}");
+    let kernel = restart(&tmp, "m_zero").await;
+    let got = call(&kernel, "m_zero", json!({"type": "usage"})).await;
+    assert_eq!(got["by_model"], json!({}), "{got}");
 }
