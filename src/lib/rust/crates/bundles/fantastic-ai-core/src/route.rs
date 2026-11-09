@@ -30,7 +30,7 @@
 //! would trip [`fantastic_kernel::call_guard`] as a false cycle on turn 2. The
 //! INBOUND check lives in [`crate::verbs::send`], before the lock.
 
-use crate::constants::MAX_SILENT_TURNS;
+use crate::constants::{MAX_CUT_TURNS, MAX_SILENT_TURNS};
 use crate::events::emit_status;
 use crate::helpers::mint_batch_token;
 use crate::history_view::{docs_head, example_verb, point_to_docs};
@@ -491,6 +491,13 @@ pub(crate) fn silent() -> &'static Mutex<HashMap<(String, String), usize>> {
     SILENT.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// THE CUT STREAK per chain `(agent id, client id)`: turns in a row the stream
+/// checker cut at a foreign call tag (#499). At [`MAX_CUT_TURNS`] the chain gives up.
+pub(crate) fn cuts() -> &'static Mutex<HashMap<(String, String), usize>> {
+    static CUTS: OnceLock<Mutex<HashMap<(String, String), usize>>> = OnceLock::new();
+    CUTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// The chain's CURRENT silent streak, read without touching it (#203). 0 when
 /// the chain has never been silent.
 fn silent_streak(self_id: &AgentId, client_id: &str) -> usize {
@@ -936,6 +943,10 @@ pub(crate) fn forget(self_id: &str) {
         .lock()
         .expect("silent poisoned")
         .retain(|chain, _| chain.0 != self_id);
+    cuts()
+        .lock()
+        .expect("cuts poisoned")
+        .retain(|chain, _| chain.0 != self_id);
     open_inquiries()
         .lock()
         .expect("open inquiries poisoned")
@@ -956,6 +967,14 @@ pub fn gave_up_text(limit: usize) -> String {
     format!(
         "The LLM was not able to answer — {limit} turns in a row produced \
          no call. Reiterate the inquiry."
+    )
+}
+
+/// What a caller is told when a chain gives up after `limit` cut turns (#499).
+pub fn cut_gave_up_text(limit: usize) -> String {
+    format!(
+        "The LLM was not able to answer — {limit} turns in a row were cut at a \
+         foreign call syntax. Reiterate the inquiry."
     )
 }
 
@@ -1175,6 +1194,9 @@ async fn route_reply_gated(
     // ONLY THE ANSWER ACTS: calls written inside thinking are
     // read as thinking — dispatch and the malformed-call report read the answer.
     let answer = crate::call_check::repair(&crate::think::without_thinking(&text));
+    // A stream-cut answer ends at its first foreign tag; a finished answer holding
+    // one was always cut. So this is true exactly for a turn the stream checker cut.
+    let foreign = !cut && crate::call_check::foreign_cut(&answer).is_some();
     let parsed = if cut {
         Vec::new()
     } else {
@@ -1731,6 +1753,9 @@ async fn route_reply_gated(
     if any_calls {
         silent().lock().expect("silent poisoned").remove(&chain);
     }
+    if any_calls || !foreign {
+        cuts().lock().expect("cuts poisoned").remove(&chain);
+    }
     // EVERY CALL-LESS TURN IS NUDGED, chain or not, a FIRST turn of pure prose
     // from a person included — otherwise a model that decided on a call, wrote it
     // in thought, and never emitted it ends the work silently.
@@ -1741,11 +1766,13 @@ async fn route_reply_gated(
     let nudging = !any_calls && !any_blocks && chained;
     // Only broken calls: their reports are the next turn — unless this chain has
     // now been silent MAX_SILENT_TURNS in a row, and gives up.
-    if !any_calls
-        && any_blocks
-        && silent_turn(&kernel, &self_id, &client_id, send_to.as_deref(), sp).await
-    {
-        return false;
+    if !any_calls && any_blocks {
+        if foreign && cut_turn(&kernel, &self_id, &client_id, send_to.as_deref(), sp).await {
+            return false;
+        }
+        if silent_turn(&kernel, &self_id, &client_id, send_to.as_deref(), sp).await {
+            return false;
+        }
     }
     // The chain goes on only when a reply batch lands on this agent itself.
     let to_self = blocks.iter().any(|b| b.dest == self_id.as_str());
@@ -1979,7 +2006,6 @@ async fn count_silent_turn(
     if streak < limit {
         return false;
     }
-    silent().lock().expect("silent poisoned").remove(&chain);
     let gave_up = match failure {
         Some(why) => format!(
             "The LLM was not able to answer — {limit} turns in a row failed or produced \
@@ -1987,6 +2013,56 @@ async fn count_silent_turn(
         ),
         None => gave_up_text(limit),
     };
+    give_up(kernel, self_id, client_id, send_to, sp, &gave_up, streak).await;
+    true
+}
+
+/// Count a turn the stream checker cut (#499): `true` when [`MAX_CUT_TURNS`] in a
+/// row were cut and the chain GAVE UP.
+async fn cut_turn(
+    kernel: &Arc<Kernel>,
+    self_id: &AgentId,
+    client_id: &str,
+    send_to: Option<&str>,
+    sp: Option<&str>,
+) -> bool {
+    let chain = (self_id.as_str().to_string(), client_id.to_string());
+    let streak = {
+        let mut m = cuts().lock().expect("cuts poisoned");
+        let e = m.entry(chain).or_insert(0);
+        *e += 1;
+        *e
+    };
+    if streak < MAX_CUT_TURNS {
+        return false;
+    }
+    give_up(
+        kernel,
+        self_id,
+        client_id,
+        send_to,
+        sp,
+        &cut_gave_up_text(MAX_CUT_TURNS),
+        streak,
+    )
+    .await;
+    true
+}
+
+/// The give-up tail: forget both streaks, say so in the status, close the inquiry and
+/// tell the caller.
+async fn give_up(
+    kernel: &Arc<Kernel>,
+    self_id: &AgentId,
+    client_id: &str,
+    send_to: Option<&str>,
+    sp: Option<&str>,
+    gave_up: &str,
+    streak: usize,
+) {
+    let chain = (self_id.as_str().to_string(), client_id.to_string());
+    silent().lock().expect("silent poisoned").remove(&chain);
+    cuts().lock().expect("cuts poisoned").remove(&chain);
     let st = state_for(self_id);
     let mut detail = Map::new();
     detail.insert("reason".to_string(), json!("gave_up"));
@@ -1997,9 +2073,8 @@ async fn count_silent_turn(
     body.insert("error".to_string(), json!(gave_up));
     close_inquiry(kernel, self_id.as_str(), client_id, body).await;
     if let Some(to) = send_to {
-        deliver_soon(kernel, to, &gave_up, client_id, sp, false);
+        deliver_soon(kernel, to, gave_up, client_id, sp, false);
     }
-    true
 }
 
 /// ONE delivered message per destination: blocks joined by a blank line, each

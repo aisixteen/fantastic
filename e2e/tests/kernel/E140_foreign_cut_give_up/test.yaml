@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: scripted OpenAI-compatible servers
+# play the model for the kernel's own vllm_backend agents, driven over web_rest.
+id: foreign_cut_give_up
+group: kernel
+title: "the call checker on the stream (#499): a foreign call tag cuts the answer, nine cuts in a row give up, a call resets the count, a cut after thinking keeps the thought in the store and not in the next request"
+runner: probe.py
+runtimes: [python, rust]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300

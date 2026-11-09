@@ -15,16 +15,18 @@ The script, one model answer per request:
      reflect]` carrying the root's guid;
   2. a `write` to a file_bridge, `bytes` verbatim: the file lands on disk with
      exactly those bytes; the next request carries the `write` reply;
-  3. a call written WRONG — a `<tool_call><function=call name="send">` wrapper and
-     an envelope with text outside a tag: nothing runs (no file); the next request
-     carries the compiler-style report (`[malformed call — nothing ran] line L,
-     col C`, a caret, `write it as:` + the form) and the envelope's fault (`call
-     NOT dispatched: text outside a tag`);
-  4. a call INSIDE the thought (`reasoning_content`), an answer with none: nothing
+  3. a call written WRONG — a `<tool_call><function=call name="send">` wrapper: the
+     stream is CUT at the first foreign tag (#499), so nothing after it is read
+     or stored; nothing runs (no file); the next request carries the
+     compiler-style report (`[malformed call — nothing ran] line L, col C`, a
+     caret, `write it as:` + the form) and none of the cut text;
+  4. an envelope with text outside a tag: not dispatched; the next request carries
+     the envelope's fault (`call NOT dispatched: text outside a tag`);
+  5. a call INSIDE the thought (`reasoning_content`), an answer with none: nothing
      is dispatched (no file); the next request carries the no-call reminder
      (`[no call was dispatched]`), and its history holds the answer without the
      thought (stripped before the turn is stored);
-  5. a plain answer + `done`: the chain ends — no further request reaches the
+  6. a plain answer + `done`: the chain ends — no further request reaches the
      server once the agent has nothing in flight.
 
 Across the run: every request is a streamed chat completion naming the record's
@@ -53,7 +55,7 @@ from mocks.vllm import VllmMock
 
 REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
-AI, FILES = "ai", "files"
+AI, FILES, PROV = "ai", "files", "ai_prov"
 MODEL = "mock-scripted"
 TOKEN = "E119-" + secrets.token_hex(4)
 
@@ -105,7 +107,7 @@ def main() -> int:
     m = ThinkingVllm(model=MODEL).start()
     work = Path(tempfile.mkdtemp(prefix="e2e-scripted-ai-"))
     (work / "files").mkdir()
-    hk = HostKernel(spec, work, reach=[AI, FILES]).boot()
+    hk = HostKernel(spec, work, reach=[AI, FILES, PROV]).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -146,10 +148,11 @@ def main() -> int:
         # 2 · a file write, bytes verbatim
         (f'<call name="send">\n<routing><target_id>{FILES}</target_id></routing>\n<payload><type>write</type>\n'
          f'<path>out.txt</path>\n<bytes>{TOKEN}\n"quoted" & <raw></bytes></payload>\n</call>'),
-        # 3 · calls written wrong
+        # 3a · a call written wrong: cut at the first foreign tag
         ('I will write it.\n<tool_call><function=call name="send"><target_id>files'
-         '</target_id><type>write</type><path>bad.txt</path></function></tool_call>\n'
-         f'<call name="send">oops<target_id>{FILES}</target_id><type>reflect</type></call>'),
+         '</target_id><type>write</type><path>bad.txt</path></function></tool_call>'),
+        # 3b · an envelope with text outside a tag
+        f'<call name="send">oops<target_id>{FILES}</target_id><type>reflect</type></call>',
         # 4 · a call inside the thought only
         (f'<think>I could run <call name="send"><target_id>{FILES}</target_id>'
          '<type>write</type><path>think.txt</path><bytes>x</bytes></call> but I will not.'
@@ -159,19 +162,32 @@ def main() -> int:
     ]
     try:
         r = hk.send(root, {"type": "update_agent", "id": "memory",
-                           "callable_by": {**callable_by("memory"), AI: "*"}})
+                           "callable_by": {**callable_by("memory"), AI: "*", PROV: "*"}})
         need(r.get("updated") is True, f"memory accepts the AI: {str(r)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="file_bridge.tools", id=FILES,
                         root="files", allow=["."], ingress_rule="allow_all_ingress",
                         callable_by={"$self": "*", "$parent": "*", AI: "*"})
         need(rec.get("id") == FILES, f"create {FILES}: {str(rec)[:200]}")
-        rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=AI,
-                        endpoint=m.url, model=MODEL, max_tokens=8192,
-                        context_window=262144, kv_slots=4, kv_overflow="evict",
-                        memory_store_id="memory",
-                        can_call={"$self": "*", "memory": "*", root: ["reflect"],
-                                  FILES: "*"},
-                        callable_by={"$self": "*", "$parent": "*", "rest": "*"})
+        can = {"$self": "*", "memory": "*", root: ["reflect"], FILES: "*"}
+        by = {"$self": "*", "$parent": "*", "rest": "*"}
+        if RUNTIME == "rust":
+            # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it:
+            # a `send` to a provider is refused (#521)
+            rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
+                            endpoint=m.url, model=MODEL, max_tokens=8192,
+                            context_window=262144, kv_slots=4, kv_overflow="evict",
+                            memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
+                            callable_by={"$self": "*", "$parent": "*", AI: "*"})
+            need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
+            rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
+                            provider_id=PROV, model=MODEL, max_tokens=8192,
+                            context_window=262144, memory_store_id="memory",
+                            can_call={**can, PROV: ["complete", "watch"]}, callable_by=by)
+        else:
+            rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=AI,
+                            endpoint=m.url, model=MODEL, max_tokens=8192,
+                            context_window=262144, kv_slots=4, kv_overflow="evict",
+                            memory_store_id="memory", can_call=can, callable_by=by)
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:200]}")
         guid = hk.send(root, {"type": "reflect", "tree": "none"}).get("guid")
 
@@ -204,17 +220,19 @@ def main() -> int:
         need("[malformed call — nothing ran] line 2, col 12" in u[3] and "^~" in u[3]
              and "write it as:" in u[3] and '<call name="send">' in u[3],
              f"request 4 carries the compiler-style report: {u[3][:200]!r}")
-        need("call NOT dispatched: text outside a tag (`oops`)" in u[3],
-             "request 4 carries the broken envelope's fault")
+        need("bad.txt" not in json.dumps(turns[3]["body"]["messages"] if len(turns) > 3 else []),
+             "the cut: nothing after the first foreign tag was stored or quoted")
+        need("call NOT dispatched: text outside a tag (`oops`)" in u[4],
+             "request 5 carries the broken envelope's fault")
         # 4 → 5
         need(not (work / "files" / "think.txt").exists(),
              "a call inside the thought was not dispatched")
-        hist = json.dumps((turns[4]["body"].get("messages") if len(turns) > 4 else None) or [])
+        hist = json.dumps((turns[5]["body"].get("messages") if len(turns) > 5 else None) or [])
         need("Thinking it over." in hist and "think.txt" not in hist,
-             "the thought is stripped before the turn is stored: request 5 holds the "
+             "the thought is stripped before the turn is stored: request 6 holds the "
              "answer, not the thought")
-        need("[no call was dispatched]" in u[4],
-             f"request 5 carries the no-call reminder: {u[4][:160]!r}")
+        need("[no call was dispatched]" in u[5],
+             f"request 6 carries the no-call reminder: {u[5][:160]!r}")
         # across the run
         bodies = [t["body"] for t in turns]
         need(all(b.get("stream") is True and b.get("model") == MODEL and "tools" not in b

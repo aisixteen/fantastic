@@ -9,9 +9,10 @@ needs is set explicitly (`endpoint`, `model`, `max_tokens`, `context_window`,
 
 The script: a `reflect` call (its reply, with the root's guid, is the next
 request's user turn) → a `file_bridge` `write` (the bytes land verbatim) → calls
-written wrong (the compiler-style report + the broken envelope's fault come back;
-nothing runs) → a call only inside the thought (not dispatched; the no-call
-reminder comes back; the stored history has no thought) → a plain answer with
+written wrong, cut at its first foreign tag (#499: the compiler-style report comes
+back, nothing after the tag is stored; nothing runs) → an envelope with text outside
+a tag (its fault comes back) → a call only inside the thought (not dispatched; the
+no-call reminder comes back; the stored history has no thought) → a plain answer with
 `done` (no further request). The checks are listed in `probe.py`'s docstring.
 
 ```sh

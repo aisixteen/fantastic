@@ -592,7 +592,6 @@ fn each_foreign_form_is_cut_after_its_first_tag() {
         ),
         ("hi <send><target_id>a</target_id>", "hi <send>"),
         ("hi <b>bold", "hi <b>"),
-        ("call name=\"await\">more", "call name=\"await\">"),
         (
             "go {\"name\": \"send\", \"arguments\": {}}",
             "go {\"name\": \"send\"",
@@ -619,8 +618,23 @@ fn a_correct_or_quoted_call_is_not_cut() {
         "use `<invoke name=\"x\">` never, and the word invoke is fine",
         "```\n<invoke name=\"x\">\n```\nok",
         "a < b and c > d",
+        "call name=\"await\">more",
     ];
     for text in ok {
         assert_eq!(streamed_cut(text), None, "{text}");
     }
+}
+
+/// A run opened by a call opener that lost its `<` is never cut (Q1 B), but a foreign
+/// tag after it is.
+#[test]
+fn a_bare_opener_run_is_not_cut_but_a_foreign_tag_after_it_is() {
+    let text =
+        "call name=\"send\"><target_id>a</target_id></call>\nthen <invoke name=\"send\"> junk";
+    let cut = streamed_cut(text).expect("cut at the foreign tag");
+    assert!(
+        text[..cut].ends_with("<invoke name=\"send\">"),
+        "{}",
+        &text[..cut]
+    );
 }

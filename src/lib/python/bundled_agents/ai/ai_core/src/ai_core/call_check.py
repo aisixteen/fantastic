@@ -377,11 +377,11 @@ def repair(answer: str) -> str:
     return answer
 
 
-def _wrapped_reports(answer: str) -> list[str]:
-    """One report per call written INSIDE a wrapper tag: refused, not dispatched.
-    The caret sits under the wrapper and the call is shown bare — the form to write;
-    a call that does not parse has its fault named instead."""
-    out: list[str] = []
+def _wrapped_reports(answer: str) -> list[tuple[int, str]]:
+    """One `(start, report)` per call written INSIDE a wrapper tag: refused, not
+    dispatched. The caret sits under the wrapper and the call is shown bare — the form
+    to write; a call that does not parse has its fault named instead."""
+    out: list[tuple[int, str]] = []
     for env in envelopes_in(answer):
         if env.wrapper is None or env.end is None:
             continue
@@ -407,11 +407,11 @@ def _wrapped_reports(answer: str) -> list[str]:
         lines.append(
             'A call is <call name="…">, one child tag per argument, closed by </call>.'
         )
-        out.append("\n".join(lines))
+        out.append((env.start, "\n".join(lines)))
     return out
 
 
-def _wrapper_only(answer: str) -> list[str]:
+def _wrapper_only(answer: str) -> list[tuple[int, str]]:
     """An answer with no call envelope and an open wrapper that holds no call."""
     if envelopes_in(answer):
         return []
@@ -422,11 +422,54 @@ def _wrapper_only(answer: str) -> list[str]:
     line = answer.count("\n", 0, w.start) + 1
     example = _expected("send", [("target_id", "agent id"), ("type", "verb")])
     return [
-        f"[malformed call — nothing ran] line {line}: `<{w.name}>` holds no call — "
-        'write one at the top level, as <call name="…">…</call>.\n'
-        "write it as:\n" + example + "\n"
-        'If it is finished, end the chain explicitly: <call name="done"></call>'
+        (
+            w.start,
+            f"[malformed call — nothing ran] line {line}: `<{w.name}>` holds no call — "
+            'write one at the top level, as <call name="…">…</call>.\n'
+            "write it as:\n" + example + "\n"
+            'If it is finished, end the chain explicitly: <call name="done"></call>',
+        )
     ]
+
+
+def foreign_cut(answer: str) -> int | None:
+    """Where a STREAMING answer must be cut (#499): the offset just past the first
+    foreign call tag — what `check` would report, once its opening token is complete —
+    or None while the text so far holds none. A complete `<call` envelope is masked, so
+    a correct call is never cut. A tag after an unmatched backtick of its paragraph
+    waits: the span may still close and make it code. A run whose first token is a call
+    opener that lost its `<` (`call name="X">`) is never cut: when the answer ends,
+    `repair` restores it, or `check` reports it."""
+    masked = _mask(answer)
+    runs = _calls(masked, _tokens(masked))
+    wrapped = _wrapped_reports(answer)
+    cands = [c.toks[0].start for c in runs if not c.toks[0].bare]
+    cands += [at for at, _r in wrapped]
+    if not runs and not wrapped:
+        cands += [at for at, _r in _wrapper_only(answer)]
+    if not cands:
+        return None
+    at = min(cands)
+    for env in envelopes_in(answer):
+        if env.start == at and env.wrapper is not None:
+            at = env.wrapper.start
+            break
+    para = answer.rfind("\n\n", 0, at)
+    para = 0 if para == -1 else para + 2
+    if answer[para:at].count("`") % 2 == 1:
+        return None
+    rest = answer[at:]
+    if rest.startswith("<"):
+        i = rest.find(">")
+        n = i + 1 if i != -1 else 0
+    else:
+        m = _JSON.search(rest)
+        if m:
+            n = m.end()
+        else:
+            i = rest.find(">")
+            n = i + 1 if i != -1 else 0
+    return at + (n or 1)
 
 
 def check(answer: str, *, ran: int) -> list[str]:
@@ -436,9 +479,11 @@ def check(answer: str, *, ran: int) -> list[str]:
     so the model knows its well-formed calls are not to be written again."""
     masked = _mask(answer)
     calls = _calls(masked, _tokens(masked))
-    found = [_report(answer, masked, c) for c in calls] + _wrapped_reports(answer)
+    found = [_report(answer, masked, c) for c in calls] + [
+        r for _at, r in _wrapped_reports(answer)
+    ]
     if not found:
-        found = _wrapper_only(answer)
+        found = [r for _at, r in _wrapper_only(answer)]
     reports = found[:MAX_REPORTS]
     if len(found) > MAX_REPORTS:
         reports[-1] += f"\n({len(found) - MAX_REPORTS} more malformed calls not shown.)"
