@@ -28,8 +28,8 @@ the URL and what came back.
 Optional: `temperature` (sent only when set), `thinking_budget` (extended thinking
 per turn — at least 1024 tokens and below `max_tokens`, refused at the write
 otherwise; unset, no thinking is asked for; a side call too small for it gets none),
-and `price_input_per_mtok` / `price_output_per_mtok` (USD per million tokens, numbers
-zero or more; no default price — see Usage). `caching` and `cache_primer_until` are
+and `prices` (USD per million tokens by model, `{<model>: {input, output, cache_read?,
+cache_write_5m?}}`, numbers zero or more; no default price — see Usage). `caching` and `cache_primer_until` are
 ai_core's, on every AI agent — see Caching.
 
 ## Chat cards
@@ -81,8 +81,16 @@ the `usage.json` file. Deleting the agent drops them too.
 
 `by_model` beside the totals (and inside `usage_since_boot`) counts the same way per model,
 keyed by the model each response names: `{requests, input, cache_write, cache_read,
-output, hit_rate, saved_tokens}`. It persists in `usage.json`; `reset` and `usage_reset`
-zero it with the counts. Per-model prices are not set yet.
+output, hit_rate, saved_tokens, cost_usd}`. It persists in `usage.json`; `reset` and
+`usage_reset` zero it with the counts. A model with no entry in `prices` is unpriced: it
+carries `unpriced: true` instead of `cost_usd`, never $0, and `unpriced_models` lists
+them beside the total.
+
+`by_agent` counts the same per calling chat, keyed by the id of the chat that sent each
+`complete` (the `rid`'s prefix): `{requests, input, cache_write, cache_read, output,
+cost_usd?}`, `cost_usd` priced per model from `prices` (absent when none of the models it
+used is priced). It is kept after the chat is deleted, persists in `usage.json` with the
+totals, and `reset` and `usage_reset` zero it with them.
 
 - `requests` — responses counted (side calls too)
 - `input_tokens` — the uncached remainder of the prompt
@@ -96,8 +104,9 @@ zero it with the counts. Per-model prices are not set yet.
   price. Computed exactly, halves to even. It may be negative — a write that is never
   read costs more than no cache — and is never clamped.
 
-With BOTH `price_input_per_mtok` and `price_output_per_mtok` on the record (USD per
-million tokens):
+With `prices` on the record (USD per million tokens, per model), the total `cost_usd`
+and `saved_usd` are the sums over the models in `by_model` that have an entry (a dated
+model id uses the entry of the id it is a dated form of), where for each model:
 - `cost_usd` = Σ over the buckets of (`input_tokens` × price_in + `cache_write_tokens`
   5-minute part × write_5m + 1-hour part × write_1h + `cache_read_tokens` × read +
   `output_tokens` × price_out) / 1e6. The long-context bucket bills at its own input/output
@@ -110,11 +119,14 @@ million tokens):
 Cache rates default per model from the base input price: a read 0.1×, except
 `claude-sonnet-5-5` and `claude-opus-5-5` (and their dated ids), which read at 0.05×; a
 5-minute write 1.25×; a 1-hour write 2× (`usage.cache_creation.ephemeral_1h_input_tokens`
-of the API reply). `price_cache_read_per_mtok`, `price_cache_write_5m_per_mtok` and
-`price_cache_write_1h_per_mtok` on the record (USD per million tokens) override them.
+of the API reply). `cache_read` and `cache_write_5m` in a model's `prices` entry, and
+`price_cache_write_1h_per_mtok` on the record (USD per million tokens), override them.
+`price_input_long_per_mtok` and `price_output_long_per_mtok` set the long-context prices of
+every model in `prices`.
 
-`cost_usd` and `saved_usd` need BOTH `price_input_per_mtok` and `price_output_per_mtok`;
-without both they are absent. No base price is assumed.
+Each entry needs `input` and `output`. Without `prices` the costs are absent; no price is
+assumed. The four flat fields `price_input_per_mtok`, `price_output_per_mtok`,
+`price_cache_read_per_mtok` and `price_cache_write_5m_per_mtok` are gone: put them in `prices`.
 
 ## The key
 
