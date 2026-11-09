@@ -40,7 +40,10 @@ async fn mk_kernel_with(
 ) -> (Arc<Kernel>, AgentId) {
     let mut kernel = Kernel::new();
 
-    kernel.bundles.register(fantastic_ai_core::chat_bundle::HANDLER_MODULE, fantastic_ai_core::chat_bundle::AiChatBundle);
+    kernel.bundles.register(
+        fantastic_ai_core::chat_bundle::HANDLER_MODULE,
+        fantastic_ai_core::chat_bundle::AiChatBundle,
+    );
     kernel.bundles.register(HANDLER_MODULE, OllamaBackendBundle);
     kernel
         .bundles
@@ -193,7 +196,6 @@ async fn send_streams_tokens_and_emits_done() {
         .result;
     assert_eq!(reply["client_id"], client_id);
     assert_eq!(reply["response"], "Hello world");
-    assert_eq!(reply["final"], "Hello world");
 
     let events = drain(&mut rx).await;
     let token_count = events
@@ -541,7 +543,10 @@ async fn history_persists_and_round_trips() {
     )
     .await
     .expect("store read");
-    assert!(none.is_empty(), "the provider holds no conversation: {none:#?}");
+    assert!(
+        none.is_empty(),
+        "the provider holds no conversation: {none:#?}"
+    );
     let rows = fantastic_kernel::test_support::as_agent(
         chat.clone(),
         fantastic_ai_core::memory::load_history(&chat, &kernel, true),

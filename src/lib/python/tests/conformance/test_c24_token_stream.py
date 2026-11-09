@@ -90,6 +90,6 @@ def test_token_stream_order_and_terminal_across_ws(wired):
                 break
         assert tokens == CHUNKS, "the wire reordered or dropped token chunks"
         assert done, "no terminal status(done) arrived"
-        assert reply["data"]["final"] == "".join(CHUNKS).strip() or reply["data"].get(
+        assert reply["data"]["response"] == "".join(CHUNKS).strip() or reply["data"].get(
             "response"
         )

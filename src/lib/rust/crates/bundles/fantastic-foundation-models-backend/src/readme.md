@@ -48,7 +48,7 @@ calibrates the context estimate; it reports no stop reason.
 ## Calling this agent
 
 `send {type:'send', text, client_id?}` runs ONE completion (per-backend FIFO lock)
-and returns `{response, final}`. Optional `system_prompt:str` REPLACES the default
+and returns `{response}`. Optional `system_prompt:str` REPLACES the default
 system block. A first-class peer of every other AI backend: a scheduler, a host
 job, a peer kernel or a routine calls it by id.
 

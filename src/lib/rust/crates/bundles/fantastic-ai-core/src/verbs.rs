@@ -45,7 +45,7 @@ pub fn verb_docs() -> Value {
         "complete": crate::remote_provider::COMPLETE_DOC,
         "models": crate::remote_provider::MODELS_DOC,
         "set_default_model": crate::remote_provider::SET_DEFAULT_DOC,
-        "send": "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str?, send_to:str?. Runs one turn on `text` and streams tokens to ONLY the caller — cli (stdout) for client_id='cli', else the browser tab whose WS filters by client_id. The conversation is this agent's own (its memory store). A FIFO lock serializes callers: one that waits gets a `status` event (phase='queued', detail.ahead), and its first `token` (or non-queued `status`) unqueues it. `system_prompt` REPLACES the built prompt for this delivery. `send_to` hands this pass's TEXT to that agent id as a fresh turn, once. `_call_stack` is reserved for the recursion guard. The model routes its own work with `<reply_to>` inside its calls. Returns {response, final, client_id}.",
+        "send": "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str?, send_to:str?. Runs one turn on `text` and streams tokens to ONLY the caller — cli (stdout) for client_id='cli', else the browser tab whose WS filters by client_id. The conversation is this agent's own (its memory store). A FIFO lock serializes callers: one that waits gets a `status` event (phase='queued', detail.ahead), and its first `token` (or non-queued `status`) unqueues it. `system_prompt` REPLACES the built prompt for this delivery. `send_to` hands this pass's TEXT to that agent id as a fresh turn, once. `_call_stack` is reserved for the recursion guard. The model routes its own work with `<reply_to>` inside its calls. Returns {response, client_id}.",
         "stop": "args: stream_id:str? (a part of the generation in flight). STOP this agent's in-flight generation — how a receiver of its streaming parts stops it: the provider stream closes, open parts abort, the turn keeps a `[stopped by <you>]` marker. Returns {stopped:bool}.",
         "pause": "args: reason:str? (why — kept on the pause row). PAUSE this agent: stop its in-flight generation and HOLD every message sent to it, in order, until `resume`. Already paused: a no-op. Returns {paused:bool, held:int}.",
         "resume": "args: note:str? (text added to the resumed row). RESUME this agent: write one resumed row, then release the held messages in order, each as a fresh turn after it. Not paused: a no-op. Returns {resumed:bool, released:int}.",
@@ -1404,7 +1404,6 @@ pub async fn send(
             // stored, so there is no row to name.
             json!({
                 "response": final_text,
-                "final": final_text,
                 "client_id": client_id,
                 "dead_turn": true,
             })
@@ -1423,7 +1422,6 @@ pub async fn send(
             // its own send produced.
             let reply = json!({
                 "response": final_text,
-                "final": final_text,
                 "client_id": client_id,
                 "message_id": tid,
             });

@@ -105,7 +105,7 @@ async def test_send_works(seeded_kernel, store_agent, fake_providers):
                 [{"target": oid, "payload": {"type": "send", "text": "hi"}}]
             )
         )[0]["result"]
-        assert r["final"] == "ok"
+        assert r["response"] == "ok"
     finally:
         fake_providers.pop(oid, None)
 
@@ -151,7 +151,7 @@ async def test_run_no_tool_calls_returns_content(
                 [{"target": oid, "payload": {"type": "send", "text": "hi"}}]
             )
         )[0]["result"]
-        assert r["final"] == "Hello! How are you?"
+        assert r["response"] == "Hello! How are you?"
         assert fp.calls == 1
     finally:
         fake_providers.pop(oid, None)
@@ -198,7 +198,7 @@ async def test_system_prompt_override_replaces_auto_prompt(
                 ]
             )
         )[0]["result"]
-        assert r["final"] == "ok"
+        assert r["response"] == "ok"
         assert rp.last_messages[0]["role"] == "system"
         assert rp.last_messages[0]["content"] == "ROLE-XYZ"
     finally:
@@ -467,7 +467,7 @@ async def test_contended_sends_emit_one_queued_status_and_no_bare_queued_event(
             if e.get("kind") in ("send", "emit")
         ]
 
-        assert r1["final"].startswith("ok") and r2["final"].startswith("ok")
+        assert r1["response"].startswith("ok") and r2["response"].startswith("ok")
 
         # Bob's request hit the lock → got a queued event tagged for bob.
         # Browser-routed events go via emit (target = oid).
@@ -568,7 +568,7 @@ async def test_concurrent_sends_serialize_per_backend(
         )
         assert "second" in seen[1], seen
         replies = [outs[0]["result"] for outs in results]
-        assert all(r["final"].startswith("ok") for r in replies)
+        assert all(r["response"].startswith("ok") for r in replies)
         assert {r["client_id"] for r in replies} == {"a", "b"}
     finally:
         fake_providers.pop(oid, None)
@@ -1019,7 +1019,7 @@ async def test_kernel_cancel_kills_an_in_flight_send(
                         [{"target": oid, "payload": {"type": "send", "text": "again"}}]
                     )
                 )[0]["result"]
-            )["final"]
+            )["response"]
             == "after"
         )
     finally:
@@ -1244,7 +1244,7 @@ async def test_status_current_shape_matches_python(
 async def test_send_reply_carries_message_id(
     seeded_kernel, store_agent, fake_providers
 ):
-    """The `send` reply is `{response, final, client_id, message_id}` and
+    """The `send` reply is `{response, client_id, message_id}` and
     `message_id` names the assistant row this turn appended."""
     oid = await _make_ollama(seeded_kernel)
     fake_providers[oid] = _FakeProvider([["ack"], ['<call name="done"></call>']])
@@ -1265,7 +1265,7 @@ async def test_send_reply_carries_message_id(
         )[0]["result"]
     finally:
         fake_providers.pop(oid, None)
-    assert list(r) == ["response", "final", "client_id", "message_id"], r
+    assert list(r) == ["response", "client_id", "message_id"], r
     mid = r["message_id"]
     assert isinstance(mid, int)
     rows = await core._load_history(oid, seeded_kernel)

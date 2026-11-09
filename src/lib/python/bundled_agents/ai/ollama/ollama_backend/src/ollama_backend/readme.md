@@ -41,7 +41,7 @@ or a fold); `mark {label, note?, version?}` marks a turn boundary to fork from a
 `fork_points {filter?}` lists this agent's marks (across agents: #424).
 ## Calling this agent
 `send {type:'send', text, client_id?}` runs ONE completion (per-backend FIFO lock)
-and returns `{response, final}`. A first-class peer of `exec_bridge`: a
+and returns `{response}`. A first-class peer of `exec_bridge`: a
 scheduler, a host job, a peer kernel, or a routine can call it by id. Optional
 `system_prompt:str` REPLACES the default system block (the caller supplies its own
 role / tool convention / whatever menu it built).

@@ -72,9 +72,9 @@ record names (`memory_store_id`).
 ```bash
 MEM=$(call kernel '{"type":"create_agent","parent_id":"kernel_state","handler_module":"ram_store.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 OB=$(call kernel "{\"type\":\"create_agent\",\"parent_id\":\"kernel_state\",\"handler_module\":\"ollama_backend.tools\",\"endpoint\":\"$ENDPOINT\",\"model\":\"$MODEL\",\"memory_store_id\":\"$MEM\",\"can_call\":{\"$MEM\":\"*\"}}" | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-call $OB '{"type":"send","text":"reply with the single word: ready"}' | python -c "import json,sys; print(json.load(sys.stdin).get('final','').lower())"
+call $OB '{"type":"send","text":"reply with the single word: ready"}' | python -c "import json,sys; print(json.load(sys.stdin).get('response','').lower())"
 ```
-Expected: a `final` reply containing "ready".
+Expected: a `response` reply containing "ready".
 
 ### Test 2: reflect surfaces the context-window posture
 
@@ -97,7 +97,7 @@ back via the `history` verb, a DIGEST of rows. A different `client_id` addresses
 different thread.
 
 ```bash
-call $OB '{"type":"send","text":"reply with the single word: ok"}' | python -m json.tool | grep -F '"final"'
+call $OB '{"type":"send","text":"reply with the single word: ok"}' | python -m json.tool | grep -F '"response"'
 call $OB '{"type":"history"}' | python -c "
 import json,sys
 d = json.load(sys.stdin)['rows']
@@ -109,7 +109,7 @@ Expected: rows ≥ 2; the last row's head contains "ok" (case-insensitive).
 ### Test 4: tool-call round-trip — and the history keeps the round-trip
 
 ```bash
-call $OB '{"type":"send","text":"how many agents are online? actually check using the send tool"}' | python -c "import json,sys; print(json.load(sys.stdin).get('final',''))"
+call $OB '{"type":"send","text":"how many agents are online? actually check using the send tool"}' | python -c "import json,sys; print(json.load(sys.stdin).get('response',''))"
 ```
 Expected: the model emits a `<call name="send">` to `kernel` with
 `<type>list_agents</type>`, reads the reply, summarizes. Final answer mentions a
@@ -138,7 +138,7 @@ Regression signal: PASS missing → the turn store dropped the call or its reply
 
 ```bash
 call $OB '{"type":"send","text":"my favorite color is teal, remember it"}' >/dev/null
-call $OB '{"type":"send","text":"what color did I just say?"}' | python -c "import json,sys; print(json.load(sys.stdin).get('final','').lower())"
+call $OB '{"type":"send","text":"what color did I just say?"}' | python -c "import json,sys; print(json.load(sys.stdin).get('response','').lower())"
 ```
 Expected: response mentions "teal" — proves the history round-trip via the
 mounted chat JSONL sidecar (persisted through the loader).

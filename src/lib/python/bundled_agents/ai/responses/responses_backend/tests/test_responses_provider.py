@@ -808,7 +808,7 @@ async def test_send_streams_tokens_raw_on_both_channels(
     )
     assert tokens == "<think>pondering</think>hello", "streamed raw, both channels"
     # the reply is the RAW text; only the stored assistant row is stripped
-    assert r.get("final") == "<think>pondering</think>hello", r
+    assert r.get("response") == "<think>pondering</think>hello", r
 
 
 async def test_an_endpoint_that_never_answers_fails_after_the_idle_window():

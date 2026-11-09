@@ -276,6 +276,7 @@ async def test_a_dead_turn_is_discarded_and_rerolled(seeded_kernel, fake_provide
             )
         )[0]["result"]
         assert out.get("dead_turn") is True, out
+        assert list(out) == ["response", "client_id", "dead_turn"], out
         await _settle(fp, 2)
         assert fp.incoming[1].startswith("[no answer]"), fp.incoming
         assert "[no call was dispatched]" in fp.incoming[1], fp.incoming
