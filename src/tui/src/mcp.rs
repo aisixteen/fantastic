@@ -6,8 +6,8 @@
 //! - A LIVE KERNEL HOLDS THE LOCK (the terminal UI, the canvas, `--headless`,
 //!   or another `fantastic mcp`): this process ATTACHES — it relays stdio to
 //!   that kernel's MCP socket, `.fantastic/cli/mcp.sock`, and runs no kernel.
-//! - NO LIVE KERNEL: this process RUNS IT — boots (a fresh directory is seeded
-//!   first, like every command), serves stdio, and opens the socket so other
+//! - NO LIVE KERNEL: this process RUNS IT — boots (the launcher has already seeded
+//!   a fresh directory: `starts_kernel`, `seed_dir_with`), serves stdio, and opens the socket so other
 //!   clients can attach.
 //!
 //! Every process that owns a kernel serves the socket ([`listen`]); what MCP
@@ -118,11 +118,6 @@ fn attach(pid: u32) -> ! {
 
 /// RUN THE KERNEL: boot it here, serve stdio, and open the socket.
 fn own(paths: Paths) -> ! {
-    // Whether this store needs INIT must be read BEFORE the log is opened: the
-    // log lives inside `.fantastic`, so opening it first would make every store
-    // look initialised.
-    let fresh = paths.is_fresh();
-
     // ── stdio hygiene ────────────────────────────────────────────────────────
     let (std_out, mut err_out) = match (crate::sys::dup_stdout(), crate::sys::dup_stderr()) {
         (Ok(o), Ok(e)) => (o, e),
@@ -152,7 +147,7 @@ fn own(paths: Paths) -> ! {
             std::process::exit(1);
         }
     };
-    let code = rt.block_on(serve(paths, fresh, std_out, &mut err_out));
+    let code = rt.block_on(serve(paths, std_out, &mut err_out));
     drop(rt);
     std::process::exit(code);
 }
@@ -171,13 +166,7 @@ fn fatal(err_out: &mut std::fs::File, msg: &str) -> i32 {
     1
 }
 
-async fn serve(paths: Paths, fresh: bool, std_out: std::fs::File, err_out: &mut std::fs::File) -> i32 {
-    if fresh {
-        if let Err(e) = crate::boot::seed::write_all(&paths) {
-            return fatal(err_out, &format!("init failed: {e}"));
-        }
-    }
-
+async fn serve(paths: Paths, std_out: std::fs::File, err_out: &mut std::fs::File) -> i32 {
     // ── boot / rehydrate ─────────────────────────────────────────────────────
     let host = match Host::boot(&paths, false, None, None).await {
         Ok(h) => Arc::new(h),

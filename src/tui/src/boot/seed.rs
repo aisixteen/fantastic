@@ -1,10 +1,10 @@
 //! THE ONLY WRITE POINT of a first run: it materialises `blueprint.yaml`.
 //!
-//! The base tree is DATA, embedded in the binary, applied once at init. Init is
-//! explicit, never a default: it runs only when `fantastic` or `fantastic mcp`
-//! is run in the directory. A directory neither ran in gets nothing written to
-//! it. Every later run rehydrates what is on disk and never
-//! reads the blueprint again.
+//! The base tree is DATA, embedded in the binary, applied once at init. Init runs
+//! in the LAUNCHER, before the kernel starts (`main.rs`: `starts_kernel(argv)`
+//! then `seed_dir_with`). The kernel and `main_with` never seed, and a command
+//! that starts no kernel writes nothing. Every later run rehydrates what is on
+//! disk and never reads the blueprint again.
 //!
 //! DISK POSITION IS THE PARENT. The kernel takes a child's parent from the
 //! directory it sits in and ignores any `parent_id` field, so the blueprint may
@@ -218,12 +218,13 @@ fn write_blueprint(paths: &Paths, agents_dir: &std::path::Path, list: &[Value], 
 /// A partial tree is left in place on failure, and the error says so: silently
 /// removing a directory the user may have had other files in would be worse than
 /// a clear message.
+#[cfg(test)]
 pub fn write_all(paths: &Paths) -> Result<(), String> {
     write_from(paths, &[BLUEPRINT])
 }
 
 /// THE HOST ENTRY POINT: seed `dir` the way the `fantastic` CLI does on a first
-/// run. An embedding binary calls this before booting its kernel in `dir`.
+/// run. A launcher (fantastic's own, or an embedder's) calls this before `main_with` when `starts_kernel(argv)`.
 ///
 /// Idempotent: when `dir/.fantastic` already exists it writes nothing and
 /// returns `Ok(false)`; otherwise it writes the blueprint tree (the `user`
