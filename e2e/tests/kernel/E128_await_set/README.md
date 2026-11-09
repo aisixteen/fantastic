@@ -1,8 +1,9 @@
 # `await_set` (E128) — one wake for a set of agents
 
 Free: no model. Four local OpenAI-compatible servers (`e2e/mocks/vllm.py`) play the
-model of a LEAD and of three WORKERS (the kernel's own `vllm_backend` agents, on the
-PACKAGED host of `RUNTIME`, driven over `web_rest`).
+model of a LEAD and of three WORKERS (the kernel's own AI agents, on the PACKAGED host of
+`RUNTIME`, driven over `web_rest`: python, `vllm_backend` agents; rust, `ai_chat.tools`
+chats each naming its own `vllm_backend` provider, #521).
 
 The lead's script: `await_set {ids:[w1,w2,w3], timeout_s:60, label:E128}` on the
 kernel (its reply, with a `wait_id`, is the next request's user turn) → a plain answer
