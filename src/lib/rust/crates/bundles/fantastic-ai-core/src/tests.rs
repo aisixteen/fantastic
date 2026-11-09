@@ -1002,14 +1002,14 @@ async fn a_stalled_provider_times_out_at_the_python_float_ceiling() {
     assert_eq!(done["detail"]["reason"], json!("timeout"));
 }
 
-/// The default is python's `180.0`, and it is a float on the wire of the
+/// The default is `600.0` (10 minutes), and it is a float on the wire of the
 /// refusal — not `180`.
 #[test]
 fn the_default_send_ceiling_is_a_python_float() {
-    assert_eq!(crate::verbs::SEND_TIMEOUT_SECS, 180.0);
+    assert_eq!(crate::verbs::SEND_TIMEOUT_SECS, 600.0);
     assert_eq!(
         fantastic_bundle::py_float_repr(crate::verbs::SEND_TIMEOUT_SECS),
-        "180.0"
+        "600.0"
     );
 }
 

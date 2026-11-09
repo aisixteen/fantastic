@@ -55,7 +55,7 @@ pub const TRIGGER: f64 = 0.8;
 /// `FANTASTIC_AI_SEND_TIMEOUT` env (see [`send_timeout_secs`]). Mirrors the
 /// python default; a slow LOCAL model can raise it via the env. Python
 /// `SEND_TIMEOUT` (the hard ceiling per generation; releases the lock).
-pub const SEND_TIMEOUT_SECS: f64 = 180.0;
+pub const SEND_TIMEOUT_SECS: f64 = 600.0;
 
 /// The output budget a request carries when the record names no `max_tokens`
 /// (#495): bounded, so a degenerate generation is cut by the model's own stop
@@ -83,10 +83,10 @@ pub const STREAM_IDLE_SECONDS: f64 = 60.0;
 
 /// The effective per-`send` ceiling: `FANTASTIC_AI_SEND_TIMEOUT` if set, else
 /// [`SEND_TIMEOUT_SECS`]. python `SEND_TIMEOUT = float(os.environ.get(
-/// "FANTASTIC_AI_SEND_TIMEOUT", "180"))`.
+/// "FANTASTIC_AI_SEND_TIMEOUT", "600"))`.
 ///
 /// A FLOAT, and PARSED LIKE PYTHON'S: `0.05` is a sub-second ceiling, and the
-/// ceiling printed in a refusal reads like python's (`180.0s`). A value python's
+/// ceiling printed in a refusal reads like python's (`600.0s`). A value python's
 /// `float()` rejects is a MISCONFIGURATION and fails loud NAMING the variable,
 /// exactly as python's import-time `float()` raises; there is no fallback to the
 /// default.
