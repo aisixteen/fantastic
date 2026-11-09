@@ -19,11 +19,11 @@ What is Anthropic-specific here:
 - THE KEY: the record's `credentials` ref, read before each request and sent as
   `x-api-key` (with `anthropic-version`); no `credentials`, no key header — the API
   then answers 401, and the error says to name one.
-- CACHING (ai_core's `caching`): `provider_cache` sends ephemeral `cache_control`
-  markers: on the `system` block, and on the block that ends each flagged row
-  (`cache_primer`, `cache_fold`, `cache_tail`). The backend adds no mark of its own
-  beyond the system block: where the conversation is marked is the agent's choice.
-  At most four. Every other mode sends none, and the body is unchanged.
+- CACHING: the backend forwards the agent's marks. A message carrying `cache_mark`
+  gets an ephemeral `cache_control` at the end of its text. A marked system message
+  makes `system` one marked text block. The backend adds no mark of its own and reads
+  no caching mode, so it sends at most the four the agent places. With no mark, the
+  body is the plain one.
 - USAGE: each stream's token counts accumulate into the agent's `Usage` (the
   `usage` verb and `reflect` read it), side calls included. The running total is
   kept across a kernel restart in the agent's `usage.json` (#308, Rust #319): every
@@ -377,39 +377,38 @@ def write_usage_file(path: str | Path, total: Usage) -> None:
 def to_messages(messages: list[dict]) -> tuple[str, list[dict]]:
     """ai_core's messages → (`system`, the user/assistant turns). Every system
     message joins the one `system` string; consecutive turns of one role are merged
-    into one turn, blank-line separated. The cache flags are not read: see
+    into one turn, blank-line separated. The cache marks are not read: see
     `to_wire`."""
-    return to_wire(messages, False)
+    system, _, turns = to_wire(messages, False)
+    return system, turns
 
 
-def to_wire(messages: list[dict], marks: bool) -> tuple[str, list[dict]]:
-    """ai_core's messages → (`system`, the turns as the request sends them). `marks`
-    reads the cache flags (`cache_primer`, `cache_fold`); off, they are ignored and
-    the turns are the plain merged strings.
+def to_wire(messages: list[dict], marks: bool) -> tuple[str, bool, list[dict]]:
+    """ai_core's messages → (`system`, whether a non-empty system message carried
+    `cache_mark`, the turns as the request sends them). `marks` reads `cache_mark`;
+    off, it is ignored and the turns are the plain merged strings.
 
     With `marks`, a merged turn whose rows carry flags is cut into text blocks at
     the end of each flagged row's text, so the marker lands there, not at the end of
     the merged turn. The block texts concatenate to the merged string exactly (see
     `cut_blocks`)."""
     systems: list[str] = []
+    system_marked = False
     turns: list[tuple[str, list[tuple[str, bool]]]] = []
     for m in messages:
         role = m.get("role")
         content = str(m.get("content") or "")
-        flagged = marks and (
-            m.get("cache_primer") is True
-            or m.get("cache_fold") is True
-            or m.get("cache_tail") is True
-        )
+        flagged = marks and m.get(ai_caching.CACHE_MARK) is True
         if role == "system":
             if content:
                 systems.append(content)
+                system_marked = system_marked or flagged
         elif role in ("user", "assistant"):
             if turns and turns[-1][0] == role:
                 turns[-1][1].append((content, flagged))
             else:
                 turns.append((role, [(content, flagged)]))
-    return "\n\n".join(systems), [
+    return "\n\n".join(systems), system_marked, [
         {"role": role, "content": turn_content(rows)} for role, rows in turns
     ]
 
@@ -466,7 +465,6 @@ class AnthropicProvider:
         thinking_budget: int | None = None,
         effort: str | None = None,
         thinking_display: str | None = None,
-        caching: str = ai_caching.DEFAULT_MODE,
         usage: Usage | None = None,
         base: Usage | None = None,
         persist_to: str | Path | None = None,
@@ -485,7 +483,6 @@ class AnthropicProvider:
         self._thinking_budget = thinking_budget
         self._effort = effort
         self._thinking_display = thinking_display
-        self._marks = ai_caching.marks(caching)
         # The agent's running counts; None = nothing is counted (a bare provider).
         self._usage = usage
         # The counts from before this kernel process (the sidecar's), and the file
@@ -535,9 +532,8 @@ class AnthropicProvider:
                 self._usage.log_error = f"{self._usage_log}: {e}"
 
     def body(self, messages: list[dict], max_tokens: int | None) -> dict:
-        # Markers only in provider_cache: every other mode's body is the plain one.
-        marks = self._marks
-        system, turns = to_wire(messages, marks)
+        # the agent's marks, exactly: none of the backend's own
+        system, system_marked, turns = to_wire(messages, True)
         call_max = int(max_tokens) if max_tokens is not None else self._max_tokens
         body: dict = {
             "model": self._model,
@@ -548,7 +544,7 @@ class AnthropicProvider:
         if system:
             body["system"] = (
                 [{"type": "text", "text": system, "cache_control": dict(CACHE_CONTROL)}]
-                if marks
+                if system_marked
                 else system
             )
         if self._temperature is not None:

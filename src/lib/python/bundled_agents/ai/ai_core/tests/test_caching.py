@@ -175,20 +175,26 @@ def test_mark_flags_the_primer_and_the_last_fold_or_clear():
         {"id": 5, "kind": "fold", "role": "user", "content": "f2"},
     ]
     out = caching.mark(msgs, 2)
-    assert [m["id"] for m in out if m.get("cache_primer")] == [2]
-    assert [m["id"] for m in out if m.get("cache_fold")] == [5]
+    assert [m["id"] for m in out if m.get("cache_mark")] == [2, 5]
 
 
 def test_mark_with_no_primer_or_no_fold_flags_nothing_extra():
-    msgs = [{"id": 1, "role": "user", "content": "a"}]
-    out = caching.mark(msgs, None)
-    assert not any("cache_primer" in m or "cache_fold" in m for m in out)
+    msgs = [
+        {"id": 1, "role": "user", "content": "a"},
+        {"id": 2, "role": "user", "content": "b"},
+    ]
+    for primer in (None, 99):
+        out = caching.mark(msgs, primer)
+        assert [m["id"] for m in out if m.get("cache_mark")] == [2]
 
 
 def test_a_clear_row_counts_as_a_fold_for_the_marker():
-    msgs = [{"id": 1, "kind": "fold"}, {"id": 2, "kind": "clear"}]
+    msgs = [
+        {"id": 1, "kind": "clear", "role": "user", "content": "[cleared"},
+        {"id": 2, "role": "user", "content": "x"},
+    ]
     out = caching.mark(msgs, None)
-    assert [m["id"] for m in out if m.get("cache_fold")] == [2]
+    assert [m["id"] for m in out if m.get("cache_mark")] == [1, 2]
 
 
 # ── Python-only unit tests ──────────────────────────────────────────────────
@@ -200,8 +206,8 @@ def test_mark_returns_new_messages_and_never_mutates_its_input():
         {"id": 2, "kind": "fold", "role": "user", "content": "f"},
     ]
     out = caching.mark(src, 1)
-    assert not any("cache_primer" in m or "cache_fold" in m for m in src)
-    flagged = [m for m in out if m.get("cache_primer") or m.get("cache_fold")]
+    assert not any("cache_mark" in m for m in src)
+    flagged = [m for m in out if m.get("cache_mark")]
     assert flagged and all(m is not src[0] and m is not src[1] for m in flagged)
 
 
@@ -247,10 +253,10 @@ def test_render_for_model_carries_the_cache_flags_and_nothing_else():
         "content": "a",
         "id": 3,
         "kind": "fold",
-        "cache_fold": True,
+        "cache_mark": True,
     }
     assert core._render_for_model([flagged]) == [
-        {"role": "user", "content": "a", "cache_fold": True}
+        {"role": "user", "content": "a", "cache_mark": True}
     ]
     plain = {"role": "user", "content": "b", "id": 4}
     assert core._render_for_model([plain]) == [{"role": "user", "content": "b"}]
@@ -339,16 +345,15 @@ def test_provider_cache_flags_the_primer_end_and_the_last_fold_and_the_fold_move
     f2 = _fold(k, [5, 6], "fold two")
 
     msgs = caching.mark(asyncio.run(_view(k, "provider_cache")), a1)
-    assert [m["id"] for m in msgs if m.get("cache_primer")] == [a1]
-    assert [m["id"] for m in msgs if m.get("cache_fold")] == [f2]
+    assert msgs[0].get("cache_mark") is True
+    assert [m["id"] for m in msgs if m.get("cache_mark") and "id" in m] == [a1, f2]
     assert any(m.get("id") == f1 for m in msgs)
 
     _put(k, "user", "u4")
     _put(k, "assistant", "a4")
     f3 = _fold(k, [8, 9], "fold three")
     msgs = caching.mark(asyncio.run(_view(k, "provider_cache")), a1)
-    assert [m["id"] for m in msgs if m.get("cache_primer")] == [a1]
-    assert [m["id"] for m in msgs if m.get("cache_fold")] == [f3]
+    assert [m["id"] for m in msgs if m.get("cache_mark") and "id" in m] == [a1, f3]
     assert a2 and a3
 
 
@@ -359,7 +364,7 @@ def test_no_primer_field_flags_no_primer_and_no_fold_flags_no_fold():
     _put(k, "user", "u1")
     _put(k, "assistant", "a1")
     msgs = caching.mark(asyncio.run(_view(k, "provider_cache")), None)
-    assert not any(m.get("cache_primer") or m.get("cache_fold") for m in msgs)
+    assert not any(m.get("cache_mark") for m in msgs if "id" in m)
 
 
 def test_a_primer_outside_the_view_flags_nothing_and_pins_nothing():
@@ -372,9 +377,7 @@ def test_a_primer_outside_the_view_flags_nothing_and_pins_nothing():
     _put(k, "user", "u2")
     _put(k, "assistant", "a2")
     msgs = caching.mark(asyncio.run(_view(k, "provider_cache")), a1)
-    assert not any(
-        m.get("cache_primer") and m.get("id") == a1 for m in msgs
-    ) or not any(m.get("id") == a1 for m in msgs)
+    assert not any(m.get("cache_mark") and m.get("id") == a1 for m in msgs)
 
 
 def test_provider_cache_is_refused_by_a_backend_that_cannot_cache(fake_providers):
@@ -415,11 +418,13 @@ def test_a_provider_cache_turn_hands_the_provider_the_primer_and_the_last_fold_f
     _fold(k, [5, 6], "fold two")
 
     msgs = asyncio.run(_turn(k, cfg, fake_providers))
-    primed = [m["content"] for m in msgs if m.get("cache_primer")]
-    assert primed == ["a1"]
-    folded = [m for m in msgs if m.get("cache_fold")]
-    assert len(folded) == 1 and '"fold two"' in folded[0]["content"]
-    assert any('"fold one"' in m["content"] for m in msgs)
+    assert msgs[0]["role"] == "system" and msgs[0].get("cache_mark") is True
+    marked = [m["content"] for m in msgs[1:] if m.get("cache_mark")]
+    assert len(marked) == 3, msgs
+    assert marked[0] == "a1" and '"fold two"' in marked[1] and marked[2] == "live"
+    assert any(
+        '"fold one"' in m["content"] and not m.get("cache_mark") for m in msgs
+    )
 
 
 def test_a_cleanup_or_none_turn_hands_the_provider_no_flag_even_with_a_primer_and_folds(
@@ -439,7 +444,7 @@ def test_a_cleanup_or_none_turn_hands_the_provider_no_flag_even_with_a_primer_an
         k.record["caching"] = mode
         _fold(k, [2, 4], "fold one")
         msgs = asyncio.run(_turn(k, cfg, fake_providers))
-        assert not any(m.get("cache_primer") or m.get("cache_fold") for m in msgs)
+        assert not any(m.get("cache_mark") for m in msgs)
         assert len(msgs) > 3
         _reset()
 

@@ -29,14 +29,14 @@ pub const SENTENCE: &str =
 const CFG: BackendConfig = BackendConfig {
     name: NAME,
     model_window: crate::constants::DEFAULT_CONTEXT_WINDOW,
-    // the provider decides: one that cannot place cache markers ignores them
+    // the provider decides: a provider that cannot place cache markers ignores them; where marks go is this chat's `caching`
     provider_cache: true,
 };
 
 const README: &str = "# ai_chat\n\nThe AI agent apart from any provider: it keeps the conversation \
 and completes each turn through the provider agent named by `provider_id` (`complete`). Grant it \
-`can_call {<provider>: [complete, watch]}`; the provider admits it in `callable_by`. Model, endpoint, \
-key and caching marks are the provider's.\n";
+`can_call {<provider>: [complete, watch]}`; the provider admits it in `callable_by`. Model, endpoint \
+and key are the provider's; the cache marks are this chat's (`caching`): the provider forwards them.\n";
 
 /// The `ai_chat.tools` bundle.
 pub struct AiChatBundle;
@@ -73,12 +73,20 @@ impl Bundle for AiChatBundle {
         Some(README)
     }
 
-    async fn handle(&self, agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
+    async fn handle(
+        &self,
+        agent_id: &AgentId,
+        payload: &Value,
+        kernel: &Arc<Kernel>,
+    ) -> Result<Reply, BundleError> {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         if verb == "reflect" {
             let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, CFG.model_window);
             let meta = crate::helpers::agent_meta(agent_id, kernel);
-            out.insert(PROVIDER_FIELD.into(), meta.get(PROVIDER_FIELD).cloned().unwrap_or(Value::Null));
+            out.insert(
+                PROVIDER_FIELD.into(),
+                meta.get(PROVIDER_FIELD).cloned().unwrap_or(Value::Null),
+            );
             return Ok(Some(Value::Object(out)));
         }
         if matches!(verb, "complete" | "models" | "set_default_model") {

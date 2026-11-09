@@ -159,8 +159,8 @@ def _big_reply():
     return "[reply to 3 · notes read]\n" + "x" * (AUTOFOLD_AT * 4 + 4)
 
 
-def _tails(msgs):
-    return [i for i, m in enumerate(msgs) if m.get("cache_tail")]
+def _marked(msgs):
+    return [i for i, m in enumerate(msgs) if m.get("cache_mark")]
 
 
 def test_folds_runs_in_cleanup_and_provider_cache_only():
@@ -175,8 +175,8 @@ def test_mark_puts_the_tail_mark_on_the_last_message_when_nothing_will_fold():
         {"role": "assistant", "content": "b", "id": 2},
         {"role": "user", "content": "[reply to 3 · notes read]\nsmall"},
     ]
-    assert _tails(caching.mark(msgs, None)) == [3]
-    assert not any("cache_tail" in m for m in msgs), "never mutates"
+    assert _marked(caching.mark(msgs, None)) == [0, 3]
+    assert not any("cache_mark" in m for m in msgs), "never mutates"
 
 
 def test_mark_puts_the_tail_mark_before_the_first_row_that_will_fold():
@@ -187,24 +187,24 @@ def test_mark_puts_the_tail_mark_before_the_first_row_that_will_fold():
         {"role": "user", "content": _big_reply()},
     ]
     out = caching.mark(msgs, None)
-    assert _tails(out) == [2] and "cache_tail" not in out[3]
+    assert _marked(out) == [0, 2] and "cache_mark" not in out[3]
     msgs[3] = {"role": "user", "content": "[reply to 3 · ai recall]\nx"}
-    assert _tails(caching.mark(msgs, None)) == [2]
+    assert _marked(caching.mark(msgs, None)) == [0, 2]
     older = [
         {"role": "system", "content": "s"},
         {"role": "user", "content": _big_reply()},
         {"role": "assistant", "content": "b"},
         {"role": "user", "content": "live"},
     ]
-    assert _tails(caching.mark(older, None)) == [3]
+    assert _marked(caching.mark(older, None)) == [0, 3]
 
 
-def test_the_tail_mark_never_lands_on_the_system_message():
+def test_a_system_message_before_a_row_that_will_fold_is_the_only_mark():
     msgs = [
         {"role": "system", "content": "s"},
         {"role": "user", "content": _big_reply()},
     ]
-    assert _tails(caching.mark(msgs, None)) == []
+    assert _marked(caching.mark(msgs, None)) == [0]
 
 
 # ── the view, over a store ──────────────────────────────────────────────────
@@ -304,15 +304,15 @@ async def test_a_provider_cache_turn_marks_before_the_large_body_and_the_next_tu
     msgs1 = next(c for c in p.calls if c[-1]["content"] == text)
     msgs2 = next(c for c in p.calls if c[-1]["content"] == "next")
     n = len(msgs1)
-    assert "cache_tail" not in msgs1[-1]
-    assert [i for i, m in enumerate(msgs1) if m.get("cache_tail")] == [n - 2]
+    assert "cache_mark" not in msgs1[-1]
+    assert _marked(msgs1) == [0, n - 2]
 
     def pair(m):
         return (m["role"], m["content"])
 
     assert [pair(m) for m in msgs1[: n - 1]] == [pair(m) for m in msgs2[: n - 1]]
     assert msgs2[n - 1]["content"].startswith("[folded · read reply from notes")
-    assert msgs2[-1].get("cache_tail") is True
+    assert msgs2[-1].get("cache_mark") is True
 
 
 # ── recall by id ────────────────────────────────────────────────────────────

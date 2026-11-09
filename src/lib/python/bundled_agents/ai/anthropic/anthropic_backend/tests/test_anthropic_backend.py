@@ -448,8 +448,8 @@ def _markers(body: dict) -> int:
 
 
 def _flagged(rows) -> list[dict]:
-    """The conversation's messages as ai_core flags them, a system row first.
-    `rows` = [(role, text, flag-or-None)]."""
+    """The conversation's messages as ai_core flags them, an unmarked system row
+    first. `rows` = [(role, text, flag-or-None)]."""
     out = [{"role": "system", "content": "S"}]
     for role, text, flag in rows:
         m = {"role": role, "content": text}
@@ -459,7 +459,14 @@ def _flagged(rows) -> list[dict]:
     return out
 
 
-def test_cleanup_and_none_send_no_marker_even_when_a_message_is_flagged():
+def _flagged_sys(rows) -> list[dict]:
+    """`_flagged`, with `cache_mark` on the system row."""
+    out = _flagged(rows)
+    out[0]["cache_mark"] = True
+    return out
+
+
+def test_the_backend_adds_no_mark_of_its_own():
     assert _provider(None).body(PLAIN, None) == {
         "model": MODEL,
         "max_tokens": 8000,
@@ -467,33 +474,31 @@ def test_cleanup_and_none_send_no_marker_even_when_a_message_is_flagged():
         "stream": True,
         "system": "s",
     }
-    flags = _flagged([("user", "a", "cache_primer"), ("assistant", "b", "cache_fold")])
-    for mode in ("cleanup", "none"):
-        b = _provider(None, caching=mode).body(flags, None)
-        assert _markers(b) == 0, b
-        assert b["system"] == "S"
-        assert b["messages"] == [
-            {"role": "user", "content": "a"},
-            {"role": "assistant", "content": "b"},
-        ]
+    b = _provider(None).body(_flagged([("user", "a", None), ("assistant", "b", None)]), None)
+    assert _markers(b) == 0, b
+    assert b["system"] == "S"
+    assert b["messages"] == [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "b"},
+    ]
 
 
-def test_provider_cache_splits_the_merged_turns_at_the_flagged_rows():
+def test_every_agent_mark_is_forwarded_where_it_was_put():
     # [primer rows][fold][fold][task rows]: the primer's row is the assistant turn
     # "p2"; the fold rows and the task rows are one merged user turn, and the marker
     # lands at the end of the last fold's text, not at the end of that merged turn.
-    msgs = _flagged(
+    msgs = _flagged_sys(
         [
             ("user", "p1", None),
-            ("assistant", "p2", "cache_primer"),
+            ("assistant", "p2", "cache_mark"),
             ("user", "f1", None),
-            ("user", "f2", "cache_fold"),
+            ("user", "f2", "cache_mark"),
             ("user", "t1", None),
             ("assistant", "t2", None),
             ("user", "live", None),
         ]
     )
-    b = _provider(None, caching="provider_cache").body(msgs, None)
+    b = _provider(None).body(msgs, None)
     marked = {"type": "ephemeral"}
     assert b["system"][0]["cache_control"] == marked, b
     assert b["messages"] == [
@@ -518,21 +523,21 @@ def test_provider_cache_splits_the_merged_turns_at_the_flagged_rows():
 
 
 _SPLIT_CASES = [
-    (["one", "", "three"], ["cache_primer", None, None]),
-    (["one", "", "three"], [None, "cache_fold", None]),
-    (["one", "", "three"], [None, "cache_primer", "cache_fold"]),
-    (["one", "", "three"], ["cache_fold", "cache_fold", None]),
-    (["one", "", "three"], [None, None, "cache_primer"]),
-    (["one", ""], ["cache_primer", None]),
-    (["one", "", ""], ["cache_fold", None, None]),
-    (["", "one", ""], [None, "cache_fold", None]),
-    (["one", ""], ["cache_primer", "cache_fold"]),
+    (["one", "", "three"], ["cache_mark", None, None]),
+    (["one", "", "three"], [None, "cache_mark", None]),
+    (["one", "", "three"], [None, "cache_mark", "cache_mark"]),
+    (["one", "", "three"], ["cache_mark", "cache_mark", None]),
+    (["one", "", "three"], [None, None, "cache_mark"]),
+    (["one", ""], ["cache_mark", None]),
+    (["one", "", ""], ["cache_mark", None, None]),
+    (["", "one", ""], [None, "cache_mark", None]),
+    (["one", ""], ["cache_mark", "cache_mark"]),
     # a flagged row that is only whitespace, first in its turn, opens no block of its
     # own (the API refuses a blank block): it joins the next text
-    ([" ", "two"], ["cache_primer", None]),
-    ([" ", "two", "three"], ["cache_fold", "cache_primer", None]),
+    ([" ", "two"], ["cache_mark", None]),
+    ([" ", "two", "three"], ["cache_mark", "cache_mark", None]),
     # ...and after text, it closes the block it is part of, bytes unchanged
-    (["one", " "], [None, "cache_fold"]),
+    (["one", " "], [None, "cache_mark"]),
 ]
 
 
@@ -541,7 +546,7 @@ def test_the_split_turns_concatenate_to_exactly_the_merged_string(texts, shape):
     # The block texts of a merged turn, joined, are the string the turn was before
     # any split: no byte added or lost, wherever a flag falls. And no block is blank.
     msgs = _flagged([("user", t, f) for t, f in zip(texts, shape)])
-    b = _provider(None, caching="provider_cache").body(msgs, None)
+    b = _provider(None).body(msgs, None)
     merged = to_messages(msgs)[1][0]["content"]
     content = b["messages"][0]["content"]
     if isinstance(content, list):
@@ -555,8 +560,8 @@ def test_the_split_turns_concatenate_to_exactly_the_merged_string(texts, shape):
 
 
 def test_a_flagged_row_followed_by_empty_rows_keeps_its_marker_and_no_blank_block():
-    msgs = _flagged([("user", "one", "cache_primer"), ("user", "", None)])
-    b = _provider(None, caching="provider_cache").body(msgs, None)
+    msgs = _flagged([("user", "one", "cache_mark"), ("user", "", None)])
+    b = _provider(None).body(msgs, None)
     assert b["messages"] == [
         {
             "role": "user",
@@ -569,42 +574,32 @@ def test_a_flagged_row_followed_by_empty_rows_keeps_its_marker_and_no_blank_bloc
             ],
         }
     ], b
-    assert _markers(b) == 2, b
+    assert _markers(b) == 1, b
 
 
 def test_a_tail_flagged_row_is_marked_and_the_backend_adds_no_mark_of_its_own():
     msgs = _flagged(
-        [("user", "t1", None), ("assistant", "t2", "cache_tail"), ("user", "live", None)]
+        [("user", "t1", None), ("assistant", "t2", "cache_mark"), ("user", "live", None)]
     )
-    b = _provider(None, caching="provider_cache").body(msgs, None)
+    b = _provider(None).body(msgs, None)
     assert b["messages"][1]["content"] == [
         {"type": "text", "text": "t2", "cache_control": {"type": "ephemeral"}},
-    ], b
-    assert _markers(b) == 2, b
-
-
-def test_a_flagged_row_with_no_text_carries_no_marker():
-    msgs = _flagged([("user", "a", None), ("user", "", "cache_primer")])
-    b = _provider(None, caching="provider_cache").body(msgs, None)
-    assert b["messages"] == [
-        {"role": "user", "content": [{"type": "text", "text": "a\n\n"}]}
     ], b
     assert _markers(b) == 1, b
 
 
-def test_a_primer_and_a_fold_on_one_message_send_one_marker():
-    msgs = _flagged([("user", "only", None), ("assistant", "both", "cache_primer")])
-    msgs[2]["cache_fold"] = True
-    b = _provider(None, caching="provider_cache").body(msgs, None)
-    assert b["messages"][1]["content"] == [
-        {"type": "text", "text": "both", "cache_control": {"type": "ephemeral"}},
+def test_a_flagged_row_with_no_text_carries_no_marker():
+    msgs = _flagged([("user", "a", None), ("user", "", "cache_mark")])
+    b = _provider(None).body(msgs, None)
+    assert b["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "a\n\n"}]}
     ], b
-    assert _markers(b) == 2, b
+    assert _markers(b) == 0, b
 
 
-def test_provider_cache_with_no_primer_and_no_fold_marks_only_the_system():
-    b = _provider(None, caching="provider_cache").body(
-        _flagged([("user", "a", None), ("assistant", "b", None)]), None
+def test_a_marked_system_message_marks_only_the_system_block():
+    b = _provider(None).body(
+        _flagged_sys([("user", "a", None), ("assistant", "b", None)]), None
     )
     assert b["messages"] == [
         {"role": "user", "content": "a"},
@@ -613,9 +608,15 @@ def test_provider_cache_with_no_primer_and_no_fold_marks_only_the_system():
     assert _markers(b) == 1, b
 
 
-def test_provider_cache_marks_the_system_block():
-    p = _provider(None, caching="provider_cache", temperature=0.2, thinking_budget=2048)
-    assert p.body(PLAIN, None) == {
+_MARKED_PLAIN = [
+    {"role": "system", "content": "s", "cache_mark": True},
+    {"role": "user", "content": "hi"},
+]
+
+
+def test_a_marked_system_message_is_one_marked_block():
+    p = _provider(None, temperature=0.2, thinking_budget=2048)
+    assert p.body(_MARKED_PLAIN, None) == {
         "model": MODEL,
         "max_tokens": 8000,
         "messages": [{"role": "user", "content": "hi"}],
@@ -625,28 +626,45 @@ def test_provider_cache_marks_the_system_block():
         "thinking": {"type": "enabled", "budget_tokens": 2048},
     }
     # a side call's own bound is marked the same way
-    b = p.body(PLAIN, 1500)
+    b = p.body(_MARKED_PLAIN, 1500)
     assert b["max_tokens"] == 1500 and _markers(b) == 1
 
 
-def test_provider_cache_sends_no_system_block_when_the_system_is_empty():
-    p = _provider(None, caching="provider_cache")
-    b = p.body([{"role": "user", "content": "hi"}], None)
+def test_two_system_messages_one_marked_send_one_marked_block():
+    b = _provider(None).body(
+        [
+            {"role": "system", "content": "a"},
+            {"role": "system", "content": "b", "cache_mark": True},
+            {"role": "user", "content": "hi"},
+        ],
+        None,
+    )
+    assert b["system"] == [{"type": "text", "text": "a\n\nb", "cache_control": CACHED}]
+
+
+def test_an_empty_marked_system_sends_no_system_block():
+    b = _provider(None).body(
+        [
+            {"role": "system", "content": "", "cache_mark": True},
+            {"role": "user", "content": "hi"},
+        ],
+        None,
+    )
     assert "system" not in b
     assert _markers(b) == 0, b
 
 
-async def test_provider_cache_marks_every_request_a_provider_sends():
+async def test_the_wire_carries_exactly_the_agents_marks():
     seen: list = []
-    p = _provider(
-        _transport(_sse(START, _text("ok"), *_stop()), seen), caching="provider_cache"
-    )
-    await _drain(p, PLAIN)
+    p = _provider(_transport(_sse(START, _text("ok"), *_stop()), seen))
+    await _drain(p, _MARKED_PLAIN)
     assert json.loads(seen[0].content)["system"][0]["cache_control"] == CACHED
+    await _drain(p, PLAIN)
+    assert json.loads(seen[1].content)["system"] == "s"
 
 
 def test_the_flags_reach_the_wire_only_through_body_marks():
-    assert to_messages(_flagged([("user", "a", "cache_primer")]))[1] == [
+    assert to_messages(_flagged([("user", "a", "cache_mark")]))[1] == [
         {"role": "user", "content": "a"}
     ]
 
@@ -913,7 +931,7 @@ def test_the_record_refuses_a_bad_caching_mode_or_primer_or_price():
     assert "prompt_cache" not in names
 
 
-def test_make_provider_reads_the_caching_mode(
+def test_a_provider_cache_record_adds_no_mark_of_its_own(
     seeded_kernel, mock_http, fake_providers, _fresh_usage
 ):
     mock_http(_api([]))
@@ -923,7 +941,8 @@ def test_make_provider_reads_the_caching_mode(
     from anthropic_backend import tools
 
     p = tools.make_provider("a1", seeded_kernel)
-    assert p.body(PLAIN, None)["system"][0]["cache_control"] == CACHED
+    b = p.body(PLAIN, None)
+    assert b["system"] == "s" and _markers(b) == 0
 
 
 def test_the_backend_declares_provider_cache(monkeypatch):
