@@ -7,8 +7,9 @@ from ai_core.constants import DEFAULT_TURN_TOKENS, default_max_tokens
 
 
 def test_the_default_is_bounded_grows_with_thinking_and_stops_at_the_models_maximum():
-    assert DEFAULT_TURN_TOKENS == 16384
-    assert default_max_tokens(None, 64000) == 16384
-    assert default_max_tokens(2048, 64000) == 2048 + 16384
+    assert DEFAULT_TURN_TOKENS == 260000
+    assert default_max_tokens(None, 64000) == 64000
+    assert default_max_tokens(None, 1_000_000) == 260000
+    assert default_max_tokens(2048, 1_000_000) == 2048 + 260000
     assert default_max_tokens(None, 8000) == 8000
     assert default_max_tokens(4000, 10000) == 10000

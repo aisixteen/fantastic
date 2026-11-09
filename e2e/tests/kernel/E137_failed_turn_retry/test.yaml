@@ -4,7 +4,7 @@ id: failed_turn_retry
 group: kernel
 title: "a failed turn is retried as the chain's own next turn (#533): a provider error reply and a stream cut at max_tokens each get a next request carrying the [turn failed] text and the chain finishes; MAX_SILENT_TURNS failures in a row end the chain (no hang, no request past the bound)"
 runner: probe.py
-runtimes: [rust]
+runtimes: [python, rust]
 costs: free
 limits:
   idle_seconds: 120

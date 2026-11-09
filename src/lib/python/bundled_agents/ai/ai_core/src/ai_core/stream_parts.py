@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import secrets
 
-from ai_core.grammar import open_tags
+from ai_core.grammar import open_tags, opens_call
 from ai_core.tool_parse import BYTES_CLOSE, BYTES_OPEN, CLOSE, OPEN, parses
 
 THINK_OPEN = "<think>"
@@ -57,6 +57,7 @@ class PartSplitter:
         self._call_started = False  # its `start` was emitted
         self._call_pending = ""  # deltas held until the addressee is known
         self._in_bytes = False
+        self._call_depth = 1  # open nested `<call name…>` + 1: a quoted call is text
         self.parts: list[dict] = []  # every part opened, in order
         # every CLOSED call part, in order: (stream_id, body) — what a dispatched
         # call is matched to by its exact body, so the message it becomes carries
@@ -201,6 +202,7 @@ class PartSplitter:
             self._call_started = False
             self._call_pending = ""
             self._in_bytes = False
+            self._call_depth = 1
             self._buf = head[gt + 1 :]
             return True
         # a thinking boundary
@@ -210,7 +212,7 @@ class PartSplitter:
         return True
 
     def _step_call(self, out: list[tuple]) -> bool:
-        stop_tags = (BYTES_CLOSE,) if self._in_bytes else (BYTES_OPEN, CLOSE)
+        stop_tags = (BYTES_CLOSE,) if self._in_bytes else (BYTES_OPEN, CLOSE, OPEN)
         hits = [(self._buf.find(t), t) for t in stop_tags]
         hits = [(i, t) for i, t in hits if i != -1]
         if not hits:
@@ -219,6 +221,23 @@ class PartSplitter:
             self._buf = self._buf[len(self._buf) - hold :]
             return False
         i, tag = min(hits)
+        if tag == OPEN:
+            # A nested opener pairs with its own close; anything else is text.
+            opens = opens_call(self._buf[i + len(OPEN) :])
+            if opens is None:
+                self._call_text(out, self._buf[:i])
+                self._buf = self._buf[i:]
+                return False  # undecided until more arrives
+            if opens:
+                self._call_depth += 1
+            self._call_text(out, self._buf[: i + len(OPEN)])
+            self._buf = self._buf[i + len(OPEN) :]
+            return True
+        if tag == CLOSE and self._call_depth > 1:
+            self._call_depth -= 1
+            self._call_text(out, self._buf[: i + len(CLOSE)])
+            self._buf = self._buf[i + len(CLOSE) :]
+            return True
         if tag == CLOSE:
             self._call_text(out, self._buf[:i])
             self._buf = self._buf[i + len(CLOSE) :]

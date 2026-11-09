@@ -181,6 +181,8 @@ async def test_await_with_nothing_in_flight_ends_the_chain_with_a_visible_note(
         assert len(notes) == 1, rows
         assert "[await: nothing to wait for]" in notes[0]["content"]
         assert "nothing was awaited" in notes[0]["content"]
+        assert "reach you through your check-ins" in notes[0]["content"]
+        assert "has reported or been stopped" in notes[0]["content"]
     finally:
         fake_providers.pop(aid, None)
 

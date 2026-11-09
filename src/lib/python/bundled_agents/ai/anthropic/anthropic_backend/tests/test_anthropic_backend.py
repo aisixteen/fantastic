@@ -327,7 +327,7 @@ async def test_what_the_record_leaves_out_is_read_from_the_model_entry():
     seen: list = []
     k = _Kernel(_rec())
     assert await _resolve(k, _api(seen), key=_key) is None
-    assert k.updates == [{"max_tokens": 16384, "context_window": 200000}]
+    assert k.updates == [{"max_tokens": 64000, "context_window": 200000}]
     assert seen == [(f"https://api.test/v1/models/{MODEL}", "sk-test")]
     seen.clear()
     assert await _resolve(k, _api(seen)) is None
@@ -335,7 +335,7 @@ async def test_what_the_record_leaves_out_is_read_from_the_model_entry():
 
 
 async def test_the_bound_is_the_default_plus_thinking_never_above_the_models_max():
-    # no max_tokens on the record (#495): 16384, plus the thinking budget, capped
+    # no max_tokens on the record (#495): 260000, plus the thinking budget, capped
     # at the entry's own maximum; a record's own max_tokens is never read
     async def read(rec, max_tokens):
         # an id the 4.7+/5.x budget-thinking refusal does not cover
@@ -344,8 +344,9 @@ async def test_the_bound_is_the_default_plus_thinking_never_above_the_models_max
         assert await _resolve(k, _api([], entry=entry)) is None
         return k.updates[0].get("max_tokens")
 
-    assert await read({}, 64000) == 16384
-    assert await read({"thinking_budget": 2048}, 64000) == 2048 + 16384
+    assert await read({}, 64000) == 64000
+    assert await read({}, 1_000_000) == 260000
+    assert await read({"thinking_budget": 2048}, 1_000_000) == 2048 + 260000
     assert await read({}, 8000) == 8000
     assert await read({"thinking_budget": 4000}, 10000) == 10000
     assert await read({"max_tokens": 40000}, 64000) is None
@@ -421,7 +422,7 @@ async def test_a_send_reads_the_api_first_and_a_no_turn_verb_reads_nothing(seede
     assert r.get("id") == "a1", r
     await _call(seeded_kernel, "a1", {"type": "send", "text": "hi", "client_id": "t"})
     rec = seeded_kernel.get("a1")
-    assert (rec["max_tokens"], rec["context_window"]) == (16384, 200000), rec
+    assert (rec["max_tokens"], rec["context_window"]) == (64000, 200000), rec
 
 
 async def test_a_verb_that_runs_no_turn_reads_nothing(seeded_kernel, mock_http):

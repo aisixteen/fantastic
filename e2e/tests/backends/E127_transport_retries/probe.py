@@ -6,10 +6,12 @@ agent on the PACKAGED host of `RUNTIME` (python), every call through `web_rest`,
   A. one 503, then an answer: two requests, the second carries the `[retry 1/2]` notice
      row, a `retrying` status (attempt 1 of 2, the error naming 503) is emitted, the
      notice is stored, the planted token is the final answer, the agent ends idle;
-  B. a 503 on every try with `transport_retries: 1`: exactly two requests, the turn fails
-     loud naming 503, one `retrying` status;
-  C. a 400 (a model-side refusal) and `transport_retries: 0` on a 503: one request each,
-     no `retrying` status.
+  B. a 503 on every try with `transport_retries: 1` (and `misfire_limit: 2`): the turn
+     fails loud naming 503 after 1 try + 1 link retry, then the failed turn's own retry
+     (#533) tries twice too and the chain gives up: four requests, one `retrying`
+     status;
+  C. a 400 (a model-side refusal) and `transport_retries: 0` on a 503: two requests each
+     (the failed turn and its own retry), no `retrying` status.
 """
 
 from __future__ import annotations
@@ -102,7 +104,13 @@ def main() -> int:
         ):
             time.sleep(0.05)
         stop.set()
-        return out, events, m.turns()[before:]
+        # the events of THIS turn: up to its first `done` — the failed turn's own
+        # retry (#533) starts at once and its events are not this turn's
+        seen = list(events)
+        first = next((i for i, e in enumerate(seen)
+                      if e.get("type") == "status" and e.get("phase") == "done"), len(seen))
+        idle()  # the failed turn's own retries run out (#533) before the next case
+        return out, seen[: first + 1], m.turns()[before:]
 
     def idle(bound: float = 30) -> bool:
         end = time.monotonic() + bound
@@ -127,7 +135,7 @@ def main() -> int:
         rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=AI,
                         endpoint=m.url, model=MODEL, max_tokens=8192,
                         context_window=262144, kv_slots=4, kv_overflow="evict",
-                        transport_retries=2, memory_store_id="memory",
+                        transport_retries=2, misfire_limit=2, memory_store_id="memory",
                         can_call={"$self": "*", "memory": "*"},
                         callable_by={"$self": "*", "$parent": "*", "rest": "*", "ws": "*"})
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:200]}")
@@ -158,7 +166,9 @@ def main() -> int:
         m.error(None)
         need(bool(out.get("error")) and "503" in json.dumps(out),
              f"B: the turn fails loud naming 503: {str(out)[:200]}")
-        need(len(turns) == 2, f"B: exactly 2 requests (1 try + 1 retry): {len(turns)}")
+        need(len(turns) == 4,
+             f"B: 4 requests (1 try + 1 link retry, then the failed turn's own retry, "
+             f"which tries twice too): {len(turns)}")
         need(len(retrying(events)) == 1, f"B: exactly one retrying status: {len(retrying(events))}")
         need(idle(), "B: the agent ends idle")
 
@@ -167,14 +177,16 @@ def main() -> int:
         m.error(400, times=None)
         out, events, turns = run_turn("bad request")
         m.error(None)
-        need(bool(out.get("error")) and len(turns) == 1 and not retrying(events),
-             f"C: a 400 is not retried: {len(turns)} request(s), {len(retrying(events))} retrying")
+        need(bool(out.get("error")) and len(turns) == 2 and not retrying(events),
+             f"C: a 400 is not link-retried (the failed turn and its own retry): "
+             f"{len(turns)} request(s), {len(retrying(events))} retrying")
         hk.send(root, {"type": "update_agent", "id": AI, "transport_retries": 0})
         m.error(503, times=None)
         out, events, turns = run_turn("no retries")
         m.error(None)
-        need(bool(out.get("error")) and len(turns) == 1 and not retrying(events),
-             f"C: transport_retries 0 → a 503 is not retried: {len(turns)} request(s)")
+        need(bool(out.get("error")) and len(turns) == 2 and not retrying(events),
+             f"C: transport_retries 0 → a 503 is not link-retried (the failed turn and "
+             f"its own retry): {len(turns)} request(s)")
     finally:
         hk.close()
         m.stop()

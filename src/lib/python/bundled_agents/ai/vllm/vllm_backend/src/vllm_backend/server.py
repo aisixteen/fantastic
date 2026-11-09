@@ -11,7 +11,7 @@ the record sets is used as set, never read.
 - `model` — the ONE model the server serves (`GET {endpoint}/models`); a server
   serving several names them, and the record must pick one.
 - `context_window` — that model's window: `max_model_len`, or, when the entry names
-  none, llama.cpp's `meta.n_ctx` (same list). `max_tokens` — 16384, plus the record's
+  none, llama.cpp's `meta.n_ctx` (same list). `max_tokens` — 260000, plus the record's
   `thinking_token_budget` when it sets one, never above that window (#495). A main
   turn whose `max_tokens` could overrun the window sends NO `max_tokens`, so the
   server bounds the reply by what the prompt leaves.

@@ -600,3 +600,30 @@ def test_a_backtick_in_a_call_argument_does_not_hide_a_wrapper_after_it():
     ev, sp = _run(text, 4)
     assert _call_oks(ev) == [True, False], ev
     assert len(sp.closed_calls) == 1, sp.closed_calls
+
+
+Q = '<call name="send"><target_id>x</target_id><type>y</type></call>'
+
+
+def test_a_whole_call_quoted_in_an_argument_is_one_call_part_at_every_chunk_size():
+    text = (
+        '<call name="send"><target_id>kernel</target_id><type>spawn</type>'
+        f"<task>do {Q} now</task></call>{DONE}"
+    )
+    for n in (1, 2, 5, len(text)):
+        ev, sp = _run(text, n)
+        shape = [(e[0], e[1]["kind"]) for e in ev if e[0] != "delta"]
+        assert shape == [
+            ("start", "call"),
+            ("end", "call"),
+            ("start", "call"),
+            ("end", "call"),
+        ], (n, shape)
+        assert f"<task>do {Q} now</task>" in sp.closed_calls[0][1], n
+        assert len(sp.closed_calls) == 2, n
+
+
+def test_a_lone_close_in_a_call_still_ends_it():
+    ev, _ = _run(f"{DONE}</call>", 3)
+    shape = [(e[0], e[1]["kind"]) for e in ev if e[0] != "delta"]
+    assert shape[:2] == [("start", "call"), ("end", "call")], shape

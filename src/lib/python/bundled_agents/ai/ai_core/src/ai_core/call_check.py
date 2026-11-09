@@ -26,7 +26,7 @@ import json
 import re
 from dataclasses import dataclass, field
 
-from ai_core.grammar import envelopes_in, open_tags
+from ai_core.grammar import OpenTag, envelopes_in, open_tags, tags_outside
 from ai_core.tool_parse import (
     CLOSE,
     TOOLS,
@@ -432,6 +432,79 @@ def _wrapper_only(answer: str) -> list[tuple[int, str]]:
     ]
 
 
+def _unsupported(answer: str, covered: list[tuple[int, int]]) -> list[tuple[int, str]]:
+    """One report per tag outside every `<call` envelope that no report above already
+    names (`covered`): the call grammar has no other markup, so an `invoke` tag, a bold
+    tag or an empty `tool_call` pair is an error the model is told about. Code is not
+    markup. A close whose open tag was reported or covered is not reported again."""
+
+    def inside(t: OpenTag) -> bool:
+        return any(a <= t.start and t.end <= b for a, b in covered)
+
+    named: list[str] = []
+    out: list[tuple[int, str]] = []
+    for tag, closing in tags_outside(answer):
+        if inside(tag):
+            if not closing:
+                named.append(tag.name)
+            continue
+        if closing:
+            if tag.name in named:
+                i = len(named) - 1 - named[::-1].index(tag.name)
+                del named[i]
+                continue
+        else:
+            named.append(tag.name)
+        written = answer[tag.start : tag.end]
+        line, col, quoted, caret = _where(
+            answer, _Tok("other", written, tag.start, tag.end)
+        )
+        out.append(
+            (
+                tag.start,
+                "\n".join(
+                    [
+                        f"[unsupported tag — not read] line {line}, col {col}:",
+                        f"  {quoted}",
+                        f"  {caret} `{_defang(written)}` is not part of the call grammar — delete it",
+                        'A call is <call name="…">, one child tag per argument, closed by </call>.',
+                    ]
+                ),
+            )
+        )
+    return out
+
+
+def _scan(answer: str) -> list[tuple[int, str]]:
+    """Every malformed call of the answer with where it starts, in document order,
+    unbounded. `check` reports the first `MAX_REPORTS`; `foreign_cut` needs only the
+    first position."""
+    masked = _mask(answer)
+    # byte ranges a report below already names (so their tags are not reported again)
+    covered: list[tuple[int, int]] = []
+    found: list[tuple[int, str]] = []
+    for c in _calls(masked, _tokens(masked)):
+        at = c.toks[0].start
+        covered.append((at, c.toks[-1].end))
+        covered.extend((w.start, w.end) for w in c.wrappers)
+        found.append((at, _report(answer, masked, c)))
+    envs = envelopes_in(answer)
+    for at, r in _wrapped_reports(answer):
+        for env in envs:
+            if env.start == at and env.wrapper is not None:
+                covered.append((env.wrapper.start, env.start))
+                break
+        found.append((at, r))
+    if not found:
+        for at, r in _wrapper_only(answer):
+            # the wrapper holds no call: what follows it is part of that report
+            covered.append((at, len(answer)))
+            found.append((at, r))
+    found.extend(_unsupported(answer, covered))
+    found.sort(key=lambda f: f[0])
+    return found
+
+
 def foreign_cut(answer: str) -> int | None:
     """Where a STREAMING answer must be cut (#499): the offset just past the first
     foreign call tag — what `check` would report, once its opening token is complete —
@@ -440,16 +513,10 @@ def foreign_cut(answer: str) -> int | None:
     waits: the span may still close and make it code. A run whose first token is a call
     opener that lost its `<` (`call name="X">`) is never cut: when the answer ends,
     `repair` restores it, or `check` reports it."""
-    masked = _mask(answer)
-    runs = _calls(masked, _tokens(masked))
-    wrapped = _wrapped_reports(answer)
-    cands = [c.toks[0].start for c in runs if not c.toks[0].bare]
-    cands += [at for at, _r in wrapped]
-    if not runs and not wrapped:
-        cands += [at for at, _r in _wrapper_only(answer)]
-    if not cands:
+    bare_starts = {m.start() for m in _BARE.finditer(_mask(answer))}
+    at = next((p for p, _r in _scan(answer) if p not in bare_starts), None)
+    if at is None:
         return None
-    at = min(cands)
     for env in envelopes_in(answer):
         if env.start == at and env.wrapper is not None:
             at = env.wrapper.start
@@ -477,13 +544,7 @@ def check(answer: str, *, ran: int) -> list[str]:
     document order (at most `MAX_REPORTS`, then a count); `[]` when there is none.
     `ran` is how many of the answer's calls were dispatched — said in each report,
     so the model knows its well-formed calls are not to be written again."""
-    masked = _mask(answer)
-    calls = _calls(masked, _tokens(masked))
-    found = [_report(answer, masked, c) for c in calls] + [
-        r for _at, r in _wrapped_reports(answer)
-    ]
-    if not found:
-        found = [r for _at, r in _wrapper_only(answer)]
+    found = [r for _at, r in _scan(answer)]
     reports = found[:MAX_REPORTS]
     if len(found) > MAX_REPORTS:
         reports[-1] += f"\n({len(found) - MAX_REPORTS} more malformed calls not shown.)"

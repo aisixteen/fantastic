@@ -1,8 +1,8 @@
 # `failed_turn_retry` (E137) — a failed turn is retried on its own (#533)
 
 Free: no model. A scripted OpenAI-compatible server (`e2e/mocks/vllm.py`; the probe
-adds a stream cut with `finish_reason: length`) plays a provider that fails, for the
-Rust kernel's own `ai_chat.tools` agent (provider: a `vllm_backend`, via `provider_id`) on the PACKAGED host, over `web_rest`. Rust only: Python has no #533 retry yet (checklist in #170).
+adds a stream cut with `finish_reason: length`) plays a provider that fails, on the
+PACKAGED host of `RUNTIME`, over `web_rest`: on the python lane one `vllm_backend` agent; on the rust lane an `ai_chat.tools` chat naming a `vllm_backend` provider (`provider_id`, #521).
 
 1. HTTP 500 once, then a plain `done`: the next request is the agent's own next turn
    and its last user turn carries `[turn failed]` and the provider's error text; the
@@ -15,6 +15,6 @@ Rust kernel's own `ai_chat.tools` agent (provider: a `vllm_backend`, via `provid
 
 ```sh
 cd src/lib/python
-uv run python ../../../e2e/run.py --only-free --id failed_turn_retry --lanes 1
+uv run python ../../../e2e/run.py --only-free --id failed_turn_retry --lanes 2
 RUNTIME=rust uv run python ../../../e2e/tests/kernel/E137_failed_turn_retry/probe.py
 ```

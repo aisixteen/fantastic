@@ -3,6 +3,7 @@ verbatim, no JSON anywhere. Parse or refuse with the fault named — never repai
 
 from __future__ import annotations
 
+from ai_core.grammar import envelopes_in
 from ai_core.tool_parse import (
     OPEN,
     _HINT,
@@ -349,7 +350,12 @@ def test_a_trailing_fence_and_a_leading_invoke_fragment_leave_calls_dispatchable
         calls = extract_tool_calls(text)
         assert [c["name"] for c in calls] == ["send", "await"], calls
         assert malformed_calls(text) == []
-        assert call_check.check(text, ran=2) == []
+        # the Rust twin does not call `check`; since #525 the leftover fragment is
+        # reported as an unsupported tag, and nothing else is
+        reports = call_check.check(text, ran=2)
+        expect = 1 if text.startswith("<invoke") else 0
+        assert len(reports) == expect, reports
+        assert all(r.startswith("[unsupported tag") for r in reports), reports
 
 
 def test_a_reply_body_reads_as_utf8_text_at_its_slot():
@@ -609,3 +615,27 @@ def test_render_call_writes_the_routing_form_when_the_payload_needs_it():
     text = render_call("send", args)
     assert "<routing>" in text, text
     assert _one(text)["arguments"] == args
+
+
+# ── a whole call quoted in an argument is text (#543) ──
+
+QUOTED = '<call name="send"><target_id>x</target_id><type>y</type></call>'
+
+
+def test_a_whole_call_quoted_in_a_spawn_task_is_one_call_with_that_text():
+    q = QUOTED
+    c = _one(
+        '<call name="send"><target_id>kernel</target_id><type>spawn</type>'
+        f"<task>do {q} now</task></call>"
+    )
+    assert c["arguments"]["payload"]["task"] == f"do {q} now"
+
+
+def test_a_whole_call_quoted_in_a_routing_payload_is_text():
+    q = QUOTED
+    text = (
+        '<call name="send"><routing><target_id>kernel</target_id></routing>'
+        f"<payload><type>spawn</type><task>do {q}</task></payload></call>"
+    )
+    assert _one(text)["arguments"]["payload"]["task"] == f"do {q}"
+    assert len(envelopes_in(text)) == 1

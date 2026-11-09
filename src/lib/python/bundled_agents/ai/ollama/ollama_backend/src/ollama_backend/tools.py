@@ -45,7 +45,7 @@ RECORD_SCHEMA = schema(
         field(
             "temperature", "float", "sampling temperature", default=DEFAULT_TEMPERATURE
         ),
-        field("num_predict", "int", "a turn's output budget (tokens); unset, 16384"),
+        field("num_predict", "int", "a turn's output budget (tokens); unset, 260000"),
         field("think", "bool", "turn the model's thinking channel on or off"),
         field(
             "stream_idle_seconds",

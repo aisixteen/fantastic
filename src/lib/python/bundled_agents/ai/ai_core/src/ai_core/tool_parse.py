@@ -58,7 +58,7 @@ import secrets
 
 from kernel.modes.parse import coerce_scalar
 
-from ai_core.grammar import envelopes_in
+from ai_core.grammar import envelopes_in, find_close
 
 OPEN = "<call"
 CLOSE = "</call>"
@@ -99,18 +99,11 @@ class _Malformed(Exception):
 
 
 def _find_close(text: str, start: int) -> int:
-    """Index of the `</call>` that closes a call whose body starts at `start`,
-    skipping any `</call>` inside a `<bytes>` value; -1 if unterminated."""
-    i = start
-    while True:
-        c = text.find(CLOSE, i)
-        b = text.find(BYTES_OPEN, i)
-        if b == -1 or (c != -1 and c < b):
-            return c
-        e = text.find(BYTES_CLOSE, b + len(BYTES_OPEN))
-        if e == -1:
-            return -1  # an open document runs to the end: unterminated
-        i = e + len(BYTES_CLOSE)
+    """Index of the `</call>` that closes a call whose body starts at `start`
+    (grammar.find_close: skips `<bytes>` values, pairs a nested call with its own
+    close); -1 if unterminated."""
+    end = find_close(text, start)
+    return -1 if end is None else end
 
 
 def _elements(body: str) -> list[tuple[str, str]]:

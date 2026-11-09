@@ -125,8 +125,18 @@ class _RogueMind:
             )
 
 
+class _Quiet:
+    """Answers every turn with a done call, so a push into ua_ai ends its chain."""
+
+    async def chat(self, messages, max_tokens=None):
+        yield '<call name="done"></call>'
+
+
 @pytest.fixture
-def wired(seeded_kernel, store_agent):
+def wired(seeded_kernel, store_agent, fake_providers):
+    # A failed turn is retried as its own turn (#533); with no provider seated a
+    # push into ua_ai would fail and retry forever, so every test starts quiet.
+    fake_providers["ua_ai"] = _Quiet()
     _bought.clear()
     # `port`: the authority the web's Host guard admits.
     seeded_kernel.create(None, id="test_web", port=8088)
@@ -196,7 +206,7 @@ def test_c3_approve_the_click_executes_and_the_result_reaches_the_dialog(
             assert data.get("bought") == "rocket", data
             assert _bought == [{"item": "rocket"}]
     finally:
-        fake_providers.pop("ua_ai", None)
+        fake_providers["ua_ai"] = _Quiet()
     # the push lane delivered the outcome INTO the dialog (purchase → ai)
     assert any("[purchase result]" in json.dumps(req) for req in mind.requests), (
         "the result never reached the model's dialog"
@@ -242,7 +252,7 @@ def test_c3_reject_the_wall_refusal_is_model_visible(wired, fake_providers):
         assert "unauthorized" in joined, "the refusal never reached the dialog"
         assert "may not call" in joined
     finally:
-        fake_providers.pop("ua_ai", None)
+        fake_providers["ua_ai"] = _Quiet()
 
 
 def test_a_frame_id_becomes_the_execution_id(wired):

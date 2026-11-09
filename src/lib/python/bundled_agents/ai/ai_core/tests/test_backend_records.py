@@ -476,7 +476,7 @@ def test_ollama_make_provider_coerces_each_knob(monkeypatch):
                 "model": "m",
                 "num_ctx": None,
                 "temperature": None,
-                "num_predict": 16384,
+                "num_predict": 260000,
                 "think": None,
                 "stream_idle": 60.0,
             },
@@ -488,7 +488,7 @@ def test_ollama_make_provider_coerces_each_knob(monkeypatch):
                 "model": "m",
                 "num_ctx": 4096,
                 "temperature": 0.5,
-                "num_predict": 16384,  # 0 is "unset": the default bounds it
+                "num_predict": 260000,  # 0 is "unset": the default bounds it
                 "think": False,  # a set falsy think is still sent
                 "stream_idle": 60.0,
             },

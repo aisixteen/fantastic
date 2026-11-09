@@ -374,7 +374,7 @@ def test_stream_idle_seconds_is_validated_at_the_write():
 
 @pytest.mark.parametrize(
     ("rec", "sent"),
-    [({}, 16384), ({"num_predict": 0}, 16384), ({"num_predict": 200}, 200)],
+    [({}, 260000), ({"num_predict": 0}, 260000), ({"num_predict": 200}, 200)],
 )
 async def test_a_record_with_no_num_predict_sends_the_bounded_default(rec, sent):
     # #495: ollama's own default is no cap at all; the record builds a bounded one
