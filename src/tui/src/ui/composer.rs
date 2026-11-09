@@ -166,9 +166,6 @@ impl Composer {
         if self.caret == 0 {
             return;
         }
-        if self.palette != Palette::None {
-            self.query_pop();
-        }
         let prev = self.text[..self.caret]
             .chars()
             .next_back()
@@ -176,6 +173,9 @@ impl Composer {
             .unwrap_or(1);
         self.caret -= prev;
         self.text.remove(self.caret);
+        if self.palette != Palette::None {
+            self.query_pop();
+        }
     }
 
     pub fn delete(&mut self) {
@@ -531,5 +531,21 @@ mod tests {
     fn parse_export_without_selection_says_select_an_agent() {
         assert_eq!(Composer::parse_export("/export out", None).unwrap_err(), "select an agent first.");
         assert_eq!(Composer::parse_export("/export out", Some("#bundles")).unwrap_err(), "select an agent first.");
+    }
+
+    #[test]
+    fn backspace_keeps_the_palette_until_its_trigger_is_gone() {
+        for (trigger, verb) in [('@', Palette::Agents { query: String::new(), sel: 0 }), ('/', Palette::Verbs { query: String::new(), sel: 0 })] {
+            let mut c = Composer::default();
+            c.insert(trigger);
+            c.insert('a');
+            assert!(matches!(c.palette, Palette::Agents { .. } | Palette::Verbs { .. }));
+            c.backspace();
+            assert_eq!(c.palette, verb, "one backspace removes the query, the trigger is still there");
+            assert_eq!(c.text, trigger.to_string());
+            c.backspace();
+            assert_eq!(c.palette, Palette::None, "the trigger is gone, so the palette closes");
+            assert_eq!(c.text, "");
+        }
     }
 }
