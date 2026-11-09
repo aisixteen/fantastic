@@ -144,7 +144,12 @@ pub fn loader_dir(kernel: &Kernel, loader: &Agent) -> Result<PathBuf, String> {
             let (base, rel) = kernel.record_root(&raw, &loader.root_path)?;
             Ok(normalize_lexical(&base, Path::new(&rel)))
         }
-        None => Ok(loader.root_path.clone()),
+        // Folded like the candidates in `find_store_for`, so a relative or `..`
+        // state folder still compares and strips consistently.
+        None => Ok(match kernel.state_dir() {
+            Ok(state) => normalize_lexical(&state, &loader.root_path),
+            Err(_) => loader.root_path.clone(),
+        }),
     }
 }
 

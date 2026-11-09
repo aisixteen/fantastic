@@ -936,3 +936,17 @@ async fn a_legacy_relative_store_root_is_found_with_the_defaults() {
     persist_kid_with_store_root(&state, &work, ".fantastic").await;
     assert!(state.join("agents/kid/agent.yaml").exists());
 }
+
+#[tokio::test]
+async fn a_state_folder_with_dotdot_still_finds_its_store() {
+    let tmp = fresh_workdir();
+    let work = tmp.path().join("w");
+    std::fs::create_dir_all(&work).unwrap();
+    // The folder as `--statedir ../x/.fantastic` leaves it: absolute, `..` kept.
+    let state = work.join("../x/.fantastic");
+    persist_kid_with_store_root(&state, &work, "@state").await;
+    assert!(tmp
+        .path()
+        .join("x/.fantastic/agents/kid/agent.yaml")
+        .exists());
+}

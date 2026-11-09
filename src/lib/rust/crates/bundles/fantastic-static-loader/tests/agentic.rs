@@ -156,7 +156,7 @@ impl fantastic_kernel::bundle::Bundle for LifecycleProbe {
 
 fn mk_kernel() -> Arc<Kernel> {
     // DISK mode, rooted at the running dir. `load` computes each restored
-    // agent's root_path from `storage.work_dir()`, so an in-memory kernel hands
+    // agent's root_path from `storage.state_dir()`, so an in-memory kernel hands
     // every agent an empty path and `find_store` can never match a declared
     // provider again — the tree comes back but its STORE does not.
     let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
