@@ -55,6 +55,7 @@ from ai_core.context import (
     resolve_context_window,
 )
 from ai_core import caching
+from ai_core.autofold import autofold_row
 from ai_core import prompt_file
 from ai_core import embed as _embed_mod
 from ai_core.provider import ProviderError
@@ -451,7 +452,7 @@ def _render_for_model(messages: list[dict]) -> list[dict]:
     out = []
     for m in messages:
         r = {"role": m.get("role"), "content": m.get("content", "")}
-        for flag in ("cache_primer", "cache_fold"):
+        for flag in ("cache_primer", "cache_fold", "cache_tail"):
             if m.get(flag):
                 r[flag] = True
         out.append(r)
@@ -984,6 +985,7 @@ Your view is finite: when it overflows, older turns are compacted and a
 `<type>recall</type>` (`<query>`, `<limit>`) to page dropped turns back, and
 `<type>context_status</type>` for your budget. Facts that must outlive this window
 (names, decisions, preferences) belong in a memory agent.
+A [folded …], [thought …] or [cut …] anchor stands for a body you already saw in full; `recall` with its id to read it again — it folds back after your next answer.
 """
 
 
@@ -2854,7 +2856,10 @@ async def _assemble(
     # `context_fold`, which persists exactly what this renders.
     view = await _load_view(self_id, kernel)
     messages.extend(
-        msg for _, _, msg in _render_history(hist, view, caching.cleans(mode))
+        autofold_row(hist, i, msg, user_text)
+        if caching.folds(mode) and res == "full"
+        else msg
+        for i, res, msg in _render_history(hist, view, caching.cleans(mode))
     )
     if _listed(hist, view) is not None:
         _view_source[self_id] = "array"
@@ -4451,8 +4456,29 @@ def _recall_render(m: dict) -> str:
 
 
 async def _recall(id, payload, kernel):
-    """args: query:str? (substring of a serialized turn, tool args and replies included), limit:int? (default 20, max 100), before:int? (store index — page backward). Pages turns back from the DURABLE store — the FULL conversation, so anything compaction dropped is one call away. Read-only. A page always fits INLINE; trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content}], total, truncated, note?}."""
+    """args: id:int? (a row id — returns that row whole: its content, and its thinking when it had any; query, limit and before are then ignored), query:str? (substring of a serialized turn, tool args and replies included), limit:int? (default 20, max 100), before:int? (store index — page backward). Pages turns back from the DURABLE store — the FULL conversation, so anything compaction dropped is one call away. Read-only. A page always fits INLINE; trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content,thinking?}], total, truncated, note?}."""
     full = await _load_history(id, kernel, behind=True)
+    # BY ID: the row whole — its content and, when it had any, its thinking.
+    if payload.get("id") is not None:
+        rid = _as_id(payload["id"])
+        if rid is None:
+            return {
+                "error": "recall: `id` must be a row id (int)",
+                "reason": "bad_arg",
+                "arg": "id",
+            }
+        hit = next((i for i, r in enumerate(full) if r.get("id") == rid), None)
+        if hit is None:
+            return {
+                "error": f"recall: {rid} is not a row in your conversation",
+                "reason": "not_found",
+                "arg": "id",
+            }
+        row = full[hit]
+        m = {"index": hit, "role": row.get("role"), "content": _recall_render(row)}
+        if isinstance(row.get("thinking"), str) and row["thinking"]:
+            m["thinking"] = row["thinking"]
+        return {"messages": [m], "total": 1, "truncated": False}
     q = str(payload.get("query") or "").lower().strip()
     try:
         limit = int(payload.get("limit") or 20)

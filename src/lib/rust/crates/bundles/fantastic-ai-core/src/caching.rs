@@ -6,10 +6,14 @@
 //!   repeated reply bodies and used docs drop out of it. No markers.
 //! - `provider_cache`: `none`'s history, plus two markers the provider caches on:
 //!   the PRIMER END (the row `cache_primer_until` names) and the LAST FOLD (the last
-//!   fold or clear row in the view). Only a backend that declares `provider_cache`
+//!   fold or clear row in the view), plus the TAIL: the row before the first row that
+//!   will fold, else the last row. Only a backend that declares `provider_cache`
 //!   accepts it.
 //!
-//! ai-core only FLAGS the two messages ([`mark`]). The backend turns the flags into
+//! `cleanup` and `provider_cache` also AUTOFOLD the view: a thought, a cut answer and a
+//! large or recalled reply show as an anchor, never stored.
+//!
+//! ai-core only FLAGS the three messages ([`mark`]). The backend turns the flags into
 //! its own markers, and only in `provider_cache`.
 
 use crate::provider::ProviderError;
@@ -25,8 +29,9 @@ pub const DEFAULT_MODE: &str = "cleanup";
 pub const CACHING_HINT: &str = "how the conversation is kept in the model's view: none = \
      every stored row, in order, never trimmed (append-only); cleanup = trim superseded \
      reads, repeated reply bodies and used docs from the view; provider_cache = none's \
-     history plus the provider's cache markers (the end of the primer row named by \
-     cache_primer_until, and the end of the last fold); provider_cache is refused by a \
+     history plus marks, with autofold (the provider's cache markers: the end of the primer \
+     row named by cache_primer_until, the end of the last fold, and the end of the row \
+     before the first row that will fold); provider_cache is refused by a \
      backend that cannot cache. A switch keeps the view already written: a row a cleanup \
      left out of it stays out until a context_clear starts a new thread";
 
@@ -69,6 +74,12 @@ impl Caching {
     #[must_use]
     pub fn marks(self) -> bool {
         self == Self::ProviderCache
+    }
+
+    /// Whether the view is autofolded: anchors for thoughts, cuts and large replies.
+    #[must_use]
+    pub fn folds(self) -> bool {
+        self != Self::None
     }
 }
 
@@ -159,8 +170,11 @@ pub fn unsupported(name: &str) -> ProviderError {
 
 /// Flag the messages the provider's markers land on, in the list it is handed:
 /// `cache_primer` on the message of the row `primer` names (no flag when that row is
-/// not in the view), and `cache_fold` on the LAST message of a fold or clear row.
-/// Both flags are on the message's own text, so a backend can cut its block there.
+/// not in the view), `cache_fold` on the LAST message of a fold or clear row, and
+/// `cache_tail`: the agent's own mark. It sits on the message before the first user
+/// message after the last assistant one that will fold (a row that folds never carries
+/// the mark), else on the last message; never on the system message. The flags are on
+/// the message's own text, so a backend can cut its block there.
 pub fn mark(messages: &mut [Value], primer: Option<i64>) {
     let primer_at = primer.and_then(|p| {
         messages
@@ -178,6 +192,30 @@ pub fn mark(messages: &mut [Value], primer: Option<i64>) {
     }
     if let Some(i) = fold_at {
         messages[i]["cache_fold"] = json!(true);
+    }
+    let from = messages
+        .iter()
+        .rposition(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
+        .map_or(0, |l| l + 1);
+    let pending = messages
+        .iter()
+        .enumerate()
+        .skip(from)
+        .find(|(_, m)| {
+            m.get("role").and_then(Value::as_str) == Some("user")
+                && crate::history_view::will_fold(
+                    m.get("content").and_then(Value::as_str).unwrap_or(""),
+                )
+        })
+        .map(|(i, _)| i);
+    let tail = match pending {
+        Some(i) => i.checked_sub(1),
+        None => messages.len().checked_sub(1),
+    };
+    if let Some(i) = tail {
+        if messages[i].get("role").and_then(Value::as_str) != Some("system") {
+            messages[i]["cache_tail"] = json!(true);
+        }
     }
 }
 
@@ -311,5 +349,76 @@ mod tests {
         ];
         mark(&mut msgs, None);
         assert_eq!(msgs[0]["cache_fold"], json!(true));
+    }
+
+    #[test]
+    fn folds_runs_in_cleanup_and_provider_cache_only() {
+        assert!(Caching::Cleanup.folds());
+        assert!(Caching::ProviderCache.folds());
+        assert!(!Caching::None.folds());
+    }
+
+    fn big_reply() -> String {
+        format!(
+            "[reply to 3 · notes read]\n{}",
+            "x".repeat(crate::constants::AUTOFOLD_AT * 4 + 4)
+        )
+    }
+
+    fn tails(msgs: &[Value]) -> Vec<usize> {
+        (0..msgs.len())
+            .filter(|i| msgs[*i].get("cache_tail") == Some(&json!(true)))
+            .collect()
+    }
+
+    #[test]
+    fn mark_puts_the_tail_mark_on_the_last_message_when_nothing_will_fold() {
+        let mut msgs = vec![
+            json!({"role": "system", "content": "s"}),
+            json!({"role": "user", "content": "a", "id": 1}),
+            json!({"role": "assistant", "content": "b", "id": 2}),
+            json!({"role": "user", "content": "[reply to 3 · notes read]\nsmall"}),
+        ];
+        mark(&mut msgs, None);
+        assert_eq!(tails(&msgs), vec![3]);
+    }
+
+    #[test]
+    fn mark_puts_the_tail_mark_before_the_first_row_that_will_fold() {
+        let mut msgs = vec![
+            json!({"role": "system", "content": "s"}),
+            json!({"role": "user", "content": "a"}),
+            json!({"role": "assistant", "content": "b"}),
+            json!({"role": "user", "content": big_reply()}),
+        ];
+        mark(&mut msgs, None);
+        assert_eq!(tails(&msgs), vec![2]);
+        assert!(msgs[3].get("cache_tail").is_none());
+        // a recall reply does the same
+        msgs[3]["content"] = json!("[reply to 3 · ai recall]\nx");
+        for m in msgs.iter_mut() {
+            m.as_object_mut().unwrap().remove("cache_tail");
+        }
+        mark(&mut msgs, None);
+        assert_eq!(tails(&msgs), vec![2]);
+        // a will-fold row BEFORE the last assistant row is already answered: ignored
+        let mut older = vec![
+            json!({"role": "system", "content": "s"}),
+            json!({"role": "user", "content": big_reply()}),
+            json!({"role": "assistant", "content": "b"}),
+            json!({"role": "user", "content": "live"}),
+        ];
+        mark(&mut older, None);
+        assert_eq!(tails(&older), vec![3]);
+    }
+
+    #[test]
+    fn the_tail_mark_never_lands_on_the_system_message() {
+        let mut msgs = vec![
+            json!({"role": "system", "content": "s"}),
+            json!({"role": "user", "content": big_reply()}),
+        ];
+        mark(&mut msgs, None);
+        assert!(tails(&msgs).is_empty());
     }
 }

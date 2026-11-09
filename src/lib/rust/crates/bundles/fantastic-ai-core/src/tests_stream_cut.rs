@@ -321,4 +321,21 @@ async fn a_cut_after_thinking_keeps_it_in_the_store_not_the_view() {
     assert!(seen.contains("Sending."), "{seen}");
     assert!(!seen.contains("native tool"), "{seen}");
     assert!(!seen.contains("<think>"), "{seen}");
+    // the cut answer is its anchor in the next request, at once
+    let shown = s.request_messages(1);
+    let cut = shown
+        .iter()
+        .find(|m| m["role"] == json!("assistant"))
+        .expect("the assistant message");
+    let text = cut["content"].as_str().unwrap();
+    assert!(
+        text.starts_with(
+            "Sending.\n[cut · you wrote <invoke name=\"send\"> after thinking ~7 tokens · nothing ran · ACTION: "
+        ),
+        "{text}"
+    );
+    assert!(
+        text.ends_with(&format!(" · full: {}]", rows[0]["id"])),
+        "{text}"
+    );
 }

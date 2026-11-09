@@ -20,9 +20,10 @@ What is Anthropic-specific here:
   `x-api-key` (with `anthropic-version`); no `credentials`, no key header — the API
   then answers 401, and the error says to name one.
 - CACHING (ai_core's `caching`): `provider_cache` sends ephemeral `cache_control`
-  markers: on the `system` block, on the block that ends the primer row, on the
-  block that ends the last fold, and the top-level automatic one. At most four.
-  Every other mode sends none, and the body is unchanged.
+  markers: on the `system` block, and on the block that ends each flagged row
+  (`cache_primer`, `cache_fold`, `cache_tail`). The backend adds no mark of its own
+  beyond the system block: where the conversation is marked is the agent's choice.
+  At most four. Every other mode sends none, and the body is unchanged.
 - USAGE: each stream's token counts accumulate into the agent's `Usage` (the
   `usage` verb and `reflect` read it), side calls included. The running total is
   kept across a kernel restart in the agent's `usage.json` (#308, Rust #319): every
@@ -396,7 +397,9 @@ def to_wire(messages: list[dict], marks: bool) -> tuple[str, list[dict]]:
         role = m.get("role")
         content = str(m.get("content") or "")
         flagged = marks and (
-            m.get("cache_primer") is True or m.get("cache_fold") is True
+            m.get("cache_primer") is True
+            or m.get("cache_fold") is True
+            or m.get("cache_tail") is True
         )
         if role == "system":
             if content:
@@ -548,8 +551,6 @@ class AnthropicProvider:
                 if marks
                 else system
             )
-        if marks:
-            body["cache_control"] = dict(CACHE_CONTROL)
         if self._temperature is not None:
             body["temperature"] = self._temperature
         if self._effort is not None:

@@ -56,7 +56,7 @@ pub fn verb_docs() -> Value {
         "unembed": "args: id:str (req). Takes the card of agent `id` out of this chat: a tombstone row, so it stays gone after a reload (a later `embed` shows it again). Works the same for a live agent and a deleted one, so it also clears a '[deleted from canvas]' placeholder. It NEVER touches the agent — deleting it stays the kernel's `delete_agent`. Returns {unembedded:id} ({was_embedded:false} when no such card was shown).",
         "status": "args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int}.",
         "context_status": "No args. The context-budget posture + the last overflow projection + the model's\nderived reaction to it. Returns {context_window, output_reserve, budget, strategy,\nlast_projection:{fired, strategy?, kept_messages?, dropped_messages?, summarized?,\ntoo_small?}|null, last_reaction:{recalled, persisted, recall_count}|null}.",
-        "recall": "args: query:str? (substring of a serialized turn, tool args and replies included), limit:int? (default 20, max 100), before:int? (store index — page backward). Pages turns back from the DURABLE store — the FULL conversation, so anything compaction dropped is one call away. Read-only. A page always fits INLINE; trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content}], total, truncated, note?}.",
+        "recall": "args: id:int? (a row id — returns that row whole: its content, and its thinking when it had any; query, limit and before are then ignored), query:str? (substring of a serialized turn, tool args and replies included), limit:int? (default 20, max 100), before:int? (store index — page backward). Pages turns back from the DURABLE store — the FULL conversation, so anything compaction dropped is one call away. Read-only. A page always fits INLINE; trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content,thinking?}], total, truncated, note?}.",
         "grep": "args: query:str (req — case-insensitive substring), ids:list[int]? (row, pid or fold ids to search), limit:int? (default: as many as fit inline), width:int? (chars per matched line, default 200). Finds the LINE that mentions something ANYWHERE in your memory — every row you ever wrote or received (behind every clear, inside every fold; a fold id searches its members), and the reply bodies still held this run. Raise `width` when the value sits deep in a long line. Returns {matches:[{id, line, text}], total, truncated}.",
         "context_recall": "args: dry:bool? (mechanical fit only — no model call). Rebuild this agent's VIEW from its store: with `context_strategy` fold, a head longer than the budget is FOLDED first (oldest spans into fold rows, as a turn's projection folds); then fit the head to the budget at digest resolution, ask the model which rows it wants in full, persist the id list, log the decision as a row, and drop RAM scratch. Runs on boot, after a fold batch, or on request. Returns {kept, expanded, dropped, folded, budget, why, degraded}.",
         "context_clear": "args: why:str? — start a NEW THREAD on the same store: a CLEAR-FOLD — one row whose members are every row since the previous clear (no summary) — and the model's view begins at its `[cleared <id> · N rows]` line. Nothing is deleted: grep, recall and `history {fold: <id>}` reach every member (`context_forget` is the verb that deletes). Empties the persisted view and drops RAM scratch (projection, fold counters, pending recall). Returns {cleared:id, rows:N}.",
@@ -714,7 +714,7 @@ fn recall_render(m: &Value) -> String {
 /// `recall` verb: page turns back from the DURABLE chat store (the FULL
 /// conversation, never trimmed — so anything compaction dropped is one call
 /// away). Read-only. args: `query?` (case-insensitive substring), `limit?`
-/// (default 20, max 100), `before?` (store index).
+/// (default 20, max 100), `before?` (store index), `id?` (a row id: that row whole).
 ///
 /// The reply is python's and nothing more: `{messages, total, truncated[,
 /// note]}`. There is no `client_id` — a model reading its own recall was handed
@@ -726,6 +726,33 @@ pub async fn recall(
     model_window: i64,
 ) -> MemResult<Value> {
     let full = load_history(agent_id, kernel, true).await?;
+    // BY ID: the row whole — its content and, when it had any, its thinking.
+    if let Some(raw) = payload.get("id").filter(|v| !v.is_null()) {
+        let Some(id) = crate::retrieval::as_id(raw) else {
+            return Ok(json!({
+                "error": "recall: `id` must be a row id (int)",
+                "reason": "bad_arg", "arg": "id",
+            }));
+        };
+        let Some((i, row)) = full
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.get("id").and_then(Value::as_i64) == Some(id))
+        else {
+            return Ok(json!({
+                "error": format!("recall: {id} is not a row in your conversation"),
+                "reason": "not_found", "arg": "id",
+            }));
+        };
+        let mut m = json!({"index": i, "role": row.get("role"), "content": recall_render(row)});
+        if let Some(t) = row
+            .get("thinking")
+            .filter(|t| t.as_str().is_some_and(|s| !s.is_empty()))
+        {
+            m["thinking"] = t.clone();
+        }
+        return Ok(json!({"messages": [m], "total": 1, "truncated": false}));
+    }
     let null = Value::Null;
     // python `str(payload.get("query") or "").lower().strip()`.
     let raw_q = payload.get("query").unwrap_or(&null);
