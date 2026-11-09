@@ -30,6 +30,7 @@ host reads as itself, gated as `web`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import logging
 from typing import Any
@@ -261,6 +262,13 @@ class _Server(uvicorn.Server):
             self._exit.set()
         else:
             self._exit.clear()
+
+    @contextlib.contextmanager
+    def capture_signals(self):
+        """The kernel owns the stop signals (`_sys.install_stop_signals`). uvicorn's
+        own capture re-raises the signal when serve() ends, which the kernel would
+        count as a SECOND stop signal and cut its clean stop (#562)."""
+        yield
 
     async def main_loop(self) -> None:
         await self.on_tick(0)  # the default headers, once

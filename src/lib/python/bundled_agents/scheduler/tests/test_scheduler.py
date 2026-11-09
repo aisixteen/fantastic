@@ -1060,3 +1060,41 @@ async def test_schedule_ids_are_sch_and_token_hex_3(seeded_kernel, store_agent):
         assert re.fullmatch(r"sch_[0-9a-f]{6}", r["schedule_id"]), r
         seen.add(r["schedule_id"])
     assert len(seen) == 8, seen
+
+
+def test_the_stock_registry_names_scheduler_tools():
+    from kernel._bundles import _find_bundle_module, import_handler
+
+    assert _find_bundle_module("scheduler") == "scheduler.tools"
+    assert callable(import_handler("scheduler.tools").handler)
+
+
+async def test_a_scheduler_agent_answers_schedule_and_unschedule(
+    seeded_kernel, store_agent
+):
+    rec = await _send(
+        seeded_kernel,
+        "kernel_state",
+        {
+            "type": "create_agent",
+            "parent_id": "kernel_state",
+            "id": "sched507",
+            "handler_module": "scheduler.tools",
+        },
+    )
+    assert rec["id"] == "sched507", rec
+    r = await _send(
+        seeded_kernel,
+        "sched507",
+        {
+            "type": "schedule",
+            "target": "kernel_state",
+            "payload": {"type": "reflect"},
+            "interval_seconds": 3600,
+        },
+    )
+    assert isinstance(r["schedule_id"], str), r
+    u = await _send(
+        seeded_kernel, "sched507", {"type": "unschedule", "schedule_id": r["schedule_id"]}
+    )
+    assert u["removed"] is True, u
