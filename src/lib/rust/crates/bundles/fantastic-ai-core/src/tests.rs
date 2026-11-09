@@ -1987,11 +1987,7 @@ async fn an_error_reply_does_not_route() {
         "{r:#?}"
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(
-        s.passes_served(),
-        2,
-        "the failed pass is retried once, then done"
-    );
+    assert_eq!(s.passes_served(), 2, "the failed pass is retried once, then done");
 }
 
 /// PROVIDER FAILURE, KIND 2: unmapped — python re-raises it out of the
@@ -3587,14 +3583,8 @@ async fn await_with_nothing_in_flight_ends_the_chain_with_a_visible_note() {
         "{content}"
     );
     assert!(content.contains("nothing was awaited"), "{content}");
-    assert!(
-        content.contains("reach you through your check-ins"),
-        "{content}"
-    );
-    assert!(
-        content.contains("has reported or been stopped"),
-        "{content}"
-    );
+    assert!(content.contains("reach you through your check-ins"), "{content}");
+    assert!(content.contains("has reported or been stopped"), "{content}");
 }
 
 /// The honest wait: something is QUEUED for the agent, so `await` ends the turn
@@ -3840,10 +3830,7 @@ async fn a_held_send_returns_the_answer_of_the_pass_that_reads_it() {
     until_held(&backend, 1).await;
     let _ = first.await.expect("first send");
     // The held message is READ by the chain's next pass, which says so in its request.
-    assert!(
-        until_passes(&s, 2).await,
-        "the held message never got its pass"
-    );
+    assert!(until_passes(&s, 2).await, "the held message never got its pass");
     let reading = s.request(1);
     assert!(
         reading.contains("arrived while you were working") && reading.contains("two"),
@@ -4013,11 +4000,7 @@ async fn the_chain_ends_and_the_held_are_released(tag: &str, end: Option<Value>)
     assert!(out["error"].is_string(), "{out}");
     assert_eq!(out["held"], json!(true), "{out}");
     assert!(
-        !crate::state::state_for(&backend)
-            .chain
-            .lock()
-            .unwrap()
-            .alive,
+        !crate::state::state_for(&backend).chain.lock().unwrap().alive,
         "the chain is still alive"
     );
 }
@@ -4121,11 +4104,7 @@ async fn a_wake_that_never_runs_releases_the_held_senders_at_the_ceiling() {
 async fn a_routed_reply_carries_the_token_read_when_it_was_decided() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "tokenwhen").await;
-    let s = script(
-        &backend,
-        vec![pass(r#"<call name="done"></call>"#)],
-        Duration::ZERO,
-    );
+    let s = script(&backend, vec![pass(r#"<call name="done"></call>"#)], Duration::ZERO);
     let state = crate::state::state_for(&backend);
     {
         let mut c = state.chain.lock().unwrap();
@@ -4145,17 +4124,10 @@ async fn a_routed_reply_carries_the_token_read_when_it_was_decided() {
         if held || s.passes_served() > 0 || has_late_row(&kernel, &backend).await {
             break;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the old reply went nowhere"
-        );
+        assert!(std::time::Instant::now() < deadline, "the old reply went nowhere");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(
-        s.passes_served(),
-        0,
-        "the old reply ran as a turn of the new chain"
-    );
+    assert_eq!(s.passes_served(), 0, "the old reply ran as a turn of the new chain");
 }
 
 /// ONE CHAIN PER AGENT (#227, bug 5): `stop` rotates the token, so a routed reply
@@ -4210,11 +4182,7 @@ async fn a_reply_in_flight_across_a_stop_runs_nothing() {
 async fn an_await_reply_after_a_new_chain_began_is_held_not_dropped() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "awaitnew").await;
-    let s = script(
-        &backend,
-        vec![pass(r#"<call name="done"></call>"#)],
-        Duration::ZERO,
-    );
+    let s = script(&backend, vec![pass(r#"<call name="done"></call>"#)], Duration::ZERO);
     let state = crate::state::state_for(&backend);
     {
         // An operator message started a NEW chain after the await.
@@ -4229,14 +4197,17 @@ async fn an_await_reply_after_a_new_chain_began_is_held_not_dropped() {
     // The routed reply of an `await`ed call: the replier is the origin, so the
     // delivery carries NO chain token. It goes through the kernel, so the
     // handler runs as the TARGET (its store writes are its own).
-    tokio::spawn(fantastic_kernel::test_support::as_agent(peer, async move {
-        let _ = k
+    tokio::spawn(fantastic_kernel::test_support::as_agent(
+        peer,
+        async move {
+            let _ = k
                 .send(vec![Item::new(
                     target,
                     json!({"type": "send", "text": "[reply to 1 · peer]\nanswered", "client_id": "cli"}),
                 )])
                 .await;
-    }));
+        },
+    ));
     // The reply is read by a pass (or held for the live chain's next one) —
     // either way it is acted on, never recorded as `late`.
     until_true("the await's reply to be acted on", || {
@@ -7124,11 +7095,11 @@ mod stream_cut;
 /// Inline agent views in a chat (#339).
 #[path = "tests_embed.rs"]
 mod tests_embed;
+#[path = "tests_retries.rs"]
+mod tests_retries;
 /// fork, mark, fork_points (#425).
 #[path = "tests_fork.rs"]
 mod tests_fork;
-#[path = "tests_retries.rs"]
-mod tests_retries;
 
 /// A docs body opens with the line naming the grep that keeps what the model needs,
 /// and once answered it is cut to a stub that names the same pid — python
@@ -7769,10 +7740,7 @@ async fn a_routing_name_in_the_payload_of_a_routed_call_is_delivered() {
     assert!(until_passes(&s, 2).await, "the reply must reach the model");
     let turn = s.request(1);
     assert!(!turn.contains("call routing, never sent"), "{turn}");
-    assert!(
-        turn.contains("make notes"),
-        "the routing title labels the reply: {turn}"
-    );
+    assert!(turn.contains("make notes"), "the routing title labels the reply: {turn}");
     assert_eq!(
         *got.lock().unwrap(),
         vec![json!({"type": "create", "title": "Notes", "body": "b"})]
@@ -8277,29 +8245,12 @@ impl Bundle for EchoProvider {
     fn name(&self) -> &str {
         "echo_provider"
     }
-    async fn handle(
-        &self,
-        id: &AgentId,
-        payload: &Value,
-        kernel: &Arc<Kernel>,
-    ) -> Result<Reply, BundleError> {
+    async fn handle(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
         // no model on the pass: the "server" names its own, `srv-1`
         let build = |m: Map<String, Value>| -> Arc<dyn Provider> {
-            Arc::new(EchoWords(
-                m.get("model")
-                    .and_then(Value::as_str)
-                    .unwrap_or("srv-1")
-                    .to_string(),
-            ))
+            Arc::new(EchoWords(m.get("model").and_then(Value::as_str).unwrap_or("srv-1").to_string()))
         };
-        Ok(crate::remote_provider::provider_verbs(
-            id,
-            payload,
-            kernel,
-            build,
-            crate::remote_provider::NO_LIVE,
-        )
-        .await)
+        Ok(crate::remote_provider::provider_verbs(id, payload, kernel, build, crate::remote_provider::NO_LIVE).await)
     }
 }
 
@@ -8320,21 +8271,10 @@ async fn make_provider(kernel: &Arc<Kernel>, id: &str, extra: Value, default: Op
             c[k] = v.clone();
         }
     }
-    let made = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), c)])
-        .await
-        .remove(0)
-        .result;
+    let made = kernel.send(vec![Item::new(AgentId::from("kernel_state"), c)]).await.remove(0).result;
     assert_eq!(made["id"], id, "{made}");
     if let Some(m) = default {
-        let r = kernel
-            .send(vec![Item::new(
-                AgentId::from(id),
-                json!({"type": "set_default_model", "model": m}),
-            )])
-            .await
-            .remove(0)
-            .result;
+        let r = kernel.send(vec![Item::new(AgentId::from(id), json!({"type": "set_default_model", "model": m}))]).await.remove(0).result;
         assert_eq!(r["default"], m, "{r}");
     }
 }
@@ -8344,103 +8284,46 @@ async fn an_ai_chat_holds_the_conversation_and_completes_through_its_provider() 
     let tmp = TempDir::new().unwrap();
     let kernel = base_kernel(&tmp, |k| {
         k.bundles.register("echo_provider.tools", EchoProvider);
-        k.bundles.register(
-            crate::chat_bundle::HANDLER_MODULE,
-            crate::chat_bundle::AiChatBundle,
-        );
+        k.bundles.register(crate::chat_bundle::HANDLER_MODULE, crate::chat_bundle::AiChatBundle);
     })
     .await;
-    make_provider(
-        &kernel,
-        "prov",
-        json!({"callable_by": {"chat1": "*", "$self": "*"}, "models": ["m-small", "m-big"]}),
-        Some("m-small"),
-    )
-    .await;
-    let memory = fantastic_ram_store::test_support::memory_meta(
-        &kernel,
-        "chat1",
-        json!({"cli": "*", "prov": ["complete", "watch"]}),
-    )
-    .await;
+    make_provider(&kernel, "prov", json!({"callable_by": {"chat1": "*", "$self": "*"}, "models": ["m-small", "m-big"]}), Some("m-small")).await;
+    let memory = fantastic_ram_store::test_support::memory_meta(&kernel, "chat1", json!({"cli": "*", "prov": ["complete", "watch"]})).await;
     let mut create = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "ai_chat.tools",
                             "id": "chat1", "provider_id": "prov", "context_window": 32768});
     for (k, v) in memory {
         create[k] = v;
     }
-    let made = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), create)])
-        .await
-        .remove(0)
-        .result;
+    let made = kernel.send(vec![Item::new(AgentId::from("kernel_state"), create)]).await.remove(0).result;
     assert_eq!(made["id"], "chat1", "{made}");
     let r = kernel
-        .send(vec![Item::new(
-            AgentId::from("chat1"),
-            json!({"type": "send", "text": "hi"}),
-        )])
+        .send(vec![Item::new(AgentId::from("chat1"), json!({"type": "send", "text": "hi"}))])
         .await
         .remove(0)
         .result;
-    assert_eq!(
-        r["response"], "hello from m-small",
-        "no model on the chat: the provider's default: {r}"
-    );
+    assert_eq!(r["response"], "hello from m-small", "no model on the chat: the provider's default: {r}");
     let rec = kernel.agents.get(&AgentId::from("chat1")).unwrap().record();
-    assert!(
-        rec.meta.get("model").is_none(),
-        "the chat's record holds no provider field: {:?}",
-        rec.meta
-    );
+    assert!(rec.meta.get("model").is_none(), "the chat's record holds no provider field: {:?}", rec.meta);
     let rows = kernel
-        .send(vec![Item::new(
-            AgentId::from("chat1"),
-            json!({"type": "rows"}),
-        )])
+        .send(vec![Item::new(AgentId::from("chat1"), json!({"type": "rows"}))])
         .await
         .remove(0)
         .result;
     let text = rows.to_string();
-    assert!(
-        text.contains("hi") && text.contains("hello"),
-        "the chat holds both sides: {rows}"
-    );
-    let refl = kernel
-        .send(vec![Item::new(
-            AgentId::from("chat1"),
-            json!({"type": "reflect"}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    assert!(text.contains("hi") && text.contains("hello"), "the chat holds both sides: {rows}");
+    let refl = kernel.send(vec![Item::new(AgentId::from("chat1"), json!({"type": "reflect"}))]).await.remove(0).result;
     assert_eq!(refl["provider_id"], "prov", "{refl}");
 
     // the chat names its own model: the next pass runs on it, the conversation stays
-    kernel.update(
-        &AgentId::from("chat1"),
-        json!({"model": "m-big"}).as_object().unwrap().clone(),
-    );
+    kernel.update(&AgentId::from("chat1"), json!({"model": "m-big"}).as_object().unwrap().clone());
     let r = kernel
-        .send(vec![Item::new(
-            AgentId::from("chat1"),
-            json!({"type": "send", "text": "again"}),
-        )])
+        .send(vec![Item::new(AgentId::from("chat1"), json!({"type": "send", "text": "again"}))])
         .await
         .remove(0)
         .result;
     assert_eq!(r["response"], "hello from m-big", "{r}");
-    let rows = kernel
-        .send(vec![Item::new(
-            AgentId::from("chat1"),
-            json!({"type": "rows"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert!(
-        rows.to_string().contains("hi"),
-        "the first turn is still the chat's: {rows}"
-    );
+    let rows = kernel.send(vec![Item::new(AgentId::from("chat1"), json!({"type": "rows"}))]).await.remove(0).result;
+    assert!(rows.to_string().contains("hi"), "the first turn is still the chat's: {rows}");
 }
 
 #[tokio::test]
@@ -8450,79 +8333,25 @@ async fn a_provider_completes_on_its_default_model_field_and_lists_and_sets_it()
         k.bundles.register("echo_provider.tools", EchoProvider);
     })
     .await;
-    make_provider(
-        &kernel,
-        "prov",
-        json!({"models": ["m-small", "m-big"]}),
-        Some("m-small"),
-    )
-    .await;
+    make_provider(&kernel, "prov", json!({"models": ["m-small", "m-big"]}), Some("m-small")).await;
     make_provider(&kernel, "bare", json!({}), None).await;
     let call = |to: &str, p: Value| {
         let (k, to) = (Arc::clone(&kernel), to.to_string());
-        async move {
-            k.send(vec![Item::new(AgentId::from(to.as_str()), p)])
-                .await
-                .remove(0)
-                .result
-        }
+        async move { k.send(vec![Item::new(AgentId::from(to.as_str()), p)]).await.remove(0).result }
     };
     let msg = json!([{"role": "user", "content": "hi"}]);
-    let r = call(
-        "prov",
-        json!({"type": "complete", "messages": msg, "rid": "r1"}),
-    )
-    .await;
-    assert_eq!(
-        r["model"], "m-small",
-        "no model named: the record's default_model: {r}"
-    );
-    let r = call(
-        "prov",
-        json!({"type": "complete", "messages": msg, "rid": "r2", "model": "m-big"}),
-    )
-    .await;
+    let r = call("prov", json!({"type": "complete", "messages": msg, "rid": "r1"})).await;
+    assert_eq!(r["model"], "m-small", "no model named: the record's default_model: {r}");
+    let r = call("prov", json!({"type": "complete", "messages": msg, "rid": "r2", "model": "m-big"})).await;
     assert_eq!(r["model"], "m-big", "{r}");
-    let r = call(
-        "bare",
-        json!({"type": "complete", "messages": msg, "rid": "r3"}),
-    )
-    .await;
-    assert_eq!(
-        r["model"], "srv-1",
-        "no user model, no default: the server's: {r}"
-    );
-    assert_eq!(
-        call("bare", json!({"type": "models"})).await["default"],
-        "srv-1",
-        "which is the default from now on"
-    );
-    assert_eq!(
-        call("prov", json!({"type": "models"})).await,
-        json!({"models": ["m-small", "m-big"], "default": "m-small"})
-    );
-    assert_eq!(
-        call(
-            "prov",
-            json!({"type": "set_default_model", "model": "m-big"})
-        )
-        .await,
-        json!({"default": "m-big"})
-    );
-    assert_eq!(
-        call("prov", json!({"type": "models"})).await["default"],
-        "m-big"
-    );
-    let no = call(
-        "prov",
-        json!({"type": "set_default_model", "model": "m-huge"}),
-    )
-    .await;
+    let r = call("bare", json!({"type": "complete", "messages": msg, "rid": "r3"})).await;
+    assert_eq!(r["model"], "srv-1", "no user model, no default: the server's: {r}");
+    assert_eq!(call("bare", json!({"type": "models"})).await["default"], "srv-1", "which is the default from now on");
+    assert_eq!(call("prov", json!({"type": "models"})).await, json!({"models": ["m-small", "m-big"], "default": "m-small"}));
+    assert_eq!(call("prov", json!({"type": "set_default_model", "model": "m-big"})).await, json!({"default": "m-big"}));
+    assert_eq!(call("prov", json!({"type": "models"})).await["default"], "m-big");
+    let no = call("prov", json!({"type": "set_default_model", "model": "m-huge"})).await;
     assert_eq!(no["reason"], "bad_arg", "not one of its models: {no}");
-    let r = call(
-        "prov",
-        json!({"type": "complete", "messages": msg, "rid": "r4"}),
-    )
-    .await;
+    let r = call("prov", json!({"type": "complete", "messages": msg, "rid": "r4"})).await;
     assert_eq!(r["model"], "m-big", "the new default: {r}");
 }
