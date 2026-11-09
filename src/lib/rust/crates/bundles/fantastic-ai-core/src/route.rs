@@ -128,12 +128,27 @@ pub(crate) fn deliver_soon(
     let born = crate::state::incarnation(&AgentId::from(target));
     // ONE CHAIN PER AGENT (#227 Bug 4): the chain token is read when the routing
     // decision is made, not when the delivery later runs.
-    let chain = if notice || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == target) {
-        state_for(&AgentId::from(target)).chain.lock().expect("chain poisoned").token.clone()
-    } else {
-        String::new()
-    };
-    deliver_soon_with_born(kernel, target, text, client_id, system_prompt, born, notice, chain);
+    let chain =
+        if notice || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == target) {
+            state_for(&AgentId::from(target))
+                .chain
+                .lock()
+                .expect("chain poisoned")
+                .token
+                .clone()
+        } else {
+            String::new()
+        };
+    deliver_soon_with_born(
+        kernel,
+        target,
+        text,
+        client_id,
+        system_prompt,
+        born,
+        notice,
+        chain,
+    );
 }
 
 /// NOT AWAITED. A `send` to an AI agent takes that agent's FIFO lock and does
@@ -1061,6 +1076,29 @@ pub async fn route_reply(
     }
 }
 
+/// The route's default deadline for a call to an agent, in seconds. PRECEDENCE:
+/// the call's own `timeout` (applied where the item is built) > the root
+/// record's `send_timeout` (any finite positive number, no floor) > the env
+/// `FANTASTIC_AI_SEND_TIMEOUT` > 600 ([`crate::constants::send_timeout_secs`]).
+/// Only the route default reads the root field: the generation and held-wait
+/// ceilings keep `send_timeout_secs()`.
+pub(crate) fn route_deadline(kernel: &Kernel) -> f64 {
+    kernel
+        .root()
+        .and_then(|r| {
+            r.meta
+                .read()
+                .ok()
+                .and_then(|m| m.get("send_timeout").cloned())
+        })
+        .and_then(|v| match v {
+            Value::Number(n) => n.as_f64(),
+            _ => None,
+        })
+        .filter(|f| f.is_finite() && *f > 0.0)
+        .unwrap_or_else(crate::constants::send_timeout_secs)
+}
+
 /// ONE CHAIN PER AGENT (#227): the chain has ended. Messages held while it ran
 /// are answered by ONE wake turn; with none held, the chain is no longer alive.
 ///
@@ -1300,6 +1338,9 @@ async fn route_reply_gated(
     // before the agent runs again. The model never sees a PARTIAL batch, so
     // it never re-asks for the missing half.
     let mut items: Vec<Item> = Vec::new();
+    // The deadline each item runs under, as the model is told it (parallel to
+    // `items`): the call's own `timeout` as given, else the route default.
+    let mut deadlines: Vec<String> = Vec::new();
     // What each item was sent — its target as the model wrote it and its payload —
     // for the origin line of a digested reply and the grants-cache refresh.
     let mut payloads: Vec<(String, Value)> = Vec::new();
@@ -1570,6 +1611,11 @@ async fn route_reply_gated(
             item = item.with_raw_retries(r.clone());
         }
         items.push(item);
+        deadlines.push(
+            args.get("timeout")
+                .map(py_str)
+                .unwrap_or_else(|| fantastic_bundle::py_float_repr(send_timeout)),
+        );
         // Fire-and-forget: it acted, nobody awaits the answer. Deliberately
         // NOT counted in M — the model is owed a count of what it will
         // actually receive.
@@ -1663,7 +1709,23 @@ async fn route_reply_gated(
                         .pid
                         .map(|t| t.0.to_string())
                         .unwrap_or_else(|| "-".to_string());
-                    let shown = reply_as_text(out);
+                    let mut shown = reply_as_text(out);
+                    // A `send` that passed its deadline went to the dead letter:
+                    // the sender is told where, and how to resend or drop it.
+                    let dead_letter = u.verb == "send"
+                        && out.status == Status::TimedOut
+                        && out.pid.is_some();
+                    if dead_letter {
+                        if let Some(obj) = shown.to_mut().as_object_mut() {
+                            obj.insert(
+                                "error".to_string(),
+                                json!(format!(
+                                    "your message to {} hit its {}s deadline \u{2192} dead letter {pid}; resend or drop",
+                                    u.target, deadlines[i]
+                                )),
+                            );
+                        }
+                    }
                     let pointed = point_to_docs(&u.target, &u.verb, &shown);
                     let mut body =
                         crate::tool_parse::render_reply(pointed.as_ref().unwrap_or(&shown));
@@ -1708,6 +1770,9 @@ async fn route_reply_gated(
                                 p.0
                             );
                         }
+                    }
+                    if u.verb == "send" && out.pid.is_some() && !dead_letter {
+                        body = format!("(deadline {}s)\n{body}", deadlines[i]);
                     }
                     (pid, body)
                 }
@@ -2165,7 +2230,9 @@ async fn deliver_grouped(
             notice,
             // ONE CHAIN PER AGENT (#227 Bug 4): the token is read when this routing
             // decision is made, as in `deliver_soon`.
-            if notice || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == dest.as_str()) {
+            if notice
+                || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == dest.as_str())
+            {
                 state_for(&AgentId::from(dest.as_str()))
                     .chain
                     .lock()

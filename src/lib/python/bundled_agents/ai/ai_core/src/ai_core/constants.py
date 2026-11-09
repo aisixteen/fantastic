@@ -40,7 +40,7 @@ RECALL_EVERY = 3  # fold rows between recalls
 # budget — early enough that the summariser itself has headroom.
 TRIGGER = 0.8
 SEND_TIMEOUT = float(
-    os.environ.get("FANTASTIC_AI_SEND_TIMEOUT", "180")
+    os.environ.get("FANTASTIC_AI_SEND_TIMEOUT", "600")
 )  # hard ceiling per-generation; releases the lock (env-overridable — slow local models need more)
 # The output budget a request carries when the record names no `max_tokens` (#495):
 # bounded, so a degenerate generation is cut at the model's own stop long before

@@ -54,7 +54,7 @@ pub fn verb_docs() -> Value {
         "history": "args: fold:int? (a fold or clear id — list ITS members instead), limit:int? (default: as many as fit inline), after:int? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes, has_thinking?} per row, oldest first, paged. With `fold`, that fold's title + summary and its members (one level down; a member that is itself a fold opens the same way). A row's text is behind `recall` / `grep`. Returns {rows, next, total, fold?}.",
         "embed": "args: id:str (req) — a HOST agent that has a `view` record. Shows that agent's panel as a CARD in this chat, at this place in the conversation; the card is stored as a row, so it survives a page reload and a kernel restart, and `history` lists it as kind `embed` (the model's prompt never holds it). This is a chat card, not a canvas cell. When you create an agent to embed, design its panel FOR THE CHAT WINDOW: it fills 100% of the column width (don't set a width), define its height well, at most 1200 px (CHAT_CARD_MAX_HEIGHT). Readable at a glance: one purpose per card, no tiny text, no wide tables. Keep it live with events, not polling. HOW: create_agent {view: {kind: html, bytes_file: panel.html, calls: [get_html, watch]}, callable_by: {user: [get_html, watch]}}, then embed {id}. The same checks as the canvas's `place {backend_id}`: the agent must exist (`not_found`), have a `view` record (`no_view`: a default chat or terminal view is not a panel), and let the user call every verb its panel calls plus `watch` (`grants_missing: {<id>: [verbs]}` with the callable_by fix in `hint`). It creates nothing and moves nothing: the same agent can be a card here and a cell on a canvas at once. Embedding an agent already shown answers {already:true}. The reply carries the card's box, {width: '100%', max_height: 1200}; the chat page measures the panel it draws and, when it overflows or is taller than the cap, tells you to redo the panel. Returns {embedded:id, row, card, view, hint}.",
         "unembed": "args: id:str (req). Takes the card of agent `id` out of this chat: a tombstone row, so it stays gone after a reload (a later `embed` shows it again). Works the same for a live agent and a deleted one, so it also clears a '[deleted from canvas]' placeholder. It NEVER touches the agent — deleting it stays the kernel's `delete_agent`. Returns {unembedded:id} ({was_embedded:false} when no such card was shown).",
-        "status": "args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int}.",
+        "status": "args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Messages held while the agent's chain is running count as pending too; the reply answers at once, never queued behind a turn. Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int, pending_from:[sender id]}. pending_from names the sender of every pending message, queued first, then held.",
         "context_status": "No args. The context-budget posture + the last overflow projection + the model's\nderived reaction to it. Returns {context_window, output_reserve, budget, strategy,\nlast_projection:{fired, strategy?, kept_messages?, dropped_messages?, summarized?,\ntoo_small?}|null, last_reaction:{recalled, persisted, recall_count}|null}.",
         "recall": "args: id:int? (a row id — returns that row whole: its content, and its thinking when it had any; query, limit and before are then ignored), query:str? (substring of a serialized turn, tool args and replies included), limit:int? (default 20, max 100), before:int? (store index — page backward). Pages turns back from the DURABLE store — the FULL conversation, so anything compaction dropped is one call away. Read-only. A page always fits INLINE; trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content,thinking?}], total, truncated, note?}.",
         "grep": "args: query:str (req — case-insensitive substring), ids:list[int]? (row, pid or fold ids to search), limit:int? (default: as many as fit inline), width:int? (chars per matched line, default 200). Finds the LINE that mentions something ANYWHERE in your memory — every row you ever wrote or received (behind every clear, inside every fold; a fold id searches its members), and the reply bodies still held this run. Raise `width` when the value sits deep in a long line. Returns {matches:[{id, line, text}], total, truncated}.",
@@ -235,6 +235,25 @@ pub async fn on_cancel(
     kernel: &Arc<Kernel>,
 ) -> Result<(), BundleError> {
     let Some(entry) = crate::state::take_current_for_cancel(agent_id, task_id) else {
+        // Not the running pass: a message HELD on this chain whose sender's
+        // deadline passed is withdrawn, and a marker row tells the next pass
+        // not to answer it. (A held message a running wake pass already took
+        // is not here: the kernel still settles it, its answer goes nowhere.)
+        if let Some(h) = crate::state::withdraw_held(agent_id, task_id) {
+            let row = json!({
+                "role": "user",
+                "kind": "withdrawn",
+                "content": format!(
+                    "[withdrawn] the message above from {} passed its sender's deadline and went to dead letter {task_id}; do not answer it.",
+                    h.origin
+                ),
+                "id": kernel.mint_id(),
+                "parent": h.row_id,
+            });
+            crate::memory::save_history(agent_id, kernel, &[row])
+                .await
+                .map_err(|e| BundleError::from(e.0))?;
+        }
         return Ok(());
     };
     close_stopped(agent_id, entry, kernel).await
@@ -1110,6 +1129,9 @@ pub async fn send(
             .and_then(Value::as_str)
             .unwrap_or(DEFAULT_CLIENT_ID),
     );
+    // The sender's id, kept in RAM for `status`: the calling agent, else the client.
+    let origin_id = fantastic_kernel::current_origin()
+        .map_or_else(|| client_id.clone(), |o| o.as_str().to_string());
     // Recursion guard — checked BEFORE the FIFO lock, so a cycle can never
     // DEADLOCK on it (A→B→A would otherwise block on A's held guard). The rule
     // itself is the kernel's, shared with the authored-runtime connectors; only
@@ -1162,6 +1184,7 @@ pub async fn send(
     // chain's next pass, never a second chain of its own.
     let chain_alive = state.chain.lock().expect("chain poisoned").alive;
     if !chain_turn && chain_alive {
+        let row_id = kernel.mint_id();
         crate::memory::save_history(
             agent_id,
             kernel,
@@ -1169,7 +1192,7 @@ pub async fn send(
             // held message folds and recalls exactly like any other turn (#227).
             &[crate::agent_loop::incoming_row(
                 &text,
-                kernel.mint_id(),
+                row_id,
                 crate::agent_loop::incoming_parent(&text),
                 false,
             )],
@@ -1186,6 +1209,11 @@ pub async fn send(
                 client_id: client_id.clone(),
                 send_id: send_id.clone(),
                 reply: reply_tx,
+                origin: origin_id.clone(),
+                text: text.clone(),
+                queued_at: now_secs(),
+                task_id: current_task().map(|t| t.0.to_string()),
+                row_id,
             },
         );
         // Only now is the message visible as held: settle what it answers.
@@ -1222,6 +1250,7 @@ pub async fn send(
         send_id: send_id.clone(),
         queued_at,
         notice,
+        origin: origin_id.clone(),
     };
     // WHO IS AHEAD, counted in the SAME critical section as the push. python's
     // enqueue → `lock.locked()` → acquire runs without yielding, so "the lock is
@@ -1648,6 +1677,7 @@ pub async fn send(
         // lock, so this never waits on this agent.
         let launched = Arc::new(fantastic_kernel::Signal::default());
         let route_launched = Arc::clone(&launched);
+        let deadline = crate::route::route_deadline(kernel);
         kernel.spawn_task(agent_id, "route_reply", async move {
             crate::route::route_reply(
                 route_self,
@@ -1657,9 +1687,11 @@ pub async fn send(
                 send_to,
                 system_prompt_for_route,
                 route_incoming,
-                // THE LAYER'S PER-CALL DEADLINE, threaded to every model call the
-                // router dispatches. The kernel defaults nothing.
-                timeout_secs,
+                // THE ROUTE DEFAULT DEADLINE (root `send_timeout`, else the env /
+                // 600 s), threaded to every call the router dispatches. The
+                // kernel defaults nothing. `timeout_secs` stays the generation
+                // ceiling.
+                deadline,
                 cfg.model_window,
                 message_id,
                 dead_turn,

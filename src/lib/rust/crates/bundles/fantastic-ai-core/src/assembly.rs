@@ -165,7 +165,10 @@ A's reply) and are answered TOGETHER in one later message, one block each (`N of
 batch …`; M is complete). Messages queued earlier arrive first: an unseen reply is in
 flight — never re-issue it; send `kernel` `<type>ps</type>` to check. A reply whose pid
 you do not know was routed to you — use it. Per call: `<timeout>seconds</timeout>`
-bounds it; `<exec_id>name</exec_id>` makes it idempotent (the same exec_id never runs
+bounds it (a message to an agent has a deadline: 600 s unless the system sets
+another, and its reply states the deadline used; past it the message is withdrawn
+into a dead letter and you are told its id — resend it, or drop it with `kernel`
+`<type>ack_deadletter</type>`); `<exec_id>name</exec_id>` makes it idempotent (the same exec_id never runs
 twice — you get the first outcome back; a new attempt needs a new name);
 `<retries>N</retries>` lets the kernel re-run a failing call; `kernel`
 `<type>ledger</type>` lists your executions and what became of them.
