@@ -121,6 +121,10 @@ fn failed() {
     FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Set when the stop was cut (a hang past `STOP_GRACE`, or a second stop
+/// signal): the process then exits 1 (#562).
+pub static CUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl Boot {
     fn say(&self, line: &str) {
         use std::io::Write;
@@ -441,10 +445,20 @@ async fn run(
     }
     app.seen.flush();
     if let Some(h) = &host {
-        h.shutdown(&paths).await;
-        crate::mcp::close_socket();
-        crate::share::close();
-        crate::kern::web::remove_run_file(&paths.cwd);
+        let second = async { tokio::select! { _ = term_sig.recv() => {}, _ = int_sig.recv() => {} } };
+        match crate::kern::host::stop_bounded(h.shutdown(&paths), second, crate::kern::host::STOP_GRACE, &paths.cwd).await {
+            crate::kern::host::Stopped::Clean => {
+                crate::mcp::close_socket();
+                crate::share::close();
+                crate::kern::web::remove_run_file(&paths.cwd);
+            }
+            crate::kern::host::Stopped::Cut => {
+                crate::mcp::close_socket();
+                crate::share::close();
+                app.note(format!("the stop was cut (a hang past {:?}, or a second signal)", crate::kern::host::STOP_GRACE));
+                CUT.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
     }
     // Dropping the sender tells every View the ViewModel is gone.
     drop(frames);

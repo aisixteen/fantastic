@@ -1,0 +1,8 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: bounded_stop
+group: canvas
+title: "a signal stop is bounded: clean within the grace with a call in flight; a second signal exits at once"
+runner: probe.py
+costs: free
+limits: {seconds: 240}
+env: {}
