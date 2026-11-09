@@ -1,15 +1,20 @@
-"""Long-running default mode: boot agents, REPL loop, signal-driven shutdown."""
+"""Long-running default mode: boot agents, REPL loop, signal-driven shutdown.
+
+A signal stop is bounded by STOP_GRACE: the clean stop first; a hang past it or a
+second stop signal releases the lock and exits 1."""
 
 from __future__ import annotations
 
 import asyncio
+import enum
+import os
 import shlex
 import sys
 from typing import Any
 
 from kernel import _sys
 from kernel._bundles import _find_bundle_module
-from kernel._lock import FantasticLock
+from kernel._lock import FantasticLock, release_lock
 
 from kernel.modes.parse import _coerce, _parse_at
 from kernel.modes.print import _print_result, _read_line
@@ -78,6 +83,7 @@ async def _default(kernel) -> None:
         # uvicorn etc. die before the kernel exits — instead of
         # being left as orphans for the user to clean up by hand.
         stop = asyncio.Event()
+        second = asyncio.Event()
         # Publish the SAME event on the kernel ctx so the root-only
         # `shutdown_kernel` verb can trigger this exact graceful path
         # remotely (over web_rest / web_ws), not just via an OS signal.
@@ -92,6 +98,8 @@ async def _default(kernel) -> None:
                     flush=True,
                 )
                 stop.set()
+            else:
+                second.set()
 
         # The OS's stop signals (`_sys.STOP_SIGNALS`: SIGINT / SIGTERM / SIGHUP;
         # on Windows SIGBREAK — a CTRL_BREAK — in SIGHUP's place) all land here.
@@ -136,10 +144,20 @@ async def _default(kernel) -> None:
             # safety net in main.py is a no-op when the daemon
             # exited cleanly through here.
             print("[kernel] tearing down agents...", file=sys.stderr, flush=True)
-            try:
-                await kernel.shutdown()
-            except Exception as e:
-                print(f"[kernel] shutdown raised: {e}", file=sys.stderr)
+
+            async def _clean() -> None:
+                try:
+                    await kernel.shutdown()
+                except Exception as e:
+                    print(f"[kernel] shutdown raised: {e}", file=sys.stderr)
+
+            out = await stop_bounded(_clean(), second.wait(), STOP_GRACE)
+            if out is Stopped.CUT:
+                # Not SystemExit: main's `finally` and the atexit net would run
+                # the hung shutdown again.
+                sys.stdout.flush()
+                sys.stderr.flush()
+                os._exit(1)
             print("[kernel] down", file=sys.stderr, flush=True)
 
 
@@ -149,6 +167,45 @@ async def _block_forever() -> None:
         await asyncio.Event().wait()
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
+
+
+# The whole budget of a signal stop: the Rust host's page grace (5 s) plus the
+# kernel's quiet window (`Kernel.QUIET_TIMEOUT`, 10 s). A clean stop finishes
+# inside it, and only a real hang is cut (#562).
+STOP_GRACE = 15.0
+
+
+class Stopped(enum.Enum):
+    CLEAN = "clean"
+    CUT = "cut"
+
+
+async def stop_bounded(clean, second, grace: float) -> Stopped:
+    """Run `clean` for at most `grace` s. A hang past it, or `second` finishing
+    first (a second stop signal), releases the lock and returns CUT. Python
+    writes no run file, so the lock is all there is to release."""
+    clean_t = asyncio.ensure_future(clean)
+    second_t = asyncio.ensure_future(second)
+    await asyncio.wait(
+        {clean_t, second_t}, timeout=grace, return_when=asyncio.FIRST_COMPLETED
+    )
+    if clean_t.done():
+        second_t.cancel()
+        return Stopped.CLEAN
+    if second_t.done():
+        print(
+            "[kernel] stop: a second signal — exiting now", file=sys.stderr, flush=True
+        )
+    else:
+        print(
+            f"[kernel] stop: the clean stop did not finish within {grace:g} s — cut",
+            file=sys.stderr,
+            flush=True,
+        )
+    clean_t.cancel()
+    second_t.cancel()
+    release_lock()
+    return Stopped.CUT
 
 
 async def _repl_loop(kernel) -> None:
