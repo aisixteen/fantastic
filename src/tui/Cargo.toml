@@ -8,7 +8,7 @@ publish = false
 description = "Aisixteen Fantastic — the kernel as a terminal shell. Thin: no agentic logic lives here."
 
 # THE LIBRARY (#248): the whole shell, so another binary (aisixteen/fantastic_shift)
-# embeds it and adds its own bundles — `fantastic_tui::main_with(args, extras)`.
+# embeds it and adds its own bundles — `fantastic_tui::main_with(args, extras, readme_sections)`.
 # `fantastic` (below) is that library with no extras.
 [lib]
 name = "fantastic_tui"

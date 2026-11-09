@@ -12,11 +12,12 @@
 //!
 //! A LIBRARY (#248): the `fantastic` binary's `main` (`src/main.rs`) is
 //! `if starts_kernel(&argv) { seed_dir_with(cwd, &[]) }` then
-//! `main_with(argv, &[])`. Another binary (aisixteen/fantastic_shift: a headless
-//! one, an app) follows the same pattern with its own blueprints and extras:
+//! `main_with(argv, &[], &[])`. Another binary (aisixteen/fantastic_shift: a headless
+//! one, an app) follows the same pattern with its own blueprints, extras and readme sections:
 //! each [`Extra`] it passes registers on the host's registry AFTER the stock
 //! set, in every mode that boots a kernel (the UI, `--headless`, `canvas`,
-//! `mcp`). THE LAUNCHER SEEDS, before the kernel starts. `main_with` and the
+//! `mcp`). Each readme section is printed after fantastic's own readme (`readme`,
+//! and the readme printed with no terminal), in order. THE LAUNCHER SEEDS, before the kernel starts. `main_with` and the
 //! kernel never seed. A folder that is not fresh is left alone (no-op), and the
 //! fantastic home folder is refused inside [`seed_dir_with`]. The blueprints are
 //! written after the stock one, ids as written, and every later run rehydrates
@@ -122,24 +123,26 @@ fn kernel_mode(args: &[String], stdout_is_terminal: bool, has_tty: &dyn Fn() -> 
 
 /// The whole `fantastic` command line. `args` WITHOUT the program name
 /// (`std::env::args().skip(1)`); `extras`: the embedder's bundles (`&[]` for
-/// `fantastic` itself). The mode dispatch and nothing else: the loop lives in
+/// `fantastic` itself). `readme_sections`: the embedder's readme sections (`&[]`
+/// for `fantastic`): `readme` and the no-terminal readme print fantastic's text,
+/// then each, in order. The mode dispatch and nothing else: the loop lives in
 /// `run`, the state in `app`, the headless carrier in `mcp`. It never seeds; the
 /// launcher has done that.
 ///
 /// A PLAIN fn, not async: some modes must rearrange the process (stdio, env)
 /// before any runtime thread exists — call it from a plain `fn main`.
-pub fn main_with(args: Vec<String>, extras: &[Extra]) -> Result<()> {
+pub fn main_with(args: Vec<String>, extras: &[Extra], readme_sections: &[&str]) -> Result<()> {
     set_extras(extras);
     // NOT ON A TERMINAL, NO ARGUMENTS: the readme, and nothing runs.
     if args.is_empty() && !std::io::stdout().is_terminal() {
-        print!("{}", readme::text());
+        print!("{}", readme::text(readme_sections));
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("mcp") {
         mcp::main(&args[1..])
     }
     if args.first().map(String::as_str) == Some("readme") {
-        readme::main(&args[1..])
+        readme::main(&args[1..], readme_sections)
     }
     if args.first().map(String::as_str) == Some("send") {
         send::main(&args[1..])
