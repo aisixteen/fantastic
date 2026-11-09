@@ -10,18 +10,19 @@
 //! exist — and the gutter shows what the model can actually see, straight off its
 //! own view row.
 //!
-//! A LIBRARY (#248): the `fantastic` binary (`src/main.rs`) is
-//! `main_with(args, &[])`. Another binary (aisixteen/fantastic_shift: a headless
-//! one, an app) runs the same shell with its own bundles: each [`Extra`] it
-//! passes registers them on the host's registry AFTER the stock set, in every
-//! mode that boots a kernel (the UI, `--headless`, `canvas`, `mcp`). A host
-//! that boots its own kernel in a directory first calls [`seed_dir`], so a fresh
-//! directory has the same `user` record the CLI writes on a first run. A host
-//! with agents of its own seeds them the same way, once, with [`seed_dir_with`]:
-//! its blueprints are written after the stock one, ids as written, and every
-//! later run rehydrates from disk. A blueprint entry naming a stock agent (or
-//! the root, `@root`) may add `callable_by` / `can_call` grants to it: merged as
-//! a union, never narrowing a stock grant.
+//! A LIBRARY (#248): the `fantastic` binary's `main` (`src/main.rs`) is
+//! `if starts_kernel(&argv) { seed_dir_with(cwd, &[]) }` then
+//! `main_with(argv, &[])`. Another binary (aisixteen/fantastic_shift: a headless
+//! one, an app) follows the same pattern with its own blueprints and extras:
+//! each [`Extra`] it passes registers on the host's registry AFTER the stock
+//! set, in every mode that boots a kernel (the UI, `--headless`, `canvas`,
+//! `mcp`). THE LAUNCHER SEEDS, before the kernel starts. `main_with` and the
+//! kernel never seed. A folder that is not fresh is left alone (no-op), and the
+//! fantastic home folder is refused inside [`seed_dir_with`]. The blueprints are
+//! written after the stock one, ids as written, and every later run rehydrates
+//! from disk. A blueprint entry naming a stock agent (or the root, `@root`) may
+//! add `callable_by` / `can_call` grants to it: merged as a union, never
+//! narrowing a stock grant.
 
 mod app;
 mod atomic;
@@ -66,6 +67,7 @@ pub use fantastic_kernel::BundleRegistry;
 /// tree (the `user` record and its children) when `.fantastic` is absent and
 /// returns `Ok(true)`; a no-op returning `Ok(false)` once it exists.
 /// [`seed_dir_with`] also writes an embedder's own blueprints, ids as written.
+/// A launcher calls these before `main_with`, gated by [`starts_kernel`].
 pub use boot::seed::{seed_dir, seed_dir_with};
 
 /// AN EMBEDDER'S BUNDLES: registers them on the host's registry, after the stock
@@ -88,10 +90,41 @@ pub(crate) fn extras() -> &'static [Extra] {
     EXTRAS.get().map(Vec::as_slice).unwrap_or(&[])
 }
 
+/// THE LAUNCHER'S PREDICATE. True when `main_with(args, …)` would boot a kernel
+/// in the current directory: the UI (on a terminal), `--headless`, `canvas`, and
+/// a bare `mcp`. False for the one-shot commands (`send`, `readme`, `import`,
+/// `migrate-home`, `__ctrl_break`), for the readme printed when there is no
+/// terminal and no argument, and for a refused command line (a parse error,
+/// `mcp` with an argument, the UI with no terminal). A launcher calls it before
+/// `main_with` and, when it is true, seeds with `seed_dir_with(cwd, its
+/// blueprints)`. Nothing in the lib or the kernel calls it, and the kernel never
+/// seeds.
+pub fn starts_kernel(args: &[String]) -> bool {
+    kernel_mode(args, std::io::stdout().is_terminal(), &|| sys::open_tty().is_ok())
+}
+
+/// [`starts_kernel`] with the environment injected; mirrors the dispatch order
+/// of [`main_with`].
+fn kernel_mode(args: &[String], stdout_is_terminal: bool, has_tty: &dyn Fn() -> bool) -> bool {
+    if args.is_empty() && !stdout_is_terminal {
+        return false;
+    }
+    match args.first().map(String::as_str) {
+        Some("mcp") => return args.len() == 1,
+        Some("readme" | "send" | "import" | "migrate-home" | "__ctrl_break") => return false,
+        _ => {}
+    }
+    match recipe::parse(args) {
+        Ok(o) => o.headless || has_tty(),
+        Err(_) => false,
+    }
+}
+
 /// The whole `fantastic` command line. `args` WITHOUT the program name
 /// (`std::env::args().skip(1)`); `extras`: the embedder's bundles (`&[]` for
 /// `fantastic` itself). The mode dispatch and nothing else: the loop lives in
-/// `run`, the state in `app`, the headless carrier in `mcp`.
+/// `run`, the state in `app`, the headless carrier in `mcp`. It never seeds; the
+/// launcher has done that.
 ///
 /// A PLAIN fn, not async: some modes must rearrange the process (stdio, env)
 /// before any runtime thread exists — call it from a plain `fn main`.
@@ -155,4 +188,35 @@ fn shell(opts: recipe::Opts) -> Result<()> {
                 .init();
             run::main_loop(opts).await
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kernel_mode;
+
+    fn a(s: &str) -> Vec<String> {
+        s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn starts_kernel_is_true_for_each_mode_that_boots_a_kernel() {
+        for s in ["", "--headless", "canvas", "canvas --port 8123", "mcp", "ai", "run htop"] {
+            assert!(kernel_mode(&a(s), true, &|| true), "{s:?}");
+        }
+        for s in ["--headless", "canvas"] {
+            assert!(kernel_mode(&a(s), true, &|| false), "{s:?} needs no terminal");
+        }
+    }
+
+    #[test]
+    fn starts_kernel_is_false_for_one_shots_and_refusals() {
+        for s in [
+            "readme", "readme mcp", "send x", "import p --parent user", "migrate-home", "migrate-home --dry-run",
+            "__ctrl_break 1", "mcp --can-call files", "bogus", "--headless canvas",
+        ] {
+            assert!(!kernel_mode(&a(s), true, &|| true), "{s:?}");
+        }
+        assert!(!kernel_mode(&a(""), false, &|| true), "the bare readme");
+        assert!(!kernel_mode(&a(""), true, &|| false), "the UI with no terminal");
+    }
 }
