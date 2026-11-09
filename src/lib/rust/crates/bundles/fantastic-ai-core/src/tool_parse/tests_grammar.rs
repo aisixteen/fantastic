@@ -665,3 +665,34 @@ fn render_call_writes_the_routing_form_when_the_payload_needs_it() {
     assert!(text.contains("<routing>"), "{text}");
     assert_eq!(one(&text).arguments, args);
 }
+
+// ── a quoted whole call inside an argument is text (#543) ───────────────────
+
+const QUOTED: &str = r#"<call name="send"><target_id>x</target_id><type>y</type></call>"#;
+
+#[test]
+fn a_whole_call_quoted_in_a_spawn_task_is_one_call_with_that_text() {
+    let text = format!(
+        "<call name=\"send\"><target_id>kernel</target_id><type>spawn</type><task>do {QUOTED} now</task></call>"
+    );
+    let c = one(&text);
+    assert_eq!(payload(&c)["task"], json!(format!("do {QUOTED} now")));
+}
+
+#[test]
+fn a_whole_call_quoted_in_a_routing_payload_is_text() {
+    let text = format!(
+        "<call name=\"send\"><routing><target_id>kernel</target_id></routing><payload><type>spawn</type><task>do {QUOTED}</task></payload></call>"
+    );
+    let c = one(&text);
+    assert_eq!(payload(&c)["task"], json!(format!("do {QUOTED}")));
+    assert_eq!(envelopes_in(&text).len(), 1);
+}
+
+#[test]
+fn a_lone_close_still_ends_the_call() {
+    let text = "<call name=\"done\"></call> tail </call>";
+    let spans = super::grammar::envelopes(text);
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].2, Some(text.find("</call>").unwrap()));
+}

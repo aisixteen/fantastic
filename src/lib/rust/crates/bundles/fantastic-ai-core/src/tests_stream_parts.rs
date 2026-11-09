@@ -599,7 +599,17 @@ async fn stop_reaches_a_reply_woken_turn() {
     let target = ai.clone();
     let born = crate::state::incarnation(&ai);
     kernel.spawn_task(&ai, "deliver_reply", async move {
-        crate::route::deliver(&k, target.as_str(), "tool reply", "tab", None, born, false, String::new()).await;
+        crate::route::deliver(
+            &k,
+            target.as_str(),
+            "tool reply",
+            "tab",
+            None,
+            born,
+            false,
+            String::new(),
+        )
+        .await;
     });
     until_requests(&fp, 1).await;
     let out = as_agent(
@@ -1119,4 +1129,38 @@ fn stop_rows_keeps_the_partial_text() {
     let (shown, notice) = crate::stream_parts::stop_rows("partial words", "rx", &[]);
     assert_eq!(shown, Some("partial words".to_string()));
     assert_eq!(notice, "[your turn was stopped by rx]");
+}
+
+#[test]
+fn a_whole_call_quoted_in_an_argument_is_one_call_part_at_every_chunk_size() {
+    let q = "<call name=\"send\"><target_id>x</target_id><type>y</type></call>";
+    let text = format!(
+        "<call name=\"send\"><target_id>kernel</target_id><type>spawn</type><task>do {q} now</task></call>{DONE}"
+    );
+    for n in [1, 2, 5, text.chars().count()] {
+        let (ev, sp) = run(&text, n);
+        assert_eq!(
+            shape(&ev),
+            vec![
+                ("start", "call"),
+                ("end", "call"),
+                ("start", "call"),
+                ("end", "call")
+            ],
+            "{n}"
+        );
+        assert!(
+            sp.closed_calls[0]
+                .1
+                .contains(&format!("<task>do {q} now</task>")),
+            "{n}"
+        );
+        assert_eq!(sp.closed_calls.len(), 2, "{n}");
+    }
+}
+
+#[test]
+fn a_lone_close_in_a_call_still_ends_it() {
+    let (ev, _) = run(&format!("{DONE}</call>"), 3);
+    assert_eq!(shape(&ev)[..2], [("start", "call"), ("end", "call")]);
 }

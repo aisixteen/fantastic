@@ -383,7 +383,9 @@ fn a_wrapped_exec_call_that_stashes_is_not_rewritten_ready_to_run() {
         "{r}"
     );
     assert!(
-        form.contains("<routing><target_id>exec</target_id></routing>\n<payload><type>start</type>"),
+        form.contains(
+            "<routing><target_id>exec</target_id></routing>\n<payload><type>start</type>"
+        ),
         "{r}"
     );
 }
@@ -552,4 +554,13 @@ fn a_backtick_inside_a_call_argument_does_not_hide_a_wrapper_after_it() {
         r[0]
     );
     assert!(r[0].ends_with("The other call of this answer ran — its reply is in this batch; do not write it again."), "{}", r[0]);
+}
+
+#[test]
+fn a_whole_call_quoted_in_an_argument_reports_nothing() {
+    let q = "<call name=\"send\"><target_id>x</target_id><type>y</type></call>";
+    let answer = format!(
+        "<call name=\"send\"><target_id>kernel</target_id><type>spawn</type><task>{q}</task></call>"
+    );
+    assert!(check(&answer, 1).is_empty());
 }

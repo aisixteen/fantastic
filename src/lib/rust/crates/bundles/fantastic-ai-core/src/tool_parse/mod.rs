@@ -45,7 +45,7 @@ mod tests_render;
 
 use grammar::{envelopes_in, parse_call, Malformed};
 
-pub use grammar::{BYTES_CLOSE, BYTES_OPEN, CLOSE, OPEN, TOOLS};
+pub use grammar::{opens_call, BYTES_CLOSE, BYTES_OPEN, CLOSE, OPEN, TOOLS};
 pub use render::{render_call, render_reply};
 pub use shape::{mint_call_id, ToolCall};
 

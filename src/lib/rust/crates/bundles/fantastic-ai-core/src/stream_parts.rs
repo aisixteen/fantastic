@@ -26,7 +26,7 @@
 
 use crate::think::{THINK_CLOSE, THINK_OPEN};
 use crate::tool_parse::grammar::open_tags;
-use crate::tool_parse::{parses, BYTES_CLOSE, BYTES_OPEN, CLOSE, OPEN};
+use crate::tool_parse::{opens_call, parses, BYTES_CLOSE, BYTES_OPEN, CLOSE, OPEN};
 use fantastic_bundle::{is_space, py_strip};
 use serde_json::{json, Map, Value};
 
@@ -160,6 +160,8 @@ pub struct PartSplitter {
     /// Deltas held until the addressee is known.
     call_pending: String,
     in_bytes: bool,
+    /// `<call name…>` openers inside the open call not yet closed, plus itself.
+    call_depth: usize,
     /// Every part opened, in order.
     pub parts: Vec<Part>,
     /// Every CLOSED call part, in order: `(stream_id, body)` — what a dispatched
@@ -188,6 +190,7 @@ impl PartSplitter {
             outside: String::new(),
             call_pending: String::new(),
             in_bytes: false,
+            call_depth: 1,
             parts: Vec::new(),
             closed_calls: Vec::new(),
             stopped: false,
@@ -387,6 +390,7 @@ impl PartSplitter {
             self.call_started = false;
             self.call_pending.clear();
             self.in_bytes = false;
+            self.call_depth = 1;
             self.buf = head[gt + 1..].to_string();
             return true;
         }
@@ -401,7 +405,7 @@ impl PartSplitter {
         let stop_tags: &[&str] = if self.in_bytes {
             &[BYTES_CLOSE]
         } else {
-            &[BYTES_OPEN, CLOSE]
+            &[BYTES_OPEN, CLOSE, OPEN]
         };
         let Some((i, tag)) = self.first_hit(stop_tags) else {
             let cut = self.buf.len() - held_tail(&self.buf, stop_tags);
@@ -410,6 +414,29 @@ impl PartSplitter {
             self.buf.drain(..cut);
             return false;
         };
+        if tag == OPEN {
+            // A nested opener pairs with its own `</call>`; anything else is text.
+            let Some(opens) = opens_call(&self.buf[i + OPEN.len()..]) else {
+                let body = self.buf[..i].to_string();
+                self.call_text(out, &body);
+                self.buf.drain(..i);
+                return false; // undecided until more arrives
+            };
+            if opens {
+                self.call_depth += 1;
+            }
+            let body = self.buf[..i + tag.len()].to_string();
+            self.call_text(out, &body);
+            self.buf.drain(..i + tag.len());
+            return true;
+        }
+        if tag == CLOSE && self.call_depth > 1 {
+            self.call_depth -= 1;
+            let body = self.buf[..i + tag.len()].to_string();
+            self.call_text(out, &body);
+            self.buf.drain(..i + tag.len());
+            return true;
+        }
         if tag == CLOSE {
             let body = self.buf[..i].to_string();
             self.call_text(out, &body);

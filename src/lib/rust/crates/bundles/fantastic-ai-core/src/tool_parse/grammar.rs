@@ -79,22 +79,54 @@ impl Malformed {
 
 // ── scanning ────────────────────────────────────────────────────────────────
 
+/// Whether `rest` (the text right after `<call`) opens a call: whitespace, then
+/// `name`. `None` while `rest` is too short to tell (a stream still arriving).
+pub fn opens_call(rest: &str) -> Option<bool> {
+    if rest.is_empty() {
+        return None;
+    }
+    if !rest.starts_with(is_ws) {
+        return Some(false);
+    }
+    let head = rest.trim_start_matches(is_ws);
+    if head.starts_with("name") {
+        Some(true)
+    } else if head.is_empty() || "name".starts_with(head) {
+        None
+    } else {
+        Some(false)
+    }
+}
+
 /// Byte index of the `</call>` closing a call whose body starts at `start`,
-/// skipping any `</call>` inside a `<bytes>` value; `None` if unterminated.
+/// skipping any `</call>` inside a `<bytes>` value and pairing each nested
+/// `<call name…>` with its own `</call>` (a quoted whole call is text); `None`
+/// if unterminated.
 pub fn find_close(text: &str, start: usize) -> Option<usize> {
     let mut i = start;
+    let mut depth = 1usize;
     loop {
         let c = text[i..].find(CLOSE).map(|p| p + i);
         let b = text[i..].find(BYTES_OPEN).map(|p| p + i);
-        match (c, b) {
-            (_, None) => return c,
-            (Some(c_at), Some(b_at)) if c_at < b_at => return Some(c_at),
-            (_, Some(b_at)) => {
-                let from = b_at + BYTES_OPEN.len();
-                // An open document runs to the end: unterminated.
-                let e = text[from..].find(BYTES_CLOSE).map(|p| p + from)?;
-                i = e + BYTES_CLOSE.len();
+        let o = text[i..].find(OPEN).map(|p| p + i);
+        let next = [c, b, o].into_iter().flatten().min()?;
+        if Some(next) == c {
+            depth -= 1;
+            if depth == 0 {
+                return Some(next);
             }
+            i = next + CLOSE.len();
+        } else if Some(next) == b {
+            let from = next + BYTES_OPEN.len();
+            // An open document runs to the end: unterminated.
+            let e = text[from..].find(BYTES_CLOSE).map(|p| p + from)?;
+            i = e + BYTES_CLOSE.len();
+        } else {
+            let after = next + OPEN.len();
+            if opens_call(&text[after..]) == Some(true) {
+                depth += 1;
+            }
+            i = after;
         }
     }
 }
