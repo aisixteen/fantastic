@@ -352,6 +352,25 @@ fn blank_envelopes(text: &str, spans: &[(usize, usize, Option<usize>)]) -> Strin
     out
 }
 
+/// Every tag outside the `<call` envelopes, in document order, code excluded (see
+/// [`code_masked`]): `(tag, closing)`. The call grammar has no other markup, so the
+/// checker reports each one.
+pub fn tags_outside(text: &str) -> Vec<(OpenTag, bool)> {
+    let masked = code_masked(&blank_envelopes(text, &envelopes(text)));
+    tag_re()
+        .captures_iter(&masked)
+        .map(|c| {
+            let whole = c.get(0).expect("match");
+            let tag = OpenTag {
+                start: whole.start(),
+                end: whole.end(),
+                name: c.get(2).map_or("", |g| g.as_str()).to_string(),
+            };
+            (tag, !c.get(1).map_or("", |g| g.as_str()).is_empty())
+        })
+        .collect()
+}
+
 /// The tags still open at the end of `text`, outermost first, code excluded (see
 /// [`code_masked`]). Meant for a text with no envelope in it: an envelope's own tags
 /// are not walked by [`envelopes_in`], and this does not skip them.

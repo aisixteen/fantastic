@@ -132,15 +132,62 @@ fn a_stray_close_after_a_good_call() {
 }
 
 #[test]
-fn prose_and_foreign_markup_without_our_vocabulary_are_not_calls() {
+fn prose_without_tags_and_good_calls_get_no_report() {
     for answer in [
         "All done, the file is written.",
-        "Use <b>bold</b> and a <div class='x'>box</div>; 3 < 4 > 2.",
-        "<tool_call>\n</tool_call>",
+        "3 < 4 > 2, and a<b and c>d.",
         "<call name=\"done\"></call>",
     ] {
         assert!(check(answer, 0).is_empty(), "{answer}");
     }
+}
+
+/// Any tag outside a call is an error, even an empty one: the call grammar has no
+/// other markup. One report per element (its close is not reported again).
+#[test]
+fn any_tag_outside_a_call_is_reported() {
+    for (answer, tag) in [
+        ("Use <b>bold</b>.", "<b>"),
+        ("a <div class='x'>box</div>", "<div class='x'>"),
+        ("<tool_call>\n</tool_call>", "<tool_call>"),
+        ("<br/>", "<br/>"),
+        ("stray </invoke>", "</invoke>"),
+    ] {
+        let r = check(answer, 0);
+        assert_eq!(r.len(), 1, "{answer}: {r:?}");
+        assert!(
+            r[0].starts_with("[unsupported tag — not read] line 1, col "),
+            "{}",
+            r[0]
+        );
+        assert!(
+            r[0].contains(&format!(
+                "`{tag}` is not part of the call grammar — delete it\n"
+            )),
+            "{}",
+            r[0]
+        );
+        assert!(r[0].ends_with(TAIL), "{}", r[0]);
+    }
+}
+
+/// The measured shape (gpu_cli_ssh/leads_spawn_leads, row 5431): an empty
+/// `<invoke name="x"></invoke>` before good calls. The calls run; the tag is reported.
+#[test]
+fn an_empty_invoke_before_good_calls_is_reported_and_the_calls_run() {
+    let answer = format!("<invoke name=\"x\">\n</invoke>\n{SEND}\n{SEND}");
+    assert_eq!(extract_tool_calls(&answer).len(), 2);
+    let r = check(&answer, 2);
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(
+        r[0],
+        format!(
+            "[unsupported tag — not read] line 1, col 1:\n  <invoke name=\"x\">\n  \
+             ^~~~~~~~~~~~~~~~~ `<invoke name=\"x\">` is not part of the call grammar — delete it\n\
+             {TAIL}\nThe other 2 calls of this answer ran — their replies are in this batch; do \
+             not write them again."
+        )
+    );
 }
 
 #[test]
@@ -376,12 +423,19 @@ fn a_top_level_call_beside_a_wrapped_one_runs_and_the_report_says_so() {
     ));
 }
 
-/// A closed tag before a call wraps nothing: the call runs and no report comes.
+/// A closed tag before a call wraps nothing: the call runs, and the tag gets the
+/// unsupported-tag report, not the wrapper one.
 #[test]
 fn a_call_after_a_closed_tag_is_not_wrapped() {
     let answer = format!("<b>x</b> {SEND}");
     assert_eq!(extract_tool_calls(&answer).len(), 1);
-    assert!(check(&answer, 1).is_empty());
+    let r = check(&answer, 1);
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert!(
+        r[0].starts_with("[unsupported tag — not read] line 1, col 1:"),
+        "{}",
+        r[0]
+    );
 }
 
 /// Thinking is stripped before the answer is read: a call after `</think>` runs,
@@ -421,11 +475,17 @@ fn an_open_wrapper_after_prose_is_named() {
     );
 }
 
-/// A wrapper is only a wrapper while it is open: a closed one, with no call in it, is
-/// not reported.
+/// A wrapper is only a wrapper while it is open: a closed one, with no call in it,
+/// gets the unsupported-tag report.
 #[test]
-fn a_closed_empty_wrapper_is_not_reported() {
-    assert!(check("<tool_call></tool_call>", 0).is_empty());
+fn a_closed_empty_wrapper_is_an_unsupported_tag() {
+    let r = check("<tool_call></tool_call>", 0);
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert!(
+        r[0].starts_with("[unsupported tag — not read] line 1, col 1:"),
+        "{}",
+        r[0]
+    );
 }
 
 /// #188 review: a tag-shaped token in INLINE CODE is code, not a wrapper. The call
