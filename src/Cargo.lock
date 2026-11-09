@@ -911,6 +911,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-scheduler"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-bundle",
+ "fantastic-kernel",
+ "futures-util",
+ "libc",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "fantastic-sqlite-store"
 version = "0.1.0"
 dependencies = [
@@ -945,6 +958,7 @@ dependencies = [
  "fantastic-py-agent",
  "fantastic-ram-store",
  "fantastic-responses-backend",
+ "fantastic-scheduler",
  "fantastic-sqlite-store",
  "fantastic-user",
  "fantastic-user-home-store",

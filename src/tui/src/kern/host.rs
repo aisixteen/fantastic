@@ -75,6 +75,8 @@ fn registry_with(cwd: &std::path::Path, extras: &[crate::Extra]) -> BundleRegist
     // a ram_store, so a keystroke never touches disk — and every AI agent's
     // conversation in ONE shared SQLite file (`memory`) that survives the process.
     reg.register(fantastic_ram_store::HANDLER_MODULE, fantastic_ram_store::RamStoreBundle::default());
+    // THE SCHEDULER (#507): `scheduler.tools` runs a call on an interval, as itself.
+    reg.register(fantastic_scheduler::HANDLER_MODULE, fantastic_scheduler::SchedulerBundle);
     reg.register(
         fantastic_sqlite_store::HANDLER_MODULE,
         fantastic_sqlite_store::SqliteStoreBundle::default(),
@@ -719,6 +721,7 @@ mod tests {
             "py_agent.tools",
             "ram_store.tools",
             "relay_connector.tools",
+            "scheduler.tools",
             "setup.tools",
             "sqlite_store.tools",
             "user.tools",
@@ -856,6 +859,49 @@ mod tests {
         ] {
             assert!(reg.get(m).is_some(), "{m} must be in the default build");
         }
+    }
+
+    /// #507: a `scheduler.tools` agent made through `create_agent` answers its verbs
+    /// (before the registry held it: "No module named 'scheduler'").
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_scheduler_agent_answers_schedule_and_unschedule() {
+        // a schedule persists through the root loader: a disk kernel whose store is
+        // the file_bridge on `.fantastic`
+        let dir = std::env::temp_dir().join(format!("fc-sched507-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let k = bootstrap::bootstrap(registry_with(&dir, &[]), BootstrapOptions::one_shot(&dir))
+            .expect("boots")
+            .kernel;
+        let root = k.root().expect("root").id.0.clone();
+        let store = send(
+            &k,
+            "kernel",
+            json!({"type": "create_agent", "parent_id": root, "id": "store",
+                   "handler_module": "file_bridge.tools", "root": ".fantastic",
+                   "allow": ["."], "ingress_rule": "allow_all_ingress"}),
+        )
+        .await;
+        assert_eq!(store["id"], "store", "{store}");
+        send(&k, "kernel", json!({"type": "boot"})).await;
+        let made = send(
+            &k,
+            "kernel",
+            json!({"type": "create_agent", "parent_id": root, "id": "sched507",
+                   "handler_module": "scheduler.tools"}),
+        )
+        .await;
+        assert_eq!(made["id"], "sched507", "{made}");
+        let r = send(
+            &k,
+            "sched507",
+            json!({"type": "schedule", "target": "kernel", "payload": {"type": "reflect"}, "interval_seconds": 3600}),
+        )
+        .await;
+        let sid = r["schedule_id"].as_str().unwrap_or_else(|| panic!("schedule replied: {r}")).to_string();
+        let r = send(&k, "sched507", json!({"type": "unschedule", "schedule_id": sid})).await;
+        assert_eq!(r["removed"], json!(true), "{r}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
