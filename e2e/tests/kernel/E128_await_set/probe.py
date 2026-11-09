@@ -118,9 +118,9 @@ def main() -> int:
     ids_xml = "".join(f"<item>{w}</item>" for w in WORKERS)
     lead_script = [
         # 1 · open the wait BEFORE anyone is asked to work
-        (f'Opening the wait first.\n<call name="send">\n<target_id>{root}</target_id>\n'
+        (f'Opening the wait first.\n<call name="send">\n<routing><target_id>{root}</target_id></routing>\n<payload>'
          f'<type>await_set</type>\n<ids>{ids_xml}</ids>\n<timeout_s>60</timeout_s>\n'
-         f'<label>{LABEL}</label>\n</call>'),
+         f'<label>{LABEL}</label></payload>\n</call>'),
         # 2 · nothing more to do until the one message arrives
         'Waiting for the workers.\n<call name="done"></call>',
         # 3 · the combined message arrived
@@ -156,8 +156,8 @@ def main() -> int:
         lead_m.reply(*lead_script)
         for i, w in enumerate(WORKERS):
             work_m[w].reply(
-                f'<call name="send">\n<target_id>{LEAD}</target_id>\n<type>report</type>\n'
-                f'<state>done</state>\n<result>R{i + 1}</result>\n</call>',
+                f'<call name="send">\n<routing><target_id>{LEAD}</target_id></routing>\n<payload><type>report</type>\n'
+                f'<state>done</state>\n<result>R{i + 1}</result></payload>\n</call>',
                 '<call name="done"></call>')
         out = hk.send(LEAD, {"type": "send", "text": f"Wait for the three workers ({TOKEN})."})
         need(not out.get("error"), f"the send is accepted: {str(out)[:200]}")

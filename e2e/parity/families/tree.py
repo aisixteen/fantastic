@@ -31,16 +31,16 @@ from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub
 NAME = "tree"
 
 SCRIPT = [
-    '<call name="send"><target_id>readings</target_id><type>reflect</type></call>\n'
-    '<call name="send"><target_id>readings</target_id><type>list</type><path></path></call>\n'
-    '<call name="send"><target_id>ghost</target_id><type>reflect</type></call>\n'
+    '<call name="send"><routing><target_id>readings</target_id></routing><payload><type>reflect</type></payload></call>\n'
+    '<call name="send"><routing><target_id>readings</target_id></routing><payload><type>list</type><path></path></payload></call>\n'
+    '<call name="send"><routing><target_id>ghost</target_id></routing><payload><type>reflect</type></payload></call>\n'
     '<call name="send"><type>reflect</type></call>',
     "I have looked around and will think about the next step.",
     '<call name="await"></call>',
-    '<call name="send"><target_id>totals</target_id><type>write</type><path>t.txt</path>'
-    "<bytes>42</bytes><title>store the total</title></call>\n"
-    '<call name="send"><target_id>kernel_store</target_id><type>read_stream</type>'
-    "<path>readings/a.txt</path><offset>0</offset></call>\n"
+    '<call name="send"><routing><target_id>totals</target_id><title>store the total</title></routing>'
+    "<payload><type>write</type><path>t.txt</path><bytes>42</bytes></payload></call>\n"
+    '<call name="send"><routing><target_id>kernel_store</target_id></routing>'
+    "<payload><type>read_stream</type><path>readings/a.txt</path><offset>0</offset></payload></call>\n"
     "<call name=\"send\"><target_id>totals",
     '<call name="done"></call>',
 ]

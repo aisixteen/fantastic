@@ -38,11 +38,11 @@ CAP_TEXT = 262144
 CAP_HEAD = 256
 
 CHAIN_SCRIPT = [
-    'Checking the files agent now.\n<call name="send"><target_id>files</target_id><type>reflect</type></call>',
+    'Checking the files agent now.\n<call name="send"><routing><target_id>files</target_id></routing><payload><type>reflect</type></payload></call>',
     'The files agent answered; finishing.\n<call name="done"></call>',
 ]
 BUSY_SCRIPT = [
-    'First turn, working.\n<call name="send"><target_id>files</target_id><type>reflect</type></call>',
+    'First turn, working.\n<call name="send"><routing><target_id>files</target_id></routing><payload><type>reflect</type></payload></call>',
     '<call name="done"></call>',
 ]
 

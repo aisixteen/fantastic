@@ -148,7 +148,7 @@ def main() -> bool:
         async def run() -> None:
             async with rig.page(1600, 1000) as pg:
                 # S2 first: the first reply is a call to its canvas, then words
-                mock.reply(f'<call name="send">\n<target_id>{view}</target_id>\n<type>reflect</type>\n</call>', "S2-done: I see my canvas.")
+                mock.reply(f'<call name="send">\n<routing><target_id>{view}</target_id></routing>\n<payload><type>reflect</type></payload>\n</call>', "S2-done: I see my canvas.")
                 await spot(pg, 300, 300, "hello there")
                 await pg.until(f"{CHATS}.length === 1", 15)
                 a = (await pg.js(CHATS))[0]
@@ -252,7 +252,7 @@ def main() -> bool:
 
                 def call(verb: str, **f) -> str:
                     fields = "".join(f"<{k}>{v}</{k}>\n" for k, v in f.items())
-                    return f'<call name="send">\n<target_id>svc</target_id>\n<type>{verb}</type>\n{fields}</call>'
+                    return f'<call name="send">\n<routing><target_id>svc</target_id></routing>\n<payload><type>{verb}</type>\n{fields}</payload></call>'
 
                 def ticker(body: dict) -> str | None:
                     last = json.dumps(body.get("messages", [])[-1:])
@@ -326,8 +326,8 @@ def main() -> bool:
                     last = json.dumps(body.get("messages", [])[-1:])
                     if inq["step"] == 0 and "E75-ask-me" in last:
                         inq["step"] = 1
-                        return ('<call name="send">\n<target_id>user</target_id>\n<type>inquiry</type>\n<text>Which colour for the button?</text>\n'
-                                '<kind>single</kind>\n<options><item>red</item><item>blue</item></options>\n</call>\n<call name="await"></call>')
+                        return ('<call name="send">\n<routing><target_id>user</target_id></routing>\n<payload><type>inquiry</type>\n<text>Which colour for the button?</text>\n'
+                                '<kind>single</kind>\n<options><item>red</item><item>blue</item></options></payload>\n</call>\n<call name="await"></call>')
                     if inq["step"] == 1 and "user inquiry" in last and "<answer>" in last:
                         inq["step"], inq["answer_turn"] = 2, last[-300:]
                         m = re.search(r"<answer>([^<]*)</answer>", last.replace("\\u003c", "<").replace("\\u003e", ">"))
@@ -372,12 +372,12 @@ def main() -> bool:
                     lp.setdefault("seen", []).append((lp["step"], last[-260:]))
                     if lp["step"] == 0 and "E75-live-panel" in last:
                         lp["step"] = 1
-                        return '<call name="send">\n<target_id>canvas_root</target_id>\n<type>spawn</type>\n<bundle>python_agent</bundle>\n</call>'
+                        return '<call name="send">\n<routing><target_id>canvas_root</target_id></routing>\n<payload><type>spawn</type>\n<bundle>python_agent</bundle></payload>\n</call>'
                     m = re.search(r"<id>(py_[0-9a-f]+_\d+)</id>", last.replace("\\u003c", "<").replace("\\u003e", ">"))
                     if lp["step"] == 1 and m:
                         lp["id"], lp["step"] = m.group(1), 2
-                        return (f'<call name="send">\n<target_id>{view12}</target_id>\n<type>place</type>\n'
-                                f'<backend_id>{lp["id"]}</backend_id>\n<x>1300</x>\n<y>100</y>\n</call>')
+                        return (f'<call name="send">\n<routing><target_id>{view12}</target_id></routing>\n<payload><type>place</type>\n'
+                                f'<backend_id>{lp["id"]}</backend_id>\n<x>1300</x>\n<y>100</y></payload>\n</call>')
                     if lp["step"] == 2 and "place" in last:
                         lp["place_reply"] = last[-500:]
                         lp["step"] = 3

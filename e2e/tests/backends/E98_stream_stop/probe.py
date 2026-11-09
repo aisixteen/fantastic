@@ -28,8 +28,8 @@ BK = _resolve_backend()
 TASK = (
     "Write a LONG essay (about 800 words) about rivers and deliver it to the agent "
     "`rx` as ONE message, exactly in this shape:\n"
-    '<call name="send">\n<target_id>rx</target_id>\n<type>note</type>\n'
-    "<text>…the whole essay…</text>\n</call>\n"
+    '<call name="send">\n<routing><target_id>rx</target_id></routing>\n<payload><type>note</type>\n'
+    "<text>…the whole essay…</text></payload>\n</call>\n"
     "Write the call first, then end with <call name=\"done\"></call>."
 )
 

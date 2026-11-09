@@ -37,9 +37,9 @@ NEEDLE = "NEEDLE total=42 naïve — 日本語 😀"
 
 CASES = {
     "chain": [
-        '<call name="send"><target_id>totals</target_id><type>read</type><path>readings/big.txt</path><title>read the big file</title></call>\n'
-        '<call name="send"><target_id>readings</target_id><type>list</type><path></path></call>',
-        '<call name="send"><target_id>totals</target_id><type>write</type><path>t.txt</path><bytes>42</bytes><title>store the total</title></call>',
+        '<call name="send"><routing><target_id>totals</target_id><title>read the big file</title></routing><payload><type>read</type><path>readings/big.txt</path></payload></call>\n'
+        '<call name="send"><routing><target_id>readings</target_id></routing><payload><type>list</type><path></path></payload></call>',
+        '<call name="send"><routing><target_id>totals</target_id><title>store the total</title></routing><payload><type>write</type><path>t.txt</path><bytes>42</bytes></payload></call>',
         DONE,
     ],
     "f01_text_outside_tags": [

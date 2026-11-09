@@ -147,8 +147,8 @@ def main() -> int:
                         can_call={"$self": "*", "memory": "*", **{p: ["reflect"] for p in batch}},
                         callable_by={"$self": "*", "$parent": "*", "rest": "*"})
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:160]}")
-        calls = "\n".join(f'<call name="send"><target_id>{p}</target_id><type>reflect</type>'
-                          f'<tree>none</tree></call>' for p in batch)
+        calls = "\n".join(f'<call name="send"><routing><target_id>{p}</target_id></routing><payload><type>reflect</type>'
+                          f'<tree>none</tree></payload></call>' for p in batch)
         m.reply("Reflecting the pool.\n" + calls, 'Seen them all.\n<call name="done"></call>')
         t_sent = time.monotonic()
         out = hk.send(AI, {"type": "send", "text": "reflect the pool"}, timeout=300)

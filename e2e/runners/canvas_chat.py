@@ -44,15 +44,15 @@ def panel_bytes(agent: str, height: int = 300) -> str:
 
 def create_call(agent: str, height: int = 300) -> str:
     """The model's `create_agent` of a host agent with a `view` record, in the call grammar."""
-    return ('Making the card.\n<call name="send">\n<target_id>kernel_state</target_id>\n<type>create_agent</type>\n'
+    return ('Making the card.\n<call name="send">\n<routing><target_id>kernel_state</target_id></routing>\n<payload><type>create_agent</type>\n'
             f"<parent_id>canvas_root</parent_id>\n<handler_module>ram_store.tools</handler_module>\n<id>{agent}</id>\n"
             "<view><kind>html</kind><calls><item>get_html</item><item>watch</item></calls>"
             f"<bytes>{panel_bytes(agent, height)}</bytes></view>\n"
-            "<callable_by><user><item>get_html</item><item>watch</item><item>emit</item></user></callable_by>\n</call>")
+            "<callable_by><user><item>get_html</item><item>watch</item><item>emit</item></user></callable_by></payload>\n</call>")
 
 
 def embed_call(agent: str) -> str:
-    return f'Showing it.\n<call name="send">\n<target_id>{AI}</target_id>\n<type>embed</type>\n<id>{agent}</id>\n</call>'
+    return f'Showing it.\n<call name="send">\n<routing><target_id>{AI}</target_id></routing>\n<payload><type>embed</type>\n<id>{agent}</id></payload>\n</call>'
 
 
 DONE_TEXT = 'Here it is.\n<call name="done"></call>'

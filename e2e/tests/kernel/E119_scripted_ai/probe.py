@@ -141,11 +141,11 @@ def main() -> int:
 
     script = [
         # 1 · a call: reflect the root
-        (f'Looking around first.\n<call name="send">\n<target_id>{root}</target_id>\n'
-         '<type>reflect</type>\n<tree>none</tree>\n</call>'),
+        (f'Looking around first.\n<call name="send">\n<routing><target_id>{root}</target_id></routing>\n'
+         '<payload><type>reflect</type>\n<tree>none</tree></payload>\n</call>'),
         # 2 · a file write, bytes verbatim
-        (f'<call name="send">\n<target_id>{FILES}</target_id>\n<type>write</type>\n'
-         f'<path>out.txt</path>\n<bytes>{TOKEN}\n"quoted" & <raw></bytes>\n</call>'),
+        (f'<call name="send">\n<routing><target_id>{FILES}</target_id></routing>\n<payload><type>write</type>\n'
+         f'<path>out.txt</path>\n<bytes>{TOKEN}\n"quoted" & <raw></bytes></payload>\n</call>'),
         # 3 · calls written wrong
         ('I will write it.\n<tool_call><function=call name="send"><target_id>files'
          '</target_id><type>write</type><path>bad.txt</path></function></tool_call>\n'

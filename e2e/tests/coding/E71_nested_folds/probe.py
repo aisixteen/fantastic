@@ -52,9 +52,9 @@ def planted_reads(mint) -> list[dict]:
     for i in range(N):
         call_id, pid = mint(), mint()
         rows.append({"role": "assistant", "id": call_id, "parent": prev,
-                     "content": f'Reading filler_{i}. <call name="send"><target_id>notes</target_id>'
-                                f"<title>read filler_{i}</title><type>read</type>"
-                                f"<path>filler_{i}.txt</path></call>"})
+                     "content": f'Reading filler_{i}. <call name="send">'
+                                f"<routing><target_id>notes</target_id><title>read filler_{i}</title></routing>"
+                                f"<payload><type>read</type><path>filler_{i}.txt</path></payload></call>"})
         text = Path(f"filler_{i}.txt").read_text()
         reply = {"role": "user", "id": mint(), "parent": call_id,
                  "content": f'[reply to {pid} · notes read · "read filler_{i}" · ↑{call_id}]\n'

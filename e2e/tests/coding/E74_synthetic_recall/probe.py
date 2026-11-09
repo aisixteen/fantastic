@@ -65,7 +65,7 @@ async def main():
             call_id = mint()
             pid = mint()
             rows.append({"role": "assistant", "id": call_id, "parent": prev,
-                         "content": f'Reading filler_{i}. <call name="send"><target_id>notes</target_id><title>survey filler_{i}</title><type>read</type><path>filler_{i}.txt</path></call>'})
+                         "content": f'Reading filler_{i}. <call name="send"><routing><target_id>notes</target_id><title>survey filler_{i}</title></routing><payload><type>read</type><path>filler_{i}.txt</path></payload></call>'})
             rep = _reply(mint, pid, call_id, f"survey filler_{i}", 3000, f"filler_{i}.txt")
             rows.append(rep); ids.append((call_id, rep["id"]))
             prev = rep["id"]
