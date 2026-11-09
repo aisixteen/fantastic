@@ -1,8 +1,9 @@
 """kernel/await_set — a lead waits for a SET of workers and wakes ONCE. NO MODEL.
 
 Four local OpenAI-compatible servers (`e2e/mocks/vllm.py`) play the model of a lead
-and of three workers; the kernel's own `vllm_backend` agents (ai_core) run on the
-PACKAGED host of `RUNTIME` (python | rust), every call from the test through
+and of three workers; the kernel's own AI agents (python: `vllm_backend` agents; rust:
+`ai_chat.tools` chats each naming its own `vllm_backend` provider, `provider_id`, #521) run on
+the PACKAGED host of `RUNTIME` (python | rust), every call from the test through
 `web_rest`. Tool calling is the prompt-taught `<call name>` tag grammar.
 
 The lead's script, one model answer per request:
@@ -50,6 +51,7 @@ LEAD = "lead"
 WORKERS = ["w1", "w2", "w3"]
 LABEL = "E128"
 TOKEN = "E128-" + secrets.token_hex(4)
+PROVS = {a: f"{a}_prov" for a in (LEAD, *WORKERS)}  # rust: each chat's provider
 
 
 def last_user(req: dict) -> str:
@@ -82,7 +84,7 @@ def main() -> int:
     lead_m = VllmMock(model="mock-lead").start()
     work_m = {w: VllmMock(model=f"mock-{w}").start() for w in WORKERS}
     work = Path(tempfile.mkdtemp(prefix="e2e-await-set-"))
-    hk = HostKernel(spec, work, reach=[LEAD, *WORKERS]).boot()
+    hk = HostKernel(spec, work, reach=[LEAD, *WORKERS, *PROVS.values()]).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -129,26 +131,42 @@ def main() -> int:
     try:
         mem = callable_by("memory")
         r = hk.send(root, {"type": "update_agent", "id": "memory",
-                           "callable_by": {**mem, LEAD: "*", **{w: "*" for w in WORKERS}}})
+                           "callable_by": {**mem, LEAD: "*", **{w: "*" for w in WORKERS},
+                                           **{p: "*" for p in PROVS.values()}}})
         need(r.get("updated") is True, f"memory accepts the AIs: {str(r)[:200]}")
         r = hk.send(root, {"type": "update_agent", "id": root,
                            "callable_by": {**callable_by(root), LEAD: ["await_set"]}})
         need(r.get("updated") is True, f"the root accepts the lead's await_set: {str(r)[:200]}")
-        common = dict(max_tokens=8192, context_window=262144, kv_slots=4,
-                      kv_overflow="evict", memory_store_id="memory")
-        for i, w in enumerate(WORKERS):
-            rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=w,
-                            endpoint=work_m[w].url, model=f"mock-{w}", **common,
-                            can_call={"$self": "*", "memory": "*", LEAD: ["report"]},
-                            callable_by={"$self": "*", "$parent": "*", "rest": "*"})
-            need(rec.get("id") == w, f"create {w}: {str(rec)[:200]}")
-        rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=LEAD,
-                        endpoint=lead_m.url, model="mock-lead", **common,
-                        can_call={"$self": "*", "memory": "*", root: ["await_set"],
-                                  **{w: "*" for w in WORKERS}},
-                        callable_by={"$self": "*", "$parent": "*", "rest": "*",
-                                     **{w: ["report"] for w in WORKERS}})
-        need(rec.get("id") == LEAD, f"create {LEAD}: {str(rec)[:200]}")
+        def make(aid, mock, model, can, by):
+            fields = dict(endpoint=mock.url, model=model, max_tokens=8192,
+                          context_window=262144, memory_store_id="memory")
+            if RUNTIME == "rust":
+                # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it:
+                # a `send` to a provider is refused (#521)
+                pv = PROVS[aid]
+                rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=pv,
+                                kv_slots=4, kv_overflow="evict",
+                                can_call={"$self": "*", "memory": "*"},
+                                callable_by={"$self": "*", "$parent": "*", aid: "*"},
+                                **fields)
+                need(rec.get("id") == pv, f"create {pv}: {str(rec)[:200]}")
+                rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
+                                provider_id=pv, model=model, max_tokens=8192,
+                                context_window=262144, memory_store_id="memory",
+                                can_call={**can, pv: ["complete", "watch"]}, callable_by=by)
+            else:
+                rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=aid,
+                                kv_slots=4, kv_overflow="evict", can_call=can,
+                                callable_by=by, **fields)
+            need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")
+
+        for w in WORKERS:
+            make(w, work_m[w], f"mock-{w}",
+                 {"$self": "*", "memory": "*", LEAD: ["report"]},
+                 {"$self": "*", "$parent": "*", "rest": "*"})
+        make(LEAD, lead_m, "mock-lead",
+             {"$self": "*", "memory": "*", root: ["await_set"], **{w: "*" for w in WORKERS}},
+             {"$self": "*", "$parent": "*", "rest": "*", **{w: ["report"] for w in WORKERS}})
         for w in WORKERS:  # the lead may call each worker: both ends say yes
             cb = callable_by(w)
             hk.send(root, {"type": "update_agent", "id": w, "callable_by": {**cb, LEAD: "*"}})
@@ -196,7 +214,7 @@ def main() -> int:
              f"done holds w1..w3 in order with R1..R3: {done!r}")
         # in the last request's whole history: ONE combined message, and no report
         hist = [m.get("content") if isinstance(m.get("content"), str) else json.dumps(m.get("content"))
-                for m in (turns[-1]["body"].get("messages") or []) if m.get("role") == "user"]
+                for m in ((turns[-1]["body"].get("messages") or []) if turns else []) if m.get("role") == "user"]
         need(sum(1 for t in hist if combined(t)) == 1,
              f"the lead's history holds the combined message once: {sum(1 for t in hist if combined(t))}")
         need(not any(t.lstrip().startswith("[from w") for t in hist),
