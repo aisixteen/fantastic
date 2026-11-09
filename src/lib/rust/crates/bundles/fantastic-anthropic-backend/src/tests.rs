@@ -447,7 +447,7 @@ async fn what_the_record_leaves_out_is_read_from_the_model_entry() {
         .expect("read");
     assert_eq!(
         Value::Object(got),
-        json!({"max_tokens": 16384, "context_window": 200_000})
+        json!({"max_tokens": 64000, "context_window": 200_000})
     );
     let reqs = srv.received_requests().await.unwrap_or_default();
     assert_eq!(
@@ -569,7 +569,7 @@ async fn a_send_reads_the_api_first_and_a_no_turn_verb_reads_nothing() {
     let rec = helpers::agent_meta(&AgentId::from("a1"), &kernel);
     assert_eq!(
         (&rec["max_tokens"], &rec["context_window"]),
-        (&json!(16384), &json!(200_000)),
+        (&json!(64000), &json!(200_000)),
         "{rec:?}"
     );
 }
@@ -679,14 +679,15 @@ const OLD: &str = "claude-3-5-sonnet";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_record_with_no_max_tokens_sends_the_bounded_default() {
-    assert_eq!(sent_max_tokens(MODEL, json!({}), 64000).await, json!(16384));
+    assert_eq!(sent_max_tokens(MODEL, json!({}), 64000).await, json!(64000));
+    assert_eq!(sent_max_tokens(MODEL, json!({}), 1_000_000).await, json!(260_000));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_thinking_budget_adds_to_the_default() {
     assert_eq!(
-        sent_max_tokens(OLD, json!({"thinking_budget": 2048}), 64000).await,
-        json!(2048 + 16384)
+        sent_max_tokens(OLD, json!({"thinking_budget": 2048}), 1_000_000).await,
+        json!(2048 + 260_000)
     );
 }
 
@@ -739,7 +740,7 @@ async fn a_stream_that_never_stops_is_cut_by_the_bound_long_before_the_send_time
     p.max_tokens = read["max_tokens"].as_i64().unwrap();
     let started = std::time::Instant::now();
     let e = drain(&p, None).await.unwrap_err();
-    assert!(e.contains("cut at max_tokens=16384"), "{e}");
+    assert!(e.contains("cut at max_tokens=64000"), "{e}");
     assert_eq!(p.report().stop_reason.as_deref(), Some("max_tokens"));
     assert!(
         started.elapsed().as_secs_f64() < fantastic_ai_core::constants::SEND_TIMEOUT_SECS / 10.0,

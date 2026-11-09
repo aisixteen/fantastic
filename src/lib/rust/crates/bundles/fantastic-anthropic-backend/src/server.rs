@@ -5,7 +5,7 @@
 //! runs a turn ([`TURN_VERBS`]), each one still absent is read from the API's model
 //! entry — `GET {models}/{model}`, `{models}` being the endpoint with its
 //! `/messages` replaced by `/models` — and WRITTEN BACK: `max_tokens` from the
-//! entry's `max_tokens` BOUNDED to [`default_max_tokens`] (16384, plus the record's
+//! entry's `max_tokens` BOUNDED to [`default_max_tokens`] (260000, plus the record's
 //! `thinking_budget`, never above the entry's own maximum), `context_window` from
 //! its `max_input_tokens`.
 

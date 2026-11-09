@@ -131,11 +131,12 @@ async fn read_max_tokens(window: i64, extra: Value) -> Value {
 
 #[tokio::test]
 async fn a_record_with_no_max_tokens_reads_the_bounded_default() {
-    assert_eq!(read_max_tokens(65536, json!({})).await, json!(16384));
+    assert_eq!(read_max_tokens(65536, json!({})).await, json!(65536));
+    assert_eq!(read_max_tokens(1_000_000, json!({})).await, json!(260_000));
     // an explicit thinking budget adds to it
     assert_eq!(
-        read_max_tokens(65536, json!({"thinking_token_budget": 2000})).await,
-        json!(2000 + 16384)
+        read_max_tokens(1_000_000, json!({"thinking_token_budget": 2000})).await,
+        json!(2000 + 260_000)
     );
     // never above the server's window
     assert_eq!(read_max_tokens(8192, json!({})).await, json!(8192));
@@ -159,7 +160,7 @@ async fn what_the_record_leaves_out_is_read() {
         .expect("read");
     assert_eq!(
         Value::Object(got),
-        json!({"model": MODEL, "max_tokens": 16384, "context_window": 65536, "kv_slots": 1})
+        json!({"model": MODEL, "max_tokens": 65536, "context_window": 65536, "kv_slots": 1})
     );
     let paths: Vec<String> = seen(&srv).await.into_iter().map(|(p, _)| p).collect();
     assert!(
@@ -481,11 +482,11 @@ async fn a_send_reads_the_server_first_and_reflect_shows_the_values() {
             &rec["context_window"],
             &rec["kv_slots"]
         ),
-        (&json!(MODEL), &json!(16384), &json!(65536), &json!(1)),
+        (&json!(MODEL), &json!(65536), &json!(65536), &json!(1)),
         "{rec:?}"
     );
     let after = call(&kernel, "v1", json!({"type": "reflect"})).await;
-    assert_eq!(after["max_tokens"], json!(16384), "{after}");
+    assert_eq!(after["max_tokens"], json!(65536), "{after}");
     assert_eq!(after["kv"]["slots"], json!(1), "{after}");
 }
 

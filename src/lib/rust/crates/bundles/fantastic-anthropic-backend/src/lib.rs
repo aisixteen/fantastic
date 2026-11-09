@@ -1387,7 +1387,7 @@ pub fn record_schema() -> &'static Value {
             Field::new(
                 "max_tokens",
                 "int",
-                format!("a turn's output budget (tokens){FROM_API} (16384, plus thinking_budget, never above the \
+                format!("a turn's output budget (tokens){FROM_API} (260000, plus thinking_budget, never above the \
                      model's max_tokens)"),
             ),
             Field::new(

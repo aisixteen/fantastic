@@ -1377,7 +1377,7 @@ pub fn record_schema() -> &'static Value {
                 "max_tokens",
                 "int",
                 format!(
-                    "a turn's output budget (tokens){FROM_SERVER} (16384, plus \
+                    "a turn's output budget (tokens){FROM_SERVER} (260000, plus \
                      thinking_token_budget, never above max_model_len)"
                 ),
             ),
