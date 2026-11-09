@@ -47,6 +47,9 @@ pub async fn main_loop(opts: Opts) -> Result<()> {
         if vm::FAILED.load(std::sync::atomic::Ordering::SeqCst) {
             std::process::exit(2);
         }
+        if vm::CUT.load(std::sync::atomic::Ordering::SeqCst) {
+            std::process::exit(1);
+        }
         return Ok(());
     }
     // The TUI draws on /dev/tty and the kernel's own prints go to a log file.
@@ -63,6 +66,9 @@ pub async fn main_loop(opts: Opts) -> Result<()> {
     }
     if vm::FAILED.load(std::sync::atomic::Ordering::SeqCst) {
         std::process::exit(2);
+    }
+    if vm::CUT.load(std::sync::atomic::Ordering::SeqCst) {
+        std::process::exit(1);
     }
     res
 }

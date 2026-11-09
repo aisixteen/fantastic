@@ -28,6 +28,11 @@ use std::time::Duration;
 /// How long the pages get to stop writing before the kernel drains.
 pub(crate) const PAGE_STOP_GRACE: Duration = Duration::from_secs(5);
 
+/// The whole budget of a signal stop: `PAGE_STOP_GRACE` (5 s) + the kernel's
+/// quiet window (`QUIET_TIMEOUT`, 10 s). A clean stop finishes inside it; only
+/// a real hang is cut at it (#562).
+pub(crate) const STOP_GRACE: Duration = Duration::from_secs(15);
+
 use fantastic_kernel::{
     bootstrap::{self, BootstrapOptions},
     AgentId, BundleRegistry, Item, Kernel, Outcome,
@@ -640,6 +645,35 @@ impl Host {
     }
 }
 
+/// How a bounded stop ended. Clean: the kernel's clean stop finished. Cut: it
+/// hung past the grace, or a second stop signal came.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stopped {
+    Clean,
+    Cut,
+}
+
+/// Run the clean stop, but never past `grace` and never past a second signal.
+/// A cut releases the lock and removes the run file, so the caller only exits.
+pub(crate) async fn stop_bounded(
+    clean: impl std::future::Future<Output = ()>,
+    second: impl std::future::Future<Output = ()>,
+    grace: Duration,
+    cwd: &std::path::Path,
+) -> Stopped {
+    tokio::select! {
+        biased;
+        _ = clean => return Stopped::Clean,
+        _ = second => tracing::warn!("stop: a second signal — exiting now"),
+        _ = tokio::time::sleep(grace) => tracing::warn!("stop: the clean stop did not finish within {grace:?} — cut"),
+    }
+    if let Err(e) = bootstrap::shutdown(cwd) {
+        tracing::warn!("stop: {e}")
+    }
+    crate::kern::web::remove_run_file(cwd);
+    Stopped::Cut
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1022,6 +1056,159 @@ mod tests {
         let mut out = Outcome::refused(json!({"lines": [], "total": 0}));
         out.result = json!({"lines": [], "total": 0});
         assert_eq!(Host::read(out).unwrap(), json!({"lines": [], "total": 0}));
+    }
+    /// A bundle whose `hang` call never answers: an in-flight call at the stop.
+    struct StopHang;
+
+    const HANG: &str = "stop_hang.tools";
+
+    static ENTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    #[async_trait::async_trait]
+    impl fantastic_kernel::bundle::Bundle for StopHang {
+        fn name(&self) -> &str {
+            "stop_hang"
+        }
+
+        async fn handle(
+            &self,
+            _id: &AgentId,
+            payload: &Value,
+            _kernel: &Arc<Kernel>,
+        ) -> Result<Option<Value>, fantastic_kernel::bundle::BundleError> {
+            if payload["type"] == "hang" {
+                ENTERED.store(true, std::sync::atomic::Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            }
+            Ok(None)
+        }
+    }
+
+    fn hang_extra(reg: &mut BundleRegistry) {
+        reg.register(HANG, StopHang);
+    }
+
+    /// A temp project with the lock held and a run file written.
+    fn locked_dir(name: &str) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!("fc-stop-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".fantastic/cli")).expect("dirs");
+        fantastic_kernel::lock::acquire(&tmp).expect("lock");
+        std::fs::write(tmp.join(crate::kern::web::RUN_FILE), "pid: 1\n").expect("run file");
+        tmp
+    }
+
+    fn assert_released(tmp: &std::path::Path) {
+        assert!(
+            !tmp.join(".fantastic/lock.yaml").exists(),
+            "the lock file is gone"
+        );
+        assert!(
+            fantastic_kernel::lock::held(tmp).unwrap().is_none(),
+            "the lock is released"
+        );
+        assert!(
+            !tmp.join(crate::kern::web::RUN_FILE).exists(),
+            "the run file is gone"
+        );
+    }
+
+    #[test]
+    fn stop_grace_is_the_page_grace_plus_the_quiet_window() {
+        assert_eq!(STOP_GRACE, Duration::from_secs(15));
+        assert_eq!(STOP_GRACE, PAGE_STOP_GRACE + Duration::from_secs(10));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_with_a_call_in_flight_finishes_clean_inside_the_grace() {
+        let tmp = std::env::temp_dir().join(format!("fc-stop-clean-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("dir");
+        let k = bootstrap::bootstrap(
+            registry_with(std::path::Path::new("."), &[hang_extra]),
+            BootstrapOptions::in_memory(),
+        )
+        .expect("boots")
+        .kernel;
+        let root = k.root().expect("root").id.clone();
+        let made = send(&k, "kernel", json!({"type": "create_agent", "parent_id": root, "id": "hang562", "handler_module": HANG})).await;
+        assert_eq!(made["id"], "hang562", "{made}");
+        let k2 = k.clone();
+        tokio::spawn(async move {
+            k2.send(vec![Item::new("hang562", json!({"type": "hang"}))])
+                .await;
+        });
+        for _ in 0..250 {
+            if ENTERED.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            ENTERED.load(std::sync::atomic::Ordering::SeqCst),
+            "the call is in flight"
+        );
+        let t0 = std::time::Instant::now();
+        let out = stop_bounded(k.shutdown(), std::future::pending(), STOP_GRACE, &tmp).await;
+        let dt = t0.elapsed();
+        assert_eq!(out, Stopped::Clean);
+        assert!(
+            dt >= Duration::from_secs(9),
+            "the quiet window was waited: {dt:?}"
+        );
+        assert!(dt < STOP_GRACE, "inside the grace: {dt:?}");
+        let led = send(&k, "kernel", json!({"type": "ledger"})).await;
+        let rows = led["executions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("ledger: {led}"));
+        let row = rows
+            .iter()
+            .find(|r| r["target"] == "hang562" && r["status"] == "cancelled")
+            .unwrap_or_else(|| panic!("a cancelled hang562 execution: {led}"));
+        assert_ne!(
+            row["acked"],
+            json!(true),
+            "the dead letter is unacked: {row}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn a_hang_past_the_grace_is_cut_with_the_lock_and_run_file_gone() {
+        let tmp = locked_dir("cut");
+        let t0 = std::time::Instant::now();
+        let out = stop_bounded(
+            std::future::pending(),
+            std::future::pending(),
+            Duration::from_millis(300),
+            &tmp,
+        )
+        .await;
+        let dt = t0.elapsed();
+        assert_eq!(out, Stopped::Cut);
+        assert!(
+            dt >= Duration::from_millis(300) && dt < Duration::from_secs(2),
+            "{dt:?}"
+        );
+        assert_released(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn a_second_signal_cuts_at_once() {
+        let tmp = locked_dir("second");
+        let t0 = std::time::Instant::now();
+        let out = stop_bounded(
+            std::future::pending(),
+            tokio::time::sleep(Duration::from_millis(100)),
+            STOP_GRACE,
+            &tmp,
+        )
+        .await;
+        assert_eq!(out, Stopped::Cut);
+        assert!(t0.elapsed() < Duration::from_secs(2));
+        assert_released(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
 
