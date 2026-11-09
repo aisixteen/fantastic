@@ -57,7 +57,7 @@ pub const README: &str = include_str!("readme.md");
 const NAME: &str = "anthropic_backend";
 
 /// The `usage` verb's doc — python `_usage`'s docstring, the verb's own.
-const USAGE_DOC: &str = "usage — args: reset? (bool). The agent's token usage since it was created:\nrequests, input, cache write and read, output, the derived prompt_tokens, hit_rate\nand saved_tokens (cost_usd and saved_usd when the record has both prices), and\nusage_since_boot: the same counts over this kernel process only. reset: true returns\nthe counts, then zeroes the since-boot counts (the total is kept: see usage_reset).";
+const USAGE_DOC: &str = "usage — args: reset? (bool). The agent's token usage since it was created:\nrequests, input, cache write and read, output, the derived prompt_tokens, hit_rate\nand saved_tokens (cost_usd and saved_usd when the record has both prices), and\nusage_since_boot: the same counts over this kernel process only. by_model: a map from model name to {requests, input, cache_write, cache_read, output, hit_rate, saved_tokens}, counted from each response's model; usage_since_boot carries it too. reset: true returns\nthe counts, then zeroes the since-boot counts (the total is kept: see usage_reset).";
 /// The `usage_reset` verb's doc.
 const USAGE_RESET_DOC: &str = "usage_reset — no args. Returns the agent's token usage since it was created (as\n`usage` does), then zeroes it for good: the counts in the agent's usage.json are\nrewritten as zeros. Deleting the agent drops them too.";
 /// The agent's sidecar of persisted counts, in its own dir beside `agent.yaml`.
@@ -334,6 +334,8 @@ struct Usage {
     cur_long: bool,
     /// The last usage-log write error, reported in `usage`.
     log_error: Option<String>,
+    /// The twelve counts of each model that spent them, keyed by the response's model.
+    by_model: std::collections::BTreeMap<String, Usage>,
 }
 
 /// The sidecar's keys, in the order [`Usage::counters`] lists the counts.
@@ -389,32 +391,64 @@ impl Usage {
         }
     }
 
+    /// The twelve counts alone, with no per-model map.
+    fn plain(&self) -> Usage {
+        Usage::from_counters(self.counters())
+    }
+
     /// `self`'s counts plus `other`'s. The tier and the log error come from `other`,
     /// the since-boot side that carries them.
     fn plus(&self, other: &Usage) -> Usage {
         let (a, b) = (self.counters(), other.counters());
         let sum: [i64; 12] = std::array::from_fn(|i| a[i] + b[i]);
+        let mut by_model = std::collections::BTreeMap::new();
+        for m in self.by_model.keys().chain(other.by_model.keys()) {
+            if by_model.contains_key(m) {
+                continue;
+            }
+            let a = self.by_model.get(m).map_or_else(Usage::default, Usage::plain);
+            let b = other.by_model.get(m).map_or_else(Usage::default, Usage::plain);
+            by_model.insert(m.clone(), a.plus(&b));
+        }
         Usage {
             cur_long: other.cur_long,
             log_error: other.log_error.clone(),
+            by_model,
             ..Usage::from_counters(sum)
         }
     }
 
-    /// The sidecar's JSON: the twelve counts, by [`FIELDS`].
-    fn to_json(&self) -> Value {
-        Value::Object(
-            FIELDS
-                .iter()
-                .zip(self.counters())
-                .map(|(k, v)| ((*k).to_string(), json!(v)))
-                .collect(),
-        )
+    /// The twelve counts as JSON object entries, by [`FIELDS`].
+    fn counts_json(&self) -> Map<String, Value> {
+        FIELDS
+            .iter()
+            .zip(self.counters())
+            .map(|(k, v)| ((*k).to_string(), json!(v)))
+            .collect()
     }
 
-    /// The counts a sidecar holds. A missing or non-integer key reads as 0.
+    /// The sidecar's JSON: the twelve counts, and `by_model` (each model's twelve counts).
+    fn to_json(&self) -> Value {
+        let mut out = self.counts_json();
+        let models: Map<String, Value> = self
+            .by_model
+            .iter()
+            .map(|(m, u)| (m.clone(), Value::Object(u.counts_json())))
+            .collect();
+        out.insert("by_model".into(), Value::Object(models));
+        Value::Object(out)
+    }
+
+    /// The counts a sidecar holds. A missing or non-integer key reads as 0; `by_model`
+    /// is read when present (an old sidecar has none).
     fn from_json(v: &Value) -> Usage {
-        Usage::from_counters(FIELDS.map(|k| v.get(k).and_then(Value::as_i64).unwrap_or(0)))
+        let mut u = Usage::from_counters(FIELDS.map(|k| v.get(k).and_then(Value::as_i64).unwrap_or(0)));
+        u.by_model = v
+            .get("by_model")
+            .and_then(Value::as_object)
+            .map(|m| m.iter().map(|(k, x)| (k.clone(), Usage::from_json(x))).collect())
+            .unwrap_or_default();
+        u
     }
 
     /// What the counts derive to, with the record's prices when BOTH base prices are set
@@ -469,7 +503,36 @@ impl Usage {
             out.insert("cost_usd".into(), json!(c1 + c2));
             out.insert("saved_usd".into(), json!(s1 + s2));
         }
+        let models: Map<String, Value> = self
+            .by_model
+            .iter()
+            .map(|(m, u)| (m.clone(), u.model_snapshot()))
+            .collect();
+        out.insert("by_model".into(), Value::Object(models));
         Value::Object(out)
+    }
+
+    /// One model's counts for `by_model`: requests, input, cache write and read, output,
+    /// hit_rate and saved_tokens. No prices: the record's prices are the totals' alone.
+    fn model_snapshot(&self) -> Value {
+        let input = self.input + self.long_input;
+        let cache_write = self.cache_write + self.cache_write_1h + self.long_cache_write + self.long_cache_write_1h;
+        let cache_read = self.cache_read + self.long_cache_read;
+        let prompt = input + cache_write + cache_read;
+        let hit_rate = if prompt > 0 {
+            json!(cache_read as f64 / prompt as f64)
+        } else {
+            json!(0)
+        };
+        json!({
+            "requests": self.requests + self.long_requests,
+            "input": input,
+            "cache_write": cache_write,
+            "cache_read": cache_read,
+            "output": self.output + self.long_output,
+            "hit_rate": hit_rate,
+            "saved_tokens": saved_tokens(cache_read, cache_write),
+        })
     }
 }
 
@@ -750,6 +813,7 @@ fn consume_sse(
             stopped: false,
             endpoint,
             main_turn_max,
+            cur_model: log.model.clone(),
             log,
             cur: RequestCounts::default(),
         },
@@ -824,6 +888,23 @@ struct StreamLog {
     persist_to: Option<std::path::PathBuf>,
 }
 
+/// Counts one request's prompt into `u`: the base bucket, or the long-context one.
+fn add_prompt(u: &mut Usage, long: bool, input: i64, write: i64, write_1h: i64, read: i64) {
+    if long {
+        u.long_requests += 1;
+        u.long_input += input;
+        u.long_cache_write += write - write_1h;
+        u.long_cache_write_1h += write_1h;
+        u.long_cache_read += read;
+    } else {
+        u.requests += 1;
+        u.input += input;
+        u.cache_write += write - write_1h;
+        u.cache_write_1h += write_1h;
+        u.cache_read += read;
+    }
+}
+
 /// One request's own counts, as the stream sees them (the usage log's line).
 #[derive(Default)]
 struct RequestCounts {
@@ -847,6 +928,8 @@ struct SseState {
     main_turn_max: Option<i64>,
     log: StreamLog,
     cur: RequestCounts,
+    /// The model the open request's response names (`message_start`), or the log's.
+    cur_model: String,
 }
 
 impl SseState {
@@ -869,6 +952,9 @@ impl SseState {
         })?;
         match evt.get("type").and_then(Value::as_str).unwrap_or("") {
             "message_start" => {
+                // the model the response names; the log's when it names none
+                let model = evt["message"]["model"].as_str().filter(|m| !m.is_empty());
+                self.cur_model = model.map_or_else(|| self.log.model.clone(), str::to_string);
                 let u = &evt["message"]["usage"];
                 let count = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
                 let (input, write, read) = (
@@ -894,19 +980,9 @@ impl SseState {
                 };
                 let mut usage = self.usage.lock().expect("usage poisoned");
                 usage.cur_long = long;
-                if long {
-                    usage.long_requests += 1;
-                    usage.long_input += input;
-                    usage.long_cache_write += write - write_1h;
-                    usage.long_cache_write_1h += write_1h;
-                    usage.long_cache_read += read;
-                } else {
-                    usage.requests += 1;
-                    usage.input += input;
-                    usage.cache_write += write - write_1h;
-                    usage.cache_write_1h += write_1h;
-                    usage.cache_read += read;
-                }
+                add_prompt(&mut usage, long, input, write, write_1h, read);
+                let per_model = usage.by_model.entry(self.cur_model.clone()).or_default();
+                add_prompt(per_model, long, input, write, write_1h, read);
                 drop(usage);
                 self.persist();
             }
@@ -955,6 +1031,12 @@ impl SseState {
                             usage.long_output += step;
                         } else {
                             usage.output += step;
+                        }
+                        let per_model = usage.by_model.entry(self.cur_model.clone()).or_default();
+                        if self.cur.long {
+                            per_model.long_output += step;
+                        } else {
+                            per_model.output += step;
                         }
                     }
                     self.cur.output += step;
