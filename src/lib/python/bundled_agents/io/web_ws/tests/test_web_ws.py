@@ -67,3 +67,79 @@ def test_endpoint_mountable_on_fastapi(seeded_kernel):
                     assert data["id"] == "kernel_state" and "tree" in data
                     return
             pytest.fail("no reply frame received")
+
+
+# twin: a_leg_without_route_keeps_the_catch_all
+@pytest.mark.parametrize("i,meta", [(0, {}), (1, {"route": None})])
+async def test_a_leg_without_route_keeps_the_catch_all(seeded_kernel, i, meta):
+    lid = f"ws_noroute_{i}"
+    seeded_kernel.create("web_ws.tools", id=lid, **meta)
+    assert await _get_routes(lid, {}, seeded_kernel) == {
+        "routes": [{"kind": "websocket", "path": "/{host_id}/ws"}]
+    }
+    assert (await _reflect(lid, {}, seeded_kernel))["path_pattern"] == "/{host_id}/ws"
+    assert set(route_endpoints(seeded_kernel.ctx.agents[lid])) == {"/{host_id}/ws"}
+
+
+# twin: a_route_mounts_only_its_literal
+async def test_a_route_mounts_only_its_literal(seeded_kernel):
+    seeded_kernel.create("web_ws.tools", id="ws_lit", route="/page_ws/ws")
+    assert await _get_routes("ws_lit", {}, seeded_kernel) == {
+        "routes": [{"kind": "websocket", "path": "/page_ws/ws"}]
+    }
+    assert (await _reflect("ws_lit", {}, seeded_kernel))["path_pattern"] == "/page_ws/ws"
+    assert set(route_endpoints(seeded_kernel.ctx.agents["ws_lit"])) == {"/page_ws/ws"}
+
+
+# twin: validate_meta_refuses_a_route_that_is_not_a_literal_path
+async def test_validate_meta_refuses_a_route_that_is_not_a_literal_path(seeded_kernel):
+    from web_ws.tools import validate_meta
+
+    for bad in ("/{x}/ws", "page/ws", "", 7):
+        out = validate_meta({"route": bad}, {})
+        assert out.startswith("route=") and "is not a literal mount path" in out, out
+    assert validate_meta({"route": 7}, {}) == (
+        'route=7 is not a literal mount path — a string starting with "/", with no "{" or "}"'
+    )
+    for good in ("/page_ws/ws", None):
+        assert validate_meta({"route": good, "ingress_rule": "allow_all_ingress"}, {}) is None
+    out = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "handler_module": "web_ws.tools",
+                        "parent_id": seeded_kernel.id,
+                        "route": "page/ws",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert "is not a literal mount path" in json.dumps(out, ensure_ascii=False), out
+
+
+# Python-only (the Rust side is covered in tests_route_order.rs)
+async def test_a_literal_route_names_its_host_from_the_first_segment(
+    seeded_kernel, monkeypatch
+):
+    seen = []
+
+    async def fake(ws, kernel, host, leg):
+        seen.append((host, leg))
+        await ws.close()
+
+    monkeypatch.setattr("web_ws.tools._proxy_run", fake)
+    app = FastAPI()
+    app.add_api_websocket_route("/page_ws/ws", _make_endpoint("page_ws", seeded_kernel))
+    app.add_api_websocket_route("/{host_id}/ws", _make_endpoint("cat_ws", seeded_kernel))
+    with TestClient(app) as c:
+        for path in ("/page_ws/ws", "/user/ws"):
+            with c.websocket_connect(path) as ws:
+                try:
+                    ws.receive_text()
+                except Exception:
+                    pass
+    assert seen == [("page_ws", "page_ws"), ("user", "cat_ws")]
