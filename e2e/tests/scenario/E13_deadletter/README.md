@@ -39,3 +39,25 @@ cd src/lib/python && KERNEL=rust  uv run python ../../../e2e/runners/host.py dea
 ```sh
 cd src/lib/python && uv run python ../../../e2e/run.py --group scenario
 ```
+
+## The deadline case (free, scripted)
+
+`test.yaml` + `probe.py` sit beside `scenario.yaml` and run with NO MODEL: two
+scripted OpenAI-compatible servers play a lead and a worker (the kernel's own
+`vllm_backend` agents), and the root record carries `send_timeout: 3`. The worker
+is busy on a slow answer; the lead's message to it is HELD, then passes its 3 s
+deadline. The probe proves, on python and rust alike:
+
+- `status` answers at once on a busy agent, counts the held message in
+  `others_pending` and names the sender in `pending_from`;
+- the message is withdrawn into a dead letter: the lead is told
+  `your message to worker hit its 3.0s deadline → dead letter <pid>; resend or drop`,
+  and the worker's history holds a `withdrawn` row naming the pid;
+- the lead resends (`<timeout>30</timeout>`) and drops the dead letter
+  (`ack_deadletter`); its resend's reply states `(deadline 30s)`;
+- the worker made exactly two requests (the slow one, the wake for the resend):
+  the withdrawn message never got a pass of its own.
+
+```sh
+cd src/lib/python && CARGO_HOME=/Volumes/Warehouse/tmp/cargo-home uv run python ../../../e2e/run.py --only-free --id deadletter_deadline
+```

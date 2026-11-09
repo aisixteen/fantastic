@@ -2670,15 +2670,16 @@ async fn every_model_call_carries_the_layer_default_timeout() {
         "the timed-out call produced no block at all — the batch hung"
     );
     let turn = sa.request(0);
-    // Python's prose, verbatim — target id raw, verb `py_repr`-quoted,
-    // plus `task_id`.
+    // The sender is told its message hit the deadline and went to the dead
+    // letter (#568), with the kernel's `reason` and `task_id` kept.
     assert!(
-        turn.contains("exceeded its 0.2s timeout; task cancelled"),
-        "the block must REPORT the timeout in python's own words: {turn}"
+        turn.contains("hit its 0.2s deadline"),
+        "the block must REPORT the deadline: {turn}"
     );
+    assert!(turn.contains("dead letter"), "must name the dead letter: {turn}");
     assert!(
-        turn.contains("'send'"),
-        "the verb must be py_repr-quoted: {turn}"
+        turn.contains("<reason>timeout</reason>"),
+        "must keep the reason: {turn}"
     );
     assert!(turn.contains("<task_id>"), "must carry task_id: {turn}");
 }
@@ -4046,6 +4047,11 @@ async fn a_wake_that_cannot_be_delivered_releases_the_held_senders() {
             client_id: "h".to_string(),
             send_id: "sid".to_string(),
             reply: tx,
+            origin: "h".to_string(),
+            text: String::new(),
+            queued_at: 0.0,
+            task_id: None,
+            row_id: 0,
         });
     }
     crate::route::deliver(
@@ -4083,6 +4089,11 @@ async fn a_wake_that_never_runs_releases_the_held_senders_at_the_ceiling() {
             client_id: "h".to_string(),
             send_id: "sid".to_string(),
             reply: tx,
+            origin: "h".to_string(),
+            text: String::new(),
+            queued_at: 0.0,
+            task_id: None,
+            row_id: 0,
         });
     }
     // The FIFO lock is taken, so the wake can never run.
@@ -5666,6 +5677,11 @@ async fn a_message_held_on_a_chain_that_just_ended_wakes_it() {
             client_id: "h".to_string(),
             send_id: "sid".to_string(),
             reply: tx,
+            origin: "h".to_string(),
+            text: String::new(),
+            queued_at: 0.0,
+            task_id: None,
+            row_id: 0,
         },
     );
     assert!(
@@ -6928,6 +6944,7 @@ async fn delete_drops_every_row_but_the_incarnation() {
             send_id: "s".into(),
             queued_at: 0.0,
             notice: false,
+            origin: "h".into(),
         });
     *old.projection.lock().unwrap() = Some(json!({"fired": false}));
     *old.compaction_mark.lock().unwrap() = Some((1, "c".into()));
@@ -7103,6 +7120,9 @@ mod tests_retries;
 /// fork, mark, fork_points (#425).
 #[path = "tests_fork.rs"]
 mod tests_fork;
+/// The AI-to-AI send deadline, dead letter and withdrawal (#568).
+#[path = "tests_deadline.rs"]
+mod deadline;
 
 /// A docs body opens with the line naming the grep that keeps what the model needs,
 /// and once answered it is cut to a stub that names the same pid — python

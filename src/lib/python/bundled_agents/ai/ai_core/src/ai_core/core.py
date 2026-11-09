@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import math
 import re
 import secrets
 import time
@@ -253,7 +254,7 @@ def _chain_of(self_id: str) -> dict:
 
 def _answer_held(held: list, answer: dict) -> None:
     """Hand each held sender `answer` under its own client_id (#227)."""
-    for cid, fut in held:
+    for cid, fut, *_ in held:
         if not fut.done():
             fut.set_result({**answer, "client_id": cid})
 
@@ -292,7 +293,7 @@ def _chain_ended(kernel, self_id: str, system_prompt: str | None) -> None:
     are answered by ONE wake turn (their senders stay held: the wake pass takes and
     answers them); with none held, the chain is no longer alive."""
     chain = _chain_of(self_id)
-    held = [cid for cid, _ in chain["held"]]
+    held = [h[0] for h in chain["held"]]
     if not held:
         chain["alive"] = False
         return
@@ -331,7 +332,12 @@ def _chain_ended(kernel, self_id: str, system_prompt: str | None) -> None:
 
 
 def _push_held_or_wake(
-    kernel, self_id: str, client_id: str, fut, system_prompt: str | None
+    kernel,
+    self_id: str,
+    client_id: str,
+    fut,
+    system_prompt: str | None,
+    meta: dict | None = None,
 ) -> None:
     """ONE CHAIN PER AGENT (#227, Rust #330): hold a message on the chain. The
     chain may have ended while the message's row was being stored (the held send
@@ -339,7 +345,7 @@ def _push_held_or_wake(
     with no await between them, and a message pushed onto a dead chain revives it
     and wakes it, or no pass would ever read the message."""
     chain = _chain_of(self_id)
-    chain["held"].append((client_id, fut))
+    chain["held"].append((client_id, fut, meta or {}))
     if not chain["alive"]:
         chain["alive"] = True
         if not chain["token"]:
@@ -359,6 +365,41 @@ def _take_current_for_cancel(self_id: str, task_id: str) -> dict | None:
     return _current.pop(self_id)
 
 
+def _withdraw_held(self_id: str, task_id) -> tuple | None:
+    """WITHDRAW one held message by its task id (its sender's deadline passed):
+    removed and returned, its future left alone. The chain itself is untouched.
+    Rust: `ChainState::withdraw`."""
+    chain = _chains.get(self_id)
+    if chain is None:
+        return None
+    for i, h in enumerate(chain["held"]):
+        meta = h[2] if len(h) > 2 else {}
+        if meta.get("task_id") is not None and meta.get("task_id") == task_id:
+            return chain["held"].pop(i)
+    return None
+
+
+def _route_send_timeout(kernel) -> float:
+    """The route's default deadline for a call to an agent. PRECEDENCE: the call's
+    own `timeout` > the root record's `send_timeout` (any finite positive number,
+    no floor) > the env `FANTASTIC_AI_SEND_TIMEOUT` > 600. Only the route default
+    reads the root field; the generation and held-wait ceilings keep
+    `SEND_TIMEOUT`. Rust: `route_deadline`."""
+    root = getattr(kernel, "_root", None)
+    if callable(root):  # an Agent: `_root()` walks up to the root record
+        root = root()
+    meta = getattr(root, "_meta", None)
+    v = meta.get("send_timeout") if isinstance(meta, dict) else None
+    if (
+        isinstance(v, (int, float))
+        and not isinstance(v, bool)
+        and math.isfinite(v)
+        and v > 0
+    ):
+        return float(v)
+    return SEND_TIMEOUT
+
+
 def _redact_text(d: dict | None) -> dict | None:
     """Return a copy of a current/queue entry with text-bearing fields
     stripped. Used to surface the existence of someone else's in-flight
@@ -371,7 +412,15 @@ def _redact_text(d: dict | None) -> dict | None:
         k: v
         for k, v in d.items()
         if k
-        not in ("text", "text_so_far", "last_tool", "task_id", "parts", "stopped_by")
+        not in (
+            "text",
+            "text_so_far",
+            "last_tool",
+            "task_id",
+            "parts",
+            "stopped_by",
+            "origin",
+        )
     }
 
 
@@ -385,6 +434,23 @@ def _status_snapshot(self_id: str, requesting_client_id: str | None) -> dict:
     """
     cur = _current.get(self_id)
     queue = list(_queue.get(self_id, []))
+    # Held messages (the chain is running) are pending too: (origin, client,
+    # send_id, text, queued_at), in the order they arrived.
+    held = []
+    for h in list(_chains.get(self_id, {}).get("held", [])):
+        meta = h[2] if len(h) > 2 else {}
+        held.append(
+            (
+                meta.get("origin", h[0]),
+                h[0],
+                meta.get("send_id"),
+                meta.get("text", ""),
+                meta.get("queued_at"),
+            )
+        )
+    pending_from = [e.get("origin", e.get("client_id")) for e in queue] + [
+        h[0] for h in held
+    ]
     if requesting_client_id:
         is_mine = bool(cur and cur.get("client_id") == requesting_client_id)
         cur_out: dict | None
@@ -415,13 +481,20 @@ def _status_snapshot(self_id: str, requesting_client_id: str | None) -> dict:
         others_pending = sum(
             1 for e in queue if e.get("client_id") != requesting_client_id
         )
+        for _origin, cid, send_id, text, queued_at in held:
+            if cid == requesting_client_id:
+                mine_pending.append(
+                    {"send_id": send_id, "text": text, "queued_at": queued_at}
+                )
+            else:
+                others_pending += 1
     else:
         cur_out = _redact_text(cur)
         if cur_out is not None:
             cur_out["elapsed"] = time.time() - cur.get("started_at", time.time())
             cur_out["is_mine"] = False
         mine_pending = []
-        others_pending = len(queue)
+        others_pending = len(queue) + len(held)
     return {
         "source": self_id,
         "client_id": requesting_client_id,
@@ -429,6 +502,7 @@ def _status_snapshot(self_id: str, requesting_client_id: str | None) -> dict:
         "current": cur_out,
         "mine_pending": mine_pending,
         "others_pending": others_pending,
+        "pending_from": pending_from,
     }
 
 
@@ -1123,7 +1197,10 @@ A's reply) and are answered TOGETHER in one later message, one block each (`N of
 batch …`; M is complete). Messages queued earlier arrive first: an unseen reply is in
 flight — never re-issue it; send `kernel` `<type>ps</type>` to check. A reply whose pid
 you do not know was routed to you — use it. Per call: `<timeout>seconds</timeout>`
-bounds it; `<exec_id>name</exec_id>` makes it idempotent (the same exec_id never runs
+bounds it (a message to an agent has a deadline: 600 s unless the system sets
+another, and its reply states the deadline used; past it the message is withdrawn
+into a dead letter and you are told its id — resend it, or drop it with `kernel`
+`<type>ack_deadletter</type>`); `<exec_id>name</exec_id>` makes it idempotent (the same exec_id never runs
 twice — you get the first outcome back; a new attempt needs a new name);
 `<retries>N</retries>` lets the kernel re-run a failing call; `kernel`
 `<type>ledger</type>` lists your executions and what became of them.
@@ -2479,7 +2556,24 @@ async def _route_reply(
                 out = outcomes[idx]
                 pid = out["pid"] or "-"
                 # The SAME notation the model writes calls in — never JSON.
-                body = render_reply(point_to_docs(target, verb, out["result"]))
+                result = out["result"]
+                dead_letter = (
+                    verb == "send"
+                    and out["status"] == "timed_out"
+                    and out["pid"] is not None
+                )
+                if dead_letter and isinstance(result, dict):
+                    # Past its deadline the message went to the dead letter: the
+                    # sender is told where, and how to resend or drop it.
+                    result = {
+                        **result,
+                        "error": (
+                            f"your message to {target} hit its "
+                            f"{items[idx]['timeout']}s deadline → dead letter "
+                            f"{pid}; resend or drop"
+                        ),
+                    }
+                body = render_reply(point_to_docs(target, verb, result))
                 # Only docs bodies are cut later, so only they carry the notice, and
                 # are HELD under their pid for the model's own `grep`. A reflect is
                 # MUTABLE state and stays whole; a newer reflect
@@ -2521,6 +2615,8 @@ async def _route_reply(
                             f"To find a line in it: send yourself <type>grep</type> "
                             f"<query>substring</query> <ids><item>{pid}</item></ids>)"
                         )
+                if verb == "send" and out["pid"] is not None and not dead_letter:
+                    body = f"(deadline {items[idx]['timeout']}s)\n{body}"
             else:
                 pid = "-"
             used[dest] = used.get(dest, 0) + estimate_one(
@@ -3791,7 +3887,21 @@ def _make_send(cfg: Backend):
             )
             # A held send RETURNS THE ANSWER of the pass that reads it.
             fut = asyncio.get_running_loop().create_future()
-            _push_held_or_wake(kernel, id, client_id, fut, system_prompt)
+            _push_held_or_wake(
+                kernel,
+                id,
+                client_id,
+                fut,
+                system_prompt,
+                meta={
+                    "origin": sender or client_id,
+                    "send_id": send_id,
+                    "text": text,
+                    "queued_at": time.time(),
+                    "task_id": current_task(),
+                    "row_id": in_id,
+                },
+            )
             # HELD BEFORE SETTLED: the pid stops being owed in the same step the
             # answer becomes visible as held, never an instant with neither (an
             # `await` would read "nothing to wait for").
@@ -3810,6 +3920,7 @@ def _make_send(cfg: Backend):
             "text": text,
             "send_id": send_id,
             "queued_at": time.time(),
+            "origin": sender or client_id,
         }
         # A notice is this agent's own harness text: honoured only when the agent
         # sent it to itself, so no peer can hide a message from a person's view.
@@ -4035,9 +4146,9 @@ def _make_send(cfg: Backend):
                 send_to,
                 system_prompt,
                 # The AI layer's per-tool-call deadline. The kernel defaults
-                # nothing; this is where a default belongs — the same knob
-                # that bounds a generation bounds a call to one.
-                SEND_TIMEOUT,
+                # nothing; this is where a default belongs: the root's
+                # `send_timeout`, else the env / 600 s ceiling.
+                _route_send_timeout(kernel),
                 # The text this turn ANSWERED — what tells routing whether
                 # this was a chain turn (a delivered reply) or a chat turn.
                 text,
@@ -4319,6 +4430,31 @@ async def on_cancel(id, task_id, kernel):
     a `reflect`) — matched on the task id the generation stamped on `_current`."""
     entry = _take_current_for_cancel(id, task_id)
     if entry is None:
+        # Not the running pass: a message HELD on this chain whose sender's
+        # deadline passed is withdrawn, and a marker row tells the next pass not
+        # to answer it. (One a running wake pass already took is not here: the
+        # kernel still settles it, its answer goes nowhere.)
+        gone = _withdraw_held(id, task_id)
+        if gone is not None:
+            meta = gone[2] if len(gone) > 2 else {}
+            await _save_history(
+                id,
+                kernel,
+                [
+                    {
+                        "role": "user",
+                        "kind": "withdrawn",
+                        "content": (
+                            f"[withdrawn] the message above from "
+                            f"{meta.get('origin', gone[0])} passed its sender's "
+                            f"deadline and went to dead letter {task_id}; do not "
+                            f"answer it."
+                        ),
+                        "id": _mint_row_id(id, kernel),
+                        "parent": meta.get("row_id"),
+                    }
+                ],
+            )
         return
     client_id = entry.get("client_id", DEFAULT_CLIENT_ID)
     # THE CUT: every open part ABORTS for its watchers, and the
@@ -4435,7 +4571,7 @@ async def on_delete(agent) -> None:
 
 
 async def _status(id, payload, kernel):
-    """args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int}."""
+    """args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Messages held while the agent's chain is running count as pending too; the reply answers at once, never queued behind a turn. Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int, pending_from:[sender id]}. pending_from names the sender of every pending message, queued first, then held."""
     cid = payload.get("client_id")
     if cid:
         cid = _safe_client(cid)

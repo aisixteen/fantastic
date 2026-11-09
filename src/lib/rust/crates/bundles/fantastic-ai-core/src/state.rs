@@ -25,6 +25,9 @@ pub struct QueuedEntry {
     /// This layer's own text to its own agent (a reminder, a malformed-call
     /// report): the incoming row is stored as `kind: "notice"`.
     pub notice: bool,
+    /// The sender's id (the calling agent, else the sanitised client id) —
+    /// kept in RAM for `status`'s `pending_from`.
+    pub origin: String,
 }
 
 /// The entry currently holding the FIFO lock (used by `status`).
@@ -136,6 +139,17 @@ pub struct HeldMsg {
     pub send_id: String,
     /// Hands the caller the reply of the pass that answers it.
     pub reply: tokio::sync::oneshot::Sender<serde_json::Value>,
+    /// The sender's id (the calling agent, else the sanitised client id).
+    pub origin: String,
+    /// The incoming text.
+    pub text: String,
+    /// When it was held.
+    pub queued_at: f64,
+    /// The kernel task of the send that holds it — how the deadline's cancel
+    /// finds it.
+    pub task_id: Option<String>,
+    /// The id of the held incoming row.
+    pub row_id: i64,
 }
 
 impl ChainState {
@@ -177,6 +191,17 @@ impl ChainState {
             self.token = String::new();
         }
         any
+    }
+
+    /// WITHDRAW one held message by its task id (its sender's deadline passed):
+    /// removed and returned, never answered. The chain itself is untouched —
+    /// other held senders and the running pass go on.
+    pub fn withdraw(&mut self, task_id: &str) -> Option<HeldMsg> {
+        let at = self
+            .held
+            .iter()
+            .position(|h| h.task_id.as_deref() == Some(task_id))?;
+        Some(self.held.remove(at))
     }
 }
 
@@ -289,6 +314,14 @@ pub fn take_current_for_cancel(agent_id: &AgentId, task_id: &str) -> Option<Curr
     cur.take()
 }
 
+/// Withdraw the message of kernel task `task_id` held on this agent's chain, if
+/// any. Never creates a state slot.
+pub fn withdraw_held(agent_id: &AgentId, task_id: &str) -> Option<HeldMsg> {
+    let state = BACKENDS.lock().get(agent_id).map(Arc::clone)?;
+    let mut chain = state.chain.lock().expect("chain poisoned");
+    chain.withdraw(task_id)
+}
+
 // ── status snapshot ─────────────────────────────────────────────────
 
 /// The `current` block of a status snapshot — python `_status_snapshot`'s two
@@ -359,6 +392,29 @@ pub fn status_snapshot(agent_id: &AgentId, payload: &Value) -> Value {
         .iter()
         .cloned()
         .collect::<Vec<_>>();
+    // Held messages (the chain is running) are pending too: a snapshot of
+    // (sender, client, text, queued_at) taken under the chain lock.
+    let held: Vec<(String, String, String, String, f64)> = state
+        .chain
+        .lock()
+        .expect("chain poisoned")
+        .held
+        .iter()
+        .map(|h| {
+            (
+                h.origin.clone(),
+                h.client_id.clone(),
+                h.send_id.clone(),
+                h.text.clone(),
+                h.queued_at,
+            )
+        })
+        .collect();
+    let pending_from: Vec<String> = queue
+        .iter()
+        .map(|q| q.origin.clone())
+        .chain(held.iter().map(|h| h.0.clone()))
+        .collect();
 
     let current = cur
         .as_ref()
@@ -380,9 +436,20 @@ pub fn status_snapshot(agent_id: &AgentId, payload: &Value) -> Value {
                     others += 1;
                 }
             }
+            for (_, client, send_id, text, queued_at) in held.iter() {
+                if client == req {
+                    mine.push(json!({
+                        "send_id": send_id,
+                        "text": text,
+                        "queued_at": queued_at,
+                    }));
+                } else {
+                    others += 1;
+                }
+            }
             (Value::Array(mine), others)
         }
-        None => (Value::Array(Vec::new()), queue.len() as u64),
+        None => (Value::Array(Vec::new()), (queue.len() + held.len()) as u64),
     };
 
     json!({
@@ -392,5 +459,6 @@ pub fn status_snapshot(agent_id: &AgentId, payload: &Value) -> Value {
         "current": current,
         "mine_pending": mine_pending,
         "others_pending": others_pending,
+        "pending_from": pending_from,
     })
 }
