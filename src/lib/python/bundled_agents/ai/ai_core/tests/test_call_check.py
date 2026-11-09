@@ -33,8 +33,8 @@ def test_the_measured_shape_is_reported_with_the_form_to_write():
         "  ^~~~~~~~~~~~~~~~~~~~~~~~~~~ not a call tag\n"
         "write it as:\n"
         '<call name="send">\n'
-        "<target_id>files</target_id>\n"
-        "<type>reflect</type>\n"
+        "<routing><target_id>files</target_id></routing>\n"
+        "<payload><type>reflect</type></payload>\n"
         "</call>\n"
         "also: line 2 `<tool_call>` — drop the wrapper.\n" + TAIL
     ]
@@ -52,8 +52,8 @@ def test_a_call_name_as_a_tag_next_to_a_good_call_says_the_good_one_ran():
         "  ^~~~~~ not a call tag\n"
         "write it as:\n"
         '<call name="send">\n'
-        "<target_id>b</target_id>\n"
-        "<type>read</type>\n"
+        "<routing><target_id>b</target_id></routing>\n"
+        "<payload><type>read</type></payload>\n"
         "</call>\n"
         "also: `</send>` — close with </call>.\n" + TAIL + "\n"
         "The other call of this answer ran — its reply is in this batch; do not "
@@ -74,8 +74,8 @@ def test_a_json_call_is_shown_as_tags():
     )
     assert "^~~~~~~~~~~~~~~ calls are tags, not JSON\n" in r, r
     assert (
-        'write it as:\n<call name="send">\n<target_id>files</target_id>\n'
-        "<type>list</type>\n<path>.</path>\n</call>\n"
+        'write it as:\n<call name="send">\n<routing><target_id>files</target_id></routing>\n'
+        "<payload><type>list</type><path>.</path></payload>\n</call>\n"
     ) in r, r
 
 
@@ -89,7 +89,10 @@ def test_qwen_coder_parameters_become_child_tags():
         "[malformed call — nothing ran] line 1, col 1:\n  <function=send>\n"
         "  ^~~~~~~~~~~~~~~ not a call tag\n"
     ), r
-    assert '<call name="send">\n<target_id>files</target_id>\n<type>reflect</type>' in r
+    assert (
+        '<call name="send">\n<routing><target_id>files</target_id></routing>\n'
+        "<payload><type>reflect</type></payload>"
+    ) in r
     assert (
         "also: `<parameter=target_id>` — one child tag per argument: "
         "<target_id>…</target_id>; `<parameter=type>` — one child tag per argument: "
@@ -106,7 +109,10 @@ def test_a_control_call_as_a_bare_tag():
 def test_arguments_with_no_call_open():
     (r,) = check("<target_id>notes</target_id>\n<type>read</type>", ran=0)
     assert "^~~~~~~~~~~ an argument outside a call — open the call above it" in r, r
-    assert '<call name="send">\n<target_id>notes</target_id>\n<type>read</type>' in r
+    assert (
+        '<call name="send">\n<routing><target_id>notes</target_id></routing>\n'
+        "<payload><type>read</type></payload>"
+    ) in r
 
 
 def test_the_verbs_own_arguments_carry_into_the_form_to_write():
@@ -123,9 +129,10 @@ def test_the_verbs_own_arguments_carry_into_the_form_to_write():
     (r,) = check(broken, ran=0)
     form = r.split("write it as:\n", 1)[1].split("\nA call is", 1)[0]
     assert form == (
-        '<call name="send">\n<target_id>ai_fold</target_id>\n'
-        "<title>grep for checksum</title>\n<type>grep</type>\n"
-        "<query>checksum</query>\n<ids><item>32</item></ids>\n</call>"
+        '<call name="send">\n<routing><target_id>ai_fold</target_id>'
+        "<title>grep for checksum</title></routing>\n"
+        "<payload><type>grep</type><query>checksum</query>"
+        "<ids><item>32</item></ids></payload>\n</call>"
     ), r
 
 
@@ -237,7 +244,7 @@ async def test_a_broken_call_is_reported_instead_of_the_no_call_reminder(
         nxt = fp.incoming[1]
         assert "[no call was dispatched]" not in nxt, nxt
         assert "[malformed call — nothing ran] line 3, col 1:" in nxt, nxt
-        assert '<call name="send">\n<target_id>files</target_id>' in nxt, nxt
+        assert '<call name="send">\n<routing><target_id>files</target_id>' in nxt, nxt
     finally:
         fake_providers.pop(aid, None)
 
@@ -426,7 +433,7 @@ def test_a_wrapped_exec_call_that_stashes_is_not_rewritten_ready_to_run():
     form = r.split("write it as:\n", 1)[1]
     assert "git stash" not in form
     assert "<command>LEFT OUT — write the command yourself</command>" in form
-    assert "<target_id>exec</target_id>\n<type>start</type>" in form
+    assert "<routing><target_id>exec</target_id></routing>\n<payload><type>start</type>" in form
 
 
 def test_a_bare_tag_exec_call_with_rm_rf_is_shown_without_its_command():

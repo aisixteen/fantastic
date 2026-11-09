@@ -14,13 +14,15 @@ text, this module reads it. There is also NO JSON anywhere on this path. The gra
 is tag-delimited, args INLINE:
 
     <call name="send">
-    <target_id>notes</target_id>
-    <reply_to>self</reply_to>
-    <type>patch</type>
+    <routing><target_id>notes</target_id><reply_to>self</reply_to></routing>
+    <payload><type>patch</type>
     <edits><item><path>hello.py</path><hunks>2</hunks></item></edits>
     <bytes>…verbatim: real newlines, real quotes, ends at the first </bytes>…
-    </bytes>
+    </bytes></payload>
     </call>
+
+An INLINE send (no `<routing>`) is still read: the routing names are lifted out of the
+call and every other child is the payload.
 
 Why tags and not JSON: JSON with a verbatim `bytes` cut goes wrong — escaped quotes,
 literal `\\n`, a `\\"}` inside content ending the value early; bare child tags need
@@ -34,6 +36,11 @@ Rules (all of them):
 - `send`: `target_id` (or `to`, a list of recipients — one copy each), `re`,
   `reply_to`, `title`, `timeout`, `retries`, `exec_id` are CALL-level and stay there; every other child IS the payload (`type` names the verb). Other tools: the children
   are the arguments.
+- THE ROUTING FORM: a `send` with a `<routing>` child reads its routing ONLY from it
+  (the names above, nothing else) and takes `<payload>` WHOLE — nothing inside it is
+  read or reserved (a `<title>` or a nested `<payload>` reaches the target as written).
+  Anything beside the two, a non-routing name in `<routing>`, a `<routing>` that is not
+  tags, a `<payload>` that is not tags, or no target is refused with the form named.
 - An element with child elements → dict; children all named `<item>` → list;
   text → scalar typed by the ONE rule shared with the CLI (`kernel.modes.parse.
   coerce_scalar`: true/false, int, float, else str); an empty element → "".
@@ -69,6 +76,8 @@ _TAG = re.compile(r"<([A-Za-z_$][\w$.\-]*)>")
 # kernel item's caller-chosen execution name is `exec_id` HERE (core maps it onto the
 # item's `id`): a bare `<id>` would collide with the many verbs whose payload has an
 # `id` (`delete_agent`, `update_agent`, …) now that arguments are inline.
+_ROUTING_TAG = "routing"
+_PAYLOAD_TAG = "payload"
 _ROUTING = (
     "target_id",
     "to",
@@ -221,7 +230,7 @@ def parse_call(block: str) -> dict | None:
     if name not in TOOLS:
         raise _Malformed(
             f"`{name}` is not a tool — the tools are {', '.join(TOOLS)}. A VERB goes in "
-            f'`<type>`: `<call name="send"><target_id>…</target_id><type>{name}</type></call>`'
+            f'`<type>`: `<call name="send"><routing><target_id>…</target_id></routing><payload><type>{name}</type></payload></call>`'
         )
     body = block[m.end() :]
     fields: dict = {}
@@ -234,6 +243,10 @@ def parse_call(block: str) -> dict | None:
         fields[k] = _value(k, v)
     if name != "send":
         return {"id": _mint_id(), "name": name, "arguments": fields}
+    # THE ROUTING FORM: `<routing>` holds how the call travels, `<payload>` is the
+    # target's message, taken whole.
+    if _ROUTING_TAG in fields:
+        return _routed(fields)
     target = fields.pop("target_id", None)
     to = fields.pop("to", None)
     if isinstance(to, str) and to.strip():
@@ -257,6 +270,59 @@ def parse_call(block: str) -> dict | None:
     return {"id": _mint_id(), "name": "send", "arguments": args}
 
 
+def _routed(fields: dict) -> dict:
+    """A `send` in the routing form: `<routing>` (the `_ROUTING` names only) and
+    `<payload>` (any content), nothing else beside them."""
+    form = (
+        'a routed call is `<call name="send"><routing><target_id>agent id</target_id>…'
+        "</routing><payload><type>verb</type>…</payload></call>`"
+    )
+    for k in fields:
+        if k not in (_ROUTING_TAG, _PAYLOAD_TAG):
+            raise _Malformed(
+                f"`<{k}>` beside `<routing>` — every argument goes inside "
+                f"`<payload>`; {form}"
+            )
+    routing = fields.pop(_ROUTING_TAG)
+    if not isinstance(routing, dict):
+        raise _Malformed(f"`<routing>` holds tags such as `<target_id>`; {form}")
+    payload = fields.pop(_PAYLOAD_TAG, {})
+    if isinstance(payload, str) and not payload.strip():
+        payload = {}
+    if not isinstance(payload, dict):
+        raise _Malformed(
+            f"`<payload>` holds the message as tags (`<type>verb</type>…`); {form}"
+        )
+    for k in routing:
+        if k not in _ROUTING:
+            raise _Malformed(
+                f"`<{k}>` is not a routing field — the routing fields are "
+                f"{', '.join(_ROUTING)}; an argument of the verb goes inside `<payload>`"
+            )
+    target = routing.pop("target_id", None)
+    to = routing.pop("to", None)
+    if isinstance(to, str) and to.strip():
+        to = [to.strip()]
+    if isinstance(to, list):
+        to = [str(t).strip() for t in to if str(t).strip()]
+    if (not isinstance(target, str) or not target.strip()) and not to:
+        raise _Malformed(
+            "a routed send names its target in `<routing>`: `<target_id>agent id"
+            "</target_id>`, or several recipients as "
+            "`<to><item>id</item><item>id</item></to>`"
+        )
+    args: dict = {}
+    if isinstance(target, str) and target.strip():
+        args["target_id"] = target.strip()
+    if to:
+        args["to"] = to
+    for key in _ROUTING[2:]:
+        if key in routing:
+            args[key] = routing.pop(key)
+    args["payload"] = payload
+    return {"id": _mint_id(), "name": "send", "arguments": args}
+
+
 def render_call(name: str, arguments: dict | None = None) -> str:
     """The inverse of `parse_call`: `{name, arguments}` as the ONE grammar's text.
     `send` arguments are the parser's own shape (`target_id`, `reply_to`?, `title`?,
@@ -267,6 +333,14 @@ def render_call(name: str, arguments: dict | None = None) -> str:
     args = dict(arguments or {})
     if name == "send":
         payload = args.pop("payload", None) or {}
+        # A payload that carries a routing name can only be written in the routing
+        # form: inline, the parser would lift that name out of it.
+        if any(k in _ROUTING or k == _ROUTING_TAG for k in payload):
+            routing = {k: args[k] for k in _ROUTING if k in args}
+            body = _render_field(_ROUTING_TAG, routing) + _render_field(
+                _PAYLOAD_TAG, payload
+            )
+            return f'<call name="{name}">\n{body}</call>'
         flat = {k: args[k] for k in _ROUTING if k in args}
         flat.update(payload)
         args = flat
@@ -427,9 +501,9 @@ def extract_tool_calls(text: str) -> list[dict]:
 # The shape appended to every refusal: literal, minimal, copyable. Advice, not a
 # repair — the block is never re-parsed leniently.
 _HINT = (
-    'The shape: <call name="send">\n<target_id>agent id</target_id>\n'
-    "<type>verb</type>\n<path>a.md</path>\n<bytes>document, verbatim, to the first "
-    "</bytes>\n</bytes>\n</call> — one child tag per argument, a list is one tag "
+    'The shape: <call name="send">\n<routing><target_id>agent id</target_id></routing>\n'
+    "<payload><type>verb</type><path>a.md</path><bytes>document, verbatim, to the first "
+    "</bytes></bytes></payload>\n</call> — one child tag per argument, a list is one tag "
     "whose children are all <item>, nothing is escaped."
 )
 

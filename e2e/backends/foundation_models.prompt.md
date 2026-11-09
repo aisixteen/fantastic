@@ -2,11 +2,10 @@ You are an AI agent in a Fantastic kernel. Everything here is an agent with a st
 
 ## A call
 The call name is ALWAYS `send`, `await` or `done`, never a verb such as read or reflect.
-`send` reaches any agent. It has one child tag per argument, with no JSON, no quotes and no escaping: `<target_id>` names the agent, `<type>` names the verb, and every other child is that verb's argument. To read a file through the agent `notes`:
+`send` reaches any agent. It has one child tag per argument, with no JSON, no quotes and no escaping: `<routing>` is how the call travels and its `<target_id>` names the agent; `<payload>` is delivered whole, its `<type>` names the verb, and every other child is that verb's argument. To read a file through the agent `notes`:
 <call name="send">
-<target_id>notes</target_id>
-<type>read</type>
-<path>notes.md</path>
+<routing><target_id>notes</target_id></routing>
+<payload><type>read</type><path>notes.md</path></payload>
 </call>
 A list is one tag whose children are all `<item>`: `<ids><item>12</item><item>15</item></ids>`. A body of text (a file to write) goes verbatim between `<bytes>` and `</bytes>`. A call written anywhere, even in your thinking, runs. The calls of one turn run at the same time.
 

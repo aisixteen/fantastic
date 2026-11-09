@@ -21,8 +21,9 @@ def test_a_call_inside_a_tool_call_wrapper_is_refused_with_the_bare_rewrite():
     )
     assert "  ^~~~~~~~~~~ drop the wrapper" in reports[0]
     assert (
-        'write it as:\n<call name="send">\n<target_id>files</target_id>\n'
-        "<type>reflect</type>\n</call>"
+        'write it as:\n<call name="send">\n'
+        "<routing><target_id>files</target_id></routing>\n"
+        "<payload><type>reflect</type></payload>\n</call>"
     ) in reports[0]
 
 

@@ -88,3 +88,38 @@ async def test_a_routing_name_the_verb_documents_is_refused_loud(
     assert "title on this call is call routing" in turn2, turn2
     assert "documents an argument named title" in turn2, turn2
     assert [p.get("type") for p in _GOT] == ["ping"], "create must not run; ping must"
+
+
+async def test_a_routing_name_in_the_payload_of_a_routed_call_is_delivered(
+    seeded_kernel, fake_providers
+):
+    """The same verb in the ROUTING FORM: `<payload>` is taken whole, so its `title`
+    reaches the target, and the routing `title` still labels the call. No refusal."""
+    k = seeded_kernel
+    register_unlisted("clash_store", _store_module())
+    k.create("clash_store", id="kb2", callable_by={"rc_ai2": "*"})
+    meta = memory_meta(k, "rc_ai2", {"cli": "*", "kb2": "*", "kernel_state": ["docs"]})
+    k.create(
+        "ollama_backend.tools",
+        id="rc_ai2",
+        endpoint="http://127.0.0.1:9/stub",
+        model="stub",
+        context_window=32768,
+        **meta,
+    )
+    create = (
+        '<call name="send"><routing><target_id>kb2</target_id>'
+        "<title>make notes</title></routing>"
+        "<payload><type>create</type><title>Notes</title><body>b</body></payload></call>"
+    )
+    fp = fake_providers["rc_ai2"] = _Fake([create, DONE])
+    _GOT.clear()
+    await k.send([{"target": "rc_ai2", "payload": {"type": "send", "text": "go"}}])
+    for _ in range(100):
+        if len(fp.requests) >= 2:
+            break
+        await asyncio.sleep(0.02)
+    turn2 = fp.requests[1][-1]["content"]
+    assert "call routing, never sent" not in turn2, turn2
+    assert "make notes" in turn2, turn2
+    assert _GOT == [{"type": "create", "title": "Notes", "body": "b"}], _GOT

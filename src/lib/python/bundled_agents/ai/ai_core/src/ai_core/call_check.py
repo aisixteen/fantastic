@@ -255,13 +255,21 @@ def _rewrite(name: str, args: list[tuple[str, object]]) -> list[str]:
 def _expected(name: str, args: list[tuple[str, str]]) -> str:
     if not args:
         return f'<call name="{name}"></call>'
-    lines = [f'<call name="{name}">']
-    for k, v in args:
+
+    def tag(k, v) -> str:
         if isinstance(v, list):
-            items = "".join(f"<item>{x}</item>" for x in v)
-            lines.append(f"<{k}>{items}</{k}>")
-        else:
-            lines.append(f"<{k}>{v}</{k}>")
+            return f"<{k}>" + "".join(f"<item>{x}</item>" for x in v) + f"</{k}>"
+        return f"<{k}>{v}</{k}>"
+
+    lines = [f'<call name="{name}">']
+    if name == "send":
+        # the routing form: routing names in `<routing>`, the rest in `<payload>`
+        r = "".join(tag(k, v) for k, v in args if k in _ROUTING)
+        p = "".join(tag(k, v) for k, v in args if k not in _ROUTING)
+        lines.append(f"<routing>{r}</routing>")
+        lines.append(f"<payload>{p}</payload>")
+    else:
+        lines.extend(tag(k, v) for k, v in args)
     lines.append("</call>")
     return "\n".join(lines)
 
