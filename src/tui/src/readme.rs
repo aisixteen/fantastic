@@ -2,7 +2,9 @@
 //! 2026-10-01: "in non-tui do not run w/o flags, just show readme"). A coding
 //! CLI that runs `fantastic` in its shell reads what this is and how to drive
 //! it; nothing is written to the directory and no kernel starts. On a terminal
-//! the same command opens the terminal UI.
+//! the same command opens the terminal UI. An embedding launcher's readme
+//! sections (passed to `main_with`) are printed after this text, in order; the
+//! same for `fantastic readme`.
 
 use fantastic_web_mcp::{INSTRUCTIONS, LEAD_IN, SHAPE};
 
@@ -43,12 +45,28 @@ fn summary(text: &str) -> &str {
     text.lines().next().and_then(|l| l.strip_prefix("> ")).unwrap_or("")
 }
 
+/// `base`, then each section in order, set off by a blank line, each ended by a newline.
+fn with_sections(base: String, sections: &[&str]) -> String {
+    let mut out = base;
+    for s in sections {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+        out.push_str(s);
+        if !s.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// `fantastic readme` → the index; `fantastic readme <key>` → that doc. Reads
 /// only what is embedded: nothing starts, nothing is written.
-pub fn main(argv: &[String]) -> ! {
+pub fn main(argv: &[String], sections: &[&str]) -> ! {
     match argv {
         [] => {
-            print!("{}", index());
+            print!("{}", listing(sections));
             std::process::exit(0);
         }
         [key] => match docs().find(|(k, _)| k == key) {
@@ -78,10 +96,19 @@ pub fn index() -> String {
     out
 }
 
+/// `fantastic readme` with no key: the index, then each embedder section.
+pub fn listing(sections: &[&str]) -> String {
+    with_sections(index(), sections)
+}
+
 /// The whole text: the commands, how to register the MCP face, what a
-/// connected MCP client is told, and where the docs are.
-pub fn text() -> String {
-    format!("{COMMANDS}{SHAPE}{LEAD_IN}{INSTRUCTIONS}\n\nDetails: `fantastic readme` lists the docs, `fantastic readme <key>` prints one.\n")
+/// connected MCP client is told, and where the docs are, then each embedder
+/// section the launcher passed (none for `fantastic`).
+pub fn text(sections: &[&str]) -> String {
+    with_sections(
+        format!("{COMMANDS}{SHAPE}{LEAD_IN}{INSTRUCTIONS}\n\nDetails: `fantastic readme` lists the docs, `fantastic readme <key>` prints one.\n"),
+        sections,
+    )
 }
 
 #[cfg(test)]
@@ -104,5 +131,25 @@ mod tests {
         for (k, _) in docs() {
             assert!(i.contains(&format!("  {k} ")), "{k} missing from\n{i}");
         }
+    }
+
+    #[test]
+    fn the_readme_with_no_sections_is_the_base_text() {
+        assert_eq!(listing(&[]), index());
+        let t = text(&[]);
+        assert!(t.starts_with(COMMANDS));
+        assert!(t.ends_with("`fantastic readme <key>` prints one.\n"));
+    }
+
+    #[test]
+    fn one_section_follows_the_base_text() {
+        const S: &str = "## extra\n\nan embedder's own section\n";
+        assert_eq!(listing(&[S]), format!("{}\n{S}", index()));
+        assert_eq!(text(&[S]), format!("{}\n{S}", text(&[])));
+    }
+
+    #[test]
+    fn sections_follow_in_order_each_ended_by_a_newline() {
+        assert_eq!(text(&["A\n", "B"]), format!("{}\nA\n\nB\n", text(&[])));
     }
 }
