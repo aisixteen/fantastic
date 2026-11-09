@@ -13,6 +13,8 @@ host kernel through the socket leg `canvas_ws`. It holds no memory store and no
 AI: every cell is a VIEW of a host agent (a terminal, an AI chat, a set-up
 cell) or page-side content (html, gl).
 
+`web` is the core listener: the one HTTP/WS host, whose routes the canvas and any other agent's page share. A recorded `web` listens in every mode that starts the kernel (`--headless` and `fantastic mcp` too); `canvas` only adds its own agents and sets `--port`/`--host`. A folder with no `web` record binds no port.
+
 ## The root AI and your own programs
 
 `fantastic [canvas] ai vllm -p PORT` (also `ai ollama -p PORT`, `ai responses

@@ -197,7 +197,7 @@ async fn run(
             if let Err(e) = crate::tty::redirect_std_to(&paths.cli.join("kernel.log")) {
                 app.note(format!("{e}"));
             }
-            match Host::boot(&paths, boot.canvas, boot.port, boot.bind.clone()).await {
+            match Host::boot(&paths, boot.port, boot.bind.clone()).await {
                 Ok(h) => {
                     let h = Arc::new(h);
                     app.cfg = h.cfg.clone();

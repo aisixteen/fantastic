@@ -13,7 +13,7 @@ This is `fantastic` without a terminal, so it only prints this readme: it starts
 \x20\x20fantastic canvas [ai] --port N     the browser canvas, headless: the kernel's message stream on stdout (--port the first time only)\n\
 \x20\x20fantastic [canvas] ai vllm -p PORT  the root AI `ai` on a backend (also `ai ollama -p PORT`, `ai responses|anthropic --model M`)\n\
 \x20\x20fantastic [canvas] run CMD [ARGS]   your own program from $PATH, as is, in the terminal (or a canvas cell)\n\
-\x20\x20fantastic --headless               no screen, no canvas: the kernel's message stream on stdout\n\
+\x20\x20fantastic --headless               no screen: the kernel's message stream on stdout; a recorded `web` host still serves its routes\n\
 \x20\x20fantastic mcp                      MCP over stdio for a coding CLI (attaches to a running kernel, or runs it)\n\
 \x20\x20fantastic send '<item json>'       one call into the running kernel, as the `mcp` leg; `$env:NAME` values come from this shell, marked secret\n\
 \x20\x20fantastic import PATH --parent ID  import a blueprint folder as agents under ID: prints the preview, then asks (`--bind @port=ID`, `--allow-code`, `--approve` skips the question)\n\
