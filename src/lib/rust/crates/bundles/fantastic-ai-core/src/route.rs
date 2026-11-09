@@ -257,7 +257,16 @@ pub(crate) async fn deliver(
     // is NOT announced: an operator kill already told whoever asked for it.
     let reply_error = out.result.get("error").filter(|v| py_truthy(v));
     let failed = matches!(out.status, Status::Failed | Status::TimedOut) || reply_error.is_some();
-    if failed && notice {
+    // A failed provider pass that was RETRIED (#533) has already delivered the chain's
+    // next turn and counted itself into the streak: resetting the chain here would
+    // drop that turn's token and make it a late row.
+    let retried = notice
+        && out.result.get("raised") == Some(&json!(true))
+        && !reply_error
+            .and_then(Value::as_str)
+            .is_some_and(|e| e.starts_with("ValueError"))
+        && silent_streak(&target_agent, client_id) > 0;
+    if failed && notice && !retried {
         // ONE CHAIN PER AGENT (#227 Bug 3): a wake that failed ends the chain and
         // releases the held senders (their callers get the cancelled shape).
         state_for(&target_agent)
@@ -1919,6 +1928,41 @@ async fn silent_turn(
     send_to: Option<&str>,
     sp: Option<&str>,
 ) -> bool {
+    count_silent_turn(kernel, self_id, client_id, send_to, sp, None).await
+}
+
+/// A FAILED turn (the provider errored, or the answer was cut at `max_tokens`) is
+/// counted like a silent one (#533): `true` when the chain has now failed or been
+/// silent `MAX_SILENT_TURNS` in a row and GAVE UP, naming the error. Otherwise
+/// the agent's own next turn is delivered, carrying the `[turn failed]` text, and
+/// the chain stays alive — held messages wait for it and are answered by it.
+pub(crate) async fn failed_turn_retry(
+    kernel: &Arc<Kernel>,
+    self_id: &AgentId,
+    client_id: &str,
+    send_to: Option<&str>,
+    sp: Option<&str>,
+    reason: &str,
+) -> bool {
+    if count_silent_turn(kernel, self_id, client_id, send_to, sp, Some(reason)).await {
+        return true;
+    }
+    let text = format!(
+        "[turn failed] {reason}. Your last turn produced no answer, and nothing it meant \
+         to send was dispatched. Try again."
+    );
+    deliver_soon(kernel, self_id.as_str(), &text, client_id, sp, true);
+    false
+}
+
+async fn count_silent_turn(
+    kernel: &Arc<Kernel>,
+    self_id: &AgentId,
+    client_id: &str,
+    send_to: Option<&str>,
+    sp: Option<&str>,
+    failure: Option<&str>,
+) -> bool {
     let chain = (self_id.as_str().to_string(), client_id.to_string());
     let streak = {
         let mut m = silent().lock().expect("silent poisoned");
@@ -1934,7 +1978,13 @@ async fn silent_turn(
         return false;
     }
     silent().lock().expect("silent poisoned").remove(&chain);
-    let gave_up = gave_up_text(limit);
+    let gave_up = match failure {
+        Some(why) => format!(
+            "The LLM was not able to answer — {limit} turns in a row failed or produced \
+             no call. Last failure: {why}"
+        ),
+        None => gave_up_text(limit),
+    };
     let st = state_for(self_id);
     let mut detail = Map::new();
     detail.insert("reason".to_string(), json!("gave_up"));

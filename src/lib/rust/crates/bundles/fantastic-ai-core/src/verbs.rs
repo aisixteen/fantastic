@@ -1395,6 +1395,8 @@ pub async fn send(
     // raise is deferred to after the cleanup below (python does it from an
     // `except` whose `finally` clears the current entry and releases the lock).
     let mut raise: Option<(&'static str, String)> = None;
+    // A failed pass (not a refused record) earns its own retry turn (#533).
+    let mut failed_reason: Option<String> = None;
     let reply = match outcome {
         Ok(Ok(Generation::Dead { text: final_text })) => {
             dead_turn = true;
@@ -1503,6 +1505,7 @@ pub async fn send(
             } else {
                 let stored =
                     store_failed_turn(agent_id, kernel, &incoming_text, notice, &pe.message).await;
+                failed_reason = Some(pe.message.clone());
                 with_store_outcome(pe.message, stored)
             };
             raise = Some((pe.kind, message));
@@ -1537,7 +1540,23 @@ pub async fn send(
 
     // ONE CHAIN PER AGENT (#227): a pass that is NOT routed ends its chain here,
     // so messages held meanwhile are woken once (see `chain_ended`).
-    if reply.get("error").is_some() || raise.is_some() {
+    // A FAILED TURN IS RETRIED (#533): the chain stays alive and its own next turn
+    // is delivered, under the silent-turn bound; at the bound the chain gives up.
+    let retrying = match &failed_reason {
+        Some(why) => {
+            !crate::route::failed_turn_retry(
+                kernel,
+                agent_id,
+                &client_id,
+                send_to.as_deref(),
+                system_prompt_for_route.as_deref(),
+                why,
+            )
+            .await
+        }
+        None => false,
+    };
+    if !retrying && (reply.get("error").is_some() || raise.is_some()) {
         crate::route::chain_ended(kernel, agent_id, system_prompt_for_route.as_deref());
     }
 

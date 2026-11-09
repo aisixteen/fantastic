@@ -56,11 +56,13 @@ async fn retries_run_out_and_the_turn_fails() {
         vec![
             vec![ScriptEvent::TransportFail("connect failed".into())],
             vec![ScriptEvent::TransportFail("connect failed again".into())],
+            pass(r#"<call name="done"></call>"#),
         ],
         Duration::ZERO,
     );
     let _ = send_text(&kernel, &agent, "hello").await;
-    assert_eq!(s.passes_served(), 2);
+    // the link retry ran out after 2 passes; the failed turn's own retry is the third (#533)
+    assert!(until_passes(&s, 3).await, "passes: {}", s.passes_served());
     assert!(s.request(1).contains("[retry 1/1]"), "{}", s.request(1));
     assert!(!s.request(1).contains("[retry 2/"), "{}", s.request(1));
 }
@@ -71,12 +73,17 @@ async fn a_model_error_is_never_retried() {
     let (kernel, agent) = mk_retrying(&tmp, "rt_model", 3).await;
     let s = script(
         &agent,
-        vec![vec![ScriptEvent::Fail("boom".into())]],
+        vec![
+            vec![ScriptEvent::Fail("boom".into())],
+            pass(r#"<call name="done"></call>"#),
+        ],
         Duration::ZERO,
     );
     let _ = send_text(&kernel, &agent, "hello").await;
-    assert_eq!(s.passes_served(), 1);
+    // no link retry: the second pass is the failed turn's own retry turn (#533)
+    assert!(until_passes(&s, 2).await);
     assert!(!s.request(0).contains("[retry"), "{}", s.request(0));
+    assert!(!s.request(1).contains("[retry"), "{}", s.request(1));
 }
 
 #[tokio::test]
@@ -92,5 +99,7 @@ async fn retries_are_off_by_default() {
         Duration::ZERO,
     );
     let _ = send_text(&kernel, &agent, "hello").await;
-    assert_eq!(s.passes_served(), 1);
+    // no link retry: the second pass is the failed turn's own retry turn (#533)
+    assert!(until_passes(&s, 2).await);
+    assert!(!s.request(1).contains("[retry"), "{}", s.request(1));
 }

@@ -25,7 +25,7 @@ fn error_rows(rows: &[Value]) -> Vec<&Value> {
 
 /// A pass that FAILS (a stalled stream, say) ends its turn with an ERROR ROW: the
 /// incoming message and a row naming the failure. The FIFO lock is released, so
-/// the next send runs at once and reads the row.
+/// the failed turn is retried on its own and reads the row (#533).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_pass_stores_an_error_row_and_the_queue_moves_on() {
     let tmp = TempDir::new().unwrap();
@@ -62,22 +62,10 @@ async fn a_failed_pass_stores_an_error_row_and_the_queue_moves_on() {
         rows.iter().any(|r| r["content"] == json!("one")),
         "{rows:#?}"
     );
-    // the queue moves on: the next send is the next pass, and it reads the failure
-    let second = kernel
-        .send(vec![Item::new(
-            backend.clone(),
-            json!({"type": "send", "text": "two", "client_id": "probe"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert!(second.get("raised").is_none(), "{second}");
-    assert_eq!(s.passes_served(), 2, "the next send ran");
+    // the failed turn is retried on its own (#533): the next pass reads the failure
+    assert!(until_passes(&s, 2).await, "the retry turn never ran");
     let seen = s.request(1);
-    assert!(
-        seen.contains("two") && seen.contains("[turn failed]"),
-        "{seen}"
-    );
+    assert!(seen.contains("[turn failed]"), "{seen}");
 }
 
 /// Every status event the agent's inbox has taken in, as it arrives. Polls until
@@ -275,7 +263,10 @@ async fn a_failed_provider_turn_settles_its_sender_and_emits_done_error_once() {
     let (kernel, backend) = mk_kernel(&tmp, "rt_fail_done").await;
     let s = script(
         &backend,
-        vec![vec![ScriptEvent::Fail("boom".into())], pass("never")],
+        vec![
+            vec![ScriptEvent::Fail("boom".into())],
+            pass(r#"<call name="done"></call>"#),
+        ],
         Duration::ZERO,
     );
     let mut rx = rebind_backend_inbox(&kernel, &backend);
@@ -304,11 +295,13 @@ async fn a_failed_provider_turn_settles_its_sender_and_emits_done_error_once() {
             e["type"] == json!("status")
                 && e["phase"] == json!("done")
                 && e["client_id"] == json!("probe")
+                && e["detail"]["reason"] == json!("error")
         })
         .collect();
     assert_eq!(dones.len(), 1, "{seen:#?}");
     assert_eq!(dones[0]["detail"]["reason"], json!("error"), "{dones:#?}");
-    assert_eq!(s.passes_served(), 1, "the failed turn was run again");
+    // the failure is retried (#533): the second pass is the retry turn
+    assert!(until_passes(&s, 2).await, "the retry turn never ran");
 }
 
 /// A message held behind a chain is answered by the pass that reads it. When that
@@ -458,4 +451,214 @@ async fn a_held_sender_settles_with_transport_error_when_the_turn_that_reads_it_
     assert_eq!(two["reason"], json!("transport_error"), "{two}");
     assert_eq!(two["client_id"], json!("t"), "{two}");
     assert!(two["error"].as_str().unwrap_or_default().contains("boom"));
+}
+
+fn status_reason<'a>(events: &'a [Value], reason: &str) -> Option<&'a Value> {
+    events.iter().find(|e| {
+        e.get("type").and_then(Value::as_str) == Some("status")
+            && e["detail"]["reason"] == json!(reason)
+    })
+}
+
+/// A FAILED TURN IS RETRIED (#533): a pass that errors once, then answers. The
+/// second pass runs on its own, with the error row between the two turns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_pass_is_retried_on_its_own_and_its_answer_is_stored() {
+    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_retry_once").await;
+    let s = script(
+        &backend,
+        vec![
+            vec![ScriptEvent::Fail("mock_backend: boom".into())],
+            pass(r#"RETRIED-ANSWER <call name="done"></call>"#),
+        ],
+        Duration::ZERO,
+    );
+    let out = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(out["raised"], json!(true), "{out}");
+    assert!(until_passes(&s, 2).await, "the retry turn never ran");
+    let mut rows = Vec::new();
+    for _ in 0..200 {
+        rows = stored_rows(&kernel, &backend).await;
+        if rows.iter().any(|r| {
+            r["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("RETRIED-ANSWER"))
+        }) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let at = |f: &dyn Fn(&Value) -> bool| rows.iter().position(|r| f(r));
+    let incoming = at(&|r| r["content"] == json!("go")).expect("incoming row");
+    let error = at(&|r| r["kind"] == json!("error")).expect("error row");
+    let answer = at(&|r| {
+        r["content"]
+            .as_str()
+            .is_some_and(|c| c.contains("RETRIED-ANSWER"))
+    })
+    .expect("the retried answer is stored");
+    assert!(incoming < error && error < answer, "{rows:#?}");
+}
+
+/// A pass cut at `max_tokens` (a provider error) gets the next turn with the
+/// `[turn failed]` text (#533).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pass_cut_at_max_tokens_gets_the_next_turn_with_the_failure_text() {
+    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_retry_cut").await;
+    let s = script(
+        &backend,
+        vec![
+            vec![ScriptEvent::Fail(
+                "mock_backend: the turn was cut at max_tokens=16384 and is NOT complete".into(),
+            )],
+            pass(r#"<call name="done"></call>"#),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await;
+    assert!(until_passes(&s, 2).await, "the retry turn never ran");
+    let seen = s.request(1);
+    assert!(
+        seen.contains("[turn failed]") && seen.contains("cut at max_tokens=16384"),
+        "{seen}"
+    );
+}
+
+/// MAX_SILENT_TURNS failures in a row end in `gave_up` naming the error, not a
+/// loop (#533).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failures_in_a_row_end_in_gave_up_not_a_loop() {
+    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_retry_bound").await;
+    let mut passes: Vec<Vec<ScriptEvent>> = (0..crate::constants::MAX_SILENT_TURNS)
+        .map(|_| vec![ScriptEvent::Fail("mock_backend: boom".into())])
+        .collect();
+    // an eleventh pass must never be served
+    passes.push(pass(r#"<call name="done"></call>"#));
+    let s = script(&backend, passes, Duration::ZERO);
+    let mut rx = rebind_backend_inbox(&kernel, &backend);
+    let mut seen: Vec<Value> = Vec::new();
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await;
+    events_until(&mut rx, &mut seen, |ev| {
+        status_reason(ev, "gave_up").is_some()
+    })
+    .await;
+    let gave_up = status_reason(&seen, "gave_up").expect("gave_up");
+    assert!(
+        gave_up["detail"]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("boom"),
+        "{gave_up}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.passes_served(), crate::constants::MAX_SILENT_TURNS);
+}
+
+/// A cancelled turn is not retried (#533).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_turn_is_not_retried() {
+    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_retry_cancel").await;
+    let s = script(
+        &backend,
+        vec![
+            pass(r#"<call name="done"></call>"#),
+            pass(r#"<call name="done"></call>"#),
+        ],
+        Duration::from_millis(500),
+    );
+    let (k, b) = (Arc::clone(&kernel), backend.clone());
+    let first = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    assert!(until_passes(&s, 1).await, "the pass never started");
+    let _ = kernel
+        .send(vec![Item::new(backend.clone(), json!({"type": "stop"}))])
+        .await;
+    let _ = first.await;
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert_eq!(s.passes_served(), 1, "a cancelled turn was retried");
+    let rows = stored_rows(&kernel, &backend).await;
+    assert!(error_rows(&rows).is_empty(), "{rows:#?}");
+}
+
+/// A message held while the chain runs waits for the retried turn and is answered
+/// by it (#533).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_message_is_answered_by_the_retried_turn() {
+    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_retry_held").await;
+    let s = script(
+        &backend,
+        vec![
+            vec![ScriptEvent::Fail("mock_backend: boom".into())],
+            pass(r#"HELD-ANSWER <call name="done"></call>"#),
+        ],
+        Duration::from_millis(400),
+    );
+    let (k, b) = (Arc::clone(&kernel), backend.clone());
+    let first = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "one", "client_id": "probe_a"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    assert!(until_passes(&s, 1).await, "the first pass never started");
+    let (k, b) = (Arc::clone(&kernel), backend.clone());
+    let second = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "two", "client_id": "probe_b"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    until_held(&backend, 1).await;
+    let first_out = first.await.expect("first send");
+    assert_eq!(first_out["raised"], json!(true), "{first_out}");
+    let second_out = second.await.expect("second send");
+    assert!(second_out.get("error").is_none(), "{second_out}");
+    assert!(
+        second_out["response"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("HELD-ANSWER"),
+        "{second_out}"
+    );
+    assert_eq!(s.passes_served(), 2);
 }

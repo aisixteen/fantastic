@@ -1962,8 +1962,8 @@ async fn a_caller_send_to_hands_off_once() {
     );
 }
 
-/// A failed pass is TERMINAL — a broken chain must not keep spending turns. The
-/// script's envelope on pass 2 would chain forever if an errored pass routed.
+/// A failed pass routes nothing (#533): it is retried as its own turn, and that
+/// retry ends the chain. The failed pass's own output is never dispatched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_error_reply_does_not_route() {
     let tmp = TempDir::new().unwrap();
@@ -1972,11 +1972,7 @@ async fn an_error_reply_does_not_route() {
         &backend,
         vec![
             vec![ScriptEvent::Fail("provider exploded".into())],
-            pass(call_envelope(
-                "kernel_state",
-                json!({"type": "list_agents"}),
-                None,
-            )),
+            pass(r#"<call name="done"></call>"#),
         ],
         Duration::ZERO,
     );
@@ -1993,7 +1989,7 @@ async fn an_error_reply_does_not_route() {
         "{r:#?}"
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(s.passes_served(), 1, "an errored pass must not route");
+    assert_eq!(s.passes_served(), 2, "the failed pass is retried once, then done");
 }
 
 /// PROVIDER FAILURE, KIND 2: unmapped — python re-raises it out of the
@@ -2008,7 +2004,10 @@ async fn unmapped_provider_error_settles_raised() {
     let (kernel, backend) = mk_kernel(&tmp, "rt_raise").await;
     let _s = script(
         &backend,
-        vec![vec![ScriptEvent::Fail("provider exploded".into())]],
+        vec![
+            vec![ScriptEvent::Fail("provider exploded".into())],
+            pass(r#"<call name="done"></call>"#),
+        ],
         Duration::ZERO,
     );
     let mut rx = rebind_backend_inbox(&kernel, &backend);
@@ -2030,10 +2029,10 @@ async fn unmapped_provider_error_settles_raised() {
         .filter(|v| {
             v.get("type").and_then(Value::as_str) == Some("status")
                 && v.get("phase").and_then(Value::as_str) == Some("done")
+                && v["detail"]["reason"] == json!("error")
         })
         .collect();
     assert_eq!(done.len(), 1, "{evs:#?}");
-    assert_eq!(done[0]["detail"]["reason"], json!("error"));
     assert_eq!(done[0]["detail"]["error"], json!("provider exploded"));
 }
 
