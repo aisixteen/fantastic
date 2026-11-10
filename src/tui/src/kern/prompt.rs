@@ -35,10 +35,6 @@ pub const BRIDGE: &str = "prompt_file";
 /// a new bundle only when the user asks, `fit` an html cell after placing it).
 pub const DEFAULT: &str = "{tree}\n\n{self}\n\n{howto}\n\n## Building here\n- Make every agent with a `create_agent` call to `kernel`, from the bundles reflect lists.\n- Write a new bundle (`.fantastic/bundles/<name>/`, or `spawn` with `bundle`) ONLY when the user asks for one.\n- After placing or updating an html cell, size it to its content: `fit {id}` on its view.\n";
 
-fn exists(h: &Host, id: &str) -> bool {
-    h.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(id))
-}
-
 fn err_of(r: &Value) -> Option<String> {
     r.get("error").and_then(Value::as_str).map(str::to_string)
 }
@@ -49,7 +45,7 @@ pub async fn ensure(h: &Host, cwd: &Path) -> Result<(), String> {
     if !f.exists() {
         std::fs::write(&f, DEFAULT).map_err(|e| format!("{}: {e}", f.display()))?;
     }
-    if !exists(h, BRIDGE) {
+    if !h.kernel.exists(BRIDGE) {
         let r = h
             .operator("kernel", json!({"type": "create_agent", "parent_id": crate::env::HUMAN, "id": BRIDGE,
                 "handler_module": "file_bridge.tools", "root": ".", "readonly": true,
@@ -74,7 +70,7 @@ fn is_ai(h: &Host, id: &str) -> bool {
 /// Name the file on AI `id`'s record — unless it names a file, or a bridge, of
 /// its own (a bridge alone means the default block: left as it is).
 pub async fn stamp(h: &Host, id: &str) -> Result<(), String> {
-    if !exists(h, BRIDGE) || !is_ai(h, id) {
+    if !h.kernel.exists(BRIDGE) || !is_ai(h, id) {
         return Ok(());
     }
     let own = h.kernel.agents.get(&fantastic_kernel::AgentId::from(id)).is_some_and(|a| {

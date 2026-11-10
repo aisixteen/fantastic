@@ -29,6 +29,7 @@ pub mod call_guard;
 pub mod docs;
 pub mod errors;
 pub mod executions;
+pub mod grants;
 pub mod inbox;
 pub mod inherit;
 pub mod jsonsafe;
@@ -66,7 +67,7 @@ pub use kernel::{
 pub use outcome::{body_at, Blob, Item, Outcome, Status, Step};
 pub use paging::page;
 pub use peers::{PeerCallFuture, PeerEmitFuture, PeerReply, PeerRoute};
-pub use refusal::{bad, missing, not_here, refusal, refusal_hint, unknown_agent};
+pub use refusal::{bad, error_text, missing, not_here, refusal, refusal_hint, unknown_agent};
 pub use rows::{Row, RowStore, RowTail};
 pub use scalar::{coerce_scalar, py_strip};
 pub use secret::{current_secret, note_reply_secret};
