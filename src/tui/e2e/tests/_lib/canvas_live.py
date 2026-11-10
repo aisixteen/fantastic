@@ -397,6 +397,7 @@ class Rig:
         try:
             async with await attach(chrome) as ws:
                 pg = Page(ws)
+                pg.rig = self
                 pg.mark = self.log_at
                 self.misses = pg.misses
                 await pg.cdp("Runtime.enable")
@@ -543,12 +544,60 @@ def http_get(url: str, timeout: float = 5) -> tuple[int, str]:
         return 0, ""
 
 
+#: The verbs an AI's cell may call on the page's agents (the host's egress gate checks
+#: every agent a call names): the view's control plane, its cells' own verbs, the
+#: backgrounds', the skin's read, the file tree's and the previewer's.
+VIEW_VERBS = ["place", "move", "fit", "update", "wire", "remove", "hide", "show", "open", "terminal_renderer", "reflect"]
+CELL_VERBS = ["reflect", "get_html", "set_html", "emit"]
+BG_VERBS = ["set_bg", "default_bg", "clear_bg", "get_bg", "reflect"]
+BACKGROUNDS_VERBS = ["list", "set", "random", "none", "default", "delete", "restore_stock", "add", "rotate"]
+SKIN_VERBS = ["get", "schema"]
+FILES_VERBS = ["select", "expand", "collapse", "reveal"]
+PREVIEW_VERBS = ["open", "pin", "unpin", "mode", "edit", "save", "revert"]
+
+
+def peer_grants(rig: "Rig") -> dict:
+    """The page reach an AI of the canvas holds: what its cell's view lets it call."""
+    g = rig.page_guid()
+    out = {
+        f"{g}|view_root": VIEW_VERBS,
+        f"{g}|skin": SKIN_VERBS,
+        f"{g}|*": sorted({*CELL_VERBS, *VIEW_VERBS, *BACKGROUNDS_VERBS, *SKIN_VERBS, *FILES_VERBS, *PREVIEW_VERBS}),
+    }
+    for f in rig.cells_dir.glob("*/agent.yaml"):
+        r = yaml.safe_load(oslayer.read_text(f)) or {}
+        if r.get("handler_module") == "background.ts":
+            out[f"{g}|{r['id']}"] = BG_VERBS
+    return out
+
+
+async def open_chat(pg: Page, x: int, y: int) -> str:
+    """Make the canvas's AI and show it: the host spawns the AI from the saved set-up
+    (`canvas_root spawn`, with the canvas's reach), the root view places a cell that
+    shows it at (x, y) (`place {backend_id}`), and the cell draws the html chat view
+    its `reflect` returns. Returns the AI's id once the view is up."""
+    from canvas import host_call
+
+    rig = pg.rig
+    made = await host_call(rig.port, "canvas_root", {"type": "spawn", "peer_grants": peer_grants(rig)})
+    if "id" not in made:
+        raise SystemExit(f"open_chat: the AI was not made: {made}")
+    placed = await host_call(rig.port, f"{rig.page_guid()}|view_root",
+                             {"type": "place", "backend_id": made["id"], "x": x, "y": y, "width": 440, "height": 520})
+    if "placed" not in placed:
+        raise SystemExit(f"open_chat: the cell was not placed: {placed}")
+    if not await pg.until(f"{CHAT_DOC}.length > 0", 30):
+        raise SystemExit("open_chat: the chat view never drew")
+    return str(made["id"])
+
+
 async def ask(pg: Page, x: int, y: int, text: str, total: float, quiet: float) -> tuple[bool, str]:
-    """NOT AVAILABLE: the canvas made an AI cell from the popup's `AI agent` tile, and
-    that tile and the TS chat are gone. A probe that needs a chat seeds the AI as a
-    host agent and a cell that shows it (`agent_view.ts` with `backend_id`), then
-    drives it with `say`, `wait_quiet` and `answer`."""
-    raise SystemExit("ask: the canvas no longer makes an AI cell from its popup; seed the AI agent and a cell showing it (see this helper)")
+    """Open the canvas's AI at (x, y) (`open_chat`) and send it `text`. Returns
+    `(done, its last words)`."""
+    await open_chat(pg, x, y)
+    await say(pg, text)
+    done = await wait_quiet(pg, total, quiet)
+    return done, await answer(pg)
 
 
 def html_cell(cid: str, name: str, x: int, y: int, html: str, w: int = 340, h: int = 240, **extra: Any) -> dict:

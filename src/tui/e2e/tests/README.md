@@ -28,6 +28,7 @@ with `src/tui/e2e/wipe.sh`.
 | E47 `pdf_panel` | show a served PDF through a deny-all file leg | dara PRD / patent / mockups | live |
 | E48 `set_scene` | set the singleton background (stays locked) | dara sunset, unified_vis motif | live |
 | E49 `terminal_task` | answer from a canvas terminal (git) | the terminals | live |
+| E50 `remember` | tell a fact → restart → reopen the dialog → recall | the html chat view | live |
 | E51 `inventory` | inventory a 27-cell canvas by kind, bounded calls | dara (33 cells) | live |
 | E52 `hydrate_scale` | 300 cells render within the bound | the dara 55 s regression | scripted |
 | E53 `panel_types` | every kind renders and survives reloads | all | scripted |
