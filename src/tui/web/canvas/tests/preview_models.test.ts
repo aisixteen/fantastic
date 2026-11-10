@@ -360,7 +360,7 @@ test("preview model: a binding is pinned to its path, or follows the selection",
 });
 
 test("preview model: an agent's folder shows its agent.yaml in file mode and the agent in agent mode; anything else is itself", () => {
-  const info: AgentInfo = { id: "agent_1", handler: "x.ts", displayName: "", hasParent: false, hasMemory: false };
+  const info: AgentInfo = { id: "agent_1", handler: "x.ts", displayName: "" };
   const index = { agentAt: (p: string) => (p === ".fantastic/agents/a" ? info : undefined) };
   assert.deepEqual(agentTarget(".fantastic/agents/a", "file", index), { path: ".fantastic/agents/a/agent.yaml", agent: "agent_1" });
   assert.deepEqual(agentTarget(".fantastic/agents/a", "agent", index), { path: ".fantastic/agents/a", agent: "agent_1" });

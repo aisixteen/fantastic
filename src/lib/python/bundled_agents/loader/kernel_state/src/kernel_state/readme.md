@@ -12,7 +12,8 @@ display_name, description?, ...state}`) — never its verbs. Flags compose it:
 
 - `tree=all|ids|none` (default `all`) — the subtree: nested / id-list / omitted.
   `show_subtrees=[ids]` keeps only those branches; `ignore_subtrees=[ids]` prunes
-  each to `{id, pruned: n}`. A full-tree reflect is for the first look only.
+  each to `{id, pruned: n}`; `handler_modules=[names]` lists only the agents of
+  those handlers (flat). A full-tree reflect is for the first look only.
 - `bundles=all|ids|none` (default `none`) — the installable-bundle catalog.
 - `readme=true|index|<key>` (default `false`) — this kernel's manual (below).
 

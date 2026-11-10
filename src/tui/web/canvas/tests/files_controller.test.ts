@@ -14,7 +14,7 @@ import { project, rig } from "./rig.ts";
 test("start restores the open folders in order (a folder that went away is skipped) and the selection, and says it", async () => {
   const r = rig();
   project(r.bridge);
-  r.index.set("src", { id: "src_agent", handler: "x.ts", displayName: "", hasParent: false, hasMemory: false });
+  r.index.set("src", { id: "src_agent", handler: "x.ts", displayName: "" });
   const ctl = new FilesController({ bridge: r.bridge, hub: r.hub, selfId: "t_restore", persist: () => {}, index: r.index, walk: () => {}, publish: (s) => r.published.push(s) });
   await ctl.start({ expanded: ["src/deep", "src", "gone", "../escape", "", 7 as unknown as string], selected: "src/deep/x.ts" });
   assert.equal(ctl.model.isOpen("src"), true);
@@ -29,7 +29,7 @@ test("start restores the open folders in order (a folder that went away is skipp
 test("start with a selection the tree does not have selects nothing; with one it has, the agent there is named", async () => {
   const r = rig();
   project(r.bridge);
-  r.index.set("src", { id: "src_agent", handler: "x.ts", displayName: "", hasParent: false, hasMemory: false });
+  r.index.set("src", { id: "src_agent", handler: "x.ts", displayName: "" });
   const ctl = new FilesController({ bridge: r.bridge, hub: r.hub, selfId: "t_sel", persist: () => {}, index: r.index, walk: () => {}, publish: (s) => r.published.push(s) });
   await ctl.start({ selected: "missing/one" });
   assert.equal(ctl.model.selected, null);
@@ -165,7 +165,7 @@ test("the verbs: collapse says what was open; select of an agent's folder carrie
   const r = rig();
   project(r.bridge);
   await r.mountTree("t_verbs4");
-  r.index.set("src", { id: "agent_src", handler: "x.ts", displayName: "", hasParent: false, hasMemory: false });
+  r.index.set("src", { id: "agent_src", handler: "x.ts", displayName: "" });
   const s = await r.call("t_verbs4", { type: "select", path: "src" });
   assert.deepEqual(s, { selected: "src", kind: "dir", agent: "agent_src" });
   assert.deepEqual(r.published.at(-1), { path: "src", agent: "agent_src" }, "the previews are told the same");

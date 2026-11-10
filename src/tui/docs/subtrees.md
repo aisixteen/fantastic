@@ -36,14 +36,16 @@ A reference that points OUTSIDE the subtree (a grant key in `can_call` /
 
 | port | kind | for |
 |---|---|---|
-| `@memory` | memory | a memory store (`memory_store_id`, a `*_store.tools`) |
+| `@memory` | memory | a memory store (`ram_store.tools`, `sqlite_store.tools`, `user_home_store.tools`, `user_store.tools`) |
 | `@credentials` | credentials | the key store (`credential_store.tools`) |
 | `@exec` | exec | an exec agent (`exec_bridge.tools`) |
 | `@files` | files | a file bridge (`file_bridge.tools`) |
-| `@model` | model | a chat model (`*_backend.tools`, `backend_id`) |
+| `@model` | model | an AI backend (`anthropic_backend.tools`, `ollama_backend.tools`, `responses_backend.tools`, `vllm_backend.tools`, `foundation_models_backend.tools`) |
 | `@connector:<id>` | connector | anything else |
 | `@path:<field>` | path | an absolute path outside the subtree's folder |
 
+The kind is the target's handler name, nothing else: a target that is
+`ai_chat.tools` is a `@connector`, and a target not in the tree is too.
 Two outside agents of one kind are `@memory`, `@memory_2`…, numbered by
 outside id. `$self`, `$parent`, `$subtree`, `*` and page grants
 (`<guid>|<id>`) are written as they are.

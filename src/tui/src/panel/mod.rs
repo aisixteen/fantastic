@@ -70,10 +70,8 @@ impl PanelKind {
         }
     }
 
-    /// The classification. Suffix matching on the module is deliberate: a kernel
-    /// may ship `vllm_backend.tools` or `responses_backend.tools` and both are
-    /// the same UI, so the rule is "ends with `_backend.tools`", not a list of
-    /// provider names this shell would have to be taught.
+    /// The classification, by the module's exact name. The AI arm names the
+    /// backends this build knows; a handler not in it is Generic, or Declared.
     ///
     /// The one exception is by ID: the shell's own terminal `term` is an
     /// `exec_bridge` like any command runner, and only this shell knows it is
@@ -83,10 +81,10 @@ impl PanelKind {
         if id == crate::kern::terminal::TERM_ID && m == fantastic_exec_bridge::HANDLER_MODULE {
             return PanelKind::Terminal;
         }
-        if m.ends_with("_backend.tools") || m == "ai_core.tools" {
-            return PanelKind::Ai;
-        }
         match m {
+            "anthropic_backend.tools" | "ollama_backend.tools" | "responses_backend.tools" | "vllm_backend.tools" | "foundation_models_backend.tools" => {
+                PanelKind::Ai
+            }
             "file_bridge.tools" => PanelKind::Files,
             "ram_store.tools" | "sqlite_store.tools" => PanelKind::Store,
             "scheduler.tools" => PanelKind::Scheduler,
@@ -237,15 +235,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_backend_is_an_ai_panel_without_being_named() {
+    fn the_five_backends_get_the_ai_panel() {
         for m in [
+            "anthropic_backend.tools",
             "vllm_backend.tools",
             "responses_backend.tools",
             "ollama_backend.tools",
             "foundation_models_backend.tools",
-            // A provider this shell has never heard of still gets the AI panel.
-            "some_future_backend.tools",
-            "ai_core.tools",
         ] {
             assert_eq!(PanelKind::of("x", m), PanelKind::Ai, "{m}");
         }
@@ -277,7 +273,7 @@ mod tests {
 
     #[test]
     fn an_unknown_module_still_gets_the_generic_panel_after_the_new_kinds() {
-        for m in ["scheduler", "store.tools", "credential_store", "scheduler.tool"] {
+        for m in ["scheduler", "store.tools", "credential_store", "scheduler.tool", "some_future_backend.tools", "ai_chat.tools"] {
             assert_eq!(PanelKind::of("x", m), PanelKind::Generic, "{m}");
         }
     }
@@ -305,7 +301,7 @@ mod tests {
     #[test]
     fn panel_choice_order_built_in_then_declared_then_generic() {
         assert_eq!(PanelKind::choose("x", "scheduler.tools", true), PanelKind::Scheduler);
-        assert_eq!(PanelKind::choose("x", "ai_core.tools", true), PanelKind::Ai);
+        assert_eq!(PanelKind::choose("x", "vllm_backend.tools", true), PanelKind::Ai);
         assert_eq!(
             PanelKind::choose("term", fantastic_exec_bridge::HANDLER_MODULE, true),
             PanelKind::Terminal

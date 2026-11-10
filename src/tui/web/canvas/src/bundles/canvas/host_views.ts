@@ -9,7 +9,7 @@
 //          bytes | bytes_file   (html: the body — the agent's own small renderer),
 //          calls: [verbs…]      (html: what the body calls on its agent)}
 //
-// No `view` → the agent kind's DEFAULT (an exec agent → terminal, an AI → chat),
+// No `view` → the agent kind's DEFAULT (an exec agent → terminal, an AI backend or ai_chat → chat),
 // else the STUB (its reflect + docs). One view per agent.
 
 export type Rec = Record<string, unknown>;
@@ -59,15 +59,18 @@ export const MODULE_KINDS: Record<string, string> = {
   "sqlite_store.tools": "store",
   "scheduler.tools": "scheduler",
   "credential_store.tools": "credentials",
+  "anthropic_backend.tools": "chat",
+  "ollama_backend.tools": "chat",
+  "responses_backend.tools": "chat",
+  "vllm_backend.tools": "chat",
+  "foundation_models_backend.tools": "chat",
+  "ai_chat.tools": "chat",
 };
 
 const EXEC = "exec_bridge.tools";
 const MCP = "mcp_client.tools";
 
 const str = (r: Rec, k: string): string | undefined => (typeof r[k] === "string" && r[k] !== "" ? (r[k] as string) : undefined);
-
-/** An AI agent: the field that makes one is its memory store (`memory_store_id`). */
-const isAi = (r: Rec): boolean => str(r, "memory_store_id") !== undefined && str(r, "handler_module") !== undefined;
 
 /** The view a host record gets: its own `view`, else its kind's default, else the stub. */
 export function viewOf(r: Rec): HostView {
@@ -90,7 +93,6 @@ export function viewOf(r: Rec): HostView {
   const module = str(r, "handler_module");
   const byModule = module === undefined ? undefined : MODULE_KINDS[module];
   if (byModule !== undefined) return { handler: RENDERERS[byModule]!, kind: byModule, calls: RENDERER_CALLS[byModule]! };
-  if (isAi(r)) return { handler: RENDERERS["chat"]!, kind: "chat", calls: RENDERER_CALLS["chat"]! };
   return { handler: RENDERERS["stub"]!, kind: "stub", calls: RENDERER_CALLS["stub"]! };
 }
 
@@ -149,7 +151,7 @@ export async function reflectFresh(id: string): Promise<Rec | undefined> {
   return r !== undefined && r !== null && typeof r === "object" && typeof r["error"] !== "string" ? r : undefined;
 }
 /** The record `viewOf` draws `id` from: the listing's fields (kind defaults read
- *  `handler_module`, `memory_store_id`) with the `view` of the agent's REFLECT —
+ *  `handler_module`) with the `view` of the agent's REFLECT —
  *  the listing's own `view` is never used. `undefined` when neither the page's
  *  listing nor a reflect knows the agent. */
 /** The `view` (JSON) each agent was last drawn or re-reflected with. */

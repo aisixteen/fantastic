@@ -32,7 +32,7 @@ host does not hold shows `no canvas <id> on this host` (never the main canvas).
 - **store_view** / **scheduler_view** / **credentials_view** —
   READ-ONLY views of the agents that had only the stub (`ram_store` and `sqlite_store`,
   `scheduler`, `credential_store`). A record with no `view` gets
-  its module's view (`host_views.ts` `MODULE_KINDS`); a record's own `view` still wins. Each reads with the verbs of its grant
+  its module's view (`host_views.ts` `MODULE_KINDS`; the five `*_backend.tools` and `ai_chat.tools` map to the chat view); a record's own `view` still wins. Each reads with the verbs of its grant
   (`RENDERER_CALLS`) plus `watch`, and an event on the agent reads it again. The
   rows come from pure models (`src/bundles/agent_models/`) that keep only whitelisted
   keys: the store view shows counts and the viewer's own search hits, never another

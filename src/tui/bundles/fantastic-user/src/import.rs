@@ -227,11 +227,6 @@ fn path_ports(v: &Value, out: &mut BTreeSet<String>) {
     }
 }
 
-/// The kind of agent a handler is, in port words.
-fn handler_kind(hm: &str) -> &'static str {
-    port_kind(Some(hm), "")
-}
-
 /// A name that stays as it is: a baseline token, a wildcard, a page grant.
 fn is_kept(name: &str) -> bool {
     name == "*" || name.starts_with('$') || name.contains('|')
@@ -410,7 +405,7 @@ pub fn plan(yaml: &str, files: &BTreeMap<String, String>, w: &World) -> Result<P
                 format!("bind {name}: no agent {target:?}"),
             ));
         };
-        let found = handler_kind(&hm);
+        let found = port_kind(Some(&hm));
         if kind != "connector" && found != kind {
             return Err(err(
                 "bad_binding",

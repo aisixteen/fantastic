@@ -52,8 +52,8 @@ fn field(h: &Host, id: &str, f: &str) -> Map<String, Value> {
 }
 
 /// The HOLDERS of the reach (strictly single-user dev tool, owner 2026-10-04):
-/// each present holding leg, `user`, every AI agent (a non-root agent naming a
-/// memory store), and the host-side helpers that act for the human —
+/// each present holding leg, `user`, every AI agent (a non-root agent whose handler
+/// is a backend or `ai_chat.tools`), and the host-side helpers that act for the human —
 /// `canvas_root` and every canvas set-up agent.
 fn holders(h: &Host) -> Vec<String> {
     let root = h.kernel.root().map(|r| r.id.0.clone());
@@ -69,8 +69,18 @@ fn holders(h: &Host) -> Vec<String> {
         .filter(|e| Some(&e.key().0) != root.as_ref())
         .filter(|e| {
             let r = e.value().record();
-            r.meta.get("memory_store_id").and_then(Value::as_str).is_some()
-                || r.handler_module.as_deref().is_some_and(|m| helper.contains(&m))
+            r.handler_module.as_deref().is_some_and(|m| {
+                helper.contains(&m)
+                    || matches!(
+                        m,
+                        "anthropic_backend.tools"
+                            | "ollama_backend.tools"
+                            | "responses_backend.tools"
+                            | "vllm_backend.tools"
+                            | "foundation_models_backend.tools"
+                            | "ai_chat.tools"
+                    )
+            })
         })
         .map(|e| e.key().0.clone())
         .collect();
@@ -197,7 +207,12 @@ fn write_back(h: &Host, ids: &[String]) -> Result<(), String> {
         .filter(|e| {
             let id = e.key().0.as_str();
             Some(&e.key().0) != root.as_ref() && id != CANVAS_LEG && !held.contains(id)
-                && !e.value().record().handler_module.as_deref().is_some_and(|m| m.contains("store"))
+                && !e.value().record().handler_module.as_deref().is_some_and(|m| {
+                    matches!(
+                        m,
+                        "ram_store.tools" | "sqlite_store.tools" | "credential_store.tools" | "user_home_store.tools" | "user_store.tools"
+                    )
+                })
         })
         .map(|e| e.key().0.clone())
         .collect();
@@ -412,10 +427,15 @@ mod tests {
 
     /// An agent with the given parent and meta, registered on `kernel`.
     fn put(kernel: &Kernel, id: &str, parent: Option<&str>, meta: Value) {
+        put_as(kernel, id, "probe.tools", parent, meta);
+    }
+
+    /// [`put`] with the agent's handler named.
+    fn put_as(kernel: &Kernel, id: &str, handler: &str, parent: Option<&str>, meta: Value) {
         let meta: Map<String, Value> = meta.as_object().cloned().unwrap_or_default();
         kernel.register(Agent::new(
             AgentId::from(id),
-            Some("probe.tools".to_string()),
+            Some(handler.to_string()),
             parent.map(AgentId::from),
             meta,
             PathBuf::from("/nonexistent"),
@@ -469,7 +489,7 @@ mod tests {
             put(k, id, Some(crate::env::HUMAN), json!({"callable_by": {crate::env::HUMAN: ["*"]}}));
         }
         put(k, "ordinary", Some(crate::env::HUMAN), json!({"callable_by": {crate::env::HUMAN: ["*"]}}));
-        put(k, "master", Some("kernel"), json!({"memory_store_id": "m"}));
+        put_as(k, "master", "ai_chat.tools", Some("kernel"), json!({"memory_store_id": "m"}));
         put(k, "m", Some("kernel"), json!({}));
         let ids: Vec<String> = NARROWED.iter().map(|s| s.to_string()).chain(["ordinary".to_string()]).collect();
         write_grants(&h, &ids).unwrap();
@@ -494,8 +514,8 @@ mod tests {
         // a child canvas nested under the main one, an AI placed on it, and an ordinary AI holder
         put(k, "canvas_root", Some("kernel"), json!({}));
         put(k, "canvas_child_a", Some("canvas_root"), json!({}));
-        put(k, "helper", Some("canvas_child_a"), json!({"memory_store_id": "m"}));
-        put(k, "master", Some("kernel"), json!({"memory_store_id": "m"}));
+        put_as(k, "helper", "ai_chat.tools", Some("canvas_child_a"), json!({"memory_store_id": "m"}));
+        put_as(k, "master", "ai_chat.tools", Some("kernel"), json!({"memory_store_id": "m"}));
         put(k, "m", Some("kernel"), json!({}));
         write_grants(&h, &["helper".to_string(), "canvas_child_a".to_string()]).unwrap();
         let field = |id: &str, f: &str| -> Value {
@@ -510,6 +530,28 @@ mod tests {
             assert_eq!(field(id, "callable_by")[CANVAS_LEG], leg_verbs(&h, id), "{id}");
             assert_eq!(field(CANVAS_LEG, "can_call")[id], leg_verbs(&h, id), "{id}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_record_with_a_store_field_but_a_plain_handler_is_not_a_holder() {
+        let h = host_with_leg("plain-with-store-field").await;
+        let k = &h.kernel;
+        put_as(k, "plain", "file_bridge.tools", Some("kernel"), json!({"memory_store_id": "m"}));
+        put(k, "ordinary", Some("kernel"), json!({}));
+        write_grants(&h, &["ordinary".to_string()]).unwrap();
+        let can_call = k.agents.get(&AgentId::from("plain")).unwrap().value().record().meta.get("can_call").cloned().unwrap_or(Value::Null);
+        assert!(can_call.get("ordinary").is_none(), "{can_call}");
+    }
+
+    #[tokio::test]
+    async fn an_ai_chat_agent_is_a_holder_without_a_store_field() {
+        let h = host_with_leg("chat-without-store-field").await;
+        let k = &h.kernel;
+        put_as(k, "chat", "ai_chat.tools", Some("kernel"), json!({}));
+        put(k, "ordinary", Some("kernel"), json!({}));
+        write_grants(&h, &["ordinary".to_string()]).unwrap();
+        let can_call = k.agents.get(&AgentId::from("chat")).unwrap().value().record().meta.get("can_call").cloned().unwrap_or(Value::Null);
+        assert_eq!(can_call["ordinary"], json!(["*"]), "{can_call}");
     }
 
     #[test]
@@ -580,7 +622,7 @@ mod tests {
 
     // ── #467: THE FIRST TURN OF A NEW AGENT NEVER RUNS BEFORE ITS GRANTS ──
 
-    const PROBE_AI: &str = "probe_ai.tools";
+    const PROBE_AI: &str = "ai_chat.tools";
     const SINK: &str = "sink.tools";
 
     /// A scripted AI, no model. `send` is its FIRST TURN: one tool call, to `sink`, made as

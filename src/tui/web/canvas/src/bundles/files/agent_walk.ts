@@ -99,6 +99,6 @@ export class AgentWalker {
       errors.set(dir, `${path} names no id`);
       return null;
     }
-    return { id: y.id, handler: y.handler ?? "", displayName: y.displayName ?? "", hasParent: y.hasParent, hasMemory: y.hasMemory };
+    return { id: y.id, handler: y.handler ?? "", displayName: y.displayName ?? "" };
   }
 }

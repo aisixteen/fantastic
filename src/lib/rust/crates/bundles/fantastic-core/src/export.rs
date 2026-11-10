@@ -184,20 +184,30 @@ fn relative_to(s: &str, folder: &str) -> Option<String> {
     })
 }
 
-/// The port kind for an outside agent, from its handler and the field that
-/// reaches it.
+/// The port kind for an outside agent: decided by the target's handler
+/// name alone, never by the field that reaches it.
 #[must_use]
-pub fn port_kind(handler_module: Option<&str>, field: &str) -> &'static str {
+pub fn port_kind(handler_module: Option<&str>) -> &'static str {
     let hm = handler_module.unwrap_or("");
-    if hm == "credential_store.tools" || field == "credentials.store" {
+    if hm == "credential_store.tools" {
         "credentials"
-    } else if field == "memory_store_id" || hm.ends_with("_store.tools") {
+    } else if matches!(
+        hm,
+        "ram_store.tools" | "sqlite_store.tools" | "user_home_store.tools" | "user_store.tools"
+    ) {
         "memory"
     } else if hm == "exec_bridge.tools" {
         "exec"
     } else if hm == "file_bridge.tools" {
         "files"
-    } else if hm.ends_with("_backend.tools") || field == "backend_id" {
+    } else if matches!(
+        hm,
+        "anthropic_backend.tools"
+            | "ollama_backend.tools"
+            | "responses_backend.tools"
+            | "vllm_backend.tools"
+            | "foundation_models_backend.tools"
+    ) {
         "model"
     } else {
         "connector"
@@ -495,22 +505,12 @@ pub fn build(
             &mut collect,
         );
     }
-    // the kind of each outside target: a memory_store_id use decides it
+    // the kind of each outside target: its handler name decides it
     let mut kinds: BTreeMap<Reach, (&'static str, String)> = BTreeMap::new();
     for (_, x) in &uses {
         let key = canon(x);
         let (kind, label) = match x {
-            Reach::Agent { target, field } => {
-                let decided = uses.iter().any(|(_, y)| {
-                    matches!(y, Reach::Agent { target: t, field: f } if t == target && f == "memory_store_id")
-                });
-                let f = if decided {
-                    "memory_store_id"
-                } else {
-                    field.as_str()
-                };
-                (port_kind(hm_of(target), f), target.clone())
-            }
+            Reach::Agent { target, .. } => (port_kind(hm_of(target)), target.clone()),
             Reach::Path { field, .. } => ("path", field.clone()),
         };
         kinds.entry(key).or_insert((kind, label));

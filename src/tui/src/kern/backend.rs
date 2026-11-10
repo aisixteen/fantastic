@@ -195,7 +195,10 @@ impl BackendBundle {
         let Some(t) = shelf.saved.iter().find(|t| t.name == name) else {
             return refuse("not_found", format!("no saved set-up `{name}`"), "open ⚙ AI set-up to see your saved set-ups");
         };
-        if !fantastic_ai_core::is_ai_handler(&host.kernel, &t.handler()) {
+        if !matches!(
+            t.handler().as_str(),
+            "anthropic_backend.tools" | "ollama_backend.tools" | "responses_backend.tools" | "vllm_backend.tools" | "foundation_models_backend.tools"
+        ) {
             return refuse("bad_arg", format!("saved set-up `{name}` is not an AI set-up ({})", t.handler()), "open ⚙ AI set-up to see your saved set-ups");
         }
         let ai = format!("ai_{}", hex8());
@@ -408,7 +411,10 @@ impl BackendBundle {
         // an AI is made the way every AI is (`make_ai`): on the project's memory store from
         // its first turn, granted its store and the human's chat verbs. Equipment that is
         // an AI reaches its memory store through this, as a canvas's AI always has.
-        if fantastic_ai_core::is_ai_handler(&host.kernel, handler) {
+        if matches!(
+            handler,
+            "anthropic_backend.tools" | "ollama_backend.tools" | "responses_backend.tools" | "vllm_backend.tools" | "foundation_models_backend.tools"
+        ) {
             let ai = match rec.get("id").and_then(Value::as_str) {
                 Some(id) => id.to_string(),
                 None => format!("ai_{}", hex8()),
@@ -735,17 +741,13 @@ mod create_tests {
     use fantastic_kernel::{Agent, Kernel};
     use std::path::PathBuf;
 
-    /// A registered AI handler: its bundle's record names a memory store.
+    /// A registered AI handler, registered under a backend name.
     struct FakeAi;
 
     #[async_trait]
     impl Bundle for FakeAi {
         fn name(&self) -> &str {
-            "fake_ai.tools"
-        }
-
-        fn record_schema(&self) -> Option<Value> {
-            Some(json!({"fields": [{"name": "memory_store_id"}]}))
+            "vllm_backend.tools"
         }
 
         async fn handle(&self, _id: &AgentId, _p: &Value, _k: &Arc<Kernel>) -> Result<Option<Value>, BundleError> {
@@ -769,7 +771,7 @@ mod create_tests {
             fantastic_core::KernelStateBundle::default(),
         );
         kernel.bundles.register(HANDLER_MODULE, BackendBundle);
-        kernel.bundles.register("fake_ai.tools", FakeAi);
+        kernel.bundles.register("vllm_backend.tools", FakeAi);
         // `user` is real: the host admits an AI to the store AS `user` (`Host::act`)
         kernel.bundles.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
         let kernel = Arc::new(kernel);
@@ -816,7 +818,7 @@ mod create_tests {
         let out = BackendBundle::create(
             &h,
             &me,
-            &json!({"record": {"handler_module": "fake_ai.tools", "id": "helper", "memory_store_id": "memory"}}),
+            &json!({"record": {"handler_module": "vllm_backend.tools", "id": "helper", "memory_store_id": "memory"}}),
         )
         .await;
         assert_eq!(out, json!({"id": "helper"}), "{out}");
@@ -866,7 +868,7 @@ mod create_tests {
         let out = BackendBundle::create(
             &h,
             &AgentId::from("canvas_root"),
-            &json!({"record": {"handler_module": "fake_ai.tools", "id": "helper2", "memory_store_id": "own_store"}}),
+            &json!({"record": {"handler_module": "vllm_backend.tools", "id": "helper2", "memory_store_id": "own_store"}}),
         )
         .await;
         assert_eq!(out, json!({"id": "helper2"}), "{out}");
@@ -896,7 +898,7 @@ mod create_tests {
     fn the_ai_create_spec_grants_its_store_and_merges_the_callers_grants_over_the_defaults() {
         let me = AgentId::from("canvas_root");
         let spec = json!({
-            "handler_module": "fake_ai.tools",
+            "handler_module": "vllm_backend.tools",
             "can_call": {"tool_a": "*", "memory": ["send"]},
             "callable_by": {"ops": ["send"]},
         });

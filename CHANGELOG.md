@@ -7,6 +7,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- `reflect` takes `handler_modules` (#605): a list of handler names; with `tree` `all` or `ids` only the agents whose `handler_module` is listed come back, as a flat `tree` list, and an agent outside the list is not asked. A value that is not a list of names is refused `bad_arg`.
 - `boot_kernel` / `stop_kernel` in `fantastic_tui` (#580): a host that runs the kernel in its own
   process boots one folder (after `seed_dir_with`) with the stock bundles plus its `Extra`s, an
   optional web port and bind, and gets the running `Arc<Kernel>`; `stop_kernel` ends it in the
@@ -225,6 +226,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Changed
 
+- An agent's kind is its handler name (#605): the AI checks (`is_ai`, `is_ai_handler`, `ai_check`, the page's `isAi`, `is_web`, `is_canvas`) are removed; the row watch, grant holders, prompt stamp, set-up catalog, AI panel, export port kinds and the page's chat view and badges compare the record's `handler_module` with the names they need, and no longer read `memory_store_id` or a name suffix.
 - Boot (#580): in the terminal UI and `canvas`, a refused grant watch (`reach::start`) now stops
   the boot like in `mcp` mode (it was a note); in `mcp` mode the grant watch now starts before
   the MCP leg is made. A refused canvas now stops the kernel at once, before the UI's runners

@@ -204,7 +204,7 @@ test("ledger: owners and held paths are listed (held sorted); a release by one w
 
 test("agent index: folder and id both ways; a re-set id points at the new folder; drop only forgets what is still its own", () => {
   const ix = new AgentIndex();
-  const info = (id: string) => ({ id, handler: "x.ts", displayName: "", hasParent: false, hasMemory: false });
+  const info = (id: string) => ({ id, handler: "x.ts", displayName: "" });
   ix.set(".fantastic/a", info("one"));
   ix.set(".fantastic/b", info("one"));
   assert.equal(ix.folderOf("one"), ".fantastic/b", "the id now names the later folder");

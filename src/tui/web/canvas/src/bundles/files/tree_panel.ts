@@ -1,5 +1,5 @@
 import type { Kernel } from "../../lib.ts";
-import { badge, badgeOf, side } from "./agent_index.ts";
+import { badge, side } from "./agent_index.ts";
 import { routedBridge, sharedHub } from "./file_bridge.ts";
 import { FilesController, controllers } from "./files_controller.ts";
 import type { FilesState } from "./files_controller.ts";
@@ -111,7 +111,7 @@ export function mountTreePanel(o: TreePanelOptions): TreePanel {
     return {
       id,
       side: sd,
-      glyph: rec !== undefined ? badge(rec, handler) : info !== undefined ? badgeOf(info) : "◇",
+      glyph: badge(handler),
       handler,
       loaded,
       elsewhere: !loaded && sd === "host" && d.onHost(id) && !d.seenHere(id),

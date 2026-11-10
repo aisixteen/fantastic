@@ -195,14 +195,6 @@ async fn set_web_bind(kernel: &Arc<Kernel>, id: &AgentId, addr: &str, notes: &mu
     }
 }
 
-/// TRUE when agent `id` is a `web` host (its handler module).
-fn is_web(kernel: &Arc<Kernel>, id: &AgentId) -> bool {
-    kernel
-        .agents
-        .get(id)
-        .is_some_and(|a| a.value().record().handler_module.as_deref() == Some(fantastic_web::HANDLER_MODULE))
-}
-
 /// Boot every agent the kernel's start did not (`done`), in registration order. A recorded
 /// `web` host boots too, in every mode: it is the one HTTP/WS listener, and every agent with
 /// a route reuses it. `web_port`/`web_bind` (`--port`/`--host`) are set on it before
@@ -210,11 +202,25 @@ fn is_web(kernel: &Arc<Kernel>, id: &AgentId) -> bool {
 /// goes on.
 async fn boot_the_rest(kernel: &Arc<Kernel>, done: &[String], web_port: Option<u16>, web_bind: Option<&str>) -> Vec<String> {
     let mut notes = Vec::new();
+    // the `web` hosts, by handler: one reflect of the tree
+    let mut web: Vec<String> = Vec::new();
+    let found = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "reflect", "tree": "ids", "handler_modules": [fantastic_web::HANDLER_MODULE]}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    match found.get("tree").and_then(Value::as_array) {
+        Some(ids) if found.get("error").is_none() => web = ids.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+        _ => notes.push(format!("the web hosts could not be listed: {}", found.get("error").and_then(Value::as_str).unwrap_or("no tree"))),
+    }
     for id in kernel.agent_ids() {
         if done.contains(&id.0) {
             continue;
         }
-        if is_web(kernel, &id) {
+        if web.contains(&id.0) {
             // No `--port` and none recorded (a `web` seeded without one): a free port is
             // picked once and recorded, as the first `canvas` does; later runs reuse it.
             let recorded = kernel
@@ -400,17 +406,23 @@ impl Host {
         }
     }
 
-    /// The AI agents in the tree: every non-root agent whose record names a
-    /// memory store (`memory_store_id`) — the field that makes one.
-    pub fn ai_agents(&self) -> Vec<String> {
-        let root = self.kernel.root().map(|r| r.id.clone());
-        self.kernel
-            .agents
-            .iter()
-            .filter(|e| Some(e.key()) != root.as_ref())
-            .filter(|e| e.value().record().meta.get("memory_store_id").and_then(Value::as_str).is_some())
-            .map(|e| e.key().0.clone())
-            .collect()
+    /// The AI agents in the tree: the ids `reflect` lists for the handlers of the
+    /// five backends and `ai_chat.tools`.
+    pub async fn ai_agents(&self) -> Vec<String> {
+        let r = self
+            .operator(
+                "kernel",
+                json!({"type": "reflect", "tree": "ids", "handler_modules": [
+                    "anthropic_backend.tools", "ollama_backend.tools", "responses_backend.tools",
+                    "vllm_backend.tools", "foundation_models_backend.tools", "ai_chat.tools"]}),
+            )
+            .await
+            .result;
+        if let Some(e) = r.get("error").and_then(Value::as_str) {
+            tracing::warn!("ai_agents: reflect refused: {e}");
+            return Vec::new();
+        }
+        r.get("tree").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default()
     }
 
     /// Admit AI agent `ai` to the memory store — the store's side of the gate,
@@ -498,14 +510,21 @@ impl Host {
             return (Vec::new(), None);
         };
         let mut by: std::collections::BTreeMap<i64, Value> = std::collections::BTreeMap::new();
-        // an AI agent: a non-root agent naming a memory store (the root names
-        // the project's, for the kernel's own rows)
-        let keeps_rows = agent != self.root
-            && self
-                .kernel
-                .agents
-                .get(&AgentId::from(agent))
-                .is_some_and(|a| a.value().record().meta.get("memory_store_id").and_then(Value::as_str).is_some());
+        // an AI agent: its record's handler is a backend or `ai_chat.tools` (the root's
+        // is not: it keeps the project's rows through the kernel store)
+        let keeps_rows = self.kernel.agents.get(&AgentId::from(agent)).is_some_and(|a| {
+            matches!(
+                a.value().record().handler_module.as_deref(),
+                Some(
+                    "anthropic_backend.tools"
+                        | "ollama_backend.tools"
+                        | "responses_backend.tools"
+                        | "vllm_backend.tools"
+                        | "foundation_models_backend.tools"
+                        | "ai_chat.tools"
+                )
+            )
+        });
         let mut loaded = None;
         if keeps_rows {
             let mut cursor = after;
@@ -690,7 +709,12 @@ pub async fn boot_all(
     let asked = web_port.is_some() || web_bind.is_some();
     let bind = web_bind.clone();
     let host = Arc::new(Host::boot(paths, extras, web_port, web_bind).await.map_err(|e| format!("{e}"))?);
-    if asked && !canvas && !host.kernel.agent_ids().iter().any(|id| is_web(&host.kernel, id)) {
+    let web = host
+        .operator("kernel", json!({"type": "reflect", "tree": "ids", "handler_modules": [fantastic_web::HANDLER_MODULE]}))
+        .await
+        .result;
+    let has_web = web.get("tree").and_then(Value::as_array).is_some_and(|t| !t.is_empty());
+    if asked && !canvas && !has_web {
         stop(&host.kernel).await;
         return Err("--port/--host: the folder has no `web` record to set them on".into());
     }
@@ -1007,12 +1031,68 @@ mod tests {
         assert_eq!(made["id"], "st", "{made}");
         let notes = boot_the_rest(&k, &[root], None, None).await;
         assert!(notes.is_empty(), "{notes:?}");
-        let any_web = k.agent_ids().iter().any(|id| {
-            k.agents.get(id).is_some_and(|a| {
-                a.value().record().handler_module.as_deref() == Some(fantastic_web::HANDLER_MODULE)
-            })
+        let web = send(&k, "kernel", json!({"type": "reflect", "tree": "ids", "handler_modules": ["web.tools"]})).await;
+        assert_eq!(web["tree"], json!([]), "no web agent exists: {web}");
+    }
+
+    /// A bundle that answers nothing, registered under any handler name.
+    struct Stub(&'static str);
+
+    #[async_trait::async_trait]
+    impl fantastic_kernel::bundle::Bundle for Stub {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        async fn handle(
+            &self,
+            _id: &AgentId,
+            _p: &Value,
+            _k: &Arc<Kernel>,
+        ) -> Result<Option<Value>, fantastic_kernel::bundle::BundleError> {
+            Ok(None)
+        }
+    }
+
+    /// The row watch lists the agents of the five backends and `ai_chat.tools` only,
+    /// by handler: not a record that merely names a store, not the root.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ai_agents_lists_the_agents_of_the_six_handlers_only() {
+        let dir = std::env::temp_dir().join(format!("fc-host-{}-ai-agents", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+            state_dir: dir.join(".fantastic"),
+            work_dir: dir.to_path_buf(),
         });
-        assert!(!any_web, "no web agent exists");
+        kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+        for m in ["ai_chat.tools", "vllm_backend.tools", "py_agent.tools"] {
+            kernel.bundles.register(m, Stub(m));
+        }
+        let kernel = Arc::new(kernel);
+        let root = fantastic_kernel::Agent::new(
+            AgentId::from("kernel"),
+            Some(fantastic_core::HANDLER_MODULE.to_string()),
+            None,
+            serde_json::Map::new(),
+            dir.join(".fantastic"),
+            false,
+        );
+        kernel.register(Arc::clone(&root));
+        kernel.set_root(root);
+        for (id, handler, with_store) in
+            [("chat", "ai_chat.tools", false), ("vllm", "vllm_backend.tools", true), ("py", "py_agent.tools", true)]
+        {
+            let mut payload = json!({"type": "create_agent", "parent_id": "kernel", "id": id, "handler_module": handler});
+            if with_store {
+                payload["memory_store_id"] = json!("m");
+            }
+            let made = send(&kernel, "kernel", payload).await;
+            assert_eq!(made["id"], id, "{made}");
+        }
+        let host = Host { kernel, cfg: crate::env::ClientCfg::here(), root: "kernel".to_string() };
+        assert_eq!(host.ai_agents().await, vec!["chat".to_string(), "vllm".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// #469: a CLI host kernel makes a `ws_bridge` and `forward` reaches an agent on the

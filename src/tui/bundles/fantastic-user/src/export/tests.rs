@@ -175,6 +175,42 @@ fn outside_backend_becomes_model_port() {
 }
 
 #[test]
+fn a_port_kind_is_the_targets_handler_not_the_field_that_reaches_it() {
+    let mut recs = tree(
+        json!({"memory_store_id": "files", "backend_id": "ollama"}),
+        json!({"backend_id": "b_chat"}),
+        json!({}),
+    );
+    recs.push(rec(
+        "ollama",
+        Some("user"),
+        "ollama_backend.tools",
+        json!({}),
+    ));
+    recs.push(rec("b_chat", Some("user"), "ai_chat.tools", json!({})));
+    let ex = export(&recs);
+    let d = doc(&ex);
+    assert_eq!(d["ports"]["@files"]["kind"], "files", "{}", ex.yaml);
+    assert_eq!(d["ports"]["@model"]["kind"], "model", "{}", ex.yaml);
+    assert_eq!(
+        d["ports"]["@connector:b_chat"]["kind"], "connector",
+        "{}",
+        ex.yaml
+    );
+}
+
+#[test]
+fn a_target_outside_the_records_is_a_connector() {
+    let ex = export(&tree(
+        json!({"memory_store_id": "ghost"}),
+        json!({}),
+        json!({}),
+    ));
+    let d = doc(&ex);
+    assert_eq!(d["ports"]["@connector:ghost"]["kind"], "connector");
+}
+
+#[test]
 fn outside_exec_becomes_exec_port() {
     let ex = export(&tree(
         json!({}),
