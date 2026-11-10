@@ -979,6 +979,66 @@ async fn handler_modules_ids_lists_only_the_named_handlers() {
     assert_eq!(tree_ids(&all).len(), 5);
 }
 
+/// A role over `roster_probe.tools` (and `b2` over that role) with one agent of each.
+fn role_tree() -> Arc<Kernel> {
+    let (kernel, root) = handler_tree();
+    let yaml = |base: &str| format!("base: {base}\nsentence: s\n");
+    kernel
+        .bundles
+        .register_meta_yaml("probe_role", &yaml("roster_probe.tools"))
+        .unwrap();
+    kernel
+        .bundles
+        .register_meta_yaml("b2", &yaml("probe_role"))
+        .unwrap();
+    handler_child(&kernel, "r1", "probe_role", &root, json!({}));
+    handler_child(&kernel, "r2", "b2", &root, json!({}));
+    kernel
+}
+
+async fn ids_under(kernel: &Arc<Kernel>, hm: Value) -> Vec<String> {
+    let r = kernel_reflect(
+        kernel,
+        json!({"type": "reflect", "tree": "ids", "handler_modules": hm}),
+    )
+    .await
+    .result;
+    tree_ids(&r)
+}
+
+#[tokio::test]
+async fn handler_modules_ids_lists_a_role_agent_under_its_base_and_its_own_name() {
+    let kernel = role_tree();
+    assert_eq!(
+        ids_under(&kernel, json!(["roster_probe.tools"])).await,
+        ["a", "c", "r1", "r2"]
+    );
+    assert_eq!(ids_under(&kernel, json!(["probe_role"])).await, ["r1"]);
+    assert!(ids_under(&kernel, json!(["fixture_probe.tools"]))
+        .await
+        .iter()
+        .all(|i| i != "r1"));
+    // A two-step chain: its own name and the final base, not the link between.
+    assert_eq!(ids_under(&kernel, json!(["b2"])).await, ["r2"]);
+    assert!(!ids_under(&kernel, json!(["probe_role"]))
+        .await
+        .contains(&"r2".to_string()));
+}
+
+#[tokio::test]
+async fn handler_modules_tree_lists_a_role_agent_under_its_base() {
+    let kernel = role_tree();
+    let r = kernel_reflect(
+        &kernel,
+        json!({"type": "reflect", "handler_modules": ["roster_probe.tools"]}),
+    )
+    .await
+    .result;
+    let nodes = r["tree"].as_array().expect("flat list");
+    let ids: Vec<&str> = nodes.iter().map(|n| n["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["a", "c", "r1", "r2"]);
+}
+
 #[tokio::test]
 async fn handler_modules_distilled_tree_is_a_flat_list_of_nodes_without_children() {
     let (kernel, _root) = handler_tree();

@@ -407,7 +407,7 @@ impl Host {
     }
 
     /// The AI agents in the tree: the ids `reflect` lists for the handlers of the
-    /// five backends and `ai_chat.tools`.
+    /// five backends and `ai_chat.tools`, and the agents of roles over them.
     pub async fn ai_agents(&self) -> Vec<String> {
         let r = self
             .operator(
@@ -510,12 +510,15 @@ impl Host {
             return (Vec::new(), None);
         };
         let mut by: std::collections::BTreeMap<i64, Value> = std::collections::BTreeMap::new();
-        // an AI agent: its record's handler is a backend or `ai_chat.tools` (the root's
-        // is not: it keeps the project's rows through the kernel store)
-        let keeps_rows = self.kernel.agents.get(&AgentId::from(agent)).is_some_and(|a| {
-            matches!(
-                a.value().record().handler_module.as_deref(),
-                Some(
+        // an AI agent: its record's handler, or the base of its role, is a backend or
+        // `ai_chat.tools` (the root's is not: it keeps the project's rows through the
+        // kernel store)
+        let handler = self.kernel.agents.get(&AgentId::from(agent)).and_then(|a| a.value().record().handler_module.clone());
+        let keeps_rows = handler.is_some_and(|h| {
+            let base = self.kernel.bundles.base_of(&h);
+            [h.as_str(), base.as_str()].iter().any(|n| {
+                matches!(
+                    *n,
                     "anthropic_backend.tools"
                         | "ollama_backend.tools"
                         | "responses_backend.tools"
@@ -523,7 +526,7 @@ impl Host {
                         | "foundation_models_backend.tools"
                         | "ai_chat.tools"
                 )
-            )
+            })
         });
         let mut loaded = None;
         if keeps_rows {
@@ -1054,8 +1057,8 @@ mod tests {
         }
     }
 
-    /// The row watch lists the agents of the five backends and `ai_chat.tools` only,
-    /// by handler: not a record that merely names a store, not the root.
+    /// The row watch lists the agents of the five backends and `ai_chat.tools`, and of
+    /// roles over them, by handler: not a record that merely names a store, not the root.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ai_agents_lists_the_agents_of_the_six_handlers_only() {
         let dir = std::env::temp_dir().join(format!("fc-host-{}-ai-agents", std::process::id()));
@@ -1069,6 +1072,8 @@ mod tests {
         for m in ["ai_chat.tools", "vllm_backend.tools", "py_agent.tools"] {
             kernel.bundles.register(m, Stub(m));
         }
+        kernel.bundles.register_meta_yaml("chat_role", "base: ai_chat.tools\nsentence: s\n").unwrap();
+        kernel.bundles.register_meta_yaml("py_role", "base: py_agent.tools\nsentence: s\n").unwrap();
         let kernel = Arc::new(kernel);
         let root = fantastic_kernel::Agent::new(
             AgentId::from("kernel"),
@@ -1081,7 +1086,13 @@ mod tests {
         kernel.register(Arc::clone(&root));
         kernel.set_root(root);
         for (id, handler, with_store) in
-            [("chat", "ai_chat.tools", false), ("vllm", "vllm_backend.tools", true), ("py", "py_agent.tools", true)]
+            [
+            ("chat", "ai_chat.tools", false),
+            ("vllm", "vllm_backend.tools", true),
+            ("py", "py_agent.tools", true),
+            ("chat2", "chat_role", false),
+            ("py2", "py_role", false),
+        ]
         {
             let mut payload = json!({"type": "create_agent", "parent_id": "kernel", "id": id, "handler_module": handler});
             if with_store {
@@ -1091,7 +1102,73 @@ mod tests {
             assert_eq!(made["id"], id, "{made}");
         }
         let host = Host { kernel, cfg: crate::env::ClientCfg::here(), root: "kernel".to_string() };
-        assert_eq!(host.ai_agents().await, vec!["chat".to_string(), "vllm".to_string()]);
+        assert_eq!(host.ai_agents().await, vec!["chat".to_string(), "vllm".to_string(), "chat2".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A bundle that answers `rows` with one row, registered under any handler name.
+    struct RowsStub(&'static str);
+
+    #[async_trait::async_trait]
+    impl fantastic_kernel::bundle::Bundle for RowsStub {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        async fn handle(
+            &self,
+            _id: &AgentId,
+            p: &Value,
+            _k: &Arc<Kernel>,
+        ) -> Result<Option<Value>, fantastic_kernel::bundle::BundleError> {
+            Ok((p["type"] == "rows").then(|| json!({"rows": [{"id": 900001, "role": "user", "content": "hi"}]})))
+        }
+    }
+
+    /// `rows` reads the agent's own rows when its handler, or the base of its role, is
+    /// one of the six: a role over `ai_chat.tools` does, a role over any other bundle does not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rows_holds_the_agent_rows_of_a_role_over_an_ai_handler_only() {
+        let dir = std::env::temp_dir().join(format!("fc-host-{}-role-rows", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+            state_dir: dir.join(".fantastic"),
+            work_dir: dir.to_path_buf(),
+        });
+        kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+        for m in ["ai_chat.tools", "plain_rows.tools"] {
+            kernel.bundles.register(m, RowsStub(m));
+        }
+        kernel.bundles.register_meta_yaml("chat_role", "base: ai_chat.tools\nsentence: s\n").unwrap();
+        kernel.bundles.register_meta_yaml("plain_role", "base: plain_rows.tools\nsentence: s\n").unwrap();
+        let kernel = Arc::new(kernel);
+        let mut meta = serde_json::Map::new();
+        meta.insert("memory_store_id".into(), json!("no_store"));
+        let root = fantastic_kernel::Agent::new(
+            AgentId::from("kernel"),
+            Some(fantastic_core::HANDLER_MODULE.to_string()),
+            None,
+            meta,
+            dir.join(".fantastic"),
+            false,
+        );
+        kernel.register(Arc::clone(&root));
+        kernel.set_root(root);
+        for (id, handler) in [("w", "chat_role"), ("p", "plain_role")] {
+            let made = send(
+                &kernel,
+                "kernel",
+                json!({"type": "create_agent", "parent_id": "kernel", "id": id, "handler_module": handler}),
+            )
+            .await;
+            assert_eq!(made["id"], id, "{made}");
+        }
+        let host = Host { kernel, cfg: crate::env::ClientCfg::here(), root: "kernel".to_string() };
+        let (w, _) = host.rows("w", None).await;
+        assert!(w.iter().any(|r| r.id == 900001), "{w:?}");
+        let (p, _) = host.rows("p", None).await;
+        assert!(p.iter().all(|r| r.id != 900001), "{p:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

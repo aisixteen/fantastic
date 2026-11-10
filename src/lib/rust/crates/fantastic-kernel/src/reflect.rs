@@ -11,7 +11,9 @@
 //! - `tree=all|ids` (default `all`; any other PRESENT value omits it) — the
 //!   nested subtree / the flat descendant-id index, paged with `next`.
 //!   `handler_modules=[names]` keeps only the agents whose `handler_module` is
-//!   listed; `tree` is then a flat array (ids, or nodes without `children`).
+//!   listed (an agent of a role, a meta bundle, is listed under its base as well
+//!   as under its own name); `tree` is then a flat array (ids, or nodes without
+//!   `children`).
 //! - `bundles=all|ids` (default none) — the INSTALLED `{name, handler_module}`
 //!   catalog / its names, paged with `bundles_next`.
 //! - `readme=true` — attach the agent's readme.md (string or null).
@@ -414,8 +416,8 @@ pub async fn apply_reflect_flags(
             }
         };
         // HANDLER FILTER: a list of handler names; `tree` then lists only the
-        // agents whose record `handler_module` is one of them. Absent or null = no
-        // filter. Checked here, on the record, before any node is asked.
+        // agents whose record `handler_module`, or the base of its role (a meta
+        // bundle), is one of them. Absent or null = no filter. Checked here, on the record, before any node is asked.
         let handlers: Option<Vec<String>> = match payload.get("handler_modules") {
             None | Some(Value::Null) => None,
             Some(Value::Array(items)) => {
@@ -448,7 +450,7 @@ pub async fn apply_reflect_flags(
                         nodes.push(crate::docs::pruned_stub(&a));
                         continue;
                     }
-                    if a.handler_module.as_ref().is_some_and(|h| names.contains(h)) {
+                    if handler_listed(a.handler_module.as_deref(), names, &kernel.bundles) {
                         if full {
                             let mut obj = Map::new();
                             obj.insert("id".to_string(), json!(a.id.0));
@@ -485,7 +487,7 @@ pub async fn apply_reflect_flags(
             // it would be a forest with no root. A pruned branch stands as its stub.
             let flat: Vec<Value> = roots
                 .iter()
-                .flat_map(|r| descendant_entries(r, &ignore, handlers.as_deref()))
+                .flat_map(|r| descendant_entries(r, &ignore, handlers.as_deref(), &kernel.bundles))
                 .collect();
             let (ids, next) = crate::paging::page(flat, payload, |v| match v {
                 Value::String(s) => s.clone(),
@@ -636,20 +638,19 @@ fn tree_node_pruned(target: &Arc<Agent>, ignore: &std::collections::HashSet<Stri
 
 /// `descendant_ids` as reply entries: an id in `ignore` stands as its stub
 /// `{id, pruned: n}`, its branch unwalked. Python `_descendant_ids(ignore)`.
-/// With `handlers`, an agent's own id is listed only when its handler is named.
+/// With `handlers`, an agent's own id is listed only when its handler, or the base
+/// of its role, is named.
 fn descendant_entries(
     target: &Agent,
     ignore: &std::collections::HashSet<String>,
     handlers: Option<&[String]>,
+    bundles: &crate::bundle::BundleRegistry,
 ) -> Vec<Value> {
     if ignore.contains(&target.id.0) {
         return vec![crate::docs::pruned_stub(target)];
     }
     let listed = handlers.map_or(true, |names| {
-        target
-            .handler_module
-            .as_ref()
-            .is_some_and(|h| names.contains(h))
+        handler_listed(target.handler_module.as_deref(), names, bundles)
     });
     let mut out = if listed {
         vec![json!(target.id.0)]
@@ -657,9 +658,24 @@ fn descendant_entries(
         Vec::new()
     };
     for c in target.children_snapshot() {
-        out.extend(descendant_entries(&c, ignore, handlers));
+        out.extend(descendant_entries(&c, ignore, handlers, bundles));
     }
     out
+}
+
+/// Whether `names` holds the stored `handler`, or the base that handler (a role,
+/// a meta bundle) resolves to. No intermediate link of a chain is matched.
+fn handler_listed(
+    handler: Option<&str>,
+    names: &[String],
+    bundles: &crate::bundle::BundleRegistry,
+) -> bool {
+    handler.is_some_and(|h| {
+        names.iter().any(|n| n == h) || {
+            let base = bundles.base_of(h);
+            names.iter().any(|n| *n == base)
+        }
+    })
 }
 
 /// The refusal of a `handler_modules` that is not a list of handler names.

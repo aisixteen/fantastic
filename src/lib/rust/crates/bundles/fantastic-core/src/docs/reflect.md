@@ -25,7 +25,8 @@ with flags:
   - with `all` or `ids`: `handler_modules=[names]` keeps only the agents whose
     `handler_module` is in the list (for example every `ai_chat.tools` and backend
     agent, or every `web.tools`). `tree` is then a flat list: ids, or nodes without
-    `children`. An agent outside the list is not asked. `[]` matches nothing; a name
+    `children`. An agent made from a role (a meta bundle) is also listed under the
+    handler its role is based on. An agent outside the list is not asked. `[]` matches nothing; a name
     no bundle answers to matches nothing; a value that is not a list of names is
     refused `bad_arg`.
 - `bundles=all|ids|none` (default `none`)

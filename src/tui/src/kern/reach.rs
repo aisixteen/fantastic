@@ -52,9 +52,9 @@ fn field(h: &Host, id: &str, f: &str) -> Map<String, Value> {
 }
 
 /// The HOLDERS of the reach (strictly single-user dev tool, owner 2026-10-04):
-/// each present holding leg, `user`, every AI agent (a non-root agent whose handler
-/// is a backend or `ai_chat.tools`), and the host-side helpers that act for the human —
-/// `canvas_root` and every canvas set-up agent.
+/// each present holding leg, `user`, every AI agent (a non-root agent whose handler,
+/// or the base of its role, is a backend or `ai_chat.tools`), and the host-side
+/// helpers that act for the human — `canvas_root` and every canvas set-up agent.
 fn holders(h: &Host) -> Vec<String> {
     let root = h.kernel.root().map(|r| r.id.0.clone());
     let helper = [crate::kern::backend::HANDLER_MODULE, crate::kern::setup_agent::HANDLER_MODULE];
@@ -70,16 +70,19 @@ fn holders(h: &Host) -> Vec<String> {
         .filter(|e| {
             let r = e.value().record();
             r.handler_module.as_deref().is_some_and(|m| {
+                let base = h.kernel.bundles.base_of(m);
                 helper.contains(&m)
-                    || matches!(
-                        m,
-                        "anthropic_backend.tools"
-                            | "ollama_backend.tools"
-                            | "responses_backend.tools"
-                            | "vllm_backend.tools"
-                            | "foundation_models_backend.tools"
-                            | "ai_chat.tools"
-                    )
+                    || [m, base.as_str()].iter().any(|n| {
+                        matches!(
+                            *n,
+                            "anthropic_backend.tools"
+                                | "ollama_backend.tools"
+                                | "responses_backend.tools"
+                                | "vllm_backend.tools"
+                                | "foundation_models_backend.tools"
+                                | "ai_chat.tools"
+                        )
+                    })
             })
         })
         .map(|e| e.key().0.clone())
@@ -552,6 +555,26 @@ mod tests {
         write_grants(&h, &["ordinary".to_string()]).unwrap();
         let can_call = k.agents.get(&AgentId::from("chat")).unwrap().value().record().meta.get("can_call").cloned().unwrap_or(Value::Null);
         assert_eq!(can_call["ordinary"], json!(["*"]), "{can_call}");
+    }
+
+    /// A role (a meta bundle) over `ai_chat.tools` holds the reach; one over another bundle does not.
+    #[tokio::test]
+    async fn an_agent_of_a_role_is_a_holder_by_the_base_of_its_role() {
+        let h = host_with_bundles("role-holders", |k| {
+            k.bundles.register("ai_chat.tools", Sink);
+            k.bundles.register("file_bridge.tools", Sink);
+            k.bundles.register_meta_yaml("chat_role", "base: ai_chat.tools\nsentence: s\n").unwrap();
+            k.bundles.register_meta_yaml("file_role", "base: file_bridge.tools\nsentence: s\n").unwrap();
+        })
+        .await;
+        let k = &h.kernel;
+        put_as(k, "ai_one", "chat_role", Some("kernel"), json!({}));
+        put_as(k, "plain_one", "file_role", Some("kernel"), json!({}));
+        put(k, "ordinary", Some("kernel"), json!({}));
+        write_grants(&h, &["ordinary".to_string()]).unwrap();
+        let can_call = |id: &str| k.agents.get(&AgentId::from(id)).unwrap().value().record().meta.get("can_call").cloned().unwrap_or(Value::Null);
+        assert_eq!(can_call("ai_one")["ordinary"], json!(["*"]), "{}", can_call("ai_one"));
+        assert!(can_call("plain_one").get("ordinary").is_none(), "{}", can_call("plain_one"));
     }
 
     #[test]
