@@ -9,17 +9,25 @@ never how to call it: verbs, emits and cancel are `docs` (send `kernel`
 (`runtime`/`env`/`version`) and `peers` — the kernels this one is connected to,
 `[{guid, via}]`, each agent there reachable as `<guid>|<agent id>` (reflect
 `<guid>|kernel` for its tree). Otherwise the root is not special. Compose the reply
-with three flags:
+with flags:
 
 - `tree=all|ids|none` (default `all`)
-  - `all`  — the agent's whole subtree, nested + distilled
-             (`{id, parent_id, handler_module, display_name, description?, children}`).
+  - `all`  — the agent's whole subtree, nested. A distilled node is
+             `{id, sentence?, description?, mode?, task?, children}`; with
+             `detail=full` it is `{id, parent_id, handler_module, display_name,
+             description?, ...posture, children}`.
   - `ids`  — a flat list of descendant ids. Cheap. Use it to scan.
   - `none` — just the agent, no subtree.
   - with `all` or `ids`: `show_subtrees=[ids]` answers with ONLY those branches;
     `ignore_subtrees=[ids]` prunes each named branch to `{id, pruned: n}` (n = the
     agents it holds), so you see something is there and can open it later. Both:
     show first, then ignore inside it. An id outside the tree is refused `bad_arg`.
+  - with `all` or `ids`: `handler_modules=[names]` keeps only the agents whose
+    `handler_module` is in the list (for example every `ai_chat.tools` and backend
+    agent, or every `web.tools`). `tree` is then a flat list: ids, or nodes without
+    `children`. An agent outside the list is not asked. `[]` matches nothing; a name
+    no bundle answers to matches nothing; a value that is not a list of names is
+    refused `bad_arg`.
 - `bundles=all|ids|none` (default `none`)
   - `all`  — every installable bundle as `{name, handler_module}`, plus `schema`
     where the bundle publishes one: what that KIND's record takes, readable before
@@ -44,6 +52,7 @@ of the tree you work on, reflect with `show_subtrees` / `ignore_subtrees` — a
 full-tree reflect is for the first look only. Pull `docs` once per kind of agent,
 `detailed` only for the verb you are about to use. Never pull every agent's readme
 at once — fetch the single doc for the topic you are about to act on.
+`tree=ids handler_modules=[...]` is the cheap way to list one kind of agent.
 
 ## The `description` field
 
