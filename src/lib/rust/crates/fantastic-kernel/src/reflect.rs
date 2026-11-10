@@ -10,6 +10,8 @@
 //!   gated ROSTER and the `more` hint; full carries the wiring tree.
 //! - `tree=all|ids` (default `all`; any other PRESENT value omits it) — the
 //!   nested subtree / the flat descendant-id index, paged with `next`.
+//!   `handler_modules=[names]` keeps only the agents whose `handler_module` is
+//!   listed; `tree` is then a flat array (ids, or nodes without `children`).
 //! - `bundles=all|ids` (default none) — the INSTALLED `{name, handler_module}`
 //!   catalog / its names, paged with `bundles_next`.
 //! - `readme=true` — attach the agent's readme.md (string or null).
@@ -234,16 +236,34 @@ fn roster(
     ignore: Arc<std::collections::HashSet<String>>,
 ) -> Pin<Box<dyn Future<Output = Result<Value, Value>> + Send>> {
     Box::pin(async move {
+        let mut node = roster_node(&kernel, &a).await?;
+        let mut children = Vec::new();
+        for c in a.children_snapshot() {
+            if ignore.contains(&c.id.0) {
+                children.push(crate::docs::pruned_stub(&c));
+                continue;
+            }
+            children.push(roster(Arc::clone(&kernel), c, Arc::clone(&ignore)).await?);
+        }
+        node.insert("children".to_string(), Value::Array(children));
+        Ok(Value::Object(node))
+    })
+}
+
+/// One distilled roster node WITHOUT its `children`: the keys [`roster`] and the
+/// `handler_modules` walk share. `Err` carries the node's RAISED reflect.
+async fn roster_node(kernel: &Arc<Kernel>, a: &Arc<Agent>) -> Result<Map<String, Value>, Value> {
+    {
         let raw = if a.handler_module.is_some() {
             let (reply, status) = kernel
-                .internal_dispatch(&a, &json!({"type": "reflect"}))
+                .internal_dispatch(a, &json!({"type": "reflect"}))
                 .await;
             if status == Status::Failed {
                 return Err(reply);
             }
             reply
         } else {
-            reflect_identity(&a)
+            reflect_identity(a)
         };
         let mut node = Map::new();
         node.insert("id".to_string(), json!(a.id.0));
@@ -273,17 +293,8 @@ fn roster(
         {
             node.insert("task".to_string(), t);
         }
-        let mut children = Vec::new();
-        for c in a.children_snapshot() {
-            if ignore.contains(&c.id.0) {
-                children.push(crate::docs::pruned_stub(&c));
-                continue;
-            }
-            children.push(roster(Arc::clone(&kernel), c, Arc::clone(&ignore)).await?);
-        }
-        node.insert("children".to_string(), Value::Array(children));
-        Ok(Value::Object(node))
-    })
+        Ok(node)
+    }
 }
 
 /// Append the composable reflect flags to any reflect reply — applied
@@ -297,6 +308,9 @@ fn roster(
 ///
 /// `Err` = a roster node's reflect raised; the caller settles the whole
 /// reflect `failed` with that reply.
+///
+/// Under `handler_modules` the `tree` is a flat array of the listed agents (key
+/// order unchanged).
 pub async fn apply_reflect_flags(
     kernel: &Arc<Kernel>,
     target: &Arc<Agent>,
@@ -399,12 +413,56 @@ pub async fn apply_reflect_flags(
                 return Ok(());
             }
         };
+        // HANDLER FILTER: a list of handler names; `tree` then lists only the
+        // agents whose record `handler_module` is one of them. Absent or null = no
+        // filter. Checked here, on the record, before any node is asked.
+        let handlers: Option<Vec<String>> = match payload.get("handler_modules") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(items)) => {
+                let names: Vec<String> = items
+                    .iter()
+                    .filter_map(|v| v.as_str().filter(|s| !s.is_empty()).map(str::to_string))
+                    .collect();
+                if names.len() != items.len() {
+                    *reply = bad_handler_modules();
+                    return Ok(());
+                }
+                Some(names)
+            }
+            Some(_) => {
+                *reply = bad_handler_modules();
+                return Ok(());
+            }
+        };
         let roots: Vec<Arc<Agent>> = if show.is_empty() {
             vec![Arc::clone(target)]
         } else {
             show.clone()
         };
-        if mode == "all" {
+        if let (Some(names), "all") = (&handlers, mode) {
+            let mut nodes = Vec::new();
+            for r in &roots {
+                let mut stack = vec![Arc::clone(r)];
+                while let Some(a) = stack.pop() {
+                    if ignore.contains(&a.id.0) {
+                        nodes.push(crate::docs::pruned_stub(&a));
+                        continue;
+                    }
+                    if a.handler_module.as_ref().is_some_and(|h| names.contains(h)) {
+                        if full {
+                            let mut obj = Map::new();
+                            obj.insert("id".to_string(), json!(a.id.0));
+                            tree_fields(&a, &mut obj);
+                            nodes.push(Value::Object(obj));
+                        } else {
+                            nodes.push(Value::Object(roster_node(kernel, &a).await?));
+                        }
+                    }
+                    stack.extend(a.children_snapshot().into_iter().rev());
+                }
+            }
+            obj.insert("tree".to_string(), Value::Array(nodes));
+        } else if mode == "all" {
             let mut nodes = Vec::new();
             for r in &roots {
                 nodes.push(if ignore.contains(&r.id.0) {
@@ -427,7 +485,7 @@ pub async fn apply_reflect_flags(
             // it would be a forest with no root. A pruned branch stands as its stub.
             let flat: Vec<Value> = roots
                 .iter()
-                .flat_map(|r| descendant_entries(r, &ignore))
+                .flat_map(|r| descendant_entries(r, &ignore, handlers.as_deref()))
                 .collect();
             let (ids, next) = crate::paging::page(flat, payload, |v| match v {
                 Value::String(s) => s.clone(),
@@ -578,15 +636,40 @@ fn tree_node_pruned(target: &Arc<Agent>, ignore: &std::collections::HashSet<Stri
 
 /// `descendant_ids` as reply entries: an id in `ignore` stands as its stub
 /// `{id, pruned: n}`, its branch unwalked. Python `_descendant_ids(ignore)`.
-fn descendant_entries(target: &Agent, ignore: &std::collections::HashSet<String>) -> Vec<Value> {
+/// With `handlers`, an agent's own id is listed only when its handler is named.
+fn descendant_entries(
+    target: &Agent,
+    ignore: &std::collections::HashSet<String>,
+    handlers: Option<&[String]>,
+) -> Vec<Value> {
     if ignore.contains(&target.id.0) {
         return vec![crate::docs::pruned_stub(target)];
     }
-    let mut out = vec![json!(target.id.0)];
+    let listed = handlers.map_or(true, |names| {
+        target
+            .handler_module
+            .as_ref()
+            .is_some_and(|h| names.contains(h))
+    });
+    let mut out = if listed {
+        vec![json!(target.id.0)]
+    } else {
+        Vec::new()
+    };
     for c in target.children_snapshot() {
-        out.extend(descendant_entries(&c, ignore));
+        out.extend(descendant_entries(&c, ignore, handlers));
     }
     out
+}
+
+/// The refusal of a `handler_modules` that is not a list of handler names.
+fn bad_handler_modules() -> Value {
+    let mut r = crate::refusal::refusal(
+        crate::refusal::BAD_ARG,
+        "reflect: handler_modules must be a list of handler names",
+    );
+    crate::refusal::with(&mut r, "arg", json!("handler_modules"));
+    r
 }
 
 /// Flat id index of an agent + all descendants (DFS, self first, children in

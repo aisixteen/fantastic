@@ -719,12 +719,23 @@ fn roster_kernel() -> (Arc<Kernel>, Arc<Agent>) {
 
 /// A handler-bearing child of `parent` with `meta`.
 fn probe_child(kernel: &Arc<Kernel>, id: &str, parent: &Arc<Agent>, meta: Value) -> Arc<Agent> {
+    handler_child(kernel, id, "roster_probe.tools", parent, meta)
+}
+
+/// Like [`probe_child`] with the handler named.
+fn handler_child(
+    kernel: &Arc<Kernel>,
+    id: &str,
+    handler: &str,
+    parent: &Arc<Agent>,
+    meta: Value,
+) -> Arc<Agent> {
     let Value::Object(meta) = meta else {
         panic!("meta must be an object")
     };
     let a = Agent::new(
         AgentId::from(id),
-        Some("roster_probe.tools".to_string()),
+        Some(handler.to_string()),
         Some(parent.id.clone()),
         meta,
         Path::new("/tmp/nowhere").join(id),
@@ -755,7 +766,10 @@ async fn reflect_carries_the_agents_view() {
         let id = id.to_string();
         async move {
             kernel
-                .send(vec![Item::new(AgentId::from(id), json!({"type": "reflect"}))])
+                .send(vec![Item::new(
+                    AgentId::from(id),
+                    json!({"type": "reflect"}),
+                )])
                 .await
                 .remove(0)
                 .result
@@ -909,6 +923,207 @@ async fn a_non_string_tree_flag_omits_the_tree() {
         assert!(r.get("next").is_none());
         assert!(r.get("more").is_none());
     }
+}
+
+/// `a` (roster_probe) and `b` (fixture_probe) under the root, `c` (roster_probe)
+/// under `b`, bare `d` under `a`.
+fn handler_tree() -> (Arc<Kernel>, Arc<Agent>) {
+    let (kernel, root) = roster_kernel();
+    let a = probe_child(&kernel, "a", &root, json!({}));
+    let b = handler_child(&kernel, "b", "fixture_probe.tools", &root, json!({}));
+    probe_child(&kernel, "c", &b, json!({}));
+    let d = Agent::new(
+        AgentId::from("d"),
+        None,
+        Some(a.id.clone()),
+        Map::new(),
+        Path::new("/tmp/nowhere").join("d"),
+        true,
+    );
+    kernel.register(Arc::clone(&d));
+    a.add_child(d);
+    (kernel, root)
+}
+
+fn tree_ids(r: &Value) -> Vec<String> {
+    r["tree"]
+        .as_array()
+        .expect("tree is an array")
+        .iter()
+        .map(|v| v.as_str().expect("an id").to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn handler_modules_ids_lists_only_the_named_handlers() {
+    let (kernel, _root) = handler_tree();
+    let ask = |hm: Value| {
+        let kernel = Arc::clone(&kernel);
+        async move {
+            let r = kernel_reflect(
+                &kernel,
+                json!({"type": "reflect", "tree": "ids", "handler_modules": hm}),
+            )
+            .await
+            .result;
+            tree_ids(&r)
+        }
+    };
+    assert_eq!(ask(json!(["roster_probe.tools"])).await, ["a", "c"]);
+    assert_eq!(ask(json!(["fixture_probe.tools"])).await, ["b"]);
+    assert_eq!(
+        ask(json!(["roster_probe.tools", "fixture_probe.tools"])).await,
+        ["a", "b", "c"]
+    );
+    assert!(ask(json!([])).await.is_empty());
+    let all = kernel_reflect(&kernel, json!({"type": "reflect", "tree": "ids"}))
+        .await
+        .result;
+    assert_eq!(tree_ids(&all).len(), 5);
+}
+
+#[tokio::test]
+async fn handler_modules_distilled_tree_is_a_flat_list_of_nodes_without_children() {
+    let (kernel, _root) = handler_tree();
+    let r = kernel_reflect(
+        &kernel,
+        json!({"type": "reflect", "handler_modules": ["roster_probe.tools"]}),
+    )
+    .await
+    .result;
+    let nodes = r["tree"].as_array().expect("flat list");
+    let ids: Vec<&str> = nodes.iter().map(|n| n["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["a", "c"]);
+    for n in nodes {
+        assert!(n["sentence"].is_string());
+        assert!(n.get("children").is_none());
+    }
+}
+
+#[tokio::test]
+async fn handler_modules_full_nodes_carry_their_handler() {
+    let (kernel, _root) = handler_tree();
+    let r = kernel_reflect(
+        &kernel,
+        json!({"type": "reflect", "detail": "full", "handler_modules": ["fixture_probe.tools"]}),
+    )
+    .await
+    .result;
+    let nodes = r["tree"].as_array().expect("flat list");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0]["id"], "b");
+    assert_eq!(nodes[0]["handler_module"], "fixture_probe.tools");
+    assert!(nodes[0].get("parent_id").is_some());
+    assert!(nodes[0].get("children").is_none());
+}
+
+#[tokio::test]
+async fn an_agent_outside_the_list_is_not_asked() {
+    let (kernel, root) = handler_tree();
+    let _boom = probe_child(&kernel, "boom", &root, json!({}));
+    let ok = kernel_reflect(
+        &kernel,
+        json!({"type": "reflect", "handler_modules": ["fixture_probe.tools"]}),
+    )
+    .await;
+    assert_eq!(ok.status, Status::Completed);
+    assert_eq!(ok.result["tree"].as_array().unwrap().len(), 1);
+    assert_eq!(ok.result["tree"][0]["id"], "b");
+    let bad = kernel_reflect(
+        &kernel,
+        json!({"type": "reflect", "handler_modules": ["roster_probe.tools"]}),
+    )
+    .await;
+    assert_eq!(bad.status, Status::Failed);
+    assert_eq!(
+        bad.result,
+        json!({"error": "RuntimeError: reflect exploded", "raised": true})
+    );
+}
+
+#[tokio::test]
+async fn handler_modules_pages_after_the_filter() {
+    let (kernel, _root) = handler_tree();
+    let base = json!({"type": "reflect", "tree": "ids", "limit": 1,
+        "handler_modules": ["roster_probe.tools"]});
+    let first = kernel_reflect(&kernel, base.clone()).await.result;
+    assert_eq!(tree_ids(&first), ["a"]);
+    let next = first["next"].clone();
+    assert!(next.is_string());
+    let mut second = base;
+    second["after"] = next;
+    let second = kernel_reflect(&kernel, second).await.result;
+    assert_eq!(tree_ids(&second), ["c"]);
+    assert!(second.get("next").is_none());
+}
+
+#[tokio::test]
+async fn handler_modules_with_show_and_ignore_subtrees() {
+    let (kernel, _root) = handler_tree();
+    let shown = kernel_reflect(
+        &kernel,
+        json!({"type": "reflect", "tree": "ids", "show_subtrees": ["b"],
+            "handler_modules": ["roster_probe.tools"]}),
+    )
+    .await
+    .result;
+    assert_eq!(tree_ids(&shown), ["c"]);
+    let ignored = kernel_reflect(
+        &kernel,
+        json!({"type": "reflect", "tree": "ids", "ignore_subtrees": ["b"],
+            "handler_modules": ["roster_probe.tools"]}),
+    )
+    .await
+    .result;
+    assert_eq!(ignored["tree"], json!(["a", {"id": "b", "pruned": 2}]));
+}
+
+#[tokio::test]
+async fn a_bad_handler_modules_is_refused_bad_arg() {
+    let (kernel, _root) = handler_tree();
+    for bad in [
+        json!("roster_probe.tools"),
+        json!(1),
+        json!({}),
+        json!(["a", 1]),
+        json!([""]),
+    ] {
+        let r = kernel_reflect(
+            &kernel,
+            json!({"type": "reflect", "handler_modules": bad.clone()}),
+        )
+        .await
+        .result;
+        assert!(r["error"].is_string(), "{bad}: {r}");
+        assert_eq!(r["reason"], "bad_arg", "{bad}: {r}");
+        assert_eq!(r["arg"], "handler_modules");
+        assert!(r.get("tree").is_none());
+        let off = kernel_reflect(
+            &kernel,
+            json!({"type": "reflect", "tree": "none", "handler_modules": bad}),
+        )
+        .await
+        .result;
+        assert!(off.get("error").is_none() && off.get("tree").is_none());
+    }
+    let r = kernel_reflect(&kernel, json!({"type": "reflect", "handler_modules": null}))
+        .await
+        .result;
+    assert!(r["tree"].is_object());
+}
+
+#[tokio::test]
+async fn handler_modules_on_a_non_root_target() {
+    let (kernel, _root) = handler_tree();
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("b"),
+            json!({"type": "reflect", "tree": "ids", "handler_modules": ["roster_probe.tools"]}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(tree_ids(&r), ["c"]);
 }
 
 /// A bundle that only carries a catalog name.

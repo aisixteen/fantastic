@@ -7,6 +7,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- `reflect` takes `handler_modules` (#605): a list of handler names; with `tree` `all` or `ids` only the agents whose `handler_module` is listed come back, as a flat `tree` list, and an agent outside the list is not asked. A value that is not a list of names is refused `bad_arg`.
 - `boot_kernel` / `stop_kernel` in `fantastic_tui` (#580): a host that runs the kernel in its own
   process boots one folder (after `seed_dir_with`) with the stock bundles plus its `Extra`s, an
   optional web port and bind, and gets the running `Arc<Kernel>`; `stop_kernel` ends it in the
