@@ -594,7 +594,7 @@ impl App {
             let (rows, folded) = crate::ui::side::flatten(all, |r| {
                 r.id == root
                     || provider.as_deref() == Some(r.id.as_str())
-                    || modules.get(&r.id).is_some_and(|m| m.ends_with("_loader.tools"))
+                    || modules.get(&r.id).is_some_and(|m| m == "static_loader.tools")
             });
             self.trows = rows;
             self.system_folded = folded;

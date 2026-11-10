@@ -79,13 +79,18 @@ impl Backend {
 }
 
 /// The backends this build links — every registered module with a record
-/// schema that ends `_backend.tools` — with their schemas.
+/// schema that is one of the five backend names — with their schemas.
 pub fn backends(host: &Host) -> Vec<Backend> {
     let mut v: Vec<Backend> = host
         .kernel
         .bundles
         .catalog()
-        .filter(|(m, _)| m.ends_with("_backend.tools"))
+        .filter(|(m, _)| {
+            matches!(
+                *m,
+                "anthropic_backend.tools" | "ollama_backend.tools" | "responses_backend.tools" | "vllm_backend.tools" | "foundation_models_backend.tools"
+            )
+        })
         .filter_map(|(m, b)| b.record_schema().map(|s| Backend::from_schema(m, &s)))
         .collect();
     v.sort_by(|a, b| a.module.cmp(&b.module));

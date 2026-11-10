@@ -432,7 +432,7 @@ pub async fn spawn_row_watch(host: Arc<Host>, tx: mpsc::Sender<Ev>) {
             }
         }
     });
-    for ai in host.ai_agents() {
+    for ai in host.ai_agents().await {
         if let Err(why) = watch_rows(&host, &ai).await {
             tracing::warn!("{why}");
         }

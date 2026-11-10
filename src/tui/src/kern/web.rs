@@ -148,14 +148,6 @@ fn loader_of(h: &Host, node: &str) -> Option<String> {
         .map(|l| l.key().0.clone())
 }
 
-/// Whether `id` is a canvas node (a `canvas.tools` agent).
-fn is_canvas(h: &Host, id: &str) -> bool {
-    h.kernel
-        .agents
-        .get(&fantastic_kernel::AgentId::from(id))
-        .is_some_and(|a| a.value().record().handler_module.as_deref() == Some(crate::kern::backend::HANDLER_MODULE))
-}
-
 /// Every canvas: `(node, loader)` — each `canvas.tools` node under `canvas_page`,
 /// and each canvas nested under a canvas (`new_canvas` on it), at any depth — with
 /// its page loader (its `kernel_state` child). A flat peer made before nesting is
@@ -201,7 +193,12 @@ pub fn child_records_root(parent_root: &str, node: &str) -> String {
 /// canvas `canvas_<name>` of `parent`, its page records nested under the parent's
 /// records dir. Returns its node id. A name taken anywhere is refused.
 pub async fn new_canvas(h: &Host, parent: &str, name: &str) -> Result<String, String> {
-    if !is_canvas(h, parent) {
+    let is_canvas = h
+        .kernel
+        .agents
+        .get(&fantastic_kernel::AgentId::from(parent))
+        .is_some_and(|a| a.value().record().handler_module.as_deref() == Some(crate::kern::backend::HANDLER_MODULE));
+    if !is_canvas {
         return Err(format!("new_canvas: `{parent}` is not a canvas"));
     }
     let node = canvas_node_id(name)?;
@@ -591,7 +588,10 @@ pub(crate) mod canvas_tree_tests {
         let node = new_canvas(&h, CANVAS_NODE_ID, "research").await.unwrap();
         assert_eq!(node, "canvas_research");
         assert_eq!(parent_of(&h, &node).as_deref(), Some(CANVAS_NODE_ID), "a CHILD of the calling canvas");
-        assert!(is_canvas(&h, &node));
+        assert_eq!(
+            h.kernel.agents.get(&fantastic_kernel::AgentId::from(node.as_str())).unwrap().value().record().handler_module.as_deref(),
+            Some(crate::kern::backend::HANDLER_MODULE)
+        );
         let loader = loader_of(&h, &node).expect("its own page loader");
         assert_eq!(loader, "canvas_research_loader");
         assert_eq!(records_root_of(&h, &loader), "@state/web/canvas_research");
@@ -717,7 +717,8 @@ pub(crate) mod canvas_tree_tests {
         assert_eq!(listed, expect);
         // every listed canvas is reachable: a canvas node whose loader is its page's
         for (node, loader) in &listed {
-            assert!(is_canvas(&h, node), "{node} is a canvas");
+            let hm = h.kernel.agents.get(&fantastic_kernel::AgentId::from(node.as_str())).unwrap().value().record().handler_module.clone();
+            assert_eq!(hm.as_deref(), Some(crate::kern::backend::HANDLER_MODULE), "{node} is a canvas");
             assert_eq!(loader_of(&h, node).as_deref(), Some(loader.as_str()), "{node} boots its own loader");
         }
         let _ = std::fs::remove_dir_all(&dir);

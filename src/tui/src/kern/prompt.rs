@@ -5,10 +5,10 @@
 //!   written in its placeholders (`{tree}\n\n{self}\n\n{howto}`, ai_core's
 //!   default), then the CLI's building rules — until the human edits it. A
 //!   human, or a coding CLI reading the folder, sees and changes it.
-//! - Every AI agent READS it, as itself, through [`BRIDGE`] (a read-only
+//! - Every backend agent READS it, as itself, through [`BRIDGE`] (a read-only
 //!   file_bridge exposing only that file): its record names `file_bridge_id:
 //!   prompt_file` and `system_prompt_file: .fantastic/prompt.md` — stamped on
-//!   every AI that names neither,
+//!   every backend agent that names neither,
 //!   at boot and as each is made (`kern/reach` hands every AI the bridge's
 //!   verbs, both edges). The lib watches the file (`watch_path`): a save is the
 //!   block from the next turn on, no restart — the KV cache rebuilds once, on
@@ -62,14 +62,19 @@ pub async fn ensure(h: &Host, cwd: &Path) -> Result<(), String> {
 /// Name the file on AI `id`'s record — unless it names a file, or a bridge, of
 /// its own (a bridge alone means the default block: left as it is).
 pub async fn stamp(h: &Host, id: &str) -> Result<(), String> {
-    if !h.kernel.exists(BRIDGE) || !fantastic_ai_core::is_ai(&h.kernel, id) {
+    if !h.kernel.exists(BRIDGE) {
         return Ok(());
     }
-    let own = h.kernel.agents.get(&fantastic_kernel::AgentId::from(id)).is_some_and(|a| {
-        let m = &a.value().record().meta;
-        ["system_prompt_file", "file_bridge_id"].iter().any(|k| m.get(*k).is_some_and(|v| !v.is_null()))
+    // None: not a backend agent (or gone): nothing to stamp. Some(own): names a file or bridge already.
+    let own = h.kernel.agents.get(&fantastic_kernel::AgentId::from(id)).and_then(|a| {
+        let r = a.value().record();
+        matches!(
+            r.handler_module.as_deref(),
+            Some("anthropic_backend.tools" | "ollama_backend.tools" | "responses_backend.tools" | "vllm_backend.tools" | "foundation_models_backend.tools")
+        )
+        .then(|| ["system_prompt_file", "file_bridge_id"].iter().any(|k| r.meta.get(*k).is_some_and(|v| !v.is_null())))
     });
-    if own {
+    if own != Some(false) {
         return Ok(());
     }
     let r = h
@@ -89,4 +94,60 @@ pub async fn stamp_all(h: &Host) -> Vec<String> {
         }
     }
     notes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fantastic_kernel::{Agent, AgentId, Kernel};
+    use serde_json::Map;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn stamp_names_the_prompt_file_on_a_backend_handler_only() {
+        let dir = std::env::temp_dir().join(format!("fc-prompt-{}-stamp", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+            state_dir: dir.join(".fantastic"),
+            work_dir: dir.to_path_buf(),
+        });
+        kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+        let kernel = Arc::new(kernel);
+        let root = Agent::new(
+            AgentId::from("kernel"),
+            Some(fantastic_core::HANDLER_MODULE.to_string()),
+            None,
+            Map::new(),
+            dir.join(".fantastic"),
+            false,
+        );
+        kernel.register(Arc::clone(&root));
+        kernel.set_root(root);
+        let put = |id: &str, handler: &str, meta: Value| {
+            kernel.register(Agent::new(
+                AgentId::from(id),
+                Some(handler.to_string()),
+                Some(AgentId::from("kernel")),
+                meta.as_object().cloned().unwrap_or_default(),
+                std::path::PathBuf::from("/nonexistent"),
+                false,
+            ));
+        };
+        put(BRIDGE, "probe.tools", json!({}));
+        put("backend", "vllm_backend.tools", json!({}));
+        put("py", "py_agent.tools", json!({"memory_store_id": "m"}));
+        put("chat", "ai_chat.tools", json!({"memory_store_id": "m"}));
+        let h = Host { kernel, cfg: crate::env::ClientCfg::here(), root: "kernel".to_string() };
+        for id in ["backend", "py", "chat"] {
+            stamp(&h, id).await.unwrap();
+        }
+        let file = |id: &str| {
+            h.kernel.agents.get(&AgentId::from(id)).unwrap().value().record().meta.get("system_prompt_file").cloned()
+        };
+        assert_eq!(file("backend"), Some(json!(PATH)));
+        assert_eq!(h.kernel.agents.get(&AgentId::from("backend")).unwrap().value().record().meta["file_bridge_id"], json!(BRIDGE));
+        assert_eq!(file("py"), None, "a plain handler with a store field is not stamped");
+        assert_eq!(file("chat"), None, "ai_chat.tools is not in the backend set");
+    }
 }

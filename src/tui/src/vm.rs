@@ -494,7 +494,7 @@ fn spawn_stream(h: Arc<Host>, boot: Boot) {
     let w = fantastic_kernel::AgentId::from(format!("{}#stream", h.cfg.user).as_str());
     let mut rx = h.kernel.ensure_inbox(&w);
     tokio::spawn(async move {
-        for ai in h.ai_agents() {
+        for ai in h.ai_agents().await {
             let _ = h.operator(&ai, serde_json::json!({"type": "watch", "watcher": w.0})).await;
         }
         while let Some(item) = rx.recv().await {
