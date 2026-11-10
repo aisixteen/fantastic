@@ -61,10 +61,6 @@ fn err_of(r: &fantastic_kernel::Outcome) -> Option<String> {
     r.result.get("error").and_then(Value::as_str).map(str::to_string)
 }
 
-fn exists(h: &Host, id: &str) -> bool {
-    h.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(id))
-}
-
 fn meta(h: &Host, id: &str) -> Map<String, Value> {
     h.kernel
         .agents
@@ -109,11 +105,11 @@ async fn create(h: &Host, spec: Value) -> Result<(), String> {
 /// only: the page opens the main canvas first and lists it on top. Creates
 /// what is missing (booted by the caller).
 pub async fn ensure_canvas(h: &Host, parent: &str, node: &str, loader: &str, root: &str, main: bool) -> Result<(), String> {
-    if !exists(h, node) {
+    if !h.kernel.exists(node) {
         create(h, json!({"parent_id": parent, "id": node,
             "handler_module": crate::kern::backend::HANDLER_MODULE, "main": main})).await?;
     }
-    if !exists(h, loader) {
+    if !h.kernel.exists(loader) {
         create(h, json!({"parent_id": node, "id": loader, "handler_module": fantastic_core::HANDLER_MODULE,
             "root": root, "watch": false})).await?;
     }
@@ -209,7 +205,7 @@ pub async fn new_canvas(h: &Host, parent: &str, name: &str) -> Result<String, St
         return Err(format!("new_canvas: `{parent}` is not a canvas"));
     }
     let node = canvas_node_id(name)?;
-    if exists(h, &node) {
+    if h.kernel.exists(&node) {
         return Err(format!("a canvas `{node}` already exists"));
     }
     let parent_loader = loader_of(h, parent).ok_or_else(|| format!("new_canvas: `{parent}` has no page loader"))?;
@@ -277,13 +273,13 @@ pub fn remove_run_file(dir: &std::path::Path) {
 pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<Urls, String> {
     let recorded = meta(h, WEB_ID).get("port").and_then(Value::as_u64).map(|p| p as u16);
     // the address the recorded `web` listens on (its `bind`, else its `host`)
-    let bound = exists(h, WEB_ID).then(|| fantastic_web::listen_host(&meta(h, WEB_ID)));
-    if let (true, Some(b)) = (exists(h, WEB_ID), bind) {
+    let bound = h.kernel.exists(WEB_ID).then(|| fantastic_web::listen_host(&meta(h, WEB_ID)));
+    if let (true, Some(b)) = (h.kernel.exists(WEB_ID), bind) {
         if bound.as_deref() != Some(b) {
             return Err(format!("--host {b}: the `web` leg still binds {}", bound.as_deref().unwrap_or(fantastic_web::DEFAULT_HOST)));
         }
     }
-    let port = match (exists(h, WEB_ID), port) {
+    let port = match (h.kernel.exists(WEB_ID), port) {
         // Repeating the recorded port changes nothing, so it is not a conflict.
         (true, Some(p)) if recorded == Some(p) => p,
         // `Host::boot` already set a new --port on the record before the
@@ -304,17 +300,17 @@ pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<U
     // A hydrated host is ALREADY listening (`Host::boot` booted it): booting it
     // again restarts the listener and drops every page connected meanwhile
     // (measured). So `web` is booted only when it is created here.
-    let fresh_host = !exists(h, WEB_ID);
+    let fresh_host = !h.kernel.exists(WEB_ID);
     if fresh_host {
         create(h, web_record(user, port, bind)).await?;
     }
 
     // THE CANVAS.
-    if !exists(h, CANVAS_PAGE_ID) {
+    if !h.kernel.exists(CANVAS_PAGE_ID) {
         create(h, json!({"parent_id": WEB_ID, "id": CANVAS_PAGE_ID, "handler_module": fantastic_canvas_page::HANDLER_MODULE,
             "verbs": {"read_stream": fantastic_canvas_page::READ_STREAM_DOC}})).await?;
     }
-    let fresh_canvas_ws = !exists(h, CANVAS_WS_ID);
+    let fresh_canvas_ws = !h.kernel.exists(CANVAS_WS_ID);
     if fresh_canvas_ws {
         create(h, json!({"parent_id": WEB_ID, "id": CANVAS_WS_ID, "handler_module": fantastic_web_ws::HANDLER_MODULE,
             "ingress_rule": "allow_all_ingress"})).await?;
@@ -333,7 +329,7 @@ pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<U
     // view. DENY-ALL per path (`allow: []`): its `allow` list — the record's,
     // written from above (`update_agent`) — exposes what the cells load. `web`
     // serves it, reading AS ITSELF.
-    if !exists(h, STATIC_FILES_ID) {
+    if !h.kernel.exists(STATIC_FILES_ID) {
         create(h, json!({"parent_id": CANVAS_NODE_ID, "id": STATIC_FILES_ID, "handler_module": "file_bridge.tools",
             "root": ".", "readonly": true, "allow": [], "ingress_rule": "allow_all_ingress"})).await?;
     }

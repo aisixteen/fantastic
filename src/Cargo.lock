@@ -661,6 +661,7 @@ name = "fantastic-bridge"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "fantastic-ai-core",
  "fantastic-bundle",
  "fantastic-io-bridge",
  "fantastic-kernel",

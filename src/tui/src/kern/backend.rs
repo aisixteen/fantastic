@@ -113,18 +113,6 @@ impl BackendBundle {
         Some(Host { kernel: Arc::clone(kernel), cfg: ClientCfg::here(), root })
     }
 
-    /// Whether `handler` makes an AI agent: its bundle's record names a memory
-    /// store (`memory_store_id`, the field that makes one). A saved set-up is an AI
-    /// set-up; one on any other handler is not offered.
-    pub(crate) fn is_ai_handler(host: &Host, handler: &str) -> bool {
-        host.kernel
-            .bundles
-            .catalog()
-            .find(|(m, _)| *m == handler)
-            .and_then(|(_, b)| b.record_schema())
-            .is_some_and(|s| s["fields"].as_array().is_some_and(|a| a.iter().any(|f| f["name"] == "memory_store_id")))
-    }
-
     async fn presets(host: &Host) -> Value {
         match crate::kern::saved::shelf(host).await {
             Ok(sh) => json!({
@@ -207,7 +195,7 @@ impl BackendBundle {
         let Some(t) = shelf.saved.iter().find(|t| t.name == name) else {
             return refuse("not_found", format!("no saved set-up `{name}`"), "open ⚙ AI set-up to see your saved set-ups");
         };
-        if !Self::is_ai_handler(host, &t.handler()) {
+        if !fantastic_ai_core::is_ai_handler(&host.kernel, &t.handler()) {
             return refuse("bad_arg", format!("saved set-up `{name}` is not an AI set-up ({})", t.handler()), "open ⚙ AI set-up to see your saved set-ups");
         }
         let ai = format!("ai_{}", hex8());
@@ -420,7 +408,7 @@ impl BackendBundle {
         // an AI is made the way every AI is (`make_ai`): on the project's memory store from
         // its first turn, granted its store and the human's chat verbs. Equipment that is
         // an AI reaches its memory store through this, as a canvas's AI always has.
-        if Self::is_ai_handler(host, handler) {
+        if fantastic_ai_core::is_ai_handler(&host.kernel, handler) {
             let ai = match rec.get("id").and_then(Value::as_str) {
                 Some(id) => id.to_string(),
                 None => format!("ai_{}", hex8()),
