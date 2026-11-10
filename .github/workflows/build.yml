@@ -131,7 +131,8 @@ jobs:
             {"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","app":"aarch64-unknown-linux-gnu","deb":"arm64","kind":"linux"}]'
   # ── units ────────────────────────────────────────────────────────────────
   python:
-    if: inputs.units
+    # Rust only (owner 2026-11-11): Python off until the owner turns it back on.
+    if: false
     needs: plan
     name: python · ${{ matrix.os }}
     strategy:
@@ -346,8 +347,9 @@ jobs:
         if: matrix.e2e != ''
         working-directory: src/lib/python
         run: |
+          # Rust only (owner 2026-11-11): Python off until the owner turns it back on.
           uv run python ../../../e2e/build.py --out ../../../dist/e2e \
-            --profile ${{ inputs.profile }} --target ${{ matrix.target }}
+            --profile ${{ inputs.profile }} --target ${{ matrix.target }} --exclude-runtime python
           # one tar: upload-artifact drops the executable bit
           tar -cf ../../../dist/e2e.tar -C ../../../dist/e2e .
       - name: the CLI
@@ -656,7 +658,8 @@ jobs:
           E2E_TUI_FRAMES: ${{ github.workspace }}/e2e/runs/tui-frames
           E2E_ARTIFACTS: ${{ github.workspace }}/dist/e2e
           E2E_PROFILE: ${{ inputs.profile }}
-        run: uv run python ../../../e2e/run.py --only-free --lanes ${{ matrix.lanes }} --shard ${{ matrix.shard }}/3
+        # Rust only (owner 2026-11-11): Python off until the owner turns it back on.
+        run: uv run python ../../../e2e/run.py --only-free --lanes ${{ matrix.lanes }} --shard ${{ matrix.shard }}/3 --exclude-runtime python
       - name: the failures' logs, here
         if: failure()
         run: |
