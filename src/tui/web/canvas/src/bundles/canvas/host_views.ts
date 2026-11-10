@@ -5,11 +5,12 @@
 // it, and the cell's grant onto its agent. Nothing here touches the DOM or the
 // kernels.
 //
-//   view: {kind: terminal|chat|html|…  OR  handler: <any page bundle>,
+//   view: {kind: terminal|html|…  OR  handler: <any page bundle>,
 //          bytes | bytes_file   (html: the body — the agent's own small renderer),
-//          calls: [verbs…]      (html: what the body calls on its agent)}
+//          calls: [verbs…]      (html: what the body calls on its agent)
+//                 | {<agent id> | "*": [verbs…]}   (the same, plus READ verbs on other agents)}
 //
-// No `view` → the agent kind's DEFAULT (an exec agent → terminal, an AI backend or ai_chat → chat),
+// No `view` → the agent kind's DEFAULT (an exec agent → terminal, an MCP client, a store…),
 // else the STUB (its reflect + docs). One view per agent.
 
 export type Rec = Record<string, unknown>;
@@ -18,7 +19,7 @@ export type Rec = Record<string, unknown>;
 export interface HostView {
   /** the page bundle that renders it */
   handler: string;
-  /** the view kind it came from (`terminal`, `chat`, `html`, `stub`, or `handler`) */
+  /** the view kind it came from (`terminal`, `html`, `stub`, or `handler`) */
   kind: string;
   /** html: the body, when inline */
   bytes?: string;
@@ -26,12 +27,13 @@ export interface HostView {
   bytesFile?: string;
   /** the verbs the view calls on its agent (html: the record's; else the renderer's) */
   calls: string[];
+  /** html, `calls` given as an object: the verbs on OTHER agents (`{<id> | "*": verbs}`) */
+  reach?: Record<string, string[]>;
 }
 
 /** The page renderers the generic kinds name. */
 export const RENDERERS: Record<string, string> = {
   terminal: "terminal_view.ts",
-  chat: "ai_view.ts",
   html: "agent_view.ts",
   stub: "reflect_view.ts",
   mcp: "mcp_view.ts",
@@ -43,7 +45,6 @@ export const RENDERERS: Record<string, string> = {
 /** The fixed grants a generic renderer needs on the agent it shows. */
 const RENDERER_CALLS: Record<string, string[]> = {
   terminal: ["watch", "status", "start", "write", "ack", "resize", "output", "paste_image"],
-  chat: ["watch", "reflect", "history", "status", "send", "stop"],
   stub: ["reflect"],
   mcp: ["reflect", "boot", "watch"],
   // the read-only agent views: reads and `watch`, never a write verb (and the
@@ -59,12 +60,6 @@ export const MODULE_KINDS: Record<string, string> = {
   "sqlite_store.tools": "store",
   "scheduler.tools": "scheduler",
   "credential_store.tools": "credentials",
-  "anthropic_backend.tools": "chat",
-  "ollama_backend.tools": "chat",
-  "responses_backend.tools": "chat",
-  "vllm_backend.tools": "chat",
-  "foundation_models_backend.tools": "chat",
-  "ai_chat.tools": "chat",
 };
 
 const EXEC = "exec_bridge.tools";
@@ -78,12 +73,20 @@ export function viewOf(r: Rec): HostView {
   if (v !== null) {
     const handler = str(v, "handler");
     const kind = str(v, "kind") ?? (handler !== undefined ? "handler" : "stub");
-    const calls = Array.isArray(v["calls"]) ? (v["calls"] as unknown[]).filter((c): c is string => typeof c === "string") : [];
+    const strings = (x: unknown): string[] => (x as unknown[]).filter((c): c is string => typeof c === "string");
+    const given = v["calls"];
+    // a LIST is the verbs on the view's own agent; an OBJECT names its own agent by id and may name others
+    const byTarget = given !== null && typeof given === "object" && !Array.isArray(given) ? (given as Rec) : null;
+    const own = str(r, "id");
+    const calls = Array.isArray(given) ? strings(given) : byTarget !== null && own !== undefined && Array.isArray(byTarget[own]) ? strings(byTarget[own]) : [];
+    const reach: Record<string, string[]> = {};
+    if (byTarget !== null) for (const [target, verbs] of Object.entries(byTarget)) if (target !== own && Array.isArray(verbs)) reach[target] = strings(verbs);
     const out: HostView = {
       handler: handler !== undefined ? (handler.endsWith(".ts") ? handler : `${handler}.ts`) : (RENDERERS[kind] ?? RENDERERS["stub"]!),
       kind,
       calls: kind === "html" || kind === "handler" ? withWatch(calls) : (RENDERER_CALLS[kind] ?? withWatch(calls)),
     };
+    if (Object.keys(reach).length > 0 && (kind === "html" || kind === "handler")) out.reach = reach;
     if (str(v, "bytes") !== undefined) out.bytes = str(v, "bytes");
     if (str(v, "bytes_file") !== undefined) out.bytesFile = str(v, "bytes_file");
     return out;
@@ -101,9 +104,13 @@ function withWatch(calls: string[]): string[] {
   return calls.includes("watch") ? calls : [...calls, "watch"];
 }
 
-/** The cell's OWN grant onto the agent it shows — derived, never hand-written. */
+/** The cell's OWN grant onto the agent it shows — derived, never hand-written — and the
+ *  other targets an object `calls` names, as given. Nothing else. */
 export function cellGrant(agentId: string, view: HostView): Record<string, string[]> {
-  return { [agentId]: [...view.calls] };
+  const out: Record<string, string[]> = {};
+  for (const [target, verbs] of Object.entries(view.reach ?? {})) out[target] = [...verbs];
+  out[agentId] = [...view.calls];
+  return out;
 }
 
 /** Whether a page cell is a VIEW of a host agent (BE) or page content (FE). */

@@ -95,6 +95,8 @@ folder and sends `export_subtree` for the cell's host agent to `user` (#268). Th
 (`hidden: [<cell id>…]`), so a reload keeps the cells hidden. Picking a hidden
 agent in the sidebar shows its cell where it was.
 
+**View `calls`.** An html view's `calls` is a list (verbs on its own agent) or an object `{<agent id> | "*": [verbs]}`: its own agent's verbs and READ verbs on other agents; the cell's grant is exactly that (`cellGrant`), and `watch` is added on its own agent. The AI chat's view (`ai_chat.tools` returns it from `reflect`) uses the object form for `user inquiries`.
+
 **Chat cards (#339).** A chat cell (`ai_view.ts`) shows a host agent's panel INLINE, where the
 AI's `embed {id}` row sits in the conversation (`history` lists it as a row of kind `embed`;
 `unembed {id}` takes it out). The card (`ai_view/chat_card.ts`) is 100% of the chat column

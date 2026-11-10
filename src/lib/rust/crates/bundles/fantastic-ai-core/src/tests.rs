@@ -8356,6 +8356,29 @@ async fn an_ai_chat_holds_the_conversation_and_completes_through_its_provider() 
 }
 
 #[tokio::test]
+async fn an_ai_chat_reflect_carries_its_html_view_and_the_calls_it_needs() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = base_kernel(&tmp, |k| {
+        k.bundles.register(crate::chat_bundle::HANDLER_MODULE, crate::chat_bundle::AiChatBundle);
+    })
+    .await;
+    let create = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "ai_chat.tools", "id": "chat1"});
+    let made = kernel.send(vec![Item::new(AgentId::from("kernel_state"), create)]).await.remove(0).result;
+    assert_eq!(made["id"], "chat1", "{made}");
+    let refl = kernel.send(vec![Item::new(AgentId::from("chat1"), json!({"type": "reflect"}))]).await.remove(0).result;
+    let view = &refl["view"];
+    assert_eq!(view["kind"], "html", "{refl}");
+    assert!(view["bytes"].as_str().is_some_and(|b| !b.is_empty()), "the view has its body");
+    assert_eq!(
+        view["calls"],
+        json!({
+            "chat1": ["watch", "reflect", "history", "rows", "status", "send", "stop", "context_clear", "unembed"],
+            "user": ["inquiries", "answer_inquiry"],
+        })
+    );
+}
+
+#[tokio::test]
 async fn a_provider_completes_on_its_default_model_field_and_lists_and_sets_it() {
     let tmp = TempDir::new().unwrap();
     let kernel = base_kernel(&tmp, |k| {

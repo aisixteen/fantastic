@@ -27,11 +27,10 @@ import type { Rect } from "./layout.ts";
 export function hostViewCell(agent: string, rec: Rec): { handler: string; meta: Record<string, unknown> } {
   const v = viewOf(rec);
   const meta: Record<string, unknown> = { backend_id: agent, owns_backend: false };
-  // the renderer's OWN grant onto its agent (terminal, chat and the stub declare
+  // the renderer's OWN grant onto its agent (terminal and the stub declare
   // theirs); an html view's is its record's `calls`
   meta["can_call"] =
     v.kind === "terminal" ? { ...terminalView.grants(agent) }
-    : v.kind === "chat" ? { ...aiView.grants(agent) }
     : v.kind === "stub" ? { ...reflectView.grants(agent) }
     : v.kind === "mcp" ? { ...mcpView.grants(agent) }
     : cellGrant(agent, v);
