@@ -654,3 +654,21 @@ async fn two_stores_hold_separate_tables_and_delete_frees_one() {
     let read1 = call(&k, json!({"type": "read"}), Some("alice")).await;
     assert_eq!(ids(&read1), vec![1], "mem keeps its rows");
 }
+
+#[tokio::test]
+async fn append_emits_one_appended_event_per_new_row() {
+    let k = store();
+    let mut rx = k.ensure_inbox(&AgentId::from("mem"));
+    let out = append(&k, "alice", json!([{"content": "a"}, {"content": "b"}])).await;
+    let ids = out["ids"].as_array().unwrap().clone();
+    assert_eq!(ids.len(), 2, "{out}");
+    for id in &ids {
+        let ev = rx.try_recv().expect("an appended event").payload;
+        assert_eq!(ev, json!({"type": "appended", "table": "rows", "id": id}));
+    }
+    assert!(rx.try_recv().is_none());
+    // a refused append emits nothing
+    let refused = append(&k, "alice", json!([])).await;
+    assert_eq!(refused["reason"], json!("bad_arg"), "{refused}");
+    assert!(rx.try_recv().is_none());
+}

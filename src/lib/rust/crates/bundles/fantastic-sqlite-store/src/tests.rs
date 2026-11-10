@@ -272,3 +272,35 @@ fn path_at_state_lands_in_the_state_folder_and_a_plain_path_in_work() {
     let err = resolve_path(&rec(json!({"path": "@state/../x.db"})), &k, own).unwrap_err();
     assert!(err.contains("inside its folder"), "{err}");
 }
+
+#[tokio::test]
+async fn append_emits_one_appended_event_per_new_row() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(tmp.path());
+    add_store(&k, "mem.db");
+    let mut rx = k.ensure_inbox(&AgentId::from("mem"));
+    let out = call(
+        &k,
+        "mem",
+        json!({"type": "append", "rows": [{"content": "a"}, {"content": "b"}]}),
+        Some("alice"),
+    )
+    .await;
+    let ids = out["ids"].as_array().unwrap().clone();
+    assert_eq!(ids.len(), 2, "{out}");
+    for id in &ids {
+        let ev = rx.try_recv().expect("an appended event").payload;
+        assert_eq!(ev, json!({"type": "appended", "table": "rows", "id": id}));
+    }
+    assert!(rx.try_recv().is_none());
+    // a refused append emits nothing
+    let refused = call(
+        &k,
+        "mem",
+        json!({"type": "append", "rows": []}),
+        Some("alice"),
+    )
+    .await;
+    assert_eq!(refused["reason"], json!("bad_arg"), "{refused}");
+    assert!(rx.try_recv().is_none());
+}
