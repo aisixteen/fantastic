@@ -193,12 +193,12 @@ pub fn child_records_root(parent_root: &str, node: &str) -> String {
 /// canvas `canvas_<name>` of `parent`, its page records nested under the parent's
 /// records dir. Returns its node id. A name taken anywhere is refused.
 pub async fn new_canvas(h: &Host, parent: &str, name: &str) -> Result<String, String> {
-    let is_canvas = h
+    let canvas_parent = h
         .kernel
         .agents
         .get(&fantastic_kernel::AgentId::from(parent))
         .is_some_and(|a| a.value().record().handler_module.as_deref() == Some(crate::kern::backend::HANDLER_MODULE));
-    if !is_canvas {
+    if !canvas_parent {
         return Err(format!("new_canvas: `{parent}` is not a canvas"));
     }
     let node = canvas_node_id(name)?;
