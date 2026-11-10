@@ -7,6 +7,10 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- `KeyReader::read_fields(endpoint, names)` (#596): the credential reader returns the named
+  fields of one ref (in the order asked, an absent or empty one an error naming the field,
+  never a value), through the one store read, host pin included. `KeyReader::read` (the
+  `api_key`) and the relay connector's password read are callers of it.
 - Public helpers for programs that extend the kernel (#594): `fantastic_kernel::error_text(reply)`
   (the `error` of a verb reply as text, `: {message}` appended), `Kernel::exists(id)`,
   `fantastic_kernel::grants::union(into, from)` (merge two grant maps, never narrowing),

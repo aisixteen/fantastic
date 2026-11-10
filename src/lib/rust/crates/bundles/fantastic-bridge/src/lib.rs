@@ -634,7 +634,7 @@ impl Bundle for RelayConnectorBundle {
         if let Some(bad) = meta
             .get("credentials")
             .filter(|v| !v.is_null())
-            .and_then(credentials_shape_error)
+            .and_then(fantastic_ai_core::credentials::shape_error)
         {
             return Some(bad);
         }
@@ -646,28 +646,6 @@ impl Bundle for RelayConnectorBundle {
 
 /// The credential field that holds the relay group password. Python `FIELD`.
 pub const RELAY_PASSWORD_FIELD: &str = "password";
-
-/// Why a `credentials` value is malformed, or `None`: a map of exactly a
-/// non-empty `store` id and a non-empty `ref` (ai_core's shape, its texts).
-/// Python `credentials_shape_error`.
-fn credentials_shape_error(v: &Value) -> Option<String> {
-    let shape = || "credentials must be {store: <credential_store id>, ref: <ref>}".to_string();
-    let Some(m) = v.as_object() else {
-        return Some(shape());
-    };
-    if m.len() != 2 || !m.contains_key("store") || !m.contains_key("ref") {
-        return Some(shape());
-    }
-    for k in ["store", "ref"] {
-        if !m[k]
-            .as_str()
-            .is_some_and(|s| !fantastic_bundle::py_strip(s).is_empty())
-        {
-            return Some(format!("credentials.{k} must be a non-empty string"));
-        }
-    }
-    None
-}
 
 /// The async `read() -> password` a dial awaits — every dial, nothing cached.
 /// Asks the store named by the record's `credentials` for the ref's `password`,
@@ -681,40 +659,20 @@ fn password_reader(
     kernel: &Arc<Kernel>,
     relay_url: &str,
 ) -> transport::relay::PasswordReader {
-    let (id, kernel, url) = (self_id.clone(), Arc::clone(kernel), relay_url.to_string());
-    // `id` reads the record's `credentials`; the read itself is the connector's.
+    // The shared read: the store read, its host pin and its texts live in ai_core.
+    let reader =
+        fantastic_ai_core::credentials::key_reader(self_id, kernel, "relay_connector", true);
+    let url = relay_url.to_string();
     Arc::new(move || {
-        let (id, kernel, url) = (id.clone(), Arc::clone(&kernel), url.clone());
+        let (reader, url) = (reader.clone(), url.clone());
         Box::pin(async move {
-            let cred = meta_value(&id, &kernel, "credentials").unwrap_or(Value::Null);
-            if let Some(bad) = credentials_shape_error(&cred) {
-                return Err(format!("relay_connector: {bad}"));
-            }
-            let (store, r) = (py_str(&cred["store"]), py_str(&cred["ref"]));
-            let item = Item::new(
-                AgentId::from(store.as_str()),
-                json!({"type": "get", "ref": r, "host": url}),
-            );
-            let out = kernel.send(vec![item]).await.remove(0);
-            let res = &out.result;
-            let refused = res
-                .as_object()
-                .map_or(Some(py_str(&json!(out.status.as_str()))), |m| {
-                    m.get("error").filter(|e| py_truthy(e)).map(py_str)
-                });
-            if out.status != fantastic_kernel::Status::Completed || refused.is_some() {
-                let err = refused.unwrap_or_else(|| "None".to_string());
-                return Err(format!("relay_connector: credentials {store}/{r}: {err}"));
-            }
-            match res["fields"][RELAY_PASSWORD_FIELD].as_str() {
-                Some(pw) if !pw.is_empty() => Ok(pw.to_string()),
-                _ => Err(format!(
-                    "relay_connector: credential {} in {} has no {} field",
-                    py_repr(&r),
-                    py_repr(&store),
-                    py_repr(RELAY_PASSWORD_FIELD)
-                )),
-            }
+            let values = reader
+                .read_fields(&url, &[RELAY_PASSWORD_FIELD])
+                .await
+                .map_err(|e| e.0)?;
+            values
+                .and_then(|mut v| (!v.is_empty()).then(|| v.remove(0)))
+                .ok_or_else(|| "relay_connector: no `credentials`".to_string())
         })
     })
 }
@@ -1083,7 +1041,7 @@ async fn build_relay_transport(
              ref: <ref>}}; the ref's field `password`, bound to the relay's host)"
         ));
     };
-    if let Some(bad) = credentials_shape_error(&cred) {
+    if let Some(bad) = fantastic_ai_core::credentials::shape_error(&cred) {
         return Err(format!("relay_connector: {bad}"));
     }
     // `guid` (our WS path) is auto-minted ONCE on first boot if absent and

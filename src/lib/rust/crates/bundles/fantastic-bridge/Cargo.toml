@@ -10,6 +10,7 @@ description = "Cross-kernel bridge — WS-only, asymmetric; ships raw call frame
 fantastic-kernel = { path = "../../fantastic-kernel" }
 fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
 fantastic-bundle = { path = "../../fantastic-bundle" }
+fantastic-ai-core = { path = "../fantastic-ai-core" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
