@@ -207,7 +207,7 @@ impl Panel for StorePanel {
         if reply.get("verbs").is_some() && reply.get("sentence").is_some() {
             return false;
         }
-        if let Some(e) = ro::refusal(reply) {
+        if let Some(e) = fantastic_kernel::error_text(reply) {
             if self.search_pending {
                 self.search_pending = false;
                 self.search_error = Some(e);

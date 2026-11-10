@@ -16,6 +16,17 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   accepted and sets the recorded `web` before it listens (no `web` record: refused, nothing
   started); a recorded `web` with no port (and no `--port`) picks a free port once, records it
   and reuses it, in every mode.
+- AI core `status` reply carries `inquiry_from` (#597): the askers of the inquiries the agent has received and not yet answered, sorted, each once (the operator as `operator`), ids only, in every `status` reply. No new verb or grant.
+- `KeyReader::read_fields(endpoint, names)` (#596): the credential reader returns the named
+  fields of one ref (in the order asked, an absent or empty one an error naming the field,
+  never a value), through the one store read, host pin included. `KeyReader::read` (the
+  `api_key`) and the relay connector's password read are callers of it.
+- Public helpers for programs that extend the kernel (#594): `fantastic_kernel::error_text(reply)`
+  (the `error` of a verb reply as text, `: {message}` appended), `Kernel::exists(id)`,
+  `fantastic_kernel::grants::union(into, from)` (merge two grant maps, never narrowing),
+  `fantastic_ai_core::is_ai(kernel, id)` with `is_ai_handler(kernel, handler)`, and
+  `fantastic_ai_core::USAGE_KEYS` (the four usage key names, written by the anthropic backend
+  from it). The private copies in the CLI crates are gone; they call these.
 - `sqlite_store` in the headless Rust kernel (#432): the durable memory store moved from
   the CLI product into the lib (`fantastic-sqlite-store`) and is registered in the
   `fantastic_kernel` binary; the file is the record's `path` (config), and a stop

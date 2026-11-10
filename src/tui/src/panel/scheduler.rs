@@ -162,7 +162,7 @@ impl Panel for SchedulerPanel {
         if reply.get("verbs").is_some() && reply.get("sentence").is_some() {
             return false;
         }
-        if let Some(e) = ro::refusal(reply) {
+        if let Some(e) = fantastic_kernel::error_text(reply) {
             self.refusal = Some(e);
             return true;
         }

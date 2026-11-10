@@ -219,3 +219,85 @@ async fn a_key_that_is_not_a_legal_header_value_is_refused_by_its_ref() {
     creds::set_key(&k, tmp.path(), "ai", "claude", "api.example.com", "sk a\tb").await;
     assert_eq!(read.read(EP).await, Ok(Some("sk a\tb".to_string())));
 }
+
+const TOKEN: &str = "tok-made-up-4455";
+const APP: &str = "app-made-up-77";
+
+/// Store `fields` on ref `claude` (already declared, bound to `api.example.com`).
+async fn store_fields(k: &Arc<Kernel>, fields: Value) {
+    let out = k
+        .send(vec![Item::new(
+            AgentId::from(creds::STORE),
+            json!({"type": "set", "ref": "claude", "fields": fields}),
+        )])
+        .await
+        .remove(0);
+    assert_eq!(out.result["stored"], json!(true), "{}", out.result);
+}
+
+#[tokio::test]
+async fn read_fields_returns_the_named_fields_of_one_ref_in_order() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp).await;
+    store_fields(&k, json!({"token": TOKEN, "app_id": APP})).await;
+    let read = key_reader(&AgentId::from("ai"), &k, "github_backend", true);
+    assert_eq!(
+        read.read_fields(EP, &["app_id", "token"]).await,
+        Ok(Some(vec![APP.to_string(), TOKEN.to_string()]))
+    );
+    assert_eq!(
+        read.read_fields(EP, &["token", "app_id"]).await,
+        Ok(Some(vec![TOKEN.to_string(), APP.to_string()]))
+    );
+}
+
+#[tokio::test]
+async fn read_fields_names_the_missing_field_never_a_value() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp).await;
+    store_fields(&k, json!({"token": TOKEN})).await;
+    let read = key_reader(&AgentId::from("ai"), &k, "github_backend", true);
+    let e = read
+        .read_fields(EP, &["token", "app_id"])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        e.0,
+        "github_backend: credential 'claude' in 'creds' has no 'app_id' field"
+    );
+    assert!(!e.0.contains(TOKEN), "{e}");
+}
+
+#[tokio::test]
+async fn read_fields_is_pinned_to_the_endpoint_host() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp).await;
+    store_fields(&k, json!({"token": TOKEN})).await;
+    let read = key_reader(&AgentId::from("ai"), &k, "github_backend", true);
+    let e = read
+        .read_fields("https://evil.example.net/v1", &["token"])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        e.0,
+        "github_backend: credentials creds/claude: credential_store: ref 'claude' is bound to \
+         host 'api.example.com', not 'evil.example.net' — refused, nothing read"
+    );
+    assert!(!e.0.contains(TOKEN), "{e}");
+}
+
+#[tokio::test]
+async fn read_fields_without_credentials_is_none_when_optional() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp).await;
+    k.register(Agent::new(
+        AgentId::from("bare"),
+        None,
+        Some(AgentId::from("kernel_state")),
+        Map::new(),
+        std::path::PathBuf::new(),
+        false,
+    ));
+    let read = key_reader(&AgentId::from("bare"), &k, "github_backend", false);
+    assert_eq!(read.read_fields(EP, &["token"]).await, Ok(None));
+}
