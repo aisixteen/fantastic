@@ -78,18 +78,18 @@ def main() -> bool:
             async with rig.page(1400, 900) as pg:
                 await pg.until("document.querySelectorAll('.agent-frame').length === 2", 20)
                 await pg.until(f"!!{TERM_FG}", 20)
-                # 1-2: dark, today's look
+                # 1-2: day, the web default
                 info["1_skin"], info["1_backdrop"] = await pg.js(SKIN), await pg.js(BACKDROP)
                 info["2_body"], info["2_bezel"], info["2_accent"] = await pg.js(BODY), await pg.js(BEZEL), await pg.js(ACCENT)
                 await pg.until(f"{DRAWN} === 'drawn'", 10)
                 info["2_drawn"] = await pg.js(DRAWN)
                 info["2_term_fg"] = await pg.js(TERM_FG)
                 # 3: the skin agent is read only: get and schema answer; list, use, add, delete are unknown verbs
-                info["3_get"] = await call({"type": "get", "name": "dark"})
+                info["3_get"] = await call({"type": "get", "name": "day"})
                 info["3_schema"] = await call({"type": "schema"})
                 info["3_refused"] = {v: (await call({"type": v, "name": "glass"})).get("reason") for v in ("list", "use", "add", "delete")}
                 await asyncio.sleep(0.5)
-                info["3_unchanged"] = await pg.js(f"{SKIN} === 'dark' && {BEZEL} === 'rgba(15, 15, 25, 0.88)'")
+                info["3_unchanged"] = await pg.js(f"{SKIN} === 'day' && {BEZEL} === 'rgba(255, 255, 255, 0.58)'")
                 # 4: the record holds no skin choice
                 info["4_record"] = await disk_until(skin_yaml, lambda d: d.get("handler_module") == "skin.ts")
                 # 5: the backgrounds panel has no Skins or Themes section
@@ -120,10 +120,10 @@ def main() -> bool:
             s = str(c)
             return float(s.rsplit(",", 1)[1].strip(" )")) if s.startswith("rgba(") else 1.0
 
-        r["1 a plain tab is dark on the web backdrop"] = info.get("1_skin") == "dark" and info.get("1_backdrop") == "web"
-        r["2 dark's computed styles are today's"] = (info.get("2_body") == "rgb(6, 6, 12)" and info.get("2_bezel") == "rgba(15, 15, 25, 0.88)"
-                                                      and info.get("2_accent") == "rgb(183 140 255)" and info.get("2_drawn") == "drawn"
-                                                      and info.get("2_term_fg") == "#e5e5e5")
+        r["1 a plain tab is day on the web backdrop"] = info.get("1_skin") == "day" and info.get("1_backdrop") == "web"
+        r["2 day's computed styles are the day tokens'"] = (info.get("2_body") == "rgb(237, 237, 237)" and info.get("2_bezel") == "rgba(255, 255, 255, 0.58)"
+                                                      and info.get("2_accent") == "rgb(17 17 17)" and info.get("2_drawn") == "drawn"
+                                                      and info.get("2_term_fg") == "#0b0b0b")
         r["3 get and schema answer; list, use, add and delete are unknown verbs; nothing changes"] = (
             (info.get("3_get") or {}).get("backdrop") == "web" and bool((info.get("3_schema") or {}).get("tokens"))
             and set((info.get("3_refused") or {}).values()) == {"unhandled"} and len(info.get("3_refused") or {}) == 4 and info.get("3_unchanged") is True)

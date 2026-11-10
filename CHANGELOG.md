@@ -227,6 +227,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Changed
 
+- The canvas has a `day` stock skin (#608, #609), the default on the web (black and white glass over a light dotted page; colour only for state); `dark` stays a stock skin, `glass` stays the native default. A node test keeps the `:root` block of each shipped html view equal to the day skin.
 - An agent's kind is its handler name (#605): the AI checks (`is_ai`, `is_ai_handler`, `ai_check`, the page's `isAi`, `is_web`, `is_canvas`) are removed; the row watch, grant holders, prompt stamp, set-up catalog, AI panel, export port kinds and the page's chat view and badges compare the record's `handler_module` with the names they need, and no longer read `memory_store_id` or a name suffix.
 - Boot (#580): in the terminal UI and `canvas`, a refused grant watch (`reach::start`) now stops
   the boot like in `mcp` mode (it was a note); in `mcp` mode the grant watch now starts before

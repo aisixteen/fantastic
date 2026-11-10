@@ -245,10 +245,19 @@ test("mergeTokens: a partial skin over a base compiles; an over-token replaces t
   assert.deepEqual((((base["color"] as Dict)["b"] as Dict)["$value"] as Dict)["alpha"], 0.5);
 });
 
-test("the stock skins compile: dark is web, glass is native; dark's values are today's literals", () => {
-  assert.deepEqual(STOCK_SKINS.map((s) => s.name), ["dark", "glass"]);
+test("the stock skins compile: day and dark are web, glass is native; dark's values are the earlier literals", () => {
+  assert.deepEqual(STOCK_SKINS.map((s) => s.name), ["day", "dark", "glass"]);
   const dark = compileSkin(stockSkin("dark")!.tokens);
   const glass = compileSkin(stockSkin("glass")!.tokens);
+  const day = compileSkin(stockSkin("day")!.tokens);
+  assert.ok(day.ok, JSON.stringify(day));
+  if (day.ok) {
+    assert.equal(day.skin.backdrop, "web");
+    assert.equal(day.skin.css.size, SKIN_SCHEMA.length);
+    assert.equal(day.skin.css.get("color.page.bg"), "rgb(237 237 237)");
+    assert.equal(day.skin.css.get("color.status.error"), "rgb(179 38 30)");
+    assert.ok((day.skin.values.get("color.surface.bezel") as ColorValue).alpha < 0.6, "glass: translucent panels");
+  }
   assert.ok(dark.ok, JSON.stringify(dark));
   assert.ok(glass.ok, JSON.stringify(glass));
   if (!dark.ok || !glass.ok) return;
