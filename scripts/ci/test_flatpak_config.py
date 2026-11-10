@@ -180,7 +180,7 @@ class CiFlatpakJob(unittest.TestCase):
     def test_job_is_gated_by_the_input(self):
         job = ci_job("flatpak")
         self.assertIsNotNone(job, "a flatpak job")
-        self.assertRegex(job, r"(?m)^    if: inputs\.flatpak\s*$")
+        self.assertRegex(job, r"(?m)^    if: inputs\.flatpak && \(inputs\.os != 'macos' && inputs\.os != 'windows'\)\s*$")
         self.assertRegex(job, r"(?m)^    runs-on: ubuntu-")
         self.assertNotRegex(job, r"(?m)^    needs:")
         manifest = f"packaging/flatpak/{app_id()}.yml"
@@ -205,7 +205,7 @@ class CiFlatpakJob(unittest.TestCase):
                          ["binaries", "container", "debs", "e2e", "flatpak", "units"])
         units = ci_job("units")
         self.assertNotRegex(units, r"(?m)^    if:")
-        self.assertIn("units_os: ${{ inputs.e2e && 'all' || inputs.units_os }}", units)
+        self.assertIn("os: ${{ inputs.os }}", units)
         self.assertEqual(CI.count("inputs.flatpak"), 1, "only the flatpak job reads the input")
 
 

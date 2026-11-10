@@ -1,8 +1,7 @@
 # THE BUILD — one reusable workflow, called with what to do:
 #
 #   profile    debug | release — what every job builds
-#   units      the unit tests of every runtime, per OS (`units_os`: all three
-#              OSes, or Linux only when `units_os` is `linux`)
+#   units      the unit tests of every runtime, per OS
 #   binaries   the shipping archive of every release target (`release-<target>`;
 #              `release.yml` publishes the ones a green run of `ci.yml` kept for
 #              the tagged commit), and per OS the kernels and rig the e2e runs
@@ -19,6 +18,12 @@
 #              `app-*` and `release-*` artifacts of the same run, installed on
 #              stock Debian 13 in a container. Its own call, after the
 #              `binaries` call (`ci.yml`).
+#
+# `os` (all | linux | macos | windows; empty = all) picks the OS set of EVERY
+# job of a call. The `plan` job turns it into each job's matrix; a job whose
+# matrix has no entry for that OS is skipped (GitHub fails on an empty matrix,
+# so the job's `if` checks the plan first). The Linux-only jobs (debs) run on
+# `all` and `linux`. arm64 and amd64 Linux are both Linux.
 #
 # Callers: `ci.yml` ({debug, units}, {release, binaries}, then {release, e2e}
 # and {release, debs}).
@@ -45,8 +50,8 @@ on:
       units:
         type: boolean
         default: false
-      units_os:
-        # the units' OS set: `all` (Linux, macOS, Windows) or `linux` (Linux only)
+      os:
+        # the OS set of every job: all (Linux, macOS, Windows), linux, macos or windows
         type: string
         default: all
       binaries:
@@ -77,14 +82,63 @@ defaults:
     shell: bash
 
 jobs:
+  # The matrices of this call, for the chosen `os`: every entry has a `kind`
+  # (linux | macos | windows); the ones of other kinds are dropped. An empty list
+  # skips its job.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      units: ${{ steps.plan.outputs.units }}
+      binaries: ${{ steps.plan.outputs.binaries }}
+      cross: ${{ steps.plan.outputs.cross }}
+      app: ${{ steps.plan.outputs.app }}
+      app_e2e: ${{ steps.plan.outputs.app_e2e }}
+      e2e: ${{ steps.plan.outputs.e2e }}
+      debs: ${{ steps.plan.outputs.debs }}
+    steps:
+      - id: plan
+        env:
+          OS: ${{ inputs.os }}
+        run: |
+          pick() { jq -c --arg os "$OS" '[.[] | select($os == "" or $os == "all" or .kind == $os)]'; }
+          out() { echo "$1=$(printf '%s' "$2" | pick)" >> "$GITHUB_OUTPUT"; }
+          out units '[{"os":"ubuntu-latest","kind":"linux"},{"os":"xcode-27","kind":"macos"},{"os":"windows-latest","kind":"windows"}]'
+          out binaries '[
+            {"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl","e2e":"ubuntu-latest","kind":"linux"},
+            {"os":"xcode-27","target":"aarch64-apple-darwin","e2e":"xcode-27","kind":"macos"},
+            {"os":"windows-latest","target":"x86_64-pc-windows-msvc","e2e":"windows-latest","kind":"windows"}]'
+          out cross '[
+            {"os":"xcode-27","target":"x86_64-apple-darwin","kind":"macos"},
+            {"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","kind":"linux"}]'
+          out app '[
+            {"os":"xcode-27","target":"aarch64-apple-darwin","app":"aarch64-apple-darwin","kind":"macos"},
+            {"os":"windows-latest","target":"x86_64-pc-windows-msvc","app":"x86_64-pc-windows-msvc","kind":"windows"},
+            {"os":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","app":"x86_64-unknown-linux-gnu","kind":"linux"},
+            {"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","app":"aarch64-unknown-linux-gnu","kind":"linux"}]'
+          out app_e2e '[
+            {"os":"xcode-27","target":"aarch64-apple-darwin","app":"aarch64-apple-darwin","kind":"macos"},
+            {"os":"windows-latest","target":"x86_64-pc-windows-msvc","app":"x86_64-pc-windows-msvc","kind":"windows"},
+            {"os":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","app":"x86_64-unknown-linux-gnu","kind":"linux"}]'
+          # LANES: tests at once. Windows runs one: two software-GL Chromes and
+          # their hosts on its 4 vCPUs pushed the canvas waits past their bounds.
+          out e2e '[
+            {"os":"ubuntu-latest","lanes":2,"shard":1,"kind":"linux"},{"os":"ubuntu-latest","lanes":2,"shard":2,"kind":"linux"},{"os":"ubuntu-latest","lanes":2,"shard":3,"kind":"linux"},
+            {"os":"xcode-27","lanes":2,"shard":1,"kind":"macos"},{"os":"xcode-27","lanes":2,"shard":2,"kind":"macos"},{"os":"xcode-27","lanes":2,"shard":3,"kind":"macos"},
+            {"os":"windows-latest","lanes":1,"shard":1,"kind":"windows"},{"os":"windows-latest","lanes":1,"shard":2,"kind":"windows"},{"os":"windows-latest","lanes":1,"shard":3,"kind":"windows"}]'
+          out debs '[
+            {"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl","app":"x86_64-unknown-linux-gnu","deb":"amd64","kind":"linux"},
+            {"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","app":"aarch64-unknown-linux-gnu","deb":"arm64","kind":"linux"}]'
   # ── units ────────────────────────────────────────────────────────────────
   python:
-    if: inputs.units
+    # Rust only (owner 2026-11-11): Python off until the owner turns it back on.
+    if: false
+    needs: plan
     name: python · ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.units_os == 'linux' && '["ubuntu-latest"]' || '["ubuntu-latest","xcode-27","windows-latest"]') }}
+        os: ${{ fromJSON(needs.plan.outputs.units).*.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     defaults:
@@ -110,11 +164,12 @@ jobs:
 
   rust:
     if: inputs.units
+    needs: plan
     name: rust kernel · ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.units_os == 'linux' && '["ubuntu-latest"]' || '["ubuntu-latest","xcode-27","windows-latest"]') }}
+        os: ${{ fromJSON(needs.plan.outputs.units).*.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
@@ -148,11 +203,12 @@ jobs:
 
   cli:
     if: inputs.units
+    needs: plan
     name: cli · ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.units_os == 'linux' && '["ubuntu-latest"]' || '["ubuntu-latest","xcode-27","windows-latest"]') }}
+        os: ${{ fromJSON(needs.plan.outputs.units).*.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
@@ -180,11 +236,12 @@ jobs:
 
   desktop-app:
     if: inputs.units
+    needs: plan
     name: desktop app · ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.units_os == 'linux' && '["ubuntu-latest"]' || '["ubuntu-latest","xcode-27","windows-latest"]') }}
+        os: ${{ fromJSON(needs.plan.outputs.units).*.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
@@ -217,11 +274,12 @@ jobs:
 
   ts:
     if: inputs.units
+    needs: plan
     name: ts · ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.units_os == 'linux' && '["ubuntu-latest"]' || '["ubuntu-latest","xcode-27","windows-latest"]') }}
+        os: ${{ fromJSON(needs.plan.outputs.units).*.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -248,17 +306,13 @@ jobs:
 
   # ── the shipping binaries (+ the e2e's) ──────────────────────────────────
   binaries:
-    if: inputs.binaries
+    if: inputs.binaries && needs.plan.outputs.binaries != '[]'
+    needs: plan
     name: build · ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
-        # `e2e`: the OS whose e2e runs this target's binaries (one native target
-        # per OS). The targets no e2e runs on are `cross`, below.
-        include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, e2e: ubuntu-latest }
-          - { os: xcode-27, target: aarch64-apple-darwin, e2e: xcode-27 }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, e2e: windows-latest }
+        include: ${{ fromJSON(needs.plan.outputs.binaries) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
@@ -293,8 +347,9 @@ jobs:
         if: matrix.e2e != ''
         working-directory: src/lib/python
         run: |
+          # Rust only (owner 2026-11-11): Python off until the owner turns it back on.
           uv run python ../../../e2e/build.py --out ../../../dist/e2e \
-            --profile ${{ inputs.profile }} --target ${{ matrix.target }}
+            --profile ${{ inputs.profile }} --target ${{ matrix.target }} --exclude-runtime python
           # one tar: upload-artifact drops the executable bit
           tar -cf ../../../dist/e2e.tar -C ../../../dist/e2e .
       - name: the CLI
@@ -327,14 +382,13 @@ jobs:
 
   # ── the release targets no e2e runs on (shipped, not tested here) ───────
   cross:
-    if: inputs.binaries
+    if: inputs.binaries && needs.plan.outputs.cross != '[]'
+    needs: plan
     name: build · ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: xcode-27, target: x86_64-apple-darwin }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+        include: ${{ fromJSON(needs.plan.outputs.cross) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
@@ -382,18 +436,13 @@ jobs:
   # arm64 app (`ubuntu-24.04-arm`, glibc 2.39) is for the arm64 Debian 13 packages
   # only; its CLI comes from `cross`.
   app:
-    if: inputs.binaries
-    needs: [binaries, cross]
+    if: inputs.binaries && !cancelled() && !failure() && needs.plan.outputs.app != '[]'
+    needs: [plan, binaries, cross]
     name: app · ${{ matrix.app }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: xcode-27, target: aarch64-apple-darwin, app: aarch64-apple-darwin }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, app: x86_64-pc-windows-msvc }
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, app: x86_64-unknown-linux-gnu }
-          # for the arm64 .deb only: no installer, no e2e
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, app: aarch64-unknown-linux-gnu }
+        include: ${{ fromJSON(needs.plan.outputs.app) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -459,16 +508,13 @@ jobs:
   # Windows launch the app and ask it through the home's socket: macOS has no
   # WKWebView driver, and msedgedriver can't reach the app's WebView2.
   app-e2e:
-    if: inputs.e2e && !cancelled() && !failure()
-    needs: [binaries, app]
+    if: inputs.e2e && !cancelled() && !failure() && needs.plan.outputs.app_e2e != '[]'
+    needs: [plan, binaries, app]
     name: app e2e · ${{ matrix.app }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: xcode-27, target: aarch64-apple-darwin, app: aarch64-apple-darwin }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, app: x86_64-pc-windows-msvc }
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, app: x86_64-unknown-linux-gnu }
+        include: ${{ fromJSON(needs.plan.outputs.app_e2e) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -543,23 +589,13 @@ jobs:
   # `needs: binaries` orders a call that builds AND tests; in a call that only
   # tests, `binaries` is skipped, and only a failed or cancelled run stops this.
   e2e:
-    if: inputs.e2e && !cancelled() && !failure()
-    needs: binaries
+    if: inputs.e2e && !cancelled() && !failure() && needs.plan.outputs.e2e != '[]'
+    needs: [plan, binaries]
     name: e2e (free) · ${{ matrix.os }} · ${{ matrix.shard }}/3
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, xcode-27, windows-latest]
-        shard: [1, 2, 3]
-        # LANES: tests at once. Windows runs one: two software-GL Chromes and
-        # their hosts on its 4 vCPUs pushed the canvas waits past their bounds.
-        include:
-          - os: ubuntu-latest
-            lanes: 2
-          - os: xcode-27
-            lanes: 2
-          - os: windows-latest
-            lanes: 1
+        include: ${{ fromJSON(needs.plan.outputs.e2e) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     steps:
@@ -622,7 +658,8 @@ jobs:
           E2E_TUI_FRAMES: ${{ github.workspace }}/e2e/runs/tui-frames
           E2E_ARTIFACTS: ${{ github.workspace }}/dist/e2e
           E2E_PROFILE: ${{ inputs.profile }}
-        run: uv run python ../../../e2e/run.py --only-free --lanes ${{ matrix.lanes }} --shard ${{ matrix.shard }}/3
+        # Rust only (owner 2026-11-11): Python off until the owner turns it back on.
+        run: uv run python ../../../e2e/run.py --only-free --lanes ${{ matrix.lanes }} --shard ${{ matrix.shard }}/3 --exclude-runtime python
       - name: the failures' logs, here
         if: failure()
         run: |
@@ -654,14 +691,13 @@ jobs:
   # `app-*` and `release-*` artifacts of the `binaries` call (ci.yml's `debs` call
   # follows it). Unsigned: signing is by hand (src/lib/rust/RELEASING.md).
   debs:
-    if: inputs.debs
+    if: inputs.debs && needs.plan.outputs.debs != '[]'
+    needs: plan
     name: debs · ${{ matrix.deb }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, app: x86_64-unknown-linux-gnu, deb: amd64 }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, app: aarch64-unknown-linux-gnu, deb: arm64 }
+        include: ${{ fromJSON(needs.plan.outputs.debs) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
