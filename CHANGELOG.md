@@ -7,6 +7,10 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- `KeyReader::read_fields(endpoint, names)` (#596): the credential reader returns the named
+  fields of one ref (in the order asked, an absent or empty one an error naming the field,
+  never a value), through the one store read, host pin included. `KeyReader::read` (the
+  `api_key`) and the relay connector's password read are callers of it.
 - `sqlite_store` in the headless Rust kernel (#432): the durable memory store moved from
   the CLI product into the lib (`fantastic-sqlite-store`) and is registered in the
   `fantastic_kernel` binary; the file is the record's `path` (config), and a stop

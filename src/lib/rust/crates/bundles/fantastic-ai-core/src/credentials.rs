@@ -152,6 +152,51 @@ impl KeyReader {
     /// record's `credentials` is malformed, or a required key has no
     /// `credentials` on the record.
     pub async fn read(&self, endpoint: &str) -> Result<Option<String>, CredentialError> {
+        let Some((store, r, mut values)) = self.read_ref(endpoint, &[FIELD]).await? else {
+            return Ok(None);
+        };
+        let key = values.remove(0);
+        // named by its ref, never by its value
+        if !header_safe(&key) {
+            return Err(CredentialError(format!(
+                "{}: credential {} in {}: {} is not a legal HTTP header value (a \
+                 control or non-ASCII character, or whitespace at an edge) — store it \
+                 again without",
+                self.backend,
+                py_repr(&r),
+                py_repr(&store),
+                py_repr(FIELD)
+            )));
+        }
+        Ok(Some(key))
+    }
+
+    /// The values of the fields `names` of the ref this agent's `credentials`
+    /// names, in the order asked, or `None` when the record names no
+    /// `credentials` and they are optional. One `get` to the store, pinned to
+    /// `endpoint`'s host (the store refuses a ref bound to another host), sent as
+    /// this agent; nothing is cached.
+    ///
+    /// # Errors
+    /// [`CredentialError`] when the store refuses, the record's `credentials` is
+    /// malformed, or a required one is absent. A named field that is absent or
+    /// empty is an error naming the backend, the ref, the store and the FIELD
+    /// NAME — never a value.
+    pub async fn read_fields(
+        &self,
+        endpoint: &str,
+        names: &[&str],
+    ) -> Result<Option<Vec<String>>, CredentialError> {
+        Ok(self.read_ref(endpoint, names).await?.map(|(_, _, v)| v))
+    }
+
+    /// [`Self::read_fields`] with the store id and the ref it read, for the
+    /// readers that name them in their own texts.
+    async fn read_ref(
+        &self,
+        endpoint: &str,
+        names: &[&str],
+    ) -> Result<Option<(String, String, Vec<String>)>, CredentialError> {
         let backend = self.backend;
         let id = self.self_id.as_str();
         let cred = crate::helpers::agent_meta(&self.self_id, &self.kernel)
@@ -192,25 +237,20 @@ impl KeyReader {
                 "{backend}: credentials {store}/{r}: {err}"
             )));
         }
-        match res.get("fields").and_then(|f| f.get(FIELD)) {
-            // named by its ref, never by its value
-            Some(Value::String(key)) if !key.is_empty() && !header_safe(key) => {
-                Err(CredentialError(format!(
-                    "{backend}: credential {} in {}: {} is not a legal HTTP header value (a \
-                     control or non-ASCII character, or whitespace at an edge) — store it \
-                     again without",
-                    py_repr(&r),
-                    py_repr(&store),
-                    py_repr(FIELD)
-                )))
+        let mut values = Vec::with_capacity(names.len());
+        for name in names {
+            match res.get("fields").and_then(|f| f.get(*name)) {
+                Some(Value::String(v)) if !v.is_empty() => values.push(v.clone()),
+                _ => {
+                    return Err(CredentialError(format!(
+                        "{backend}: credential {} in {} has no {} field",
+                        py_repr(&r),
+                        py_repr(&store),
+                        py_repr(name)
+                    )))
+                }
             }
-            Some(Value::String(key)) if !key.is_empty() => Ok(Some(key.clone())),
-            _ => Err(CredentialError(format!(
-                "{backend}: credential {} in {} has no {} field",
-                py_repr(&r),
-                py_repr(&store),
-                py_repr(FIELD)
-            ))),
         }
+        Ok(Some((store, r, values)))
     }
 }
