@@ -515,9 +515,10 @@ impl Host {
         // kernel store)
         let handler = self.kernel.agents.get(&AgentId::from(agent)).and_then(|a| a.value().record().handler_module.clone());
         let keeps_rows = handler.is_some_and(|h| {
-            let six = |m: &str| {
+            let base = self.kernel.bundles.base_of(&h);
+            [h.as_str(), base.as_str()].iter().any(|n| {
                 matches!(
-                    m,
+                    *n,
                     "anthropic_backend.tools"
                         | "ollama_backend.tools"
                         | "responses_backend.tools"
@@ -525,8 +526,7 @@ impl Host {
                         | "foundation_models_backend.tools"
                         | "ai_chat.tools"
                 )
-            };
-            six(&h) || six(&self.kernel.bundles.base_of(&h))
+            })
         });
         let mut loaded = None;
         if keeps_rows {

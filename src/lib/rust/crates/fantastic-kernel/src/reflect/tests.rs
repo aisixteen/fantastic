@@ -766,10 +766,7 @@ async fn reflect_carries_the_agents_view() {
         let id = id.to_string();
         async move {
             kernel
-                .send(vec![Item::new(
-                    AgentId::from(id),
-                    json!({"type": "reflect"}),
-                )])
+                .send(vec![Item::new(AgentId::from(id), json!({"type": "reflect"}))])
                 .await
                 .remove(0)
                 .result

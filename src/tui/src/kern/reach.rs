@@ -70,18 +70,19 @@ fn holders(h: &Host) -> Vec<String> {
         .filter(|e| {
             let r = e.value().record();
             r.handler_module.as_deref().is_some_and(|m| {
-                let six = |n: &str| {
-                    matches!(
-                        n,
-                        "anthropic_backend.tools"
-                            | "ollama_backend.tools"
-                            | "responses_backend.tools"
-                            | "vllm_backend.tools"
-                            | "foundation_models_backend.tools"
-                            | "ai_chat.tools"
-                    )
-                };
-                helper.contains(&m) || six(m) || six(&h.kernel.bundles.base_of(m))
+                let base = h.kernel.bundles.base_of(m);
+                helper.contains(&m)
+                    || [m, base.as_str()].iter().any(|n| {
+                        matches!(
+                            *n,
+                            "anthropic_backend.tools"
+                                | "ollama_backend.tools"
+                                | "responses_backend.tools"
+                                | "vllm_backend.tools"
+                                | "foundation_models_backend.tools"
+                                | "ai_chat.tools"
+                        )
+                    })
             })
         })
         .map(|e| e.key().0.clone())
