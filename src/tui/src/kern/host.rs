@@ -859,6 +859,7 @@ mod tests {
             "relay_connector.tools",
             "scheduler.tools",
             "setup.tools",
+            "sidebar.tools",
             "sqlite_store.tools",
             "user.tools",
             "user_home_store.tools",
