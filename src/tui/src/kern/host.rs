@@ -1080,17 +1080,19 @@ mod tests {
         );
         kernel.register(Arc::clone(&root));
         kernel.set_root(root);
-        for (id, handler) in [("chat", "ai_chat.tools"), ("vllm", "vllm_backend.tools"), ("py", "py_agent.tools")] {
-            let made = send(
-                &kernel,
-                "kernel",
-                json!({"type": "create_agent", "parent_id": "kernel", "id": id, "handler_module": handler, "memory_store_id": "m"}),
-            )
-            .await;
+        for (id, handler, with_store) in
+            [("chat", "ai_chat.tools", false), ("vllm", "vllm_backend.tools", true), ("py", "py_agent.tools", true)]
+        {
+            let mut payload = json!({"type": "create_agent", "parent_id": "kernel", "id": id, "handler_module": handler});
+            if with_store {
+                payload["memory_store_id"] = json!("m");
+            }
+            let made = send(&kernel, "kernel", payload).await;
             assert_eq!(made["id"], id, "{made}");
         }
         let host = Host { kernel, cfg: crate::env::ClientCfg::here(), root: "kernel".to_string() };
         assert_eq!(host.ai_agents().await, vec!["chat".to_string(), "vllm".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// #469: a CLI host kernel makes a `ws_bridge` and `forward` reaches an agent on the

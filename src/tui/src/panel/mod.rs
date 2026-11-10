@@ -235,7 +235,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_backend_is_an_ai_panel_without_being_named() {
+    fn the_five_backends_get_the_ai_panel() {
         for m in [
             "anthropic_backend.tools",
             "vllm_backend.tools",
