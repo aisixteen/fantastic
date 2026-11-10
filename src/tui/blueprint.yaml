@@ -18,8 +18,8 @@
 #   <root>                     (the kernel's own; named @root in grants)
 #   ├── kernel_memory            ram_store — the KERNEL'S store: its execution rows, in RAM
 #   └── user                     the human's own face: the ONE user, everything under it
-#       ├── memory               sqlite_store at .fantastic/memory.db — THE AI store (every AI agent's rows)
-#       ├── store                file_bridge over .fantastic, allow: ['.'] — the kernel's provider
+#       ├── memory               sqlite_store at @state/memory.db — THE AI store (every AI agent's rows)
+#       ├── store                file_bridge over @state, allow: ['.'] — the kernel's provider
 #       ├── exec                 exec_bridge, allowed: ['.*'], cwd: '.', inherit_env: ["*"]
 #       └── files                file_bridge, root: '.', allow: ['.']
 #
@@ -67,7 +67,7 @@ agents:
       # admin (`kernel`). The kernel's own rows are NOT here (`kernel_memory`).
       - id: memory
         handler_module: sqlite_store.tools
-        path: .fantastic/memory.db
+        path: "@state/memory.db"
         admins: [kernel]
         callable_by: {user: "*"}
 
@@ -78,7 +78,7 @@ agents:
       # before the root boots — which is why it is here, in the blueprint.
       - id: store
         handler_module: file_bridge.tools
-        root: .fantastic
+        root: "@state"
         # the whole store dir: without it record persistence stops at the first write
         allow: ["."]
         ingress_rule: allow_all_ingress

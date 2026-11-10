@@ -82,7 +82,7 @@ pub async fn ensure_store(h: &Host) -> Result<(), String> {
         }
     }
     fields.insert("refs".into(), Value::Object(refs));
-    let cli = h.kernel.workdir().ok().map(|d| crate::env::Paths::at(&d).cli);
+    let cli = h.kernel.state_dir().ok().map(|d| d.join("cli"));
     let declared = match (&cli, store_meta(h).is_some()) {
         (Some(c), false) => crate::boot::declared::pending(c, STORE)?,
         _ => None,

@@ -126,20 +126,32 @@ pub fn find_store(kernel: &Kernel) -> Option<AgentId> {
 }
 
 /// The disk dir a loader owns — python `_root(agent)`: a `root` meta overrides
-/// the loader's own address, so a SESSION loader serves a sub-namespace.
-#[must_use]
-pub fn loader_dir(loader: &Agent) -> PathBuf {
-    loader
-        .meta
-        .read()
-        .ok()
-        .and_then(|m| {
-            m.get("root")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-        })
-        .unwrap_or_else(|| loader.root_path.clone())
+/// the loader's own address, so a SESSION loader serves a sub-namespace. The
+/// meta follows [`Kernel::record_root`] (`@state`, `@self`, else the work
+/// folder) and is folded lexically; no meta is the loader's own address.
+///
+/// # Errors
+/// The `root` meta names a folder the kernel has none of.
+pub fn loader_dir(kernel: &Kernel, loader: &Agent) -> Result<PathBuf, String> {
+    let meta = loader.meta.read().ok().and_then(|m| {
+        m.get("root")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    });
+    match meta {
+        Some(raw) => {
+            let (base, rel) = kernel.record_root(&raw, &loader.root_path)?;
+            Ok(normalize_lexical(&base, Path::new(&rel)))
+        }
+        // Folded like the candidates in `find_store_for`, so a relative or `..`
+        // state folder still compares and strips consistently. `root_path`
+        // already holds the state folder: joining it again doubled a relative one.
+        None => Ok(match kernel.state_dir() {
+            Ok(_) => normalize_lexical(Path::new(""), &loader.root_path),
+            Err(_) => loader.root_path.clone(),
+        }),
+    }
 }
 
 /// The children-container name a loader's records nest under — python
@@ -167,13 +179,10 @@ pub fn loader_children(loader: &Agent) -> String {
 /// fallback** (the substrate never writes around a missing/sealed provider),
 /// and never another loader's store: a session loader usually finds none.
 pub fn find_store_for(kernel: &Kernel, loader: &Agent) -> Option<AgentId> {
-    // The running dir (`Kernel::workdir`) — the ONE clamp base; a root with no
-    // disk address has no store to discover.
-    let base = kernel.workdir().ok()?;
     // Resolve LEXICALLY (absolutize + fold `.`/`..`) — no filesystem touch, so
     // discovery works before the dir exists (and stays a single deterministic
-    // path, no fallback).
-    let want = normalize_lexical(&base, &loader_dir(loader));
+    // path, no fallback). A loader with no folder has no store to discover.
+    let want = loader_dir(kernel, loader).ok()?;
 
     // SUBTREE, not direct children, BREADTH-FIRST.
     //
@@ -204,7 +213,10 @@ pub fn find_store_for(kernel: &Kernel, loader: &Agent) -> Option<AgentId> {
             .ok()
             .and_then(|m| m.get("root").and_then(Value::as_str).map(str::to_string))
             .unwrap_or_default();
-        if normalize_lexical(&base, Path::new(&r)) == want {
+        let Ok((base, rel)) = kernel.record_root(&r, &child.root_path) else {
+            continue;
+        };
+        if normalize_lexical(&base, Path::new(&rel)) == want {
             return Some(cid);
         }
     }
@@ -212,16 +224,13 @@ pub fn find_store_for(kernel: &Kernel, loader: &Agent) -> Option<AgentId> {
 }
 
 /// An agent's dir RELATIVE to a loader's store root — python
-/// `_store_reldir(agent, abs_path)`. Both sides are absolutized against the
-/// running dir first, so a relative `root` meta and an absolute agent address
-/// compare.
+/// `_store_reldir(agent, abs_path)`. Both sides are folded lexically, and the
+/// state folder is not joined (an agent's address already holds it), so a
+/// relative `root` meta and an absolute agent address compare.
 pub(crate) fn loader_reldir(kernel: &Kernel, loader: &Agent, abs: &Path) -> String {
-    match kernel.workdir() {
-        Ok(base) => store_reldir(
-            &normalize_lexical(&base, &loader_dir(loader)),
-            &normalize_lexical(&base, abs),
-        ),
-        Err(_) => store_reldir(&loader_dir(loader), abs),
+    match (loader_dir(kernel, loader), kernel.state_dir()) {
+        (Ok(dir), Ok(_)) => store_reldir(&dir, &normalize_lexical(Path::new(""), abs)),
+        _ => store_reldir(&loader.root_path, abs),
     }
 }
 
@@ -372,7 +381,7 @@ fn normalize_lexical(base: &Path, p: &Path) -> PathBuf {
     out.iter().collect()
 }
 
-/// An agent's dir RELATIVE to the loader's store root (`.fantastic`). The root
+/// An agent's dir RELATIVE to the loader's store root. The root
 /// loader itself → `""` (its `agent.yaml` sits at the provider root); a child →
 /// `agents/<id>` (recursively), `/`-separated on every OS — it is a wire path.
 /// Both paths share the same base, so this is a plain prefix-strip (no

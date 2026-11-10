@@ -59,7 +59,10 @@ impl fantastic_kernel::bundle::Bundle for Capture {
 async fn stage(tmp: &TempDir, port: u16, web: &str) -> Arc<Kernel> {
     let ws_leg = format!("{web}_ws");
     let rest_leg = format!("{web}_rest");
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel.bundles.register(HANDLER_MODULE, WebBundle);
     kernel
         .bundles

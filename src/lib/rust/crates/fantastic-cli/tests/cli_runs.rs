@@ -699,7 +699,7 @@ fn ledger_cap_flag_is_stripped_and_applied() {
 #[test]
 fn one_shot_refuses_a_live_lock_with_python_text() {
     let tmp = tempfile::TempDir::new().unwrap();
-    fantastic_kernel::lock::acquire(tmp.path()).expect("hold the workdir lock");
+    fantastic_kernel::lock::acquire(&tmp.path().join(".fantastic")).expect("hold the workdir lock");
     let pid = std::process::id();
     let out = Command::new(fantastic_bin())
         .args(["kernel_state", "reflect"])
@@ -723,7 +723,7 @@ fn one_shot_refuses_a_live_lock_with_python_text() {
         .output()
         .unwrap();
     assert!(ok.status.success(), "reflect is lock-free");
-    fantastic_kernel::lock::release(tmp.path()).unwrap();
+    fantastic_kernel::lock::release(&tmp.path().join(".fantastic")).unwrap();
 }
 
 /// A one-shot probes the OS lock, not the pid: a lock file
@@ -760,7 +760,11 @@ fn one_shots_take_over_a_lock_whose_pid_holds_no_flock() {
         "released"
     );
     stale();
-    std::fs::write(tmp.path().join("fantastic.yaml"), "agents: []\n").unwrap();
+    std::fs::write(
+        tmp.path().join(".fantastic").join("fantastic.yaml"),
+        "agents: []\n",
+    )
+    .unwrap();
     let out = Command::new(fantastic_bin())
         .args(["init", "static_loader", "./fantastic.yaml"])
         .current_dir(tmp.path())
@@ -821,8 +825,10 @@ fn the_root_is_the_kernel_state_loader_and_boots_before_the_roster() {
 fn init_creates_the_loader_under_the_root() {
     let tmp = tempfile::TempDir::new().unwrap();
     // An empty document boots an empty roster (`static_loader`'s own rule) —
-    // this test is about `init`'s own routing, not the loader's YAML.
-    std::fs::write(tmp.path().join("fantastic.yaml"), "").unwrap();
+    // this test is about `init`'s own routing, not the loader's YAML. The
+    // manifest is read under the state folder.
+    std::fs::create_dir_all(tmp.path().join(".fantastic")).unwrap();
+    std::fs::write(tmp.path().join(".fantastic").join("fantastic.yaml"), "").unwrap();
     let out = Command::new(fantastic_bin())
         .args(["init", "static_loader", "./fantastic.yaml"])
         .current_dir(tmp.path())
@@ -894,7 +900,7 @@ fn an_unreadable_root_record_is_never_written_over() {
 #[test]
 fn init_refuses_a_live_lock_with_python_text() {
     let tmp = tempfile::TempDir::new().unwrap();
-    fantastic_kernel::lock::acquire(tmp.path()).expect("hold the workdir lock");
+    fantastic_kernel::lock::acquire(&tmp.path().join(".fantastic")).expect("hold the workdir lock");
     let pid = std::process::id();
     let out = Command::new(fantastic_bin())
         .args(["init", "static_loader", "./fantastic.yaml"])
@@ -907,7 +913,7 @@ fn init_refuses_a_live_lock_with_python_text() {
         String::from_utf8_lossy(&out.stderr),
         format!("[init] another fantastic owns this dir (pid={pid}). Stop it first.\n"),
     );
-    fantastic_kernel::lock::release(tmp.path()).unwrap();
+    fantastic_kernel::lock::release(&tmp.path().join(".fantastic")).unwrap();
 }
 
 /// A CLI kv argument python coerces to a non-finite float or an int wider

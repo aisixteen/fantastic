@@ -304,7 +304,10 @@ async fn a_drop_mid_turn_releases_the_called_agent() {
     let tmp = TempDir::new().unwrap();
     let busy = Arc::new(AtomicBool::new(false));
     let started = Arc::new(tokio::sync::Notify::new());
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel.bundles.register(WS_HANDLER_MODULE, WsBridgeBundle);
     kernel.bundles.register(
         "turn_probe.tools",

@@ -64,7 +64,7 @@ pub struct Running {
 /// file `<home>/app/home.yaml`, which must name the lock's holder.
 pub async fn running(home: &Path) -> Result<Option<Running>, String> {
     let w = kernel::workdir(home);
-    match fantastic_kernel::lock::held_at(&w) {
+    match fantastic_kernel::lock::held(&w) {
         Err(e) => Err(e.to_string()),
         Ok(None) => Ok(None),
         Ok(Some(pid)) => match sys::read_host_run_file(home) {

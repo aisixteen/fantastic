@@ -136,12 +136,14 @@ impl BackendBundle {
     }
 
     /// THE PROJECT'S OWN BUNDLES (owner 2026-10-09: "bundle it, then place it from
-    /// the popup"): every `.fantastic/bundles/<name>/` the kernel has loaded —
+    /// the popup"): every `bundles/<name>/` of the state folder the kernel has loaded —
     /// `{name, sentence}`, sorted — each placeable as a new instance
     /// (`spawn {instance_of}`).
     fn project_bundles(host: &Host) -> Vec<Value> {
-        let Ok(paths) = crate::env::Paths::here() else { return Vec::new() };
-        let mut out: Vec<(String, String)> = std::fs::read_dir(paths.store.join("bundles"))
+        let Ok(state) = host.kernel.state_dir() else {
+            return Vec::new();
+        };
+        let mut out: Vec<(String, String)> = std::fs::read_dir(state.join("bundles"))
             .into_iter()
             .flatten()
             .flatten()
@@ -149,11 +151,16 @@ impl BackendBundle {
             .filter_map(|e| e.file_name().to_str().map(str::to_string))
             .filter(|n| host.kernel.bundles.is_folder(n))
             .map(|n| {
-                let sentence = std::fs::read_to_string(paths.store.join("bundles").join(&n).join("bundle.yaml"))
-                    .ok()
-                    .and_then(|t| serde_yaml::from_str::<Value>(&t).ok())
-                    .and_then(|d| d.get("sentence").and_then(Value::as_str).map(str::to_string))
-                    .unwrap_or_default();
+                let sentence =
+                    std::fs::read_to_string(state.join("bundles").join(&n).join("bundle.yaml"))
+                        .ok()
+                        .and_then(|t| serde_yaml::from_str::<Value>(&t).ok())
+                        .and_then(|d| {
+                            d.get("sentence")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_default();
                 (n, sentence)
             })
             .collect();
@@ -220,17 +227,22 @@ impl BackendBundle {
     }
 
     /// A starter bundle placed (owner's workflow b): its files copied into a NEW
-    /// `.fantastic/bundles/py_<hex>/` (the folder name IS the handler), the kernel
+    /// state folder's `bundles/py_<hex>/` (the folder name IS the handler), the kernel
     /// told to load it (`reload_bundle`), one instance made under `canvas_root`,
     /// its view written from the bundle's view file. Editing the folder then takes
     /// effect at once (`kern/bundle_watch`).
-    async fn spawn_bundle(host: &Host, me: &AgentId, kind: &str, stamp: Map<String, Value>) -> Value {
-        let paths = match crate::env::Paths::here() {
+    async fn spawn_bundle(
+        host: &Host,
+        me: &AgentId,
+        kind: &str,
+        stamp: Map<String, Value>,
+    ) -> Value {
+        let state = match host.kernel.state_dir() {
             Ok(p) => p,
-            Err(e) => return refuse("not_found", format!("spawn: the project dir: {e}"), ""),
+            Err(e) => return refuse("not_found", format!("spawn: the state folder: {e}"), ""),
         };
         let name = format!("py_{}", &hex8()[..6]);
-        let dir = match crate::kern::bundle_watch::scaffold(&paths.store, kind, &name) {
+        let dir = match crate::kern::bundle_watch::scaffold(&state, kind, &name) {
             Ok(d) => d,
             Err(e) => return refuse("bad_arg", format!("spawn: {e}"), ""),
         };
@@ -259,19 +271,30 @@ impl BackendBundle {
         json!({"id": id, "root": id, "bundle": name, "folder": dir.display().to_string(), "kind": "bundle"})
     }
 
-    /// An instance of project bundle `name` (`.fantastic/bundles/<name>/`, loaded):
+    /// An instance of project bundle `name` (the state folder's `bundles/<name>/`, loaded):
     /// `<name>_<n>` (the next free n) under this canvas node, granted like any
     /// cell's backend, its view written from the bundle's view file.
-    async fn spawn_instance(host: &Host, me: &AgentId, name: &str, stamp: Map<String, Value>) -> Value {
-        match crate::env::Paths::here() {
-            Ok(paths) => Self::spawn_instance_in(host, me, name, stamp, &paths).await,
-            Err(e) => refuse("not_found", format!("spawn: the project dir: {e}"), ""),
+    async fn spawn_instance(
+        host: &Host,
+        me: &AgentId,
+        name: &str,
+        stamp: Map<String, Value>,
+    ) -> Value {
+        match host.kernel.state_dir() {
+            Ok(state) => Self::spawn_instance_in(host, me, name, stamp, &state).await,
+            Err(e) => refuse("not_found", format!("spawn: the state folder: {e}"), ""),
         }
     }
 
-    /// [`Self::spawn_instance`] in project `paths`.
-    async fn spawn_instance_in(host: &Host, me: &AgentId, name: &str, stamp: Map<String, Value>, paths: &crate::env::Paths) -> Value {
-        let dir = paths.store.join("bundles").join(name);
+    /// [`Self::spawn_instance`] in the state folder `state`.
+    async fn spawn_instance_in(
+        host: &Host,
+        me: &AgentId,
+        name: &str,
+        stamp: Map<String, Value>,
+        state: &std::path::Path,
+    ) -> Value {
+        let dir = state.join("bundles").join(name);
         if !dir.join("bundle.yaml").is_file() || !host.kernel.bundles.is_folder(name) {
             let have: Vec<String> = Self::project_bundles(host).iter().filter_map(|b| b["name"].as_str().map(str::to_string)).collect();
             return refuse("not_found", format!("spawn: no project bundle `{name}`"), &format!("the project's bundles: {}", have.join(", ")));
@@ -749,8 +772,14 @@ mod create_tests {
         let dir = std::env::temp_dir().join(format!("fc-create-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let mut kernel = Kernel::new();
-        kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+        let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+            state_dir: dir.join(".fantastic"),
+            work_dir: dir.clone(),
+        });
+        kernel.bundles.register(
+            fantastic_core::HANDLER_MODULE,
+            fantastic_core::KernelStateBundle::default(),
+        );
         kernel.bundles.register(HANDLER_MODULE, BackendBundle);
         kernel.bundles.register("fake_ai.tools", FakeAi);
         // `user` is real: the host admits an AI to the store AS `user` (`Host::act`)
@@ -826,15 +855,15 @@ mod create_tests {
                 {"title": "S", "call": {"verb": "v"}, "show": show}]}}}))
         };
         std::fs::write(bundle.join("bundle.yaml"), doc("grid")).unwrap();
-        let paths = crate::env::Paths::at(&dir);
+        let state = dir.join(".fantastic");
         let me = AgentId::from("canvas_root");
-        let out = BackendBundle::spawn_instance_in(&h, &me, "fakeb", Map::new(), &paths).await;
+        let out = BackendBundle::spawn_instance_in(&h, &me, "fakeb", Map::new(), &state).await;
         assert_eq!(out["reason"], "bad_arg", "{out}");
         let e = out["error"].as_str().unwrap();
         assert!(e.contains("view.tui[0].show") && e.contains("grid"), "{e}");
         // a good declaration spawns, and the instance carries it
         std::fs::write(bundle.join("bundle.yaml"), doc("kv")).unwrap();
-        let out = BackendBundle::spawn_instance_in(&h, &me, "fakeb", Map::new(), &paths).await;
+        let out = BackendBundle::spawn_instance_in(&h, &me, "fakeb", Map::new(), &state).await;
         assert!(out.get("error").is_none(), "{out}");
         let id = out["id"].as_str().unwrap().to_string();
         assert_eq!(record_of(&h, &id)["view"]["tui"][0]["show"], "kv");

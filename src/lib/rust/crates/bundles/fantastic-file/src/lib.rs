@@ -5,8 +5,8 @@
 //! every verb except `reflect` denies with the teaching shape). Open it
 //! consciously with `ingress_rule=allow_all_ingress`. Even open, the LAW is
 //! running-dir only: the `root` AND every path are clamped inside the kernel's
-//! running dir ([`Kernel::workdir`] — the dir holding its root's `.fantastic`;
-//! `../`, absolute escapes, outward symlinks all refuse).
+//! running dir (`@state` and `@self` roots are under the state folder and the bridge's own
+//! folder; every other root is under the work folder; `../`, absolute escapes, outward symlinks all refuse).
 //!
 //! Each file_bridge owns a `root` directory and a `readonly` flag. The disk
 //! clamp + raw IO live in [`fs`] — the ONE disk surface; this bundle is the GATE
@@ -268,14 +268,13 @@ impl Bundle for FileBundle {
                 return Ok(Some(refused));
             }
         }
-        let base = kernel.workdir();
+        let root = clamp_root(&meta, kernel, &agent.root_path);
         let readonly = py_truthy(meta.get("readonly").unwrap_or(&Value::Null));
         let reply = match verb {
-            "reflect" => reflect_reply(agent_id, &meta, &base),
+            "reflect" => reflect_reply(agent_id, &meta, &root),
             "boot" => Value::Null,
             "open_view" => views::open_view_verb(kernel, &meta, agent_id, payload).await,
             v if text::TEXT_VERBS.contains(&v) => {
-                let root = clamp_root(&meta, &base);
                 text::dispatch(
                     &self.text,
                     v,
@@ -296,7 +295,6 @@ impl Bundle for FileBundle {
                 // AFTER each verb's argument checks — python reaches `fs` only
                 // once the arguments are good, so a bad argument on a bridge with
                 // an escaping root answers `bad_arg`, not `transport_error`.
-                let root = clamp_root(&meta, &base);
                 // DENY-ALL AT THE PATH LEVEL — after each verb's own argument
                 // checks (python's order), before any disk access.
                 if let Some(refused) = exposure(other, &root, &meta, payload, readonly) {
@@ -401,7 +399,7 @@ impl Bundle for FileBundle {
                 }
             }
             let readonly = py_truthy(meta.get("readonly").unwrap_or(&Value::Null));
-            let root = clamp_root(&meta, &kernel.workdir());
+            let root = clamp_root(&meta, kernel, &agent.root_path);
             let reply = text::dispatch(
                 &self.text,
                 verb,
@@ -431,7 +429,7 @@ impl Bundle for FileBundle {
         if let Some(denied) = gate(&meta, agent_id, verb) {
             return Ok((Some(denied), None));
         }
-        let root = clamp_root(&meta, &kernel.workdir());
+        let root = clamp_root(&meta, kernel, &agent.root_path);
         let readonly = py_truthy(meta.get("readonly").unwrap_or(&Value::Null));
         if let Some(refused) = exposure(verb, &root, &meta, &header, readonly) {
             return Ok((Some(refused), None));
@@ -588,14 +586,13 @@ fn root_str(meta: &Map<String, Value>) -> String {
     }
 }
 
-/// The clamped root: the configured root under the kernel's running dir
-/// ([`Kernel::workdir`] — the ONE source; no root ⇒ the refusal text).
-fn clamp_root(
-    meta: &Map<String, Value>,
-    base: &Result<PathBuf, String>,
-) -> Result<PathBuf, String> {
-    base.clone()
-        .and_then(|b| fs::resolve_root(&root_str(meta), &b))
+/// The clamped root: the configured root under the base the kernel's one rule
+/// names ([`Kernel::record_root`]: `@state` → the state folder, `@self` → the
+/// bridge's own folder `own`, else the work folder; no folder ⇒ the refusal
+/// text).
+fn clamp_root(meta: &Map<String, Value>, kernel: &Kernel, own: &Path) -> Result<PathBuf, String> {
+    let (base, rel) = kernel.record_root(&root_str(meta), own)?;
+    fs::resolve_root(&rel, &base)
 }
 
 /// The SOURCE half — read ONE raw chunk at `offset`; the chunk is the reply
@@ -1129,10 +1126,10 @@ const COMPOSE: &str = "every content-carrying verb (`write`, `edit`, `append`) t
 fn reflect_reply(
     agent_id: &AgentId,
     meta: &Map<String, Value>,
-    base: &Result<PathBuf, String>,
+    clamped: &Result<PathBuf, String>,
 ) -> Value {
     let raw_root = root_str(meta);
-    let (root_display, root_error) = match clamp_root(meta, base) {
+    let (root_display, root_error) = match clamped.clone() {
         Ok(p) => (p.to_string_lossy().into_owned(), None),
         Err(e) => (raw_root, Some(e)),
     };
@@ -1335,6 +1332,7 @@ fn mkdir_reply(root: &Result<PathBuf, String>, payload: &Value, readonly: bool) 
 mod tests;
 #[cfg(test)]
 mod tests_path_gate;
+#[cfg(test)]
 mod tests_paths;
 #[cfg(test)]
 mod tests_pump_identity;

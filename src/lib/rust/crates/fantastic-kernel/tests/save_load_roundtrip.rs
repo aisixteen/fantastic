@@ -56,7 +56,7 @@ async fn save_is_pure_in_ram_no_state_json_on_disk() {
     let store_root = tmp.path().join(".fantastic");
     let booted = bootstrap(
         registry_with_store(&store_root),
-        BootstrapOptions::daemon(tmp.path()),
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
     )
     .unwrap();
     let kernel = Arc::clone(&booted.kernel);
@@ -81,7 +81,7 @@ async fn save_is_pure_in_ram_no_state_json_on_disk() {
     assert!(snap.agents.iter().any(|a| a.id == "alpha"));
     assert!(snap.agents.iter().any(|a| a.id == "kernel_state"));
 
-    fantastic_kernel::bootstrap::shutdown(tmp.path()).unwrap();
+    fantastic_kernel::bootstrap::shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
 #[tokio::test]
@@ -115,7 +115,11 @@ async fn save_json_is_byte_deterministic() {
 #[tokio::test]
 async fn save_and_load_round_trips_disk_to_memory() {
     let tmp = TempDir::new().unwrap();
-    let booted = bootstrap(registry_with_noop(), BootstrapOptions::daemon(tmp.path())).unwrap();
+    let booted = bootstrap(
+        registry_with_noop(),
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
+    )
+    .unwrap();
     let disk_kernel = Arc::clone(&booted.kernel);
     for id in ["alpha", "beta"] {
         let _ = disk_kernel
@@ -134,7 +138,7 @@ async fn save_and_load_round_trips_disk_to_memory() {
     }
     assert_eq!(mem_kernel.save_json(), snapshot_json);
 
-    fantastic_kernel::bootstrap::shutdown(tmp.path()).unwrap();
+    fantastic_kernel::bootstrap::shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
 #[tokio::test]
@@ -220,7 +224,7 @@ async fn persist_merge_preserves_extra_fields_on_disk() {
     let store_root = tmp.path().join(".fantastic");
     let booted = bootstrap(
         registry_with_store(&store_root),
-        BootstrapOptions::daemon(tmp.path()),
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
     )
     .unwrap();
     let kernel = Arc::clone(&booted.kernel);
@@ -263,5 +267,5 @@ async fn persist_merge_preserves_extra_fields_on_disk() {
     assert_eq!(after.get("user_note"), Some(&json!("don't lose me")));
     assert_eq!(after.get("port"), Some(&json!(9090)));
 
-    fantastic_kernel::bootstrap::shutdown(tmp.path()).unwrap();
+    fantastic_kernel::bootstrap::shutdown(&tmp.path().join(".fantastic")).unwrap();
 }

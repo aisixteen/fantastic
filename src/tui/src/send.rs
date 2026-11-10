@@ -41,7 +41,7 @@ pub fn main(argv: &[String]) -> ! {
             std::process::exit(2);
         }
     };
-    match fantastic_kernel::lock::held(&paths.cwd) {
+    match fantastic_kernel::lock::held(&paths.store) {
         Ok(Some(pid)) if pid != std::process::id() => {}
         Ok(_) => {
             eprintln!("fantastic send: no kernel runs in this directory — start `fantastic` or `fantastic mcp` here first");

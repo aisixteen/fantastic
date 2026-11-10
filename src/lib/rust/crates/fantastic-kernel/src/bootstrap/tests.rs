@@ -40,14 +40,14 @@ fn bootstrap_creates_root_on_virgin_workdir() {
     let tmp = TempDir::new().unwrap();
     let booted = bootstrap(
         with_loader(BundleRegistry::new()),
-        BootstrapOptions::daemon(tmp.path()),
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
     )
     .expect("boot");
     assert!(booted.kernel.root().is_some());
     assert_eq!(booted.kernel.root().unwrap().id.0, "kernel_state");
     assert!(tmp.path().join(".fantastic/agent.yaml").exists());
     assert!(tmp.path().join(".fantastic/lock.yaml").exists());
-    shutdown(tmp.path()).unwrap();
+    shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
 #[test]
@@ -62,7 +62,11 @@ fn bootstrap_hydrates_persisted_children() {
         let mut reg = with_loader(BundleRegistry::new());
         reg.register("noop.tools", Noop);
         crate::test_support::register_fake_store(&mut reg, &store_root);
-        let booted = bootstrap(reg, BootstrapOptions::daemon(tmp.path())).expect("boot");
+        let booted = bootstrap(
+            reg,
+            BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
+        )
+        .expect("boot");
         let kernel = Arc::clone(&booted.kernel);
         rt.block_on(async {
             // THE ROOT BOOTS FIRST (registration order), so the record writer
@@ -75,13 +79,17 @@ fn bootstrap_hydrates_persisted_children() {
                 .await.remove(0).result;
             kernel.flush_records().await;
         });
-        shutdown(tmp.path()).unwrap();
+        shutdown(&tmp.path().join(".fantastic")).unwrap();
     }
     // Boot again — child + store must rehydrate (the store re-discovers itself).
     let mut reg2 = with_loader(BundleRegistry::new());
     reg2.register("noop.tools", Noop);
     crate::test_support::register_fake_store(&mut reg2, &store_root);
-    let booted2 = bootstrap(reg2, BootstrapOptions::daemon(tmp.path())).expect("boot2");
+    let booted2 = bootstrap(
+        reg2,
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
+    )
+    .expect("boot2");
     assert!(booted2
         .kernel
         .agents
@@ -89,7 +97,7 @@ fn bootstrap_hydrates_persisted_children() {
     // Both the child AND the persisted store provider rehydrate.
     assert!(booted2.loaded.contains(&AgentId::from("child_a")));
     assert!(booted2.loaded.contains(&AgentId::from("store")));
-    shutdown(tmp.path()).unwrap();
+    shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
 #[test]
@@ -140,7 +148,11 @@ fn edit_grants_persists_both_keys_across_a_restart() {
         let mut reg = with_loader(BundleRegistry::new());
         reg.register("noop.tools", Noop);
         crate::test_support::register_fake_store(&mut reg, &store_root);
-        let booted = bootstrap(reg, BootstrapOptions::daemon(tmp.path())).expect("boot");
+        let booted = bootstrap(
+            reg,
+            BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
+        )
+        .expect("boot");
         let kernel = Arc::clone(&booted.kernel);
         rt.block_on(async {
             boot_root(&kernel).await;
@@ -183,12 +195,16 @@ fn edit_grants_persists_both_keys_across_a_restart() {
                 "the edit alone persisted both keys: {on_disk:?}"
             );
         });
-        shutdown(tmp.path()).unwrap();
+        shutdown(&tmp.path().join(".fantastic")).unwrap();
     }
     let mut reg2 = with_loader(BundleRegistry::new());
     reg2.register("noop.tools", Noop);
     crate::test_support::register_fake_store(&mut reg2, &store_root);
-    let booted2 = bootstrap(reg2, BootstrapOptions::daemon(tmp.path())).expect("boot2");
+    let booted2 = bootstrap(
+        reg2,
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
+    )
+    .expect("boot2");
     let cb = booted2
         .kernel
         .agents
@@ -201,7 +217,7 @@ fn edit_grants_persists_both_keys_across_a_restart() {
         .unwrap_or(Value::Null);
     assert_eq!(cb.get("view_a"), Some(&json!(["*"])), "{cb}");
     assert_eq!(cb.get("view_b"), Some(&json!(["*"])), "{cb}");
-    shutdown(tmp.path()).unwrap();
+    shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -209,7 +225,11 @@ async fn concurrent_edit_grants_keep_every_key() {
     let tmp = TempDir::new().unwrap();
     let mut reg = with_loader(BundleRegistry::new());
     reg.register("noop.tools", Noop);
-    let booted = bootstrap(reg, BootstrapOptions::one_shot(tmp.path())).expect("boot");
+    let booted = bootstrap(
+        reg,
+        BootstrapOptions::one_shot(tmp.path().join(".fantastic"), tmp.path()),
+    )
+    .expect("boot");
     let kernel = Arc::clone(&booted.kernel);
     for round in 0..200 {
         let id = AgentId::from(format!("merge_{round}").as_str());
@@ -251,7 +271,7 @@ async fn concurrent_edit_grants_keep_every_key() {
             "round {round}: {cb}"
         );
     }
-    shutdown(tmp.path()).unwrap();
+    shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
 #[test]
@@ -268,7 +288,11 @@ fn concurrent_edit_grants_persist_every_key_across_a_restart() {
         let mut reg = with_loader(BundleRegistry::new());
         reg.register("noop.tools", Noop);
         crate::test_support::register_fake_store(&mut reg, &store_root);
-        let booted = bootstrap(reg, BootstrapOptions::daemon(tmp.path())).expect("boot");
+        let booted = bootstrap(
+            reg,
+            BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
+        )
+        .expect("boot");
         let kernel = Arc::clone(&booted.kernel);
         rt.block_on(async {
             boot_root(&kernel).await;
@@ -301,12 +325,16 @@ fn concurrent_edit_grants_persist_every_key_across_a_restart() {
             }
             kernel.flush_records().await;
         });
-        shutdown(tmp.path()).unwrap();
+        shutdown(&tmp.path().join(".fantastic")).unwrap();
     }
     let mut reg2 = with_loader(BundleRegistry::new());
     reg2.register("noop.tools", Noop);
     crate::test_support::register_fake_store(&mut reg2, &store_root);
-    let booted2 = bootstrap(reg2, BootstrapOptions::daemon(tmp.path())).expect("boot2");
+    let booted2 = bootstrap(
+        reg2,
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
+    )
+    .expect("boot2");
     for round in 0..ROUNDS {
         let cb = booted2
             .kernel
@@ -321,7 +349,7 @@ fn concurrent_edit_grants_persist_every_key_across_a_restart() {
         assert_eq!(cb.get("view_a"), Some(&json!(["*"])), "round {round}: {cb}");
         assert_eq!(cb.get("view_b"), Some(&json!(["*"])), "round {round}: {cb}");
     }
-    shutdown(tmp.path()).unwrap();
+    shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
 #[test]
@@ -454,14 +482,14 @@ fn bootstrap_one_shot_does_not_acquire_lock() {
     // First boot acquires.
     let _b1 = bootstrap(
         with_loader(BundleRegistry::new()),
-        BootstrapOptions::daemon(tmp.path()),
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
     )
     .unwrap();
     // One-shot must NOT contend with the held lock.
-    let opts = BootstrapOptions::one_shot(tmp.path());
+    let opts = BootstrapOptions::one_shot(tmp.path().join(".fantastic"), tmp.path());
     let booted = bootstrap(with_loader(BundleRegistry::new()), opts).expect("one-shot ok");
     assert!(booted.kernel.root().is_some());
-    shutdown(tmp.path()).unwrap();
+    shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
 #[test]
@@ -477,14 +505,14 @@ fn bootstrap_weak_loads_unknown_handler_modules() {
     .unwrap();
     let booted = bootstrap(
         with_loader(BundleRegistry::new()),
-        BootstrapOptions::daemon(tmp.path()),
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
     )
     .expect("boot");
     // Skipped — ghost_1 not registered.
     assert!(!booted.kernel.agents.contains_key(&AgentId::from("ghost_1")));
     // Record still on disk for the next runtime.
     assert!(ghost.join("agent.yaml").exists());
-    shutdown(tmp.path()).unwrap();
+    shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
 /// Helper: pull the root instance guid out of a booted kernel's live root meta.
@@ -513,7 +541,11 @@ fn boot_mints_a_32hex_guid_and_persists_it_stably() {
     let g1 = {
         let mut reg = with_loader(BundleRegistry::new());
         crate::test_support::register_fake_store(&mut reg, &store_root);
-        let booted = bootstrap(reg, BootstrapOptions::daemon(tmp.path())).expect("boot");
+        let booted = bootstrap(
+            reg,
+            BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
+        )
+        .expect("boot");
         let kernel = Arc::clone(&booted.kernel);
         let g = rt.block_on(async {
             crate::test_support::wire_fake_store(&kernel, &store_root).await;
@@ -521,7 +553,7 @@ fn boot_mints_a_32hex_guid_and_persists_it_stably() {
             kernel.flush_records().await;
             root_guid(&booted)
         });
-        shutdown(tmp.path()).unwrap();
+        shutdown(&tmp.path().join(".fantastic")).unwrap();
         g
     };
     assert_eq!(g1.len(), 32);
@@ -535,14 +567,18 @@ fn boot_mints_a_32hex_guid_and_persists_it_stably() {
     let g2 = {
         let mut reg = with_loader(BundleRegistry::new());
         crate::test_support::register_fake_store(&mut reg, &store_root);
-        let booted = bootstrap(reg, BootstrapOptions::daemon(tmp.path())).expect("boot2");
+        let booted = bootstrap(
+            reg,
+            BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
+        )
+        .expect("boot2");
         let kernel = Arc::clone(&booted.kernel);
         let g = rt.block_on(async {
             boot_root(&kernel).await;
             kernel.flush_records().await;
             root_guid(&booted)
         });
-        shutdown(tmp.path()).unwrap();
+        shutdown(&tmp.path().join(".fantastic")).unwrap();
         g
     };
     assert_eq!(g1, g2, "guid must be identical across boots");
@@ -573,7 +609,7 @@ fn root_is_the_kernel_state_loader_and_the_seed_is_the_constructed_record() {
     let tmp = TempDir::new().unwrap();
     let booted = bootstrap(
         with_loader(BundleRegistry::new()),
-        BootstrapOptions::daemon(tmp.path()),
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
     )
     .expect("boot");
     let root = booted.kernel.root().expect("root");
@@ -597,7 +633,7 @@ fn root_is_the_kernel_state_loader_and_the_seed_is_the_constructed_record() {
         vec!["can_call", "callable_by"],
         "grant baseline in python's order: {keys:?}"
     );
-    shutdown(tmp.path()).unwrap();
+    shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
 /// The root's meta order is `can_call, callable_by, guid` — the guid is
@@ -608,7 +644,11 @@ fn root_meta_order_is_grants_then_guid() {
     let store_root = tmp.path().join(".fantastic");
     let mut reg = with_loader(BundleRegistry::new());
     crate::test_support::register_fake_store(&mut reg, &store_root);
-    let booted = bootstrap(reg, BootstrapOptions::daemon(tmp.path())).expect("boot");
+    let booted = bootstrap(
+        reg,
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
+    )
+    .expect("boot");
     let kernel = Arc::clone(&booted.kernel);
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -619,7 +659,7 @@ fn root_meta_order_is_grants_then_guid() {
     let meta = kernel.root().unwrap().meta.read().unwrap().clone();
     let keys: Vec<&str> = meta.keys().map(String::as_str).collect();
     assert_eq!(keys, vec!["can_call", "callable_by", "guid"], "{keys:?}");
-    shutdown(tmp.path()).unwrap();
+    shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
 /// A root record that is MISSING or not JSON reseeds like a virgin dir and
@@ -636,7 +676,11 @@ fn a_missing_root_record_reseeds_and_keeps_children() {
     .unwrap();
     let mut reg = with_loader(BundleRegistry::new());
     reg.register("noop.tools", Noop);
-    let booted = bootstrap(reg, BootstrapOptions::daemon(tmp.path())).expect("boot");
+    let booted = bootstrap(
+        reg,
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
+    )
+    .expect("boot");
     assert_eq!(booted.kernel.root().unwrap().id.0, "kernel_state");
     assert_eq!(
         booted.loaded,
@@ -646,7 +690,7 @@ fn a_missing_root_record_reseeds_and_keeps_children() {
     let raw = std::fs::read_to_string(fdir.join("agent.yaml")).unwrap();
     let rec: Value = crate::yaml_io::load(&raw).expect("reseeded record parses");
     assert_eq!(rec["id"], json!("kernel_state"));
-    shutdown(tmp.path()).unwrap();
+    shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
 /// A root record that is THERE but does not parse is never written over: the
@@ -659,7 +703,7 @@ fn an_unreadable_root_record_refuses_the_boot_and_is_left_alone() {
     std::fs::write(fdir.join("agent.yaml"), "{").unwrap();
     let Err(e) = bootstrap(
         with_loader(BundleRegistry::new()),
-        BootstrapOptions::daemon(tmp.path()),
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
     ) else {
         panic!("a corrupt root record booted");
     };
@@ -668,7 +712,7 @@ fn an_unreadable_root_record_refuses_the_boot_and_is_left_alone() {
         std::fs::read_to_string(fdir.join("agent.yaml")).unwrap(),
         "{"
     );
-    let _ = shutdown(tmp.path());
+    let _ = shutdown(&tmp.path().join(".fantastic"));
 }
 
 /// THE COUNTER COMES BACK WITH THE GUID: a root record's reserved bound
@@ -684,7 +728,7 @@ fn the_root_records_next_id_resumes_the_counter_and_the_load_writes_nothing() {
     std::fs::write(fdir.join("agent.yaml"), body).unwrap();
     let booted = bootstrap(
         with_loader(BundleRegistry::new()),
-        BootstrapOptions::daemon(tmp.path()),
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
     )
     .expect("boot");
     assert_eq!(booted.kernel.rows.next_id(), 5000);
@@ -705,7 +749,7 @@ fn the_root_records_next_id_resumes_the_counter_and_the_load_writes_nothing() {
         !fdir.join("messages.yaml").exists(),
         "no tape is ever written"
     );
-    shutdown(tmp.path()).unwrap();
+    shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
 /// python `_bootstrap` is `kernel.load(read_tree(…))`, and `load` VALIDATES
@@ -732,7 +776,7 @@ fn bootstrap_refuses_a_tree_that_fails_validation() {
         std::fs::write(at.join("agent.yaml"), body).unwrap();
         let err = match bootstrap(
             with_loader(BundleRegistry::new()),
-            BootstrapOptions::one_shot(tmp.path()),
+            BootstrapOptions::one_shot(tmp.path().join(".fantastic"), tmp.path()),
         ) {
             Ok(_) => panic!("{dir}: a bad tree booted"),
             Err(e) => e.to_string(),
@@ -748,7 +792,7 @@ fn bootstrap_refuses_a_tree_that_fails_validation() {
     }
     let err = bootstrap(
         with_loader(BundleRegistry::new()),
-        BootstrapOptions::one_shot(tmp.path()),
+        BootstrapOptions::one_shot(tmp.path().join(".fantastic"), tmp.path()),
     )
     .err()
     .expect("a duplicate refuses the boot")
@@ -775,7 +819,11 @@ fn the_root_records_children_dir_places_the_whole_tree() {
     std::fs::write(fantastic.join("host_agents/web/agent.yaml"), "id: web\n").unwrap();
     let mut reg = with_loader(BundleRegistry::new());
     reg.register("noop.tools", Noop);
-    let booted = bootstrap(reg, BootstrapOptions::one_shot(tmp.path())).expect("boot");
+    let booted = bootstrap(
+        reg,
+        BootstrapOptions::one_shot(tmp.path().join(".fantastic"), tmp.path()),
+    )
+    .expect("boot");
     let kernel = Arc::clone(&booted.kernel);
     let web = kernel
         .agents
@@ -807,7 +855,7 @@ fn the_root_records_children_dir_places_the_whole_tree() {
 }
 
 #[test]
-fn daemon_at_keeps_the_lock_the_root_agents_and_the_store_in_state_dir() {
+fn daemon_keeps_lock_records_and_store_in_the_state_dir_given() {
     let tmp = TempDir::new().unwrap();
     let w = tmp.path().join("app");
     std::fs::create_dir_all(&w).unwrap();
@@ -815,9 +863,10 @@ fn daemon_at_keeps_the_lock_the_root_agents_and_the_store_in_state_dir() {
     let mut reg = with_loader(BundleRegistry::new());
     reg.register("noop.tools", Noop);
     crate::test_support::register_fake_store(&mut reg, &w);
-    let booted = bootstrap(reg, BootstrapOptions::daemon_at(&w, &w)).expect("boot");
+    let booted = bootstrap(reg, BootstrapOptions::daemon(&w, &w)).expect("boot");
     let kernel = Arc::clone(&booted.kernel);
-    assert_eq!(kernel.workdir().unwrap(), w);
+    assert_eq!(kernel.state_dir().unwrap(), w);
+    assert_eq!(kernel.work_dir().unwrap(), w);
     assert_eq!(kernel.root().unwrap().root_path, w);
     rt.block_on(async {
         boot_root(&kernel).await;
@@ -850,8 +899,8 @@ fn daemon_at_keeps_the_lock_the_root_agents_and_the_store_in_state_dir() {
         "no .fantastic inside the state dir"
     );
     assert!(!tmp.path().join(".fantastic").exists());
-    assert_eq!(lock::held_at(&w).unwrap(), Some(std::process::id()));
-    shutdown_at(&w).unwrap();
+    assert_eq!(lock::held(&w).unwrap(), Some(std::process::id()));
+    shutdown(&w).unwrap();
     assert!(!w.join("lock.yaml").exists());
 }
 
@@ -859,25 +908,25 @@ fn daemon_at_keeps_the_lock_the_root_agents_and_the_store_in_state_dir() {
 fn the_guard_refuses_a_state_dir_that_is_the_home() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join(".fantastic");
-    let err = refuse_home_as_state_dir(tmp.path(), &home, Some(&home)).unwrap_err();
+    let err = refuse_home_as_state_dir(&home, Some(&home)).unwrap_err();
     assert_eq!(
         err.to_string(),
         format!(
-            "{}: its .fantastic is the fantastic home ({}) — run fantastic in a project folder",
-            tmp.path().display(),
+            "{}: the fantastic home ({}) is never a kernel's state folder — run fantastic in a project folder",
+            home.display(),
             home.display()
         )
     );
     // folded lexically: `<home>/../.fantastic` is the home too
     let odd = tmp.path().join("x/../.fantastic");
-    assert!(refuse_home_as_state_dir(tmp.path(), &odd, Some(&home)).is_err());
+    assert!(refuse_home_as_state_dir(&odd, Some(&home)).is_err());
     // the home kernel's own state dir is `<home>/app`, never the home
     let app = home.join("app");
-    refuse_home_as_state_dir(&app, &app, Some(&home)).unwrap();
+    refuse_home_as_state_dir(&app, Some(&home)).unwrap();
     // a project folder, and no home at all
     let proj = tmp.path().join("proj");
-    refuse_home_as_state_dir(&proj, &proj.join(".fantastic"), Some(&home)).unwrap();
-    refuse_home_as_state_dir(tmp.path(), &home, None).unwrap();
+    refuse_home_as_state_dir(&proj.join(".fantastic"), Some(&home)).unwrap();
+    refuse_home_as_state_dir(&home, None).unwrap();
 }
 
 #[test]
@@ -937,4 +986,47 @@ fn edit_grants_refused_in_one_map_writes_neither() {
     let m = meta(&kernel);
     assert_eq!(m["can_call"]["peer"], json!(["*"]));
     assert_eq!(m["callable_by"]["x"], json!(["send"]));
+}
+
+#[test]
+fn state_dir_and_work_dir_are_exactly_what_boot_was_given() {
+    let tmp = TempDir::new().unwrap();
+    let s = tmp.path().join("s");
+    let w = tmp.path().join("w");
+    std::fs::create_dir_all(&w).unwrap();
+    let booted = bootstrap(
+        with_loader(BundleRegistry::new()),
+        BootstrapOptions::daemon(&s, &w),
+    )
+    .expect("boot");
+    let kernel = &booted.kernel;
+    assert_eq!(kernel.state_dir().unwrap(), s);
+    assert_eq!(kernel.work_dir().unwrap(), w);
+    assert_eq!(kernel.root().unwrap().root_path, s);
+    assert!(s.join("lock.yaml").is_file());
+    assert!(!w.join(".fantastic").exists());
+    shutdown(&s).unwrap();
+}
+
+#[test]
+fn the_defaults_keep_todays_layout() {
+    let w = Path::new("/some/where");
+    assert_eq!(
+        state_dir_for(None, Some(w)).unwrap(),
+        std::path::absolute(w).unwrap().join(".fantastic")
+    );
+}
+
+#[test]
+fn state_dir_for_prefers_the_statedir() {
+    let got = state_dir_for(Some(Path::new("/far/s")), Some(Path::new("/w"))).unwrap();
+    assert_eq!(got, std::path::absolute("/far/s").unwrap());
+}
+
+#[test]
+fn state_dir_for_with_nothing_given_is_cwd_dot_fantastic() {
+    assert_eq!(
+        state_dir_for(None, None).unwrap(),
+        std::env::current_dir().unwrap().join(".fantastic")
+    );
 }

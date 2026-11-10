@@ -30,8 +30,8 @@ struct T {
 fn t_with(meta: Value, config: HomeConfig) -> T {
     let w = PathBuf::from(&format!("{D}/h/app"));
     let kernel = Arc::new(Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
-        workdir: w.clone(),
         state_dir: w.clone(),
+        work_dir: w.clone(),
     }));
     let root = Agent::new(
         AgentId::from("kernel_state"),

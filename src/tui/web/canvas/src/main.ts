@@ -168,7 +168,10 @@ else seed(kernel);
 // taken together, then each touched folder's `reload_bundle` restarts its
 // live instances and their panels draw again. Nothing runs while nothing changes.
 const BRIDGE = "bundles_watch";
-const dir = `${here.root}/bundles`;
+// the loader's `root` is a record path (`@state/web`); the host's watch bridge is
+// read from the work folder, where the default layout keeps the state folder as
+// `.fantastic` (this watch goes away with `bundles_watch`)
+const dir = `${here.root.replace(/^@state(?=\/|$)/, ".fantastic")}/bundles`;
 const watchPath = async (path: string): Promise<void> => {
   const r = (await kernel.callHost(BRIDGE, { type: "watch_path", path } as never)) as Record<string, unknown> | null;
   if (typeof r?.["error"] === "string") console.error(`[canvas] page bundles: watch ${path}: ${r["error"]}`);

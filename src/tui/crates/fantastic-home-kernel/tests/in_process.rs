@@ -509,12 +509,12 @@ async fn boot_then_shutdown_releases_the_lock_and_removes_the_run_file() {
     let hk = f.boot().await;
     let w = f.workdir();
     assert_eq!(
-        fantastic_kernel::lock::held_at(&w).unwrap(),
+        fantastic_kernel::lock::held(&w).unwrap(),
         Some(std::process::id())
     );
     assert!(w.join("home.yaml").is_file());
     hk.shutdown().await.expect("a clean stop");
-    assert_eq!(fantastic_kernel::lock::held_at(&w).unwrap(), None);
+    assert_eq!(fantastic_kernel::lock::held(&w).unwrap(), None);
     assert!(!w.join("home.yaml").exists());
     // A stopped home boots again.
     let hk = f.boot().await;
@@ -536,7 +536,7 @@ async fn running_is_none_without_a_live_lock_holder_and_names_the_host_with_one(
     assert_eq!(running(&f.home).await.unwrap(), None);
     // A lock held with no run file naming its holder is not a home host.
     let w = f.workdir();
-    fantastic_kernel::lock::acquire_at(&w).unwrap();
+    fantastic_kernel::lock::acquire(&w).unwrap();
     let e = running(&f.home).await.unwrap_err();
     assert_eq!(
         e,
@@ -546,7 +546,7 @@ async fn running_is_none_without_a_live_lock_holder_and_names_the_host_with_one(
             std::process::id()
         )
     );
-    fantastic_kernel::lock::release_at(&w).unwrap();
+    fantastic_kernel::lock::release(&w).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

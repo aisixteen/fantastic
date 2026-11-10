@@ -480,6 +480,15 @@ fn record(kernel: &Arc<Kernel>, id: &AgentId) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
+/// The agent's own folder (empty when it is gone).
+fn own_root(kernel: &Arc<Kernel>, id: &AgentId) -> PathBuf {
+    kernel
+        .agents
+        .get(id)
+        .map(|a| a.root_path.clone())
+        .unwrap_or_default()
+}
+
 /// (key, display) for whoever is calling — the operator (and the kernel's own
 /// bookkeeping) as `kernel` — or a refusal. A caller is always local: a call a
 /// bridge leg serves is the leg's.
@@ -550,33 +559,56 @@ fn py_in(x: &Value, container: &Value) -> Result<bool, BundleError> {
 }
 
 /// Why a record's `path` cannot name the file: it is required, relative, and
-/// never climbs out of the kernel's workdir.
+/// never climbs out of its base (the work folder, or `@state/…` / `@self/…`).
 pub fn check_path(rec: &Map<String, Value>) -> Result<&Path, String> {
     let p = rec
         .get("path")
         .and_then(Value::as_str)
         .filter(|s| !s.trim().is_empty())
-        .ok_or("sqlite_store needs `path`: the database file, relative to the project dir (no default)")?;
+        .ok_or("sqlite_store needs `path`: the database file, relative to the work folder, or @state/… (no default)")?;
     let path = Path::new(p);
     if path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
-        return Err(format!("sqlite_store: `path` must stay inside the project dir, got {p:?}"));
+        return Err(format!("sqlite_store: `path` must stay inside its folder (relative to the work folder, or @state/…), got {p:?}"));
     }
     Ok(path)
 }
 
-/// Where the file is: `path` under the kernel's WORKDIR (the project dir). A
-/// kernel without one has nowhere durable to put it — refused.
-pub fn resolve_path(rec: &Map<String, Value>, kernel: &Kernel) -> Result<PathBuf, String> {
-    let path = check_path(rec)?;
-    let work = kernel
-        .storage
-        .workdir()
-        .ok_or("sqlite_store needs a disk-backed kernel: an in-memory kernel has no project dir to hold the file")?;
+/// Where the file is: `path` by the kernel's one rule ([`Kernel::record_root`]:
+/// `@state/…` under the state folder, `@self/…` under the agent's own folder
+/// `own`, else under the work folder). A kernel without folders has nowhere
+/// durable to put it — refused.
+pub fn resolve_path(
+    rec: &Map<String, Value>,
+    kernel: &Kernel,
+    own: &Path,
+) -> Result<PathBuf, String> {
+    let raw = check_path(rec)?.to_string_lossy().into_owned();
+    let no_disk = "sqlite_store needs a disk-backed kernel: an in-memory kernel has no folder to hold the file";
+    if kernel.storage.is_in_memory() {
+        return Err(no_disk.to_string());
+    }
+    let (work, rel) = kernel
+        .record_root(&raw, own)
+        .map_err(|e| format!("sqlite_store: {e}"))?;
+    let path = Path::new(&rel);
+    if path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(format!(
+            "sqlite_store: `path` must stay inside its folder, got {raw:?}"
+        ));
+    }
+    let work = work.as_path();
     // Clamp like python `fs.resolve`: the deepest part of the path that exists is
-    // followed through its symlinks and must still lie under the real workdir —
-    // a `stores -> /elsewhere` link must not carry the file out of the project.
-    let escapes = || format!("sqlite_store: `path` {:?} escapes the project dir", path.display().to_string());
-    let base = work.canonicalize().map_err(|e| format!("sqlite_store: {}: {e}", work.display()))?;
+    // followed through its symlinks and must still lie under the real base —
+    // a `stores -> /elsewhere` link must not carry the file out of its folder.
+    let escapes = || {
+        format!(
+            "sqlite_store: `path` {:?} escapes its folder",
+            path.display().to_string()
+        )
+    };
+    let base = work
+        .canonicalize()
+        .map_err(|e| format!("sqlite_store: {}: {e}", work.display()))?;
     let joined = base.join(path);
     let mut probe = joined.as_path();
     while probe.symlink_metadata().is_err() {
@@ -629,11 +661,12 @@ impl SqliteStoreBundle {
         if let Some(c) = conns(kernel).0.lock().expect("sqlite_store poisoned").get(&id.0) {
             return Ok(Arc::clone(c));
         }
-        let path = resolve_path(&record(kernel, id), kernel).map_err(|e| {
-            let mut r = refusal(BAD_ARG, e);
-            with(&mut r, "arg", json!("path"));
-            r
-        })?;
+        let path =
+            resolve_path(&record(kernel, id), kernel, &own_root(kernel, id)).map_err(|e| {
+                let mut r = refusal(BAD_ARG, e);
+                with(&mut r, "arg", json!("path"));
+                r
+            })?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| refusal(UNHANDLED, format!("sqlite_store: {}: {e}", dir.display())))?;
         }
@@ -1113,8 +1146,16 @@ impl Bundle for SqliteStoreBundle {
     /// 2026-09-26). Only an explicit `delete_agent` reaches here: the stop's
     /// teardown walk calls [`Self::on_shutdown`], which keeps the file.
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
-        conns(kernel).0.lock().expect("sqlite_store poisoned").remove(&agent_id.0);
-        let path = resolve_path(&record(kernel, agent_id), kernel)?;
+        conns(kernel)
+            .0
+            .lock()
+            .expect("sqlite_store poisoned")
+            .remove(&agent_id.0);
+        let path = resolve_path(
+            &record(kernel, agent_id),
+            kernel,
+            &own_root(kernel, agent_id),
+        )?;
         for suffix in ["", "-wal", "-shm"] {
             let f = PathBuf::from(format!("{}{suffix}", path.display()));
             match std::fs::remove_file(&f) {

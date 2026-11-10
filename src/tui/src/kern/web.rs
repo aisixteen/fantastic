@@ -11,10 +11,10 @@
 //!         │   │                              backends (AIs, exec agents)
 //!         │   ├── static_files  file_bridge  THE files every view's cells load:
 //!         │   │                              GET /static_files/file/<path>
-//!         │   ├── web_loader  kernel_state   its page records (.fantastic/web)
+//!         │   ├── web_loader  kernel_state   its page records (@state/web)
 //!         │   └── canvas_<name>  canvas.tools a CHILD canvas (`new_canvas` sent to
 //!         │       │                          canvas_root): its page records nest under
-//!         │       │                          its parent's (.fantastic/web/canvas_<name>)
+//!         │       │                          its parent's (@state/web/canvas_<name>)
 //!         │       ├── canvas_<name>_loader    its page records
 //!         │       └── canvas_<sub>  …         a canvas it spawned, the same way
 //!         └── (a flat peer canvas made before nesting loads as it did, under canvas_page)
@@ -117,9 +117,12 @@ pub async fn ensure_canvas(h: &Host, parent: &str, node: &str, loader: &str, roo
         create(h, json!({"parent_id": node, "id": loader, "handler_module": fantastic_core::HANDLER_MODULE,
             "root": root, "watch": false})).await?;
     }
-    // its page bundles' folder exists, so the page can WATCH it (`bundle_watch`)
-    if let Err(e) = std::fs::create_dir_all(format!("{root}/bundles")) {
-        return Err(format!("{root}/bundles: {e}"));
+    // its page bundles' folder exists, so the page's bundles have a place to be
+    // put (the folder is the loader's `root` under the kernel's one rule)
+    let (base, rel) = h.kernel.record_root(root, std::path::Path::new(""))?;
+    let bundles = base.join(rel).join("bundles");
+    if let Err(e) = std::fs::create_dir_all(&bundles) {
+        return Err(format!("{}: {e}", bundles.display()));
     }
     // `user` reads and writes the page records (every tab's call is `user`'s)
     let user = crate::env::HUMAN;
@@ -317,7 +320,15 @@ pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<U
             "ingress_rule": "allow_all_ingress"})).await?;
     }
     // THE MAIN CANVAS: its node, its page records, its cells' backends.
-    ensure_canvas(h, CANVAS_PAGE_ID, CANVAS_NODE_ID, CANVAS_LOADER_ID, ".fantastic/web", true).await?;
+    ensure_canvas(
+        h,
+        CANVAS_PAGE_ID,
+        CANVAS_NODE_ID,
+        CANVAS_LOADER_ID,
+        "@state/web",
+        true,
+    )
+    .await?;
     // THE STATIC FILES: one read-only file leg over the project dir, for every
     // view. DENY-ALL per path (`allow: []`): its `allow` list — the record's,
     // written from above (`update_agent`) — exposes what the cells load. `web`
@@ -414,11 +425,14 @@ mod tests {
 
     #[test]
     fn a_child_canvas_records_nest_under_its_parents_records_dir() {
-        // the main canvas's records are `.fantastic/web`: its child's sit inside them
-        let under_main = child_records_root(".fantastic/web", "canvas_child_a");
-        assert_eq!(under_main, ".fantastic/web/canvas_child_a");
+        // the main canvas's records are `@state/web`: its child's sit inside them
+        let under_main = child_records_root("@state/web", "canvas_child_a");
+        assert_eq!(under_main, "@state/web/canvas_child_a");
         // a grandchild nests under its parent's, one level deeper
-        assert_eq!(child_records_root(&under_main, "canvas_eq"), ".fantastic/web/canvas_child_a/canvas_eq");
+        assert_eq!(
+            child_records_root(&under_main, "canvas_eq"),
+            "@state/web/canvas_child_a/canvas_eq"
+        );
     }
 
     #[test]
@@ -491,9 +505,18 @@ pub(crate) mod canvas_tree_tests {
 
     /// A host whose root is `kernel` (the kernel-state root the canvas tree is made under).
     pub(crate) fn harness(dir: &Path) -> Host {
-        let mut kernel = Kernel::new();
-        kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
-        kernel.bundles.register(crate::kern::backend::HANDLER_MODULE, crate::kern::backend::BackendBundle);
+        let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+            state_dir: dir.join(".fantastic"),
+            work_dir: dir.to_path_buf(),
+        });
+        kernel.bundles.register(
+            fantastic_core::HANDLER_MODULE,
+            fantastic_core::KernelStateBundle::default(),
+        );
+        kernel.bundles.register(
+            crate::kern::backend::HANDLER_MODULE,
+            crate::kern::backend::BackendBundle,
+        );
         let kernel = Arc::new(kernel);
         let root = Agent::new(
             KernelId::from("kernel"),
@@ -517,8 +540,16 @@ pub(crate) mod canvas_tree_tests {
         ] {
             create(&h, spec).await.unwrap();
         }
-        let root = format!("{}/.fantastic/web", dir.display());
-        ensure_canvas(&h, CANVAS_PAGE_ID, CANVAS_NODE_ID, CANVAS_LOADER_ID, &root, true).await.unwrap();
+        ensure_canvas(
+            &h,
+            CANVAS_PAGE_ID,
+            CANVAS_NODE_ID,
+            CANVAS_LOADER_ID,
+            "@state/web",
+            true,
+        )
+        .await
+        .unwrap();
         h
     }
 
@@ -567,14 +598,17 @@ pub(crate) mod canvas_tree_tests {
         assert!(is_canvas(&h, &node));
         let loader = loader_of(&h, &node).expect("its own page loader");
         assert_eq!(loader, "canvas_research_loader");
-        assert_eq!(records_root_of(&h, &loader), format!("{}/.fantastic/web/canvas_research", dir.display()));
-        assert!(dir.join(".fantastic/web/canvas_research/bundles").is_dir(), "its bundles folder exists");
+        assert_eq!(records_root_of(&h, &loader), "@state/web/canvas_research");
+        assert!(
+            dir.join(".fantastic/web/canvas_research/bundles").is_dir(),
+            "its bundles folder exists"
+        );
         // a canvas made by that child nests one level deeper, under the child's records
         let deeper = new_canvas(&h, &node, "deeper").await.unwrap();
         assert_eq!(parent_of(&h, &deeper).as_deref(), Some("canvas_research"));
         assert_eq!(
             records_root_of(&h, &loader_of(&h, &deeper).unwrap()),
-            format!("{}/.fantastic/web/canvas_research/canvas_deeper", dir.display())
+            "@state/web/canvas_research/canvas_deeper"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -665,8 +699,16 @@ pub(crate) mod canvas_tree_tests {
         let nested = new_canvas(&h, CANVAS_NODE_ID, "research").await.unwrap();
         let nested_deeper = new_canvas(&h, &nested, "deeper").await.unwrap();
         // a flat peer made before nesting: a canvas under the page, its own records
-        let root = format!("{}/.fantastic/web/canvas_flat", dir.display());
-        ensure_canvas(&h, CANVAS_PAGE_ID, "canvas_flat", "canvas_flat_loader", &root, false).await.unwrap();
+        ensure_canvas(
+            &h,
+            CANVAS_PAGE_ID,
+            "canvas_flat",
+            "canvas_flat_loader",
+            "@state/web/canvas_flat",
+            false,
+        )
+        .await
+        .unwrap();
         let listed = canvases(&h);
         let expect = vec![
             ("canvas_flat".to_string(), "canvas_flat_loader".to_string()),

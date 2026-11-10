@@ -1,7 +1,7 @@
 //! THE HOME KERNEL, booted in this process on the caller's runtime.
 //!
-//! Its folder is `W = <home>/app`, both its workdir and its state dir
-//! (`BootstrapOptions::daemon_at(W, W)`: no `.fantastic` inside): everything it
+//! Its folder is `W = <home>/app`, both its work folder and its state folder
+//! (`BootstrapOptions::daemon(W, W)`: no `.fantastic` inside): everything it
 //! writes is under it, in the kernel's standard format —
 //! `W/{lock.yaml, agent.yaml, agents/…, home.db, web/…}` and the run file
 //! `W/home.yaml` `{pid, port, url}` while it serves.
@@ -198,7 +198,7 @@ impl HomeKernel {
                 .to_str()
                 .ok_or_else(|| format!("{} is not UTF-8", cfg.home.display()))?,
         )?;
-        match lock::held_at(&w) {
+        match lock::held(&w) {
             Ok(Some(pid)) => {
                 return Err(format!(
                     "{}: already running (pid {pid})",
@@ -209,7 +209,7 @@ impl HomeKernel {
             Err(e) => return Err(e.to_string()),
         }
         seed(&w)?;
-        let booted = bootstrap::bootstrap(registry(&cfg, own), BootstrapOptions::daemon_at(&w, &w))
+        let booted = bootstrap::bootstrap(registry(&cfg, own), BootstrapOptions::daemon(&w, &w))
             .map_err(|e| e.to_string())?;
         let kernel = booted.kernel;
         match Self::start(&kernel, &cfg, &w).await {
@@ -219,7 +219,7 @@ impl HomeKernel {
                 for line in fantastic_sqlite_store::close_all(&kernel) {
                     tracing::warn!("home: a failed boot: {line}");
                 }
-                if let Err(le) = bootstrap::shutdown_at(&w) {
+                if let Err(le) = bootstrap::shutdown(&w) {
                     tracing::warn!("home: a failed boot: {le}");
                 }
                 Err(e)
@@ -383,7 +383,7 @@ impl HomeKernel {
         if let Err(e) = sys::remove_file(&self.workdir.join("home.yaml")) {
             errors.push(e);
         }
-        if let Err(e) = bootstrap::shutdown_at(&self.workdir) {
+        if let Err(e) = bootstrap::shutdown(&self.workdir) {
             errors.push(e.to_string());
         }
         if errors.is_empty() {

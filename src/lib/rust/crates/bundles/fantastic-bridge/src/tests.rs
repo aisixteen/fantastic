@@ -18,7 +18,10 @@ use tempfile::TempDir;
 /// root agent. Each test gets its own tempdir so the global
 /// `BRIDGES` map can carry concurrent test agents without id clashes.
 async fn mk_kernel(tmp: &TempDir) -> Arc<Kernel> {
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel.bundles.register(WS_HANDLER_MODULE, WsBridgeBundle);
     kernel
         .bundles
@@ -1374,7 +1377,10 @@ async fn a_reentrant_forward_completes_instead_of_deadlocking() {
     let tmp = TempDir::new().unwrap();
     let tmp_b = TempDir::new().unwrap();
     let ka = mk_kernel_guid(&tmp, "guid-a").await;
-    let mut kb = Kernel::new();
+    let mut kb = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp_b.path().join(".fantastic"),
+        work_dir: tmp_b.path().to_path_buf(),
+    });
     kb.bundles.register(WS_HANDLER_MODULE, WsBridgeBundle);
     kb.bundles.register("bouncer.tools", BouncerBundle);
     let kb = Arc::new(kb);
@@ -1542,7 +1548,10 @@ async fn ask(kernel: &Arc<Kernel>, id: &str, payload: Value) -> Value {
 
 /// A kernel that carries BOTH derivations.
 async fn mk_two_family_kernel(tmp: &TempDir) -> Arc<Kernel> {
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel.bundles.register(WS_HANDLER_MODULE, WsBridgeBundle);
     kernel
         .bundles

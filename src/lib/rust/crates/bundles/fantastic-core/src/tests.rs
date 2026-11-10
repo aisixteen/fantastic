@@ -124,9 +124,12 @@ use std::sync::Arc;
 fn booted(tmp: &TempDir) -> Arc<Kernel> {
     let mut reg = BundleRegistry::new();
     reg.register(HANDLER_MODULE, KernelStateBundle::default());
-    bootstrap(reg, BootstrapOptions::daemon(tmp.path()))
-        .expect("boot")
-        .kernel
+    bootstrap(
+        reg,
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
+    )
+    .expect("boot")
+    .kernel
 }
 
 async fn root_reflect(kernel: &Arc<Kernel>, payload: serde_json::Value) -> serde_json::Value {
@@ -486,7 +489,7 @@ async fn a_session_loader_persists_a_canvas_that_survives_a_restart() {
         "the host chain is not joined in"
     );
     kernel.shutdown().await;
-    fantastic_kernel::bootstrap::shutdown(tmp.path()).unwrap();
+    fantastic_kernel::bootstrap::shutdown(&tmp.path().join(".fantastic")).unwrap();
     drop(kernel);
 
     // ── life 2: a fresh kernel, the session re-opened on the same root ────
@@ -506,7 +509,7 @@ async fn a_session_loader_persists_a_canvas_that_survives_a_restart() {
     assert_eq!(recs[1]["parent_id"], json!("sess"));
     assert_eq!(recs[2]["parent_id"], json!("canvas"));
     kernel.shutdown().await;
-    fantastic_kernel::bootstrap::shutdown(tmp.path()).unwrap();
+    fantastic_kernel::bootstrap::shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
 /// Records nested under a federated record (python `test_nested_records.py`).
@@ -524,9 +527,12 @@ fn with_file(tmp: &TempDir) -> Arc<Kernel> {
     let mut reg = BundleRegistry::new();
     reg.register(HANDLER_MODULE, KernelStateBundle::default());
     reg.register("file_bridge.tools", fantastic_file::FileBundle::default());
-    bootstrap(reg, BootstrapOptions::daemon(tmp.path()))
-        .expect("boot")
-        .kernel
+    bootstrap(
+        reg,
+        BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
+    )
+    .expect("boot")
+    .kernel
 }
 
 async fn make_store(kernel: &Arc<Kernel>, extra: serde_json::Value) {
@@ -766,6 +772,29 @@ async fn load_tree_is_rooted_at_the_live_session_record() {
     );
 }
 
+/// A state folder with `..` folds the same on both sides, so the root loader
+/// reads its DISK record, not the live one.
+#[tokio::test]
+async fn load_tree_reads_the_disk_root_record_when_the_state_folder_has_dotdot() {
+    let tmp = TempDir::new().unwrap();
+    let work = tmp.path().join("w");
+    std::fs::create_dir_all(&work).unwrap();
+    let state = work.join("../x/.fantastic");
+    let mut reg = BundleRegistry::new();
+    reg.register(HANDLER_MODULE, KernelStateBundle::default());
+    let kernel = bootstrap(reg, BootstrapOptions::daemon(&state, &work))
+        .expect("boot")
+        .kernel;
+    let yaml = tmp.path().join("x/.fantastic/agent.yaml");
+    let mut text = std::fs::read_to_string(&yaml).unwrap();
+    text.push_str("display_name: on disk\n");
+    std::fs::write(&yaml, text).unwrap();
+    let tree = root_reflect(&kernel, json!({"type": "load_tree"})).await;
+    let recs = tree["records"].as_array().expect("records");
+    assert_eq!(recs[0]["id"], "kernel_state", "{tree}");
+    assert_eq!(recs[0]["display_name"], "on disk", "{tree}");
+}
+
 /// python: `persist_record` runs `_guard_parent_chain` on a non-None
 /// `parent_id` (a non-string is `bad_arg`), and `forget_record` with a truthy
 /// non-string id is the id guard's `bad_arg`, not `missing_arg`.
@@ -894,7 +923,7 @@ async fn a_loader_without_a_root_reflects_its_relative_address() {
         .await
         .remove(0)
         .result;
-    assert_eq!(reflect["root"], ".fantastic/agents/inner");
+    assert_eq!(reflect["root"], "agents/inner");
 }
 
 /// python `str(_root(agent))` = `str(Path(r))` for a `root` meta: an ABSOLUTE
@@ -960,9 +989,7 @@ async fn a_loader_without_a_root_in_a_kernel_with_no_running_dir_raises() {
     assert_eq!(out.status, fantastic_kernel::Status::Failed, "{out:?}");
     assert_eq!(
         out.result["error"],
-        json!(
-            "RuntimeError: the kernel root has no disk address — no running dir to clamp disk to"
-        ),
+        json!("RuntimeError: an in-memory kernel has no state folder"),
         "{out:?}"
     );
 
@@ -1256,4 +1283,74 @@ fn a_secret_hit_names_the_file_with_slashes_on_every_os() {
         export::scan_secrets(d.path()),
         vec!["bundles/py_ab12/agent.py: an sk- key token".to_string()]
     );
+}
+
+/// A page loader whose `root` is `@state/web` keeps its records under the
+/// state folder, wherever that folder is relative to the work folder.
+#[tokio::test]
+async fn a_page_loader_at_state_web_writes_under_the_state_folder() {
+    let tmp = TempDir::new().unwrap();
+    let (s, w) = (tmp.path().join("far/s"), tmp.path().join("w"));
+    std::fs::create_dir_all(&w).unwrap();
+    let mut reg = BundleRegistry::new();
+    reg.register(HANDLER_MODULE, KernelStateBundle::default());
+    let kernel = bootstrap(reg, BootstrapOptions::daemon(&s, &w))
+        .expect("boot")
+        .kernel;
+    let root = kernel.root().expect("root").id.clone();
+    let r = kernel
+        .send(vec![Item::new(
+            root.clone(),
+            json!({"type": "create_agent", "parent_id": root.0, "id": "page",
+                   "handler_module": HANDLER_MODULE, "watch": false, "root": "@state/web"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], "page", "{r}");
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("page"),
+            json!({"type": "persist_record", "record": {
+                "id": "canvas", "handler_module": "canvas.tools", "parent_id": "page",
+            }}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert!(s.join("web/agents/canvas/agent.yaml").is_file());
+    assert!(!w.join("web").exists());
+    kernel.shutdown().await;
+    fantastic_kernel::bootstrap::shutdown(&s).unwrap();
+}
+
+/// A loader folder is checked against the state folder: a `root` that is not
+/// inside it is refused, even when it is inside the work folder's parent.
+#[tokio::test]
+async fn a_loader_root_outside_the_state_folder_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = booted(&tmp);
+    let root = kernel.root().expect("root").id.clone();
+    let r = kernel
+        .send(vec![Item::new(
+            root.clone(),
+            json!({"type": "create_agent", "parent_id": root.0, "id": "out",
+                   "handler_module": HANDLER_MODULE, "watch": false, "root": "../out"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], "out", "{r}");
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from("out"),
+            json!({"type": "load_tree"}),
+        )])
+        .await
+        .remove(0);
+    assert_eq!(out.status, fantastic_kernel::Status::Failed, "{out:?}");
+    let text = out.result["error"].as_str().unwrap_or_default();
+    assert!(text.contains("escapes"), "{out:?}");
+    fantastic_kernel::bootstrap::shutdown(&tmp.path().join(".fantastic")).unwrap();
 }

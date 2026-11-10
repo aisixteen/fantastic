@@ -38,7 +38,10 @@ async fn mk_kernel_with(
     endpoint: &str,
     extra: Value,
 ) -> (Arc<Kernel>, AgentId) {
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
 
     kernel.bundles.register(fantastic_ai_core::chat_bundle::HANDLER_MODULE, fantastic_ai_core::chat_bundle::AiChatBundle);
     kernel.bundles.register(HANDLER_MODULE, OllamaBackendBundle);

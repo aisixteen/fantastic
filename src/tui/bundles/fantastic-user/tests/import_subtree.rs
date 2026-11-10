@@ -73,10 +73,26 @@ async fn setup() -> Arc<Kernel> {
     reg.register("sqlite_store.tools", Echo);
     reg.register("exec_bridge.tools", Echo);
     reg.register("echo.tools", Echo);
+    // A disk kernel: an export or import names a path under its work folder.
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let work = std::env::temp_dir().join(format!(
+        "fu-setup-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    reg.register(
+        fantastic_core::HANDLER_MODULE,
+        fantastic_core::KernelStateBundle::default(),
+    );
     let k = Arc::clone(
-        &bootstrap(reg, BootstrapOptions::in_memory())
-            .expect("boots")
-            .kernel,
+        &bootstrap(
+            reg,
+            BootstrapOptions::one_shot(work.join(".fantastic"), &work),
+        )
+        .expect("boots")
+        .kernel,
     );
     let root = k.root().unwrap().id.0.clone();
     for (id, parent, hm, extra) in [

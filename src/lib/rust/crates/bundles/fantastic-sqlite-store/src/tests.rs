@@ -21,9 +21,11 @@ fn agent(id: &str, hm: Option<&str>, parent: Option<&str>, meta: Value) -> Arc<A
 
 /// A disk-backed kernel over `dir` with the root and `alice`; no store yet.
 fn kernel(dir: &Path) -> Arc<Kernel> {
-    let mut k = Kernel::with_storage(fantastic_kernel::StorageMode::disk(dir.to_path_buf()));
-    k.bundles
-        .register(HANDLER_MODULE, SqliteStoreBundle);
+    let mut k = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: dir.to_path_buf().join(".fantastic"),
+        work_dir: dir.to_path_buf(),
+    });
+    k.bundles.register(HANDLER_MODULE, SqliteStoreBundle);
     let k = Arc::new(k);
     let root = agent("kernel_state", None, None, json!({"guid": "g1"}));
     k.register(Arc::clone(&root));
@@ -73,9 +75,9 @@ fn readme_is_pythons_verbatim() {
 const BAD_PATHS: [(Option<&str>, &str); 5] = [
     (None, "needs `path`"),
     (Some(""), "needs `path`"),
-    (Some("/tmp/x.db"), "must stay inside the project dir"),
-    (Some("../x.db"), "must stay inside the project dir"),
-    (Some("a/../../x.db"), "must stay inside the project dir"),
+    (Some("/tmp/x.db"), "must stay inside its folder"),
+    (Some("../x.db"), "must stay inside its folder"),
+    (Some("a/../../x.db"), "must stay inside its folder"),
 ];
 
 #[tokio::test]
@@ -253,4 +255,20 @@ async fn sqlite_store_refusals_are_kernel_shape() {
     assert_eq!(out["reason"], json!("exists"), "{out}");
     let sentence = out["error"].as_str().unwrap();
     assert!(sentence.contains("duplicate row") && sentence != "exists", "{out}");
+}
+
+#[test]
+fn path_at_state_lands_in_the_state_folder_and_a_plain_path_in_work() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(tmp.path());
+    let state = tmp.path().join(".fantastic");
+    std::fs::create_dir_all(&state).unwrap();
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap();
+    let own = Path::new("");
+    let at_state = resolve_path(&rec(json!({"path": "@state/memory.db"})), &k, own).unwrap();
+    assert_eq!(at_state, real(&state).join("memory.db"));
+    let plain = resolve_path(&rec(json!({"path": "plain.db"})), &k, own).unwrap();
+    assert_eq!(plain, real(tmp.path()).join("plain.db"));
+    let err = resolve_path(&rec(json!({"path": "@state/../x.db"})), &k, own).unwrap_err();
+    assert!(err.contains("inside its folder"), "{err}");
 }

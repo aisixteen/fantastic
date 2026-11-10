@@ -472,9 +472,12 @@ async fn named_dedup_survives_the_flush() {
 async fn named_dedup_survives_a_restart_on_the_same_store() {
     let tmp = tempfile::TempDir::new().unwrap();
     let state = Arc::new(ProbeState::default());
-    let k = bootstrap(registry(&state), BootstrapOptions::one_shot(tmp.path()))
-        .expect("boot")
-        .kernel;
+    let k = bootstrap(
+        registry(&state),
+        BootstrapOptions::one_shot(tmp.path().join(".fantastic"), tmp.path()),
+    )
+    .expect("boot")
+    .kernel;
     call(&k, &root_id(&k), json!({"type": "boot"})).await; // mints the guid
     mk(&k, "probe", json!({})).await;
     with_store(&k, true).await;
@@ -488,9 +491,12 @@ async fn named_dedup_survives_a_restart_on_the_same_store() {
     }
     let next = k.rows.next_id();
     // a NEW kernel on the same dir: same guid, same counter bound, an empty RAM store
-    let k2 = bootstrap(registry(&state), BootstrapOptions::one_shot(tmp.path()))
-        .expect("reboot")
-        .kernel;
+    let k2 = bootstrap(
+        registry(&state),
+        BootstrapOptions::one_shot(tmp.path().join(".fantastic"), tmp.path()),
+    )
+    .expect("reboot")
+    .kernel;
     assert_eq!(guid(&k2), guid(&k));
     assert!(
         k2.rows.next_id() >= next,

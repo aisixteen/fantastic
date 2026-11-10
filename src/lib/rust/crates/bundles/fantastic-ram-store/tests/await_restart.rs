@@ -82,9 +82,12 @@ async fn as_a(k: &Arc<Kernel>, who: &str, target: &str, payload: Value) -> Value
 /// A first kernel on `dir`: lead + w1 + w2 wired, a started memory store.
 async fn first(dir: &std::path::Path) -> (Arc<Kernel>, Arc<Seen>) {
     let seen = Arc::new(Seen::default());
-    let k = bootstrap(registry(&seen), BootstrapOptions::one_shot(dir))
-        .expect("boot")
-        .kernel;
+    let k = bootstrap(
+        registry(&seen),
+        BootstrapOptions::one_shot(dir.join(".fantastic"), dir),
+    )
+    .expect("boot")
+    .kernel;
     call(&k, &root_id(&k), json!({"type": "boot"})).await; // mints the guid
     for id in ["lead", "w1", "w2"] {
         let r = call(&k, "kernel", json!({
@@ -123,9 +126,12 @@ async fn restart(
     // the first kernel is DEAD from here: what it does next never reaches the store
     tokio::time::sleep(down).await;
     let seen = Arc::new(Seen::default());
-    let k2 = bootstrap(registry(&seen), BootstrapOptions::one_shot(dir))
-        .expect("reboot")
-        .kernel;
+    let k2 = bootstrap(
+        registry(&seen),
+        BootstrapOptions::one_shot(dir.join(".fantastic"), dir),
+    )
+    .expect("reboot")
+    .kernel;
     call(&k2, "memory", json!({"type": "inject", "tables": tables})).await;
     assert_eq!(k2.start(false).await["started"], json!(true));
     (k2, seen)

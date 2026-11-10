@@ -1297,7 +1297,10 @@ async fn a_text_sends_bytes_reply_comes_back_raw() {
 async fn a_text_read_stream_is_answered_by_one_binary_frame() {
     use tokio::io::AsyncReadExt;
     let tmp = TempDir::new().unwrap();
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel.bundles.register(HANDLER_MODULE, ExecBridgeBundle);
     kernel
         .bundles

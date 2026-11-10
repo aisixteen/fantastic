@@ -752,7 +752,10 @@ pub(crate) async fn open_view_verb(
         return rf::bad("open_view", "path", "a file path (the root is a folder)");
     }
     let allow = super::allow_list(meta);
-    let root = clamp_root(meta, &kernel.workdir());
+    let Some(bridge) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
+        return json!({"error": format!("no agent {agent_id}")});
+    };
+    let root = clamp_root(meta, kernel, &bridge.root_path);
     if let Some(err) = gate_path("open_view", &root, &allow, &norm_path) {
         return err;
     }

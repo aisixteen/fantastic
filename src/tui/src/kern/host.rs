@@ -242,9 +242,16 @@ impl Host {
     /// `web_port`: `--port` — a recorded `web` on another port is set to it
     /// BEFORE its listener boots (nothing runs here yet, so it is the user's to
     /// overwrite). `web_bind`: `--host`, set on the record the same way.
-    pub async fn boot(paths: &Paths, web_port: Option<u16>, web_bind: Option<String>) -> Result<Self, KernelErr> {
-        let booted = bootstrap::bootstrap(registry(&paths.cwd), BootstrapOptions::daemon(&paths.cwd))
-            .map_err(|e| KernelErr::Boot(format!("{e}")))?;
+    pub async fn boot(
+        paths: &Paths,
+        web_port: Option<u16>,
+        web_bind: Option<String>,
+    ) -> Result<Self, KernelErr> {
+        let booted = bootstrap::bootstrap(
+            registry(&paths.cwd),
+            BootstrapOptions::daemon(&paths.store, &paths.cwd),
+        )
+        .map_err(|e| KernelErr::Boot(format!("{e}")))?;
         let kernel = Arc::clone(&booted.kernel);
         // THE LEDGER CAP (owner 2026-10-09): 100 000 calls; past it the kernel
         // prunes its store to 90% — oldest settled first, unnamed before named,
@@ -428,7 +435,7 @@ impl Host {
         for e in fantastic_sqlite_store::close_all(&self.kernel) {
             tracing::warn!("shutdown: {e}");
         }
-        if let Err(e) = bootstrap::shutdown(&paths.cwd) {
+        if let Err(e) = bootstrap::shutdown(&paths.store) {
             tracing::warn!("shutdown: {e}");
         }
     }
@@ -659,6 +666,7 @@ pub(crate) async fn stop_bounded(
     clean: impl std::future::Future<Output = ()>,
     second: impl std::future::Future<Output = ()>,
     grace: Duration,
+    state: &std::path::Path,
     cwd: &std::path::Path,
 ) -> Stopped {
     tokio::select! {
@@ -667,7 +675,7 @@ pub(crate) async fn stop_bounded(
         _ = second => tracing::warn!("stop: a second signal — exiting now"),
         _ = tokio::time::sleep(grace) => tracing::warn!("stop: the clean stop did not finish within {grace:?} — cut"),
     }
-    if let Err(e) = bootstrap::shutdown(cwd) {
+    if let Err(e) = bootstrap::shutdown(state) {
         tracing::warn!("stop: {e}")
     }
     crate::kern::web::remove_run_file(cwd);
@@ -816,12 +824,27 @@ mod tests {
         std::fs::write(&rec, fantastic_kernel::yaml_io::dump(&json!({"id": "probe", "handler_module": PROBE}))).unwrap();
 
         // one_shot: no lock, nothing written
-        let booted = bootstrap::bootstrap(registry_with(&dir, &[probe_extra]), BootstrapOptions::one_shot(&dir))
-            .expect("boots");
-        assert!(booted.loaded.contains(&AgentId::from("probe")), "hydrated: {:?}", booted.loaded);
+        let booted = bootstrap::bootstrap(
+            registry_with(&dir, &[probe_extra]),
+            BootstrapOptions::one_shot(dir.join(".fantastic"), &dir),
+        )
+        .expect("boots");
+        assert!(
+            booted.loaded.contains(&AgentId::from("probe")),
+            "hydrated: {:?}",
+            booted.loaded
+        );
 
-        let stock = bootstrap::bootstrap(registry_with(&dir, &[]), BootstrapOptions::one_shot(&dir)).expect("boots");
-        assert!(!stock.loaded.contains(&AgentId::from("probe")), "weak-skipped without the extra: {:?}", stock.loaded);
+        let stock = bootstrap::bootstrap(
+            registry_with(&dir, &[]),
+            BootstrapOptions::one_shot(dir.join(".fantastic"), &dir),
+        )
+        .expect("boots");
+        assert!(
+            !stock.loaded.contains(&AgentId::from("probe")),
+            "weak-skipped without the extra: {:?}",
+            stock.loaded
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1000,9 +1023,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fc-sched507-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let k = bootstrap::bootstrap(registry_with(&dir, &[]), BootstrapOptions::one_shot(&dir))
-            .expect("boots")
-            .kernel;
+        let k = bootstrap::bootstrap(
+            registry_with(&dir, &[]),
+            BootstrapOptions::one_shot(dir.join(".fantastic"), &dir),
+        )
+        .expect("boots")
+        .kernel;
         let root = k.root().expect("root").id.0.clone();
         let store = send(
             &k,
@@ -1093,7 +1119,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("fc-stop-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".fantastic/cli")).expect("dirs");
-        fantastic_kernel::lock::acquire(&tmp).expect("lock");
+        fantastic_kernel::lock::acquire(&tmp.join(".fantastic")).expect("lock");
         std::fs::write(tmp.join(crate::kern::web::RUN_FILE), "pid: 1\n").expect("run file");
         tmp
     }
@@ -1104,7 +1130,9 @@ mod tests {
             "the lock file is gone"
         );
         assert!(
-            fantastic_kernel::lock::held(tmp).unwrap().is_none(),
+            fantastic_kernel::lock::held(&tmp.join(".fantastic"))
+                .unwrap()
+                .is_none(),
             "the lock is released"
         );
         assert!(
@@ -1149,7 +1177,14 @@ mod tests {
             "the call is in flight"
         );
         let t0 = std::time::Instant::now();
-        let out = stop_bounded(k.shutdown(), std::future::pending(), STOP_GRACE, &tmp).await;
+        let out = stop_bounded(
+            k.shutdown(),
+            std::future::pending(),
+            STOP_GRACE,
+            &tmp.join(".fantastic"),
+            &tmp,
+        )
+        .await;
         let dt = t0.elapsed();
         assert_eq!(out, Stopped::Clean);
         assert!(
@@ -1181,6 +1216,7 @@ mod tests {
             std::future::pending(),
             std::future::pending(),
             Duration::from_millis(300),
+            &tmp.join(".fantastic"),
             &tmp,
         )
         .await;
@@ -1202,6 +1238,7 @@ mod tests {
             std::future::pending(),
             tokio::time::sleep(Duration::from_millis(100)),
             STOP_GRACE,
+            &tmp.join(".fantastic"),
             &tmp,
         )
         .await;

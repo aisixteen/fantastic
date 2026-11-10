@@ -673,10 +673,10 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, p: &Value) -> Value {
             format!("user.import_subtree: no agent {parent_id:?} to import under"),
         );
     }
-    let base = kernel
-        .workdir()
-        .or_else(|_| std::env::current_dir().map_err(|e| e.to_string()))
-        .unwrap_or_default();
+    let base = match kernel.work_dir() {
+        Ok(b) => b,
+        Err(e) => return refuse("failed", format!("user.import_subtree: {e}")),
+    };
     let dir = if rel.is_absolute() {
         rel.to_path_buf()
     } else {

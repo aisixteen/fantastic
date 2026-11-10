@@ -330,7 +330,10 @@ async fn mk_kernel(tmp: &tempfile::TempDir) -> Arc<Kernel> {
 
 /// …with extra record fields (posture, `readonly`, a different `root`).
 async fn mk_kernel_with(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel
         .bundles
         .register(HANDLER_MODULE, FileBundle::default());
@@ -989,7 +992,15 @@ async fn reflect_root_is_resolved_absolute_path() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mut meta = Map::new();
     meta.insert("root".into(), json!("../nope"));
-    let r = reflect_reply(&AgentId::from("fb"), &meta, &Ok(tmp.path().to_path_buf()));
+    let k = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
+    let r = reflect_reply(
+        &AgentId::from("fb"),
+        &meta,
+        &clamp_root(&meta, &k, Path::new("")),
+    );
     assert_eq!(r["root"], "../nope");
     assert_eq!(
         r["root_error"],
@@ -1008,7 +1019,7 @@ async fn reflect_root_is_resolved_absolute_path() {
     let r = reflect_reply(
         &AgentId::from("fb"),
         &Map::new(),
-        &Ok(tmp.path().to_path_buf()),
+        &clamp_root(&Map::new(), &k, Path::new("")),
     );
     assert_eq!(
         r["root"],

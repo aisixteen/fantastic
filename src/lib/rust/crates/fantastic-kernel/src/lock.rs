@@ -1,4 +1,4 @@
-//! `.fantastic/lock.yaml` — one kernel per workdir, python `kernel/_lock.py`.
+//! `<state>/lock.yaml` — one kernel per state folder, python `kernel/_lock.py`.
 //!
 //! The decision is an `flock(LOCK_EX)` on `lock.yaml`, held on an open
 //! descriptor for the life of the process: the OS grants it to exactly one
@@ -50,27 +50,15 @@ pub fn pid_alive(pid: u32) -> bool {
     sys::pid_alive(pid)
 }
 
-/// Acquire the workdir lock for the current process: take the flock on
-/// `.fantastic/lock.yaml` and keep its descriptor open until [`release`].
+/// Acquire the state folder lock for the current process: take the flock on
+/// `<state>/lock.yaml` and keep its descriptor open until [`release`].
 ///
 /// If a live process holds it, returns [`KernelError::LockHeld`] naming the
 /// pid in the file. A lock whose holder died is taken over.
-pub fn acquire(workdir: &Path) -> KernelResult<PathBuf> {
-    acquire_at(&project_state_dir(workdir))
-}
-
-/// The project layout's state dir, `<workdir>/.fantastic`: what the `workdir`
-/// forms of the lock calls lock.
-fn project_state_dir(workdir: &Path) -> PathBuf {
-    workdir.join(".fantastic")
-}
-
-/// [`acquire`] for a kernel whose state lives in `state_dir`: the flock on
-/// `<state_dir>/lock.yaml`.
 ///
 /// # Errors
-/// As [`acquire`].
-pub fn acquire_at(state_dir: &Path) -> KernelResult<PathBuf> {
+/// As above.
+pub fn acquire(state_dir: &Path) -> KernelResult<PathBuf> {
     let path = state_dir.join(super::persistence::LOCK_FILE);
     let io = |e: std::io::Error| KernelError::LockIo {
         path: path.clone(),
@@ -162,21 +150,16 @@ fn publish(staged: &Path, path: &Path) -> KernelResult<bool> {
     Ok(true)
 }
 
-/// Release the workdir lock — but only if THIS process holds it.
+/// Release the state folder lock — but only if THIS process holds it.
 /// Mirrors Python's `release_lock`: removes the file while it still names
 /// `std::process::id()`, then closes the descriptor (which drops the flock).
 /// If a foreign pid is named (the file was replaced by hand), the file stays
 /// — we don't yank someone else's lock. No-op when this process holds no
 /// lock here (idempotent shutdown path).
-pub fn release(workdir: &Path) -> KernelResult<()> {
-    release_at(&project_state_dir(workdir))
-}
-
-/// [`release`] for the lock in `state_dir`.
 ///
 /// # Errors
-/// As [`release`].
-pub fn release_at(state_dir: &Path) -> KernelResult<()> {
+/// The lock file's removal.
+pub fn release(state_dir: &Path) -> KernelResult<()> {
     let path = state_dir.join(super::persistence::LOCK_FILE);
     let held = {
         let mut held = HELD.lock().expect("lock registry poisoned");
@@ -199,7 +182,7 @@ pub fn release_at(state_dir: &Path) -> KernelResult<()> {
     Ok(())
 }
 
-/// Is the workdir lock HELD — the attach probe? `Some(pid)`
+/// Is the state folder lock HELD — the attach probe? `Some(pid)`
 /// while a live process holds the flock on `lock.yaml` (the pid read from the
 /// file, for the message); `None` when nobody holds it — no file, or a file a
 /// dead holder left, whatever pid it names (a reused pid is not a holder).
@@ -209,15 +192,10 @@ pub fn release_at(state_dir: &Path) -> KernelResult<()> {
 /// conflicts with the holder's exclusive one; for the instant it is granted, a
 /// racing [`acquire`] reads the file held and is refused — the probe never takes
 /// a lock it keeps. This process's own lock reads as held.
-pub fn held(workdir: &Path) -> KernelResult<Option<u32>> {
-    held_at(&project_state_dir(workdir))
-}
-
-/// [`held`] for the lock in `state_dir`.
 ///
 /// # Errors
-/// As [`held`].
-pub fn held_at(state_dir: &Path) -> KernelResult<Option<u32>> {
+/// The lock file's I/O, or a malformed lock.
+pub fn held(state_dir: &Path) -> KernelResult<Option<u32>> {
     let path = state_dir.join(super::persistence::LOCK_FILE);
     let io = |e: std::io::Error| KernelError::LockIo {
         path: path.clone(),
@@ -250,16 +228,11 @@ pub fn held_at(state_dir: &Path) -> KernelResult<Option<u32>> {
 
 /// Read the pid currently in the lock file, if any. Used by callers
 /// that want to attach to a running daemon (e.g. one-shot CLI
-/// invocations detecting a serve in the same workdir).
-pub fn current_holder(workdir: &Path) -> KernelResult<Option<u32>> {
-    current_holder_at(&project_state_dir(workdir))
-}
-
-/// [`current_holder`] for the lock in `state_dir`.
+/// invocations detecting a serve in the same state folder).
 ///
 /// # Errors
-/// As [`current_holder`].
-pub fn current_holder_at(state_dir: &Path) -> KernelResult<Option<u32>> {
+/// The lock file's I/O, or a malformed lock.
+pub fn current_holder(state_dir: &Path) -> KernelResult<Option<u32>> {
     let path = state_dir.join(super::persistence::LOCK_FILE);
     if !path.exists() {
         return Ok(None);

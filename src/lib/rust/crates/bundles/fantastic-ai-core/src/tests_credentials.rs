@@ -23,7 +23,10 @@ const KEY2: &str = "sk-ant-rotated-9876543210";
 /// `credentials: {store: creds, ref: claude}` — the ref bound to
 /// `api.example.com`.
 async fn mk(tmp: &tempfile::TempDir) -> Arc<Kernel> {
-    let mut kernel = Kernel::new();
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
     kernel
         .bundles
         .register(fantastic_credential_store::HANDLER_MODULE, creds::bundle());
