@@ -5,7 +5,7 @@ import { registerHtmlAgent } from "../src/bundles/html_agent/html_agent.ts";
 import type { Payload } from "../src/lib.ts";
 import { registerCanvas } from "../src/bundles/canvas/canvas_agent.ts";
 import { registerAgentView } from "../src/bundles/agent_view/agent_view.ts";
-import { cellGrant, onViewChange, rereflectViews, seenHere, setCanvasNode, setHostRecords, setHostReflect, sideOf, viewOf, viewRecordOf } from "../src/bundles/canvas/host_views.ts";
+import { cellGrant, expandReach, onViewChange, rereflectViews, seenHere, setCanvasNode, setHostRecords, setHostReflect, sideOf, viewOf, viewRecordOf } from "../src/bundles/canvas/host_views.ts";
 
 // BACKEND-OWNED VIEWS: a host agent's record says how it is drawn; a page cell
 // is layout + `backend_id` + a grant DERIVED from the record.
@@ -242,4 +242,17 @@ test("an agent's changed view is re-reflected and its cells told", async () => {
   assert.equal(redraws, 1);
   assert.equal(viewOf(recs.get("a")!).bytes, "two");
   off();
+});
+
+test("a `\"*\"` reach is written out for each agent that exists; a named target keeps its verbs", () => {
+  const grant = { kernel: ["reflect"], user: ["inquiries"], "*": ["status"], sidebar: ["watch"] };
+  assert.deepEqual(expandReach(grant, ["chat1", "user", "kernel_state"]), {
+    kernel: ["reflect"],
+    user: ["inquiries", "status"],
+    sidebar: ["watch"],
+    chat1: ["status"],
+    kernel_state: ["status"],
+  });
+  assert.deepEqual(expandReach({ a: ["x"] }, ["b"]), { a: ["x"] }, "no `*`: nothing added");
+  assert.deepEqual(expandReach({ "*": ["status"] }, []), {}, "no agents: no grant");
 });

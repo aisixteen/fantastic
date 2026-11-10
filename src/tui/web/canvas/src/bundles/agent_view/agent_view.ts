@@ -80,7 +80,8 @@ async function bodyOf(host: Host, agent: string): Promise<string> {
  *  them (`cellGrant`). */
 export function mountHostPanel(ctx: ViewContext, agent: string, opts: PanelOptions = {}): ViewHandle {
   const host = new Host(ctx.kernel, ctx.selfId);
-  const panel = mountPanel(ctx, () => bodyOf(host, agent), opts);
+  // `{{cell}}` in a body is this cell's id: where the panel emits what the canvas should hear
+  const panel = mountPanel(ctx, async () => (await bodyOf(host, agent)).replaceAll("{{cell}}", ctx.selfId), opts);
   // the agent's `view` changed on the host → render again (the registry says so)
   const off = onViewChange(agent, () => panel.reload());
   return {

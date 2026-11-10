@@ -36,7 +36,8 @@ import { FILES_VERBS } from "../files/files_controller.ts";
 import { filesView } from "../files/files_view.ts";
 import { renderFileTrees, setFilesDeps } from "../files/files_deps.ts";
 import { DRAG_MIME, boxCentre, decodeDrag, dropPlan, worldAt, zoomAbout } from "../files/drag.ts";
-import { mountTreeSidebar } from "./tree_sidebar.ts";
+import { SIDEBAR_AGENT, SIDEBAR_CELL, mountSidebarColumn } from "./sidebar_mount.ts";
+import type { SidebarColumn } from "./sidebar_mount.ts";
 import { fileGrant, kernelBridge, onStateFrame } from "../files/file_bridge.ts";
 import { dropParent, isBlueprintDir, runImportDrop } from "../files/import_drop.ts";
 import { norm, wire } from "../files/paths.ts";
@@ -281,6 +282,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // agent added in the background is listed NEW, unplaced; a change of an
   // agent's `view` re-renders its cells.
   const registry = new Map<string, Rec>();
+  // the left column: the `sidebar` agent's own view (`sidebar_mount.ts`); null while there is none
+  let sidebar: SidebarColumn | null = null;
   /** every agent on the host as the last sync saw it (another canvas's too) */
   const onHostIds = new Set<string>();
   /** host agents added in the background, not shown in any cell yet */
@@ -364,6 +367,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
             kernel.updateMeta(cell, { can_call: { ...have, [agent]: want[agent] } } as unknown as Payload);
           }
         }
+        // the sidebar's cell follows its agent's view, `"*"` written out for the agents that exist
+        sidebar?.follow(recs.get(SIDEBAR_AGENT), registry.keys());
         // the first sync also cleans cells whose agent went while no page was open
         if (!synced) {
           for (const id of everyAgent()) {
@@ -474,7 +479,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     // crossing 768px switches between the column and the free canvas
     if (layoutShown !== null && layoutNow() !== layoutShown) void refresh();
     // and the sidebar's place: beside the canvas on a wide screen, over it on a narrow one
-    treeSidebar.setWide(innerWidth > 768);
+    sidebar?.setWide(innerWidth > 768);
   });
 
   // THE WORLD IS ITS OWN LAYER ONLY WHILE IT MOVES (owner 2026-10-09, the load
@@ -1738,6 +1743,53 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     el.appendChild(card);
     return { unmount: (): void => card.remove() };
   };
+  // the cell itself, or the cells fronting it (its backend, or its root)
+  const cellsFor = (id: string): string[] => {
+    if (kernel.get(id) !== undefined && id !== rootOr()) return [id];
+    return everyAgent()
+      .map((a) => kernel.get(a)!.record() as Rec)
+      .filter((r) => r["backend_id"] === id || r["backend_root"] === id)
+      .map((r) => String(r["id"]));
+  };
+  const viewAgent = (id: string, focus: boolean): void => {
+    // a focus pick goes through `moveTo`, which shows a hidden cell itself
+    if (focus && id !== rootOr()) return moveTo(id);
+    showPicked(id);
+    return setViewed(id);
+  };
+  // an agent no cell shows: an AI opens in a chat cell, anything else as its
+  // reflect card — a weak peer either way (✕ leaves the agent)
+  const openAgent = async (id: string): Promise<void> => {
+    // a host agent, drawn as ITS REFLECT says (`view`, else its kind's default,
+    // else the stub) — the same path `place {backend_id}` takes
+    const rec = await viewRecordOf(id);
+    if (rec === undefined) return;
+    const { handler, meta } = hostViewCell(id, rec);
+    const viewId = `view_${crypto.randomUUID().slice(0, 8)}`;
+    // CENTRED on what the person is looking at, and the camera stays put
+    // (owner 2026-10-12: no refocus after a tree click spawns a cell)
+    const w = centre();
+    const ai = handler === aiView.handles[0];
+    const [width, height] = ai ? [440, 520] : [480, 360];
+    registerCell(
+      new Agent({
+        id: viewId,
+        parentId: containerNow(),
+        handlerModule: handler,
+        meta: { ...meta, x: Math.round(w.x - width / 2), y: Math.round(w.y - height / 2), width, height } as unknown as Payload,
+      }),
+    );
+    fresh.delete(id);
+  };
+  // WHAT A CLICK IN THE SIDEBAR DOES (the old tree's plain click): view a page agent, show a
+  // host agent's cell, or open one. The sidebar's own agent and cell are not drawn.
+  const selectAgent = (id: string): void => {
+    if (id === SIDEBAR_AGENT || id === SIDEBAR_CELL) return;
+    if (kernel.get(id) !== undefined && id !== rootOr()) return viewAgent(id, false);
+    const now = cellsFor(id);
+    if (now.length > 0) viewAgent(now[0]!, false);
+    else void openAgent(id);
+  };
   // THE FILE TREE and PREVIEW cells (`files_view.ts`, `preview_view.ts`) and the
   // CANVAS-LIST cell (`side_view.ts`) read the canvas through this wiring; none is
   // made by default — the double-click places them
@@ -1772,52 +1824,17 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         actions: canvasActions,
       });
     },
-    // the cell itself, or the cells fronting it (its backend, or its root)
-    cellsFor: (id) => {
-      if (kernel.get(id) !== undefined && id !== rootOr()) return [id];
-      return everyAgent()
-        .map((a) => kernel.get(a)!.record() as Rec)
-        .filter((r) => r["backend_id"] === id || r["backend_root"] === id)
-        .map((r) => String(r["id"]));
-    },
+    cellsFor,
     // whether a cell is off its view (#133): its agent runs, its frame is not drawn
     isHidden: (cell) => {
       const view = kernel.get(cell)?.parentId;
       return typeof view === "string" && hiddenOf(kernel, view).has(cell);
     },
     moveTo,
-    view: (id, focus) => {
-      // a focus pick goes through `moveTo`, which shows a hidden cell itself
-      if (focus && id !== rootOr()) return moveTo(id);
-      showPicked(id);
-      return setViewed(id);
-    },
+    view: viewAgent,
     viewed: () => viewed,
     mac: onMac(),
-    // an agent no cell shows: an AI opens in a chat cell, anything else as its
-    // reflect card — a weak peer either way (✕ leaves the agent)
-    open: async (id) => {
-      // a host agent, drawn as ITS REFLECT says (`view`, else its kind's default,
-      // else the stub) — the same path `place {backend_id}` takes
-      const rec = await viewRecordOf(id);
-      if (rec === undefined) return;
-      const { handler, meta } = hostViewCell(id, rec);
-      const viewId = `view_${crypto.randomUUID().slice(0, 8)}`;
-      // CENTRED on what the person is looking at, and the camera stays put
-      // (owner 2026-10-12: no refocus after a tree click spawns a cell)
-      const w = centre();
-      const ai = handler === aiView.handles[0];
-      const [width, height] = ai ? [440, 520] : [480, 360];
-      registerCell(
-        new Agent({
-          id: viewId,
-          parentId: containerNow(),
-          handlerModule: handler,
-          meta: { ...meta, x: Math.round(w.x - width / 2), y: Math.round(w.y - height / 2), width, height } as unknown as Payload,
-        }),
-      );
-      fresh.delete(id);
-    },
+    open: openAgent,
     fresh: (id) => fresh.has(id),
     deleteAgent,
   });
@@ -2105,11 +2122,12 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     if ((e.target as Element).closest(".agent-frame")) return;
     openSelector(e.clientX, e.clientY);
   });
-  // THE CANVAS'S OWN SIDEBAR (#148): the file tree beside the zoomed world, never in it,
-  // so a zoom or a pan leaves it where it is. Its rows drag onto `#canvas` like the tree cell's.
-  // Mounted after `setFilesDeps` (the tree reads the canvas through it).
+  // THE CANVAS'S LEFT COLUMN (#608): the `sidebar` agent's own view beside the zoomed world, never in it,
+  // so a zoom or a pan leaves it where it is. A click in it (`select {id}`) opens that agent.
   // (its open or its place moves the canvas's box: the GL camera reads that box, so it follows)
-  const treeSidebar = mountTreeSidebar({ kernel, view: ROOT_VIEW, mount, wide: innerWidth > 768, onPlace: () => glHost?.applyCamera() });
+  void mountSidebarColumn({ kernel, mount, ids: () => registry.keys(), wide: innerWidth > 768, onSelect: selectAgent, onPlace: () => glHost?.applyCamera() }).then((col) => {
+    sidebar = col;
+  });
   // ESC LEAVES FULL VIEW (owner 2026-10-08: nothing floats, so this is the way
   // back): to the canvas's root view — unless the keyboard is in an editor (a
   // terminal, a text field), whose Esc is its own

@@ -11,7 +11,7 @@ import { compileSkin } from "../src/bundles/skin/tokens.ts";
 // block. This keeps that block equal to the day skin, token by token.
 
 /** Paths of the shipped `*_view.html` files, relative to the repository root. */
-const VIEWS: string[] = ["src/lib/rust/crates/bundles/fantastic-ai-core/src/chat_view.html"];
+const VIEWS: string[] = ["src/lib/rust/crates/bundles/fantastic-ai-core/src/chat_view.html", "src/tui/src/kern/sidebar_view.html"];
 
 const ROOT = fileURLToPath(new URL("../../../../../", import.meta.url));
 

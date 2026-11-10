@@ -66,25 +66,18 @@ host does not hold shows `no canvas <id> on this host` (never the main canvas).
 - **skin** — the page's skin agent: the design tokens (W3C 2025.10) every view is
   drawn with, fixed by the backdrop (`dark` on the web, `glass` in the app's window); it
   answers `get` and `schema`, read only (`fantastic readme skins`).
-- **the canvas's own file tree sidebar** (#148, `canvas/tree_sidebar.ts`) — the file
-  tree fused into the canvas page, not an agent and not a cell: a column fixed to the
-  viewport's left edge, mounted beside the zoomed world (never in it), so a zoom or a
-  pan never moves or scales it. On a wide screen (over 768px) the canvas sits beside it
-  (the page's `tree-beside` and `tree-open` classes set the canvas's margin to the
-  sidebar's width: 300px open, 22px as a rail); on a narrow one it is an overlay, opened
-  only when asked. From a bird's-eye zoom its rows drag onto the canvas like the tree
-  cell's: the same panel (`files/tree_panel.ts`, the drawing, the marks and the drag
-  source) and the same drop on `#canvas`, which places each item by `dropPlan` (a grid
-  centred on the point in world coordinates, at any zoom). Its tree is the project
-  folder's view (#150), bound on the bridge as the tree cell binds its folder: the view's
-  id is kept on the root view (`tree_sidebar.view_agent`), and dispose lets it go. A
-  `‹`/`›` button collapses it, to a strip; its open state, its view and its tree's
-  folders and selection are kept on the root view (`tree_sidebar`), so a reload restores
-  them. Its verbs are the tree's, reached through the root view alone: `tree {verb:
-  select|expand|collapse|reveal, path | agent}`; any other view refuses it (`bad_arg`,
-  `arg: view`). The tree cell (`files_view.ts`) stays as the extra kind: a folder dropped
-  on the canvas opens a tree rooted at it. Its colours are skin tokens (`--fc-*`); its
-  widths are the two sizes in `styles.ts`.
+- **the canvas's left column** (#608, `canvas/sidebar_mount.ts`) — the host agent
+  `sidebar`'s own html view (`sidebar_view.html` in the host's `kern/sidebar.rs`, returned by
+  its `reflect`), in a panel fixed to the viewport's left edge, mounted beside the zoomed
+  world (never in it), so a zoom or a pan never moves or scales it. Its cell (`view_sidebar`,
+  a page agent under the root) is granted exactly the view's `calls`, the `"*"` reach written
+  out per host agent (`expandReach`). On a wide screen (over 768px) the canvas sits beside it
+  (the page's `sidebar-beside` and `sidebar-open` classes set the canvas's margin: 300px
+  open, 22px as a rail); on a narrow one it is an overlay. What the view emits
+  (`select {id}`) is heard on its cell's inbox and opens that agent as a click in the old
+  tree did; `select_kernel` is ignored for now. No `sidebar` agent (a folder seeded before
+  it): no column. Its open state is not kept. The tree cell (`files_view.ts`) stays as the
+  extra kind: a folder dropped on the canvas opens a tree rooted at it.
 
 A cell's head: **✕ hides** it — the view lets go of the cell, its agent keeps
 running and its stream is torn down until it is shown again (the view's `show`

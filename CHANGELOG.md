@@ -7,6 +7,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- The sidebar (#608): the canvas's left column is the `sidebar` agent (`sidebar.tools`, seeded under the root on a first run), whose `reflect` returns its html view: the kernels, the agent tree with each chat's state, what waits for the person, and the project's files, drawn from reads on other agents (a view's `calls` as an object). It replaces the canvas's file-tree sidebar and its `tree` view verb; a folder seeded before it has no left column.
 - `reflect` takes `handler_modules` (#605): a list of handler names; with `tree` `all` or `ids` only the agents whose `handler_module` is listed come back, as a flat `tree` list, and an agent outside the list is not asked. A value that is not a list of names is refused `bad_arg`.
 - `boot_kernel` / `stop_kernel` in `fantastic_tui` (#580): a host that runs the kernel in its own
   process boots one folder (after `seed_dir_with`) with the stock bundles plus its `Extra`s, an

@@ -9,7 +9,6 @@ import { htmlRefusal } from "../html_check.ts";
 import { aiView } from "../ai_view/ai_view.ts";
 import { fileGrant, isRefusal, kernelBridge, openViewAgent, said } from "../files/file_bridge.ts";
 import { agentIndex } from "../files/files_deps.ts";
-import { filesAgent } from "../files/files_controller.ts";
 import { isRefusalOf, resolveTarget } from "../files/drag.ts";
 import type { Look, Opened, Refusal, Target } from "../files/drag.ts";
 import { nameOf, norm, parentOf, wire } from "../files/paths.ts";
@@ -19,7 +18,6 @@ import { cellGrant, hostRecordFresh, viewOf, viewRecordFresh } from "./host_view
 import type { Rec } from "./host_views.ts";
 import { hiddenOf, layoutFor, setHidden, setRect, tabWidth } from "./layout.ts";
 import { isCellHandler } from "./cell_menu.ts";
-import { SIDEBAR_ID } from "./tree_sidebar.ts";
 import { chromeOf, FIT_MAX, fitSize, nextSize, sizeOf } from "./fit.ts";
 import type { Rect } from "./layout.ts";
 
@@ -78,7 +76,7 @@ export const SETTABLE = ["display_name", "html", "gl_source", "trusted", "readme
 export const GEOMETRY = ["x", "y", "width", "height"] as const;
 
 /** Every view verb, for the grants that admit a caller. */
-export const VIEW_VERBS = ["place", "move", "fit", "update", "wire", "remove", "hide", "show", "open", "tree", "terminal_renderer", "reflect"] as const;
+export const VIEW_VERBS = ["place", "move", "fit", "update", "wire", "remove", "hide", "show", "open", "terminal_renderer", "reflect"] as const;
 
 const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
@@ -332,14 +330,6 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
     }
     case "open":
       return openView(id, payload, kernel);
-    // THE TREE SIDEBAR (#148): its verbs, through the root view — `tree {verb, path | agent}`.
-    // The sidebar is the page's one, bound to the root view alone: any other view refuses it.
-    case "tree": {
-      if (id !== ROOT_VIEW) return { error: `view: tree — the sidebar is the canvas's own, on ${ROOT_VIEW}; ask that view`, reason: "bad_arg", arg: "view" };
-      const verb = str(payload, "verb");
-      if (verb === "") return { error: "view: tree needs verb (select | expand | collapse | reveal)", reason: "bad_arg", arg: "verb" };
-      return filesAgent(SIDEBAR_ID, { ...payload, type: verb }, kernel);
-    }
     case "terminal_renderer": {
       // THE TERMINALS' RENDERER: auto (per tab — DOM in WebKitGTK, else the
       // shared WebGL), webgl or dom. Every terminal of the view switches live.

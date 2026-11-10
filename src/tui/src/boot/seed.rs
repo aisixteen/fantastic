@@ -315,7 +315,7 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         lvl1.sort();
-        assert_eq!(lvl1, vec!["kernel_memory", USER]);
+        assert_eq!(lvl1, vec!["kernel_memory", "sidebar", USER]);
 
         // Under `user`: exactly these, NESTED under it, which is what makes them
         // its children — the kernel reads the parent off the directory.
@@ -348,6 +348,20 @@ mod tests {
         assert_eq!(mem["handler_module"], json!(fantastic_sqlite_store::HANDLER_MODULE));
         assert!(mem.get("operator").is_none(), "the kernel no longer writes the AI store");
         assert_eq!(mem["admins"], json!(["kernel"]));
+    }
+
+    #[test]
+    fn the_sidebar_is_seeded_once_under_the_root_as_a_sidebar_tools_agent() {
+        let p = sandbox("sidebar");
+        assert_eq!(seed_dir(&p.cwd), Ok(true));
+        let r = rec(&p, "sidebar/agent.yaml");
+        assert_eq!(r["handler_module"], json!(crate::kern::sidebar::HANDLER_MODULE));
+        assert_eq!(r["callable_by"]["user"], "*");
+        assert!(r.get("view").is_none(), "the view comes from its reflect, not a record field");
+        let before = snapshot(&p.store);
+        assert_eq!(seed_dir(&p.cwd), Ok(false));
+        assert_eq!(snapshot(&p.store), before, "a second seed changes nothing");
+        let _ = std::fs::remove_dir_all(&p.cwd);
     }
 
     #[test]
@@ -410,7 +424,7 @@ mod tests {
         let p = sandbox("grants");
         write_all(&p).unwrap();
         let u = rec(&p, "user/agent.yaml");
-        for id in ["exec", "files", "memory", "store", ROOT_ID] {
+        for id in ["exec", "files", "memory", "sidebar", "store", ROOT_ID] {
             assert_eq!(u["can_call"][id], "*", "the human cannot reach {id}");
         }
         let _ = std::fs::remove_dir_all(&p.cwd);
@@ -509,7 +523,7 @@ mod tests {
         write_all(&b).unwrap();
         let (sa, sb) = (snapshot(&a.store), snapshot(&b.store));
         assert_eq!(sa, sb);
-        for k in ["kernel_memory", "user", "user/agents/memory", "user/agents/store", "user/agents/exec", "user/agents/files"] {
+        for k in ["kernel_memory", "sidebar", "user", "user/agents/memory", "user/agents/store", "user/agents/exec", "user/agents/files"] {
             assert!(sa.contains_key(&format!("agents/{k}/agent.yaml")), "{k}");
         }
         assert!(!sa.contains_key("agent.yaml"), "the kernel owns the root record");

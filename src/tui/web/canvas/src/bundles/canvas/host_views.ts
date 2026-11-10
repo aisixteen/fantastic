@@ -113,6 +113,18 @@ export function cellGrant(agentId: string, view: HostView): Record<string, strin
   return out;
 }
 
+/** A grant whose `"*"` key (the verbs on every other agent) is written out for each id in
+ *  `ids`: the page gate matches ids, not a wildcard. A target the grant names keeps its
+ *  verbs, with the `"*"` ones added. */
+export function expandReach(grant: Record<string, string[]>, ids: Iterable<string>): Record<string, string[]> {
+  const { "*": every, ...named } = grant;
+  const out: Record<string, string[]> = {};
+  for (const [target, verbs] of Object.entries(named)) out[target] = [...verbs];
+  if (every === undefined) return out;
+  for (const id of ids) out[id] = [...new Set([...(out[id] ?? []), ...every])];
+  return out;
+}
+
 /** Whether a page cell is a VIEW of a host agent (BE) or page content (FE). */
 export function sideOf(cell: Rec): "host" | "page" {
   return str(cell, "backend_id") !== undefined ? "host" : "page";
