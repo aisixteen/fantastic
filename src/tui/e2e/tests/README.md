@@ -19,7 +19,6 @@ with `src/tui/e2e/wipe.sh`.
 
 | id | capability | inferred from | kind |
 |---|---|---|---|
-| E40 `canvas_ai_reflect` | the AI finds the page kernel on its own and reflects it | the two-kernel setup | live |
 | E41 `deck_order` | read a two-language deck: order + the gap | gaus_arta, unified_vis | live |
 | E42 `lay_out` | arrange cells into an ordered row | every project | live |
 | E43 `make_panel` | author a working calculator panel | dara flows, gaus calculator | live |
@@ -29,14 +28,12 @@ with `src/tui/e2e/wipe.sh`.
 | E47 `pdf_panel` | show a served PDF through a deny-all file leg | dara PRD / patent / mockups | live |
 | E48 `set_scene` | set the singleton background (stays locked) | dara sunset, unified_vis motif | live |
 | E49 `terminal_task` | answer from a canvas terminal (git) | the terminals | live |
-| E50 `remember` | keep → close → restart → reopen → recall | kept dialogs | live |
 | E51 `inventory` | inventory a 27-cell canvas by kind, bounded calls | dara (33 cells) | live |
 | E52 `hydrate_scale` | 300 cells render within the bound | the dara 55 s regression | scripted |
 | E53 `panel_types` | every kind renders and survives reloads | all | scripted |
 | E54 `media` | video + audio play, before and after a reload | gaus final cuts, dawee WebAudio | scripted |
 | E55 `dev_surface` | an AI builds a reactive dev surface (controls, logs, app, status) | dara Compose + terminals + webapp | live |
 | E56 `dev_reactive` | a reference dev surface reacts to build / run / stop / edit | same | scripted |
-| E57 `setup_ai` | the set-up cell writes an agent + default set-up; both answer | owner: set-up is VERY important | live |
 | E58 `prototype` | from an EMPTY canvas: a script, the exec agent that runs it, Start/Stop + a live log wired both ways; then a change (count by 10, the last value big) — scored by clicking | owner 2026-10-04: yes/no for the prototyping flow (a garage, no packaging) | live |
 | E59 `calc` | behind a SEEDED six-button panel (det, factor, simpson, roots, fib_mod, gcd_lcm) the AI writes `calc.py` + its own `test_calc.py` in one ask; scored by its tests, hidden vectors per function and every button | owner 2026-10-07: can the model write good multi-function code and test it |
 | E60 `bundle_flow` | a python agent's whole life: double-click → a new bundle + instance + view, live edits of logic (reload) and view (re-render), kept across a restart, copied into a release that lives on its own, then the AI updates the release and overwrites it from the working bundle | owner 2026-10-08: the a–f workflow; the AI must tell the BUNDLE (code) from the AGENT (an instance) |

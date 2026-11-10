@@ -74,8 +74,7 @@ async function bodyOf(host: Host, agent: string): Promise<string> {
 }
 
 /** A host agent's panel drawn into `ctx.mount`: its body from its record, re-drawn
- *  when its `view` changes. The agent's own cell mounts it (`agentViewBundle`), and so
- *  does a CHAT CARD (`ai_view`): the panel is the same, only the frame around it differs.
+ *  when its `view` changes. The agent's own cell mounts it (`agentViewBundle`).
  *  `agent` is the host agent shown; calls go out AS `ctx.selfId`, whose `can_call` names
  *  them (`cellGrant`). */
 export function mountHostPanel(ctx: ViewContext, agent: string, opts: PanelOptions = {}): ViewHandle {

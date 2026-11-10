@@ -26,9 +26,6 @@ host does not hold shows `no canvas <id> on this host` (never the main canvas).
 - **terminal_view** — xterm CLIENT for a host PTY backend. Bound to any agent
   answering the PTY surface (`boot`/`write`/`ack`/`resize`/`interrupt`/`stop`) by
   a `backend_id` peer ref.
-- **ai_view** — chat CLIENT for a host LLM backend. Bound to any agent answering
-  `send`/`history`/`status` by `backend_id`; ESC cancels the in-flight turn
-  through the kernel (`ps` → `cancel`).
 - **store_view** / **scheduler_view** / **credentials_view** —
   READ-ONLY views of the agents that had only the stub (`ram_store` and `sqlite_store`,
   `scheduler`, `credential_store`). A record with no `view` gets
@@ -90,19 +87,6 @@ agent in the sidebar shows its cell where it was.
 
 **View `calls`.** An html view's `calls` is a list (verbs on its own agent) or an object `{<agent id> | "*": [verbs]}`: its own agent's verbs and READ verbs on other agents; the cell's grant is exactly that (`cellGrant`), and `watch` is added on its own agent. The AI chat's view (`ai_chat.tools` returns it from `reflect`) uses the object form for `user inquiries`.
 
-**Chat cards (#339).** A chat cell (`ai_view.ts`) shows a host agent's panel INLINE, where the
-AI's `embed {id}` row sits in the conversation (`history` lists it as a row of kind `embed`;
-`unembed {id}` takes it out). The card (`ai_view/chat_card.ts`) is 100% of the chat column
-wide and as tall as its panel says, at most `CHAT_CARD_MAX_HEIGHT` = 1200 px (taller content
-scrolls inside; the twin of ai-core's constant). Its panel is the one `place {backend_id}` draws
-(`mountHostPanel`), its calls go out as the chat cell, granted from the record's `view.calls`.
-**✕ hides** the card (its hide is `embed:<chat cell>:<agent>` in the view's hidden set, so a
-reload keeps it), **Shift+✕** and the menu **delete the agent** (the delete lock refuses, said),
-the menu's *remove card* is `unembed`. The host's `removed` state frame turns a card "deleted";
-a redraw with the agent gone shows `[deleted from canvas]`, and pressing it checks again.
-The AI is told, by a short message through its `send`, when a fresh card overflows the column
-or the cap.
-
 The view↔backend pairing is **never hardcoded** — each view's reflect names the
 host capability + verb surface it fronts; an LLM weaves the binding from that plus
 the host's capability readme.
@@ -114,7 +98,7 @@ src/main.ts            the page: boot (the library) → register → seed → mo
 src/home.ts            the Home page (home.html): boot → its records via web_loader → mount home_view
 src/bundle.ts          the esbuild entry: inlines xterm.css, then loads main.ts, or home.ts on <body data-page="home">
 src/lib.ts             the ONE seam to the library's public entry (src/lib/ts/src/index.ts)
-src/bundles/           canvas/, view.ts, terminal_view/, ai_view/, html_agent/, gl_agent/, skin/, shell.ts,
+src/bundles/           canvas/, view.ts, terminal_view/, html_agent/, gl_agent/, skin/, shell.ts,
                        agent_models/ (pure models of the read-only agent views), read_view.ts (their shared body)
 src/bundles/home_view/ the Home: home_view.ts (the view), home_model.ts (pure: state, labels, cards, shortcuts),
                        pages.ts (the canvas-frame pool), home_css.ts (its style, every colour one --home-* property)

@@ -5,7 +5,6 @@ import { GATEWAY, UserBridge } from "./user_bridge.ts";
 import { registerGlAgent } from "./bundles/gl_agent/gl_agent.ts";
 import { registerHtmlAgent } from "./bundles/html_agent/html_agent.ts";
 import { registerAgentView } from "./bundles/agent_view/agent_view.ts";
-import { aiViewAgent } from "./bundles/ai_view/ai_view.ts";
 import { mountCanvas } from "./bundles/canvas/canvas.ts";
 import { setCanvasNode } from "./bundles/canvas/host_views.ts";
 import { onHostStopping, registerCanvas } from "./bundles/canvas/canvas_agent.ts";
@@ -54,9 +53,7 @@ function register(kernel: Kernel): void {
   // View bundles that front a host backend are real frontend agents too — a
   // no-op handler makes their records load-able; the ViewBundle renders them.
   kernel.registerBundle("terminal_view.ts", () => null);
-  kernel.registerBundle("ai_view.ts", aiViewAgent); // its cards' panels relay their calls through it
   kernel.registerBundle("reflect_view.ts", () => null);
-  kernel.registerBundle("setup_view.ts", () => null);
   kernel.registerBundle("stream_view.ts", () => null);
   registerFilesView(kernel); // the file tree cell, a page agent with verbs (sidebar_view.ts is the cell's name before the file tree (#106): saved layouts still hold it, and it opens as the tree)
   registerPreviewView(kernel); // the previewer / editor cell: a page agent with verbs
@@ -90,10 +87,6 @@ function register(kernel: Kernel): void {
   kernel.setBundleReadme(
     "terminal_view.ts",
     "A terminal cell: an xterm onto a host exec agent's PTY job (`backend_id`) — it starts the job, writes keystrokes (write), resizes, and draws its output.",
-  );
-  kernel.setBundleReadme(
-    "ai_view.ts",
-    "A chat cell: the human's view of a host AI (`backend_id`). It sends the human's turns (send), draws the AI's streamed parts, and stops a turn (stop).",
   );
 }
 

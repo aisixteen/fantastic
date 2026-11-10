@@ -193,16 +193,6 @@ export const CANVAS_CSS = `
   #canvas.full-view .agent-frame.full { left: 12px !important; top: 44px !important;
     width: calc(100% - 24px) !important; height: calc(100vh - 56px) !important; }
   #canvas.full-view .agent-frame.full .resize-handle { display: none; }
-  /* an AI cell not set up yet (the wizard's skip) */
-  .ai-not-set-up { height: 100%; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 10px; padding: 24px; text-align: center; background: ${tok("color.surface.panel")}; color: ${tok("color.text.muted")}; border-radius: ${tok("radius.panel")};
-    font: 14px/1.5 ${tok("font.family.sans")}; }
-  .ai-not-set-up .nsu-title { color: ${tok("color.text.primary")}; font-size: 17px; font-weight: 650; }
-  .ai-not-set-up p { margin: 0; max-width: 300px; }
-  .ai-not-set-up .nsu-row { display: flex; gap: 8px; margin-top: 6px; }
-  .ai-not-set-up button { font: inherit; color: ${tok("color.text.primary")}; background: ${tok("color.surface.button")}; border: 1px solid ${tok("color.line.button")}; border-radius: ${tok("radius.card")}; padding: 8px 14px; cursor: pointer; }
-  .ai-not-set-up button:hover { border-color: ${tok("color.accent.base")}; }
-  .ai-not-set-up .nsu-settings { background: ${tok("color.accent.base")}; border-color: ${tok("color.accent.base")}; color: ${tok("color.accent.on")}; font-weight: 700; }
   /* the viewed-full label: centred ON the frame's top border (top: 44px) */
   .full-hint { position: fixed; top: 44px; left: 50%; transform: translate(-50%, -50%); z-index: 60;
     max-width: calc(100vw - 48px); box-sizing: border-box; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

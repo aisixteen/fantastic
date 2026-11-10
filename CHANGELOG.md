@@ -284,6 +284,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Removed
 
+- The canvas setup wizard and the TS chat (#609): every chat is drawn by the html view its `reflect` returns; a chat's provider and model are set by `update_agent` (`provider_id`, `model`). The action popup has no AI agent or kept-chat tiles, and `place` no longer takes `kind: chat`.
 - The Swift kernel runtime (`src/lib/swift`): its kernel, bundles, CLI and
   unit suites, its e2e and contract runners, the CI `swift` job,
   `scripts/build/swift.sh` and the container's swift runtime (#53). The host

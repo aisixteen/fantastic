@@ -20,24 +20,14 @@ export interface ViewContext {
   record?: Record<string, unknown>;
   /** remove this cell from its view (its agent untouched); ✕ only hides it */
   close(): void;
-  /** what a view may ask of the canvas around it (the AI set-up wizard, an AI cell) */
+  /** what a view may ask of the canvas around it */
   actions?: CanvasActions;
 }
 
 /** The canvas's own moves a view may ask for. */
 export interface CanvasActions {
-  /** an AI from saved set-up `saved`: bound to AI cell `cell` when given
-   *  (one not set up yet), else a new AI cell where view `from` sits; `from` (the
-   *  wizard) closes */
-  spawnAi(saved: string, from: string, cell?: string): Promise<void>;
-  /** an AI cell with no AI yet ("not set up"), where view `from` sits; `from` closes */
-  skipAi(from: string): void;
-  /** the AI set-up wizard — for AI cell `cell`; the settings of its AI `ai` when given */
-  openSetup(cell?: string, ai?: string): void;
   /** the first coding agent found on PATH, in a terminal next to view `near` */
   startCoding(near: string): Promise<void>;
-  /** host agent `agent` full screen (a chat card's ⤢): its cell, shown or made */
-  viewFull?(agent: string): void;
   /** the kernel's `delete_agent` for `agent` (its lock gate refuses what is locked) */
   deleteAgent?(agent: string): void;
   /** a short message to the person */
