@@ -41,6 +41,7 @@ from anthropic_backend import server
 from anthropic_backend.provider import (
     THINKING_FLOOR,
     USAGE_FILE,
+    PriceBook,
     budget_thinking_refused,
     Usage,
     write_usage_file,
@@ -151,44 +152,31 @@ RECORD_SCHEMA = schema(
             enum=["summarized", "omitted"],
         ),
         field(
-            "price_input_per_mtok",
-            "float",
-            "USD per million input tokens — with price_output_per_mtok, reflect and "
-            "usage report cost_usd and saved_usd; no default price",
-        ),
-        field(
-            "price_output_per_mtok",
-            "float",
-            "USD per million output tokens — with price_input_per_mtok, reflect and "
-            "usage report cost_usd and saved_usd; no default price",
+            "prices",
+            "map",
+            "USD per million tokens by model: {<model>: {input, output, cache_read?, "
+            "cache_write_5m?}} — cache rates unset = the model defaults from input (0.05x "
+            "read for claude-sonnet-5-5 and claude-opus-5-5, else 0.1x; 1.25x 5-minute "
+            "write). reflect and usage report cost_usd per model and in total; a model "
+            "with no entry is unpriced (never $0); a dated id uses its base id's entry",
         ),
         field(
             "price_input_long_per_mtok",
             "float",
-            "USD per million input tokens for a long-context request; unset = the "
-            "base price",
+            "USD per million input tokens for a long-context request, for every model "
+            "in prices; unset = the model's input price",
         ),
         field(
             "price_output_long_per_mtok",
             "float",
-            "USD per million output tokens for a long-context request; unset = the "
-            "base price",
-        ),
-        field(
-            "price_cache_read_per_mtok",
-            "float",
-            "USD per million cache-read input tokens; unset = the model default (0.05x "
-            "input for claude-sonnet-5-5 and claude-opus-5-5, else 0.1x)",
-        ),
-        field(
-            "price_cache_write_5m_per_mtok",
-            "float",
-            "USD per million 5-minute cache-write input tokens; unset = 1.25x input",
+            "USD per million output tokens for a long-context request, for every model "
+            "in prices; unset = the model's output price",
         ),
         field(
             "price_cache_write_1h_per_mtok",
             "float",
-            "USD per million 1-hour cache-write input tokens; unset = 2x input",
+            "USD per million 1-hour cache-write input tokens, for every model in "
+            "prices; unset = 2x input",
         ),
         field(
             "long_context_tokens",
@@ -221,6 +209,36 @@ def _number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _prices_refusal(prices) -> str | None:
+    """Why `prices` is not a map of model to {input, output, cache_read?,
+    cache_write_5m?}, or None."""
+    if not isinstance(prices, dict):
+        return (
+            "prices must be a map of model to "
+            "{input, output, cache_read?, cache_write_5m?}"
+        )
+    for model, e in prices.items():
+        if not isinstance(e, dict):
+            return f"prices.{model} must be {{input, output, cache_read?, cache_write_5m?}}"
+        for key in ("input", "output"):
+            v = e.get(key)
+            if not _number(v) or v < 0:
+                return f"prices.{model}.{key} must be a number, zero or more"
+        for key in ("cache_read", "cache_write_5m"):
+            v = e.get(key)
+            if v is not None and (not _number(v) or v < 0):
+                return f"prices.{model}.{key} must be a number, zero or more"
+    return None
+
+
+def caller_of(payload) -> str | None:
+    """The chat that sent this `complete`: the rid's prefix (`<chat id>~<n>`)."""
+    rid = payload.get("rid") if isinstance(payload, dict) else None
+    if isinstance(rid, str) and "~" in rid:
+        return rid.rsplit("~", 1)[0] or None
+    return None
+
+
 def validate_meta(meta: dict, record: dict) -> str | None:
     """Refuse a write this backend cannot honour, AT THE WRITE, on the MERGED
     record — then every required field, named at once, from the schema."""
@@ -233,17 +251,18 @@ def validate_meta(meta: dict, record: dict) -> str | None:
         return "temperature must be a number"
 
     for key in (
-        "price_input_per_mtok",
-        "price_output_per_mtok",
         "price_input_long_per_mtok",
         "price_output_long_per_mtok",
-        "price_cache_read_per_mtok",
-        "price_cache_write_5m_per_mtok",
         "price_cache_write_1h_per_mtok",
     ):
         p = meta.get(key)
         if p is not None and (not _number(p) or p < 0):
             return f"{key} must be a number, zero or more"
+    p = meta.get("prices")
+    if p is not None:
+        bad = _prices_refusal(p)
+        if bad:
+            return bad
     t = meta.get("long_context_tokens")
     if t is not None and not _positive_int(t):
         return "long_context_tokens must be a positive int"
@@ -306,7 +325,7 @@ def make_provider(id, kernel):
     return make_provider_with(id, kernel, kernel.get(id) or {})
 
 
-def make_provider_with(id, kernel, rec):
+def make_provider_with(id, kernel, rec, caller=None):
     """Build an AnthropicProvider from `rec`."""
     from anthropic_backend.provider import AnthropicProvider
 
@@ -328,23 +347,14 @@ def make_provider_with(id, kernel, rec):
         else None,
         usage_log=rec.get("usage_log") or None,
         agent_id=id,
+        caller=caller,
         stream_idle=stream_idle_of(rec),
     )
 
 
 def _priced(counts: Usage, id, kernel) -> dict:
-    """The counts, with the record's prices applied."""
-    rec = kernel.get(id) or {}
-    return counts.snapshot(
-        rec.get("price_input_per_mtok"),
-        rec.get("price_output_per_mtok"),
-        rec.get("price_input_long_per_mtok"),
-        rec.get("price_output_long_per_mtok"),
-        model=rec.get("model") or "",
-        cache_read=rec.get("price_cache_read_per_mtok"),
-        cache_write_5m=rec.get("price_cache_write_5m_per_mtok"),
-        cache_write_1h=rec.get("price_cache_write_1h_per_mtok"),
-    )
+    """The counts, with the record's per-model prices applied."""
+    return counts.snapshot_priced(PriceBook.of(kernel.get(id) or {}))
 
 
 def _usage_now(id, kernel) -> dict:
@@ -378,10 +388,9 @@ async def _reflect_extra(id, kernel):
 async def _usage(id, payload, kernel):
     """usage — args: reset? (bool). The agent's token usage since it was created:
     requests, input, cache write and read, output, the derived prompt_tokens, hit_rate
-    and saved_tokens (cost_usd and saved_usd when the record has both prices), and
-    usage_since_boot: the same counts over this kernel process only. reset: true
-    returns the counts, then zeroes the since-boot counts (the total is kept: see
-    usage_reset)."""
+    and saved_tokens (cost_usd and saved_usd when the record's prices name a model it served), and
+    usage_since_boot: the same counts over this kernel process only. by_model: a map from model name to {requests, input, cache_write, cache_read, output, hit_rate, saved_tokens, cost_usd}, counted from each response's model; a model with no entry in the record's prices carries unpriced: true instead of cost_usd, and unpriced_models lists them beside the total cost_usd (the sum over the priced models). by_agent: a map from the calling chat's id to {requests, input, cache_write, cache_read, output, cost_usd?}, counted from the chat that sent each complete and kept after that chat is deleted. usage_since_boot carries both. reset: true returns
+    the counts, then zeroes the since-boot counts (the total is kept: see usage_reset)."""
     reset = payload.get("reset", False)
     if not isinstance(reset, bool):
         return refusal(BAD_ARG, "usage: reset must be true or false", arg="reset")
@@ -431,7 +440,7 @@ async def _provider(id, payload, kernel):
         id,
         payload,
         kernel,
-        lambda rec: make_provider_with(id, kernel, rec),
+        lambda rec: make_provider_with(id, kernel, rec, caller_of(payload)),
         lambda: _live(id, kernel),
     )
 

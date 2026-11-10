@@ -28,7 +28,9 @@ What is Anthropic-specific here:
   `usage` verb and `reflect` read it), side calls included. The running total is
   kept across a kernel restart in the agent's `usage.json` (#308, Rust #319): every
   count change rewrites it (`persist_to`), so a stream that dies mid-answer keeps
-  what it billed.
+  what it billed. The counts are also kept per model (`by_model`, keyed by the model
+  the response names) and per calling chat (`by_agent`, the `rid` prefix of a
+  `complete`).
 """
 
 from __future__ import annotations
@@ -178,6 +180,65 @@ def bucket_cost(
     return cost / 1e6, saved / 1e6
 
 
+def _num(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+class PriceBook:
+    """The record's per-model prices (USD per million tokens) and the long-context
+    and 1-hour-write prices that apply to every model in it."""
+
+    def __init__(self):
+        self.models: dict[str, dict] = {}
+        self.input_long = None
+        self.output_long = None
+        self.cache_write_1h = None
+
+    @classmethod
+    def of(cls, rec: dict) -> PriceBook:
+        book = cls()
+        prices = rec.get("prices")
+        if isinstance(prices, dict):
+            for m, e in prices.items():
+                if (
+                    isinstance(e, dict)
+                    and _num(e.get("input")) is not None
+                    and _num(e.get("output")) is not None
+                ):
+                    book.models[m] = {
+                        "input": e["input"],
+                        "output": e["output"],
+                        "cache_read": _num(e.get("cache_read")),
+                        "cache_write_5m": _num(e.get("cache_write_5m")),
+                    }
+        book.input_long = _num(rec.get("price_input_long_per_mtok"))
+        book.output_long = _num(rec.get("price_output_long_per_mtok"))
+        book.cache_write_1h = _num(rec.get("price_cache_write_1h_per_mtok"))
+        return book
+
+    def prices_for(self, model: str) -> dict | None:
+        """`cost_of` keyword arguments for `model`: its own entry, else the entry of
+        the longest id the model is a dated form of."""
+        e = self.models.get(model)
+        if e is None:
+            best = ""
+            for k in self.models:
+                if model.startswith(k + "-") and len(k) > len(best):
+                    best = k
+            e = self.models.get(best) if best else None
+        if e is None:
+            return None
+        return {
+            "price_in": e["input"],
+            "price_out": e["output"],
+            "long_in": self.input_long,
+            "long_out": self.output_long,
+            "cache_read": e["cache_read"],
+            "cache_write_5m": e["cache_write_5m"],
+            "cache_write_1h": self.cache_write_1h,
+        }
+
+
 #: The attributes of a `Usage` that are counts, in the order `counters()` lists them.
 _COUNT_ATTRS = (
     "requests",
@@ -231,11 +292,26 @@ class Usage:
         for attr, mine, theirs in zip(_COUNT_ATTRS, self.counters(), other.counters()):
             setattr(out, attr, mine + theirs)
         out.log_error = other.log_error
+        for m in set(self.by_model) | set(other.by_model):
+            out.by_model[m] = self.by_model.get(m, Usage()).plus(
+                other.by_model.get(m, Usage())
+            )
+        for c in set(self.by_agent) | set(other.by_agent):
+            out.by_agent[c] = self.by_agent.get(c, Usage()).plus(
+                other.by_agent.get(c, Usage())
+            )
         return out
 
     def to_json(self) -> dict:
-        """The sidecar's JSON: the twelve counts, by `FIELDS`."""
-        return dict(zip(FIELDS, self.counters()))
+        """The sidecar's JSON: the twelve counts, by `FIELDS`, the per-model counts
+        (`by_model`) and, when any chat called, the per-caller ones (`by_agent`)."""
+        out = dict(zip(FIELDS, self.counters()))
+        out["by_model"] = {
+            m: dict(zip(FIELDS, u.counters())) for m, u in self.by_model.items()
+        }
+        if self.by_agent:
+            out["by_agent"] = {c: u.to_json() for c, u in self.by_agent.items()}
+        return out
 
     @classmethod
     def from_json(cls, data) -> Usage:
@@ -248,6 +324,11 @@ class Usage:
             v = data.get(key)
             if isinstance(v, int) and not isinstance(v, bool):
                 setattr(out, attr, v)
+        for key, dest in (("by_model", out.by_model), ("by_agent", out.by_agent)):
+            sub = data.get(key)
+            if isinstance(sub, dict):
+                for name, entry in sub.items():
+                    dest[name] = cls.from_json(entry)
         return out
 
     def reset(self) -> None:
@@ -269,6 +350,20 @@ class Usage:
         self.long_output_tokens = 0
         # The last usage-log write error, reported in `usage`.
         self.log_error: str | None = None
+        # The same counts per model the response names, and per calling chat (each
+        # with its own by_model).
+        self.by_model: dict[str, Usage] = {}
+        self.by_agent: dict[str, Usage] = {}
+
+    def bump(self, model: str, caller: str | None, f) -> None:
+        """Apply `f` to the total, to `model`'s counts and, for a `caller`, to its
+        counts and its per-model ones."""
+        f(self)
+        f(self.by_model.setdefault(model, Usage()))
+        if caller:
+            agent = self.by_agent.setdefault(caller, Usage())
+            f(agent)
+            f(agent.by_model.setdefault(model, Usage()))
 
     def add_request(
         self,
@@ -301,6 +396,131 @@ class Usage:
         else:
             self.output_tokens += n
 
+    def cost_of(
+        self,
+        model,
+        price_in,
+        price_out,
+        long_in=None,
+        long_out=None,
+        cache_read=None,
+        cache_write_5m=None,
+        cache_write_1h=None,
+    ) -> tuple[float, float] | None:
+        """(cost, saved) in USD at the given prices, or None when either base price
+        is unset. `long_in` / `long_out` price the long-context bucket; unset (either
+        one), the base prices do."""
+        if price_in is None or price_out is None:
+            return None
+        if long_in is None or long_out is None:
+            long_in, long_out = price_in, price_out
+        prices = CachePrices(cache_read, cache_write_5m, cache_write_1h)
+        base = (
+            self.input_tokens,
+            self.cache_write_tokens,
+            self.cache_write_1h_tokens,
+            self.cache_read_tokens,
+            self.output_tokens,
+        )
+        long = (
+            self.long_input_tokens,
+            self.long_cache_write_tokens,
+            self.long_cache_write_1h_tokens,
+            self.long_cache_read_tokens,
+            self.long_output_tokens,
+        )
+        c1, s1 = bucket_cost(model, base, price_in, price_out, price_in, prices)
+        c2, s2 = bucket_cost(model, long, long_in, long_out, price_in, prices)
+        return c1 + c2, s1 + s2
+
+    def _sums(self) -> tuple[int, int, int, int, int]:
+        """(requests, input, cache write, cache read, output), base plus long."""
+        return (
+            self.requests + self.long_requests,
+            self.input_tokens + self.long_input_tokens,
+            self.cache_write_tokens
+            + self.cache_write_1h_tokens
+            + self.long_cache_write_tokens
+            + self.long_cache_write_1h_tokens,
+            self.cache_read_tokens + self.long_cache_read_tokens,
+            self.output_tokens + self.long_output_tokens,
+        )
+
+    def model_snapshot(self) -> dict:
+        """One model's counts, without prices."""
+        req, inp, cw, cr, out = self._sums()
+        prompt = inp + cw + cr
+        return {
+            "requests": req,
+            "input": inp,
+            "cache_write": cw,
+            "cache_read": cr,
+            "output": out,
+            "hit_rate": cr / prompt if prompt else 0,
+            "saved_tokens": saved_tokens(cr, cw),
+        }
+
+    def cost_by_model(self, book) -> tuple[tuple[float, float] | None, list[str]]:
+        """The (cost, saved) summed over the models the book prices, and the models
+        it does not. The sum is None when the book names no model, or names none of
+        those served."""
+        total = [0.0, 0.0]
+        priced = 0
+        unpriced: list[str] = []
+        for m in sorted(self.by_model):
+            p = book.prices_for(m)
+            c = self.by_model[m].cost_of(m, **p) if p else None
+            if c is None:
+                unpriced.append(m)
+            else:
+                total[0] += c[0]
+                total[1] += c[1]
+                priced += 1
+        known = bool(book.models) and (priced > 0 or not unpriced)
+        return ((total[0], total[1]) if known else None), unpriced
+
+    def snapshot_priced(self, book) -> dict:
+        """The snapshot with costs summed per model at the book's prices, each
+        model's own, and the per-caller counts."""
+        out = self.snapshot()
+        total, unpriced = self.cost_by_model(book)
+        if total is not None:
+            out["cost_usd"], out["saved_usd"] = total
+        if unpriced and book.models:
+            out["unpriced_models"] = unpriced
+        by_model = {}
+        for m in sorted(self.by_model):
+            u = self.by_model[m]
+            entry = u.model_snapshot()
+            if book.models:
+                p = book.prices_for(m)
+                c = u.cost_of(m, **p) if p else None
+                if c is None:
+                    entry["unpriced"] = True
+                else:
+                    entry["cost_usd"] = c[0]
+            by_model[m] = entry
+        out["by_model"] = by_model
+        out["by_agent"] = {c: u.agent_snapshot(book) for c, u in self.by_agent.items()}
+        return out
+
+    def agent_snapshot(self, book) -> dict:
+        """One calling chat's counts and cost at the book's prices."""
+        req, inp, cw, cr, out = self._sums()
+        snap = {
+            "requests": req,
+            "input": inp,
+            "cache_write": cw,
+            "cache_read": cr,
+            "output": out,
+        }
+        total, unpriced = self.cost_by_model(book)
+        if total is not None:
+            snap["cost_usd"] = total[0]
+        if unpriced and book.models:
+            snap["unpriced_models"] = unpriced
+        return snap
+
     def snapshot(
         self,
         price_in=None,
@@ -314,25 +534,15 @@ class Usage:
     ) -> dict:
         """The counts and what they derive to. `cost_usd` and `saved_usd` (USD per
         million tokens, from the record's prices) are reported only when BOTH base
-        prices are set. `long_in` / `long_out` price the long-context bucket; unset
-        (either one), the base prices do. `model` picks the default cache rates;
-        `cache_read` / `cache_write_5m` / `cache_write_1h` override them (USD per
-        million tokens at the base input price)."""
-        inp = self.input_tokens + self.long_input_tokens
-        cw = (
-            self.cache_write_tokens
-            + self.cache_write_1h_tokens
-            + self.long_cache_write_tokens
-            + self.long_cache_write_1h_tokens
-        )
-        cr = self.cache_read_tokens + self.long_cache_read_tokens
+        prices are set (see `cost_of`). `model` picks the default cache rates."""
+        req, inp, cw, cr, outp = self._sums()
         prompt = inp + cw + cr
         out = {
-            "requests": self.requests + self.long_requests,
+            "requests": req,
             "input_tokens": inp,
             "cache_write_tokens": cw,
             "cache_read_tokens": cr,
-            "output_tokens": self.output_tokens + self.long_output_tokens,
+            "output_tokens": outp,
             "prompt_tokens": prompt,
             "hit_rate": cr / prompt if prompt else 0,
             "saved_tokens": saved_tokens(cr, cw),
@@ -340,28 +550,13 @@ class Usage:
         }
         if self.log_error is not None:
             out["usage_log_error"] = self.log_error
-        if price_in is not None and price_out is not None:
-            if long_in is None or long_out is None:
-                long_in, long_out = price_in, price_out
-            prices = CachePrices(cache_read, cache_write_5m, cache_write_1h)
-            base = (
-                self.input_tokens,
-                self.cache_write_tokens,
-                self.cache_write_1h_tokens,
-                self.cache_read_tokens,
-                self.output_tokens,
-            )
-            long = (
-                self.long_input_tokens,
-                self.long_cache_write_tokens,
-                self.long_cache_write_1h_tokens,
-                self.long_cache_read_tokens,
-                self.long_output_tokens,
-            )
-            c1, s1 = bucket_cost(model, base, price_in, price_out, price_in, prices)
-            c2, s2 = bucket_cost(model, long, long_in, long_out, price_in, prices)
-            out["cost_usd"] = c1 + c2
-            out["saved_usd"] = s1 + s2
+        out["by_model"] = {m: self.by_model[m].model_snapshot() for m in sorted(self.by_model)}
+        c = self.cost_of(
+            model, price_in, price_out, long_in, long_out,
+            cache_read, cache_write_5m, cache_write_1h,
+        )
+        if c is not None:
+            out["cost_usd"], out["saved_usd"] = c
         return out
 
 
@@ -472,6 +667,7 @@ class AnthropicProvider:
         long_context_tokens: int | None = None,
         usage_log: str | None = None,
         agent_id: str = "",
+        caller: str | None = None,
         stream_idle: float = STREAM_IDLE_SECONDS,
     ):
         self._endpoint = endpoint.rstrip("/")
@@ -496,6 +692,8 @@ class AnthropicProvider:
         # id written into each line.
         self._usage_log = usage_log
         self._agent_id = agent_id
+        # The chat that sent this `complete` (the rid's prefix); its counts go to by_agent.
+        self._caller = caller
         self._stream_idle = stream_idle
 
     def _persist(self) -> None:
@@ -577,6 +775,7 @@ class AnthropicProvider:
             "output_tokens": 0,
         }
         long = False
+        cur_model = self._model
         try:
             async with (
                 httpx.AsyncClient(
@@ -609,7 +808,10 @@ class AnthropicProvider:
                     evt = json.loads(data)
                     kind = evt.get("type")
                     if kind == "message_start":
-                        u = (evt.get("message") or {}).get("usage") or {}
+                        msg = evt.get("message") or {}
+                        m = msg.get("model")
+                        cur_model = m if isinstance(m, str) and m else self._model
+                        u = msg.get("usage") or {}
                         inp, cw, cr = (
                             int(u.get(k) or 0)
                             for k in (
@@ -635,8 +837,12 @@ class AnthropicProvider:
                             cache_read_tokens=cr,
                         )
                         if self._usage is not None:
-                            self._usage.add_request(
-                                inp, cw, cr, long=long, cache_write_1h=cw1
+                            self._usage.bump(
+                                cur_model,
+                                self._caller,
+                                lambda u: u.add_request(
+                                    inp, cw, cr, long=long, cache_write_1h=cw1
+                                ),
                             )
                             self._persist()
                     elif kind == "content_block_delta":
@@ -665,7 +871,11 @@ class AnthropicProvider:
                             # message_delta carries the running total: bill the step.
                             step = int(out) - billed_out
                             if self._usage is not None:
-                                self._usage.add_output(step, long=long)
+                                self._usage.bump(
+                                    cur_model,
+                                    self._caller,
+                                    lambda u: u.add_output(step, long=long),
+                                )
                                 self._persist()
                             counts["output_tokens"] += step
                             billed_out = int(out)

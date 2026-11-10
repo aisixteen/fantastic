@@ -52,8 +52,7 @@ def test_anthropic_is_a_registered_plug(plug_env):
     assert rec["model"] == MODEL
     assert rec["endpoint"] == ENDPOINT
     assert rec["caching"] == "provider_cache"
-    assert rec["price_input_per_mtok"] == 3.0
-    assert rec["price_output_per_mtok"] == 15.0
+    assert rec["prices"] == {MODEL: {"input": 3.0, "output": 15.0}}
     assert rec["credentials"] == {"store": "creds", "ref": "anthropic"}
     assert KEY not in json.dumps(rec)
 
