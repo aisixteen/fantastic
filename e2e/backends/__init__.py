@@ -276,19 +276,20 @@ def _anthropic() -> Backend:
             f"ANTHROPIC_CACHING={extra['caching']!r} is not a caching mode; "
             f"one of {' | '.join(ANTHROPIC_CACHING)}"
         )
+    model = _model_or_die("anthropic")
     if ep := os.environ.get("ANTHROPIC_ENDPOINT"):
         extra["endpoint"] = ep
     # Prices are the operator's to name, per model: the backend has no default.
-    for var, field_ in (
-        ("ANTHROPIC_PRICE_INPUT_PER_MTOK", "price_input_per_mtok"),
-        ("ANTHROPIC_PRICE_OUTPUT_PER_MTOK", "price_output_per_mtok"),
-    ):
-        if (v := os.environ.get(var)) is not None and v != "":
-            extra[field_] = float(v)
+    price_in = os.environ.get("ANTHROPIC_PRICE_INPUT_PER_MTOK")
+    price_out = os.environ.get("ANTHROPIC_PRICE_OUTPUT_PER_MTOK")
+    if price_in and price_out:
+        extra["prices"] = {
+            model: {"input": float(price_in), "output": float(price_out)}
+        }
     return Backend(
         name="anthropic",
         handler_module="anthropic_backend.tools",
-        model=_model_or_die("anthropic"),
+        model=model,
         extra=extra,
         key_ref="anthropic",
         requires=(
