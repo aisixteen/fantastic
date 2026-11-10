@@ -43,7 +43,10 @@ async fn mk_kernel_with(
         work_dir: tmp.path().to_path_buf(),
     });
 
-    kernel.bundles.register(fantastic_ai_core::chat_bundle::HANDLER_MODULE, fantastic_ai_core::chat_bundle::AiChatBundle);
+    kernel.bundles.register(
+        fantastic_ai_core::chat_bundle::HANDLER_MODULE,
+        fantastic_ai_core::chat_bundle::AiChatBundle,
+    );
     kernel.bundles.register(HANDLER_MODULE, OllamaBackendBundle);
     kernel
         .bundles
@@ -499,15 +502,28 @@ async fn list_models_is_unknown_type() {
 async fn history_persists_and_round_trips() {
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;
-    let body = ndjson_body(&[json!({"message": {"content": "ack"}, "done": true})]);
+    // A call-less turn is nudged, and a mock that only ever says "ack" would chain
+    // on for MAX_SILENT_TURNS passes while the test reads the store. So: "ack" once,
+    // then the explicit `done` that ends the chain, and the read waits for that end.
+    let ack = ndjson_body(&[json!({"message": {"content": "ack"}, "done": true})]);
+    let done = ndjson_body(&[
+        json!({"message": {"content": "<call name=\"done\"></call>"}, "done": true}),
+    ]);
     Mock::given(method("POST"))
         .and(path("/api/chat"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .respond_with(ResponseTemplate::new(200).set_body_string(ack))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(done))
         .mount(&server)
         .await;
 
     let (kernel, backend) = mk_kernel(&tmp, "hist", &server.uri()).await;
-    let _rx = rebind_backend_inbox(&kernel, &backend);
+    let chat_id = fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await;
+    let mut rx = rebind_backend_inbox(&kernel, &chat_id);
     let client_id = "browser_hist";
     let _reply = kernel
         .send(vec![Item::new(
@@ -517,6 +533,42 @@ async fn history_persists_and_round_trips() {
         .await
         .remove(0)
         .result;
+    // The script makes the end deterministic: two generations (the call-less "ack",
+    // then the `done` the nudge earned), so two status `done` events; each one is
+    // emitted before its turn's rows are saved, so then wait for the store itself
+    // to hold all four rows.
+    let chat = fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut dones = 0;
+    let mut events: Vec<Value> = Vec::new();
+    let mut rows = Vec::new();
+    loop {
+        while let Some(v) = rx.try_recv() {
+            if v.payload.get("type").and_then(Value::as_str) == Some("status")
+                && v.payload.get("phase").and_then(Value::as_str) == Some("done")
+            {
+                dones += 1;
+            }
+            events.push(v.payload);
+        }
+        if dones >= 2 {
+            rows = fantastic_kernel::test_support::as_agent(
+                chat.clone(),
+                fantastic_ai_core::memory::load_history(&chat, &kernel, true),
+            )
+            .await
+            .expect("store read");
+            if rows.len() >= 4 {
+                break;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the chain did not end: {dones} done events, {} rows in the store: {events:#?} {rows:#?}",
+            rows.len()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 
     let h = kernel
         .send(vec![Item::new(
@@ -530,29 +582,29 @@ async fn history_persists_and_round_trips() {
     assert!(digest.len() >= 2, "expected >=2 rows, got {digest:#?}");
     assert_eq!(digest[0]["role"], "user");
     assert_eq!(digest[0]["head"], "ping");
-    let last = digest.last().unwrap();
-    assert_eq!(last["role"], "assistant");
-    assert_eq!(last["head"], "ack");
+    assert_eq!(digest[1]["role"], "assistant");
+    assert_eq!(digest[1]["head"], "ack");
 
     // The turns live in the CHAT's memory store (`memory_store_id`) — the chat's id IS
     // the conversation's; the provider and the kernel keep none.
-    let chat = fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await;
     let none = fantastic_kernel::test_support::as_agent(
         backend.clone(),
         fantastic_ai_core::memory::load_history(&backend, &kernel, true),
     )
     .await
     .expect("store read");
-    assert!(none.is_empty(), "the provider holds no conversation: {none:#?}");
-    let rows = fantastic_kernel::test_support::as_agent(
-        chat.clone(),
-        fantastic_ai_core::memory::load_history(&chat, &kernel, true),
-    )
-    .await
-    .expect("store read");
-    assert_eq!(rows.len(), 2, "one row per message: {rows:#?}");
+    assert!(
+        none.is_empty(),
+        "the provider holds no conversation: {none:#?}"
+    );
+    // four turns: the ping, the call-less answer, the nudge it earned, and the `done`
+    assert_eq!(rows.len(), 4, "one row per message: {rows:#?}");
     assert_eq!(rows[0]["content"], "ping");
     assert_eq!(rows[1]["content"], "ack");
+    assert!(rows[2]["content"]
+        .as_str()
+        .unwrap()
+        .starts_with("[no call was dispatched]"));
     assert!(
         !tmp.path()
             .join(".fantastic")
