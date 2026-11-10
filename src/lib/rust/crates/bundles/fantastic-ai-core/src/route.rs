@@ -617,6 +617,22 @@ pub(crate) fn open_inquiries() -> &'static Mutex<HashMap<(String, String), OpenI
     OPEN.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// The askers of the inquiries `receiver` has received and not yet answered: sorted,
+/// each once. The operator (no calling agent) is named `"operator"`, the name
+/// `stop` already gives it (`verbs.rs`).
+pub(crate) fn inquiry_askers(receiver: &str) -> Vec<String> {
+    let mut askers: Vec<String> = open_inquiries()
+        .lock()
+        .expect("open inquiries poisoned")
+        .iter()
+        .filter(|((r, _), _)| r == receiver)
+        .map(|(_, o)| o.asker.clone().unwrap_or_else(|| "operator".to_string()))
+        .collect();
+    askers.sort();
+    askers.dedup();
+    askers
+}
+
 /// The jobs an agent has started and not yet heard end, by owner.
 type RunningJobs = HashMap<String, Vec<(Value, String)>>;
 

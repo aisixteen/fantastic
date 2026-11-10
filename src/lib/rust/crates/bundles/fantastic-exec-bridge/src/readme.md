@@ -19,6 +19,8 @@ keys reach a child only when named). A per-call `env`/`cwd` is refused. A bare `
 is found on the CHILD's `PATH` only — pass `PATH` through `inherit_env`/`env`, or start an
 absolute path; with no `PATH` the start is refused naming it.
 
+The exec bridge is for commands a caller chooses. A bundle that wraps one fixed program may start that program directly.
+
 - `start(command, args?, pty?)` → `{job_id, status:'running', pty}` at once (`job_id` is an int) — non-blocking,
   many jobs in parallel. `command` is the program/binary; `args` is its argv (a list of
   strings). The FULL line (`command` + `args`, shell-joined) must fullmatch one of the

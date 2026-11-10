@@ -460,5 +460,6 @@ pub fn status_snapshot(agent_id: &AgentId, payload: &Value) -> Value {
         "mine_pending": mine_pending,
         "others_pending": others_pending,
         "pending_from": pending_from,
+        "inquiry_from": crate::route::inquiry_askers(agent_id.as_str()),
     })
 }

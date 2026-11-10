@@ -7,6 +7,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- AI core `status` reply carries `inquiry_from` (#597): the askers of the inquiries the agent has received and not yet answered, sorted, each once (the operator as `operator`), ids only, in every `status` reply. No new verb or grant.
 - `KeyReader::read_fields(endpoint, names)` (#596): the credential reader returns the named
   fields of one ref (in the order asked, an absent or empty one an error naming the field,
   never a value), through the one store read, host pin included. `KeyReader::read` (the
