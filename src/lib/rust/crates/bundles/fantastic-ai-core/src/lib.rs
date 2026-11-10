@@ -118,6 +118,7 @@
 #![deny(missing_docs)]
 
 pub mod agent_loop;
+pub mod ai_check;
 pub mod assembly;
 pub mod caching;
 pub mod chat_bundle;
@@ -149,7 +150,8 @@ pub mod verbs;
 pub mod view;
 
 pub use agent_loop::{run_generation, BackendConfig};
-pub use constants::CHAT_CARD_MAX_HEIGHT;
+pub use ai_check::{is_ai, is_ai_handler};
+pub use constants::{CHAT_CARD_MAX_HEIGHT, USAGE_KEYS};
 pub use helpers::DEFAULT_CLIENT_ID;
 pub use provider::{Provider, ProviderEvent, ProviderStream};
 pub use route::route_reply;

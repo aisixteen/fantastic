@@ -36,6 +36,7 @@ use fantastic_ai_core::provider::{
 };
 use fantastic_ai_core::schema::{self, Field};
 use fantastic_ai_core::think::ThinkWrap;
+use fantastic_ai_core::USAGE_KEYS;
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, verbs};
 use fantastic_bundle::{py_float, py_repr_value};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
@@ -690,10 +691,11 @@ impl Usage {
         };
         let mut out = Map::new();
         out.insert("requests".into(), json!(self.requests + self.long_requests));
-        out.insert("input_tokens".into(), json!(input));
-        out.insert("cache_write_tokens".into(), json!(cache_write));
-        out.insert("cache_read_tokens".into(), json!(cache_read));
-        out.insert("output_tokens".into(), json!(output));
+        let [k_input, k_cache_write, k_cache_read, k_output] = USAGE_KEYS;
+        out.insert(k_input.into(), json!(input));
+        out.insert(k_cache_write.into(), json!(cache_write));
+        out.insert(k_cache_read.into(), json!(cache_read));
+        out.insert(k_output.into(), json!(output));
         out.insert("prompt_tokens".into(), json!(prompt));
         out.insert("hit_rate".into(), hit_rate);
         out.insert("saved_tokens".into(), json!(saved));
@@ -1295,10 +1297,10 @@ impl SseState {
             "ts": ts,
             "agent": self.log.agent_id,
             "model": self.log.model,
-            "input_tokens": self.cur.input,
-            "cache_write_tokens": self.cur.cache_write,
-            "cache_read_tokens": self.cur.cache_read,
-            "output_tokens": self.cur.output,
+            (USAGE_KEYS[0]): self.cur.input,
+            (USAGE_KEYS[1]): self.cur.cache_write,
+            (USAGE_KEYS[2]): self.cur.cache_read,
+            (USAGE_KEYS[3]): self.cur.output,
             "long_context": self.cur.long,
         });
         let result = std::fs::OpenOptions::new()

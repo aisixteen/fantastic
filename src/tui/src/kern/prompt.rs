@@ -59,18 +59,10 @@ pub async fn ensure(h: &Host, cwd: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether `id` is an AI agent (its bundle's record takes a memory store).
-fn is_ai(h: &Host, id: &str) -> bool {
-    let Some(a) = h.kernel.agents.get(&fantastic_kernel::AgentId::from(id)) else { return false };
-    let r = a.value().record();
-    let Some(hm) = r.handler_module.as_deref() else { return false };
-    r.meta.get("memory_store_id").and_then(Value::as_str).is_some() && crate::kern::backend::BackendBundle::is_ai_handler(h, hm)
-}
-
 /// Name the file on AI `id`'s record — unless it names a file, or a bridge, of
 /// its own (a bridge alone means the default block: left as it is).
 pub async fn stamp(h: &Host, id: &str) -> Result<(), String> {
-    if !h.kernel.exists(BRIDGE) || !is_ai(h, id) {
+    if !h.kernel.exists(BRIDGE) || !fantastic_ai_core::is_ai(&h.kernel, id) {
         return Ok(());
     }
     let own = h.kernel.agents.get(&fantastic_kernel::AgentId::from(id)).is_some_and(|a| {

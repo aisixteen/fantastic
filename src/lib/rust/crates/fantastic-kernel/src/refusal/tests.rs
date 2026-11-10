@@ -249,10 +249,16 @@ fn new_bundle_codes_are_in_closed_set() {
 #[test]
 fn error_text_reads_the_error_and_appends_the_message() {
     assert_eq!(error_text(&serde_json::json!({"ok": true})), None);
-    assert_eq!(error_text(&serde_json::json!({"error": "boom"})).as_deref(), Some("boom"));
+    assert_eq!(
+        error_text(&serde_json::json!({"error": "boom"})).as_deref(),
+        Some("boom")
+    );
     assert_eq!(
         error_text(&serde_json::json!({"error": "boom", "message": "why"})).as_deref(),
         Some("boom: why")
     );
-    assert_eq!(error_text(&serde_json::json!({"error": 7})).as_deref(), Some("7"));
+    assert_eq!(
+        error_text(&serde_json::json!({"error": 7})).as_deref(),
+        Some("7")
+    );
 }
