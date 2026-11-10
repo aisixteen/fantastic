@@ -24,10 +24,6 @@ pub const BRIDGE: &str = "mcp_config";
 /// The file, inside the project's `.fantastic`.
 pub const FILE: &str = ".fantastic/.mcp.json";
 
-fn exists(h: &Host, id: &str) -> bool {
-    h.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(id))
-}
-
 fn err_of(r: &Value) -> Option<String> {
     r.get("error").and_then(Value::as_str).map(str::to_string)
 }
@@ -35,7 +31,7 @@ fn err_of(r: &Value) -> Option<String> {
 /// Make the bridge and the leg, name the file, grant, boot the leg. Returns its
 /// `mcp_config_error`, as a note, when the write failed.
 pub async fn ensure(h: &Host) -> Result<(), String> {
-    let r = if exists(h, BRIDGE) {
+    let r = if h.kernel.exists(BRIDGE) {
         // the binary fixes what it exposes: [`FILE`], however the record says
         h.operator("kernel", json!({"type": "update_agent", "id": BRIDGE, "allow": [FILE]})).await.result
     } else {

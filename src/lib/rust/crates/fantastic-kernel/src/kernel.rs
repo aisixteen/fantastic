@@ -783,6 +783,12 @@ impl Kernel {
             .clone()
     }
 
+    /// True when an agent with this id is in the tree.
+    #[must_use]
+    pub fn exists(&self, id: &str) -> bool {
+        self.agents.contains_key(&AgentId::from(id))
+    }
+
     /// Unregister an agent + drop its inbox. Caller has already run
     /// the bundle's `on_delete` hook + rmtreed the dir.
     pub fn unregister(&self, id: &AgentId) {

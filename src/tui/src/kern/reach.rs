@@ -43,10 +43,6 @@ pub fn verbs() -> Vec<&'static str> {
     vec!["*"]
 }
 
-fn exists(h: &Host, id: &str) -> bool {
-    h.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(id))
-}
-
 fn field(h: &Host, id: &str, f: &str) -> Map<String, Value> {
     h.kernel
         .agents
@@ -55,7 +51,6 @@ fn field(h: &Host, id: &str, f: &str) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-
 /// The HOLDERS of the reach (strictly single-user dev tool, owner 2026-10-04):
 /// each present holding leg, `user`, every AI agent (a non-root agent naming a
 /// memory store), and the host-side helpers that act for the human —
@@ -63,8 +58,8 @@ fn field(h: &Host, id: &str, f: &str) -> Map<String, Value> {
 fn holders(h: &Host) -> Vec<String> {
     let root = h.kernel.root().map(|r| r.id.0.clone());
     let helper = [crate::kern::backend::HANDLER_MODULE, crate::kern::setup_agent::HANDLER_MODULE];
-    let mut v: Vec<String> = HOLDING_LEGS.into_iter().filter(|l| exists(h, l)).map(String::from).collect();
-    if exists(h, crate::env::HUMAN) {
+    let mut v: Vec<String> = HOLDING_LEGS.into_iter().filter(|l| h.kernel.exists(l)).map(String::from).collect();
+    if h.kernel.exists(crate::env::HUMAN) {
         v.push(crate::env::HUMAN.to_string());
     }
     let candidates: Vec<String> = h
@@ -123,9 +118,9 @@ const NARROWED: [&str; 2] = [crate::kern::saved::HOME_ID, crate::kern::user_stor
 fn write_grants(h: &Host, ids: &[String]) -> Result<(), String> {
     let all = json!(verbs());
     let holders = holders(h);
-    let leg = exists(h, CANVAS_LEG);
+    let leg = h.kernel.exists(CANVAS_LEG);
     for id in ids {
-        if !exists(h, id) {
+        if !h.kernel.exists(id) {
             continue;
         }
         let narrowed = NARROWED.contains(&id.as_str());
@@ -158,14 +153,14 @@ fn write_grants(h: &Host, ids: &[String]) -> Result<(), String> {
     }
     for (holder, full) in writers {
         // a holder that is not an agent here has no record to write (the old read-then-write skipped it too)
-        if !exists(h, &holder) {
+        if !h.kernel.exists(&holder) {
             continue;
         }
         h.kernel
             .edit_can_call(&fantastic_kernel::AgentId::from(holder.as_str()), |cc| {
                 let mut changed = false;
                 for id in ids.iter().map(String::as_str).chain(["kernel"]) {
-                    if id == holder || (id != "kernel" && !exists(h, id)) || (full && NARROWED.contains(&id) && holder != crate::env::HUMAN) {
+                    if id == holder || (id != "kernel" && !h.kernel.exists(id)) || (full && NARROWED.contains(&id) && holder != crate::env::HUMAN) {
                         continue;
                     }
                     // the leg's own: MERGED into what it holds (its calls to `user`)
@@ -216,7 +211,7 @@ fn write_back(h: &Host, ids: &[String]) -> Result<(), String> {
     };
     // the holders' side: who may send to them
     for holder in &holders {
-        if !exists(h, holder) {
+        if !h.kernel.exists(holder) {
             continue;
         }
         let xs = pairs(holder);
@@ -281,7 +276,7 @@ pub async fn granted(h: &Host, id: &str) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + GRANT_WAIT;
     loop {
         let wake = GRANTED.notified();
-        let leg_ok = !exists(h, CANVAS_LEG) || field(h, CANVAS_LEG, "can_call").contains_key(id);
+        let leg_ok = !h.kernel.exists(CANVAS_LEG) || field(h, CANVAS_LEG, "can_call").contains_key(id);
         if field(h, crate::env::HUMAN, "can_call").contains_key(id) && leg_ok {
             return Ok(());
         }
@@ -391,7 +386,7 @@ async fn grant_peer(h: &Host, guid: &str) -> Result<(), String> {
     // the holding legs too (the `mcp` leg: a coding CLI reaches the page's
     // agents — the background, the view — as it reaches the host's)
     for holder in [crate::env::HUMAN, CANVAS_LEG].into_iter().chain(HOLDING_LEGS) {
-        if !exists(h, holder) {
+        if !h.kernel.exists(holder) {
             continue;
         }
         h.kernel

@@ -1,5 +1,5 @@
 //! Shared parts of the READ-ONLY panels (store, scheduler, credentials): the
-//! line builders, the scroll keys and the refusal reader. A panel built on these sends reads only and shows every `{error}`.
+//! line builders and the scroll keys. A panel built on these sends reads only and shows every `{error}`.
 
 use crossterm::event::{KeyCode as K, KeyEvent};
 use ratatui::layout::Rect;
@@ -48,19 +48,6 @@ pub fn sel(s: String, on: bool) -> Line<'static> {
     } else {
         plain(s)
     }
-}
-
-/// The error text of a refusal reply, or None.
-pub fn refusal(reply: &Value) -> Option<String> {
-    let e = reply.get("error")?;
-    let mut s = e
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| e.to_string());
-    if let Some(m) = reply.get("message").and_then(Value::as_str) {
-        s = format!("{s}: {m}");
-    }
-    Some(s)
 }
 
 /// A string field, or empty.

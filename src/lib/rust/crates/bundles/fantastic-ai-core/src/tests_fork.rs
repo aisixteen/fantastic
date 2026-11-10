@@ -92,10 +92,6 @@ async fn messages(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
     .0
 }
 
-fn exists(kernel: &Arc<Kernel>, id: &str) -> bool {
-    kernel.agents.contains_key(&AgentId::from(id))
-}
-
 #[tokio::test]
 async fn fork_copies_rows_up_to_at_with_their_ids() {
     let tmp = TempDir::new().unwrap();
@@ -153,7 +149,7 @@ async fn fork_refuses_an_at_that_cuts_a_fold() {
     .await;
     assert_eq!(out["reason"], "cuts_fold", "{out}");
     assert_eq!(out["at"], all[1], "{out}");
-    assert!(!exists(&kernel, "fk_cutfold_new"), "no agent is created");
+    assert!(!kernel.exists("fk_cutfold_new"), "no agent is created");
 }
 
 #[tokio::test]
@@ -189,7 +185,7 @@ async fn fork_refuses_an_at_that_cuts_a_turn() {
         )
         .await;
         assert_eq!(out["reason"], "cuts_turn", "at {at}: {out}");
-        assert!(!exists(&kernel, "fk_cutturn_new"));
+        assert!(!kernel.exists("fk_cutturn_new"));
     }
     // the end of the finished turn is a boundary
     let out = verb(&kernel, &parent, json!({"type": "fork", "at": done})).await;
@@ -246,7 +242,7 @@ async fn fork_refuses_while_the_parent_is_mid_turn() {
     )
     .await;
     assert_eq!(out["reason"], "parent_mid_turn", "{out}");
-    assert!(!exists(&kernel, "fk_busy_new"));
+    assert!(!kernel.exists("fk_busy_new"));
 }
 
 #[tokio::test]
@@ -363,7 +359,7 @@ async fn fork_is_all_or_nothing_on_a_store_refusal() {
     )
     .await;
     assert_eq!(out["reason"], "store_refused", "{out}");
-    assert!(!exists(&kernel, "fk_refused_new"), "the agent is deleted");
+    assert!(!kernel.exists("fk_refused_new"), "the agent is deleted");
     let dump = verb(&kernel, &AgentId::from(MEMORY), json!({"type": "dump"})).await;
     let rows = dump["tables"]["rows"]
         .as_array()

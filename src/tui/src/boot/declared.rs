@@ -16,7 +16,7 @@
 //! ([`done`]). No verb and no record field: the file is the shell's, the
 //! agent's record carries only ordinary grants.
 //!
-//! MERGE IS A UNION PER KEY, never a removal or a narrowing ([`union`]).
+//! MERGE IS A UNION PER KEY, never a removal or a narrowing ([`fantastic_kernel::grants::union`]).
 
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -28,35 +28,6 @@ fn file(cli: &Path) -> PathBuf {
     cli.join("grants.yaml")
 }
 
-/// Merge grant map `from` into `into`: a key `into` lacks is added; a key both
-/// have becomes the wider of the two (`"*"` wins; two verb lists are unioned).
-/// Nothing in `into` is removed or narrowed.
-pub fn union(into: &mut Map<String, Value>, from: &Map<String, Value>) {
-    for (k, v) in from {
-        match into.get_mut(k) {
-            None => {
-                into.insert(k.clone(), v.clone());
-            }
-            Some(have) => {
-                if have.as_str() == Some("*") {
-                    continue;
-                }
-                match (have.as_array_mut(), v) {
-                    (_, Value::String(s)) if s == "*" => *have = v.clone(),
-                    (Some(a), Value::Array(b)) => {
-                        for verb in b {
-                            if !a.contains(verb) {
-                                a.push(verb.clone());
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-}
-
 /// Merge the `callable_by` / `can_call` of `from` into the record `into`.
 pub fn union_record(into: &mut Map<String, Value>, from: &Map<String, Value>) {
     for f in FIELDS {
@@ -66,7 +37,7 @@ pub fn union_record(into: &mut Map<String, Value>, from: &Map<String, Value>) {
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            union(&mut have, g);
+            fantastic_kernel::grants::union(&mut have, g);
             into.insert(f.to_string(), Value::Object(have));
         }
     }
@@ -148,14 +119,14 @@ pub async fn apply_to_root(
     if let Some(Value::Object(cb)) = g.get("callable_by") {
         kernel.edit_callable_by(&id, |m| {
             let before = m.clone();
-            union(m, cb);
+            fantastic_kernel::grants::union(m, cb);
             *m != before
         })?;
     }
     if let Some(Value::Object(cc)) = g.get("can_call") {
         kernel.edit_can_call(&id, |m| {
             let before = m.clone();
-            union(m, cc);
+            fantastic_kernel::grants::union(m, cc);
             *m != before
         })?;
     }
@@ -171,19 +142,6 @@ mod tests {
 
     fn m(v: Value) -> Map<String, Value> {
         v.as_object().cloned().unwrap()
-    }
-
-    #[test]
-    fn union_adds_widens_and_never_narrows() {
-        let mut a = m(json!({"x": "*", "y": ["a"], "z": ["a"], "keep": ["k"]}));
-        union(
-            &mut a,
-            &m(json!({"x": ["v"], "y": ["b", "a"], "z": "*", "new": ["n"]})),
-        );
-        assert_eq!(
-            Value::Object(a),
-            json!({"x": "*", "y": ["a", "b"], "z": "*", "keep": ["k"], "new": ["n"]})
-        );
     }
 
     #[test]

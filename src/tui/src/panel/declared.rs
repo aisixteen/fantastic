@@ -587,7 +587,7 @@ impl Panel for DeclaredPanel {
             return false;
         };
         if let Some(slot) = self.slots.get_mut(i) {
-            *slot = match ro::refusal(reply) {
+            *slot = match fantastic_kernel::error_text(reply) {
                 Some(error) => Slot::Refused {
                     error,
                     reason: reply
