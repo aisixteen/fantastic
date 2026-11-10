@@ -15,7 +15,9 @@ test("a host record gets its own view, else its kind's default, else the stub", 
   assert.deepEqual([html.handler, html.kind, html.bytes, html.calls], ["agent_view.ts", "html", "<p>s</p>", ["search", "watch"]], "an html view: agent_view, its body, its calls + watch");
   assert.equal(viewOf({ id: "x", view: { handler: "my_chart_view" } }).handler, "my_chart_view.ts", "any page bundle by handler");
   assert.equal(viewOf({ id: "t", handler_module: "exec_bridge.tools" }).kind, "terminal", "an exec agent defaults to its terminal");
-  assert.equal(viewOf({ id: "ai", handler_module: "vllm_backend.tools", memory_store_id: "memory" }).kind, "chat", "an AI defaults to its chat");
+  assert.equal(viewOf({ id: "ai", handler_module: "vllm_backend.tools" }).kind, "chat", "an AI defaults to its chat");
+  for (const h of ["anthropic_backend.tools", "ollama_backend.tools", "responses_backend.tools", "foundation_models_backend.tools", "ai_chat.tools"]) assert.equal(viewOf({ id: "ai", handler_module: h }).kind, "chat", h);
+  assert.equal(viewOf({ id: "k", handler_module: "kernel_state.tools", memory_store_id: "m" }).kind, "stub", "a memory store field makes no AI");
   const stub = viewOf({ id: "files", handler_module: "file_bridge.tools" });
   assert.deepEqual([stub.kind, stub.handler], ["stub", "reflect_view.ts"], "anything else: the stub");
   assert.deepEqual(cellGrant("search", html), { search: ["search", "watch"] });

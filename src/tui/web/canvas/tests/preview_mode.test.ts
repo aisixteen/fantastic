@@ -50,7 +50,7 @@ test("targetOf: follow takes the selection, pinned ignores it", () => {
 
 test("agentTarget: an agent folder shows its agent.yaml in file mode, the agent in agent mode", () => {
   const ix = new AgentIndex();
-  ix.set(".fantastic/agents/user/agents/files", { id: "files", handler: "file_bridge.tools", displayName: "", hasParent: true, hasMemory: false });
+  ix.set(".fantastic/agents/user/agents/files", { id: "files", handler: "file_bridge.tools", displayName: "" });
   const p = ".fantastic/agents/user/agents/files";
   assert.deepEqual(agentTarget(p, "file", ix), { path: `${p}/agent.yaml`, agent: "files" });
   assert.deepEqual(agentTarget(p, "agent", ix), { path: p, agent: "files" });

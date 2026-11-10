@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AgentWalker } from "../src/bundles/files/agent_walk.ts";
-import { AgentIndex, agentIdOf, badge, badgeOf, side } from "../src/bundles/files/agent_index.ts";
+import { AgentIndex, agentIdOf, badge, side } from "../src/bundles/files/agent_index.ts";
 import type { FileBridge } from "../src/bundles/files/file_bridge.ts";
 import { FakeBridge } from "./fake_bridge.ts";
 
@@ -123,26 +123,18 @@ test("agentIdOf: the top-level keys only; a null or empty value is none; quotes 
   assert.equal(r.id, "alpha");
   assert.equal(r.handler, "exec_bridge.py");
   assert.equal(r.displayName, "The Alpha");
-  assert.equal(r.hasParent, false, "parent_id: ~ names no parent");
-  assert.equal(r.hasMemory, true);
   assert.equal(agentIdOf(["id: null", "handler_module: \"\""]).id, null);
   assert.equal(agentIdOf(["id: null", "handler_module: \"\""]).handler, null);
   assert.equal(agentIdOf([]).id, null);
   assert.equal(agentIdOf(["id:"]).id, null, "an empty id is none");
 });
 
-test("badges: an AI agent (a non-root with a memory store) is ✦; then the handler's kind; badgeOf reads the same from the yaml's flags", () => {
-  assert.equal(badge({ memory_store_id: "m", parent_id: "p" }, "x.ts"), "✦");
-  assert.equal(badge({ memory_store_id: "m" }, "x.ts"), "◻", "a root with a store is not an AI agent");
-  assert.equal(badge({ parent_id: "p" }, "exec_bridge.py"), "⌨");
-  assert.equal(badge({}, "file_store.tools"), "▣");
-  assert.equal(badge({ memory_store_id: 5, parent_id: "p" }, "x.ts"), "◻", "a memory store must be named");
-  assert.equal(badge({}, "x.ts"), "◻");
-  assert.equal(badge({}, "terminal.py"), "◇");
-  const info = (over: Partial<{ hasParent: boolean; hasMemory: boolean; handler: string }>) => ({ id: "i", handler: "x.ts", displayName: "", hasParent: false, hasMemory: false, ...over });
-  assert.equal(badgeOf(info({ hasParent: true, hasMemory: true })), "✦");
-  assert.equal(badgeOf(info({ hasMemory: true })), "◻");
-  assert.equal(badgeOf(info({ handler: "exec_bridge.py" })), "⌨");
+test("badges: by the handler's name only; an unknown handler is ◇, a .ts handler ◻", () => {
+  assert.equal(badge("vllm_backend.tools"), "✦");
+  assert.equal(badge("exec_bridge.tools"), "⌨");
+  assert.equal(badge("ram_store.tools"), "▣");
+  assert.equal(badge("x.ts"), "◻");
+  assert.equal(badge("terminal.py"), "◇");
   assert.equal(side("page.ts"), "page");
   assert.equal(side("exec_bridge.py"), "host");
 });

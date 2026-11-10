@@ -186,7 +186,7 @@ test("an agent folder: file mode shows its agent.yaml, agent mode the agent; mod
   const r = rig();
   project(r.bridge);
   const folder = ".fantastic/agents/user/agents/files";
-  r.index.set(folder, { id: "files", handler: "file_bridge.tools", displayName: "", hasParent: true, hasMemory: false });
+  r.index.set(folder, { id: "files", handler: "file_bridge.tools", displayName: "" });
   const p = await r.mountPreview("prev_follow", {});
   await r.select({ path: folder, agent: "files" });
   assert.equal(p.path, `${folder}/agent.yaml`);

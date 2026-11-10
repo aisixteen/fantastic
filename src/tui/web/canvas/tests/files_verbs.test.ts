@@ -20,7 +20,7 @@ test("select: opens the folders above, selects, publishes to the previews; repli
   const r = rig();
   project(r.bridge);
   await r.mountTree("tree_1");
-  r.index.set(".fantastic/agents/user/agents/files", { id: "files", handler: "file_bridge.tools", displayName: "", hasParent: true, hasMemory: false });
+  r.index.set(".fantastic/agents/user/agents/files", { id: "files", handler: "file_bridge.tools", displayName: "" });
   const a = await r.call("tree_1", { type: "select", path: "docs/a.md" });
   assert.deepEqual(a, { selected: "docs/a.md", kind: "file" });
   assert.deepEqual(r.published.at(-1), { path: "docs/a.md", agent: null });

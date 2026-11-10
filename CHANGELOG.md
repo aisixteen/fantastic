@@ -226,6 +226,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Changed
 
+- An agent's kind is its handler name (#605): the AI checks (`is_ai`, `is_ai_handler`, `ai_check`, the page's `isAi`, `is_web`, `is_canvas`) are removed; the row watch, grant holders, prompt stamp, set-up catalog, AI panel, export port kinds and the page's chat view and badges compare the record's `handler_module` with the names they need, and no longer read `memory_store_id` or a name suffix.
 - Boot (#580): in the terminal UI and `canvas`, a refused grant watch (`reach::start`) now stops
   the boot like in `mcp` mode (it was a note); in `mcp` mode the grant watch now starts before
   the MCP leg is made. A refused canvas now stops the kernel at once, before the UI's runners

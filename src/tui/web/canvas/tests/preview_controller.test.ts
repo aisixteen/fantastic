@@ -412,7 +412,7 @@ test("the verbs: an unmounted cell is refused, and mode on a folder's agent swit
   project(r.bridge);
   assert.equal((await r.call("pv_ghost", { type: "open", path: "top.txt" }))["reason"], "unknown_agent", "a cell that is not registered is the kernel's refusal");
   const dir = await r.mountPreview("pv_agentdir", { pinned: ".fantastic/agents/user/agents/files", follow: false });
-  r.index.set(".fantastic/agents/user/agents/files", { id: "files", handler: "file_bridge.tools", displayName: "", hasParent: false, hasMemory: false });
+  r.index.set(".fantastic/agents/user/agents/files", { id: "files", handler: "file_bridge.tools", displayName: "" });
   await dir.refresh();
   assert.equal(dir.isAgent, true);
   assert.equal((await r.call("pv_agentdir", { type: "mode", mode: "agent" }))["mode"], "agent");
@@ -673,7 +673,7 @@ test("a read that finds the file gone while it is not dirty shows the deleted ca
 test("the mode verb is refused with unsaved edits, and the mode stays", async () => {
   const r = rig();
   project(r.bridge);
-  r.index.set(".fantastic/agents/user/agents/files", { id: "files", handler: "file_bridge.tools", displayName: "", hasParent: false, hasMemory: false });
+  r.index.set(".fantastic/agents/user/agents/files", { id: "files", handler: "file_bridge.tools", displayName: "" });
   const p = await r.mountPreview("pv_mode_dirty", { pinned: ".fantastic/agents/user/agents/files", follow: false });
   assert.equal(p.isAgent, true);
   p.setEditing(true);

@@ -9,17 +9,13 @@ export interface AgentInfo {
   id: string;
   handler: string;
   displayName: string;
-  /** the yaml names a parent (the project's root agent has none) */
-  hasParent: boolean;
-  /** the yaml names a memory store (an AI agent) */
-  hasMemory: boolean;
 }
 
 const unquote = (v: string): string => v.trim().replace(/^(["'])(.*)\1$/, "$2");
 
 /** The identity fields from the head of an agent.yaml: top-level keys only (an
  *  indented `id:` belongs to a nested map). `id` null when the head names none. */
-export function agentIdOf(lines: string[]): { id: string | null; handler: string | null; displayName: string | null; hasParent: boolean; hasMemory: boolean } {
+export function agentIdOf(lines: string[]): { id: string | null; handler: string | null; displayName: string | null } {
   const top = (key: string): string | null => {
     for (const l of lines) {
       const m = new RegExp(`^${key}:\\s*(\\S.*)?$`).exec(l);
@@ -34,8 +30,6 @@ export function agentIdOf(lines: string[]): { id: string | null; handler: string
     id: top("id"),
     handler: top("handler_module"),
     displayName: top("display_name"),
-    hasParent: top("parent_id") !== null,
-    hasMemory: top("memory_store_id") !== null,
   };
 }
 
@@ -82,18 +76,27 @@ export class AgentIndex {
 /** The side an agent runs on: a `.ts` handler is a page agent, anything else the host's. */
 export const side = (handler: string): "page" | "host" => (handler.endsWith(".ts") ? "page" : "host");
 
-/** The badge for an agent, by what its record says it is. An AI agent is a
- *  NON-ROOT agent naming a memory store (the root names the project's). `rec`
- *  is the live record when the page has one, else what the yaml said. */
-export function badge(rec: Record<string, unknown>, handler: string): string {
-  if (typeof rec["memory_store_id"] === "string" && typeof rec["parent_id"] === "string") return "✦";
-  if (handler.startsWith("exec_bridge")) return "⌨";
-  if (handler.includes("store")) return "▣";
+/** The badge for an agent, by its handler name: ✦ an AI (a backend or `ai_chat`),
+ *  ⌨ exec, ▣ a store, ◻ a page (`.ts`) agent, ◇ anything else. */
+export function badge(handler: string): string {
+  if (
+    handler === "anthropic_backend.tools" ||
+    handler === "ollama_backend.tools" ||
+    handler === "responses_backend.tools" ||
+    handler === "vllm_backend.tools" ||
+    handler === "foundation_models_backend.tools" ||
+    handler === "ai_chat.tools"
+  )
+    return "✦";
+  if (handler === "exec_bridge.tools") return "⌨";
+  if (
+    handler === "ram_store.tools" ||
+    handler === "sqlite_store.tools" ||
+    handler === "credential_store.tools" ||
+    handler === "user_home_store.tools" ||
+    handler === "user_store.tools"
+  )
+    return "▣";
   if (handler.endsWith(".ts")) return "◻";
   return "◇";
-}
-
-/** `badge` for a folder known only by its yaml. */
-export function badgeOf(info: AgentInfo): string {
-  return badge({ ...(info.hasMemory ? { memory_store_id: "x" } : {}), ...(info.hasParent ? { parent_id: "x" } : {}) }, info.handler);
 }

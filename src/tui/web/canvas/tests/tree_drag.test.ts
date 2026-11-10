@@ -266,7 +266,7 @@ test("open an agent's folder opens the agent", async () => {
   const k = page(b);
   setHostRecords((id) => HOST[id]);
   setHostSync(async () => {});
-  agentIndex.set(".fantastic/agents/user/agents/ea", { id: "ea", handler: "exec_bridge.tools", displayName: "", hasParent: true, hasMemory: false });
+  agentIndex.set(".fantastic/agents/user/agents/ea", { id: "ea", handler: "exec_bridge.tools", displayName: "" });
   const r = await call(k, { type: "open", path: ".fantastic/agents/user/agents/ea" });
   assert.equal(r["kind"], "agent");
   assert.equal(k.get(String(r["cell"]))?.meta["backend_id"], "ea");
