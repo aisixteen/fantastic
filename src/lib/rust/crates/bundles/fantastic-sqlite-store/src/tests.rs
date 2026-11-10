@@ -288,11 +288,18 @@ async fn append_emits_one_appended_event_per_new_row() {
     .await;
     let ids = out["ids"].as_array().unwrap().clone();
     assert_eq!(ids.len(), 2, "{out}");
-    for id in &ids {
-        let ev = rx.try_recv().expect("an appended event").payload;
-        assert_eq!(ev, json!({"type": "appended", "table": "rows", "id": id}));
+    // the inbox also holds the append request itself; keep the events
+    let mut events = Vec::new();
+    while let Some(item) = rx.try_recv() {
+        if item.payload["type"] == json!("appended") {
+            events.push(item.payload);
+        }
     }
-    assert!(rx.try_recv().is_none());
+    let want: Vec<Value> = ids
+        .iter()
+        .map(|id| json!({"type": "appended", "table": "rows", "id": id}))
+        .collect();
+    assert_eq!(events, want);
     // a refused append emits nothing
     let refused = call(
         &k,
@@ -302,5 +309,7 @@ async fn append_emits_one_appended_event_per_new_row() {
     )
     .await;
     assert_eq!(refused["reason"], json!("bad_arg"), "{refused}");
-    assert!(rx.try_recv().is_none());
+    while let Some(item) = rx.try_recv() {
+        assert_ne!(item.payload["type"], json!("appended"), "{refused}");
+    }
 }
