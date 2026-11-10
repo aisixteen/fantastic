@@ -15,7 +15,8 @@ record carries `send_timeout: 3`.
      `hit its 3.0s deadline → dead letter <pid>; resend or drop`, the worker's
      history holds a `withdrawn` row naming the pid;
   5. the lead resends (`<timeout>30</timeout>`) and drops the dead letter
-     (`ack_deadletter`); the worker answers only the resend, in ONE wake pass.
+     (`ack_deadletter`); the worker answers only the resend, in ONE wake pass;
+     its answer reaches the lead once, under `<response>` (#510).
 """
 
 from __future__ import annotations
@@ -240,6 +241,8 @@ def main() -> int:
         last = last_user(l_turns[-1]["body"]) if l_turns else ""
         need("(deadline 30s)" in last, f"the resend's reply states its deadline: {last[:300]!r}")
         need("Got RESEND" in last, "the resend was answered")
+        need(last.count("Got RESEND") == 1, "the worker's answer reaches the lead once")
+        need("<response>" in last, "the reply is rendered under <response>")
         need("<acked>true</acked>" in last, "the dead letter was dropped (ack_deadletter)")
     finally:
         hk.close()

@@ -57,6 +57,7 @@ deadline. The probe proves, on python and rust alike:
   (`ack_deadletter`); its resend's reply states `(deadline 30s)`;
 - the worker made exactly two requests (the slow one, the wake for the resend):
   the withdrawn message never got a pass of its own.
+- the resend's answer reaches the lead once, under `<response>` (#510).
 
 ```sh
 cd src/lib/python && CARGO_HOME=/Volumes/Warehouse/tmp/cargo-home uv run python ../../../e2e/run.py --only-free --id deadletter_deadline
