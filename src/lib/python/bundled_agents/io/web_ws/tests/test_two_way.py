@@ -312,7 +312,7 @@ def pair_of(tmp_path, monkeypatch, fake_providers):
         accept = {leg: "*"} if granted else {}
         ka.create("two_way_probe.tools", id="probe", callable_by=dict(accept))
         ka.create(
-            "ollama_backend.tools",
+            "ai_chat.tools",
             id=ai,
             context_window=32768,
             **memory_meta(ka, ai, {"cli": "*"}),

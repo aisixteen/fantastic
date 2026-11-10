@@ -322,10 +322,8 @@ class _Model:
 
 def _agent(k, aid: str, *, window: int = 32768, store: str = "memory") -> None:
     k.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
-        endpoint="http://127.0.0.1:9/stub",
-        model="stub",
         context_window=window,
         output_reserve=0,
         context_strategy="fold",

@@ -28,6 +28,12 @@ from ai_core import build, on_cancel, required_meta  # noqa: F401 — the hooks
 from ai_core import on_delete as _core_on_delete
 from ai_core import ProviderError, caching, stream_idle_of
 from ai_core.credentials import key_reader
+from ai_core.remote_provider import (
+    chat_refusal,
+    default_of,
+    is_chat_verb,
+    provider_verbs,
+)
 from ai_core.schema import credentials_field, field, schema, validate
 from kernel._refusal import BAD_ARG, refusal
 
@@ -105,7 +111,11 @@ RECORD_SCHEMA = schema(
             "the Messages API URL, e.g. https://api.anthropic.com/v1/messages",
             required=True,
         ),
-        field("model", "str", "the model id, e.g. claude-sonnet-5", required=True),
+        field(
+            "model",
+            "str",
+            "the model id, e.g. claude-sonnet-5 (absent: the call's `model`, else `default_model`)",
+        ),
         field(
             "max_tokens",
             "int",
@@ -292,10 +302,14 @@ def _required_int(rec: dict, key: str) -> int:
 
 
 def make_provider(id, kernel):
-    """Build an AnthropicProvider from the agent record."""
+    """Build an AnthropicProvider from the agent's live record."""
+    return make_provider_with(id, kernel, kernel.get(id) or {})
+
+
+def make_provider_with(id, kernel, rec):
+    """Build an AnthropicProvider from `rec`."""
     from anthropic_backend.provider import AnthropicProvider
 
-    rec = kernel.get(id) or {}
     t = rec.get("temperature")
     return AnthropicProvider(
         endpoint=required_meta(rec, "endpoint", NAME),
@@ -396,20 +410,35 @@ async def _usage_reset(id, payload, kernel):
     return out
 
 
-async def _models(id, payload, kernel):
-    """models — args: none. The models this agent's key can use: [{id, display_name, max_input_tokens, max_tokens}], read from the API."""
-    rec = kernel.get(id) or {}
+async def _live(id, kernel):
+    """The model ids this agent's key can use, read from the API — or the refusal text."""
     from ai_core.credentials import CredentialError
 
-    endpoint = str(rec.get("endpoint") or "")
+    endpoint = str((kernel.get(id) or {}).get("endpoint") or "")
     try:
         secret = await key_reader(id, kernel, NAME, required=False)(endpoint)
     except CredentialError as e:
-        return {"error": str(e)}
+        return str(e)
     out = await server.list_models(endpoint, key=secret or "")
     if isinstance(out, str):
-        return {"error": out}
-    return {"models": out}
+        return out
+    return [m["id"] for m in out if isinstance(m.get("id"), str)]
+
+
+async def _provider(id, payload, kernel):
+    """The provider verbs (`complete`, `models`, `set_default_model`) of this backend."""
+    return await provider_verbs(
+        id,
+        payload,
+        kernel,
+        lambda rec: make_provider_with(id, kernel, rec),
+        lambda: _live(id, kernel),
+    )
+
+
+async def _models(id, payload, kernel):
+    """models — args: none. The models this agent's key can use: [{id, display_name, max_input_tokens, max_tokens}], read from the API."""
+    return await _provider(id, payload, kernel)
 
 
 async def on_delete(agent) -> None:
@@ -434,14 +463,23 @@ def _build():
         # A verb that runs a turn first reads what the record leaves to the API; an
         # API that does not answer refuses the verb, naming the field.
         if payload.get("type") in server.TURN_VERBS:
+            model = payload.get("model")
+            if not isinstance(model, str) or not model:
+                model = await default_of(id, kernel)
             refused = await server.resolve(
                 id,
                 kernel,
                 key=key_reader(id, kernel, NAME, required=False),
                 validate=validate_meta,
+                model=model,
             )
             if refused is not None:
                 return refused
+        r = await _provider(id, payload, kernel)
+        if r is not None:
+            return r
+        if is_chat_verb(payload.get("type")):
+            return chat_refusal(NAME, payload.get("type"))
         return await core(id, payload, kernel)
 
     return verbs, handler

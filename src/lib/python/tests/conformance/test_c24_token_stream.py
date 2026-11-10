@@ -45,7 +45,7 @@ def wired(seeded_kernel, store_agent, fake_providers):
         "/{host_id}/ws", _make_endpoint("c24_ws_leg", seeded_kernel)
     )
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id="c24_ai",
         context_window=32768,
         **memory_meta(seeded_kernel, "c24_ai", {"cli": "*"}),

@@ -2,8 +2,8 @@
 SCRIPTED model. NO MODEL.
 
 A local OpenAI-compatible server plays the model (two: `m` for the AI, `mb` for the
-BOSS it hands its text to); the kernel's own AI agents (python:
-`vllm_backend` agents; rust: `ai_chat.tools` chats naming a `vllm_backend` provider, #521) on the
+BOSS it hands its text to); the kernel's own AI agents (on both runtimes:
+`ai_chat.tools` chats naming a `vllm_backend` provider, #521) on the
 PACKAGED host of `RUNTIME` (python | rust) run the chains, driven through `web_rest`.
 
   A. the BOSS asks the AI (`inquiry`); the model writes a foreign call tag (`<invoke name="send">` followed by a loop of
@@ -154,24 +154,19 @@ def main() -> int:
                 by[BOSS] = ["inquiry"]
             fields = dict(endpoint=mock.url, model=MODEL, max_tokens=8192,
                           context_window=262144, memory_store_id="memory")
-            if RUNTIME == "rust":
-                # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it:
-                # a `send` to a provider is refused (#521)
-                pv = PROVS[aid]
-                rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=pv,
-                                kv_slots=4, kv_overflow="evict",
-                                can_call={"$self": "*", "memory": "*"},
-                                callable_by={"$self": "*", "$parent": "*", aid: "*"},
-                                **fields)
-                need(rec.get("id") == pv, f"create {pv}: {str(rec)[:200]}")
-                rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
-                                provider_id=pv, model=MODEL, max_tokens=8192,
-                                context_window=262144, memory_store_id="memory",
-                                can_call={**can, pv: ["complete", "watch"]}, callable_by=by)
-            else:
-                rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=aid,
-                                kv_slots=4, kv_overflow="evict", can_call=can,
-                                callable_by=by, **fields)
+            # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it:
+            # a `send` to a provider is refused (#521)
+            pv = PROVS[aid]
+            rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=pv,
+                            kv_slots=4, kv_overflow="evict",
+                            can_call={"$self": "*", "memory": "*"},
+                            callable_by={"$self": "*", "$parent": "*", aid: "*"},
+                            **fields)
+            need(rec.get("id") == pv, f"create {pv}: {str(rec)[:200]}")
+            rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
+                            provider_id=pv, model=MODEL, max_tokens=8192,
+                            context_window=262144, memory_store_id="memory",
+                            can_call={**can, pv: ["complete", "watch"]}, callable_by=by)
             need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")
 
         # ── A · nine cut turns in a row give up ───────────────────────────────

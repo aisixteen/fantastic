@@ -87,8 +87,8 @@ async def main():
     _record(d, {"id": "kernel_state", "handler_module": "kernel_state.tools", "guid": GUID,
                 "next_id": 50_000, "memory_store_id": memory.MEMORY})
     _record(d, memory.store_record("kernel_state", callable_by={**BASE, "ai": "*"}))
-    _record(d, {"id": "ai", "handler_module": "ollama_backend.tools", "parent_id": "kernel_state",
-                "model": "stub", "context_window": 32000, "context_strategy": "fold",
+    _record(d, {"id": "ai", "handler_module": "ai_chat.tools", "parent_id": "kernel_state",
+                "model": "stub", "provider_id": "stub", "context_window": 32000, "context_strategy": "fold",
                 **memory.ai_memory_meta({**BASE, "cli": "*"})})
     _record(d, {"id": "worker", "handler_module": "slow_probe.tools", "parent_id": "kernel_state"})
     sys.path.insert(0, str(next(p for p in Path(__file__).resolve().parents if (p / ".e2e-root").exists()) / "probes"))

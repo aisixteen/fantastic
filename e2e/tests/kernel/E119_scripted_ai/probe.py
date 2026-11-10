@@ -2,8 +2,8 @@
 
 A local OpenAI-compatible server (`e2e/mocks/vllm.py`, extended here with vLLM's
 thought channel `reasoning_content`) plays the model; the kernel's own
-`vllm_backend` agent (ai_core) on the PACKAGED host of `RUNTIME` (python |
-rust) runs the chain, every call from the test through `web_rest`. Tool calling
+`ai_chat.tools` chat (ai_core), completing through a `vllm_backend` provider, on the
+PACKAGED host of `RUNTIME` (python | rust) runs the chain, every call from the test through `web_rest`. Tool calling
 is the prompt-taught `<call name>` tag grammar — the request carries no `tools`.
 Every field the backend needs is SET on the record (endpoint, model, max_tokens,
 context_window, kv_slots, kv_overflow), so nothing is read from the server.
@@ -170,24 +170,18 @@ def main() -> int:
         need(rec.get("id") == FILES, f"create {FILES}: {str(rec)[:200]}")
         can = {"$self": "*", "memory": "*", root: ["reflect"], FILES: "*"}
         by = {"$self": "*", "$parent": "*", "rest": "*"}
-        if RUNTIME == "rust":
-            # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it:
-            # a `send` to a provider is refused (#521)
-            rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
-                            endpoint=m.url, model=MODEL, max_tokens=8192,
-                            context_window=262144, kv_slots=4, kv_overflow="evict",
-                            memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
-                            callable_by={"$self": "*", "$parent": "*", AI: "*"})
-            need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
-            rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
-                            provider_id=PROV, model=MODEL, max_tokens=8192,
-                            context_window=262144, memory_store_id="memory",
-                            can_call={**can, PROV: ["complete", "watch"]}, callable_by=by)
-        else:
-            rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=AI,
-                            endpoint=m.url, model=MODEL, max_tokens=8192,
-                            context_window=262144, kv_slots=4, kv_overflow="evict",
-                            memory_store_id="memory", can_call=can, callable_by=by)
+        # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it:
+        # a `send` to a provider is refused (#521)
+        rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
+                        endpoint=m.url, model=MODEL, max_tokens=8192,
+                        context_window=262144, kv_slots=4, kv_overflow="evict",
+                        memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
+                        callable_by={"$self": "*", "$parent": "*", AI: "*"})
+        need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
+        rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
+                        provider_id=PROV, model=MODEL, max_tokens=8192,
+                        context_window=262144, memory_store_id="memory",
+                        can_call={**can, PROV: ["complete", "watch"]}, callable_by=by)
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:200]}")
         guid = hk.send(root, {"type": "reflect", "tree": "none"}).get("guid")
 

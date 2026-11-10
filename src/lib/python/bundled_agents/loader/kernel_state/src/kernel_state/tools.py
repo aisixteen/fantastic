@@ -38,7 +38,6 @@ import re
 import secrets
 import sys
 import uuid
-from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any
 
@@ -52,16 +51,15 @@ from kernel import CURRENT_VERSION
 from kernel._bundles import (
     _find_bundle_module,
     clashes,
-    folder_rows,
-    handler_of,
+    folder_bases,
     import_handler,
     meta_chain,
+    meta_row,
     refuse_folder,
     register_folder,
     register_meta,
 )
 from kernel import _inherit, current_origin
-from kernel._kernel import BUNDLE_ENTRY_GROUP
 from kernel._refusal import (
     BAD_ARG,
     INVALID_META,
@@ -135,19 +133,6 @@ _BUNDLE_FILE = "bundle.yaml"
 _FOLDER_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 
 
-def _known_bases() -> list[str]:
-    """The installed bundled agents a folder can extend (they build `folder_bundle`)."""
-    out = []
-    for ep in entry_points(group=BUNDLE_ENTRY_GROUP):
-        try:
-            mod = import_handler(ep.value)
-        except Exception:  # noqa: BLE001 — a bundle that cannot import is no base
-            continue
-        if hasattr(mod, "folder_bundle"):
-            out.append(ep.name)
-    return sorted(out)
-
-
 def load_bundle(root_dir: fs.Root, name: str) -> str | None:
     """Load ONE folder bundle `<root>/bundles/<name>/` into the kernel's registry.
     → None, or the error — recorded on its catalog row too, never loaded."""
@@ -183,7 +168,7 @@ def load_bundle(root_dir: fs.Root, name: str) -> str | None:
     if not isinstance(base, str) or not base:
         return refuse(
             "base: required — the bundled agent it extends "
-            f"(here: {', '.join(_known_bases()) or 'none'})"
+            f"(here: {', '.join(folder_bases()) or 'none'})"
         )
     sentence = spec.get("sentence")
     if not isinstance(sentence, str) or not sentence.strip():
@@ -203,7 +188,7 @@ def load_bundle(root_dir: fs.Root, name: str) -> str | None:
     if base_mod is None or not hasattr(base_mod, "folder_bundle"):
         return refuse(
             f"base: {base!r} is no bundled agent a folder can extend in this "
-            f"kernel — known: {', '.join(_known_bases()) or 'none'}"
+            f"kernel — known: {', '.join(folder_bases()) or 'none'}"
         )
     built = base_mod.folder_bundle(name, str(fs.resolve(root_dir, rel)), spec)
     if isinstance(built, str):
@@ -218,34 +203,14 @@ def load_bundle(root_dir: fs.Root, name: str) -> str | None:
 
 
 def _load_meta(name: str, base: str, sentence: str, spec: dict, row: dict, refuse) -> str | None:
-    """A meta bundle's load: its `base` must resolve to a registered bundle (through
-    meta bundles, never back to itself), and `record` is a mapping of the fields its
-    instances inherit."""
-    record = spec.get("record")
-    if record is None:
-        record = {}
-    if not isinstance(record, dict):
-        return refuse("record: must be a mapping of the fields every instance inherits")
-    handler = handler_of(base)
-    if handler is None:
-        return refuse(
-            f"base: {base!r} is no bundle of this kernel — a folder extends a registered "
-            "handler_module or another folder bundle (folder bases with a program — "
-            f"known: {', '.join(_known_bases()) or 'none'})"
-        )
-    # no cycle: following the bases from `base` never comes back to this folder
-    rows = {r["name"]: r for r in folder_rows()}
-    at = handler
-    for _ in range(17):
-        if at == name:
-            return refuse(
-                f"base: {base!r} leads back to {name!r} — a meta bundle cannot extend itself"
-            )
-        nxt = (rows.get(at) or {}).get("base")
-        if not isinstance(nxt, str):
-            break
-        at = nxt
-    register_meta(name, {**row, "base": handler, "sentence": sentence, "record": record})
+    """A meta bundle's load: `meta_row` is the one shape check (`base` resolves to a
+    registered bundle, never back to itself; `record` a mapping of the fields its
+    instances inherit)."""
+    try:
+        row = meta_row(name, base, sentence, spec, row)
+    except ValueError as e:
+        return refuse(str(e))
+    register_meta(name, row)
     return None
 
 

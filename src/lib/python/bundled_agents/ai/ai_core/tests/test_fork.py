@@ -28,7 +28,7 @@ class _Done:
 
 def _agent(kernel, aid, **extra):
     kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         model="test-model",

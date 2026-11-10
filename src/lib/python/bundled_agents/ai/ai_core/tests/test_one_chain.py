@@ -50,7 +50,7 @@ async def _settle(fp, want, timeout=5.0):
 
 def _agent(kernel, aid):
     kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(kernel, aid, {"cli": "*"}),
@@ -553,7 +553,7 @@ async def test_an_await_reply_after_a_new_chain_began_is_held_not_dropped(
     aid = "oc_awaitnew"
     fp = _Script([DONE])
     seeded_kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         callable_by={"oc_replier": "*"},

@@ -1,8 +1,8 @@
 # `autofold` (E141) — thoughts, large replies, recalls and cut answers fold to anchors (#556)
 
 Free: no model. A scripted OpenAI-compatible server (the thought channel as in E119)
-plays the model for one AI agent on the PACKAGED host of `RUNTIME` (python: a
-`vllm_backend` agent; rust: an `ai_chat.tools` chat naming a `vllm_backend` provider),
+plays the model for one AI agent on the PACKAGED host of `RUNTIME` (on both runtimes: an
+`ai_chat.tools` chat naming a `vllm_backend` provider),
 next to a `file_bridge` agent holding an 80 kB file. `context_window` is 262144, so a
 page of that size is delivered inline.
 

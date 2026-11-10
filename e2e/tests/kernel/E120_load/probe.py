@@ -44,6 +44,7 @@ N_AGENTS = 1000
 N_BATCH = 500
 N_REST = 500
 AI = "ai"
+PROV = f"{AI}_prov"  # the provider the chat completes through
 MODEL = "mock-load"
 #: Seconds. Generous on purpose: only a gross regression fails.
 BOUNDS = {"boot_1000": 90.0, "list_agents": 15.0, "rest_500": 60.0, "batch_500": 90.0}
@@ -99,7 +100,7 @@ def main() -> int:
     t = time.monotonic()
     seed_pool(work)
     print(f"     wrote {N_AGENTS} records in {time.monotonic() - t:.2f}s", flush=True)
-    hk, nums["boot_1000"] = timed_boot(spec, work, [AI])
+    hk, nums["boot_1000"] = timed_boot(spec, work, [AI, PROV])
     root = hk.root_id
     try:
         # 2 · hydration
@@ -137,14 +138,21 @@ def main() -> int:
         # 4 · one batch of 500 from an AI turn
         r = hk.send(root, {"type": "update_agent", "id": "memory", "callable_by": {
             **next(a for a in la["agents"] if a.get("id") == "memory").get("callable_by", {}),
-            AI: "*"}})
+            AI: "*", PROV: "*"}})
         need(r.get("updated") is True, f"memory accepts the AI: {str(r)[:160]}")
         batch = [pool_id(i) for i in range(N_BATCH)]
-        rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=AI,
+        # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it
+        rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
                         endpoint=m.url, model=MODEL, max_tokens=8192,
                         context_window=262144, kv_slots=4, kv_overflow="evict",
-                        memory_store_id="memory",
-                        can_call={"$self": "*", "memory": "*", **{p: ["reflect"] for p in batch}},
+                        memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
+                        callable_by={"$self": "*", "$parent": "*", AI: "*"})
+        need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:160]}")
+        rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
+                        provider_id=PROV, model=MODEL, max_tokens=8192,
+                        context_window=262144, memory_store_id="memory",
+                        can_call={"$self": "*", "memory": "*", PROV: ["complete", "watch"],
+                                  **{p: ["reflect"] for p in batch}},
                         callable_by={"$self": "*", "$parent": "*", "rest": "*"})
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:160]}")
         calls = "\n".join(f'<call name="send"><routing><target_id>{p}</target_id></routing><payload><type>reflect</type>'

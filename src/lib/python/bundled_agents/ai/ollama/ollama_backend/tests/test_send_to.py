@@ -20,6 +20,7 @@ from __future__ import annotations
 from _testkit import ensure_memory
 import asyncio
 
+from ai_core.remote_provider import pair_chat
 from ai_core import core
 from ai_core.tool_parse import extract_tool_calls, render_call
 
@@ -83,7 +84,8 @@ async def _make_ollama(kernel, grants=None):
     # `callable_by` (the backend streams its turn to `cli` and routes to peers).
     for target in can_call:
         await _accept(kernel, target, aid)
-    return aid
+    # the provider stays the provider; the chat that completes through it is the agent a test drives
+    return await pair_chat(kernel, aid)
 
 
 async def _accept(kernel, target: str, caller: str, verbs="*") -> None:

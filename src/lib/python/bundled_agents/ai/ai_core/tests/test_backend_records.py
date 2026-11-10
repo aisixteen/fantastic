@@ -84,7 +84,7 @@ SCHEMAS = {
     "responses_backend": (
         [
             ("endpoint", "str", True, None, None),
-            ("model", "str", True, None, None),
+            ("model", "str", False, None, None),
             ("stream_idle_seconds", "float", False, None, None),
             ("max_tokens", "int", False, 8192, None),
             ("sampling", "map", False, None, None),
@@ -94,7 +94,7 @@ SCHEMAS = {
     "anthropic_backend": (
         [
             ("endpoint", "str", True, None, None),
-            ("model", "str", True, None, None),
+            ("model", "str", False, None, None),
             ("max_tokens", "int", False, None, None),
             ("context_window", "int", False, None, None),
             ("temperature", "float", False, None, None),

@@ -4,6 +4,7 @@ requires-python = ">=3.11"
 
 [manifest]
 members = [
+    "fantastic-ai-chat",
     "fantastic-ai-core",
     "fantastic-anthropic-backend",
     "fantastic-cli",
@@ -336,6 +337,17 @@ wheels = [
 ]
 
 [[package]]
+name = "fantastic-ai-chat"
+version = "0.1.0"
+source = { editable = "bundled_agents/ai/ai_chat" }
+dependencies = [
+    { name = "fantastic-ai-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" }]
+
+[[package]]
 name = "fantastic-ai-core"
 version = "0.1.0"
 source = { editable = "bundled_agents/ai/ai_core" }
@@ -417,6 +429,7 @@ name = "fantastic-kernel"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "fantastic-ai-chat" },
     { name = "fantastic-ai-core" },
     { name = "fantastic-anthropic-backend" },
     { name = "fantastic-cli" },
@@ -454,6 +467,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fantastic-ai-chat", editable = "bundled_agents/ai/ai_chat" },
     { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
     { name = "fantastic-anthropic-backend", editable = "bundled_agents/ai/anthropic/anthropic_backend" },
     { name = "fantastic-cli", editable = "bundled_agents/cli" },

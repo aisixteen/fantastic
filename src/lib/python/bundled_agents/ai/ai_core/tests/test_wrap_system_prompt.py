@@ -6,6 +6,7 @@ no placeholders. A value the record cannot use is refused AT THE WRITE; null cle
 from __future__ import annotations
 
 import pytest
+from _testkit import memory_meta
 from test_record_system_prompt import DONE, LIST, _Fake, _ai, _op, _send, _sys, _until
 
 from ai_core.schema import WRAP_PROMPT_REFUSAL
@@ -73,7 +74,15 @@ async def test_one_side_alone_and_update_live(seeded_kernel, fake_providers):
 @pytest.mark.parametrize("bad", ["", "   ", 42, ["x"]])
 async def test_an_unusable_wrap_value_is_refused_at_the_write(seeded_kernel, name, bad):
     k = seeded_kernel
-    _ai(k, "wr_ok", **{name: "FINE"})
+    # on a backend: the write-time refusal of an ai_core field is every record's
+    k.create(
+        "ollama_backend.tools",
+        id="wr_ok",
+        endpoint="http://127.0.0.1:9/stub",
+        model="stub",
+        **{name: "FINE"},
+        **memory_meta(k, "wr_ok", {"cli": "*"}),
+    )
     out = await _op(k, {"type": "update_agent", "id": "wr_ok", name: bad})
     assert out.get("error") == WRAP_PROMPT_REFUSAL.format(name=name), out
     assert k.get("wr_ok")[name] == "FINE"

@@ -15,6 +15,7 @@ import json
 import httpx
 import pytest
 from ai_core.core import THINK_CLOSE, THINK_OPEN
+from ai_core.remote_provider import pair_chat
 from responses_backend.provider import (
     RETRIES,
     ResponsesProvider,
@@ -788,7 +789,7 @@ async def test_send_streams_tokens_raw_on_both_channels(
     stubbed_provider["transport"] = httpx.MockTransport(
         lambda req: httpx.Response(200, text=sse)
     )
-    aid = await _make_responses(seeded_kernel, None)
+    aid = await pair_chat(seeded_kernel, await _make_responses(seeded_kernel, None))
     events: list[dict] = []
     unsub = seeded_kernel.add_state_subscriber(events.append)
     try:

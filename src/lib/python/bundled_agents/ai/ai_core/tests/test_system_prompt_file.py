@@ -99,10 +99,8 @@ def _ai(k, aid: str, fake_providers, *, file: bool = False, **meta) -> _Fake:
         meta["file_bridge_id"] = "prompts"
         meta["system_prompt_file"] = "prompt.md"
     rec = k.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
-        endpoint="http://127.0.0.1:9/stub",
-        model="stub",
         context_window=32768,
         **meta,
         **memory_meta(k, aid, can),

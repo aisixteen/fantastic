@@ -66,7 +66,7 @@ class _Script:
 def _ai(kernel, aid, script, fake_providers, *, can_call=None):
     fake_providers[aid] = script
     kernel.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
         context_window=32768,
         **memory_meta(kernel, aid, {"cli": "*", **(can_call or {})}),

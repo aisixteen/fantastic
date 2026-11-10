@@ -24,6 +24,7 @@ from ai_core import build, on_cancel, required_meta  # noqa: F401 — the cancel
 from ai_core import caching, stream_idle_of
 from ai_core import on_delete as _core_on_delete
 from ai_core.credentials import key_reader
+from ai_core.remote_provider import chat_refusal, is_chat_verb, provider_verbs
 from ai_core.schema import credentials_field, field, schema, validate
 from kernel._refusal import bad
 
@@ -72,12 +73,16 @@ def _sampling(rec: dict) -> tuple[dict, bool]:
 
 
 def make_provider(id, kernel):
-    """Build a VllmProvider from the agent record. `endpoint` and `kv_overflow`
+    """Build a VllmProvider from the agent's live record."""
+    return make_provider_with(id, kernel, kernel.get(id) or {})
+
+
+def make_provider_with(id, kernel, rec):
+    """Build a VllmProvider from `rec`. `endpoint` and `kv_overflow`
     are the record's; `model`, `max_tokens`, `context_window` and `kv_slots` are
     the record's or were read from the server before the turn."""
     from vllm_backend.provider import VllmProvider
 
-    rec = kernel.get(id) or {}
     sampling, explicit = _sampling(rec)
     overflow = rec.get("kv_overflow")
     if overflow not in KV_OVERFLOWS:
@@ -389,6 +394,13 @@ def _build():
             )
             if refused is not None:
                 return refused
+        r = await provider_verbs(
+            id, payload, kernel, lambda rec: make_provider_with(id, kernel, rec)
+        )
+        if r is not None:
+            return r
+        if is_chat_verb(payload.get("type")):
+            return chat_refusal(NAME, payload.get("type"))
         return await core(id, payload, kernel)
 
     return verbs, handler

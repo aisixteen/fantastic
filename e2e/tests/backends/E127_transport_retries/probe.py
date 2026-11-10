@@ -38,6 +38,7 @@ from mocks.vllm import VllmMock
 REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
 AI = "ai"
+PROV = f"{AI}_prov"  # the provider the chat completes through
 MODEL = "mock-retry"
 DONE = '<call name="done"></call>'
 
@@ -76,7 +77,7 @@ def main() -> int:
     spec = ensure_runtime(REPO, name)
     m = VllmMock(model=MODEL).start()
     work = Path(tempfile.mkdtemp(prefix="e2e-transport-retries-"))
-    hk = HostKernel(spec, work, reach=[AI]).boot()
+    hk = HostKernel(spec, work, reach=[AI, PROV]).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -130,13 +131,20 @@ def main() -> int:
 
     try:
         r = hk.send(root, {"type": "update_agent", "id": "memory",
-                           "callable_by": {**callable_by("memory"), AI: "*"}})
+                           "callable_by": {**callable_by("memory"), AI: "*", PROV: "*"}})
         need(r.get("updated") is True, f"memory accepts the AI: {str(r)[:200]}")
-        rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=AI,
+        # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it
+        rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
                         endpoint=m.url, model=MODEL, max_tokens=8192,
                         context_window=262144, kv_slots=4, kv_overflow="evict",
-                        transport_retries=2, misfire_limit=2, memory_store_id="memory",
-                        can_call={"$self": "*", "memory": "*"},
+                        memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
+                        callable_by={"$self": "*", "$parent": "*", AI: "*"})
+        need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
+        rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
+                        provider_id=PROV, model=MODEL, max_tokens=8192,
+                        context_window=262144, memory_store_id="memory",
+                        transport_retries=2, misfire_limit=2,
+                        can_call={"$self": "*", "memory": "*", PROV: ["complete", "watch"]},
                         callable_by={"$self": "*", "$parent": "*", "rest": "*", "ws": "*"})
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:200]}")
 

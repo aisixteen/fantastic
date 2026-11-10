@@ -14,6 +14,7 @@ import json
 import httpx
 import pytest
 from ai_core.core import THINK_CLOSE, THINK_OPEN
+from ai_core.remote_provider import pair_chat
 from vllm_backend import provider as vp
 from vllm_backend.provider import (
     KvSlotsFull,
@@ -1151,13 +1152,14 @@ async def test_the_last_budget_is_per_agent_and_freed_on_delete(
 
     await make("v1")
     await make("v1_sib")
-    out = (await call("v1", {"type": "send", "text": "hi"}))[0]["result"]
+    chat = await pair_chat(k, "v1")
+    out = (await call(chat, {"type": "send", "text": "hi"}))[0]["result"]
     assert out.get("response") == "ok", out
     # the call-less answer is rerolled in the background; let it settle so a late
     # reroll cannot record a budget for the re-created id
     quiet = 0
     for _ in range(500):
-        st = (await call("v1", {"type": "status"}))[0]["result"]
+        st = (await call(chat, {"type": "status"}))[0]["result"]
         idle = st["generating"] is False and st["current"] is None
         quiet = quiet + 1 if idle else 0
         if quiet >= 5:

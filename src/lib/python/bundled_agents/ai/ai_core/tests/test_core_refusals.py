@@ -21,7 +21,7 @@ from ai_core.tool_parse import render_call, render_reply
 from kernel import register_unlisted
 from _testkit import as_agent
 
-NAME = "ollama_backend"
+NAME = "ai_chat"
 
 
 class _Script:
@@ -43,10 +43,8 @@ class _Script:
 def _ai(k, aid: str, provider=None, **meta) -> str:
     m = memory_meta(k, aid, can_call=meta.pop("can_call", None))
     rec = k.create(
-        "ollama_backend.tools",
+        "ai_chat.tools",
         id=aid,
-        endpoint="http://127.0.0.1:9/stub",
-        model="stub",
         context_window=32768,
         **m,
         **meta,

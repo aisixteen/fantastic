@@ -266,9 +266,9 @@ def _rec(**kw) -> dict:
     return {"endpoint": ENDPOINT, "model": MODEL, "memory_store_id": "memory", **kw}
 
 
-def test_endpoint_model_and_a_store_are_all_a_record_needs():
+def test_an_endpoint_and_a_store_are_all_a_record_needs():
     required = [f["name"] for f in RECORD_SCHEMA["fields"] if f["required"]]
-    assert required == ["endpoint", "model", "memory_store_id"]
+    assert required == ["endpoint", "memory_store_id"]
     assert validate_meta(_rec(), {}) is None
     cred = next(f for f in RECORD_SCHEMA["fields"] if f["name"] == "credentials")
     assert cred["required"] is False
@@ -420,7 +420,15 @@ async def test_a_send_reads_the_api_first_and_a_no_turn_verb_reads_nothing(seede
     mock_http(_api(seen))
     r = await _create(seeded_kernel)
     assert r.get("id") == "a1", r
-    await _call(seeded_kernel, "a1", {"type": "send", "text": "hi", "client_id": "t"})
+    await _call(
+        seeded_kernel,
+        "a1",
+        {
+            "type": "complete",
+            "messages": [{"role": "user", "content": "hi"}],
+            "rid": "r",
+        },
+    )
     rec = seeded_kernel.get("a1")
     assert (rec["max_tokens"], rec["context_window"]) == (64000, 200000), rec
 
@@ -848,8 +856,7 @@ async def test_the_models_verb_lists_the_keys_models(
     mock_http(_models_api(200, body, seen))
     await _create(seeded_kernel)
     got = await _call(seeded_kernel, "a1", {"type": "models"})
-    assert [m["id"] for m in got["models"]] == ["m1", "m2"]
-    assert got["models"][1]["max_tokens"] is None
+    assert got == {"models": ["m1", "m2"], "default": None}
     assert "limit=1000" in seen[0]
 
 
