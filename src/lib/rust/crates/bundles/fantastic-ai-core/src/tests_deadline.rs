@@ -357,3 +357,105 @@ async fn a_send_past_its_deadline_tells_the_sender_its_dead_letter_and_can_be_re
     .result;
     assert!(resent.get("response").is_some(), "{resent}");
 }
+
+async fn status_reply(kernel: &Arc<Kernel>, to: &AgentId, payload: Value) -> Value {
+    kernel
+        .send(vec![Item::new(to.clone(), payload)])
+        .await
+        .remove(0)
+        .result
+}
+
+/// Sends `to` an inquiry, as `from` (an agent) or as the operator (`None`).
+async fn ask_inquiry(kernel: &Arc<Kernel>, to: &AgentId, from: Option<&AgentId>) {
+    let item = vec![Item::new(
+        to.clone(),
+        json!({"type": "inquiry", "text": "ship?"}),
+    )];
+    let out = match from {
+        Some(f) => as_agent(f.clone(), kernel.send(item)).await,
+        None => kernel.send(item).await,
+    };
+    assert_eq!(
+        out[0].result["accepted"],
+        json!(true),
+        "{:?}",
+        out[0].result
+    );
+}
+
+/// `status` names the askers of the inquiries the agent holds and has not answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_has_no_inquiry_from_when_nothing_is_open() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "iq_none").await;
+    let bare = status_reply(&kernel, &backend, json!({"type": "status"})).await;
+    assert_eq!(bare["inquiry_from"], json!([]), "{bare}");
+    let mine = status_reply(
+        &kernel,
+        &backend,
+        json!({"type": "status", "client_id": "pc"}),
+    )
+    .await;
+    assert_eq!(mine["inquiry_from"], json!([]), "{mine}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_names_the_asker_of_an_open_inquiry() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "iq_one").await;
+    let peer = add_peer(&kernel, &tmp, &backend).await;
+    let _s = script(&backend, vec![pass(DONE)], Duration::from_millis(1500));
+    ask_inquiry(&kernel, &backend, Some(&peer)).await;
+    let bare = status_reply(&kernel, &backend, json!({"type": "status"})).await;
+    assert_eq!(bare["inquiry_from"], json!([peer.as_str()]), "{bare}");
+    let mine = status_reply(
+        &kernel,
+        &backend,
+        json!({"type": "status", "client_id": "pc"}),
+    )
+    .await;
+    assert_eq!(mine["inquiry_from"], json!([peer.as_str()]), "{mine}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_drops_an_inquiry_from_inquiry_from_once_it_is_answered() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "iq_answered").await;
+    let s = script(
+        &backend,
+        vec![pass(answer_call("ship it"))],
+        Duration::from_millis(300),
+    );
+    ask_inquiry(&kernel, &backend, None).await;
+    let open = status_reply(&kernel, &backend, json!({"type": "status"})).await;
+    assert_eq!(open["inquiry_from"], json!(["operator"]), "{open}");
+    assert!(until_passes(&s, 1).await);
+    let probe = (kernel.clone(), backend.clone());
+    for _ in 0..100 {
+        let now = status_reply(&probe.0, &probe.1, json!({"type": "status"})).await;
+        if now["inquiry_from"] == json!([]) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the answered inquiry is still named in inquiry_from");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_names_two_askers_sorted() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "iq_two").await;
+    let peer = add_peer(&kernel, &tmp, &backend).await;
+    let _s = script(
+        &backend,
+        vec![pass(DONE), pass(DONE)],
+        Duration::from_millis(1500),
+    );
+    ask_inquiry(&kernel, &backend, Some(&peer)).await;
+    ask_inquiry(&kernel, &backend, None).await;
+    let mut want = vec![peer.as_str().to_string(), "operator".to_string()];
+    want.sort();
+    let bare = status_reply(&kernel, &backend, json!({"type": "status"})).await;
+    assert_eq!(bare["inquiry_from"], json!(want), "{bare}");
+}

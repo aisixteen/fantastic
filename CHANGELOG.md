@@ -7,6 +7,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- AI core `status` reply carries `inquiry_from` (#597): the askers of the inquiries the agent has received and not yet answered, sorted, each once (the operator as `operator`), ids only, in every `status` reply. No new verb or grant.
 - `sqlite_store` in the headless Rust kernel (#432): the durable memory store moved from
   the CLI product into the lib (`fantastic-sqlite-store`) and is registered in the
   `fantastic_kernel` binary; the file is the record's `path` (config), and a stop
