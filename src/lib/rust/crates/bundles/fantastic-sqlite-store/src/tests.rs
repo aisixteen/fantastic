@@ -254,7 +254,10 @@ async fn sqlite_store_refusals_are_kernel_shape() {
     .await;
     assert_eq!(out["reason"], json!("exists"), "{out}");
     let sentence = out["error"].as_str().unwrap();
-    assert!(sentence.contains("duplicate row") && sentence != "exists", "{out}");
+    assert!(
+        sentence.contains("duplicate row") && sentence != "exists",
+        "{out}"
+    );
 }
 
 #[test]
@@ -278,6 +281,11 @@ async fn append_emits_one_appended_event_per_new_row() {
     let tmp = tempfile::TempDir::new().unwrap();
     let k = kernel(tmp.path());
     add_store(&k, "mem.db");
+    let state: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
+    let tap = state.clone();
+    k.add_state_subscriber(std::sync::Arc::new(move |ev: &Value, _body| {
+        tap.lock().unwrap().push(ev.clone());
+    }));
     let mut rx = k.ensure_inbox(&AgentId::from("mem"));
     let out = call(
         &k,
@@ -300,6 +308,15 @@ async fn append_emits_one_appended_event_per_new_row() {
         .map(|id| json!({"type": "appended", "table": "rows", "id": id}))
         .collect();
     assert_eq!(events, want);
+    // and each one went out as an emit on the state stream too
+    let on_state: Vec<Value> = state
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|ev| ev["kind"] == json!("emit") && ev["payload"]["type"] == json!("appended"))
+        .map(|ev| ev["payload"].clone())
+        .collect();
+    assert_eq!(on_state, want);
     // a refused append emits nothing
     let refused = call(
         &k,
