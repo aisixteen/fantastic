@@ -168,26 +168,21 @@ fn fatal(err_out: &mut std::fs::File, msg: &str) -> i32 {
 
 async fn serve(paths: Paths, std_out: std::fs::File, err_out: &mut std::fs::File) -> i32 {
     // ── boot / rehydrate ─────────────────────────────────────────────────────
-    let host = match Host::boot(&paths, None, None).await {
-        Ok(h) => Arc::new(h),
-        Err(e) => return fatal(err_out, &format!("{e}")),
+    // THE ONE BOOT (`kern::host::boot_all`): the kernel and the grant watch.
+    let host = match crate::kern::host::boot_all(&paths, crate::extras(), None, None, false).await {
+        Ok((h, _)) => h,
+        Err(e) => return fatal(err_out, &e),
     };
     let served = Served::new(Arc::clone(&host));
     // The leg now, not on the first request: a refusal is said at start.
     if let Err(e) = served.core().await {
         let code = fatal(err_out, &e);
-        host.shutdown(&paths).await;
-        return code;
-    }
-    // THE GRANT WATCH, once the boot's own grant writes are done (`kern/reach`)
-    if let Err(e) = crate::kern::reach::start(&host).await {
-        let code = fatal(err_out, &e);
-        host.shutdown(&paths).await;
+        crate::kern::host::stop(&host.kernel).await;
         return code;
     }
     if let Err(e) = listen(Arc::clone(&served)) {
         let code = fatal(err_out, &e);
-        host.shutdown(&paths).await;
+        crate::kern::host::stop(&host.kernel).await;
         return code;
     }
 
@@ -202,7 +197,7 @@ async fn serve(paths: Paths, std_out: std::fs::File, err_out: &mut std::fs::File
     }
 
     // ── shutdown, in the kernel's order ──────────────────────────────────────
-    host.shutdown(&paths).await;
+    crate::kern::host::stop(&host.kernel).await;
     close_socket();
     0
 }

@@ -24,6 +24,12 @@
 //! from disk. A blueprint entry naming a stock agent (or the root, `@root`) may
 //! add `callable_by` / `can_call` grants to it: merged as a union, never
 //! narrowing a stock grant.
+//!
+//! A HOST THAT BOOTS ITS OWN KERNEL (a window shell, its unit tests) seeds with
+//! [`seed_dir_with`], then calls [`boot_kernel`] and, at the end, [`stop_kernel`]: the one
+//! boot and the one stop the binary's modes run, with the stock bundles plus its own
+//! [`Extra`]s. It never seeds and never reads `main_with`'s extras. The MCP channel and the
+//! share socket are opened only by the binary's modes, never by these two.
 
 mod app;
 mod atomic;
@@ -70,6 +76,32 @@ pub use fantastic_kernel::BundleRegistry;
 /// [`seed_dir_with`] also writes an embedder's own blueprints, ids as written.
 /// A launcher calls these before `main_with`, gated by [`starts_kernel`].
 pub use boot::seed::{seed_dir, seed_dir_with};
+
+/// BOOT ONE FOLDER IN THIS PROCESS: the stock registry plus `extras`, the kernel's start, the
+/// folder's recorded agents booted and the grant watch started: the same boot the modes run
+/// (`kern::host::boot_all`), with no canvas. Returns the running kernel; end it with
+/// [`stop_kernel`]. It never seeds: the caller has run [`seed_dir_with`]. `web_port` /
+/// `web_bind` are what `--port` / `--host` pass: set on the folder's recorded `web` before its
+/// listener boots (a `web` with no port and none given picks a free one and records it); with
+/// no `web` record in the folder they are refused. A folder a kernel already holds is refused
+/// with the lock error. Bundles clamp their paths against the process's current dir.
+pub async fn boot_kernel(
+    dir: &std::path::Path,
+    extras: &[Extra],
+    web_port: Option<u16>,
+    web_bind: Option<String>,
+) -> Result<std::sync::Arc<fantastic_kernel::Kernel>, String> {
+    let paths = env::Paths::at(dir);
+    paths.refuse_the_home()?;
+    let (host, _) = kern::host::boot_all(&paths, extras, web_port, web_bind, false).await?;
+    Ok(std::sync::Arc::clone(&host.kernel))
+}
+
+/// STOP A KERNEL [`boot_kernel`] returned, in the kernel's order: the pages, the drain, the
+/// store close, then the lock release. The same stop the modes end in.
+pub async fn stop_kernel(kernel: &std::sync::Arc<fantastic_kernel::Kernel>) {
+    kern::host::stop(kernel).await
+}
 
 /// AN EMBEDDER'S BUNDLES: registers them on the host's registry, after the stock
 /// set (`kern/host.rs`), so a record naming one hydrates into a live agent.
