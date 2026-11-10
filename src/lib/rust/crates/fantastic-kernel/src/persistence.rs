@@ -224,9 +224,9 @@ pub fn find_store_for(kernel: &Kernel, loader: &Agent) -> Option<AgentId> {
 }
 
 /// An agent's dir RELATIVE to a loader's store root — python
-/// `_store_reldir(agent, abs_path)`. Both sides are absolutized against the
-/// folded lexically (the state folder is not joined: an agent's address already
-/// holds it), so a relative `root` meta and an absolute agent address compare.
+/// `_store_reldir(agent, abs_path)`. Both sides are folded lexically, and the
+/// state folder is not joined (an agent's address already holds it), so a
+/// relative `root` meta and an absolute agent address compare.
 pub(crate) fn loader_reldir(kernel: &Kernel, loader: &Agent, abs: &Path) -> String {
     match (loader_dir(kernel, loader), kernel.state_dir()) {
         (Ok(dir), Ok(_)) => store_reldir(&dir, &normalize_lexical(Path::new(""), abs)),
