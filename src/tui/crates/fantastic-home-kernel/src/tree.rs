@@ -73,10 +73,6 @@ pub fn grants() -> Vec<(&'static str, Value, Value)> {
     ]
 }
 
-fn exists(kernel: &Kernel, id: &str) -> bool {
-    kernel.agents.contains_key(&AgentId::from(id))
-}
-
 /// `id`'s record meta (empty when there is no such agent).
 pub fn meta(kernel: &Kernel, id: &str) -> Map<String, Value> {
     kernel
@@ -119,7 +115,7 @@ async fn create(kernel: &Arc<Kernel>, mut spec: Value) -> Result<(), String> {
 /// host's `--port`: a new `web` takes it, or a free port when none is given; a
 /// recorded one was already set to it before `web` booted. The port served.
 pub async fn ensure(kernel: &Arc<Kernel>, port: Option<u16>) -> Result<u16, String> {
-    let fresh_web = !exists(kernel, WEB);
+    let fresh_web = !kernel.exists(WEB);
     let port = if fresh_web {
         match port {
             Some(p) => p,
@@ -132,7 +128,7 @@ pub async fn ensure(kernel: &Arc<Kernel>, port: Option<u16>) -> Result<u16, Stri
         }
         recorded
     };
-    let fresh_ws = !exists(kernel, HOME_WS);
+    let fresh_ws = !kernel.exists(HOME_WS);
     let made = [
         (
             USER,
@@ -162,7 +158,7 @@ pub async fn ensure(kernel: &Arc<Kernel>, port: Option<u16>) -> Result<u16, Stri
         ),
     ];
     for (id, mut spec) in made {
-        if !exists(kernel, id) {
+        if !kernel.exists(id) {
             spec["id"] = json!(id);
             create(kernel, spec).await?;
         }

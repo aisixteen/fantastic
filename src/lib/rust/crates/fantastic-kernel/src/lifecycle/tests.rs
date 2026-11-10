@@ -118,6 +118,8 @@ async fn create_then_delete_unregisters_and_calls_hook() {
         .await.remove(0).result;
     assert_eq!(v["id"], "kid_1");
     assert!(kernel.agents.contains_key(&AgentId::from("kid_1")));
+    assert!(kernel.exists("kid_1"));
+    assert!(!kernel.exists("no_such_agent"));
     // The record reaches disk through the root loader's writer; the flush
     // barrier waits for it.
     kernel.flush_records().await;
@@ -134,6 +136,7 @@ async fn create_then_delete_unregisters_and_calls_hook() {
         .result;
     assert_eq!(v["deleted"], true);
     assert!(!kernel.agents.contains_key(&AgentId::from("kid_1")));
+    assert!(!kernel.exists("kid_1"));
     assert_eq!(deletes.load(Ordering::SeqCst), 1);
     kernel.flush_records().await;
     assert!(!tmp.path().join("agents/kid_1").exists());

@@ -161,6 +161,22 @@ pub fn refusal(code: &str, error: impl Into<String>) -> Value {
     Value::Object(out)
 }
 
+/// The error text of a reply, or `None` when the reply carries no `error`.
+/// A string `error` is returned as is (any other JSON shape as its JSON text);
+/// a string `message` is appended as `: {message}`.
+#[must_use]
+pub fn error_text(reply: &Value) -> Option<String> {
+    let e = reply.get("error")?;
+    let mut s = e
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| e.to_string());
+    if let Some(m) = reply.get("message").and_then(Value::as_str) {
+        s = format!("{s}: {m}");
+    }
+    Some(s)
+}
+
 /// `refusal`, plus `hint` — what to do instead. Prefer this over the bare form
 /// wherever a repair exists: a refusal that cannot be acted on costs the same as
 /// no reply.
