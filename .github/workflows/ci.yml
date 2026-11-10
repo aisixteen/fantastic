@@ -35,8 +35,9 @@
 #                      rootless Podman (`container/server/container_check.py`). Beside the
 #                      e2e, the same way: full runs only
 #
-# The run's title says which it was (`ci · units` / `ci · full`). A green FULL
-# run is what `release.yml` publishes for its commit.
+# The run's title says which it was (`ci · units` / `ci · full`; a full run of
+# one OS is `ci · full · <os>`). A green `ci · full` (os all) run is what
+# `release.yml` publishes for its commit; a one-OS run never is.
 #
 # One more manual job, beside all of the above: `-f flatpak=true` builds the desktop
 # app's Flatpak (`packaging/flatpak/`, #82) on Ubuntu to prove the manifest compiles.
@@ -45,7 +46,7 @@
 # Free: standard GitHub-hosted runners on a public repo (see `build.yml`).
 
 name: ci
-run-name: ${{ inputs.e2e && 'ci · full' || 'ci · units' }}
+run-name: ${{ inputs.e2e && ((inputs.os == 'all' || inputs.os == '') && 'ci · full' || format('ci · full · {0}', inputs.os)) || 'ci · units' }}
 
 on:
   workflow_dispatch:
