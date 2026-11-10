@@ -71,7 +71,7 @@ impl PanelKind {
     }
 
     /// The classification, by the module's exact name. The AI arm names the
-    /// backends this build knows; a handler not in it is Generic, or Declared.
+    /// chat (`ai_chat.tools`; its provider is an agent like any other); a handler not in it is Generic, or Declared.
     ///
     /// The one exception is by ID: the shell's own terminal `term` is an
     /// `exec_bridge` like any command runner, and only this shell knows it is
@@ -82,9 +82,7 @@ impl PanelKind {
             return PanelKind::Terminal;
         }
         match m {
-            "anthropic_backend.tools" | "ollama_backend.tools" | "responses_backend.tools" | "vllm_backend.tools" | "foundation_models_backend.tools" => {
-                PanelKind::Ai
-            }
+            "ai_chat.tools" => PanelKind::Ai,
             "file_bridge.tools" => PanelKind::Files,
             "ram_store.tools" | "sqlite_store.tools" => PanelKind::Store,
             "scheduler.tools" => PanelKind::Scheduler,
@@ -235,7 +233,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_five_backends_get_the_ai_panel() {
+    fn the_chat_gets_the_ai_panel_and_its_provider_the_generic_one() {
+        assert_eq!(PanelKind::of("x", "ai_chat.tools"), PanelKind::Ai);
         for m in [
             "anthropic_backend.tools",
             "vllm_backend.tools",
@@ -243,7 +242,7 @@ mod tests {
             "ollama_backend.tools",
             "foundation_models_backend.tools",
         ] {
-            assert_eq!(PanelKind::of("x", m), PanelKind::Ai, "{m}");
+            assert_eq!(PanelKind::of("x", m), PanelKind::Generic, "{m}");
         }
     }
 
@@ -273,7 +272,7 @@ mod tests {
 
     #[test]
     fn an_unknown_module_still_gets_the_generic_panel_after_the_new_kinds() {
-        for m in ["scheduler", "store.tools", "credential_store", "scheduler.tool", "some_future_backend.tools", "ai_chat.tools"] {
+        for m in ["scheduler", "store.tools", "credential_store", "scheduler.tool", "some_future_backend.tools"] {
             assert_eq!(PanelKind::of("x", m), PanelKind::Generic, "{m}");
         }
     }
@@ -301,7 +300,7 @@ mod tests {
     #[test]
     fn panel_choice_order_built_in_then_declared_then_generic() {
         assert_eq!(PanelKind::choose("x", "scheduler.tools", true), PanelKind::Scheduler);
-        assert_eq!(PanelKind::choose("x", "vllm_backend.tools", true), PanelKind::Ai);
+        assert_eq!(PanelKind::choose("x", "ai_chat.tools", true), PanelKind::Ai);
         assert_eq!(
             PanelKind::choose("term", fantastic_exec_bridge::HANDLER_MODULE, true),
             PanelKind::Terminal

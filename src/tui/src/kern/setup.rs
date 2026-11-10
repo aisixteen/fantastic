@@ -198,42 +198,18 @@ pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
             return Err(format!("may call: no agent `{t}`"));
         }
     }
-    let user = host.cfg.user.clone();
-    // Its conversation lives in the kernel's memory store, both sides granted.
-    let store = host.admit_to_memory(id).await?;
-    let mut can_call: Map<String, Value> = rec.may_call.iter().map(|t| (t.clone(), json!("*"))).collect();
-    can_call.insert(store.clone(), json!("*"));
-    let mut create = rec.fields.clone();
-    crate::kern::keys::attach(host, &rec.handler, &mut create)?;
-    let mut create = { create.extend(
-        json!({
-            "type": "create_agent",
-            "parent_id": PARENT,
-            "id": id,
-            "handler_module": rec.handler,
-            "callable_by": {user.as_str(): "*"},
-            "can_call": can_call,
-            "memory_store_id": store,
-        })
-        .as_object()
-        .cloned()
-        .unwrap_or_default(),
-    ); create };
-    crate::kern::keys::grant_on_create(&mut create);
-    let named: Map<String, Value> = create.get("credentials").map(|c| [("credentials".to_string(), c.clone())].into_iter().collect()).unwrap_or_default();
-    let create = Value::Object(create);
-    // created AS `user`, its parent; `user`'s own side, and each target's
-    // `callable_by`, are `kern/reach`'s (an AI agent is a holder)
-    let r = host.act("kernel", create).await;
-    if let Some(e) = err_of(&r) {
-        return Err(e);
-    }
-    // its key, when it names one: the store's side of reading it
-    crate::kern::keys::wire_record(host, id, &named).await?;
-    crate::kern::reach::granted(host, id).await?;
-    let r = host.act(id, json!({"type": "boot"})).await;
-    if let Some(e) = err_of(&r) {
-        return Err(format!("`{id}` was written but did not boot: {e}"));
+    // the pair: the provider (the backend, its fields and key) and the chat `id` naming it, on the
+    // kernel's memory store; the targets the page names are the chat's to call. Both are made
+    // under `user` by `make_ai`; `user`'s own side and each target's `callable_by` are `kern/reach`'s
+    let peer: Map<String, Value> = rec.may_call.iter().map(|t| (t.clone(), json!("*"))).collect();
+    let mut spec = rec.fields.clone();
+    spec.insert("handler_module".into(), json!(rec.handler));
+    crate::kern::backend::BackendBundle::make_ai(host, &fantastic_kernel::AgentId::from(PARENT), id, spec, peer).await?;
+    for agent in [crate::kern::backend::provider_id(id), id.to_string()] {
+        let r = host.act(&agent, json!({"type": "boot"})).await;
+        if let Some(e) = err_of(&r) {
+            return Err(format!("`{agent}` was written but did not boot: {e}"));
+        }
     }
     Ok(format!(".fantastic/agents/{PARENT}/agents/{id}/agent.yaml"))
 }

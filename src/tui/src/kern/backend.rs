@@ -47,6 +47,9 @@ use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
 
+use fantastic_ai_core::chat_bundle::HANDLER_MODULE as CHAT_HANDLER;
+use fantastic_ai_core::remote_provider::PROVIDER_FIELD;
+
 use crate::env::ClientCfg;
 use crate::kern::host::Host;
 
@@ -57,6 +60,47 @@ pub const HANDLER_MODULE: &str = "canvas.tools";
 const CHAT_USER: &str = crate::env::HUMAN;
 /// What the cell's view may call on a spawned AI.
 pub const CHAT_VERBS: [&str; 6] = ["send", "history", "status", "watch", "reflect", "stop"];
+
+/// What a chat may call on its provider, and the provider admits it for.
+const PROVIDER_VERBS: [&str; 2] = ["complete", "watch"];
+
+/// The spec fields that are the CHAT's alone (the conversation's, its prompt and its saved
+/// set-up's name): the provider's record does not carry them.
+const CHAT_ONLY: [&str; 13] = [
+    "output_reserve",
+    "context_strategy",
+    "recent_n",
+    "caching",
+    "cache_primer_until",
+    "transport_retries",
+    "misfire_limit",
+    "system_prompt",
+    "file_bridge_id",
+    "system_prompt_file",
+    "pre_system_prompt",
+    "post_system_prompt",
+    "saved",
+];
+
+/// The spec fields BOTH records carry: the model the chat runs (the provider's default), and
+/// the window it fits the conversation to.
+const BOTH: [&str; 2] = ["model", "context_window"];
+
+/// The provider's id of the AI `ai` that [`BackendBundle::make_ai`] makes.
+pub(crate) fn provider_id(ai: &str) -> String {
+    format!("{ai}_provider")
+}
+
+/// The share of `spec` that sits on the CHAT's record: its own fields and the shared ones.
+pub(crate) fn chat_part(spec: &Map<String, Value>) -> Map<String, Value> {
+    spec.iter().filter(|(k, _)| CHAT_ONLY.contains(&k.as_str()) || BOTH.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
+/// The provider agent the chat `ai` names, when it is an agent here.
+pub(crate) fn provider_of(host: &Host, ai: &str) -> Option<String> {
+    let p = host.kernel.agents.get(&AgentId::from(ai)).and_then(|a| a.value().record().meta.get(PROVIDER_FIELD).and_then(Value::as_str).map(str::to_string))?;
+    host.kernel.agents.contains_key(&AgentId::from(p.as_str())).then_some(p)
+}
 
 /// The memory-store row kind a kept dialog is recorded as (under `user`'s key).
 const DIALOG: &str = "dialog";
@@ -311,62 +355,130 @@ impl BackendBundle {
         json!({"id": id, "root": id, "bundle": name, "kind": "bundle"})
     }
 
-    /// Create AI `ai` as `canvas_root`'s direct child, on the project's memory
-    /// store from its first turn (owner D4): the store admits it (as `user`, the
-    /// store's parent), its record names the store, `user` may call its chat
-    /// verbs, it may call the store, its key and `peer`. `user`'s own side is
-    /// `kern/reach`'s.
+    /// Make AI `ai` as `me`'s direct children: a PROVIDER (`<ai>_provider`: the spec's backend
+    /// handler, endpoint, models, key, prices) and the CHAT `ai` (`ai_chat.tools`, `provider_id`
+    /// naming the provider), both on the project's memory store from the first turn (owner D4).
+    /// The store admits both (as `user`, its parent); the chat's record lets `user` call the chat
+    /// verbs and names its store and the provider's `complete` / `watch`; the provider admits only
+    /// the chat. A spec whose handler is `ai_chat.tools` makes the chat alone, on the provider it
+    /// names. `user`'s own side is `kern/reach`'s. A chat refused deletes the provider just made.
     pub(crate) async fn make_ai(host: &Host, me: &AgentId, ai: &str, mut spec: Map<String, Value>, peer: Map<String, Value>) -> Result<(), String> {
+        let handler = spec.get("handler_module").and_then(Value::as_str).unwrap_or("").to_string();
+        let alone = handler == CHAT_HANDLER;
+        let prov = provider_id(ai);
         // the project's store, named or not, admits the AI; a caller's OWN store
         // is the caller's to grant
         let named = spec.get("memory_store_id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
         let store = match named {
             Some(s) if host.ai_store().ok().as_deref() != Some(s.as_str()) => s,
-            _ => host.admit_to_memory(ai).await?,
+            _ => {
+                let s = host.admit_to_memory(ai).await?;
+                if !alone {
+                    host.admit_to_memory(&prov).await?;
+                }
+                s
+            }
         };
-        let handler = spec.get("handler_module").and_then(Value::as_str).unwrap_or("").to_string();
-        crate::kern::keys::attach(host, &handler, &mut spec)?;
-        let spec = Self::ai_create_spec(me, ai, &store, spec, peer);
-        let named = spec.clone();
-        let r = host.operator("kernel", Value::Object(spec)).await.result;
-        if let Some(e) = r.get("error").and_then(Value::as_str) {
-            return Err(e.to_string());
+        if !alone {
+            crate::kern::keys::attach(host, &handler, &mut spec)?;
         }
-        if let Err(e) = crate::kern::keys::wire_record(host, ai, &named).await {
-            let _ = host.operator("kernel", json!({"type": "delete_agent", "id": ai})).await;
-            return Err(e);
+        let (provider, chat) = Self::pair_specs(me, ai, &store, spec, peer);
+        if let Some(provider) = provider {
+            let named = provider.clone();
+            let r = host.operator("kernel", Value::Object(provider)).await.result;
+            if let Some(e) = r.get("error").and_then(Value::as_str) {
+                return Err(e.to_string());
+            }
+            if let Err(e) = crate::kern::keys::wire_record(host, &prov, &named).await {
+                let _ = host.operator("kernel", json!({"type": "delete_agent", "id": prov})).await;
+                return Err(e);
+            }
+        } else if let Some(p) = chat.get(PROVIDER_FIELD).and_then(Value::as_str) {
+            Self::admit_chat(host, p, ai)?;
+        }
+        let r = host.operator("kernel", Value::Object(chat)).await.result;
+        if let Some(e) = r.get("error").and_then(Value::as_str) {
+            if !alone {
+                let _ = host.operator("kernel", json!({"type": "delete_agent", "id": prov})).await;
+            }
+            return Err(e.to_string());
         }
         // the cell calls it through `user` and watches it through the leg the
         // moment this answers: both grants first
+        if !alone {
+            crate::kern::reach::granted(host, &prov).await?;
+        }
         crate::kern::reach::granted(host, ai).await
     }
 
-    /// The `create_agent` spec of AI `ai` under `me`, on memory `store` (pure): the
-    /// store's grant on the AI's `can_call`, the human's chat verbs on its `callable_by`,
-    /// and the caller's own grants MERGED over both (the caller's keys win on a clash).
-    fn ai_create_spec(me: &AgentId, ai: &str, store: &str, mut spec: Map<String, Value>, peer: Map<String, Value>) -> Map<String, Value> {
-        spec.insert("type".into(), json!("create_agent"));
-        spec.insert("parent_id".into(), json!(me.0));
-        spec.insert("id".into(), json!(ai));
-        spec.insert("memory_store_id".into(), json!(store));
-        let caller = |spec: &mut Map<String, Value>, f: &str| match spec.remove(f) {
+    /// A provider on this kernel admits the chat `ai`: `complete` and `watch`, merged into its
+    /// `callable_by`. A provider on another kernel (`<guid>|<id>`) is that kernel's to admit.
+    fn admit_chat(host: &Host, provider: &str, ai: &str) -> Result<(), String> {
+        let id = AgentId::from(provider);
+        if !host.kernel.agents.contains_key(&id) {
+            return Ok(());
+        }
+        host.kernel
+            .edit_callable_by(&id, |m| {
+                m.insert(ai.to_string(), json!(PROVIDER_VERBS));
+                true
+            })
+            .map(|_| ())
+            .map_err(|e| format!("could not admit `{ai}` to `{provider}`: {e}"))
+    }
+
+    /// The `create_agent` specs (pure) of the PROVIDER of AI `ai` and of the CHAT `ai`, under `me`,
+    /// on memory `store`. The provider takes the spec but the chat's own fields ([`CHAT_ONLY`]):
+    /// its store grant, its key's `get`, and `callable_by` the chat alone. The chat takes
+    /// [`CHAT_ONLY`] and [`BOTH`]: the store's grant and the provider's, the human's chat verbs on
+    /// its `callable_by`, and the caller's own grants MERGED over both (the caller's keys win on a
+    /// clash). A spec that is already a chat has no provider (`None`): its `provider_id` is its own.
+    fn pair_specs(me: &AgentId, ai: &str, store: &str, mut spec: Map<String, Value>, peer: Map<String, Value>) -> (Option<Map<String, Value>>, Map<String, Value>) {
+        let taken = |spec: &mut Map<String, Value>, f: &str| match spec.remove(f) {
             Some(Value::Object(m)) => m,
             _ => Map::new(),
         };
-        let (caller_cc, caller_cb) = (caller(&mut spec, "can_call"), caller(&mut spec, "callable_by"));
+        let (caller_cc, caller_cb) = (taken(&mut spec, "can_call"), taken(&mut spec, "callable_by"));
+        let alone = spec.get("handler_module").and_then(Value::as_str) == Some(CHAT_HANDLER);
+        let prov = provider_id(ai);
+        let mut chat = Map::new();
+        for (k, v) in &spec {
+            if CHAT_ONLY.contains(&k.as_str()) || BOTH.contains(&k.as_str()) || alone {
+                chat.insert(k.clone(), v.clone());
+            }
+        }
+        let mut provider = spec;
+        provider.retain(|k, _| !CHAT_ONLY.contains(&k.as_str()));
+        for (m, id) in [(&mut chat, ai), (&mut provider, prov.as_str())] {
+            m.insert("type".into(), json!("create_agent"));
+            m.insert("parent_id".into(), json!(me.0));
+            m.insert("id".into(), json!(id));
+            m.insert("memory_store_id".into(), json!(store));
+        }
+        chat.insert("handler_module".into(), json!(CHAT_HANDLER));
+        let mut cc = Map::new();
+        cc.insert(store.to_string(), json!("*"));
+        let provider_spec = if alone {
+            if let Some(p) = chat.get(PROVIDER_FIELD).and_then(Value::as_str) {
+                cc.insert(p.to_string(), json!(PROVIDER_VERBS));
+            }
+            None
+        } else {
+            chat.insert(PROVIDER_FIELD.into(), json!(prov));
+            cc.insert(prov.clone(), json!(PROVIDER_VERBS));
+            provider.insert("callable_by".into(), json!({ai: PROVIDER_VERBS}));
+            provider.insert("can_call".into(), json!({store: "*"}));
+            crate::kern::keys::grant_on_create(&mut provider);
+            Some(provider)
+        };
         let mut cb = Map::new();
         cb.insert(CHAT_USER.into(), json!(CHAT_VERBS));
         cb.extend(caller_cb);
-        spec.insert("callable_by".into(), Value::Object(cb));
-        let mut cc = Map::new();
-        cc.insert(store.to_string(), json!("*"));
-        spec.insert("can_call".into(), Value::Object(cc));
-        crate::kern::keys::grant_on_create(&mut spec);
-        if let Some(Value::Object(cc)) = spec.get_mut("can_call") {
-            cc.extend(peer);
-            cc.extend(caller_cc);
-        }
-        spec
+        chat.insert("callable_by".into(), Value::Object(cb));
+        cc.extend(peer);
+        cc.extend(caller_cc);
+        chat.insert("can_call".into(), Value::Object(cc));
+        (provider_spec, chat)
     }
 
     /// Whether `id` sits under `me` (strictly).
@@ -398,23 +510,26 @@ impl BackendBundle {
         if handler.is_empty() {
             return refuse("bad_arg", "create: record.handler_module required", "");
         }
+        // an AI is a chat on its provider: asked as either, the chat is the child
+        let is_ai = matches!(
+            handler,
+            "anthropic_backend.tools" | "ollama_backend.tools" | "responses_backend.tools" | "vllm_backend.tools" | "foundation_models_backend.tools" | "ai_chat.tools"
+        );
+        let made = if is_ai { CHAT_HANDLER } else { handler };
         // a child asked again is the same child
         if let Some(id) = rec.get("id").and_then(Value::as_str) {
             if let Some(a) = host.kernel.agents.get(&AgentId::from(id)) {
                 let r = a.value().record();
-                if r.parent_id.as_deref() == Some(me.0.as_str()) && r.handler_module.as_deref() == Some(handler) {
+                if r.parent_id.as_deref() == Some(me.0.as_str()) && r.handler_module.as_deref() == Some(made) {
                     return json!({"id": id, "existed": true});
                 }
                 return refuse("exists", format!("create: `{id}` already exists elsewhere"), "");
             }
         }
-        // an AI is made the way every AI is (`make_ai`): on the project's memory store from
-        // its first turn, granted its store and the human's chat verbs. Equipment that is
-        // an AI reaches its memory store through this, as a canvas's AI always has.
-        if matches!(
-            handler,
-            "anthropic_backend.tools" | "ollama_backend.tools" | "responses_backend.tools" | "vllm_backend.tools" | "foundation_models_backend.tools"
-        ) {
+        // an AI is made the way every AI is (`make_ai`): a provider and its chat, on the project's
+        // memory store from its first turn, the chat granted its store, its provider and the
+        // human's chat verbs. Equipment that is an AI reaches its memory store through this.
+        if is_ai {
             let ai = match rec.get("id").and_then(Value::as_str) {
                 Some(id) => id.to_string(),
                 None => format!("ai_{}", hex8()),
@@ -446,7 +561,16 @@ impl BackendBundle {
         if !Self::below(host, me, id) {
             return refuse("not_found", format!("delete: no {id:?} under `{}`", me.0), "");
         }
-        host.operator("kernel", json!({"type": "delete_agent", "id": id})).await.result
+        // the provider `make_ai` made for a chat goes with it
+        let provider = Some(provider_id(id)).filter(|p| provider_of(host, id).as_deref() == Some(p.as_str()));
+        let r = host.operator("kernel", json!({"type": "delete_agent", "id": id})).await.result;
+        if let (Some(p), None) = (provider, r.get("error")) {
+            let gone = host.operator("kernel", json!({"type": "delete_agent", "id": p})).await.result;
+            if gone.get("error").is_some() {
+                return gone;
+            }
+        }
+        r
     }
 
     /// `add_mcp {url, key?}` — ONE remote MCP server as an agent (`mcp_client`):
@@ -602,10 +726,22 @@ impl BackendBundle {
         if let Some(d) = dialogs.get(&ai) {
             return json!({"kept": ai, "name": d["name"]});
         }
-        let mut record: Map<String, Value> =
-            meta.iter().filter(|(k, _)| !NOT_SNAPSHOT.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+        let snapshot = |m: &Map<String, Value>| -> Map<String, Value> {
+            m.iter().filter(|(k, _)| !NOT_SNAPSHOT.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
         // the handler is on the record, not in its meta
-        let handler = host.kernel.agents.get(&AgentId::from(ai.as_str())).and_then(|a| a.value().record().handler_module);
+        let handler_of = |id: &str| host.kernel.agents.get(&AgentId::from(id)).and_then(|a| a.value().record().handler_module);
+        // the pair `make_ai` made is ONE provider-shaped record: the provider's fields under the
+        // chat's, the provider's handler (a saved set-up's shape); a chat on a provider of its own
+        // stays a chat record naming it
+        let (mut record, handler) = match Self::meta_of(host, &provider_id(&ai)).filter(|_| provider_of(host, &ai).as_deref() == Some(provider_id(&ai).as_str())) {
+            Some(pm) => {
+                let mut r = snapshot(&pm);
+                r.extend(snapshot(&meta).into_iter().filter(|(k, _)| k != PROVIDER_FIELD));
+                (r, handler_of(&provider_id(&ai)))
+            }
+            None => (snapshot(&meta), handler_of(&ai)),
+        };
         record.insert("handler_module".into(), json!(handler));
         let name = p.get("name").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(&ai).trim().to_string();
         let d = json!({"name": name, "saved": meta.get("saved"), "record": record});
@@ -741,13 +877,13 @@ mod create_tests {
     use fantastic_kernel::{Agent, Kernel};
     use std::path::PathBuf;
 
-    /// A registered AI handler, registered under a backend name.
-    struct FakeAi;
+    /// A registered AI handler, registered under the name it carries.
+    struct FakeAi(&'static str);
 
     #[async_trait]
     impl Bundle for FakeAi {
         fn name(&self) -> &str {
-            "vllm_backend.tools"
+            self.0
         }
 
         async fn handle(&self, _id: &AgentId, _p: &Value, _k: &Arc<Kernel>) -> Result<Option<Value>, BundleError> {
@@ -771,7 +907,8 @@ mod create_tests {
             fantastic_core::KernelStateBundle::default(),
         );
         kernel.bundles.register(HANDLER_MODULE, BackendBundle);
-        kernel.bundles.register("vllm_backend.tools", FakeAi);
+        kernel.bundles.register("vllm_backend.tools", FakeAi("vllm_backend.tools"));
+        kernel.bundles.register("ai_chat.tools", FakeAi("ai_chat.tools"));
         // `user` is real: the host admits an AI to the store AS `user` (`Host::act`)
         kernel.bundles.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
         let kernel = Arc::new(kernel);
@@ -811,33 +948,120 @@ mod create_tests {
         h.kernel.agents.get(&AgentId::from(id)).map(|a| a.value().record().meta.clone()).unwrap_or_default()
     }
 
+    const PV: [&str; 2] = ["complete", "watch"];
+
+    fn rec_ai(extra: Value) -> Value {
+        let mut r = json!({"handler_module": "vllm_backend.tools", "id": "helper", "memory_store_id": "memory",
+            "endpoint": "http://box.example:8000/v1", "model": "m1", "kv_overflow": "evict", "context_strategy": "none"});
+        r.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap_or_default());
+        r
+    }
+
     #[tokio::test]
-    async fn an_ai_made_on_a_canvas_reaches_the_store_it_names_and_the_store_admits_it() {
-        let (h, dir) = host("ai", &["helper"]).await;
+    async fn an_ai_made_on_a_canvas_is_a_provider_and_a_chat_naming_it() {
+        let (h, dir) = host("ai", &["helper", "helper_provider"]).await;
         let me = AgentId::from("canvas_root");
+        let out = BackendBundle::create(&h, &me, &json!({"record": rec_ai(json!({}))})).await;
+        assert_eq!(out, json!({"id": "helper"}), "{out}");
+        for id in ["helper", "helper_provider"] {
+            let rec = h.kernel.agents.get(&AgentId::from(id)).unwrap().value().record();
+            assert_eq!(rec.parent_id.as_deref(), Some("canvas_root"), "{id} is a child of the canvas");
+        }
+        let handler = |id: &str| h.kernel.agents.get(&AgentId::from(id)).unwrap().value().record().handler_module;
+        assert_eq!(handler("helper").as_deref(), Some("ai_chat.tools"));
+        assert_eq!(handler("helper_provider").as_deref(), Some("vllm_backend.tools"));
+        let (chat, prov) = (record_of(&h, "helper"), record_of(&h, "helper_provider"));
+        // the chat names its provider and holds the conversation; the endpoint is the provider's
+        assert_eq!(chat["provider_id"], json!("helper_provider"));
+        assert_eq!(chat["memory_store_id"], json!("memory"));
+        assert_eq!(chat["model"], json!("m1"));
+        assert_eq!(chat["context_strategy"], json!("none"));
+        for f in ["endpoint", "credentials", "kv_overflow", "handler_module"] {
+            assert!(chat.get(f).is_none(), "the chat holds no `{f}`");
+        }
+        assert_eq!(prov["endpoint"], json!("http://box.example:8000/v1"));
+        assert_eq!(prov["kv_overflow"], json!("evict"));
+        assert_eq!(prov["memory_store_id"], json!("memory"));
+        assert!(prov.get("provider_id").is_none() && prov.get("context_strategy").is_none(), "the provider holds none of the chat's");
+        // both ends of the edge, exactly: the chat calls its store and the provider's complete/watch,
+        // the provider admits the chat alone, and the human's chat verbs reach the chat
+        // (the kernel adds `$self` to every record's grants)
+        let grants = |m: &Map<String, Value>, f: &str| {
+            let mut g = m[f].as_object().cloned().unwrap();
+            g.remove("$self");
+            Value::Object(g)
+        };
+        assert_eq!(grants(&chat, "can_call"), json!({"memory": "*", "helper_provider": PV}));
+        assert_eq!(grants(&chat, "callable_by"), json!({crate::env::HUMAN: CHAT_VERBS}));
+        assert_eq!(grants(&prov, "can_call"), json!({"memory": "*"}));
+        assert_eq!(grants(&prov, "callable_by"), json!({"helper": PV}));
+        // and the store admits both (its ingress side)
+        assert_eq!(record_of(&h, "memory")["callable_by"]["helper"], json!("*"), "the store admits the chat");
+        assert_eq!(record_of(&h, "memory")["callable_by"]["helper_provider"], json!("*"), "and the provider");
+        // asked again as either handler, it is the same child
+        let again = BackendBundle::create(&h, &me, &json!({"record": rec_ai(json!({}))})).await;
+        assert_eq!(again, json!({"id": "helper", "existed": true}), "{again}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_chat_refused_deletes_the_provider_just_made() {
+        let (h, dir) = host("refused", &["taken", "taken_provider"]).await;
+        let me = AgentId::from("canvas_root");
+        let first = BackendBundle::make_ai(&h, &me, "taken", rec_ai(json!({})).as_object().unwrap().clone(), Map::new()).await;
+        assert!(first.is_ok(), "{first:?}");
+        // the chat id is taken now: the second chat is refused, the provider it made first goes
+        h.operator("kernel", json!({"type": "delete_agent", "id": "taken_provider"})).await;
+        let second = BackendBundle::make_ai(&h, &me, "taken", rec_ai(json!({})).as_object().unwrap().clone(), Map::new()).await;
+        assert!(second.is_err(), "the chat `taken` exists");
+        assert!(!h.kernel.agents.contains_key(&AgentId::from("taken_provider")), "the provider of the refused chat is gone");
+        assert!(h.kernel.agents.contains_key(&AgentId::from("taken")), "the first chat is untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn delete_takes_both_and_the_pair_can_be_made_again() {
+        let (h, dir) = host("delete", &["helper", "helper_provider", "again", "again_provider"]).await;
+        let me = AgentId::from("canvas_root");
+        let made = BackendBundle::create(&h, &me, &json!({"record": rec_ai(json!({}))})).await;
+        assert_eq!(made, json!({"id": "helper"}), "{made}");
+        let out = BackendBundle::delete(&h, &me, &json!({"id": "helper"})).await;
+        assert!(out.get("error").is_none(), "{out}");
+        for id in ["helper", "helper_provider"] {
+            assert!(!h.kernel.agents.contains_key(&AgentId::from(id)), "{id} is gone with the chat");
+        }
+        // a kept dialog's reopen is `make_ai` on the one record: both agents again
+        let again = BackendBundle::make_ai(&h, &me, "again", rec_ai(json!({})).as_object().unwrap().clone(), Map::new()).await;
+        assert!(again.is_ok(), "{again:?}");
+        assert!(h.kernel.agents.contains_key(&AgentId::from("again_provider")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_chat_asked_for_names_its_provider_and_the_provider_admits_it() {
+        let (h, dir) = host("chat-only", &["mine"]).await;
+        let me = AgentId::from("canvas_root");
+        let prov = h
+            .operator("kernel", json!({"type": "create_agent", "parent_id": "kernel", "id": "prov", "handler_module": "vllm_backend.tools", "callable_by": {"$self": "*"}}))
+            .await;
+        assert!(prov.result.get("error").is_none(), "{:?}", prov.result);
         let out = BackendBundle::create(
             &h,
             &me,
-            &json!({"record": {"handler_module": "vllm_backend.tools", "id": "helper", "memory_store_id": "memory"}}),
+            &json!({"record": {"handler_module": "ai_chat.tools", "id": "mine", "provider_id": "prov", "memory_store_id": "memory"}}),
         )
         .await;
-        assert_eq!(out, json!({"id": "helper"}), "{out}");
-        let rec = h.kernel.agents.get(&AgentId::from("helper")).unwrap().value().record();
-        assert_eq!(rec.parent_id.as_deref(), Some("canvas_root"), "a child of the canvas");
-        let meta = record_of(&h, "helper");
-        assert_eq!(meta["memory_store_id"], json!("memory"));
-        // the AI reads its store (its own side), and the human's chat verbs reach it
-        assert_eq!(meta["can_call"]["memory"], json!("*"));
-        assert_eq!(meta["callable_by"][crate::env::HUMAN], json!(CHAT_VERBS));
-        // and the store admits it (its ingress side)
-        assert_eq!(record_of(&h, "memory")["callable_by"]["helper"], json!("*"), "the store admits the helper");
+        assert_eq!(out, json!({"id": "mine"}), "{out}");
+        assert!(!h.kernel.agents.contains_key(&AgentId::from("mine_provider")), "no second provider");
+        assert_eq!(record_of(&h, "mine")["can_call"]["prov"], json!(PV));
+        assert_eq!(record_of(&h, "prov")["callable_by"]["mine"], json!(PV));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn spawn_instance_refuses_a_bad_tui_with_reason_bad_arg() {
         let (h, dir) = host("bad-tui", &["fakeb_1", "fakeb_2"]).await;
-        h.kernel.bundles.register_folder("fakeb", Arc::new(FakeAi), json!({}));
+        h.kernel.bundles.register_folder("fakeb", Arc::new(FakeAi("vllm_backend.tools")), json!({}));
         let bundle = dir.join(".fantastic").join("bundles").join("fakeb");
         std::fs::create_dir_all(&bundle).unwrap();
         let doc = |show: &str| {
@@ -862,7 +1086,7 @@ mod create_tests {
 
     #[tokio::test]
     async fn an_ai_naming_its_callers_own_store_is_not_admitted_by_the_host() {
-        let (h, dir) = host("own", &["helper2"]).await;
+        let (h, dir) = host("own", &["helper2", "helper2_provider"]).await;
         h.act("kernel", json!({"type": "create_agent", "parent_id": "kernel", "id": "own_store", "handler_module": fantastic_core::HANDLER_MODULE}))
             .await;
         let out = BackendBundle::create(
@@ -895,32 +1119,47 @@ mod create_tests {
     }
 
     #[test]
-    fn the_ai_create_spec_grants_its_store_and_merges_the_callers_grants_over_the_defaults() {
+    fn the_pair_specs_split_the_fields_and_merge_the_callers_grants_over_the_defaults() {
         let me = AgentId::from("canvas_root");
         let spec = json!({
             "handler_module": "vllm_backend.tools",
+            "endpoint": "http://h/v1",
+            "credentials": {"store": "credentials", "ref": "vllm/h"},
+            "model": "m1",
+            "caching": "auto",
             "can_call": {"tool_a": "*", "memory": ["send"]},
             "callable_by": {"ops": ["send"]},
         });
-        let spec = BackendBundle::ai_create_spec(
+        let (prov, chat) = BackendBundle::pair_specs(
             &me,
             "helper",
             "memory",
             spec.as_object().unwrap().clone(),
             Map::from_iter([("peer_b".to_string(), json!(["send"]))]),
         );
-        assert_eq!(spec["type"], json!("create_agent"));
-        assert_eq!(spec["parent_id"], json!("canvas_root"));
-        assert_eq!(spec["id"], json!("helper"));
-        assert_eq!(spec["memory_store_id"], json!("memory"));
+        let prov = prov.expect("a provider");
+        assert_eq!((prov["type"].clone(), prov["parent_id"].clone(), prov["id"].clone()), (json!("create_agent"), json!("canvas_root"), json!("helper_provider")));
+        assert_eq!(prov["handler_module"], json!("vllm_backend.tools"));
+        assert_eq!(prov["endpoint"], json!("http://h/v1"));
+        assert_eq!(prov["model"], json!("m1"));
+        assert!(prov.get("caching").is_none() && prov.get("provider_id").is_none());
+        // the key's `get` is the provider's; the caller's tool grants are the chat's
+        assert_eq!(prov["can_call"], json!({"memory": "*", "credentials": ["get"]}));
+        assert_eq!(prov["callable_by"], json!({"helper": ["complete", "watch"]}));
+        assert_eq!(chat["handler_module"], json!("ai_chat.tools"));
+        assert_eq!(chat["id"], json!("helper"));
+        assert_eq!(chat["provider_id"], json!("helper_provider"));
+        assert_eq!(chat["memory_store_id"], json!("memory"));
+        assert_eq!(chat["caching"], json!("auto"));
+        assert!(chat.get("endpoint").is_none() && chat.get("credentials").is_none());
         // the caller's own `memory` grant wins a clash; the store is named either way
-        assert_eq!(spec["can_call"]["memory"], json!(["send"]));
-        assert_eq!(spec["can_call"]["tool_a"], json!("*"));
-        assert_eq!(spec["can_call"]["peer_b"], json!(["send"]));
+        assert_eq!(chat["can_call"]["memory"], json!(["send"]));
+        assert_eq!(chat["can_call"]["tool_a"], json!("*"));
+        assert_eq!(chat["can_call"]["peer_b"], json!(["send"]));
+        assert_eq!(chat["can_call"]["helper_provider"], json!(["complete", "watch"]));
+        assert!(chat["can_call"].get("credentials").is_none());
         // the human's chat verbs and the caller's callers, merged
-        assert_eq!(spec["callable_by"][crate::env::HUMAN], json!(CHAT_VERBS));
-        assert_eq!(spec["callable_by"]["ops"], json!(["send"]));
-        assert!(spec.get("can_call").and_then(|c| c.as_object()).is_some());
+        assert_eq!(chat["callable_by"][crate::env::HUMAN], json!(CHAT_VERBS));
+        assert_eq!(chat["callable_by"]["ops"], json!(["send"]));
     }
 }
-

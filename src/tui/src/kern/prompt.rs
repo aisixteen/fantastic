@@ -65,14 +65,10 @@ pub async fn stamp(h: &Host, id: &str) -> Result<(), String> {
     if !h.kernel.exists(BRIDGE) {
         return Ok(());
     }
-    // None: not a backend agent (or gone): nothing to stamp. Some(own): names a file or bridge already.
+    // None: not a chat (or gone): nothing to stamp. Some(own): names a file or bridge already.
     let own = h.kernel.agents.get(&fantastic_kernel::AgentId::from(id)).and_then(|a| {
         let r = a.value().record();
-        matches!(
-            r.handler_module.as_deref(),
-            Some("anthropic_backend.tools" | "ollama_backend.tools" | "responses_backend.tools" | "vllm_backend.tools" | "foundation_models_backend.tools")
-        )
-        .then(|| ["system_prompt_file", "file_bridge_id"].iter().any(|k| r.meta.get(*k).is_some_and(|v| !v.is_null())))
+        (r.handler_module.as_deref() == Some(fantastic_ai_core::chat_bundle::HANDLER_MODULE)).then(|| ["system_prompt_file", "file_bridge_id"].iter().any(|k| r.meta.get(*k).is_some_and(|v| !v.is_null())))
     });
     if own != Some(false) {
         return Ok(());
@@ -104,7 +100,7 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn stamp_names_the_prompt_file_on_a_backend_handler_only() {
+    async fn stamp_names_the_prompt_file_on_a_chat_only() {
         let dir = std::env::temp_dir().join(format!("fc-prompt-{}-stamp", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -145,9 +141,9 @@ mod tests {
         let file = |id: &str| {
             h.kernel.agents.get(&AgentId::from(id)).unwrap().value().record().meta.get("system_prompt_file").cloned()
         };
-        assert_eq!(file("backend"), Some(json!(PATH)));
-        assert_eq!(h.kernel.agents.get(&AgentId::from("backend")).unwrap().value().record().meta["file_bridge_id"], json!(BRIDGE));
+        assert_eq!(file("chat"), Some(json!(PATH)));
+        assert_eq!(h.kernel.agents.get(&AgentId::from("chat")).unwrap().value().record().meta["file_bridge_id"], json!(BRIDGE));
+        assert_eq!(file("backend"), None, "a provider holds no prompt file: it is the chat's field");
         assert_eq!(file("py"), None, "a plain handler with a store field is not stamped");
-        assert_eq!(file("chat"), None, "ai_chat.tools is not in the backend set");
     }
 }

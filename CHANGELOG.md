@@ -7,6 +7,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- `E150_chat_provider_split` (#519): an e2e probe (Rust lane, scripted provider) for the chat and its provider apart: the local split, a swap of the chat's `provider_id`, the grants refused by name, and a provider on another kernel; the base e2e (E99, E22, E23 and the parity families) make their AI as a provider plus a chat.
 - `reflect` takes `handler_modules` (#605): a list of handler names; with `tree` `all` or `ids` only the agents whose `handler_module` is listed come back, as a flat `tree` list, and an agent outside the list is not asked. A value that is not a list of names is refused `bad_arg`.
 - `boot_kernel` / `stop_kernel` in `fantastic_tui` (#580): a host that runs the kernel in its own
   process boots one folder (after `seed_dir_with`) with the stock bundles plus its `Extra`s, an
@@ -227,6 +228,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Changed
 
+- The terminal UI makes an AI as a provider plus a chat (#518): `make_ai` (canvas `spawn` / `create` / `reopen`, the set-up page's write, the wizard, `ai BACKEND`) creates the provider `<id>_provider` (the backend, its endpoint, models and key) and the chat `<id>` (`ai_chat.tools`, `provider_id`, the model, store and prompt fields), the chat granted `complete` and `watch` on its provider and the provider admitting the chat alone; a chat refused deletes the provider just made, and `delete` takes both. `ai BACKEND` re-points the provider. The prompt-file stamp and the AI panel are the chat's; a provider gets the generic panel.
 - An agent's kind is its handler name (#605): the AI checks (`is_ai`, `is_ai_handler`, `ai_check`, the page's `isAi`, `is_web`, `is_canvas`) are removed; the row watch, grant holders, prompt stamp, set-up catalog, AI panel, export port kinds and the page's chat view and badges compare the record's `handler_module` with the names they need, and no longer read `memory_store_id` or a name suffix.
 - Boot (#580): in the terminal UI and `canvas`, a refused grant watch (`reach::start`) now stops
   the boot like in `mcp` mode (it was a note); in `mcp` mode the grant watch now starts before
