@@ -221,7 +221,7 @@ pub async fn new_canvas(h: &Host, parent: &str, name: &str) -> Result<String, St
 }
 
 /// A port free on this machine now (the OS picks it), for the first run that names none.
-fn free_port() -> Result<u16, String> {
+pub(crate) fn free_port() -> Result<u16, String> {
     let l = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("no free port to pick: {e}"))?;
     l.local_addr().map(|a| a.port()).map_err(|e| format!("no free port to pick: {e}"))
 }

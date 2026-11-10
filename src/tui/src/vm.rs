@@ -201,9 +201,11 @@ async fn run(
             if let Err(e) = crate::tty::redirect_std_to(&paths.cli.join("kernel.log")) {
                 app.note(format!("{e}"));
             }
-            match Host::boot(&paths, boot.port, boot.bind.clone()).await {
-                Ok(h) => {
-                    let h = Arc::new(h);
+            // THE ONE BOOT (`kern::host::boot_all`): the kernel, the canvas when asked, the
+            // grant watch. No page is fatal: a served-but-dead page is worse than a loud
+            // stop; the reason is said on the way out.
+            match crate::kern::host::boot_all(&paths, crate::extras(), boot.port, boot.bind.clone(), boot.canvas).await {
+                Ok((h, urls)) => {
                     app.cfg = h.cfg.clone();
                     app.link = Link::Up;
                     crate::kern::runner::spawn_row_tail(Arc::clone(&h), tx.clone(), h.kernel.rows.next_id() - 1);
@@ -214,34 +216,15 @@ async fn run(
                     // each terminal's last launched command (`kern/term_watch`)
                     crate::kern::term_watch::spawn(Arc::clone(&h));
                     cmds = Some(crate::kern::runner::spawn(Arc::clone(&h), tx.clone()));
-                    if boot.canvas {
-                        match crate::kern::web::ensure(&h, boot.port, boot.bind.as_deref()).await {
-                            Ok(urls) => {
-                                boot.say(&format!("fantastic: the canvas: {}", urls.canvas));
-                                app.note(format!("the canvas: {}", urls.canvas));
-                                if let Err(e) = crate::kern::web::write_run_file(&paths.cwd, &urls) {
-                                    app.note(format!("the run file: {e}"));
-                                }
-                                if let Err(e) = crate::kern::user_store::set_canvas(&h, &urls.canvas).await {
-                                    app.note(e);
-                                }
-                            }
-                            // No page to serve is fatal where the page is the
-                            // only View; with a terminal it is a note there.
-                            // No page is fatal: a served-but-dead page is worse
-                            // than a loud stop. The reason is said on the way out.
-                            Err(e) => {
-                                boot.say(&format!("fantastic: {e}"));
-                                app.note(e);
-                                failed();
-                                app.quit = true;
-                            }
+                    if let Some(urls) = urls {
+                        boot.say(&format!("fantastic: the canvas: {}", urls.canvas));
+                        app.note(format!("the canvas: {}", urls.canvas));
+                        if let Err(e) = crate::kern::web::write_run_file(&paths.cwd, &urls) {
+                            app.note(format!("the run file: {e}"));
                         }
-                    }
-                    // THE GRANT WATCH, once the boot's own grant writes (the canvas's
-                    // above) are done; `ai` and `run` below wait on its grants
-                    if let Err(e) = crate::kern::reach::start(&h).await {
-                        app.note(e);
+                        if let Err(e) = crate::kern::user_store::set_canvas(&h, &urls.canvas).await {
+                            app.note(e);
+                        }
                     }
                     // `ai BACKEND …` and `run COMMAND…`: with or without the canvas. One
                     // that cannot be done is a loud stop, like no page.
@@ -449,7 +432,7 @@ async fn run(
             tokio::select! { _ = term_sig.recv() => {}, _ = int_sig.recv() => {} }
         };
         match crate::kern::host::stop_bounded(
-            h.shutdown(&paths),
+            crate::kern::host::stop(&h.kernel),
             second,
             crate::kern::host::STOP_GRACE,
             &paths.store,

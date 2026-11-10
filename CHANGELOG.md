@@ -7,6 +7,15 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- `boot_kernel` / `stop_kernel` in `fantastic_tui` (#580): a host that runs the kernel in its own
+  process boots one folder (after `seed_dir_with`) with the stock bundles plus its `Extra`s, an
+  optional web port and bind, and gets the running `Arc<Kernel>`; `stop_kernel` ends it in the
+  kernel's order (pages, drain, store close, lock release). The modes and the embedder run ONE
+  boot (`kern::host::boot_all`: boot, the canvas when asked, the grant watch) and ONE stop; the
+  MCP channel and the share socket stay the modes' own. `--headless --port N --host ADDR` is
+  accepted and sets the recorded `web` before it listens (no `web` record: refused, nothing
+  started); a recorded `web` with no port (and no `--port`) picks a free port once, records it
+  and reuses it, in every mode.
 - AI core `status` reply carries `inquiry_from` (#597): the askers of the inquiries the agent has received and not yet answered, sorted, each once (the operator as `operator`), ids only, in every `status` reply. No new verb or grant.
 - `KeyReader::read_fields(endpoint, names)` (#596): the credential reader returns the named
   fields of one ref (in the order asked, an absent or empty one an error naming the field,
@@ -216,6 +225,10 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Changed
 
+- Boot (#580): in the terminal UI and `canvas`, a refused grant watch (`reach::start`) now stops
+  the boot like in `mcp` mode (it was a note); in `mcp` mode the grant watch now starts before
+  the MCP leg is made. A refused canvas now stops the kernel at once, before the UI's runners
+  spawn.
 - The app's fullscreen flag is `--fullscreen` (renamed; the old flag name no longer parses) (#475). The server container's
   files are in `container/server/`, and the installers carry the app's `.deb` only.
 - CI runs only by hand: a push to a `fix/**` or `feat/**` branch no longer

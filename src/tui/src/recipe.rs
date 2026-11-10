@@ -1,5 +1,5 @@
 //! THE COMMAND LINE:
-//! `fantastic [canvas [--port N] | --headless] [ai [BACKEND FLAGS…]] [run COMMAND [ARGS…]]`.
+//! `fantastic [canvas [--port N] [--host ADDR] | --headless [--port N] [--host ADDR]] [ai [BACKEND FLAGS…]] [run COMMAND [ARGS…]]`.
 //!
 //! A RECIPE is a word that names agents. It ADDS them to the kernel only if they
 //! are missing — a recipe already applied adds nothing — and RUNS them. The
@@ -27,9 +27,11 @@
 //! its View — and the kernel's message stream goes to stdout. `--headless`: the
 //! same with no canvas recipe (a recorded `web` host still listens: it is the core
 //! listener, booted in every mode). Both together are refused: `canvas` says it already.
-//! `--port N` belongs to `canvas`; a new one overwrites the recorded. The first
-//! `canvas` without one picks a free port and records it; later runs reuse it.
-//! `--host ADDR` (the bind address, `127.0.0.1` unless named) belongs to `canvas`
+//! `--port N` belongs to the `web` host: `canvas` or `--headless`; a new one overwrites the
+//! recorded. A `web` with no recorded port (the first `canvas`, or one seeded without) picks a
+//! free port and records it; later runs reuse it. With `--headless` and no `web` record the
+//! flag has nothing to set and the boot is refused.
+//! `--host ADDR` (the bind address, `127.0.0.1` unless named) belongs to the `web` host
 //! the same way: it is recorded on `web`, and a container names `0.0.0.0` to
 //! publish its port. A kernel already running here refuses every argument
 //! (`run.rs`). `fantastic mcp` stays its own command (stdout is its protocol).
@@ -67,7 +69,7 @@ impl Opts {
     }
 }
 
-const USAGE: &str = "run `fantastic [canvas [--port N] | --headless] [ai [vllm|ollama|responses|anthropic …]] [run COMMAND …]`, `fantastic mcp`, `fantastic send <item>`, `fantastic import <path> --parent <id>`, `fantastic migrate-home [--dry-run]` or `fantastic readme [key]`";
+const USAGE: &str = "run `fantastic [canvas [--port N] [--host ADDR] | --headless [--port N] [--host ADDR]] [ai [vllm|ollama|responses|anthropic …]] [run COMMAND …]`, `fantastic mcp`, `fantastic send <item>`, `fantastic import <path> --parent <id>`, `fantastic migrate-home [--dry-run]` or `fantastic readme [key]`";
 
 fn port_of(v: &str, flag: &str) -> Result<u16, String> {
     v.parse::<u16>().ok().filter(|p| *p > 0).ok_or_else(|| format!("{flag} must be 1..65535, got `{v}`"))
@@ -200,11 +202,12 @@ pub fn parse(args: &[String]) -> Result<Opts, String> {
     }
     // the canvas's View is the browser: no terminal UI, the stream on stdout
     o.headless |= o.canvas();
-    if o.port.is_some() && !o.canvas() {
-        return Err("--port belongs to the `canvas` recipe".into());
+    // `o.headless` is true for `canvas` too (set above)
+    if o.port.is_some() && !o.headless {
+        return Err("--port belongs to the `web` host: use it with the `canvas` recipe or with --headless".into());
     }
-    if o.bind.is_some() && !o.canvas() {
-        return Err("--host belongs to the `canvas` recipe".into());
+    if o.bind.is_some() && !o.headless {
+        return Err("--host belongs to the `web` host: use it with the `canvas` recipe or with --headless".into());
     }
     if o.headless && o.run.is_some() && !o.canvas() {
         return Err("`run` needs a View: the terminal UI (drop --headless) or the canvas".into());
@@ -255,6 +258,17 @@ mod tests {
         assert!(h.headless && !h.canvas(), "--headless alone: no UI, no canvas");
         assert!(p("ai --port 8123").is_err());
         assert!(p("canvas --port 0").is_err());
+    }
+
+    #[test]
+    fn headless_takes_the_web_hosts_flags() {
+        let o = p("--headless --port 8123 --host 127.0.0.1").unwrap();
+        assert!(o.headless && !o.canvas());
+        assert_eq!(o.port, Some(8123));
+        assert_eq!(o.bind.as_deref(), Some("127.0.0.1"));
+        assert!(p("--port 8123").is_err(), "neither canvas nor --headless");
+        assert!(p("--host 127.0.0.1").is_err(), "neither canvas nor --headless");
+        assert!(p("ai --host 0.0.0.0").is_err());
     }
 
     #[test]

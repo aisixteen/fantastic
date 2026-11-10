@@ -58,16 +58,10 @@ pub struct Host {
     pub root: MyId,
 }
 
-/// Every bundle this shell's roster can name, plus the EMBEDDER'S
-/// (`crate::extras`, set by `main_with`; none for the `fantastic` binary).
-fn registry(cwd: &std::path::Path) -> BundleRegistry {
-    registry_with(cwd, crate::extras())
-}
-
 /// Every bundle this shell's roster can name. Deliberately short: the set of
 /// agents is the user's to grow, and registering a bundle nobody declared only
 /// widens what a stray record could become. `extras` (an embedding binary's
-/// own bundles, #248) run AFTER the stock set.
+/// own bundles, #248; `main_with`'s for the `fantastic` binary) run AFTER the stock set.
 fn registry_with(cwd: &std::path::Path, extras: &[crate::Extra]) -> BundleRegistry {
     let mut reg = BundleRegistry::new();
     // THE ROOT. Its handler is the durable-state loader; see the module header.
@@ -201,10 +195,18 @@ async fn set_web_bind(kernel: &Arc<Kernel>, id: &AgentId, addr: &str, notes: &mu
     }
 }
 
+/// TRUE when agent `id` is a `web` host (its handler module).
+fn is_web(kernel: &Arc<Kernel>, id: &AgentId) -> bool {
+    kernel
+        .agents
+        .get(id)
+        .is_some_and(|a| a.value().record().handler_module.as_deref() == Some(fantastic_web::HANDLER_MODULE))
+}
+
 /// Boot every agent the kernel's start did not (`done`), in registration order. A recorded
 /// `web` host boots too, in every mode: it is the one HTTP/WS listener, and every agent with
-/// a route reuses it. `web_port`/`web_bind` (`canvas`'s `--port`/`--host`) are set on it before
-/// it listens. A tree with no `web` record binds no port. A failure is a note, and the boot
+/// a route reuses it. `web_port`/`web_bind` (`--port`/`--host`) are set on it before
+/// it listens; a `web` with neither the flag nor a recorded port gets a free one. A tree with no `web` record binds no port. A failure is a note, and the boot
 /// goes on.
 async fn boot_the_rest(kernel: &Arc<Kernel>, done: &[String], web_port: Option<u16>, web_bind: Option<&str>) -> Vec<String> {
     let mut notes = Vec::new();
@@ -212,11 +214,24 @@ async fn boot_the_rest(kernel: &Arc<Kernel>, done: &[String], web_port: Option<u
         if done.contains(&id.0) {
             continue;
         }
-        let is_web = kernel.agents.get(&id).is_some_and(|a| {
-            a.value().record().handler_module.as_deref() == Some(fantastic_web::HANDLER_MODULE)
-        });
-        if is_web {
-            if let Some(p) = web_port {
+        if is_web(kernel, &id) {
+            // No `--port` and none recorded (a `web` seeded without one): a free port is
+            // picked once and recorded, as the first `canvas` does; later runs reuse it.
+            let recorded = kernel
+                .agents
+                .get(&id)
+                .is_some_and(|a| a.value().record().meta.get("port").and_then(Value::as_u64).is_some_and(|p| p > 0));
+            let picked = match (web_port, recorded) {
+                (None, false) => match crate::kern::web::free_port() {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        notes.push(format!("{id}: {e}"));
+                        None
+                    }
+                },
+                _ => web_port,
+            };
+            if let Some(p) = picked {
                 set_web_field(kernel, &id, "port", "--port", json!(p), &mut notes).await;
             }
             if let Some(addr) = web_bind {
@@ -236,19 +251,21 @@ async fn boot_the_rest(kernel: &Arc<Kernel>, done: &[String], web_port: Option<u
 }
 
 impl Host {
-    /// Boot over `paths.cwd`. Acquires the directory lock, so a second shell in
-    /// the same directory fails here rather than corrupting the store.
+    /// Boot over `paths.cwd`, with the stock bundles plus `extras`. Acquires the directory
+    /// lock, so a second shell in the same directory fails here rather than corrupting the
+    /// store.
     ///
     /// `web_port`: `--port` — a recorded `web` on another port is set to it
     /// BEFORE its listener boots (nothing runs here yet, so it is the user's to
     /// overwrite). `web_bind`: `--host`, set on the record the same way.
     pub async fn boot(
         paths: &Paths,
+        extras: &[crate::Extra],
         web_port: Option<u16>,
         web_bind: Option<String>,
     ) -> Result<Self, KernelErr> {
         let booted = bootstrap::bootstrap(
-            registry(&paths.cwd),
+            registry_with(&paths.cwd, extras),
             BootstrapOptions::daemon(&paths.store, &paths.cwd),
         )
         .map_err(|e| KernelErr::Boot(format!("{e}")))?;
@@ -418,57 +435,6 @@ impl Host {
             Some(e) => Err(format!("could not admit `{ai}` to `{store}`: {e}")),
             None => Ok(store),
         }
-    }
-
-    /// Shut down IN THE KERNEL'S ORDER, on the runtime that booted it: the
-    /// pages stop writing first ([`Host::stop_pages`]), then `Kernel::shutdown` (drain, each agent's `shutdown` verb, cancel what
-    /// remains, the last execution rows flushed into the memory store, the
-    /// records written, the teardown walk), and only then the lock release.
-    /// Releasing the lock first used to lose the last execution.
-    pub async fn shutdown(&self, paths: &Paths) {
-        // The kernel lands every record and every message itself
-        // (`flush_pending`) before its teardown walk; the lock goes last.
-        self.stop_pages().await;
-        self.kernel.shutdown().await;
-        // Every row has landed: the SQLite stores fold their WAL into the file
-        // and close, so a stopped kernel leaves only `memory.db`.
-        for e in fantastic_sqlite_store::close_all(&self.kernel) {
-            tracing::warn!("shutdown: {e}");
-        }
-        if let Err(e) = bootstrap::shutdown(&paths.store) {
-            tracing::warn!("shutdown: {e}");
-        }
-    }
-
-    /// THE PAGES STOP BEFORE THE DRAIN (owner, 2026-10-15): every connected
-    /// page kernel is called `<guid>|canvas` `host_stopping` — it flushes its
-    /// last records and writes no more — and the drain starts once each has
-    /// answered or [`PAGE_STOP_GRACE`] has passed. A write that would land
-    /// mid-drain is refused there; this makes none land.
-    async fn stop_pages(&self) {
-        let guids: std::collections::BTreeSet<String> = self
-            .kernel
-            .peer_rows()
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|r| r.get("guid").and_then(Value::as_str).map(str::to_string))
-            .collect();
-        let calls = guids.into_iter().map(|g| {
-            let k = Arc::clone(&self.kernel);
-            async move {
-                let item = Item::new(AgentId::from(format!("{g}|canvas").as_str()), json!({"type": "host_stopping"}));
-                match tokio::time::timeout(PAGE_STOP_GRACE, k.send(vec![item])).await {
-                    Err(_) => tracing::warn!("shutdown: page {g} did not stop within {PAGE_STOP_GRACE:?}"),
-                    Ok(mut out) => {
-                        if let Some(e) = out.remove(0).result.get("error").and_then(Value::as_str) {
-                            tracing::warn!("shutdown: page {g}: {e}");
-                        }
-                    }
-                }
-            }
-        });
-        futures_util::future::join_all(calls).await;
     }
 
     // ── acting ───────────────────────────────────────────────────────────
@@ -652,6 +618,100 @@ impl Host {
     }
 }
 
+/// Shut down IN THE KERNEL'S ORDER, on the runtime that booted it: the
+/// pages stop writing first ([`stop_pages`]), then `Kernel::shutdown` (drain, each agent's `shutdown` verb, cancel what
+/// remains, the last execution rows flushed into the memory store, the
+/// records written, the teardown walk), and only then the lock release.
+/// Releasing the lock first used to lose the last execution. The one stop: every mode,
+/// every refused boot and an embedder end in it.
+pub async fn stop(kernel: &Arc<Kernel>) {
+    // The kernel lands every record and every message itself
+    // (`flush_pending`) before its teardown walk; the lock goes last.
+    stop_pages(kernel).await;
+    kernel.shutdown().await;
+    // Every row has landed: the SQLite stores fold their WAL into the file
+    // and close, so a stopped kernel leaves only `memory.db`.
+    for e in fantastic_sqlite_store::close_all(kernel) {
+        tracing::warn!("shutdown: {e}");
+    }
+    match kernel.state_dir() {
+        Ok(state) => {
+            if let Err(e) = bootstrap::shutdown(&state) {
+                tracing::warn!("shutdown: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("shutdown: {e}"),
+    }
+}
+
+/// THE PAGES STOP BEFORE THE DRAIN (owner, 2026-10-15): every connected
+/// page kernel is called `<guid>|canvas` `host_stopping` — it flushes its
+/// last records and writes no more — and the drain starts once each has
+/// answered or [`PAGE_STOP_GRACE`] has passed. A write that would land
+/// mid-drain is refused there; this makes none land.
+async fn stop_pages(kernel: &Arc<Kernel>) {
+    let guids: std::collections::BTreeSet<String> = kernel
+        .peer_rows()
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.get("guid").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    let calls = guids.into_iter().map(|g| {
+        let k = Arc::clone(kernel);
+        async move {
+            let item = Item::new(AgentId::from(format!("{g}|canvas").as_str()), json!({"type": "host_stopping"}));
+            match tokio::time::timeout(PAGE_STOP_GRACE, k.send(vec![item])).await {
+                Err(_) => tracing::warn!("shutdown: page {g} did not stop within {PAGE_STOP_GRACE:?}"),
+                Ok(mut out) => {
+                    if let Some(e) = out.remove(0).result.get("error").and_then(Value::as_str) {
+                        tracing::warn!("shutdown: page {g}: {e}");
+                    }
+                }
+            }
+        }
+    });
+    futures_util::future::join_all(calls).await;
+}
+
+/// THE ONE BOOT, every mode's and an embedder's: [`Host::boot`] (the stock bundles plus
+/// `extras`), then, when `canvas` asks for it, the canvas ([`crate::kern::web::ensure`], its
+/// URLs returned), then the grant watch ([`crate::kern::reach::start`]), which must follow the
+/// boot's own grant writes. With `web_port`/`web_bind` and no canvas, the folder must hold a
+/// `web` record to set them on; none is refused. A refusal after the kernel is up stops it
+/// ([`stop`]) and returns the reason. Opens no socket, never seeds.
+pub async fn boot_all(
+    paths: &Paths,
+    extras: &[crate::Extra],
+    web_port: Option<u16>,
+    web_bind: Option<String>,
+    canvas: bool,
+) -> Result<(Arc<Host>, Option<crate::kern::web::Urls>), String> {
+    let asked = web_port.is_some() || web_bind.is_some();
+    let bind = web_bind.clone();
+    let host = Arc::new(Host::boot(paths, extras, web_port, web_bind).await.map_err(|e| format!("{e}"))?);
+    if asked && !canvas && !host.kernel.agent_ids().iter().any(|id| is_web(&host.kernel, id)) {
+        stop(&host.kernel).await;
+        return Err("--port/--host: the folder has no `web` record to set them on".into());
+    }
+    let urls = if canvas {
+        match crate::kern::web::ensure(&host, web_port, bind.as_deref()).await {
+            Ok(u) => Some(u),
+            Err(e) => {
+                stop(&host.kernel).await;
+                return Err(e);
+            }
+        }
+    } else {
+        None
+    };
+    if let Err(e) = crate::kern::reach::start(&host).await {
+        stop(&host.kernel).await;
+        return Err(e);
+    }
+    Ok((host, urls))
+}
+
 /// How a bounded stop ended. Clean: the kernel's clean stop finished. Cut: it
 /// hung past the grace, or a second stop signal came.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -688,7 +748,7 @@ mod tests {
 
     #[test]
     fn the_registry_holds_exactly_the_declared_set() {
-        let reg = registry(std::path::Path::new("."));
+        let reg = registry_with(std::path::Path::new("."), &[]);
         for m in [
             "kernel_state.tools",
             "file_bridge.tools",
@@ -804,13 +864,13 @@ mod tests {
         assert_eq!(reg.catalog().count(), stock.catalog().count() + 1, "one bundle more, listed");
     }
 
-    /// `main_with` sets the process's extras; `registry` — what `Host::boot` builds —
-    /// runs them. (The only test that sets them: the first set wins.)
+    /// `main_with` sets the process's extras; the registry built from `crate::extras()` —
+    /// what the modes pass `Host::boot` — runs them. (The only test that sets them: the first set wins.)
     #[test]
     fn the_extras_main_with_sets_reach_the_host_registry() {
         crate::set_extras(&[probe_extra]);
         assert_eq!(crate::extras().len(), 1);
-        assert!(registry(std::path::Path::new(".")).get(PROBE).is_some(), "Host::boot's registry has the extra");
+        assert!(registry_with(std::path::Path::new("."), crate::extras()).get(PROBE).is_some(), "the registry built from the process extras has it");
     }
 
     /// A record on disk naming the extra's handler module HYDRATES with the extra,
@@ -1003,7 +1063,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "vllm", feature = "anthropic", feature = "ollama", feature = "responses"))]
     fn the_default_build_links_the_four_ai_backends() {
-        let reg = registry(std::path::Path::new("."));
+        let reg = registry_with(std::path::Path::new("."), &[]);
         for m in [
             "vllm_backend.tools",
             "anthropic_backend.tools",
