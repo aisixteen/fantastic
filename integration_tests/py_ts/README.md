@@ -85,7 +85,6 @@ grants the socket leg onto each host agent it seeds, both halves.
 - `scheduler_ai_html.browser.itest.ts` — the deep cross-kernel cascade
   (scheduler ⇄ python ⇄ AI ⇄ JS panels); `A` + `G` are deterministic, `B–J` are
   live (PAID — real tokens on the active backend).
-- `llm_e2e.browser.itest.ts` — a live-LLM browser round-trip (PAID).
 - `bundle_revive.browser.itest.ts` — revives the canvas artifact
   (`src/tui/web/canvas/dist/canvas.zip`) as its readme says: the stamped sha256
   matches the served bundle, the single `bundle.min.js` runs with no import map

@@ -3,7 +3,7 @@
 # driven over web_rest.
 id: deadletter_deadline
 group: scenario
-title: "a message to a busy AI passes its sender's deadline (root send_timeout): it is withdrawn into a dead letter, the sender is told its id and resends and drops it, the target never answers the withdrawn message, and status counts the held sender while the turn runs"
+title: "a message to a busy AI passes its sender's deadline (root send_timeout): it is withdrawn into a dead letter, the sender is told its id and resends and drops it, the target never answers the withdrawn message, and status counts the held sender while the turn runs and its answer reaches the lead once"
 runner: probe.py
 runtimes: [python, rust]
 costs: free
