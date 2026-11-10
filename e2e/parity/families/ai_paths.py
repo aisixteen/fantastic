@@ -16,7 +16,7 @@ from __future__ import annotations
 import threading
 import time
 
-from families import BASE, MEMORY, OPEN, ROOT_ID, VLLM, ai, call, quiesce, save_kernel_log, vllm
+from families import BASE, MEMORY, OPEN, ROOT_ID, VLLM, ai, ai_split, call, quiesce, save_kernel_log, vllm
 from spec import AI_FILL_CHARS, AI_RESERVE, AI_WINDOW
 from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub
 
@@ -138,7 +138,7 @@ def run(ctx) -> None:  # noqa: C901
     stub.start(OpenAIHandler)
 
     cb = {**BASE, "rest": "*", "web": "*", "ws": "*", "ai": "*", "ai2": "*"}
-    reach = ["readings", "slow", "plant", "ai", "ai2", "web", "rest", "ws"]
+    reach = ["readings", "slow", "plant", "ai", "ai_provider", "ai2", "ai2_provider", "web", "rest", "ws"]
     k = ctx.boot(reach=reach, port=ports.take("main"))
     try:
         rec.json("setup/readings", k.create(parent_id=k.home, id="readings",
@@ -152,18 +152,13 @@ def run(ctx) -> None:  # noqa: C901
                                          callable_by=cb))
         ai_meta = vllm(stub.base_url(), context_window=AI_WINDOW,
                        output_reserve=AI_RESERVE, context_async=True)
-        rec.json("setup/ai", k.create(parent_id=k.home, id="ai",
-                                      handler_module=VLLM, **OPEN,
-                                      callable_by=cb,
-                                      **ai(can_call={**BASE, "readings": "*", "slow": "*",
-                                                     "plant": "*", ROOT_ID: "*", "ai2": "*"},
-                                           **ai_meta)))
-        rec.json("setup/ai2", k.create(parent_id=k.home, id="ai2",
-                                       handler_module=VLLM, **OPEN,
-                                       callable_by=cb,
-                                       **ai(can_call={**BASE, "readings": "*", ROOT_ID: "*",
-                                                      "ai": "*"},
-                                            **ai_meta)))
+        # each AI is a provider (the backend) and a chat naming it
+        for aid, can in (("ai", {**BASE, "readings": "*", "slow": "*", "plant": "*", ROOT_ID: "*",
+                                 "ai2": "*"}),
+                         ("ai2", {**BASE, "readings": "*", ROOT_ID: "*", "ai": "*"})):
+            prov, chat = ai_split(aid, VLLM, {**ai(can_call=can, **ai_meta), "callable_by": cb})
+            rec.json(f"setup/{aid}_provider", k.create(parent_id=k.home, **OPEN, **prov))
+            rec.json(f"setup/{aid}", k.create(parent_id=k.home, **OPEN, **chat))
         time.sleep(1.2)
 
         from helpers.host.ws import WSWatcher
@@ -290,12 +285,13 @@ def run(ctx) -> None:  # noqa: C901
         # changed in a running kernel. 0.5 s against a 3 s stall: the send must
         # give up before the model does, and what it says then is the item.
         stub.set_cases({**CASES, "send_timeout": [{"text": DONE, "stall": 3}]})
-        k2 = ctx.boot(reach=[*reach, "ai_to"], port=k.port,
+        k2 = ctx.boot(reach=[*reach, "ai_to", "ai_to_provider"], port=k.port,
                       env_extra={"FANTASTIC_AI_SEND_TIMEOUT": "0.5"})
         try:
-            rec.json("send_timeout/create_ai", k2.create(
-                parent_id=k2.home, id="ai_to", handler_module=VLLM,
-                **OPEN, callable_by=cb, **ai(can_call={**BASE, "readings": "*"}, **ai_meta)))
+            prov, chat = ai_split("ai_to", VLLM, {**ai(can_call={**BASE, "readings": "*"}, **ai_meta),
+                                                  "callable_by": cb})
+            rec.json("send_timeout/create_ai_provider", k2.create(parent_id=k2.home, **OPEN, **prov))
+            rec.json("send_timeout/create_ai", k2.create(parent_id=k2.home, **OPEN, **chat))
             time.sleep(1.0)
             t0 = time.monotonic()
             reply = call(k2, "ai_to", {"type": "send", "text": "CASE=send_timeout#1 stall me",
