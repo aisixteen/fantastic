@@ -126,6 +126,7 @@ fn provider_idle(
         usage: Arc::new(Mutex::new(Usage::default())),
         base: Arc::new(Mutex::new(Usage::default())),
         usage_file: None,
+        kernel: Arc::new(Kernel::new()),
         report: ReportCell::default(),
         stream_idle,
         long_context_tokens: None,
@@ -2038,6 +2039,35 @@ async fn usage_survives_a_restart() {
     assert_eq!(got["requests"], json!(1), "{got}");
     assert_eq!(got["output_tokens"], json!(35), "{got}");
     assert_eq!(got["cache_read_tokens"], json!(1000), "{got}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_survives_a_restart_through_the_params_store() {
+    let tmp = TempDir::new().unwrap();
+    let (_srv, ep) = api(200, turn_events(35)).await;
+    let kernel = mk_unbounded_store(&tmp, &ep, "u_store", json!({"max_tokens": 8000})).await;
+    turn(&kernel, "u_store").await;
+    assert!(
+        !usage_file_of(&AgentId::from("u_store"), &kernel).is_some_and(|p| p.is_file()),
+        "this agent has no usage file"
+    );
+    // a restart: the counts this process held are gone, the store kept its row
+    forget_counts("u_store");
+    let got = call(&kernel, "u_store", json!({"type": "usage"})).await;
+    assert_eq!(got["requests"], json!(1), "{got}");
+    assert_eq!(got["output_tokens"], json!(35), "{got}");
+    assert_eq!(got["cache_read_tokens"], json!(1000), "{got}");
+    // a new turn adds to what the store held
+    turn(&kernel, "u_store").await;
+    forget_counts("u_store");
+    let got = call(&kernel, "u_store", json!({"type": "usage"})).await;
+    assert_eq!(got["requests"], json!(2), "{got}");
+    // reset zeroes it in the store too
+    let pre = call(&kernel, "u_store", json!({"type": "usage_reset"})).await;
+    assert_eq!(pre["requests"], json!(2), "{pre}");
+    forget_counts("u_store");
+    let after = call(&kernel, "u_store", json!({"type": "usage"})).await;
+    assert_eq!(after["requests"], json!(0), "{after}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
