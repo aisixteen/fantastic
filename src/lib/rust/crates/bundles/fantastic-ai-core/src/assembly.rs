@@ -315,14 +315,7 @@ async fn parts(
     let mut out: HashMap<&'static str, String> = HashMap::new();
     if need.contains(&"tree") {
         // Lean primer: a flat id-index of the tree + the bundle catalog by name.
-        let primer = kernel
-            .send(vec![Item::new(
-                AgentId::from("kernel"),
-                json!({"type": "reflect", "tree": "ids", "bundles": "ids"}),
-            )])
-            .await
-            .remove(0)
-            .result;
+        let primer = kernel.tree_ids_primer().await;
         out.insert("tree", render_reflect(&primer));
     }
     if need.contains(&"self") {

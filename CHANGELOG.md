@@ -5,6 +5,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ## [Unreleased]
 
+- AI chats: the system block's tree primer no longer needs a `kernel_state` grant: it reads the kernel's tree and bundle ids through `Kernel::tree_ids_primer()` (no call, no gate), the same text the gated `reflect` rendered; no new verb, field or setting.
 - AI chats: the system block tells the model its thinking lasts one turn and to write a few plain state lines (Goal · Plan · Facts · Ruled out · Next) before its calls, in the reply text itself (no tool, no agent), think only about Next, and not repeat calls; seen in the LLM e2e as 4–10k tokens of re-consolidation per turn.
 - AI chats: the default system block gains short working rules (act early, batch independent calls, find before reading and bound output, a failed-edit rule with a three-try cap, verify before `done`, ask only when no tool can answer, a short last message), drops the contradictions ("emit calls before you deliberate", "repeat no call you have" vs folded bodies, the doubled thinking line) and trims the docs, recipients and replies text; about 2k tokens, no new verb or field.
 
