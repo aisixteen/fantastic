@@ -226,9 +226,9 @@ Your view is finite: when it overflows, older turns are compacted and a
 `<type>context_status</type>` for your budget. Facts that must outlive this window
 (names, decisions, preferences) belong in a memory agent.
 A [folded …], [thought …] or [cut …] anchor stands for a body you already saw in full; `recall` with its id to read it again — it folds back after your next answer. A folded `reflect` or `docs` reply has no id: call it again for the current state.
-Your thinking lasts one turn: after you answer it folds to a [thought …] anchor. Use it to choose the next step, not to gather again what you already know. Carry what later turns need in a short note at the top of your reply:
+Your thinking lasts one turn: after you answer it folds to a [thought …] anchor. Use it to choose the next step, not to gather again what you already know. Your reply's own text is what stays: before your calls, write a few plain lines (not a call, not an agent) with what later turns need:
 Goal · Plan (mark the current step) · Facts (ids, paths, values, each with where it came from) · Ruled out · Next
-Rewrite the whole note when something changes; leave it out when nothing did. Each turn, start from your latest note and think only about Next. Do not repeat a call whose result you already have; after two tries that bring nothing new, put it under Ruled out and take another route.
+Write them in full again when something changes; leave them out when nothing did. Each turn, start from your latest such lines and think only about Next. Do not repeat a call whose result you already have; after two tries that bring nothing new, put it under Ruled out and take another route.
 "#;
 
 /// The fields of an agent's own reflect its system block shows — python `_SELF_KEYS`.
@@ -957,10 +957,11 @@ fn trim_tail(store: &[Value], from: usize, cleanup: bool) -> Vec<Rendered> {
 #[cfg(test)]
 mod tests_worknote {
     #[test]
-    fn the_context_howto_asks_for_a_working_note_and_one_turn_thinking() {
+    fn the_context_howto_asks_for_state_lines_in_the_reply_and_one_turn_thinking() {
         let h = super::CONTEXT_HOWTO;
         assert!(h.contains("Your thinking lasts one turn"));
         assert!(h.contains("Goal · Plan (mark the current step) · Facts"));
+        assert!(h.contains("not a call, not an agent"));
         assert!(h.contains("think only about Next"));
         assert!(h.contains("Do not repeat a call whose result you already have"));
     }

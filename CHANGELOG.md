@@ -5,7 +5,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ## [Unreleased]
 
-- AI chats: the system block tells the model its thinking lasts one turn and to carry a short working note (Goal · Plan · Facts · Ruled out · Next) at the top of its reply, think only about Next, and not repeat calls; seen in the LLM e2e as 4–10k tokens of re-consolidation per turn.
+- AI chats: the system block tells the model its thinking lasts one turn and to write a few plain state lines (Goal · Plan · Facts · Ruled out · Next) before its calls, in the reply text itself (no tool, no agent), think only about Next, and not repeat calls; seen in the LLM e2e as 4–10k tokens of re-consolidation per turn.
 
 ### Added
 - A `reflect` or `docs` reply over `REFERENCE_FOLD_AT` (1500) tokens folds to an anchor once answered, and a `reflect` reply's `view` reaches the model as its kind and size only (#634); the store keeps both whole.
