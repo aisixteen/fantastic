@@ -2718,7 +2718,13 @@ fn reflect_names_the_capabilities_of_its_models_and_an_unknown_model_sees_no_ima
     for k in ["max_images", "max_bytes", "max_pixels"] {
         assert!(sees[k].as_i64().is_some_and(|n| n > 0), "{k}: {sees}");
     }
-    for m in ["gpt-x", "claude-2.1", "claude-instant-1.2", ""] {
+    for m in [
+        "gpt-x",
+        "claude-2.1",
+        "claude-instant-1.2",
+        "claude-unknown-9",
+        "",
+    ] {
         assert_eq!(static_capability(m), json!({"images": false}), "{m}");
     }
 }

@@ -497,7 +497,20 @@ async fn the_chat_keeps_its_providers_capabilities_and_asks_again_only_on_a_chan
         Value::Null,
         "nothing before the first turn"
     );
+    // every write of the map to the chat's record shows as an `updated` event naming it
+    let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (counter, chat_id) = (writes.clone(), chat.as_str().to_string());
+    kernel.add_state_subscriber(Arc::new(move |ev, _| {
+        let names = ev["changed"]
+            .as_array()
+            .is_some_and(|c| c.iter().any(|k| k == "provider_capabilities"));
+        if ev["kind"] == "updated" && ev["agent_id"] == chat_id && names {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }));
+    let written = || writes.load(std::sync::atomic::Ordering::SeqCst);
     say(&kernel, &chat, "hello", json!(null)).await;
+    assert_eq!(written(), 1, "the first read writes the map once");
     assert_eq!(
         held(&kernel, &chat),
         json!({"provider": provider, "model": "test-model", "capabilities": e1}),
@@ -508,6 +521,7 @@ async fn the_chat_keeps_its_providers_capabilities_and_asks_again_only_on_a_chan
     update(&kernel, &provider_id, json!({"reflect_reply": other})).await;
     say(&kernel, &chat, "again", json!(null)).await;
     assert_eq!(held(&kernel, &chat)["capabilities"], e1);
+    assert_eq!(written(), 1, "an unchanged turn writes no record");
     // the model changes: asked again, and the entry is the new model's
     update(&kernel, &chat, json!({"model": "small-model"})).await;
     say(&kernel, &chat, "third", json!(null)).await;

@@ -1720,13 +1720,40 @@ const CAPABILITIES_FIELD: &str = "capabilities";
 /// down by the API anyway, so the chat sends it at this size).
 const IMAGE_LIMITS: (i64, i64, i64) = (100, 5_000_000, 1_150_000);
 
-/// The static capability entry of one model id: Claude models since the 3 family see
-/// images; `claude-2*`, `claude-instant*` and any id that is not a Claude one do not.
+/// The Claude model ids known to see images (the 3 family on, with their dated
+/// snapshots). Any id not listed here, a `claude-2*`, `claude-instant*`, a future or
+/// custom id, has no static entry; the `capabilities` setting can add one.
+const IMAGE_MODELS: &[&str] = &[
+    "claude-3-haiku-20240307",
+    "claude-3-opus-20240229",
+    "claude-3-sonnet-20240229",
+    "claude-3-5-haiku-20241022",
+    "claude-3-5-sonnet",
+    "claude-3-5-sonnet-20240620",
+    "claude-3-5-sonnet-20241022",
+    "claude-3-7-sonnet-20250219",
+    "claude-sonnet-4-20250514",
+    "claude-opus-4-20250514",
+    "claude-opus-4-1",
+    "claude-opus-4-1-20250805",
+    "claude-sonnet-4-5",
+    "claude-haiku-4-5",
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-5-5",
+    "claude-opus-5-5-20260601",
+    "claude-sonnet-5-5",
+    "claude-sonnet-5-5-20260101",
+    "claude-haiku-5-5",
+    "claude-haiku-5-5-20260101",
+    "claude-fable-5-1",
+];
+
+/// The static capability entry of one model id: a model in [`IMAGE_MODELS`] sees images;
+/// every other id (unknown, `claude-2*`, `claude-instant*`, not a Claude one) does not.
 fn static_capability(model: &str) -> Value {
-    let sees = model.starts_with("claude-")
-        && !model.starts_with("claude-2")
-        && !model.starts_with("claude-instant");
-    if !sees {
+    if !IMAGE_MODELS.contains(&model) {
         return json!({"images": false});
     }
     let (max_images, max_bytes, max_pixels) = IMAGE_LIMITS;
