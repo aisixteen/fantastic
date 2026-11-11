@@ -51,7 +51,7 @@ pub fn verb_docs() -> Value {
         "resume": "args: note:str? (text added to the resumed row). RESUME this agent: write one resumed row, then release the held messages in order, each as a fresh turn after it. Not paused: a no-op. Returns {resumed:bool, released:int}.",
         "rows": "args: after:int? (a row id — the page starts after it), limit:int?. A VIEW of this agent's conversation exactly as the agent HOLDS it in memory — its loaded head, in the order it lived it; no store read, no transform, so what a UI draws is what the agent has. Before the agent has loaded its head (a fresh boot, before its first turn) it holds nothing: {rows:[], loaded:false}. Returns {rows, next, total, loaded}.",
         "inquiry": "args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. Sends THIS agent an inquiry: accepted at once ({accepted, re, request_id}); the answer it later gives with `inquiry_answer` — or the news that it ended without one — reaches the asker as a message under the inquiry's pid. The same verb a human answers; a sender writes one call for either.",
-        "history": "args: fold:int? (a fold or clear id — list ITS members instead), limit:int? (default: as many as fit inline), after:int? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes, has_thinking?} per row, oldest first, paged. With `fold`, that fold's title + summary and its members (one level down; a member that is itself a fold opens the same way). A row's text is behind `recall` / `grep`. Returns {rows, next, total, fold?}.",
+        "history": "args: fold:int? (a fold or clear id — list ITS members instead), limit:int? (default: as many as fit inline), after:int? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes, ts, usage?, has_thinking?} per row, oldest first, paged. With `fold`, that fold's title + summary and its members (one level down; a member that is itself a fold opens the same way). A row's text is behind `recall` / `grep`. Returns {rows, next, total, fold?}.",
         "embed": "args: id:str (req) — a HOST agent that has a `view` record. Shows that agent's panel as a CARD in this chat, at this place in the conversation; the card is stored as a row, so it survives a page reload and a kernel restart, and `history` lists it as kind `embed` (the model's prompt never holds it). This is a chat card, not a canvas cell. When you create an agent to embed, design its panel FOR THE CHAT WINDOW: it fills 100% of the column width (don't set a width), define its height well, at most 1200 px (CHAT_CARD_MAX_HEIGHT). Readable at a glance: one purpose per card, no tiny text, no wide tables. Keep it live with events, not polling. HOW: create_agent {view: {kind: html, bytes_file: panel.html, calls: [get_html, watch]}, callable_by: {user: [get_html, watch]}}, then embed {id}. The same checks as the canvas's `place {backend_id}`: the agent must exist (`not_found`), have a `view` record (`no_view`: a default chat or terminal view is not a panel), and let the user call every verb its panel calls plus `watch` (`grants_missing: {<id>: [verbs]}` with the callable_by fix in `hint`). It creates nothing and moves nothing: the same agent can be a card here and a cell on a canvas at once. Embedding an agent already shown answers {already:true}. The reply carries the card's box, {width: '100%', max_height: 1200}; the chat page measures the panel it draws and, when it overflows or is taller than the cap, tells you to redo the panel. Returns {embedded:id, row, card, view, hint}.",
         "unembed": "args: id:str (req). Takes the card of agent `id` out of this chat: a tombstone row, so it stays gone after a reload (a later `embed` shows it again). Works the same for a live agent and a deleted one, so it also clears a '[deleted from canvas]' placeholder. It NEVER touches the agent — deleting it stays the kernel's `delete_agent`. Returns {unembedded:id} ({was_embedded:false} when no such card was shown).",
         "status": "args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Messages held while the agent's chain is running count as pending too; the reply answers at once, never queued behind a turn. Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int, pending_from:[sender id], inquiry_from:[sender id]}. pending_from names the sender of every pending message, queued first, then held. inquiry_from names the asker of every inquiry this agent has received and not yet answered, sorted, each once; the operator is `operator`.",
@@ -580,7 +580,7 @@ fn py_eq(a: &Value, b: &Value) -> bool {
 }
 
 /// One row at DIGEST resolution — python `_digest`: `{id, parent, kind, role,
-/// head, bytes}`, the head capped at 120 code points with newlines flattened.
+/// head, bytes}` (+ `ts`, and `usage` on an assistant row), the head capped at 120 code points with newlines flattened.
 fn digest(r: &Value) -> Value {
     // python `str(r.get("content", ""))`: an ABSENT content is the empty string, a
     // null one is `None` (4 bytes), a dict one is its repr.
@@ -598,6 +598,12 @@ fn digest(r: &Value) -> Value {
         "head": text.chars().take(120).collect::<String>().replace('\n', " "),
         "bytes": text.chars().count(),
     });
+    // when it was written, and what the pass that wrote it used
+    for key in ["ts", "usage"] {
+        if let Some(v) = r.get(key) {
+            d[key] = v.clone();
+        }
+    }
     // a row that kept its generation's thinking says so (python `has_thinking`)
     if r.get("thinking").is_some_and(py_truthy) {
         d["has_thinking"] = json!(true);

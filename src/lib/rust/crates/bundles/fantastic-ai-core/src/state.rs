@@ -100,6 +100,10 @@ pub struct BackendState {
     /// `"store"` (no view yet) or `"store (stale array)"`. Python `_view_source`,
     /// reported by `context_status`.
     pub view_source: Mutex<Option<String>>,
+    /// What the last assembled request carried, piece by piece (`{part, ref?,
+    /// form?, bytes, hash}`): kept for the assistant row the turn writes, never
+    /// rendered into a request.
+    pub request_parts: Mutex<Vec<Value>>,
     /// TOKEN CALIBRATION — python `_calib`: the prompt size the endpoint
     /// REPORTED for the last pass divided by our own estimate of what we sent.
     /// The estimate is chars/4 over the rendered messages; a real tokenizer
@@ -216,6 +220,7 @@ impl BackendState {
             folds_since: Mutex::new(0),
             recall_due: Mutex::new(false),
             view_source: Mutex::new(None),
+            request_parts: Mutex::new(Vec::new()),
             calib: Mutex::new(None),
             reported: Mutex::new(None),
             chain: Mutex::new(ChainState::default()),

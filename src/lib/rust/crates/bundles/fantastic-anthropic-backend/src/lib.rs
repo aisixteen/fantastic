@@ -932,6 +932,8 @@ impl Provider for AnthropicProvider {
         let mut r = self.report.lock().expect("report poisoned");
         r.prompt_tokens = None;
         r.completion_tokens = None;
+        r.cache_read = None;
+        r.cache_write = None;
     }
 
     fn clear_stop_reason(&self) {
@@ -1206,8 +1208,14 @@ impl SseState {
                     .unwrap_or(0)
                     .clamp(0, write.max(0));
                 let total = input + write + read;
-                self.report.lock().expect("report poisoned").prompt_tokens =
-                    (total > 0).then_some(total);
+                {
+                    let mut report = self.report.lock().expect("report poisoned");
+                    report.prompt_tokens = (total > 0).then_some(total);
+                    // the cache counts, only when the endpoint named them
+                    let named = |k: &str| u.get(k).and_then(Value::as_i64);
+                    report.cache_read = named("cache_read_input_tokens");
+                    report.cache_write = named("cache_creation_input_tokens");
+                }
                 let long = self.log.long_context_tokens.is_some_and(|t| total > t);
                 self.cur = RequestCounts {
                     input,

@@ -315,6 +315,10 @@ pub async fn save_history(
         if r.get("id").is_none_or(Value::is_null) {
             r.insert("id".to_string(), Value::from(kernel.mint_id()));
         }
+        // WHEN it was written, on every row; a row that already carries its own
+        // (a view) keeps it
+        r.entry("ts")
+            .or_insert_with(|| Value::from(crate::helpers::now_secs()));
         rows.push(r);
     }
     if rows.is_empty() {

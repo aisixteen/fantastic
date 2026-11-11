@@ -517,15 +517,23 @@ pub fn will_fold(content: &str) -> bool {
 /// answered large body or any answered recall reply. Pure and never stored: the
 /// store keeps every row whole, and `recall` with the row's id reads it back.
 /// `incoming` is the text of the turn being assembled, which is the correction a
-/// last cut row is followed by. A row with no int `id` comes back unchanged.
+/// last cut row is followed by. A row with no int `id` comes back unchanged. Also
+/// which form the row took: `whole`, `cut`, `thought_anchor` (the anchor stands for
+/// the whole answer), `thought` (the anchor sits on the answer), `recalled` (a recall
+/// reply) or `anchor` (a large body).
 #[must_use]
-pub fn autofold(store: &[Value], idx: usize, msg: &Value, incoming: Option<&str>) -> Value {
+pub fn autofold(
+    store: &[Value],
+    idx: usize,
+    msg: &Value,
+    incoming: Option<&str>,
+) -> (Value, &'static str) {
     let (Some(row), Some(content)) = (store.get(idx), msg.get("content").and_then(Value::as_str))
     else {
-        return msg.clone();
+        return (msg.clone(), "whole");
     };
     let Some(id) = row.get("id").and_then(Value::as_i64) else {
-        return msg.clone();
+        return (msg.clone(), "whole");
     };
     match row.get("role").and_then(Value::as_str) {
         Some("assistant") => {
@@ -535,19 +543,22 @@ pub fn autofold(store: &[Value], idx: usize, msg: &Value, incoming: Option<&str>
             };
             let thought = thinking_tokens(row);
             if let Some(body) = next.and_then(correction) {
-                return with_content(msg, cut_content(content, thought, id, body));
+                return (
+                    with_content(msg, cut_content(content, thought, id, body)),
+                    "cut",
+                );
             }
             match thought {
                 Some(x) => {
                     let anchor = format!("[thought ~{x} tokens · id {id}]");
-                    let shown = if content.is_empty() {
-                        anchor
+                    let (shown, form) = if content.is_empty() {
+                        (anchor, "thought_anchor")
                     } else {
-                        format!("{anchor}\n{content}")
+                        (format!("{anchor}\n{content}"), "thought")
                     };
-                    with_content(msg, shown)
+                    (with_content(msg, shown), form)
                 }
-                None => msg.clone(),
+                None => (msg.clone(), "whole"),
             }
         }
         Some("user") => {
@@ -555,9 +566,10 @@ pub fn autofold(store: &[Value], idx: usize, msg: &Value, incoming: Option<&str>
                 .iter()
                 .any(|t| t.get("role").and_then(Value::as_str) == Some("assistant"));
             if !answered || parse_reply_tag(content).is_none() {
-                return msg.clone();
+                return (msg.clone(), "whole");
             }
             let mut changed = false;
+            let mut recalled = false;
             let mut recalls = 0usize;
             let shown: Vec<String> = reply_blocks(content)
                 .into_iter()
@@ -570,6 +582,7 @@ pub fn autofold(store: &[Value], idx: usize, msg: &Value, incoming: Option<&str>
                         let what = recalled_what(store, tag_line, agent, recalls);
                         recalls += 1;
                         changed = true;
+                        recalled = true;
                         format!(
                             "[folded · recall reply from {agent}{what} · ~{x} tokens · get: {id}]"
                         )
@@ -585,12 +598,15 @@ pub fn autofold(store: &[Value], idx: usize, msg: &Value, incoming: Option<&str>
                 })
                 .collect();
             if changed {
-                with_content(msg, shown.join("\n\n"))
+                (
+                    with_content(msg, shown.join("\n\n")),
+                    if recalled { "recalled" } else { "anchor" },
+                )
             } else {
-                msg.clone()
+                (msg.clone(), "whole")
             }
         }
-        _ => msg.clone(),
+        _ => (msg.clone(), "whole"),
     }
 }
 
@@ -762,7 +778,7 @@ mod tests {
 
     /// The view message of `store[idx]` after autofold.
     fn folded(store: &[Value], idx: usize, incoming: Option<&str>) -> String {
-        let out = autofold(store, idx, &store[idx], incoming);
+        let (out, _) = autofold(store, idx, &store[idx], incoming);
         out["content"].as_str().unwrap().to_string()
     }
 

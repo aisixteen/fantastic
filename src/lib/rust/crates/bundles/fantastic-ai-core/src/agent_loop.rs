@@ -249,6 +249,12 @@ pub async fn run_generation(
         }
     };
 
+    // WHAT THIS REQUEST CARRIES, piece by piece, for the assistant row it earns.
+    let request_parts = crate::assembly::request_parts(
+        &state.request_parts.lock().expect("request_parts poisoned"),
+        &model_messages,
+    );
+
     // THE AGENT'S CACHE MARKS (`cache_mark`): its system message, the primer's end, the
     // last fold's, the tail. Only `provider_cache` places them; the backend forwards.
     if caching.marks() {
@@ -475,6 +481,12 @@ pub async fn run_generation(
             });
             if let Some(m) = row.as_object_mut() {
                 m.extend(crate::think::thinking_fields(&last_text));
+                // stored and returned by the retrieval verbs, never rendered into a
+                // request (`render_for_model` carries role and content only)
+                if let Some(u) = usage_row(&provider.report()) {
+                    m.insert("usage".to_string(), u);
+                }
+                m.insert("parts".to_string(), Value::Array(request_parts));
             }
             row
         },
@@ -535,6 +547,28 @@ pub fn usage_detail(
     m
 }
 
+/// The counts the endpoint reported for the pass, as the assistant row keeps them:
+/// `input` (what the cache did not serve or write), `output`, and the cache counts
+/// when the endpoint has them. A figure the endpoint did not report is absent, never
+/// 0; none reported leaves no `usage` at all.
+fn usage_row(report: &crate::provider::ProviderReport) -> Option<Value> {
+    let mut u = Map::new();
+    let cached = report.cache_read.unwrap_or(0) + report.cache_write.unwrap_or(0);
+    if let Some(n) = report.prompt_tokens.filter(|n| *n > 0) {
+        u.insert("input".into(), json!((n - cached).max(0)));
+    }
+    if let Some(n) = report.completion_tokens.filter(|n| *n > 0) {
+        u.insert("output".into(), json!(n));
+    }
+    if let Some(n) = report.cache_read {
+        u.insert("cache_read".into(), json!(n));
+    }
+    if let Some(n) = report.cache_write {
+        u.insert("cache_write".into(), json!(n));
+    }
+    (!u.is_empty()).then_some(Value::Object(u))
+}
+
 async fn abort_parts(parts: &tokio::sync::Mutex<PassParts>, e: ProviderError) -> GenFailure {
     let mut p = parts.lock().await;
     let evs = p.splitter.stop("error");
@@ -567,6 +601,7 @@ mod usage_tests {
             prompt_tokens: Some(1234),
             completion_tokens: Some(56),
             stop_reason: None,
+            ..Default::default()
         };
         let d = usage_detail(&rep, &view, "answer", 1.23456, 32768);
         assert_eq!(

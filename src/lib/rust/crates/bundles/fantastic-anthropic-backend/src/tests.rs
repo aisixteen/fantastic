@@ -1140,6 +1140,41 @@ async fn a_request_over_the_long_context_line_is_billed_long() {
 }
 
 #[tokio::test]
+async fn the_report_carries_the_cache_counts_the_stream_names() {
+    let mut events = vec![usage_start(50, 40, 7), text("ok")];
+    events.extend(usage_stop(10));
+    let (_s, ep) = api(200, sse(&events)).await;
+    let p = provider(&ep, Arc::new(NoKey));
+    drain(&p, None).await.unwrap();
+    let r = p.report();
+    assert_eq!(r.prompt_tokens, Some(97));
+    assert_eq!(r.completion_tokens, Some(10));
+    assert_eq!(r.cache_read, Some(7));
+    assert_eq!(r.cache_write, Some(40));
+    // a pass is a fresh reading
+    p.clear_prompt_tokens();
+    assert_eq!(
+        (p.report().cache_read, p.report().cache_write),
+        (None, None)
+    );
+}
+
+#[tokio::test]
+async fn a_stream_without_cache_counts_leaves_them_absent() {
+    let mut events = vec![
+        json!({"type": "message_start", "message": {"usage": {"input_tokens": 100}}}),
+        text("ok"),
+    ];
+    events.extend(usage_stop(10));
+    let (_s, ep) = api(200, sse(&events)).await;
+    let p = provider(&ep, Arc::new(NoKey));
+    drain(&p, None).await.unwrap();
+    let r = p.report();
+    assert_eq!(r.prompt_tokens, Some(100));
+    assert_eq!((r.cache_read, r.cache_write), (None, None));
+}
+
+#[tokio::test]
 async fn a_request_under_the_line_is_billed_base() {
     let mut events = vec![usage_start(50, 40, 0), text("ok")];
     events.extend(usage_stop(10));

@@ -12,7 +12,23 @@ use serde_json::{json, Map, Value};
 
 /// Rough token estimate for ONE message — counts the SERIALIZED form, because
 /// role + content + the JSON envelope all consume real context.
+///
+/// A row's `ts`, `usage` and `parts` are about the row, not for the model, and
+/// never count toward a window.
 pub fn estimate_one(message: &Value) -> i64 {
+    const NOT_SENT: [&str; 3] = ["ts", "usage", "parts"];
+    let trimmed;
+    let message = match message.as_object() {
+        Some(m) if NOT_SENT.iter().any(|k| m.contains_key(*k)) => {
+            let mut m = m.clone();
+            for k in NOT_SENT {
+                m.shift_remove(k);
+            }
+            trimmed = Value::Object(m);
+            &trimmed
+        }
+        _ => message,
+    };
     // PYTHON'S `json.dumps`, PYTHON'S LENGTH: `, `/`: ` separators, `\uXXXX`
     // escapes (ensure_ascii), and CODE POINTS. `serde_json`'s compact separators
     // and byte length made every estimate smaller than python's — by 2 chars per

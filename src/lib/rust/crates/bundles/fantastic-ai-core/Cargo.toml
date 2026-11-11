@@ -17,6 +17,8 @@ tokio = { workspace = true }
 futures-util = { workspace = true }
 # `getentropy` — the OS CSPRNG behind python's `secrets` module.
 libc = { workspace = true }
+# A request part's content hash.
+sha2 = "0.10"
 # The fold's MECHANICAL INDEX — python's `_PATH` / `_IDENT` patterns.
 regex = "1"
 
