@@ -363,6 +363,13 @@ def longest_first(tests) -> list[dict]:
     return sorted(tests, key=lambda t: -float(t.get("duration", 0)))
 
 
+# SHORTEST FIRST (`--order short`): the smallest tests first, so a broken basic shows up in the
+# first minutes of a model run. Size = the `duration:` hint, else the test's `limits.seconds`.
+def shortest_first(tests) -> list[dict]:
+    size = lambda t: float(t.get("duration") or (t.get("limits") or {}).get("seconds") or 0)  # noqa: E731
+    return sorted(tests, key=size)
+
+
 # THE HARD STOP: 15 minutes per test. A test still running then is
 # stopped (its whole process group, kernel included) and scored FAIL with the reason
 # in its log — a run that needs longer is a finding, not a wait. A test that names its
@@ -669,6 +676,8 @@ async def main() -> int:
         "CI runs one OS's suite as n jobs",
     )
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--order", choices=["long", "short"], default="long",
+                    help="long: longest first (the free suite's wall time); short: smallest first (a model run)")
     ap.add_argument(
         "--dry-run",
         action="store_true",
@@ -721,7 +730,8 @@ async def main() -> int:
         picked = picked[i - 1 :: n]
 
     if a.list:
-        for t in picked:
+        order = shortest_first if a.order == "short" else longest_first
+        for t in order(t for t in picked if not t.get("exclusive")) + order(t for t in picked if t.get("exclusive")):
             print(f"{t['group']:<18} {t['id']:<20} {t['costs']:<6} {t['title']}" + (f"  [{mute_note(t)}]" if mute_note(t) else ""))
         return 0
 
@@ -838,13 +848,14 @@ async def main() -> int:
     # Written every time a test settles, so a watcher tailing this file sees
     # progress without parsing 14 transcripts.
     began = time.monotonic()
+    order = shortest_first if a.order == "short" else longest_first
     await asyncio.gather(
         *(run_one(t, bk, logdir, sem, results, long_sem, chrome_sem)
-          for t in longest_first(t for t in picked if not t.get("exclusive")))
+          for t in order(t for t in picked if not t.get("exclusive")))
     )
     # EXCLUSIVE: a test marked `exclusive: true` runs a team of AIs (sub-AIs, groups) that
     # takes every model slot itself, so it runs after the pool, one at a time, nothing beside it.
-    for t in longest_first(t for t in picked if t.get("exclusive")):
+    for t in order(t for t in picked if t.get("exclusive")):
         await run_one(t, bk, logdir, sem, results, long_sem, chrome_sem)
 
     if meter is not None:
