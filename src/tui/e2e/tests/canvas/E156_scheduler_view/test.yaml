@@ -1,0 +1,8 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: scheduler_view
+group: canvas
+title: "the canvas scheduler view shows a real scheduler.tools job, its fire and its removal (#507)"
+runner: probe.py
+costs: free
+limits: {seconds: 300}
+env: {}

@@ -17,6 +17,15 @@ record carries `send_timeout: 3`.
   5. the lead resends (`<timeout>30</timeout>`) and drops the dead letter
      (`ack_deadletter`); the worker answers only the resend, in ONE wake pass;
      its answer reaches the lead once, under `<response>` (#510).
+
+Rust lane only, a second part (#568): the kernel's ledger store becomes a `sqlite_store`
+(`stores/memory.db`: the `memory` record is rewritten while the kernel is stopped), and
+  6. the worker is busy again; the lead's message passes the deadline: a dead letter on the
+     sqlite ledger, the lead is told its id;
+  7. the kernel is stopped and a NEW one booted on the same folder; the lead (its own
+     `ledger` call: the ledger is scoped to its caller) sees the dead letter, `timed_out`,
+     with the same id, and resends the message: the worker answers it once. The lead's
+     `ack_deadletter` after the restart is printed, not required.
 """
 
 from __future__ import annotations
@@ -32,6 +41,8 @@ import threading
 import time
 from pathlib import Path
 
+import yaml
+
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 
@@ -43,6 +54,9 @@ REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
 LEAD, WORKER = "lead", "worker"
 TOKEN = secrets.token_hex(4)
+TOKEN2 = secrets.token_hex(4)
+RECALL_MARK = "rebuilding your own working context"
+DB = "stores/memory.db"
 SLOW = 8
 BOUND = 90.0
 SLOW_MARK = "<slow>"
@@ -92,7 +106,7 @@ def main() -> int:
     lead_m = VllmMock(model="mock-lead").start()
     work_m = SlowVllm(model="mock-worker").start()
     work = Path(tempfile.mkdtemp(prefix="e2e-deadletter-deadline-"))
-    hk = HostKernel(spec, work, reach=[LEAD, WORKER, f"{LEAD}_prov", f"{WORKER}_prov"]).boot()
+    hk = HostKernel(spec, work, reach=[LEAD, WORKER, f"{LEAD}_prov", f"{WORKER}_prov", "memory"]).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -149,7 +163,7 @@ def main() -> int:
 
     try:
         r = hk.send(root, {"type": "update_agent", "id": root, "send_timeout": 3,
-                           "callable_by": {**callable_by(root), LEAD: ["ack_deadletter"]}})
+                           "callable_by": {**callable_by(root), LEAD: ["ack_deadletter", "ledger"]}})
         need(r.get("updated") is True, f"the root carries send_timeout 3 and admits the lead's ack: {str(r)[:200]}")
         r = hk.send(root, {"type": "update_agent", "id": "memory",
                            "callable_by": {**callable_by("memory"), LEAD: "*", WORKER: "*",
@@ -173,7 +187,7 @@ def main() -> int:
 
         make_ai(WORKER, work_m, {"$self": "*", "memory": "*"},
                 {"$self": "*", "$parent": "*", "rest": "*", LEAD: "*"})
-        make_ai(LEAD, lead_m, {"$self": "*", "memory": "*", root: ["ack_deadletter"], WORKER: "*"},
+        make_ai(LEAD, lead_m, {"$self": "*", "memory": "*", root: ["ack_deadletter", "ledger"], WORKER: "*"},
                 {"$self": "*", "$parent": "*", "rest": "*"})
         r = hk.send(root, {"type": "update_agent", "id": WORKER,
                            "callable_by": {**callable_by(WORKER), LEAD: "*"}})
@@ -240,6 +254,99 @@ def main() -> int:
         need(last.count("Got RESEND") == 1, "the worker's answer reaches the lead once")
         need("<response>" in last, "the reply is rendered under <response>")
         need("<acked>true</acked>" in last, "the dead letter was dropped (ack_deadletter)")
+
+        # ── part 2 (rust): the dead letter survives a restart on a sqlite ledger (#568) ──
+        if RUNTIME != "rust":
+            print("  (part 2, the sqlite ledger across a restart, runs on the rust lane)", flush=True)
+        else:
+            hk.close()
+            rec_path = work / ".fantastic/agents/web/agents/rest/agents/memory/agent.yaml"
+            rec = yaml.safe_load(rec_path.read_text())
+            rec["handler_module"] = "sqlite_store.tools"
+            rec["path"] = DB
+            rec_path.write_text(yaml.safe_dump(rec, sort_keys=False))
+            # a restarted agent first asks its model to rebuild its working context from
+            # the rows it read back: answered apart, it takes no scripted answer
+            recall = lambda req: ("The head is fine as it is."  # noqa: E731
+                                  if RECALL_MARK in last_user(req) else None)
+            work_m.responder = recall
+            hk.boot()
+            refl = hk.send("memory", {"type": "reflect"})
+            need(refl.get("durable") is True and refl.get("path") == DB,
+                 f"the kernel's ledger store is a sqlite_store: {str(refl)[:200]}")
+            need((work / DB).is_file(), f"the ledger file is on disk: {DB}")
+
+            # 6 · the worker is busy again; the lead's message passes its deadline
+            work_m.reply(f'{SLOW_MARK}busy again\n<call name="done"></call>')
+            busy2 = Bg(hk, WORKER, {"type": "send", "text": "work on something slow, again"})
+            end = time.monotonic() + 30
+            st = {}
+            while time.monotonic() < end and not st.get("generating"):
+                st = hk.send(WORKER, {"type": "status"})
+                time.sleep(0.05)
+            need(bool(st.get("generating")), "part 2: the worker is generating (busy)")
+            seen_l = len(lead_m.turns())
+            state2 = {"pid": None, "resent": False}
+            ledger_call = (f'<call name="send">\n<routing><target_id>{root}</target_id></routing>\n'
+                           "<payload><type>ledger</type></payload>\n</call>")
+
+            def lead_responder2(req: dict) -> str | None:
+                u = last_user(req)
+                if RECALL_MARK in u:
+                    return "The head is fine as it is."
+                if TOKEN2 in u and "Ping the worker again" in u:
+                    return send_call(f"PING-{TOKEN2}")
+                if "Check the ledger" in u:
+                    return ledger_call
+                pid_ = state2["pid"]
+                if pid_ and pid_ in u and "timed_out" in u and not state2["resent"]:
+                    state2["resent"] = True
+                    return (send_call(f"RESEND-{TOKEN2}", "30")
+                            + f'\n<call name="send">\n<routing><target_id>{root}</target_id></routing>\n'
+                              f"<payload><type>ack_deadletter</type><id>{pid_}</id></payload>\n</call>")
+                return None
+
+            lead_m.responder = lead_responder2
+            lead_task = Bg(hk, LEAD, {"type": "send", "text": f"Ping the worker again ({TOKEN2})."})
+            got = turns_at_least(lead_m, seen_l + 2)[seen_l:]
+            note = re.search(r"hit its 3\.0s deadline → dead letter (\d+); resend or drop",
+                             last_user(got[1]["body"]) if len(got) > 1 else "")
+            need(note is not None, "part 2: the lead is told the dead letter's id on the sqlite ledger: "
+                 f"{last_user(got[1]['body'])[:300] if len(got) > 1 else ''!r}")
+            pid2 = note.group(1) if note else "?"
+            state2["pid"] = pid2
+            lead_task.join()
+            busy2.join()
+            need(idle(), "part 2: the chains settle before the restart")
+
+            # 7 · the kernel is stopped and a new one booted on the same folder
+            work_m.reply('Got RESEND again.\n<call name="done"></call>')
+            hk.close()
+            need(hk.proc is not None and hk.proc.poll() is not None, "the first kernel process is gone")
+            hk.boot()
+            need((work / DB).is_file(), f"the ledger file is still on disk: {DB}")
+            seen_l = len(lead_m.turns())
+            seen_w = len(work_m.turns())
+            lead_task = Bg(hk, LEAD, {"type": "send", "text": "Check the ledger, then deal with it."})
+            lead_task.join()
+            need(idle(), "part 2: the chains settle after the restart")
+            time.sleep(0.5)
+            l_after = [last_user(t["body"]) for t in lead_m.turns()[seen_l:]]
+            ledger_seen = next((u for u in l_after if "timed_out" in u and pid2 in u), "")
+            need(bool(ledger_seen),
+                 f"after the restart the lead's ledger still holds dead letter {pid2} as timed_out: "
+                 f"{[u[:200] for u in l_after]}")
+            w_after = [last_user(t["body"]) for t in work_m.turns()[seen_w:]]
+            need(any(f"RESEND-{TOKEN2}" in u for u in w_after),
+                 f"the resent message reached the worker: {[u[:120] for u in w_after]}")
+            need(not any(f"PING-{TOKEN2}" in u for u in w_after),
+                 "the withdrawn message was never the worker's turn to answer")
+            last2 = l_after[-1] if l_after else ""
+            need("Got RESEND again" in last2 and last2.count("Got RESEND again") == 1,
+                 f"the worker's answer to the resend reaches the lead once: {last2[:300]!r}")
+            print("  info: ack_deadletter after the restart: "
+                  + ("acked" if "<acked>true</acked>" in last2 else f"not acked: {last2[:200]!r}"),
+                  flush=True)
     finally:
         hk.close()
         lead_m.stop()

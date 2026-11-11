@@ -6,6 +6,11 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 ## [Unreleased]
 
 ### Added
+- `E101_provider_mocks` (#519): its chats are `ai_chat.tools` completing through the provider agent (Rust lane); `--exclude-runtime python` leaves the Python peer out of `kernel.artifact_smoke` (step 7) and `kernel.kernel_bridges` (skipped, the peer is the test), through `E2E_EXCLUDE_RUNTIME` set by `run.py`.
+- `E155_store_view` (#505, #508) and `E156_scheduler_view` (#507): free e2e probes with a browser (Rust lane, scripted, no model), with `_lib/host_view.py` to read the inline read-only views. E155: a real `append` shows in the canvas store view with no click, its rows counted from `tables.rows`. E156: a real `scheduler.tools` job (create, schedule, tick, unschedule) shows in the scheduler view with its run and last result.
+- `E153_launcher_seed` (#555) and `E154_headless_port` (#580): free e2e probes (Rust lane, scripted, no model). E153: each kernel mode seeds a fresh folder from the launcher, a one-shot command writes nothing, and a test-only embedder (`examples/embedder.rs` of `fantastic_tui`: the launcher plus one YAML blueprint, public API only) run with `--statedir` far from the cwd leaves its records in the state folder and the live `list_agents` and nothing in the cwd or the work folder. E154: `--headless --port N --host` takes the recorded `web` onto N, a restart reuses N, and a port-less `web` picks a free port once.
+- `E152_payload_routing_name` (#528): a free e2e probe (Rust lane, scripted model) that a routing name in `<payload>` (a `title` the verb documents) reaches its target while the routing `title` only labels the call, and the inline form of the same call is refused; the how-to's `reflect` example is written in the routing form. `E13_deadletter` (#568) gains a Rust-lane part: on a `sqlite_store` ledger a dead letter survives a kernel restart and the lead finds it in its ledger and resends it.
+- `E151_fold_more` (#556, #532): a free e2e probe (Rust lane, scripted model) for the rest of the fold cycle: a folded thought recalled by id is whole and refolds, the large `exec` `run` and `file` `list` replies fold like a read reply, `caching: none` folds and marks nothing, a person's `context_fold` stands in the next request and a large reply still folds after it, and the bytes before the cache mark never change. `ThinkingVllmMock` moved to `e2e/mocks/vllm.py` (E119, E140, E141 use it).
 - Export (#563): `export_subtree` reads a folder bundle's files from the state folder (`<state>/bundles/<name>/`), not from `<work>/.fantastic`; the README and the E63/E64 test READMEs name the prompt and mcp config files by their new place.
 - Home (#563, 5/5): the registry's `path` is the state folder. Open Folder runs `fantastic canvas --statedir <folder>/.fantastic` with the picked folder as the working directory; the probe reads the root record's `workdir` (`Ask::Workdir`) to start a listed row and to name an unnamed one (a row with no readable record and no picked folder has no name). `Registered::display_name` takes the work folder, `Event::Open` carries `Opened {path, workdir}` (on the intent wire still one string), `Effect::Spawn` has a `workdir`, `HomeOs::spawn` takes both folders, and the home kernel's seed records are `@state` relative.
 
@@ -24,8 +29,8 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   kernel's order (pages, drain, store close, lock release). The modes and the embedder run ONE
   boot (`kern::host::boot_all`: boot, the canvas when asked, the grant watch) and ONE stop; the
   MCP channel and the share socket stay the modes' own. `--headless --port N --host ADDR` is
-  accepted and sets the recorded `web` before it listens (no `web` record: refused, nothing
-  started); a recorded `web` with no port (and no `--port`) picks a free port once, records it
+  accepted and sets the recorded `web` before it listens (no `web` record: refused, the kernel
+  stopped and the lock released); a recorded `web` with no port (and no `--port`) picks a free port once, records it
   and reuses it, in every mode.
 - AI core `status` reply carries `inquiry_from` (#597): the askers of the inquiries the agent has received and not yet answered, sorted, each once (the operator as `operator`), ids only, in every `status` reply. No new verb or grant.
 - `KeyReader::read_fields(endpoint, names)` (#596): the credential reader returns the named

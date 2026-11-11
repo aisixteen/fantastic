@@ -196,7 +196,9 @@ class Rig:
             return f"the CLI links no {self.plug.handler_module} — it links {', '.join(FEATURES)}"
         return None
 
-    def build(self, *features: str) -> None:
+    def build(self, *features: str, example: str | None = None) -> None:
+        """Build the CLI, and copy it to `self.binary`. `example`: also build that cargo example of
+        the CLI crate (an embedder) and copy it to `self.example`."""
         feats = sorted({*features, *([FEATURES[self.plug.handler_module]] if self.plug else [])})
         args = ["cargo", "build", "-p", "fantastic-tui", *(["--features", ",".join(feats)] if feats else [])]
         # the build AND the copy under one lock: another test's build (other
@@ -209,6 +211,13 @@ class Rig:
                     raise SystemExit(f"{' '.join(args)} failed:\n{r.stderr[-2000:]}")
             self.binary = oslayer.exe(self.art / "fantastic")
             shutil.copy2(src, self.binary)  # a private copy: another build cannot swap it mid-run
+            if example:
+                r = subprocess.run([*args, "--example", example], cwd=SRC, capture_output=True, text=True,
+                                   env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
+                if r.returncode != 0:
+                    raise SystemExit(f"{' '.join(args)} --example {example} failed:\n{r.stderr[-2000:]}")
+                self.example = oslayer.exe(self.art / example)
+                shutil.copy2(oslayer.exe(E2E_TARGET / "debug" / "examples" / example), self.example)
 
     def make_home(self, record: dict | None = None, name: str = "plug") -> None:
         """A throwaway FANTASTIC_HOME — with `record` saved as the default, or none."""

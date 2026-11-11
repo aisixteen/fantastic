@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: a scripted OpenAI-compatible server plays the
+# model for the kernel's own ai_chat.tools chat over a vllm_backend provider, driven over web_rest.
+id: payload_routing_name
+group: kernel
+title: "a routing name in <payload> reaches its target (#528): a call in the routing form whose payload carries a `title` delivers it to the target (the kernel's create_agent, which keeps it on the new record) while the routing `title` only labels the call; the same call in the inline form delivers none"
+runner: probe.py
+runtimes: [rust]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300
