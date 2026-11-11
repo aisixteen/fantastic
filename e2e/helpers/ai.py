@@ -94,7 +94,7 @@ SHARED_PROVIDER = "ai_prov"
 def provider_id_for(backend, role: str | None = None) -> str:
     """The shared provider's id: `ai_prov`, or `ai_prov_<role>` for a role on another model."""
     if role and backend.model_for(role) != backend.model:
-        return f"{SHARED_PROVIDER}_{re.sub(r'\W', '_', role)}"
+        return SHARED_PROVIDER + "_" + re.sub(r"\W", "_", role)
     return SHARED_PROVIDER
 #: record fields the CHAT takes too (it sizes its own context and output)
 CHAT_SHARED = ("model", "max_tokens", "context_window")
