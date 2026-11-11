@@ -69,10 +69,12 @@ TOKEN = "E151-" + secrets.token_hex(4)
 DONE = '<call name="done"></call>'
 PY = sys.executable
 ALLOWED = [re.escape(shlex.quote(PY)) + r" -c .*"]
-# 600 files, 30-char names: the `list` reply renders about 140 chars an entry (84,000).
+# 600 files, 130-char names: an entry renders at least its name, so the `list` reply is over
+# 600 x 130 = 78,000 chars, past the 64,000 fold line with margin.
 MANY, MANY_N, LAST_NAME = "many", 600, "n0599-"
-# 500 lines of 110 chars: `run` keeps the last 500 (the cap of `tail`), about 86,000 rendered.
-RUN_PROGRAM = "for i in range(500): print('X%04d ' % i + 'x' * 104)"
+# 500 lines of 170 chars (85,000): `run` keeps the last 500 (the cap of `tail`), past the 64,000
+# fold line with margin.
+RUN_PROGRAM = "for i in range(500): print('X%04d ' % i + 'x' * 164)"
 LAST_LINE = "X0499 "
 
 
@@ -120,7 +122,7 @@ def main() -> int:
     (work / "files" / "big.txt").write_text(
         "".join(f"L{n:03d} " + "x" * 795 + "\n" for n in range(1, 101)))
     for n in range(MANY_N):
-        (work / "files" / MANY / (f"n{n:04d}-" + "a" * 24)).write_text("")
+        (work / "files" / MANY / (f"n{n:04d}-" + "a" * 124)).write_text("")
     hk = HostKernel(spec, work, reach=[*AIS, FILES, EXEC, "memory"]
                     + [f"prov_{a}" for a in AIS]).boot()
     root = hk.root_id
@@ -245,6 +247,10 @@ def main() -> int:
                     call(AI_T, f"<type>recall</type><id>{p}</id>"), f"Noted.\n{DONE}")
         allt += turns
         seen = blob(turns[0]) if turns else ""
+        bt = new_big(AI_T, set(), "T2")
+        need(re.search(rf'\[folded · read reply from {FILES} · ~\d+ tokens · '
+                       rf'head: "[^"]*" · get: {bt}\]', seen) is not None
+             and "L100 " not in seen, "T2: request 1 shows the read reply as its anchor, body gone")
         need(re.search(rf"\[thought ~\d+ tokens · id {p}\]", seen) is not None,
              "T2: request 1 shows the thought as its anchor")
         need(f"PLAN-{TOKEN}" not in seen and f"SEEN-{TOKEN}" not in seen,
