@@ -232,6 +232,12 @@ impl crate::bundle::Bundle for Docs {
     fn name(&self) -> &str {
         "docs_probe"
     }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::fixture_verbs!("ping")
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
+    }
     fn readme(&self) -> Option<&'static str> {
         self.readme
     }
@@ -676,6 +682,12 @@ impl crate::bundle::Bundle for RosterBundle {
     fn name(&self) -> &str {
         "roster_probe"
     }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::fixture_verbs!("boom", "modeless", "ping")
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
+    }
     async fn handle(
         &self,
         agent_id: &AgentId,
@@ -766,7 +778,10 @@ async fn reflect_carries_the_agents_view() {
         let id = id.to_string();
         async move {
             kernel
-                .send(vec![Item::new(AgentId::from(id), json!({"type": "reflect"}))])
+                .send(vec![Item::new(
+                    AgentId::from(id),
+                    json!({"type": "reflect"}),
+                )])
                 .await
                 .remove(0)
                 .result
@@ -800,8 +815,8 @@ async fn a_refusal_gets_no_view() {
 }
 
 #[tokio::test]
-async fn reflect_carries_no_verb_docs() {
-    // A reflect says what an agent IS; verbs, emits, cancel,
+async fn reflect_carries_the_declared_verbs_and_no_other_docs() {
+    // A reflect says what an agent IS and lists its declared verbs; emits, cancel,
     // `more` and `kernel_verbs` are the `docs` kernel verb.
     let (kernel, root) = roster_kernel();
     let child = probe_child(&kernel, "kid", &root, json!({}));
@@ -817,10 +832,21 @@ async fn reflect_carries_no_verb_docs() {
         .remove(0)
         .result;
     for reply in [&r, &c] {
-        for key in ["more", "kernel_verbs", "verbs", "emits", "cancel"] {
+        for key in ["more", "kernel_verbs", "emits", "cancel"] {
             assert!(reply.get(key).is_none(), "{key}: {reply}");
         }
     }
+    let shown: Vec<&str> = c["verbs"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        shown,
+        ["boom", "modeless", "ping", "reflect", "boot", "shutdown"],
+        "{c}"
+    );
     // Python order: `tree`, `next`, `bundles`, `readme`.
     let r = kernel_reflect(
         &kernel,
@@ -1201,6 +1227,12 @@ impl crate::bundle::Bundle for Named {
     fn name(&self) -> &str {
         self.0
     }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::fixture_verbs!("ping")
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
+    }
     async fn handle(
         &self,
         _agent_id: &AgentId,
@@ -1237,9 +1269,9 @@ async fn bundles_page_like_python() {
     assert_eq!(
         all["bundles"],
         json!([
-            {"name": "alpha", "handler_module": "alpha.tools"},
-            {"name": "bravo", "handler_module": "bravo.tools"},
-            {"name": "charlie", "handler_module": "charlie.tools"},
+            {"name": "alpha", "handler_module": "alpha.tools", "schema": {"fields": [], "open": true}},
+            {"name": "bravo", "handler_module": "bravo.tools", "schema": {"fields": [], "open": true}},
+            {"name": "charlie", "handler_module": "charlie.tools", "schema": {"fields": [], "open": true}},
         ])
     );
     assert!(
@@ -1281,7 +1313,8 @@ async fn bundles_page_like_python() {
     .result;
     assert_eq!(
         pa["bundles"],
-        json!([{"name": "alpha", "handler_module": "alpha.tools"}])
+        json!([{"name": "alpha", "handler_module": "alpha.tools",
+                "schema": {"fields": [], "open": true}}])
     );
     assert_eq!(pa["bundles_next"], "alpha");
     let pb = kernel_reflect(
@@ -1307,7 +1340,8 @@ async fn a_probe_registered_bundle_is_absent_from_the_catalog() {
     .result;
     assert_eq!(
         ids["bundles"],
-        json!([{"name": "roster_probe", "handler_module": "roster_probe.tools"}])
+        json!([{"name": "roster_probe", "handler_module": "roster_probe.tools",
+                "schema": {"fields": [], "open": true}}])
     );
     // ...and it still dispatches.
     let fixture = Agent::new(
@@ -1398,13 +1432,32 @@ async fn root_with_handler_reflects_identity() {
     );
 }
 
-/// A bundle that publishes its KIND's record schema.
+/// The record of the `schemaed` bundle.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SchemaedRecord {
+    /// the URL
+    #[allow(dead_code)]
+    endpoint: String,
+}
+
+mod schemaed_record {
+    use super::SchemaedRecord;
+    crate::record!(SchemaedRecord);
+}
+
+/// A bundle that declares a closed record.
 struct Schemaed;
 
 #[async_trait::async_trait]
 impl crate::bundle::Bundle for Schemaed {
     fn name(&self) -> &str {
         "schemaed"
+    }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::fixture_verbs!("ping")
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        &schemaed_record::RECORD
     }
     async fn handle(
         &self,
@@ -1414,20 +1467,13 @@ impl crate::bundle::Bundle for Schemaed {
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
         Ok(None)
     }
-    fn record_schema(&self) -> Option<Value> {
-        Some(
-            json!({"fields": [{"name": "endpoint", "type": "str", "required": true,
-                                "hint": "the URL"}]}),
-        )
-    }
 }
 
 /// Python `_available_bundles(schemas=True)`: `bundles=all` carries a bundle's
-/// `schema` when it publishes one — after `name`/`handler_module`, and only
-/// there; a bundle that publishes none has no key, and the cheap `bundles=ids`
-/// listing stays names.
+/// `schema` — its declared record, after `name`/`handler_module`, and only
+/// there; the cheap `bundles=ids` listing stays names.
 #[tokio::test]
-async fn bundles_all_carries_a_published_record_schema() {
+async fn bundles_all_carries_a_declared_record() {
     let mut kernel = Kernel::new();
     let mut reg = crate::bundle::BundleRegistry::new();
     reg.register("alpha.tools", Named("alpha"));
@@ -1446,10 +1492,11 @@ async fn bundles_all_carries_a_published_record_schema() {
     assert_eq!(
         all["bundles"],
         json!([
-            {"name": "alpha", "handler_module": "alpha.tools"},
+            {"name": "alpha", "handler_module": "alpha.tools",
+             "schema": {"fields": [], "open": true}},
             {"name": "schemaed", "handler_module": "schemaed.tools",
-             "schema": {"fields": [{"name": "endpoint", "type": "str", "required": true,
-                                    "hint": "the URL"}]}},
+             "schema": {"fields": [{"name": "endpoint", "type": "string", "required": true,
+                                    "hint": "the URL"}], "open": false}},
         ])
     );
     let keys: Vec<&String> = all["bundles"][1].as_object().unwrap().keys().collect();

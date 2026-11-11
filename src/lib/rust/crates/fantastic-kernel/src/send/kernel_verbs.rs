@@ -313,16 +313,14 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
     // `validate_meta`; the trait default accepts everything.
     if let Some(hm) = target.handler_module.as_deref() {
         if let Some(bundle) = kernel.bundles.get(hm) {
-            if let Some(own) = bundle.record() {
-                if let Err(refused) = crate::verbs::check_record(
-                    "update_agent",
-                    bundle.name(),
-                    &patch,
-                    &crate::declared::record::RECORD,
-                    own,
-                ) {
-                    return refused;
-                }
+            if let Err(refused) = crate::verbs::check_record(
+                "update_agent",
+                bundle.name(),
+                &patch,
+                &crate::declared::record::RECORD,
+                bundle.record(),
+            ) {
+                return refused;
             }
             let current = target.meta.read().expect("meta poisoned").clone();
             if let Some(why) = bundle.validate_meta(&patch, &current) {

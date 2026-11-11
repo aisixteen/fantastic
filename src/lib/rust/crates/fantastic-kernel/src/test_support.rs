@@ -18,6 +18,171 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// What a stand-in bundle's verb takes: any arguments (the stand-in reads the
+/// payload itself). A stand-in still names every verb it answers.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AnyArgs {}
+
+/// The record of a stand-in bundle: freeform.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AnyRecord {}
+
+/// `fixture_verbs!("a", "b")` — the declared verbs of a stand-in bundle, each taking
+/// any arguments: a `&'static [Verb]` for [`Bundle::verbs`].
+#[macro_export]
+macro_rules! fixture_verbs {
+    ($($name:literal),* $(,)?) => {{
+        static V: [$crate::Verb; <[&str]>::len(&[$(stringify!($name)),*])] =
+            [$($crate::Verb::of::<$crate::test_support::AnyArgs>($name)),*];
+        &V as &'static [$crate::Verb]
+    }};
+}
+
+/// `fixture_record!()` — a freeform record: a `&'static RecordDecl` for [`Bundle::record`].
+#[macro_export]
+macro_rules! fixture_record {
+    () => {{
+        static R: $crate::RecordDecl =
+            $crate::RecordDecl::of::<$crate::test_support::AnyRecord>(true);
+        &R
+    }};
+}
+
+/// The verbs and record of the stand-ins below, declared as every bundle does.
+#[doc(hidden)]
+pub mod declared_fixtures {
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+
+    /// Remove a file or a directory.
+    #[derive(Debug, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    pub struct Delete {
+        /// The path under the store's root.
+        pub path: String,
+        /// Remove a directory with what is in it.
+        pub recursive: Option<bool>,
+    }
+
+    /// Move a file; the commit protocol's atomic step.
+    #[derive(Debug, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    pub struct Rename {
+        /// The file to move.
+        pub old_path: String,
+        /// Where it goes.
+        pub new_path: String,
+    }
+
+    /// Read a text file.
+    #[derive(Debug, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    pub struct Read {
+        /// The path under the store's root.
+        pub path: String,
+    }
+
+    /// Write a text file.
+    #[derive(Debug, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    pub struct Write {
+        /// The path under the store's root.
+        pub path: String,
+        /// The text.
+        pub content: String,
+    }
+
+    /// Read a file's bytes; they ride the binary channel.
+    #[derive(Debug, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    pub struct ReadStream {
+        /// The path under the store's root.
+        pub path: String,
+        /// Where in the file the chunk starts.
+        pub offset: Option<i64>,
+    }
+
+    /// Write bytes to a file (appended unless `truncate`); they ride the binary channel.
+    #[derive(Debug, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    pub struct WriteStream {
+        /// The path under the store's root.
+        pub path: String,
+        /// Start the file over instead of appending.
+        pub truncate: Option<bool>,
+    }
+
+    /// The record of the stand-in agents.
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct StoreRecord {
+        /// Where the store reads and writes.
+        pub root: Option<String>,
+        /// The paths it may touch.
+        pub allow: Option<Vec<String>>,
+        /// How calls reach it.
+        pub ingress_rule: Option<String>,
+    }
+
+    /// Install the record writer, once.
+    #[derive(Debug, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    pub struct Boot {}
+
+    /// Store a sidecar file of an agent.
+    #[derive(Debug, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    pub struct PersistBlob {
+        /// The agent the file belongs to.
+        pub agent_id: String,
+        /// One bare filename.
+        pub name: String,
+        /// The file's text.
+        pub content: String,
+    }
+
+    /// Read an agent's sidecar file.
+    #[derive(Debug, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    pub struct LoadBlob {
+        /// The agent the file belongs to.
+        pub agent_id: String,
+        /// One bare filename.
+        pub name: String,
+    }
+
+    /// The loader record: free.
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct LoaderRecord {}
+
+    pub mod store_verbs {
+        use super::*;
+        crate::verbs! {
+            "delete" => Delete,
+            "rename" => Rename,
+            "read" => Read,
+            "write" => Write,
+            "read_stream" => ReadStream,
+            "write_stream" => WriteStream,
+        }
+    }
+    pub mod store_record {
+        use super::*;
+        crate::record!(StoreRecord, open);
+    }
+    pub mod loader_verbs {
+        use super::*;
+        crate::verbs! {
+            "boot" => Boot,
+            "persist_blob" => PersistBlob,
+            "load_blob" => LoadBlob,
+        }
+    }
+    pub mod loader_record {
+        use super::*;
+        crate::record!(LoaderRecord, open);
+    }
+}
+
 /// A minimal stand-in for the real `file_bridge` provider, rooted at `root`.
 pub struct FakeStore {
     /// The directory this fake store reads/writes under (the loader's
@@ -29,6 +194,12 @@ pub struct FakeStore {
 impl Bundle for FakeStore {
     fn name(&self) -> &str {
         "file_bridge"
+    }
+    fn verbs(&self) -> &'static [crate::verbs::Verb] {
+        declared_fixtures::store_verbs::VERBS
+    }
+    fn record(&self) -> &'static crate::verbs::RecordDecl {
+        &declared_fixtures::store_record::RECORD
     }
     async fn handle(
         &self,
@@ -151,6 +322,12 @@ pub struct RootLoader {
 impl Bundle for RootLoader {
     fn name(&self) -> &str {
         "kernel_state.tools"
+    }
+    fn verbs(&self) -> &'static [crate::verbs::Verb] {
+        declared_fixtures::loader_verbs::VERBS
+    }
+    fn record(&self) -> &'static crate::verbs::RecordDecl {
+        &declared_fixtures::loader_record::RECORD
     }
     async fn handle(
         &self,

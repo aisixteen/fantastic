@@ -25,6 +25,12 @@ impl Bundle for Noop {
     fn name(&self) -> &str {
         "noop"
     }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::fixture_verbs!()
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
+    }
     async fn handle(
         &self,
         _id: &AgentId,

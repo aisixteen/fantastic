@@ -158,6 +158,7 @@ pub mod kernel {
     }
 
     crate::verbs! {
+        @own
         "create_agent" => CreateAgent,
         "update_agent" => UpdateAgent,
         "delete_agent" => DeleteAgent,
@@ -218,6 +219,7 @@ pub mod common {
     }
 
     crate::verbs! {
+        @own
         "reflect" => Reflect,
         "boot" => Boot,
         "shutdown" => Shutdown,

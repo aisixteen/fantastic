@@ -106,7 +106,29 @@ fn parse_as<T: serde::de::DeserializeOwned>(v: Value) -> Result<(), String> {
 /// one variant per struct (named like it) and `Call::parse(&payload)`.
 #[macro_export]
 macro_rules! verbs {
+    // The kernel's own lists (`declared`): no `Reflect` variant added.
+    (@own $($name:literal => $ty:ident),+ $(,)?) => {
+        $crate::verbs!(@list args [] [] $($name => $ty),+);
+    };
+    // A bundle's list: `reflect`, which every agent answers and the kernel always
+    // passes on, is a variant of its `Call` beside its own verbs.
     ($($name:literal => $ty:ident),+ $(,)?) => {
+        $crate::verbs!(
+            @list
+            args
+            [
+                /// The `reflect` verb every agent answers.
+                Reflect($crate::declared::common::Reflect),
+            ]
+            [
+                "reflect" => $crate::verbs::serde_json::from_value::<$crate::declared::common::Reflect>(args)
+                    .map(Call::Reflect)
+                    .map_err(|e| e.to_string()),
+            ]
+            $($name => $ty),+
+        );
+    };
+    (@list $args:ident [$($variant:tt)*] [$($arm:tt)*] $($name:literal => $ty:ident),+) => {
         /// Every verb this bundle declares: the list the kernel validates a call
         /// against and renders in `reflect` and `docs`.
         pub static VERBS: &[$crate::verbs::Verb] = &__DECLARED_VERBS;
@@ -119,6 +141,7 @@ macro_rules! verbs {
         /// A call of one of this bundle's verbs, its arguments typed.
         #[derive(Debug)]
         pub enum Call {
+            $($variant)*
             $(
                 #[doc = concat!("The `", $name, "` verb.")]
                 $ty($ty)
@@ -133,10 +156,11 @@ macro_rules! verbs {
                     .get("type")
                     .and_then(|t| t.as_str())
                     .unwrap_or("");
-                let args = $crate::verbs::args_of(payload);
+                let $args = $crate::verbs::args_of(payload);
                 match verb {
+                    $($arm)*
                     $(
-                        $name => $crate::verbs::serde_json::from_value::<$ty>(args)
+                        $name => $crate::verbs::serde_json::from_value::<$ty>($args)
                             .map(Call::$ty)
                             .map_err(|e| e.to_string()),
                     )+
@@ -548,19 +572,20 @@ fn check_against(
 }
 
 /// `unknown verb 'X'; <agent> answers: a, b, c` — the refusal for a verb not in the
-/// list. `answers` are the verb names the agent takes.
+/// list. `verb` is the call's raw `type` (`null` when absent), echoed as sent.
+/// `answers` are the verb names the agent takes.
 #[must_use]
-pub fn unknown_verb(agent: &str, verb: &str, answers: &[&str]) -> Value {
+pub fn unknown_verb(agent: &str, verb: &Value, answers: &[&str]) -> Value {
     let mut r = refusal_hint(
         UNHANDLED,
         format!(
             "unknown verb {}; {agent} answers: {}",
-            fantastic_bundle::py_repr(verb),
+            fantastic_bundle::py_repr_value(verb),
             answers.join(", ")
         ),
         format!("docs of={agent} lists each verb's arguments"),
     );
-    with(&mut r, "verb", json!(verb));
+    with(&mut r, "verb", verb.clone());
     r
 }
 
@@ -584,7 +609,11 @@ pub fn check_call(
                 }
             }
         }
-        return Err(unknown_verb(agent, verb, &names));
+        return Err(unknown_verb(
+            agent,
+            payload.get("type").unwrap_or(&Value::Null),
+            &names,
+        ));
     };
     let args = check_args(v, payload)?;
     let mut out = match args {

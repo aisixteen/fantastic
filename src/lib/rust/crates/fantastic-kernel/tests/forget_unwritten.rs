@@ -28,6 +28,12 @@ impl Bundle for DeleteLog {
     fn name(&self) -> &str {
         "file_bridge"
     }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!("delete", "rename", "write_stream")
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
     async fn handle(
         &self,
         id: &AgentId,
@@ -57,6 +63,12 @@ struct Plain;
 impl Bundle for Plain {
     fn name(&self) -> &str {
         "plain"
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!()
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,

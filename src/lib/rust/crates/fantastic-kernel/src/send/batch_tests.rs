@@ -307,6 +307,12 @@ impl crate::bundle::Bundle for Overlap {
     fn name(&self) -> &str {
         "overlap"
     }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::fixture_verbs!("b", "boot", "reflect", "shutdown", "wait_for_b")
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
+    }
 
     async fn handle(
         &self,

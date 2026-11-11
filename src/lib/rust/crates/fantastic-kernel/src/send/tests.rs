@@ -229,6 +229,12 @@ async fn a_binary_item_routes_through_bundle_handle_binary() {
         fn name(&self) -> &str {
             "echo_bytes"
         }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            every_verb_the_tests_send()
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
+        }
         async fn handle(
             &self,
             _agent_id: &AgentId,
@@ -341,6 +347,12 @@ async fn a_binary_bundle_error_settles_raised() {
     impl Bundle for Boom {
         fn name(&self) -> &str {
             "boom"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            every_verb_the_tests_send()
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         async fn handle(
             &self,
@@ -488,6 +500,12 @@ async fn a_handler_reads_its_caller_not_itself() {
     impl Bundle for Spy {
         fn name(&self) -> &str {
             "origin_spy"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            every_verb_the_tests_send()
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         async fn handle(
             &self,
@@ -720,6 +738,38 @@ async fn gate_denial_keys_are_error_reason_hint_side() {
     assert_eq!(d["side"], "ingress");
 }
 
+/// The verbs these tests send to the stand-in bundles below; each stand-in declares
+/// them all and answers the ones it handles.
+fn every_verb_the_tests_send() -> &'static [crate::Verb] {
+    crate::fixture_verbs!(
+        "after_unwatch",
+        "echo",
+        "echo_error",
+        "empty",
+        "fail",
+        "frob",
+        "get",
+        "go",
+        "hello",
+        "hi",
+        "hop",
+        "ingest",
+        "load_tree",
+        "nope",
+        "paste_image",
+        "ping",
+        "poke",
+        "put",
+        "raise",
+        "say",
+        "self",
+        "set",
+        "take",
+        "work",
+        "write_stream"
+    )
+}
+
 // ── the call row and its settle ────────────────────────────────────────
 
 /// A bundle that answers whatever the payload asks for: `{"type":"work"}` is a
@@ -730,6 +780,12 @@ struct C36Bundle;
 impl crate::bundle::Bundle for C36Bundle {
     fn name(&self) -> &str {
         "c36"
+    }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::fixture_verbs!("echo_error", "nope", "work")
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
     }
     async fn handle(
         &self,
@@ -1061,6 +1117,12 @@ impl crate::bundle::Bundle for PeekInbox {
     fn name(&self) -> &str {
         "peek"
     }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        every_verb_the_tests_send()
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
+    }
     async fn handle(
         &self,
         agent_id: &AgentId,
@@ -1199,6 +1261,12 @@ async fn a_fork_is_rowed_before_the_dispatch_settles_and_its_body_runs_under_it(
         fn name(&self) -> &str {
             "forker"
         }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            every_verb_the_tests_send()
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
+        }
         async fn handle(
             &self,
             a: &AgentId,
@@ -1280,6 +1348,12 @@ async fn a_watched_write_stream_reaches_the_watcher_with_its_body() {
         fn name(&self) -> &str {
             "sink"
         }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            every_verb_the_tests_send()
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
+        }
         async fn handle(
             &self,
             _a: &AgentId,
@@ -1353,6 +1427,12 @@ async fn a_binary_body_rides_at_its_payload_path() {
     impl Bundle for Echo {
         fn name(&self) -> &str {
             "echo"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            every_verb_the_tests_send()
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         async fn handle(
             &self,
@@ -1483,6 +1563,12 @@ async fn a_literal_key_body_is_one_top_level_key() {
         fn name(&self) -> &str {
             "echo"
         }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            every_verb_the_tests_send()
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
+        }
         async fn handle(
             &self,
             _a: &AgentId,
@@ -1579,6 +1665,12 @@ async fn binary_dispatch_runs_the_same_pre_bundle_path_as_text() {
     impl Bundle for Loader {
         fn name(&self) -> &str {
             "loader"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            every_verb_the_tests_send()
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         async fn handle(
             &self,
@@ -1729,19 +1821,6 @@ fn kernel_verbs_are_declared_in_order_and_rendered() {
     assert!(row("create_agent").2.contains("parent_id:string (req)"));
 }
 
-#[test]
-fn docs_signatures_are_pythons() {
-    assert_eq!(
-        crate::docs::signature("args: q:str (req — e.g. a word), n:int? (default 5). Finds q."),
-        "args: q:str (req — e.g. a word), n:int? (default 5)"
-    );
-    assert_eq!(
-        crate::docs::signature("Start the loop unless `watch=false`\n(a loader). More.\n\nX."),
-        "Start the loop unless `watch=false` (a loader)"
-    );
-    assert_eq!(crate::docs::signature("No args."), "No args");
-}
-
 // ─── one dispatch per channel ───────────────────────────────────────────────
 //
 // The text and binary dispatch paths carry the same prologue (kernel-verb
@@ -1868,6 +1947,12 @@ struct NoReply;
 impl crate::bundle::Bundle for NoReply {
     fn name(&self) -> &str {
         "no_reply"
+    }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::fixture_verbs!("echo", "empty", "raise")
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
     }
     async fn handle(
         &self,
@@ -1996,6 +2081,12 @@ struct Hop(Arc<HopLog>);
 impl crate::bundle::Bundle for Hop {
     fn name(&self) -> &str {
         "hop"
+    }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        every_verb_the_tests_send()
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
     }
     async fn handle(
         &self,
@@ -2329,6 +2420,12 @@ async fn a_marked_value_is_shown_never_kept() {
         fn name(&self) -> &str {
             "secret_probe"
         }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            every_verb_the_tests_send()
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
+        }
         async fn handle(
             &self,
             _agent_id: &AgentId,
@@ -2415,6 +2512,12 @@ async fn a_bundle_names_its_own_secret_paths() {
     impl Bundle for Vault {
         fn name(&self) -> &str {
             "vault_probe"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            every_verb_the_tests_send()
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         fn payload_secret(&self, payload: &Value) -> Vec<String> {
             if payload.get("type") == Some(&json!("put")) {
@@ -2509,6 +2612,12 @@ async fn a_call_error_echoing_a_secret_is_shown_in_the_row() {
         fn name(&self) -> &str {
             "echo_probe"
         }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            every_verb_the_tests_send()
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
+        }
         fn reply_secret(&self, payload: &Value, _reply: &Value) -> Vec<String> {
             if payload.get("type") == Some(&json!("fail")) {
                 vec!["error".into()]
@@ -2551,7 +2660,10 @@ async fn a_call_error_echoing_a_secret_is_shown_in_the_row() {
         out.result
     );
     let rows = serde_json::to_string(&kernel.rows.all()).unwrap();
-    assert!(!rows.contains("sk-ERR-REAL"), "a row kept the error text: {rows}");
+    assert!(
+        !rows.contains("sk-ERR-REAL"),
+        "a row kept the error text: {rows}"
+    );
     assert!(rows.contains("[secret]"), "{rows}");
 }
 
@@ -2567,13 +2679,23 @@ async fn a_handler_noting_reply_secret_marks_its_settle_row() {
         fn name(&self) -> &str {
             "relay_probe"
         }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            every_verb_the_tests_send()
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
+        }
         async fn handle(
             &self,
             _agent_id: &AgentId,
             _payload: &Value,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
-            crate::note_reply_secret(["fields.k".to_string(), "type".to_string(), "a..b".to_string()]);
+            crate::note_reply_secret([
+                "fields.k".to_string(),
+                "type".to_string(),
+                "a..b".to_string(),
+            ]);
             Ok(Some(json!({"fields": {"k": "sk-RELAYED", "n": "keep"}})))
         }
     }
@@ -2599,13 +2721,21 @@ async fn a_handler_noting_reply_secret_marks_its_settle_row() {
         .send(vec![Item::new("rp", json!({"type": "get"})).with_id("r1")])
         .await
         .remove(0);
-    assert_eq!(out.result["fields"]["k"], json!("sk-RELAYED"), "{}", out.result);
+    assert_eq!(
+        out.result["fields"]["k"],
+        json!("sk-RELAYED"),
+        "{}",
+        out.result
+    );
     assert_eq!(out.secret, vec!["fields.k".to_string()]);
     let rows = serde_json::to_string(&kernel.rows.all()).unwrap();
     assert!(!rows.contains("sk-RELAYED"), "a row kept the value: {rows}");
     let ledger = serde_json::to_string(&kernel.ledger.entries()).unwrap();
     assert!(!ledger.contains("sk-RELAYED"), "{ledger}");
-    assert!(ledger.contains("[secret]") && ledger.contains("keep"), "{ledger}");
+    assert!(
+        ledger.contains("[secret]") && ledger.contains("keep"),
+        "{ledger}"
+    );
     let events = format!("{:?}", seen.lock().expect("sink poisoned"));
     assert!(!events.contains("sk-RELAYED"), "{events}");
 }

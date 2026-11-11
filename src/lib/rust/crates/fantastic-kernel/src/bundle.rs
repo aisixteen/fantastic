@@ -97,54 +97,16 @@ pub trait Bundle: Send + Sync {
         None
     }
 
-    /// What this bundle KIND's record takes — `{fields:[{name, type, required,
-    /// enum?, default?, hint}]}` — readable before any agent of it exists; a key
-    /// is a `credentials` field (`{store, ref}`),
-    /// never an environment variable. The substrate attaches it to this
-    /// bundle's entry in the `reflect bundles=all` catalog, and nowhere else.
-    /// Python's duck-typed module-level `RECORD_SCHEMA`.
-    ///
-    /// ONE TRUTH: a bundle that publishes a schema enforces the same one in
-    /// [`Self::validate_meta`] (the AI backends build both from
-    /// `fantastic_ai_core::schema`). Default: none — most bundles publish no
-    /// record contract.
-    fn record_schema(&self) -> Option<Value> {
-        None
-    }
-
     /// THE VERBS this bundle's agents answer, DECLARED (`verbs!{}` in its `verbs.rs`): the
     /// list the kernel checks every call against — verb known, arguments known,
-    /// present and typed — and renders in `reflect` and `docs`. `None`: this bundle has
-    /// not been moved to declarations yet (issue #642); its calls are not checked and
-    /// `docs` serves [`Self::verb_docs`]. Default: `None`.
-    fn verbs(&self) -> Option<&'static [crate::verbs::Verb]> {
-        None
-    }
+    /// present and typed — and renders in `reflect` and `docs`. Required.
+    fn verbs(&self) -> &'static [crate::verbs::Verb];
 
     /// THE RECORD this bundle's agents carry, DECLARED (`record!` in its `record.rs`):
     /// the fields `create_agent` / `update_agent` may set on them, beside the fields
-    /// every record has ([`crate::declared::record`]). `None`: not declared — any field
-    /// is accepted. Default: `None`.
-    fn record(&self) -> Option<&'static crate::verbs::RecordDecl> {
-        None
-    }
-
-    /// HOW TO CALL this bundle's agents — `{verb: doc}` in the bundle's order,
-    /// python's module-level `VERBS` docstrings. Served by the kernel's `docs`
-    /// verb (oneliners: each doc's signature; detailed: the whole doc) and read
-    /// by [`crate::kernel::Kernel::advertises`]. Never on a reflect. Default: no
-    /// verbs.
-    fn verb_docs(&self) -> Value {
-        Value::Object(serde_json::Map::new())
-    }
-
-    /// THIS AGENT'S verb docs, when its bundle serves different verbs per agent
-    /// (an MCP server's tools) — python's duck-typed `instance_verbs(agent)`.
-    /// `docs of=<agent id>` reads it before [`Self::verb_docs`]; `None` keeps the
-    /// bundle's. Default: none.
-    fn instance_verb_docs(&self, _agent: &crate::agent::Agent) -> Option<Value> {
-        None
-    }
+    /// every record has ([`crate::declared::record`]); also what `reflect bundles=all`
+    /// lists for the kind. Required.
+    fn record(&self) -> &'static crate::verbs::RecordDecl;
 
     /// The rest of the DETAILED docs — python's duck-typed module-level `EMITS`,
     /// `CANCEL` and `NOTES`, served by `docs` (tier detailed, no `verb`).
@@ -421,7 +383,11 @@ impl BundleRegistry {
             // A bare bundle name (`ai_chat`) is accepted for its `.tools` module (owner).
             .or_else(|| {
                 (!handler_module.contains('.'))
-                    .then(|| self.by_handler.get(&format!("{handler_module}.tools")).cloned())
+                    .then(|| {
+                        self.by_handler
+                            .get(&format!("{handler_module}.tools"))
+                            .cloned()
+                    })
                     .flatten()
             })
     }
@@ -503,11 +469,22 @@ impl BundleRegistry {
     /// (a registered `handler_module`, a meta bundle, an installed bundle's name) that
     /// never leads back to `name`. `Ok` is the row to register, `base` resolved to its
     /// handler module; `Err` names the field.
-    pub fn meta_row(&self, name: &str, base: &str, sentence: &str, spec: &Value, row: Value) -> Result<Value, String> {
+    pub fn meta_row(
+        &self,
+        name: &str,
+        base: &str,
+        sentence: &str,
+        spec: &Value,
+        row: Value,
+    ) -> Result<Value, String> {
         let record = match spec.get("record") {
             None | Some(Value::Null) => Value::Object(serde_json::Map::new()),
             Some(r @ Value::Object(_)) => r.clone(),
-            Some(_) => return Err("record: must be a mapping of the fields every instance inherits".to_string()),
+            Some(_) => {
+                return Err(
+                    "record: must be a mapping of the fields every instance inherits".to_string(),
+                )
+            }
         };
         let Some(handler) = self.handler_of(base) else {
             let bases = self.folder_bases().join(", ");
@@ -559,8 +536,13 @@ impl BundleRegistry {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| format!("{name}: sentence: required — one line saying what it is"))?;
         let row = serde_json::json!({"name": name, "handler_module": name});
-        let row = self.meta_row(name, base, sentence, &spec, row).map_err(|e| format!("{name}: {e}"))?;
-        self.embedded.write().expect("embedded poisoned").insert(name.to_string(), row);
+        let row = self
+            .meta_row(name, base, sentence, &spec, row)
+            .map_err(|e| format!("{name}: {e}"))?;
+        self.embedded
+            .write()
+            .expect("embedded poisoned")
+            .insert(name.to_string(), row);
         Ok(())
     }
 
@@ -607,17 +589,30 @@ impl BundleRegistry {
     /// folder with no program — its row holds its `record`, and no built bundle
     /// stands for it), else its embedded one.
     fn meta_base(&self, name: &str) -> Option<String> {
-        self.meta_row_of(name)?.get("base").and_then(Value::as_str).map(str::to_string)
+        self.meta_row_of(name)?
+            .get("base")
+            .and_then(Value::as_str)
+            .map(str::to_string)
     }
 
     /// The live row of the meta bundle `name`: a loaded folder meta bundle wins over
     /// an embedded one. `None`: no meta bundle by that name (or a program folder).
     fn meta_row_of(&self, name: &str) -> Option<Value> {
-        if self.folders.read().expect("folders poisoned").contains_key(name) {
+        if self
+            .folders
+            .read()
+            .expect("folders poisoned")
+            .contains_key(name)
+        {
             return None;
         }
-        self.folder_meta(name)
-            .or_else(|| self.embedded.read().expect("embedded poisoned").get(name).cloned())
+        self.folder_meta(name).or_else(|| {
+            self.embedded
+                .read()
+                .expect("embedded poisoned")
+                .get(name)
+                .cloned()
+        })
     }
 
     /// A FOLDER meta bundle's row: loaded, no error, a `record`.
@@ -646,7 +641,11 @@ impl BundleRegistry {
         for name in chain.iter().rev() {
             // a meta bundle's live row (folder over embedded), or a program folder's own
             let row = self.meta_row_of(name).or_else(|| {
-                self.folder_rows.read().expect("folder rows poisoned").get(name).cloned()
+                self.folder_rows
+                    .read()
+                    .expect("folder rows poisoned")
+                    .get(name)
+                    .cloned()
             });
             if let Some(Value::Object(rec)) = row.as_ref().and_then(|r| r.get("record")) {
                 for (k, v) in rec {

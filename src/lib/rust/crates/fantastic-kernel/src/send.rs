@@ -2127,33 +2127,26 @@ fn dispatch(
             // cannot be answered HERE, and says so with a code.
             return Ok((not_installed_refusal(&target.id.0, hm, verb), None));
         };
-        // A bundle that DECLARES its verbs (`Bundle::verbs`) is checked here, for every
+        // The bundle's declared verbs (`Bundle::verbs`) are checked here, for every
         // caller: the verb must be one it answers (or one every agent does), and
         // the arguments must be known, present and typed. The handler gets the
-        // payload with its numbers and bools typed. A bundle not yet moved to
-        // declarations is not checked (issue #642).
-        let payload = match bundle.verbs() {
-            Some(own) => {
-                let mut lists: Vec<&[crate::verbs::Verb]> =
-                    vec![own, crate::declared::common::VERBS];
-                if target.parent_id.is_none() {
-                    // the root is `kernel`: it answers the kernel's verbs too
-                    lists.push(crate::declared::kernel::VERBS);
-                }
-                let checked = match crate::verbs::check_call(&target.id.0, verb, &payload, &lists) {
-                    Ok(p) => p,
-                    Err(refused) => return Ok((refused, None)),
-                };
-                // `boot` and `shutdown` are answered by EVERY agent: a bundle that
-                // declares neither has nothing to open or release, and the kernel
-                // answers for it, as it does for a bare agent.
-                if matches!(verb, "boot" | "shutdown") && !own.iter().any(|v| v.name == verb) {
-                    return Ok((Value::Null, None));
-                }
-                checked
-            }
-            None => payload,
+        // payload with its numbers and bools typed.
+        let own = bundle.verbs();
+        let mut lists: Vec<&[crate::verbs::Verb]> = vec![own, crate::declared::common::VERBS];
+        if target.parent_id.is_none() {
+            // the root is `kernel`: it answers the kernel's verbs too
+            lists.push(crate::declared::kernel::VERBS);
+        }
+        let payload = match crate::verbs::check_call(&target.id.0, verb, &payload, &lists) {
+            Ok(p) => p,
+            Err(refused) => return Ok((refused, None)),
         };
+        // `boot` and `shutdown` are answered by EVERY agent: a bundle that
+        // declares neither has nothing to open or release, and the kernel
+        // answers for it, as it does for a bare agent.
+        if matches!(verb, "boot" | "shutdown") && !own.iter().any(|v| v.name == verb) {
+            return Ok((Value::Null, None));
+        }
         // The reply body comes back AT ITS SLOT of the reply: `bytes` for a
         // `read_stream`, a bundle's own key for its own verb, the peer's own key
         // for a bridge relaying a peer's reply.

@@ -20,6 +20,12 @@ impl Bundle for Noop {
     fn name(&self) -> &str {
         "noop"
     }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!("get", "no_such_system_verb", "poke")
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
     async fn handle(
         &self,
         _id: &AgentId,

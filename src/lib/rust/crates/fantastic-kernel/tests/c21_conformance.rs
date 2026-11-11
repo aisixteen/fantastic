@@ -38,6 +38,12 @@ impl Bundle for C21Probe {
     fn name(&self) -> &str {
         "c21_echo"
     }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!("boot", "poke", "shutdown")
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
     async fn handle(
         &self,
         _id: &AgentId,

@@ -30,6 +30,12 @@ impl Bundle for ReadmeBundle {
     fn name(&self) -> &str {
         "readme_bundle"
     }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!()
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
     async fn handle(
         &self,
         _id: &AgentId,
@@ -55,6 +61,12 @@ struct GatedStore {
 impl Bundle for GatedStore {
     fn name(&self) -> &str {
         "file_bridge"
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!("rename", "write_stream")
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,

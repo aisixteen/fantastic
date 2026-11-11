@@ -25,6 +25,12 @@ impl Bundle for IdBundle {
     fn name(&self) -> &str {
         "hook_identity_probe"
     }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::fixture_verbs!("boot", "fork_service", "shutdown", "slow")
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
+    }
 
     async fn handle(
         &self,

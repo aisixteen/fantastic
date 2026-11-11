@@ -363,22 +363,19 @@ impl KernelStateBundle {
     async fn persist_record(
         &self,
         agent: &Arc<Agent>,
-        payload: &Value,
+        args: verbs::PersistRecord,
         kernel: &Arc<Kernel>,
     ) -> Result<Value, BundleError> {
         if let Some(denied) = guard_own_tree("persist_record", agent) {
             return Ok(denied);
         }
-        let Some(record) = payload
-            .get("record")
-            .and_then(Value::as_object)
-            .filter(|r| r.get("id").is_some_and(fantastic_bundle::py_truthy))
-        else {
+        let record = &args.record;
+        if !record.get("id").is_some_and(fantastic_bundle::py_truthy) {
             return Ok(fantastic_kernel::missing(
                 "persist_record",
                 "record (dict with id)",
             ));
-        };
+        }
         if let Some(bad) = guard_id("persist_record", record.get("id")) {
             return Ok(bad);
         }
@@ -405,27 +402,24 @@ impl KernelStateBundle {
     async fn forget_record(
         &self,
         agent: &Arc<Agent>,
-        payload: &Value,
+        args: verbs::ForgetRecord,
         kernel: &Arc<Kernel>,
     ) -> Result<Value, BundleError> {
         if let Some(denied) = guard_own_tree("forget_record", agent) {
             return Ok(denied);
         }
-        // `if not target: missing` — TRUTHINESS; a truthy non-string is then the
-        // id guard's `bad_arg`, not `missing_arg`.
-        let Some(raw) = payload.get("id").filter(|v| fantastic_bundle::py_truthy(v)) else {
+        // `if not target: missing`; the kernel already checked the argument is a string.
+        let target = args.id.as_str();
+        if target.is_empty() {
             return Ok(fantastic_kernel::missing("forget_record", "id"));
-        };
-        if let Some(bad) = guard_id("forget_record", Some(raw)) {
+        }
+        if let Some(bad) = fantastic_kernel::refusal::guard_agent_id("forget_record", target) {
             return Ok(bad);
         }
-        let target = raw.as_str().unwrap_or("");
-        let parent_id = payload.get("parent_id");
-        let parent = parent_id.and_then(Value::as_str);
+        let parent = args.parent_id.as_deref();
         let mut at = Places::new(agent, kernel);
-        if let Some(bad) = parent_id
-            .filter(|p| !p.is_null())
-            .and_then(|p| guard_id("forget_record", Some(p)))
+        if let Some(bad) =
+            parent.and_then(|p| fantastic_kernel::refusal::guard_agent_id("forget_record", p))
         {
             return Ok(bad);
         }
@@ -567,12 +561,12 @@ impl Bundle for KernelStateBundle {
         "kernel_state"
     }
 
-    fn verbs(&self) -> Option<&'static [fantastic_kernel::Verb]> {
-        Some(verbs::VERBS)
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        verbs::VERBS
     }
 
-    fn record(&self) -> Option<&'static fantastic_kernel::RecordDecl> {
-        Some(&record::RECORD)
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &record::RECORD
     }
 
     fn readme(&self) -> Option<&'static str> {
@@ -606,28 +600,25 @@ impl Bundle for KernelStateBundle {
                 kernel.agents.iter().map(|e| e.key().0.clone()).collect(),
             )));
         };
-        // `reflect` is a verb every agent answers (declared once, in the kernel); the
-        // others are this bundle's `verbs!`. The kernel checked the call before it got
-        // here: the verb is known and its arguments are in order.
-        if payload.get("type").and_then(Value::as_str) == Some("reflect") {
-            return Ok(Some(json!({
+        // The kernel checked the call before it got here: the verb is known and its
+        // arguments are in order.
+        let call = verbs::Call::parse(payload).map_err(|e| -> BundleError { e.into() })?;
+        let reply = match call {
+            verbs::Call::Reflect(_) => json!({
                 "id": agent.id.0,
                 "sentence": "Disk persistence/hydration root — owns .fantastic; \
                              answers load_tree / persist_record / forget_record.",
                 "root": reported_root(&agent, kernel)?,
-            })));
-        }
-        let call = verbs::Call::parse(payload).map_err(|e| -> BundleError { e.into() })?;
-        let reply = match call {
+            }),
             verbs::Call::Boot(_) => self.boot(&agent, kernel).await?,
             verbs::Call::LoadTree(_) => self.load_tree(&agent, kernel).await?,
-            verbs::Call::PersistRecord(_) => self.persist_record(&agent, payload, kernel).await?,
-            verbs::Call::ForgetRecord(_) => self.forget_record(&agent, payload, kernel).await?,
+            verbs::Call::PersistRecord(args) => self.persist_record(&agent, args, kernel).await?,
+            verbs::Call::ForgetRecord(args) => self.forget_record(&agent, args, kernel).await?,
             verbs::Call::PersistBlob(_) => {
                 persistence::persist_blob(kernel, &agent, payload).await?
             }
             verbs::Call::LoadBlob(_) => persistence::load_blob(kernel, &agent, payload).await?,
-            verbs::Call::ReloadBundle(_) => reload_bundle(&agent, payload, kernel).await?,
+            verbs::Call::ReloadBundle(args) => reload_bundle(&agent, args, kernel).await?,
             verbs::Call::ReadBundles(_) => read_bundles(&agent, payload, kernel)?,
             verbs::Call::ExportSubtree(_) => export_subtree_root(&agent, payload, kernel).await,
         };
@@ -726,7 +717,7 @@ impl Bundle for KernelStateBundle {
 /// folder and field; its instances keep the previous load.
 async fn reload_bundle(
     agent: &Arc<Agent>,
-    payload: &Value,
+    args: verbs::ReloadBundle,
     kernel: &Arc<Kernel>,
 ) -> Result<Value, BundleError> {
     use fantastic_kernel::refusal::{
@@ -739,17 +730,14 @@ async fn reload_bundle(
             "send it to kernel",
         ));
     }
-    let Some(name) = payload
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    else {
+    let name = args.name.as_str();
+    if name.is_empty() {
         return Ok(missing_hint(
             "reload_bundle",
             "name",
             "a folder under .fantastic/bundles/",
         ));
-    };
+    }
     let root = clamp(kernel, &loader_root(kernel, agent)?)?;
     let shown = fantastic_fs::file_name(&root);
     let rel = format!("{}/{name}", crate::folders::BUNDLES_DIR);

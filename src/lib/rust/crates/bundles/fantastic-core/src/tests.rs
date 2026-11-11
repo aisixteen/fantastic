@@ -129,6 +129,12 @@ impl Bundle for Noop {
     fn name(&self) -> &str {
         "noop"
     }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!()
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
     async fn handle(
         &self,
         _id: &AgentId,
@@ -430,7 +436,10 @@ async fn blob_verbs_are_the_loaders_and_refuse_like_python() {
         .remove(0)
         .result;
     // a missing argument is refused by the kernel, by name, from the declaration
-    assert_eq!(v["error"], json!("persist_blob: missing argument 'agent_id'"));
+    assert_eq!(
+        v["error"],
+        json!("persist_blob: missing argument 'agent_id'")
+    );
     assert_eq!(v["reason"], json!("missing_arg"), "{v}");
     assert_eq!(v["arg"], json!("agent_id"), "{v}");
 

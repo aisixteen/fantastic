@@ -13,6 +13,12 @@ impl crate::Bundle for CountingBundle {
     fn name(&self) -> &str {
         "counting"
     }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::fixture_verbs!()
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
+    }
     async fn handle(
         &self,
         _id: &AgentId,
@@ -385,6 +391,12 @@ async fn a_raised_child_boot_prints_python_line_and_an_errored_one_is_silent() {
     impl crate::Bundle for BootBundle {
         fn name(&self) -> &str {
             "booty.tools"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            crate::fixture_verbs!("boot")
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         async fn handle(
             &self,
@@ -920,6 +932,12 @@ struct KeepProbe {
 impl crate::Bundle for KeepProbe {
     fn name(&self) -> &str {
         "keep_probe"
+    }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::fixture_verbs!()
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
     }
     async fn handle(
         &self,

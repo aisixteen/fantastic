@@ -22,6 +22,12 @@ impl Bundle for Sink {
     fn name(&self) -> &str {
         "sink"
     }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!("read_stream", "write_stream")
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
     async fn handle(
         &self,
         _id: &AgentId,

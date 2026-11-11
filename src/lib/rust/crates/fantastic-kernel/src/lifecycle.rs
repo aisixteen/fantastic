@@ -245,16 +245,14 @@ pub async fn create_from_payload(
         return crate::refusal::refusal(crate::refusal::INVALID_META, &why);
     }
     // THE RECORD'S FIELDS are the bundle's declared ones ([`crate::verbs::check_record`]).
-    if let Some(own) = bundle.record() {
-        if let Err(refused) = crate::verbs::check_record(
-            "create_agent",
-            bundle.name(),
-            &meta,
-            &crate::declared::record::RECORD,
-            own,
-        ) {
-            return refused;
-        }
+    if let Err(refused) = crate::verbs::check_record(
+        "create_agent",
+        bundle.name(),
+        &meta,
+        &crate::declared::record::RECORD,
+        bundle.record(),
+    ) {
+        return refused;
     }
     if let Some(why) = bundle.validate_meta(&meta, &Map::new()) {
         return crate::refusal::refusal(crate::refusal::INVALID_META, why);

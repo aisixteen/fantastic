@@ -3,10 +3,9 @@
 //!
 //! A reflect says what an agent IS: id, sentence, state,
 //! grants, tree. How to call it — verb signatures, emits, cancel, notes — is
-//! `docs`, pulled per BUNDLE, in two tiers: `oneliners` (default) — each doc's
-//! first paragraph cut at its first top-level `. ` or ` — ` (never inside
-//! brackets, so an arg note like `(req — …)` stays whole); `detailed` — the whole
-//! doc, and without a `verb` filter the bundle's emits / cancel / notes.
+//! `docs`, pulled per BUNDLE and rendered from its declared verbs, in two tiers:
+//! `oneliners` (default) — each verb's signature line; `detailed` — the whole
+//! text, and without a `verb` filter the bundle's emits / cancel / notes.
 
 use crate::agent::Agent;
 use crate::kernel::Kernel;
@@ -15,61 +14,8 @@ use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// A verb's whole doc, trimmed (python `inspect.cleandoc`).
-#[must_use]
-pub fn full_doc(doc: &str) -> String {
-    doc.trim().to_string()
-}
-
-/// The ONELINER of a verb doc — python `_docs.signature`.
-#[must_use]
-pub fn signature(doc: &str) -> String {
-    let full = full_doc(doc);
-    let para = full.split("\n\n").next().unwrap_or("");
-    let line = para
-        .split('\n')
-        .map(str::trim)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let chars: Vec<char> = line.chars().collect();
-    let mut depth = 0usize;
-    for i in 0..chars.len() {
-        let ch = chars[i];
-        if "([{".contains(ch) {
-            depth += 1;
-        } else if ")]}".contains(ch) {
-            depth = depth.saturating_sub(1);
-        } else if depth == 0 {
-            if ch == '.' && chars.get(i + 1) == Some(&' ') {
-                return chars[..i].iter().collect();
-            }
-            if ch == ' ' && chars.get(i + 1) == Some(&'—') && chars.get(i + 2) == Some(&' ') {
-                return chars[..i].iter().collect();
-            }
-        }
-    }
-    line.trim_end_matches('.').to_string()
-}
-
 /// One row of a docs answer: the verb, its ONE-LINE text and its DETAILED text.
 pub type Entry = (String, String, String);
-
-/// The rows of a bundle that has NOT been moved to declarations: its hand-written
-/// `{verb: doc}` table, cut to a oneliner by [`signature`] (issue #642: gone with the
-/// last bundle that moves).
-#[must_use]
-pub fn entries_of_table(table: &Value) -> Vec<Entry> {
-    let empty = Map::new();
-    table
-        .as_object()
-        .unwrap_or(&empty)
-        .iter()
-        .map(|(n, d)| {
-            let d = d.as_str().unwrap_or("");
-            (n.clone(), signature(d), full_doc(d))
-        })
-        .collect()
-}
 
 /// The rows of DECLARED verbs, rendered from the declarations ([`crate::verbs`]); a
 /// verb named in an earlier list is not repeated from a later one.
@@ -253,19 +199,8 @@ pub fn docs_reply(kernel: &Arc<Kernel>, payload: &Value) -> Value {
     let Some(bundle) = kernel.bundles.get(&module) else {
         return render(of, json!(module), tier, verb, &[], &[]);
     };
-    // PER-INSTANCE VERBS: an agent whose bundle names its own
-    // table (an MCP server's tools) is documented by it; the bundle (no agent)
-    // shows the bundle's. A bundle that DECLARES its verbs is rendered from the
-    // declarations, with the verbs every agent answers.
-    let table = match bundle.verbs() {
-        Some(own) => entries_of_decls(&[own, crate::declared::common::VERBS]),
-        None => entries_of_table(
-            &agent
-                .as_deref()
-                .and_then(|a| bundle.instance_verb_docs(a))
-                .unwrap_or_else(|| bundle.verb_docs()),
-        ),
-    };
+    // The bundle's declarations, with the verbs every agent answers.
+    let table = entries_of_decls(&[bundle.verbs(), crate::declared::common::VERBS]);
     render(
         of,
         json!(module),

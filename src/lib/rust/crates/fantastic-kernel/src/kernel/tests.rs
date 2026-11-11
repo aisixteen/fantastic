@@ -479,6 +479,12 @@ impl crate::Bundle for Hooked {
     fn name(&self) -> &str {
         "hooked.tools"
     }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::fixture_verbs!("inner", "nope", "outer", "ping", "test", "tick")
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
+    }
     async fn handle(
         &self,
         _id: &AgentId,
@@ -556,6 +562,12 @@ struct OnlyDelete {
 impl crate::Bundle for OnlyDelete {
     fn name(&self) -> &str {
         "only_delete.tools"
+    }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::fixture_verbs!("inner", "nope", "outer", "ping", "test", "tick")
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
     }
     async fn handle(
         &self,
@@ -664,7 +676,7 @@ async fn shutdown_continues_on_a_raising_hook() {
 // same answer would write one `call`/`reflect` row per agent plus an `internal`
 // roster row per node of the tree, which python does not have.
 
-/// Declares a verb table (`verb_docs`) — with or without `shutdown` — and
+/// Declares its verbs — with or without `shutdown` — and
 /// counts how often the handler is asked anything.
 struct Declares {
     shutdown: bool,
@@ -676,13 +688,15 @@ impl crate::Bundle for Declares {
     fn name(&self) -> &str {
         "declares.tools"
     }
-    fn verb_docs(&self) -> Value {
-        let mut verbs = Map::new();
-        verbs.insert("reflect".to_string(), json!("Identity."));
+    fn verbs(&self) -> &'static [crate::Verb] {
         if self.shutdown {
-            verbs.insert("shutdown".to_string(), json!("Tear down."));
+            crate::fixture_verbs!("shutdown")
+        } else {
+            crate::fixture_verbs!()
         }
-        Value::Object(verbs)
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
     }
     async fn handle(
         &self,
@@ -762,7 +776,7 @@ async fn the_shutdown_sweep_mints_no_id_and_writes_no_row() {
     assert_eq!(
         calls.load(Ordering::SeqCst),
         seen,
-        "the bundle is NOT asked — its verb table is read statically (`verb_docs`)"
+        "the bundle is NOT asked — its verb table is read statically (`verbs`)"
     );
     assert_eq!(reply["shut"], json!([]), "nothing declares `shutdown`");
 }

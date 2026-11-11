@@ -68,11 +68,27 @@ impl Bundle for SlowBundle {
     fn name(&self) -> &str {
         "slow"
     }
-    // ADVERTISES `shutdown`: that is what `shutdown_agents` selects on, so the
-    // slow agent is one it tells.
-    fn verb_docs(&self) -> Value {
-        json!({"shutdown": "no-op"})
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::fixture_verbs!(
+            "boom",
+            "boot",
+            "chain",
+            "chain_fork",
+            "count",
+            "fast",
+            "flaky",
+            "fork",
+            "kill",
+            "raised_reply",
+            "shutdown",
+            "slow"
+        )
     }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
+    }
+    // DECLARES `shutdown` (in `verbs` above): that is what `shutdown_agents` selects
+    // on, so the slow agent is one it tells.
 
     async fn handle(
         &self,
@@ -1111,96 +1127,4 @@ async fn a_task_keeps_a_parent_that_has_already_ended() {
     // And it is therefore NOT a root, so the shutdown sweep leaves it to the
     // subtree it belongs to (python's `roots only` skip).
     assert!(!kernel.tasks.is_root(&forked));
-}
-
-/// PER-INSTANCE VERBS — python
-/// `test_docs_of_an_agent_read_its_own_table_when_its_bundle_names_one`: a bundle
-/// whose agents serve different verbs names each one's table
-/// (`instance_verb_docs`); `None` keeps the bundle's.
-#[tokio::test]
-async fn docs_of_an_agent_read_its_own_table_when_its_bundle_names_one() {
-    struct PerInstance;
-    #[async_trait]
-    impl Bundle for PerInstance {
-        fn name(&self) -> &str {
-            "per_instance_probe"
-        }
-        fn verb_docs(&self) -> Value {
-            json!({"ping": "No args. The bundle's own verb."})
-        }
-        fn instance_verb_docs(&self, agent: &Agent) -> Option<Value> {
-            (agent.id.as_str() != "plain").then(|| {
-                let mut m = Map::new();
-                m.insert("ping".into(), json!("No args. Still here."));
-                m.insert(
-                    format!("own_{}", agent.id.as_str()),
-                    json!("args: x:int. Only mine."),
-                );
-                Value::Object(m)
-            })
-        }
-        async fn handle(
-            &self,
-            _: &AgentId,
-            _: &Value,
-            _: &Arc<Kernel>,
-        ) -> Result<Reply, BundleError> {
-            Ok(None)
-        }
-    }
-    let mut kernel = Kernel::new();
-    kernel.bundles.register("per_instance_probe", PerInstance);
-    let kernel = Arc::new(kernel);
-    let root = Agent::new(
-        AgentId::from("kernel_state"),
-        None,
-        None,
-        Map::new(),
-        PathBuf::new(),
-        false,
-    );
-    kernel.register(Arc::clone(&root));
-    kernel.set_root(root);
-    for id in ["a1", "a2", "plain"] {
-        kernel.register(Agent::new(
-            AgentId::from(id),
-            Some("per_instance_probe".into()),
-            Some(AgentId::from("kernel_state")),
-            Map::new(),
-            PathBuf::new(),
-            false,
-        ));
-    }
-    let docs = |of: &str, extra: Value| {
-        let mut p = json!({"type": "docs", "of": of});
-        for (k, v) in extra.as_object().cloned().unwrap_or_default() {
-            p[k] = v;
-        }
-        let k = Arc::clone(&kernel);
-        async move {
-            k.send(vec![Item::new(AgentId::from("kernel"), p)])
-                .await
-                .remove(0)
-                .result
-        }
-    };
-    let a1 = docs("a1", json!({})).await;
-    assert_eq!(
-        a1["verbs"],
-        json!({"ping": "No args", "own_a1": "args: x:int"}),
-        "{a1}"
-    );
-    let a2 = docs("a2", json!({"tier": "detailed", "verb": "own_a2"})).await;
-    assert_eq!(
-        a2["verbs"],
-        json!({"own_a2": "args: x:int. Only mine."}),
-        "{a2}"
-    );
-    assert_eq!(
-        docs("plain", json!({})).await["verbs"],
-        json!({"ping": "No args"})
-    );
-    let gone = docs("a1", json!({"verb": "own_a2"})).await;
-    assert_eq!(gone["reason"], "bad_arg", "{gone}");
-    assert!(gone["hint"].as_str().unwrap().contains("own_a1"), "{gone}");
 }

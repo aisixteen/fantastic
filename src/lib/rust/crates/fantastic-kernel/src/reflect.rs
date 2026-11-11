@@ -582,9 +582,9 @@ pub async fn apply_reflect_flags(
         _ => {}
     }
     // THE VERBS, rendered from the declarations: the agent's own (its bundle's) and the
-    // ones every agent answers; the root answers the kernel's too. A bundle not yet
-    // moved to declarations has none here — `docs` serves its text.
-    if let Some(own) = bundle.as_ref().and_then(|b| b.verbs()) {
+    // ones every agent answers; the root answers the kernel's too. An agent without a
+    // bundle has none.
+    if let Some(own) = bundle.as_ref().map(|b| b.verbs()) {
         let mut lists: Vec<&[crate::verbs::Verb]> = Vec::new();
         if target.parent_id.is_none() {
             lists.push(crate::declared::kernel::VERBS);
@@ -753,7 +753,7 @@ pub fn descendant_ids(target: &Agent) -> Vec<String> {
 /// `bundles=all` tier (`bundles=ids` maps to just the names).
 ///
 /// With `schemas`, an entry also carries `schema` when its bundle publishes a
-/// [`crate::bundle::Bundle::record_schema`] — what that KIND's record takes,
+/// [`crate::bundle::Bundle::record`] — what that KIND's record takes,
 /// readable before any agent of it exists. Python
 /// `_available_bundles(schemas=True)`; the cheap `bundles=ids` listing never asks.
 fn available_bundles(kernel: &Arc<Kernel>, schemas: bool) -> Vec<Value> {
@@ -766,12 +766,7 @@ fn available_bundles(kernel: &Arc<Kernel>, schemas: bool) -> Vec<Value> {
                 "handler_module": handler_module,
             });
             if schemas {
-                // DECLARED record first (issue #642); a bundle not yet moved keeps its schema.
-                if let Some(rec) = b.record() {
-                    entry["schema"] = crate::verbs::record_fields(rec);
-                } else if let Some(sch) = b.record_schema() {
-                    entry["schema"] = sch;
-                }
+                entry["schema"] = crate::verbs::record_fields(b.record());
             }
             entry
         })

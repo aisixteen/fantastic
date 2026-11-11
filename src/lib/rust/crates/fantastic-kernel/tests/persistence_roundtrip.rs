@@ -25,6 +25,12 @@ impl Bundle for NoopBundle {
     fn name(&self) -> &str {
         "noop"
     }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!()
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
     async fn handle(
         &self,
         _id: &AgentId,
@@ -43,6 +49,12 @@ struct ReadmeBundle;
 impl Bundle for ReadmeBundle {
     fn name(&self) -> &str {
         "readme_bundle"
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!()
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
@@ -70,6 +82,12 @@ struct FakeStore {
 impl Bundle for FakeStore {
     fn name(&self) -> &str {
         "file_bridge"
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!("delete", "read_stream", "rename", "write_stream")
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
@@ -515,6 +533,12 @@ impl Bundle for PagingStore {
     fn name(&self) -> &str {
         "file_bridge"
     }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!("read_stream", "rename", "write_stream")
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
     async fn handle(
         &self,
         _id: &AgentId,
@@ -691,6 +715,12 @@ impl Bundle for ArcBundle {
     fn name(&self) -> &str {
         self.0.name()
     }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!("delete", "read_stream", "rename", "write_stream")
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
     async fn handle(
         &self,
         id: &AgentId,
@@ -805,6 +835,12 @@ struct RefusingStore;
 impl Bundle for RefusingStore {
     fn name(&self) -> &str {
         "file_bridge"
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!("delete", "read_stream", "rename", "write_stream")
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,

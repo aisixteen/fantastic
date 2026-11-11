@@ -25,6 +25,12 @@ impl Bundle for CountingBundle {
     fn name(&self) -> &str {
         "counting"
     }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!("boom", "boot", "shutdown", "work")
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
     async fn handle(
         &self,
         _id: &AgentId,
@@ -48,6 +54,12 @@ struct FakeStore {
 impl Bundle for FakeStore {
     fn name(&self) -> &str {
         "file_bridge"
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!("read_stream", "write_stream")
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,

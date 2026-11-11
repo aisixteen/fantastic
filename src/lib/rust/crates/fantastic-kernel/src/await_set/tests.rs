@@ -33,6 +33,12 @@ impl Bundle for RecBundle {
     fn name(&self) -> &str {
         "rec"
     }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::fixture_verbs!("note", "report", "send")
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
+    }
     async fn handle(
         &self,
         id: &AgentId,

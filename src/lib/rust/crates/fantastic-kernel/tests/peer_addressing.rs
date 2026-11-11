@@ -28,6 +28,12 @@ impl Bundle for Echo {
     fn name(&self) -> &str {
         "echo"
     }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!("around", "clear")
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
     async fn handle(
         &self,
         id: &AgentId,

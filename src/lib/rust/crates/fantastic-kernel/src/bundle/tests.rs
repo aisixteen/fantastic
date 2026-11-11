@@ -10,6 +10,12 @@ impl Bundle for FakeBundle {
     fn name(&self) -> &str {
         "fake"
     }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::fixture_verbs!("frob", "ping")
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
+    }
     async fn handle(
         &self,
         _agent_id: &AgentId,
@@ -49,6 +55,12 @@ async fn default_handle_binary_dispatches_header_and_drops_blob() {
     impl Bundle for CaptureBundle {
         fn name(&self) -> &str {
             "capture"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            crate::fixture_verbs!("frob", "ping")
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         async fn handle(
             &self,

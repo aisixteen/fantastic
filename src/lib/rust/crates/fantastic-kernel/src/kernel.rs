@@ -537,8 +537,8 @@ impl Kernel {
     /// `Agent.advertises(verb)` (`_agent.py:1160`), which reads the module's
     /// `VERBS` table and dispatches nothing.
     ///
-    /// Read STATICALLY from [`crate::bundle::Bundle::verb_docs`] — the same
-    /// table `docs` serves — never through `send`: a dispatch would mint a
+    /// Read STATICALLY from [`crate::bundle::Bundle::verbs`] — the same
+    /// declarations `docs` serves — never through `send`: a dispatch would mint a
     /// message id and write a call row, a task row, a ledger execution and a
     /// watcher echo for a question python answers with an attribute lookup.
     ///
@@ -555,15 +555,7 @@ impl Kernel {
         else {
             return false;
         };
-        // PER-INSTANCE first, as `docs` reads it: an agent whose bundle names its own
-        // table answers that table (python `advertises` reads `instance_verbs`).
-        if let Some(own) = bundle.verbs() {
-            return own.iter().any(|v| v.name == verb);
-        }
-        let table = bundle
-            .instance_verb_docs(&agent)
-            .unwrap_or_else(|| bundle.verb_docs());
-        table.as_object().is_some_and(|v| v.contains_key(verb))
+        bundle.verbs().iter().any(|v| v.name == verb)
     }
 
     /// DEPTH-FIRST `on_shutdown`, children before their parent. A hook that

@@ -25,6 +25,12 @@ impl Bundle for Probe {
     fn name(&self) -> &str {
         "minimal_gate_probe"
     }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!("boot", "ping", "shutdown")
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
     async fn handle(
         &self,
         id: &AgentId,

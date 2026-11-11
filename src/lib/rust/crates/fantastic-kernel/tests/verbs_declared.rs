@@ -72,11 +72,11 @@ impl Bundle for Probe {
     fn name(&self) -> &str {
         "probe"
     }
-    fn verbs(&self) -> Option<&'static [fantastic_kernel::Verb]> {
-        Some(probe_verbs::VERBS)
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        probe_verbs::VERBS
     }
-    fn record(&self) -> Option<&'static fantastic_kernel::RecordDecl> {
-        Some(&probe_record::RECORD)
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &probe_record::RECORD
     }
     async fn handle(
         &self,
@@ -84,11 +84,9 @@ impl Bundle for Probe {
         payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
-        if payload["type"] == "reflect" {
-            return Ok(Some(json!({"id": id.0, "sentence": "A probe."})));
-        }
         // no validation here: the kernel checked the call
         match probe_verbs::Call::parse(payload)? {
+            probe_verbs::Call::Reflect(_) => Ok(Some(json!({"id": id.0, "sentence": "A probe."}))),
             probe_verbs::Call::Greet(g) => Ok(Some(json!({
                 "said": g.name, "times": g.times,
                 "loud": matches!(g.style, Some(Style::Loud)),
@@ -113,8 +111,11 @@ impl Bundle for Open {
     fn name(&self) -> &str {
         "open"
     }
-    fn record(&self) -> Option<&'static fantastic_kernel::RecordDecl> {
-        Some(&open_record::RECORD)
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::fixture_verbs!("anything")
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &open_record::RECORD
     }
     async fn handle(
         &self,
@@ -126,31 +127,12 @@ impl Bundle for Open {
     }
 }
 
-/// A bundle not yet moved to declarations: its calls are not checked.
-struct Legacy;
-
-#[async_trait]
-impl Bundle for Legacy {
-    fn name(&self) -> &str {
-        "legacy"
-    }
-    async fn handle(
-        &self,
-        _id: &AgentId,
-        payload: &Value,
-        _kernel: &Arc<Kernel>,
-    ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(Some(json!({"saw": payload})))
-    }
-}
-
 fn mk() -> (TempDir, Arc<Kernel>) {
     let tmp = TempDir::new().unwrap();
     let mut kernel = Kernel::new();
     let mut reg = BundleRegistry::new();
     reg.register("probe.tools", Probe);
     reg.register("open.tools", Open);
-    reg.register("legacy.tools", Legacy);
     kernel.bundles = reg;
     let kernel = Arc::new(kernel);
     let root = Agent::new(
@@ -212,6 +194,36 @@ async fn an_unknown_verb_is_refused_with_the_list() {
         r["error"], "unknown verb 'nope'; p answers: greet, tally, reflect, boot, shutdown",
         "{r}"
     );
+}
+
+/// The refusal of an unknown verb echoes the RAW `type` — python `verb=t`: `null` when
+/// it is absent, the number for `5`, the empty string for `""`. `send` refuses those
+/// payloads before any handler runs (`send: payload.type must be a non-empty string`),
+/// so the kernel's own dispatch is driven directly, as for a bundle that forwards a
+/// payload.
+#[tokio::test]
+async fn an_unknown_type_echoes_the_raw_value_as_verb() {
+    let (_t, k) = with_probe().await;
+    let agent = k
+        .agents
+        .get(&AgentId::from("p"))
+        .map(|e| Arc::clone(&e))
+        .unwrap();
+    for (payload, shown, raw) in [
+        (json!({}), "None", Value::Null),
+        (json!({"type": null}), "None", Value::Null),
+        (json!({"type": 5}), "5", json!(5)),
+        (json!({"type": ""}), "''", json!("")),
+    ] {
+        let r = k.bookkeeping(&agent, payload.clone(), None).await.result;
+        assert_eq!(
+            r["error"],
+            format!("unknown verb {shown}; p answers: greet, tally, reflect, boot, shutdown"),
+            "{payload}: {r}"
+        );
+        assert_eq!(r["reason"], "unhandled", "{payload}: {r}");
+        assert_eq!(r["verb"], raw, "{payload}: {r}");
+    }
 }
 
 #[tokio::test]
@@ -388,9 +400,9 @@ async fn a_record_field_unknown_to_the_bundle_is_refused_at_create_and_update() 
 }
 
 #[tokio::test]
-async fn an_open_record_takes_any_field_and_an_undeclared_one_is_not_checked() {
+async fn an_open_record_takes_any_field() {
     let (_t, k) = mk();
-    for hm in ["open.tools", "legacy.tools"] {
+    for hm in ["open.tools"] {
         let r = call(
             &k,
             "kernel",
@@ -419,20 +431,6 @@ async fn a_handler_that_is_not_installed_is_refused_at_create() {
         "{r}"
     );
     assert!(k.agents.get(&AgentId::from("ghost")).is_none());
-}
-
-#[tokio::test]
-async fn a_bundle_not_yet_moved_is_not_checked() {
-    let (_t, k) = mk();
-    call(
-        &k,
-        "kernel",
-        json!({"type": "create_agent", "parent_id": "kernel_state", "id": "old",
-               "handler_module": "legacy.tools"}),
-    )
-    .await;
-    let r = call(&k, "old", json!({"type": "whatever", "any": 1})).await;
-    assert_eq!(r["saw"]["any"], 1, "{r}");
 }
 
 #[tokio::test]
