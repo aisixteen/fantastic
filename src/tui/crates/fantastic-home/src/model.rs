@@ -2,7 +2,7 @@
 //!
 //! ```text
 //!   <home>/fantastics/<folder>/fantastic.yaml   one Registered entry
-//!   <folder>/.fantastic/cli/canvas.yaml         one CanvasRun, while a canvas serves
+//!   <state>/cli/canvas.yaml                     one CanvasRun, while a canvas serves
 //! ```
 //!
 //! A REGISTRY ENTRY is written by the CLI's `user_store` agent:
@@ -16,10 +16,10 @@
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 
-/// A folder's run file, relative to the folder: `{pid, port, url}` while
+/// A kernel's run file, relative to its STATE folder: `{pid, port, url}` while
 /// `fantastic canvas` serves there (see [`CanvasRun`]). The one definition: the
 /// CLI writes it and the home reads it.
-pub const RUN_FILE: &str = ".fantastic/cli/canvas.yaml";
+pub const RUN_FILE: &str = "cli/canvas.yaml";
 
 /// The largest pid any of the supported systems hands out (`i32::MAX`).
 const PID_MAX: i64 = 2_147_483_647;
@@ -63,6 +63,33 @@ impl Canvas {
             url: url.to_string(),
             port,
         })
+    }
+}
+
+/// A folder to open: the state folder, and the folder the person picked. On
+/// the intent wire it is the one string a client sends (`open {paths: [str]}`):
+/// a listed row's state folder, or a picked folder the home resolves.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(from = "String", into = "String")]
+pub struct Opened {
+    /// The state folder (what the registry's `path` holds).
+    pub path: String,
+    /// The picked work folder; `None` for a listed row.
+    pub workdir: Option<String>,
+}
+
+impl From<String> for Opened {
+    fn from(path: String) -> Opened {
+        Opened {
+            path,
+            workdir: None,
+        }
+    }
+}
+
+impl From<Opened> for String {
+    fn from(opened: Opened) -> String {
+        opened.path
     }
 }
 
@@ -118,11 +145,13 @@ impl Registered {
         })
     }
 
-    /// Its name, else the last component of its path.
-    pub fn display_name(&self) -> String {
-        match &self.name {
-            Some(name) => name.clone(),
-            None => last_component(&self.path).to_string(),
+    /// Its name, else the last component of its work folder, else empty. Never
+    /// the state folder's own name: `path` is the state folder.
+    pub fn display_name(&self, workdir: Option<&str>) -> String {
+        match (&self.name, workdir) {
+            (Some(name), _) => name.clone(),
+            (None, Some(workdir)) => last_component(workdir).to_string(),
+            (None, None) => String::new(),
         }
     }
 
@@ -152,7 +181,7 @@ pub fn registered(entries: Vec<(String, String)>) -> Vec<Registered> {
     kept
 }
 
-/// A folder's run file `.fantastic/cli/canvas.yaml` `{pid, port, url}`, written
+/// A state folder's run file `cli/canvas.yaml` `{pid, port, url}`, written
 /// while `fantastic canvas` serves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanvasRun {
@@ -229,7 +258,7 @@ mod tests {
             })
         );
         assert_eq!((reg.stored_at, reg.last_seen), (17, 99));
-        assert_eq!(reg.display_name(), "Notes");
+        assert_eq!(reg.display_name(None), "Notes");
         assert_eq!(reg.run_key(), "g-1 4242 http://127.0.0.1:8123/");
     }
 
@@ -241,7 +270,8 @@ mod tests {
             (None, None, None)
         );
         assert_eq!((reg.stored_at, reg.last_seen), (0, 0));
-        assert_eq!(reg.display_name(), "q");
+        assert_eq!(reg.display_name(Some("/p/q/")), "q");
+        assert_eq!(reg.display_name(None), "");
         assert_eq!(reg.run_key(), "g 0 ");
     }
 
@@ -284,11 +314,11 @@ mod tests {
     fn a_null_or_empty_name_falls_to_the_path() {
         let null = entry("guid: g\npath: C:\\work\\atlas\nname: ~\n").expect("parses");
         assert_eq!(null.name, None);
-        assert_eq!(null.display_name(), "atlas");
+        assert_eq!(null.display_name(Some("C:\\work\\atlas")), "atlas");
         let empty = entry("guid: g\npath: /w/atlas\nname: ''\n").expect("parses");
         assert_eq!(empty.name, None);
         let number = entry("guid: g\npath: /w/atlas\nname: 7\n").expect("parses");
-        assert_eq!(number.display_name(), "7");
+        assert_eq!(number.display_name(None), "7");
     }
 
     #[test]

@@ -1,4 +1,5 @@
-//! THE PROJECT'S SYSTEM BLOCK: `.fantastic/prompt.md` (owner 2026-10-08:
+//! THE PROJECT'S SYSTEM BLOCK: `prompt.md`, in the folder of its own bridge,
+//! `<state>/agents/user/agents/prompt_file/` (owner 2026-10-08:
 //! "bundled default, seeded, then replace if defined, no appends").
 //!
 //! - SEEDED when missing, at every boot, with [`DEFAULT`] — ai_core's own block
@@ -7,7 +8,7 @@
 //!   human, or a coding CLI reading the folder, sees and changes it.
 //! - Every backend agent READS it, as itself, through [`BRIDGE`] (a read-only
 //!   file_bridge exposing only that file): its record names `file_bridge_id:
-//!   prompt_file` and `system_prompt_file: .fantastic/prompt.md` — stamped on
+//!   prompt_file` and `system_prompt_file: prompt.md` — stamped on
 //!   every backend agent that names neither,
 //!   at boot and as each is made (`kern/reach` hands every AI the bridge's
 //!   verbs, both edges). The lib watches the file (`watch_path`): a save is the
@@ -16,18 +17,12 @@
 //!   appended. A missing or EMPTY file FAILS the turn loud (the lib: no fallback
 //!   to the default block) — the file is re-seeded at the next boot.
 
-use std::path::Path;
-
 use serde_json::{json, Value};
 
 use crate::kern::host::Host;
 
-/// The file, under `.fantastic/`.
+/// The file, in the bridge's own folder (the bridge's root is `@self`).
 pub const FILE: &str = "prompt.md";
-/// Its path under the bridge's root (the project dir — NOT `.fantastic`: a
-/// file_bridge rooted at the kernel's own store is taken as the place its
-/// records persist through, and a read-only one refuses every write).
-pub const PATH: &str = ".fantastic/prompt.md";
 /// The read-only bridge every AI reads it through.
 pub const BRIDGE: &str = "prompt_file";
 /// What a fresh project's file holds: ai_core's default block, as placeholders,
@@ -39,22 +34,29 @@ fn err_of(r: &Value) -> Option<String> {
     r.get("error").and_then(Value::as_str).map(str::to_string)
 }
 
-/// Seed the file when missing; make (and boot) the bridge when missing.
-pub async fn ensure(h: &Host, cwd: &Path) -> Result<(), String> {
-    let f = cwd.join(".fantastic").join(FILE);
-    if !f.exists() {
-        std::fs::write(&f, DEFAULT).map_err(|e| format!("{}: {e}", f.display()))?;
-    }
+/// Make (and boot) the bridge when missing, then seed the file in its folder when missing.
+pub async fn ensure(h: &Host) -> Result<(), String> {
     if !h.kernel.exists(BRIDGE) {
         let r = h
             .operator("kernel", json!({"type": "create_agent", "parent_id": crate::env::HUMAN, "id": BRIDGE,
-                "handler_module": "file_bridge.tools", "root": ".", "readonly": true,
-                "allow": [PATH], "ingress_rule": "allow_all_ingress"}))
+                "handler_module": "file_bridge.tools", "root": "@self", "readonly": true,
+                "allow": [FILE], "ingress_rule": "allow_all_ingress"}))
             .await
             .result;
         if let Some(e) = err_of(&r) {
             return Err(format!("the prompt bridge `{BRIDGE}`: {e}"));
         }
+    }
+    let dir = h
+        .kernel
+        .agents
+        .get(&fantastic_kernel::AgentId::from(BRIDGE))
+        .map(|a| a.value().root_path.clone())
+        .ok_or_else(|| format!("the prompt bridge `{BRIDGE}` is missing"))?;
+    let f = dir.join(FILE);
+    if !f.exists() {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        std::fs::write(&f, DEFAULT).map_err(|e| format!("{}: {e}", f.display()))?;
     }
     Ok(())
 }
@@ -74,7 +76,7 @@ pub async fn stamp(h: &Host, id: &str) -> Result<(), String> {
         return Ok(());
     }
     let r = h
-        .operator("kernel", json!({"type": "update_agent", "id": id, "file_bridge_id": BRIDGE, "system_prompt_file": PATH}))
+        .operator("kernel", json!({"type": "update_agent", "id": id, "file_bridge_id": BRIDGE, "system_prompt_file": FILE}))
         .await
         .result;
     err_of(&r).map_or(Ok(()), |e| Err(format!("{id}: system_prompt_file: {e}")))
@@ -141,7 +143,7 @@ mod tests {
         let file = |id: &str| {
             h.kernel.agents.get(&AgentId::from(id)).unwrap().value().record().meta.get("system_prompt_file").cloned()
         };
-        assert_eq!(file("chat"), Some(json!(PATH)));
+        assert_eq!(file("chat"), Some(json!(FILE)));
         assert_eq!(h.kernel.agents.get(&AgentId::from("chat")).unwrap().value().record().meta["file_bridge_id"], json!(BRIDGE));
         assert_eq!(file("backend"), None, "a provider holds no prompt file: it is the chat's field");
         assert_eq!(file("py"), None, "a plain handler with a store field is not stamped");

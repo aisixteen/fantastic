@@ -47,11 +47,10 @@ otherwise it makes agents with `create_agent` from the bundles `reflect` lists.
   <name>}` on this canvas's node (`canvas_root`).
 - **an html cell, bundled**: write its body (`get_html` on `<guid>|<cell>`) into
   `.fantastic/web/bundles/<name>/bundle.yaml` — `base: html_agent`, `sentence:`,
-  `html: |` and the body indented under it. It loads on the write (the page
-  watches its `bundles/`), is a tile in the popup's **page · bundles** group, and
+  `html: |` and the body indented under it. It is loaded with the page
+  (a page bundle is not watched), is a tile in the popup's **page · bundles** group, and
   each pick places one more instance (`<name>_<hex>`) whose body is the bundle's
-  `html`; edit that `html` and every instance without its own `set_html` body
-  draws it. The cell you bundled from keeps its own body.
+  `html`; an edit of that `html` is drawn by the instances after the page loads again. The cell you bundled from keeps its own body.
 - **update a release from the working one**: copy the working folder's files OVER
   the release folder — every instance of the RELEASE restarts with the new code.
 - Never edit a bundle to change ONE agent: every instance of it changes. Fork first.

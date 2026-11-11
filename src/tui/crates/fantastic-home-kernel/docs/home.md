@@ -88,8 +88,9 @@ No arguments. Returns the state.
 
 ### `open`
 
-`paths: [str]`, required, at least one. Each is a listed row's `path` as it is,
-or an absolute folder. Opens each folder's page and shows the last one; a
+`paths: [str]`, required, at least one. Each is a listed row's `path` (its state
+folder) as it is, or an absolute folder: the work folder, whose state folder is
+`<folder>/.fantastic`. Opens each folder's page and shows the last one; a
 stopped one is started; an unlisted one is started and added to the list (its
 row is `adding:<path>` until the registry lists it). Returns the state.
 Refuses `missing_arg` (`paths` absent or empty) and `bad_arg` (`paths` not a
@@ -105,7 +106,9 @@ string, not absolute, not a folder, the home's own folder, or listed already).
 ### `start`
 
 `id: str`, required: a row whose `actions` hold `start`. Starts
-`fantastic canvas` in its folder; the row is `starting` until its canvas
+`fantastic canvas --statedir <path>`, run in the work folder its root record
+names (`workdir`); a row with no recorded work folder is refused as a problem.
+The row is `starting` until its canvas
 answers (30 s grace, then the problem says so). Returns the state. Refuses
 `missing_arg`, `not_found` (no such row) and `bad_arg` (its actions lack
 `start`; the text names its status).
@@ -211,8 +214,8 @@ A row:
 |---|---|---|
 | `id` | str | its registry `guid`, or `adding:<path>` for a folder being added |
 | `guid` | str \| null | null while being added |
-| `name` | str | the entry's name, else its folder's last component |
-| `path` | str | its folder, as a kernel running there names it |
+| `name` | str | the entry's name, else the last component of its work folder (the root record's `workdir`; empty when none is readable) |
+| `path` | str | its state folder |
 | `last_seen` | int \| null | when it last ran, in seconds since the epoch; 0 when the entry never said; null while being added |
 | `status` | str | below |
 | `canvas` | `{url, port}` \| null | set while `running` |

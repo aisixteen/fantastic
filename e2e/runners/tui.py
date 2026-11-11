@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
@@ -372,8 +373,38 @@ def main(argv: list[str]) -> int:
             script.write_text(text)
             env = {**os.environ, **extra_env, "FT_CWD": str(cwd),
                    "FT_ROWS": str(screen.get("rows", 30)), "FT_COLS": str(screen.get("cols", 110))}
-            r = subprocess.run([str(rig), str(binary), str(script), str(frames_dir)],
-                               env=env, capture_output=True, text=True, timeout=run.get("timeout", 180))
+            # `args`: the shell's own arguments (the rig's `FT_ARGS`)
+            if run.get("args"):
+                env["FT_ARGS"] = run["args"]
+            # `host_argv`: a kernel already running over this work dir (`fantastic
+            # <host_argv>`, cwd = the work dir, the rig's home), which the shell run must
+            # attach to as a thin client; stopped after the run
+            host = None
+            if "host_argv" in run:
+                home = cwd / "home"
+                home.mkdir(exist_ok=True)
+                oslayer.make_private(home)
+                host = subprocess.Popen([str(binary), *run["host_argv"]], cwd=cwd,
+                                        env={**os.environ, **extra_env, "FANTASTIC_HOME": str(home)},
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                        **oslayer.group_kwargs())
+                endpoint = cwd / (run.get("statedir") or ".fantastic") / "cli" / "tui.yaml"
+                for _ in range(300):
+                    if endpoint.exists() or host.poll() is not None:
+                        break
+                    time.sleep(0.1)
+                if not endpoint.exists():
+                    failures.append(f"{name}/host: no {endpoint.relative_to(cwd)} (host exit {host.poll()})")
+            try:
+                r = subprocess.run([str(rig), str(binary), str(script), str(frames_dir)],
+                                   env=env, capture_output=True, text=True, timeout=run.get("timeout", 180))
+            finally:
+                if host is not None:
+                    oslayer.stop(host)
+                    try:
+                        host.wait(30)
+                    except subprocess.TimeoutExpired:
+                        host.kill()
             out = r.stdout + r.stderr
             # E2E_TUI_FRAMES=<dir>: keep each run's frames there (debugging a script)
             if keep := os.environ.get("E2E_TUI_FRAMES"):

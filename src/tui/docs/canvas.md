@@ -103,7 +103,8 @@ changes on disk under unsaved edits the preview says so — reload, keep mine or
 compare; edits are never merged and never overwritten silently. Their colours are
 the skin's `color.syntax.*` and `color.tree.fantastic` tokens.
 
-THE SYSTEM BLOCK: `.fantastic/prompt.md` is every AI's system block. It starts
+THE SYSTEM BLOCK: `prompt.md`, in the folder of the `prompt_file` agent
+(`<state>/agents/user/agents/prompt_file/`; `<state>/readme.md` names it), is every AI's system block. It starts
 as the default (`{tree}`, `{self}`, `{howto}` — the agent tree, who the AI is,
 how to call agents); edit it and every AI uses your text from its next turn.
 Keep the placeholders you still want.

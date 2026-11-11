@@ -11,7 +11,7 @@
 //! own view row.
 //!
 //! A LIBRARY (#248): the `fantastic` binary's `main` (`src/main.rs`) is
-//! `if starts_kernel(&argv) { seed_dir_with(cwd, &[]) }` then
+//! `if starts_kernel(&argv) { seed_dir_with(&state_dir_of(&argv)?, &[]) }` then
 //! `main_with(argv, &[], &[])`. Another binary (aisixteen/fantastic_shift: a headless
 //! one, an app) follows the same pattern with its own blueprints, extras and readme sections:
 //! each [`Extra`] it passes registers on the host's registry AFTER the stock
@@ -39,6 +39,7 @@ mod ev;
 mod import;
 mod kern;
 mod keys;
+mod local;
 mod mcp;
 mod migrate;
 mod panel;
@@ -75,23 +76,29 @@ pub use fantastic_kernel::BundleRegistry;
 /// returns `Ok(true)`; a no-op returning `Ok(false)` once it exists.
 /// [`seed_dir_with`] also writes an embedder's own blueprints, ids as written.
 /// A launcher calls these before `main_with`, gated by [`starts_kernel`].
+///
+/// They take the STATE folder: a launcher derives it from the command line with
+/// [`state_dir_of`] (`--statedir DIR`, else `<--workdir DIR or the current dir>/.fantastic`).
 pub use boot::seed::{seed_dir, seed_dir_with};
 
-/// BOOT ONE FOLDER IN THIS PROCESS: the stock registry plus `extras`, the kernel's start, the
+/// BOOT ONE STATE FOLDER IN THIS PROCESS: the stock registry plus `extras`, the kernel's start, the
 /// folder's recorded agents booted and the grant watch started: the same boot the modes run
 /// (`kern::host::boot_all`), with no canvas. Returns the running kernel; end it with
 /// [`stop_kernel`]. It never seeds: the caller has run [`seed_dir_with`]. `web_port` /
 /// `web_bind` are what `--port` / `--host` pass: set on the folder's recorded `web` before its
 /// listener boots (a `web` with no port and none given picks a free one and records it); with
 /// no `web` record in the folder they are refused. A folder a kernel already holds is refused
-/// with the lock error. Bundles clamp their paths against the process's current dir.
+/// with the lock error. `state_dir` and `work_dir` are what the kernel reports as
+/// `state_dir()` and `work_dir()`: its records and loader live in the first, the
+/// bundles clamp their non-state paths against the second.
 pub async fn boot_kernel(
-    dir: &std::path::Path,
+    state_dir: &std::path::Path,
+    work_dir: &std::path::Path,
     extras: &[Extra],
     web_port: Option<u16>,
     web_bind: Option<String>,
 ) -> Result<std::sync::Arc<fantastic_kernel::Kernel>, String> {
-    let paths = env::Paths::at(dir);
+    let paths = env::Paths::of(state_dir.to_path_buf(), work_dir.to_path_buf());
     paths.refuse_the_home()?;
     let (host, _) = kern::host::boot_all(&paths, extras, web_port, web_bind, false).await?;
     Ok(std::sync::Arc::clone(&host.kernel))
@@ -123,13 +130,31 @@ pub(crate) fn extras() -> &'static [Extra] {
     EXTRAS.get().map(Vec::as_slice).unwrap_or(&[])
 }
 
+/// THE STATE FOLDER a command line names, for a launcher that seeds it
+/// ([`seed_dir_with`]) before [`main_with`]: `--statedir DIR` when given, else
+/// `<--workdir DIR, or the current dir>/.fantastic`, for the UI, `--headless`,
+/// `canvas` and `mcp`. The one derivation is the kernel's (`state_dir_for`).
+///
+/// # Errors
+/// A command line that does not parse, or the current dir cannot be read.
+pub fn state_dir_of(args: &[String]) -> Result<std::path::PathBuf, String> {
+    let (statedir, workdir) = match args.first().map(String::as_str) {
+        Some("mcp") => mcp::flags(&args[1..])?,
+        _ => {
+            let o = recipe::parse(args)?;
+            (o.statedir, o.workdir)
+        }
+    };
+    fantastic_kernel::bootstrap::state_dir_for(statedir.as_deref(), workdir.as_deref()).map_err(|e| e.to_string())
+}
+
 /// THE LAUNCHER'S PREDICATE. True when `main_with(args, …)` would boot a kernel
 /// in the current directory: the UI (on a terminal), `--headless`, `canvas`, and
-/// a bare `mcp`. False for the one-shot commands (`send`, `readme`, `import`,
+/// an `mcp` with no flag but `--statedir` and `--workdir`. False for the one-shot commands (`send`, `readme`, `import`,
 /// `migrate-home`, `__ctrl_break`), for the readme printed when there is no
 /// terminal and no argument, and for a refused command line (a parse error,
-/// `mcp` with an argument, the UI with no terminal). A launcher calls it before
-/// `main_with` and, when it is true, seeds with `seed_dir_with(cwd, its
+/// `mcp` with another argument, the UI with no terminal). A launcher calls it before
+/// `main_with` and, when it is true, seeds with `seed_dir_with(&state_dir_of(argv)?, its
 /// blueprints)`. Nothing in the lib or the kernel calls it, and the kernel never
 /// seeds.
 pub fn starts_kernel(args: &[String]) -> bool {
@@ -143,7 +168,7 @@ fn kernel_mode(args: &[String], stdout_is_terminal: bool, has_tty: &dyn Fn() -> 
         return false;
     }
     match args.first().map(String::as_str) {
-        Some("mcp") => return args.len() == 1,
+        Some("mcp") => return mcp::flags(&args[1..]).is_ok(),
         Some("readme" | "send" | "import" | "migrate-home" | "__ctrl_break") => return false,
         _ => {}
     }
@@ -227,7 +252,7 @@ fn shell(opts: recipe::Opts) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::kernel_mode;
+    use super::{kernel_mode, state_dir_of};
 
     fn a(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
@@ -235,7 +260,7 @@ mod tests {
 
     #[test]
     fn starts_kernel_is_true_for_each_mode_that_boots_a_kernel() {
-        for s in ["", "--headless", "canvas", "canvas --port 8123", "mcp", "ai", "run htop"] {
+        for s in ["", "--headless", "canvas", "canvas --port 8123", "mcp", "mcp --statedir s", "mcp --workdir w --statedir s", "ai", "run htop"] {
             assert!(kernel_mode(&a(s), true, &|| true), "{s:?}");
         }
         for s in ["--headless", "canvas"] {
@@ -247,11 +272,22 @@ mod tests {
     fn starts_kernel_is_false_for_one_shots_and_refusals() {
         for s in [
             "readme", "readme mcp", "send x", "import p --parent user", "migrate-home", "migrate-home --dry-run",
-            "__ctrl_break 1", "mcp --can-call files", "bogus", "--headless canvas",
+            "__ctrl_break 1", "mcp --can-call files", "mcp --bogus", "bogus", "--headless canvas",
         ] {
             assert!(!kernel_mode(&a(s), true, &|| true), "{s:?}");
         }
         assert!(!kernel_mode(&a(""), false, &|| true), "the bare readme");
         assert!(!kernel_mode(&a(""), true, &|| false), "the UI with no terminal");
+    }
+
+    #[test]
+    fn state_dir_of_derives_from_workdir_or_takes_statedir() {
+        let v = |s: &str| state_dir_of(&a(s)).unwrap();
+        assert_eq!(v("--headless --workdir /w"), std::path::PathBuf::from("/w/.fantastic"));
+        assert_eq!(v("canvas --statedir /s"), std::path::PathBuf::from("/s"));
+        assert_eq!(v("mcp"), std::env::current_dir().unwrap().join(".fantastic"));
+        assert_eq!(v("mcp --workdir /w --statedir /s"), std::path::PathBuf::from("/s"));
+        assert!(state_dir_of(&a("mcp --bogus")).is_err());
+        assert!(state_dir_of(&a("bogus")).is_err());
     }
 }

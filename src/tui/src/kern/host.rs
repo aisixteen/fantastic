@@ -62,7 +62,7 @@ pub struct Host {
 /// agents is the user's to grow, and registering a bundle nobody declared only
 /// widens what a stray record could become. `extras` (an embedding binary's
 /// own bundles, #248; `main_with`'s for the `fantastic` binary) run AFTER the stock set.
-fn registry_with(cwd: &std::path::Path, extras: &[crate::Extra]) -> BundleRegistry {
+fn registry_with(state: &std::path::Path, extras: &[crate::Extra]) -> BundleRegistry {
     let mut reg = BundleRegistry::new();
     // THE ROOT. Its handler is the durable-state loader; see the module header.
     reg.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
@@ -105,12 +105,12 @@ fn registry_with(cwd: &std::path::Path, extras: &[crate::Extra]) -> BundleRegist
         fantastic_user_home_store::UserHomeStore::new(fantastic_user_home_store::home_dir_from_env()),
     );
     // THE USER STORE: the keys, set-ups and stored fantastic locations in the
-    // user's home; "here" is this project's dir, fixed by the binary (`kern/user_store`).
+    // user's home; "here" is this fantastic's state folder, fixed by the binary (`kern/user_store`).
     reg.register(
         fantastic_user_home_store::user_store::HANDLER_MODULE,
         fantastic_user_home_store::user_store::UserStore::new(
             fantastic_user_home_store::home_dir_from_env(),
-            std::path::absolute(cwd).unwrap_or_else(|_| cwd.to_path_buf()),
+            std::path::absolute(state).unwrap_or_else(|_| state.to_path_buf()),
         ),
     );
     // THE WEB HOST (the one HTTP/WS listener: a recorded one listens in every mode, and
@@ -259,7 +259,7 @@ async fn boot_the_rest(kernel: &Arc<Kernel>, done: &[String], web_port: Option<u
 }
 
 impl Host {
-    /// Boot over `paths.cwd`, with the stock bundles plus `extras`. Acquires the directory
+    /// Boot over `paths.store` (the state) and `paths.work`, with the stock bundles plus `extras`. Acquires the directory
     /// lock, so a second shell in the same directory fails here rather than corrupting the
     /// store.
     ///
@@ -273,8 +273,8 @@ impl Host {
         web_bind: Option<String>,
     ) -> Result<Self, KernelErr> {
         let booted = bootstrap::bootstrap(
-            registry_with(&paths.cwd, extras),
-            BootstrapOptions::daemon(&paths.store, &paths.cwd),
+            registry_with(&paths.store, extras),
+            BootstrapOptions::daemon(&paths.store, &paths.work),
         )
         .map_err(|e| KernelErr::Boot(format!("{e}")))?;
         let kernel = Arc::clone(&booted.kernel);
@@ -297,6 +297,12 @@ impl Host {
                 if !meta.contains_key(&k) {
                     patch.insert(k, v);
                 }
+            }
+            // The root keeps the work folder: set on the first start, and again when a
+            // `--workdir` was given while no kernel runs (`Paths::resolve`).
+            let work = paths.work.display().to_string();
+            if meta.get("workdir").and_then(Value::as_str) != Some(work.as_str()) {
+                patch.insert("workdir".into(), json!(work));
             }
         }
         if !patch.is_empty() {
@@ -355,9 +361,9 @@ impl Host {
         if let Err(e) = crate::kern::user_store::ensure(&host).await {
             notes.push(e);
         }
-        // THE PROJECT'S SYSTEM BLOCK: `.fantastic/prompt.md`, seeded, read by
+        // THE PROJECT'S SYSTEM BLOCK: `prompt.md`, in its bridge's folder, seeded, read by
         // every AI through its bridge (`kern/prompt`)
-        match crate::kern::prompt::ensure(&host, &paths.cwd).await {
+        match crate::kern::prompt::ensure(&host).await {
             Ok(()) => {
                 if let Err(e) = crate::kern::reach::grant_all(&host).await {
                     notes.push(e);
@@ -366,14 +372,23 @@ impl Host {
             }
             Err(e) => notes.push(e),
         }
-        // THE PROJECT'S `.fantastic/.mcp.json`: kept by the `mcp` leg, through its bridge
+        // THE PROJECT'S `.mcp.json`: kept by the `mcp` leg, through its bridge
         // (`kern/mcp_config`) — right before any coding CLI connects
         if let Err(e) = crate::kern::mcp_config::ensure(&host).await {
             notes.push(e);
         }
-        // the orientation a coding CLI opened here reads (`kern/orient`)
-        if let Err(e) = crate::kern::orient::seed(&paths.cwd) {
-            notes.push(e);
+        // the orientation a coding CLI opened here reads (`kern/orient`), and the
+        // state folder's readme, rewritten from the live values
+        match (host.kernel.state_dir(), host.kernel.work_dir()) {
+            (Ok(state), Ok(work)) => {
+                if let Err(e) = crate::kern::orient::seed(&state) {
+                    notes.push(e);
+                }
+                if let Err(e) = crate::kern::orient::write_readme(&host, &state, &work) {
+                    notes.push(e);
+                }
+            }
+            (Err(e), _) | (_, Err(e)) => notes.push(e),
         }
         // A browser set-up agent lives only while its page is open: never hydrated.
         crate::kern::setup_agent::sweep(&host).await;
@@ -756,7 +771,6 @@ pub(crate) async fn stop_bounded(
     second: impl std::future::Future<Output = ()>,
     grace: Duration,
     state: &std::path::Path,
-    cwd: &std::path::Path,
 ) -> Stopped {
     tokio::select! {
         biased;
@@ -767,7 +781,7 @@ pub(crate) async fn stop_bounded(
     if let Err(e) = bootstrap::shutdown(state) {
         tracing::warn!("stop: {e}")
     }
-    crate::kern::web::remove_run_file(cwd);
+    crate::kern::web::remove_run_file(state);
     Stopped::Cut
 }
 
@@ -1340,7 +1354,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".fantastic/cli")).expect("dirs");
         fantastic_kernel::lock::acquire(&tmp.join(".fantastic")).expect("lock");
-        std::fs::write(tmp.join(crate::kern::web::RUN_FILE), "pid: 1\n").expect("run file");
+        std::fs::write(tmp.join(".fantastic").join(crate::kern::web::RUN_FILE), "pid: 1\n").expect("run file");
         tmp
     }
 
@@ -1356,7 +1370,7 @@ mod tests {
             "the lock is released"
         );
         assert!(
-            !tmp.join(crate::kern::web::RUN_FILE).exists(),
+            !tmp.join(".fantastic").join(crate::kern::web::RUN_FILE).exists(),
             "the run file is gone"
         );
     }
@@ -1402,7 +1416,6 @@ mod tests {
             std::future::pending(),
             STOP_GRACE,
             &tmp.join(".fantastic"),
-            &tmp,
         )
         .await;
         let dt = t0.elapsed();
@@ -1437,7 +1450,6 @@ mod tests {
             std::future::pending(),
             Duration::from_millis(300),
             &tmp.join(".fantastic"),
-            &tmp,
         )
         .await;
         let dt = t0.elapsed();
@@ -1459,7 +1471,6 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)),
             STOP_GRACE,
             &tmp.join(".fantastic"),
-            &tmp,
         )
         .await;
         assert_eq!(out, Stopped::Cut);

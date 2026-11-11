@@ -23,10 +23,10 @@ pub struct Seen {
 }
 
 impl Seen {
-    /// `.fantastic/cli/seen.yaml`. A missing or corrupt file is an empty set,
+    /// `<cli>/seen.yaml`. A missing or corrupt file is an empty set,
     /// never an error: nothing here is worth failing a launch over.
-    pub fn load(cwd: &Path) -> Self {
-        let path = cwd.join(".fantastic").join("cli").join("seen.yaml");
+    pub fn load(cli: &Path) -> Self {
+        let path = cli.join("seen.yaml");
         let ids = std::fs::read_to_string(&path)
             .ok()
             .and_then(|t| fantastic_kernel::yaml_io::load(&t).ok())

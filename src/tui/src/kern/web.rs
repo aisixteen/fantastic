@@ -58,7 +58,10 @@ pub const CANVAS_NODE_ID: &str = "canvas_root";
 pub const STATIC_FILES_ID: &str = "static_files";
 
 fn err_of(r: &fantastic_kernel::Outcome) -> Option<String> {
-    r.result.get("error").and_then(Value::as_str).map(str::to_string)
+    r.result
+        .get("error")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn meta(h: &Host, id: &str) -> Map<String, Value> {
@@ -73,7 +76,13 @@ fn meta(h: &Host, id: &str) -> Map<String, Value> {
 /// lock (`Kernel::edit_grants`): a key another writer puts there meanwhile (the reach's watch
 /// grants each new agent as it is made) stays. Read whole and written back by `update_agent`,
 /// a canvas made while an agent was being granted lost that grant.
-async fn merge_verbs(h: &Host, id: &str, field: &str, add: &str, verbs: Value) -> Result<(), String> {
+async fn merge_verbs(
+    h: &Host,
+    id: &str,
+    field: &str,
+    add: &str,
+    verbs: Value,
+) -> Result<(), String> {
     let agent = fantastic_kernel::AgentId::from(id);
     let edit = |g: &mut Map<String, Value>| {
         if g.get(add) == Some(&verbs) {
@@ -87,7 +96,8 @@ async fn merge_verbs(h: &Host, id: &str, field: &str, add: &str, verbs: Value) -
         "callable_by" => h.kernel.edit_callable_by(&agent, edit),
         other => Err(format!("`{other}` is no grant map")),
     };
-    done.map(|_| ()).map_err(|e| format!("could not grant {id}.{field} += {add}: {e}"))
+    done.map(|_| ())
+        .map_err(|e| format!("could not grant {id}.{field} += {add}: {e}"))
 }
 
 async fn create(h: &Host, spec: Value) -> Result<(), String> {
@@ -104,17 +114,28 @@ async fn create(h: &Host, spec: Value) -> Result<(), String> {
 /// at `root`), its own cells' backends as its children. `main` is declarative
 /// only: the page opens the main canvas first and lists it on top. Creates
 /// what is missing (booted by the caller).
-pub async fn ensure_canvas(h: &Host, parent: &str, node: &str, loader: &str, root: &str, main: bool) -> Result<(), String> {
+pub async fn ensure_canvas(
+    h: &Host,
+    parent: &str,
+    node: &str,
+    loader: &str,
+    root: &str,
+    main: bool,
+) -> Result<(), String> {
     if !h.kernel.exists(node) {
-        create(h, json!({"parent_id": parent, "id": node,
-            "handler_module": crate::kern::backend::HANDLER_MODULE, "main": main})).await?;
+        create(
+            h,
+            json!({"parent_id": parent, "id": node,
+            "handler_module": crate::kern::backend::HANDLER_MODULE, "main": main}),
+        )
+        .await?;
     }
     if !h.kernel.exists(loader) {
         create(h, json!({"parent_id": node, "id": loader, "handler_module": fantastic_core::HANDLER_MODULE,
             "root": root, "watch": false})).await?;
     }
-    // its page bundles' folder exists, so the page's bundles have a place to be
-    // put (the folder is the loader's `root` under the kernel's one rule)
+    // its page bundles' folder exists (no watching), so the page's bundles
+    // have a place to be put (the folder is the loader's `root` under the kernel's one rule)
     let (base, rel) = h.kernel.record_root(root, std::path::Path::new(""))?;
     let bundles = base.join(rel).join("bundles");
     if let Err(e) = std::fs::create_dir_all(&bundles) {
@@ -143,7 +164,8 @@ fn loader_of(h: &Host, node: &str) -> Option<String> {
         .iter()
         .find(|l| {
             let r = l.value().record();
-            r.parent_id.as_deref() == Some(node) && r.handler_module.as_deref() == Some(fantastic_core::HANDLER_MODULE)
+            r.parent_id.as_deref() == Some(node)
+                && r.handler_module.as_deref() == Some(fantastic_core::HANDLER_MODULE)
         })
         .map(|l| l.key().0.clone())
 }
@@ -158,7 +180,9 @@ pub fn canvases(h: &Host) -> Vec<(String, String)> {
     while let Some(parent) = parents.pop() {
         for a in h.kernel.agents.iter() {
             let r = a.value().record();
-            if r.parent_id.as_deref() != Some(parent.as_str()) || r.handler_module.as_deref() != Some(crate::kern::backend::HANDLER_MODULE) {
+            if r.parent_id.as_deref() != Some(parent.as_str())
+                || r.handler_module.as_deref() != Some(crate::kern::backend::HANDLER_MODULE)
+            {
                 continue;
             }
             let node = a.key().0.clone();
@@ -175,7 +199,12 @@ pub fn canvases(h: &Host) -> Vec<(String, String)> {
 /// The node id a canvas named `name` takes: `canvas_<slug>`, the slug its letters
 /// and digits (other characters `_`, the ends trimmed). A name with none is refused.
 pub fn canvas_node_id(name: &str) -> Result<String, String> {
-    let slug: String = name.trim().to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    let slug: String = name
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
     let slug = slug.trim_matches('_');
     if slug.is_empty() {
         return Err("new_canvas needs a name (letters or digits)".into());
@@ -197,7 +226,10 @@ pub async fn new_canvas(h: &Host, parent: &str, name: &str) -> Result<String, St
         .kernel
         .agents
         .get(&fantastic_kernel::AgentId::from(parent))
-        .is_some_and(|a| a.value().record().handler_module.as_deref() == Some(crate::kern::backend::HANDLER_MODULE));
+        .is_some_and(|a| {
+            a.value().record().handler_module.as_deref()
+                == Some(crate::kern::backend::HANDLER_MODULE)
+        });
     if !canvas_parent {
         return Err(format!("new_canvas: `{parent}` is not a canvas"));
     }
@@ -205,7 +237,8 @@ pub async fn new_canvas(h: &Host, parent: &str, name: &str) -> Result<String, St
     if h.kernel.exists(&node) {
         return Err(format!("a canvas `{node}` already exists"));
     }
-    let parent_loader = loader_of(h, parent).ok_or_else(|| format!("new_canvas: `{parent}` has no page loader"))?;
+    let parent_loader =
+        loader_of(h, parent).ok_or_else(|| format!("new_canvas: `{parent}` has no page loader"))?;
     let parent_root = meta(h, &parent_loader)
         .get("root")
         .and_then(Value::as_str)
@@ -213,14 +246,25 @@ pub async fn new_canvas(h: &Host, parent: &str, name: &str) -> Result<String, St
         .ok_or_else(|| format!("new_canvas: the page loader of `{parent}` has no root"))?;
     let loader = format!("{node}_loader");
     // `create_agent` boots each as it makes it
-    ensure_canvas(h, parent, &node, &loader, &child_records_root(&parent_root, &node), false).await?;
+    ensure_canvas(
+        h,
+        parent,
+        &node,
+        &loader,
+        &child_records_root(&parent_root, &node),
+        false,
+    )
+    .await?;
     Ok(node)
 }
 
 /// A port free on this machine now (the OS picks it), for the first run that names none.
 pub(crate) fn free_port() -> Result<u16, String> {
-    let l = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("no free port to pick: {e}"))?;
-    l.local_addr().map(|a| a.port()).map_err(|e| format!("no free port to pick: {e}"))
+    let l = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|e| format!("no free port to pick: {e}"))?;
+    l.local_addr()
+        .map(|a| a.port())
+        .map_err(|e| format!("no free port to pick: {e}"))
 }
 
 /// What `ensure` serves: the canvas's page, on its port.
@@ -249,31 +293,43 @@ pub fn canvas_authority(host: &str, port: u16) -> String {
 
 /// THE RUN FILE (owner 2026-10-16, for a local manager of fantastics): while this
 /// process serves the canvas, `{pid, port, url}` — written once it serves,
-/// removed at a clean exit. Under the project dir. A killed process leaves it
-/// behind: the lock (`.fantastic/lock.yaml`, flocked while the kernel runs) says
+/// removed at a clean exit. In the state folder (`<state>/cli/canvas.yaml`). A killed process leaves it
+/// behind: the lock (`<state>/lock.yaml`, flocked while the kernel runs) says
 /// whether it is live.
 pub const RUN_FILE: &str = fantastic_home::RUN_FILE;
 
-/// Write `dir`'s [`RUN_FILE`] for this process.
-pub fn write_run_file(dir: &std::path::Path, urls: &Urls) -> Result<(), String> {
-    crate::atomic::write_yaml(&dir.join(RUN_FILE), &json!({"pid": std::process::id(), "port": urls.port, "url": urls.canvas}))
+/// Write `state`'s [`RUN_FILE`] for this process.
+pub fn write_run_file(state: &std::path::Path, urls: &Urls) -> Result<(), String> {
+    crate::atomic::write_yaml(
+        &state.join(RUN_FILE),
+        &json!({"pid": std::process::id(), "port": urls.port, "url": urls.canvas}),
+    )
 }
 
-/// Remove `dir`'s [`RUN_FILE`] at a clean exit (none written: nothing to remove).
-pub fn remove_run_file(dir: &std::path::Path) {
-    let _ = std::fs::remove_file(dir.join(RUN_FILE));
+/// Remove `state`'s [`RUN_FILE`] at a clean exit (none written: nothing to remove).
+pub fn remove_run_file(state: &std::path::Path) {
+    let _ = std::fs::remove_file(state.join(RUN_FILE));
 }
 
 /// Create what is missing, grant, boot, mount. Returns the pages' URLs. `bind` is
 /// `--host`: a fresh `web` binds it; a recorded `web` must already bind it (`Host::boot`
 /// set it before the listener booted).
 pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<Urls, String> {
-    let recorded = meta(h, WEB_ID).get("port").and_then(Value::as_u64).map(|p| p as u16);
+    let recorded = meta(h, WEB_ID)
+        .get("port")
+        .and_then(Value::as_u64)
+        .map(|p| p as u16);
     // the address the recorded `web` listens on (its `bind`, else its `host`)
-    let bound = h.kernel.exists(WEB_ID).then(|| fantastic_web::listen_host(&meta(h, WEB_ID)));
+    let bound = h
+        .kernel
+        .exists(WEB_ID)
+        .then(|| fantastic_web::listen_host(&meta(h, WEB_ID)));
     if let (true, Some(b)) = (h.kernel.exists(WEB_ID), bind) {
         if bound.as_deref() != Some(b) {
-            return Err(format!("--host {b}: the `web` leg still binds {}", bound.as_deref().unwrap_or(fantastic_web::DEFAULT_HOST)));
+            return Err(format!(
+                "--host {b}: the `web` leg still binds {}",
+                bound.as_deref().unwrap_or(fantastic_web::DEFAULT_HOST)
+            ));
         }
     }
     let port = match (h.kernel.exists(WEB_ID), port) {
@@ -331,7 +387,14 @@ pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<U
             "root": ".", "readonly": true, "allow": [], "ingress_rule": "allow_all_ingress"})).await?;
     }
     // `web` MOUNTS its legs by asking each for its routes, as itself
-    merge_verbs(h, CANVAS_WS_ID, "callable_by", WEB_ID, json!(["get_routes"])).await?;
+    merge_verbs(
+        h,
+        CANVAS_WS_ID,
+        "callable_by",
+        WEB_ID,
+        json!(["get_routes"]),
+    )
+    .await?;
     merge_verbs(h, WEB_ID, "can_call", CANVAS_WS_ID, json!(["get_routes"])).await?;
     // `web` serves every `/<agent>/file/` route READING AS ITSELF: the page,
     // and the static files, both ends
@@ -341,18 +404,32 @@ pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<U
     }
     // `user`: the leg's one reach (its verbs), and the page loader it reads.
     let gw_verbs = json!(fantastic_user::VERBS);
-    let r = h.operator("kernel", json!({"type": "update_agent", "id": user, "page_loader": CANVAS_LOADER_ID})).await;
+    let r = h
+        .operator(
+            "kernel",
+            json!({"type": "update_agent", "id": user, "page_loader": CANVAS_LOADER_ID}),
+        )
+        .await;
     if let Some(e) = err_of(&r) {
-        return Err(format!("could not name `{CANVAS_LOADER_ID}` on `{user}`: {e}"));
+        return Err(format!(
+            "could not name `{CANVAS_LOADER_ID}` on `{user}`: {e}"
+        ));
     }
     merge_verbs(h, user, "callable_by", CANVAS_WS_ID, gw_verbs.clone()).await?;
     // the leg's can_call IS `user`, plus each connected page's agents
     // (`<guid>|*`, written by `kern/reach` when the page connects — `around`
     // judges by it); the record is rewritten whole
-    let r = h.operator("kernel", json!({"type": "update_agent", "id": CANVAS_WS_ID,
-        "can_call": {user: gw_verbs}})).await;
+    let r = h
+        .operator(
+            "kernel",
+            json!({"type": "update_agent", "id": CANVAS_WS_ID,
+        "can_call": {user: gw_verbs}}),
+        )
+        .await;
     if let Some(e) = err_of(&r) {
-        return Err(format!("could not narrow `{CANVAS_WS_ID}` to `{user}`: {e}"));
+        return Err(format!(
+            "could not narrow `{CANVAS_WS_ID}` to `{user}`: {e}"
+        ));
     }
 
     let mut boots = vec![CANVAS_PAGE_ID, CANVAS_WS_ID, STATIC_FILES_ID];
@@ -367,7 +444,9 @@ pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<U
     }
     // A leg created under a host that was already listening is mounted onto it.
     if fresh_canvas_ws && !fresh_host {
-        let r = h.operator(WEB_ID, json!({"type":"mount","child_id": CANVAS_WS_ID})).await;
+        let r = h
+            .operator(WEB_ID, json!({"type":"mount","child_id": CANVAS_WS_ID}))
+            .await;
         if let Some(e) = err_of(&r) {
             return Err(format!("could not mount `{CANVAS_WS_ID}`: {e}"));
         }
@@ -381,9 +460,14 @@ pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<U
     crate::kern::reach::grant_all(h).await?;
     // the address the web binds: the recorded one (a recorded `web` already binds
     // it, checked above), else `--host` for a fresh one, else the default
-    let host = bound.or_else(|| bind.map(str::to_string)).unwrap_or_else(|| fantastic_web::DEFAULT_HOST.to_string());
+    let host = bound
+        .or_else(|| bind.map(str::to_string))
+        .unwrap_or_else(|| fantastic_web::DEFAULT_HOST.to_string());
     Ok(Urls {
-        canvas: format!("http://{}/{CANVAS_PAGE_ID}/file/index.html", canvas_authority(&host, port)),
+        canvas: format!(
+            "http://{}/{CANVAS_PAGE_ID}/file/index.html",
+            canvas_authority(&host, port)
+        ),
         port,
     })
 }
@@ -410,7 +494,10 @@ mod tests {
     #[test]
     fn a_canvas_takes_its_node_id_from_its_name_or_is_refused_without_one() {
         assert_eq!(canvas_node_id("research").unwrap(), "canvas_research");
-        assert_eq!(canvas_node_id("  Research Team! ").unwrap(), "canvas_research_team");
+        assert_eq!(
+            canvas_node_id("  Research Team! ").unwrap(),
+            "canvas_research_team"
+        );
         assert_eq!(canvas_node_id("a-b").unwrap(), "canvas_a_b");
         assert!(canvas_node_id("").unwrap_err().contains("needs a name"));
         assert!(canvas_node_id(" -- ").unwrap_err().contains("needs a name"));
@@ -450,14 +537,20 @@ mod tests {
         assert_eq!(named["port"], json!(8088));
         assert_eq!(named["parent_id"], json!("user"));
         assert_eq!(named["id"], json!(WEB_ID));
-        assert_eq!(named["handler_module"], json!(fantastic_web::HANDLER_MODULE));
+        assert_eq!(
+            named["handler_module"],
+            json!(fantastic_web::HANDLER_MODULE)
+        );
         // a concrete address is both the listener and the guard's identity
         let lan = web_record("user", 8088, Some("192.168.1.5"));
         assert_eq!(lan["bind"], json!("192.168.1.5"));
         assert_eq!(lan["host"], json!("192.168.1.5"));
         // no --host: the record says nothing about the address, so the default (loopback) holds
         let plain = web_record("user", 8088, None);
-        assert!(plain.get("host").is_none() && plain.get("bind").is_none(), "{plain}");
+        assert!(
+            plain.get("host").is_none() && plain.get("bind").is_none(),
+            "{plain}"
+        );
         assert_eq!(plain["port"], json!(8088));
     }
 
@@ -465,10 +558,16 @@ mod tests {
     fn the_run_file_names_this_process_its_port_and_url_until_a_clean_exit() {
         let d = std::env::temp_dir().join(format!("fc-runfile-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let urls = Urls { canvas: "http://127.0.0.1:8123/canvas_page/file/index.html".into(), port: 8123 };
+        let urls = Urls {
+            canvas: "http://127.0.0.1:8123/canvas_page/file/index.html".into(),
+            port: 8123,
+        };
         write_run_file(&d, &urls).unwrap();
         let v = crate::atomic::read_yaml(&d.join(RUN_FILE)).unwrap();
-        assert_eq!(v, json!({"pid": std::process::id(), "port": 8123, "url": urls.canvas}));
+        assert_eq!(
+            v,
+            json!({"pid": std::process::id(), "port": 8123, "url": urls.canvas})
+        );
         remove_run_file(&d);
         assert!(!d.join(RUN_FILE).exists());
         remove_run_file(&d); // nothing left: still fine
@@ -521,7 +620,11 @@ pub(crate) mod canvas_tree_tests {
         );
         kernel.register(Arc::clone(&root));
         kernel.set_root(root);
-        Host { kernel, cfg: ClientCfg::here(), root: "kernel".to_string() }
+        Host {
+            kernel,
+            cfg: ClientCfg::here(),
+            root: "kernel".to_string(),
+        }
     }
 
     /// The main canvas as `ensure` makes it, under a canvas page: its records under `dir`.
@@ -547,11 +650,18 @@ pub(crate) mod canvas_tree_tests {
     }
 
     fn parent_of(h: &Host, id: &str) -> Option<String> {
-        h.kernel.agents.get(&KernelId::from(id)).and_then(|a| a.value().record().parent_id.clone())
+        h.kernel
+            .agents
+            .get(&KernelId::from(id))
+            .and_then(|a| a.value().record().parent_id.clone())
     }
 
     fn records_root_of(h: &Host, loader: &str) -> String {
-        meta(h, loader).get("root").and_then(Value::as_str).unwrap_or_default().to_string()
+        meta(h, loader)
+            .get("root")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
     }
 
     #[tokio::test]
@@ -573,12 +683,24 @@ pub(crate) mod canvas_tree_tests {
             }
         });
         for i in 0..6 {
-            new_canvas(&h, CANVAS_NODE_ID, &format!("race{i}")).await.unwrap();
+            new_canvas(&h, CANVAS_NODE_ID, &format!("race{i}"))
+                .await
+                .unwrap();
         }
         writing.join().unwrap();
-        let cc = meta(&h, crate::env::HUMAN).get("can_call").and_then(Value::as_object).cloned().unwrap_or_default();
-        let lost: Vec<String> = (0..300).map(|i| format!("late_{i}")).filter(|k| !cc.contains_key(k)).collect();
-        assert!(lost.is_empty(), "grants lost to a canvas being made: {lost:?}");
+        let cc = meta(&h, crate::env::HUMAN)
+            .get("can_call")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let lost: Vec<String> = (0..300)
+            .map(|i| format!("late_{i}"))
+            .filter(|k| !cc.contains_key(k))
+            .collect();
+        assert!(
+            lost.is_empty(),
+            "grants lost to a canvas being made: {lost:?}"
+        );
     }
 
     #[tokio::test]
@@ -587,9 +709,20 @@ pub(crate) mod canvas_tree_tests {
         let h = canvas_world(&dir).await;
         let node = new_canvas(&h, CANVAS_NODE_ID, "research").await.unwrap();
         assert_eq!(node, "canvas_research");
-        assert_eq!(parent_of(&h, &node).as_deref(), Some(CANVAS_NODE_ID), "a CHILD of the calling canvas");
         assert_eq!(
-            h.kernel.agents.get(&fantastic_kernel::AgentId::from(node.as_str())).unwrap().value().record().handler_module.as_deref(),
+            parent_of(&h, &node).as_deref(),
+            Some(CANVAS_NODE_ID),
+            "a CHILD of the calling canvas"
+        );
+        assert_eq!(
+            h.kernel
+                .agents
+                .get(&fantastic_kernel::AgentId::from(node.as_str()))
+                .unwrap()
+                .value()
+                .record()
+                .handler_module
+                .as_deref(),
             Some(crate::kern::backend::HANDLER_MODULE)
         );
         let loader = loader_of(&h, &node).expect("its own page loader");
@@ -615,12 +748,27 @@ pub(crate) mod canvas_tree_tests {
         let h = canvas_world(&dir).await;
         new_canvas(&h, CANVAS_NODE_ID, "research").await.unwrap();
         // the same name under the same canvas
-        let err = new_canvas(&h, CANVAS_NODE_ID, "research").await.unwrap_err();
-        assert!(err.contains("canvas_research") && err.contains("already exists"), "{err}");
+        let err = new_canvas(&h, CANVAS_NODE_ID, "research")
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("canvas_research") && err.contains("already exists"),
+            "{err}"
+        );
         // a name the main canvas already holds, asked from a nested canvas
         let err = new_canvas(&h, "canvas_research", "root").await.unwrap_err();
-        assert!(err.contains("canvas_root") && err.contains("already exists"), "{err}");
-        assert_eq!(h.kernel.agents.iter().filter(|a| a.key().0 == "canvas_research_loader").count(), 1);
+        assert!(
+            err.contains("canvas_root") && err.contains("already exists"),
+            "{err}"
+        );
+        assert_eq!(
+            h.kernel
+                .agents
+                .iter()
+                .filter(|a| a.key().0 == "canvas_research_loader")
+                .count(),
+            1
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -640,19 +788,31 @@ pub(crate) mod canvas_tree_tests {
         let h = harness(&dir);
         recorded_web(&h, json!({"bind": "0.0.0.0"})).await;
         // another bind than the record's: refused before anything is created or booted
-        let Err(err) = ensure(&h, None, Some("127.0.0.1")).await else { panic!("a bind the record does not hold is refused") };
-        assert!(err.contains("--host 127.0.0.1") && err.contains("still binds 0.0.0.0"), "{err}");
+        let Err(err) = ensure(&h, None, Some("127.0.0.1")).await else {
+            panic!("a bind the record does not hold is refused")
+        };
+        assert!(
+            err.contains("--host 127.0.0.1") && err.contains("still binds 0.0.0.0"),
+            "{err}"
+        );
         // a recorded web with no host binds the default: `--host 0.0.0.0` is refused against it
         let plain = scratch("bind-refused-default");
         let h2 = harness(&plain);
         recorded_web(&h2, json!({})).await;
-        let Err(err) = ensure(&h2, None, Some("0.0.0.0")).await else { panic!("refused") };
-        assert!(err.contains("--host 0.0.0.0") && err.contains("still binds 127.0.0.1"), "{err}");
+        let Err(err) = ensure(&h2, None, Some("0.0.0.0")).await else {
+            panic!("refused")
+        };
+        assert!(
+            err.contains("--host 0.0.0.0") && err.contains("still binds 127.0.0.1"),
+            "{err}"
+        );
         // a record from before `bind` names its listener in `host`, and that is the bind it holds
         let legacy = scratch("bind-refused-legacy");
         let h3 = harness(&legacy);
         recorded_web(&h3, json!({"host": "0.0.0.0"})).await;
-        let Err(err) = ensure(&h3, None, Some("127.0.0.1")).await else { panic!("refused") };
+        let Err(err) = ensure(&h3, None, Some("127.0.0.1")).await else {
+            panic!("refused")
+        };
         assert!(err.contains("still binds 0.0.0.0"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&plain);
@@ -678,13 +838,26 @@ pub(crate) mod canvas_tree_tests {
         let node = new_canvas(&h, CANVAS_NODE_ID, "research").await.unwrap();
         let deeper = new_canvas(&h, &node, "deeper").await.unwrap();
         let (loader, deeper_loader) = (format!("{node}_loader"), format!("{deeper}_loader"));
-        let out = h.operator("kernel", json!({"type": "delete_agent", "id": node})).await;
+        let out = h
+            .operator("kernel", json!({"type": "delete_agent", "id": node}))
+            .await;
         assert!(out.result.get("error").is_none(), "{:?}", out.result);
         for gone in [&node, &loader, &deeper, &deeper_loader] {
-            assert!(!h.kernel.agents.contains_key(&KernelId::from(gone.as_str())), "{gone} is gone");
+            assert!(
+                !h.kernel.agents.contains_key(&KernelId::from(gone.as_str())),
+                "{gone} is gone"
+            );
         }
-        assert!(h.kernel.agents.contains_key(&KernelId::from(CANVAS_NODE_ID)), "the main canvas stays");
-        assert_eq!(canvases(&h), vec![(CANVAS_NODE_ID.to_string(), CANVAS_LOADER_ID.to_string())]);
+        assert!(
+            h.kernel
+                .agents
+                .contains_key(&KernelId::from(CANVAS_NODE_ID)),
+            "the main canvas stays"
+        );
+        assert_eq!(
+            canvases(&h),
+            vec![(CANVAS_NODE_ID.to_string(), CANVAS_LOADER_ID.to_string())]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -717,9 +890,25 @@ pub(crate) mod canvas_tree_tests {
         assert_eq!(listed, expect);
         // every listed canvas is reachable: a canvas node whose loader is its page's
         for (node, loader) in &listed {
-            let hm = h.kernel.agents.get(&fantastic_kernel::AgentId::from(node.as_str())).unwrap().value().record().handler_module.clone();
-            assert_eq!(hm.as_deref(), Some(crate::kern::backend::HANDLER_MODULE), "{node} is a canvas");
-            assert_eq!(loader_of(&h, node).as_deref(), Some(loader.as_str()), "{node} boots its own loader");
+            let hm = h
+                .kernel
+                .agents
+                .get(&fantastic_kernel::AgentId::from(node.as_str()))
+                .unwrap()
+                .value()
+                .record()
+                .handler_module
+                .clone();
+            assert_eq!(
+                hm.as_deref(),
+                Some(crate::kern::backend::HANDLER_MODULE),
+                "{node} is a canvas"
+            );
+            assert_eq!(
+                loader_of(&h, node).as_deref(),
+                Some(loader.as_str()),
+                "{node} boots its own loader"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

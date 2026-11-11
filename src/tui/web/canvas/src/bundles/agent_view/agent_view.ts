@@ -4,16 +4,13 @@ import { str } from "../../lib.ts";
 import { panelRelay } from "../panel_relay.ts";
 import { mountPanel } from "../html_agent/html_view.ts";
 import type { PanelOptions } from "../html_agent/html_view.ts";
-import { Host } from "../../lib.ts";
-import { bodyText } from "../body_text.ts";
 import { onViewChange, viewOf, viewRecordOf } from "../canvas/host_views.ts";
 
 // agent_view — a HOST agent's OWN view (backend-owned views,
 // tmp/backend_owned_views.md). NOT page content: the cell holds only layout and
-// `backend_id`; the BODY is the host agent's own small renderer: its BUNDLE's
-// view file (`view.bytes_file`, read from `.fantastic/bundles/<bundle>/` through
-// the host's `bundles_watch` bridge — the record holds only the name), else the
-// record's inline `view.bytes`. It runs in the same sandboxed panel as an html cell (`mountPanel`),
+// `backend_id`; the BODY is the host agent's own small renderer: the
+// `view.bytes` its record carries (one path: the bytes that arrive — the host
+// puts a bundle's view file there). It runs in the same sandboxed panel as an html cell (`mountPanel`),
 // relayed AS this cell, whose grant onto its agent is derived from the record's
 // `view.calls` (`host_views.ts`). A change of the agent's `view` re-renders it.
 // `html_agent.ts` stays pure page content.
@@ -36,41 +33,12 @@ export function registerAgentView(kernel: { registerBundle(hm: string, h: Handle
   kernel.registerBundle(AGENT_VIEW, agentView);
 }
 
-/** The host bridge that exposes the host's bundle folders (read-only). */
-const BUNDLES_BRIDGE = "bundles_watch";
-/** Where the host's bundles live, relative to the project (the bridge's root). */
-const HOST_BUNDLES = ".fantastic/bundles";
-
-/** A host file, whole, through the bundles bridge (`read_stream` pages to eof). */
-async function readHostFile(host: Host, path: string): Promise<string> {
-  let out = "";
-  let offset = 0;
-  for (;;) {
-    const r = (await host.callHost(BUNDLES_BRIDGE, { type: "read_stream", path, offset } as never)) as Record<string, unknown> | null;
-    if (typeof r?.["error"] === "string") throw new Error(r["error"]);
-    out += bodyText(r?.["bytes"]) ?? "";
-    if (r?.["eof"] === true || typeof r?.["next_offset"] !== "number" || r["next_offset"] <= offset) return out;
-    offset = r["next_offset"];
-  }
-}
-
-/** The host agent's view body: its bundle's view file (its `{{agent}}` = this
- *  instance), else the record's inline `bytes`. */
-async function bodyOf(host: Host, agent: string): Promise<string> {
+/** The host agent's view body: the `view.bytes` its record carries (the host put
+ *  the bundle's view file there, its `{{agent}}` already this instance). */
+async function bodyOf(agent: string): Promise<string> {
   const rec = await viewRecordOf(agent);
   if (rec === undefined) return `<pre>no host agent ${agent}</pre>`;
-  const v = viewOf(rec);
-  if (v.bytesFile !== undefined) {
-    const bundle = typeof rec["handler_module"] === "string" ? rec["handler_module"] : "";
-    const path = `${HOST_BUNDLES}/${bundle}/${v.bytesFile.replace(/^\/+/, "")}`;
-    try {
-      return (await readHostFile(host, path)).replaceAll("{{agent}}", agent);
-    } catch (e) {
-      return `<pre>${agent}'s view file ${path} did not load: ${(e as Error).message}</pre>`;
-    }
-  }
-  if (v.bytes !== undefined) return v.bytes;
-  return `<pre>${agent} declares no view body</pre>`;
+  return viewOf(rec).bytes ?? `<pre>${agent} declares no view body</pre>`;
 }
 
 /** A host agent's panel drawn into `ctx.mount`: its body from its record, re-drawn
@@ -78,9 +46,8 @@ async function bodyOf(host: Host, agent: string): Promise<string> {
  *  `agent` is the host agent shown; calls go out AS `ctx.selfId`, whose `can_call` names
  *  them (`cellGrant`). */
 export function mountHostPanel(ctx: ViewContext, agent: string, opts: PanelOptions = {}): ViewHandle {
-  const host = new Host(ctx.kernel, ctx.selfId);
   // `{{cell}}` in a body is this cell's id: where the panel emits what the canvas should hear
-  const panel = mountPanel(ctx, async () => (await bodyOf(host, agent)).replaceAll("{{cell}}", ctx.selfId), opts);
+  const panel = mountPanel(ctx, async () => (await bodyOf(agent)).replaceAll("{{cell}}", ctx.selfId), opts);
   // the agent's `view` changed on the host → render again (the registry says so)
   const off = onViewChange(agent, () => panel.reload());
   return {

@@ -1,5 +1,9 @@
 //! THE COMMAND LINE:
-//! `fantastic [canvas [--port N] [--host ADDR] | --headless [--port N] [--host ADDR]] [ai [BACKEND FLAGS…]] [run COMMAND [ARGS…]]`.
+//! `fantastic [canvas [--port N] [--host ADDR] | --headless [--port N] [--host ADDR]] [--statedir DIR] [--workdir DIR] [ai [BACKEND FLAGS…]] [run COMMAND [ARGS…]]`.
+//!
+//! TWO FOLDERS: `--statedir DIR` is the kernel's state folder (default
+//! `<workdir>/.fantastic`); `--workdir DIR` is where it works (default the current
+//! folder; the root record keeps it, so a later start finds it again).
 //!
 //! A RECIPE is a word that names agents. It ADDS them to the kernel only if they
 //! are missing — a recipe already applied adds nothing — and RUNS them. The
@@ -36,6 +40,8 @@
 //! publish its port. A kernel already running here refuses every argument
 //! (`run.rs`). `fantastic mcp` stays its own command (stdout is its protocol).
 
+use std::path::PathBuf;
+
 use crate::kern::root_ai::Backend;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +62,10 @@ pub struct Opts {
     pub ai: Option<Backend>,
     /// `run COMMAND [ARGS…]`: the argv, as typed.
     pub run: Option<Vec<String>>,
+    /// `--statedir DIR`: the state folder (default `<workdir>/.fantastic`).
+    pub statedir: Option<PathBuf>,
+    /// `--workdir DIR`: the work folder (default the current folder).
+    pub workdir: Option<PathBuf>,
 }
 
 impl Opts {
@@ -69,7 +79,7 @@ impl Opts {
     }
 }
 
-const USAGE: &str = "run `fantastic [canvas [--port N] [--host ADDR] | --headless [--port N] [--host ADDR]] [ai [vllm|ollama|responses|anthropic …]] [run COMMAND …]`, `fantastic mcp`, `fantastic send <item>`, `fantastic import <path> --parent <id>`, `fantastic migrate-home [--dry-run]` or `fantastic readme [key]`";
+const USAGE: &str = "run `fantastic [canvas [--port N] [--host ADDR] | --headless [--port N] [--host ADDR]] [--statedir DIR] [--workdir DIR] [ai [vllm|ollama|responses|anthropic …]] [run COMMAND …]`, `fantastic mcp [--statedir DIR] [--workdir DIR]`, `fantastic send [--statedir DIR] <item>`, `fantastic import <path> --parent <id>`, `fantastic migrate-home [--dry-run]` or `fantastic readme [key]`";
 
 fn port_of(v: &str, flag: &str) -> Result<u16, String> {
     v.parse::<u16>().ok().filter(|p| *p > 0).ok_or_else(|| format!("{flag} must be 1..65535, got `{v}`"))
@@ -128,7 +138,7 @@ fn backend(word: &str, f: AiFlags) -> Result<Backend, String> {
 }
 
 pub fn parse(args: &[String]) -> Result<Opts, String> {
-    let mut o = Opts { recipes: Vec::new(), port: None, bind: None, headless: false, ai: None, run: None };
+    let mut o = Opts { recipes: Vec::new(), port: None, bind: None, headless: false, ai: None, run: None, statedir: None, workdir: None };
     let mut i = 0;
     let next = |i: &mut usize, what: &str| -> Result<String, String> {
         *i += 1;
@@ -139,6 +149,8 @@ pub fn parse(args: &[String]) -> Result<Opts, String> {
             "--headless" => o.headless = true,
             "--port" => o.port = Some(port_of(&next(&mut i, "--port needs a number")?, "--port")?),
             "--host" => o.bind = Some(bind_of(&next(&mut i, "--host needs an IP address")?)?),
+            "--statedir" => o.statedir = Some(PathBuf::from(next(&mut i, "--statedir needs a folder")?)),
+            "--workdir" => o.workdir = Some(PathBuf::from(next(&mut i, "--workdir needs a folder")?)),
             "canvas" => push(&mut o.recipes, Recipe::Canvas),
             "ai" => {
                 push(&mut o.recipes, Recipe::Ai);
@@ -269,6 +281,25 @@ mod tests {
         assert!(p("--port 8123").is_err(), "neither canvas nor --headless");
         assert!(p("--host 127.0.0.1").is_err(), "neither canvas nor --headless");
         assert!(p("ai --host 0.0.0.0").is_err());
+    }
+
+    #[test]
+    fn statedir_and_workdir_take_a_folder() {
+        let o = p("--headless --statedir /s --workdir /w").unwrap();
+        assert_eq!(o.statedir.as_deref(), Some(std::path::Path::new("/s")));
+        assert_eq!(o.workdir.as_deref(), Some(std::path::Path::new("/w")));
+        let c = p("canvas --workdir /w --statedir /s").unwrap();
+        assert!(c.canvas());
+        assert_eq!(c.statedir.as_deref(), Some(std::path::Path::new("/s")));
+        assert_eq!(c.workdir.as_deref(), Some(std::path::Path::new("/w")));
+        let n = p("ai").unwrap();
+        assert!(n.statedir.is_none() && n.workdir.is_none());
+    }
+
+    #[test]
+    fn a_flag_without_its_folder_is_refused() {
+        assert_eq!(p("--headless --statedir").unwrap_err(), "--statedir needs a folder");
+        assert_eq!(p("--headless --workdir").unwrap_err(), "--workdir needs a folder");
     }
 
     #[test]

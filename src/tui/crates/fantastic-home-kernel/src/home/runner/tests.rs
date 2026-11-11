@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use fantastic_home::{Config as HomeConfig, Event, Mode};
+use fantastic_home::{Config as HomeConfig, Event, Mode, Opened};
 use serde_json::{json, Value};
 
 use super::Runner;
@@ -67,6 +67,7 @@ impl T {
             path,
             Folder {
                 is_fantastic: true,
+                workdir: Some(path.to_string()),
                 holder: None,
                 run: None,
             },
@@ -79,6 +80,7 @@ impl T {
             path,
             Folder {
                 is_fantastic: true,
+                workdir: Some(path.to_string()),
                 holder: Some(pid),
                 run: Some(run(pid, port)),
             },
@@ -148,7 +150,7 @@ async fn start_spawns_and_shows_starting_then_running() {
     });
     assert_eq!(status(&s, "g1"), "starting");
     let s = t.settle().await;
-    assert_eq!(t.os.spawned(), ["/w/a"]);
+    assert_eq!(t.os.spawned(), [("/w/a".to_string(), "/w/a".to_string())]);
     assert_eq!(status(&s, "g1"), "starting", "still within its grace");
     // it comes up and writes its registry entry
     t.os.set_registry(vec![entry("g1", "/w/a", Some(9), Some(8200))]);
@@ -210,7 +212,10 @@ async fn opening_an_unlisted_folder_starts_it_and_registers_its_canvas() {
     let t = t();
     t.look().await;
     let s = t.runner.apply(Event::Open {
-        paths: vec!["/w/new".into()],
+        paths: vec![Opened {
+            path: "/w/new".into(),
+            workdir: Some("/w/new".into()),
+        }],
         now_ms: 0,
     });
     assert_eq!(row(&s, "adding:/w/new")["status"], json!("starting"));
@@ -219,7 +224,10 @@ async fn opening_an_unlisted_folder_starts_it_and_registers_its_canvas() {
         (json!(["adding:/w/new"]), json!("adding:/w/new"))
     );
     t.settle().await;
-    assert_eq!(t.os.spawned(), ["/w/new"]);
+    assert_eq!(
+        t.os.spawned(),
+        [("/w/new".to_string(), "/w/new".to_string())]
+    );
     // its canvas comes up: the home asks that canvas's own kernel to register it
     t.running("/w/new", 9, 8200, "g-new");
     let register = Forwarded {
@@ -490,6 +498,7 @@ async fn a_demotion_is_emitted_as_diagnostics_with_the_probe_that_caused_it() {
             "path": "/w/b",
             "probe": {
                 "is_fantastic": true,
+                "workdir": "/w/b",
                 "holder": 7,
                 "owns_entry": true,
                 "canvas": {"url": "http://127.0.0.1:8100/canvas_page/file/index.html", "port": 8100},
@@ -532,6 +541,7 @@ async fn a_demotion_carries_the_read_error_that_came_with_its_probe() {
         "/w/c",
         Folder {
             is_fantastic: true,
+            workdir: Some("/w/c".into()),
             holder: None,
             run: None,
         },

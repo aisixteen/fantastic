@@ -21,6 +21,7 @@ costs: free
 # Files the runner writes into the temp directory before the first run.
 fixture:
   note.txt: "hello from E15 $NONCE\n"
+  work-e15/w.txt: "in the work folder $NONCE\n"
 
 runs:
   # ── 1 · a fresh directory: init from the blueprint, create the leg ─────────
@@ -124,10 +125,10 @@ runs:
     steps: []
     after_exit:
       exit_code: 2
-      stderr_contains: "takes no arguments"
+      stderr_contains: "takes only --statedir and --workdir"
       lock_released: true
 
-  # ── 4 · a kernel already runs here: `fantastic mcp` ATTACHES to its socket ─
+  # ── 4 · a kernel already runs here: `fantastic mcp` ATTACHES to its channel ─
   - name: attach
     host_argv: [--headless]
     argv: []
@@ -148,3 +149,35 @@ runs:
       lock_released: true
       no_kernel_rows: true
       mcp_records: 1
+
+  # ── 5 · a state folder far from the work folder (a path too long for a unix
+  #       socket address): the headless host takes both flags, `fantastic mcp`
+  #       attaches with --statedir alone, and files and exec work in the WORK folder ─
+  - name: far_state
+    statedir: far/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/state
+    host_argv: [--headless, --statedir, far/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/state, --workdir, work-e15]
+    argv: [--statedir, far/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/state]
+    vars:
+      pwd_cmd: {posix: pwd, nt: cmd}
+      pwd_args: {posix: [], nt: [/c, cd]}
+    steps:
+      - call: initialize
+        params: {protocolVersion: "2025-11-25", capabilities: {}, clientInfo: {name: e15, version: "1"}}
+        expect: {result.protocolVersion: "2025-11-25", result.serverInfo.name: fantastic}
+      - notify: notifications/initialized
+      - tool: send
+        args: {items: [{target: files, payload: {type: read_stream, path: w.txt}}]}
+        expect:
+          item0.status: completed
+          text_contains: "in the work folder $NONCE"
+      - tool: send
+        args: {items: [{target: exec, payload: {type: run, command: "{pwd_cmd}", args: "{pwd_args}", wait_s: 30}}]}
+        expect:
+          item0.status: completed
+          text_contains: "work-e15"
+    after_exit:
+      exit_code: 0
+      lock_held_by_host: true
+      lock_released: true
+      files_exist: [far/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/state/agent.yaml, far/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/state/memory.db]
+      files_absent: [work-e15/.fantastic]

@@ -1,4 +1,5 @@
-"""E63 prompt_file — `.fantastic/prompt.md`, the project's system block:
+"""E63 prompt_file — `prompt.md` in the `prompt_file` bridge's own folder
+(`.fantastic/agents/user/agents/prompt_file/`), the project's system block:
 
 a) a fresh project SEEDS it with ai_core's default block as placeholders
    (`{tree}`, `{self}`, `{howto}`) and the CLI's building rules — so the first
@@ -71,7 +72,7 @@ def main() -> bool:
     rig.make_home({"handler_module": "vllm_backend.tools", "endpoint": stub.base_url(), "model": "stub",
                    "context_window": 32768, "max_tokens": 4096, "kv_slots": 4, "kv_overflow": "evict"})
     rig.init()
-    prompt = rig.proj / ".fantastic" / "prompt.md"
+    prompt = rig.proj / ".fantastic/agents/user/agents/prompt_file/prompt.md"
     r: dict = {}
     info: dict = {}
     secs = rig.limits["seconds"]
@@ -109,7 +110,7 @@ def main() -> bool:
             recs = [yaml.safe_load(p.read_text()) or {} for p in (rig.proj / ".fantastic" / "agents").rglob("agent.yaml")]
             rec = next((x for x in recs if x.get("handler_module") == "vllm_backend.tools"), {})
             info["ai"] = rec.get("id")
-            r["ai_names_file"] = rec.get("file_bridge_id") == "prompt_file" and rec.get("system_prompt_file") == ".fantastic/prompt.md"
+            r["ai_names_file"] = rec.get("file_bridge_id") == "prompt_file" and rec.get("system_prompt_file") == "prompt.md"
             r["records_persist"] = "persist through 'prompt_file' failed" not in (rig.proj / ".fantastic" / "cli" / "kernel.log").read_text(errors="ignore")
             # c) an edit is the block on the next turn: the turn that answers "again"
             await asyncio.sleep(4)

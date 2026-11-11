@@ -333,7 +333,7 @@ content (`html`, `gl`).
 - **Grants**: `user`, and every AI under a canvas, may call every host agent
   with every verb (god mode, granted on both sides). You narrow it with
   `update_agent`.
-- **The system block**: `.fantastic/prompt.md` is every AI's system prompt. Edit
+- **The system block**: `<state>/agents/user/agents/prompt_file/prompt.md` is every AI's system prompt. Edit
   it, and every AI uses your text from its next turn.
 
 ### Agents, bundles and keys
@@ -349,8 +349,8 @@ content (`html`, `gl`).
   secure (the keychain). Your home is `FANTASTIC_HOME`, or
   `~/.fantastic`, and holds saved set-ups, key refs and the list of your
   fantastics (see [Where fantastic keeps your files](#where-fantastic-keeps-your-files)).
-- **Coding CLIs** connect through `.fantastic/.mcp.json`, which every start
-  writes (`claude --mcp-config .fantastic/.mcp.json`). The client is the `mcp`
+- **Coding CLIs** connect through `<state>/agents/user/agents/mcp_config/.mcp.json`, which every start
+  writes (`claude --mcp-config <state>/agents/user/agents/mcp_config/.mcp.json`). The client is the `mcp`
   agent, and each tool call is a kernel task that `ps` lists and MCP
   cancellation stops.
 

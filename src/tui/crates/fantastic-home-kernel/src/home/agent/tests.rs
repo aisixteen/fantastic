@@ -111,6 +111,7 @@ impl T {
             path,
             Folder {
                 is_fantastic: true,
+                workdir: Some(path.to_string()),
                 holder: Some(pid),
                 run: Some(run(pid, port)),
             },
@@ -124,6 +125,7 @@ impl T {
             path,
             Folder {
                 is_fantastic: true,
+                workdir: Some(path.to_string()),
                 holder: None,
                 run: None,
             },
@@ -307,8 +309,19 @@ async fn open_and_register_refuse_the_homes_own_folder() {
 #[tokio::test]
 async fn register_refuses_a_listed_folder() {
     let t = t();
-    t.os.set_registry(vec![entry("g1", &format!("{D}/w/atlas"), None, None)]);
-    t.stopped(&format!("{D}/w/atlas"));
+    let state = format!("{D}/w/atlas/.fantastic");
+    t.os.set_registry(vec![entry("g1", &state, None, None)]);
+    t.stopped(&state);
+    t.os.set_folder(
+        &state,
+        Folder {
+            is_fantastic: true,
+            workdir: Some(format!("{D}/w/atlas")),
+            holder: None,
+            run: None,
+        },
+    );
+    t.os.set_resolve(&format!("{D}/w/atlas"), Ok(format!("{D}/w/atlas")));
     t.os.set_resolve(&format!("{D}/w/link-to-atlas"), Ok(format!("{D}/w/atlas")));
     t.boot().await;
     for path in [&format!("{D}/w/atlas"), &format!("{D}/w/link-to-atlas")] {
@@ -324,7 +337,10 @@ async fn register_refuses_a_listed_folder() {
     let s = t
         .call(json!({"type": "register", "path": &format!("{D}/w/new")}))
         .await;
-    assert_eq!(s["selection"], json!(&format!("adding:{D}/w/new")));
+    assert_eq!(
+        s["selection"],
+        json!(&format!("adding:{D}/w/new/.fantastic"))
+    );
     t.shutdown().await;
 }
 

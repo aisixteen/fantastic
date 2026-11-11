@@ -154,7 +154,7 @@ pub struct ViewSlots {
 impl App {
     pub fn new(paths: Paths) -> Self {
         Self {
-            seen: Seen::load(&paths.cwd),
+            seen: Seen::load(&paths.cli),
             cfg: ClientCfg::here(),
             link: Link::Down {
                 why: "probing".into(),
@@ -1130,7 +1130,7 @@ mod tests {
             description: None,
             children: vec![],
         };
-        let mut app = App::new(crate::env::Paths::at(std::path::Path::new("/nonexistent")));
+        let mut app = App::new(crate::env::Paths::of("/nonexistent/.fantastic".into(), "/nonexistent".into()));
         app.screen = ratatui::layout::Rect::new(0, 0, 120, 40);
         app.tree = Some(TreeNode { children: vec![leaf(id)], ..leaf("root") });
         app.reflow();

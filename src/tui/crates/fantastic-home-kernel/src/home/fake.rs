@@ -15,6 +15,8 @@ use super::os::HomeOs;
 #[derive(Debug, Clone, Default)]
 pub struct Folder {
     pub is_fantastic: bool,
+    /// The work folder its root record names.
+    pub workdir: Option<String>,
     pub holder: Option<u32>,
     pub run: Option<CanvasRun>,
 }
@@ -37,7 +39,7 @@ struct State {
     terminate: BTreeMap<String, Result<bool, String>>,
     forward_replies: BTreeMap<(u16, String), Result<Value, String>>,
     forwarded: Vec<Forwarded>,
-    spawned: Vec<String>,
+    spawned: Vec<(String, String)>,
     terminated: Vec<String>,
     asked: BTreeMap<&'static str, usize>,
     /// `folder()`: a path → the folder it names, or why it is not one.
@@ -87,9 +89,10 @@ impl FakeOs {
     /// ```text
     ///   now_ms     the clock
     ///   registry   {folder: fantastic.yaml text}, in registry order
-    ///   folders    {path: {fantastic, holder, run?: {pid, port, url}, canvas_up?, guid?}};
-    ///              each path resolves to itself; canvas_up and guid answer for the run's port
-    ///   spawn      {path: "ok" | why it failed}
+    ///   folders    {state folder: {fantastic, workdir?, holder, run?: {pid, port, url}, canvas_up?, guid?}};
+    ///              each `workdir` (a picked folder) resolves to itself; canvas_up and guid
+    ///              answer for the run's port
+    ///   spawn      {state folder: "ok" | why it failed}
     ///   forward    {"<port> <target>": reply}
     ///   logs       {path: {file, tail}}
     /// ```
@@ -135,6 +138,9 @@ impl FakeOs {
                                     folder.is_fantastic = v
                                         .as_bool()
                                         .unwrap_or_else(|| panic!("{at}.fantastic: a bool"))
+                                }
+                                "workdir" => {
+                                    folder.workdir = Some(str_of(&v, &format!("{at}.workdir")))
                                 }
                                 "holder" => {
                                     folder.holder = match &v {
@@ -183,7 +189,9 @@ impl FakeOs {
                                 os.set_guid(run.port, guid);
                             }
                         }
-                        os.set_resolve(&path, Ok(path.clone()));
+                        if let Some(work) = &folder.workdir {
+                            os.set_resolve(work, Ok(work.clone()));
+                        }
                         os.set_folder(&path, folder);
                     }
                 }
@@ -277,13 +285,14 @@ impl FakeOs {
     pub fn forwarded(&self) -> Vec<Forwarded> {
         self.s().forwarded.clone()
     }
-    pub fn spawned(&self) -> Vec<String> {
+    /// Each spawn as `(state folder, work folder)`.
+    pub fn spawned(&self) -> Vec<(String, String)> {
         self.s().spawned.clone()
     }
     pub fn terminated(&self) -> Vec<String> {
         self.s().terminated.clone()
     }
-    /// How many questions of `kind` were asked: `registry`, `is_fantastic`,
+    /// How many questions of `kind` were asked: `registry`, `is_fantastic`, `workdir`,
     /// `holder`, `run_file`, `canvas_up`, `guid`.
     pub fn asked(&self, kind: &str) -> usize {
         self.s().asked.get(kind).copied().unwrap_or(0)
@@ -326,6 +335,10 @@ impl HomeOs for FakeOs {
                 let folder = self.folder_of(path);
                 (Answer::IsFantastic(folder.is_fantastic), path.clone())
             }
+            Ask::Workdir { path } => {
+                self.count("workdir");
+                (Answer::Workdir(self.folder_of(path).workdir), path.clone())
+            }
             Ask::LockHolder { path } => {
                 self.count("holder");
                 (
@@ -355,9 +368,9 @@ impl HomeOs for FakeOs {
         (answer, error)
     }
 
-    async fn spawn(&self, path: &str) -> Result<(), String> {
+    async fn spawn(&self, path: &str, workdir: &str) -> Result<(), String> {
         let mut s = self.s();
-        s.spawned.push(path.to_string());
+        s.spawned.push((path.to_string(), workdir.to_string()));
         s.spawn.get(path).cloned().unwrap_or(Ok(()))
     }
 

@@ -232,8 +232,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let bp = "agents:\n  - id: '@root'\n    callable_by:\n      user: [get]\n    can_call:\n      user: '*'\n";
-        assert_eq!(crate::boot::seed::seed_dir_with(&dir, &[bp]), Ok(true));
-        let cli = crate::env::Paths::at(&dir).cli;
+        assert_eq!(crate::boot::seed::seed_dir_with(&dir.join(".fantastic"), &[bp]), Ok(true));
+        let cli = crate::env::Paths::of(dir.join(".fantastic"), dir.clone()).cli;
         let carries = |k: &fantastic_kernel::Kernel| {
             let r = k.root().unwrap();
             let meta = r.meta.read().unwrap();

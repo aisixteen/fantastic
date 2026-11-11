@@ -7,8 +7,8 @@ request's system message and answers plain text.
 
 | check | what |
 |---|---|
-| seeded | a fresh project's `.fantastic/prompt.md` is `{tree}\n\n{self}\n\n{howto}` |
+| seeded | a fresh project's `<state>/agents/user/agents/prompt_file/prompt.md` is `{tree}\n\n{self}\n\n{howto}` |
 | turn1 · turn1_default | the first turn's system block is the default one (its id, the how-tos), placeholders filled |
-| ai_names_file | the canvas AI's record names `file_bridge_id: prompt_file` and `system_prompt_file: .fantastic/prompt.md` |
-| records_persist | the kernel's records never persist through the prompt bridge (it is rooted at the project, not `.fantastic`) |
+| ai_names_file | the canvas AI's record names `file_bridge_id: prompt_file` and `system_prompt_file: prompt.md` |
+| records_persist | the kernel's records never persist through the prompt bridge (its root is its own folder, not the project) |
 | turn2 · turn2_edited | after an edit of the file, the next turn's block is the edit — its own id still filled, the replaced default gone — with no restart |

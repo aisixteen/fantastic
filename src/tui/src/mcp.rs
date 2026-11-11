@@ -1,18 +1,21 @@
 //! `fantastic mcp` — THE MCP FACE: the kernel of this directory, driven by an
-//! MCP client (a coding CLI) over stdio. It takes no arguments.
+//! MCP client (a coding CLI) over stdio. It takes `--statedir DIR` and
+//! `--workdir DIR` and nothing else.
 //!
 //! ONE COMMAND, TWO SHAPES, decided by the directory's lock (never a fallback):
 //!
 //! - A LIVE KERNEL HOLDS THE LOCK (the terminal UI, the canvas, `--headless`,
 //!   or another `fantastic mcp`): this process ATTACHES — it relays stdio to
-//!   that kernel's MCP socket, `.fantastic/cli/mcp.sock`, and runs no kernel.
+//!   that kernel's MCP channel, a loopback port named in `<state>/cli/mcp.yaml`
+//!   (with its token: `local`), and runs no kernel. A `--workdir` given here cannot
+//!   change a running kernel, so it is refused.
 //! - NO LIVE KERNEL: this process RUNS IT — boots (the launcher has already seeded
-//!   a fresh directory: `starts_kernel`, `seed_dir_with`), serves stdio, and opens the socket so other
+//!   a fresh state folder: `starts_kernel`, `seed_dir_with`), serves stdio, and opens the channel so other
 //!   clients can attach.
 //!
-//! Every process that owns a kernel serves the socket ([`listen`]); what MCP
+//! Every process that owns a kernel serves the channel ([`listen`]); what MCP
 //! means lives in the `fantastic-web-mcp` crate. Each connection, stdio or
-//! socket, is served the same way ([`serve_conn`]).
+//! channel, is served the same way ([`serve_conn`]).
 //!
 //! THE LEG. `mcp` is a persisted, first-class agent, created once by code on the
 //! first connection to a kernel that lacks it (never by the blueprint), with
@@ -33,6 +36,7 @@
 
 use std::collections::HashMap;
 use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -48,22 +52,38 @@ use crate::kern::host::Host;
 /// The leg's id. Its parent is the root; its handler is `web_mcp.tools`.
 pub const LEG: &str = "mcp";
 
-/// The kernel's MCP socket, RELATIVE to the directory: every process runs in
-/// the directory it serves, and a relative path never meets the ~104-byte
-/// limit on a unix socket's address. (On Windows the path is a private file
-/// naming a loopback port — `sys`.)
-pub const SOCKET: &str = ".fantastic/cli/mcp.sock";
+/// The flags `fantastic mcp` takes: `--statedir DIR` and `--workdir DIR`, as
+/// `(statedir, workdir)`. Its grants live in the `mcp` record, not on the line.
+pub(crate) fn flags(argv: &[String]) -> Result<(Option<PathBuf>, Option<PathBuf>), String> {
+    let (mut statedir, mut workdir) = (None, None);
+    let mut it = argv.iter();
+    while let Some(a) = it.next() {
+        let slot = match a.as_str() {
+            "--statedir" => &mut statedir,
+            "--workdir" => &mut workdir,
+            other => return Err(format!("fantastic mcp: takes only --statedir and --workdir (got `{other}`)")),
+        };
+        match it.next().filter(|v| !v.is_empty()) {
+            Some(v) => *slot = Some(PathBuf::from(v)),
+            None => return Err(format!("fantastic mcp: {a} needs a folder")),
+        }
+    }
+    Ok((statedir, workdir))
+}
 
 /// Entry point, called from `main` before any runtime exists.
 pub fn main(argv: &[String]) -> ! {
-    if let Some(a) = argv.first() {
-        eprintln!("fantastic mcp: takes no arguments (got `{a}`) — its grants live in the `{LEG}` record; change them with update_agent");
-        std::process::exit(2);
-    }
-    let paths = match Paths::here() {
+    let (statedir, workdir) = match flags(argv) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("{e} — its grants live in the `{LEG}` record; change them with update_agent");
+            std::process::exit(2);
+        }
+    };
+    let paths = match Paths::resolve(statedir.as_deref(), workdir.as_deref()) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("fantastic mcp: no working directory: {e}");
+            eprintln!("fantastic mcp: {e}");
             std::process::exit(2);
         }
     };
@@ -73,7 +93,13 @@ pub fn main(argv: &[String]) -> ! {
     }
     // the OS lock, not the pid in the file: a stale lock.yaml naming a reused pid is not held
     match fantastic_kernel::lock::held(&paths.store) {
-        Ok(Some(pid)) if pid != std::process::id() => attach(pid),
+        Ok(Some(pid)) if pid != std::process::id() => {
+            if workdir.is_some() {
+                eprintln!("fantastic mcp: a kernel (pid {pid}) already runs on this state folder — this command cannot change it while it runs");
+                std::process::exit(2);
+            }
+            attach(pid, &paths.cli)
+        }
         Ok(_) => own(paths),
         Err(e) => {
             eprintln!("fantastic mcp: {e}");
@@ -82,8 +108,8 @@ pub fn main(argv: &[String]) -> ! {
     }
 }
 
-/// ATTACH: relay stdio to the running kernel's socket until it closes.
-fn attach(pid: u32) -> ! {
+/// ATTACH: relay stdio to the running kernel's MCP channel until it closes.
+fn attach(pid: u32, cli: &Path) -> ! {
     let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(rt) => rt,
         Err(e) => {
@@ -92,16 +118,16 @@ fn attach(pid: u32) -> ! {
         }
     };
     let code = rt.block_on(async move {
-        let sock = match crate::sys::connect_local(SOCKET).await {
+        let sock = match crate::local::connect(cli, crate::local::MCP).await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("fantastic mcp: a kernel (pid {pid}) runs in this directory, but its MCP socket `{SOCKET}` does not answer: {e}");
+                eprintln!("fantastic mcp: a kernel (pid {pid}) runs on this state folder, but its MCP channel `{}` does not answer: {e}", cli.join(crate::local::MCP).display());
                 return 1;
             }
         };
         let _ = std::io::stderr().write_all(shape().as_bytes());
         let (mut r, mut w) = sock.into_split();
-        // up: the client's requests; when stdin ends, the socket's write half
+        // up: the client's requests; when stdin ends, the channel's write half
         // closes and the kernel finishes what is in flight, then closes.
         let up = tokio::spawn(async move {
             let _ = tokio::io::copy(&mut tokio::io::stdin(), &mut w).await;
@@ -116,7 +142,7 @@ fn attach(pid: u32) -> ! {
     std::process::exit(code);
 }
 
-/// RUN THE KERNEL: boot it here, serve stdio, and open the socket.
+/// RUN THE KERNEL: boot it here, serve stdio, and open the channel.
 fn own(paths: Paths) -> ! {
     // ── stdio hygiene ────────────────────────────────────────────────────────
     let (std_out, mut err_out) = match (crate::sys::dup_stdout(), crate::sys::dup_stderr()) {
@@ -180,7 +206,7 @@ async fn serve(paths: Paths, std_out: std::fs::File, err_out: &mut std::fs::File
         crate::kern::host::stop(&host.kernel).await;
         return code;
     }
-    if let Err(e) = listen(Arc::clone(&served)) {
+    if let Err(e) = listen(Arc::clone(&served), &paths.cli) {
         let code = fatal(err_out, &e);
         crate::kern::host::stop(&host.kernel).await;
         return code;
@@ -198,7 +224,7 @@ async fn serve(paths: Paths, std_out: std::fs::File, err_out: &mut std::fs::File
 
     // ── shutdown, in the kernel's order ──────────────────────────────────────
     crate::kern::host::stop(&host.kernel).await;
-    close_socket();
+    close_socket(&paths.cli);
     0
 }
 
@@ -229,23 +255,21 @@ impl Served {
     }
 }
 
-/// Serve the kernel's MCP socket: every process that owns a kernel calls this
-/// once it has booted. The caller holds the directory's lock, so a socket file
-/// already there is stale.
-pub fn listen(served: Arc<Served>) -> Result<(), String> {
-    let _ = std::fs::remove_file(SOCKET);
-    let l = crate::sys::bind_local(SOCKET).map_err(|e| format!("could not open the MCP socket `{SOCKET}`: {e}"))?;
-    crate::sys::make_private(SOCKET)
-        .map_err(|e| format!("could not make `{SOCKET}` private: {e}"))?;
+/// Serve the kernel's MCP channel: every process that owns a kernel calls this
+/// once it has booted. The caller holds the state folder's lock, so an endpoint
+/// file already there is stale (`local::bind` replaces it).
+pub fn listen(served: Arc<Served>, cli: &Path) -> Result<(), String> {
+    let l = crate::local::bind(cli, crate::local::MCP)
+        .map_err(|e| format!("could not open the MCP channel `{}`: {e}", cli.join(crate::local::MCP).display()))?;
     tokio::spawn(async move {
         loop {
             match l.accept().await {
-                Ok((s, _)) => {
+                Ok(s) => {
                     let (r, w) = s.into_split();
                     tokio::spawn(serve_conn(Arc::clone(&served), r, w));
                 }
                 Err(e) => {
-                    tracing::warn!("mcp socket: {e}");
+                    tracing::warn!("mcp channel: {e}");
                     break;
                 }
             }
@@ -254,9 +278,9 @@ pub fn listen(served: Arc<Served>) -> Result<(), String> {
     Ok(())
 }
 
-/// Remove the socket file, after the kernel has shut down.
-pub fn close_socket() {
-    let _ = std::fs::remove_file(SOCKET);
+/// Remove the endpoint file, after the kernel has shut down.
+pub fn close_socket(cli: &Path) {
+    crate::local::close(cli, crate::local::MCP);
 }
 
 /// One MCP connection: JSON-RPC lines in, replies out, until the reader ends —

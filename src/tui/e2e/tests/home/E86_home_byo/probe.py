@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.home_live import HomeRig, canonical, click, page_errors, q, verdict, yaml_of  # noqa: E402
+from _lib.home_live import HomeRig, state_of, click, page_errors, q, verdict, yaml_of  # noqa: E402
 
 FOREIGN = "http://example.invalid"
 
@@ -70,7 +70,7 @@ def main() -> bool:
         rig.start_home()
         alpha = await rig.fantastic("alpha")
         beta = await rig.fantastic("beta", running=False)
-        ap, bp = canonical(alpha), canonical(beta)
+        ap, bp = state_of(alpha), state_of(beta)
         state = await rig.until_state("alpha running, beta stopped",
                                       lambda s: row_of(s, ap).get("status") == "running" and row_of(s, bp).get("status") == "stopped", 30)
         aid, bid = row_of(state, ap)["id"], row_of(state, bp)["id"]

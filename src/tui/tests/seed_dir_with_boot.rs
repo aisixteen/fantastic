@@ -24,7 +24,7 @@ async fn embedder_agents_hydrate_under_their_written_ids_and_disk_parents() {
     let dir = std::env::temp_dir().join(format!("fc-seed-with-boot-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    assert_eq!(fantastic_tui::seed_dir_with(&dir, &[EMBEDDER]), Ok(true));
+    assert_eq!(fantastic_tui::seed_dir_with(&dir.join(".fantastic"), &[EMBEDDER]), Ok(true));
     std::env::set_current_dir(&dir).unwrap();
 
     let mut reg = BundleRegistry::new();

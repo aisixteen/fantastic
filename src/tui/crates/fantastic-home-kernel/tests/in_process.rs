@@ -61,11 +61,18 @@ impl Fixture {
             .expect("the home boots")
     }
 
-    /// A folder that is a fantastic (its `.fantastic/` exists), canonical.
+    /// A fantastic's state folder `<root>/<name>/.fantastic`, canonical, its
+    /// root record naming the work folder `<root>/<name>`.
     fn fantastic_folder(&self, name: &str) -> String {
-        let f = self.root.join(name);
-        std::fs::create_dir_all(f.join(".fantastic")).expect("a fantastic folder");
-        f.display().to_string()
+        let work = self.root.join(name);
+        let state = work.join(".fantastic");
+        std::fs::create_dir_all(&state).expect("a fantastic folder");
+        std::fs::write(
+            state.join("agent.yaml"),
+            format!("id: root\nworkdir: {}\n", work.display()),
+        )
+        .expect("a root record");
+        state.display().to_string()
     }
 
     /// A registry entry for `path` under `guid`.

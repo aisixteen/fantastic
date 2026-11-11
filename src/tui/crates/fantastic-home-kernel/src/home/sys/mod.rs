@@ -164,27 +164,43 @@ pub fn read_registry(home: &Path) -> Result<Vec<(String, String)>, String> {
     Ok(out)
 }
 
-/// Does `path/.fantastic/` exist as a directory. Absent is `Ok(false)`; any
-/// other failure to look is an `Err` naming it.
+/// Is `path` (the state folder) a directory. Absent is `Ok(false)`; any other
+/// failure to look is an `Err` naming it.
 pub fn is_fantastic(path: &str) -> Result<bool, String> {
-    let dir = fantastic_kernel::bootstrap::state_dir_for(None, Some(Path::new(path)))
-        .map_err(|e| format!("{path}: {e}"))?;
-    match std::fs::metadata(&dir) {
+    match std::fs::metadata(path) {
         Ok(meta) => Ok(meta.is_dir()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(format!("{}: {e}", dir.display())),
+        Err(e) => Err(format!("{path}: {e}")),
     }
+}
+
+/// The work folder the root record in the state folder `path` keeps: the
+/// `workdir` of `<path>/agent.yaml`. No file, or no such field, is `Ok(None)`;
+/// a file that cannot be read or parsed is an `Err` naming it.
+pub fn workdir(path: &str) -> Result<Option<String>, String> {
+    let file = Path::new(path).join("agent.yaml");
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", file.display())),
+    };
+    let doc: serde_yaml::Value =
+        serde_yaml::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
+    Ok(doc
+        .get("workdir")
+        .and_then(serde_yaml::Value::as_str)
+        .filter(|w| !w.is_empty())
+        .map(str::to_string))
 }
 
 /// The live pid holding `path`'s lock, or the error that stopped the look. A
 /// stale file (its pid dead) is not asked for its flock: a probe's shared flock
 /// on it would refuse a kernel taking it over at that moment.
 pub fn lock_holder_checked(path: &str) -> Result<Option<u32>, String> {
-    let s = fantastic_kernel::bootstrap::state_dir_for(None, Some(Path::new(path)))
-        .map_err(|e| format!("{path}: {e}"))?;
-    match lock::current_holder(&s) {
+    let s = Path::new(path);
+    match lock::current_holder(s) {
         Ok(Some(pid)) if lock::pid_alive(pid) => {
-            lock::held(&s).map_err(|e| format!("{path}: the lock: {e}"))
+            lock::held(s).map_err(|e| format!("{path}: the lock: {e}"))
         }
         Ok(_) => Ok(None),
         Err(e) => Err(format!("{path}: the lock: {e}")),

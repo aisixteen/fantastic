@@ -98,7 +98,7 @@ impl Me {
     }
 }
 
-/// The store. `here` is this fantastic's project dir, fixed by the binary;
+/// The store. `here` is this fantastic's state folder, fixed by the binary;
 /// `canvas` the URL this run serves, set by the binary (RAM: a run's, never a record's).
 pub struct UserStore {
     home: Result<PathBuf, String>,
@@ -107,7 +107,7 @@ pub struct UserStore {
 }
 
 impl UserStore {
-    /// `home`: the resolved home dir (or why there is none); `here`: this fantastic's dir.
+    /// `home`: the resolved home dir (or why there is none); `here`: this fantastic's state folder.
     pub fn new(home: Result<PathBuf, String>, here: PathBuf) -> Self {
         Self { home, here, canvas: Mutex::new(None) }
     }
@@ -153,7 +153,7 @@ impl UserStore {
                 if let Some(o) = v.as_object_mut() {
                     o.insert("folder".into(), json!(p.file_name().and_then(|s| s.to_str()).unwrap_or("")));
                     o.insert("here".into(), json!(here));
-                    o.insert("exists".into(), json!(Path::new(&path).join(".fantastic").is_dir()));
+                    o.insert("exists".into(), json!(Path::new(&path).is_dir()));
                 }
                 v
             })
@@ -551,11 +551,17 @@ mod tests {
     #[tokio::test]
     async fn on_writes_a_folder_named_by_the_guid_off_removes_it() {
         let h = home();
+        // `here` is a state folder: the stored location exists while it is a directory
         let here = h.parent().unwrap().join("proj");
         let s = UserStore::new(Ok(h.clone()), here.clone());
         let (k, id) = fantastic(Some("g-1"), json!({}));
         let r = call(&s, &k, &id, json!({"type": SWITCH, "value": true})).await;
         assert_eq!(r[SWITCH], true, "{r}");
+        let l = call(&s, &k, &id, json!({"type": "list"})).await;
+        assert_eq!(l["locations"][0]["exists"], false, "no such folder yet");
+        std::fs::create_dir_all(&here).unwrap();
+        let l = call(&s, &k, &id, json!({"type": "list"})).await;
+        assert_eq!(l["locations"][0]["exists"], true, "a directory");
         assert_eq!(r["stored"]["folder"], "g-1");
         assert_eq!(folders(&h), vec!["g-1"], "one folder, named by the guid");
         let i = info(&h, "g-1").expect("fantastic.yaml in it");

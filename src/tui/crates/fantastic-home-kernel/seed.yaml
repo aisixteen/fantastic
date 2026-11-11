@@ -2,10 +2,10 @@
 agents:
   - id: home_memory            # the kernel's own store, named by the root's memory_store_id
     handler_module: sqlite_store.tools
-    path: home.db
+    path: "@state/home.db"
     admins: [kernel]
   - id: store                  # the root loader's provider: every host record persists through it
     handler_module: file_bridge.tools
-    root: .
+    root: "@state"
     allow: ["."]
     ingress_rule: allow_all_ingress

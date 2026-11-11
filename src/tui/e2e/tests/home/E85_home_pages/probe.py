@@ -27,7 +27,7 @@ from _lib.canvas_live import http_get  # noqa: E402
 from _lib.home_live import (  # noqa: E402
     HomeRig,
     StateLog,
-    canonical,
+    state_of,
     click,
     key,
     lock_pid,
@@ -65,7 +65,7 @@ def main() -> bool:
         rig.start_home()
         alpha = await rig.fantastic("alpha")
         beta = await rig.fantastic("beta")
-        ap, bp = canonical(alpha), canonical(beta)
+        ap, bp = state_of(alpha), state_of(beta)
         state = await rig.until_state("alpha and beta running",
                                       lambda s: row_of(s, ap).get("status") == "running" and row_of(s, bp).get("status") == "running", 30)
         aid, bid = row_of(state, ap)["id"], row_of(state, bp)["id"]

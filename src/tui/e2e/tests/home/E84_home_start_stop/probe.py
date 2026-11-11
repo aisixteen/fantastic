@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.home_live import HomeRig, canonical, click, key, os_shell, page_errors, q, verdict  # noqa: E402
+from _lib.home_live import HomeRig, state_of, click, key, os_shell, page_errors, q, verdict  # noqa: E402
 
 # every status a page's state card shows, as it changes (the stopping beat can be short)
 WATCH_CARD = """(()=>{window.__cards=[]; const seen=()=>{const c=document.querySelector('#home .page[data-id="%s"] .state-card');
@@ -39,7 +39,7 @@ def main() -> bool:
     async def drive() -> None:
         rig.start_home()
         beta = await rig.fantastic("beta", running=False)
-        bp = canonical(beta)
+        bp = state_of(beta)
         state = await rig.until_state("beta stopped", lambda s: row_of(s, bp).get("status") == "stopped", 30)
         bid = row_of(state, bp)["id"]
         row = f'#home .home-row[data-id="{bid}"]'
@@ -109,7 +109,7 @@ def main() -> bool:
             info["open_folder_rect"] = await pg.rect("#home button.open-folder")
             r["open_folder_clicked"] = await click(pg, "#home button.open-folder")
             info["keys_tab2"], info["clicks_tab2"] = pg.key_log, pg.click_log
-            dp = canonical(delta)
+            dp = state_of(delta)
             try:
                 st = await rig.until_state("delta running", lambda s: row_of(s, dp).get("status") == "running", 30)
             except SystemExit as e:

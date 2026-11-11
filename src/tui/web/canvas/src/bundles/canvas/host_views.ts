@@ -6,7 +6,7 @@
 // kernels.
 //
 //   view: {kind: terminal|html|…  OR  handler: <any page bundle>,
-//          bytes | bytes_file   (html: the body — the agent's own small renderer),
+//          bytes                (html: the body — the agent's own small renderer),
 //          calls: [verbs…]      (html: what the body calls on its agent)
 //                 | {<agent id> | "*": [verbs…]}   (the same, plus READ verbs on other agents)}
 //
@@ -21,10 +21,8 @@ export interface HostView {
   handler: string;
   /** the view kind it came from (`terminal`, `html`, `stub`, or `handler`) */
   kind: string;
-  /** html: the body, when inline */
+  /** html: the body (the host puts a bundle's view file here) */
   bytes?: string;
-  /** html: the body's file, when not inline (read through the file leg) */
-  bytesFile?: string;
   /** the verbs the view calls on its agent (html: the record's; else the renderer's) */
   calls: string[];
   /** html, `calls` given as an object: the verbs on OTHER agents (`{<id> | "*": verbs}`) */
@@ -88,7 +86,6 @@ export function viewOf(r: Rec): HostView {
     };
     if (Object.keys(reach).length > 0 && (kind === "html" || kind === "handler")) out.reach = reach;
     if (str(v, "bytes") !== undefined) out.bytes = str(v, "bytes");
-    if (str(v, "bytes_file") !== undefined) out.bytesFile = str(v, "bytes_file");
     return out;
   }
   if (str(r, "handler_module") === EXEC) return { handler: RENDERERS["terminal"]!, kind: "terminal", calls: RENDERER_CALLS["terminal"]! };

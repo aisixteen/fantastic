@@ -7,8 +7,7 @@ b) `set_html` sent to `<guid>|<cell>` through the host re-renders it;
 c) its body written as a page folder bundle (`.fantastic/web/bundles/card_e68/`,
    `base: html_agent`) is a tile in the popup's `page · bundles` group;
 d) that tile places an instance showing the body;
-e) the bundle's html rewritten reaches the placed instance (not the edited cell,
-   whose body is its own)."""
+e) the edited cell of (b) keeps its own body."""
 
 from __future__ import annotations
 
@@ -22,7 +21,6 @@ from _lib.canvas_live import Rig, spot, verdict  # noqa: E402
 
 NAME = "card_e68"
 BODY_A = "<div style='font:20px system-ui;color:#cde;padding:14px'>HTML-E68-A</div>"
-BODY_B = "<div style='font:20px system-ui;color:#fc8;padding:14px'>HTML-E68-B</div>"
 
 
 def bundle_yaml(body: str) -> str:
@@ -84,9 +82,7 @@ def main() -> bool:
                 inst = await pg.js(f"{CELLS}.find(id=>id.startsWith({json.dumps(NAME + '_')}))") or ""
                 info["instance"] = inst
                 r["instance_placed"] = inst != "" and bool(await pg.until(has(inst, "HTML-E68-A"), 15))
-                # e) the bundle edited → its instance draws it; the edited cell keeps its own
-                (folder / "bundle.yaml").write_text(bundle_yaml(BODY_B))
-                r["bundle_edit_reaches_instance"] = inst != "" and bool(await pg.until(has(inst, "HTML-E68-B"), 15))
+                # e) the edited cell keeps its own body
                 r["own_body_kept"] = bool(await pg.js(has(cell, "HTML-E68-A")))
                 info["page_errors"] = pg.logs[:5]
 

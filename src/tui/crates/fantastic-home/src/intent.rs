@@ -13,15 +13,17 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::model::Opened;
 use crate::viewmodel::Event;
 
 /// One user intent.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Intent {
-    /// Open these folders (absolute; a listed row's path as it is).
+    /// Open these folders (a listed row's state folder as it is; a picked
+    /// folder with its state folder and itself as the work folder).
     Open {
-        paths: Vec<String>,
+        paths: Vec<Opened>,
     },
     Start {
         id: String,
@@ -84,7 +86,10 @@ mod tests {
         let cases = [
             (
                 Intent::Open {
-                    paths: vec!["/a".into()],
+                    paths: vec![Opened {
+                        path: "/a".into(),
+                        workdir: None,
+                    }],
                 },
                 r#"{"type":"open","paths":["/a"]}"#,
             ),

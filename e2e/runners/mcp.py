@@ -289,9 +289,31 @@ def row_has(row: dict, want: dict) -> bool:
     return True
 
 
+def state_of(run: dict, cwd: Path) -> Path:
+    """The run's state folder: its `statedir` (relative to the temp dir), else `.fantastic`."""
+    return cwd / (run.get("statedir") or ".fantastic")
+
+
+def with_vars(value, vars_: dict):
+    """`{name}` in a step's strings: the run's `vars`, each this OS's (`oslayer.for_os`). A
+    string that is exactly `{name}` becomes the value itself (a list stays a list)."""
+    if isinstance(value, str):
+        for k, v in vars_.items():
+            tag = "{" + k + "}"
+            if value == tag:
+                return oslayer.for_os(v)
+            value = value.replace(tag, str(oslayer.for_os(v)))
+        return value
+    if isinstance(value, list):
+        return [with_vars(x, vars_) for x in value]
+    if isinstance(value, dict):
+        return {k: with_vars(x, vars_) for k, x in value.items()}
+    return value
+
+
 def after(run: dict, cwd: Path, code: int, client: Client, state: dict) -> list[str]:
     exp = run.get("after_exit") or {}
-    store = cwd / ".fantastic"
+    store = state_of(run, cwd)
     bad: list[str] = []
     for key, want in exp.items():
         if key == "exit_code":
@@ -371,6 +393,7 @@ def main(argv: list[str]) -> int:
     with tempfile.TemporaryDirectory(prefix="e2e-mcp-") as tmp:
         cwd = Path(tmp)
         for name, body in (sc.get("fixture") or {}).items():
+            (cwd / name).parent.mkdir(parents=True, exist_ok=True)
             (cwd / name).write_text(body)
 
         for run in sc["runs"]:
@@ -382,7 +405,7 @@ def main(argv: list[str]) -> int:
                 host = subprocess.Popen([str(binary), *run["host_argv"]], cwd=cwd,
                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                         **oslayer.group_kwargs())
-                sock = cwd / ".fantastic" / "cli" / "mcp.sock"
+                sock = state_of(run, cwd) / "cli" / "mcp.yaml"
                 for _ in range(300):
                     if sock.exists() or host.poll() is not None:
                         break
@@ -390,7 +413,7 @@ def main(argv: list[str]) -> int:
                 if not sock.exists():
                     failures.append(f"{run['name']}/host: no {sock.relative_to(cwd)} (host exit {host.poll()})")
             client = Client(binary, run.get("argv", []), cwd)
-            for i, step in enumerate(run.get("steps", [])):
+            for i, step in enumerate(with_vars(s, run.get("vars") or {}) for s in run.get("steps", [])):
                 label = step.get("call") or step.get("notify") or f"tool {step.get('tool')}"
                 try:
                     if "notify" in step:
@@ -410,7 +433,7 @@ def main(argv: list[str]) -> int:
             code = client.close()
             if host is not None:
                 # the lock is still the host's: the client ran no kernel
-                lock = yaml.safe_load((cwd / ".fantastic" / "lock.yaml").read_text()) or {}
+                lock = yaml.safe_load((state_of(run, cwd) / "lock.yaml").read_text()) or {}
                 if run.get("after_exit", {}).get("lock_held_by_host") and lock.get("pid") != host.pid:
                     failures.append(f"{run['name']}/after: lock pid {lock.get('pid')} != host {host.pid}")
                 oslayer.stop(host)
