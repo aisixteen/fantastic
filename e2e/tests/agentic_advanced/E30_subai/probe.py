@@ -285,6 +285,9 @@ def _ai_meta(
             "ws": "*",
         },
     }
+    if agent_id == "ai":
+        # the builder READS `brain_prov`'s record as its template, as it reads `brain`'s
+        meta["can_call"][BRAIN_PROV] = ["reflect"]
     if extra_reach:
         meta["can_call"].update(extra_reach)
     if agent_id == "brain":
@@ -807,6 +810,13 @@ async def run(
     # the store's half of each memory wire
     for who in ("brain", aid):
         await memory.open_ingress(root, memory.MEMORY, who)
+    # the provider's half of that read: it admits the builder for `reflect` only
+    listing = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]["result"]
+    have = next((a for a in listing.get("agents") or [] if a.get("id") == BRAIN_PROV), {})
+    out = (await root.send([{"target": root.id, "payload": {
+        "type": "update_agent", "id": BRAIN_PROV,
+        "callable_by": {**(have.get("callable_by") or {}), aid: ["reflect"]}}}]))[0]["result"]
+    assert isinstance(out, dict) and out.get("updated") is True, out
     # the stores' halves for the pairs the creator will make (see SUB_AI): the chat's
     # conversation store, and the provider's memory and key stores
     for who in sub_ais or [SUB_AI]:
