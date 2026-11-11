@@ -241,7 +241,7 @@ def main() -> int:
                 rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
                                 provider_id=prov, model=MODEL, max_tokens=8192,
                                 context_window=262144, memory_store_id="memory",
-                                caching=mode, can_call={**can, prov: ["complete", "watch"]},
+                                caching=mode, can_call={**can, prov: ["complete", "watch", "reflect"]},
                                 callable_by=by)
                 need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")
         else:

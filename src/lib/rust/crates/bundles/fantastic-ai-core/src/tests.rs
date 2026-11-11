@@ -7141,6 +7141,10 @@ mod deadline;
 #[path = "tests_row_attrs.rs"]
 mod row_attrs;
 
+/// Images in a chat (#622).
+#[path = "tests_images.rs"]
+mod images;
+
 /// A docs body opens with the line naming the grep that keeps what the model needs,
 /// and once answered it is cut to a stub that names the same pid — python
 /// `test_a_docs_reply_is_cut_to_a_stub_naming_its_held_pid`.

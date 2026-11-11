@@ -295,7 +295,10 @@ pub async fn close_stopped(
     let in_parent = crate::agent_loop::incoming_parent(&entry.text);
     let (shown, notice) = crate::stream_parts::stop_rows(&entry.text_so_far, &who, &unsent);
     let mut rows = vec![crate::row_attrs::with_source(
-        crate::agent_loop::incoming_row(&entry.text, in_id, in_parent, entry.notice),
+        crate::images::stamped(
+            crate::agent_loop::incoming_row(&entry.text, in_id, in_parent, entry.notice),
+            entry.attached.as_ref(),
+        ),
         &entry.origin,
     )];
     let mut prev = in_id;
@@ -439,13 +442,17 @@ async fn store_failed_turn(
     notice: bool,
     reason: &str,
     origin: &str,
+    attached: Option<&crate::images::Attached>,
 ) -> Result<(), String> {
     let in_id = kernel.mint_id();
     let in_parent = crate::agent_loop::incoming_parent(text);
     let error_id = kernel.mint_id();
     let rows = [
         crate::row_attrs::with_source(
-            crate::agent_loop::incoming_row(text, in_id, in_parent, notice),
+            crate::images::stamped(
+                crate::agent_loop::incoming_row(text, in_id, in_parent, notice),
+                attached,
+            ),
             origin,
         ),
         json!({
@@ -776,6 +783,33 @@ pub async fn recall(
             .filter(|t| t.as_str().is_some_and(|s| !s.is_empty()))
         {
             m["thinking"] = t.clone();
+        }
+        // AN IMAGE ROW comes back with its image, once: shown whole in the next request
+        // by a model that can see it (#622)
+        if let Some(parts) = crate::images::parts_of(row) {
+            let seen = crate::images::can(&agent_meta(agent_id, kernel), crate::images::NEEDS);
+            let how = if seen {
+                state_for(agent_id)
+                    .recalled_images
+                    .lock()
+                    .expect("recalled poisoned")
+                    .push(id);
+                format!(
+                    "{} image(s) of this row come back in your next request, once",
+                    parts.len()
+                )
+            } else {
+                format!(
+                    "{} image(s) of this row, not shown to this model",
+                    parts.len()
+                )
+            };
+            let text = m["content"].as_str().unwrap_or("");
+            m["content"] = json!(if text.is_empty() {
+                format!("[{how}]")
+            } else {
+                format!("{text}\n[{how}]")
+            });
         }
         return Ok(json!({"messages": [m], "total": 1, "truncated": false}));
     }
@@ -1177,6 +1211,13 @@ pub async fn send(
     }
     let send_id = mint_send_id();
     let state = state_for(agent_id);
+    // WHAT THE PROVIDER CAN DO is read from it when the chat starts and when its provider or
+    // model changed, and the images of this send are brought inside the model's limits (#622)
+    crate::images::refresh(agent_id, kernel, &state).await;
+    let attached = match crate::images::attach(agent_id, kernel, payload.get("images")).await {
+        Ok(a) => a,
+        Err(e) => return Ok(json!({"error": e, "reason": "bad_arg", "client_id": client_id})),
+    };
     // ONE CHAIN PER AGENT (#227): a message that lands while this agent's chain
     // is alive is HELD — stored as a row, read by the chain's next pass — unless
     // it is one of the chain's own turns (it carries the chain token).
@@ -1198,11 +1239,14 @@ pub async fn send(
             // The SAME row the normal incoming path stores (`incoming_row`), so a
             // held message folds and recalls exactly like any other turn (#227).
             &[crate::row_attrs::with_source(
-                crate::agent_loop::incoming_row(
-                    &text,
-                    row_id,
-                    crate::agent_loop::incoming_parent(&text),
-                    false,
+                crate::images::stamped(
+                    crate::agent_loop::incoming_row(
+                        &text,
+                        row_id,
+                        crate::agent_loop::incoming_parent(&text),
+                        false,
+                    ),
+                    attached.as_ref(),
                 ),
                 &origin_id,
             )],
@@ -1355,6 +1399,7 @@ pub async fn send(
             parts: None,
             stopped_by: None,
             notice,
+            attached: attached.clone(),
             abort: Arc::clone(&abort),
         });
     }
@@ -1575,6 +1620,7 @@ pub async fn send(
                     notice,
                     &pe.message,
                     &origin_id,
+                    attached.as_ref(),
                 )
                 .await;
                 failed_reason = Some(pe.message.clone());
@@ -1603,6 +1649,7 @@ pub async fn send(
                 notice,
                 &message,
                 &origin_id,
+                attached.as_ref(),
             )
             .await;
             timeout_reply(with_store_outcome(message, stored), &client_id)
@@ -1883,6 +1930,11 @@ pub fn boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     }
     // A new incarnation reads its store afresh; bodies are this run's only.
     crate::memory::forget_head(agent_id, kernel);
+    // the provider is asked what it can do again at the first turn of this incarnation
+    *state_for(agent_id)
+        .caps_checked
+        .lock()
+        .expect("caps_checked poisoned") = None;
     *state_for(agent_id)
         .recall_due
         .lock()

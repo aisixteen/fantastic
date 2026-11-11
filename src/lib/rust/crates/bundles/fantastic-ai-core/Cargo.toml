@@ -21,6 +21,8 @@ libc = { workspace = true }
 sha2 = "0.10"
 # The fold's MECHANICAL INDEX — python's `_PATH` / `_IDENT` patterns.
 regex = "1"
+# Decode and downscale an attached image to the model's limits (#622).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [dev-dependencies]
 fantastic-file = { path = "../fantastic-file" }

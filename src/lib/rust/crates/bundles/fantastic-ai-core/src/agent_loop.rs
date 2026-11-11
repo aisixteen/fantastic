@@ -124,6 +124,10 @@ pub(crate) fn render_for_model(messages: &[Value]) -> Vec<Value> {
             let role = m.get("role").cloned().unwrap_or(Value::Null);
             let content = m.get("content").cloned().unwrap_or_else(|| json!(""));
             let mut out = json!({"role": role, "content": content});
+            // the image parts of a message whose model is to see them (#622)
+            if let Some(images) = crate::images::parts_of(m) {
+                out["images"] = Value::Array(images.clone());
+            }
             // the agent's cache_mark travels with its message; nothing else does
             if let Some(v) = m.get(crate::caching::CACHE_MARK) {
                 out[crate::caching::CACHE_MARK] = v.clone();
@@ -143,6 +147,24 @@ pub fn incoming_row(text: &str, id: i64, parent: Option<i64>, notice: bool) -> V
         row["kind"] = json!("notice");
     }
     row
+}
+
+/// The incoming row of the turn in flight, with the images the turn attached.
+fn incoming_row_of(state: &BackendState, text: &str, id: i64, parent: Option<i64>) -> Value {
+    crate::images::stamped(
+        incoming_row(text, id, parent, notice_in_flight(state)),
+        attached_in_flight(state).as_ref(),
+    )
+}
+
+/// The images the turn in flight attached.
+pub(crate) fn attached_in_flight(state: &BackendState) -> Option<crate::images::Attached> {
+    state
+        .current_meta
+        .lock()
+        .expect("current poisoned")
+        .as_ref()
+        .and_then(|c| c.attached.clone())
 }
 
 /// Who sent the turn in flight: the `source` of its incoming row.
@@ -435,7 +457,7 @@ pub async fn run_generation(
             self_id,
             kernel,
             &[crate::row_attrs::with_source(
-                incoming_row(user_text, in_id, in_parent, notice_in_flight(state)),
+                incoming_row_of(state, user_text, in_id, in_parent),
                 &incoming_source(state),
             )],
         )
@@ -484,7 +506,7 @@ pub async fn run_generation(
     let mut next_request = None;
     let new_turns = vec![
         crate::row_attrs::with_source(
-            incoming_row(user_text, in_id, in_parent, notice_in_flight(state)),
+            incoming_row_of(state, user_text, in_id, in_parent),
             &incoming_source(state),
         ),
         // STRIPPED — the deliberation is not part of the conversation. The RAW

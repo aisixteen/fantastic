@@ -118,7 +118,7 @@ def main() -> int:
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
                         provider_id=PROV, model=MODEL, max_tokens=8192,
                         context_window=262144, memory_store_id=STORE,
-                        can_call={"$self": "*", STORE: "*", PROV: ["complete", "watch"]},
+                        can_call={"$self": "*", STORE: "*", PROV: ["complete", "watch", "reflect"]},
                         callable_by={"$self": "*", "$parent": "*", "rest": "*"})
         need(rec.get("id") == AI, f"create the agent on that store: {str(rec)[:200]}")
 

@@ -81,6 +81,18 @@ impl T {
         self.log.push(out.clone());
         out
     }
+    /// A call whose request body is `bytes` at `data`; the reply is logged with the
+    /// bytes it carried back, so the two stores' transcripts cover the body too.
+    async fn call_bytes(&mut self, payload: Value, bytes: Option<&[u8]>, who: &str) -> (Value, Option<Vec<u8>>) {
+        let mut item = Item::new(AgentId::from("mem"), payload);
+        if let Some(b) = bytes {
+            item = item.with_binary_key("data", b.to_vec());
+        }
+        let out = as_agent(AgentId::from(who), self.k.send(vec![item])).await.remove(0);
+        let body = out.body_bytes().map(<[u8]>::to_vec);
+        self.log.push(json!([out.result.clone(), body]));
+        (out.result, body)
+    }
     async fn append(&mut self, who: &str, rows: Value) -> Value {
         self.call(json!({"type": "append", "rows": rows}), Some(who)).await
     }
@@ -513,7 +525,10 @@ async fn reflect_names_the_same_verbs_and_says_durable() {
         let verbs: Vec<&String> = d["verbs"].as_object().unwrap().keys().collect();
         assert_eq!(
             verbs,
-            vec!["reflect", "boot", "append", "read", "search", "prune", "inject", "dump"]
+            vec![
+                "reflect", "boot", "append", "read", "search", "prune", "inject", "dump", "put_bytes",
+                "get_bytes"
+            ]
         );
     }
 }
@@ -533,3 +548,34 @@ fn verb_docs_match_ram_store() {
         assert!(src.contains(&format!("(\"{name}\", \"{doc}\")")), "{name} drifted from ram_store");
     }
 }
+
+async fn s_bytes_round_trip_and_stay_out_of_the_rows(t: &mut T) {
+    t.append("alice", json!([{"id": 1, "content": "hi"}])).await;
+    let rows = t.call(json!({"type": "read"}), Some("alice")).await;
+    let dump = t.call(json!({"type": "dump"}), None).await;
+    let raw: Vec<u8> = (0..=255u8).collect();
+    let (put, _) = t
+        .call_bytes(json!({"type": "put_bytes", "ref": "b1", "media_type": "image/png"}), Some(&raw), "alice")
+        .await;
+    assert_eq!(put, json!({"ref": "b1", "media_type": "image/png", "bytes": 256}));
+    let (got, body) = t.call_bytes(json!({"type": "get_bytes", "ref": "b1"}), None, "alice").await;
+    assert_eq!(got["media_type"], json!("image/png"));
+    assert_eq!(body, Some(raw));
+    // another caller's space is empty; a missing ref and a missing body are refused
+    let (r, _) = t.call_bytes(json!({"type": "get_bytes", "ref": "b1"}), None, "bob").await;
+    assert_eq!(r["reason"], json!("not_found"));
+    let (r, _) = t.call_bytes(json!({"type": "get_bytes"}), None, "alice").await;
+    assert_eq!(r["reason"], json!("missing_arg"));
+    let (r, _) = t
+        .call_bytes(json!({"type": "put_bytes", "ref": "b2", "media_type": "image/png"}), None, "alice")
+        .await;
+    assert_eq!(r["reason"], json!("missing_arg"));
+    // rows, search and dump do not move
+    assert_eq!(t.call(json!({"type": "read"}), Some("alice")).await, rows);
+    assert_eq!(t.call(json!({"type": "dump"}), None).await, dump);
+    // inject replaces the whole store, bytes included
+    t.call(json!({"type": "inject", "tables": dump["tables"].clone()}), None).await;
+    let (r, _) = t.call_bytes(json!({"type": "get_bytes", "ref": "b1"}), None, "alice").await;
+    assert_eq!(r["reason"], json!("not_found"));
+}
+conform!(bytes_round_trip_and_stay_out_of_the_rows, s_bytes_round_trip_and_stay_out_of_the_rows);

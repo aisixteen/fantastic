@@ -131,6 +131,7 @@ pub mod folds;
 pub mod fork;
 pub mod helpers;
 pub mod history_view;
+mod images;
 pub mod memory;
 pub mod pause;
 pub mod projection;

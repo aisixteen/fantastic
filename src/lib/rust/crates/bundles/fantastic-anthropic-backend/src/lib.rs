@@ -28,6 +28,7 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
+use base64::Engine;
 use fantastic_ai_core::caching;
 use fantastic_ai_core::credentials::{key_reader, KeySource};
 use fantastic_ai_core::provider::{
@@ -45,7 +46,7 @@ use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub mod server;
 
@@ -90,7 +91,7 @@ const CFG: BackendConfig = BackendConfig {
 /// separated. Python `to_messages`. The cache marks are not read: see [`to_wire`].
 #[must_use]
 pub fn to_messages(messages: &[Value]) -> (String, Vec<Value>) {
-    let (system, _, turns) = to_wire(messages, false);
+    let (system, _, turns) = to_wire(messages, false, &Images::default());
     (system, turns)
 }
 
@@ -104,10 +105,15 @@ pub fn to_messages(messages: &[Value]) -> (String, Vec<Value>) {
 /// line that joins two rows opens the next block, and is never dropped. The one
 /// exception is a trailing blank line with no row after it, which closes the block
 /// before it (see [`cut_blocks`]), so that marker sits a blank line after its text.
-fn to_wire(messages: &[Value], marks: bool) -> (String, bool, Vec<Value>) {
+///
+/// A message may carry `images`: its image parts (`{type: "image", ref, media_type, ..}`),
+/// whose bytes came on the binary path for this request ([`Images`]). Each becomes a
+/// base64 image block placed before the text of that message, and the turn's `content`
+/// is then the array of blocks. A message with no image renders exactly as before.
+fn to_wire(messages: &[Value], marks: bool, images: &Images) -> (String, bool, Vec<Value>) {
     let mut system_marked = false;
     let mut systems: Vec<String> = Vec::new();
-    let mut turns: Vec<(String, Vec<(String, bool)>)> = Vec::new();
+    let mut turns: Vec<(String, Vec<Row>)> = Vec::new();
     for m in messages {
         let role = m.get("role").and_then(Value::as_str).unwrap_or("");
         let content = match m.get("content") {
@@ -116,6 +122,11 @@ fn to_wire(messages: &[Value], marks: bool) -> (String, bool, Vec<Value>) {
             Some(v) => fantastic_bundle::py_str(v),
         };
         let marked = marks && m.get(caching::CACHE_MARK).and_then(Value::as_bool) == Some(true);
+        let blocks = if role == "system" {
+            Vec::new()
+        } else {
+            images.blocks_of(m)
+        };
         match role {
             "system" => {
                 if !content.is_empty() {
@@ -124,8 +135,8 @@ fn to_wire(messages: &[Value], marks: bool) -> (String, bool, Vec<Value>) {
                 }
             }
             "user" | "assistant" => match turns.last_mut() {
-                Some((r, rows)) if r == role => rows.push((content, marked)),
-                _ => turns.push((role.to_string(), vec![(content, marked)])),
+                Some((r, rows)) if r == role => rows.push((content, marked, blocks)),
+                _ => turns.push((role.to_string(), vec![(content, marked, blocks)])),
             },
             _ => {}
         }
@@ -137,25 +148,131 @@ fn to_wire(messages: &[Value], marks: bool) -> (String, bool, Vec<Value>) {
     (systems.join("\n\n"), system_marked, turns)
 }
 
+/// One row of a merged turn: its text, whether it carries `cache_mark`, its image blocks.
+type Row = (String, bool, Vec<Value>);
+
 /// One merged turn's `content`: the plain string when no row in it is flagged, else
-/// its text blocks, the marked ones carrying the cache marker.
-fn turn_content(rows: &[(String, bool)]) -> Value {
+/// its text blocks, the marked ones carrying the cache marker. A turn with an image
+/// is always the array of blocks: each image row opens a run that starts with its
+/// image blocks, then its text (and the rows after it up to the next image row).
+fn turn_content(rows: &[Row]) -> Value {
+    if rows.iter().any(|(_, _, imgs)| !imgs.is_empty()) {
+        let mut out: Vec<Value> = Vec::new();
+        let mut run: Vec<(String, bool)> = Vec::new();
+        for (text, marked, imgs) in rows {
+            if !imgs.is_empty() {
+                out.extend(text_blocks(&std::mem::take(&mut run), false));
+                out.extend(imgs.iter().cloned());
+            }
+            run.push((text.clone(), *marked));
+        }
+        out.extend(text_blocks(&run, false));
+        return Value::Array(out);
+    }
+    let rows: Vec<(String, bool)> = rows.iter().map(|(t, m, _)| (t.clone(), *m)).collect();
     if !rows.iter().any(|(_, m)| *m) {
         let plain: Vec<&str> = rows.iter().map(|(t, _)| t.as_str()).collect();
         return json!(plain.join("\n\n"));
     }
-    Value::Array(
-        cut_blocks(rows)
-            .into_iter()
-            .map(|(text, marked)| {
-                let mut block = json!({"type": "text", "text": text});
-                if marked {
-                    block["cache_control"] = cache_control();
-                }
-                block
+    Value::Array(text_blocks(&rows, true))
+}
+
+/// A run of rows as text blocks, the marked ones carrying the cache marker. A blank
+/// block is left out unless `keep_blank`: the API refuses a whitespace-only text block.
+fn text_blocks(rows: &[(String, bool)], keep_blank: bool) -> Vec<Value> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    cut_blocks(rows)
+        .into_iter()
+        .filter(|(text, _)| keep_blank || !text.trim().is_empty())
+        .map(|(text, marked)| {
+            let mut block = json!({"type": "text", "text": text});
+            if marked {
+                block["cache_control"] = cache_control();
+            }
+            block
+        })
+        .collect()
+}
+
+/// The bytes of a request's images, from the binary path: `ref` (as text) → the
+/// image's media type and bytes. A message's `images` name them by `ref`.
+#[derive(Default, Clone)]
+struct Images(HashMap<String, (String, Vec<u8>)>);
+
+/// The key an image's `ref` goes by, whatever JSON type the chat's store gave it.
+fn ref_key(v: &Value) -> String {
+    v.as_str().map_or_else(|| v.to_string(), String::from)
+}
+
+impl Images {
+    /// The image blocks of `message`, in order: `{"type":"image","source":{"type":"base64",
+    /// "media_type":…,"data":…}}`. A part whose bytes did not arrive makes no block
+    /// ([`Self::missing`] names it before the request is sent).
+    fn blocks_of(&self, message: &Value) -> Vec<Value> {
+        let Some(parts) = message.get("images").and_then(Value::as_array) else {
+            return Vec::new();
+        };
+        parts
+            .iter()
+            .filter_map(|p| {
+                let (media, bytes) = self.0.get(&ref_key(p.get("ref")?))?;
+                Some(
+                    json!({"type": "image", "source": {"type": "base64", "media_type": media,
+                    "data": base64::engine::general_purpose::STANDARD.encode(bytes)}}),
+                )
             })
-            .collect(),
-    )
+            .collect()
+    }
+
+    /// The first image ref a message names whose bytes did not arrive.
+    fn missing(&self, messages: &[Value]) -> Option<String> {
+        messages
+            .iter()
+            .filter_map(|m| m.get("images").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|p| p.get("ref"))
+            .map(ref_key)
+            .find(|k| !self.0.contains_key(k))
+    }
+}
+
+/// The images that arrived on the binary path, kept until their `complete` takes them
+/// (every `complete` does, whatever its outcome): `(this provider agent, rid)` → when
+/// the last image arrived, and the images of that request. An entry whose `complete`
+/// never came is dropped once it is older than the request timeout.
+type Stash = HashMap<(String, String), (Instant, Images)>;
+
+fn stash() -> &'static Mutex<Stash> {
+    static STASH: OnceLock<Mutex<Stash>> = OnceLock::new();
+    STASH.get_or_init(Mutex::default)
+}
+
+/// Keep one image's bytes for the request `rid` of this provider.
+fn stash_image(agent: &str, rid: &str, image_ref: &Value, media_type: &str, bytes: Vec<u8>) {
+    let max_age = Duration::from_secs_f64(fantastic_ai_core::constants::SEND_TIMEOUT_SECS);
+    let now = Instant::now();
+    let mut held = stash().lock().expect("image stash poisoned");
+    held.retain(|_, (at, _)| now.duration_since(*at) < max_age);
+    let entry = held
+        .entry((agent.to_string(), rid.to_string()))
+        .or_insert_with(|| (now, Images::default()));
+    entry.0 = now;
+    entry
+        .1
+         .0
+        .insert(ref_key(image_ref), (media_type.to_string(), bytes));
+}
+
+/// The images kept for the request `rid`, taken out of the stash (none: empty).
+fn take_images(agent: &str, rid: &str) -> Images {
+    stash()
+        .lock()
+        .expect("image stash poisoned")
+        .remove(&(agent.to_string(), rid.to_string()))
+        .map(|(_, images)| images)
+        .unwrap_or_default()
 }
 
 /// A merged turn cut at the end of each flagged row: `(block text, ends a flagged
@@ -875,13 +992,15 @@ struct AnthropicProvider {
     agent_id: String,
     /// The chat that sent this `complete` (the `rid`'s prefix); its counts go to `by_agent`.
     caller: Option<String>,
+    /// The images of this request, as they arrived on the binary path.
+    images: Images,
 }
 
 impl AnthropicProvider {
     /// The request body. Python `AnthropicProvider.body`.
     fn body(&self, messages: &[Value], max_tokens: Option<i64>) -> Value {
         // the agent's marks, exactly: none of the backend's own
-        let (system, system_marked, turns) = to_wire(messages, true);
+        let (system, system_marked, turns) = to_wire(messages, true, &self.images);
         let call_max = max_tokens.unwrap_or(self.max_tokens);
         let mut body = Map::new();
         body.insert("model".into(), json!(self.model));
@@ -945,6 +1064,11 @@ impl Provider for AnthropicProvider {
         messages: &[Value],
         max_tokens: Option<i64>,
     ) -> Result<ProviderStream, ProviderError> {
+        if let Some(r) = self.images.missing(messages) {
+            return Err(ProviderError::raised(format!(
+                "{NAME}: image ref {r} of this request did not arrive on the binary path"
+            )));
+        }
         let body = self.body(messages, max_tokens);
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs_f64(CONNECT_TIMEOUT))
@@ -1430,6 +1554,7 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
         kernel,
         helpers::agent_meta(agent_id, kernel),
         None,
+        Images::default(),
     )
 }
 
@@ -1447,6 +1572,7 @@ fn build_provider_with(
     kernel: &Arc<Kernel>,
     meta: Map<String, Value>,
     caller: Option<String>,
+    images: Images,
 ) -> Arc<dyn Provider> {
     let built = (|| -> Result<AnthropicProvider, ProviderError> {
         Ok(AnthropicProvider {
@@ -1477,6 +1603,7 @@ fn build_provider_with(
                 .map(std::path::PathBuf::from),
             agent_id: agent_id.as_str().to_string(),
             caller,
+            images,
         })
     })();
     match built {
@@ -1560,7 +1687,11 @@ fn usage_reset_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
 
 /// `reflect` — the shared base body, then what the next request will send, and the
 /// usage so far.
-fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleError> {
+fn reflect_reply(
+    agent_id: &AgentId,
+    kernel: &Kernel,
+    capabilities: Value,
+) -> Result<Value, BundleError> {
     let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, CFG.model_window);
     let meta = helpers::agent_meta(agent_id, kernel);
     for k in ["max_tokens", "temperature", "thinking_budget"] {
@@ -1581,12 +1712,87 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleErr
     if let Some(row) = meta.get("cache_primer_until").filter(|v| !v.is_null()) {
         out.insert("cache_primer_until".into(), row.clone());
     }
+    out.insert("capabilities".into(), capabilities);
     out.insert("usage".into(), usage_now(agent_id, kernel));
     out.insert(
         "usage_since_boot".into(),
         usage_since_boot_now(agent_id, kernel),
     );
     Ok(Value::Object(out))
+}
+
+/// The params-store setting that overrides the static capability entries: a map of
+/// model to `{images, max_images, max_bytes, max_pixels}`, as `reflect` shows them.
+const CAPABILITIES_FIELD: &str = "capabilities";
+
+/// What the API takes of images, for a Claude model that sees them: up to 100 images
+/// a request, 5 MB each, and about 1.15 megapixels each (a larger image is scaled
+/// down by the API anyway, so the chat sends it at this size).
+const IMAGE_LIMITS: (i64, i64, i64) = (100, 5_000_000, 1_150_000);
+
+/// The Claude model ids known to see images (the 3 family on, with their dated
+/// snapshots). Any id not listed here, a `claude-2*`, `claude-instant*`, a future or
+/// custom id, has no static entry; the `capabilities` setting can add one.
+const IMAGE_MODELS: &[&str] = &[
+    "claude-3-haiku-20240307",
+    "claude-3-opus-20240229",
+    "claude-3-sonnet-20240229",
+    "claude-3-5-haiku-20241022",
+    "claude-3-5-sonnet",
+    "claude-3-5-sonnet-20240620",
+    "claude-3-5-sonnet-20241022",
+    "claude-3-7-sonnet-20250219",
+    "claude-sonnet-4-20250514",
+    "claude-opus-4-20250514",
+    "claude-opus-4-1",
+    "claude-opus-4-1-20250805",
+    "claude-sonnet-4-5",
+    "claude-haiku-4-5",
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-5-5",
+    "claude-opus-5-5-20260601",
+    "claude-sonnet-5-5",
+    "claude-sonnet-5-5-20260101",
+    "claude-haiku-5-5",
+    "claude-haiku-5-5-20260101",
+    "claude-fable-5-1",
+];
+
+/// The static capability entry of one model id: a model in [`IMAGE_MODELS`] sees images;
+/// every other id (unknown, `claude-2*`, `claude-instant*`, not a Claude one) does not.
+fn static_capability(model: &str) -> Value {
+    if !IMAGE_MODELS.contains(&model) {
+        return json!({"images": false});
+    }
+    let (max_images, max_bytes, max_pixels) = IMAGE_LIMITS;
+    json!({"images": true, "max_images": max_images, "max_bytes": max_bytes, "max_pixels": max_pixels})
+}
+
+/// `reflect`'s `capabilities`: `{<model>: {images, max_images, max_bytes, max_pixels}}`
+/// for the models the record lists, its own model and its default, and any model the
+/// `capabilities` setting in the params store names. A model's entry is the setting's
+/// when it has one, else the static one; an unknown model has `images: false`.
+async fn capabilities_of(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
+    let meta = helpers::agent_meta(agent_id, kernel);
+    let kept = fantastic_ai_core::remote_provider::setting_of(agent_id, kernel, CAPABILITIES_FIELD)
+        .await
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut models = fantastic_ai_core::remote_provider::listed_models(&meta);
+    models.extend(meta.get("model").and_then(Value::as_str).map(String::from));
+    models.extend(fantastic_ai_core::remote_provider::default_of(agent_id, kernel).await);
+    models.extend(kept.keys().cloned());
+    let mut out = Map::new();
+    for m in models.into_iter().filter(|m| !m.is_empty()) {
+        let entry = kept
+            .get(&m)
+            .cloned()
+            .unwrap_or_else(|| static_capability(&m));
+        out.insert(m, entry);
+    }
+    Value::Object(out)
 }
 
 /// #182 — 4.7+ and 5.x models run adaptive thinking and 400 on
@@ -1929,7 +2135,8 @@ impl Bundle for AnthropicBundle {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         preload_base(agent_id, kernel).await;
         if verb == "reflect" {
-            return Ok(Some(reflect_reply(agent_id, kernel)?));
+            let capabilities = capabilities_of(agent_id, kernel).await;
+            return Ok(Some(reflect_reply(agent_id, kernel, capabilities)?));
         }
         if verb == "usage" {
             return Ok(Some(usage_reply(agent_id, payload, kernel)));
@@ -1944,6 +2151,17 @@ impl Bundle for AnthropicBundle {
             }
             return Ok(Some(out));
         }
+        // A `complete` takes its request's images out of the stash here, before any
+        // path that can refuse or fail it, so none keeps them.
+        let images = if verb == "complete" {
+            payload
+                .get("rid")
+                .and_then(Value::as_str)
+                .map(|rid| take_images(agent_id.as_str(), rid))
+                .unwrap_or_default()
+        } else {
+            Images::default()
+        };
         // A verb that runs a turn first reads what the record leaves to the API; an
         // API that does not answer refuses the verb, naming the field.
         if server::TURN_VERBS.contains(&verb) {
@@ -1965,7 +2183,7 @@ impl Bundle for AnthropicBundle {
             agent_id,
             payload,
             kernel,
-            |m| build_provider_with(agent_id, kernel, m, caller_of(payload)),
+            |m| build_provider_with(agent_id, kernel, m, caller_of(payload), images.clone()),
             Some(|| async {
                 let meta = helpers::agent_meta(agent_id, kernel);
                 let endpoint = meta
@@ -2008,6 +2226,47 @@ impl Bundle for AnthropicBundle {
             fantastic_kernel::refusal::with(&mut r, "verb", raw);
             r
         }))
+    }
+
+    /// An image's bytes for a request: a `complete` header `{rid, image: {ref,
+    /// media_type}}` with the bytes as the body at `data`. They are kept for the
+    /// `complete` of that `rid` (one item per image, sent before it); no pass runs.
+    /// Every other header is `handle`'s, its body dropped.
+    async fn handle_binary(
+        &self,
+        agent_id: &AgentId,
+        header: Value,
+        body: Option<fantastic_kernel::outcome::Blob>,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(Reply, Option<fantastic_kernel::outcome::Blob>), BundleError> {
+        let image = header.get("image").filter(|i| i.is_object());
+        if header.get("type").and_then(Value::as_str) != Some("complete") || image.is_none() {
+            let reply = self.handle(agent_id, &header, kernel).await?;
+            return Ok((reply, None));
+        }
+        let bad = |why: &str| {
+            Ok((
+                Some(
+                    json!({"error": format!("{NAME}: complete image: {why}"), "reason": "bad_arg"}),
+                ),
+                None,
+            ))
+        };
+        let image = image.expect("checked above");
+        let rid = header.get("rid").and_then(Value::as_str).unwrap_or("");
+        let media = image
+            .get("media_type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let (Some(r), true, false) = (image.get("ref"), !rid.is_empty(), media.is_empty()) else {
+            return bad("rid, image.ref and image.media_type are required");
+        };
+        let Some(bytes) = body.and_then(|b| b.into_at("data")) else {
+            return bad("the image bytes are required as the body at `data`");
+        };
+        let n = bytes.len();
+        stash_image(agent_id.as_str(), rid, r, media, bytes);
+        Ok((Some(json!({"rid": rid, "image": r, "bytes": n})), None))
     }
 
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {

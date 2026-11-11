@@ -46,6 +46,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use fantastic_bundle::{py_json_dumps, py_repr_value, py_type_name, py_splitlines, py_str, py_strip, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::outcome::{body_at, Blob};
 use fantastic_kernel::refusal::{
     missing, refusal, refusal_hint, with, BAD_ARG, EXISTS, NOT_FOUND, UNHANDLED,
 };
@@ -89,6 +90,11 @@ CREATE INDEX IF NOT EXISTS fold_refs_member ON fold_refs (owner, member);
 -- planner preferred the primary key's owner range — the whole history.
 CREATE INDEX IF NOT EXISTS rows_by_name ON rows (owner, json_extract(doc, '$."name"'));
 CREATE INDEX IF NOT EXISTS rows_by_parent ON rows (owner, json_extract(doc, '$."parent"'));
+-- `put_bytes` / `get_bytes`: raw bytes per (owner, ref). Not rows: no text index, never in `dump`.
+CREATE TABLE IF NOT EXISTS blobs (
+  owner TEXT NOT NULL, ref TEXT NOT NULL, media_type TEXT NOT NULL, data BLOB NOT NULL,
+  PRIMARY KEY (owner, ref)
+) WITHOUT ROWID;
 CREATE VIRTUAL TABLE IF NOT EXISTS text_idx USING fts5 (
   owner UNINDEXED, id UNINDEXED, text, tokenize = 'trigram case_sensitive 1'
 );
@@ -523,7 +529,7 @@ fn fold_closure(db: &Db<'_>, owner: &str, fold: i64) -> rusqlite::Result<HashSet
 }
 
 /// ram_store's verb docs, word for word — the one on `boot` names the file.
-pub const VERB_DOCS: [(&str, &str); 8] = [
+pub const VERB_DOCS: [(&str, &str); 10] = [
     ("reflect", "Identity + posture: how many owners/rows, which optional verbs exist. No args."),
     ("boot", "Opens (creating if absent) the SQLite file named by `path`; the tables survive the process."),
     ("append", "args: rows:list[dict] (req). Appends rows under the CALLER's key, all or none. A row carries the kernel id it was minted with, or none and the next id is taken from the kernel's counter; `refs` must name rows of the same owner (this batch included). Returns {ids:[int], appended:int}."),
@@ -532,6 +538,8 @@ pub const VERB_DOCS: [(&str, &str); 8] = [
     ("prune", "args: before_id:int? and/or ids:list? (req — one of them), keep:list? (kinds kept). Deletes YOUR rows below `before_id` (or exactly `ids`) except kinds in `keep`; every fold ref naming a deleted row goes with it (FK cascade). Returns {pruned}."),
     ("inject", "args: tables:dict (req — a `dump`). Replaces the WHOLE store with the given tables, every key and FK checked; nothing changes on a refusal. Returns {rows}."),
     ("dump", "No args. The whole store as tables — {rows:[{owner, row}], fold_refs:[{owner, fold, members}]} — exactly what `inject` takes back. Returns {tables}."),
+    ("put_bytes", "args: ref:str (req), media_type:str (req), and the raw bytes as the request body at `data`. Stores them under the CALLER's key and `ref` (a second put to the same ref replaces them). They are not rows: `read`, `search` and `dump` never show them. Returns {ref, media_type, bytes} (the byte count)."),
+    ("get_bytes", "args: ref:str (req). The bytes the caller put under `ref`, as the reply body at `data`. Returns {ref, media_type, bytes} (the byte count), or not_found."),
 ];
 
 /// python `x in container` for the JSON value a payload carried. `Err` is the
@@ -1065,7 +1073,7 @@ impl SqliteStoreBundle {
             // The WHOLE store is replaced, in this one transaction.
             db.0
                 .execute_batch(
-                    "DELETE FROM fold_refs; DELETE FROM ref_lists; DELETE FROM rows; DELETE FROM text_idx;",
+                    "DELETE FROM fold_refs; DELETE FROM ref_lists; DELETE FROM rows; DELETE FROM text_idx; DELETE FROM blobs;",
                 )
                 .map_err(db_err)?;
             let mut rows = 0usize;
@@ -1078,6 +1086,78 @@ impl SqliteStoreBundle {
             }
             Ok(json!({"rows": rows}))
         })
+    }
+
+    /// The `ref` of a bytes verb: a non-empty string.
+    fn blob_ref(verb: &str, payload: &Value) -> Result<String, Value> {
+        match payload.get("ref") {
+            Some(Value::String(r)) if !r.is_empty() => Ok(r.clone()),
+            None | Some(Value::Null) => Err(missing(verb, "ref")),
+            Some(_) => Err(refusal(BAD_ARG, format!("{verb}: `ref` must be a non-empty string"))),
+        }
+    }
+
+    fn put_bytes(&self, id: &AgentId, payload: &Value, body: Option<&Blob>, kernel: &Arc<Kernel>) -> Value {
+        let (owner, _) = match caller(kernel) {
+            Ok(o) => o,
+            Err(r) => return r,
+        };
+        let key = match Self::blob_ref("put_bytes", payload) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+        let media = match payload.get("media_type") {
+            Some(Value::String(m)) if !m.is_empty() => m.clone(),
+            None | Some(Value::Null) => return missing("put_bytes", "media_type"),
+            Some(_) => return refusal(BAD_ARG, "put_bytes: `media_type` must be a non-empty string"),
+        };
+        let Some(bytes) = body_at(body, "data") else {
+            return missing("put_bytes", "data (the raw bytes, as the request body)");
+        };
+        self.tx(id, kernel, |db| {
+            db.0.execute(
+                "INSERT OR REPLACE INTO blobs (owner, ref, media_type, data) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![owner, key, media, bytes],
+            )
+            .map_err(db_err)?;
+            Ok(json!({"ref": key, "media_type": media, "bytes": bytes.len()}))
+        })
+    }
+
+    fn get_bytes(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> (Value, Option<Blob>) {
+        let (owner, _) = match caller(kernel) {
+            Ok(o) => o,
+            Err(r) => return (r, None),
+        };
+        let key = match Self::blob_ref("get_bytes", payload) {
+            Ok(r) => r,
+            Err(e) => return (e, None),
+        };
+        let mut found: Option<Vec<u8>> = None;
+        let out = self.tx(id, kernel, |db| {
+            let row = db
+                .0
+                .query_row(
+                    "SELECT media_type, data FROM blobs WHERE owner = ?1 AND ref = ?2",
+                    rusqlite::params![owner, key],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
+                )
+                .optional()
+                .map_err(db_err)?;
+            match row {
+                Some((media, bytes)) => {
+                    let head = json!({"ref": key, "media_type": media, "bytes": bytes.len()});
+                    found = Some(bytes);
+                    Ok(head)
+                }
+                None => {
+                    let mut r = refusal(NOT_FOUND, format!("get_bytes: no bytes under ref `{key}`"));
+                    with(&mut r, "ref", Value::from(key.clone()));
+                    Err(r)
+                }
+            }
+        });
+        (out, found.map(|b| Blob::key("data", b)))
     }
 
     fn dump(&self, id: &AgentId, kernel: &Arc<Kernel>) -> Value {
@@ -1138,6 +1218,11 @@ impl Bundle for SqliteStoreBundle {
             "prune" => self.prune(agent_id, payload, kernel)?,
             "inject" => self.inject(agent_id, payload, kernel),
             "dump" => self.dump(agent_id, kernel),
+            // the bytes verbs ride the binary path only (`handle_binary`)
+            "put_bytes" | "get_bytes" => refusal(
+                BAD_ARG,
+                format!("sqlite_store: {verb} carries its bytes as a binary body, at `data`"),
+            ),
             _ => {
                 let t = payload.get("type").cloned().unwrap_or(Value::Null);
                 let mut r = refusal(UNHANDLED, format!("sqlite_store: unknown type {}", py_repr_value(&t)));
@@ -1146,6 +1231,28 @@ impl Bundle for SqliteStoreBundle {
             }
         };
         Ok(Some(out))
+    }
+
+    /// `put_bytes` takes the raw bytes as the body at `data`, `get_bytes` answers
+    /// them as the reply body there; every other verb is `handle`'s.
+    async fn handle_binary(
+        &self,
+        agent_id: &AgentId,
+        header: Value,
+        body: Option<Blob>,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(Reply, Option<Blob>), BundleError> {
+        match header.get("type").and_then(Value::as_str) {
+            Some("put_bytes") => {
+                let out = self.put_bytes(agent_id, &header, body.as_ref(), kernel);
+                Ok((Some(out), None))
+            }
+            Some("get_bytes") => {
+                let (out, blob) = self.get_bytes(agent_id, &header, kernel);
+                Ok((Some(out), blob))
+            }
+            _ => Ok((self.handle(agent_id, &header, kernel).await?, None)),
+        }
     }
 
     /// A deleted store agent DELETES ITS DATA — the file and its WAL/SHM

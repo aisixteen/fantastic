@@ -62,7 +62,7 @@ const CHAT_USER: &str = crate::env::HUMAN;
 pub const CHAT_VERBS: [&str; 6] = ["send", "history", "status", "watch", "reflect", "stop"];
 
 /// What a chat may call on its provider, and the provider admits it for.
-const PROVIDER_VERBS: [&str; 2] = ["complete", "watch"];
+const PROVIDER_VERBS: [&str; 3] = ["complete", "watch", "reflect"];
 
 /// The spec fields that are the CHAT's alone (the conversation's, its prompt and its saved
 /// set-up's name): the provider's record does not carry them.
@@ -1002,7 +1002,7 @@ pub(crate) mod create_tests {
         h.kernel.agents.get(&AgentId::from(id)).map(|a| a.value().record().meta.clone()).unwrap_or_default()
     }
 
-    pub(crate) const PV: [&str; 2] = ["complete", "watch"];
+    pub(crate) const PV: [&str; 3] = ["complete", "watch", "reflect"];
 
     pub(crate) fn rec_ai(extra: Value) -> Value {
         let mut r = json!({"handler_module": "vllm_backend.tools", "id": "helper", "memory_store_id": "memory",
@@ -1244,7 +1244,7 @@ pub(crate) mod create_tests {
         assert!(prov.get("caching").is_none() && prov.get("provider_id").is_none());
         // the key's `get` is the provider's; the caller's tool grants are the chat's
         assert_eq!(prov["can_call"], json!({"memory": "*", "credentials": ["get"]}));
-        assert_eq!(prov["callable_by"], json!({"helper": ["complete", "watch"]}));
+        assert_eq!(prov["callable_by"], json!({"helper": ["complete", "watch", "reflect"]}));
         assert_eq!(chat["handler_module"], json!("ai_chat.tools"));
         assert_eq!(chat["id"], json!("helper"));
         assert_eq!(chat["provider_id"], json!("helper_provider"));
@@ -1255,7 +1255,7 @@ pub(crate) mod create_tests {
         assert_eq!(chat["can_call"]["memory"], json!(["send"]));
         assert_eq!(chat["can_call"]["tool_a"], json!("*"));
         assert_eq!(chat["can_call"]["peer_b"], json!(["send"]));
-        assert_eq!(chat["can_call"]["helper_provider"], json!(["complete", "watch"]));
+        assert_eq!(chat["can_call"]["helper_provider"], json!(["complete", "watch", "reflect"]));
         assert!(chat["can_call"].get("credentials").is_none());
         // the human's chat verbs and the caller's callers, merged
         assert_eq!(chat["callable_by"][crate::env::HUMAN], json!(CHAT_VERBS));

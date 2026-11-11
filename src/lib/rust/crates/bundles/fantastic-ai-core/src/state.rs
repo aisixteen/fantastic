@@ -73,6 +73,9 @@ pub struct CurrentEntry {
     pub stopped_by: Option<String>,
     /// Carried from the queue row: the incoming row is a `notice`.
     pub notice: bool,
+    /// What the turn's attached images add to its incoming row (`images`, `attributes.image`):
+    /// see [`crate::images::Attached`]. `None`: an imageless turn.
+    pub(crate) attached: Option<crate::images::Attached>,
 }
 
 /// Per-agent coordination state. Cloning the `Arc` is cheap.
@@ -125,6 +128,12 @@ pub struct BackendState {
     /// When the last provider pass ended (unix seconds) — `fork_points` reads it
     /// to say whether the prompt cache is still warm. Python `_last_send`.
     pub last_send_secs: Mutex<Option<f64>>,
+    /// The provider and model the chat's `provider_capabilities` were last checked for in
+    /// this incarnation: the provider is asked again at the first turn after a boot and
+    /// whenever either changes (#622).
+    pub caps_checked: Mutex<Option<(String, String)>>,
+    /// Image rows a `recall` brought back: shown whole in the next request, once.
+    pub recalled_images: Mutex<Vec<i64>>,
 }
 
 /// The agent's chain: `alive` while a pass or its routing is running.
@@ -232,6 +241,8 @@ impl BackendState {
             reported: Mutex::new(None),
             chain: Mutex::new(ChainState::default()),
             last_send_secs: Mutex::new(None),
+            caps_checked: Mutex::new(None),
+            recalled_images: Mutex::new(Vec::new()),
         })
     }
 }

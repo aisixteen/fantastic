@@ -44,6 +44,7 @@ use fantastic_bundle::{
     py_json_dumps, py_repr_value, py_splitlines, py_str, py_strip, py_truthy, py_type_name,
 };
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::outcome::{body_at, Blob};
 use fantastic_kernel::refusal::{
     missing, refusal, refusal_hint, with, BAD_ARG, EXISTS, NOT_FOUND, UNHANDLED,
 };
@@ -154,6 +155,9 @@ struct Tables {
     /// kernel looks a caller's execution name up on every named call, and a scan
     /// of every row there grows with the whole history.
     by_name: HashMap<(String, String), Vec<i64>>,
+    /// (owner, ref) → (media type, raw bytes): `put_bytes` / `get_bytes`. Not rows:
+    /// `read`, `search` and `dump` never see them.
+    blobs: HashMap<(String, String), (String, Vec<u8>)>,
 }
 
 impl Tables {
@@ -456,7 +460,7 @@ fn fold_closure(t: &Tables, owner: &str, fold: i64) -> HashSet<i64> {
 }
 
 /// One line per verb — python's first-docstring-line rule, in `VERBS` order.
-const VERB_DOCS: [(&str, &str); 8] = [
+const VERB_DOCS: [(&str, &str); 10] = [
     ("reflect", "Identity + posture: how many owners/rows, which optional verbs exist. No args."),
     ("boot", "No-op — the tables start empty (RAM) or are filled by `inject`."),
     ("append", "args: rows:list[dict] (req). Appends rows under the CALLER's key, all or none. A row carries the kernel id it was minted with, or none and the next id is taken from the kernel's counter; `refs` must name rows of the same owner (this batch included). Returns {ids:[int], appended:int}."),
@@ -465,6 +469,8 @@ const VERB_DOCS: [(&str, &str); 8] = [
     ("prune", "args: before_id:int? and/or ids:list? (req — one of them), keep:list? (kinds kept). Deletes YOUR rows below `before_id` (or exactly `ids`) except kinds in `keep`; every fold ref naming a deleted row goes with it (FK cascade). Returns {pruned}."),
     ("inject", "args: tables:dict (req — a `dump`). Replaces the WHOLE store with the given tables, every key and FK checked; nothing changes on a refusal. Returns {rows}."),
     ("dump", "No args. The whole store as tables — {rows:[{owner, row}], fold_refs:[{owner, fold, members}]} — exactly what `inject` takes back. Returns {tables}."),
+    ("put_bytes", "args: ref:str (req), media_type:str (req), and the raw bytes as the request body at `data`. Stores them under the CALLER's key and `ref` (a second put to the same ref replaces them). They are not rows: `read`, `search` and `dump` never show them. Returns {ref, media_type, bytes} (the byte count)."),
+    ("get_bytes", "args: ref:str (req). The bytes the caller put under `ref`, as the reply body at `data`. Returns {ref, media_type, bytes} (the byte count), or not_found."),
 ];
 
 impl RamStoreBundle {
@@ -808,6 +814,82 @@ impl RamStoreBundle {
         })
     }
 
+    /// The `ref` of a bytes verb: a non-empty string.
+    fn blob_ref(verb: &str, payload: &Value) -> Result<String, Value> {
+        match payload.get("ref") {
+            Some(Value::String(r)) if !r.is_empty() => Ok(r.clone()),
+            None | Some(Value::Null) => Err(missing(verb, "ref")),
+            Some(_) => Err(refusal(
+                BAD_ARG,
+                format!("{verb}: `ref` must be a non-empty string"),
+            )),
+        }
+    }
+
+    fn put_bytes(
+        &self,
+        id: &AgentId,
+        payload: &Value,
+        body: Option<&Blob>,
+        kernel: &Arc<Kernel>,
+    ) -> Value {
+        let (owner, _) = match caller(kernel) {
+            Ok(o) => o,
+            Err(r) => return r,
+        };
+        let key = match Self::blob_ref("put_bytes", payload) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+        let media = match payload.get("media_type") {
+            Some(Value::String(m)) if !m.is_empty() => m.clone(),
+            None | Some(Value::Null) => return missing("put_bytes", "media_type"),
+            Some(_) => {
+                return refusal(
+                    BAD_ARG,
+                    "put_bytes: `media_type` must be a non-empty string",
+                )
+            }
+        };
+        let Some(bytes) = body_at(body, "data") else {
+            return missing("put_bytes", "data (the raw bytes, as the request body)");
+        };
+        let n = bytes.len();
+        self.with_tables(id, |t| {
+            t.blobs
+                .insert((owner, key.clone()), (media.clone(), bytes.to_vec()));
+        });
+        json!({"ref": key, "media_type": media, "bytes": n})
+    }
+
+    fn get_bytes(
+        &self,
+        id: &AgentId,
+        payload: &Value,
+        kernel: &Arc<Kernel>,
+    ) -> (Value, Option<Blob>) {
+        let (owner, _) = match caller(kernel) {
+            Ok(o) => o,
+            Err(r) => return (r, None),
+        };
+        let key = match Self::blob_ref("get_bytes", payload) {
+            Ok(r) => r,
+            Err(e) => return (e, None),
+        };
+        let found = self.with_tables(id, |t| t.blobs.get(&(owner, key.clone())).cloned());
+        match found {
+            Some((media, bytes)) => (
+                json!({"ref": key, "media_type": media, "bytes": bytes.len()}),
+                Some(Blob::key("data", bytes)),
+            ),
+            None => {
+                let mut r = refusal(NOT_FOUND, format!("get_bytes: no bytes under ref `{key}`"));
+                with(&mut r, "ref", Value::from(key));
+                (r, None)
+            }
+        }
+    }
+
     fn inject(&self, id: &AgentId, payload: &Value) -> Value {
         let t = match load_tables(payload.get("tables").unwrap_or(&Value::Null)) {
             Ok(t) => t,
@@ -883,6 +965,11 @@ impl Bundle for RamStoreBundle {
             "prune" => self.prune(agent_id, payload, kernel)?,
             "inject" => self.inject(agent_id, payload),
             "dump" => self.dump(agent_id),
+            // the bytes verbs ride the binary path only (`handle_binary`)
+            "put_bytes" | "get_bytes" => refusal(
+                BAD_ARG,
+                format!("ram_store: {verb} carries its bytes as a binary body, at `data`"),
+            ),
             _ => {
                 let t = payload.get("type").cloned().unwrap_or(Value::Null);
                 let mut r = refusal(
@@ -894,6 +981,28 @@ impl Bundle for RamStoreBundle {
             }
         };
         Ok(Some(out))
+    }
+
+    /// `put_bytes` takes the raw bytes as the body at `data`, `get_bytes` answers
+    /// them as the reply body there; every other verb is `handle`'s.
+    async fn handle_binary(
+        &self,
+        agent_id: &AgentId,
+        header: Value,
+        body: Option<Blob>,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(Reply, Option<Blob>), BundleError> {
+        match header.get("type").and_then(Value::as_str) {
+            Some("put_bytes") => {
+                let out = self.put_bytes(agent_id, &header, body.as_ref(), kernel);
+                Ok((Some(out), None))
+            }
+            Some("get_bytes") => {
+                let (out, blob) = self.get_bytes(agent_id, &header, kernel);
+                Ok((Some(out), blob))
+            }
+            _ => Ok((self.handle(agent_id, &header, kernel).await?, None)),
+        }
     }
 
     /// A deleted store is GONE: a re-created agent under the same id starts empty

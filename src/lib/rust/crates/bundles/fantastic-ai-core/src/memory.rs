@@ -109,14 +109,27 @@ pub async fn store_call(
     kernel: &Arc<Kernel>,
     payload: Value,
 ) -> MemResult<Map<String, Value>> {
+    Ok(store_item(self_id, kernel, payload, None).await?.0)
+}
+
+/// [`store_call`] with a request body (the raw bytes at `data`), and the reply body
+/// beside the reply: the store's byte verbs (`put_bytes`, `get_bytes`).
+pub(crate) async fn store_item(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    payload: Value,
+    body: Option<Vec<u8>>,
+) -> MemResult<(Map<String, Value>, Option<Vec<u8>>)> {
     let sid = store_of(self_id, kernel)?;
     let verb = payload
         .get("type")
         .map_or_else(|| "None".to_string(), py_str);
-    let out = kernel
-        .send(vec![Item::new(sid.clone(), payload)])
-        .await
-        .remove(0);
+    let mut item = Item::new(sid.clone(), payload);
+    if let Some(b) = body {
+        item = item.with_binary_key("data", b);
+    }
+    let out = kernel.send(vec![item]).await.remove(0);
+    let reply_body = out.body.and_then(|b| b.into_at("data"));
     let res = out.result;
     let refused = res.get("error").is_some_and(py_truthy);
     if !out.status.is_completed_or(refused) {
@@ -134,9 +147,50 @@ pub async fn store_call(
             py_repr(&sid.0)
         )));
     }
-    Ok(match res {
-        Value::Object(m) => m,
-        _ => Map::new(),
+    Ok((
+        match res {
+            Value::Object(m) => m,
+            _ => Map::new(),
+        },
+        reply_body,
+    ))
+}
+
+/// Keep an image's `bytes` in this agent's memory store under `image_ref`.
+pub(crate) async fn put_bytes(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    image_ref: &str,
+    media_type: &str,
+    bytes: Vec<u8>,
+) -> MemResult<()> {
+    let head = json!({"type": "put_bytes", "ref": image_ref, "media_type": media_type});
+    store_item(self_id, kernel, head, Some(bytes)).await?;
+    Ok(())
+}
+
+/// The bytes this agent's memory store holds under `image_ref`: `(media type, bytes)`.
+pub(crate) async fn get_bytes(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    image_ref: &str,
+) -> MemResult<(String, Vec<u8>)> {
+    let (head, body) = store_item(
+        self_id,
+        kernel,
+        json!({"type": "get_bytes", "ref": image_ref}),
+        None,
+    )
+    .await?;
+    let media = head
+        .get("media_type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    body.map(|b| (media, b)).ok_or_else(|| {
+        MemoryStoreError(format!(
+            "{self_id}: memory store returned no bytes for image `{image_ref}`"
+        ))
     })
 }
 
