@@ -38,9 +38,8 @@ sys.path.insert(
         next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
     ),
 )
-from backends import backend as _resolve_backend
 from helpers.kernel import home
-from helpers import creds, memory, verdict  # noqa: E402
+from helpers import memory, verdict  # noqa: E402
 from helpers.ai import IDLE_END, QuietWatch  # noqa: E402
 from tests.agentic_advanced.E30_subai import probe as P  # noqa: E402
 from tests.agentic_advanced.E36_multisubai import probe as S  # noqa: E402
@@ -75,12 +74,10 @@ def solver_instructions(k: int) -> str:
     )
 
 
-#: What the creator copies from `brain`'s record into each solver: every field the
-#: PLUG put there (handler, model, endpoint, the backend's required fields, the
-#: key's `credentials` when the plug has one) plus the conversation store and the
-#: window. Read off the plug, never a hand-kept list: a list written for one
-#: backend leaves another backend's required fields out.
-COPY = [*P.BK.record(), "memory_store_id", "context_window"]
+#: What the creator copies from `brain`'s record into each solver (a CHAT: the model,
+#: endpoint and key are its provider's, named by `provider_id`): the handler, the
+#: provider, the conversation store and the window.
+COPY = ["handler_module", "provider_id", "memory_store_id", "context_window"]
 
 TASK = (
     "You are the CREATOR here — the mind building the structure. I am going to walk "
@@ -107,14 +104,10 @@ TASK = (
     "(a map is a tag whose children are keyed by agent id or a relative token):\n"
     f"  `<can_call>`: `<$self>*</$self> <$parent>*</$parent> <$subtree>*</$subtree> "
     f"<oracle_k>*</oracle_k> <notes>*</notes> <memory>*</memory>"
-    + (f" <{creds.CREDS}>*</{creds.CREDS}>" if P.BK.key_ref else "")
-    + "` (`memory` is the store their conversation lives in"
-    + (
-        f", `{creds.CREDS}` holds their model key — both doors are already open for them"
-        if P.BK.key_ref
-        else " — its door is already open for them"
-    )
-    + ") and one "
+    + f" <{P.BRAIN_PROV}>*</{P.BRAIN_PROV}>"
+    + "` (`memory` is the store their conversation lives in, "
+    f"`{P.BRAIN_PROV}` is the provider their completions come from — both doors are "
+    "already open for them) and one "
     "`<solver_j>*</solver_j>` for EACH of the two other solvers.\n"
     "  `<callable_by>`: `<$self>*</$self> <$parent>*</$parent> <$subtree>*</$subtree>` "
     "and one `<solver_j>*</solver_j>` for EACH of the two other solvers.\n"
@@ -217,10 +210,6 @@ async def fixture(root, *, interpreter=None):
     # call it; the store's own ingress is the fixture's to grant.
     for sid in SOLVERS:
         await memory.open_ingress(root, memory.MEMORY, sid)
-        if _resolve_backend().key_ref:
-            # The STORE's half only: the solver does not exist yet, and its own
-            # `can_call` is its creator's to write (the task names `creds` there).
-            await creds.open_store(root, sid)
     return store
 
 
@@ -378,6 +367,7 @@ async def main() -> None:
         mine=MINE,
         extra_reach={o: "*" for o in ORACLES} | {"notes": "*"},
         prefix="multisubai_build_",
+        sub_ais=list(SOLVERS),
     )
     sys.exit(0 if ok else 1)
 

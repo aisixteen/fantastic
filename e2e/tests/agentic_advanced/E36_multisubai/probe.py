@@ -39,9 +39,9 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend  # noqa: E402
-from helpers import creds, memory
+from helpers import memory
 from helpers import verdict  # noqa: E402
-from helpers.ai import IDLE_END, QuietWatch  # noqa: E402
+from helpers.ai import IDLE_END, QuietWatch, make_chat  # noqa: E402
 from helpers.kernel import home, open_kernel  # noqa: E402
 
 BK = _resolve_backend()
@@ -171,10 +171,7 @@ def _ai_record(agent_id: str, root, store, *, oracle: str, peers: list[str], des
             **{p: "*" for p in peers},
         },
     }
-    # The plug describes ITSELF (e2e/backends) — see E30's `_ai_meta`. The probe's
-    # own wiring (grants, description) wins over the plug's.
-    for k, v in _resolve_backend(BACKEND).record().items():
-        meta.setdefault(k, v)
+    # The chat's payload only: `make_chat` adds the provider from the plug (e2e/backends).
     return meta
 
 
@@ -229,26 +226,23 @@ async def build(root):
                 },
             }
         )
-    for k, sid in enumerate(SOLVERS):
-        batch.append(
-            {
-                "target": root.id,
-                "payload": _ai_record(
-                    sid,
-                    root,
-                    store,
-                    oracle=ORACLES[k],
-                    peers=[s for s in SOLVERS if s != sid],
-                    description=f"Solver {k + 1} of three: holds the {LEDGER_NAMES[k]} ledger through {ORACLES[k]}.",
-                ),
-            }
-        )
     for out in await root.send(batch):
         assert not (out.get("result") or {}).get("error"), out
+    for k, sid in enumerate(SOLVERS):  # each solver: a chat on its own provider
+        await make_chat(
+            root,
+            BK,
+            _ai_record(
+                sid,
+                root,
+                store,
+                oracle=ORACLES[k],
+                peers=[s for s in SOLVERS if s != sid],
+                description=f"Solver {k + 1} of three: holds the {LEDGER_NAMES[k]} ledger through {ORACLES[k]}.",
+            ),
+        )
     for sid in SOLVERS:  # the store's half of each memory wire
         await memory.open_ingress(root, memory.MEMORY, sid)
-        if _resolve_backend().key_ref:
-            await creds.grant_reader(root, sid)
     return store
 
 
