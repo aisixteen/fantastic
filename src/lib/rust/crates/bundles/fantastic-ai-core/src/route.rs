@@ -328,6 +328,21 @@ fn reply_as_text(out: &fantastic_kernel::Outcome) -> std::borrow::Cow<'_, Value>
     std::borrow::Cow::Owned(shown)
 }
 
+/// #634: a `reflect` reply's `view` is how the agent is DRAWN for a person; the
+/// model gets its kind and size only. `None` when the reply carries no view body.
+/// The store keeps the reply whole.
+fn hide_view_body(shown: &Value) -> Option<Value> {
+    let view = shown.get("view")?.as_object()?;
+    let body = view.get("bytes").or_else(|| view.get("html"))?.as_str()?;
+    let kind = view.get("kind").and_then(Value::as_str).unwrap_or("view");
+    let mut out = shown.clone();
+    out["view"] = json!(format!(
+        "{kind}, {} chars, not shown",
+        body.chars().count()
+    ));
+    Some(out)
+}
+
 /// The args echoed back with an error, minus `payload` — python's
 /// `{k: v for k, v in args.items() if k != "payload"}`. Shows the model the
 /// ROUTING it wrote, which is the part that was wrong, without re-quoting a
@@ -1726,6 +1741,11 @@ async fn route_reply_gated(
                         .map(|t| t.0.to_string())
                         .unwrap_or_else(|| "-".to_string());
                     let mut shown = reply_as_text(out);
+                    if u.verb == "reflect" {
+                        if let Some(trimmed) = hide_view_body(&shown) {
+                            shown = std::borrow::Cow::Owned(trimmed);
+                        }
+                    }
                     // A `send` that passed its deadline went to the dead letter:
                     // the sender is told where, and how to resend or drop it.
                     let dead_letter = u.verb == "send"
@@ -2308,6 +2328,16 @@ mod tests {
         assert!(no_payload_error("it's").starts_with("send to \"it's\" carried"));
         assert!(no_payload_error("C:\\notes").starts_with("send to 'C:\\\\notes' carried"));
         assert!(no_payload_error("tab\there").starts_with("send to 'tab\\there' carried"));
+    }
+
+    #[test]
+    fn a_reflect_view_body_is_hidden_from_the_model_but_kind_and_size_stay() {
+        let r = json!({"id": "c", "view": {"kind": "html", "bytes": "<p>héllo</p>", "calls": {}}});
+        let shown = hide_view_body(&r).expect("a view body is hidden");
+        assert_eq!(shown["view"], json!("html, 12 chars, not shown"));
+        assert_eq!(shown["id"], "c");
+        assert_eq!(r["view"]["bytes"], "<p>héllo</p>", "the original is whole");
+        assert!(hide_view_body(&json!({"id": "c"})).is_none());
     }
 
     #[test]

@@ -202,3 +202,83 @@ async fn a_recall_reply_refolds_after_the_next_answer() {
     );
     assert!(!seen.contains(&"x".repeat(1000)));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reflect_reply_folds_over_the_reference_limit_and_get_returns_it_whole() {
+    use crate::constants::REFERENCE_FOLD_AT;
+    let tmp = TempDir::new().unwrap();
+    let (kernel, agent) = mk_kernel(&tmp, "af_reflect").await;
+    widen(&kernel, &agent).await;
+    let s = script(
+        &agent,
+        vec![pass(format!("Noted.\n{DONE}")), pass(DONE)],
+        Duration::ZERO,
+    );
+    let text = format!(
+        "[reply to 9 · notes reflect]\nhead line\n{}",
+        "x".repeat(REFERENCE_FOLD_AT * 4 + 4)
+    );
+    say(&kernel, &agent, &text).await;
+    assert!(until_passes(&s, 1).await);
+    assert!(s.request(0).contains(&"x".repeat(1000)), "whole on arrival");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    say(&kernel, &agent, "next").await;
+    assert!(until_passes(&s, 2).await);
+    let kept = rows(&kernel, &agent).await;
+    let stored = kept
+        .iter()
+        .find(|r| r["content"].as_str() == Some(text.as_str()))
+        .expect("the store row is whole");
+    let seen = s.request(1);
+    assert!(
+        seen.contains("[folded · reflect reply from notes · ~1504 tokens · reflect again for the current state]"),
+        "{}",
+        &seen[seen.len().saturating_sub(900)..]
+    );
+    assert!(!seen.contains(&"x".repeat(1000)));
+    assert!(!seen.contains("get: "), "no recall pointer on a reflect anchor");
+    let r = verb(&kernel, &agent, json!({"type": "recall", "id": stored["id"]})).await;
+    assert_eq!(r["messages"][0]["content"].as_str(), Some(text.as_str()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reflect_reply_carrying_an_html_view_reaches_the_model_without_the_body() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = base_kernel(&tmp, |k| {
+        k.bundles
+            .register(crate::chat_bundle::HANDLER_MODULE, crate::chat_bundle::AiChatBundle);
+    })
+    .await;
+    let backend_id = id_for(&tmp, "af_viewhide");
+    let file_id = format!("ff_{backend_id}");
+    add_file_bridge(&kernel, &file_id, &tmp.path().join(".fantastic"), &backend_id).await;
+    let agent = add_backend(&kernel, &backend_id, &file_id).await;
+    let made = verb(
+        &kernel,
+        &AgentId::from("kernel_state"),
+        json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "ai_chat.tools",
+               "id": "viewchat", "callable_by": {agent.as_str(): "*"}}),
+    )
+    .await;
+    assert_eq!(made["id"], "viewchat", "{made}");
+    let r = verb(
+        &kernel,
+        &AgentId::from("kernel_state"),
+        json!({"type": "update_agent", "id": agent.as_str(),
+               "can_call": {"$self": "*", file_id.as_str(): "*", "cli": "*", MEMORY: "*", "viewchat": "*"}}),
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+    let whole = verb(&kernel, &AgentId::from("viewchat"), json!({"type": "reflect"})).await;
+    let size = whole["view"]["bytes"].as_str().expect("the view body").chars().count();
+    let call = call_envelope("viewchat", json!({"type": "reflect"}), Some("self"));
+    let s = script(&agent, vec![pass(call), pass(DONE)], Duration::ZERO);
+    say(&kernel, &agent, "go").await;
+    assert!(until_passes(&s, 2).await);
+    let seen = s.request(1);
+    assert!(
+        seen.contains(&format!("<view>html, {size} chars, not shown</view>")),
+        "{seen}"
+    );
+    assert!(!seen.contains("<!DOCTYPE") && !seen.contains("<html"), "{seen}");
+}

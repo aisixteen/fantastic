@@ -175,6 +175,10 @@ pub const FOLD_AT: f64 = 0.95;
 /// Tokens per body over which an answered reply folds to an anchor in the model's
 /// view (#556); start there and watch the behaviour.
 pub const AUTOFOLD_AT: usize = 16_000;
+/// Tokens per body over which an answered `reflect` or `docs` reply folds to an
+/// anchor (#634): reference text the model can re-read with `get`, much smaller
+/// than [`AUTOFOLD_AT`].
+pub const REFERENCE_FOLD_AT: usize = 1_500;
 /// Adjacent folds at the head of the view before they fold as a group.
 ///
 /// THREE, not four. A real run folds at most once per turn — each projection
