@@ -238,6 +238,67 @@ async fn two_identical_builds_give_the_same_parts_and_a_changed_prompt_only_its_
     assert_eq!(a[1..], b[1..], "nothing else changed");
 }
 
+/// The prompt FILE's piece is named `prompt_file`, and changing only that file changes
+/// only its hash.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_changed_prompt_file_changes_only_the_prompt_file_part() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, agent) = mk_kernel(&tmp, "ra_file").await;
+    let dir = tmp.path().join(".fantastic");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("prompt.md");
+    std::fs::write(&path, "FILE-A {howto}").unwrap();
+    for (field, v) in [
+        ("file_bridge_id", format!("ff_{}", agent.as_str())),
+        ("system_prompt_file", "prompt.md".to_string()),
+    ] {
+        let mut p = json!({"type": "update_agent", "id": agent.as_str()});
+        p[field] = json!(v);
+        let r = ask(&kernel, &AgentId::from("kernel_state"), p).await;
+        assert!(r.get("error").is_none(), "{r}");
+    }
+    let _s = script(&agent, passes(12), Duration::ZERO);
+    say(&kernel, &agent, "go").await;
+    let before = replay(&rows(&kernel, &agent).await).pop().unwrap().1;
+    assert_eq!(
+        names(&before),
+        ["prompt_file", "verb_docs", "new_input"],
+        "{before:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    std::fs::write(&path, "FILE-B {howto}").unwrap();
+    // the watcher marks the file stale; a later turn reads it again
+    let mut after = before.clone();
+    for _ in 0..10 {
+        say(&kernel, &agent, "go").await;
+        after = replay(&rows(&kernel, &agent).await).pop().unwrap().1;
+        if part(&after, "prompt_file")["hash"] != part(&before, "prompt_file")["hash"] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_ne!(
+        part(&after, "prompt_file")["hash"],
+        part(&before, "prompt_file")["hash"],
+        "the edited file never reached a request"
+    );
+    assert_eq!(
+        part(&after, "prompt_file")["hash"],
+        json!(crate::row_attrs::short_hash("FILE-B ")),
+    );
+    assert_eq!(part(&after, "verb_docs"), part(&before, "verb_docs"));
+    assert!(!names(&after).contains(&"system_text".to_string()));
+}
+
+/// The hash is the first 16 hex digits of the text's SHA-256.
+#[test]
+fn the_hash_is_the_first_sixteen_hex_digits_of_the_sha256() {
+    // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+    assert_eq!(crate::row_attrs::short_hash("abc"), "ba7816bf8f01cfea");
+    // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    assert_eq!(crate::row_attrs::short_hash(""), "e3b0c44298fc1c14");
+}
+
 // ---- the delta, the checkpoints, the totals ----
 
 /// A request's parts as `build` takes them: `{part, ref?, form?, bytes, hash}`.
