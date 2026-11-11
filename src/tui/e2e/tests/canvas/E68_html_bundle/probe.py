@@ -4,9 +4,9 @@ bundling"):
 
 a) double-click → `html` places an html cell with its starter body;
 b) `set_html` sent to `<guid>|<cell>` through the host re-renders it;
-c) its body written as a page folder bundle (`.fantastic/web/bundles/card_e68/`,
-   `base: html_agent`) is a tile in the popup's `page · bundles` group once the page
-   opens again (a page loads its folder bundles when it opens);
+c) its body (`get_html` gives back what (b) set) as a page folder bundle (`.fantastic/web/bundles/card_e68/`,
+   `base: html_agent`, on disk before the page opens: a page loads its folder bundles when it
+   opens) is a tile in the popup's `page · bundles` group;
 d) that tile places an instance showing the body;
 e) the edited cell of (b) keeps its own body."""
 
@@ -45,6 +45,11 @@ def main() -> bool:
     info: dict = {}
     try:
         rig.init()
+        # the page loads its folder bundles when it OPENS (the live page-bundle watch went with
+        # `bundles_watch`, #620): the bundle is on disk before the page opens, with the body (b) sets
+        folder = rig.proj / ".fantastic" / "web" / "bundles" / NAME
+        folder.mkdir(parents=True)
+        (folder / "bundle.yaml").write_text(bundle_yaml(BODY_A))
 
         async def run() -> None:
             sys.path.insert(0, str(Path(__file__).resolve().parents[6] / "e2e" / "runners"))
@@ -63,15 +68,7 @@ def main() -> bool:
                 r["edited"] = bool(await pg.until(has(cell, "HTML-E68-A"), 15))
                 # c) bundled: the body as a page folder → a popup tile
                 got = await host_call(rig.port, f"{guid}|{cell}", {"type": "get_html"})
-                body = got.get("html", "") if isinstance(got, dict) else ""
-                folder = rig.proj / ".fantastic" / "web" / "bundles" / NAME
-                folder.mkdir(parents=True)
-                (folder / "bundle.yaml").write_text(bundle_yaml(body))
-                # the page loads its folder bundles when it OPENS (the live page-bundle watch went
-                # with `bundles_watch`, #620): a reload shows the new folder
-                await pg.open(rig.url)
-                await pg.until(f"{CELLS}.some(id=>id==={json.dumps(cell)})", 20)
-                await asyncio.sleep(2.0)
+                r["body_round_trips"] = isinstance(got, dict) and got.get("html") == BODY_A
                 for c in (1, 2):
                     await pg.mouse("mousePressed", 900, 200, c)
                     await pg.mouse("mouseReleased", 900, 200, c)
