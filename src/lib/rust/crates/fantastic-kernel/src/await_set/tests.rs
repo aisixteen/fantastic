@@ -317,7 +317,7 @@ async fn await_set_refuses_bad_args() {
             "timeout_s",
         ),
         (
-            json!({"type": "await_set", "ids": ["w1"], "timeout_s": "5"}),
+            json!({"type": "await_set", "ids": ["w1"], "timeout_s": "soon"}),
             "bad_arg",
             "timeout_s",
         ),

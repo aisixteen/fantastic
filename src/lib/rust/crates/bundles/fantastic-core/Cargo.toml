@@ -13,6 +13,8 @@ fantastic-bundle = { path = "../../fantastic-bundle" }
 # loader's record verbs read and write through it, clamped to the running dir.
 fantastic-file = { path = "../fantastic-file" }
 async-trait = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9"
 

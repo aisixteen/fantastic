@@ -486,16 +486,21 @@ async fn missing_hint_orders_hint_before_arg() {
         .remove(0)
         .result;
     assert_eq!(r["reason"], "missing_arg");
-    assert_eq!(
-        r["hint"],
-        "name the agent that will OWN the new one — your own id for a tool \
-         you keep, or the root ('kernel_state') for a top-level agent"
+    // the hint is the verb's declared argument list and the missing argument's doc
+    let hint = r["hint"].as_str().unwrap();
+    assert!(
+        hint.starts_with(
+            "create_agent takes — args: handler_module:string?, parent_id:string (req)"
+        ),
+        "{hint}"
     );
-    // python `missing(verb, arg, hint=hint)` → `refusal(code, error, hint=hint,
-    // arg=arg)`: `hint` is a named parameter of `refusal`, inserted BEFORE
-    // `arg`, which rides `**extra`.
+    assert!(
+        hint.contains("The agent that will OWN the new one"),
+        "{hint}"
+    );
+    // `hint` is inserted BEFORE `arg`, which rides beside `verb`
     let keys: Vec<&String> = r.as_object().unwrap().keys().collect();
-    assert_eq!(keys, vec!["error", "reason", "hint", "arg"]);
+    assert_eq!(keys, vec!["error", "reason", "hint", "arg", "verb"]);
 }
 
 #[tokio::test]
@@ -532,11 +537,22 @@ async fn create_refusal_precedence_matches_python() {
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
 
-    // Both handler_module AND parent_id absent -> handler_module wins (checked first).
+    // Both handler_module AND parent_id absent -> the declared REQUIRED argument
+    // (parent_id) is refused first, by the kernel's check of the declaration.
     let r = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["arg"], "parent_id");
+    // parent_id given, handler_module absent -> handler_module.
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","parent_id":"kernel"}),
         )])
         .await
         .remove(0)
@@ -571,12 +587,12 @@ async fn create_refusal_precedence_matches_python() {
     assert_eq!(r["arg"], "parent");
 
     // Reserved keys clear but the grant shape is bad -> invalid_meta before
-    // `guard_agent_id`/`exists` are ever reached (id is a number, not a str).
+    // `guard_agent_id`/`exists` are ever reached (the id is not a valid one).
     let r = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","handler_module":"counting.tools",
-                   "parent_id":"kernel","can_call":"*","id":123}),
+                   "parent_id":"kernel","can_call":"*","id":".."}),
         )])
         .await
         .remove(0)

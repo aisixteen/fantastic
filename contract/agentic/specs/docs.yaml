@@ -38,7 +38,7 @@ expect:
       because: DOC-2
     - name: an agent granted docs on the root reads them
       reach: {from: reader, to: $root, send: {type: docs, of: kernel, verb: cancel}}
-      expect: {allow: true, contains: {verbs.cancel: "args: task_id:str"}}
+      expect: {allow: true, contains: {bundle: kernel}}
       because: DOC-2
     - name: and the grant covers docs alone — reflect stays gated
       reach: {from: reader, to: $root, send: {type: reflect}}

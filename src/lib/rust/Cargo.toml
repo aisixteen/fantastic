@@ -48,6 +48,9 @@ async-trait = "0.1"
 
 # JSON record encoding + WS frames + reflect payloads.
 serde = { version = "1", features = ["derive"] }
+# One declaration per verb: its struct is the argument list, the JSON schema the kernel
+# validates and renders from (issue #642).
+schemars = { version = "0.8", features = ["preserve_order"] }
 # `preserve_order` so `serde_json::Map` round-trips JSON object key
 # order — matches Python's `dict` insertion-order semantics. Without
 # it, agent.yaml fields shuffle to alphabetical (BTreeMap), making

@@ -1682,64 +1682,42 @@ async fn a_literal_dotted_key_summarizes_at_that_key() {
     );
 }
 
-// ─── The kernel_verbs map is python's `_SYSTEM_VERB_DOCS` ─────────
+// ─── The kernel's own verbs are DECLARED, and `docs of=kernel` renders them ─────
 
-/// python `_SYSTEM_VERB_DOCS`, in declaration order, verbatim
-/// (`P/kernel/_agent.py`).
-const PY_KERNEL_VERB_DOCS: [(&str, &str); 14] = [
-    ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent. A handler_module that is a meta bundle (`bundles/<name>/bundle.yaml` with a base and no program) runs its base, with the `record` of the bundle under your fields; `bundle:<name>` beside the base is the same."),
-    ("update_agent", "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT. Whoever holds update_agent on the root updates any agent, itself included."),
-    ("delete_agent", "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`. Whoever holds delete_agent on the root deletes any agent."),
-    ("list_agents", "No args. Every agent's record, flat. Paged."),
-    ("ps", "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}, one row per in-flight dispatch. Paged."),
-    ("ledger", "No args. EVERY execution and what it became — named under its id, unnamed under its minted pid — {executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}, paged, scoped to what YOU originated; read from the kernel's memory store plus what is not yet flushed. `outcome` keeps the RESULT only for a named call; a dead letter keeps its error; anything else is {status, bytes} — the reply itself went to its caller. Failed/timed_out/cancelled rows are the dead-letter queue (announced by the `on_deadletter` event): inspect, retry with a NEW id if you choose, then `ack_deadletter` it — nothing is retried silently."),
-    ("ack_deadletter", "args: id:int|str (req — an execution id, or its name). Acknowledges a DEAD LETTER (failed/timed_out/cancelled) you originated: recorded in the kernel's store, it may then be pruned. Returns {acked:true, id}."),
-    ("kernel_start", "No args. THE START SEQUENCE — the root must name `memory_store_id` (fail loud otherwise): boots the root, then that store, starts flushing the kernel's execution rows into it, then boots every other agent in registration order. Idempotent. Returns {started, store, booted:[ids]}."),
-    ("cancel", "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}."),
-    ("shutdown_agents", "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."),
-    ("kernel_stop", "No args. Stops the kernel PROCESS gracefully — drain, every call settles (done, or cancelled into the dead letters), the last rows flush, agents shut down, exit. Under env:'container', the container."),
-    ("docs", "args: of:str (req — an agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'), tier:'oneliners'|'detailed'?, verb:str?. HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one signature line per verb, `detailed` the full text (no `verb`: plus emits, cancel and notes). Pull once per bundle; `detailed` for a verb you are about to use. Gated like every kernel verb: a `can_call` grant of `docs` on the root. Returns {of, bundle, tier, verbs, emits?, cancel?, notes?}."),
-    ("await_set", "args: ids:list[str] (req — agent ids), timeout_s:number? (a positive number of seconds), label:str?. Waits for EVERY named agent to send YOU a message of type 'report' (its `state` and `result`); a report from a named agent is HELD for the one combined message, not delivered as its own turn. Returns at once {wait_id, label, ids, timeout_s}; later ONE message reaches you — {wait_id, label, done:[{id, state, result}], missing:[ids], timed_out} — when all have reported or `timeout_s` passes. Refuses a missing or empty `ids`, an id that names no agent (unknown_agent), yourself, a non-positive `timeout_s` and a non-string `label`. The wait is a row: it survives a restart."),
-    ("await_cancel", "args: wait_id:int (req). Drops YOUR wait; the reports it held are then delivered one by one, each as its own message. Returns {cancelled:bool, wait_id, released:int}. A wait that is unknown or not yours ⇒ {cancelled:false}."),
-];
-
-/// python `kernel/_docs.signature` of each `_SYSTEM_VERB_DOCS` entry.
-const PY_SIGNATURES: [(&str, &str); 14] = [
-    ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta"),
-    ("update_agent", "args: id:str, **meta"),
-    ("delete_agent", "args: id:str"),
-    ("list_agents", "No args"),
-    ("ps", "No args"),
-    ("ledger", "No args"),
-    ("ack_deadletter", "args: id:int|str (req — an execution id, or its name)"),
-    ("kernel_start", "No args"),
-    ("cancel", "args: task_id:str"),
-    ("shutdown_agents", "No args"),
-    ("kernel_stop", "No args"),
-    ("docs", "args: of:str (req — an agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'), tier:'oneliners'|'detailed'?, verb:str?"),
-    ("await_set", "args: ids:list[str] (req — agent ids), timeout_s:number? (a positive number of seconds), label:str?"),
-    ("await_cancel", "args: wait_id:int (req)"),
+/// The kernel's verbs in declaration order (python's `_SYSTEM_VERB_DOCS` order).
+const KERNEL_VERB_NAMES: [&str; 14] = [
+    "create_agent",
+    "update_agent",
+    "delete_agent",
+    "list_agents",
+    "ps",
+    "ledger",
+    "ack_deadletter",
+    "kernel_start",
+    "cancel",
+    "shutdown_agents",
+    "kernel_stop",
+    "docs",
+    "await_set",
+    "await_cancel",
 ];
 
 #[test]
-fn kernel_verb_docs_match_python_verbatim() {
-    let docs = kernel_verb_docs();
-    let obj = docs.as_object().expect("an object");
-    assert_eq!(obj.len(), PY_KERNEL_VERB_DOCS.len(), "{docs}");
-    for (verb, text) in PY_KERNEL_VERB_DOCS {
-        assert_eq!(obj[verb], json!(text), "{verb}");
-    }
-    let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
-    let want: Vec<&str> = PY_KERNEL_VERB_DOCS.iter().map(|(v, _)| *v).collect();
-    assert_eq!(keys, want, "python declaration order");
+fn kernel_verbs_are_declared_in_order_and_rendered() {
+    let names: Vec<&str> = crate::declared::kernel::VERBS.iter().map(|v| v.name).collect();
+    assert_eq!(names, KERNEL_VERB_NAMES);
+    let rows = crate::docs::entries_of_decls(&[crate::declared::kernel::VERBS]);
+    let one = |verb: &str| rows.iter().find(|r| r.0 == verb).expect("declared").1.clone();
+    let det = |verb: &str| rows.iter().find(|r| r.0 == verb).expect("declared").2.clone();
+    assert_eq!(one("kernel_stop").split(" — ").next(), Some("No args"));
+    assert!(one("delete_agent").starts_with("args: id:string (req), keep_memory:bool? — CASCADES"));
+    assert!(one("docs").starts_with("args: of:string (req), tier:'oneliners'|'detailed'?, verb:string?"));
+    assert!(det("await_set").contains("ids:list[string] (req) — The agent ids to wait for."));
+    assert!(det("create_agent").contains("parent_id:string (req)"));
 }
 
 #[test]
 fn docs_signatures_are_pythons() {
-    for ((verb, text), (sverb, sig)) in PY_KERNEL_VERB_DOCS.iter().zip(PY_SIGNATURES.iter()) {
-        assert_eq!(verb, sverb);
-        assert_eq!(crate::docs::signature(text), *sig, "{verb}");
-    }
     assert_eq!(
         crate::docs::signature("args: q:str (req — e.g. a word), n:int? (default 5). Finds q."),
         "args: q:str (req — e.g. a word), n:int? (default 5)"
@@ -2295,10 +2273,9 @@ async fn ack_deadletter_refusals_and_acks_are_byte_exact() {
         .remove(0);
     let did = done.pid.expect("an id").0;
 
-    assert_eq!(
-        ack(Value::Null).await,
-        r#"{"error":"ack_deadletter: id required","reason":"missing_arg","arg":"id"}"#
-    );
+    let missing = r#"{"error":"ack_deadletter: missing argument 'id'","reason":"missing_arg","hint":"ack_deadletter takes — args: id:int|string (req). id: An execution id, or its name.","arg":"id","verb":"ack_deadletter"}"#;
+    assert_eq!(ack(Value::Null).await, missing);
+    // an empty name is a string: the verb's own answer, not a declaration refusal
     assert_eq!(
         ack(json!("")).await,
         r#"{"error":"ack_deadletter: id required","reason":"missing_arg","arg":"id"}"#

@@ -609,6 +609,15 @@ pub(crate) mod canvas_tree_tests {
             crate::kern::backend::HANDLER_MODULE,
             crate::kern::backend::BackendBundle,
         );
+        // the agents the canvas world creates (`create_agent` refuses a handler that is not installed)
+        kernel.bundles.register(
+            fantastic_user::HANDLER_MODULE,
+            fantastic_user::UserBundle::default(),
+        );
+        kernel.bundles.register(
+            fantastic_canvas_page::HANDLER_MODULE,
+            fantastic_canvas_page::CanvasPageBundle,
+        );
         let kernel = Arc::new(kernel);
         let root = Agent::new(
             KernelId::from("kernel"),

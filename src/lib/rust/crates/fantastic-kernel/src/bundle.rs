@@ -112,6 +112,23 @@ pub trait Bundle: Send + Sync {
         None
     }
 
+    /// THE VERBS this bundle's agents answer, DECLARED (`verbs!{}` in its `verbs.rs`): the
+    /// list the kernel checks every call against — verb known, arguments known,
+    /// present and typed — and renders in `reflect` and `docs`. `None`: this bundle has
+    /// not been moved to declarations yet (issue #642); its calls are not checked and
+    /// `docs` serves [`Self::verb_docs`]. Default: `None`.
+    fn verbs(&self) -> Option<&'static [crate::verbs::Verb]> {
+        None
+    }
+
+    /// THE RECORD this bundle's agents carry, DECLARED (`record!` in its `record.rs`):
+    /// the fields `create_agent` / `update_agent` may set on them, beside the fields
+    /// every record has ([`crate::declared::record`]). `None`: not declared — any field
+    /// is accepted. Default: `None`.
+    fn record(&self) -> Option<&'static crate::verbs::RecordDecl> {
+        None
+    }
+
     /// HOW TO CALL this bundle's agents — `{verb: doc}` in the bundle's order,
     /// python's module-level `VERBS` docstrings. Served by the kernel's `docs`
     /// verb (oneliners: each doc's signature; detailed: the whole doc) and read

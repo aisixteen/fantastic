@@ -367,15 +367,37 @@ async fn import_refuses_missing_binding_secret_and_code_with_messages_that_name_
         "{msg}"
     );
     assert_eq!(k.agents.len(), n, "nothing created");
-    // allowed, the code comes in
+    // allowed, a handler this kernel does not run is still refused when the agent is
+    // made (`create_agent` needs an installed bundle), and nothing is kept
     let r = import(
         &k,
         &c,
         json!({"approve": true, "bind": {}, "allow_code": true}),
     )
     .await;
+    assert_eq!(r["reason"], "failed", "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .contains("handler_module 'py_ab12.tools' is not installed"),
+        "{r}"
+    );
+    assert_eq!(k.agents.len(), n, "nothing kept");
+    // allowed, with the handler installed, the code comes in
+    let ok = written(
+        "code-ok",
+        "agents:\n  - id: s\n    handler_module: echo.tools\n",
+        &[("s/bundle.yaml", "name: s\n"), ("s/tools.py", "print(1)\n")],
+    );
+    let r = import(
+        &k,
+        &ok,
+        json!({"approve": true, "bind": {}, "allow_code": true}),
+    )
+    .await;
     assert_eq!(r["imported"], 1, "{r}");
-    for x in [d, s, c] {
+    for x in [d, s, c, ok] {
         let _ = std::fs::remove_dir_all(x);
     }
 }

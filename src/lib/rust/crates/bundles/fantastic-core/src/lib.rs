@@ -36,6 +36,8 @@ use fantastic_kernel::{persistence, AgentId, Kernel};
 
 pub mod export;
 pub mod folders;
+pub mod record;
+pub mod verbs;
 
 /// The `handler_module` this bundle answers to — python's package path.
 pub const HANDLER_MODULE: &str = "kernel_state.tools";
@@ -565,8 +567,12 @@ impl Bundle for KernelStateBundle {
         "kernel_state"
     }
 
-    fn verb_docs(&self) -> Value {
-        verbs_view()
+    fn verbs(&self) -> Option<&'static [fantastic_kernel::Verb]> {
+        Some(verbs::VERBS)
+    }
+
+    fn record(&self) -> Option<&'static fantastic_kernel::RecordDecl> {
+        Some(&record::RECORD)
     }
 
     fn readme(&self) -> Option<&'static str> {
@@ -600,40 +606,28 @@ impl Bundle for KernelStateBundle {
                 kernel.agents.iter().map(|e| e.key().0.clone()).collect(),
             )));
         };
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        let reply = match verb {
-            "reflect" => json!({
+        // `reflect` is a verb every agent answers (declared once, in the kernel); the
+        // others are this bundle's `verbs!`. The kernel checked the call before it got
+        // here: the verb is known and its arguments are in order.
+        if payload.get("type").and_then(Value::as_str) == Some("reflect") {
+            return Ok(Some(json!({
                 "id": agent.id.0,
                 "sentence": "Disk persistence/hydration root — owns .fantastic; \
                              answers load_tree / persist_record / forget_record.",
                 "root": reported_root(&agent, kernel)?,
-            }),
-            "boot" => self.boot(&agent, kernel).await?,
-            "load_tree" => self.load_tree(&agent, kernel).await?,
-            "persist_record" => self.persist_record(&agent, payload, kernel).await?,
-            "forget_record" => self.forget_record(&agent, payload, kernel).await?,
-            "persist_blob" => persistence::persist_blob(kernel, &agent, payload).await?,
-            "load_blob" => persistence::load_blob(kernel, &agent, payload).await?,
-            "reload_bundle" => reload_bundle(&agent, payload, kernel).await?,
-            "read_bundles" => read_bundles(&agent, payload, kernel)?,
-            "export_subtree" => export_subtree_root(&agent, payload, kernel).await,
-            // CODED. A reason-less error on the ROOT — the most-addressed agent
-            // in the kernel — is decorated by `apply_reflect_flags` into
-            // something that reads like a healthy reflect (python).
-            // `verb` echoes the RAW `type` (python `verb=t`): null when absent, `5`
-            // for a number — never the empty string the dispatch matched on.
-            _ => {
-                let t = payload.get("type").cloned().unwrap_or(Value::Null);
-                let mut r = fantastic_kernel::refusal(
-                    fantastic_kernel::refusal::UNHANDLED,
-                    format!(
-                        "kernel_state: unknown type {}",
-                        fantastic_bundle::py_repr_value(&t)
-                    ),
-                );
-                fantastic_kernel::refusal::with(&mut r, "verb", t);
-                r
-            }
+            })));
+        }
+        let call = verbs::Call::parse(payload).map_err(|e| -> BundleError { e.into() })?;
+        let reply = match call {
+            verbs::Call::Boot(_) => self.boot(&agent, kernel).await?,
+            verbs::Call::LoadTree(_) => self.load_tree(&agent, kernel).await?,
+            verbs::Call::PersistRecord(_) => self.persist_record(&agent, payload, kernel).await?,
+            verbs::Call::ForgetRecord(_) => self.forget_record(&agent, payload, kernel).await?,
+            verbs::Call::PersistBlob(_) => persistence::persist_blob(kernel, &agent, payload).await?,
+            verbs::Call::LoadBlob(_) => persistence::load_blob(kernel, &agent, payload).await?,
+            verbs::Call::ReloadBundle(_) => reload_bundle(&agent, payload, kernel).await?,
+            verbs::Call::ReadBundles(_) => read_bundles(&agent, payload, kernel)?,
+            verbs::Call::ExportSubtree(_) => export_subtree_root(&agent, payload, kernel).await,
         };
         if reply.is_null() {
             return Ok(None);
@@ -723,8 +717,6 @@ impl Bundle for KernelStateBundle {
     }
 }
 
-/// `verbs` as the loader's own reflect renders it — one line per verb, python's
-/// first-docstring-line rule.
 /// `reload_bundle {name}` — python `kernel_state._reload_bundle`: re-read
 /// `bundles/<name>/bundle.yaml` (a new folder loads) and restart every live
 /// instance, each AS ITSELF (kernel bookkeeping): `shutdown` with the reason, then
@@ -869,21 +861,6 @@ async fn export_subtree_root(agent: &Arc<Agent>, payload: &Value, kernel: &Arc<K
         );
     }
     export::export_subtree(kernel, payload, "kernel_state.export_subtree").await
-}
-
-fn verbs_view() -> Value {
-    json!({
-        "reflect": "Identity + the disk root it owns. No args.",
-        "boot": "Start the auto-flush loop unless `watch=false` (a loader serving a",
-        "load_tree": "args: none. Read this loader's subtree from disk → {records, version}.",
-        "persist_record": "args: record:dict (req). Merge-write one agent.yaml. Location is the",
-        "forget_record": "args: id:str (req), parent_id:str (opt). rmtree the agent's dir. For a",
-        "persist_blob": "args: agent_id:str (req), name:str (req), content:str (req). Persist an",
-        "load_blob": "args: agent_id:str (req), name:str (req). Read an agent's sidecar THROUGH the",
-        "reload_bundle": "args: name:str (req). Re-read `bundles/<name>/bundle.yaml` (a new folder loads) and restart every live instance of it, abruptly — an in-flight call is answered with an error naming the reload. Returns {reloaded, instances}. The root answers it.",
-        "export_subtree": "args: agent_id:str (req), path:str (req) — writes the agent and everything under it as a blueprint folder; outside references become ports; no keys, no absolute paths, no rows. path: a new or empty folder (relative to the running dir; no `..`). Reply {exported, path, ports, files}.",
-        "read_bundles": "args: name:str?. The folder bundles under this loader's root AS TEXT — {bundles:[{name, folder, text?, error?}]}, each `bundles/<name>/bundle.yaml` raw (`error` when it has none); `name` reads one. For a kernel that loads its own folders through this loader (a page kernel's proxy_loader); this loader parses nothing.",
-    })
 }
 
 #[cfg(test)]

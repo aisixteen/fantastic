@@ -543,8 +543,8 @@ async fn cancel_unknown_or_finished_task_is_honest() {
     assert!(bad["error"].is_string(), "expected an error: {bad}");
     assert!(bad.get("cancelled").is_none());
 
-    // `not isinstance(raw, (int, str))`: a float is neither — missing_arg, the
-    // same refusal as an absent id, never an honest {cancelled:false}.
+    // a float is neither an int nor a string: refused by the declaration (bad_arg,
+    // naming the argument), never an honest {cancelled:false}.
     for f in [json!(3.5), json!(3.0)] {
         let r = kernel
             .send(vec![Item::new(
@@ -554,7 +554,7 @@ async fn cancel_unknown_or_finished_task_is_honest() {
             .await
             .remove(0)
             .result;
-        assert_eq!(r["reason"], "missing_arg", "task_id={f}: {r}");
+        assert_eq!(r["reason"], "bad_arg", "task_id={f}: {r}");
         assert_eq!(r["arg"], "task_id");
     }
 }
@@ -780,7 +780,13 @@ async fn kernel_verbs_are_docs_not_reflect() {
         .remove(0)
         .result;
     assert_eq!(one["bundle"], json!("kernel"));
-    assert_eq!(one["verbs"]["cancel"], json!("args: task_id:str"));
+    assert!(
+        one["verbs"]["cancel"]
+            .as_str()
+            .unwrap()
+            .starts_with("args: task_id:int|string (req) — Kills that task"),
+        "{one}"
+    );
     assert!(
         one["verbs"].get("get").is_none(),
         "`get` is not a kernel verb"

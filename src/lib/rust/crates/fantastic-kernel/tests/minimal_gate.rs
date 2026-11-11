@@ -278,41 +278,48 @@ async fn a_missing_operand_or_an_unknown_id_gets_the_verbs_own_refusal() {
         json!({"can_call": {"kernel_state": "*"}}),
     )
     .await;
-    // a missing or non-string operand is the VERB's missing/shape refusal
-    for (payload, verb, arg) in [
+    // a missing operand is `missing_arg`, a non-string one `bad_arg`: the kernel's
+    // check of the verb's declaration, by argument name, before the verb runs
+    for (payload, verb, arg, reason) in [
         (
             json!({"type": "create_agent", "handler_module": MOD}),
             "create_agent",
             "parent_id",
+            "missing_arg",
         ),
         (
             json!({"type": "create_agent", "parent_id": 7, "handler_module": MOD}),
             "create_agent",
             "parent_id",
+            "bad_arg",
         ),
         (
             json!({"type": "update_agent", "description": "x"}),
             "update_agent",
             "id",
+            "missing_arg",
         ),
         (
             json!({"type": "update_agent", "id": 7}),
             "update_agent",
             "id",
+            "bad_arg",
         ),
-        (json!({"type": "delete_agent"}), "delete_agent", "id"),
+        (
+            json!({"type": "delete_agent"}),
+            "delete_agent",
+            "id",
+            "missing_arg",
+        ),
         (
             json!({"type": "delete_agent", "id": ""}),
             "delete_agent",
             "id",
+            "missing_arg",
         ),
     ] {
         let out = as_agent(&k, "a", "kernel", payload.clone()).await;
-        assert_eq!(
-            out.result["reason"], "missing_arg",
-            "{payload}: {}",
-            out.result
-        );
+        assert_eq!(out.result["reason"], reason, "{payload}: {}", out.result);
         assert_eq!(out.result["arg"], arg, "{payload}: {}", out.result);
         assert!(
             out.result["error"]

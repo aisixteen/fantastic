@@ -559,10 +559,11 @@ async fn handler_module_absent_or_falsy_is_refused_truthy_passes() {
 
 #[tokio::test]
 async fn a_spec_type_key_overrides_the_create_verb() {
-    // Python spreads the spec OVER the verb, so an entry naming `type`
-    // decides what is sent. Here the manifest sends `reflect` to the kernel: no
-    // agent is created, and the loader reports the reflect's own `id` as
-    // "created" — python's behaviour, root id apart.
+    // Python spreads the spec OVER the verb, so an entry naming `type` decides what
+    // is sent. Here the manifest sends `reflect` to the kernel with the spec's own
+    // fields: the kernel checks that call against the declaration of `reflect`
+    // and refuses the first argument it does not take, naming it. No agent is
+    // created.
     let (kernel, _fixture) = boot_with_manifest(
         "agents:\n  - id: a\n    handler_module: mock.tools\n    type: reflect\n",
     )
@@ -575,8 +576,9 @@ async fn a_spec_type_key_overrides_the_create_verb() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["booted"], json!(true), "{r}");
-    assert_eq!(r["created"], json!(["kernel_state"]), "{r}");
+    assert_eq!(r["booted"], json!(false), "{r}");
+    let error = r["error"].as_str().unwrap_or("");
+    assert!(error.contains("reflect: unknown argument 'id'"), "{r}");
     assert!(!kernel.agents.contains_key(&AgentId::from("a")), "{r}");
 }
 

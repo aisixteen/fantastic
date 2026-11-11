@@ -49,96 +49,33 @@ pub(super) fn is_kernel_verb(verb: &str) -> bool {
     )
 }
 
-/// One doc per KERNEL verb — what `docs of=kernel` serves. These are the
-/// SUBSTRATE's own verbs, answered by the ROOT alone, so they appear in no
-/// bundle's map. Mirrors python's `_SYSTEM_VERB_DOCS`.
-pub fn kernel_verb_docs() -> Value {
-    // PYTHON DECLARATION ORDER (`_SYSTEM_VERB_DOCS`).
-    json!({
-        "create_agent": "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. \
-    Creates a CHILD OF `parent_id` — any agent you name (your own id grows \
-    your own subtree); 'kernel_state' for top-level. No default parent. A \
-    handler_module that is a meta bundle (`bundles/<name>/bundle.yaml` with a base \
-    and no program) runs its base, with the `record` of the bundle under your fields; \
-    `bundle:<name>` beside the base is the same.",
-        "update_agent": "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED \
-    (a field you do not name is untouched), so a dict field must be sent \
-    WHOLE — `can_call`/`callable_by` included: restate every key you want \
-    to keep, the baseline `$self` among them, or the keys you omit are GONE. \
-    Granting one edge reads like a PATCH and behaves like a PUT. Whoever \
-    holds update_agent on the root updates any agent, itself included.",
-        "delete_agent": "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, \
-    deepest first; refuses if any descendant carries `delete_lock`. Whoever \
-    holds delete_agent on the root deletes any agent.",
-        "list_agents": "No args. Every agent's record, flat. Paged.",
-        "ps": "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, \
-    verb, started_at}]}, one row per in-flight dispatch. Paged.",
-        // EVERY execution, not just the named ones: the doc once said NAMED-only
-        // while the reply carried every minted-pid row beside them.
-        "ledger": "No args. EVERY execution and what it became — named under its id, \
-    unnamed under its minted pid — {executions:[{id, target, status, attempts, \
-    retries, named, outcome?, acked?}]}, paged, scoped to what YOU originated; read \
-    from the kernel's memory store plus what is not yet flushed. `outcome` keeps the \
-    RESULT only for a named call; a dead letter keeps its error; anything else is \
-    {status, bytes} — the reply itself went to its caller. Failed/timed_out/cancelled \
-    rows are the dead-letter queue (announced by the `on_deadletter` event): inspect, \
-    retry with a NEW id if you choose, then `ack_deadletter` it — nothing is retried \
-    silently.",
-        "ack_deadletter": "args: id:int|str (req — an execution id, or its name). \
-    Acknowledges a DEAD LETTER (failed/timed_out/cancelled) you originated: recorded \
-    in the kernel's store, it may then be pruned. Returns {acked:true, id}.",
-        "kernel_start": "No args. THE START SEQUENCE — the root must name \
-    `memory_store_id` (fail loud otherwise): boots the root, then that store, starts \
-    flushing the kernel's execution rows into it, then boots every other agent in \
-    registration order. Idempotent. Returns {started, store, booted:[ids]}.",
-        "cancel": "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its \
-    own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's \
-    batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}.",
-        // No em-dash, so the distilled line is the whole doc.
-        "shutdown_agents": "No args. Stops the AGENTS, not the process: drains (new \
-    roots refused), sends `shutdown` to every agent advertising it, waits for \
-    in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}.",
-        "kernel_stop": "No args. Stops the kernel PROCESS gracefully — drain, every call \
-    settles (done, or cancelled into the dead letters), the last rows flush, agents \
-    shut down, exit. Under env:'container', the container.",
-        "docs": "args: of:str (req — an agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'), \
-    tier:'oneliners'|'detailed'?, verb:str?. HOW TO CALL an agent — its bundle's \
-    verbs: `oneliners` (default) is one signature line per verb, `detailed` the full \
-    text (no `verb`: plus emits, cancel and notes). Pull once per bundle; `detailed` \
-    for a verb you are about to use. Gated like every kernel verb: a `can_call` grant \
-    of `docs` on the root. Returns {of, bundle, tier, verbs, emits?, cancel?, notes?}.",
-        "await_set": "args: ids:list[str] (req — agent ids), timeout_s:number? (a positive number of \
-    seconds), label:str?. Waits for EVERY named agent to send YOU a message of \
-    type 'report' (its `state` and `result`); a report from a named agent is HELD \
-    for the one combined message, not delivered as its own turn. Returns at once \
-    {wait_id, label, ids, timeout_s}; later ONE message reaches you — {wait_id, \
-    label, done:[{id, state, result}], missing:[ids], timed_out} — when all have \
-    reported or `timeout_s` passes. Refuses a missing or empty `ids`, an id that \
-    names no agent (unknown_agent), yourself, a non-positive `timeout_s` and a \
-    non-string `label`. The wait is a row: it survives a restart.",
-        "await_cancel": "args: wait_id:int (req). Drops YOUR wait; the reports it held are then \
-    delivered one by one, each as its own message. Returns {cancelled:bool, \
-    wait_id, released:int}. A wait that is unknown or not yours ⇒ \
-    {cancelled:false}.",
-    })
-}
-
 /// `Err` is a python RAISE the verb emulates (a store read that failed, an
 /// `int()` that threw) — settled `failed`, out of band; `Ok` is the reply.
 pub(super) async fn handle_kernel_verb(
     kernel: &Arc<Kernel>,
     target: &Arc<Agent>,
-    verb: &str,
     payload: &Value,
 ) -> Result<Value, Value> {
-    Ok(match verb {
-        "docs" => match payload.get("of").and_then(Value::as_str) {
+    use crate::declared::kernel::Call as K;
+    // The kernel checked the call against its declaration at dispatch; the typed
+    // call is the exhaustive list of what it answers.
+    let call = match K::parse(payload) {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(crate::refusal::refusal(
+                crate::refusal::BAD_ARG,
+                format!("the arguments do not parse ({e})"),
+            ))
+        }
+    };
+    Ok(match call {
+        K::Docs(_) => match payload.get("of").and_then(Value::as_str) {
             Some(of) if of.contains('|') => {
                 crate::docs::remote_docs_reply(kernel, of, payload).await
             }
             _ => crate::docs::docs_reply(kernel, payload),
         },
-        "list_agents" => {
+        K::ListAgents(_) => {
             // REGISTRATION ORDER — python iterates `self.ctx.agents`, a plain
             // dict, and the root comes first because it registered first. The
             // port sorted by id, which put every alphabetically-earlier agent
@@ -163,16 +100,16 @@ pub(super) async fn handle_kernel_verb(
             // `system_verbs`, so it needs a signpost back to the briefing.
             json!({ "agents": out, "next": next, "more": LIST_HINT })
         }
-        "create_agent" => crate::lifecycle::create_from_payload(kernel, target, payload).await,
-        "delete_agent" => crate::lifecycle::delete_from_payload(kernel, target, payload).await,
-        "update_agent" => update_from_payload(kernel, target, payload).await,
+        K::CreateAgent(_) => crate::lifecycle::create_from_payload(kernel, target, payload).await,
+        K::DeleteAgent(_) => crate::lifecycle::delete_from_payload(kernel, target, payload).await,
+        K::UpdateAgent(_) => update_from_payload(kernel, target, payload).await,
         // The EXECUTION LEDGER — a PROJECTION, not a table: the executions still
         // in RAM (in flight, or settled and not yet flushed) merged with the
         // `call`/`settle`/`ack` rows the kernel flushed into its memory store —
         // each call paired with its settle. CALLER-SCOPED: an agent sees what IT
         // originated, the operator sees all. Unscoped this would be a side-channel
         // around `callable_by`.
-        "ledger" => {
+        K::Ledger(_) => {
             let viewer = crate::send::current_origin();
             let entries = match kernel.ledger_entries().await {
                 Ok(e) => e,
@@ -195,17 +132,17 @@ pub(super) async fn handle_kernel_verb(
             });
             json!({ "executions": rows, "next": next })
         }
-        "ack_deadletter" => ack_deadletter(kernel, payload).await?,
-        "await_set" => {
+        K::AckDeadletter(_) => ack_deadletter(kernel, payload).await?,
+        K::AwaitSet(_) => {
             crate::await_set::await_set(kernel, crate::send::current_origin(), payload).await
         }
-        "await_cancel" => {
+        K::AwaitCancel(_) => {
             crate::await_set::await_cancel(kernel, crate::send::current_origin(), payload).await
         }
         // The live TASK TABLE, kernel-wide (like `list_agents`), not per-agent:
         // one row per in-flight dispatch, `parent` chaining them into the send
         // tree. `ps` shows its own row too — it IS a dispatch. The table is honest.
-        "ps" => {
+        K::Ps(_) => {
             // PAGED like `list_agents` — same cursor law: the id of the last row
             // handed over. Over a LIVE table a cursor may miss a row that
             // finished mid-walk; this is a kernel, not a snapshot store.
@@ -234,7 +171,7 @@ pub(super) async fn handle_kernel_verb(
         // via a bare `str::parse::<i64>()` fallback, which python's
         // `str.isdigit()` gate refuses (they fall through to the name path
         // instead, exactly like any other non-digit string).
-        "cancel" => {
+        K::Cancel(_) => {
             // `not isinstance(raw, (int, str))`: a FLOAT (3.5, and 3.0 too) is
             // neither, so it is refused, not answered {cancelled:false}.
             let raw = payload.get("task_id").filter(|v| !v.is_null());
@@ -255,8 +192,8 @@ pub(super) async fn handle_kernel_verb(
             }
         }
         // THE START SEQUENCE — see `Kernel::start`. Idempotent.
-        "kernel_start" => kernel.start(true).await,
-        "shutdown_agents" => {
+        K::KernelStart(_) => kernel.start(true).await,
+        K::ShutdownAgents(_) => {
             // Root control surface only, gated on rootness like
             // `kernel_stop` so it holds whether the verb was addressed to
             // the literal root id or via the reserved `kernel` address.
@@ -268,7 +205,7 @@ pub(super) async fn handle_kernel_verb(
             }
             kernel.shutdown_agents().await
         }
-        "kernel_stop" => {
+        K::KernelStop(_) => {
             // Root control surface only. Gate on rootness
             // (parent_id is None) so it holds whether the verb was
             // addressed to the literal root id or via the reserved `kernel` address —
@@ -294,7 +231,6 @@ pub(super) async fn handle_kernel_verb(
             });
             json!({ "type": "kernel_stop", "ok": true })
         }
-        _ => unreachable!("is_kernel_verb gate"),
     })
 }
 
@@ -377,6 +313,17 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
     // `validate_meta`; the trait default accepts everything.
     if let Some(hm) = target.handler_module.as_deref() {
         if let Some(bundle) = kernel.bundles.get(hm) {
+            if let Some(own) = bundle.record() {
+                if let Err(refused) = crate::verbs::check_record(
+                    "update_agent",
+                    bundle.name(),
+                    &patch,
+                    &crate::declared::record::RECORD,
+                    own,
+                ) {
+                    return refused;
+                }
+            }
             let current = target.meta.read().expect("meta poisoned").clone();
             if let Some(why) = bundle.validate_meta(&patch, &current) {
                 let mut r = crate::refusal::refusal(crate::refusal::INVALID_META, why);

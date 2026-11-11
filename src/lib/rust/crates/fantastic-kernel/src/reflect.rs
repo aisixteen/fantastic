@@ -311,7 +311,14 @@ impl Kernel {
         let mut reply = reflect_identity(&root);
         let payload = json!({"type": "reflect", "tree": "ids", "bundles": "ids"});
         match apply_reflect_flags(self, &root, &payload, &mut reply).await {
-            Ok(()) => reply,
+            Ok(()) => {
+                // LEAN: the primer is the tree and the bundle names; the verbs are
+                // what `docs` and a direct `reflect` serve.
+                if let Some(o) = reply.as_object_mut() {
+                    o.shift_remove("verbs");
+                }
+                reply
+            }
             Err(raised) => raised,
         }
     }
@@ -559,17 +566,39 @@ pub async fn apply_reflect_flags(
         .and_then(|hm| kernel.bundles.get(hm));
     match payload.get("readme") {
         Some(Value::Bool(true)) => {
-            let readme = bundle.and_then(|b| b.readme()).map(translate_newlines);
+            let readme = bundle.as_ref().and_then(|b| b.readme()).map(translate_newlines);
             obj.insert(
                 "readme".to_string(),
                 readme.map_or(Value::Null, Value::String),
             );
         }
         Some(Value::String(sel)) if !sel.is_empty() => {
-            let docs = bundle.map_or(&[][..], |b| b.docs());
+            let docs = bundle.as_ref().map_or(&[][..], |b| b.docs());
             obj.insert("readme".to_string(), readme_view(docs, sel));
         }
         _ => {}
+    }
+    // THE VERBS, rendered from the declarations: the agent's own (its bundle's) and the
+    // ones every agent answers; the root answers the kernel's too. A bundle not yet
+    // moved to declarations has none here — `docs` serves its text.
+    if let Some(own) = bundle.as_ref().and_then(|b| b.verbs()) {
+        let mut lists: Vec<&[crate::verbs::Verb]> = Vec::new();
+        if target.parent_id.is_none() {
+            lists.push(crate::declared::kernel::VERBS);
+        }
+        lists.push(own);
+        lists.push(crate::declared::common::VERBS);
+        let mut seen: Vec<&str> = Vec::new();
+        let mut shown: Vec<&crate::verbs::Verb> = Vec::new();
+        for l in lists {
+            for v in l.iter() {
+                if !seen.contains(&v.name) {
+                    seen.push(v.name);
+                    shown.push(v);
+                }
+            }
+        }
+        obj.insert("verbs".to_string(), crate::verbs::lines(&shown));
     }
     Ok(())
 }
@@ -734,7 +763,10 @@ fn available_bundles(kernel: &Arc<Kernel>, schemas: bool) -> Vec<Value> {
                 "handler_module": handler_module,
             });
             if schemas {
-                if let Some(sch) = b.record_schema() {
+                // DECLARED record first (issue #642); a bundle not yet moved keeps its schema.
+                if let Some(rec) = b.record() {
+                    entry["schema"] = crate::verbs::record_fields(rec);
+                } else if let Some(sch) = b.record_schema() {
                     entry["schema"] = sch;
                 }
             }

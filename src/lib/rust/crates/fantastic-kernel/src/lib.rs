@@ -26,6 +26,7 @@ pub mod await_set;
 pub mod bootstrap;
 pub mod bundle;
 pub mod call_guard;
+pub mod declared;
 pub mod docs;
 pub mod errors;
 pub mod executions;
@@ -51,6 +52,7 @@ pub mod state;
 pub mod storage;
 mod sys;
 pub mod tasks;
+pub mod verbs;
 pub mod yaml_io;
 
 #[doc(hidden)]
@@ -59,6 +61,7 @@ pub mod test_support;
 pub use agent::{Agent, AgentId, AgentRecord, RESERVED_RECORD_KEYS};
 pub use authz::{authorize_call, default_callable_by, default_can_call, Decision, FROM_ABOVE};
 pub use bundle::{Bundle, BundleRegistry, Reply};
+pub use verbs::{RecordDecl, Verb};
 pub use errors::{KernelError, KernelResult};
 pub use kernel::{
     Kernel, StateSubscriber, SubscriberToken, DEFAULT_INBOX_BOUND, SELF_PLACEHOLDER,

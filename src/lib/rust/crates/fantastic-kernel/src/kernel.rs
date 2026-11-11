@@ -557,6 +557,9 @@ impl Kernel {
         };
         // PER-INSTANCE first, as `docs` reads it: an agent whose bundle names its own
         // table answers that table (python `advertises` reads `instance_verbs`).
+        if let Some(own) = bundle.verbs() {
+            return own.iter().any(|v| v.name == verb);
+        }
         let table = bundle
             .instance_verb_docs(&agent)
             .unwrap_or_else(|| bundle.verb_docs());

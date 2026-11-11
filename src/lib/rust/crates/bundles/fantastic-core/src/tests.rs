@@ -120,10 +120,38 @@ use fantastic_kernel::{BundleRegistry, Item, Kernel};
 use serde_json::json;
 use std::sync::Arc;
 
-/// A disk kernel at `tmp` whose root is the real `kernel_state` loader.
-fn booted(tmp: &TempDir) -> Arc<Kernel> {
+/// An installed bundle that answers anything: the agents these tests create
+/// (`create_agent` refuses a handler that is not installed).
+struct Noop;
+
+#[async_trait]
+impl Bundle for Noop {
+    fn name(&self) -> &str {
+        "noop"
+    }
+    async fn handle(
+        &self,
+        _id: &AgentId,
+        _payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<Reply, BundleError> {
+        Ok(Some(json!({"ok": true})))
+    }
+}
+
+/// Register the loader and the bundles the tests create agents of.
+fn registry() -> BundleRegistry {
     let mut reg = BundleRegistry::new();
     reg.register(HANDLER_MODULE, KernelStateBundle::default());
+    reg.register("noop.tools", Noop);
+    reg.register("file_bridge.tools", Noop);
+    reg.register("folder_b", Noop);
+    reg
+}
+
+/// A disk kernel at `tmp` whose root is the real `kernel_state` loader.
+fn booted(tmp: &TempDir) -> Arc<Kernel> {
+    let reg = registry();
     bootstrap(
         reg,
         BootstrapOptions::daemon(tmp.path().join(".fantastic"), tmp.path()),
@@ -154,6 +182,12 @@ async fn root_with_handler_reflects_identity() {
         v["sentence"],
         json!("Fantastic kernel. Everything is reachable by sending messages to agents.")
     );
+    // The verbs, rendered from the declarations: the kernel's own, the loader's, and
+    // the ones every agent answers.
+    let verbs = v["verbs"].as_object().expect("a verbs block");
+    for name in ["create_agent", "docs", "persist_record", "export_subtree", "reflect"] {
+        assert!(verbs.contains_key(name), "{name} in {v}");
+    }
     // The loader's contribution, python's distilled set.
     assert!(v["persistence"].is_object());
     assert!(v.get("self_extension").is_some());
@@ -259,7 +293,10 @@ async fn unknown_type_refusal_is_verbatim() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);
     let v = root_reflect(&kernel, json!({"type": "wat"})).await;
-    assert_eq!(v["error"], json!("kernel_state: unknown type 'wat'"));
+    // the KERNEL refuses a verb the bundle does not declare, naming what it answers
+    let error = v["error"].as_str().unwrap();
+    assert!(error.starts_with("unknown verb 'wat'; kernel_state answers: boot, load_tree, "), "{error}");
+    assert!(error.contains("export_subtree, reflect, shutdown"), "{error}");
     assert_eq!(v["reason"], json!("unhandled"));
     assert_eq!(v["verb"], json!("wat"));
 }
@@ -380,8 +417,10 @@ async fn blob_verbs_are_the_loaders_and_refuse_like_python() {
         .await
         .remove(0)
         .result;
-    assert_eq!(v["error"], json!("persist_blob: agent_id (str) required"));
-    assert!(v.get("reason").is_none(), "python's bare error: {v}");
+    // a missing argument is refused by the kernel, by name, from the declaration
+    assert_eq!(v["error"], json!("persist_blob: missing argument 'agent_id'"));
+    assert_eq!(v["reason"], json!("missing_arg"), "{v}");
+    assert_eq!(v["arg"], json!("agent_id"), "{v}");
 
     let v = kernel
         .send(vec![Item::new(
@@ -1021,60 +1060,29 @@ async fn a_loader_without_a_root_in_a_kernel_with_no_running_dir_raises() {
 async fn unknown_type_wire_shape_is_byte_exact() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);
-    for (verb, want) in [
-        (
-            "wat",
-            r#"{"error":"kernel_state: unknown type 'wat'","reason":"unhandled","verb":"wat"}"#,
-        ),
-        (
-            "shutdown",
-            r#"{"error":"kernel_state: unknown type 'shutdown'","reason":"unhandled","verb":"shutdown"}"#,
-        ),
-        (
-            "it's",
-            r#"{"error":"kernel_state: unknown type \"it's\"","reason":"unhandled","verb":"it's"}"#,
-        ),
-    ] {
+    let answers = "boot, load_tree, persist_record, forget_record, persist_blob, load_blob, \
+                   reload_bundle, read_bundles, export_subtree, reflect, shutdown, create_agent, \
+                   update_agent, delete_agent, list_agents, ps, ledger, ack_deadletter, \
+                   kernel_start, cancel, shutdown_agents, kernel_stop, docs, await_set, \
+                   await_cancel";
+    for verb in ["wat", "it's"] {
         let v = root_reflect(&kernel, json!({"type": verb})).await;
-        assert_eq!(serde_json::to_string(&v).unwrap(), want, "{verb}");
+        let want = json!({
+            "error": format!("unknown verb {}; kernel_state answers: {answers}",
+                fantastic_bundle::py_repr(verb)),
+            "reason": "unhandled",
+            "hint": "docs of=kernel_state lists each verb's arguments",
+            "verb": verb,
+        });
+        assert_eq!(
+            serde_json::to_string(&v).unwrap(),
+            serde_json::to_string(&want).unwrap(),
+            "{verb}"
+        );
     }
-}
-
-/// The handler's `verb` echoes the RAW `type` — python `verb=t`: null when it is
-/// absent, the number for `5` — never the empty string the dispatch matched on.
-/// `send` refuses those payloads before any handler runs (python: `send:
-/// payload.type required` / `must be a non-empty string`), so the handler is
-/// called directly, as a bundle that forwards a payload would.
-#[tokio::test]
-async fn an_unknown_type_echoes_the_raw_value_as_verb() {
-    let tmp = TempDir::new().unwrap();
-    let kernel = booted(&tmp);
-    let root = kernel.root().expect("root").id.clone();
-    for (payload, want) in [
-        (
-            json!({}),
-            r#"{"error":"kernel_state: unknown type None","reason":"unhandled","verb":null}"#,
-        ),
-        (
-            json!({"type": null}),
-            r#"{"error":"kernel_state: unknown type None","reason":"unhandled","verb":null}"#,
-        ),
-        (
-            json!({"type": 5}),
-            r#"{"error":"kernel_state: unknown type 5","reason":"unhandled","verb":5}"#,
-        ),
-        (
-            json!({"type": ""}),
-            r#"{"error":"kernel_state: unknown type ''","reason":"unhandled","verb":""}"#,
-        ),
-    ] {
-        let r = KernelStateBundle::default()
-            .handle(&root, &payload, &kernel)
-            .await
-            .expect("a refusal, not a raise")
-            .expect("a reply");
-        assert_eq!(serde_json::to_string(&r).unwrap(), want, "{payload}");
-    }
+    // `shutdown` is answered by every agent: this bundle has nothing to release
+    let v = root_reflect(&kernel, json!({"type": "shutdown"})).await;
+    assert!(v.is_null(), "{v}");
 }
 
 async fn ask(kernel: &Arc<Kernel>, target: &str, payload: serde_json::Value) -> serde_json::Value {
@@ -1165,11 +1173,13 @@ async fn mk(kernel: &Arc<Kernel>, id: &str, parent: &str) {
 
 #[test]
 fn root_export_subtree_is_in_the_roots_verbs_and_docs() {
-    let v = KernelStateBundle::default().verb_docs();
-    let doc = v["export_subtree"]
-        .as_str()
+    let verb = verbs::VERBS
+        .iter()
+        .find(|v| v.name == "export_subtree")
         .expect("export_subtree is a verb");
-    assert!(doc.contains("agent_id:str (req), path:str (req)"), "{doc}");
+    let doc = fantastic_kernel::verbs::detail(verb);
+    assert!(doc.contains("agent_id:string (req)"), "{doc}");
+    assert!(doc.contains("path:string (req)"), "{doc}");
     assert!(doc.contains("{exported, path, ports, files}"), "{doc}");
 }
 
@@ -1201,8 +1211,7 @@ async fn root_export_subtree_exports_a_three_level_subtree() {
 async fn root_export_subtree_reads_bundles_from_the_state_folder_not_the_work_folder() {
     let state = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
-    let mut reg = BundleRegistry::new();
-    reg.register(HANDLER_MODULE, KernelStateBundle::default());
+    let reg = registry();
     let kernel = bootstrap(reg, BootstrapOptions::daemon(state.path(), work.path()))
         .expect("boot")
         .kernel;
@@ -1238,32 +1247,38 @@ async fn root_export_subtree_refuses_the_root_id_and_unknown_id_and_bad_args() {
     let kernel = booted(&tmp);
     let root = kernel.root().unwrap().id.0.clone();
     mk(&kernel, "a", &root).await;
-    for (p, reason) in [
+    // the verb's own refusals, and the kernel's for an argument the declaration requires
+    for (p, reason, prefix) in [
         (
             json!({"type": "export_subtree", "agent_id": root, "path": "o1"}),
             "bad_arg",
+            "kernel_state.export_subtree:",
         ),
         (
             json!({"type": "export_subtree", "agent_id": "nope", "path": "o2"}),
             "bad_arg",
+            "kernel_state.export_subtree:",
         ),
         (
             json!({"type": "export_subtree", "agent_id": "a"}),
-            "bad_arg",
+            "missing_arg",
+            "export_subtree: missing argument 'path'",
         ),
-        (json!({"type": "export_subtree", "path": "o3"}), "bad_arg"),
+        (
+            json!({"type": "export_subtree", "path": "o3"}),
+            "missing_arg",
+            "export_subtree: missing argument 'agent_id'",
+        ),
         (
             json!({"type": "export_subtree", "agent_id": "a", "path": "../o4"}),
             "bad_arg",
+            "kernel_state.export_subtree:",
         ),
     ] {
         let r = root_reflect(&kernel, p.clone()).await;
         assert_eq!(r["reason"], json!(reason), "{p}: {r}");
         assert!(
-            r["error"]
-                .as_str()
-                .unwrap_or("")
-                .starts_with("kernel_state.export_subtree:"),
+            r["error"].as_str().unwrap_or("").starts_with(prefix),
             "{p}: {r}"
         );
     }

@@ -132,7 +132,7 @@ async fn delete_agent_without_an_id_is_missing_arg() {
     let r = call(&kernel, "kernel", json!({"type": "delete_agent"})).await;
     assert_eq!(r["reason"], "missing_arg", "{r}");
     assert_eq!(r["arg"], "id", "{r}");
-    assert_eq!(r["error"], "delete_agent: id required", "{r}");
+    assert_eq!(r["error"], "delete_agent: missing argument 'id'", "{r}");
 }
 
 /// Same for `cancel` — `{cancelled:false}` would claim the kernel looked; it
@@ -143,7 +143,7 @@ async fn cancel_without_a_task_id_is_missing_arg() {
     let r = call(&kernel, "kernel", json!({"type": "cancel"})).await;
     assert_eq!(r["reason"], "missing_arg", "{r}");
     assert_eq!(r["arg"], "task_id", "{r}");
-    assert_eq!(r["error"], "cancel: task_id required", "{r}");
+    assert_eq!(r["error"], "cancel: missing argument 'task_id'", "{r}");
 }
 
 /// A verb the ROOT cannot answer is `unhandled` + the `verb` that was asked —

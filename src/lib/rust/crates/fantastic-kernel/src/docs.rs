@@ -51,6 +51,45 @@ pub fn signature(doc: &str) -> String {
     line.trim_end_matches('.').to_string()
 }
 
+/// One row of a docs answer: the verb, its ONE-LINE text and its DETAILED text.
+pub type Entry = (String, String, String);
+
+/// The rows of a bundle that has NOT been moved to declarations: its hand-written
+/// `{verb: doc}` table, cut to a oneliner by [`signature`] (issue #642: gone with the
+/// last bundle that moves).
+#[must_use]
+pub fn entries_of_table(table: &Value) -> Vec<Entry> {
+    let empty = Map::new();
+    table
+        .as_object()
+        .unwrap_or(&empty)
+        .iter()
+        .map(|(n, d)| {
+            let d = d.as_str().unwrap_or("");
+            (n.clone(), signature(d), full_doc(d))
+        })
+        .collect()
+}
+
+/// The rows of DECLARED verbs, rendered from the declarations ([`crate::verbs`]); a
+/// verb named in an earlier list is not repeated from a later one.
+#[must_use]
+pub fn entries_of_decls(lists: &[&[crate::verbs::Verb]]) -> Vec<Entry> {
+    let mut out: Vec<Entry> = Vec::new();
+    for l in lists {
+        for v in l.iter() {
+            if !out.iter().any(|(n, _, _)| n == v.name) {
+                out.push((
+                    v.name.to_string(),
+                    crate::verbs::line(v),
+                    crate::verbs::detail(v),
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// The `docs` reply `{of, bundle, tier, verbs, emits?, cancel?, notes?}` —
 /// extras only on a detailed reply with no `verb`. Python `_docs.render`.
 #[must_use]
@@ -59,14 +98,12 @@ pub fn render(
     bundle: Value,
     tier: &str,
     verb: Option<&str>,
-    table: &Value,
+    table: &[Entry],
     extras: &[(&str, Option<Value>)],
 ) -> Value {
-    let empty = Map::new();
-    let docs = table.as_object().unwrap_or(&empty);
     if let Some(v) = verb {
-        if !docs.contains_key(v) {
-            let names: Vec<&str> = docs.keys().map(String::as_str).collect();
+        if !table.iter().any(|(n, _, _)| n == v) {
+            let names: Vec<&str> = table.iter().map(|(n, _, _)| n.as_str()).collect();
             let mut r = refusal_hint(
                 BAD_ARG,
                 format!("docs: {of} has no verb {}", fantastic_bundle::py_repr(v)),
@@ -76,19 +113,13 @@ pub fn render(
             return r;
         }
     }
-    let names: Vec<String> = match verb {
-        Some(v) => vec![v.to_string()],
-        None => docs.keys().cloned().collect(),
-    };
     let mut verbs = Map::new();
-    for n in names {
-        let d = docs.get(&n).and_then(Value::as_str).unwrap_or("");
-        let text = if tier == "detailed" {
-            full_doc(d)
-        } else {
-            signature(d)
-        };
-        verbs.insert(n, Value::String(text));
+    for (n, line, detail) in table {
+        if verb.is_some_and(|v| v != n) {
+            continue;
+        }
+        let text = if tier == "detailed" { detail } else { line };
+        verbs.insert(n.clone(), Value::String(text.clone()));
     }
     let mut out = Map::new();
     out.insert("of".into(), json!(of));
@@ -181,7 +212,7 @@ pub fn docs_reply(kernel: &Arc<Kernel>, payload: &Value) -> Value {
             json!("kernel"),
             tier,
             verb,
-            &crate::send::kernel_verb_docs(),
+            &entries_of_decls(&[crate::declared::kernel::VERBS]),
             &[],
         );
     }
@@ -192,7 +223,7 @@ pub fn docs_reply(kernel: &Arc<Kernel>, payload: &Value) -> Value {
     let module = if let Some(a) = &agent {
         match a.handler_module.clone() {
             Some(hm) => hm,
-            None => return render(of, Value::Null, tier, verb, &json!({}), &[]),
+            None => return render(of, Value::Null, tier, verb, &[], &[]),
         }
     } else if kernel.bundles.is_folder(of) {
         // a FOLDER BUNDLE by its name — its handler_module
@@ -220,15 +251,21 @@ pub fn docs_reply(kernel: &Arc<Kernel>, payload: &Value) -> Value {
         return r;
     };
     let Some(bundle) = kernel.bundles.get(&module) else {
-        return render(of, json!(module), tier, verb, &json!({}), &[]);
+        return render(of, json!(module), tier, verb, &[], &[]);
     };
     // PER-INSTANCE VERBS: an agent whose bundle names its own
     // table (an MCP server's tools) is documented by it; the bundle (no agent)
-    // shows the bundle's.
-    let table = agent
-        .as_deref()
-        .and_then(|a| bundle.instance_verb_docs(a))
-        .unwrap_or_else(|| bundle.verb_docs());
+    // shows the bundle's. A bundle that DECLARES its verbs is rendered from the
+    // declarations, with the verbs every agent answers.
+    let table = match bundle.verbs() {
+        Some(own) => entries_of_decls(&[own, crate::declared::common::VERBS]),
+        None => entries_of_table(
+            &agent
+                .as_deref()
+                .and_then(|a| bundle.instance_verb_docs(a))
+                .unwrap_or_else(|| bundle.verb_docs()),
+        ),
+    };
     render(
         of,
         json!(module),

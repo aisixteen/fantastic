@@ -963,6 +963,7 @@ pub(crate) mod create_tests {
         kernel.bundles.register("ai_chat.tools", FakeAi("ai_chat.tools"));
         kernel.bundles.register("ollama_backend.tools", RefusingAi);
         kernel.bundles.register("fake_store.tools", FakeStore::default());
+        kernel.bundles.register("file_bridge.tools", fantastic_file::FileBundle::default());
         // `user` is real: the host admits an AI to the store AS `user` (`Host::act`)
         kernel.bundles.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
         let kernel = Arc::new(kernel);

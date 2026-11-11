@@ -116,9 +116,9 @@ impl McpClientBundle {
 /// is skipped, never shadowed silently.
 fn reserved(name: &str) -> bool {
     matches!(name, "reflect" | "boot" | "shutdown")
-        || fantastic_kernel::send::kernel_verb_docs()
-            .as_object()
-            .is_some_and(|m| m.contains_key(name))
+        || fantastic_kernel::declared::kernel_verbs()
+            .iter()
+            .any(|v| v.name == name)
 }
 
 /// The record schema the catalog publishes and the write enforces.

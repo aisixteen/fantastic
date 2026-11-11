@@ -176,10 +176,21 @@ pub async fn create_from_payload(
         }
     };
     let parent = &parent;
-    // We allow creation of agents whose bundle isn't yet registered —
-    // record persists, agent is registered but won't dispatch domain
-    // verbs until the bundle lands. Matches Python's behaviour. Only
-    // the LOAD path skips unknown bundles (weak-load semantics).
+    // THE HANDLER MUST BE INSTALLED (issue #642): an agent of a bundle this kernel
+    // does not run would be created, and fail only when called. The LOAD path still
+    // skips a record whose bundle is another runtime's (weak-load semantics).
+    let Some(bundle) = kernel.bundles.get(hm) else {
+        let mut r = crate::refusal::refusal_hint(
+            crate::refusal::BAD_ARG,
+            format!(
+                "create_agent: handler_module {} is not installed in this kernel",
+                fantastic_bundle::py_repr(hm)
+            ),
+            "`reflect` with bundles=ids lists the installed bundles",
+        );
+        crate::refusal::with(&mut r, "arg", json!("handler_module"));
+        return r;
+    };
 
     // RESERVED KEYS FIRST, in SORTED order — python walks `sorted(RESERVED_RECORD_KEYS)`
     // and checks each against the payload, so the refusal names the
@@ -210,9 +221,8 @@ pub async fn create_from_payload(
         }
     }
 
-    // Compose meta from the remaining payload fields. No per-field check here:
-    // an unknown handler_module is not refused (see above), and reserved keys
-    // were already ruled out.
+    // Compose meta from the remaining payload fields; the bundle's declared record
+    // judges them below, and reserved keys were already ruled out.
     let mut meta: Map<String, Value> = Map::new();
     if let Some(obj) = payload.as_object() {
         for (k, v) in obj {
@@ -234,10 +244,20 @@ pub async fn create_from_payload(
     if let Some(why) = bad_grant_shape(&meta) {
         return crate::refusal::refusal(crate::refusal::INVALID_META, &why);
     }
-    if let Some(bundle) = kernel.bundles.get(hm) {
-        if let Some(why) = bundle.validate_meta(&meta, &Map::new()) {
-            return crate::refusal::refusal(crate::refusal::INVALID_META, why);
+    // THE RECORD'S FIELDS are the bundle's declared ones ([`crate::verbs::check_record`]).
+    if let Some(own) = bundle.record() {
+        if let Err(refused) = crate::verbs::check_record(
+            "create_agent",
+            bundle.name(),
+            &meta,
+            &crate::declared::record::RECORD,
+            own,
+        ) {
+            return refused;
         }
+    }
+    if let Some(why) = bundle.validate_meta(&meta, &Map::new()) {
+        return crate::refusal::refusal(crate::refusal::INVALID_META, why);
     }
 
     // A supplied id — even "" — is the caller's choice and is validated as one

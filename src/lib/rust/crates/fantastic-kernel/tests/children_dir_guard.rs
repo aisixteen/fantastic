@@ -15,9 +15,30 @@ use std::path::Path;
 use std::sync::Arc;
 use tempfile::TempDir;
 
+struct Noop;
+
+#[async_trait::async_trait]
+impl fantastic_kernel::Bundle for Noop {
+    fn name(&self) -> &str {
+        "noop"
+    }
+    async fn handle(
+        &self,
+        _id: &AgentId,
+        _payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<fantastic_kernel::Reply, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Some(json!({"ok": true})))
+    }
+}
+
 fn mk() -> (TempDir, Arc<Kernel>) {
     let tmp = TempDir::new().unwrap();
-    let kernel = Arc::new(Kernel::new());
+    let mut kernel = Kernel::new();
+    let mut reg = BundleRegistry::new();
+    reg.register("noop.tools", Noop);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("kernel_state"),
         None,

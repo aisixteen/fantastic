@@ -141,14 +141,27 @@ async fn a_refusal_is_not_decorated_into_a_reflect() {
     // agents persist here). The call is refused with a code — and is not dressed
     // up with kernel_verbs/tree/more, which made it read like a healthy reflect.
     let (_t, kernel) = mk();
-    let rec = call(
+    // `create_agent` refuses a handler that is not installed (issue #642), so the
+    // foreign record is one the kernel LOADED: registered as the load path does.
+    let refused = call(
         &kernel,
         "kernel",
         json!({"type": "create_agent", "parent_id": "kernel_state", "id": "foreign",
                "handler_module": "frontend_view.tools"}),
     )
     .await;
-    assert_eq!(rec["id"], "foreign", "{rec}");
+    assert_eq!(refused["reason"], "bad_arg", "{refused}");
+    assert_eq!(refused["arg"], "handler_module", "{refused}");
+    assert!(kernel.agents.get(&AgentId::from("foreign")).is_none());
+    let foreign = Agent::new(
+        AgentId::from("foreign"),
+        Some("frontend_view.tools".to_string()),
+        Some(AgentId::from("kernel_state")),
+        Map::new(),
+        std::path::PathBuf::from("/nowhere/foreign"),
+        true,
+    );
+    kernel.register(foreign);
     let r = call(&kernel, "foreign", json!({"type": "reflect"})).await;
     assert_eq!(r["reason"], "unhandled", "{r}");
     assert_eq!(r["verb"], "reflect", "{r}");
