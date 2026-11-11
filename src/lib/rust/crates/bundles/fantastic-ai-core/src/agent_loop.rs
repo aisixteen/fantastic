@@ -240,7 +240,7 @@ pub async fn run_generation(
         )
         .await?;
     }
-    let (messages, store_len) = assemble_messages(
+    let (mut messages, store_len) = assemble_messages(
         self_id,
         state,
         user_text,
@@ -250,6 +250,15 @@ pub async fn run_generation(
         caching,
     )
     .await?;
+    // KEEP (#641): a reply that will fold after the answer carries the call that keeps
+    // what the model needs of it
+    if caching.folds() {
+        if let Some(last) = messages.last_mut() {
+            let marked =
+                crate::history_view::mark_keep(last.get("content").and_then(Value::as_str).unwrap_or(""));
+            last["content"] = Value::String(marked);
+        }
+    }
     // Context-overflow projection: shape what the MODEL sees this turn to fit the
     // window via the agent's `context_strategy`. Done ONCE at turn entry. The
     // window is read off the record EVERY turn, so a model switched to a smaller

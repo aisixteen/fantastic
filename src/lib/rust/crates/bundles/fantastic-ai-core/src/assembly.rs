@@ -213,6 +213,7 @@ Your view is finite: when it overflows, older turns are compacted and a
 `<type>recall</type>` (`<query>`, `<limit>`) to page dropped turns back, `<type>context_status</type>`
 for your budget.
 A [folded …], [thought …] or [cut …] anchor stands for a body you already saw in full; `recall` with its id to read it again — it folds back after your next answer. A folded `reflect` or `docs` reply has no id: call it again for the current state.
+A reply that will fold after your answer ends with a `keep` call holding its id: write what you will still need of it in `summary`, short, and the folded block shows that in place of the body; leave it out and the block folds to its anchor.
 Your thinking lasts one turn: after you answer it folds to a [thought …] anchor and is not kept. Use it to choose the next step, not to gather again what you already know. Do not repeat a call whose result you still have or noted; fetch again only what was folded and you need.
 "#;
 

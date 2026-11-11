@@ -5,6 +5,8 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ## [Unreleased]
 
+- AI chats: a reply that will fold after the answer carries a `keep` call (its id filled in) the model may use to write a short summary; when the block folds, the summary stands in the context in place of the body (over 300 tokens or none: the plain anchor, as before), and `keep` alone does not count as a turn's action (#641).
+
 - AI chats: the system block keeps the task state in general terms (no fixed template or checkmarks), and every example uses placeholders (AGENT, VERB, PATH, <title>) — no invented files, values or e2e fixture names (filler_2, "audit marker", notes.md) in the prompt.
 
 - AI chats: the Working rules (state lines, act early, batch, verify) move to the END of the system block, where a long task brief no longer buries them (an LLM e2e run wrote no state lines with them mid-block).
