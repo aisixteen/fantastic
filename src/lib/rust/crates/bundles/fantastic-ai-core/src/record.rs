@@ -42,8 +42,10 @@ pub enum CachingMode {
 #[serde(deny_unknown_fields)]
 pub struct Credentials {
     /// The credential store agent.
+    #[schemars(length(min = 1))]
     pub store: String,
     /// The ref in that store.
+    #[schemars(length(min = 1))]
     #[serde(rename = "ref")]
     pub key_ref: String,
 }
@@ -122,7 +124,7 @@ pub fn record_system_prompt(meta: &Map<String, Value>) -> Option<String> {
 }
 
 /// What a type cannot say about the fields every ai_core agent takes: a blank
-/// system text, a `credentials` pair with a blank half, the prompt-file pairing.
+/// system text, the prompt-file pairing.
 #[must_use]
 pub fn validate_meta(meta: &Map<String, Value>) -> Option<String> {
     if let Some(Value::String(s)) = meta.get("system_prompt") {
@@ -134,16 +136,6 @@ pub fn validate_meta(meta: &Map<String, Value>) -> Option<String> {
         if let Some(Value::String(s)) = meta.get(name) {
             if py_strip(s).is_empty() {
                 return Some(wrap_prompt_refusal(name));
-            }
-        }
-    }
-    if let Some(Value::Object(c)) = meta.get("credentials") {
-        for k in ["store", "ref"] {
-            if c.get(k)
-                .and_then(Value::as_str)
-                .is_some_and(|s| py_strip(s).is_empty())
-            {
-                return Some(format!("credentials.{k} must be a non-empty string"));
             }
         }
     }

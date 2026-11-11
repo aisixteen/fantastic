@@ -688,7 +688,16 @@ async fn fork_from_forks_the_named_agent() {
         json!({"type": "fork", "from": {"agent": 3}}),
     )
     .await;
+    assert_eq!(bad["reason"], "missing_arg", "{bad}");
+    assert_eq!(bad["arg"], "from.at", "{bad}");
+    let bad = verb(
+        &kernel,
+        &peer,
+        json!({"type": "fork", "from": {"agent": 3, "at": 1}}),
+    )
+    .await;
     assert_eq!(bad["reason"], "bad_arg", "{bad}");
+    assert_eq!(bad["arg"], "from.agent", "{bad}");
 }
 
 /// `fork` and `mark` already answer in the kernel's shape: the sentence in

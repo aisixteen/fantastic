@@ -12,6 +12,8 @@ fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }

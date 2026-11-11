@@ -28,18 +28,21 @@
 pub mod wire;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use base64::Engine;
 use fantastic_ai_core::credentials::key_reader;
-use fantastic_ai_core::schema::{self, credentials_field, Field};
+use fantastic_ai_core::record::Credentials;
 use fantastic_bundle::py_repr_value;
 use fantastic_kernel::agent::Agent;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
+use fantastic_kernel::DynVerb;
+use schemars::JsonSchema;
+use serde::Deserialize;
 use fantastic_kernel::outcome::Blob;
 use fantastic_kernel::refusal::{
-    refusal, refusal_hint, with, NOT_CONNECTED, TRANSPORT_ERROR, UNAUTHORIZED, UNHANDLED,
+    refusal, TRANSPORT_ERROR, UNAUTHORIZED,
 };
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
@@ -53,17 +56,14 @@ pub const NAME: &str = "mcp_client";
 /// What a binary item past the first carries instead of its bytes.
 pub const OMITTED: &str = "one binary body per reply — this item's bytes were not sent";
 
-const REFLECT_DOC: &str =
-    "No args. → {id, sentence, url, protocol_version (the one agreed at boot; null before), server?, instructions?, tools, skipped?, last_error?}.";
-const BOOT_DOC: &str = "No args. Ask the server who it is and list its tools — this agent's verbs. Returns {server, protocol_version, tools:[names], skipped?}.\n\nSent again it RE-LISTS (a server's tools changed). A failure keeps the tools\nalready listed and answers why; `reflect` shows it as `last_error`.";
-const NOTES: &str = "A remote MCP server's tools are this agent's verbs (`docs of=<id>`). Record: `url` (the MCP endpoint), `credentials` ({store, ref} holding `api_key`, sent as a Bearer key to that host only; absent = keyless). Wiring: this agent's `can_call` names the store, the store's `callable_by` names this agent. A tool runs on the remote server with the key's rights — the grant on each tool is the consent.";
+/// What the bundle is for — its one short man text.
+const MAN: &str = "A client of a remote MCP server: its tools are this agent's verbs, listed when it boots and run on the server with the key's rights; progress and log lines a tool sends come back as events.";
 
 /// What one server said, per instance.
 #[derive(Debug, Default, Clone)]
 struct State {
     /// `None` until a listing succeeded.
     tools: Option<Vec<(String, Value)>>,
-    docs: Vec<(String, String)>,
     mirrors: HashMap<String, Vec<Mirror>>,
     server: Value,
     instructions: Value,
@@ -121,20 +121,6 @@ fn reserved(name: &str) -> bool {
             .any(|v| v.name == name)
 }
 
-/// The record schema the catalog publishes and the write enforces.
-#[must_use]
-pub fn record_schema() -> &'static Value {
-    static SCHEMA: OnceLock<Value> = OnceLock::new();
-    SCHEMA.get_or_init(|| {
-        json!({"fields": [
-            Field::new("url", "str", "the MCP server's endpoint, e.g. https://mcp.example.com/mcp")
-                .required()
-                .json(),
-            credentials_field(false).json(),
-        ]})
-    })
-}
-
 fn meta_of(kernel: &Kernel, id: &AgentId) -> Map<String, Value> {
     kernel
         .agents
@@ -164,75 +150,28 @@ async fn read_key(
 
 async fn no_note(_: Value) {}
 
-// ─── a tool's doc, from its schema ───────────────────────────────────
+// ─── the record and the verbs ────────────────────────────────────────
 
-fn type_name(s: &Value) -> String {
-    let one = |t: &str| match t {
-        "string" => "str".to_string(),
-        "integer" => "int".to_string(),
-        "number" => "float".to_string(),
-        "boolean" => "bool".to_string(),
-        "array" => "list".to_string(),
-        "object" => "dict".to_string(),
-        "null" => "null".to_string(),
-        other => other.to_string(),
-    };
-    match s.get("type") {
-        Some(Value::Array(ts)) => ts
-            .iter()
-            .map(|t| t.as_str().map_or_else(|| fantastic_bundle::py_str(t), one))
-            .collect::<Vec<_>>()
-            .join("|"),
-        Some(Value::String(t)) => match t.as_str() {
-            "string" | "integer" | "number" | "boolean" | "array" | "object" | "null" => one(t),
-            _ => "any".to_string(),
-        },
-        _ => "any".to_string(),
-    }
+/// The fields an mcp_client record carries.
+#[derive(Debug, JsonSchema)]
+pub struct McpRecord {
+    /// The MCP server's endpoint, e.g. https://mcp.example.com/mcp.
+    #[schemars(length(min = 1))]
+    pub url: String,
+    /// The credential store and ref holding `api_key`, sent as a Bearer key to that host only; absent = keyless.
+    pub credentials: Option<Credentials>,
 }
 
-/// `args: a:str (req), b:int?. <description>` — the signature first (what the
-/// oneliner tier keeps), the tool's description after it.
-#[must_use]
-pub fn tool_doc(tool: &Value) -> String {
-    let schema = tool.get("inputSchema").cloned().unwrap_or(Value::Null);
-    let req: Vec<&str> = schema
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    let sig = match schema.get("properties").and_then(Value::as_object) {
-        Some(props) if !props.is_empty() => {
-            let args: Vec<String> = props
-                .iter()
-                .map(|(n, s)| {
-                    format!(
-                        "{n}:{}{}",
-                        type_name(s),
-                        if req.contains(&n.as_str()) {
-                            " (req)"
-                        } else {
-                            "?"
-                        }
-                    )
-                })
-                .collect();
-            format!("args: {}.", args.join(", "))
-        }
-        _ => "No args.".to_string(),
-    };
-    let desc = tool
-        .get("description")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .or_else(|| tool.get("title").and_then(Value::as_str))
-        .unwrap_or("")
-        .trim();
-    if desc.is_empty() {
-        sig
-    } else {
-        format!("{sig} {desc}")
-    }
+fantastic_kernel::record!(McpRecord);
+
+/// Ask the server who it is and list its tools — this agent's verbs. Returns {server, protocol_version, tools:[names], skipped?}. Sent again it RE-LISTS (a server's tools changed); a failure keeps the tools already listed and answers why (`reflect` shows it as `last_error`).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Boot {}
+
+mod declared {
+    use super::Boot;
+    fantastic_kernel::verbs! { dynamic; "boot" => Boot }
 }
 
 // ─── the answer ──────────────────────────────────────────────────────
@@ -463,7 +402,6 @@ impl McpClientBundle {
             }
         }
         let mut table: Vec<(String, Value)> = Vec::new();
-        let mut docs = Vec::new();
         let mut mirrors = HashMap::new();
         let mut skipped = Vec::new();
         for t in tools {
@@ -497,7 +435,6 @@ impl McpClientBundle {
                     mirrors.insert(n.to_string(), found);
                 }
             }
-            docs.push((n.to_string(), tool_doc(&t)));
             table.push((n.to_string(), t));
         }
         let server = disc.get("server").cloned().unwrap_or(Value::Null);
@@ -506,7 +443,6 @@ impl McpClientBundle {
         self.put(id.as_str(), |s| {
             *s = State {
                 tools: Some(table),
-                docs,
                 mirrors,
                 server: server.clone(),
                 instructions,
@@ -534,20 +470,12 @@ impl McpClientBundle {
         &self,
         id: &AgentId,
         tool: &str,
-        payload: &Value,
+        args: Value,
         kernel: &Arc<Kernel>,
         mirrors: &[Mirror],
     ) -> Result<(Value, Option<Blob>), McpError> {
         let url = url_of(kernel, id);
-        let arguments: Map<String, Value> = payload
-            .as_object()
-            .map(|m| {
-                m.iter()
-                    .filter(|(k, _)| *k != "type")
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let arguments: Map<String, Value> = args.as_object().cloned().unwrap_or_default();
         let key = read_key(id, kernel, &url).await?;
         let headers = wire::param_headers(mirrors, &Value::Object(arguments.clone()))?;
         let mut params = Map::new();
@@ -597,19 +525,53 @@ impl McpClientBundle {
 }
 
 #[async_trait]
-impl Bundle for McpClientBundle {
+impl Handler for McpClientBundle {
+    type Call = declared::Call;
+
     fn name(&self) -> &str {
         NAME
     }
 
-    fn record_schema(&self) -> Option<Value> {
-        Some(record_schema().clone())
+    fn man(&self) -> &'static str {
+        MAN
+    }
+
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        declared::VERBS
+    }
+
+    /// THE SERVER'S CURRENT TOOL LIST: each tool is a verb of this agent, its arguments
+    /// the tool's own `inputSchema`, checked by the one engine like any declared verb.
+    fn dynamic_verbs(&self, agent: &Agent) -> Vec<DynVerb> {
+        self.get(agent.id.as_str())
+            .tools
+            .unwrap_or_default()
+            .iter()
+            .map(|(name, tool)| {
+                let desc = tool
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| tool.get("title").and_then(Value::as_str))
+                    .unwrap_or("")
+                    .trim();
+                DynVerb::new(
+                    name.clone(),
+                    desc,
+                    tool.get("inputSchema").unwrap_or(&Value::Null),
+                )
+            })
+            .collect()
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &RECORD
     }
 
     fn validate_meta(
         &self,
         meta: &Map<String, Value>,
-        record: &Map<String, Value>,
+        _record: &Map<String, Value>,
     ) -> Option<String> {
         if let Some(url) = meta.get("url").filter(|v| !v.is_null()) {
             let ok = url
@@ -627,106 +589,42 @@ impl Bundle for McpClientBundle {
                 ));
             }
         }
-        schema::validate(record_schema(), NAME, meta, record)
-    }
-
-    fn verb_docs(&self) -> Value {
-        json!({"reflect": REFLECT_DOC, "boot": BOOT_DOC})
-    }
-
-    fn instance_verb_docs(&self, agent: &Agent) -> Option<Value> {
-        let mut out = Map::new();
-        out.insert("reflect".into(), json!(REFLECT_DOC));
-        out.insert("boot".into(), json!(BOOT_DOC));
-        for (n, d) in self.get(agent.id.as_str()).docs {
-            out.insert(n, json!(d));
-        }
-        Some(Value::Object(out))
-    }
-
-    fn emits_doc(&self) -> Option<Value> {
-        Some(json!({
-            "tools_listed": "{tools:[names], skipped:[{name, why}]} — after every listing (boot)",
-            "progress": "{tool, progressToken, progress, total?, message?} — a tool's progress",
-            "log": "{tool, level, data, logger?} — a log line a tool sent",
-        }))
-    }
-
-    fn notes_doc(&self) -> Option<Value> {
-        Some(json!(NOTES))
+        fantastic_ai_core::record::validate_meta(meta)
     }
 
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let (reply, _) = self
-            .handle_binary(agent_id, payload.clone(), None, kernel)
-            .await?;
+        let (reply, _) = Handler::handle_binary(self, agent_id, call, None, kernel).await?;
         Ok(reply)
     }
 
     async fn handle_binary(
         &self,
         agent_id: &AgentId,
-        header: Value,
+        call: Self::Call,
         _body: Option<Blob>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<Blob>), BundleError> {
-        let verb = header
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        match verb.as_str() {
-            "reflect" => return Ok((Some(self.reflect(agent_id, kernel)), None)),
-            "boot" => return Ok((Some(self.boot(agent_id, kernel).await), None)),
-            _ => {}
-        }
-        let st = self.get(agent_id.as_str());
-        let id = agent_id.as_str();
-        let Some(tools) = &st.tools else {
-            let why = st
-                .error
-                .clone()
-                .unwrap_or_else(|| "boot has not run".to_string());
-            return Ok((
-                Some(refusal_hint(
-                    NOT_CONNECTED,
-                    format!("{id}: the server's tools are not listed — {why}"),
-                    format!("send boot to {id} once the server is up"),
-                )),
-                None,
-            ));
-        };
-        if !tools.iter().any(|(n, _)| *n == verb) {
-            let names: Vec<&str> = tools.iter().map(|(n, _)| n.as_str()).collect();
-            let listed = if names.is_empty() {
-                "none".to_string()
-            } else {
-                names.join(", ")
-            };
-            let mut r = refusal_hint(
-                UNHANDLED,
-                format!(
-                    "{id}: the MCP server has no tool {}",
-                    fantastic_bundle::py_repr(&verb)
-                ),
-                format!("its tools: {listed} (docs of={id}); boot re-lists them"),
-            );
-            with(
-                &mut r,
-                "verb",
-                header.get("type").cloned().unwrap_or(Value::Null),
-            );
-            return Ok((Some(r), None));
-        }
-        let mirrors = st.mirrors.get(&verb).cloned().unwrap_or_default();
-        match self.call(agent_id, &verb, &header, kernel, &mirrors).await {
-            Ok((reply, body)) => Ok((Some(reply), body)),
-            Err(McpError(reply)) => Ok((Some(reply), None)),
+        use declared::Call;
+        match call {
+            Call::Reflect(_) => Ok((Some(self.reflect(agent_id, kernel)), None)),
+            Call::Boot(_) => Ok((Some(self.boot(agent_id, kernel).await), None)),
+            // A TOOL of the server, its arguments already checked against its schema
+            Call::Dynamic(tool) => {
+                let st = self.get(agent_id.as_str());
+                let mirrors = st.mirrors.get(&tool.name).cloned().unwrap_or_default();
+                match self
+                    .call(agent_id, &tool.name, tool.args, kernel, &mirrors)
+                    .await
+                {
+                    Ok((reply, body)) => Ok((Some(reply), body)),
+                    Err(McpError(reply)) => Ok((Some(reply), None)),
+                }
+            }
         }
     }
 

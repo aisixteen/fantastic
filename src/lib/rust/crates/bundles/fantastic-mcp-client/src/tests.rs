@@ -353,10 +353,6 @@ async fn boot_lists_every_page_and_skips_what_it_cannot_serve() {
     assert_eq!(rf["protocol_version"], PROTOCOL);
     assert_eq!(rf["tools"], 8);
     assert_eq!(rf["instructions"], "Weather and friends.");
-    assert!(
-        rf.get("verbs").is_none(),
-        "reflect says what it is, never how to call it"
-    );
 }
 
 #[tokio::test]
@@ -366,12 +362,13 @@ async fn docs_serve_this_agents_own_table_built_from_the_schemas() {
         .await
         .result;
     assert_eq!(d["bundle"], HANDLER_MODULE);
+    // rendered from the tool's own schema and description
     assert_eq!(
         d["verbs"]["get_weather"],
-        "args: city:str (req), days:int?, region:str?"
+        "args: city:string (req), days:int?, region:string? — Current weather for a city"
     );
-    assert_eq!(d["verbs"]["picture"], "No args");
-    assert_eq!(d["verbs"].as_object().unwrap().len(), 10, "{d}");
+    assert!(d["verbs"]["picture"].as_str().unwrap().starts_with("No args"), "{d}");
+    assert_eq!(d["verbs"].as_object().unwrap().len(), 11, "{d}");
     let full = send(
         &r.kernel,
         "kernel",
@@ -382,7 +379,7 @@ async fn docs_serve_this_agents_own_table_built_from_the_schemas() {
     assert!(full["verbs"]["get_weather"]
         .as_str()
         .unwrap()
-        .ends_with("Current weather for a city. Units default to metric."));
+        .contains("Current weather for a city. Units default to metric."));
     let b = send(
         &r.kernel,
         "kernel",
@@ -391,7 +388,7 @@ async fn docs_serve_this_agents_own_table_built_from_the_schemas() {
     .await
     .result;
     let verbs: Vec<&String> = b["verbs"].as_object().unwrap().keys().collect();
-    assert_eq!(verbs, ["reflect", "boot"]);
+    assert_eq!(verbs, ["boot", "reflect", "shutdown"]);
 }
 
 // ─── the wire ────────────────────────────────────────────────────────
@@ -619,18 +616,16 @@ async fn failures_are_refusals_from_the_closed_set() {
     for (payload, reason) in [
         (json!({"type": "weird"}), "transport_error"),
         (json!({"type": "cut"}), "transport_closed"),
-        (json!({"type": "get_weather"}), "bad_arg"),
+        (json!({"type": "get_weather"}), "missing_arg"),
         (json!({"type": "no_such_tool"}), "unhandled"),
     ] {
         let out = send(&r.kernel, "mcp", payload.clone()).await.result;
         assert_eq!(out["reason"], reason, "{payload}: {out}");
     }
     let r2 = send(&r.kernel, "mcp", json!({"type": "nope"})).await.result;
-    let hint = r2["hint"].as_str().unwrap();
-    assert!(
-        hint.contains("get_weather") && hint.contains("docs of=mcp"),
-        "{hint}"
-    );
+    // the agent's own entry names what it answers (its tools included) and where the arguments are
+    assert!(r2["error"].as_str().unwrap().contains("get_weather"), "{r2}");
+    assert!(r2["hint"].as_str().unwrap().contains("docs of=mcp"), "{r2}");
 }
 
 // ─── versions, connection, lifecycle ─────────────────────────────────
@@ -685,14 +680,12 @@ async fn an_unreachable_server_is_not_connected_and_calls_say_so() {
     let (k, _tmp) = rig_on(&format!("http://127.0.0.1:{port}/mcp"), None, KEY, true).await;
     let boot = send(&k, "mcp", json!({"type": "boot"})).await.result;
     assert_eq!(boot["reason"], "not_connected", "{boot}");
+    // no tools are listed, so the agent answers no tool: its entry names what it does answer
     let call = send(&k, "mcp", json!({"type": "get_weather", "city": "x"}))
         .await
         .result;
-    assert_eq!(call["reason"], "not_connected");
-    assert!(
-        call["error"].as_str().unwrap().contains("cannot connect"),
-        "{call}"
-    );
+    assert_eq!(call["reason"], "unhandled", "{call}");
+    assert!(call["error"].as_str().unwrap().contains("boot"), "{call}");
     assert!(send(&k, "mcp", json!({"type": "reflect"}))
         .await
         .result
@@ -751,14 +744,32 @@ async fn a_grant_names_tools_like_verbs() {
 fn the_record_is_checked_at_the_write() {
     let b = McpClientBundle::default();
     let m = |v: Value| v.as_object().cloned().unwrap();
+    // what the declaration says: the engine answers, by field name
+    for (verb, meta, field) in [
+        ("create_agent", json!({}), "url"),
+        (
+            "update_agent",
+            json!({"url": "https://mcp.test/mcp", "credentials": {"store": "creds"}}),
+            "credentials",
+        ),
+    ] {
+        let refused = fantastic_kernel::verbs::check_record(
+            verb,
+            NAME,
+            &m(meta.clone()),
+            &fantastic_kernel::declared::record::RECORD,
+            &RECORD,
+        )
+        .expect_err("refused");
+        assert!(
+            refused["arg"].as_str().is_some_and(|a| a.starts_with(field)),
+            "{meta}: {refused}"
+        );
+    }
+    // what a type cannot say: an endpoint that is not an absolute http(s) URL
     for (meta, fragment) in [
-        (json!({}), "required on the record and missing: url"),
         (json!({"url": "mcp.test/mcp"}), "absolute http(s) URL"),
         (json!({"url": "https://mcp.test/mcp#frag"}), "no fragment"),
-        (
-            json!({"url": "https://mcp.test/mcp", "credentials": {"store": "creds"}}),
-            "credentials must be",
-        ),
     ] {
         let e = b
             .validate_meta(&m(meta.clone()), &Map::new())

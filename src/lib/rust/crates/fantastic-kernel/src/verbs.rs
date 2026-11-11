@@ -744,9 +744,24 @@ fn is_missing(schema: &Value, name: &str, value: Option<&Value>) -> bool {
 
 /// Does the schema describe an object with declared properties (so its fields are
 /// checked by name, not just "is an object")?
-fn described_object(schema: &Value) -> bool {
-    schema.get("type").and_then(Value::as_str) == Some("object")
-        && (schema.get("properties").is_some() || schema.get("required").is_some())
+fn described_object(schema: &Value) -> Option<&Value> {
+    let is = |s: &Value| {
+        let object = match s.get("type") {
+            Some(Value::String(t)) => t == "object",
+            Some(Value::Array(ts)) => ts.iter().any(|t| t.as_str() == Some("object")),
+            _ => false,
+        };
+        object && (s.get("properties").is_some() || s.get("required").is_some())
+    };
+    if is(schema) {
+        return Some(schema);
+    }
+    // an optional object: `anyOf` the object and null
+    ["anyOf", "oneOf"]
+        .iter()
+        .filter_map(|k| schema.get(*k).and_then(Value::as_array))
+        .flatten()
+        .find(|alt| is(alt))
 }
 
 /// One object against its schema: unknown → missing → wrongly typed, a nested
@@ -796,8 +811,8 @@ fn check_object(
     if let Some(props) = props {
         for (k, v) in raw {
             let Some(p) = props.get(k) else { continue };
-            if let (true, Value::Object(inner)) = (described_object(p), v) {
-                check_object(name, &dotted(k), p, inner, top)?;
+            if let (Some(obj), Value::Object(inner)) = (described_object(p), v) {
+                check_object(name, &dotted(k), obj, inner, top)?;
                 continue;
             }
             if !matches_type(p, v) {
@@ -997,6 +1012,12 @@ pub fn check_record(
             let Some(p) = schema.get("properties").and_then(|p| p.get(k)) else {
                 continue;
             };
+            // a field that is itself a declared object is checked the same way,
+            // by its own fields (`credentials.store`)
+            if let (Some(obj), Value::Object(inner)) = (described_object(p), v) {
+                check_object(verb, k, obj, inner, schema)?;
+                continue;
+            }
             if !matches_type(p, v) {
                 let mut r = refusal_hint(
                     BAD_ARG,
