@@ -1,5 +1,5 @@
 import { TIPS_HTML } from "../tips/tips_html.ts";
-import { BACKGROUNDS, BACKGROUNDS_VERBS, grantsFor } from "../backgrounds/backgrounds_agent.ts";
+import { BACKGROUNDS, grantsFor } from "../backgrounds/backgrounds_agent.ts";
 import { backgroundsView } from "../backgrounds/backgrounds_view.ts";
 import { DEFAULT_BG_SOURCE } from "./default_bg.ts";
 import { documentPage } from "../verb_docs.ts";
@@ -8,47 +8,39 @@ import type { Json, Kernel, Payload } from "../../lib.ts";
 import { CANVAS_CSS } from "./styles.ts";
 import type { CanvasActions, ViewBundle, ViewHandle } from "../view.ts";
 import { terminalView } from "../terminal_view/terminal_view.ts";
-import { aiView } from "../ai_view/ai_view.ts";
-import { setupView } from "../setup_view/setup_view.ts";
 import { reflectView } from "../reflect_view/reflect_view.ts";
 import { streamView } from "../stream_view/stream_view.ts";
 import { CODING_AGENTS, exactLine, openActionPopup, tiles } from "./action_popup.ts";
 import { SELECTOR, SELECTOR_PREFIX, setSelectorHost } from "./selector_agent.ts";
-import { ROOT_VIEW, VIEW, VIEW_VERBS, grantViewLists, hostViewCell } from "./canvas_agent.ts";
+import { ROOT_VIEW, VIEW, grantViewLists, hostViewCell } from "./canvas_agent.ts";
 import { containerOf, hashFor, isContainer, onMac, pathTo, viewFromHash } from "./viewer.ts";
 import type { Lookup } from "./viewer.ts";
 import { BACKGROUND, BACKGROUND_ID, bgCallableBy, viewToBg } from "./background_agent.ts";
-import { SKIN_ID, SKIN_VERBS, ensureSkin } from "../skin/skin_agent.ts";
+import { ensureSkin } from "../skin/skin_agent.ts";
 import { skinNow } from "../skin/apply.ts";
 import { EMPTY_HTML } from "../html_agent/empty_html.ts";
 
-/** What a host agent (a cell's AI) may ask ANY cell: look at it, read and
- *  write a panel's html, emit to it. */
-const CELL_VERBS = ["reflect", "get_html", "set_html", "emit"] as const;
-/** What a cell's AI may ask the background. */
-const BG_VERBS = ["set_bg", "default_bg", "clear_bg", "get_bg", "reflect"] as const;
 import { MCP_ADD_VIEW, mcpAddView, mcpView, setMcpDeps } from "../mcp_view/mcp_view.ts";
 import { storeView } from "../store_view/store_view.ts";
 import { schedulerView } from "../scheduler_view/scheduler_view.ts";
 import { credentialsView } from "../credentials_view/credentials_view.ts";
 import { canvasesView, setCanvasesDeps } from "../side_view/side_view.ts";
-import { FILES_VERBS } from "../files/files_controller.ts";
 import { filesView } from "../files/files_view.ts";
 import { renderFileTrees, setFilesDeps } from "../files/files_deps.ts";
 import { DRAG_MIME, boxCentre, decodeDrag, dropPlan, worldAt, zoomAbout } from "../files/drag.ts";
-import { mountTreeSidebar } from "./tree_sidebar.ts";
+import { SIDEBAR_AGENT, SIDEBAR_CELL, mountSidebarColumn } from "./sidebar_mount.ts";
+import type { SidebarColumn } from "./sidebar_mount.ts";
 import { fileGrant, kernelBridge, onStateFrame } from "../files/file_bridge.ts";
 import { dropParent, isBlueprintDir, runImportDrop } from "../files/import_drop.ts";
 import { norm, wire } from "../files/paths.ts";
 import type { ImportAnswer, ImportView } from "../files/import_drop.ts";
-import { PREVIEW_VERBS } from "../preview/preview_controller.ts";
 import { previewView } from "../preview/preview_view.ts";
 import type { Pick, Presets } from "./action_popup.ts";
 import { htmlView } from "../html_agent/html_view.ts";
 import { agentViewBundle } from "../agent_view/agent_view.ts";
 import { headTitle, seenHere, setCanvasNode, setHostRecords, setHostReflect, setHostSync, sideOf, rereflectViews, viewRecordFresh, viewRecordOf } from "./host_views.ts";
 import { createGlHost } from "./gl_host.ts";
-import { COLUMN, LAYOUT, framesToRemove, hiddenCellFor, hiddenOf, minimizedOf, pinnedOf, placeMissing, prune, rectsOf, reorderY, setHidden, setMinimized, setPinned, setRect, showHidden, stack, layoutFor, writeRects } from "./layout.ts";
+import { COLUMN, LAYOUT, framesToRemove, hiddenOf, minimizedOf, pinnedOf, placeMissing, prune, rectsOf, reorderY, setHidden, setMinimized, setPinned, setRect, showHidden, stack, layoutFor, writeRects } from "./layout.ts";
 import { CELL_MENU, closeIntent, exportCall, exportTarget } from "./cell_menu.ts";
 import type { Layout, Rect } from "./layout.ts";
 import type { GlHost, GlView } from "./gl_host.ts";
@@ -60,7 +52,7 @@ import type { GlHost, GlView } from "./gl_host.ts";
 // kernel sends. The kernel knows none of this.
 
 // inline view registry — host handler_module → TS view bundle
-const VIEW_BUNDLES: readonly ViewBundle[] = [terminalView, aiView, htmlView, agentViewBundle, setupView, reflectView, streamView, filesView, previewView, canvasesView, mcpView, mcpAddView, backgroundsView, storeView, schedulerView, credentialsView];
+const VIEW_BUNDLES: readonly ViewBundle[] = [terminalView, htmlView, agentViewBundle, reflectView, streamView, filesView, previewView, canvasesView, mcpView, mcpAddView, backgroundsView, storeView, schedulerView, credentialsView];
 // A PAGE BUNDLE's instance (handler_module = its folder name) is drawn by its
 // BASE's view (`base: html_agent` → `html_agent.ts`), read off the catalog row.
 function viewFor(handlerModule: unknown, kernel: Kernel): ViewBundle | undefined {
@@ -281,6 +273,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // agent added in the background is listed NEW, unplaced; a change of an
   // agent's `view` re-renders its cells.
   const registry = new Map<string, Rec>();
+  // the left column: the `sidebar` agent's own view (`sidebar_mount.ts`); null while there is none
+  let sidebar: SidebarColumn | null = null;
   /** every agent on the host as the last sync saw it (another canvas's too) */
   const onHostIds = new Set<string>();
   /** host agents added in the background, not shown in any cell yet */
@@ -364,6 +358,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
             kernel.updateMeta(cell, { can_call: { ...have, [agent]: want[agent] } } as unknown as Payload);
           }
         }
+        // the sidebar's cell follows its agent's view, `"*"` written out for the agents that exist
+        sidebar?.follow(recs.get(SIDEBAR_AGENT), registry.keys());
         // the first sync also cleans cells whose agent went while no page was open
         if (!synced) {
           for (const id of everyAgent()) {
@@ -474,7 +470,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     // crossing 768px switches between the column and the free canvas
     if (layoutShown !== null && layoutNow() !== layoutShown) void refresh();
     // and the sidebar's place: beside the canvas on a wide screen, over it on a narrow one
-    treeSidebar.setWide(innerWidth > 768);
+    sidebar?.setWide(innerWidth > 768);
   });
 
   // THE WORLD IS ITS OWN LAYER ONLY WHILE IT MOVES (owner 2026-10-09, the load
@@ -955,10 +951,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     if (cellMenuEl !== null && !cellMenuEl.contains(e.target as Node)) closeCellMenu();
   });
 
-  // ── AI CELLS ─────────────────────────────────────────────────────────
-  // `canvas_root` (`kern/backend`) spawns the cell's AI from one of the user's
-  // saved set-ups (only the CLI reads those), and answers the saved set-ups and the
-  // kept dialogs.
   const toast = (text: string): void => {
     const t = document.createElement("div");
     t.className = "canvas-toast";
@@ -980,10 +972,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   const presets = async (): Promise<Presets | null> => {
     const r = (await host.callHost(BACKEND, { type: "presets" } as unknown as Payload).catch(() => null)) as Rec | null;
     if (!r || typeof r["error"] === "string") return null;
-    const d = (await host.callHost(BACKEND, { type: "dialogs" } as unknown as Payload).catch(() => null)) as Rec | null;
     return {
-      preferred: (r["preferred"] as string | null) ?? null,
-      dialogs: ((d?.["dialogs"] as Presets["dialogs"] | undefined) ?? []).map((x) => ({ id: x.id, name: x.name })),
       coding: await codingAgents(),
       bundles: (r["bundles"] as Presets["bundles"]) ?? [],
       // this canvas's page bundles: folder rows with a base, loaded (not refused)
@@ -994,69 +983,18 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         .map((b) => ({ name: String(b["name"]), sentence: typeof b["sentence"] === "string" ? b["sentence"] : "" })),
     };
   };
-  // THE VIEW AS A PEER: a cell's AI (on the host) reaches the cell's view at
-  // `<page guid>|<view id>` — its control plane and `reflect`.
-  const peerGrants = (view: string): Record<string, string[]> => {
-    if (kernel.guid === null) return {};
-    const bg = [...(kernel.get(view)?.children.values() ?? [])].find((a) => a.record().handler_module === BACKGROUND)?.id;
-    return {
-      // the view's control plane over its cells
-      [`${kernel.guid}|${view}`]: [...VIEW_VERBS],
-      ...(bg !== undefined ? { [`${kernel.guid}|${bg}`]: [...BG_VERBS] } : {}),
-      // the page's skin (`skin_agent.ts`): read only, `get` and `schema`
-      [`${kernel.guid}|${SKIN_ID}`]: [...SKIN_VERBS],
-      // any cell — and the view verbs, since the cells are their OPERANDS
-      // (`move {id}`, `wire {sender, receiver}`): the host's egress gate checks
-      // the agents a call names, not only its target
-      // (the file tree's and the previewer's verbs too: an AI shows a file, edits it)
-      [`${kernel.guid}|*`]: [...new Set([...CELL_VERBS, ...VIEW_VERBS, ...BACKGROUNDS_VERBS, ...SKIN_VERBS, ...FILES_VERBS, ...PREVIEW_VERBS])],
-    };
-  };
-  const spawnAi = async (cellId: string, saved: string | null, view?: string): Promise<Rec | null> => {
-    const r = (await host.callHost(BACKEND, {
-      type: "spawn",
-      stamp: { cell_id: cellId },
-      peer_grants: peerGrants(view ?? containerOf(look, cellId) ?? ROOT_VIEW),
-      ...(saved ? { saved } : {}),
-    } as unknown as Payload)) as Rec;
-    if (typeof r["error"] === "string") {
-      toast(`✕ ${r["error"]}${typeof r["hint"] === "string" && r["hint"] ? ` — ${r["hint"]}` : ""}`);
-      return null;
-    }
-    return r;
-  };
-  const bindAi = (cellId: string, r: Rec): void => {
-    kernel.updateMeta(cellId, {
-      backend_id: r["id"],
-      backend_root: r["root"],
-      backend_lost: false,
-      unconfigured: false,
-      // every dialog is kept from its start (no ephemeral chats)
-      kept: true,
-      ...(typeof r["dialog_name"] === "string" ? { dialog_name: r["dialog_name"] } : {}),
-      saved: r["saved"],
-      can_call: { ...aiView.grants(String(r["id"])) },
-    } as unknown as Payload);
-  };
-
   // Mount a first-party TS view-agent inline into a fresh frame.
   const mountInline = async (rec: Rec, bundle: ViewBundle, idx: number): Promise<void> => {
     const rect = rectFromRec(rec, 480, 320);
     let reload = (): void => {};
     const { el, body, actions } = makeShell(rec, str(rec, "display_name") ?? rec.id, rect, () => reload());
-    if ((bool(rec, "owns_backend") || bool(rec, "kept")) && str(rec, "backend_id") === undefined && !bool(rec, "backend_lost")) {
+    if (bool(rec, "owns_backend") && str(rec, "backend_id") === undefined && !bool(rec, "backend_lost")) {
       // Saved, its backend not spawned (or a kept dialog not reopened) yet: a
       // placeholder until `bind` lands and the refresh remounts it.
       const note = document.createElement("div");
       note.className = "backend-starting";
       note.textContent = "starting its backend…";
       body.appendChild(note);
-      frames.set(rec.id, { el, rec, kind: "inline" });
-      return;
-    }
-    if (bundle === aiView && bool(rec, "unconfigured") && str(rec, "backend_id") === undefined) {
-      // AN AI CELL NOT SET UP YET (the wizard's skip): how to set it up
-      body.appendChild(notSetUp(rec.id));
       frames.set(rec.id, { el, rec, kind: "inline" });
       return;
     }
@@ -1069,14 +1007,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       body.appendChild(note);
       frames.set(rec.id, { el, rec, kind: "inline" });
       reload = (): void => {
-        if (bundle === aiView) {
-          void spawnAi(rec.id, str(rec, "saved") ?? null).then((r) => {
-            if (r === null) return;
-            removeFrame(rec.id);
-            bindAi(rec.id, r);
-          });
-          return;
-        }
         void spawnBackend(bundle, rec.id).then((bid) => {
           if (bid === null) return;
           removeFrame(rec.id);
@@ -1467,16 +1397,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     setTimeout(() => f.el.classList.remove("flash"), 900);
   };
 
-  // THE AI SET-UP WIZARD — one per view: opening it again moves to it; opened
-  // FOR an AI cell (its settings, or one not set up yet) it replaces the open one.
-  const SETUP_SIZE = { width: 900, height: 640 };
-  const openSetupAt = (w: { x: number; y: number }, extra: Record<string, unknown> = {}): void => {
-    const c = kernel.get(containerNow());
-    const open = c ? [...c.children.values()].find((a) => a.record().handler_module === setupView.handles[0]) : undefined;
-    if (open && Object.keys(extra).length === 0) return moveTo(open.id);
-    if (open) closeView(open.id);
-    void spawnPairAt(setupView, w, SETUP_SIZE, extra);
-  };
   // where a cell sits (its rect in the layout in use), or the screen's centre
   const spotOf = (cellId: string): { x: number; y: number; w: number; h: number } => {
     const r = rectsNow()[cellId];
@@ -1484,51 +1404,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     const c = centre();
     return { x: c.x, y: c.y, w: 0, h: 0 };
   };
-  // THE CANVAS'S MOVES a view may ask for (the wizard, an AI cell)
+  // THE CANVAS'S MOVES a view may ask for
   const canvasActions: CanvasActions = {
-    async spawnAi(saved, from, cell) {
-      if (cell !== undefined && kernel.get(cell) !== undefined) {
-        const r = await spawnAi(cell, saved);
-        if (r === null) return;
-        removeFrame(cell);
-        bindAi(cell, r);
-      } else {
-        const at = spotOf(from);
-        if ((await spawnAiIn(containerOf(look, from) ?? containerNow(), at, saved, "")) === null) return;
-      }
-      closeView(from);
-    },
-    skipAi(from) {
-      const at = spotOf(from);
-      registerCell(
-        new Agent({
-          id: `ai_view_${crypto.randomUUID().slice(0, 8)}`,
-          parentId: containerOf(look, from) ?? containerNow(),
-          handlerModule: aiView.handles[0]!,
-          meta: { owns_backend: false, unconfigured: true, x: Math.round(at.x), y: Math.round(at.y), width: 440, height: 360 },
-        }),
-      );
-      closeView(from);
-    },
-    openSetup(cell, ai) {
-      const at = cell !== undefined ? spotOf(cell) : { ...centre(), w: 0, h: 0 };
-      openSetupAt({ x: at.x + at.w + 40, y: at.y }, { ...(cell !== undefined ? { target_cell: cell } : {}), ...(ai !== undefined ? { edit_ai: ai } : {}) });
-    },
-    // a chat card's ⤢ (#339): the agent's own cell full screen — the one that shows it, else a new one
-    async viewFull(agent) {
-      const shows = everyAgent().find((id) => (kernel.get(id)?.record() as Rec | undefined)?.["backend_id"] === agent);
-      if (shows !== undefined) {
-        showPicked(shows);
-        return setViewed(shows);
-      }
-      const rec = await viewRecordOf(agent);
-      if (rec === undefined) return toast(`✕ no agent ${agent}`);
-      const { handler, meta } = hostViewCell(agent, rec);
-      const viewId = `view_${crypto.randomUUID().slice(0, 8)}`;
-      const w = centre();
-      registerCell(new Agent({ id: viewId, parentId: containerNow(), handlerModule: handler, meta: { ...meta, x: Math.round(w.x - 240), y: Math.round(w.y - 180), width: 480, height: 360 } as unknown as Payload }));
-      setViewed(viewId);
-    },
     deleteAgent,
     toast,
     async startCoding(near) {
@@ -1539,53 +1416,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       await spawnPairAt(DEFAULT_VIEW, { x: at.x + at.w + 40, y: at.y }, { width: 760, height: 480 }, { command: [first.path], display_name: first.name }, { allowed: [exactLine([first.path])] });
     },
   };
-  // AN AI CELL NOT SET UP YET: what it needs, and the two ways to get there
-  const notSetUp = (cellId: string): HTMLElement => {
-    const box = document.createElement("div");
-    box.className = "ai-not-set-up";
-    box.innerHTML = `<div class="nsu-title">⚙ Not set up yet</div>
-      <p>Press settings to set me up, or start your coding AI agent here to help set me up.</p>
-      <div class="nsu-row"><button class="nsu-settings">⚙ settings</button><button class="nsu-coding">▸ coding agent</button></div>`;
-    (box.querySelector(".nsu-settings") as HTMLButtonElement).onclick = (): void => canvasActions.openSetup(cellId);
-    (box.querySelector(".nsu-coding") as HTMLButtonElement).onclick = (): void => void canvasActions.startCoding(cellId);
-    return box;
-  };
-
-  // An AI cell at the spot, its first turn what was typed. The same order as a
-  // terminal: the cell lands on disk first, then its backend, then the bind.
-  const spawnAiAt = async (w: { x: number; y: number }, saved: string | null, text: string): Promise<void> => {
-    await spawnAiIn(containerNow(), w, saved, text);
-  };
-  // An AI cell on view `parent`: the cell, then its backend. Its id, or null
-  // (the refusal toasted, the cell removed).
-  const spawnAiIn = async (parent: string, w: { x: number; y: number }, saved: string | null, text: string): Promise<string | null> => {
-    // HOST-FIRST: the AI is made (stamped with the cell it will show in), then
-    // the cell views it
-    const viewId = `ai_view_${crypto.randomUUID().slice(0, 8)}`;
-    const x = Math.round(w.x);
-    const y = Math.round(w.y);
-    const r = await spawnAi(viewId, saved, parent);
-    if (r === null) return null;
-    placing.add(String(r["id"]));
-    registerCell(
-      new Agent({
-        id: viewId,
-        parentId: parent,
-        handlerModule: aiView.handles[0]!,
-        meta: {
-          owns_backend: false,
-          x,
-          y,
-          width: 440,
-          height: 520,
-          ...(text ? { first_turn: { text, x, y } } : {}),
-        },
-      }),
-    );
-    bindAi(viewId, r);
-    return viewId;
-  };
-
   // A BUNDLE'S AGENT placed (backend-owned views): `canvas_root spawn` makes the
   // host agent — from a NEW project bundle folder the host scaffolds (`starter`:
   // `spawn {bundle}`) or one more instance of a project bundle (`instance_of`) —
@@ -1616,41 +1446,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     );
   };
 
-  // A KEPT dialog in a new cell: the live AI when another cell has it open (one
-  // dialog, several cells), else a fresh one on SQLite with its history.
-  const reopenAt = async (w: { x: number; y: number }, dialog: { id: string; name: string }): Promise<void> => {
-    // a HIDDEN cell already on this dialog (#133) is the dialog's cell again: it
-    // is re-bound (the host re-makes the AI if it is gone) and shown where it was,
-    // rather than a second cell beside it
-    const hiddenCell = hiddenCellFor(kernel, dialog.id, everyAgent());
-    const viewId = hiddenCell ?? `ai_view_${crypto.randomUUID().slice(0, 8)}`;
-    if (hiddenCell === undefined) {
-      registerCell(
-        new Agent({
-          id: viewId,
-          parentId: containerNow(),
-          handlerModule: aiView.handles[0]!,
-          meta: { owns_backend: false, kept: true, dialog_name: dialog.name, x: Math.round(w.x), y: Math.round(w.y), width: 440, height: 520 },
-        }),
-      );
-      await flush();
-    }
-    const r = (await host.callHost(BACKEND, {
-      type: "reopen",
-      id: dialog.id,
-      stamp: { cell_id: viewId },
-      peer_grants: peerGrants(containerOf(look, viewId) ?? ROOT_VIEW),
-    } as unknown as Payload)) as Rec;
-    if (typeof r["error"] === "string") {
-      toast(`✕ ${r["error"]}`);
-      // a new cell is withdrawn; the hidden one stays hidden
-      if (hiddenCell === undefined) kernel.remove(viewId);
-      return;
-    }
-    bindAi(viewId, r);
-    if (hiddenCell !== undefined) showPicked(viewId);
-  };
-
   // VIEW an agent: a view (its world, its camera, its background) or any
   // other page agent FULL. `push`: a new history entry (`#view=<id>`).
   function setViewed(id: string, push = true): void {
@@ -1675,11 +1470,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     const mid = boxCentre(canvas.getBoundingClientRect());
     return screenToWorld(mid.x, mid.y);
   };
-  // every AI cell on every view of this page
-  const aiCells = (): Rec[] =>
-    everyAgent()
-      .map((id) => kernel.get(id)!.record() as Rec)
-      .filter((r) => r["handler_module"] === aiView.handles[0]);
   // every agent of the page's own kernel, as a record (the root first)
   const pageAgents = (): Rec[] => everyAgent().map((id) => kernel.get(id)!.record() as Rec);
   // AN MCP SERVER (`mcp_view.ts`): the form adds it on this canvas's node, then
@@ -1738,6 +1528,52 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     el.appendChild(card);
     return { unmount: (): void => card.remove() };
   };
+  // the cell itself, or the cells fronting it (its backend, or its root)
+  const cellsFor = (id: string): string[] => {
+    if (kernel.get(id) !== undefined && id !== rootOr()) return [id];
+    return everyAgent()
+      .map((a) => kernel.get(a)!.record() as Rec)
+      .filter((r) => r["backend_id"] === id || r["backend_root"] === id)
+      .map((r) => String(r["id"]));
+  };
+  const viewAgent = (id: string, focus: boolean): void => {
+    // a focus pick goes through `moveTo`, which shows a hidden cell itself
+    if (focus && id !== rootOr()) return moveTo(id);
+    showPicked(id);
+    return setViewed(id);
+  };
+  // an agent no cell shows: an AI opens in a chat cell, anything else as its
+  // reflect card — a weak peer either way (✕ leaves the agent)
+  const openAgent = async (id: string): Promise<void> => {
+    // a host agent, drawn as ITS REFLECT says (`view`, else its kind's default,
+    // else the stub) — the same path `place {backend_id}` takes
+    const rec = await viewRecordOf(id);
+    if (rec === undefined) return;
+    const { handler, meta } = hostViewCell(id, rec);
+    const viewId = `view_${crypto.randomUUID().slice(0, 8)}`;
+    // CENTRED on what the person is looking at, and the camera stays put
+    // (owner 2026-10-12: no refocus after a tree click spawns a cell)
+    const w = centre();
+    const [width, height] = [480, 360];
+    registerCell(
+      new Agent({
+        id: viewId,
+        parentId: containerNow(),
+        handlerModule: handler,
+        meta: { ...meta, x: Math.round(w.x - width / 2), y: Math.round(w.y - height / 2), width, height } as unknown as Payload,
+      }),
+    );
+    fresh.delete(id);
+  };
+  // WHAT A CLICK IN THE SIDEBAR DOES (the old tree's plain click): view a page agent, show a
+  // host agent's cell, or open one. The sidebar's own agent and cell are not drawn.
+  const selectAgent = (id: string): void => {
+    if (id === SIDEBAR_AGENT || id === SIDEBAR_CELL) return;
+    if (kernel.get(id) !== undefined && id !== rootOr()) return viewAgent(id, false);
+    const now = cellsFor(id);
+    if (now.length > 0) viewAgent(now[0]!, false);
+    else void openAgent(id);
+  };
   // THE FILE TREE and PREVIEW cells (`files_view.ts`, `preview_view.ts`) and the
   // CANVAS-LIST cell (`side_view.ts`) read the canvas through this wiring; none is
   // made by default — the double-click places them
@@ -1772,52 +1608,17 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         actions: canvasActions,
       });
     },
-    // the cell itself, or the cells fronting it (its backend, or its root)
-    cellsFor: (id) => {
-      if (kernel.get(id) !== undefined && id !== rootOr()) return [id];
-      return everyAgent()
-        .map((a) => kernel.get(a)!.record() as Rec)
-        .filter((r) => r["backend_id"] === id || r["backend_root"] === id)
-        .map((r) => String(r["id"]));
-    },
+    cellsFor,
     // whether a cell is off its view (#133): its agent runs, its frame is not drawn
     isHidden: (cell) => {
       const view = kernel.get(cell)?.parentId;
       return typeof view === "string" && hiddenOf(kernel, view).has(cell);
     },
     moveTo,
-    view: (id, focus) => {
-      // a focus pick goes through `moveTo`, which shows a hidden cell itself
-      if (focus && id !== rootOr()) return moveTo(id);
-      showPicked(id);
-      return setViewed(id);
-    },
+    view: viewAgent,
     viewed: () => viewed,
     mac: onMac(),
-    // an agent no cell shows: an AI opens in a chat cell, anything else as its
-    // reflect card — a weak peer either way (✕ leaves the agent)
-    open: async (id) => {
-      // a host agent, drawn as ITS REFLECT says (`view`, else its kind's default,
-      // else the stub) — the same path `place {backend_id}` takes
-      const rec = await viewRecordOf(id);
-      if (rec === undefined) return;
-      const { handler, meta } = hostViewCell(id, rec);
-      const viewId = `view_${crypto.randomUUID().slice(0, 8)}`;
-      // CENTRED on what the person is looking at, and the camera stays put
-      // (owner 2026-10-12: no refocus after a tree click spawns a cell)
-      const w = centre();
-      const ai = handler === aiView.handles[0];
-      const [width, height] = ai ? [440, 520] : [480, 360];
-      registerCell(
-        new Agent({
-          id: viewId,
-          parentId: containerNow(),
-          handlerModule: handler,
-          meta: { ...meta, x: Math.round(w.x - width / 2), y: Math.round(w.y - height / 2), width, height } as unknown as Payload,
-        }),
-      );
-      fresh.delete(id);
-    },
+    open: openAgent,
     fresh: (id) => fresh.has(id),
     deleteAgent,
   });
@@ -1949,9 +1750,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       onPick: (p: Pick): void => {
         if (p.kind === "terminal") void spawnTerminalAt(w);
         else if (p.kind === "html") spawnHtmlAt(w);
-        else if (p.kind === "setup") openSetupAt(w);
         else if (p.kind === "stream") spawnStreamAt(w);
-        else if (p.kind === "chat") void reopenAt(w, { id: p.id, name: p.name });
         // a CODING AGENT: the human's own program, started in a terminal cell
         // (its exec agent runs EXACTLY that program, as `run COMMAND` does)
         else if (p.kind === "coding") void spawnPairAt(DEFAULT_VIEW, w, { width: 760, height: 480 }, { command: [p.path], display_name: p.name }, { allowed: [exactLine([p.path])] });
@@ -1968,7 +1767,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         else if (p.kind === "bundle") void spawnBundleAt(w, { bundle: p.starter });
         else if (p.kind === "instance") void spawnBundleAt(w, { instance_of: p.bundle });
         else if (p.kind === "page_instance") spawnPageCellAt(w, p.bundle, p.bundle, 360, 260);
-        else void spawnAiAt(w, null, p.text);
       },
     });
   };
@@ -2105,11 +1903,12 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     if ((e.target as Element).closest(".agent-frame")) return;
     openSelector(e.clientX, e.clientY);
   });
-  // THE CANVAS'S OWN SIDEBAR (#148): the file tree beside the zoomed world, never in it,
-  // so a zoom or a pan leaves it where it is. Its rows drag onto `#canvas` like the tree cell's.
-  // Mounted after `setFilesDeps` (the tree reads the canvas through it).
+  // THE CANVAS'S LEFT COLUMN (#608): the `sidebar` agent's own view beside the zoomed world, never in it,
+  // so a zoom or a pan leaves it where it is. A click in it (`select {id}`) opens that agent.
   // (its open or its place moves the canvas's box: the GL camera reads that box, so it follows)
-  const treeSidebar = mountTreeSidebar({ kernel, view: ROOT_VIEW, mount, wide: innerWidth > 768, onPlace: () => glHost?.applyCamera() });
+  void mountSidebarColumn({ kernel, mount, ids: () => registry.keys(), wide: innerWidth > 768, onSelect: selectAgent, onPlace: () => glHost?.applyCamera() }).then((col) => {
+    sidebar = col;
+  });
   // ESC LEAVES FULL VIEW (owner 2026-10-08: nothing floats, so this is the way
   // back): to the canvas's root view — unless the keyboard is in an editor (a
   // terminal, a text field), whose Esc is its own

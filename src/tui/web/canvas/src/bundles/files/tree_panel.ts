@@ -12,9 +12,8 @@ import { ensureFilesStyle } from "./styles.ts";
 import { isFocusClick } from "../canvas/viewer.ts";
 
 // THE FILE TREE'S PANEL: the drawing, the marks, the drag source and the keys of
-// the project's folder, live. The tree cell (`files_view.ts`) and the canvas's own
-// sidebar (`canvas/tree_sidebar.ts`) both mount THIS, so a row drags the same way
-// from either (#148). `files_controller.ts` holds the state and the verbs.
+// the project's folder, live. The tree cell (`files_view.ts`) mounts it; a row drags onto the
+// canvas (#148). `files_controller.ts` holds the state and the verbs.
 
 /** What a panel needs from its host: the page kernel, the id its watches and verbs answer to, where it draws, and how it keeps its state. */
 export interface TreePanelOptions {

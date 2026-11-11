@@ -33,6 +33,25 @@ const CFG: BackendConfig = BackendConfig {
     provider_cache: true,
 };
 
+/// The chat's own view (html, plain JS): the canvas draws the chat from it. `{{agent}}` is the
+/// chat's id, filled at reflect time.
+const CHAT_VIEW: &str = include_str!("chat_view.html");
+
+/// The verbs the view calls on its own chat agent.
+pub const VIEW_CALLS: [&str; 9] = [
+    "watch",
+    "reflect",
+    "history",
+    "rows",
+    "status",
+    "send",
+    "stop",
+    "context_clear",
+    "unembed",
+];
+/// What the view reads and answers on `user`: the inquiries this chat asked the person.
+pub const VIEW_USER_CALLS: [&str; 2] = ["inquiries", "answer_inquiry"];
+
 const README: &str = "# ai_chat\n\nThe AI agent apart from any provider: it keeps the conversation \
 and completes each turn through the provider agent named by `provider_id` (`complete`). Grant it \
 `can_call {<provider>: [complete, watch]}`; the provider admits it in `callable_by`. Model, endpoint \
@@ -86,6 +105,16 @@ impl Bundle for AiChatBundle {
             out.insert(
                 PROVIDER_FIELD.into(),
                 meta.get(PROVIDER_FIELD).cloned().unwrap_or(Value::Null),
+            );
+            // HOW IT IS DRAWN: an html view, compiled in (no record field holds it)
+            let id = agent_id.as_str();
+            out.insert(
+                "view".into(),
+                json!({
+                    "kind": "html",
+                    "bytes": CHAT_VIEW.replace("{{agent}}", id),
+                    "calls": {id: VIEW_CALLS, "user": VIEW_USER_CALLS},
+                }),
             );
             return Ok(Some(Value::Object(out)));
         }

@@ -8,7 +8,7 @@ import type { CompiledSkin } from "./tokens.ts";
 // THE SKIN AGENT (phase 4, #49) — the page's skin: the design tokens every view
 // is drawn with, and its backdrop. One per canvas (peer canvases too), a
 // delete-locked child of the page root, made by the canvas when missing
-// (`ensureSkin`). It is read only: the skin is fixed by the backdrop — dark on
+// (`ensureSkin`). It is read only: the skin is fixed by the backdrop — day on
 // the web, glass in the app's window (`DEFAULT_SKINS`) — and applied once by the
 // page (`apply.ts`); nothing on its record chooses it.
 
@@ -20,8 +20,8 @@ export const SKIN_VERBS = ["get", "schema"] as const;
 
 export const SKIN_README =
   "THE SKIN — how this canvas looks: the design tokens (W3C Design Tokens 2025.10, a subset) every view is drawn with — colours, corner radii, font families, shadows, motion — plus a BACKDROP: `web` (the page paints its own background) or `native` (the app's window draws a material behind a transparent page). " +
-  "The skin is fixed by the backdrop: `dark` on the web (the canvas's own look), `glass` in the app's window (translucent). It is read only here. " +
-  "`get {name: \"dark\"}` → the skin's tokens as authored and its backdrop; `schema` names every token (path, type, CSS name, what it paints) and the token format.";
+  "The skin is fixed by the backdrop: `day` on the web (black and white glass), `glass` in the app's window (translucent). It is read only here. " +
+  "`get {name: \"day\"}` → the skin's tokens as authored and its backdrop; `schema` names every token (path, type, CSS name, what it paints) and the token format.";
 
 type Dict = Record<string, unknown>;
 

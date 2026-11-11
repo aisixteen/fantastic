@@ -8,13 +8,13 @@ import { Agent, Kernel } from "../src/lib.ts";
 
 test("reflect readme=true surfaces a view bundle's registered readme", async () => {
   const kernel = new Kernel();
-  kernel.registerBundle("ai_view.ts", () => null);
+  kernel.registerBundle("terminal_view.ts", () => null);
   kernel.setBundleReadme(
-    "ai_view.ts",
+    "terminal_view.ts",
     "HTML chat CLIENT for a host LLM backend. Fronts any agent answering send/history/interrupt; bound by backend_id.",
   );
   kernel.setRoot(new Agent({ id: "canvas", handlerModule: "canvas.ts" }));
-  kernel.register(new Agent({ id: "chat", handlerModule: "ai_view.ts", parentId: "canvas" }));
+  kernel.register(new Agent({ id: "chat", handlerModule: "terminal_view.ts", parentId: "canvas" }));
 
   const reply = ((await kernel.send([{ target: "chat", payload: { type: "reflect", readme: true } }]))[0]!.result) as Record<
     string,
@@ -27,13 +27,13 @@ test("reflect readme=true surfaces a view bundle's registered readme", async () 
 
 test("per-record meta.readme overrides the bundle readme", async () => {
   const kernel = new Kernel();
-  kernel.registerBundle("ai_view.ts", () => null);
-  kernel.setBundleReadme("ai_view.ts", "BUNDLE-LEVEL");
+  kernel.registerBundle("terminal_view.ts", () => null);
+  kernel.setBundleReadme("terminal_view.ts", "BUNDLE-LEVEL");
   kernel.setRoot(new Agent({ id: "canvas", handlerModule: "canvas.ts" }));
   kernel.register(
     new Agent({
       id: "chat",
-      handlerModule: "ai_view.ts",
+      handlerModule: "terminal_view.ts",
       parentId: "canvas",
       meta: { readme: "PER-RECORD" },
     }),
@@ -48,9 +48,9 @@ test("per-record meta.readme overrides the bundle readme", async () => {
 
 test("an agent with no readme reflects readme:null", async () => {
   const kernel = new Kernel();
-  kernel.registerBundle("ai_view.ts", () => null);
+  kernel.registerBundle("terminal_view.ts", () => null);
   kernel.setRoot(new Agent({ id: "canvas", handlerModule: "canvas.ts" }));
-  kernel.register(new Agent({ id: "chat", handlerModule: "ai_view.ts", parentId: "canvas" }));
+  kernel.register(new Agent({ id: "chat", handlerModule: "terminal_view.ts", parentId: "canvas" }));
 
   const reply = ((await kernel.send([{ target: "chat", payload: { type: "reflect", readme: true } }]))[0]!.result) as Record<
     string,

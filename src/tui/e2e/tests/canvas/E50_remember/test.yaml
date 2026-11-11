@@ -2,7 +2,7 @@
 # plug names those). Live: the BACKEND plug.
 id: remember
 group: canvas
-title: "a kept dialog remembers across a closed cell and a host restart"
+title: "a dialog remembers across a host restart and a reopen"
 runner: probe.py
 costs: turns
 limits:

@@ -1,0 +1,582 @@
+<style>
+:root{
+--fc-color-accent-base:rgb(17 17 17);
+--fc-color-accent-deep:rgb(17 17 17);
+--fc-color-accent-deep-hover:rgb(43 43 43);
+--fc-color-accent-on:rgb(255 255 255);
+--fc-color-line-button:rgb(0 0 0 / 0.1);
+--fc-color-line-faint:rgb(0 0 0 / 0.06);
+--fc-color-line-strong:rgb(0 0 0 / 0.18);
+--fc-color-status-error:rgb(179 38 30);
+--fc-color-status-ok:rgb(27 116 70);
+--fc-color-status-warn:rgb(143 82 0);
+--fc-color-status-warn-field:rgb(255 255 255 / 0.6);
+--fc-color-status-warn-line:rgb(143 82 0 / 0.45);
+--fc-color-status-warn-muted:rgb(143 82 0);
+--fc-color-status-warn-on:rgb(255 255 255);
+--fc-color-status-warn-surface:rgb(143 82 0 / 0.12);
+--fc-color-surface-bubble:rgb(255 255 255 / 0.6);
+--fc-color-surface-button:rgb(0 0 0 / 0.05);
+--fc-color-surface-code:rgb(0 0 0 / 0.045);
+--fc-color-surface-field:rgb(0 0 0 / 0.06);
+--fc-color-surface-raised:rgb(255 255 255 / 0.72);
+--fc-color-surface-well:rgb(0 0 0 / 0.06);
+--fc-color-text-code:rgb(69 69 69);
+--fc-color-text-cool:rgb(69 69 69);
+--fc-color-text-muted:rgb(69 69 69);
+--fc-color-text-primary:rgb(11 11 11);
+--fc-color-text-subtle:rgb(107 107 107);
+--fc-duration-pulse:1400ms;
+--fc-duration-think:1100ms;
+--fc-easing-in-out:cubic-bezier(0.42, 0, 0.58, 1);
+--fc-font-family-mono:ui-monospace, SFMono-Regular, Menlo, monospace;
+--fc-font-family-sans:system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+--fc-radius-bubble:12px;
+--fc-radius-card:8px;
+--fc-radius-chip:4px;
+--fc-radius-control:6px;
+--fc-radius-key:5px;
+--fc-radius-panel:10px;
+--fc-radius-pill:999px;
+--fc-shadow-bubble:inset 0px 0px 0px 1px rgb(0 0 0 / 0.07);
+--fc-shadow-focus:inset 0px 0px 0px 1px rgb(17 17 17 / 0.45), 0px 0px 0px 3px rgb(17 17 17 / 0.1);
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{display:flex;flex-direction:column;min-height:0;overflow:hidden;background:transparent;color:var(--fc-color-text-primary);font:14px/1.5 var(--fc-font-family-sans)}
+button{font:inherit;color:inherit;cursor:pointer}
+button:focus-visible,input:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--fc-color-accent-base);outline-offset:2px}
+.head{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:10px 14px;border-bottom:1px solid var(--fc-color-line-faint)}
+.head .name{font-size:15px;font-weight:600;letter-spacing:-.01em}
+.head .tag{font:11px/18px var(--fc-font-family-mono);padding:0 7px;border-radius:var(--fc-radius-key);color:var(--fc-color-text-muted);background:var(--fc-color-surface-well)}
+.head .model{margin-left:auto;font:12px/1 var(--fc-font-family-mono);color:var(--fc-color-text-subtle)}
+.head .stop{height:30px;padding:0 12px;border:1px solid var(--fc-color-status-error);border-radius:var(--fc-radius-card);background:transparent;color:var(--fc-color-status-error);font-weight:600}
+.head .stop[hidden]{display:none}
+.dialog{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;display:flex;flex-direction:column;gap:10px;padding:14px}
+.who{display:flex;flex-direction:column;gap:3px;max-width:85%}
+.who.user{align-self:flex-end;align-items:flex-end}
+.who.assistant{align-self:flex-start;align-items:flex-start}
+.meta{font:11px/1.4 var(--fc-font-family-mono);color:var(--fc-color-text-subtle)}
+.msg{padding:8px 12px;border-radius:var(--fc-radius-bubble);white-space:pre-wrap;word-wrap:break-word;box-shadow:var(--fc-shadow-bubble);background:var(--fc-color-surface-bubble)}
+.who.user .msg{background:var(--fc-color-surface-field)}
+.msg.not-sent{opacity:.5;text-decoration:line-through}
+.who.queued{max-width:100%;opacity:.6;font-style:italic}
+.queue{flex:none;display:flex;flex-direction:column;gap:6px;padding:0 14px}
+.queue:empty{display:none}
+.notice{align-self:center;max-width:92%;padding:3px 10px;border-radius:var(--fc-radius-pill);font-size:12px;color:var(--fc-color-text-muted);background:var(--fc-color-surface-well);text-align:center;white-space:pre-wrap}
+.notice.warn{color:var(--fc-color-status-warn);background:var(--fc-color-status-warn-surface)}
+.notice.error{color:var(--fc-color-status-error);box-shadow:inset 0 0 0 1px var(--fc-color-status-error)}
+.notice.report{align-self:stretch;text-align:left;border-radius:var(--fc-radius-card);font:11.5px/1.45 var(--fc-font-family-mono)}
+details.tools,details.think{align-self:flex-start;width:85%;border-radius:var(--fc-radius-card);background:var(--fc-color-surface-code);box-shadow:inset 0 0 0 1px var(--fc-color-line-faint);font-size:12px}
+details.tools>summary,details.think>summary{display:flex;align-items:center;gap:8px;min-height:32px;padding:0 12px;cursor:pointer;list-style-position:inside;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+details.tools .n{font-weight:500}
+details.tools .verbs{font-family:var(--fc-font-family-mono);color:var(--fc-color-text-subtle);overflow:hidden;text-overflow:ellipsis}
+details.think>summary{font-style:italic;color:var(--fc-color-text-muted)}
+details.think.live>summary{animation:pulse var(--fc-duration-think) var(--fc-easing-in-out) infinite}
+.think .body{padding:0 12px 10px;white-space:pre-wrap;color:var(--fc-color-text-muted);max-height:320px;overflow:auto}
+.call{padding:6px 12px;border-top:1px solid var(--fc-color-line-faint)}
+.call .ct{font:12px var(--fc-font-family-mono);color:var(--fc-color-text-cool)}
+.call .ct.run::after{content:" …";animation:pulse var(--fc-duration-pulse) var(--fc-easing-in-out) infinite}
+.call pre{margin:4px 0 0;padding:6px 8px;border-radius:var(--fc-radius-chip);background:var(--fc-color-surface-well);font:11.5px/1.45 var(--fc-font-family-mono);color:var(--fc-color-text-code);white-space:pre-wrap;word-break:break-all;max-height:160px;overflow:auto}
+.card{align-self:stretch;display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:var(--fc-radius-card);background:var(--fc-color-surface-raised);box-shadow:inset 0 0 0 1px var(--fc-color-line-faint)}
+.card .k{font:600 10.5px var(--fc-font-family-mono);letter-spacing:.1em;text-transform:uppercase;color:var(--fc-color-text-subtle)}
+.card .id{font:12px var(--fc-font-family-mono)}
+.inq{align-self:stretch;display:flex;flex-direction:column;gap:10px;padding:14px;border-radius:var(--fc-radius-bubble);background:var(--fc-color-status-warn-surface);box-shadow:inset 0 0 0 1px var(--fc-color-status-warn-line)}
+.inq .k{font:600 11px var(--fc-font-family-mono);letter-spacing:.5px;text-transform:uppercase;color:var(--fc-color-status-warn)}
+.inq .q{font-size:15px;font-weight:600;white-space:pre-wrap}
+.inq .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.inq button{min-height:34px;padding:0 14px;border:1px solid var(--fc-color-line-strong);border-radius:var(--fc-radius-card);background:var(--fc-color-surface-raised);font-weight:500}
+.inq button.primary{background:var(--fc-color-status-warn);border-color:var(--fc-color-status-warn);color:var(--fc-color-status-warn-on);font-weight:600}
+.inq input[type=text]{flex:1;min-width:140px;height:34px;padding:0 10px;border:1px solid var(--fc-color-status-warn-line);border-radius:var(--fc-radius-card);background:var(--fc-color-status-warn-field);font:inherit;color:inherit}
+.inq .st{font-size:12px;color:var(--fc-color-status-warn-muted)}
+.inq.answered{opacity:.75}
+.foot{flex:none;display:flex;align-items:center;gap:10px;min-height:28px;padding:4px 14px;border-top:1px solid var(--fc-color-line-faint);font:11px var(--fc-font-family-mono);color:var(--fc-color-text-subtle)}
+.pill{padding:1px 9px;border-radius:var(--fc-radius-pill);background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
+.pill[data-phase=queued]{color:var(--fc-color-status-warn);background:var(--fc-color-status-warn-surface)}
+.pill[data-phase=thinking],.pill[data-phase=tool_calling],.pill[data-phase=streaming]{color:var(--fc-color-status-ok);animation:pulse var(--fc-duration-pulse) var(--fc-easing-in-out) infinite}
+.foot .clear{margin-left:auto;border:0;background:transparent;color:var(--fc-color-text-subtle);padding:2px 8px;border-radius:var(--fc-radius-control)}
+.foot .clear:hover{background:var(--fc-color-surface-button)}
+.input{flex:none;display:flex;align-items:flex-end;gap:8px;padding:8px 14px 12px}
+.input textarea{flex:1;min-width:0;min-height:38px;max-height:140px;resize:none;padding:8px 12px;border:0;border-radius:var(--fc-radius-panel);background:var(--fc-color-surface-field);box-shadow:inset 0 0 0 1px var(--fc-color-line-button);font:inherit;color:inherit}
+.input textarea:focus{box-shadow:var(--fc-shadow-focus);outline:none}
+.input .send{height:38px;padding:0 16px;border:0;border-radius:var(--fc-radius-panel);background:var(--fc-color-accent-deep);color:var(--fc-color-accent-on);font-weight:600}
+.input .send:hover{background:var(--fc-color-accent-deep-hover)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+</style>
+<div class="head"><span class="name" id="name"></span><span class="tag" id="tag"></span><span class="model" id="model"></span><button class="stop" id="stop" type="button" hidden>Stop</button></div>
+<div class="dialog" id="dialog"></div>
+<div class="queue" id="queue"></div>
+<div class="foot"><span class="pill" id="pill" data-phase="idle">idle</span><span id="hint"></span><span id="others"></span><button class="clear" id="clear" type="button" title="start a new thread: nothing is deleted, the earlier one stays recallable">clear</button></div>
+<div class="input"><textarea id="text" rows="1" placeholder="Message" aria-label="Message"></textarea><button class="send" id="send" type="button">Send</button></div>
+<script>
+// pure
+var FROM = /^\[from ([^\]\s·]+)[^\]]*\]\s*/;
+var SPOT = /\n?\[at (-?\d+),(-?\d+)\]$/;
+var SETUP_BLOCK = /\n\[canvas setup\][\s\S]*$/;
+var CALLS = /<call\b[^>]*>[\s\S]*?<\/call>/g;
+var OPEN_CALL = /<call\b[\s\S]*$/;
+var THINK = /<think>[\s\S]*?(?:<\/think>|$)/g;
+var CALL_HEAD = /<call name="([^"]+)">(?:[\s\S]*?<target_id>([^<]*)<\/target_id>)?(?:[\s\S]*?<type>([^<]*)<\/type>)?/;
+var REPLY_HEAD = /^\[reply to \d+ · ([^\]·]+?)(?: · [^\]]*)?\]/;
+var MONITOR_HEAD = /^\[monitor (\d+) · job (\d+) · from (.+?) call (\S+?)(?: · "([^"]*)")?( · job ended)?\]\s*/;
+var MALFORMED = "[malformed call — nothing ran]";
+
+function words(t) { return t.replace(THINK, "").replace(CALLS, "").replace(OPEN_CALL, "").trim(); }
+// "[from planner · msg 4] hello" -> the sender is the meta line, the rest the text
+function parseFrom(text) {
+  var m = FROM.exec(text);
+  return m ? { sender: m[1], text: text.slice(m[0].length) } : { sender: "", text: text };
+}
+// a stored person turn, as shown: setup block, spot and sender header taken off
+function personText(text) {
+  var spot = SPOT.exec(text);
+  var t = (spot ? text.slice(0, spot.index) : text).replace(SETUP_BLOCK, "");
+  return parseFrom(t);
+}
+function monitorOf(text) {
+  var f = parseFrom(text);
+  if (f.sender === "") return null;
+  var m = MONITOR_HEAD.exec(f.text);
+  if (!m) return null;
+  return { tag: "monitor " + m[1] + " · job " + m[2] + (m[5] ? ' "' + m[5] + '"' : "") + (m[6] ? " · ended" : ""), lines: f.text.slice(m[0].length).replace(/\s+$/, "") };
+}
+// a row that is a tool call (assistant, calls only) or its reply (the next user turn)
+function toolOf(role, text) {
+  if (role === "assistant" && words(text) === "") {
+    var c = CALL_HEAD.exec(text);
+    if (c) return { call: { target: c[2] || c[1], verb: c[3] || "", args: text } };
+  }
+  if (role === "user") {
+    var r = REPLY_HEAD.exec(text);
+    if (r) return { reply: { label: r[1], text: text } };
+  }
+  return null;
+}
+function newGroup() { return { kind: "tools", calls: [] }; }
+function addTool(g, t) {
+  if (t.call) { g.calls.push({ id: t.call.id || "", target: t.call.target, verb: t.call.verb, args: t.call.args, reply: null }); return; }
+  var open = null;
+  for (var i = 0; i < g.calls.length; i++) if (g.calls[i].reply === null) { open = g.calls[i]; break; }
+  if (open) open.reply = t.reply.text;
+  else g.calls.push({ id: "", target: "", verb: t.reply.label, args: "", reply: t.reply.text });
+}
+function groupTitle(g) {
+  var verbs = [];
+  g.calls.forEach(function (c) { var v = c.verb || c.target; if (v && verbs.indexOf(v) < 0) verbs.push(v); });
+  var n = g.calls.length;
+  return { n: n + " tool call" + (n === 1 ? "" : "s"), verbs: verbs.join(", ") };
+}
+// the agents on show: an embed row puts a name card in its place, a later unembed takes it out
+function cardRows(rows) {
+  var out = {};
+  rows.forEach(function (m) {
+    if ((m.kind !== "embed" && m.kind !== "unembed") || typeof m.head !== "string") return;
+    if (m.kind === "embed" && typeof m.id === "number") out[m.head] = m.id; else delete out[m.head];
+  });
+  return out;
+}
+// a run of consecutive reports with one head is the first with repeat: n
+function collapseReports(rows) {
+  var out = [];
+  rows.forEach(function (m) {
+    var last = out[out.length - 1];
+    var rep = typeof m.head === "string" && m.head.indexOf(MALFORMED) >= 0;
+    if (rep && last && typeof last.head === "string" && last.head === m.head) { last.repeat = (last.repeat || 1) + 1; return; }
+    out.push(Object.assign({}, m));
+  });
+  return out;
+}
+// history rows (+ the thoughts kept on their rows: id -> {text, cut}) -> what the transcript shows, in order
+function shapeRows(rows, thoughts) {
+  var out = [];
+  var group = null;
+  var shown = cardRows(rows);
+  collapseReports(rows).forEach(function (m) {
+    var role = String(m.role || ""), head = typeof m.head === "string" ? m.head : "", kind = m.kind || "";
+    if (kind === "embed" || kind === "unembed") {
+      group = null;
+      if (kind === "embed" && shown[head] === m.id) out.push({ kind: "card", agent: head });
+      return;
+    }
+    var t = thoughts && typeof m.id === "number" ? thoughts.get(m.id) : undefined;
+    var tool = kind === "notice" ? null : toolOf(role, head);
+    if (tool) {
+      if (!group) { group = newGroup(); out.push(group); }
+      addTool(group, tool);
+      return;
+    }
+    group = null;
+    if (t) out.push({ kind: "think", text: t.text, cut: t.cut || 0 });
+    var bad = role === "user" ? head.indexOf(MALFORMED) : -1;
+    if (bad >= 0) { out.push({ kind: "report", text: head.slice(bad) + (m.repeat ? " ×" + m.repeat : "") }); return; }
+    if (kind === "notice") return;
+    var mon = role === "user" ? monitorOf(head) : null;
+    if (mon) { out.push({ kind: "monitor", tag: mon.tag, text: mon.lines }); return; }
+    if (role === "user") {
+      var p = personText(head);
+      out.push({ kind: "msg", role: "user", sender: p.sender, text: p.text });
+    } else {
+      var w = words(head);
+      if (w !== "") out.push({ kind: "msg", role: "assistant", sender: "", text: w });
+    }
+  });
+  return out;
+}
+// the newest `keep` history rows, oldest first, over every page (`next` is the cursor)
+async function historyTail(call, keep) {
+  keep = keep || 300;
+  var win = [], bytes = 0, lastId = 0, args = { type: "history" };
+  for (var page = 0; page < 1000; page++) {
+    var r = await call(args);
+    if (r === null || r === undefined) break;
+    var rows = Array.isArray(r.rows) ? r.rows : [];
+    rows.forEach(function (m) {
+      if (typeof m.bytes === "number") bytes += m.bytes;
+      if (typeof m.id === "number") lastId = Math.max(lastId, m.id);
+    });
+    win = win.concat(rows);
+    if (win.length > keep) win = win.slice(win.length - keep);
+    if (typeof r.next !== "number") break;
+    args = { type: "history", after: r.next };
+  }
+  return { rows: win, bytes: bytes, lastId: lastId };
+}
+// the thoughts kept on rows (the `rows` verb), from the head, following `next`
+async function keptThoughts(call, pageSize) {
+  var out = new Map(), after;
+  for (var page = 0; page < 20; page++) {
+    var args = { type: "rows", limit: pageSize || 200 };
+    if (after !== undefined) args.after = after;
+    var r = await call(args);
+    var got = r && Array.isArray(r.rows) ? r.rows : [];
+    got.forEach(function (x) {
+      if (typeof x.id === "number" && typeof x.thinking === "string") out.set(x.id, { text: x.thinking, cut: typeof x.thinking_cut === "number" ? x.thinking_cut : 0 });
+    });
+    if (!r || r.next === null || r.next === undefined) break;
+    after = r.next;
+  }
+  return out;
+}
+// end pure
+
+(function () {
+  var AGENT = "{{agent}}";
+  var me = "web_" + Math.random().toString(36).slice(2, 10);
+  var $ = function (id) { return document.getElementById(id); };
+  var dialog = $("dialog"), queue = $("queue"), text = $("text");
+  var s = function (d, k) { return d && typeof d[k] === "string" ? d[k] : ""; };
+  var o = function (d, k) { return d && d[k] !== null && typeof d[k] === "object" ? d[k] : {}; };
+  var call = function (p) { return fantastic.send(AGENT, p); };
+  var el = function (tag, cls, txt) { var e = document.createElement(tag); if (cls) e.className = cls; if (txt !== undefined) e.textContent = txt; return e; };
+
+  var pinned = true;
+  dialog.addEventListener("scroll", function () { pinned = dialog.scrollHeight - dialog.scrollTop - dialog.clientHeight < 48; });
+  new MutationObserver(function () { if (pinned) dialog.scrollTop = dialog.scrollHeight; }).observe(dialog, { childList: true, subtree: true, characterData: true });
+
+  var tail = null; // the open tool group: {g, box}
+  function push(node) { tail = null; dialog.appendChild(node); return node; }
+  function notice(txt, cls) { return push(el("div", "notice" + (cls ? " " + cls : ""), txt)); }
+  function bubble(role, txt, sender) {
+    var w = el("div", "who " + role);
+    if (sender) w.appendChild(el("div", "meta", sender));
+    w.appendChild(el("div", "msg", txt));
+    return w;
+  }
+
+  function drawGroup(t) {
+    var title = groupTitle(t.g);
+    t.sum.textContent = "";
+    t.sum.append(el("span", "n", title.n), el("span", "verbs", title.verbs));
+    t.body.textContent = "";
+    t.g.calls.forEach(function (c) {
+      var row = el("div", "call");
+      row.appendChild(el("div", "ct" + (c.reply === null ? " run" : ""), (c.target ? c.target + " " : "") + c.verb));
+      if (c.args) row.appendChild(el("pre", "", c.args));
+      if (c.reply !== null) row.appendChild(el("pre", "", c.reply));
+      t.body.appendChild(row);
+    });
+  }
+  function groupEl(g) {
+    var box = el("details", "tools"), sum = el("summary"), body = el("div");
+    box.append(sum, body);
+    var t = { g: g, box: box, sum: sum, body: body };
+    drawGroup(t);
+    return t;
+  }
+  function openGroup() {
+    if (tail) return tail;
+    var t = groupEl(newGroup());
+    dialog.appendChild(t.box);
+    tail = t;
+    return t;
+  }
+  function thinkEl(txt, cut) {
+    var d = el("details", "think");
+    d.append(el("summary", "", "thought · " + txt.length + " chars" + (cut > 0 ? " (+" + cut + " cut)" : "")), el("div", "body", txt));
+    return d;
+  }
+  function cardEl(agent) {
+    var c = el("div", "card");
+    c.dataset.agent = agent;
+    c.append(el("span", "k", "embedded"), el("span", "id", agent));
+    return c;
+  }
+  function drawItems(items) {
+    items.forEach(function (it) {
+      if (it.kind === "tools") { var t = groupEl(it); tail = null; dialog.appendChild(t.box); }
+      else if (it.kind === "think") push(thinkEl(it.text, it.cut));
+      else if (it.kind === "card") push(cardEl(it.agent));
+      else if (it.kind === "report") notice(it.text, "report warn");
+      else if (it.kind === "monitor") { var b = bubble("assistant", it.text, it.tag); push(b); }
+      else push(bubble(it.role, it.text, it.sender));
+    });
+  }
+
+  // THE TURN
+  var pending = []; // my queued sends: {el, sendId}
+  var inflight = null;
+  var drafts = {};
+  function busy() { return inflight !== null || pending.length > 0; }
+  function refresh() { $("stop").hidden = !busy(); }
+  function phase(p, hint) {
+    $("pill").dataset.phase = p;
+    $("pill").textContent = p;
+    $("hint").textContent = hint || "";
+  }
+  function bind(sendId) {
+    if (!sendId || pending.some(function (q) { return q.sendId === sendId; })) return;
+    var q = pending.find(function (x) { return !x.sendId; });
+    if (q) q.sendId = sendId;
+  }
+  function promote(sendId) {
+    var i = pending.findIndex(function (q) { return q.sendId === sendId; });
+    if (i < 0) i = pending.findIndex(function (q) { return !q.sendId; });
+    if (i >= 0) {
+      var q = pending.splice(i, 1)[0];
+      q.el.classList.remove("queued");
+      push(q.el);
+    }
+    inflight = { sendId: sendId };
+    refresh();
+  }
+  var mine = function (p) { return (!s(p, "client_id") || s(p, "client_id") === me) && (!s(p, "source") || s(p, "source") === AGENT); };
+  var toMe = function (p) { return s(p, "client_id") === me && (!s(p, "source") || s(p, "source") === AGENT); };
+
+  function tool(t) {
+    var g = openGroup();
+    var id = s(t, "call_id");
+    var c = id ? g.g.calls.find(function (x) { return x.id === id; }) : undefined;
+    if (!c) {
+      c = { id: id, target: s(t, "target"), verb: s(t, "verb"), args: JSON.stringify(o(t, "args"), null, 2), reply: null };
+      g.g.calls.push(c);
+    }
+    if ("reply_preview" in t) { c.reply = s(t, "reply_preview"); if (s(t, "target") === AGENT && /^(un)?embed$/.test(s(t, "verb"))) rowsSoon(); }
+    drawGroup(g);
+  }
+  function settle(id, why) {
+    var d = drafts[id];
+    if (!d) return;
+    delete drafts[id];
+    if (d.kind === "thinking" && d.text === "") { d.el.remove(); return; }
+    d.el.classList.remove("live");
+    if (d.kind === "text") { d.el.classList.add("not-sent"); d.el.title = "not sent — " + why; }
+  }
+  function onEvent(p) {
+    if (!p || typeof p !== "object") return;
+    if (typeof p.error === "string") { notice("✕ " + p.error, "error"); return; }
+    var d;
+    switch (p.type) {
+      case "queued": if (mine(p) && s(p, "send_id")) bind(s(p, "send_id")); break;
+      case "status": {
+        var ph = s(p, "phase"), det = o(p, "detail"), sid = s(det, "send_id");
+        if (ph === "done") soon();
+        if (!mine(p)) break;
+        if (ph === "queued") { bind(sid); phase("queued", typeof det.ahead === "number" ? det.ahead + " ahead" : ""); }
+        else if (ph === "thinking" || ph === "streaming") { if (!inflight || inflight.sendId !== sid) promote(sid); phase(ph, "Esc to stop"); }
+        else if (ph === "tool_calling") { tool(o(det, "tool")); phase(ph, "Esc to stop"); }
+        else if (ph === "done") {
+          if (inflight && (!sid || inflight.sendId === sid)) inflight = null;
+          refresh();
+          var why = s(det, "reason");
+          phase("idle", why && why !== "ok" ? why : "");
+        }
+        break;
+      }
+      case "part_start": {
+        if (!toMe(p)) break;
+        var kind = s(p, "kind");
+        if (kind === "call") break; // the tool group shows calls
+        var node = kind === "thinking" ? el("details", "think live") : bubble("assistant", "");
+        if (kind === "thinking") { node.append(el("summary", "", "thinking"), el("div", "body")); node.dataset.t0 = String(Date.now()); }
+        push(node);
+        drafts[s(p, "stream_id")] = { el: kind === "thinking" ? node : node.querySelector(".msg"), kind: kind, text: "" };
+        break;
+      }
+      case "part_delta":
+        if (!toMe(p)) break;
+        d = drafts[s(p, "stream_id")];
+        if (!d) break;
+        d.text += s(p, "text");
+        if (d.kind === "thinking") d.el.querySelector(".body").textContent = d.text;
+        else if (d.kind === "text") d.el.textContent = d.text;
+        break;
+      case "part_end":
+        if (!toMe(p)) break;
+        d = drafts[s(p, "stream_id")];
+        if (!d) break;
+        if (p.ok === false) { settle(s(p, "stream_id"), "malformed"); break; }
+        delete drafts[s(p, "stream_id")];
+        if (d.kind === "thinking") {
+          if (d.text.trim() === "") d.el.remove();
+          else { d.el.classList.remove("live"); d.el.querySelector("summary").textContent = "thought for " + ((Date.now() - Number(d.el.dataset.t0)) / 1000).toFixed(1) + "s"; }
+        }
+        break;
+      case "part_abort": if (toMe(p)) settle(s(p, "stream_id"), s(p, "reason") || "aborted"); break;
+      case "done": soon(); if (mine(p)) { inflight = null; refresh(); } break;
+      case "context": {
+        if (!mine(p)) break;
+        var cd = o(p, "detail");
+        if (s(p, "phase") === "too_small") { notice("context too small — " + s(cd, "hint"), "error"); phase("idle", "context too small"); refresh(); break; }
+        var folded = typeof cd.folded === "number" ? cd.folded : 0, dropped = typeof cd.dropped_messages === "number" ? cd.dropped_messages : 0, kept = typeof cd.kept_messages === "number" ? cd.kept_messages : 0;
+        if (folded === 0 && dropped === 0) break;
+        notice(folded > 0 ? "context folded · " + folded + " older part" + (folded === 1 ? "" : "s") + " summarized · " + kept + " kept (recall to page back)" : "context compacted · " + s(cd, "strategy") + " · " + dropped + " dropped → " + kept + " kept (recall to page back)");
+        break;
+      }
+    }
+  }
+
+  // INQUIRIES this agent asked the person: `user` holds them
+  var seenInq = {};
+  function inquiryEl(q) {
+    var re = Number(q.re), kind = s(q, "kind") || "text";
+    var card = el("section", "inq"), row = el("div", "row"), st = el("div", "st");
+    card.append(el("div", "k", "Question for you"), el("div", "q", s(q, "text")), row, st);
+    function lock(on) { row.querySelectorAll("button,input").forEach(function (b) { b.disabled = on; }); }
+    function reply(answer, shownAs) {
+      lock(true);
+      fantastic.send("user", { type: "answer_inquiry", re: re, answer: answer }).then(function (r) {
+        if (r && typeof r.error === "string") { st.textContent = "✕ " + r.error; lock(false); return; }
+        card.classList.add("answered");
+        row.textContent = "";
+        st.textContent = "✓ you answered: " + shownAs;
+      });
+    }
+    function button(label, fn, primary) { var b = el("button", primary ? "primary" : "", label); b.type = "button"; b.onclick = fn; return b; }
+    var opts = (Array.isArray(q.options) ? q.options : []).map(function (x) {
+      if (x !== null && typeof x === "object") { var v = String(x.value !== undefined ? x.value : x.label); return { value: v, label: String(x.label !== undefined ? x.label : v) }; }
+      return { value: String(x), label: String(x) };
+    });
+    if (kind === "confirm") row.append(button("Yes", function () { reply(true, "yes"); }, true), button("No", function () { reply(false, "no"); }));
+    else if (kind === "single") opts.forEach(function (x) { row.append(button(x.label, function () { reply(x.value, x.label); })); });
+    else if (kind === "multi") {
+      var picks = [];
+      opts.forEach(function (x) { var l = el("label"), c = el("input"); c.type = "checkbox"; c.value = x.value; picks.push(c); l.append(c, " " + x.label); row.append(l); });
+      row.append(button("Answer", function () { var ch = picks.filter(function (c) { return c.checked; }).map(function (c) { return c.value; }); if (ch.length) reply(ch, ch.join(", ")); }, true));
+    }
+    if (kind !== "confirm" && kind !== "multi") {
+      var inp = el("input"); inp.type = "text"; inp.placeholder = kind === "single" ? "Or answer in your own words" : "Your answer"; inp.setAttribute("aria-label", "Your answer");
+      var go = function () { var v = inp.value.trim(); if (v) reply(v, v); };
+      inp.onkeydown = function (e) { if (e.key === "Enter") go(); };
+      row.append(inp, button("Answer", go, kind !== "single"));
+    }
+    return card;
+  }
+  async function inquiries() {
+    var r = await fantastic.send("user", { type: "inquiries", asker: AGENT }).catch(function () { return null; });
+    (r && Array.isArray(r.inquiries) ? r.inquiries : []).forEach(function (q) {
+      var re = Number(q.re);
+      if (!Number.isFinite(re) || seenInq[re]) return;
+      seenInq[re] = true;
+      push(inquiryEl(q));
+    });
+  }
+
+  // rows after the last seen: embed cards and the checker's reports arrive as rows, not events
+  var lastRow = 0;
+  async function newRows() {
+    var read = function (a) { return call(Object.assign({ type: "history", client_id: me }, a)).catch(function () { return null; }); };
+    var rowsOf = function (h) { return h && Array.isArray(h.rows) ? h.rows : []; };
+    var fresh = lastRow > 0 ? rowsOf(await read({ after: lastRow })) : [];
+    if (fresh.length === 0) fresh = rowsOf(await read({})).filter(function (m) { return typeof m.id === "number" && m.id > lastRow; });
+    fresh.forEach(function (m) {
+      if (typeof m.id === "number") lastRow = Math.max(lastRow, m.id);
+      if (m.kind === "embed" || m.kind === "unembed") {
+        var have = dialog.querySelector('.card[data-agent="' + CSS.escape(s(m, "head")) + '"]');
+        if (m.kind === "unembed") { if (have) have.remove(); }
+        else if (!have) push(cardEl(s(m, "head")));
+      } else if (s(m, "head").indexOf(MALFORMED) >= 0) notice(s(m, "head").slice(s(m, "head").indexOf(MALFORMED)), "report warn");
+    });
+  }
+  var timer = null, rowTimer = null;
+  function soon() { if (timer) return; timer = setTimeout(function () { timer = null; inquiries(); newRows(); }, 250); }
+  function rowsSoon() { if (rowTimer) return; rowTimer = setTimeout(function () { rowTimer = null; newRows(); }, 60); }
+
+  // SEND / STOP / CLEAR
+  function submit() {
+    var typed = text.value.trim();
+    if (!typed) return;
+    text.value = "";
+    text.style.height = "";
+    pinned = true;
+    var b = bubble("user", typed, "");
+    b.classList.add("queued");
+    queue.appendChild(b);
+    var q = { el: b, sendId: "" };
+    pending.push(q);
+    refresh();
+    var drop = function () { b.remove(); var i = pending.indexOf(q); if (i >= 0) pending.splice(i, 1); refresh(); };
+    call({ type: "send", text: typed, client_id: me }).then(function (r) {
+      if (r && typeof r.error === "string") { notice("✕ " + r.error + (typeof r.hint === "string" && r.hint ? " — " + r.hint : ""), "error"); drop(); }
+    }).catch(function (e) { notice("✕ " + e.message, "error"); drop(); });
+  }
+  function stop() { call({ type: "stop" }); }
+  $("send").onclick = function () { if (inflight) stop(); else submit(); };
+  $("stop").onclick = stop;
+  text.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } });
+  text.addEventListener("input", function () { text.style.height = "auto"; text.style.height = Math.min(text.scrollHeight, 140) + "px"; });
+  window.addEventListener("keydown", function (e) { if (e.key === "Escape" && inflight) { e.preventDefault(); stop(); } });
+  $("clear").onclick = function () {
+    call({ type: "context_clear", why: "cleared from the chat" }).then(function (r) {
+      if (r && typeof r.error === "string") notice("✕ " + r.error, "error");
+      else notice("— cleared: a new thread starts here (the earlier one is kept, recall pages back) —");
+    });
+  };
+
+  // BOOT: head, history, live snapshot, then the watch
+  async function boot() {
+    fantastic.watch(AGENT, onEvent);
+    var rf = await call({ type: "reflect" });
+    $("name").textContent = s(rf, "display_name") || s(rf, "id") || AGENT;
+    $("tag").textContent = s(rf, "handler_module") || "ai_chat";
+    var prov = s(rf, "provider_id"), model = s(rf, "model");
+    $("model").textContent = prov ? (model ? model + " · " : "") + prov : "";
+    if (!prov) notice("No model set", "warn");
+    var tl = await historyTail(function (p) { return call(Object.assign({}, p, { client_id: me })); }, 300);
+    var thoughts = tl.rows.some(function (m) { return m.has_thinking === true; })
+      ? await keptThoughts(function (p) { return call(p).catch(function () { return null; }); }) : new Map();
+    drawItems(shapeRows(tl.rows, thoughts));
+    lastRow = tl.lastId;
+    var snap = await call({ type: "status", client_id: me });
+    if (snap && typeof snap === "object") {
+      $("others").textContent = typeof snap.others_pending === "number" && snap.others_pending > 0 ? "+" + snap.others_pending + " from other clients" : "";
+      var cur = o(snap, "current");
+      if (cur.is_mine === true) {
+        push(bubble("user", s(cur, "text"), ""));
+        if (s(cur, "text_so_far")) push(bubble("assistant", s(cur, "text_so_far"), ""));
+        inflight = { sendId: s(cur, "send_id") };
+        var lt = o(cur, "last_tool");
+        if (Object.keys(lt).length > 0) tool(lt);
+        phase(s(cur, "phase") || "thinking", "Esc to stop");
+      }
+      (Array.isArray(snap.mine_pending) ? snap.mine_pending : []).forEach(function (e) {
+        var b = bubble("user", s(e, "text"), ""); b.classList.add("queued"); queue.appendChild(b);
+        pending.push({ el: b, sendId: s(e, "send_id") });
+      });
+      refresh();
+    }
+    inquiries();
+  }
+  boot().catch(function (e) { notice("✕ " + (e && e.message ? e.message : e), "error"); });
+})();
+</script>

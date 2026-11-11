@@ -3,43 +3,33 @@
 // top, and below it a GRID of icon tiles in two groups (backend-owned views):
 //
 //   page    html · stream · file tree · preview · backgrounds · tips — page content (FE)
-//   host    ask (the default AI) · terminal · agent (set-up) · python agent —
+//   host    terminal · python agent —
 //           a HOST agent made, then a cell views it (BE)
 //   host · bundles  this project's own bundles — one more instance of each
 //   page · bundles  this canvas's page bundles (an html cell bundled) — likewise
-//   host · chats  your kept dialogs — reopened here
 //
-// Your AI set-ups are NOT in the menu (owner 2026-10-12): the AI agent's is
-// chosen in its ⚙ settings (★ the default). Typing FILTERS the tiles; a kind
-// typed exactly offers only that kind; anything else becomes the
-// FIRST TURN of a new AI cell on the default set-up. With no default
-// saved set-up the first tile opens set-up instead — nothing is guessed. ←↑↓→ move
-// across the grid, ⏎ goes, esc / a click away closes; a pick replaces the popup.
+// Typing FILTERS the tiles; a kind typed exactly offers only that kind.
+// ←↑↓→ move across the grid, ⏎ goes, esc / a click away closes; a pick replaces
+// the popup.
 
 import { tint, tok } from "../skin/css.ts";
 
 export type Pick =
-  | { kind: "ai"; text: string }
   | { kind: "terminal" }
   | { kind: "html" }
   | { kind: "stream" }
-  | { kind: "setup" }
   | { kind: "files" }
   | { kind: "preview" }
   | { kind: "backgrounds" }
   | { kind: "tips" }
   | { kind: "mcp" }
   | { kind: "user_store" }
-  | { kind: "chat"; id: string; name: string }
   | { kind: "bundle"; starter: string }
   | { kind: "instance"; bundle: string }
   | { kind: "page_instance"; bundle: string }
   | { kind: "coding"; name: string; path: string };
 
 export interface Presets {
-  preferred: string | null;
-  /** kept dialogs (`backend dialogs`) */
-  dialogs: Array<{ id: string; name: string }>;
   /** the known coding agents found on the human's PATH (`user path`) */
   coding?: Array<{ name: string; path: string }>;
   /** the project's own bundles (`.fantastic/bundles/`), each placeable again */
@@ -68,7 +58,7 @@ export function exactLine(argv: string[]): string {
   return argv.map(quote).join(" ").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export type Section = "page" | "host" | "coding" | "bundles" | "page_bundles" | "chats";
+export type Section = "page" | "host" | "coding" | "bundles" | "page_bundles";
 export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "bundle" | "chat" | "tree" | "preview" | "backgrounds" | "tips" | "claude" | "codex" | "aider" | "opencode" | "fantastic" | "mcp" | "store";
 
 export interface Tile {
@@ -102,14 +92,13 @@ const KINDS: Array<[string, Pick, Icon, Section]> = [
   ["tips", { kind: "tips" }, "tips", "page"],
 ];
 /** The groups in DRAWN order — the flat tile order follows it (arrow keys walk it). */
-const SECTIONS: Section[] = ["host", "coding", "bundles", "page", "page_bundles", "chats"];
+const SECTIONS: Section[] = ["host", "coding", "bundles", "page", "page_bundles"];
 
 /** The tiles for what is typed, in order (sections in order). Pure. */
 export function tiles(typed: string, presets: Presets | null): Tile[] {
   const t = typed.trim();
   const low = t.toLowerCase();
   const out: Tile[] = [];
-  const dialogs = presets?.dialogs ?? [];
   const exact = KINDS.find(([k]) => k.toLowerCase() === low);
   if (exact) return [{ icon: exact[2], label: exact[0], hint: "", pick: exact[1], section: exact[3] }];
   // a project bundle's name typed exactly: only that bundle (⏎ places it)
@@ -117,15 +106,6 @@ export function tiles(typed: string, presets: Presets | null): Tile[] {
   if (exactBundle) return [{ icon: "bundle", label: exactBundle.name, hint: "", pick: { kind: "instance", bundle: exactBundle.name }, section: "bundles" }];
   const exactPage = (presets?.pageBundles ?? []).find((b) => b.name.toLowerCase() === low);
   if (exactPage) return [{ icon: "html", label: exactPage.name, hint: "", pick: { kind: "page_instance", bundle: exactPage.name }, section: "page_bundles" }];
-  // THE FIRST TILE, "AI agent" (owner 2026-10-12: was "ask"; the ONE way to make
-  // an AI — no "new AI agent…" beside it): the default AI, free text its first
-  // turn; with none set up, the wizard. Another provider: the cell's ⚙ settings.
-  const aiTile = (text: string): Tile =>
-    presets?.preferred
-      ? { icon: "ask", label: text ? `AI agent · ${presets.preferred}` : "AI agent", hint: `★ ${presets.preferred}`, pick: { kind: "ai", text }, section: "host" }
-      : { icon: "agent", label: "AI agent", hint: "set one up", pick: { kind: "setup" }, section: "host" };
-  if (low === "ai agent") return [aiTile("")];
-  out.push(aiTile(t));
   for (const [k, pick, icon, section] of KINDS) {
     if (!t || k.toLowerCase().startsWith(low)) out.push({ icon, label: k, hint: "", pick, section });
   }
@@ -146,11 +126,7 @@ export function tiles(typed: string, presets: Presets | null): Tile[] {
     if (t && !b.name.toLowerCase().startsWith(low)) continue;
     out.push({ icon: "html", label: b.name, hint: "", pick: { kind: "page_instance", bundle: b.name }, section: "page_bundles" });
   }
-  for (const d of dialogs) {
-    if (t && !d.name.toLowerCase().includes(low)) continue;
-    out.push({ icon: "chat", label: d.name, hint: "kept chat", pick: { kind: "chat", id: d.id, name: d.name }, section: "chats" });
-  }
-  // stable by group: the first tile stays the default AI (free text + ⏎ asks it)
+  // stable by group
   return SECTIONS.flatMap((sec) => out.filter((x) => x.section === sec));
 }
 
@@ -228,7 +204,7 @@ export function iconSvg(icon: Icon): string {
   return `<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${PATH[icon]}</svg>`;
 }
 
-const SECTION_TITLE: Record<Section, string> = { page: "page", host: "host", coding: "host · coding agents", bundles: "host · bundles", page_bundles: "page · bundles", chats: "host · chats" };
+const SECTION_TITLE: Record<Section, string> = { page: "page", host: "host", coding: "host · coding agents", bundles: "host · bundles", page_bundles: "page · bundles" };
 
 const CSS = `
   .action-popup { position: fixed; z-index: 1000; width: 520px; max-width: calc(100vw - 32px);
@@ -253,7 +229,6 @@ const CSS = `
   .action-popup .tile .lb { font-size: 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .action-popup .tile .ht { font-size: 10px; color: ${tint("color.text.cool", 42)}; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .action-popup .tile.sel { background: ${tint("color.accent.base", 22)}; box-shadow: inset 0 0 0 1px ${tint("color.accent.base", 45)}; }
-  .action-popup .tile[data-section="chats"] .ic { color: ${tok("color.status.ok")}; }
   .action-popup .foot { padding: 6px 16px 9px; color: ${tint("color.text.cool", 40)}; font-size: 11px; border-top: 1px solid ${tint("color.ink", 6)}; }
   /* NARROW SCREENS (a phone): one vertical list, full width, centred — each tile
      a row (icon · label · hint) */
