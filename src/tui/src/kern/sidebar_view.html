@@ -1,0 +1,356 @@
+<style>
+:root{
+--fc-color-accent-base:rgb(17 17 17);
+--fc-color-accent-deep:rgb(17 17 17);
+--fc-color-accent-deep-hover:rgb(43 43 43);
+--fc-color-accent-on:rgb(255 255 255);
+--fc-color-line-button:rgb(0 0 0 / 0.1);
+--fc-color-line-faint:rgb(0 0 0 / 0.06);
+--fc-color-line-strong:rgb(0 0 0 / 0.18);
+--fc-color-status-error:rgb(179 38 30);
+--fc-color-status-ok:rgb(27 116 70);
+--fc-color-status-warn:rgb(143 82 0);
+--fc-color-status-warn-field:rgb(255 255 255 / 0.6);
+--fc-color-status-warn-line:rgb(143 82 0 / 0.45);
+--fc-color-status-warn-muted:rgb(143 82 0);
+--fc-color-status-warn-on:rgb(255 255 255);
+--fc-color-status-warn-surface:rgb(143 82 0 / 0.12);
+--fc-color-surface-bubble:rgb(255 255 255 / 0.6);
+--fc-color-surface-button:rgb(0 0 0 / 0.05);
+--fc-color-surface-code:rgb(0 0 0 / 0.045);
+--fc-color-surface-field:rgb(0 0 0 / 0.06);
+--fc-color-surface-raised:rgb(255 255 255 / 0.72);
+--fc-color-surface-well:rgb(0 0 0 / 0.06);
+--fc-color-text-code:rgb(69 69 69);
+--fc-color-text-cool:rgb(69 69 69);
+--fc-color-text-muted:rgb(69 69 69);
+--fc-color-text-primary:rgb(11 11 11);
+--fc-color-text-subtle:rgb(107 107 107);
+--fc-duration-pulse:1400ms;
+--fc-duration-think:1100ms;
+--fc-easing-in-out:cubic-bezier(0.42, 0, 0.58, 1);
+--fc-font-family-mono:ui-monospace, SFMono-Regular, Menlo, monospace;
+--fc-font-family-sans:system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+--fc-radius-bubble:12px;
+--fc-radius-card:8px;
+--fc-radius-chip:4px;
+--fc-radius-control:6px;
+--fc-radius-key:5px;
+--fc-radius-panel:10px;
+--fc-radius-pill:999px;
+--fc-shadow-bubble:inset 0px 0px 0px 1px rgb(0 0 0 / 0.07);
+--fc-shadow-focus:inset 0px 0px 0px 1px rgb(17 17 17 / 0.45), 0px 0px 0px 3px rgb(17 17 17 / 0.1);
+}
+
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{display:flex;flex-direction:column;min-height:0;overflow:hidden;background:transparent;color:var(--fc-color-text-primary);font:13px/1.45 var(--fc-font-family-sans)}
+button{font:inherit;color:inherit;cursor:pointer;border:0;background:transparent;padding:0;text-align:left}
+button:focus-visible,input:focus-visible{outline:2px solid var(--fc-color-accent-base);outline-offset:1px}
+.hov:hover{background:var(--fc-color-surface-button)}
+.strip{flex:none;display:flex;gap:6px;overflow-x:auto;padding:10px 10px 8px;border-bottom:1px solid var(--fc-color-line-faint);scrollbar-width:none}
+.k{flex:none;display:flex;flex-direction:column;align-items:center;gap:3px;width:56px;padding:5px 0 4px;border-radius:var(--fc-radius-control)}
+.k .mark{display:grid;place-items:center;width:32px;height:32px;border-radius:var(--fc-radius-card);font:600 11px/1 var(--fc-font-family-mono);text-transform:uppercase;background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
+.k.here .mark{background:var(--fc-color-accent-deep);color:var(--fc-color-accent-on)}
+.k .nm{max-width:54px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--fc-color-text-muted)}
+.k.here .nm{color:var(--fc-color-text-primary);font-weight:600}
+.scroll{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:none;padding:8px 8px 4px;display:flex;flex-direction:column;gap:12px}
+.wait{display:flex;flex-direction:column;gap:2px;padding:8px 4px 4px;border-radius:var(--fc-radius-panel);background:var(--fc-color-status-warn-surface);box-shadow:inset 0 0 0 1px var(--fc-color-status-warn-line)}
+.wait[hidden]{display:none}
+.wait h2{margin:0;padding:0 8px 4px;font:600 11px/1.4 var(--fc-font-family-mono);letter-spacing:.5px;text-transform:uppercase;color:var(--fc-color-status-warn)}
+.w{display:flex;align-items:center;gap:9px;width:100%;min-height:44px;padding:5px 8px;border-radius:var(--fc-radius-card)}
+.w .who{display:flex;flex-direction:column;flex:1;min-width:0}
+.w .who b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.w .who span{font-size:12px;color:var(--fc-color-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.w .age{flex:none;font:500 11px/1 var(--fc-font-family-mono);color:var(--fc-color-status-warn)}
+.tree{display:flex;flex-direction:column;gap:1px}
+.r{display:flex;align-items:center;border-radius:var(--fc-radius-card)}
+.r .tw{flex:none;display:grid;place-items:center;width:18px;height:28px;border-radius:var(--fc-radius-chip);color:var(--fc-color-text-subtle);font-size:10px}
+.r .tw.none{visibility:hidden}
+.r .main{flex:1;min-width:0;display:flex;align-items:center;gap:9px;min-height:30px;padding:3px 8px 3px 4px;border-radius:var(--fc-radius-card)}
+.r .gl{position:relative;flex:none;display:grid;place-items:center;width:26px;height:26px;border-radius:var(--fc-radius-card);background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
+.r .gl svg{display:block}
+.r .name{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.r .name.chat{font-weight:600}
+.r .tag{flex:none;font:10px/15px var(--fc-font-family-mono);padding:0 5px;border-radius:var(--fc-radius-chip);color:var(--fc-color-text-muted);background:var(--fc-color-surface-well);max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.r .sp{flex:1}
+.r .count{flex:none;font:11px/1 var(--fc-font-family-mono);color:var(--fc-color-text-subtle)}
+.r .st{flex:none;font:11px/1 var(--fc-font-family-mono);color:var(--fc-color-text-subtle);white-space:nowrap}
+.badge{position:absolute;right:-4px;bottom:-4px;display:none;place-items:center;width:13px;height:13px;border-radius:50%;font:700 9px/1 var(--fc-font-family-sans);border:2px solid transparent;box-sizing:content-box;margin:-2px}
+.badge.ask{display:grid;background:var(--fc-color-status-warn);color:var(--fc-color-status-warn-on)}
+.badge.queued{display:grid;background:var(--fc-color-status-warn-surface);color:var(--fc-color-status-warn);box-shadow:inset 0 0 0 1px var(--fc-color-status-warn-line)}
+.badge.active{display:grid;width:11px;height:11px;margin:-1px;border:2px solid var(--fc-color-status-ok);border-top-color:transparent;background:transparent;animation:spin 900ms linear infinite}
+.r.sel,.r.sel .main{background:var(--fc-color-surface-raised);box-shadow:inset 0 0 0 1px var(--fc-color-line-button)}
+.st.ask{color:var(--fc-color-status-warn)}
+.st.active{color:var(--fc-color-status-ok)}
+.st.queued{color:var(--fc-color-status-warn)}
+.pins{flex:none;display:flex;flex-direction:column;gap:1px;padding:6px 8px 8px;border-top:1px solid var(--fc-color-line-faint)}
+.f .name{font:12px/1.3 var(--fc-font-family-mono)}
+.f .gl{width:22px;height:22px;border-radius:var(--fc-radius-control)}
+.note{padding:4px 8px;font-size:12px;color:var(--fc-color-text-subtle)}
+.note.err{color:var(--fc-color-status-error)}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+</style>
+<div class="strip" id="strip" role="navigation" aria-label="Kernels"></div>
+<div class="scroll">
+<section class="wait" id="wait" aria-label="Waiting for you" hidden></section>
+<nav class="tree" id="tree" aria-label="Agents"></nav>
+<div class="note err" id="err" hidden></div>
+</div>
+<div class="pins" id="pins" role="group" aria-label="Files"></div>
+<script>
+// pure
+var CHAT_REPLY_KEYS = ["tree"];
+function oneLine(t) { return String(t == null ? "" : t).replace(/\s+/g, " ").trim(); }
+function shortGuid(g) { return String(g == null ? "" : g).slice(0, 6); }
+function markOf(name) { return String(name == null ? "" : name).replace(/[^A-Za-z0-9]/g, "").slice(0, 2) || "?"; }
+// the kernel strip: this kernel first (highlighted), then each connected peer row {guid, via}
+function kernelStrip(root, peers) {
+  var here = { key: "here", guid: String(root && root.guid || ""), name: String(root && (root.display_name || root.id) || "this kernel"), here: true };
+  here.mark = markOf(here.name);
+  var rows = [here];
+  (Array.isArray(peers) ? peers : []).forEach(function (p) {
+    if (!p || typeof p.guid !== "string" || p.guid === "") return;
+    var n = shortGuid(p.guid);
+    rows.push({ key: p.guid, guid: p.guid, name: n, mark: markOf(n), here: false });
+  });
+  return rows;
+}
+// the ids a handler_modules reply lists (tree: "ids" is a flat list of ids)
+function chatSet(reply) {
+  var out = {};
+  var t = reply && Array.isArray(reply.tree) ? reply.tree : [];
+  t.forEach(function (x) { if (typeof x === "string") out[x] = true; });
+  return out;
+}
+// the state of a chat: what it asks > what it is doing > queued > idle
+function stateOf(status, asks) {
+  if (asks) return { kind: "ask", label: "asks you" };
+  var cur = status && status.current && typeof status.current === "object" ? status.current : null;
+  var phase = cur ? String(cur.phase || "") : "";
+  if (phase === "thinking") return { kind: "active", label: "thinking" };
+  if (phase === "streaming") return { kind: "active", label: "writing" };
+  if (phase === "tool_calling") return { kind: "active", label: "using tools" };
+  if (phase === "queued") return { kind: "queued", label: "queued" };
+  return { kind: "idle", label: "idle" };
+}
+function countKids(n) { return n && Array.isArray(n.children) ? n.children.length : 0; }
+function totalBelow(n) {
+  var c = 0;
+  (n && n.children || []).forEach(function (k) { c += 1 + totalBelow(k); });
+  return c;
+}
+// the agent tree as rows: parent order, root first, children nested in the order reflect gives them.
+// `folded` = {id: true}; a folded branch shows its child count and hides what is below it.
+function treeRows(root, chats, folded, status, asks) {
+  var rows = [];
+  function walk(n, depth) {
+    if (!n || typeof n.id !== "string") return;
+    var kids = countKids(n);
+    var isChat = !!chats[n.id];
+    var isFolded = kids > 0 && !!folded[n.id];
+    rows.push({
+      id: n.id, depth: depth,
+      name: String(n.display_name || n.id),
+      tag: n.handler_module ? String(n.handler_module).replace(/\.tools$/, "") : "",
+      chat: isChat, kids: kids, folded: isFolded, below: isFolded ? totalBelow(n) : 0,
+      state: isChat ? stateOf(status[n.id], !!asks[n.id]) : null
+    });
+    if (!isFolded) (n.children || []).forEach(function (k) { walk(k, depth + 1); });
+  }
+  walk(root, 0);
+  return rows;
+}
+// open inquiries by who asked: {asker: true}
+function askers(inq) {
+  var out = {};
+  (inq || []).forEach(function (q) { if (q && typeof q.asker === "string") out[q.asker] = true; });
+  return out;
+}
+function ageText(ts, now) {
+  if (typeof ts !== "number") return "";
+  var s = Math.max(0, now - ts);
+  return s < 60 ? "now" : s < 3600 ? Math.round(s / 60) + "m" : s < 86400 ? Math.round(s / 3600) + "h" : Math.round(s / 86400) + "d";
+}
+// "waiting for you": one row per open inquiry, the oldest first
+function waitingRows(inq, names, now) {
+  return (inq || []).filter(function (q) { return q && typeof q.asker === "string"; })
+    .slice().sort(function (a, b) { return (a.ts || 0) - (b.ts || 0); })
+    .map(function (q) {
+      return { asker: q.asker, who: names[q.asker] || q.asker, text: oneLine(q.text), age: ageText(q.ts, now), re: q.re };
+    });
+}
+// a folder listing, directories first, then by name
+function sortedListing(files) {
+  return (Array.isArray(files) ? files : []).filter(function (f) { return f && typeof f.name === "string"; })
+    .slice().sort(function (a, b) {
+      var da = a.type === "dir" ? 0 : 1, db = b.type === "dir" ? 0 : 1;
+      if (da !== db) return da - db;
+      return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : a.name.toLowerCase() > b.name.toLowerCase() ? 1 : 0;
+    });
+}
+// the project folder as rows: `lists` = {path: files|undefined}, `open` = {path: true}
+function fileRows(lists, open, path, depth) {
+  var out = [];
+  sortedListing(lists[path]).forEach(function (f) {
+    var isDir = f.type === "dir";
+    out.push({ path: f.path, name: f.name, dir: isDir, open: isDir && !!open[f.path], depth: depth });
+    if (isDir && open[f.path]) out = out.concat(fileRows(lists, open, f.path, depth + 1));
+  });
+  return out;
+}
+// end pure
+
+var SELF = "{{cell}}", ME = "{{agent}}", ROOT = ".";
+var st = { root: null, chats: {}, status: {}, inq: [], folded: {}, selected: "", filesOpen: false, projOpen: false, open: {}, lists: {}, tick: 0, busy: false };
+var $ = function (id) { return document.getElementById(id); };
+var ROBOT = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="11" height="8" rx="2"/><path d="M8 5V2.5M5.8 9v.01M10.2 9v.01M6 11.2h4"/></svg>';
+var TOOL = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 3a3 3 0 0 0 3.2 3.9L6 13.6a1.4 1.4 0 0 1-2-2l6.7-6.7A3 3 0 0 0 9.5 3z"/></svg>';
+var FOLDER = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.6l1.4 1.5h5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>';
+var FILE = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M4 2h5l3 3v9H4z"/><path d="M9 2v3h3"/></svg>';
+
+function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function say(msg) { var e = $("err"); e.hidden = !msg; e.textContent = msg || ""; }
+function failed(r) { return !r || typeof r !== "object" || typeof r.error === "string"; }
+function call(target, p) { return fantastic.send(target, p).then(function (r) { return r; }, function () { return null; }); }
+function select(id) { if (id) { st.selected = id; fantastic.emit(SELF, { type: "select", id: id }); paintTree(); } }
+
+function paintStrip() {
+  var host = $("strip"); host.textContent = "";
+  kernelStrip(st.root, st.root && st.root.peers).forEach(function (k) {
+    var b = el("button", "k hov" + (k.here ? " here" : ""));
+    b.type = "button"; b.title = k.here ? k.name + " (this kernel)" : "kernel " + k.guid;
+    b.appendChild(el("span", "mark", k.mark)); b.appendChild(el("span", "nm", k.name));
+    if (!k.here) b.addEventListener("click", function () { fantastic.emit(SELF, { type: "select_kernel", guid: k.guid }); });
+    host.appendChild(b);
+  });
+}
+function nameMap(n, out) { if (n && typeof n.id === "string") { out[n.id] = String(n.display_name || n.id); (n.children || []).forEach(function (k) { nameMap(k, out); }); } return out; }
+function paintWait() {
+  var host = $("wait"); host.textContent = "";
+  var rows = waitingRows(st.inq, nameMap(st.tree, {}), Date.now() / 1000);
+  host.hidden = rows.length === 0;
+  if (!rows.length) return;
+  host.appendChild(el("h2", "", "Waiting for you · " + rows.length));
+  rows.forEach(function (w) {
+    var b = el("button", "w hov"); b.type = "button";
+    var who = el("span", "who"); who.appendChild(el("b", "", w.who)); who.appendChild(el("span", "", w.text));
+    b.appendChild(who); b.appendChild(el("span", "age", w.age));
+    b.addEventListener("click", function () { select(w.asker); });
+    host.appendChild(b);
+  });
+}
+function glyph(inner) { var g = el("span", "gl"); g.innerHTML = inner; return g; }
+function treeButton(row, fold, onFold) {
+  var w = el("div", "r" + (st.selected === row.id ? " sel" : ""));
+  var tw = el("button", "tw" + (fold === null ? " none" : " hov"), fold === null ? "" : fold ? "▸" : "▾");
+  tw.type = "button"; tw.setAttribute("aria-label", fold ? "unfold" : "fold");
+  if (fold !== null) tw.addEventListener("click", function (e) { e.stopPropagation(); onFold(); });
+  w.appendChild(tw);
+  return w;
+}
+function paintTree() {
+  var host = $("tree"); host.textContent = "";
+  if (!st.tree) return;
+  treeRows(st.tree, st.chats, st.folded, st.status, askers(st.inq)).forEach(function (row) {
+    var w = treeButton(row, row.kids > 0 ? row.folded : null, function () { st.folded[row.id] = !st.folded[row.id]; paintTree(); });
+    w.style.paddingLeft = (row.depth * 14) + "px";
+    var b = el("button", "main hov"); b.type = "button"; b.title = row.id;
+    var g = glyph(row.chat ? ROBOT : TOOL);
+    if (row.state) { var bd = el("span", "badge " + row.state.kind, row.state.kind === "ask" ? "?" : ""); g.appendChild(bd); }
+    b.appendChild(g);
+    b.appendChild(el("span", "name" + (row.chat ? " chat" : ""), row.name));
+    if (row.tag) b.appendChild(el("span", "tag", row.tag));
+    b.appendChild(el("span", "sp"));
+    if (row.folded) b.appendChild(el("span", "count", String(row.below)));
+    if (row.state && row.state.kind !== "idle") b.appendChild(el("span", "st " + row.state.kind, row.state.label));
+    b.addEventListener("click", function () { select(row.id); });
+    w.appendChild(b);
+    host.appendChild(w);
+  });
+}
+function fileLine(depth, isDir, open, name, tag, onClick, onFold) {
+  var w = el("div", "r f"); w.style.paddingLeft = (depth * 14) + "px";
+  var tw = el("button", "tw" + (isDir ? " hov" : " none"), isDir ? (open ? "▾" : "▸") : "");
+  tw.type = "button"; if (isDir) tw.addEventListener("click", function (e) { e.stopPropagation(); onFold(); });
+  w.appendChild(tw);
+  var b = el("button", "main hov"); b.type = "button"; b.title = name;
+  b.appendChild(glyph(isDir ? FOLDER : FILE));
+  b.appendChild(el("span", "name", name));
+  if (tag) b.appendChild(el("span", "tag", tag));
+  b.addEventListener("click", onClick);
+  w.appendChild(b);
+  return w;
+}
+function paintPins() {
+  var host = $("pins"); host.textContent = "";
+  host.appendChild(fileLine(0, true, st.filesOpen, "files", "tool", function () { select("files"); }, function () { st.filesOpen = !st.filesOpen; paintPins(); }));
+  if (!st.filesOpen) return;
+  host.appendChild(fileLine(1, true, st.projOpen, "project folder", "", function () { toggleDir(ROOT, true); }, function () { toggleDir(ROOT, true); }));
+  if (!st.projOpen) return;
+  fileRows(st.lists, st.open, ROOT, 2).forEach(function (f) {
+    host.appendChild(fileLine(f.depth, f.dir, f.open, f.name, "", function () { f.dir ? toggleDir(f.path, false) : openFile(f.path); }, function () { toggleDir(f.path, false); }));
+  });
+  if (st.lists[ROOT] === undefined) host.appendChild(el("div", "note", "reading…"));
+}
+function toggleDir(path, project) {
+  if (project) st.projOpen = !st.projOpen; else st.open[path] = !st.open[path];
+  paintPins();
+  if (project ? st.projOpen : st.open[path]) readDir(path);
+}
+function readDir(path) {
+  return call("files", { type: "list", path: path }).then(function (r) {
+    if (failed(r)) { say("files: " + (r && r.error || "no answer")); return; }
+    st.lists[path] = r.files || []; paintPins();
+  });
+}
+function openFile(path) {
+  call("files", { type: "open_view", kind: "file", path: path }).then(function (r) {
+    if (failed(r)) { say("open " + path + ": " + (r && r.error || "no answer")); return; }
+    if (typeof r.id === "string") select(r.id);
+  });
+}
+// folders are read again every tick while open (the files agent's watch is not granted here)
+function refreshDirs() {
+  var paths = [];
+  if (st.filesOpen && st.projOpen) paths.push(ROOT);
+  Object.keys(st.open).forEach(function (p) { if (st.open[p] && st.filesOpen && st.projOpen) paths.push(p); });
+  return Promise.all(paths.map(readDir));
+}
+function refreshStatus() {
+  var ids = Object.keys(st.chats);
+  return Promise.all(ids.map(function (id) {
+    return call(id, { type: "status" }).then(function (r) { if (!failed(r)) st.status[id] = r; else delete st.status[id]; });
+  })).then(function () {
+    return call("user", { type: "inquiries" });
+  }).then(function (r) { st.inq = failed(r) ? [] : (r.inquiries || []); paintWait(); paintTree(); });
+}
+var watched = {};
+function watchChats() {
+  Object.keys(st.chats).forEach(function (id) {
+    if (watched[id]) return; watched[id] = true;
+    fantastic.watch(id, function (ev) { if (ev && !ev.error) refreshStatus(); });
+  });
+}
+function refreshTree() {
+  return Promise.all([
+    call("kernel", { type: "reflect", detail: "full" }),
+    call("kernel", { type: "reflect", handler_modules: ["ai_chat.tools"], tree: "ids" })
+  ]).then(function (rs) {
+    if (failed(rs[0])) { say("kernel reflect: " + (rs[0] && rs[0].error || "no answer")); return; }
+    say("");
+    st.root = rs[0]; st.tree = rs[0].tree && !Array.isArray(rs[0].tree) ? rs[0].tree : null;
+    st.chats = failed(rs[1]) ? {} : chatSet(rs[1]);
+    paintStrip(); paintTree(); watchChats();
+  });
+}
+function tick() {
+  if (st.busy) return; st.busy = true;
+  var p = (st.tick++ % 2 === 0 ? refreshTree() : Promise.resolve()).then(refreshStatus).then(refreshDirs);
+  p.then(function () { st.busy = false; }, function () { st.busy = false; });
+}
+tick();
+setInterval(tick, 5000);
+paintPins();
+</script>

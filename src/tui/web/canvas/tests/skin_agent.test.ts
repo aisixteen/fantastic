@@ -34,16 +34,16 @@ test("ensureSkin makes one delete-locked skin agent under the page root, once; i
   assert.equal([...k.get("canvas")!.children.values()].length, 1);
 });
 
-test("the skin shown is the default of the backdrop (dark on the web, glass in the window)", () => {
-  assert.deepEqual(DEFAULT_SKINS, { web: "dark", native: "glass" });
+test("the skin shown is the default of the backdrop (day on the web, glass in the window)", () => {
+  assert.deepEqual(DEFAULT_SKINS, { web: "day", native: "glass" });
   // node has no shell flag: a plain tab, web
-  assert.equal(bootSkin().name, "dark");
+  assert.equal(bootSkin().name, "day");
   assert.equal(bootSkin().skin.backdrop, "web");
 });
 
 test("get answers a stock skin's tokens and backdrop; schema lists every SKIN_SCHEMA path with its CSS name", async () => {
   const { call } = page();
-  const d = await call({ type: "get", name: "dark" });
+  const d = await call({ type: "get", name: "day" });
   assert.equal(d["backdrop"], "web");
   assert.ok(((d["tokens"] as Dict)["color"] as Dict)["accent"] !== undefined, "a complete example");
   assert.equal((await call({ type: "get", name: "glass" }))["backdrop"], "native");
@@ -72,6 +72,6 @@ test("the skin agent answers get and schema only: list, use, add and delete are 
 test("a stored `skins` or `user_skins` on the record changes nothing: the skin applied stays the backdrop's default", async () => {
   const { k, call } = page();
   k.updateMeta(SKIN_ID, { skins: { web: "ocean", native: "ocean" }, user_skins: [{ name: "ocean", base: "dark", note: "", tokens: {} }] } as unknown as Payload);
-  assert.equal(bootSkin().name, "dark");
+  assert.equal(bootSkin().name, "day");
   assert.equal((await call({ type: "get", name: "ocean" }))["reason"], "not_found", "a stored user skin is not a skin");
 });

@@ -7,6 +7,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- The sidebar (#608): the canvas's left column is the `sidebar` agent (`sidebar.tools`, seeded under the root on a first run), whose `reflect` returns its html view: the kernels, the agent tree with each chat's state, what waits for the person, and the project's files, drawn from reads on other agents (a view's `calls` as an object). It replaces the canvas's file-tree sidebar and its `tree` view verb; a folder seeded before it has no left column.
 - `reflect` takes `handler_modules` (#605): a list of handler names; with `tree` `all` or `ids` only the agents whose `handler_module` is listed come back, as a flat `tree` list, and an agent outside the list is not asked. A value that is not a list of names is refused `bad_arg`.
 - `boot_kernel` / `stop_kernel` in `fantastic_tui` (#580): a host that runs the kernel in its own
   process boots one folder (after `seed_dir_with`) with the stock bundles plus its `Extra`s, an
@@ -227,6 +228,8 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Changed
 
+- The AI chat has its own html view (#609): `ai_chat.tools` returns `view {kind: html, bytes, calls}` from its `reflect` (the html is compiled into `fantastic-ai-core`, plain JS, day look), and the canvas draws a chat from it, so an AI chat opened from the tree or `place {backend_id}` shows the new view (a provider agent shows its reflect card). A view's `calls` may be an object `{<agent id> | "*": [verbs]}`: its own agent's verbs, plus READ verbs on other agents (the chat reads and answers its inquiries on `user`); the canvas grants the cell exactly those. A list keeps its meaning. The chat cells the setup wizard and the `chat` kind of `place` make still use the TS chat view, which holds the settings button.
+- The canvas has a `day` stock skin (#608, #609), the default on the web (black and white glass over a light dotted page; colour only for state); `dark` stays a stock skin, `glass` stays the native default. A node test keeps the `:root` block of each shipped html view equal to the day skin.
 - An agent's kind is its handler name (#605): the AI checks (`is_ai`, `is_ai_handler`, `ai_check`, the page's `isAi`, `is_web`, `is_canvas`) are removed; the row watch, grant holders, prompt stamp, set-up catalog, AI panel, export port kinds and the page's chat view and badges compare the record's `handler_module` with the names they need, and no longer read `memory_store_id` or a name suffix.
 - Boot (#580): in the terminal UI and `canvas`, a refused grant watch (`reach::start`) now stops
   the boot like in `mcp` mode (it was a note); in `mcp` mode the grant watch now starts before
@@ -281,6 +284,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Removed
 
+- The canvas setup wizard and the TS chat (#609): every chat is drawn by the html view its `reflect` returns; a chat's provider and model are set by `update_agent` (`provider_id`, `model`). The action popup has no AI agent or kept-chat tiles, and `place` no longer takes `kind: chat`.
 - The Swift kernel runtime (`src/lib/swift`): its kernel, bundles, CLI and
   unit suites, its e2e and contract runners, the CI `swift` job,
   `scripts/build/swift.sh` and the container's swift runtime (#53). The host

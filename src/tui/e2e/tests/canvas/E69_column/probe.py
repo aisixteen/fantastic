@@ -54,10 +54,10 @@ def main() -> bool:
                 info["a_screen_w"] = await pg.js("Math.round(document.querySelector('.agent-frame[data-id=a]').getBoundingClientRect().width)")
                 info["a_head_opacity"] = await pg.js("getComputedStyle(document.querySelector('.agent-frame[data-id=a] > .frame-head')).opacity")
                 # the wheel over A's head bar (no gutter now; an iframe takes its own wheel). Past the
-                # file tree's sidebar: on a phone it is an overlay over the canvas (#148) and takes the
+                # left column (the sidebar agent's view): on a phone it is an overlay over the canvas (#148) and takes the
                 # wheel where it covers the bar, so the point is just right of its right edge
                 head = await pg.rect(".agent-frame[data-id=a] > .frame-head")
-                side = await pg.rect(".tree-sidebar")
+                side = await pg.rect(".sidebar-col")
                 info["phone_side"] = side
                 wheel_x = max((head or {}).get("x", 0), (side or {}).get("x", 0) + (side or {}).get("w", 0)) + 12
                 await pg.cdp("Input.dispatchMouseEvent", type="mouseWheel", x=wheel_x, y=(head or {}).get("y", 0) + 16, deltaX=0, deltaY=300)

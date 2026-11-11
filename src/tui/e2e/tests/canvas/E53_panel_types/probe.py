@@ -40,10 +40,6 @@ def main() -> bool:
                     "overlay_before": await pg.js("[...document.querySelectorAll('.term-stopped')].filter(o=>!o.hidden).map(o=>o.textContent.trim()).join(' | ')")}
             await spot(pg, 1250, 450, "stream")
             await asyncio.sleep(1)
-            # x 320, not 250: the tree sidebar is open beside the canvas on a wide screen (#148), a
-            # 300px column at the left edge; a double-click in it is not on the canvas
-            await spot(pg, 320, 700, "AI agent")  # none set up: the wizard
-            await pg.until("!!document.querySelector('.wiz .tiles button')", 20)
             await asyncio.sleep(2)  # the loader's flush lands before any reload
             ids = lambda: pg.js("[...document.querySelectorAll('.agent-frame')].map(f=>f.dataset.id).sort()")
             before = await ids()
@@ -56,7 +52,6 @@ def main() -> bool:
                     "ids": await ids(),
                     "term": await pg.js(f"{TERM_TEXT}.includes('MARK-53')"),
                     "html": await pg.js("[...document.querySelectorAll('.agent-frame iframe')].some(f=>{try{return f.contentDocument.body.innerText.includes('html-53')}catch(e){return false}})"),
-                    "setup": await pg.js("!!document.querySelector('.wiz .tiles button')"),
                     "stream": await pg.js("!!document.querySelector('.stream-view')"),
                     "term_text": ((await pg.js(TERM_TEXT)) or "").strip()[:300],
                     "overlay": await pg.js("[...document.querySelectorAll('.term-stopped')].filter(o=>!o.hidden).map(o=>o.textContent.trim()).join(' | ')"),
@@ -69,8 +64,8 @@ def main() -> bool:
         rig.stop()
     rig.summary.update({"before": before, "after": seen, "errors": errors, "terminal": diag})
     print(f"frames {before} · after reloads {seen} · errors {errors[:3]}")
-    ok = all(s["ids"] == before and s["term"] and s["html"] and s["setup"] and s["stream"] for s in seen) and not errors
-    return verdict(*rig.finish(ok, f"{len(before)} kinds of cell, same after 2 reloads, terminal replay + html + set-up + stream intact: {ok}"))
+    ok = all(s["ids"] == before and s["term"] and s["html"] and s["stream"] for s in seen) and not errors
+    return verdict(*rig.finish(ok, f"{len(before)} kinds of cell, same after 2 reloads, terminal replay + html + stream intact: {ok}"))
 
 
 if __name__ == "__main__":

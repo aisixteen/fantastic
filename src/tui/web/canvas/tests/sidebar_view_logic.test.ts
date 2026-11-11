@@ -1,0 +1,119 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import vm from "node:vm";
+
+// THE SIDEBAR VIEW'S PURE DATA SHAPING (reflect tree -> rows, the chat set, state, waiting rows,
+// file rows). The view (`src/tui/src/kern/sidebar_view.html`) keeps it in one `// pure` script
+// block: it is read here and run in a bare vm context, no DOM.
+
+const HTML = fileURLToPath(new URL("../../../src/kern/sidebar_view.html", import.meta.url));
+const src = readFileSync(HTML, "utf8");
+const from = src.indexOf("// pure\n");
+const to = src.indexOf("// end pure");
+assert.ok(from >= 0 && to > from, "the view marks its pure block");
+
+type Obj = Record<string, unknown>;
+interface Pure {
+  kernelStrip(root: Obj, peers: Obj[]): Obj[];
+  chatSet(reply: Obj): Record<string, boolean>;
+  stateOf(status: Obj | undefined, asks: boolean): { kind: string; label: string };
+  treeRows(root: Obj, chats: Record<string, boolean>, folded: Record<string, boolean>, status: Record<string, Obj>, asks: Record<string, boolean>): Obj[];
+  askers(inq: Obj[]): Record<string, boolean>;
+  waitingRows(inq: Obj[], names: Record<string, string>, now: number): Obj[];
+  sortedListing(files: Obj[]): Obj[];
+  fileRows(lists: Record<string, Obj[]>, open: Record<string, boolean>, path: string, depth: number): Obj[];
+}
+const ctx = vm.createContext({});
+vm.runInContext(`${src.slice(from, to)}\nthis.api = { kernelStrip, chatSet, stateOf, treeRows, askers, waitingRows, sortedListing, fileRows };`, ctx);
+const raw = (ctx as unknown as { api: Pure }).api;
+// the vm's objects are of another realm: compare them as plain JSON
+const plain = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
+
+const tree = {
+  id: "kernel_state", display_name: "kernel_state", handler_module: null,
+  children: [
+    { id: "user", display_name: "user", handler_module: "user.tools", children: [
+      { id: "files", display_name: "files", handler_module: "file_bridge.tools", children: [] },
+      { id: "coder", display_name: "Coder", handler_module: "role_x.tools", children: [] },
+    ] },
+    { id: "chat1", display_name: "chat1", handler_module: "ai_chat.tools", children: [] },
+  ],
+};
+
+test("the kernel strip: this kernel first and highlighted, then each peer by short guid", () => {
+  const rows = plain(raw.kernelStrip({ id: "kernel_state", display_name: "demo", guid: "abcdef123456" }, [{ guid: "99aabbccdd", via: "ws" }, { guid: "" }, {} as Obj]));
+  assert.equal(rows.length, 2);
+  assert.deepEqual([rows[0]!["here"], rows[0]!["mark"], rows[0]!["name"]], [true, "de", "demo"]);
+  assert.deepEqual([rows[1]!["here"], rows[1]!["mark"], rows[1]!["name"], rows[1]!["guid"]], [false, "99", "99aabb", "99aabbccdd"]);
+});
+
+test("the tree rows keep parent order, nested depth, and the order reflect gives", () => {
+  const rows = plain(raw.treeRows(tree, {}, {}, {}, {}));
+  assert.deepEqual(rows.map((r) => [r["id"], r["depth"]]), [["kernel_state", 0], ["user", 1], ["files", 2], ["coder", 2], ["chat1", 1]]);
+  assert.equal(rows[1]!["tag"], "user", "the handler is the small tag, `.tools` cut");
+  assert.equal(rows[3]!["name"], "Coder", "the display name");
+});
+
+test("a role over ai_chat.tools is a chat when the handler_modules reply lists it", () => {
+  const chats = plain(raw.chatSet({ tree: ["coder", "chat1", 7] }));
+  assert.deepEqual(chats, { coder: true, chat1: true });
+  const rows = plain(raw.treeRows(tree, chats, {}, {}, {}));
+  assert.deepEqual(rows.map((r) => [r["id"], r["chat"]]), [["kernel_state", false], ["user", false], ["files", false], ["coder", true], ["chat1", true]]);
+  assert.equal(rows.find((r) => r["id"] === "files")!["state"], null, "only a chat has a state");
+  assert.deepEqual(plain(raw.chatSet({ error: "x" })), {}, "no list: no chats");
+});
+
+test("a folded branch shows its child count and hides what is below", () => {
+  const rows = plain(raw.treeRows(tree, {}, { user: true }, {}, {}));
+  assert.deepEqual(rows.map((r) => r["id"]), ["kernel_state", "user", "chat1"]);
+  assert.equal(rows[1]!["folded"], true);
+  assert.equal(rows[1]!["below"], 2);
+  assert.equal(rows[1]!["kids"], 2);
+});
+
+test("state: asks > active phases > queued > idle", () => {
+  const S = (phase?: string): Obj => ({ current: phase === undefined ? null : { phase } });
+  assert.deepEqual(plain(raw.stateOf(S("thinking"), true)).kind, "ask");
+  for (const p of ["thinking", "streaming", "tool_calling"]) assert.equal(plain(raw.stateOf(S(p), false)).kind, "active", p);
+  assert.equal(plain(raw.stateOf(S("queued"), false)).kind, "queued");
+  assert.equal(plain(raw.stateOf(S("done"), false)).kind, "idle");
+  assert.equal(plain(raw.stateOf(S(), false)).kind, "idle");
+  assert.equal(plain(raw.stateOf(undefined, false)).kind, "idle");
+  const rows = plain(raw.treeRows(tree, { chat1: true }, {}, { chat1: S("streaming") }, { chat1: true }));
+  assert.equal((rows.find((r) => r["id"] === "chat1")!["state"] as Obj)["kind"], "ask");
+});
+
+test("waiting rows: one per inquiry, the oldest first, one line, an age", () => {
+  const inq = [
+    { asker: "b", text: "second\nline  here", ts: 900, re: 2 },
+    { asker: "a", text: "first", ts: 100, re: 1 },
+    { text: "no asker", ts: 1 },
+  ];
+  const rows = plain(raw.waitingRows(inq, { a: "Alpha" }, 1000));
+  assert.deepEqual(rows.map((r) => r["asker"]), ["a", "b"]);
+  assert.deepEqual(rows.map((r) => r["who"]), ["Alpha", "b"], "the asker's name when known");
+  assert.equal(rows[1]!["text"], "second line here");
+  assert.deepEqual(rows.map((r) => r["age"]), ["15m", "2m"]);
+  assert.deepEqual(plain(raw.askers(inq)), { a: true, b: true });
+});
+
+test("a folder listing puts directories first, then names", () => {
+  const files = [
+    { name: "b.txt", path: "b.txt", type: "file" },
+    { name: "Zed", path: "Zed", type: "dir" },
+    { name: "a.txt", path: "a.txt", type: "file" },
+    { name: "alpha", path: "alpha", type: "dir" },
+  ];
+  assert.deepEqual(plain(raw.sortedListing(files)).map((f) => f["name"]), ["alpha", "Zed", "a.txt", "b.txt"]);
+});
+
+test("file rows nest the open folders, listed sorted", () => {
+  const lists = {
+    ".": [{ name: "f.md", path: "f.md", type: "file" }, { name: "src", path: "src", type: "dir" }, { name: "docs", path: "docs", type: "dir" }],
+    src: [{ name: "main.rs", path: "src/main.rs", type: "file" }, { name: "kern", path: "src/kern", type: "dir" }],
+  };
+  const rows = plain(raw.fileRows(lists, { src: true }, ".", 2));
+  assert.deepEqual(rows.map((r) => [r["path"], r["depth"], r["open"]]), [["docs", 2, false], ["src", 2, true], ["src/kern", 3, false], ["src/main.rs", 3, false], ["f.md", 2, false]]);
+});

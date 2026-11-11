@@ -122,6 +122,8 @@ fn registry_with(cwd: &std::path::Path, extras: &[crate::Extra]) -> BundleRegist
     // THE BROWSER'S SET-UP PAGE, host side. Registered so the page can create
     // it; it exists only while that page is open (`kern/setup_agent`).
     reg.register(crate::kern::setup_agent::HANDLER_MODULE, crate::kern::setup_agent::SetupBundle);
+    // THE SIDEBAR: the canvas's left column, one html view its reflect returns (`kern/sidebar`).
+    reg.register(crate::kern::sidebar::HANDLER_MODULE, crate::kern::sidebar::SidebarBundle);
     // THE CANVAS, host side: its node `canvas_root` — creates and deletes its
     // the cells' backends and spawns AI cells from the user's
     // saved set-ups (`kern/backend`).
@@ -857,6 +859,7 @@ mod tests {
             "relay_connector.tools",
             "scheduler.tools",
             "setup.tools",
+            "sidebar.tools",
             "sqlite_store.tools",
             "user.tools",
             "user_home_store.tools",

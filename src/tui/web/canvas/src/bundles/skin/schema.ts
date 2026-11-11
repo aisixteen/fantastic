@@ -78,7 +78,7 @@ export const SKIN_SCHEMA: ReadonlyArray<SchemaToken> = [
   { path: "color.surface.raised", type: "color", note: "the stopped-terminal box" },
   { path: "color.surface.popup", type: "color", note: "the action popup" },
   { path: "color.surface.pill", type: "color", note: "the full-view label" },
-  { path: "color.surface.panel", type: "color", note: "wizard, not-set-up card" },
+  { path: "color.surface.panel", type: "color", note: "panels" },
   { path: "color.surface.field", type: "color", note: "inputs and selects" },
   { path: "color.surface.button", type: "color", note: "buttons" },
   { path: "color.surface.badge", type: "color", note: "the terminal's last-command bar" },

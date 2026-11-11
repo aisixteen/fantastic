@@ -5,7 +5,7 @@ import { registerHtmlAgent } from "../src/bundles/html_agent/html_agent.ts";
 import type { Payload } from "../src/lib.ts";
 import { registerCanvas } from "../src/bundles/canvas/canvas_agent.ts";
 import { registerAgentView } from "../src/bundles/agent_view/agent_view.ts";
-import { cellGrant, onViewChange, rereflectViews, seenHere, setCanvasNode, setHostRecords, setHostReflect, sideOf, viewOf, viewRecordOf } from "../src/bundles/canvas/host_views.ts";
+import { cellGrant, expandReach, onViewChange, rereflectViews, seenHere, setCanvasNode, setHostRecords, setHostReflect, sideOf, viewOf, viewRecordOf } from "../src/bundles/canvas/host_views.ts";
 
 // BACKEND-OWNED VIEWS: a host agent's record says how it is drawn; a page cell
 // is layout + `backend_id` + a grant DERIVED from the record.
@@ -15,14 +15,29 @@ test("a host record gets its own view, else its kind's default, else the stub", 
   assert.deepEqual([html.handler, html.kind, html.bytes, html.calls], ["agent_view.ts", "html", "<p>s</p>", ["search", "watch"]], "an html view: agent_view, its body, its calls + watch");
   assert.equal(viewOf({ id: "x", view: { handler: "my_chart_view" } }).handler, "my_chart_view.ts", "any page bundle by handler");
   assert.equal(viewOf({ id: "t", handler_module: "exec_bridge.tools" }).kind, "terminal", "an exec agent defaults to its terminal");
-  assert.equal(viewOf({ id: "ai", handler_module: "vllm_backend.tools" }).kind, "chat", "an AI defaults to its chat");
-  for (const h of ["anthropic_backend.tools", "ollama_backend.tools", "responses_backend.tools", "foundation_models_backend.tools", "ai_chat.tools"]) assert.equal(viewOf({ id: "ai", handler_module: h }).kind, "chat", h);
+  // a chat is drawn by the html view its reflect returns (no default of its own); a provider falls to the stub
+  for (const h of ["vllm_backend.tools", "anthropic_backend.tools", "ollama_backend.tools", "responses_backend.tools", "foundation_models_backend.tools", "ai_chat.tools"]) assert.equal(viewOf({ id: "ai", handler_module: h }).kind, "stub", h);
   assert.equal(viewOf({ id: "k", handler_module: "kernel_state.tools", memory_store_id: "m" }).kind, "stub", "a memory store field makes no AI");
   const stub = viewOf({ id: "files", handler_module: "file_bridge.tools" });
   assert.deepEqual([stub.kind, stub.handler], ["stub", "reflect_view.ts"], "anything else: the stub");
   assert.deepEqual(cellGrant("search", html), { search: ["search", "watch"] });
   assert.equal(sideOf({ id: "c", backend_id: "search" }), "host");
   assert.equal(sideOf({ id: "c", html: "<p/>" }), "page");
+});
+
+test("view.calls: a list is the verbs on its own agent; an object names its own agent and may name other agents' read verbs", () => {
+  const list = viewOf({ id: "a", view: { kind: "html", bytes: "<p/>", calls: ["x", "watch"] } });
+  assert.deepEqual(list.calls, ["x", "watch"]);
+  assert.equal(list.reach, undefined);
+  assert.deepEqual(cellGrant("a", list), { a: ["x", "watch"] }, "the list form is unchanged");
+
+  const obj = viewOf({ id: "a", view: { kind: "html", bytes: "<p/>", calls: { a: ["x"], user: ["inquiries"], "*": ["reflect"], junk: "nope" } } });
+  assert.deepEqual(obj.calls, ["x", "watch"], "`watch` is added on its own agent");
+  assert.deepEqual(cellGrant("a", obj), { a: ["x", "watch"], user: ["inquiries"], "*": ["reflect"] }, "exactly its targets; `watch` only on its own agent; a non-array value is ignored");
+  assert.deepEqual(Object.keys(cellGrant("a", obj)).sort(), ["*", "a", "user"]);
+
+  const alone = viewOf({ id: "a", view: { kind: "html", bytes: "<p/>", calls: { user: ["inquiries"] } } });
+  assert.deepEqual(cellGrant("a", alone), { user: ["inquiries"], a: ["watch"] });
 });
 
 test("place {backend_id} draws a host agent by its record — layout + derived grant, no content", async () => {
@@ -227,4 +242,17 @@ test("an agent's changed view is re-reflected and its cells told", async () => {
   assert.equal(redraws, 1);
   assert.equal(viewOf(recs.get("a")!).bytes, "two");
   off();
+});
+
+test("a `\"*\"` reach is written out for each agent that exists; a named target keeps its verbs", () => {
+  const grant = { kernel: ["reflect"], user: ["inquiries"], "*": ["status"], sidebar: ["watch"] };
+  assert.deepEqual(expandReach(grant, ["chat1", "user", "kernel_state"]), {
+    kernel: ["reflect"],
+    user: ["inquiries", "status"],
+    sidebar: ["watch"],
+    chat1: ["status"],
+    kernel_state: ["status"],
+  });
+  assert.deepEqual(expandReach({ a: ["x"] }, ["b"]), { a: ["x"] }, "no `*`: nothing added");
+  assert.deepEqual(expandReach({ "*": ["status"] }, []), {}, "no agents: no grant");
 });

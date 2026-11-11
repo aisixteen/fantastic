@@ -29,19 +29,21 @@ plain tab — is `web`.
 
 Each canvas (peer canvases too) has one page agent `skin` (`skin.ts`), a
 delete-locked child of the page root, made when missing. It is read only. The
-skin shown is the stock one of this tab's backdrop (`dark` for `web`, `glass`
+skin shown is the stock one of this tab's backdrop (`day` for `web`, `glass`
 for `native`), installed once when the page boots; one canvas can show glass in
-the app's window and dark in a browser tab at the same time.
+the app's window and day in a browser tab at the same time.
 
-Stock skins: `dark` (web — the canvas's own look) and `glass` (native —
-translucent surfaces over the window's material).
+Stock skins: `day` (web — the default: black and white glass over a light
+dotted page, colour only for state), `dark` (web — the canvas's earlier deep
+blue-black look) and `glass` (native — translucent surfaces over the window's
+material).
 
 Verbs (`<page guid>|skin`; an AI cell is granted them when it is spawned or
 reopened):
 
 | verb | args | answer / rule |
 |---|---|---|
-| `get` | `name` (`dark` or `glass`) | `{name, note, backdrop, tokens}` — `tokens` as authored, a complete example |
+| `get` | `name` (`day`, `dark` or `glass`) | `{name, note, backdrop, tokens}` — `tokens` as authored, a complete example |
 | `schema` | — | the format, the supported and refused features, and every token: `{path, type, opaque, note, css}` |
 
 ## The token format
@@ -83,105 +85,105 @@ A skin must give every token below, with its type, and no other (but
 
 ## The schema
 
-| path | type | CSS name | paints | dark | glass |
-|---|---|---|---|---|---|
-| `color.page.bg` | color | `--fc-color-page-bg` | html/body, the GL clear colour, the refused box | `rgb(6 6 12)` | `rgb(0 0 0 / 0)` |
-| `color.page.text` | color | `--fc-color-page-text` | body text | `rgb(170 170 170)` | `rgb(196 196 204)` |
-| `color.ink` (opaque) | color | `--fc-color-ink` | the overlay hue: hairlines, hover fills, glints (always via tint) | `rgb(255 255 255)` | `rgb(255 255 255)` |
-| `color.shade` (opaque) | color | `--fc-color-shade` | the shadow hue: wells, veils (via tint) | `rgb(0 0 0)` | `rgb(0 0 0)` |
-| `color.text.bright` | color | `--fc-color-text-bright` | headings, active and hovered text | `rgb(255 255 255)` | `rgb(255 255 255)` |
-| `color.text.primary` | color | `--fc-color-text-primary` | body text of panels, dialogs, popup | `rgb(236 233 245)` | `rgb(244 242 250)` |
-| `color.text.cool` (opaque) | color | `--fc-color-text-cool` | secondary text (always at an alpha) | `rgb(220 230 245)` | `rgb(230 238 250)` |
-| `color.text.muted` | color | `--fc-color-text-muted` | leads, labels | `rgb(163 156 186)` | `rgb(188 182 208)` |
-| `color.text.subtle` | color | `--fc-color-text-subtle` | step labels, small print | `rgb(143 136 166)` | `rgb(168 162 191)` |
-| `color.text.faint` | color | `--fc-color-text-faint` | hints, empty states | `rgb(111 104 134)` | `rgb(140 134 163)` |
-| `color.text.code` | color | `--fc-color-text-code` | tool blocks, reflect text | `rgb(170 187 187)` | `rgb(194 208 208)` |
-| `color.text.dim` | color | `--fc-color-text-dim` | tool state, others' hints | `rgb(102 102 119)` | `rgb(138 138 154)` |
-| `color.accent.base` (opaque) | color | `--fc-color-accent-base` | the accent and all its tints | `rgb(183 140 255)` | `rgb(195 160 255)` |
-| `color.accent.text` (opaque) | color | `--fc-color-accent-text` | text on accent tints | `rgb(230 220 255)` | `rgb(239 232 255)` |
-| `color.accent.soft` | color | `--fc-color-accent-soft` | thinking text, tip emphasis | `rgb(203 184 240)` | `rgb(216 200 246)` |
-| `color.accent.on` | color | `--fc-color-accent-on` | text on a solid accent button | `rgb(22 18 31)` | `rgb(22 18 31)` |
-| `color.accent.deep` (opaque) | color | `--fc-color-accent-deep` | user bubble, send, busy pill (tints) | `rgb(110 90 220)` | `rgb(122 102 230)` |
-| `color.accent.deep-hover` (opaque) | color | `--fc-color-accent-deep-hover` | send hover (tint) | `rgb(130 110 240)` | `rgb(142 124 244)` |
-| `color.status.ok` (opaque) | color | `--fc-color-status-ok` | ok, start button, kept badge | `rgb(126 226 168)` | `rgb(134 236 176)` |
-| `color.status.ok-hover` | color | `--fc-color-status-ok-hover` | start button hover | `rgb(165 240 197)` | `rgb(176 244 204)` |
-| `color.status.ok-on` | color | `--fc-color-status-ok-on` | text on the start button | `rgb(13 26 18)` | `rgb(13 26 18)` |
-| `color.status.ok-deep` (opaque) | color | `--fc-color-status-ok-deep` | streaming pill (tint) | `rgb(80 180 120)` | `rgb(88 192 128)` |
-| `color.status.monitor` (opaque) | color | `--fc-color-status-monitor` | monitor delivery (tints) | `rgb(110 200 160)` | `rgb(120 210 170)` |
-| `color.status.monitor-text` | color | `--fc-color-status-monitor-text` | monitor delivery text | `rgb(225 240 232 / 0.92)` | `rgb(232 246 238 / 0.95)` |
-| `color.status.warn` (opaque) | color | `--fc-color-status-warn` | notices, inquiries, queued | `rgb(255 209 102)` | `rgb(255 214 119)` |
-| `color.status.warn-text` | color | `--fc-color-status-warn-text` | inquiry text | `rgb(243 236 214)` | `rgb(248 242 222)` |
-| `color.status.warn-muted` | color | `--fc-color-status-warn-muted` | inquiry status | `rgb(217 201 154)` | `rgb(226 212 168)` |
-| `color.status.warn-on` | color | `--fc-color-status-warn-on` | text on a warn button | `rgb(30 24 6)` | `rgb(30 24 6)` |
-| `color.status.warn-surface` | color | `--fc-color-status-warn-surface` | inquiry button | `rgb(42 37 22)` | `rgb(42 37 22 / 0.7)` |
-| `color.status.warn-field` | color | `--fc-color-status-warn-field` | inquiry input | `rgb(27 24 16)` | `rgb(27 24 16 / 0.6)` |
-| `color.status.warn-line` | color | `--fc-color-status-warn-line` | inquiry borders | `rgb(90 74 34)` | `rgb(106 88 48)` |
-| `color.status.gold` (opaque) | color | `--fc-color-status-gold` | the main canvas ★, main badge | `rgb(255 211 107)` | `rgb(255 217 125)` |
-| `color.status.error` (opaque) | color | `--fc-color-status-error` | errors, delete × | `rgb(255 138 138)` | `rgb(255 154 154)` |
-| `color.status.error-text` | color | `--fc-color-status-error-text` | toast text | `rgb(255 179 179)` | `rgb(255 192 192)` |
-| `color.status.error-deep` (opaque) | color | `--fc-color-status-error-deep` | stop button (tint) | `rgb(200 80 80)` | `rgb(208 90 90)` |
-| `color.status.lock` (opaque) | color | `--fc-color-status-lock` | the locked 🔒 chip | `rgb(247 118 142)` | `rgb(255 138 160)` |
-| `color.status.info` | color | `--fc-color-status-info` | recall verb | `rgb(154 208 255)` | `rgb(168 216 255)` |
-| `color.status.info-muted` | color | `--fc-color-status-info-muted` | tool target | `rgb(136 170 221)` | `rgb(156 186 230)` |
-| `color.side.page` (opaque) | color | `--fc-color-side-page` | page-side bezel border (tint) | `rgb(120 170 255)` | `rgb(134 180 255)` |
-| `color.side.page-text` | color | `--fc-color-side-page-text` | page agents in the tree | `rgb(140 185 255 / 0.95)` | `rgb(160 198 255)` |
-| `color.side.host` (opaque) | color | `--fc-color-side-host` | host-side bezel border (tint) | `rgb(255 190 90)` | `rgb(255 198 108)` |
-| `color.side.host-text` | color | `--fc-color-side-host-text` | host agents in the tree | `rgb(255 200 120 / 0.95)` | `rgb(255 210 144)` |
-| `color.syntax.keyword` | color | `--fc-color-syntax-keyword` | keywords in the previewer and editor | `rgb(199 146 234)` | `rgb(212 168 242)` |
-| `color.syntax.string` | color | `--fc-color-syntax-string` | strings in the previewer and editor | `rgb(165 214 167)` | `rgb(180 224 182)` |
-| `color.syntax.comment` | color | `--fc-color-syntax-comment` | comments in the previewer and editor | `rgb(122 127 148)` | `rgb(142 147 168)` |
-| `color.syntax.number` | color | `--fc-color-syntax-number` | numbers in the previewer and editor | `rgb(249 168 106)` | `rgb(255 184 124)` |
-| `color.syntax.type` | color | `--fc-color-syntax-type` | types and keys in the previewer and editor | `rgb(127 209 232)` | `rgb(146 220 239)` |
-| `color.syntax.punct` | color | `--fc-color-syntax-punct` | punctuation in the previewer and editor | `rgb(139 144 168)` | `rgb(157 162 186)` |
-| `color.tree.fantastic` (opaque) | color | `--fc-color-tree-fantastic` | the .fantastic folder in the file tree (via tint) | `rgb(95 211 181)` | `rgb(114 224 194)` |
-| `color.surface.bezel` | color | `--fc-color-surface-bezel` | a cell's bezel | `rgb(15 15 25 / 0.88)` | `rgb(18 18 30 / 0.42)` |
-| `color.surface.bezel-flat` | color | `--fc-color-surface-bezel-flat` | the mobile bezel | `rgb(17 17 26)` | `rgb(17 17 26 / 0.55)` |
-| `color.surface.raised` | color | `--fc-color-surface-raised` | the stopped-terminal box | `rgb(17 17 26 / 0.92)` | `rgb(20 20 31 / 0.72)` |
-| `color.surface.popup` | color | `--fc-color-surface-popup` | the action popup | `rgb(22 20 32 / 0.96)` | `rgb(24 22 36 / 0.74)` |
-| `color.surface.pill` | color | `--fc-color-surface-pill` | the full-view label | `rgb(20 18 30)` | `rgb(20 18 30 / 0.7)` |
-| `color.surface.panel` | color | `--fc-color-surface-panel` | wizard, not-set-up card | `rgb(15 14 22)` | `rgb(15 14 22 / 0.45)` |
-| `color.surface.field` | color | `--fc-color-surface-field` | inputs and selects | `rgb(26 24 36)` | `rgb(0 0 0 / 0.25)` |
-| `color.surface.button` | color | `--fc-color-surface-button` | buttons | `rgb(36 31 53)` | `rgb(255 255 255 / 0.08)` |
-| `color.surface.badge` | color | `--fc-color-surface-badge` | the terminal's last-command bar | `rgb(10 10 18 / 0.72)` | `rgb(10 10 18 / 0.5)` |
-| `color.surface.veil` | color | `--fc-color-surface-veil` | the stopped-terminal veil | `rgb(6 6 12 / 0.66)` | `rgb(6 6 12 / 0.45)` |
-| `color.surface.toast` | color | `--fc-color-surface-toast` | the error toast | `rgb(40 20 26 / 0.9)` | `rgb(40 20 26 / 0.78)` |
-| `color.surface.bubble` | color | `--fc-color-surface-bubble` | an assistant bubble | `rgb(36 38 56 / 0.5)` | `rgb(36 38 56 / 0.35)` |
-| `color.surface.code` | color | `--fc-color-surface-code` | a tool block | `rgb(24 26 40 / 0.5)` | `rgb(24 26 40 / 0.35)` |
-| `color.surface.well` | color | `--fc-color-surface-well` | a tool pre, the stream view | `rgb(8 10 18 / 0.55)` | `rgb(8 10 18 / 0.38)` |
-| `color.line.button` | color | `--fc-color-line-button` | button and control borders | `rgb(49 44 64)` | `rgb(255 255 255 / 0.14)` |
-| `color.line.strong` | color | `--fc-color-line-strong` | hovered control borders | `rgb(74 74 77)` | `rgb(255 255 255 / 0.26)` |
-| `color.line.faint` | color | `--fc-color-line-faint` | row separators | `rgb(29 29 31)` | `rgb(255 255 255 / 0.07)` |
-| `color.terminal.bg` | color | `--fc-color-terminal-bg` | xterm theme.background | `rgb(0 0 0 / 0)` | `rgb(0 0 0 / 0)` |
-| `color.terminal.fg` (opaque) | color | `--fc-color-terminal-fg` | xterm theme.foreground, the stopped box text | `rgb(229 229 229)` | `rgb(236 236 236)` |
-| `color.terminal.cursor` | color | `--fc-color-terminal-cursor` | xterm theme.cursor | `rgb(229 229 229)` | `rgb(255 255 255)` |
-| `shadow.bezel` | shadow | `--fc-shadow-bezel` | a cell's bezel (.agent-frame::before) | `0px 8px 32px 0px rgb(0 0 0 / 0.4), inset 0px 1px 0px 0px rgb(255 255 255 / 0.04)` | `0px 10px 30px 0px rgb(0 0 0 / 0.22), inset 0px 1px 0px 0px rgb(255 255 255 / 0.12)` |
-| `shadow.bezel-lifted` | shadow | `--fc-shadow-bezel-lifted` | a dragged or resized cell's bezel | `0px 12px 48px 0px rgb(0 0 0 / 0.6), inset 0px 1px 0px 0px rgb(255 255 255 / 0.08)` | `0px 14px 44px 0px rgb(0 0 0 / 0.32), inset 0px 1px 0px 0px rgb(255 255 255 / 0.16)` |
-| `shadow.popup` | shadow | `--fc-shadow-popup` | the action popup | `inset 0px 1px 0px 0px rgb(255 255 255 / 0.1), 0px 0px 0px 1px rgb(255 255 255 / 0.12), 0px 22px 60px -12px rgb(0 0 0 / 0.65)` | `inset 0px 1px 0px 0px rgb(255 255 255 / 0.16), 0px 0px 0px 1px rgb(255 255 255 / 0.18), 0px 22px 60px -12px rgb(0 0 0 / 0.35)` |
-| `shadow.bubble` | shadow | `--fc-shadow-bubble` | a chat message bubble | `inset 0px 1px 0px 0px rgb(255 255 255 / 0.1), 0px 0px 0px 1px rgb(255 255 255 / 0.08), 0px 6px 14px -6px rgb(0 0 0 / 0.45)` | `inset 0px 1px 0px 0px rgb(255 255 255 / 0.14), 0px 0px 0px 1px rgb(255 255 255 / 0.12), 0px 6px 14px -6px rgb(0 0 0 / 0.25)` |
-| `shadow.pill` | shadow | `--fc-shadow-pill` | the full-view label | `0px 0px 0px 1px rgb(183 140 255 / 0.35), 0px 8px 24px 0px rgb(0 0 0 / 0.5)` | `0px 0px 0px 1px rgb(195 160 255 / 0.4), 0px 8px 24px 0px rgb(0 0 0 / 0.28)` |
-| `shadow.flash` | shadow | `--fc-shadow-flash` | a cell flashed from the tree | `0px 0px 0px 2px rgb(183 140 255), 0px 0px 30px 0px rgb(183 140 255 / 0.6)` | `0px 0px 0px 2px rgb(195 160 255), 0px 0px 30px 0px rgb(195 160 255 / 0.6)` |
-| `shadow.button` | shadow | `--fc-shadow-button` | the chat's send button | `inset 0px 1px 0px 0px rgb(255 255 255 / 0.12), inset 0px 0px 0px 1px rgb(255 255 255 / 0.1)` | `inset 0px 1px 0px 0px rgb(255 255 255 / 0.18), inset 0px 0px 0px 1px rgb(255 255 255 / 0.16)` |
-| `shadow.focus` | shadow | `--fc-shadow-focus` | a focused chat input | `inset 0px 0px 0px 1px rgb(180 220 255 / 0.45), 0px 0px 0px 3px rgb(120 200 255 / 0.1)` | `inset 0px 0px 0px 1px rgb(180 220 255 / 0.45), 0px 0px 0px 3px rgb(120 200 255 / 0.1)` |
-| `shadow.toast` | shadow | `--fc-shadow-toast` | the error toast's ring | `0px 0px 0px 1px rgb(255 120 120 / 0.3)` | `0px 0px 0px 1px rgb(255 120 120 / 0.3)` |
-| `radius.tag` | dimension | `--fc-radius-tag` | tags and kbd-like labels | `3px` | `4px` |
-| `radius.chip` | dimension | `--fc-radius-chip` | head chips | `4px` | `5px` |
-| `radius.key` | dimension | `--fc-radius-key` | keycaps | `5px` | `6px` |
-| `radius.control` | dimension | `--fc-radius-control` | buttons, inputs, small boxes | `6px` | `8px` |
-| `radius.card` | dimension | `--fc-radius-card` | cards, tool blocks | `8px` | `10px` |
-| `radius.panel` | dimension | `--fc-radius-panel` | panels, a cell's body (.frame-body) | `10px` | `12px` |
-| `radius.bubble` | dimension | `--fc-radius-bubble` | chat bubbles | `12px` | `14px` |
-| `radius.handle` | dimension | `--fc-radius-handle` | the resize handles' outer corner | `14px` | `18px` |
-| `radius.bezel` | dimension | `--fc-radius-bezel` | a cell's bezel | `16px` | `20px` |
-| `radius.pill` | dimension | `--fc-radius-pill` | pills | `999px` | `999px` |
-| `font.family.sans` | fontFamily | `--fc-font-family-sans` | every sans-serif text | `system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif` | `system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif` |
-| `font.family.mono` | fontFamily | `--fc-font-family-mono` | every monospace text | `ui-monospace, SFMono-Regular, Menlo, monospace` | `ui-monospace, SFMono-Regular, Menlo, monospace` |
-| `font.family.terminal` | fontFamily | `--fc-font-family-terminal` | xterm's fontFamily | `"SF Mono", Menlo, monospace` | `"SF Mono", Menlo, monospace` |
-| `duration.hover` | duration | `--fc-duration-hover` | hover transitions of head chips | `150ms` | `150ms` |
-| `duration.pulse` | duration | `--fc-duration-pulse` | the busy pulse | `1400ms` | `1400ms` |
-| `duration.think` | duration | `--fc-duration-think` | the thinking shimmer | `1100ms` | `1100ms` |
-| `easing.standard` | cubicBezier | `--fc-easing-standard` | CSS ease | `cubic-bezier(0.25, 0.1, 0.25, 1)` | `cubic-bezier(0.25, 0.1, 0.25, 1)` |
-| `easing.in-out` | cubicBezier | `--fc-easing-in-out` | CSS ease-in-out | `cubic-bezier(0.42, 0, 0.58, 1)` | `cubic-bezier(0.42, 0, 0.58, 1)` |
-| `blur.veil` | dimension | `--fc-blur-veil` | the stopped-terminal veil's backdrop blur | `2px` | `2px` |
+| path | type | CSS name | paints | day | dark | glass |
+|---|---|---|---|---|---|---|
+| `color.page.bg` | color | `--fc-color-page-bg` | html/body, the GL clear colour, the refused box | `rgb(237 237 237)` | `rgb(6 6 12)` | `rgb(0 0 0 / 0)` |
+| `color.page.text` | color | `--fc-color-page-text` | body text | `rgb(69 69 69)` | `rgb(170 170 170)` | `rgb(196 196 204)` |
+| `color.ink` (opaque) | color | `--fc-color-ink` | the overlay hue: hairlines, hover fills, glints (always via tint) | `rgb(0 0 0)` | `rgb(255 255 255)` | `rgb(255 255 255)` |
+| `color.shade` (opaque) | color | `--fc-color-shade` | the shadow hue: wells, veils (via tint) | `rgb(0 0 0)` | `rgb(0 0 0)` | `rgb(0 0 0)` |
+| `color.text.bright` | color | `--fc-color-text-bright` | headings, active and hovered text | `rgb(11 11 11)` | `rgb(255 255 255)` | `rgb(255 255 255)` |
+| `color.text.primary` | color | `--fc-color-text-primary` | body text of panels, dialogs, popup | `rgb(11 11 11)` | `rgb(236 233 245)` | `rgb(244 242 250)` |
+| `color.text.cool` (opaque) | color | `--fc-color-text-cool` | secondary text (always at an alpha) | `rgb(69 69 69)` | `rgb(220 230 245)` | `rgb(230 238 250)` |
+| `color.text.muted` | color | `--fc-color-text-muted` | leads, labels | `rgb(69 69 69)` | `rgb(163 156 186)` | `rgb(188 182 208)` |
+| `color.text.subtle` | color | `--fc-color-text-subtle` | step labels, small print | `rgb(107 107 107)` | `rgb(143 136 166)` | `rgb(168 162 191)` |
+| `color.text.faint` | color | `--fc-color-text-faint` | hints, empty states | `rgb(107 107 107)` | `rgb(111 104 134)` | `rgb(140 134 163)` |
+| `color.text.code` | color | `--fc-color-text-code` | tool blocks, reflect text | `rgb(69 69 69)` | `rgb(170 187 187)` | `rgb(194 208 208)` |
+| `color.text.dim` | color | `--fc-color-text-dim` | tool state, others' hints | `rgb(107 107 107)` | `rgb(102 102 119)` | `rgb(138 138 154)` |
+| `color.accent.base` (opaque) | color | `--fc-color-accent-base` | the accent and all its tints | `rgb(17 17 17)` | `rgb(183 140 255)` | `rgb(195 160 255)` |
+| `color.accent.text` (opaque) | color | `--fc-color-accent-text` | text on accent tints | `rgb(17 17 17)` | `rgb(230 220 255)` | `rgb(239 232 255)` |
+| `color.accent.soft` | color | `--fc-color-accent-soft` | thinking text, tip emphasis | `rgb(69 69 69)` | `rgb(203 184 240)` | `rgb(216 200 246)` |
+| `color.accent.on` | color | `--fc-color-accent-on` | text on a solid accent button | `rgb(255 255 255)` | `rgb(22 18 31)` | `rgb(22 18 31)` |
+| `color.accent.deep` (opaque) | color | `--fc-color-accent-deep` | user bubble, send, busy pill (tints) | `rgb(17 17 17)` | `rgb(110 90 220)` | `rgb(122 102 230)` |
+| `color.accent.deep-hover` (opaque) | color | `--fc-color-accent-deep-hover` | send hover (tint) | `rgb(43 43 43)` | `rgb(130 110 240)` | `rgb(142 124 244)` |
+| `color.status.ok` (opaque) | color | `--fc-color-status-ok` | ok, start button, kept badge | `rgb(27 116 70)` | `rgb(126 226 168)` | `rgb(134 236 176)` |
+| `color.status.ok-hover` | color | `--fc-color-status-ok-hover` | start button hover | `rgb(20 90 54)` | `rgb(165 240 197)` | `rgb(176 244 204)` |
+| `color.status.ok-on` | color | `--fc-color-status-ok-on` | text on the start button | `rgb(255 255 255)` | `rgb(13 26 18)` | `rgb(13 26 18)` |
+| `color.status.ok-deep` (opaque) | color | `--fc-color-status-ok-deep` | streaming pill (tint) | `rgb(27 116 70)` | `rgb(80 180 120)` | `rgb(88 192 128)` |
+| `color.status.monitor` (opaque) | color | `--fc-color-status-monitor` | monitor delivery (tints) | `rgb(27 116 70)` | `rgb(110 200 160)` | `rgb(120 210 170)` |
+| `color.status.monitor-text` | color | `--fc-color-status-monitor-text` | monitor delivery text | `rgb(11 11 11 / 0.92)` | `rgb(225 240 232 / 0.92)` | `rgb(232 246 238 / 0.95)` |
+| `color.status.warn` (opaque) | color | `--fc-color-status-warn` | notices, inquiries, queued | `rgb(143 82 0)` | `rgb(255 209 102)` | `rgb(255 214 119)` |
+| `color.status.warn-text` | color | `--fc-color-status-warn-text` | inquiry text | `rgb(92 53 0)` | `rgb(243 236 214)` | `rgb(248 242 222)` |
+| `color.status.warn-muted` | color | `--fc-color-status-warn-muted` | inquiry status | `rgb(143 82 0)` | `rgb(217 201 154)` | `rgb(226 212 168)` |
+| `color.status.warn-on` | color | `--fc-color-status-warn-on` | text on a warn button | `rgb(255 255 255)` | `rgb(30 24 6)` | `rgb(30 24 6)` |
+| `color.status.warn-surface` | color | `--fc-color-status-warn-surface` | inquiry button | `rgb(143 82 0 / 0.12)` | `rgb(42 37 22)` | `rgb(42 37 22 / 0.7)` |
+| `color.status.warn-field` | color | `--fc-color-status-warn-field` | inquiry input | `rgb(255 255 255 / 0.6)` | `rgb(27 24 16)` | `rgb(27 24 16 / 0.6)` |
+| `color.status.warn-line` | color | `--fc-color-status-warn-line` | inquiry borders | `rgb(143 82 0 / 0.45)` | `rgb(90 74 34)` | `rgb(106 88 48)` |
+| `color.status.gold` (opaque) | color | `--fc-color-status-gold` | the main canvas ★, main badge | `rgb(143 82 0)` | `rgb(255 211 107)` | `rgb(255 217 125)` |
+| `color.status.error` (opaque) | color | `--fc-color-status-error` | errors, delete × | `rgb(179 38 30)` | `rgb(255 138 138)` | `rgb(255 154 154)` |
+| `color.status.error-text` | color | `--fc-color-status-error-text` | toast text | `rgb(179 38 30)` | `rgb(255 179 179)` | `rgb(255 192 192)` |
+| `color.status.error-deep` (opaque) | color | `--fc-color-status-error-deep` | stop button (tint) | `rgb(179 38 30)` | `rgb(200 80 80)` | `rgb(208 90 90)` |
+| `color.status.lock` (opaque) | color | `--fc-color-status-lock` | the locked 🔒 chip | `rgb(179 38 30)` | `rgb(247 118 142)` | `rgb(255 138 160)` |
+| `color.status.info` | color | `--fc-color-status-info` | recall verb | `rgb(69 69 69)` | `rgb(154 208 255)` | `rgb(168 216 255)` |
+| `color.status.info-muted` | color | `--fc-color-status-info-muted` | tool target | `rgb(107 107 107)` | `rgb(136 170 221)` | `rgb(156 186 230)` |
+| `color.side.page` (opaque) | color | `--fc-color-side-page` | page-side bezel border (tint) | `rgb(69 69 69)` | `rgb(120 170 255)` | `rgb(134 180 255)` |
+| `color.side.page-text` | color | `--fc-color-side-page-text` | page agents in the tree | `rgb(69 69 69 / 0.95)` | `rgb(140 185 255 / 0.95)` | `rgb(160 198 255)` |
+| `color.side.host` (opaque) | color | `--fc-color-side-host` | host-side bezel border (tint) | `rgb(107 107 107)` | `rgb(255 190 90)` | `rgb(255 198 108)` |
+| `color.side.host-text` | color | `--fc-color-side-host-text` | host agents in the tree | `rgb(107 107 107 / 0.95)` | `rgb(255 200 120 / 0.95)` | `rgb(255 210 144)` |
+| `color.syntax.keyword` | color | `--fc-color-syntax-keyword` | keywords in the previewer and editor | `rgb(11 11 11)` | `rgb(199 146 234)` | `rgb(212 168 242)` |
+| `color.syntax.string` | color | `--fc-color-syntax-string` | strings in the previewer and editor | `rgb(69 69 69)` | `rgb(165 214 167)` | `rgb(180 224 182)` |
+| `color.syntax.comment` | color | `--fc-color-syntax-comment` | comments in the previewer and editor | `rgb(107 107 107)` | `rgb(122 127 148)` | `rgb(142 147 168)` |
+| `color.syntax.number` | color | `--fc-color-syntax-number` | numbers in the previewer and editor | `rgb(69 69 69)` | `rgb(249 168 106)` | `rgb(255 184 124)` |
+| `color.syntax.type` | color | `--fc-color-syntax-type` | types and keys in the previewer and editor | `rgb(11 11 11)` | `rgb(127 209 232)` | `rgb(146 220 239)` |
+| `color.syntax.punct` | color | `--fc-color-syntax-punct` | punctuation in the previewer and editor | `rgb(107 107 107)` | `rgb(139 144 168)` | `rgb(157 162 186)` |
+| `color.tree.fantastic` (opaque) | color | `--fc-color-tree-fantastic` | the .fantastic folder in the file tree (via tint) | `rgb(11 11 11)` | `rgb(95 211 181)` | `rgb(114 224 194)` |
+| `color.surface.bezel` | color | `--fc-color-surface-bezel` | a cell's bezel | `rgb(255 255 255 / 0.58)` | `rgb(15 15 25 / 0.88)` | `rgb(18 18 30 / 0.42)` |
+| `color.surface.bezel-flat` | color | `--fc-color-surface-bezel-flat` | the mobile bezel | `rgb(255 255 255 / 0.72)` | `rgb(17 17 26)` | `rgb(17 17 26 / 0.55)` |
+| `color.surface.raised` | color | `--fc-color-surface-raised` | the stopped-terminal box | `rgb(255 255 255 / 0.72)` | `rgb(17 17 26 / 0.92)` | `rgb(20 20 31 / 0.72)` |
+| `color.surface.popup` | color | `--fc-color-surface-popup` | the action popup | `rgb(255 255 255 / 0.86)` | `rgb(22 20 32 / 0.96)` | `rgb(24 22 36 / 0.74)` |
+| `color.surface.pill` | color | `--fc-color-surface-pill` | the full-view label | `rgb(255 255 255 / 0.72)` | `rgb(20 18 30)` | `rgb(20 18 30 / 0.7)` |
+| `color.surface.panel` | color | `--fc-color-surface-panel` | wizard, not-set-up card | `rgb(255 255 255 / 0.58)` | `rgb(15 14 22)` | `rgb(15 14 22 / 0.45)` |
+| `color.surface.field` | color | `--fc-color-surface-field` | inputs and selects | `rgb(0 0 0 / 0.06)` | `rgb(26 24 36)` | `rgb(0 0 0 / 0.25)` |
+| `color.surface.button` | color | `--fc-color-surface-button` | buttons | `rgb(0 0 0 / 0.05)` | `rgb(36 31 53)` | `rgb(255 255 255 / 0.08)` |
+| `color.surface.badge` | color | `--fc-color-surface-badge` | the terminal's last-command bar | `rgb(255 255 255 / 0.72)` | `rgb(10 10 18 / 0.72)` | `rgb(10 10 18 / 0.5)` |
+| `color.surface.veil` | color | `--fc-color-surface-veil` | the stopped-terminal veil | `rgb(237 237 237 / 0.66)` | `rgb(6 6 12 / 0.66)` | `rgb(6 6 12 / 0.45)` |
+| `color.surface.toast` | color | `--fc-color-surface-toast` | the error toast | `rgb(255 255 255 / 0.86)` | `rgb(40 20 26 / 0.9)` | `rgb(40 20 26 / 0.78)` |
+| `color.surface.bubble` | color | `--fc-color-surface-bubble` | an assistant bubble | `rgb(255 255 255 / 0.6)` | `rgb(36 38 56 / 0.5)` | `rgb(36 38 56 / 0.35)` |
+| `color.surface.code` | color | `--fc-color-surface-code` | a tool block | `rgb(0 0 0 / 0.045)` | `rgb(24 26 40 / 0.5)` | `rgb(24 26 40 / 0.35)` |
+| `color.surface.well` | color | `--fc-color-surface-well` | a tool pre, the stream view | `rgb(0 0 0 / 0.06)` | `rgb(8 10 18 / 0.55)` | `rgb(8 10 18 / 0.38)` |
+| `color.line.button` | color | `--fc-color-line-button` | button and control borders | `rgb(0 0 0 / 0.1)` | `rgb(49 44 64)` | `rgb(255 255 255 / 0.14)` |
+| `color.line.strong` | color | `--fc-color-line-strong` | hovered control borders | `rgb(0 0 0 / 0.18)` | `rgb(74 74 77)` | `rgb(255 255 255 / 0.26)` |
+| `color.line.faint` | color | `--fc-color-line-faint` | row separators | `rgb(0 0 0 / 0.06)` | `rgb(29 29 31)` | `rgb(255 255 255 / 0.07)` |
+| `color.terminal.bg` | color | `--fc-color-terminal-bg` | xterm theme.background | `rgb(0 0 0 / 0)` | `rgb(0 0 0 / 0)` | `rgb(0 0 0 / 0)` |
+| `color.terminal.fg` (opaque) | color | `--fc-color-terminal-fg` | xterm theme.foreground, the stopped box text | `rgb(11 11 11)` | `rgb(229 229 229)` | `rgb(236 236 236)` |
+| `color.terminal.cursor` | color | `--fc-color-terminal-cursor` | xterm theme.cursor | `rgb(11 11 11)` | `rgb(229 229 229)` | `rgb(255 255 255)` |
+| `shadow.bezel` | shadow | `--fc-shadow-bezel` | a cell's bezel (.agent-frame::before) | `0px 10px 30px 0px rgb(0 0 0 / 0.1), 0px 1px 2px 0px rgb(0 0 0 / 0.06)` | `0px 8px 32px 0px rgb(0 0 0 / 0.4), inset 0px 1px 0px 0px rgb(255 255 255 / 0.04)` | `0px 10px 30px 0px rgb(0 0 0 / 0.22), inset 0px 1px 0px 0px rgb(255 255 255 / 0.12)` |
+| `shadow.bezel-lifted` | shadow | `--fc-shadow-bezel-lifted` | a dragged or resized cell's bezel | `0px 12px 40px 0px rgb(0 0 0 / 0.16), 0px 1px 2px 0px rgb(0 0 0 / 0.08)` | `0px 12px 48px 0px rgb(0 0 0 / 0.6), inset 0px 1px 0px 0px rgb(255 255 255 / 0.08)` | `0px 14px 44px 0px rgb(0 0 0 / 0.32), inset 0px 1px 0px 0px rgb(255 255 255 / 0.16)` |
+| `shadow.popup` | shadow | `--fc-shadow-popup` | the action popup | `inset 0px 1px 0px 0px rgb(255 255 255 / 0.6), 0px 0px 0px 1px rgb(0 0 0 / 0.1), 0px 22px 60px -12px rgb(0 0 0 / 0.25)` | `inset 0px 1px 0px 0px rgb(255 255 255 / 0.1), 0px 0px 0px 1px rgb(255 255 255 / 0.12), 0px 22px 60px -12px rgb(0 0 0 / 0.65)` | `inset 0px 1px 0px 0px rgb(255 255 255 / 0.16), 0px 0px 0px 1px rgb(255 255 255 / 0.18), 0px 22px 60px -12px rgb(0 0 0 / 0.35)` |
+| `shadow.bubble` | shadow | `--fc-shadow-bubble` | a chat message bubble | `inset 0px 0px 0px 1px rgb(0 0 0 / 0.07)` | `inset 0px 1px 0px 0px rgb(255 255 255 / 0.1), 0px 0px 0px 1px rgb(255 255 255 / 0.08), 0px 6px 14px -6px rgb(0 0 0 / 0.45)` | `inset 0px 1px 0px 0px rgb(255 255 255 / 0.14), 0px 0px 0px 1px rgb(255 255 255 / 0.12), 0px 6px 14px -6px rgb(0 0 0 / 0.25)` |
+| `shadow.pill` | shadow | `--fc-shadow-pill` | the full-view label | `0px 0px 0px 1px rgb(17 17 17 / 0.3), 0px 8px 24px 0px rgb(0 0 0 / 0.12)` | `0px 0px 0px 1px rgb(183 140 255 / 0.35), 0px 8px 24px 0px rgb(0 0 0 / 0.5)` | `0px 0px 0px 1px rgb(195 160 255 / 0.4), 0px 8px 24px 0px rgb(0 0 0 / 0.28)` |
+| `shadow.flash` | shadow | `--fc-shadow-flash` | a cell flashed from the tree | `0px 0px 0px 2px rgb(17 17 17), 0px 0px 30px 0px rgb(17 17 17 / 0.4)` | `0px 0px 0px 2px rgb(183 140 255), 0px 0px 30px 0px rgb(183 140 255 / 0.6)` | `0px 0px 0px 2px rgb(195 160 255), 0px 0px 30px 0px rgb(195 160 255 / 0.6)` |
+| `shadow.button` | shadow | `--fc-shadow-button` | the chat's send button | `inset 0px 1px 0px 0px rgb(255 255 255 / 0.6), inset 0px 0px 0px 1px rgb(0 0 0 / 0.1)` | `inset 0px 1px 0px 0px rgb(255 255 255 / 0.12), inset 0px 0px 0px 1px rgb(255 255 255 / 0.1)` | `inset 0px 1px 0px 0px rgb(255 255 255 / 0.18), inset 0px 0px 0px 1px rgb(255 255 255 / 0.16)` |
+| `shadow.focus` | shadow | `--fc-shadow-focus` | a focused chat input | `inset 0px 0px 0px 1px rgb(17 17 17 / 0.45), 0px 0px 0px 3px rgb(17 17 17 / 0.1)` | `inset 0px 0px 0px 1px rgb(180 220 255 / 0.45), 0px 0px 0px 3px rgb(120 200 255 / 0.1)` | `inset 0px 0px 0px 1px rgb(180 220 255 / 0.45), 0px 0px 0px 3px rgb(120 200 255 / 0.1)` |
+| `shadow.toast` | shadow | `--fc-shadow-toast` | the error toast's ring | `0px 0px 0px 1px rgb(179 38 30 / 0.3)` | `0px 0px 0px 1px rgb(255 120 120 / 0.3)` | `0px 0px 0px 1px rgb(255 120 120 / 0.3)` |
+| `radius.tag` | dimension | `--fc-radius-tag` | tags and kbd-like labels | `3px` | `3px` | `4px` |
+| `radius.chip` | dimension | `--fc-radius-chip` | head chips | `4px` | `4px` | `5px` |
+| `radius.key` | dimension | `--fc-radius-key` | keycaps | `5px` | `5px` | `6px` |
+| `radius.control` | dimension | `--fc-radius-control` | buttons, inputs, small boxes | `6px` | `6px` | `8px` |
+| `radius.card` | dimension | `--fc-radius-card` | cards, tool blocks | `8px` | `8px` | `10px` |
+| `radius.panel` | dimension | `--fc-radius-panel` | panels, a cell's body (.frame-body) | `10px` | `10px` | `12px` |
+| `radius.bubble` | dimension | `--fc-radius-bubble` | chat bubbles | `12px` | `12px` | `14px` |
+| `radius.handle` | dimension | `--fc-radius-handle` | the resize handles' outer corner | `14px` | `14px` | `18px` |
+| `radius.bezel` | dimension | `--fc-radius-bezel` | a cell's bezel | `16px` | `16px` | `20px` |
+| `radius.pill` | dimension | `--fc-radius-pill` | pills | `999px` | `999px` | `999px` |
+| `font.family.sans` | fontFamily | `--fc-font-family-sans` | every sans-serif text | `system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif` | `system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif` | `system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif` |
+| `font.family.mono` | fontFamily | `--fc-font-family-mono` | every monospace text | `ui-monospace, SFMono-Regular, Menlo, monospace` | `ui-monospace, SFMono-Regular, Menlo, monospace` | `ui-monospace, SFMono-Regular, Menlo, monospace` |
+| `font.family.terminal` | fontFamily | `--fc-font-family-terminal` | xterm's fontFamily | `"SF Mono", Menlo, monospace` | `"SF Mono", Menlo, monospace` | `"SF Mono", Menlo, monospace` |
+| `duration.hover` | duration | `--fc-duration-hover` | hover transitions of head chips | `150ms` | `150ms` | `150ms` |
+| `duration.pulse` | duration | `--fc-duration-pulse` | the busy pulse | `1400ms` | `1400ms` | `1400ms` |
+| `duration.think` | duration | `--fc-duration-think` | the thinking shimmer | `1100ms` | `1100ms` | `1100ms` |
+| `easing.standard` | cubicBezier | `--fc-easing-standard` | CSS ease | `cubic-bezier(0.25, 0.1, 0.25, 1)` | `cubic-bezier(0.25, 0.1, 0.25, 1)` | `cubic-bezier(0.25, 0.1, 0.25, 1)` |
+| `easing.in-out` | cubicBezier | `--fc-easing-in-out` | CSS ease-in-out | `cubic-bezier(0.42, 0, 0.58, 1)` | `cubic-bezier(0.42, 0, 0.58, 1)` | `cubic-bezier(0.42, 0, 0.58, 1)` |
+| `blur.veil` | dimension | `--fc-blur-veil` | the stopped-terminal veil's backdrop blur | `2px` | `2px` | `2px` |
 
 ## What stays literal
 

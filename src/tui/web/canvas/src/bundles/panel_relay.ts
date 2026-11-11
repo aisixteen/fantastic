@@ -7,7 +7,7 @@ import type { Json, Kernel, Payload } from "../lib.ts";
 // no API to send as anyone else — identity comes only from dispatch — so the
 // page hands each one to the agent's own handler, whose sends ARE the agent's:
 //
-//   panel_send  {target, payload} → that call's result
+//   panel_send  {target, payload} → that call's result ("kernel" from a host agent's view is the host's root)
 //   panel_emit  {target, payload} → an emit (a local agent's inbox, or a host
 //                                   agent's over the bridge, gated by `emit` in
 //                                   this agent's can_call); dropped if denied
@@ -19,6 +19,12 @@ export function panelRelay(kernel: Kernel, payload: Payload): Json | Promise<Jso
   const inner = (payload["payload"] ?? {}) as Payload;
   switch (str(payload, "type")) {
     case "panel_send":
+      // a HOST agent's view (its cell carries `backend_id`) says "kernel" for the HOST's root: the
+      // page's own "kernel" is the canvas root, so the literal goes over the bridge (the cell's
+      // `can_call` still judges it, `callHost`)
+      if (target === "kernel" && kernel.currentOrigin !== null && typeof kernel.get(kernel.currentOrigin)?.meta["backend_id"] === "string") {
+        return kernel.callHost(target, inner);
+      }
       return kernel.send([{ target, payload: inner }]).then((outs) => outs[0]!.result);
     case "panel_emit": {
       if (kernel.get(target) !== undefined) {
