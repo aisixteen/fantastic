@@ -199,8 +199,15 @@ def main() -> int:
 
         # 7 · vs python
         if name != "python" and excluded("python"):
-            print("  skip: step 7 (vs python), the run excludes the python runtime", flush=True)
-            pcat, pdocs = cat, docs
+            # Comparing the kernel with itself would pass vacuously: SKIP, never PASS.
+            # A real failure in steps 1-6 still wins (run.py reads E2E-SKIP first, so it
+            # is printed only when nothing failed).
+            if bad:
+                verdict(False, f"{RUNTIME}: {len(bad)} failed — first: {bad[0]}")
+                return 1
+            print("E2E-SKIP: step 7 (vs python) needs the python runtime, which the run excludes",
+                  flush=True)
+            return 0
         elif name != "python":
             ref_work = Path(tempfile.mkdtemp(prefix="e2e-artifact-ref-"))
             ref = HostKernel(ensure_runtime(REPO, "python"), ref_work, reach=[]).boot()

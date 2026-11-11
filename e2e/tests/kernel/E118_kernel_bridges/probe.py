@@ -391,8 +391,7 @@ def main() -> int:
     if PEER == RUNTIME:
         raise SystemExit("RUNTIME must be named")
     if excluded(PEER):
-        print(f"skip: the peer is {PEER} and the run excludes that runtime", flush=True)
-        verdict(True, f"{RUNTIME}: skipped, the {PEER} peer is excluded")
+        print(f"E2E-SKIP: the {PEER} peer is excluded from this run", flush=True)
         return 0
     name, _ = runtime(REPO, RUNTIME)
     kspec, pspec = ensure_runtime(REPO, name), ensure_runtime(REPO, PEER)
