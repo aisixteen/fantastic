@@ -109,12 +109,12 @@ def split_record(backend_record: dict, extra: dict | None = None) -> tuple[dict,
     return prov, chat
 
 
-async def make_chat(root, backend, chat: dict, *, role: str | None = None,
-                    provider_id: str | None = None) -> tuple[str, str]:
-    """Create the provider and the chat. `chat` is the chat's create_agent payload as a
-    probe would write it for ONE agent (id, parent_id, can_call, callable_by, memory,
-    and any record fields); backend fields in it go to the provider. Returns
-    (chat_id, provider_id)."""
+def chat_pair(backend, chat: dict, *, role: str | None = None,
+              provider_id: str | None = None, parent: str) -> tuple[dict, dict]:
+    """The two create_agent payloads (provider, chat) for one AI. `chat` is the payload a
+    probe would write for ONE agent (id, parent_id, can_call, callable_by, memory, and any
+    record fields); backend fields in it go to the provider. Pure: a sync runner (the host
+    runner) sends them through its own wire; `make_chat` sends them through a root."""
     chat = dict(chat)
     chat.pop("type", None)
     cid = chat["id"]
@@ -124,28 +124,37 @@ async def make_chat(root, backend, chat: dict, *, role: str | None = None,
     for k in ("can_call", "callable_by", "parent_id", "memory_store_id", "description"):
         prov_fields.pop(k, None)
     prov = {
-        "type": "create_agent", "parent_id": chat.get("parent_id") or home(root), "id": pid,
+        "type": "create_agent", "parent_id": chat.get("parent_id") or parent, "id": pid,
         **prov_fields,
         "memory_store_id": memory.MEMORY,
         "can_call": {"$self": "*", memory.MEMORY: "*",
                      **({creds.CREDS: creds.GET} if backend.key_ref else {})},
         "callable_by": {"$self": "*", "$parent": "*", cid: PROVIDER_CALLS},
     }
+    chat_fields["can_call"] = {**(chat_fields.get("can_call") or {}), pid: PROVIDER_CALLS}
+    # the KEY is the provider's: the chat names no credentials and reads no `creds`
+    chat_fields.pop("credentials", None)
+    chat_fields["can_call"].pop(creds.CREDS, None)
+    return prov, {"type": "create_agent", **chat_fields, "handler_module": CHAT_MODULE,
+                  "provider_id": pid}
+
+
+async def make_chat(root, backend, chat: dict, *, role: str | None = None,
+                    provider_id: str | None = None) -> tuple[str, str]:
+    """Create the provider and the chat (`chat_pair`) and open the provider's store halves.
+    Returns (chat_id, provider_id)."""
+    prov, payload = chat_pair(backend, chat, role=role, provider_id=provider_id,
+                              parent=home(root))
+    pid = prov["id"]
     made = (await root.send([{"target": root.id, "payload": prov}]))[0]["result"]
     if isinstance(made, dict) and made.get("error"):
         raise SystemExit(f"create_agent({pid}) refused: {made}")
     await memory.open_ingress(root, memory.MEMORY, pid)
     if backend.key_ref:
         await memory.open_ingress(root, creds.CREDS, pid)
-    chat_fields["can_call"] = {**(chat_fields.get("can_call") or {}), pid: PROVIDER_CALLS}
-    # the KEY is the provider's: the chat names no credentials and reads no `creds`
-    chat_fields.pop("credentials", None)
-    chat_fields["can_call"].pop(creds.CREDS, None)
-    payload = {"type": "create_agent", **chat_fields, "handler_module": CHAT_MODULE,
-               "provider_id": pid}
     made = (await root.send([{"target": root.id, "payload": payload}]))[0]["result"]
     if isinstance(made, dict) and made.get("error"):
-        raise SystemExit(f"create_agent({cid}) refused: {made}")
+        raise SystemExit(f"create_agent({payload['id']}) refused: {made}")
     return made["id"], pid
 
 
