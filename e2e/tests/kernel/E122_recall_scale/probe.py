@@ -167,8 +167,13 @@ def main() -> int:
             print(f"  ROW {name}: " + json.dumps(row), flush=True)
 
         ratio = 0.0
+        n, dump_s = settled()
         for cp in CHECKPOINTS:
-            n, dump_s = settled()
+            if not ratio and cp:
+                # the count is read here once more only for the rows-per-call calibration below; later
+                # checkpoints size their fill from the last settled count (short by the rows the timed
+                # calls added, which the top-up loop absorbs) — each `settled()` is dumps of a growing store
+                n, dump_s = settled()
             todo, t = 0, time.monotonic()
             if cp > n and not ratio:
                 # one measured batch: how many stored rows one REST call makes
