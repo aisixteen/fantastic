@@ -566,7 +566,10 @@ pub async fn apply_reflect_flags(
         .and_then(|hm| kernel.bundles.get(hm));
     match payload.get("readme") {
         Some(Value::Bool(true)) => {
-            let readme = bundle.as_ref().and_then(|b| b.readme()).map(translate_newlines);
+            let readme = bundle
+                .as_ref()
+                .and_then(|b| b.readme())
+                .map(translate_newlines);
             obj.insert(
                 "readme".to_string(),
                 readme.map_or(Value::Null, Value::String),

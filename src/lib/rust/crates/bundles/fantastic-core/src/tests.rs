@@ -185,7 +185,13 @@ async fn root_with_handler_reflects_identity() {
     // The verbs, rendered from the declarations: the kernel's own, the loader's, and
     // the ones every agent answers.
     let verbs = v["verbs"].as_object().expect("a verbs block");
-    for name in ["create_agent", "docs", "persist_record", "export_subtree", "reflect"] {
+    for name in [
+        "create_agent",
+        "docs",
+        "persist_record",
+        "export_subtree",
+        "reflect",
+    ] {
         assert!(verbs.contains_key(name), "{name} in {v}");
     }
     // The loader's contribution, python's distilled set.
@@ -295,8 +301,14 @@ async fn unknown_type_refusal_is_verbatim() {
     let v = root_reflect(&kernel, json!({"type": "wat"})).await;
     // the KERNEL refuses a verb the bundle does not declare, naming what it answers
     let error = v["error"].as_str().unwrap();
-    assert!(error.starts_with("unknown verb 'wat'; kernel_state answers: boot, load_tree, "), "{error}");
-    assert!(error.contains("export_subtree, reflect, shutdown"), "{error}");
+    assert!(
+        error.starts_with("unknown verb 'wat'; kernel_state answers: boot, load_tree, "),
+        "{error}"
+    );
+    assert!(
+        error.contains("export_subtree, reflect, shutdown"),
+        "{error}"
+    );
     assert_eq!(v["reason"], json!("unhandled"));
     assert_eq!(v["verb"], json!("wat"));
 }

@@ -623,7 +623,9 @@ impl Bundle for KernelStateBundle {
             verbs::Call::LoadTree(_) => self.load_tree(&agent, kernel).await?,
             verbs::Call::PersistRecord(_) => self.persist_record(&agent, payload, kernel).await?,
             verbs::Call::ForgetRecord(_) => self.forget_record(&agent, payload, kernel).await?,
-            verbs::Call::PersistBlob(_) => persistence::persist_blob(kernel, &agent, payload).await?,
+            verbs::Call::PersistBlob(_) => {
+                persistence::persist_blob(kernel, &agent, payload).await?
+            }
             verbs::Call::LoadBlob(_) => persistence::load_blob(kernel, &agent, payload).await?,
             verbs::Call::ReloadBundle(_) => reload_bundle(&agent, payload, kernel).await?,
             verbs::Call::ReadBundles(_) => read_bundles(&agent, payload, kernel)?,

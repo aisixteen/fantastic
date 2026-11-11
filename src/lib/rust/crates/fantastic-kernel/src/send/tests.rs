@@ -1704,16 +1704,29 @@ const KERNEL_VERB_NAMES: [&str; 14] = [
 
 #[test]
 fn kernel_verbs_are_declared_in_order_and_rendered() {
-    let names: Vec<&str> = crate::declared::kernel::VERBS.iter().map(|v| v.name).collect();
+    let names: Vec<&str> = crate::declared::kernel::VERBS
+        .iter()
+        .map(|v| v.name)
+        .collect();
     assert_eq!(names, KERNEL_VERB_NAMES);
     let rows = crate::docs::entries_of_decls(&[crate::declared::kernel::VERBS]);
-    let one = |verb: &str| rows.iter().find(|r| r.0 == verb).expect("declared").1.clone();
-    let det = |verb: &str| rows.iter().find(|r| r.0 == verb).expect("declared").2.clone();
-    assert_eq!(one("kernel_stop").split(" — ").next(), Some("No args"));
-    assert!(one("delete_agent").starts_with("args: id:string (req), keep_memory:bool? — CASCADES"));
-    assert!(one("docs").starts_with("args: of:string (req), tier:'oneliners'|'detailed'?, verb:string?"));
-    assert!(det("await_set").contains("ids:list[string] (req) — The agent ids to wait for."));
-    assert!(det("create_agent").contains("parent_id:string (req)"));
+    let row = |verb: &str| {
+        rows.iter()
+            .find(|r| r.0 == verb)
+            .cloned()
+            .expect("declared")
+    };
+    assert_eq!(row("kernel_stop").1.split(" — ").next(), Some("No args"));
+    assert!(row("delete_agent")
+        .1
+        .starts_with("args: id:string (req), keep_memory:bool? — CASCADES"));
+    assert!(row("docs")
+        .1
+        .starts_with("args: of:string (req), tier:'oneliners'|'detailed'?, verb:string?"));
+    assert!(row("await_set")
+        .2
+        .contains("ids:list[string] (req) — The agent ids to wait for."));
+    assert!(row("create_agent").2.contains("parent_id:string (req)"));
 }
 
 #[test]
