@@ -51,7 +51,7 @@ pub fn verb_docs() -> Value {
         "resume": "args: note:str? (text added to the resumed row). RESUME this agent: write one resumed row, then release the held messages in order, each as a fresh turn after it. Not paused: a no-op. Returns {resumed:bool, released:int}.",
         "rows": "args: after:int? (a row id — the page starts after it), limit:int?. A VIEW of this agent's conversation exactly as the agent HOLDS it in memory — its loaded head, in the order it lived it; no store read, no transform, so what a UI draws is what the agent has. Before the agent has loaded its head (a fresh boot, before its first turn) it holds nothing: {rows:[], loaded:false}. Returns {rows, next, total, loaded}.",
         "inquiry": "args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. Sends THIS agent an inquiry: accepted at once ({accepted, re, request_id}); the answer it later gives with `inquiry_answer` — or the news that it ended without one — reaches the asker as a message under the inquiry's pid. The same verb a human answers; a sender writes one call for either.",
-        "history": "args: fold:int? (a fold or clear id — list ITS members instead), limit:int? (default: as many as fit inline), after:int? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes, has_thinking?} per row, oldest first, paged. With `fold`, that fold's title + summary and its members (one level down; a member that is itself a fold opens the same way). A row's text is behind `recall` / `grep`. Returns {rows, next, total, fold?}.",
+        "history": "args: fold:int? (a fold or clear id — list ITS members instead), limit:int? (default: as many as fit inline), after:int? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes, attributes?, has_thinking?} per row, oldest first, paged. With `fold`, that fold's title + summary and its members (one level down; a member that is itself a fold opens the same way). A row's text is behind `recall` / `grep`. Returns {rows, next, total, fold?}.",
         "embed": "args: id:str (req) — a HOST agent that has a `view` record. Shows that agent's panel as a CARD in this chat, at this place in the conversation; the card is stored as a row, so it survives a page reload and a kernel restart, and `history` lists it as kind `embed` (the model's prompt never holds it). This is a chat card, not a canvas cell. When you create an agent to embed, design its panel FOR THE CHAT WINDOW: it fills 100% of the column width (don't set a width), define its height well, at most 1200 px (CHAT_CARD_MAX_HEIGHT). Readable at a glance: one purpose per card, no tiny text, no wide tables. Keep it live with events, not polling. HOW: create_agent {view: {kind: html, bytes_file: panel.html, calls: [get_html, watch]}, callable_by: {user: [get_html, watch]}}, then embed {id}. The same checks as the canvas's `place {backend_id}`: the agent must exist (`not_found`), have a `view` record (`no_view`: a default chat or terminal view is not a panel), and let the user call every verb its panel calls plus `watch` (`grants_missing: {<id>: [verbs]}` with the callable_by fix in `hint`). It creates nothing and moves nothing: the same agent can be a card here and a cell on a canvas at once. Embedding an agent already shown answers {already:true}. The reply carries the card's box, {width: '100%', max_height: 1200}; the chat page measures the panel it draws and, when it overflows or is taller than the cap, tells you to redo the panel. Returns {embedded:id, row, card, view, hint}.",
         "unembed": "args: id:str (req). Takes the card of agent `id` out of this chat: a tombstone row, so it stays gone after a reload (a later `embed` shows it again). Works the same for a live agent and a deleted one, so it also clears a '[deleted from canvas]' placeholder. It NEVER touches the agent — deleting it stays the kernel's `delete_agent`. Returns {unembedded:id} ({was_embedded:false} when no such card was shown).",
         "status": "args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Messages held while the agent's chain is running count as pending too; the reply answers at once, never queued behind a turn. Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int, pending_from:[sender id], inquiry_from:[sender id]}. pending_from names the sender of every pending message, queued first, then held. inquiry_from names the asker of every inquiry this agent has received and not yet answered, sorted, each once; the operator is `operator`.",
@@ -294,11 +294,9 @@ pub async fn close_stopped(
     let in_id = kernel.mint_id();
     let in_parent = crate::agent_loop::incoming_parent(&entry.text);
     let (shown, notice) = crate::stream_parts::stop_rows(&entry.text_so_far, &who, &unsent);
-    let mut rows = vec![crate::agent_loop::incoming_row(
-        &entry.text,
-        in_id,
-        in_parent,
-        entry.notice,
+    let mut rows = vec![crate::row_attrs::with_source(
+        crate::agent_loop::incoming_row(&entry.text, in_id, in_parent, entry.notice),
+        &entry.origin,
     )];
     let mut prev = in_id;
     if let Some(text) = shown {
@@ -440,12 +438,16 @@ async fn store_failed_turn(
     text: &str,
     notice: bool,
     reason: &str,
+    origin: &str,
 ) -> Result<(), String> {
     let in_id = kernel.mint_id();
     let in_parent = crate::agent_loop::incoming_parent(text);
     let error_id = kernel.mint_id();
     let rows = [
-        crate::agent_loop::incoming_row(text, in_id, in_parent, notice),
+        crate::row_attrs::with_source(
+            crate::agent_loop::incoming_row(text, in_id, in_parent, notice),
+            origin,
+        ),
         json!({
             "role": "user",
             "kind": "error",
@@ -580,7 +582,8 @@ fn py_eq(a: &Value, b: &Value) -> bool {
 }
 
 /// One row at DIGEST resolution — python `_digest`: `{id, parent, kind, role,
-/// head, bytes}`, the head capped at 120 code points with newlines flattened.
+/// head, bytes}` (+ the row's `attributes`, whole), the head capped at 120 code points
+/// with newlines flattened.
 fn digest(r: &Value) -> Value {
     // python `str(r.get("content", ""))`: an ABSENT content is the empty string, a
     // null one is `None` (4 bytes), a dict one is its repr.
@@ -598,6 +601,10 @@ fn digest(r: &Value) -> Value {
         "head": text.chars().take(120).collect::<String>().replace('\n', " "),
         "bytes": text.chars().count(),
     });
+    // what the row knows about itself, whole and for the caller only
+    if let Some(a) = r.get("attributes") {
+        d["attributes"] = a.clone();
+    }
     // a row that kept its generation's thinking says so (python `has_thinking`)
     if r.get("thinking").is_some_and(py_truthy) {
         d["has_thinking"] = json!(true);
@@ -1190,11 +1197,14 @@ pub async fn send(
             kernel,
             // The SAME row the normal incoming path stores (`incoming_row`), so a
             // held message folds and recalls exactly like any other turn (#227).
-            &[crate::agent_loop::incoming_row(
-                &text,
-                row_id,
-                crate::agent_loop::incoming_parent(&text),
-                false,
+            &[crate::row_attrs::with_source(
+                crate::agent_loop::incoming_row(
+                    &text,
+                    row_id,
+                    crate::agent_loop::incoming_parent(&text),
+                    false,
+                ),
+                &origin_id,
             )],
         )
         .await?;
@@ -1334,6 +1344,7 @@ pub async fn send(
             // PROMOTED, not rebuilt — python's `{**entry, …}` carries the queue
             // row's `queued_at` into the in-flight entry, and `status` reports it.
             queued_at,
+            origin: origin_id.clone(),
             started_at: now_secs(),
             phase: "thinking".to_string(),
             text_so_far: String::new(),
@@ -1557,8 +1568,15 @@ pub async fn send(
             let message = if pe.kind == "ValueError" {
                 pe.message
             } else {
-                let stored =
-                    store_failed_turn(agent_id, kernel, &incoming_text, notice, &pe.message).await;
+                let stored = store_failed_turn(
+                    agent_id,
+                    kernel,
+                    &incoming_text,
+                    notice,
+                    &pe.message,
+                    &origin_id,
+                )
+                .await;
                 failed_reason = Some(pe.message.clone());
                 with_store_outcome(pe.message, stored)
             };
@@ -1578,8 +1596,15 @@ pub async fn send(
             .await;
             let message = format!("send: timeout after {}s", py_float_repr(timeout_secs));
             // The send ceiling ends the turn with an error row too (#177).
-            let stored =
-                store_failed_turn(agent_id, kernel, &incoming_text, notice, &message).await;
+            let stored = store_failed_turn(
+                agent_id,
+                kernel,
+                &incoming_text,
+                notice,
+                &message,
+                &origin_id,
+            )
+            .await;
             timeout_reply(with_store_outcome(message, stored), &client_id)
         }
     };

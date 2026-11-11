@@ -185,6 +185,12 @@ pub struct ProviderReport {
     /// Why the last stream ended — `"max_tokens"` when it stopped AT the output
     /// bound (a side call's budget).
     pub stop_reason: Option<String>,
+    /// Prompt tokens the endpoint served from its cache, or `None` when it has
+    /// no such count (never 0 for "unknown").
+    pub cache_read: Option<i64>,
+    /// Prompt tokens the endpoint wrote to its cache, or `None` when it has no
+    /// such count.
+    pub cache_write: Option<i64>,
 }
 
 /// The shared cell a provider and its streams write the report into.

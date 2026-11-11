@@ -255,28 +255,67 @@ fn named(text: &str) -> Vec<&'static str> {
         .collect()
 }
 
+/// One piece of the system block, in the order the block concatenates them:
+/// `part` names what it is (`system_text`, `prompt_file`, `reflect_tree`,
+/// `self_reflect`, `verb_docs`), or is empty for the blank line between two pieces.
+/// The block IS the pieces' texts end to end, so the request carries the same bytes
+/// however they are told apart.
+pub(crate) struct SystemPiece {
+    pub(crate) part: &'static str,
+    pub(crate) text: String,
+}
+
+const SEPARATOR: &str = "\n\n";
+
+fn piece(part: &'static str, text: impl Into<String>) -> SystemPiece {
+    SystemPiece {
+        part,
+        text: text.into(),
+    }
+}
+
 /// `text` with every placeholder replaced in ONE pass, so a filled part is never
-/// scanned again (python `_PLACEHOLDER.sub`).
-fn fill(text: &str, parts: &HashMap<&'static str, String>) -> String {
-    let mut out = String::with_capacity(text.len());
+/// scanned again (python `_PLACEHOLDER.sub`), told apart piece by piece: the text
+/// between placeholders is `literal`, and each placeholder's value is the part it
+/// names (`{store}` is the id, plain text).
+fn fill(
+    text: &str,
+    parts: &HashMap<&'static str, String>,
+    literal: &'static str,
+) -> Vec<SystemPiece> {
+    let mut out: Vec<SystemPiece> = Vec::new();
+    let mut run = String::new();
     let mut rest = text;
     'scan: while let Some(i) = rest.find('{') {
-        out.push_str(&rest[..i]);
+        run.push_str(&rest[..i]);
         let tail = &rest[i..];
         for p in PLACEHOLDERS {
             let token = format!("{{{p}}}");
             if tail.starts_with(&token) {
                 if let Some(v) = parts.get(p) {
-                    out.push_str(v);
+                    let named = match p {
+                        "tree" => Some("reflect_tree"),
+                        "self" => Some("self_reflect"),
+                        "howto" => Some("verb_docs"),
+                        _ => None,
+                    };
+                    match named {
+                        Some(name) => {
+                            out.push(piece(literal, std::mem::take(&mut run)));
+                            out.push(piece(name, v.as_str()));
+                        }
+                        None => run.push_str(v),
+                    }
                     rest = &tail[token.len()..];
                     continue 'scan;
                 }
             }
         }
-        out.push('{');
+        run.push('{');
         rest = &tail[1..];
     }
-    out.push_str(rest);
+    run.push_str(rest);
+    out.push(piece(literal, run));
     out
 }
 
@@ -337,12 +376,17 @@ async fn parts(
 
 /// A prompt with its placeholders filled for this agent and this turn — python
 /// `_render_prompt`.
-async fn render_prompt(text: &str, self_id: &AgentId, kernel: &Arc<Kernel>) -> String {
+async fn render_prompt(
+    text: &str,
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    literal: &'static str,
+) -> Vec<SystemPiece> {
     let need = named(text);
     if need.is_empty() {
-        return text.to_string();
+        return vec![piece(literal, text)];
     }
-    fill(text, &parts(self_id, kernel, &need).await)
+    fill(text, &parts(self_id, kernel, &need).await, literal)
 }
 
 /// The DEFAULT system block: `{tree}\n\n{self}\n\n{howto}` — the lean primer,
@@ -350,12 +394,24 @@ async fn render_prompt(text: &str, self_id: &AgentId, kernel: &Arc<Kernel>) -> S
 /// so `context_recall` can MEASURE the same block the next turn will carry —
 /// python's `_default_system_content`.
 pub async fn default_system_content(self_id: &AgentId, kernel: &Arc<Kernel>) -> String {
-    let p = parts(self_id, kernel, &["tree", "self", "howto"]).await;
-    [&p["tree"], &p["self"], &p["howto"]]
-        .iter()
-        .map(|s| s.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    default_pieces(self_id, kernel)
+        .await
+        .into_iter()
+        .map(|p| p.text)
+        .collect()
+}
+
+/// The default block as its pieces: the primer, this agent's own reflect and the
+/// how-to sections, a blank line between.
+async fn default_pieces(self_id: &AgentId, kernel: &Arc<Kernel>) -> Vec<SystemPiece> {
+    let mut p = parts(self_id, kernel, &["tree", "self", "howto"]).await;
+    vec![
+        piece("reflect_tree", p.remove("tree").unwrap_or_default()),
+        piece("", SEPARATOR),
+        piece("self_reflect", p.remove("self").unwrap_or_default()),
+        piece("", SEPARATOR),
+        piece("verb_docs", p.remove("howto").unwrap_or_default()),
+    ]
 }
 
 /// `You are <id>. ` + this agent's own reflect, cut to who it is.
@@ -397,41 +453,67 @@ pub async fn system_content(
     kernel: &Arc<Kernel>,
     system_prompt: Option<&str>,
 ) -> Result<String, PromptFileError> {
+    Ok(system_pieces(self_id, kernel, system_prompt)
+        .await?
+        .into_iter()
+        .map(|p| p.text)
+        .collect())
+}
+
+/// [`system_content`] told apart piece by piece: the block is their texts end to end.
+pub(crate) async fn system_pieces(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    system_prompt: Option<&str>,
+) -> Result<Vec<SystemPiece>, PromptFileError> {
     // THE WRAP: the record's `pre_system_prompt` goes BEFORE
     // whichever prompt is in force and `post_system_prompt` AFTER it, each read
     // live and taken verbatim — no placeholders, and neither replaces anything.
     // Absent or null adds nothing (python `_system_content`).
     let meta = crate::helpers::agent_meta(self_id, kernel);
-    let inner = inner_system_content(self_id, kernel, system_prompt).await?;
-    let pre = crate::schema::record_wrap_prompt(&meta, "pre_system_prompt");
-    let post = crate::schema::record_wrap_prompt(&meta, "post_system_prompt");
-    Ok([pre, Some(inner), post]
-        .into_iter()
-        .flatten()
-        .filter(|s| !py_strip(s).is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n"))
+    let inner = inner_system_pieces(self_id, kernel, system_prompt).await?;
+    let wrap = |key: &str| {
+        crate::schema::record_wrap_prompt(&meta, key).map(|s| vec![piece("system_text", s)])
+    };
+    let mut out: Vec<SystemPiece> = Vec::new();
+    for group in [
+        wrap("pre_system_prompt"),
+        Some(inner),
+        wrap("post_system_prompt"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if group.iter().all(|p| py_strip(&p.text).is_empty()) {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(piece("", SEPARATOR));
+        }
+        out.extend(group);
+    }
+    Ok(out)
 }
 
 /// The prompt in force, before the pre/post wrap of [`system_content`].
-async fn inner_system_content(
+async fn inner_system_pieces(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
     system_prompt: Option<&str>,
-) -> Result<String, PromptFileError> {
+) -> Result<Vec<SystemPiece>, PromptFileError> {
     if let Some(s) = system_prompt.filter(|s| !s.trim().is_empty()) {
-        return Ok(render_prompt(s, self_id, kernel).await);
+        return Ok(render_prompt(s, self_id, kernel, "system_text").await);
     }
     if let Some(s) =
         crate::schema::record_system_prompt(&crate::helpers::agent_meta(self_id, kernel))
     {
-        return Ok(render_prompt(&s, self_id, kernel).await);
+        return Ok(render_prompt(&s, self_id, kernel, "system_text").await);
     }
     // Set and unusable is an `Err` — the turn fails, never the default below.
     if let Some(s) = crate::prompt_file::text(self_id, kernel).await? {
-        return Ok(render_prompt(&s, self_id, kernel).await);
+        return Ok(render_prompt(&s, self_id, kernel, "prompt_file").await);
     }
-    Ok(default_system_content(self_id, kernel).await)
+    Ok(default_pieces(self_id, kernel).await)
 }
 
 /// Why a turn's block or view could not be built: the memory store failed, or a
@@ -506,8 +588,16 @@ pub async fn assemble_messages(
     system_prompt: Option<&str>,
     caching: Caching,
 ) -> Result<(Vec<Value>, usize), BlockFail> {
-    let system_content = system_content(self_id, kernel, system_prompt).await?;
+    let pieces = system_pieces(self_id, kernel, system_prompt).await?;
+    let system_content: String = pieces.iter().map(|p| p.text.as_str()).collect();
     let mut messages = vec![json!({"role": "system", "content": system_content})];
+    // WHAT THE REQUEST CARRIES, piece by piece — kept for the row the turn writes;
+    // never rendered into the request.
+    let mut parts: Vec<Value> = pieces
+        .iter()
+        .filter(|p| !p.part.is_empty() && !p.text.is_empty())
+        .map(|p| part_entry(p.part, None, None, &p.text))
+        .collect();
     // A trimmed VIEW, not a rewrite of the store: stale whole-state reads deduped,
     // identical bodies stubbed, and answered reflects reduced to a stub — the
     // model's own distillation carries the facts forward.
@@ -536,19 +626,74 @@ pub async fn assemble_messages(
         }
     };
     *state.view_source.lock().expect("view_source poisoned") = Some(source.to_string());
-    messages.extend(
-        render_history(&store, listed.as_deref(), caching.cleans())
-            .into_iter()
-            .map(|r| {
-                if caching.folds() && r.res == "full" {
-                    crate::history_view::autofold(&store, r.idx, &r.msg, Some(user_text))
-                } else {
-                    r.msg
-                }
-            }),
-    );
+    for r in render_history(&store, listed.as_deref(), caching.cleans()) {
+        let (msg, form) = if caching.folds() && r.res == "full" {
+            crate::history_view::autofold(&store, r.idx, &r.msg, Some(user_text))
+        } else {
+            (r.msg, if r.res == "full" { "whole" } else { "anchor" })
+        };
+        // a body a trimmer cut down is no longer the row whole
+        let shown = msg.get("content").and_then(Value::as_str).unwrap_or("");
+        let stored = store[r.idx].get("content").and_then(Value::as_str);
+        let form = if form == "whole" && stored != Some(shown) {
+            "anchor"
+        } else {
+            form
+        };
+        parts.push(part_entry(
+            "row",
+            msg.get("id").and_then(Value::as_i64),
+            Some(form),
+            shown,
+        ));
+        messages.push(msg);
+    }
+    *state.request_parts.lock().expect("request_parts poisoned") = parts;
     messages.push(json!({"role": "user", "content": user_text}));
     Ok((messages, store_len))
+}
+
+/// One part of a request: `{part, ref?, form?, bytes, hash}` — `bytes` the length
+/// of the piece's text as the request carries it, `hash` the first 16 hex digits
+/// of its SHA-256.
+fn part_entry(part: &str, id: Option<i64>, form: Option<&str>, text: &str) -> Value {
+    let mut e = json!({"part": part});
+    if let Some(id) = id {
+        e["ref"] = json!(id);
+    }
+    if let Some(form) = form {
+        e["form"] = json!(form);
+    }
+    e["bytes"] = json!(text.len());
+    e["hash"] = json!(crate::row_attrs::short_hash(text));
+    e
+}
+
+/// The parts of the request that is SENT: the assembly's own, with each history
+/// message checked against the final list — the projection can fold, strip or drop
+/// rows after the assembly, and a row it changed is a reduced one (`anchor`). The
+/// last message is the new input.
+pub(crate) fn request_parts(assembled: &[Value], sent: &[Value]) -> Vec<Value> {
+    let mut out: Vec<Value> = assembled
+        .iter()
+        .filter(|p| p["part"] != json!("row"))
+        .cloned()
+        .collect();
+    let last = sent.len().saturating_sub(1);
+    for (i, m) in sent.iter().enumerate().skip(1) {
+        let text = m.get("content").and_then(Value::as_str).unwrap_or("");
+        let id = m.get("id").and_then(Value::as_i64);
+        if i == last {
+            out.push(part_entry("new_input", None, None, text));
+            continue;
+        }
+        let now = part_entry("row", id, Some("anchor"), text);
+        let same = assembled.iter().find(|p| {
+            p["part"] == json!("row") && p.get("ref") == now.get("ref") && p["hash"] == now["hash"]
+        });
+        out.push(same.cloned().unwrap_or(now));
+    }
+    out
 }
 
 /// One entry of the persisted view array, resolved against the store: the row's

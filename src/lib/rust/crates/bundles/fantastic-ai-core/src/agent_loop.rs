@@ -145,6 +145,17 @@ pub fn incoming_row(text: &str, id: i64, parent: Option<i64>, notice: bool) -> V
     row
 }
 
+/// Who sent the turn in flight: the `source` of its incoming row.
+fn incoming_source(state: &BackendState) -> String {
+    state
+        .current_meta
+        .lock()
+        .expect("current poisoned")
+        .as_ref()
+        .map(|c| c.origin.clone())
+        .unwrap_or_default()
+}
+
 /// Whether the turn in flight answers this layer's own text.
 fn notice_in_flight(state: &BackendState) -> bool {
     state
@@ -247,6 +258,23 @@ pub async fn run_generation(
         Err(crate::projection::ProjectFail::FoldAnchor(e)) => {
             return Err(GenFailure::FoldAnchor(e))
         }
+    };
+
+    // WHAT THIS REQUEST CARRIES, piece by piece, for the assistant row it earns.
+    let request_parts = crate::assembly::request_parts(
+        &state.request_parts.lock().expect("request_parts poisoned"),
+        &model_messages,
+    );
+    let prev_request = state
+        .prev_request
+        .lock()
+        .expect("prev_request poisoned")
+        .clone();
+    // a restart keeps counting from the newest stored row
+    let seed = if prev_request.is_none() {
+        crate::row_attrs::seed_totals(self_id, kernel).await
+    } else {
+        None
     };
 
     // THE AGENT'S CACHE MARKS (`cache_mark`): its system message, the primer's end, the
@@ -406,11 +434,9 @@ pub async fn run_generation(
         save_history(
             self_id,
             kernel,
-            &[incoming_row(
-                user_text,
-                in_id,
-                in_parent,
-                notice_in_flight(state),
+            &[crate::row_attrs::with_source(
+                incoming_row(user_text, in_id, in_parent, notice_in_flight(state)),
+                &incoming_source(state),
             )],
         )
         .await?;
@@ -455,8 +481,12 @@ pub async fn run_generation(
     let message_id = kernel.mint_id();
     // APPEND this send's user + assistant turns to the memory store so context
     // management (compaction/recall) has the FULL conversation next turn.
+    let mut next_request = None;
     let new_turns = vec![
-        incoming_row(user_text, in_id, in_parent, notice_in_flight(state)),
+        crate::row_attrs::with_source(
+            incoming_row(user_text, in_id, in_parent, notice_in_flight(state)),
+            &incoming_source(state),
+        ),
         // STRIPPED — the deliberation is not part of the conversation. The RAW
         // text (thinking included) is what the caller receives; the router parses
         // only the answer, and durable history loses the `<think>` spans, because a
@@ -475,11 +505,46 @@ pub async fn run_generation(
             });
             if let Some(m) = row.as_object_mut() {
                 m.extend(crate::think::thinking_fields(&last_text));
+                // stored in `attributes` and returned by the retrieval verbs, never
+                // rendered into a request (`render_for_model` carries role and content
+                // only)
+                let mut attrs = Map::new();
+                let usage = usage_row(&provider.report());
+                // WHAT SERVED IT: the provider agent (the chat itself when it names
+                // none) and the model it ran, with the pass priced from that
+                // provider's record
+                let provider_id = crate::helpers::agent_meta(self_id, kernel)
+                    .get(crate::remote_provider::PROVIDER_FIELD)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map_or_else(|| self_id.as_str().to_string(), String::from);
+                let model = provider.model();
+                if let Some(c) = crate::row_attrs::cost(
+                    usage.as_ref(),
+                    &crate::helpers::agent_meta(&AgentId::from(provider_id.as_str()), kernel),
+                    &model,
+                ) {
+                    attrs.insert("cost".to_string(), c);
+                }
+                if let Some(u) = usage {
+                    attrs.insert("usage".to_string(), u);
+                }
+                if !model.is_empty() {
+                    attrs.insert("model".to_string(), json!(model));
+                }
+                attrs.insert("provider".to_string(), json!(provider_id));
+                let (parts, totals, next) =
+                    crate::row_attrs::build(prev_request.as_ref(), seed, message_id, request_parts);
+                attrs.insert("parts".to_string(), parts);
+                attrs.insert("totals".to_string(), totals);
+                m.insert("attributes".to_string(), Value::Object(attrs));
+                next_request = Some(next);
             }
             row
         },
     ];
     save_history(self_id, kernel, &new_turns).await?;
+    *state.prev_request.lock().expect("prev_request poisoned") = next_request;
     Ok(Generation::Answered {
         text: last_text,
         message_id,
@@ -535,6 +600,28 @@ pub fn usage_detail(
     m
 }
 
+/// The counts the endpoint reported for the pass, as the assistant row keeps them:
+/// `input` (what the cache did not serve or write), `output`, and the cache counts
+/// when the endpoint has them. A figure the endpoint did not report is absent, never
+/// 0; none reported leaves no `usage` at all.
+fn usage_row(report: &crate::provider::ProviderReport) -> Option<Value> {
+    let mut u = Map::new();
+    let cached = report.cache_read.unwrap_or(0) + report.cache_write.unwrap_or(0);
+    if let Some(n) = report.prompt_tokens.filter(|n| *n > 0) {
+        u.insert("input".into(), json!((n - cached).max(0)));
+    }
+    if let Some(n) = report.completion_tokens.filter(|n| *n > 0) {
+        u.insert("output".into(), json!(n));
+    }
+    if let Some(n) = report.cache_read {
+        u.insert("cache_read".into(), json!(n));
+    }
+    if let Some(n) = report.cache_write {
+        u.insert("cache_write".into(), json!(n));
+    }
+    (!u.is_empty()).then_some(Value::Object(u))
+}
+
 async fn abort_parts(parts: &tokio::sync::Mutex<PassParts>, e: ProviderError) -> GenFailure {
     let mut p = parts.lock().await;
     let evs = p.splitter.stop("error");
@@ -567,6 +654,7 @@ mod usage_tests {
             prompt_tokens: Some(1234),
             completion_tokens: Some(56),
             stop_reason: None,
+            ..Default::default()
         };
         let d = usage_detail(&rep, &view, "answer", 1.23456, 32768);
         assert_eq!(

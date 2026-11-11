@@ -325,6 +325,8 @@ pub async fn project_context(
     // reaction to a compaction the model had not yet seen.
     *state.compaction_mark.lock().expect("mark poisoned") =
         Some((store_len, client_id.to_string()));
+    // a compaction reshapes the head: the next request's parts are a checkpoint
+    *state.prev_request.lock().expect("prev_request poisoned") = None;
     if proj.folded > 0 {
         // "When it feels it folded, it runs context_recall" — at the start of
         // the next turn, over the new head. DEBOUNCED: every RECALL_EVERY-th

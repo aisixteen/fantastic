@@ -62,6 +62,10 @@ pub(crate) struct MockScript {
     /// is spent. A test holds a peer's answer until the ordering it needs has
     /// happened, so no sleep decides the order.
     gate: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
+    /// What the scripted endpoint reports about each pass (nothing, by default).
+    report: std::sync::Mutex<crate::provider::ProviderReport>,
+    /// The model the scripted endpoint says served each pass.
+    model: std::sync::Mutex<String>,
 }
 
 /// A request's messages → the completion for it, or `None` to serve the queue.
@@ -164,7 +168,10 @@ impl Provider for MockProvider {
         )))
     }
     fn model(&self) -> String {
-        "test-model".to_string()
+        self.script.model.lock().unwrap().clone()
+    }
+    fn report(&self) -> crate::provider::ProviderReport {
+        self.script.report.lock().unwrap().clone()
     }
 }
 
@@ -196,6 +203,8 @@ fn script(agent: &AgentId, passes: Vec<Vec<ScriptEvent>>, delay: Duration) -> Ar
         responder: std::sync::Mutex::new(None),
         served: tokio::sync::Notify::new(),
         gate: std::sync::Mutex::new(None),
+        report: std::sync::Mutex::new(Default::default()),
+        model: std::sync::Mutex::new("test-model".to_string()),
     });
     scripts().insert(agent.as_str().to_string(), Arc::clone(&s));
     s
@@ -213,6 +222,8 @@ fn script_for(agent: &AgentId) -> Arc<MockScript> {
             responder: std::sync::Mutex::new(None),
             served: tokio::sync::Notify::new(),
             gate: std::sync::Mutex::new(None),
+            report: std::sync::Mutex::new(Default::default()),
+            model: std::sync::Mutex::new("test-model".to_string()),
         })
     }))
 }
@@ -7126,6 +7137,9 @@ mod tests_fork;
 /// The AI-to-AI send deadline, dead letter and withdrawal (#568).
 #[path = "tests_deadline.rs"]
 mod deadline;
+
+#[path = "tests_row_attrs.rs"]
+mod row_attrs;
 
 /// A docs body opens with the line naming the grep that keeps what the model needs,
 /// and once answered it is cut to a stub that names the same pid — python

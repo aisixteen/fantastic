@@ -65,6 +65,7 @@ impl Provider for Reporting {
             prompt_tokens: Some(self.0),
             completion_tokens: None,
             stop_reason: None,
+            ..Default::default()
         }
     }
 }
