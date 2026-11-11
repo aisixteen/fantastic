@@ -5,7 +5,7 @@
 > out-of-scope: HTTP, WS, bundles other than core itself
 
 Root orchestrator. System verbs (create_agent / delete_agent /
-update_agent / list_agents) + reflect + readme seeding. No
+update_agent / list_agents) + reflect. No
 handler_module — dispatch is native to the Agent class.
 
 ## Pre-flight
@@ -27,15 +27,7 @@ test -f .fantastic/agent.yaml
 jq -e '.id == "kernel_state"' .fantastic/agent.yaml
 ```
 
-### Test 2: core seeds its own readme.md
-
-```bash
-test -f .fantastic/readme.md
-grep -q "This is a Fantastic kernel" .fantastic/readme.md
-grep -q "send(target_id, payload)" .fantastic/readme.md
-```
-
-### Test 3: list_agents enumerates everything
+### Test 2: list_agents enumerates everything
 
 ```bash
 $FANTASTIC kernel_state create_agent handler_module=file_bridge.tools id=t_file
@@ -43,14 +35,14 @@ $FANTASTIC kernel_state list_agents | jq -e '.agents | length >= 2'
 $FANTASTIC kernel_state list_agents | jq -e '[.agents[].id] | contains(["kernel_state","t_file"])'
 ```
 
-### Test 4: update_agent merges meta + persists
+### Test 3: update_agent merges meta + persists
 
 ```bash
 $FANTASTIC kernel_state update_agent id=t_file note="from test 4"
 jq -e '.note == "from test 4"' .fantastic/agents/t_file/agent.yaml
 ```
 
-### Test 5: delete_lock blocks delete_agent
+### Test 4: delete_lock blocks delete_agent
 
 ```bash
 $FANTASTIC kernel_state update_agent id=t_file delete_lock=true
@@ -67,7 +59,6 @@ test ! -e .fantastic/agents/t_file
 | Test | Pass / Fail | Notes |
 |---|---|---|
 | 1. core exists after cold boot |  |  |
-| 2. readme.md auto-seeded |  |  |
-| 3. list_agents enumerates |  |  |
-| 4. update_agent persists |  |  |
-| 5. delete_lock blocks delete |  |  |
+| 2. list_agents enumerates |  |  |
+| 3. update_agent persists |  |  |
+| 4. delete_lock blocks delete |  |  |

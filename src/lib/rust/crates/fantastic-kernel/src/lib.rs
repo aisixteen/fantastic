@@ -20,6 +20,9 @@
 
 #![deny(missing_docs)]
 
+// the macros below name this crate by its own name, in it as in a dependent one
+extern crate self as fantastic_kernel;
+
 pub mod agent;
 pub mod authz;
 pub mod await_set;
@@ -51,6 +54,7 @@ pub mod state;
 pub mod storage;
 mod sys;
 pub mod tasks;
+pub mod typing;
 pub mod verbs;
 pub mod yaml_io;
 
@@ -59,8 +63,7 @@ pub mod test_support;
 
 pub use agent::{Agent, AgentId, AgentRecord, RESERVED_RECORD_KEYS};
 pub use authz::{authorize_call, default_callable_by, default_can_call, Decision, FROM_ABOVE};
-pub use bundle::{Bundle, BundleRegistry, Reply};
-pub use verbs::{DynVerb, RecordDecl, Verb};
+pub use bundle::{Bundle, BundleError, BundleRegistry, Handler, Reply};
 pub use errors::{KernelError, KernelResult};
 pub use kernel::{
     Kernel, StateSubscriber, SubscriberToken, DEFAULT_INBOX_BOUND, SELF_PLACEHOLDER,
@@ -76,3 +79,4 @@ pub use send::{current_origin, current_sender, Signal, ON_BATCH_LAUNCHED};
 pub use state::{KernelState, CURRENT_VERSION};
 pub use storage::StorageMode;
 pub use tasks::{current_killed, current_task, spawn_inherit, TaskId, TaskTable, CURRENT_TASK};
+pub use verbs::{DynVerb, Parse, RecordDecl, Routed, Verb};

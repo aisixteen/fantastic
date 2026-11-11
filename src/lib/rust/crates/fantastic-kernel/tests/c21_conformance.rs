@@ -11,7 +11,7 @@
 //! parser reads it unchanged.
 
 use async_trait::async_trait;
-use fantastic_kernel::{Agent, AgentId, Bundle, Item, Kernel, Reply};
+use fantastic_kernel::{Agent, AgentId, Handler, Item, Kernel, Reply};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,7 +35,11 @@ struct C21Probe;
 
 fantastic_kernel::stand_in_verbs!(c21probe_verbs { BootV "boot" {  }, PokeV "poke" { value: Option<serde_json::Value> }, ShutdownV "shutdown" {  } });
 #[async_trait]
-impl Bundle for C21Probe {
+impl Handler for C21Probe {
+    type Call = c21probe_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "c21_echo"
     }
@@ -51,12 +55,10 @@ impl Bundle for C21Probe {
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
-        if let Err(refused) = c21probe_verbs::Call::parse(&id.0, &payload) {
-            return Ok(Some(refused));
-        }
+        let payload = &call.payload();
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         match verb {
             "boot" | "shutdown" => Ok(None),

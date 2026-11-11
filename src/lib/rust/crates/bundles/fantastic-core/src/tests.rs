@@ -3,116 +3,9 @@
 use super::*;
 use tempfile::TempDir;
 
-#[test]
-fn readme_present_and_titled() {
-    assert!(!README.is_empty());
-    assert!(README.contains("This is a Fantastic kernel"));
-    assert!(README.contains("send(target_id, payload)"));
-}
-
-#[test]
-fn docs_tree_present_keyed_and_descriptored() {
-    assert!(!DOCS.is_empty());
-    assert!(DOCS.iter().any(|(k, _)| *k == "self-extension"));
-    // `minds` is not a topic on python, so it is not one here.
-    assert!(!DOCS.iter().any(|(k, _)| *k == "minds"), "minds is gone");
-    let mut keys: Vec<_> = DOCS.iter().map(|(k, _)| *k).collect();
-    let n = keys.len();
-    keys.sort_unstable();
-    keys.dedup();
-    assert_eq!(keys.len(), n, "duplicate doc key");
-    for (k, body) in DOCS {
-        assert!(!body.is_empty(), "empty doc {k}");
-        assert!(
-            body.starts_with("> "),
-            "doc {k} must open with a `> ` descriptor line"
-        );
-    }
-}
-
-/// The keyed doc tree IS python's: the same keys (no
-/// more `minds`, and the six topics rust never had), and every body byte for
-/// byte. The rust index was 9 top-level entries against python's 12.
-#[test]
-fn docs_equal_python_verbatim() {
-    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(4)
-        .expect("repo's src/lib above the crate")
-        .join("python/bundled_agents/loader/kernel_state/src/kernel_state");
-    let docs = py.join("docs");
-
-    // Every `.md` under python's docs/, keyed the way a nested tier is keyed.
-    let mut want: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(&docs).expect("python docs/") {
-        let path = entry.expect("dir entry").path();
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if path.is_dir() {
-            for sub in std::fs::read_dir(&path).expect("nested tier") {
-                let sub = sub.expect("dir entry").path();
-                if sub.extension().and_then(|e| e.to_str()) == Some("md") {
-                    let leaf = sub.file_stem().and_then(|s| s.to_str()).expect("leaf");
-                    want.push(format!("{stem}/{leaf}"));
-                }
-            }
-        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            want.push(stem.to_string());
-        }
-    }
-    want.sort();
-    let mut got: Vec<String> = DOCS.iter().map(|(k, _)| (*k).to_string()).collect();
-    got.sort();
-    assert_eq!(got, want, "the doc key set must be python's");
-
-    for (key, body) in DOCS {
-        let path = docs.join(format!("{key}.md"));
-        assert_eq!(
-            *body,
-            std::fs::read_to_string(&path).expect("python doc"),
-            "{key} has drifted from {}",
-            path.display()
-        );
-    }
-}
-
-/// The root orientation readme is python's, byte for byte (rust was
-/// missing the whole `kernel_verbs` paragraph).
-#[test]
-fn root_readme_is_pythons_verbatim() {
-    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(4)
-        .expect("repo's src/lib above the crate")
-        .join("python/bundled_agents/loader/kernel_state/src/kernel_state/readme.md");
-    assert_eq!(README, std::fs::read_to_string(&py).expect("python readme"));
-    assert!(README.contains("type: docs"));
-}
-
-/// The nested tiers are served from the compiled table: the index
-/// nests them under their parent topic, and nothing is written to disk.
-#[test]
-fn nested_tiers_index_from_the_table() {
-    let index = fantastic_kernel::reflect::readme_index(DOCS, "");
-    let frontend = index
-        .iter()
-        .find(|e| e["key"] == "frontend")
-        .expect("frontend topic");
-    let children: Vec<&str> = frontend["children"]
-        .as_array()
-        .expect("frontend tiers")
-        .iter()
-        .filter_map(|e| e["key"].as_str())
-        .collect();
-    assert_eq!(children, vec!["frontend/html-agent", "frontend/routing"]);
-    assert!(!index.iter().any(|e| e["key"] == "minds"), "minds is gone");
-}
-
 // ─── the kernel_state LOADER: the root's own bundle ──────────────────
 //
-// The root frame (`persistence`, `guid`, `readmes`, `docs`,
-// `self_extension`) lives in this bundle's `reflect_root_extra`, not the
+// The root frame (`persistence`, `guid`, `self_extension`) lives in this bundle's `reflect_root_extra`, not the
 // kernel, so the texts and their tests live together here.
 
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
@@ -125,9 +18,13 @@ use std::sync::Arc;
 struct Noop;
 
 #[async_trait]
-impl Bundle for Noop {
+impl Handler for Noop {
+    type Call = fantastic_kernel::test_support::NoCall;
     fn name(&self) -> &str {
         "noop"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
     }
     fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
         fantastic_kernel::test_support::no_verbs()
@@ -141,7 +38,7 @@ impl Bundle for Noop {
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         Ok(Some(json!({"ok": true})))
@@ -206,13 +103,9 @@ async fn root_with_handler_reflects_identity() {
     // The loader's contribution, python's distilled set.
     assert!(v["persistence"].is_object());
     assert!(v.get("self_extension").is_some());
-    // DISTILLED carries no doc frame — `more` names the manual instead.
-    assert!(v.get("readmes").is_none());
-    assert!(v.get("docs").is_none());
 }
 
-/// The FULL frame is python's key order —
-/// persistence, guid, readmes, docs, self_extension — appended after
+/// The FULL frame's key order — persistence, guid, self_extension — appended after
 /// runtime/env/version.
 #[tokio::test]
 async fn full_root_frame_key_order_is_pythons() {
@@ -231,14 +124,7 @@ async fn full_root_frame_key_order_is_pythons() {
         .filter(|k| {
             matches!(
                 *k,
-                "runtime"
-                    | "env"
-                    | "version"
-                    | "persistence"
-                    | "guid"
-                    | "readmes"
-                    | "docs"
-                    | "self_extension"
+                "runtime" | "env" | "version" | "persistence" | "guid" | "self_extension"
             )
         })
         .collect();
@@ -250,18 +136,10 @@ async fn full_root_frame_key_order_is_pythons() {
             "version",
             "persistence",
             "guid",
-            "readmes",
-            "docs",
             "self_extension"
         ],
         "{keys:?}"
     );
-    assert!(v["readmes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|e| e["key"] == "self-extension"));
-    assert!(v["docs"].as_str().unwrap().contains("keyed doc tree"));
 }
 
 /// The FULL `self_extension` is python's text VERBATIM — and it ends at
@@ -478,8 +356,7 @@ async fn blob_verbs_are_the_loaders_and_refuse_like_python() {
 /// prompt all carry it.
 #[test]
 fn the_catalog_name_is_pythons_entry_point_name() {
-    use fantastic_kernel::Bundle;
-    assert_eq!(KernelStateBundle::default().name(), "kernel_state");
+    assert_eq!(Handler::name(&KernelStateBundle::default()), "kernel_state");
     assert_eq!(HANDLER_MODULE, "kernel_state.tools");
 }
 
@@ -755,10 +632,9 @@ async fn loader_record_verbs_are_clamped_to_the_running_dir() {
     assert_eq!(reflect["root"], ".fantastic/near");
 }
 
-/// python `write_record` writes the record only — no readme or `docs/` copy —
-/// and a write that fails RAISES.
+/// python `write_record` writes the record, and a write that fails RAISES.
 #[tokio::test]
-async fn persist_record_writes_the_record_only_and_raises_on_a_failed_write() {
+async fn persist_record_writes_the_record_and_raises_on_a_failed_write() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);
     let root = kernel.root().expect("root").id.clone();
@@ -775,7 +651,6 @@ async fn persist_record_writes_the_record_only_and_raises_on_a_failed_write() {
     assert_eq!(r["ok"], json!(true), "{r}");
     let dir = tmp.path().join(".fantastic/agents/seeded");
     assert!(dir.join("agent.yaml").is_file());
-    assert!(!dir.join("readme.md").exists() && !dir.join("docs").exists());
 
     // `agent.yaml` is a DIRECTORY: the atomic rename onto it fails — raised.
     std::fs::create_dir_all(tmp.path().join(".fantastic/agents/blocked/agent.yaml/x")).unwrap();
@@ -892,10 +767,16 @@ async fn loader_verbs_refuse_a_missing_id_by_their_declaration() {
     let kernel = booted(&tmp);
     let root = kernel.root().expect("root").id.clone();
     for (payload, arg) in [
-        (json!({"type": "persist_record", "record": {"note": "no id"}}), "record.id"),
+        (
+            json!({"type": "persist_record", "record": {"note": "no id"}}),
+            "record.id",
+        ),
         (json!({"type": "persist_record"}), "record"),
         (json!({"type": "forget_record"}), "id"),
-        (json!({"type": "persist_blob", "agent_id": "a", "name": "n"}), "content"),
+        (
+            json!({"type": "persist_blob", "agent_id": "a", "name": "n"}),
+            "content",
+        ),
         (json!({"type": "load_blob", "agent_id": "a"}), "name"),
         (json!({"type": "export_subtree", "agent_id": "a"}), "path"),
         (json!({"type": "reload_bundle"}), "name"),
@@ -918,7 +799,10 @@ async fn loader_verbs_refuse_a_missing_id_by_their_declaration() {
         .remove(0)
         .result;
     assert_eq!(r["reason"], "bad_arg", "{r}");
-    assert_eq!(r["error"], "read_bundles: argument 'name' must be string, got int", "{r}");
+    assert_eq!(
+        r["error"], "read_bundles: argument 'name' must be string, got int",
+        "{r}"
+    );
     assert!(!tmp.path().join(".fantastic/agents/note").exists());
 }
 

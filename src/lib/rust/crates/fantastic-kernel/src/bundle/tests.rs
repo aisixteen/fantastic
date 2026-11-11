@@ -7,7 +7,11 @@ struct FakeBundle;
 
 crate::stand_in_verbs!(fakebundle_verbs { FrobV "frob" {  }, PingV "ping" {  } });
 #[async_trait]
-impl Bundle for FakeBundle {
+impl Handler for FakeBundle {
+    type Call = fakebundle_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "fake"
     }
@@ -22,13 +26,10 @@ impl Bundle for FakeBundle {
     }
     async fn handle(
         &self,
-        agent_id: &AgentId,
-        payload: &Value,
+        _agent_id: &AgentId,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        if let Err(refused) = fakebundle_verbs::Call::parse(&agent_id.0, &payload) {
-            return Ok(Some(refused));
-        }
         Ok(Some(json!({"ok": true})))
     }
 }
@@ -39,11 +40,21 @@ async fn register_and_lookup() {
     reg.register("fake.tools", FakeBundle);
     let b = reg.get("fake.tools").expect("registered");
     let kernel = Arc::new(Kernel::new());
-    let reply = b
-        .handle(&AgentId::from("x"), &json!({"type": "ping"}), &kernel)
+    let agent = crate::Agent::new(
+        AgentId::from("x"),
+        Some("fake.tools".to_string()),
+        None,
+        Map::new(),
+        std::path::PathBuf::from("/tmp/nowhere/x"),
+        true,
+    );
+    kernel.register(agent);
+    let (reply, body) = b
+        .handle_binary(&AgentId::from("x"), json!({"type": "ping"}), None, &kernel)
         .await
         .unwrap();
     assert_eq!(reply, Some(json!({"ok": true})));
+    assert_eq!(body, None);
 }
 
 #[test]
@@ -60,7 +71,11 @@ async fn default_handle_binary_dispatches_header_and_drops_blob() {
     struct CaptureBundle;
     crate::stand_in_verbs!(capturebundle_verbs { FrobV "frob" {  }, PingV "ping" {  } });
     #[async_trait]
-    impl Bundle for CaptureBundle {
+    impl Handler for CaptureBundle {
+        type Call = capturebundle_verbs::Call;
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
         fn name(&self) -> &str {
             "capture"
         }
@@ -75,21 +90,27 @@ async fn default_handle_binary_dispatches_header_and_drops_blob() {
         }
         async fn handle(
             &self,
-            agent_id: &AgentId,
-            payload: &Value,
+            _agent_id: &AgentId,
+            call: Self::Call,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
-            if let Err(refused) = capturebundle_verbs::Call::parse(&agent_id.0, &payload) {
-                return Ok(Some(refused));
-            }
+            let payload = &call.payload();
             Ok(Some(json!({
                 "type": payload.get("type").cloned().unwrap_or(Value::Null),
                 "data": payload.get("data").cloned().unwrap_or(Value::Null),
             })))
         }
     }
-    let b = CaptureBundle;
+    let b: Arc<dyn Bundle> = Arc::new(CaptureBundle);
     let kernel = Arc::new(Kernel::new());
+    kernel.register(crate::Agent::new(
+        AgentId::from("x"),
+        Some("capture.tools".to_string()),
+        None,
+        Map::new(),
+        std::path::PathBuf::from("/tmp/nowhere/x"),
+        true,
+    ));
     let header = json!({"type": "frob"});
     let blob = vec![0xCA, 0xFE, 0xBA, 0xBE];
     let (reply, body) = b

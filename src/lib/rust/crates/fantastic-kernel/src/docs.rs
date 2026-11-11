@@ -5,11 +5,16 @@
 //! grants, tree. How to call it — verb signatures, emits, cancel, notes — is
 //! `docs`, pulled per BUNDLE and rendered from its declared verbs, in two tiers:
 //! `oneliners` (default) — each verb's signature line; `detailed` — the whole
-//! text, and without a `verb` filter the bundle's emits / cancel / notes.
+//! text. Without a `verb` filter the reply also carries the bundle's one short
+//! `man` text — the only prose a bundle has; everything else is rendered from the
+//! declarations.
 
 use crate::agent::Agent;
+use crate::declared::common::Reflect;
+use crate::declared::kernel::Docs;
+use crate::declared::Tier;
 use crate::kernel::Kernel;
-use crate::refusal::{refusal, refusal_hint, with, BAD_ARG};
+use crate::refusal::{refusal_hint, with, BAD_ARG};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -37,16 +42,16 @@ pub fn entries_of_decls(
         .collect()
 }
 
-/// The `docs` reply `{of, bundle, tier, verbs, emits?, cancel?, notes?}` —
-/// extras only on a detailed reply with no `verb`. Python `_docs.render`.
+/// The `docs` reply `{of, bundle, tier, verbs, man?}` — `man` only when no `verb`
+/// is asked for. Python `_docs.render`.
 #[must_use]
 pub fn render(
     of: &str,
     bundle: Value,
-    tier: &str,
+    tier: Tier,
     verb: Option<&str>,
     table: &[Entry],
-    extras: &[(&str, Option<Value>)],
+    man: Option<&str>,
 ) -> Value {
     if let Some(v) = verb {
         if !table.iter().any(|(n, _, _)| n == v) {
@@ -65,20 +70,16 @@ pub fn render(
         if verb.is_some_and(|v| v != n) {
             continue;
         }
-        let text = if tier == "detailed" { detail } else { line };
+        let text = if tier == Tier::Detailed { detail } else { line };
         verbs.insert(n.clone(), Value::String(text.clone()));
     }
     let mut out = Map::new();
     out.insert("of".into(), json!(of));
     out.insert("bundle".into(), bundle);
-    out.insert("tier".into(), json!(tier));
+    out.insert("tier".into(), json!(tier.as_str()));
     out.insert("verbs".into(), Value::Object(verbs));
-    if tier == "detailed" && verb.is_none() {
-        for (k, v) in extras {
-            if let Some(v) = v.as_ref().filter(|v| !v.is_null()) {
-                out.insert((*k).to_string(), v.clone());
-            }
-        }
+    if let (None, Some(man)) = (verb, man) {
+        out.insert("man".into(), json!(man));
     }
     Value::Object(out)
 }
@@ -89,7 +90,8 @@ pub fn render(
 /// root is what the gate checked; this kernel then asks as itself over the peer's
 /// live routes, and the peer judges its leg. With verbs out of reflect, this is
 /// how a model learns a page agent's verbs at all.
-pub async fn remote_docs_reply(kernel: &Arc<Kernel>, of: &str, payload: &Value) -> Value {
+pub async fn remote_docs_reply(kernel: &Arc<Kernel>, args: &Docs) -> Value {
+    let of = args.of.as_str();
     let (guid, agent_id) = of.split_once('|').unwrap_or(("", ""));
     let target = if !guid.is_empty() && !agent_id.is_empty() && !agent_id.contains('|') {
         kernel.qualified_target(&format!("{guid}|kernel"))
@@ -109,16 +111,22 @@ pub async fn remote_docs_reply(kernel: &Arc<Kernel>, of: &str, payload: &Value) 
         with(&mut r, "arg", json!("of"));
         return r;
     };
-    let mut ask = json!({"type": "docs", "of": agent_id});
-    for k in ["verb", "tier"] {
-        if let Some(v) = payload.get(k) {
-            ask[k] = v.clone();
-        }
-    }
+    let local = Docs {
+        of: agent_id.to_string(),
+        tier: args.tier,
+        verb: args.verb.clone(),
+    };
     let Some(remote) = target.remote.as_ref() else {
         // this kernel's own guid — a LOCAL id, answered here
-        return docs_reply(kernel, &ask);
+        return docs_reply(kernel, &local);
     };
+    let mut ask = json!({"type": "docs", "of": agent_id});
+    if let Some(v) = &args.verb {
+        ask["verb"] = json!(v);
+    }
+    if let Some(t) = args.tier {
+        ask["tier"] = json!(t.as_str());
+    }
     let (mut out, _) = crate::peers::call_peer(remote, ask, None).await;
     if let Some(o) = out.as_object_mut() {
         if o.contains_key("of") {
@@ -132,27 +140,10 @@ pub async fn remote_docs_reply(kernel: &Arc<Kernel>, of: &str, payload: &Value) 
 /// verbs), an agent id (the bundle it runs), or a bundle's handler module,
 /// readable before any agent of it exists.
 #[must_use]
-pub fn docs_reply(kernel: &Arc<Kernel>, payload: &Value) -> Value {
-    let of = match payload.get("of").and_then(Value::as_str) {
-        Some(s) if !s.is_empty() => s,
-        _ => {
-            return crate::refusal::missing_hint(
-                "docs",
-                "of",
-                "an agent id, a bundle (e.g. 'exec_bridge.tools') or 'kernel'",
-            )
-        }
-    };
-    let tier = match payload.get("tier") {
-        None => "oneliners",
-        Some(Value::String(t)) if t == "oneliners" || t == "detailed" => t.as_str(),
-        _ => return crate::refusal::bad("docs", "tier", "'oneliners' or 'detailed'"),
-    };
-    let verb = match payload.get("verb") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(v)) if !v.is_empty() => Some(v.as_str()),
-        _ => return crate::refusal::bad("docs", "verb", "a verb name"),
-    };
+pub fn docs_reply(kernel: &Arc<Kernel>, args: &Docs) -> Value {
+    let of = args.of.as_str();
+    let tier = args.tier.unwrap_or(Tier::Oneliners);
+    let verb = args.verb.as_deref();
     if of == "kernel" {
         return render(
             of,
@@ -160,7 +151,7 @@ pub fn docs_reply(kernel: &Arc<Kernel>, payload: &Value) -> Value {
             tier,
             verb,
             &entries_of_decls(&[crate::declared::kernel::VERBS], &[]),
-            &[],
+            None,
         );
     }
     let agent = kernel
@@ -170,7 +161,7 @@ pub fn docs_reply(kernel: &Arc<Kernel>, payload: &Value) -> Value {
     let module = if let Some(a) = &agent {
         match a.handler_module.clone() {
             Some(hm) => hm,
-            None => return render(of, Value::Null, tier, verb, &[], &[]),
+            None => return render(of, Value::Null, tier, verb, &[], None),
         }
     } else if kernel.bundles.is_folder(of) {
         // a FOLDER BUNDLE by its name — its handler_module
@@ -198,7 +189,7 @@ pub fn docs_reply(kernel: &Arc<Kernel>, payload: &Value) -> Value {
         return r;
     };
     let Some(bundle) = kernel.bundles.get(&module) else {
-        return render(of, json!(module), tier, verb, &[], &[]);
+        return render(of, json!(module), tier, verb, &[], None);
     };
     // The bundle's declarations, with the verbs every agent answers.
     // The agent's own dynamic verbs too (a bundle addressed by name has none).
@@ -207,18 +198,7 @@ pub fn docs_reply(kernel: &Arc<Kernel>, payload: &Value) -> Value {
         .map(|a| bundle.dynamic_verbs(a))
         .unwrap_or_default();
     let table = entries_of_decls(&[bundle.verbs(), crate::declared::common::VERBS], &dynamic);
-    render(
-        of,
-        json!(module),
-        tier,
-        verb,
-        &table,
-        &[
-            ("emits", bundle.emits_doc()),
-            ("cancel", bundle.cancel_doc()),
-            ("notes", bundle.notes_doc()),
-        ],
-    )
+    render(of, json!(module), tier, verb, &table, Some(bundle.man()))
 }
 
 // ─── reflect subtree filters ────────────────────────────────────
@@ -242,60 +222,49 @@ fn within(kernel: &Kernel, agent: &Agent, ancestor: &Agent) -> bool {
     false
 }
 
-/// Validate `show_subtrees` / `ignore_subtrees` on a reflect of `target` —
-/// python `_docs.subtree_filter`. `Ok((show, ignore))`: the branch roots to
+/// Check `show_subtrees` / `ignore_subtrees` of a reflect of `target` against the
+/// tree — python `_docs.subtree_filter`. `Ok((show, ignore))`: the branch roots to
 /// answer with (empty: the whole subtree of `target`) and the ids pruned to a
-/// stub; `Err` a coded refusal. A shown id under another shown id is not repeated.
+/// stub; `Err` a coded refusal when an id is not an agent in `target`'s tree. A shown id
+/// under another shown id is not repeated.
 pub fn subtree_filter(
     kernel: &Arc<Kernel>,
-    payload: &Value,
+    args: &Reflect,
     target: &Arc<Agent>,
 ) -> Result<(Vec<Arc<Agent>>, HashSet<String>), Value> {
-    let mut lists: Vec<Vec<String>> = Vec::new();
-    for arg in ["show_subtrees", "ignore_subtrees"] {
-        match payload.get(arg) {
-            None | Some(Value::Null) => lists.push(Vec::new()),
-            Some(Value::Array(items))
-                if items
-                    .iter()
-                    .all(|x| x.as_str().is_some_and(|s| !s.is_empty())) =>
-            {
-                let ids: Vec<String> = items
-                    .iter()
-                    .filter_map(|x| x.as_str().map(str::to_string))
-                    .collect();
-                for x in &ids {
-                    let ok = kernel
-                        .agents
-                        .get(&crate::agent::AgentId(x.clone()))
-                        .is_some_and(|a| within(kernel, &a, target));
-                    if !ok {
-                        let mut r = refusal_hint(
-                            BAD_ARG,
-                            format!(
-                                "reflect: {arg} names {} — not an agent in {}'s tree",
-                                fantastic_bundle::py_repr(x),
-                                target.id.0
-                            ),
-                            "reflect with tree='ids' lists the ids",
-                        );
-                        with(&mut r, "arg", json!(arg));
-                        return Err(r);
-                    }
-                }
-                lists.push(ids);
-            }
-            Some(_) => {
-                let mut r = refusal(
+    let named = [
+        (
+            "show_subtrees",
+            args.show_subtrees.as_deref().unwrap_or(&[]),
+        ),
+        (
+            "ignore_subtrees",
+            args.ignore_subtrees.as_deref().unwrap_or(&[]),
+        ),
+    ];
+    for (arg, ids) in named {
+        for x in ids {
+            let ok = kernel
+                .agents
+                .get(&crate::agent::AgentId(x.clone()))
+                .is_some_and(|a| within(kernel, &a, target));
+            if !ok {
+                let mut r = refusal_hint(
                     BAD_ARG,
-                    format!("reflect: {arg} must be a list of agent ids"),
+                    format!(
+                        "reflect: {arg} names {} — not an agent in {}'s tree",
+                        fantastic_bundle::py_repr(x),
+                        target.id.0
+                    ),
+                    "reflect with tree='ids' lists the ids",
                 );
                 with(&mut r, "arg", json!(arg));
                 return Err(r);
             }
         }
     }
-    let shown = &lists[0];
+    let shown: &[String] = named[0].1;
+    let ignored: HashSet<String> = named[1].1.iter().cloned().collect();
     let mut seen = HashSet::new();
     let mut show = Vec::new();
     for x in shown {
@@ -320,7 +289,7 @@ pub fn subtree_filter(
             show.push(a);
         }
     }
-    Ok((show, lists[1].iter().cloned().collect()))
+    Ok((show, ignored))
 }
 
 /// What an ignored branch leaves in the tree: its id and how many agents it

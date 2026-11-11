@@ -10,7 +10,7 @@
 //! - A grant key outside the legal set is refused `invalid_meta` at the write.
 
 use async_trait::async_trait;
-use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Outcome, Reply};
+use fantastic_kernel::{Agent, AgentId, BundleRegistry, Handler, Item, Kernel, Outcome, Reply};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -22,7 +22,11 @@ struct Probe;
 
 fantastic_kernel::stand_in_verbs!(probe_verbs { BootV "boot" {  }, PingV "ping" {  }, ShutdownV "shutdown" {  } });
 #[async_trait]
-impl Bundle for Probe {
+impl Handler for Probe {
+    type Call = probe_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "minimal_gate_probe"
     }
@@ -38,12 +42,10 @@ impl Bundle for Probe {
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
-        if let Err(refused) = probe_verbs::Call::parse(&id.0, &payload) {
-            return Ok(Some(refused));
-        }
+        let payload = &call.payload();
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         Ok(match verb {
             "boot" | "shutdown" => None,

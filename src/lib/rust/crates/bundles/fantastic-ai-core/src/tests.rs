@@ -7627,27 +7627,40 @@ async fn a_peer_cannot_mark_its_message_a_notice() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_routing_name_the_verb_documents_is_refused_loud() {
     struct Store(Arc<std::sync::Mutex<Vec<String>>>);
+    // `create` takes a `title`: a name the call's routing also carries
+    fantastic_kernel::stand_in_verbs!(clash_verbs {
+        CreateV "create" { title: String, body: String },
+        PingV "ping" {}
+    });
     #[async_trait]
-    impl Bundle for Store {
+    impl fantastic_kernel::Handler for Store {
+        type Call = clash_verbs::Call;
         fn name(&self) -> &str {
             "clash_store"
         }
-        fn verb_docs(&self) -> Value {
-            json!({
-                "create": "args: title:str (req), body:str (req). A page → {created}.",
-                "ping": "No args. → {pong}.",
-            })
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
+        fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+            clash_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &Agent) -> Vec<fantastic_kernel::DynVerb> {
+            clash_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+            fantastic_kernel::fixture_record!()
         }
         async fn handle(
             &self,
             _agent_id: &AgentId,
-            payload: &Value,
+            call: Self::Call,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
-            let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-            if matches!(verb, "boot" | "shutdown") {
-                return Ok(None);
-            }
+            let verb = match &call {
+                clash_verbs::Call::CreateV(_) => "create",
+                clash_verbs::Call::PingV(_) => "ping",
+                clash_verbs::Call::Reflect(_) => "reflect",
+            };
             self.0.lock().unwrap().push(verb.to_string());
             Ok(Some(json!({"ok": verb})))
         }
@@ -7725,25 +7738,34 @@ async fn a_routing_name_the_verb_documents_is_refused_loud() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_routing_name_in_the_payload_of_a_routed_call_is_delivered() {
     struct Store(Arc<std::sync::Mutex<Vec<Value>>>);
+    fantastic_kernel::stand_in_verbs!(clash2_verbs {
+        CreateV "create" { title: String, body: String }
+    });
     #[async_trait]
-    impl Bundle for Store {
+    impl fantastic_kernel::Handler for Store {
+        type Call = clash2_verbs::Call;
         fn name(&self) -> &str {
             "clash_store2"
         }
-        fn verb_docs(&self) -> Value {
-            json!({"create": "args: title:str (req), body:str (req). A page → {created}."})
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
+        fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+            clash2_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &Agent) -> Vec<fantastic_kernel::DynVerb> {
+            clash2_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+            fantastic_kernel::fixture_record!()
         }
         async fn handle(
             &self,
             _agent_id: &AgentId,
-            payload: &Value,
+            call: Self::Call,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
-            let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-            if matches!(verb, "boot" | "shutdown") {
-                return Ok(None);
-            }
-            self.0.lock().unwrap().push(payload.clone());
+            self.0.lock().unwrap().push(call.payload());
             Ok(Some(json!({"created": true})))
         }
     }

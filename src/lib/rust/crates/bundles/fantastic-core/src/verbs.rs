@@ -77,6 +77,7 @@ pub struct LoadBlob {
 #[serde(deny_unknown_fields)]
 pub struct ReloadBundle {
     /// A folder under `.fantastic/bundles/`.
+    #[schemars(length(min = 1))]
     pub name: String,
 }
 
@@ -85,6 +86,7 @@ pub struct ReloadBundle {
 #[serde(deny_unknown_fields)]
 pub struct ReadBundles {
     /// One folder only; absent, all of them.
+    #[schemars(length(min = 1))]
     pub name: Option<String>,
 }
 

@@ -8,7 +8,7 @@
 //! row, id and deadline as any other item — in python's payload shape.
 
 use async_trait::async_trait;
-use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Reply, Status};
+use fantastic_kernel::{Agent, AgentId, BundleRegistry, Handler, Item, Kernel, Reply, Status};
 use serde_json::{json, Map, Value};
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
@@ -18,7 +18,11 @@ use tempfile::TempDir;
 struct Sink(Arc<Mutex<Vec<u8>>>);
 
 #[async_trait]
-impl Bundle for Sink {
+impl Handler for Sink {
+    type Call = fantastic_kernel::test_support::declared_fixtures::store_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "sink"
     }
@@ -34,7 +38,7 @@ impl Bundle for Sink {
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Some(
@@ -44,11 +48,12 @@ impl Bundle for Sink {
     async fn handle_binary(
         &self,
         _id: &AgentId,
-        header: Value,
+        call: Self::Call,
         body: Option<fantastic_kernel::Blob>,
         _kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<fantastic_kernel::Blob>), Box<dyn std::error::Error + Send + Sync>>
     {
+        let header = call.payload();
         let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
         // A READ answers a chunk; it never received one.
         if header.get("type").and_then(Value::as_str) == Some("read_stream") {

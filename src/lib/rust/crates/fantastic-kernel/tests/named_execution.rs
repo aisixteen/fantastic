@@ -6,7 +6,7 @@
 //! named. Python registers named work under `exec_id`.
 
 use async_trait::async_trait;
-use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Reply, Status};
+use fantastic_kernel::{Agent, AgentId, BundleRegistry, Handler, Item, Kernel, Reply, Status};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,7 +17,11 @@ struct Slow;
 
 fantastic_kernel::stand_in_verbs!(slow_verbs { PingV "ping" {  }, WorkV "work" {  } });
 #[async_trait]
-impl Bundle for Slow {
+impl Handler for Slow {
+    type Call = slow_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "slow"
     }
@@ -32,13 +36,11 @@ impl Bundle for Slow {
     }
     async fn handle(
         &self,
-        id: &AgentId,
-        payload: &Value,
+        _id: &AgentId,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
-        if let Err(refused) = slow_verbs::Call::parse(&id.0, &payload) {
-            return Ok(Some(refused));
-        }
+        let payload = &call.payload();
         match payload.get("type").and_then(Value::as_str) {
             Some("work") => {
                 tokio::time::sleep(Duration::from_secs(30)).await;

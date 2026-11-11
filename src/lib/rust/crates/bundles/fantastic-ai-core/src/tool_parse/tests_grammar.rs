@@ -97,9 +97,9 @@ fn lists_are_item_children_any_count() {
         r#"<call name="send"><target_id>me</target_id><type>grep</type>"#,
         "<query>marker</query><ids><item>12</item><item>15</item></ids></call>"
     );
-    assert_eq!(payload(&one(text))["ids"], json!([12, 15]));
+    assert_eq!(payload(&one(text))["ids"], json!(["12", "15"]));
     let lone = text.replace("<item>15</item>", "");
-    assert_eq!(payload(&one(&lone))["ids"], json!([12]));
+    assert_eq!(payload(&one(&lone))["ids"], json!(["12"]));
     let allowed = concat!(
         r#"<call name="send"><target_id>kernel</target_id><type>update_agent</type>"#,
         r"<id>worker</id><allowed><item>python3 \S+</item></allowed></call>"

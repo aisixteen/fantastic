@@ -4,8 +4,8 @@
 //! and `reflect` / `docs` render them.
 
 use schemars::JsonSchema;
-use serde::Deserialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 /// A task or execution named by its id, or by the name a caller gave its own execution.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -13,18 +13,70 @@ use serde_json::Value;
 pub enum IdOrName {
     /// The numeric id.
     Id(i64),
-    /// The decimal text of an id, or the name the caller gave.
+    /// The name the caller gave its own execution (text is never read as a number).
     Name(String),
 }
 
+/// The schema of a positive number of seconds, or none.
+fn positive_seconds(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    serde_json::from_value(serde_json::json!({
+        "type": ["number", "null"],
+        "exclusiveMinimum": 0,
+    }))
+    .expect("a number schema")
+}
+
 /// The tier of a `docs` answer.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
     /// One line per verb (the default).
     Oneliners,
     /// The whole text of each verb.
     Detailed,
+}
+
+impl Tier {
+    /// The tier as a call spells it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tier::Oneliners => "oneliners",
+            Tier::Detailed => "detailed",
+        }
+    }
+}
+
+/// How much wiring a `reflect` carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Detail {
+    /// The roster (the default).
+    Distilled,
+    /// The wiring detail: the full tree.
+    Full,
+}
+
+/// Which tree a `reflect` carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TreeKind {
+    /// The nested tree (the default).
+    All,
+    /// A flat index of ids.
+    Ids,
+    /// No tree.
+    None,
+}
+
+/// Which installable bundles a `reflect` lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum BundlesKind {
+    /// Each with its record schema.
+    All,
+    /// Their names.
+    Ids,
 }
 
 /// THE KERNEL'S OWN VERBS, answered by the ROOT alone (address `kernel`): they act on
@@ -40,18 +92,26 @@ pub mod kernel {
         /// The bundle the agent runs (`file_bridge.tools`, or a bare bundle name such as `file_bridge`).
         pub handler_module: Option<String>,
         /// The agent that will OWN the new one: your own id for a tool you keep, `kernel_state` for a top-level agent.
+        #[schemars(length(min = 1))]
         pub parent_id: String,
         /// Its id. Absent: minted from the bundle's name.
         pub id: Option<String>,
         /// The bundle a record inherits from when it runs another base than the bundle's own.
         pub bundle: Option<String>,
+        /// The fields of the new agent's record — whatever its bundle's record declares.
+        #[serde(flatten)]
+        pub fields: Map<String, Value>,
     }
 
     /// EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT. Whoever holds update_agent on the root updates any agent, itself included. Every argument beyond `id` is a field of the agent's bundle's record, and a field it does not have is refused.
     #[derive(Debug, Deserialize, JsonSchema)]
     pub struct UpdateAgent {
         /// The agent to update.
+        #[schemars(length(min = 1))]
         pub id: String,
+        /// The fields to replace in its record — whatever its bundle's record declares.
+        #[serde(flatten)]
+        pub fields: Map<String, Value>,
     }
 
     /// CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`. Whoever holds delete_agent on the root deletes any agent.
@@ -59,6 +119,7 @@ pub mod kernel {
     #[serde(deny_unknown_fields)]
     pub struct DeleteAgent {
         /// The agent to delete.
+        #[schemars(length(min = 1))]
         pub id: String,
         /// `true` leaves the persisted memory of the whole subtree alone.
         pub keep_memory: Option<bool>,
@@ -69,6 +130,7 @@ pub mod kernel {
     #[serde(deny_unknown_fields)]
     pub struct ListAgents {
         /// A page size: absent, everything.
+        #[schemars(range(min = 1))]
         pub limit: Option<i64>,
         /// The cursor `next` of the previous page.
         pub after: Option<String>,
@@ -79,6 +141,7 @@ pub mod kernel {
     #[serde(deny_unknown_fields)]
     pub struct Ps {
         /// A page size: absent, everything.
+        #[schemars(range(min = 1))]
         pub limit: Option<i64>,
         /// The cursor `next` of the previous page.
         pub after: Option<String>,
@@ -89,6 +152,7 @@ pub mod kernel {
     #[serde(deny_unknown_fields)]
     pub struct Ledger {
         /// A page size: absent, everything.
+        #[schemars(range(min = 1))]
         pub limit: Option<i64>,
         /// The cursor `next` of the previous page.
         pub after: Option<String>,
@@ -125,7 +189,7 @@ pub mod kernel {
     #[serde(deny_unknown_fields)]
     pub struct KernelStop {}
 
-    /// HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument (no `verb`: plus emits, cancel and notes). Pull once per bundle; `detailed` for a verb you are about to use. Gated like every kernel verb: a `can_call` grant of `docs` on the root. Returns {of, bundle, tier, verbs, emits?, cancel?, notes?}.
+    /// HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument. Without `verb` the reply also carries the bundle's short `man` text. Pull once per bundle; `detailed` for a verb you are about to use. Gated like every kernel verb: a `can_call` grant of `docs` on the root. Returns {of, bundle, tier, verbs, man?}.
     #[derive(Debug, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct Docs {
@@ -142,8 +206,11 @@ pub mod kernel {
     #[serde(deny_unknown_fields)]
     pub struct AwaitSet {
         /// The agent ids to wait for.
+        #[schemars(length(min = 1))]
         pub ids: Vec<String>,
         /// A positive number of seconds after which the wait ends as timed out.
+        #[schemars(schema_with = "positive_seconds")]
+        #[serde(default)]
         pub timeout_s: Option<f64>,
         /// A name for the wait, echoed in the combined message.
         pub label: Option<String>,
@@ -181,27 +248,34 @@ pub mod kernel {
 pub mod common {
     use super::*;
 
-    /// What this agent IS: identity, sentence, state, grants — and, by flags, its subtree, the installable bundles and its readme. How to CALL it is `docs`.
-    #[derive(Debug, Deserialize, JsonSchema)]
+    /// What this agent IS: identity, sentence, state, grants — and, by flags, its subtree and the installable bundles. How to CALL it is `docs`.
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct Reflect {
-        /// `full` adds the wiring detail (the full tree, the manual index).
-        pub detail: Option<String>,
-        /// `all` (default) the nested tree, `ids` a flat id index; `none` or `false` omits it.
-        pub tree: Option<Value>,
+        /// `full` adds the wiring detail (the full tree).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub detail: Option<Detail>,
+        /// `all` (default) the nested tree, `ids` a flat id index, `none` omits it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub tree: Option<TreeKind>,
         /// Answer with only these branches (agent ids in this agent's tree).
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub show_subtrees: Option<Vec<String>>,
         /// Prune these branches to a stub `{id, pruned}`.
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub ignore_subtrees: Option<Vec<String>>,
         /// List only the agents running one of these handler names (or a role on it).
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub handler_modules: Option<Vec<String>>,
         /// The installable bundles: `all` with their record schemas, `ids` the names.
-        pub bundles: Option<String>,
-        /// `true` the short orientation readme, `index` the manual's topics, a key one topic.
-        pub readme: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub bundles: Option<BundlesKind>,
         /// A page size for `tree=ids` and `bundles`.
+        #[schemars(range(min = 1))]
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub limit: Option<i64>,
         /// The cursor of the previous page.
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub after: Option<String>,
     }
 
@@ -243,7 +317,7 @@ pub mod record {
         /// Who may call this agent: a map of caller → verbs (`*` for all). Sent WHOLE.
         pub callable_by: Option<Value>,
         /// `true` refuses a delete of this agent or an ancestor.
-        pub delete_lock: Option<Value>,
+        pub delete_lock: Option<bool>,
         /// The folder name its children live under on disk (one safe segment).
         pub children_dir: Option<String>,
         /// How a client draws the agent.
@@ -255,6 +329,19 @@ pub mod record {
     }
 
     crate::record!(CommonRecord);
+}
+
+/// THE RECORD OF A BARE AGENT (no `handler_module`): the kernel is its agent, and a
+/// bare agent carries whatever fields it was given — an open record.
+#[allow(missing_docs)]
+pub mod bare_record {
+    use super::*;
+
+    /// A bare agent's own fields: none declared, all accepted.
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct BareRecord {}
+
+    crate::record!(BareRecord, open);
 }
 
 /// The kernel's own verbs, as `name → declaration`, for `docs of=kernel`.

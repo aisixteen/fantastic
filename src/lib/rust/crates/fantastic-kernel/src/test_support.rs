@@ -11,10 +11,10 @@
 //! bundle's gate lives in `fantastic-file`).
 
 use crate::agent::AgentId;
-use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+use crate::bundle::{BundleError, BundleRegistry, Handler, Reply};
 use crate::kernel::Kernel;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -23,6 +23,19 @@ use std::sync::Arc;
 #[must_use]
 pub fn non_finite(token: &str) -> Value {
     Value::Number(serde_json::Number::from_string_unchecked(token.to_string()))
+}
+
+/// A stand-in's call, as the payload it was parsed from: the verb as `type`, then its
+/// arguments.
+#[must_use]
+pub fn tagged<T: serde::Serialize>(verb: &str, args: &T) -> Value {
+    let mut m = Map::new();
+    m.insert("type".to_string(), Value::from(verb));
+    if let Ok(Value::Object(a)) = serde_json::to_value(args) {
+        // an argument left out was never in the payload: no null stands for it
+        m.extend(a.into_iter().filter(|(_, v)| !v.is_null()));
+    }
+    Value::Object(m)
 }
 
 /// The record of a stand-in bundle: freeform.
@@ -39,11 +52,30 @@ macro_rules! stand_in_verbs {
         #[allow(missing_docs, dead_code)]
         pub mod $m {
             $(
-                #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-                #[serde(deny_unknown_fields)]
-                pub struct $S { $( $(#[$fm])* pub $f: $t ),* }
+                #[derive(
+                    Debug,
+                    $crate::verbs::serde::Serialize,
+                    $crate::verbs::serde::Deserialize,
+                    $crate::verbs::schemars::JsonSchema,
+                )]
+                #[serde(crate = "fantastic_kernel::verbs::serde", deny_unknown_fields)]
+                #[schemars(crate = "fantastic_kernel::verbs::schemars")]
+                pub struct $S {
+                    $( $(#[$fm])* pub $f: $t ),*
+                }
             )+
             $crate::verbs! { $( $name => $S ),+ }
+
+            impl Call {
+                /// The call as the payload it was parsed from: a test stand-in reads
+                /// its arguments from it by key.
+                pub fn payload(&self) -> $crate::verbs::serde_json::Value {
+                    match self {
+                        $( Call::$S(a) => $crate::test_support::tagged($name, a), )+
+                        Call::Reflect(a) => $crate::test_support::tagged("reflect", a),
+                    }
+                }
+            }
         }
     };
 }
@@ -52,6 +84,30 @@ macro_rules! stand_in_verbs {
 #[must_use]
 pub fn no_verbs() -> &'static [crate::Verb] {
     &[]
+}
+
+/// The call to a stand-in that answers no verb of its own: `reflect` alone (`boot` and
+/// `shutdown` the shared entry answers itself).
+#[derive(Debug)]
+pub enum NoCall {
+    /// The `reflect` every agent answers.
+    Reflect(crate::declared::common::Reflect),
+}
+
+impl crate::verbs::Parse for NoCall {
+    fn parse(
+        agent: &str,
+        payload: &Value,
+        _dynamic: &[crate::DynVerb],
+    ) -> Result<crate::verbs::Routed<NoCall>, Value> {
+        let (verb, _args) =
+            crate::verbs::resolve_builtin(agent, payload, &[crate::declared::common::VERBS])?;
+        match verb {
+            "reflect" => crate::verbs::decode("reflect", payload)
+                .map(|r| crate::verbs::Routed::Call(NoCall::Reflect(r))),
+            _ => Ok(crate::verbs::Routed::Answered(Value::Null)),
+        }
+    }
 }
 
 /// A stand-in with no verbs built at runtime: the explicit empty list.
@@ -74,10 +130,10 @@ macro_rules! fixture_record {
 #[doc(hidden)]
 pub mod declared_fixtures {
     use schemars::JsonSchema;
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
 
     /// Remove a file or a directory.
-    #[derive(Debug, Deserialize, JsonSchema)]
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct Delete {
         /// The path under the store's root.
@@ -87,7 +143,7 @@ pub mod declared_fixtures {
     }
 
     /// Move a file; the commit protocol's atomic step.
-    #[derive(Debug, Deserialize, JsonSchema)]
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct Rename {
         /// The file to move.
@@ -97,7 +153,7 @@ pub mod declared_fixtures {
     }
 
     /// Read a text file.
-    #[derive(Debug, Deserialize, JsonSchema)]
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct Read {
         /// The path under the store's root.
@@ -105,7 +161,7 @@ pub mod declared_fixtures {
     }
 
     /// Write a text file.
-    #[derive(Debug, Deserialize, JsonSchema)]
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct Write {
         /// The path under the store's root.
@@ -115,7 +171,7 @@ pub mod declared_fixtures {
     }
 
     /// Read a file's bytes; they ride the binary channel.
-    #[derive(Debug, Deserialize, JsonSchema)]
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct ReadStream {
         /// The path under the store's root.
@@ -125,7 +181,7 @@ pub mod declared_fixtures {
     }
 
     /// Write bytes to a file (appended unless `truncate`); they ride the binary channel.
-    #[derive(Debug, Deserialize, JsonSchema)]
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct WriteStream {
         /// The path under the store's root.
@@ -135,7 +191,7 @@ pub mod declared_fixtures {
     }
 
     /// The record of the stand-in agents.
-    #[derive(Debug, Deserialize, JsonSchema)]
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     pub struct StoreRecord {
         /// Where the store reads and writes.
         pub root: Option<String>,
@@ -146,12 +202,12 @@ pub mod declared_fixtures {
     }
 
     /// Install the record writer, once.
-    #[derive(Debug, Deserialize, JsonSchema)]
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct Boot {}
 
     /// Store a sidecar file of an agent.
-    #[derive(Debug, Deserialize, JsonSchema)]
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct PersistBlob {
         /// The agent the file belongs to.
@@ -163,7 +219,7 @@ pub mod declared_fixtures {
     }
 
     /// Read an agent's sidecar file.
-    #[derive(Debug, Deserialize, JsonSchema)]
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct LoadBlob {
         /// The agent the file belongs to.
@@ -173,7 +229,7 @@ pub mod declared_fixtures {
     }
 
     /// The loader record: free.
-    #[derive(Debug, Deserialize, JsonSchema)]
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     pub struct LoaderRecord {}
 
     pub mod store_verbs {
@@ -186,6 +242,22 @@ pub mod declared_fixtures {
             "read_stream" => ReadStream,
             "write_stream" => WriteStream,
         }
+
+        impl Call {
+            /// The call as the payload it was parsed from.
+            pub fn payload(&self) -> serde_json::Value {
+                use crate::test_support::tagged;
+                match self {
+                    Call::Delete(a) => tagged("delete", a),
+                    Call::Rename(a) => tagged("rename", a),
+                    Call::Read(a) => tagged("read", a),
+                    Call::Write(a) => tagged("write", a),
+                    Call::ReadStream(a) => tagged("read_stream", a),
+                    Call::WriteStream(a) => tagged("write_stream", a),
+                    Call::Reflect(a) => tagged("reflect", a),
+                }
+            }
+        }
     }
     pub mod store_record {
         use super::*;
@@ -197,6 +269,19 @@ pub mod declared_fixtures {
             "boot" => Boot,
             "persist_blob" => PersistBlob,
             "load_blob" => LoadBlob,
+        }
+
+        impl Call {
+            /// The call as the payload it was parsed from.
+            pub fn payload(&self) -> serde_json::Value {
+                use crate::test_support::tagged;
+                match self {
+                    Call::Boot(a) => tagged("boot", a),
+                    Call::PersistBlob(a) => tagged("persist_blob", a),
+                    Call::LoadBlob(a) => tagged("load_blob", a),
+                    Call::Reflect(a) => tagged("reflect", a),
+                }
+            }
         }
     }
     pub mod loader_record {
@@ -265,9 +350,13 @@ impl FakeStore {
 }
 
 #[async_trait]
-impl Bundle for FakeStore {
+impl Handler for FakeStore {
+    type Call = declared_fixtures::store_verbs::Call;
     fn name(&self) -> &str {
         "file_bridge"
+    }
+    fn man(&self) -> &'static str {
+        "A stand-in file store for kernel tests."
     }
     fn verbs(&self) -> &'static [crate::verbs::Verb] {
         declared_fixtures::store_verbs::VERBS
@@ -281,26 +370,19 @@ impl Bundle for FakeStore {
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        match declared_fixtures::store_verbs::Call::parse(&id.0, payload) {
-            Ok(call) => Ok(self.run(call, id)),
-            Err(refused) => Ok(Some(refused)),
-        }
+        Ok(self.run(call, id))
     }
     async fn handle_binary(
         &self,
         id: &AgentId,
-        header: Value,
+        call: Self::Call,
         body: Option<crate::outcome::Blob>,
         _kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
         use declared_fixtures::store_verbs::Call;
-        let call = match Call::parse(&id.0, &header) {
-            Ok(c) => c,
-            Err(refused) => return Ok((Some(refused), None)),
-        };
         match call {
             // A CHUNK-RETURNING verb answers `Some(bytes)` even when the chunk
             // is empty; anything else answers `None`.
@@ -348,9 +430,13 @@ pub struct RootLoader {
 }
 
 #[async_trait]
-impl Bundle for RootLoader {
+impl Handler for RootLoader {
+    type Call = declared_fixtures::loader_verbs::Call;
     fn name(&self) -> &str {
         "kernel_state.tools"
+    }
+    fn man(&self) -> &'static str {
+        "A stand-in root loader for kernel tests."
     }
     fn verbs(&self) -> &'static [crate::verbs::Verb] {
         declared_fixtures::loader_verbs::VERBS
@@ -364,17 +450,13 @@ impl Bundle for RootLoader {
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
             return Ok(Some(json!({"error": "no agent"})));
         };
         use declared_fixtures::loader_verbs::Call;
-        let call = match Call::parse(&agent_id.0, payload) {
-            Ok(c) => c,
-            Err(refused) => return Ok(Some(refused)),
-        };
         match call {
             Call::Boot(_) => {
                 let fresh = self.installed.lock().expect("loader poisoned").is_none();

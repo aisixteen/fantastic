@@ -2,7 +2,7 @@
 //! memory store, in `fantastic-ram-store/tests/await_restart.rs`.)
 use super::*;
 use crate::agent::Agent;
-use crate::bundle::{Bundle, BundleError, Reply};
+use crate::bundle::{BundleError, Handler, Reply};
 use crate::test_support::wire;
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -30,7 +30,11 @@ struct RecBundle(Arc<Rec>);
 
 crate::stand_in_verbs!(recbundle_verbs { NoteV "note" {  }, ReportV "report" { state: Option<String>, result: Option<serde_json::Value> }, SendV "send" { wait_id: Option<i64>, label: Option<String>, done: Option<Vec<serde_json::Value>>, missing: Option<Vec<String>>, timed_out: Option<bool>, text: Option<String> } });
 #[async_trait]
-impl Bundle for RecBundle {
+impl Handler for RecBundle {
+    type Call = recbundle_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "rec"
     }
@@ -46,12 +50,10 @@ impl Bundle for RecBundle {
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        if let Err(refused) = recbundle_verbs::Call::parse(&id.0, &payload) {
-            return Ok(Some(refused));
-        }
+        let payload = &call.payload();
         if payload["type"] == json!("boot") {
             return Ok(None);
         }

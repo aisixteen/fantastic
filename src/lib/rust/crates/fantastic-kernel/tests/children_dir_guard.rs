@@ -18,7 +18,11 @@ use tempfile::TempDir;
 struct Noop;
 
 #[async_trait::async_trait]
-impl fantastic_kernel::Bundle for Noop {
+impl fantastic_kernel::Handler for Noop {
+    type Call = fantastic_kernel::test_support::NoCall;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "noop"
     }
@@ -34,7 +38,7 @@ impl fantastic_kernel::Bundle for Noop {
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<fantastic_kernel::Reply, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Some(json!({"ok": true})))

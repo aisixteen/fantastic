@@ -28,10 +28,23 @@ fn mk_agent_meta(id: &str, parent: Option<AgentId>, meta: Map<String, Value>) ->
     )
 }
 
+/// The arguments of a `reflect` that names no flag.
+fn plain_reflect() -> crate::declared::common::Reflect {
+    match crate::declared::common::Call::parse("x", &json!({"type": "reflect"})) {
+        Ok(crate::declared::common::Call::Reflect(a)) => a,
+        other => panic!("not a reflect: {other:?}"),
+    }
+}
+
 /// Mirror what `send()` does for a bare agent: identity + flags.
 async fn bare_reflect(kernel: &Arc<Kernel>, agent: &Arc<Agent>, payload: &Value) -> Value {
     let mut r = reflect_identity(agent);
-    apply_reflect_flags(kernel, agent, payload, &mut r)
+    let args = match crate::declared::common::Call::parse(&agent.id.0, payload) {
+        Ok(crate::declared::common::Call::Reflect(a)) => a,
+        Ok(other) => panic!("not a reflect: {other:?}"),
+        Err(refused) => return refused,
+    };
+    apply_reflect_flags(kernel, agent, &args, &mut r)
         .await
         .expect("no roster node raised");
     r
@@ -186,321 +199,6 @@ async fn description_surfaces_top_and_tree() {
         .unwrap();
     assert_eq!(node["description"], "holds my notes");
 }
-
-#[tokio::test]
-async fn readme_flag_tiers() {
-    let kernel = Arc::new(Kernel::new());
-    let root = mk_agent("kernel_state", None);
-    kernel.register(Arc::clone(&root));
-    kernel.set_root(Arc::clone(&root));
-    // default → no readme key.
-    let plain = bare_reflect(&kernel, &root, &json!({"type": "reflect"})).await;
-    assert!(plain.get("readme").is_none());
-    // readme=true with no file on disk → key present, value null.
-    let r = bare_reflect(&kernel, &root, &json!({"type": "reflect", "readme": true})).await;
-    assert!(r.get("readme").is_some());
-    assert_eq!(r["readme"], Value::Null);
-}
-
-// ─── keyed / tiered doc tree ───────────────────────────────────
-
-// The `self_extension` pointer and the always-on doc FRAME (`readmes`,
-// `docs`, `persistence`, `guid`) are the ROOT LOADER's contribution now —
-// `Bundle::reflect_root_extra`, merged by `apply_reflect_flags` on the root.
-// Their tests live with the bundle that owns the text
-// (`crates/bundles/fantastic-core/src/tests.rs`).
-
-#[test]
-fn est_tokens_matches_ceil_div_and_desc_prefers_quote() {
-    assert_eq!(est_tokens(&"x".repeat(400)), 100); // 400/4
-    assert_eq!(est_tokens(&"x".repeat(401)), 101); // ceil
-    assert_eq!(est_tokens(""), 0);
-    assert_eq!(read_desc("> the desc\n\n# Title\nbody"), "the desc");
-    assert_eq!(read_desc("# Title\n\nfirst prose line"), "first prose line");
-    assert_eq!(read_desc("# only a heading"), "");
-}
-
-/// A bundle that ships a readme and a keyed docs table — the only place a
-/// manual lives (never copied to disk).
-struct Docs {
-    readme: Option<&'static str>,
-    docs: &'static [(&'static str, &'static str)],
-}
-
-crate::stand_in_verbs!(docs_verbs { PingV "ping" {  } });
-#[async_trait::async_trait]
-impl crate::bundle::Bundle for Docs {
-    fn name(&self) -> &str {
-        "docs_probe"
-    }
-    fn verbs(&self) -> &'static [crate::Verb] {
-        docs_verbs::VERBS
-    }
-    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
-        docs_verbs::dynamic_verbs(agent)
-    }
-    fn record(&self) -> &'static crate::RecordDecl {
-        crate::fixture_record!()
-    }
-    fn readme(&self) -> Option<&'static str> {
-        self.readme
-    }
-    fn docs(&self) -> &'static [(&'static str, &'static str)] {
-        self.docs
-    }
-    async fn handle(
-        &self,
-        agent_id: &AgentId,
-        payload: &Value,
-        _kernel: &Arc<Kernel>,
-    ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
-        if let Err(refused) = docs_verbs::Call::parse(&agent_id.0, &payload) {
-            return Ok(Some(refused));
-        }
-        Ok(None)
-    }
-}
-
-/// A kernel whose root runs a [`Docs`] bundle. The root's dir does not exist —
-/// nothing is read from disk.
-fn mk_docs_kernel(
-    readme: Option<&'static str>,
-    docs: &'static [(&'static str, &'static str)],
-) -> (Arc<Kernel>, Arc<Agent>) {
-    let mut kernel = Kernel::new();
-    let mut reg = crate::bundle::BundleRegistry::new();
-    reg.register("docs_probe.tools", Docs { readme, docs });
-    kernel.bundles = reg;
-    let kernel = Arc::new(kernel);
-    let root = Agent::new(
-        AgentId::from("kernel_state"),
-        Some("docs_probe.tools".to_string()),
-        None,
-        Map::new(),
-        Path::new("/tmp/nowhere/docs_probe").to_path_buf(),
-        true,
-    );
-    kernel.register(Arc::clone(&root));
-    kernel.set_root(Arc::clone(&root));
-    (kernel, root)
-}
-
-/// A minimal orientation + docs tree (with one nested tier).
-const README: &str = "# This is a Fantastic kernel.\n\nkeyed doc tree — reflect readme=index";
-const DOCS: &[(&str, &str)] = &[
-    (
-        "self-extension",
-        "> author your own tools\n\n# Self-extension\nauthor durable tools here",
-    ),
-    ("streams", "> byte streams\n\n# Streams\nchunked bytes"),
-    ("frontend", "> two kernels\n\n# Frontend\nhost + browser"),
-    (
-        "frontend/routing",
-        "> routing rule\n\n# Routing\nonly the js kernel",
-    ),
-];
-
-#[tokio::test]
-async fn readme_doctree_frame_index_view_and_errors() {
-    let (kernel, root) = mk_docs_kernel(Some(README), DOCS);
-
-    // readme=true → the SHORT orientation string.
-    let r = bare_reflect(
-        &kernel,
-        &root,
-        &json!({"type":"reflect","tree":"none","readme":true}),
-    )
-    .await;
-    assert!(r["readme"].as_str().unwrap().contains("Fantastic kernel"));
-
-    // readme=index → token-annotated tree; nesting preserved; NO body.
-    let idx = bare_reflect(
-        &kernel,
-        &root,
-        &json!({"type":"reflect","tree":"none","readme":"index"}),
-    )
-    .await;
-    let arr = idx["readme"]["index"].as_array().unwrap();
-    for e in arr {
-        assert!(e.get("body").is_none());
-        assert!(e["tokens"].as_u64().unwrap() > 0);
-    }
-    let fe = arr.iter().find(|e| e["key"] == "frontend").unwrap();
-    assert_eq!(fe["children"][0]["key"], "frontend/routing");
-
-    // readme=<key> → body + (leaf) no children.
-    let doc = bare_reflect(
-        &kernel,
-        &root,
-        &json!({"type":"reflect","tree":"none","readme":"self-extension"}),
-    )
-    .await;
-    assert_eq!(doc["readme"]["key"], "self-extension");
-    assert!(doc["readme"]["body"].as_str().unwrap().contains("author"));
-
-    // A nested key is reachable by its slashed path.
-    let nested = bare_reflect(
-        &kernel,
-        &root,
-        &json!({"type":"reflect","tree":"none","readme":"frontend/routing"}),
-    )
-    .await;
-    assert_eq!(nested["readme"]["key"], "frontend/routing");
-
-    // Unknown key → {error, keys}; a `..` escape is refused.
-    let miss = bare_reflect(
-        &kernel,
-        &root,
-        &json!({"type":"reflect","tree":"none","readme":"nope"}),
-    )
-    .await;
-    assert!(miss["readme"]["error"].is_string());
-    assert!(miss["readme"]["keys"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|k| k == "self-extension"));
-    let esc = bare_reflect(
-        &kernel,
-        &root,
-        &json!({"type":"reflect","tree":"none","readme":"../readme"}),
-    )
-    .await;
-    assert_eq!(esc["readme"]["error"], "bad key '../readme'");
-}
-
-/// `minds` was a rust-only topic python never shipped. With it gone the
-/// key is an ORDINARY unknown key: the reply stays well-formed and names the keys
-/// that do exist, rather than serving a doc no other runtime has.
-#[tokio::test]
-async fn readme_minds_is_no_doc() {
-    let (kernel, root) = mk_docs_kernel(Some(README), DOCS);
-
-    let r = bare_reflect(
-        &kernel,
-        &root,
-        &json!({"type":"reflect","tree":"none","readme":"minds"}),
-    )
-    .await;
-    assert_eq!(r["readme"]["error"], "no doc 'minds'");
-    let keys = r["readme"]["keys"].as_array().unwrap();
-    assert!(keys.iter().any(|k| k == "self-extension"));
-    assert!(!keys.iter().any(|k| k == "minds"));
-}
-
-#[tokio::test]
-async fn non_root_has_no_readmes_frame() {
-    let kernel = Arc::new(Kernel::new());
-    let child = mk_agent("kid", Some(AgentId::from("kernel_state")));
-    kernel.register(Arc::clone(&child));
-    let r = bare_reflect(&kernel, &child, &json!({"type":"reflect","tree":"none"})).await;
-    assert!(r.get("readmes").is_none());
-    assert!(r.get("docs").is_none());
-}
-
-/// The key matrix: a nested tier (`nested/child`), a topic with a
-/// tier (`frontend/…`) and a top-level topic.
-const CLAMP_DOCS: &[(&str, &str)] = &[
-    ("frontend", "> f\n\nfrontend body"),
-    ("frontend/routing", "> r\n\nrouting body"),
-    ("frontend/html-agent", "> p\n\npanel body"),
-    ("nested", "> n\n\nnested body"),
-    ("nested/child", "> c\n\nchild body"),
-    ("topic", "> t\n\ntopic body"),
-];
-
-/// The key check is LEXICAL and then the INDEX — a
-/// `.`, `..` or empty segment is a `bad key` whatever the filesystem holds, and
-/// a key is a doc only if the index lists it.
-#[tokio::test]
-async fn readme_view_key_check_is_lexical_then_the_index() {
-    let (kernel, root) = mk_docs_kernel(None, CLAMP_DOCS);
-
-    // `nested/../topic`: a `..` segment is a bad key even though `nested` is a
-    // real directory and the target exists.
-    let r = bare_reflect(
-        &kernel,
-        &root,
-        &json!({"type":"reflect","tree":"none","readme":"nested/../topic"}),
-    )
-    .await;
-    assert_eq!(r["readme"]["error"], "bad key 'nested/../topic'");
-
-    // `frontend/html-agent/../routing`: the same, whether or not
-    // `html-agent` is a directory — the filesystem is never consulted.
-    let r = bare_reflect(
-        &kernel,
-        &root,
-        &json!({"type":"reflect","tree":"none","readme":"frontend/html-agent/../routing"}),
-    )
-    .await;
-    assert_eq!(
-        r["readme"]["error"],
-        "bad key 'frontend/html-agent/../routing'"
-    );
-
-    // `nested//child`: an EMPTY segment is a bad key (no POSIX collapsing).
-    let r = bare_reflect(
-        &kernel,
-        &root,
-        &json!({"type":"reflect","tree":"none","readme":"nested//child"}),
-    )
-    .await;
-    assert_eq!(r["readme"]["error"], "bad key 'nested//child'");
-
-    // A leading `\` becomes `/` (backslash→slash) AFTER the strip, so
-    // `\topic` is `/topic` — an empty first segment. `bad key`,
-    // py_repr-quoted, echoing the ORIGINAL `sel`.
-    let sel = "\\topic";
-    let r = bare_reflect(
-        &kernel,
-        &root,
-        &json!({"type":"reflect","tree":"none","readme":sel}),
-    )
-    .await;
-    assert_eq!(
-        r["readme"]["error"],
-        format!("bad key {}", fantastic_bundle::py_repr(sel))
-    );
-
-    // `/` alone strips to an empty `safe` — a bad key.
-    let r = bare_reflect(
-        &kernel,
-        &root,
-        &json!({"type":"reflect","tree":"none","readme":"/"}),
-    )
-    .await;
-    assert_eq!(r["readme"]["error"], "bad key '/'");
-}
-
-/// Doc reads translate `\r\n` and a lone `\r` to `\n` (python text mode)
-/// BEFORE `tokens`/`desc` are computed from the body — a doc kept with its
-/// CRs counts one extra "character" per CRLF pair and desc-matching sees
-/// stray `\r`s python's reader never produces.
-#[tokio::test]
-async fn doc_reads_translate_newlines_like_python_text_mode() {
-    // "> desc\r\nbody\rline\r\n" — CRLF, lone CR, CRLF.
-    let (kernel, root) = mk_docs_kernel(None, &[("crlf", "> desc\r\nbody\rline\r\n")]);
-
-    let r = bare_reflect(
-        &kernel,
-        &root,
-        &json!({"type":"reflect","tree":"none","readme":"crlf"}),
-    )
-    .await;
-    let body = r["readme"]["body"].as_str().unwrap();
-    assert!(
-        !body.contains('\r'),
-        "CRs must be translated away: {body:?}"
-    );
-    assert_eq!(body, "> desc\nbody\nline\n");
-    // python `len("> desc\nbody\nline\n")` == 18 code points, ceil(18/4) == 5 —
-    // NOT the raw-byte count (20, which a CR-preserving reader would report).
-    assert_eq!(r["readme"]["tokens"], 5);
-    assert_eq!(r["readme"]["desc"], "desc");
-}
-
-// ─── #1 / #7 — paged listings + the gate made readable ──────────────
 
 #[tokio::test]
 async fn tree_ids_is_paged_and_the_cursor_walks_the_whole_tree() {
@@ -686,7 +384,11 @@ struct RosterBundle;
 
 crate::stand_in_verbs!(rosterbundle_verbs { BoomV "boom" {  }, ModelessV "modeless" {  }, PingV "ping" {  } });
 #[async_trait::async_trait]
-impl crate::bundle::Bundle for RosterBundle {
+impl crate::bundle::Handler for RosterBundle {
+    type Call = rosterbundle_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "roster_probe"
     }
@@ -702,12 +404,10 @@ impl crate::bundle::Bundle for RosterBundle {
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
-        if let Err(refused) = rosterbundle_verbs::Call::parse(&agent_id.0, &payload) {
-            return Ok(Some(refused));
-        }
+        let payload = &call.payload();
         if payload.get("type").and_then(Value::as_str) != Some("reflect") {
             return Ok(Some(json!({"ok": true})));
         }
@@ -811,7 +511,7 @@ async fn a_reply_that_built_its_own_view_keeps_it() {
     let a = probe_child(&kernel, "drawn", &root, json!({"view": {"kind": "html"}}));
     let own = json!({"kind": "html", "bytes": "own"});
     let mut reply = json!({"id": "drawn", "view": own});
-    apply_reflect_flags(&kernel, &a, &json!({"type": "reflect"}), &mut reply)
+    apply_reflect_flags(&kernel, &a, &plain_reflect(), &mut reply)
         .await
         .expect("no roster node raised");
     assert_eq!(reply["view"], own);
@@ -822,7 +522,7 @@ async fn a_refusal_gets_no_view() {
     let (kernel, root) = roster_kernel();
     let a = probe_child(&kernel, "drawn", &root, json!({"view": {"kind": "html"}}));
     let mut reply = json!({"error": "nope"});
-    apply_reflect_flags(&kernel, &a, &json!({"type": "reflect"}), &mut reply)
+    apply_reflect_flags(&kernel, &a, &plain_reflect(), &mut reply)
         .await
         .expect("no roster node raised");
     assert_eq!(reply, json!({"error": "nope"}));
@@ -861,16 +561,16 @@ async fn reflect_carries_the_declared_verbs_and_no_other_docs() {
         ["boom", "modeless", "ping", "reflect", "boot", "shutdown"],
         "{c}"
     );
-    // Python order: `tree`, `next`, `bundles`, `readme`.
+    // Python order: `tree`, `next`, `bundles`.
     let r = kernel_reflect(
         &kernel,
-        json!({"type": "reflect", "tree": "ids", "limit": 1, "bundles": "ids", "readme": true}),
+        json!({"type": "reflect", "tree": "ids", "limit": 1, "bundles": "ids"}),
     )
     .await
     .result;
     let keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
     let tail: Vec<&str> = keys[keys.iter().position(|k| *k == "tree").unwrap()..].to_vec();
-    assert_eq!(tail, ["tree", "next", "bundles", "readme"], "{r}");
+    assert_eq!(tail[..3], ["tree", "next", "bundles"], "{r}");
 }
 
 #[tokio::test]
@@ -936,12 +636,19 @@ async fn a_raising_roster_node_fails_the_reflect() {
 }
 
 #[tokio::test]
-async fn a_non_string_tree_flag_omits_the_tree() {
+async fn tree_none_omits_the_tree_and_a_value_the_declaration_lacks_is_refused() {
     let (kernel, _root) = roster_kernel();
     let absent = kernel_reflect(&kernel, json!({"type": "reflect"}))
         .await
         .result;
     assert!(absent["tree"].is_object(), "absent ⇒ all");
+    let r = kernel_reflect(&kernel, json!({"type": "reflect", "tree": "none"}))
+        .await
+        .result;
+    assert!(r.get("tree").is_none(), "{r}");
+    assert!(r.get("next").is_none());
+    assert!(r.get("more").is_none());
+    // every other value is refused by name, never read as "omit"
     for flag in [
         Value::Null,
         json!(true),
@@ -949,16 +656,20 @@ async fn a_non_string_tree_flag_omits_the_tree() {
         json!(1),
         json!([]),
         json!({}),
-        json!("none"),
         json!("ALL"),
         json!(""),
     ] {
         let r = kernel_reflect(&kernel, json!({"type": "reflect", "tree": flag.clone()}))
             .await
             .result;
-        assert!(r.get("tree").is_none(), "tree={flag}: {r}");
-        assert!(r.get("next").is_none());
-        assert!(r.get("more").is_none());
+        if flag.is_null() {
+            // an explicit null is an absent argument
+            assert!(r["tree"].is_object(), "tree=null: {r}");
+            continue;
+        }
+        assert_eq!(r["reason"], "bad_arg", "tree={flag}: {r}");
+        assert_eq!(r["arg"], "tree", "tree={flag}: {r}");
+        assert!(r.get("tree").is_none());
     }
 }
 
@@ -1183,7 +894,6 @@ async fn a_bad_handler_modules_is_refused_bad_arg() {
         json!(1),
         json!({}),
         json!(["a", 1]),
-        json!([""]),
     ] {
         let r = kernel_reflect(
             &kernel,
@@ -1195,23 +905,16 @@ async fn a_bad_handler_modules_is_refused_bad_arg() {
         assert_eq!(r["reason"], "bad_arg", "{bad}: {r}");
         assert_eq!(r["arg"], "handler_modules");
         assert!(r.get("tree").is_none());
-        let wrong_type = bad != json!([""]);
         let off = kernel_reflect(
             &kernel,
             json!({"type": "reflect", "tree": "none", "handler_modules": bad}),
         )
         .await
         .result;
-        if wrong_type {
-            // a wrongly typed argument is refused by the shared entry's check of the
-            // declaration, whether or not a tree is asked for
-            assert_eq!(off["reason"], "bad_arg", "{off}");
-            assert_eq!(off["arg"], "handler_modules", "{off}");
-        } else {
-            // a list of strings passes the declaration; the filter judges its names
-            // only when it builds a tree
-            assert!(off.get("error").is_none() && off.get("tree").is_none());
-        }
+        // a wrongly typed argument is refused by the shared entry's check of the
+        // declaration, whether or not a tree is asked for
+        assert_eq!(off["reason"], "bad_arg", "{off}");
+        assert_eq!(off["arg"], "handler_modules", "{off}");
     }
     let r = kernel_reflect(&kernel, json!({"type": "reflect", "handler_modules": null}))
         .await
@@ -1238,7 +941,11 @@ struct Named(&'static str);
 
 crate::stand_in_verbs!(named_verbs { PingV "ping" {  } });
 #[async_trait::async_trait]
-impl crate::bundle::Bundle for Named {
+impl crate::bundle::Handler for Named {
+    type Call = named_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         self.0
     }
@@ -1253,13 +960,10 @@ impl crate::bundle::Bundle for Named {
     }
     async fn handle(
         &self,
-        agent_id: &AgentId,
-        payload: &Value,
+        _agent_id: &AgentId,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
-        if let Err(refused) = named_verbs::Call::parse(&agent_id.0, &payload) {
-            return Ok(Some(refused));
-        }
         Ok(None)
     }
 }
@@ -1471,7 +1175,11 @@ struct Schemaed;
 
 crate::stand_in_verbs!(schemaed_verbs { PingV "ping" {  } });
 #[async_trait::async_trait]
-impl crate::bundle::Bundle for Schemaed {
+impl crate::bundle::Handler for Schemaed {
+    type Call = schemaed_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "schemaed"
     }
@@ -1486,13 +1194,10 @@ impl crate::bundle::Bundle for Schemaed {
     }
     async fn handle(
         &self,
-        agent_id: &AgentId,
-        payload: &Value,
+        _agent_id: &AgentId,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
-        if let Err(refused) = schemaed_verbs::Call::parse(&agent_id.0, &payload) {
-            return Ok(Some(refused));
-        }
         Ok(None)
     }
 }

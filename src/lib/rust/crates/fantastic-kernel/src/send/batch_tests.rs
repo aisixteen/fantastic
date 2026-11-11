@@ -304,7 +304,11 @@ struct Overlap {
 
 crate::stand_in_verbs!(overlap_verbs { BV "b" {  }, BootV "boot" {  }, ShutdownV "shutdown" {  }, WaitForBV "wait_for_b" {  } });
 #[async_trait::async_trait]
-impl crate::bundle::Bundle for Overlap {
+impl crate::bundle::Handler for Overlap {
+    type Call = overlap_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "overlap"
     }
@@ -321,26 +325,24 @@ impl crate::bundle::Bundle for Overlap {
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &serde_json::Value,
+        call: Self::Call,
         _kernel: &Arc<crate::kernel::Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
-        let verb = payload
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        Ok(Some(match verb {
-            "boot" | "shutdown" => serde_json::Value::Null,
-            "reflect" => json!({"id": agent_id.0, "sentence": "overlap probe", "verbs": {}}),
-            "wait_for_b" => {
+        use overlap_verbs::Call;
+        Ok(Some(match call {
+            Call::BootV(_) | Call::ShutdownV(_) => serde_json::Value::Null,
+            Call::Reflect(_) => {
+                json!({"id": agent_id.0, "sentence": "overlap probe", "verbs": {}})
+            }
+            Call::WaitForBV(_) => {
                 let saw =
                     tokio::time::timeout(Duration::from_secs(3), self.b_started.notified()).await;
                 json!({"overlapped": saw.is_ok()})
             }
-            "b" => {
+            Call::BV(_) => {
                 self.b_started.notify_one();
                 json!({"b": true})
             }
-            other => json!({"error": format!("unknown verb {other}")}),
         }))
     }
 }

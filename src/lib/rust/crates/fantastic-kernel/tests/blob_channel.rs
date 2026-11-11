@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 use fantastic_kernel::test_support::symlink;
 use fantastic_kernel::{
-    Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Reply, Status, StorageMode,
+    Agent, AgentId, BundleRegistry, Handler, Item, Kernel, Reply, Status, StorageMode,
 };
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
@@ -22,7 +22,11 @@ struct CountingBundle;
 
 fantastic_kernel::stand_in_verbs!(countingbundle_verbs { BoomV "boom" {  }, BootV "boot" {  }, ShutdownV "shutdown" {  }, WorkV "work" {  } });
 #[async_trait]
-impl Bundle for CountingBundle {
+impl Handler for CountingBundle {
+    type Call = countingbundle_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "counting"
     }
@@ -37,13 +41,11 @@ impl Bundle for CountingBundle {
     }
     async fn handle(
         &self,
-        id: &AgentId,
-        payload: &Value,
+        _id: &AgentId,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
-        if let Err(refused) = countingbundle_verbs::Call::parse(&id.0, &payload) {
-            return Ok(Some(refused));
-        }
+        let payload = &call.payload();
         match payload.get("type").and_then(Value::as_str).unwrap_or("") {
             "boot" | "shutdown" => Ok(None),
             "work" => Ok(Some(json!({ "ok": true }))),
@@ -58,7 +60,11 @@ struct FakeStore {
 }
 
 #[async_trait]
-impl Bundle for FakeStore {
+impl Handler for FakeStore {
+    type Call = fantastic_kernel::test_support::declared_fixtures::store_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "file_bridge"
     }
@@ -74,19 +80,21 @@ impl Bundle for FakeStore {
     async fn handle(
         &self,
         _id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
+        let payload = &call.payload();
         Ok(Some(json!({"ok": true, "verb": payload.get("type")})))
     }
     async fn handle_binary(
         &self,
         id: &AgentId,
-        header: Value,
+        call: Self::Call,
         body: Option<fantastic_kernel::Blob>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<fantastic_kernel::Blob>), Box<dyn std::error::Error + Send + Sync>>
     {
+        let header = call.payload();
         let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
         let path = header.get("path").and_then(Value::as_str).unwrap_or("");
         let target = self.root.join(path);
@@ -111,7 +119,7 @@ impl Bundle for FakeStore {
             },
             // every other verb is the JSON half — the kernel dispatches
             // EVERY call here
-            _ => Ok((self.handle(id, &header, kernel).await?, None)),
+            _ => Ok((self.handle(id, call, kernel).await?, None)),
         }
     }
 }

@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 use fantastic_kernel::Item;
-use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Kernel, Reply, StorageMode};
+use fantastic_kernel::{Agent, AgentId, BundleRegistry, Handler, Kernel, Reply, StorageMode};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,7 +21,11 @@ use tempfile::TempDir;
 struct NoopBundle;
 
 #[async_trait]
-impl Bundle for NoopBundle {
+impl Handler for NoopBundle {
+    type Call = fantastic_kernel::test_support::NoCall;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "noop"
     }
@@ -37,19 +41,22 @@ impl Bundle for NoopBundle {
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _kernel: &std::sync::Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
         Ok(None)
     }
 }
 
-/// Like [`NoopBundle`], but ships a readme — proof that even a bundle WITH a
-/// readme gets none copied beside its record.
+/// Like [`NoopBundle`], under another name.
 struct ReadmeBundle;
 
 #[async_trait]
-impl Bundle for ReadmeBundle {
+impl Handler for ReadmeBundle {
+    type Call = fantastic_kernel::test_support::NoCall;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "readme_bundle"
     }
@@ -65,13 +72,10 @@ impl Bundle for ReadmeBundle {
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _kernel: &std::sync::Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
         Ok(None)
-    }
-    fn readme(&self) -> Option<&'static str> {
-        Some("shipped readme text\n")
     }
 }
 
@@ -85,7 +89,11 @@ struct FakeStore {
 }
 
 #[async_trait]
-impl Bundle for FakeStore {
+impl Handler for FakeStore {
+    type Call = fantastic_kernel::test_support::declared_fixtures::store_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "file_bridge"
     }
@@ -101,9 +109,10 @@ impl Bundle for FakeStore {
     async fn handle(
         &self,
         _id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
+        let payload = &call.payload();
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         if verb == "delete" {
             let path = payload.get("path").and_then(Value::as_str).unwrap_or("");
@@ -142,11 +151,12 @@ impl Bundle for FakeStore {
     async fn handle_binary(
         &self,
         id: &AgentId,
-        header: Value,
+        call: Self::Call,
         body: Option<fantastic_kernel::Blob>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<fantastic_kernel::Blob>), Box<dyn std::error::Error + Send + Sync>>
     {
+        let header = call.payload();
         let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
         let verb = header.get("type").and_then(Value::as_str).unwrap_or("");
         let path = header.get("path").and_then(Value::as_str).unwrap_or("");
@@ -168,7 +178,7 @@ impl Bundle for FakeStore {
             }
             // every other verb is the JSON half — the kernel dispatches
             // EVERY call here
-            _ => Ok((self.handle(id, &header, kernel).await?, None)),
+            _ => Ok((self.handle(id, call, kernel).await?, None)),
         }
     }
 }
@@ -538,7 +548,11 @@ struct PagingStore {
 }
 
 #[async_trait]
-impl Bundle for PagingStore {
+impl Handler for PagingStore {
+    type Call = fantastic_kernel::test_support::declared_fixtures::store_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "file_bridge"
     }
@@ -554,9 +568,10 @@ impl Bundle for PagingStore {
     async fn handle(
         &self,
         _id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
+        let payload = &call.payload();
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         if verb == "rename" {
             let old_path = payload
@@ -582,11 +597,12 @@ impl Bundle for PagingStore {
     async fn handle_binary(
         &self,
         id: &AgentId,
-        header: Value,
+        call: Self::Call,
         body: Option<fantastic_kernel::Blob>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<fantastic_kernel::Blob>), Box<dyn std::error::Error + Send + Sync>>
     {
+        let header = call.payload();
         let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
         let verb = header.get("type").and_then(Value::as_str).unwrap_or("");
         let path = header.get("path").and_then(Value::as_str).unwrap_or("");
@@ -627,7 +643,7 @@ impl Bundle for PagingStore {
             }
             // every other verb is the JSON half — the kernel dispatches
             // EVERY call here
-            _ => Ok((self.handle(id, &header, kernel).await?, None)),
+            _ => Ok((self.handle(id, call, kernel).await?, None)),
         }
     }
 }
@@ -723,7 +739,11 @@ async fn store_sink_merge_keeps_unknown_keys_past_one_chunk() {
 struct ArcBundle(Arc<PagingStore>);
 
 #[async_trait]
-impl Bundle for ArcBundle {
+impl Handler for ArcBundle {
+    type Call = fantastic_kernel::test_support::declared_fixtures::store_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         self.0.name()
     }
@@ -739,28 +759,27 @@ impl Bundle for ArcBundle {
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
-        self.0.handle(id, payload, kernel).await
+        self.0.handle(id, call, kernel).await
     }
     async fn handle_binary(
         &self,
         id: &AgentId,
-        header: Value,
+        call: Self::Call,
         body: Option<fantastic_kernel::Blob>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<fantastic_kernel::Blob>), Box<dyn std::error::Error + Send + Sync>>
     {
-        self.0.handle_binary(id, header, body, kernel).await
+        self.0.handle_binary(id, call, body, kernel).await
     }
 }
 
-/// A record write through the store copies NO readme beside it — a bundle's
-/// readme is served from the bundle, on create and on every
+/// A record write through the store lands the record, on create and on every
 /// later write.
 #[tokio::test]
-async fn a_record_write_copies_no_readme() {
+async fn a_record_write_lands_the_record() {
     let tmp = fresh_workdir();
     let store_root = tmp.path();
     let kernel = kernel_at(store_root);
@@ -779,7 +798,6 @@ async fn a_record_write_copies_no_readme() {
         kernel.flush_records().await;
         let dir = store_root.join("agents/documented");
         assert!(dir.join("agent.yaml").exists());
-        assert!(!dir.join("readme.md").exists() && !dir.join("docs").exists());
     }
 }
 
@@ -847,7 +865,11 @@ async fn store_calls_have_python_shape() {
 struct RefusingStore;
 
 #[async_trait]
-impl Bundle for RefusingStore {
+impl Handler for RefusingStore {
+    type Call = fantastic_kernel::test_support::declared_fixtures::store_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "file_bridge"
     }
@@ -863,18 +885,16 @@ impl Bundle for RefusingStore {
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Some(json!({"error": "sealed", "reason": "unauthorized"})))
     }
 }
 
-/// python `_persist_via_store` RETURNS after `_persist_failed`: the readme/docs
-/// seed runs only after `_persist_landed`. A refused record write must not be
-/// followed by readme probes and writes.
+/// A refused record write is attempted through the store.
 #[tokio::test]
-async fn a_failed_record_write_seeds_no_readme() {
+async fn a_refused_record_write_was_attempted() {
     let tmp = fresh_workdir();
     let store_root = tmp.path();
     let mut kernel = Kernel::with_storage(StorageMode::Disk {
@@ -919,10 +939,6 @@ async fn a_failed_record_write_seeds_no_readme() {
             .iter()
             .any(|p| p.starts_with("agents/doc/agent.yaml.tmp.")),
         "the record write was attempted: {paths:?}"
-    );
-    assert!(
-        !paths.iter().any(|p| p.ends_with("readme.md")),
-        "a failed write still seeded the readme: {paths:?}"
     );
 }
 

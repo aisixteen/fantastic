@@ -237,15 +237,21 @@ pub async fn fork(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
         "display_name".to_string(),
         Value::from(name.unwrap_or_else(|| format!("{shown} fork"))),
     );
-    let mut create = meta;
-    create.insert("handler_module".into(), json!(parent.handler_module));
-    create.insert(
-        "parent_id".into(),
-        json!(parent.parent_id.as_ref().map_or("kernel", |p| p.as_str())),
-    );
-    if let Some(id) = want_id {
-        create.insert("id".into(), Value::from(id));
-    }
+    // the card's `bundle` (the kind it inherits from) is the argument of that name
+    let bundle = meta
+        .remove("bundle")
+        .and_then(|b| b.as_str().map(str::to_string));
+    let create = fantastic_kernel::declared::kernel::CreateAgent {
+        handler_module: parent.handler_module.clone(),
+        parent_id: parent
+            .parent_id
+            .as_ref()
+            .map_or("kernel", |p| p.as_str())
+            .to_string(),
+        id: want_id,
+        bundle,
+        fields: meta,
+    };
     let Some(root) = kernel.root() else {
         return Ok(refuse(
             verb,
@@ -255,9 +261,7 @@ pub async fn fork(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
             Some(at),
         ));
     };
-    let made =
-        fantastic_kernel::lifecycle::create_from_payload(kernel, &root, &Value::Object(create))
-            .await;
+    let made = fantastic_kernel::lifecycle::create_agent(kernel, &root, create).await;
     if made.get("error").is_some_and(py_truthy) {
         let mut m = made;
         m["at"] = Value::from(at);

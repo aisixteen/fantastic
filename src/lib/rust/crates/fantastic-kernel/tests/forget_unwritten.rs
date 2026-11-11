@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use fantastic_kernel::test_support::{boot_root, register_root_loader, wire_fake_store, FakeStore};
 use fantastic_kernel::StorageMode;
-use fantastic_kernel::{Agent, AgentId, Blob, Bundle, BundleRegistry, Item, Kernel, Reply};
+use fantastic_kernel::{Agent, AgentId, Blob, BundleRegistry, Handler, Item, Kernel, Reply};
 use serde_json::{json, Map, Value};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -24,7 +24,11 @@ struct DeleteLog {
 }
 
 #[async_trait]
-impl Bundle for DeleteLog {
+impl Handler for DeleteLog {
+    type Call = fantastic_kernel::test_support::declared_fixtures::store_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "file_bridge"
     }
@@ -40,30 +44,35 @@ impl Bundle for DeleteLog {
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BoxError> {
-        self.inner.handle(id, payload, kernel).await
+        self.inner.handle(id, call, kernel).await
     }
     async fn handle_binary(
         &self,
         id: &AgentId,
-        header: Value,
+        call: Self::Call,
         body: Option<Blob>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<Blob>), BoxError> {
+        let header = call.payload();
         if header.get("type").and_then(Value::as_str) == Some("delete") {
             let path = header.get("path").and_then(Value::as_str).unwrap_or("");
             self.deletes.lock().unwrap().push(path.to_string());
         }
-        self.inner.handle_binary(id, header, body, kernel).await
+        self.inner.handle_binary(id, call, body, kernel).await
     }
 }
 
 struct Plain;
 
 #[async_trait]
-impl Bundle for Plain {
+impl Handler for Plain {
+    type Call = fantastic_kernel::test_support::NoCall;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "plain"
     }
@@ -79,7 +88,7 @@ impl Bundle for Plain {
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BoxError> {
         Ok(None)

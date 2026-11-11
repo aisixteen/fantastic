@@ -5,7 +5,7 @@
 //! `record!`, and a `handle` whose first act is the entry.
 
 use async_trait::async_trait;
-use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Reply};
+use fantastic_kernel::{Agent, AgentId, BundleRegistry, Handler, Item, Kernel, Reply};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -68,6 +68,19 @@ mod probe_record {
 
 struct Probe;
 
+/// How many calls reached a probe's handler, per kernel (the tests run side by side).
+static HANDLED: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
+
+fn handled_by(kernel: &Arc<Kernel>) -> usize {
+    let key = Arc::as_ptr(kernel) as usize;
+    HANDLED
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map_or(0, |(_, n)| *n)
+}
+
 /// A bundle whose agents carry verbs built at runtime: the record's `tools` list
 /// (`{name, description, schema}`), the way an MCP client builds one verb per tool.
 struct Tools;
@@ -97,7 +110,11 @@ mod tools_record {
 }
 
 #[async_trait]
-impl Bundle for Tools {
+impl Handler for Tools {
+    type Call = tools_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "tools_probe"
     }
@@ -128,25 +145,28 @@ impl Bundle for Tools {
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
-        let agent = kernel.agents.get(id).map(|e| Arc::clone(&e)).unwrap();
-        let dynamic = self.dynamic_verbs(&agent);
-        let call = match tools_verbs::Call::parse(&id.0, payload, &dynamic) {
-            Ok(c) => c,
-            Err(refused) => return Ok(Some(refused)),
-        };
         match call {
             tools_verbs::Call::Reflect(_) => Ok(Some(json!({"id": id.0, "sentence": "Tools."}))),
-            tools_verbs::Call::Tools0(_) => Ok(Some(json!({"tools": dynamic.len()}))),
+            tools_verbs::Call::Tools0(_) => {
+                let agent = kernel.agents.get(id).map(|e| Arc::clone(&e)).unwrap();
+                Ok(Some(
+                    json!({"tools": Handler::dynamic_verbs(self, &agent).len()}),
+                ))
+            }
             tools_verbs::Call::Dynamic(c) => Ok(Some(json!({"ran": c.name, "args": c.args}))),
         }
     }
 }
 
 #[async_trait]
-impl Bundle for Probe {
+impl Handler for Probe {
+    type Call = probe_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "probe"
     }
@@ -162,14 +182,17 @@ impl Bundle for Probe {
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
-        _kernel: &Arc<Kernel>,
+        call: Self::Call,
+        kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
-        // the shared entry checks the call and its refusal is the reply
-        let call = match probe_verbs::Call::parse(&id.0, payload) {
-            Ok(c) => c,
-            Err(refused) => return Ok(Some(refused)),
-        };
+        {
+            let key = Arc::as_ptr(kernel) as usize;
+            let mut all = HANDLED.lock().unwrap();
+            match all.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, n)) => *n += 1,
+                None => all.push((key, 1)),
+            }
+        }
         match call {
             probe_verbs::Call::Reflect(_) => Ok(Some(json!({"id": id.0, "sentence": "A probe."}))),
             probe_verbs::Call::Greet(g) => Ok(Some(json!({
@@ -193,7 +216,11 @@ struct Open;
 
 fantastic_kernel::stand_in_verbs!(open_verbs { AnythingV "anything" {  } });
 #[async_trait]
-impl Bundle for Open {
+impl Handler for Open {
+    type Call = open_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "open"
     }
@@ -208,13 +235,10 @@ impl Bundle for Open {
     }
     async fn handle(
         &self,
-        id: &AgentId,
-        payload: &Value,
+        _id: &AgentId,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
-        if let Err(refused) = open_verbs::Call::parse(&id.0, &payload) {
-            return Ok(Some(refused));
-        }
         Ok(Some(json!({"ok": true})))
     }
 }
@@ -634,24 +658,48 @@ async fn a_nested_object_is_checked_by_its_own_declared_fields() {
     )
     .await;
     assert_eq!(made["id"], "n", "{made}");
-    let ok = call(&k, "n", json!({"type": "put", "item": {"id": "a", "qty": 2, "x": 1}})).await;
+    let ok = call(
+        &k,
+        "n",
+        json!({"type": "put", "item": {"id": "a", "qty": 2, "x": 1}}),
+    )
+    .await;
     assert_eq!(ok["ran"], "put", "{ok}");
     let r = call(&k, "n", json!({"type": "put", "item": {"qty": 2}})).await;
     assert_eq!(r["reason"], "missing_arg", "{r}");
     assert_eq!(r["arg"], "item.id", "{r}");
     assert_eq!(r["error"], "put: missing argument 'item.id'", "{r}");
-    let r = call(&k, "n", json!({"type": "put", "item": {"id": "a", "qty": "2"}})).await;
-    assert_eq!(r["error"], "put: argument 'item.qty' must be int, got str", "{r}");
+    let r = call(
+        &k,
+        "n",
+        json!({"type": "put", "item": {"id": "a", "qty": "2"}}),
+    )
+    .await;
+    assert_eq!(
+        r["error"], "put: argument 'item.qty' must be int, got str",
+        "{r}"
+    );
     let r = call(&k, "n", json!({"type": "put", "item": "a"})).await;
-    assert_eq!(r["error"], "put: argument 'item' must be object, got str", "{r}");
+    assert_eq!(
+        r["error"], "put: argument 'item' must be object, got str",
+        "{r}"
+    );
 }
 
 #[tokio::test]
 async fn reflect_and_docs_render_both_kinds_of_verb_from_the_agent() {
     let (_t, k) = with_tools().await;
     let r = call(&k, "t", json!({"type": "reflect"})).await;
-    let names: Vec<&str> = r["verbs"].as_object().unwrap().keys().map(String::as_str).collect();
-    assert_eq!(names, ["tools", "reflect", "boot", "shutdown", "search", "ping"]);
+    let names: Vec<&str> = r["verbs"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        names,
+        ["tools", "reflect", "boot", "shutdown", "search", "ping"]
+    );
     assert_eq!(
         r["verbs"]["search"],
         "args: q:string (req), limit:int? — Find pages"
@@ -672,7 +720,12 @@ async fn reflect_and_docs_render_both_kinds_of_verb_from_the_agent() {
         "{det}"
     );
     // a bundle addressed by name has no agent, so no dynamic verbs
-    let bundle = call(&k, "kernel", json!({"type": "docs", "of": "tools_probe.tools"})).await;
+    let bundle = call(
+        &k,
+        "kernel",
+        json!({"type": "docs", "of": "tools_probe.tools"}),
+    )
+    .await;
     assert!(bundle["verbs"].get("search").is_none(), "{bundle}");
     assert!(bundle["verbs"].get("tools").is_some(), "{bundle}");
 }
@@ -759,4 +812,162 @@ async fn the_bundle_catalog_lists_the_declared_record() {
     assert_eq!(fields[0]["name"], "word", "{probe}");
     assert_eq!(fields[0]["hint"], "The greeting's first word.", "{probe}");
     assert_eq!(fields[1]["name"], "limit", "{probe}");
+}
+
+// ─── the typed arguments of the kernel's own verbs: the declared type decides ───
+
+#[tokio::test]
+async fn a_page_size_and_cursor_are_the_declared_types() {
+    let (_t, k) = with_probe().await;
+    for verb in ["list_agents", "ps", "ledger"] {
+        let r = call(&k, "kernel", json!({"type": verb, "limit": 0})).await;
+        assert_eq!(r["reason"], "bad_arg", "{verb}: {r}");
+        assert_eq!(r["arg"], "limit", "{verb}: {r}");
+        assert_eq!(
+            r["error"],
+            format!("{verb}: argument 'limit' must be int >= 1, got int"),
+            "{r}"
+        );
+        // a number is no cursor, text is no page size
+        let r = call(&k, "kernel", json!({"type": verb, "after": 2})).await;
+        assert_eq!(r["arg"], "after", "{verb}: {r}");
+        let r = call(&k, "kernel", json!({"type": verb, "limit": "2"})).await;
+        assert_eq!(r["arg"], "limit", "{verb}: {r}");
+    }
+    let page = call(&k, "kernel", json!({"type": "list_agents", "limit": 1})).await;
+    assert_eq!(page["agents"].as_array().unwrap().len(), 1, "{page}");
+    assert!(page["next"].is_string(), "{page}");
+}
+
+#[tokio::test]
+async fn text_is_a_name_never_a_task_id() {
+    let (_t, k) = with_probe().await;
+    // an id is a number; the text of one names no execution, and says so honestly
+    let r = call(&k, "kernel", json!({"type": "cancel", "task_id": "123456"})).await;
+    assert_eq!(r, json!({"cancelled": false, "killed": []}), "{r}");
+    let r = call(&k, "kernel", json!({"type": "cancel", "task_id": 123_456})).await;
+    assert_eq!(r, json!({"cancelled": false, "killed": []}), "{r}");
+    // neither a float nor a bool is either
+    for bad in [json!(3.5), json!(true), json!([1])] {
+        let r = call(
+            &k,
+            "kernel",
+            json!({"type": "cancel", "task_id": bad.clone()}),
+        )
+        .await;
+        assert_eq!(r["reason"], "bad_arg", "{bad}: {r}");
+        assert_eq!(r["arg"], "task_id", "{bad}: {r}");
+    }
+    let r = call(&k, "kernel", json!({"type": "cancel"})).await;
+    assert_eq!(r["reason"], "missing_arg", "{r}");
+    // the wait of `await_cancel` is an integer id
+    let r = call(
+        &k,
+        "kernel",
+        json!({"type": "await_cancel", "wait_id": "5"}),
+    )
+    .await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "wait_id", "{r}");
+}
+
+#[tokio::test]
+async fn await_set_takes_its_declared_arguments() {
+    let (_t, k) = with_probe().await;
+    let r = call(
+        &k,
+        "kernel",
+        json!({"type": "await_set", "ids": ["p"], "timeout_s": 0}),
+    )
+    .await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "timeout_s", "{r}");
+    let r = call(
+        &k,
+        "kernel",
+        json!({"type": "await_set", "ids": ["p"], "timeout_s": "5"}),
+    )
+    .await;
+    assert_eq!(r["arg"], "timeout_s", "{r}");
+    let r = call(&k, "kernel", json!({"type": "await_set", "ids": "p"})).await;
+    assert_eq!(r["arg"], "ids", "{r}");
+    let r = call(
+        &k,
+        "kernel",
+        json!({"type": "await_set", "ids": ["p"], "label": 4}),
+    )
+    .await;
+    assert_eq!(r["arg"], "label", "{r}");
+}
+
+#[tokio::test]
+async fn docs_of_a_bundle_carries_its_one_man_text_and_no_other_prose() {
+    let (_t, k) = with_probe().await;
+    for tier in ["oneliners", "detailed"] {
+        let r = call(
+            &k,
+            "kernel",
+            json!({"type": "docs", "of": "p", "tier": tier}),
+        )
+        .await;
+        assert_eq!(r["man"], "A test stand-in.", "{tier}: {r}");
+        assert_eq!(r["tier"], tier, "{r}");
+    }
+    // one verb's entry carries the verb alone
+    let r = call(
+        &k,
+        "kernel",
+        json!({"type": "docs", "of": "p", "verb": "tally"}),
+    )
+    .await;
+    assert!(r.get("man").is_none(), "{r}");
+    // the tier is the declared enum
+    let r = call(
+        &k,
+        "kernel",
+        json!({"type": "docs", "of": "p", "tier": "full"}),
+    )
+    .await;
+    assert_eq!(r["arg"], "tier", "{r}");
+}
+
+/// The handler runs on a CHECKED call only: whatever the entry refuses never reaches it.
+#[tokio::test]
+async fn a_refused_call_never_reaches_the_handler() {
+    let (_t, k) = with_probe().await;
+    let ran = call(&k, "p", json!({"type": "tally"})).await;
+    assert_eq!(ran, json!({"count": 0}), "{ran}");
+    let handled = handled_by(&k);
+    for bad in [
+        json!({"type": "greet"}),
+        json!({"type": "greet", "name": 5}),
+        json!({"type": "greet", "name": "a", "extra": 1}),
+        json!({"type": "nope"}),
+    ] {
+        let r = call(&k, "p", bad.clone()).await;
+        assert!(r["error"].is_string(), "{bad}: {r}");
+        assert!(r["reason"].is_string(), "{bad}: {r}");
+    }
+    assert_eq!(handled_by(&k), handled, "a refused call ran the handler");
+    // a checked one does
+    let ok = call(&k, "p", json!({"type": "greet", "name": "Ann"})).await;
+    assert_eq!(ok["said"], "Ann", "{ok}");
+    assert_eq!(handled_by(&k), handled + 1);
+}
+
+#[tokio::test]
+async fn a_reflect_flag_is_the_declared_type() {
+    let (_t, k) = with_probe().await;
+    for (arg, bad) in [
+        ("detail", json!("everything")),
+        ("tree", json!(false)),
+        ("bundles", json!("some")),
+        ("limit", json!(0)),
+        ("after", json!(3)),
+        ("show_subtrees", json!("p")),
+    ] {
+        let r = call(&k, "kernel", json!({"type": "reflect", arg: bad.clone()})).await;
+        assert_eq!(r["reason"], "bad_arg", "{arg}={bad}: {r}");
+        assert_eq!(r["arg"], arg, "{arg}={bad}: {r}");
+    }
 }

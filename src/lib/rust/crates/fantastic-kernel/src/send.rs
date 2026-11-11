@@ -26,7 +26,7 @@
 //! target and for every watcher that is a real agent. `emit` does the same with
 //! `kind:"emit"`; once the handler returns, `{agent_id, kind:"drain", backlog}`.
 
-use crate::agent::{Agent, AgentId, RESERVED_RECORD_KEYS};
+use crate::agent::{Agent, AgentId};
 use crate::kernel::Kernel;
 use crate::outcome::{Item, Outcome, Status};
 use crate::tasks::{
@@ -206,6 +206,23 @@ fn summarize_payload(payload: &Value, body: Option<&crate::outcome::Blob>) -> St
             let _ = b.place(&mut shrunk, json!(format!("<bytes:{}>", b.bytes.len())));
             fantastic_bundle::py_json_dumps(&shrunk, false, None)
         }
+    }
+}
+
+/// The typed arguments of a `reflect` the KERNEL answers itself (the `kernel` address
+/// fast path): the kernel is the agent of its own verbs and parses them through the
+/// shared entry of the common verbs; `Err` is its refusal.
+fn kernel_reflect_args(
+    target: &Agent,
+    payload: &Value,
+) -> Result<crate::declared::common::Reflect, Value> {
+    use crate::declared::common::Call;
+    match Call::parse(&target.id.0, payload)? {
+        Call::Reflect(args) => Ok(args),
+        _ => Err(crate::refusal::refusal(
+            crate::refusal::UNHANDLED,
+            "the kernel's reflect fast path answers `reflect` alone",
+        )),
     }
 }
 
@@ -991,13 +1008,12 @@ impl Kernel {
                 let read = async {
                     // the kernel IS the agent here (the fast path answers `reflect`
                     // itself): it parses through the shared entry of the common verbs
-                    if let Err(refused) =
-                        crate::declared::common::Call::parse(&target.id.0, &payload)
-                    {
-                        return (refused, Status::Completed);
-                    }
+                    let args = match kernel_reflect_args(&target, &payload) {
+                        Ok(a) => a,
+                        Err(refused) => return (refused, Status::Completed),
+                    };
                     let mut reply = crate::reflect::reflect_identity(&target);
-                    match crate::reflect::apply_reflect_flags(self, &target, &payload, &mut reply)
+                    match crate::reflect::apply_reflect_flags(self, &target, &args, &mut reply)
                         .await
                     {
                         Ok(()) => (reply, Status::Completed),
@@ -1070,14 +1086,18 @@ impl Kernel {
                 // but with no task row, no fanout and no deadline (python
                 // `_launch`'s `flags_done` branch).
                 let mut reply = crate::reflect::reflect_identity(&target);
-                let (reply, status) =
-                    match crate::reflect::apply_reflect_flags(self, &target, &payload, &mut reply)
-                        .await
-                    {
-                        Ok(()) if error_shaped(&reply) => (reply, Status::Errored),
-                        Ok(()) => (reply, Status::Completed),
-                        Err(raised) => (raised, Status::Failed),
-                    };
+                let (reply, status) = match kernel_reflect_args(&target, &payload) {
+                    Err(refused) => (refused, Status::Errored),
+                    Ok(args) => {
+                        match crate::reflect::apply_reflect_flags(self, &target, &args, &mut reply)
+                            .await
+                        {
+                            Ok(()) if error_shaped(&reply) => (reply, Status::Errored),
+                            Ok(()) => (reply, Status::Completed),
+                            Err(raised) => (raised, Status::Failed),
+                        }
+                    }
+                };
                 if !self.ledger.should_retry(exec_id, status) {
                     break (Some(task_id), reply, status, None);
                 }
@@ -1104,7 +1124,7 @@ impl Kernel {
             noted_marks = sink.lock().map(|m| m.clone()).unwrap_or_default();
             // Universal post-process, PER ATTEMPT (python applies it inside
             // `_settle_once`, before `_record` weighs a retry): compose every
-            // reflect reply with the tree/bundles/readme/more flags. A roster
+            // reflect reply with the tree/bundles flags. A roster
             // node whose own reflect RAISED fails this whole reflect, exactly as
             // the exception propagating out of python's `_roster` does.
             //
@@ -1117,11 +1137,23 @@ impl Kernel {
                 && !target.is_remote()
                 && !named_fast_reflect
             {
-                if let Err(raised) =
-                    crate::reflect::apply_reflect_flags(self, &target, &payload, &mut reply).await
+                // The agent's own entry checked the call before it answered: its typed
+                // form is decoded, not judged again.
+                match crate::verbs::decode::<crate::declared::common::Reflect>("reflect", &payload)
                 {
-                    reply = raised;
-                    status = Status::Failed;
+                    Err(refused) => {
+                        reply = refused;
+                        status = Status::Errored;
+                    }
+                    Ok(args) => {
+                        if let Err(raised) =
+                            crate::reflect::apply_reflect_flags(self, &target, &args, &mut reply)
+                                .await
+                        {
+                            reply = raised;
+                            status = Status::Failed;
+                        }
+                    }
                 }
             }
             if !self.ledger.should_retry(exec_id, status) {
@@ -2090,8 +2122,7 @@ fn dispatch(
             // Universal answers for bare agents, through the shared entry of the
             // common verbs: their arguments are checked like any agent's.
             if matches!(verb, "boot" | "shutdown" | "reflect") {
-                if let Err(refused) = crate::declared::common::Call::parse(&target.id.0, &payload)
-                {
+                if let Err(refused) = crate::declared::common::Call::parse(&target.id.0, &payload) {
                     return Ok((refused, None));
                 }
             }
@@ -2116,20 +2147,10 @@ fn dispatch(
             // cannot be answered HERE, and says so with a code.
             return Ok((not_installed_refusal(&target.id.0, hm, verb), None));
         };
-        // The kernel ROUTES: the bundle's own entry (`verbs::Call::parse`, shared
-        // library code) checks the verb and its arguments and replies with the
-        // refusal. `boot` and `shutdown` are answered by EVERY agent: a bundle that
-        // declares neither has nothing to open or release, and the kernel answers for
-        // it through the shared entry of the common verbs, as it does for a bare agent.
-        if matches!(verb, "boot" | "shutdown") && !bundle.verbs().iter().any(|v| v.name == verb) {
-            return Ok((
-                match crate::declared::common::Call::parse(&target.id.0, &payload) {
-                    Ok(_) => Value::Null,
-                    Err(refused) => refused,
-                },
-                None,
-            ));
-        }
+        // The kernel ROUTES: the bundle's own entry (the generated `Parse`, shared
+        // library code the bundle cannot skip) checks the verb and its arguments
+        // and replies with the refusal; `boot` and `shutdown` an agent does not
+        // declare are answered there too.
         // The reply body comes back AT ITS SLOT of the reply: `bytes` for a
         // `read_stream`, a bundle's own key for its own verb, the peer's own key
         // for a bridge relaying a peer's reply.
@@ -2179,9 +2200,8 @@ fn taped_payload(value: &Value, body: Option<&crate::outcome::Blob>) -> Value {
 const LIST_HINT: &str = "Raw records — how agents are WIRED, not what they are FOR, \
 and no manual. <type>reflect</type> on the root is the briefing: each agent's purpose, \
 plus `self_extension` (how to author your own durable tools in THIS kernel — which \
-executor, and the fields without which the agent is created and never runs) and, \
-with `detail:\"full\"`, `readmes` (the manual index). Reflect the root before building \
-anything.";
+executor, and the fields without which the agent is created and never runs). Reflect \
+the root before building anything.";
 
 mod gate;
 mod kernel_verbs;

@@ -11,7 +11,6 @@
 //! {"error":  "<one line a person reads>",
 //!  "reason": "<code a machine branches on>",
 //!  "hint":   "<what to do instead>",    // optional but strongly encouraged
-//!  "see":    "<readme key>",            // optional doc pointer
 //!  ...extra}                            // facts specific to this refusal
 //! ```
 //!

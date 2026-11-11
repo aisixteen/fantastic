@@ -74,13 +74,6 @@ pub fn mint_guid() -> String {
     hex(&b)
 }
 
-/// Implementation of the `create_agent` system verb.
-///
-/// `payload` shape (matches the workdir wire format):
-/// ```json
-/// {"type":"create_agent","handler_module":"file_bridge.tools","id":"opt"}
-/// ```
-/// Any extra fields become the new agent's meta.
 /// A grant map's SHAPE, judged at WRITE time — the gate only judges edges.
 ///
 /// `{key: "*" | [verbs]}`, a key being one of [`crate::authz::legal_keys`] —
@@ -123,43 +116,25 @@ pub fn bad_grant_shape(meta: &Map<String, Value>) -> Option<String> {
 
 /// The `create_agent` body, for a bundle that makes a child as bookkeeping — python's
 /// `Agent.create` (a view of a file bridge is made this way). NOT a gated send: the
-/// caller already holds the verb that asked for it.
-pub async fn create_from_payload(
+/// caller already holds the verb that asked for it. `args` are the declared, typed
+/// arguments of `create_agent`; any field beyond them is a field of the new agent's
+/// record, which its bundle's shared entry checks.
+pub async fn create_agent(
     kernel: &Arc<Kernel>,
     root: &Arc<Agent>,
-    payload: &Value,
+    args: crate::declared::kernel::CreateAgent,
 ) -> Value {
-    // THE BUNDLE'S FIELDS go under the payload's (`crate::inherit`).
-    let inherited = crate::inherit::create_payload(&kernel.bundles, payload);
-    let payload = inherited.as_ref().unwrap_or(payload);
-    // python: `if not isinstance(handler_module, str) or not handler_module:
-    // return missing(...)` — an EMPTY string is falsy and refused the same as
-    // an absent one, not just a missing/non-string value.
-    let Some(hm) = payload
-        .get("handler_module")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    else {
+    let pid = args.parent_id.clone();
+    let supplied_id = args.id.clone();
+    // THE BUNDLE'S FIELDS go under the arguments' (`crate::inherit`).
+    let (hm, meta) = crate::inherit::create_args(&kernel.bundles, args);
+    let Some(hm) = hm.as_deref() else {
         return crate::refusal::missing("create_agent", "handler_module");
     };
+    let pid = pid.as_str();
 
     // `parent_id` NAMES THE OWNER. It is a real, REQUIRED argument — resolved
     // like a send target (the reserved `kernel` address included), never defaulted.
-    //
-    // Same falsy-string rule as `handler_module` — an empty `parent_id` is
-    // refused as absent, not resolved as an (unknown) empty-string agent id.
-    let Some(pid) = payload
-        .get("parent_id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    else {
-        return crate::refusal::missing_hint(
-            "create_agent",
-            "parent_id",
-            "name the agent that will OWN the new one — your own id for a \
-             tool you keep, or the root ('kernel_state') for a top-level agent",
-        );
-    };
     // Resolved the same way `send` does: `kernel` special-cased to the root,
     // then a literal id.
     let parent: Arc<Agent> = if pid == "kernel" {
@@ -192,45 +167,11 @@ pub async fn create_from_payload(
         return r;
     };
 
-    // RESERVED KEYS FIRST, in SORTED order — python walks `sorted(RESERVED_RECORD_KEYS)`
-    // and checks each against the payload, so the refusal names the
-    // alphabetically-first reserved key present, never whichever the payload
-    // happened to list first.
-    let mut reserved: Vec<&str> = crate::agent::RESERVED_RECORD_KEYS.to_vec();
-    reserved.sort_unstable();
-    for k in reserved {
-        if payload.get(k).is_some() {
-            return crate::refusal::bad(
-                "create_agent",
-                k,
-                "absent — root_path/ctx/parent name substrate wiring the \
-                 record may not carry",
-            );
-        }
-    }
-    // `children_dir` BECOMES A DIRECTORY (`<agent>/<children_dir>/<child>`), so
-    // it is one safe segment, exactly as an id is. A non-string is judged as ""
-    // — python refuses it as "a non-empty string" too.
-    if let Some(cd) = payload.get("children_dir") {
-        if let Some(r) = crate::refusal::guard_agent_id_as(
-            "create_agent",
-            "children_dir",
-            cd.as_str().unwrap_or(""),
-        ) {
-            return r;
-        }
-    }
-
-    // Compose meta from the remaining payload fields; the bundle's declared record
-    // judges them below, and reserved keys were already ruled out.
-    let mut meta: Map<String, Value> = Map::new();
-    if let Some(obj) = payload.as_object() {
-        for (k, v) in obj {
-            if matches!(k.as_str(), "type" | "id" | "handler_module" | "parent_id") {
-                continue;
-            }
-            meta.insert(k.clone(), v.clone());
-        }
+    // THE RECORD'S FIELDS are judged by the target's own bundle, through its shared
+    // entry: the substrate wiring no record may carry, `children_dir`, the fields its
+    // record declares and their types.
+    if let Err(refused) = bundle.check_record("create_agent", &meta) {
+        return refused;
     }
 
     // The structural authority baseline ({$self:*} on both
@@ -244,16 +185,6 @@ pub async fn create_from_payload(
     if let Some(why) = bad_grant_shape(&meta) {
         return crate::refusal::refusal(crate::refusal::INVALID_META, &why);
     }
-    // THE RECORD'S FIELDS are the bundle's declared ones ([`crate::verbs::check_record`]).
-    if let Err(refused) = crate::verbs::check_record(
-        "create_agent",
-        bundle.name(),
-        &meta,
-        &crate::declared::record::RECORD,
-        bundle.record(),
-    ) {
-        return refused;
-    }
     if let Some(why) = bundle.validate_meta(&meta, &Map::new()) {
         return crate::refusal::refusal(crate::refusal::INVALID_META, why);
     }
@@ -262,9 +193,9 @@ pub async fn create_from_payload(
     // by `guard_agent_id`; only an ABSENT id is minted (python parity). Minted
     // AFTER every refusal above (python's `parent.create()` runs last, inside
     // `rec = parent.create(...)`).
-    let id = match payload.get("id") {
-        None | Some(Value::Null) => mint_id(hm),
-        Some(v) => v.as_str().unwrap_or("").to_string(),
+    let id = match supplied_id {
+        None => mint_id(hm),
+        Some(v) => v,
     };
     // An id BECOMES A DIRECTORY, so it must be one safe segment. Enforced at
     // the mint, so every consumer inherits it rather than each remembering.
@@ -309,8 +240,7 @@ pub async fn create_from_payload(
 
     // NO INLINE PERSIST. The record reaches disk through the ROOT LOADER's
     // `persist_writer`, which consumes the `added` event published below and
-    // debounces it — python's `_FlushLoop`, and the only path that also seeds
-    // the bundle's readme/docs. A kernel with no loader booted (or no store
+    // debounces it — python's `_FlushLoop`. A kernel with no loader booted (or no store
     // wired) keeps the record in RAM, which is the auto-flush law.
 
     // LIFECYCLE SHAPE, python's: `{agent_id, kind, …}` like every other state
@@ -404,18 +334,12 @@ pub fn keep_memory(kernel: &Kernel, id: &AgentId) -> bool {
 }
 
 /// Implementation of the `delete_agent` system verb.
-pub(crate) async fn delete_from_payload(
+pub(crate) async fn delete_agent(
     kernel: &Arc<Kernel>,
     caller: &Arc<Agent>,
-    payload: &Value,
+    args: &crate::declared::kernel::DeleteAgent,
 ) -> Value {
-    let Some(id_str) = payload
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    else {
-        return crate::refusal::missing("delete_agent", "id");
-    };
+    let id_str = args.id.as_str();
     let id = AgentId::from(id_str);
     let Some(target) = kernel.agents.get(&id).map(|e| Arc::clone(&e)) else {
         // THE ONE REFUSAL SHAPE, py-canonical: a code to branch on, the LIVE id
@@ -477,7 +401,7 @@ pub(crate) async fn delete_from_payload(
     // `keep_memory:true` (only the literal) tells every `on_delete` hook of this
     // subtree to leave the agent's persisted memory alone. The hook has no
     // payload, so the flag rides kernel state, set for this one delete.
-    let keep = payload.get("keep_memory") == Some(&Value::Bool(true));
+    let keep = args.keep_memory == Some(true);
     let kept = kernel.extension::<KeepMemory>(KEEP_MEMORY_KEY);
     if keep {
         kept.0

@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use fantastic_kernel::{
-    Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Outcome, PeerRoute, Reply,
+    Agent, AgentId, BundleRegistry, Handler, Item, Kernel, Outcome, PeerRoute, Reply,
 };
 use serde_json::{json, Map, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,7 +25,11 @@ struct Echo;
 
 fantastic_kernel::stand_in_verbs!(echo_verbs { AroundV "around" { x: Option<i64>, y: Option<i64>, radius: Option<i64> }, ClearV "clear" {  } });
 #[async_trait]
-impl Bundle for Echo {
+impl Handler for Echo {
+    type Call = echo_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "echo"
     }
@@ -41,12 +45,9 @@ impl Bundle for Echo {
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
-        if let Err(refused) = echo_verbs::Call::parse(&id.0, &payload) {
-            return Ok(Some(refused));
-        }
         Ok(Some(json!({"id": id.0})))
     }
 }

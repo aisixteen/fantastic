@@ -52,11 +52,6 @@ pub const VIEW_CALLS: [&str; 9] = [
 /// What the view reads and answers on `user`: the inquiries this chat asked the person.
 pub const VIEW_USER_CALLS: [&str; 2] = ["inquiries", "answer_inquiry"];
 
-const README: &str = "# ai_chat\n\nThe AI agent apart from any provider: it keeps the conversation \
-and completes each turn through the provider agent named by `provider_id` (`complete`). Grant it \
-`can_call {<provider>: [complete, watch]}`; the provider admits it in `callable_by`. Model, endpoint \
-and key are the provider's; the cache marks are this chat's (`caching`): the provider forwards them.\n";
-
 /// The `ai_chat.tools` bundle.
 pub struct AiChatBundle;
 
@@ -64,32 +59,6 @@ pub struct AiChatBundle;
 impl Bundle for AiChatBundle {
     fn name(&self) -> &str {
         NAME
-    }
-
-    fn verb_docs(&self) -> Value {
-        let mut docs = verbs::verb_docs();
-        if let Some(m) = docs.as_object_mut() {
-            for v in ["complete", "models", "set_default_model"] {
-                m.remove(v); // a provider's verbs, not a chat's
-            }
-        }
-        docs
-    }
-
-    fn emits_doc(&self) -> Option<Value> {
-        Some(verbs::emits())
-    }
-
-    fn cancel_doc(&self) -> Option<Value> {
-        Some(Value::String(verbs::CANCEL_DOC.to_string()))
-    }
-
-    fn notes_doc(&self) -> Option<Value> {
-        Some(verbs::notes())
-    }
-
-    fn readme(&self) -> Option<&'static str> {
-        Some(README)
     }
 
     /// The write-time check of the chat's own prompt-file fields (the provider's `validate_meta`

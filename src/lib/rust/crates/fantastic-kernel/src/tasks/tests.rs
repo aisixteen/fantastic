@@ -15,7 +15,7 @@ use crate::outcome::Item;
 
 use super::*;
 use crate::agent::Agent;
-use crate::bundle::{Bundle, BundleError, Reply};
+use crate::bundle::{BundleError, Handler, Reply};
 use async_trait::async_trait;
 use serde_json::Map;
 use std::collections::HashSet;
@@ -65,7 +65,11 @@ struct SlowBundle {
 
 crate::stand_in_verbs!(slowbundle_verbs { BoomV "boom" {  }, BootV "boot" {  }, ChainV "chain" { next: Option<String> }, ChainForkV "chain_fork" { next: Option<String> }, CountV "count" {  }, FastV "fast" {  }, FlakyV "flaky" { succeed_on: Option<i64> }, ForkV "fork" {  }, KillV "kill" { victim: Option<String> }, RaisedReplyV "raised_reply" {  }, ShutdownV "shutdown" {  }, SlowV "slow" { hold_ms: Option<i64> } });
 #[async_trait]
-impl Bundle for SlowBundle {
+impl Handler for SlowBundle {
+    type Call = slowbundle_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "slow"
     }
@@ -84,12 +88,10 @@ impl Bundle for SlowBundle {
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        if let Err(refused) = slowbundle_verbs::Call::parse(&agent_id.0, &payload) {
-            return Ok(Some(refused));
-        }
+        let payload = &call.payload();
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         let reply = match verb {
             "boot" | "shutdown" => Value::Null,
@@ -1123,7 +1125,18 @@ async fn a_task_keeps_a_parent_that_has_already_ended() {
     assert!(!kernel.tasks.is_root(&forked));
 }
 
-crate::stand_in_verbs!(per_instance_verbs { PingV "ping" {  } });
+/// Answer a ping.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PingV {}
+
+mod per_instance_verbs {
+    use super::PingV;
+    crate::verbs! {
+        dynamic;
+        "ping" => PingV,
+    }
+}
 
 /// DYNAMIC VERBS — python
 /// `test_docs_of_an_agent_read_its_own_table_when_its_bundle_names_one`: a bundle
@@ -1133,7 +1146,11 @@ crate::stand_in_verbs!(per_instance_verbs { PingV "ping" {  } });
 async fn docs_of_an_agent_render_its_dynamic_verbs_beside_the_bundles_own() {
     struct PerInstance;
     #[async_trait]
-    impl Bundle for PerInstance {
+    impl Handler for PerInstance {
+        type Call = per_instance_verbs::Call;
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
         fn name(&self) -> &str {
             "per_instance_probe"
         }
@@ -1158,17 +1175,11 @@ async fn docs_of_an_agent_render_its_dynamic_verbs_beside_the_bundles_own() {
         async fn handle(
             &self,
             id: &AgentId,
-            payload: &Value,
+            call: Self::Call,
             kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
-            let agent = kernel.agents.get(id).map(|e| Arc::clone(&e)).unwrap();
-            let own = self.dynamic_verbs(&agent);
-            let lists: [&'static [crate::Verb]; 2] =
-                [per_instance_verbs::VERBS, crate::declared::common::VERBS];
-            match crate::verbs::resolve(&id.0, payload, &lists, &own) {
-                Ok(_) => Ok(Some(json!({"ok": true}))),
-                Err(refused) => Ok(Some(refused)),
-            }
+            let _ = (id, kernel, call);
+            Ok(Some(json!({"ok": true})))
         }
     }
     let mut kernel = Kernel::new();
@@ -1218,9 +1229,16 @@ async fn docs_of_an_agent_render_its_dynamic_verbs_beside_the_bundles_own() {
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(names, ["ping", "reflect", "boot", "shutdown", "own_a1"], "{a1}");
-    assert_eq!(a1["verbs"]["ping"], "No args", "{a1}");
-    assert_eq!(a1["verbs"]["own_a1"], "args: x:int (req) — Only mine", "{a1}");
+    assert_eq!(
+        names,
+        ["ping", "reflect", "boot", "shutdown", "own_a1"],
+        "{a1}"
+    );
+    assert_eq!(a1["verbs"]["ping"], "No args — Answer a ping", "{a1}");
+    assert_eq!(
+        a1["verbs"]["own_a1"], "args: x:int (req) — Only mine",
+        "{a1}"
+    );
     // the detailed tier of one dynamic verb: the whole doc, then each argument
     let a2 = docs("a2", json!({"tier": "detailed", "verb": "own_a2"})).await;
     assert_eq!(
@@ -1233,7 +1251,11 @@ async fn docs_of_an_agent_render_its_dynamic_verbs_beside_the_bundles_own() {
     assert!(plain["verbs"].get("ping").is_some(), "{plain}");
     assert!(plain["verbs"].get("own_plain").is_none(), "{plain}");
     assert!(
-        plain["verbs"].as_object().unwrap().keys().all(|k| !k.starts_with("own_")),
+        plain["verbs"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|k| !k.starts_with("own_")),
         "{plain}"
     );
     // another agent's dynamic verb is not this agent's
@@ -1249,7 +1271,10 @@ async fn docs_of_an_agent_render_its_dynamic_verbs_beside_the_bundles_own() {
         json!({"ok": true})
     );
     let r = send("a1", json!({"type": "own_a1", "x": "3"})).await;
-    assert_eq!(r["error"], "own_a1: argument 'x' must be int, got str", "{r}");
+    assert_eq!(
+        r["error"], "own_a1: argument 'x' must be int, got str",
+        "{r}"
+    );
     let r = send("a1", json!({"type": "own_a2", "x": 3})).await;
     assert_eq!(r["reason"], "unhandled", "{r}");
 }

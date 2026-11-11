@@ -6,6 +6,7 @@
 //! create_agent to X" read three ways and only one was ever true.
 
 use super::*;
+use crate::declared::IdOrName;
 
 /// excludes `reflect`. Reflect is per-bundle (each handler customizes
 /// its `sentence` + state shape); the substrate's reflect path only
@@ -64,13 +65,14 @@ pub(super) async fn handle_kernel_verb(
         Err(refused) => return Ok(refused),
     };
     Ok(match call {
-        K::Docs(_) => match payload.get("of").and_then(Value::as_str) {
-            Some(of) if of.contains('|') => {
-                crate::docs::remote_docs_reply(kernel, of, payload).await
+        K::Docs(args) => {
+            if args.of.contains('|') {
+                crate::docs::remote_docs_reply(kernel, &args).await
+            } else {
+                crate::docs::docs_reply(kernel, &args)
             }
-            _ => crate::docs::docs_reply(kernel, payload),
-        },
-        K::ListAgents(_) => {
+        }
+        K::ListAgents(args) => {
             // REGISTRATION ORDER — python iterates `self.ctx.agents`, a plain
             // dict, and the root comes first because it registered first. The
             // port sorted by id, which put every alphabetically-earlier agent
@@ -84,7 +86,7 @@ pub(super) async fn handle_kernel_verb(
             // PAGED. Absent `limit` ⇒ everything and `next: null`, so a caller
             // that never learned about paging is unaffected; the cursor is the
             // last id handed over, never an offset.
-            let (out, next) = crate::paging::page(out, payload, |r| {
+            let (out, next) = crate::paging::page(out, args.limit, args.after.as_deref(), |r| {
                 r.get("id")
                     .map_or_else(String::new, fantastic_bundle::py_str)
             });
@@ -95,16 +97,16 @@ pub(super) async fn handle_kernel_verb(
             // `system_verbs`, so it needs a signpost back to the briefing.
             json!({ "agents": out, "next": next, "more": LIST_HINT })
         }
-        K::CreateAgent(_) => crate::lifecycle::create_from_payload(kernel, target, payload).await,
-        K::DeleteAgent(_) => crate::lifecycle::delete_from_payload(kernel, target, payload).await,
-        K::UpdateAgent(_) => update_from_payload(kernel, target, payload).await,
+        K::CreateAgent(args) => crate::lifecycle::create_agent(kernel, target, args).await,
+        K::DeleteAgent(args) => crate::lifecycle::delete_agent(kernel, target, &args).await,
+        K::UpdateAgent(args) => update_agent(kernel, target, args).await,
         // The EXECUTION LEDGER — a PROJECTION, not a table: the executions still
         // in RAM (in flight, or settled and not yet flushed) merged with the
         // `call`/`settle`/`ack` rows the kernel flushed into its memory store —
         // each call paired with its settle. CALLER-SCOPED: an agent sees what IT
         // originated, the operator sees all. Unscoped this would be a side-channel
         // around `callable_by`.
-        K::Ledger(_) => {
+        K::Ledger(args) => {
             let viewer = crate::send::current_origin();
             let entries = match kernel.ledger_entries().await {
                 Ok(e) => e,
@@ -121,65 +123,50 @@ pub(super) async fn handle_kernel_verb(
                     }
                 })
                 .collect();
-            let (rows, next) = crate::paging::page(rows, payload, |r| {
+            let (rows, next) = crate::paging::page(rows, args.limit, args.after.as_deref(), |r| {
                 r.get("id")
                     .map_or_else(String::new, fantastic_bundle::py_str)
             });
             json!({ "executions": rows, "next": next })
         }
-        K::AckDeadletter(_) => ack_deadletter(kernel, payload).await?,
-        K::AwaitSet(_) => {
-            crate::await_set::await_set(kernel, crate::send::current_origin(), payload).await
+        K::AckDeadletter(args) => ack_deadletter(kernel, &args.id).await?,
+        K::AwaitSet(args) => {
+            crate::await_set::await_set(kernel, crate::send::current_origin(), &args).await
         }
-        K::AwaitCancel(_) => {
-            crate::await_set::await_cancel(kernel, crate::send::current_origin(), payload).await
+        K::AwaitCancel(args) => {
+            crate::await_set::await_cancel(kernel, crate::send::current_origin(), &args).await
         }
         // The live TASK TABLE, kernel-wide (like `list_agents`), not per-agent:
         // one row per in-flight dispatch, `parent` chaining them into the send
         // tree. `ps` shows its own row too — it IS a dispatch. The table is honest.
-        K::Ps(_) => {
+        K::Ps(args) => {
             // PAGED like `list_agents` — same cursor law: the id of the last row
             // handed over. Over a LIVE table a cursor may miss a row that
             // finished mid-walk; this is a kernel, not a snapshot store.
-            let (rows, next) = crate::paging::page(kernel.tasks.rows(), payload, |r| {
-                r.get("id")
-                    .map_or_else(String::new, fantastic_bundle::py_str)
-            });
+            let (rows, next) = crate::paging::page(
+                kernel.tasks.rows(),
+                args.limit,
+                args.after.as_deref(),
+                |r| {
+                    r.get("id")
+                        .map_or_else(String::new, fantastic_bundle::py_str)
+                },
+            );
             json!({ "tasks": rows, "next": next })
         }
         // Kill a task AND ITS SUBTREE (children first, like killing a process
         // group). Each bundle's `on_cancel` hook runs BEFORE the abort so real
         // resources (OS subprocesses, PTYs, sockets) die with it. An unknown or
         // already-finished id returns {cancelled:false} — it does not pretend.
-        // A pid is a NUMBER now, so `task_id` may arrive as one, as the decimal
-        // string a URL or a form carries, or as the NAME a caller gave its own
-        // execution — the ledger resolves that last case. An id that resolves to
-        // nothing is an honest `{cancelled:false}`, not a refusal: python does
-        // not pretend to know whether a stranger's id ever existed.
-        // PYTHON, VERBATIM: `raw = payload.get("task_id")`; None / "" /
-        // a bool / anything not (int, str) → `missing_arg`. Otherwise
-        // `task_id = _as_id(raw)`; if that names nothing AND raw is a
-        // string, the caller's NAME for its own execution is its handle too
-        // (`resolve_name`). Still nothing → an honest `{cancelled:false}`,
-        // never a refusal — python does not pretend to know whether a
-        // stranger's id ever existed. Used to accept `"+5"`/padded strings
-        // via a bare `str::parse::<i64>()` fallback, which python's
-        // `str.isdigit()` gate refuses (they fall through to the name path
-        // instead, exactly like any other non-digit string).
-        K::Cancel(_) => {
-            // `not isinstance(raw, (int, str))`: a FLOAT (3.5, and 3.0 too) is
-            // neither, so it is refused, not answered {cancelled:false}.
-            let raw = payload.get("task_id").filter(|v| !v.is_null());
-            let usable = matches!(raw, Some(n @ Value::Number(_)) if fantastic_bundle::py_type_name(n) == "int")
-                || matches!(raw, Some(Value::String(s)) if !s.is_empty());
-            if !usable {
-                return Ok(crate::refusal::missing("cancel", "task_id"));
-            }
-            let raw = raw.expect("checked usable above");
-            let task_id = as_id(raw)?;
-            let resolved = match task_id {
-                Some(n) => Some(n),
-                None => raw.as_str().and_then(|s| kernel.ledger.resolve_name(s)),
+        // `task_id` is the declared `IdOrName`: a number is the task's id, text is the
+        // NAME a caller gave its own execution — the ledger resolves it. Text is never
+        // read as a number. Either resolving to nothing is an honest
+        // `{cancelled:false}`, not a refusal: python does not pretend to know whether
+        // a stranger's id ever existed.
+        K::Cancel(args) => {
+            let resolved = match args.task_id {
+                IdOrName::Id(n) => (n > 0).then_some(n),
+                IdOrName::Name(name) => kernel.ledger.resolve_name(&name),
             };
             match resolved {
                 Some(n) => kernel.cancel_task(&TaskId(n)).await,
@@ -229,65 +216,17 @@ pub(super) async fn handle_kernel_verb(
     })
 }
 
-async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload: &Value) -> Value {
-    let id = match payload
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    {
-        Some(s) => AgentId::from(s),
-        None => return crate::refusal::missing("update_agent", "id"),
-    };
-    // REFUSED, not silently skipped, and checked BEFORE the id is even
-    // resolved to a live agent — python's `for k in ("handler_module",
-    // *sorted(RESERVED_RECORD_KEYS)):`. `handler_module` is fixed at create —
-    // swapping it would leave a live agent whose in-process state belongs to
-    // the OLD bundle. The reserved keys name substrate wiring; dropping them
-    // without a word would let the caller believe a change had landed that
-    // never did.
-    let mut checks: Vec<&str> = vec!["handler_module"];
-    let mut reserved: Vec<&str> = RESERVED_RECORD_KEYS.to_vec();
-    reserved.sort_unstable();
-    checks.extend(reserved);
-    for k in checks {
-        if payload.get(k).is_some() {
-            return crate::refusal::bad(
-                "update_agent",
-                k,
-                "absent — handler_module is fixed at create_agent, and \
-                 root_path/ctx/parent name substrate wiring the record may \
-                 not carry",
-            );
-        }
-    }
-    // `children_dir` BECOMES A DIRECTORY — one safe segment, as at create.
-    if let Some(cd) = payload.get("children_dir") {
-        if let Some(r) = crate::refusal::guard_agent_id_as(
-            "update_agent",
-            "children_dir",
-            cd.as_str().unwrap_or(""),
-        ) {
-            return r;
-        }
-    }
-    // Patch is every field in payload except `type`, `id` and `parent_id`.
-    // `parent_id` is STRUCTURAL — where the agent actually sits, which only
-    // the tree knows. Letting it into meta lets a record LIE about its own
-    // parent: `$parent` then resolves differently on the two halves of the
-    // gate, and a reboot silently corrects it from the agent's position on
-    // disk. Capture changed-field names so the lifecycle event mirrors
-    // Python's `agent_updated.changed`.
-    let mut patch: Map<String, Value> = Map::new();
-    let mut changed: Vec<String> = Vec::new();
-    if let Some(obj) = payload.as_object() {
-        for (k, v) in obj {
-            if k == "type" || k == "id" || k == "parent_id" {
-                continue;
-            }
-            patch.insert(k.clone(), v.clone());
-            changed.push(k.clone());
-        }
-    }
+async fn update_agent(
+    kernel: &Arc<Kernel>,
+    caller: &Arc<Agent>,
+    args: crate::declared::kernel::UpdateAgent,
+) -> Value {
+    let id = AgentId::from(args.id.as_str());
+    // The patch is the declared arguments' remainder: every field of the record to
+    // change. Capture changed-field names so the lifecycle event mirrors Python's
+    // `agent_updated.changed`.
+    let patch: Map<String, Value> = args.fields;
+    let changed: Vec<String> = patch.keys().cloned().collect();
     let Some(target) = kernel.agents.get(&id).map(|e| Arc::clone(&e)) else {
         return crate::refusal::unknown_agent(
             id.as_str(),
@@ -302,19 +241,19 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
         crate::refusal::with(&mut r, "id", json!(id));
         return r;
     }
-    // WRITE-TIME VALIDATION. Ask the target's bundle whether it can honour this
-    // patch before anything changes — a refusal names the bad field at the point of
-    // the mistake instead of surfacing calls later. Mirrors python's duck-typed
-    // `validate_meta`; the trait default accepts everything.
-    if let Some(hm) = target.handler_module.as_deref() {
-        if let Some(bundle) = kernel.bundles.get(hm) {
-            if let Err(refused) = crate::verbs::check_record(
-                "update_agent",
-                bundle.name(),
-                &patch,
-                &crate::declared::record::RECORD,
-                bundle.record(),
-            ) {
+    // WRITE-TIME VALIDATION. The target's bundle judges the patch before anything
+    // changes — its shared record entry (the fields its record declares, their types,
+    // the substrate wiring no record carries), then its own `validate_meta` — so a
+    // refusal names the bad field at the point of the mistake instead of surfacing
+    // calls later. A bare agent (no bundle) is judged by the kernel as the agent it
+    // is: the common record, open to whatever fields it was given.
+    match target
+        .handler_module
+        .as_deref()
+        .and_then(|hm| kernel.bundles.get(hm))
+    {
+        Some(bundle) => {
+            if let Err(refused) = bundle.check_record("update_agent", &patch) {
                 return refused;
             }
             let current = target.meta.read().expect("meta poisoned").clone();
@@ -322,6 +261,17 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
                 let mut r = crate::refusal::refusal(crate::refusal::INVALID_META, why);
                 crate::refusal::with(&mut r, "id", json!(id));
                 return r;
+            }
+        }
+        None => {
+            if let Err(refused) = crate::verbs::check_record(
+                "update_agent",
+                "bare agent",
+                &patch,
+                &crate::declared::record::RECORD,
+                &crate::declared::bare_record::RECORD,
+            ) {
+                return refused;
             }
         }
     }
@@ -364,70 +314,23 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
     ])
 }
 
-/// A message id from whatever the caller wrote: a POSITIVE int, or the
-/// decimal string a URL or a form carries. A bool is not an id.
-///
-/// PYTHON'S `_as_id`, verbatim:
-/// ```python
-/// if isinstance(x, bool): return None
-/// if isinstance(x, int): return x if x > 0 else None
-/// if isinstance(x, str) and x.isdigit(): return int(x)
-/// return None
-/// ```
-/// A non-`isdigit` string is NOT a fallback-parsed id — it is simply not one
-/// (0, negatives, whitespace-padded and `+5` all fail `isdigit` and answer
-/// `None`, never a best-effort `str::parse`).
-///
-/// `Err` is a RAISE, not a refusal: python's `_as_id` gates on `str.isdigit()`
-/// and then calls `int(x)`, and the two disagree — `'²'` is a digit CPython's
-/// base-10 parser rejects, so the verb dies with a `ValueError` instead of
-/// answering. The whole call is reported as a raised handler, as python's
-/// dispatch reports any exception out of a verb body.
-fn as_id(v: &Value) -> Result<Option<i64>, Value> {
-    match v {
-        Value::Bool(_) => Ok(None),
-        Value::Number(n) => Ok(n.as_i64().filter(|i| *i > 0)),
-        // `isdecimal`, not `isdigit`: a superscript digit would pass the guard
-        // and then raise inside `int()`.
-        Value::String(s) if fantastic_bundle::py_isdecimal(s) => {
-            match fantastic_bundle::py_int(v) {
-                Ok(n) => Ok(Some(n)),
-                Err(e) => Err(raised(e.class_name(), e.message())),
-            }
-        }
-        _ => Ok(None),
-    }
-}
-
-/// A python exception the way a raised verb body is recorded: `{"error":
-/// "<Class>: <message>", "raised": true}` — the shape python's dispatch builds
-/// from `type(e).__name__` and `str(e)`, which settles the item `failed`.
-fn raised(class: &str, message: &str) -> Value {
-    json!({"error": format!("{class}: {message}"), "raised": true})
-}
-
 /// `ack_deadletter` — acknowledge a DEAD LETTER the caller originated (the
 /// operator: any). The ack is a row in the kernel's store (`kind: ack`); an acked
 /// dead letter may be pruned. Python `_verb_ack_deadletter`.
-async fn ack_deadletter(kernel: &Arc<Kernel>, payload: &Value) -> Result<Value, Value> {
-    let raw = payload.get("id").cloned().unwrap_or(Value::Null);
-    let usable = match &raw {
-        Value::Null | Value::Bool(_) => false,
-        Value::String(s) => !s.is_empty(),
-        _ => true,
+async fn ack_deadletter(kernel: &Arc<Kernel>, id: &IdOrName) -> Result<Value, Value> {
+    // the declared type decides: a number is an execution's id, text its name
+    let raw = match id {
+        IdOrName::Id(n) => json!(n),
+        IdOrName::Name(s) => json!(s),
     };
-    if !usable {
-        return Ok(crate::refusal::missing("ack_deadletter", "id"));
-    }
     let viewer = crate::send::current_origin();
     let entries = kernel
         .ledger_entries()
         .await
         .map_err(|e| crate::executions::raised("RuntimeError", &e))?;
-    let eid = as_id(&raw)?;
-    let hit = entries.into_iter().find(|e| match eid {
-        Some(n) => e.get("id").and_then(Value::as_i64) == Some(n),
-        None => e.get("name") == Some(&raw),
+    let hit = entries.into_iter().find(|e| match id {
+        IdOrName::Id(n) => e.get("id").and_then(Value::as_i64) == Some(*n),
+        IdOrName::Name(_) => e.get("name") == Some(&raw),
     });
     let mine = hit.filter(|e| match &viewer {
         None => true,

@@ -2321,10 +2321,10 @@ async fn deliver_grouped(
     }
 }
 
-/// The routing fields of this call that `target`'s `verb` also documents as
-/// arguments — read from the kernel's own `docs` (the signature the model reads),
-/// in process: no dispatch, no ledger row, once per (target, verb) per batch. A
-/// target this kernel cannot document (a peer's agent, an unknown verb) documents
+/// The routing fields of this call that `target`'s `verb` also declares as
+/// arguments — read from the verb's declared schema (what `docs` renders), in
+/// process: no dispatch, no ledger row, once per (target, verb) per batch. A
+/// target this kernel cannot document (a peer's agent, an unknown verb) declares
 /// nothing here: the call goes on, and its own reply says what happened. Python
 /// `_routing_clash`.
 fn routing_clash(
@@ -2334,22 +2334,17 @@ fn routing_clash(
     used: &[&str],
     cache: &mut HashMap<(String, String), HashSet<String>>,
 ) -> Vec<String> {
-    static DOC_ARG: OnceLock<regex::Regex> = OnceLock::new();
-    let re = DOC_ARG.get_or_init(|| {
-        regex::Regex::new(r"(?:\bargs:|,)\s*([A-Za-z_][A-Za-z0-9_]*)\s*:").expect("doc arg regex")
-    });
+    // the argument names the verb DECLARES (its schema), never parsed back out of text
     let names = cache
         .entry((target.to_string(), verb.to_string()))
         .or_insert_with(|| {
-            let res =
-                fantastic_kernel::docs::docs_reply(kernel, &json!({"of": target, "verb": verb}));
-            let sig = res
-                .get("verbs")
-                .and_then(|v| v.get(verb))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            re.captures_iter(&sig).map(|c| c[1].to_string()).collect()
+            fantastic_kernel::typing::verb_schema(kernel, target, verb, &serde_json::Map::new())
+                .and_then(|s| {
+                    s.get("properties")
+                        .and_then(Value::as_object)
+                        .map(|p| p.keys().cloned().collect::<HashSet<String>>())
+                })
+                .unwrap_or_default()
         });
     used.iter()
         .filter(|k| names.contains(**k))

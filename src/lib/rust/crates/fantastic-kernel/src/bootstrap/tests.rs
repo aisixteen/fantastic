@@ -2,7 +2,7 @@
 use crate::outcome::Item;
 
 use super::*;
-use crate::Bundle;
+use crate::Handler;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -21,7 +21,11 @@ use crate::test_support::boot_root;
 
 struct Noop;
 #[async_trait]
-impl Bundle for Noop {
+impl Handler for Noop {
+    type Call = crate::test_support::NoCall;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "noop"
     }
@@ -37,7 +41,7 @@ impl Bundle for Noop {
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _k: &Arc<Kernel>,
     ) -> Result<crate::Reply, crate::bundle::BundleError> {
         Ok(None)

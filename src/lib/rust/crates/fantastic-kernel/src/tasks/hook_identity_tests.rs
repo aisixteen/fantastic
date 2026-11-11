@@ -8,7 +8,7 @@
 //!   root owns); `ps` still lists them, and a group kill leaves them out.
 use super::*;
 use crate::agent::Agent;
-use crate::bundle::{Bundle, BundleError, Reply};
+use crate::bundle::{BundleError, Handler, Reply};
 use crate::outcome::Item;
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -22,7 +22,11 @@ struct IdBundle {
 
 crate::stand_in_verbs!(idbundle_verbs { BootV "boot" {  }, ForkServiceV "fork_service" {  }, ShutdownV "shutdown" {  }, SlowV "slow" {  } });
 #[async_trait]
-impl Bundle for IdBundle {
+impl Handler for IdBundle {
+    type Call = idbundle_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "hook_identity_probe"
     }
@@ -38,13 +42,11 @@ impl Bundle for IdBundle {
 
     async fn handle(
         &self,
-        agent_id: &AgentId,
-        payload: &Value,
+        _agent_id: &AgentId,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        if let Err(refused) = idbundle_verbs::Call::parse(&agent_id.0, &payload) {
-            return Ok(Some(refused));
-        }
+        let payload = &call.payload();
         match payload.get("type").and_then(Value::as_str).unwrap_or("") {
             "boot" | "shutdown" => Ok(None),
             "slow" => {

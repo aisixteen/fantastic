@@ -432,13 +432,7 @@ async fn dispatch(
             Some(first) if !first.contains('=') => (first.clone(), &rest[1..]),
             _ => (DEFAULT_ROOT_ID.to_string(), rest),
         };
-        let mut payload = Map::new();
-        payload.insert("type".to_string(), json!("reflect"));
-        for kv in kvs {
-            if let Some((k, v)) = kv.split_once('=') {
-                payload.insert(k.to_string(), parse_kv(v));
-            }
-        }
+        let payload = typed_payload(&booted.kernel, &target, "reflect", kvs);
         let reply = booted
             .kernel
             .send(vec![Item::new(
@@ -525,13 +519,6 @@ async fn dispatch(
     if args.len() >= 2 {
         let id = args[0].clone();
         let verb = args[1].clone();
-        let mut payload = Map::new();
-        payload.insert("type".to_string(), json!(verb));
-        for kv in &args[2..] {
-            if let Some((k, v)) = kv.split_once('=') {
-                payload.insert(k.to_string(), parse_kv(v));
-            }
-        }
         // THE DAEMON'S OWN LOCK, the flock the bootstrap takes; a live
         // holder refuses with python's `[call]` line, not the kernel's LockHeld
         // text (see [`one_shot_bootstrap`]).
@@ -545,6 +532,9 @@ async fn dispatch(
             return Ok(ExitCode::from(1));
         };
         apply_ledger_cap(&booted, cap);
+        // THE VALUES take the type the verb's declaration asks for (the kernel is up, so
+        // its bundles' declared verbs are known).
+        let payload = typed_payload(&booted.kernel, &id, &verb, &args[2..]);
         // BOOT THE ROOT LOADER so this call's mutations (create/update/delete)
         // subscribe and persist. The debounce never ticks before we exit, so
         // the writer is drained synchronously after the call — python's `call`
@@ -697,58 +687,51 @@ async fn dispatch(
     Ok(ExitCode::SUCCESS)
 }
 
-/// k=v value coercion for one-shot `fantastic <id> <verb> k=v`. Mirrors the
-/// canonical python CLI's `_coerce` (kernel/modes/parse.py): the SHARED scalar
-/// rule, plus a JSON object/array literal for the OPERATOR.
-///
-/// The scalar half is [`fantastic_kernel::coerce_scalar`], the same function the
-/// model's `<k>v</k>` goes through — ONE rule for text a caller typed, as python
-/// has. The JSON branch is this side only: it lets an operator pass a nested
-/// payload (`payload={"type":"list_agents"}`, `tags=[1,2]`), and the
-/// model↔harness path carries no JSON at all.
-fn parse_kv(v: &str) -> Value {
-    let typed = fantastic_kernel::coerce_scalar(v);
-    if !typed.is_string() {
-        return typed;
-    }
-    // Only attempt JSON when it *looks* like an object/array, so a plain
-    // string with a stray brace doesn't get misparsed (matches Python).
-    let looks_json =
-        (v.starts_with('{') && v.ends_with('}')) || (v.starts_with('[') && v.ends_with(']'));
-    if looks_json {
-        if let Ok(parsed) = serde_json::from_str::<Value>(v) {
-            return parsed;
-        }
-    }
-    Value::String(v.to_string())
+/// The payload of a one-shot `fantastic <id> <verb> k=v …` call: each value takes the
+/// type the verb's OWN declaration asks for for that argument (`limit=7` is the integer 7
+/// where the verb declares an integer, the text `7` where it declares text; a JSON
+/// literal is a list or an object only where the verb declares one). The typing is the
+/// kernel's ([`fantastic_kernel::typing`]), the same code the model's `<k>v</k>` goes
+/// through; an agent or verb this kernel does not declare leaves the text as written, and
+/// the target refuses a wrongly typed value by name.
+fn typed_payload(
+    kernel: &std::sync::Arc<fantastic_kernel::Kernel>,
+    target: &str,
+    verb: &str,
+    kvs: &[String],
+) -> Map<String, Value> {
+    let pairs: Vec<(String, String)> = kvs
+        .iter()
+        .filter_map(|kv| kv.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    fantastic_kernel::typing::operator_payload(kernel, target, verb, &pairs)
 }
 
 #[cfg(test)]
-mod parse_kv_tests {
-    use super::parse_kv;
+mod typed_payload_tests {
+    use super::typed_payload;
     use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
-    fn coerces_like_python() {
-        // bool (case-insensitive, matching Python's `v.lower()`).
-        assert_eq!(parse_kv("true"), json!(true));
-        assert_eq!(parse_kv("True"), json!(true));
-        assert_eq!(parse_kv("FALSE"), json!(false));
-        // int then float.
-        assert_eq!(parse_kv("42"), json!(42));
-        assert_eq!(parse_kv("1.5"), json!(1.5));
-        // JSON object/array literal — regression: previously stayed a
-        // string, so `payload={...}` reached handlers as text and the
-        // scheduler errored "payload.type required".
-        assert_eq!(
-            parse_kv("{\"type\":\"list_agents\"}"),
-            json!({"type": "list_agents"})
+    fn a_value_for_an_undeclared_verb_stays_the_text_written() {
+        let kernel = Arc::new(fantastic_kernel::Kernel::new());
+        let p = typed_payload(
+            &kernel,
+            "nobody",
+            "ping",
+            &[
+                "n=42".into(),
+                "flag=true".into(),
+                "w=[1]".into(),
+                "no_equals".into(),
+            ],
         );
-        assert_eq!(parse_kv("[1,2,3]"), json!([1, 2, 3]));
-        // plain strings (incl. a stray brace) stay strings.
-        assert_eq!(parse_kv("hello"), json!("hello"));
-        assert_eq!(parse_kv("a{b"), json!("a{b"));
-        assert_eq!(parse_kv("web.tools"), json!("web.tools"));
+        assert_eq!(
+            serde_json::Value::Object(p),
+            json!({"type": "ping", "n": "42", "flag": "true", "w": "[1]"})
+        );
     }
 }
 

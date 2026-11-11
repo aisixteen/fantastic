@@ -728,15 +728,21 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, p: &Value) -> Value {
     // APPROVED: depth first, then the other end of every bound edge
     let top = plan.agents.first().map(|a| a.new_id.clone());
     for a in &plan.agents {
-        let mut payload = a.meta.clone();
-        payload.insert("type".into(), json!("create_agent"));
-        payload.insert("id".into(), json!(a.new_id));
-        payload.insert("handler_module".into(), json!(a.handler_module));
-        payload.insert("parent_id".into(), json!(a.parent));
-        let r = fantastic_kernel::lifecycle::create_from_payload(
+        // the declared arguments of `create_agent`; the rest of the record rides as its fields
+        let mut fields = a.meta.clone();
+        let bundle = fields
+            .remove("bundle")
+            .and_then(|b| b.as_str().map(str::to_string));
+        let r = fantastic_kernel::lifecycle::create_agent(
             kernel,
             &root,
-            &Value::Object(payload),
+            fantastic_kernel::declared::kernel::CreateAgent {
+                handler_module: Some(a.handler_module.clone()),
+                parent_id: a.parent.clone(),
+                id: Some(a.new_id.clone()),
+                bundle,
+                fields,
+            },
         )
         .await;
         if let Some(e) = r.get("error") {

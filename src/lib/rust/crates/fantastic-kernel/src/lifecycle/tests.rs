@@ -9,7 +9,11 @@ struct CountingBundle {
     deletes: Arc<AtomicUsize>,
 }
 #[async_trait]
-impl crate::Bundle for CountingBundle {
+impl crate::Handler for CountingBundle {
+    type Call = crate::test_support::NoCall;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "counting"
     }
@@ -25,7 +29,7 @@ impl crate::Bundle for CountingBundle {
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _k: &Arc<Kernel>,
     ) -> Result<crate::Reply, crate::bundle::BundleError> {
         Ok(None)
@@ -392,7 +396,11 @@ async fn a_raised_child_boot_prints_python_line_and_an_errored_one_is_silent() {
     struct BootBundle;
     crate::stand_in_verbs!(bootbundle_verbs { BootV "boot" {  } });
     #[async_trait::async_trait]
-    impl crate::Bundle for BootBundle {
+    impl crate::Handler for BootBundle {
+        type Call = bootbundle_verbs::Call;
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
         fn name(&self) -> &str {
             "booty.tools"
         }
@@ -408,12 +416,10 @@ async fn a_raised_child_boot_prints_python_line_and_an_errored_one_is_silent() {
         async fn handle(
             &self,
             id: &AgentId,
-            payload: &Value,
+            call: Self::Call,
             _k: &Arc<Kernel>,
         ) -> Result<crate::Reply, crate::bundle::BundleError> {
-            if let Err(refused) = bootbundle_verbs::Call::parse(&id.0, &payload) {
-                return Ok(Some(refused));
-            }
+            let payload = &call.payload();
             if payload.get("type").and_then(Value::as_str) == Some("boot") {
                 if id.0.starts_with("raiser") {
                     return Err("boot blew up".into());
@@ -705,16 +711,27 @@ async fn unknown_grant_keys_and_bad_values_are_refused_at_write_time() {
 }
 
 #[tokio::test]
-async fn update_agent_checks_reserved_keys_before_resolving_id() {
-    // python: `for k in ("handler_module", *sorted(RESERVED_RECORD_KEYS))` runs
-    // BEFORE `self.ctx.agents.get(target_id)` — an unknown target with a
-    // reserved key present still answers `bad_arg`, not `unknown_agent`.
+async fn update_agent_refuses_substrate_wiring_through_the_targets_bundle() {
+    // The record's fields are judged by the TARGET's bundle (its shared record
+    // entry): `handler_module` is fixed at create, and `root_path`/`ctx`/`parent`
+    // name substrate wiring — each refused by name, `parent` (alphabetically first of
+    // the sorted reserved keys) before `root_path`.
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
+    let made = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","parent_id":"kernel",
+                   "handler_module":"counting.tools","id":"wired"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(made["id"], "wired", "{made}");
     let r = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
-            json!({"type":"update_agent","id":"ghost","handler_module":"x.tools"}),
+            json!({"type":"update_agent","id":"wired","handler_module":"x.tools"}),
         )])
         .await
         .remove(0)
@@ -725,15 +742,36 @@ async fn update_agent_checks_reserved_keys_before_resolving_id() {
     let r = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
-            json!({"type":"update_agent","id":"ghost","root_path":"/evil","parent":"x"}),
+            json!({"type":"update_agent","id":"wired","root_path":"/evil","parent":"x"}),
         )])
         .await
         .remove(0)
         .result;
-    // `handler_module` absent here -> sorted(RESERVED_RECORD_KEYS) =
-    // ["ctx","parent","root_path"] -> `parent` is alphabetically first of the
-    // two present.
+    assert_eq!(r["reason"], "bad_arg");
     assert_eq!(r["arg"], "parent");
+
+    // where an agent sits is the tree's, never its record's
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"update_agent","id":"wired","parent_id":"kernel_state"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "bad_arg");
+    assert_eq!(r["arg"], "parent_id");
+
+    // an agent that is not there is the unknown agent
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"update_agent","id":"ghost","display_name":"x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "unknown_agent");
 
     let r = kernel
         .send(vec![Item::new(
@@ -823,12 +861,23 @@ async fn delete_lock_refusal_is_python_text_and_key_order() {
 }
 
 #[tokio::test]
-async fn delete_lock_int_refuses_like_python() {
-    // python `_find_locked_descendant` reads truthiness: `delete_lock: 1` (the
-    // CLI's k=v coercion) locks a GRANDCHILD and the cascade is refused.
+async fn delete_lock_on_a_grandchild_refuses_the_cascade() {
+    // `delete_lock` is the record's declared bool: a lock on a GRANDCHILD refuses the
+    // cascade, and a number is no lock — it is refused as the wrong type.
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
-    for (id, parent, lock) in [("P", "kernel", json!(0)), ("C", "P", json!(1))] {
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","parent_id":"kernel","handler_module":"counting.tools",
+                   "id":"N","delete_lock":1}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "delete_lock", "{r}");
+    for (id, parent, lock) in [("P", "kernel", json!(false)), ("C", "P", json!(true))] {
         let r = kernel
             .send(vec![Item::new(
                 AgentId::from("kernel"),
@@ -939,7 +988,11 @@ struct KeepProbe {
     seen: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
 }
 #[async_trait]
-impl crate::Bundle for KeepProbe {
+impl crate::Handler for KeepProbe {
+    type Call = crate::test_support::NoCall;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "keep_probe"
     }
@@ -955,7 +1008,7 @@ impl crate::Bundle for KeepProbe {
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _k: &Arc<Kernel>,
     ) -> Result<crate::Reply, crate::bundle::BundleError> {
         Ok(None)

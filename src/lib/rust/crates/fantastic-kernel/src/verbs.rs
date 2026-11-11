@@ -6,11 +6,14 @@
 //! `///` says what the verb does. [`verbs!`] lists them (`VERBS` + `enum Call`),
 //! [`record!`] declares the fields `create_agent` / `update_agent` may set.
 //!
-//! THE AGENT, NOT THE KERNEL, CHECKS THE CALL. The kernel routes; the entry the
-//! `verbs!` macro generates (`Call::parse`) is the shared library code every agent
-//! uses: the verb is in the list (builtin, from `verbs!`, or dynamic, from
-//! [`Bundle::dynamic_verbs`](crate::Bundle::dynamic_verbs)), then each argument is
-//! known, present when required and of its type — ONE engine, the JSON schema
+//! THE AGENT, NOT THE KERNEL, CHECKS THE CALL, AND THE GENERATED CODE OWNS THE
+//! DISPATCH. A bundle implements [`Handler`](crate::bundle::Handler): its `handle`
+//! takes the typed `Call` and nothing else, so no bundle can see a raw payload. The
+//! `Call` the `verbs!` macro generates implements [`Parse`], the shared library
+//! entry the kernel-facing [`Bundle`](crate::Bundle) runs BEFORE the handler: the
+//! verb is in the list (builtin, from `verbs!`, or dynamic, from
+//! [`Handler::dynamic_verbs`](crate::bundle::Handler::dynamic_verbs)), then each argument
+//! is known, present when required and of its type — ONE engine, the JSON schema
 //! ([`validate`]), no coercion: a wrongly typed value is refused by name and the
 //! refusal is the agent's reply. A record field is known to the bundle's own record
 //! declaration ([`check_record`]). `reflect` and `docs` render the same
@@ -30,24 +33,20 @@ pub use serde_json;
 
 /// One declared verb: its name and its arguments' struct, kept as the JSON schema
 /// (the struct's doc comment is the schema's `description`, each field's the
-/// property's) and a typed parse of the payload into that struct.
+/// property's).
 pub struct Verb {
     /// The verb's name — `payload["type"]`.
     pub name: &'static str,
     make: fn() -> Value,
-    parse: fn(Value) -> Result<(), String>,
     schema: OnceLock<Value>,
 }
 
 impl Verb {
     /// Declare `name` as the struct `T`. What [`verbs!`] calls.
-    pub const fn of<T: schemars::JsonSchema + serde::de::DeserializeOwned>(
-        name: &'static str,
-    ) -> Verb {
+    pub const fn of<T: schemars::JsonSchema>(name: &'static str) -> Verb {
         Verb {
             name,
             make: schema_of::<T>,
-            parse: parse_as::<T>,
             schema: OnceLock::new(),
         }
     }
@@ -95,12 +94,6 @@ fn schema_of<T: schemars::JsonSchema>() -> Value {
     });
     let root = settings.into_generator().into_root_schema_for::<T>();
     serde_json::to_value(root).unwrap_or(Value::Null)
-}
-
-fn parse_as<T: serde::de::DeserializeOwned>(v: Value) -> Result<(), String> {
-    serde_json::from_value::<T>(v)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
 }
 
 /// A verb that exists per AGENT INSTANCE, produced at runtime (an MCP client's
@@ -152,38 +145,66 @@ pub enum Resolved {
     Dynamic(DynCall),
 }
 
+/// What an agent's entry made of a call: the typed call for its handler, or the
+/// reply the shared code gives itself (`boot` and `shutdown` of an agent that
+/// declares neither: nothing to open or release).
+#[derive(Debug)]
+pub enum Routed<C> {
+    /// The call, its arguments checked and typed: the handler's.
+    Call(C),
+    /// The entry answered; no handler runs.
+    Answered(Value),
+}
+
+/// THE ENTRY of every call to a bundle's agents, implemented by the `Call` that
+/// [`verbs!`] generates: the verb is looked up (builtin, common, dynamic), its
+/// arguments are checked against the declaration and typed. `Err` is the agent's
+/// reply. The kernel-facing [`Bundle`](crate::Bundle) runs it before the handler, so
+/// a handler only ever sees a `Call`.
+pub trait Parse: Sized + Send + 'static {
+    /// Parse `payload` as a call to the agent `agent`, whose verbs built at runtime
+    /// are `dynamic`.
+    fn parse(agent: &str, payload: &Value, dynamic: &[DynVerb]) -> Result<Routed<Self>, Value>;
+}
+
 /// Declare a bundle's verbs: `verbs! { "name" => Struct, … }` generates
 /// `pub static VERBS`, `pub enum Call` with one variant per struct (named like it)
-/// and its ENTRY `Call::parse(agent_id, &payload)`: the shared parse + validation
-/// that replies with the refusal when the call is not one of the verbs. A bundle
-/// with no dynamic verbs also gets `dynamic_verbs(&agent)`, an explicit empty list.
+/// and its ENTRY, `impl Parse for Call`: the shared parse + validation that replies
+/// with the refusal when the call is not one of the verbs. A bundle with no dynamic
+/// verbs also gets `dynamic_verbs(&agent)`, an explicit empty list.
 ///
 /// `verbs! { dynamic; "name" => Struct, … }` is the form for a bundle whose agents
-/// also carry verbs built at runtime: `Call` has a `Dynamic(DynCall)` variant,
-/// `Call::parse(agent_id, &payload, &dynamic)` takes the agent's dynamic list, and
+/// also carry verbs built at runtime: `Call` has a `Dynamic(DynCall)` variant and
 /// the bundle writes its own `dynamic_verbs`.
 #[macro_export]
 macro_rules! verbs {
-    // The kernel's own lists (`declared`): no `Reflect` variant added, nothing dynamic.
+    // The kernel's own lists (`declared`): no `Reflect` variant added, nothing
+    // dynamic; `Call::parse(agent, payload)` answers `Result<Call, refusal>`.
     (@own $($name:literal => $ty:ident),+ $(,)?) => {
         $crate::verbs!(
-            @list agent payload dynamic vname args
-            [] []
+            @list args
             [&[VERBS]]
             [] []
-            [
-                let (vname, args) = $crate::verbs::resolve_builtin(agent, payload, &[VERBS])?;
-                Self::arm(agent, payload, vname, args)
-            ]
             $($name => $ty),+
         );
+        impl Call {
+            /// THE ENTRY of every call to the kernel's own verbs (it is an agent
+            /// too): resolve the verb (unknown ⇒ the refusal listing what it
+            /// answers), check its arguments against the declaration, then type
+            /// them. `Err` is the kernel's reply.
+            pub fn parse(
+                agent: &str,
+                payload: &$crate::verbs::serde_json::Value,
+            ) -> Result<Call, $crate::verbs::serde_json::Value> {
+                let (vname, args) = $crate::verbs::resolve_builtin(agent, payload, &[VERBS])?;
+                Self::arm(agent, payload, vname, args)
+            }
+        }
     };
-    // A bundle's list: `reflect`, which every agent answers and the kernel always
-    // passes on, is a variant of its `Call` beside its own verbs.
+    // A bundle's list with verbs built at runtime.
     (dynamic; $($name:literal => $ty:ident),+ $(,)?) => {
         $crate::verbs!(
-            @list agent payload dynamic vname args
-            [, dynamic: &[$crate::verbs::DynVerb]] []
+            @list args
             [&[VERBS, $crate::declared::common::VERBS]]
             [
                 /// The `reflect` verb every agent answers.
@@ -194,24 +215,33 @@ macro_rules! verbs {
             [
                 "reflect" => Self::typed::<$crate::declared::common::Reflect>("reflect", args).map(Call::Reflect),
             ]
-            [
+            $($name => $ty),+
+        );
+        impl $crate::verbs::Parse for Call {
+            fn parse(
+                agent: &str,
+                payload: &$crate::verbs::serde_json::Value,
+                dynamic: &[$crate::verbs::DynVerb],
+            ) -> Result<$crate::verbs::Routed<Call>, $crate::verbs::serde_json::Value> {
                 match $crate::verbs::resolve(
                     agent,
                     payload,
                     &[VERBS, $crate::declared::common::VERBS],
                     dynamic,
                 )? {
-                    $crate::verbs::Resolved::Dynamic(call) => Ok(Call::Dynamic(call)),
-                    $crate::verbs::Resolved::Builtin(vname, args) => Self::arm(agent, payload, vname, args),
+                    $crate::verbs::Resolved::Dynamic(call) => {
+                        Ok($crate::verbs::Routed::Call(Call::Dynamic(call)))
+                    }
+                    $crate::verbs::Resolved::Builtin(vname, args) => {
+                        Self::route(agent, payload, vname, args)
+                    }
                 }
-            ]
-            $($name => $ty),+
-        );
+            }
+        }
     };
     ($($name:literal => $ty:ident),+ $(,)?) => {
         $crate::verbs!(
-            @list agent payload dynamic vname args
-            [] []
+            @list args
             [&[VERBS, $crate::declared::common::VERBS]]
             [
                 /// The `reflect` verb every agent answers.
@@ -220,28 +250,32 @@ macro_rules! verbs {
             [
                 "reflect" => Self::typed::<$crate::declared::common::Reflect>("reflect", args).map(Call::Reflect),
             ]
-            [
+            $($name => $ty),+
+        );
+        impl $crate::verbs::Parse for Call {
+            fn parse(
+                agent: &str,
+                payload: &$crate::verbs::serde_json::Value,
+                _dynamic: &[$crate::verbs::DynVerb],
+            ) -> Result<$crate::verbs::Routed<Call>, $crate::verbs::serde_json::Value> {
                 let (vname, args) = $crate::verbs::resolve_builtin(
                     agent,
                     payload,
                     &[VERBS, $crate::declared::common::VERBS],
                 )?;
-                Self::arm(agent, payload, vname, args)
-            ]
-            $($name => $ty),+
-        );
+                Self::route(agent, payload, vname, args)
+            }
+        }
         /// This bundle's agents carry no verbs built at runtime: an explicit empty list
-        /// (what `Bundle::dynamic_verbs` returns).
+        /// (what `Handler::dynamic_verbs` returns).
         #[must_use]
         pub fn dynamic_verbs(_agent: &$crate::Agent) -> Vec<$crate::verbs::DynVerb> {
             Vec::new()
         }
     };
-    (@list $agent:ident $payload:ident $dynamic:ident $vname:ident $args:ident
-        [$($sig:tt)*] [$($setup:tt)*]
+    (@list $args:ident
         [$lists:expr]
         [$($variant:tt)*] [$($arm:tt)*]
-        [$($entry:tt)*]
         $($name:literal => $ty:ident),+) => {
         /// Every verb this bundle declares: the list its entry validates a call
         /// against and `reflect` and `docs` render.
@@ -254,6 +288,7 @@ macro_rules! verbs {
 
         /// A call of one of this bundle's verbs, its arguments typed.
         #[derive(Debug)]
+        #[allow(dead_code)]
         pub enum Call {
             $($variant)*
             $(
@@ -263,20 +298,6 @@ macro_rules! verbs {
         }
 
         impl Call {
-            /// THE ENTRY of every call to this bundle's agents: resolve the verb
-            /// (unknown ⇒ the refusal listing what the agent answers), check its
-            /// arguments against the declaration (unknown, missing, mistyped ⇒ the
-            /// refusal naming the argument), then type them. `Err` is the agent's
-            /// reply; no verb fn runs before this returns `Ok`.
-            pub fn parse(
-                $agent: &str,
-                $payload: &$crate::verbs::serde_json::Value
-                $($sig)*
-            ) -> Result<Call, $crate::verbs::serde_json::Value> {
-                $($setup)*
-                $($entry)*
-            }
-
             fn typed<T: $crate::verbs::serde::de::DeserializeOwned>(
                 verb: &str,
                 args: $crate::verbs::serde_json::Value,
@@ -285,20 +306,35 @@ macro_rules! verbs {
                     .map_err(|e| $crate::verbs::unparsed(verb, &e.to_string()))
             }
 
+            // The call of a resolved builtin verb, typed. `boot` and `shutdown` an
+            // agent does not declare are answered by the shared entry itself.
+            #[allow(dead_code)]
+            fn route(
+                agent: &str,
+                payload: &$crate::verbs::serde_json::Value,
+                vname: &str,
+                $args: $crate::verbs::serde_json::Value,
+            ) -> Result<$crate::verbs::Routed<Call>, $crate::verbs::serde_json::Value> {
+                if matches!(vname, "boot" | "shutdown") && !VERBS.iter().any(|v| v.name == vname) {
+                    return Ok($crate::verbs::Routed::Answered($crate::verbs::serde_json::Value::Null));
+                }
+                Self::arm(agent, payload, vname, $args).map($crate::verbs::Routed::Call)
+            }
+
             fn arm(
-                $agent: &str,
-                $payload: &$crate::verbs::serde_json::Value,
-                $vname: &str,
+                agent: &str,
+                payload: &$crate::verbs::serde_json::Value,
+                vname: &str,
                 $args: $crate::verbs::serde_json::Value,
             ) -> Result<Call, $crate::verbs::serde_json::Value> {
-                match $vname {
+                match vname {
                     $($arm)*
                     $(
                         $name => Self::typed::<$ty>($name, $args).map(Call::$ty),
                     )+
                     _ => Err($crate::verbs::unknown_verb(
-                        $agent,
-                        $payload.get("type").unwrap_or(&$crate::verbs::serde_json::Value::Null),
+                        agent,
+                        payload.get("type").unwrap_or(&$crate::verbs::serde_json::Value::Null),
                         &$crate::verbs::names($lists, &[]),
                     )),
                 }
@@ -358,6 +394,25 @@ fn doc_of(schema: &Value) -> String {
 }
 
 fn type_label(s: &Value) -> String {
+    let mut label = base_label(s);
+    if let Some(n) = s.get("exclusiveMinimum").and_then(Value::as_f64) {
+        label.push_str(&format!(" > {n}"));
+    }
+    // an unsigned integer's own floor, 0, says nothing a reader needs
+    if let Some(n) = s
+        .get("minimum")
+        .and_then(Value::as_f64)
+        .filter(|n| *n != 0.0)
+    {
+        label.push_str(&format!(" >= {n}"));
+    }
+    if let Some(n) = s.get("minItems").and_then(Value::as_u64) {
+        label.push_str(&format!(" with at least {n} item(s)"));
+    }
+    label
+}
+
+fn base_label(s: &Value) -> String {
     let Some(o) = s.as_object() else {
         return "any".to_string();
     };
@@ -433,7 +488,7 @@ pub fn args(schema: &Value) -> Vec<Arg> {
             name: name.clone(),
             ty: type_label(p),
             required: required.contains(&name.as_str()),
-            default: p.get("default").cloned(),
+            default: p.get("default").filter(|d| !d.is_null()).cloned(),
             doc: doc_of(p),
         })
         .collect()
@@ -592,18 +647,39 @@ fn matches_type(schema: &Value, v: &Value) -> bool {
             return alts.iter().any(|a| matches_type(a, v));
         }
     }
+    let within = |n: &serde_json::Number| -> bool {
+        let f = n.as_f64().unwrap_or(f64::NAN);
+        o.get("minimum")
+            .and_then(Value::as_f64)
+            .is_none_or(|m| f >= m)
+            && o.get("maximum")
+                .and_then(Value::as_f64)
+                .is_none_or(|m| f <= m)
+            && o.get("exclusiveMinimum")
+                .and_then(Value::as_f64)
+                .is_none_or(|m| f > m)
+    };
     let one = |t: &str| -> bool {
         match t {
-            "string" => v.is_string(),
+            "string" => v.as_str().is_some_and(|t| {
+                o.get("minLength")
+                    .and_then(Value::as_u64)
+                    .is_none_or(|m| t.chars().count() as u64 >= m)
+            }),
             "boolean" => v.is_boolean(),
             "null" => v.is_null(),
             "integer" => v.as_number().is_some_and(|n| {
-                n.is_i64() || n.is_u64() || fantastic_bundle::py_type_name(v) == "int"
+                (n.is_i64() || n.is_u64() || fantastic_bundle::py_type_name(v) == "int")
+                    && within(n)
             }),
-            "number" => v.is_number(),
+            "number" => v.as_number().is_some_and(within),
             "array" => match (v, o.get("items")) {
-                (Value::Array(items), Some(it)) => items.iter().all(|x| matches_type(it, x)),
-                (Value::Array(_), None) => true,
+                (Value::Array(items), it) => {
+                    o.get("minItems")
+                        .and_then(Value::as_u64)
+                        .is_none_or(|m| items.len() as u64 >= m)
+                        && it.is_none_or(|it| items.iter().all(|x| matches_type(it, x)))
+                }
                 _ => false,
             },
             "object" => v.is_object(),
@@ -643,6 +719,27 @@ pub fn validate(name: &str, schema: &Value, payload: &Value) -> Result<Value, Va
     };
     check_object(name, "", schema, &raw, schema)?;
     Ok(Value::Object(raw))
+}
+
+fn bound_of(schema: &Value, name: &str, key: &str) -> u64 {
+    schema
+        .get("properties")
+        .and_then(|p| p.get(name))
+        .and_then(|p| p.get(key))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+/// Is a required argument ABSENT: not sent, null, or an empty text where the
+/// declaration asks for a non-empty one, or an empty list where it asks for at
+/// least one item (python's falsy rule).
+fn is_missing(schema: &Value, name: &str, value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::String(s)) if s.is_empty() => bound_of(schema, name, "minLength") >= 1,
+        Some(Value::Array(a)) if a.is_empty() => bound_of(schema, name, "minItems") >= 1,
+        Some(_) => false,
+    }
 }
 
 /// Does the schema describe an object with declared properties (so its fields are
@@ -685,7 +782,7 @@ fn check_object(
     }
     if let Some(Value::Array(req)) = schema.get("required") {
         for r in req.iter().filter_map(Value::as_str) {
-            if matches!(raw.get(r), None | Some(Value::Null)) {
+            if is_missing(schema, r, raw.get(r)) {
                 return Err(refuse_arg(
                     name,
                     MISSING_ARG,
@@ -722,8 +819,16 @@ fn check_object(
     Ok(())
 }
 
+/// The typed form of a call an agent's entry ALREADY checked (the agent answered
+/// it): the arguments, decoded into the declared struct. A decode that fails means
+/// the struct and its schema disagree.
+pub fn decode<T: serde::de::DeserializeOwned>(verb: &str, payload: &Value) -> Result<T, Value> {
+    serde_json::from_value::<T>(args_of(payload)).map_err(|e| unparsed(verb, &e.to_string()))
+}
+
 /// The refusal for arguments the schema accepted and the declared struct could not
-/// parse (a rule a schema cannot say, such as a nested field's type).
+/// decode: the struct and its schema disagree, which is a bug in the declaration,
+/// never a second round of validation.
 #[doc(hidden)]
 #[must_use]
 pub fn unparsed(verb: &str, why: &str) -> Value {
@@ -756,13 +861,6 @@ fn verb_name(payload: &Value) -> Option<&str> {
     payload.get("type").and_then(Value::as_str)
 }
 
-fn builtin_arguments(verb: &Verb, payload: &Value) -> Result<Value, Value> {
-    let args = validate(verb.name, verb.schema(), payload)?;
-    // the declared struct has the last word on what a schema cannot say
-    (verb.parse)(args.clone()).map_err(|e| unparsed(verb.name, &e))?;
-    Ok(args)
-}
-
 /// Resolve a call among BUILTIN verbs only (searched in order — the bundle's first,
 /// then the verbs every agent answers) and check its arguments: the verb's name and
 /// the arguments. The entry `verbs!` generates for a bundle with no dynamic verbs.
@@ -771,8 +869,8 @@ pub fn resolve_builtin(
     payload: &Value,
     lists: &[&'static [Verb]],
 ) -> Result<(&'static str, Value), Value> {
-    let found = verb_name(payload)
-        .and_then(|n| lists.iter().find_map(|l| l.iter().find(|v| v.name == n)));
+    let found =
+        verb_name(payload).and_then(|n| lists.iter().find_map(|l| l.iter().find(|v| v.name == n)));
     let Some(v) = found else {
         return Err(unknown_verb(
             agent,
@@ -780,7 +878,7 @@ pub fn resolve_builtin(
             &names(lists, &[]),
         ));
     };
-    Ok((v.name, builtin_arguments(v, payload)?))
+    Ok((v.name, validate(v.name, v.schema(), payload)?))
 }
 
 /// Resolve a call among the builtin verbs and the agent's DYNAMIC ones (a builtin
@@ -815,9 +913,14 @@ pub fn resolve(
 
 /// Check the FIELDS of a record patch (`create_agent` / `update_agent`) against what
 /// the kernel declares for every record (`common`) and the bundle's own record
-/// (`own`). A field neither names is refused by name, with both lists; a known one
-/// must be of its type. A freeform record (`own.open`) accepts any field the
-/// common record does not own.
+/// (`own`) — the SHARED ENTRY a bundle's [`Bundle::check_record`](crate::Bundle::check_record)
+/// runs, so the target's bundle judges the fields, never the kernel.
+///
+/// First the SUBSTRATE WIRING no record may carry (`root_path`, `ctx`, `parent`, and
+/// at update `handler_module`, fixed at create, and `parent_id`, the tree's) and the `children_dir` rule
+/// (one safe path segment). Then a field neither record names is refused by name,
+/// with both lists; a known one must be of its type. A freeform record (`own.open`)
+/// accepts any field the common record does not own.
 pub fn check_record(
     verb: &str,
     bundle: &str,
@@ -825,6 +928,42 @@ pub fn check_record(
     common: &RecordDecl,
     own: &RecordDecl,
 ) -> Result<(), Value> {
+    // REFUSED, not silently skipped — python's `for k in ("handler_module",
+    // *sorted(RESERVED_RECORD_KEYS)):`. `handler_module` is fixed at create:
+    // swapping it would leave a live agent whose in-process state belongs to the OLD
+    // bundle. The reserved keys name substrate wiring; dropping them without a word
+    // would let the caller believe a change had landed that never did.
+    let mut wiring: Vec<&str> = crate::agent::RESERVED_RECORD_KEYS.to_vec();
+    wiring.sort_unstable();
+    if verb == "update_agent" {
+        wiring.insert(0, "parent_id");
+        wiring.insert(0, "handler_module");
+    }
+    for k in wiring {
+        if fields.contains_key(k) {
+            let why = if k == "parent_id" {
+                "absent — parent_id is structural: where an agent sits is the \
+                 tree's, never its record's"
+            } else if k == "handler_module" {
+                "absent — handler_module is fixed at create_agent, and \
+                 root_path/ctx/parent name substrate wiring the record may \
+                 not carry"
+            } else {
+                "absent — root_path/ctx/parent name substrate wiring the \
+                 record may not carry"
+            };
+            return Err(crate::refusal::bad(verb, k, why));
+        }
+    }
+    // `children_dir` BECOMES A DIRECTORY (`<agent>/<children_dir>/<child>`): one safe
+    // segment, exactly as an id is. A non-string is judged as "".
+    if let Some(cd) = fields.get("children_dir") {
+        if let Some(r) =
+            crate::refusal::guard_agent_id_as(verb, "children_dir", cd.as_str().unwrap_or(""))
+        {
+            return Err(r);
+        }
+    }
     let (cs, os) = (common.schema(), own.schema());
     let cprops = cs.get("properties").and_then(Value::as_object);
     let oprops = os.get("properties").and_then(Value::as_object);
