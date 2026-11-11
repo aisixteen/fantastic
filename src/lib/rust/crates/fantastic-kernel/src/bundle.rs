@@ -391,13 +391,22 @@ impl BundleRegistry {
         if let Some(base) = self.meta_base(handler_module) {
             return self.get(&base);
         }
-        self.by_handler.get(handler_module).cloned().or_else(|| {
-            self.folders
-                .read()
-                .expect("folders poisoned")
-                .get(handler_module)
-                .cloned()
-        })
+        self.by_handler
+            .get(handler_module)
+            .cloned()
+            .or_else(|| {
+                self.folders
+                    .read()
+                    .expect("folders poisoned")
+                    .get(handler_module)
+                    .cloned()
+            })
+            // A bare bundle name (`ai_chat`) is accepted for its `.tools` module (owner).
+            .or_else(|| {
+                (!handler_module.contains('.'))
+                    .then(|| self.by_handler.get(&format!("{handler_module}.tools")).cloned())
+                    .flatten()
+            })
     }
 
     /// Load a folder bundle: `name` resolves to `bundle` (a reload replaces it).

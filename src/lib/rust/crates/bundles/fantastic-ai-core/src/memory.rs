@@ -223,7 +223,7 @@ pub(crate) fn rows_of(res: &Map<String, Value>, self_id: &AgentId) -> Vec<Value>
 /// The store holds this agent's conversation AND its view rows. The CONVERSATION
 /// a reader sees is everything but the view and the recorded fold anchors (an
 /// allow-list of kinds to HIDE: a kind forgotten here lands in the model's prompt).
-pub const BOOKKEEPING: [&str; 2] = ["view", "anchors"];
+pub const BOOKKEEPING: [&str; 3] = ["view", "anchors", "keep"];
 
 /// The chat roles a TURN carries.
 pub const TURN_ROLES: [&str; 3] = ["user", "assistant", "system"];
@@ -332,7 +332,15 @@ pub async fn load_history(
     // `append` a row of its own straight to its store (a note to itself); that row
     // is memory, not a turn: it stays in the store, `grep` finds it, the view never
     // renders it as a message it cannot be.
-    let rows: Vec<Value> = rows
+    // WHAT THE MODEL KEPT (#641): each `keep` row's summary rides on the reply block it
+    // names, in `attributes.keep` (the newest wins); never rendered but by the fold.
+    let mut kept: std::collections::HashMap<i64, Value> = std::collections::HashMap::new();
+    for r in rows.iter().filter(|r| kind_of(r) == Some("keep")) {
+        if let (Some(of), Some(s)) = (r.get("of").and_then(Value::as_i64), r.get("summary")) {
+            kept.insert(of, s.clone());
+        }
+    }
+    let mut rows: Vec<Value> = rows
         .into_iter()
         .filter(|r| !kind_of(r).is_some_and(|k| BOOKKEEPING.contains(&k)))
         .filter(|r| {
@@ -341,7 +349,38 @@ pub async fn load_history(
                 .is_some_and(|role| TURN_ROLES.contains(&role))
         })
         .collect();
+    crate::history_view::attach_kept(&mut rows, &kept);
     Ok(rows)
+}
+
+/// The model's `keep` (#641): `summary` kept for the reply block `of` (its pid), a `keep`
+/// row in the store (the stores only append). `Err` names why not: no such reply block.
+pub async fn save_keep(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    of: i64,
+    summary: &str,
+) -> Result<(), String> {
+    let rows = load_history(self_id, kernel, false)
+        .await
+        .map_err(|e| e.0)?;
+    let is_reply = rows.iter().any(|r| {
+        r.get("role").and_then(Value::as_str) == Some("user")
+            && crate::history_view::reply_blocks(r.get("content").and_then(Value::as_str).unwrap_or(""))
+                .into_iter()
+                .any(|b| crate::history_view::reply_pid(b) == Some(of))
+    });
+    if !is_reply {
+        return Err(format!("keep: there is no reply with id {of} in your conversation"));
+    }
+    save_history(
+        self_id,
+        kernel,
+        &[json!({"kind": "keep", "of": of, "summary": summary})],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| e.0)
 }
 
 /// APPEND rows to the memory store, then to the head cache (write-through). A row

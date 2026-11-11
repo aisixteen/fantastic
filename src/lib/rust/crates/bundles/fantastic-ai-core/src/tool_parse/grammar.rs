@@ -47,7 +47,7 @@ pub const BYTES_CLOSE: &str = "</bytes>";
 
 /// The tools. Any other `name` is refused with the shape — a verb is `<type>`,
 /// never the tool name (a compression small models made under the JSON grammar).
-pub const TOOLS: [&str; 4] = ["send", "done", "await", "inquiry_answer"];
+pub const TOOLS: [&str; 5] = ["send", "done", "await", "inquiry_answer", "keep"];
 
 /// Call-level fields of a `send`: where it goes, where the answer goes, what it
 /// is for, and the kernel's per-item bounds. Everything else in the call is the

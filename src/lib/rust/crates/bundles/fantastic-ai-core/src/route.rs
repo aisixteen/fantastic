@@ -974,6 +974,26 @@ pub(crate) async fn answer_inquiry(
     None
 }
 
+/// The model's `keep`: `<of>` the id a reply block names, `<summary>` what to keep of
+/// it. `Some` is the error block for the model.
+async fn keep_note(
+    kernel: &Arc<Kernel>,
+    self_id: &AgentId,
+    call: &crate::tool_parse::ToolCall,
+) -> Option<String> {
+    let of = call.arguments.get("of").and_then(crate::retrieval::as_id);
+    let summary = call.arguments.get("summary").map(py_str);
+    let (Some(of), Some(summary)) = (of, summary) else {
+        return Some(
+            "keep: it takes `<of>` the id of the reply and `<summary>` what to keep of it"
+                .to_string(),
+        );
+    };
+    crate::memory::save_keep(self_id, kernel, of, &summary)
+        .await
+        .err()
+}
+
 /// Drop a deleted agent's routing count and every silent streak of its chains
 /// ([`crate::verbs::on_delete`]).
 pub(crate) fn forget(self_id: &str) {
@@ -1353,7 +1373,8 @@ async fn route_reply_gated(
 
     let done_called = calls.iter().any(|c| c.name == "done");
     let await_called = calls.iter().any(|c| c.name == "await");
-    let any_calls = !calls.is_empty();
+    // `keep` is a note, not an action: a turn of notes alone is a turn with no call (#641)
+    let any_calls = calls.iter().any(|c| c.name != "keep");
     // ONE TURN, ONE BATCH. Every call the model emitted is dispatched in a
     // SINGLE `kernel.send([...])` — concurrent, side-effect order across
     // calls undefined — and everything owed to one destination arrives as
@@ -1386,6 +1407,21 @@ async fn route_reply_gated(
     // inquiry's pid; an answer with nothing to answer, or a placeholder, is told so.
     for call in calls.iter().filter(|c| c.name == "inquiry_answer") {
         if let Some(err) = answer_inquiry(&kernel, self_id.as_str(), &client_id, call).await {
+            units.push(Unit {
+                dest: self_id.as_str().to_string(),
+                target: "-".to_string(),
+                verb: "-".to_string(),
+                idx: None,
+                body: Some(err),
+                title: None,
+            });
+        }
+    }
+
+    // WHAT THE MODEL KEEPS of a reply that will fold (#641): stored for the fold; a
+    // reply that is not in the conversation is refused, saying so.
+    for call in calls.iter().filter(|c| c.name == "keep") {
+        if let Some(err) = keep_note(&kernel, &self_id, call).await {
             units.push(Unit {
                 dest: self_id.as_str().to_string(),
                 target: "-".to_string(),
@@ -2044,8 +2080,9 @@ async fn note_empty_await(
     emit_status(kernel, &st, self_id, client_id, "done", detail).await;
 }
 
-/// The calls that are not dispatches: they end, park or answer the chain.
-const CONTROL_CALLS: [&str; 3] = ["done", "await", "inquiry_answer"];
+/// The calls that are not dispatches: they end, park or answer the chain, or (`keep`)
+/// note a reply for its fold.
+const CONTROL_CALLS: [&str; 4] = ["done", "await", "inquiry_answer", "keep"];
 
 /// Count one silent turn of the chain (a turn that ran nothing). At
 /// [`MAX_SILENT_TURNS`] in a row the chain GIVES UP — the status says so, an open

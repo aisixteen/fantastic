@@ -82,15 +82,16 @@ pub const SEND_TO_HOWTO: &str = r#"## Reaching other agents
 Everything is an agent with a string id; `send` reaches any of them. A call is a
 `<call>` element, one child tag per argument — no JSON, no quotes, no escaping:
 <call name="send">
-<routing><target_id>notes</target_id></routing>
-<payload><type>write</type><path>notes.md</path><bytes>line one
-line two, with "quotes"
+<routing><target_id>AGENT</target_id></routing>
+<payload><type>VERB</type><path>PATH</path><bytes>FIRST LINE
+SECOND LINE, with "quotes"
 </bytes></payload>
 </call>
 `<routing>` is how the call travels: `<target_id>` names the agent. `<payload>` is
 delivered whole: `<type>` the verb, every other child an argument. A value is text as
 written (`true`, `12`, a path); a list is `<item>` children; an object is child tags
-(`<edits><item><path>a.py</path><hunks>2</hunks></item></edits>`).
+(`<edits><item><path>PATH</path><hunks>N</hunks></item></edits>`); a map's keys are its
+tags, `$` included (`<callable_by><$self>*</$self><AGENT><item>VERB</item></AGENT></callable_by>`).
 A body (a file, a patch) goes in `<bytes>`…`</bytes>` VERBATIM — real newlines and quotes,
 nothing escaped, no fence; it ends at the first `</bytes>`. `<reply_to>` in `<routing>` picks where the reply
 goes: you by default (your next message), another id hands it to them, `null` discards it.
@@ -122,7 +123,7 @@ resend it, or drop it with `kernel` `<type>ack_deadletter</type>`.
 ## How to call an agent — `docs`
 `docs` is a KERNEL verb: send it to `kernel` with the agent you ask about in `<of>`
 (an agent id, a bundle by its listed name, or
-`kernel` for create_agent, update_agent, ps, …): `<payload><type>docs</type><of>notes</of></payload>`.
+`kernel` for create_agent, update_agent, ps, …): `<payload><type>docs</type><of>AGENT</of></payload>`.
 It answers one signature per verb; add `<verb>write</verb> <tier>detailed</tier>` for one
 verb's full text. A docs reply is TRANSIENT: after your next message it becomes a
 one-line stub — act on it then, or ask again. Reflect only agents you are granted; for part
@@ -144,13 +145,12 @@ for it. Asked one yourself
 pub const TITLES_HOWTO: &str = r#"## Titling your calls
 Every call carries a one-sentence `<title>` in its `<routing>`:
 <call name="send">
-<routing><target_id>notes</target_id><title>read filler_2 — looking for the audit marker</title></routing>
-<payload><type>read</type><path>filler_2.txt</path></payload>
+<routing><target_id>AGENT</target_id><title>WHAT THIS CALL IS FOR</title></routing>
+<payload><type>VERB</type><path>PATH</path></payload>
 </call>
 The title rides on the reply's tag and is what remains once the reply BODY is stripped
-from your view (bodies stay fetchable by pid). Title the INTENT ("read filler_2 — looking
-for the audit marker"); what a reply told you goes in your Facts line — the body will go;
-the title and your Facts stay.
+from your view (bodies stay fetchable by pid). Title the INTENT (what you read and what you look for in it);
+what a reply told you goes in your task state — the body will go; the title and your state stay.
 "#;
 
 /// The FULL-ASYNC how-to, gated on the record's `context_async` — taught only
@@ -158,8 +158,8 @@ the title and your Facts stay.
 pub const ASYNC_HOWTO: &str = r#"## Replies are rows, not turns
 A reply is DATA, not a message to answer. A LARGE reply arrives as a one-line digest —
 tag, your title, size, and its ORIGIN (how to get it again):
-[reply to <pid> · notes read · "survey filler_2"]
-(settled, 6812 bytes — NOT inlined, held in memory only until this agent restarts. origin: notes notes.md lines 1-200 v3f2a — read {path, range}. To find a line in it: send yourself `<type>grep</type> <query>substring</query> <ids><item>pid</item></ids>`)
+[reply to <pid> · <agent> <verb> · "<title>"]
+(settled, <N> bytes — NOT inlined, held in memory only until this agent restarts. origin: <agent> <path> lines <a-b> <version> — read {path, range}. To find a line in it: send yourself `<type>grep</type> <query>substring</query> <ids><item>pid</item></ids>`)
 GREP FIRST: `<type>grep</type> <query>substring</query>` on yourself finds the line —
 in a body held this run, a folded stretch, an old turn, a row shared with you — with
 its id and line. BODIES ARE NOT KEPT: after a restart only the origin line remains, so
@@ -181,33 +181,28 @@ pub const MEMORY_HOWTO: &str = r#"Your conversation lives in your MEMORY STORE `
 /// The working rules, placed LAST in the default system block: the model follows the
 /// most recent instructions most closely, and these must survive a long task brief.
 pub const WORKING_HOWTO: &str = r#"## Working
-Text outside calls is only the state lines when they changed, and your last message.
-State lines are plain reply text before your calls (not a call, not an agent); your thinking
-lasts one turn, they are what later turns have. Write them again only when something changed:
-Goal: add --json to ls. Done when: ls test passes, build clean.
-Plan: [x] find handler  [ ] add flag (current)  [ ] run test
-Facts: handler src/cli.rs:120 (grep)
-Ruled out: -
-Next: edit src/cli.rs:120
-A step is [x] only after its result is in Facts; a Fact a later result contradicts is rewritten.
-Each turn, start from your latest such lines and think only about Next.
+Your thinking lasts one turn; your reply's own text stays. Keep the task's state there, in a
+few plain lines before your calls (plain text, not a call or an agent): what was asked and how
+you will know it is done; the steps and which one you are on; what you found, with where you
+found it; what you tried that failed; and your next step. Restate them only when something
+changed. A step counts as done only once its result is among what you found; a finding a
+later result contradicts is corrected. Each turn, start from your latest state and think only
+about the next step. Other text outside calls: only your last message.
 Read only what the request names; no docs or reflect sweep before your first real call. Make
 the first call that changes or tests something as soon as you can — an error reply names the
 missing argument. The tree above lists what exists and `can_call` what you may use: do not
 reflect to rediscover them; `docs` only for a verb you are about to call.
 One answer may hold many <call> elements; they run at once. Put in it every call that does not
 need another's reply; a call waits for a later turn only when it does.
-Find before you read: grep or list, then read only the lines you need. Bound command output
-(`head`, `tail`, `grep`, a count); put long logs in a file and search it. Never guess a path
-or symbol you have not seen.
-When an edit or command fails, read the error and the current file, then change the call;
-never resend it unchanged. A step that fails or brings nothing new three times: stop, put it
-under Ruled out, then take another route or send whoever asked you an `inquiry` with what you tried.
-Before `done`: each Done-when item gets one line with its evidence (test or build output, a
-command result). Checks are run, not re-read: the test for your change first, the full suite
-once. Do not re-read a file only to confirm an edit the tool acknowledged. Say what you could
-not check.
-Your last message: what changed, where (path:line), what you checked, what is left; under ten lines.
+Find before you read: locate first, then fetch only the part you need. Keep large outputs
+bounded. Never guess an id, name or path you have not seen.
+When a call fails, read the error and the current state, then change the call; never resend
+it unchanged. A step that fails or brings nothing new three times: stop, put it in your state
+as failed, then take another route or send whoever asked you an `inquiry` with what you tried.
+Before `done`: for each check that shows the task is done, the reply that proves it. Checks are
+run, not re-read; do not fetch something again only to confirm a call that already succeeded.
+Say what you could not check.
+Your last message: what changed, where, what you checked, what is left; under ten lines.
 "#;
 
 /// The context-window how-to, appended to the DEFAULT system block. Context is
@@ -219,6 +214,7 @@ Your view is finite: when it overflows, older turns are compacted and a
 `<type>recall</type>` (`<query>`, `<limit>`) to page dropped turns back, `<type>context_status</type>`
 for your budget.
 A [folded …], [thought …] or [cut …] anchor stands for a body you already saw in full; `recall` with its id to read it again — it folds back after your next answer. A folded `reflect` or `docs` reply has no id: call it again for the current state.
+A reply that will fold after your answer ends with a `keep` call holding its id: write what you will still need of it in `summary`, short, and the folded block shows that in place of the body; leave it out and the block folds to its anchor.
 Your thinking lasts one turn: after you answer it folds to a [thought …] anchor and is not kept. Use it to choose the next step, not to gather again what you already know. Do not repeat a call whose result you still have or noted; fetch again only what was folded and you need.
 "#;
 
@@ -947,23 +943,17 @@ mod tests_worknote {
         let h = super::CONTEXT_HOWTO;
         assert!(h.contains("Your thinking lasts one turn"));
         assert!(h.contains("Do not repeat a call whose result you still have or noted"));
-        assert!(!h.contains("memory agent"));
-        assert!(!h.contains("Goal"));
     }
 
     #[test]
-    fn the_working_section_leads_with_the_state_lines_and_a_five_line_sample() {
-        let h = super::WORKING_HOWTO;
-        let w = h.find("## Working").unwrap();
-        let state = h.find("Text outside calls is only the state lines").unwrap();
-        assert!(state > w && state < h.find("Read only what the request names").unwrap());
-        assert!(h.contains("not a call, not an agent"));
-        assert!(h.contains("Write them again only when something changed"));
-        assert!(h.contains("Goal: add --json to ls. Done when:"));
-        assert!(h.contains("Plan: [x] find handler  [ ] add flag (current)"));
-        assert!(h.contains("Facts: handler src/cli.rs:120 (grep)\nRuled out: -\nNext: edit"));
-        assert!(h.contains("A step is [x] only after its result is in Facts; a Fact a later result contradicts is rewritten."));
-        assert!(h.contains("think only about Next"));
+    fn the_working_section_asks_to_keep_the_task_state_in_the_reply() {
+        let h = super::WORKING_HOWTO.split_whitespace().collect::<Vec<_>>().join(" ");
+        let h = h.as_str();
+        assert!(h.starts_with("## Working Your thinking lasts one turn; your reply's own text stays."));
+        assert!(h.contains("Keep the task's state there, in a few plain lines before your calls (plain text, not a call or an agent)"));
+        assert!(h.contains("what was asked and how you will know it is done; the steps and which one you are on; what you found, with where you found it; what you tried that failed; and your next step."));
+        assert!(h.contains("A step counts as done only once its result is among what you found"));
+        assert!(h.contains("think only about the next step"));
         // the sections run in the agreed order
         let s = super::SEND_TO_HOWTO;
         assert!(!s.contains("## Working"));
@@ -981,17 +971,11 @@ mod tests_worknote {
         assert!(h.contains("an error reply names the missing argument"));
         assert!(h.contains("One answer may hold many <call> elements; they run at once."));
         assert!(h.contains("a call waits for a later turn only when it does"));
-        assert!(h.contains("Before `done`: each Done-when item gets one line with its evidence"));
-        assert!(h.contains("the test for your change first, the full suite once"));
+        assert!(h.contains("Before `done`: for each check that shows the task is done, the reply that proves it."));
+        assert!(h.contains("Checks are run, not re-read"));
         assert!(h.contains("`done` (the work is done, checked as under Working)") || h.contains("checked as under Working"));
         assert!(h.contains("three times: stop"));
         assert!(h.contains("send whoever asked you an `inquiry`"));
-        assert!(!h.contains("EMIT CALLS BEFORE YOU DELIBERATE"));
-        assert_eq!(h.matches("Thinking is stripped").count(), 0);
-        // one visible-text rule; no names that may not exist
-        assert_eq!(h.matches("Text outside calls").count(), 1);
-        for gone in ["scout", "A human is an agent", "<re>N</re>", "<guid>", "was routed to you", "deliberate at length"] {
-            assert!(!h.contains(gone), "{gone}");
-        }
+        assert!(h.contains("Other text outside calls: only your last message."));
     }
 }

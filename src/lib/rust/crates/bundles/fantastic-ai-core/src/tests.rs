@@ -7126,6 +7126,9 @@ mod stream_cut;
 /// Autofold: thoughts, large replies and recall by id (#556).
 #[path = "tests_autofold.rs"]
 mod autofold;
+/// The model's `keep` summary of a reply that folds (#641).
+#[path = "tests_keep.rs"]
+mod keep;
 /// Inline agent views in a chat (#339).
 #[path = "tests_embed.rs"]
 mod tests_embed;

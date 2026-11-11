@@ -185,7 +185,11 @@ async fn turn_messages(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) -> Vec
     assert!(until_passes(&s, 1).await, "the provider was never called");
     (0..s.passes_served())
         .map(|n| s.request_messages(n))
-        .find(|msgs| msgs.last().and_then(|m| m["content"].as_str()) == Some(text))
+        .find(|msgs| {
+            msgs.last()
+                .and_then(|m| m["content"].as_str())
+                .is_some_and(|c| c.starts_with(text))
+        })
         .unwrap_or_else(|| panic!("no provider pass carried the turn {text:?}"))
 }
 

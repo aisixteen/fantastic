@@ -179,6 +179,9 @@ pub const AUTOFOLD_AT: usize = 16_000;
 /// anchor (#634): reference text the model can re-read with `get`, much smaller
 /// than [`AUTOFOLD_AT`].
 pub const REFERENCE_FOLD_AT: usize = 1_500;
+/// Tokens a `keep` summary may take (#641): over it the summary is discarded and the
+/// folded block shows the plain anchor. Well under the blocks that fold.
+pub const KEEP_SUMMARY_MAX: usize = 300;
 /// Adjacent folds at the head of the view before they fold as a group.
 ///
 /// THREE, not four. A real run folds at most once per turn — each projection

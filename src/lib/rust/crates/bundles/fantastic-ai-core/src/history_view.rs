@@ -25,7 +25,7 @@
 //! AUTOFOLD ([`autofold`], #556) then shows a thought, a cut answer and a large or
 //! recalled reply as a short anchor, at assembly time and never stored.
 
-use crate::constants::{AUTOFOLD_AT, CHARS_PER_TOKEN, REFERENCE_FOLD_AT};
+use crate::constants::{AUTOFOLD_AT, CHARS_PER_TOKEN, KEEP_SUMMARY_MAX, REFERENCE_FOLD_AT};
 use serde_json::{json, Value};
 
 /// The verbs whose reply is WHOLE STATE, so a later reply strictly supersedes an
@@ -516,11 +516,83 @@ fn fold_limit(verb: &str) -> usize {
 /// ([`AUTOFOLD_AT`] tokens; [`REFERENCE_FOLD_AT`] for `reflect` and `docs`).
 #[must_use]
 pub fn will_fold(content: &str) -> bool {
-    parse_reply_tag(content).is_some()
-        && reply_blocks(content).into_iter().any(|b| {
-            let verb = parse_reply_tag(b).map_or("", |(_, v)| v);
-            verb == "recall" || body_tokens(body_of(b)) > fold_limit(verb)
+    parse_reply_tag(content).is_some() && reply_blocks(content).into_iter().any(block_folds)
+}
+
+/// Whether one reply block folds once answered: a recall reply, or a body over its
+/// verb's fold limit.
+fn block_folds(block: &str) -> bool {
+    let verb = parse_reply_tag(block).map_or("", |(_, v)| v);
+    verb == "recall" || body_tokens(body_of(block)) > fold_limit(verb)
+}
+
+/// The pid a reply block names (`[reply to <pid> · …]`), when it is a number.
+#[must_use]
+pub fn reply_pid(block: &str) -> Option<i64> {
+    let (pid, _) = take_run(block.strip_prefix("[reply to ")?)?;
+    pid.parse().ok()
+}
+
+/// KEEP (#641): `content`, the turn that just arrived, with the `keep` call template
+/// — the block's pid filled in — closing each reply block that will fold. The call's
+/// presence is the cue; the model's view of the turn only, never stored.
+#[must_use]
+pub fn mark_keep(content: &str) -> String {
+    if parse_reply_tag(content).is_none() {
+        return content.to_string();
+    }
+    reply_blocks(content)
+        .into_iter()
+        .map(|b| match reply_pid(b).filter(|_| block_folds(b)) {
+            Some(pid) => format!(
+                "{b}\n<call name=\"keep\"><of>{pid}</of><summary>\u{2026}</summary></call>"
+            ),
+            None => b.to_string(),
         })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The summary the model kept for the block `pid` of a row (`attributes.keep`), when it
+/// is a real one and within [`KEEP_SUMMARY_MAX`] tokens: the placeholder copied back, an
+/// empty text or an over-long one is no summary, and the block folds to its plain anchor.
+fn kept_summary(row: &Value, pid: Option<i64>) -> Option<&str> {
+    let text = row
+        .get("attributes")?
+        .get("keep")?
+        .get(pid?.to_string())?
+        .as_str()?
+        .trim();
+    let real = !text
+        .trim_matches(|c: char| c == '.' || c == '\u{2026}' || c.is_whitespace())
+        .is_empty();
+    (real && body_tokens(text) <= KEEP_SUMMARY_MAX).then_some(text)
+}
+
+/// The summaries `kept` (by block pid) onto the rows that carry those blocks, as
+/// `attributes.keep` (pid to summary): what [`autofold`] reads.
+pub fn attach_kept(rows: &mut [Value], kept: &std::collections::HashMap<i64, Value>) {
+    for row in rows
+        .iter_mut()
+        .filter(|r| r.get("role").and_then(Value::as_str) == Some("user"))
+    {
+        let mine: serde_json::Map<String, Value> = reply_blocks(content_of(row))
+            .into_iter()
+            .filter_map(reply_pid)
+            .filter_map(|pid| kept.get(&pid).map(|s| (pid.to_string(), s.clone())))
+            .collect();
+        if !mine.is_empty() {
+            row["attributes"]["keep"] = Value::Object(mine);
+        }
+    }
+}
+
+/// `anchor`, followed by the model's kept summary when there is one.
+fn with_kept(anchor: String, summary: Option<&str>) -> String {
+    match summary {
+        Some(s) => format!("{anchor}\n{s}"),
+        None => anchor,
+    }
 }
 
 /// AUTOFOLD (#556): the row `store[idx]`, whose current message is `msg`, as the
@@ -594,16 +666,31 @@ pub fn autofold(
                         recalls += 1;
                         changed = true;
                         recalled = true;
-                        format!(
-                            "[folded · recall reply from {agent}{what} · ~{x} tokens · get: {id}]"
+                        with_kept(
+                            format!(
+                                "[folded · recall reply from {agent}{what} · ~{x} tokens · get: {id}]"
+                            ),
+                            kept_summary(row, reply_pid(b)),
                         )
                     } else if x > fold_limit(verb) {
                         changed = true;
                         let head = cap120(body.split('\n').next().unwrap_or("").trim());
+                        let summary = kept_summary(row, reply_pid(b));
                         if matches!(verb, "reflect" | "docs") {
                             // re-called, never recalled: no `get:` pointer
-                            format!(
-                                "[folded · {verb} reply from {agent} · ~{x} tokens · {verb} again for the current state]"
+                            with_kept(
+                                format!(
+                                    "[folded · {verb} reply from {agent} · ~{x} tokens · {verb} again for the current state]"
+                                ),
+                                summary,
+                            )
+                        } else if summary.is_some() {
+                            // the summary stands where the head line would
+                            with_kept(
+                                format!(
+                                    "[folded · {verb} reply from {agent} · ~{x} tokens · get: {id}]"
+                                ),
+                                summary,
                             )
                         } else {
                             format!(
@@ -1033,5 +1120,53 @@ mod tests {
         )));
         assert!(!will_fold("[reply to 3 · notes read]\nsmall"));
         assert!(!will_fold(&"x".repeat(AUTOFOLD_AT * 8)));
+    }
+
+    fn kept_row(content: &str, keep: Option<&str>) -> Vec<Value> {
+        let mut user = json!({"role": "user", "id": 5, "content": content});
+        if let Some(k) = keep {
+            user["attributes"] = json!({"keep": {"3": k}});
+        }
+        vec![user, json!({"role": "assistant", "id": 6, "content": "ok"})]
+    }
+
+    #[test]
+    fn keep_marks_the_blocks_that_will_fold_only() {
+        let big = format!("[reply to 3 · ai read]\nhead\n{}", "x".repeat(AUTOFOLD_AT * 4 + 4));
+        let small = "[reply to 4 · ai read]\nsmall";
+        let marked = mark_keep(&format!("{small}\n\n{big}"));
+        assert_eq!(marked.matches("<call name=\"keep\">").count(), 1);
+        assert!(marked.starts_with(small), "{marked}");
+        assert!(marked.ends_with("<call name=\"keep\"><of>3</of><summary>\u{2026}</summary></call>"));
+        assert_eq!(mark_keep(small), small);
+        assert_eq!(mark_keep("plain text"), "plain text");
+    }
+
+    #[test]
+    fn a_kept_summary_stands_for_the_body_when_it_folds() {
+        let big = format!("[reply to 3 · ai read]\nhead\n{}", "x".repeat(AUTOFOLD_AT * 4 + 4));
+        let store = kept_row(&big, Some("the part I need"));
+        let (out, form) = autofold(&store, 0, &store[0], None);
+        assert_eq!(form, "anchor");
+        assert_eq!(
+            out["content"],
+            json!("[folded · read reply from ai · ~16003 tokens · get: 5]\nthe part I need")
+        );
+    }
+
+    #[test]
+    fn no_summary_an_over_cap_one_or_the_placeholder_fold_to_the_plain_anchor() {
+        let big = format!("[reply to 3 · ai read]\nhead\n{}", "x".repeat(AUTOFOLD_AT * 4 + 4));
+        let plain = "[folded · read reply from ai · ~16003 tokens · head: \"head\" · get: 5]";
+        let long = "y".repeat(KEEP_SUMMARY_MAX * 4 + 4);
+        for keep in [None, Some(long.as_str()), Some("\u{2026}"), Some(" ... "), Some("")] {
+            let store = kept_row(&big, keep);
+            let (out, _) = autofold(&store, 0, &store[0], None);
+            assert_eq!(out["content"], json!(plain), "{keep:?}");
+        }
+        let at = "y".repeat(KEEP_SUMMARY_MAX * 4);
+        let store = kept_row(&big, Some(&at));
+        let (out, _) = autofold(&store, 0, &store[0], None);
+        assert!(out["content"].as_str().unwrap().ends_with(&at));
     }
 }
