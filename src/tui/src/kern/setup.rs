@@ -211,7 +211,7 @@ pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
             return Err(format!("`{agent}` was written but did not boot: {e}"));
         }
     }
-    Ok(format!(".fantastic/agents/{PARENT}/agents/{id}/agent.yaml"))
+    Ok(host.kernel.state_dir()?.join("agents").join(PARENT).join("agents").join(id).join("agent.yaml").display().to_string())
 }
 
 #[cfg(test)]
@@ -245,6 +245,7 @@ mod tests {
         };
         let at = write(&h, &rec).await.unwrap();
         assert!(at.ends_with("/agents/mine/agent.yaml"), "{at}");
+        assert!(at.starts_with(&h.kernel.state_dir().unwrap().display().to_string()), "{at}");
         for id in ["mine", "mine_provider"] {
             assert!(
                 h.kernel

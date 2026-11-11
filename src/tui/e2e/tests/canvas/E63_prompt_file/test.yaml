@@ -2,7 +2,7 @@
 # plug names those). Scripted: a stub model (no GPU).
 id: prompt_file
 group: canvas
-title: "the project's system block: .fantastic/prompt.md seeded, every AI reads it, an edit is the block on the next turn"
+title: "the project's system block: prompt.md seeded in its bridge's folder, every AI reads it, an edit is the block on the next turn"
 runner: probe.py
 costs: free
 limits:

@@ -355,9 +355,9 @@ impl Host {
         if let Err(e) = crate::kern::user_store::ensure(&host).await {
             notes.push(e);
         }
-        // THE PROJECT'S SYSTEM BLOCK: `.fantastic/prompt.md`, seeded, read by
+        // THE PROJECT'S SYSTEM BLOCK: `prompt.md`, in its bridge's folder, seeded, read by
         // every AI through its bridge (`kern/prompt`)
-        match crate::kern::prompt::ensure(&host, &paths.cwd).await {
+        match crate::kern::prompt::ensure(&host).await {
             Ok(()) => {
                 if let Err(e) = crate::kern::reach::grant_all(&host).await {
                     notes.push(e);
@@ -366,14 +366,23 @@ impl Host {
             }
             Err(e) => notes.push(e),
         }
-        // THE PROJECT'S `.fantastic/.mcp.json`: kept by the `mcp` leg, through its bridge
+        // THE PROJECT'S `.mcp.json`: kept by the `mcp` leg, through its bridge
         // (`kern/mcp_config`) — right before any coding CLI connects
         if let Err(e) = crate::kern::mcp_config::ensure(&host).await {
             notes.push(e);
         }
-        // the orientation a coding CLI opened here reads (`kern/orient`)
-        if let Err(e) = crate::kern::orient::seed(&paths.cwd) {
-            notes.push(e);
+        // the orientation a coding CLI opened here reads (`kern/orient`), and the
+        // state folder's readme, rewritten from the live values
+        match (host.kernel.state_dir(), host.kernel.work_dir()) {
+            (Ok(state), Ok(work)) => {
+                if let Err(e) = crate::kern::orient::seed(&state) {
+                    notes.push(e);
+                }
+                if let Err(e) = crate::kern::orient::write_readme(&host, &state, &work) {
+                    notes.push(e);
+                }
+            }
+            (Err(e), _) | (_, Err(e)) => notes.push(e),
         }
         // A browser set-up agent lives only while its page is open: never hydrated.
         crate::kern::setup_agent::sweep(&host).await;

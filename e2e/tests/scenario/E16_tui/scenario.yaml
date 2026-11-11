@@ -28,7 +28,7 @@ runs:
     frames:
       # no docked title: the live shell gives every row to the work
       # the `mcp` leg is made at boot (it keeps the project's
-      # .fantastic/.mcp.json right before any client connects), with its bridge
+      # its .mcp.json right before any client connects), with its bridge
       live: {contains: [exec, files, user, store, memory, mcp], contains_block_title: false}
     after_exit:
       exit_code: 0
@@ -42,8 +42,9 @@ runs:
         - .fantastic/memory.db
         - .fantastic/agents/user/agents/mcp/agent.yaml
         - .fantastic/agents/user/agents/mcp_config/agent.yaml
-        - .fantastic/prompt.md
-        - .fantastic/.mcp.json
+        - .fantastic/agents/user/agents/prompt_file/prompt.md
+        - .fantastic/agents/user/agents/mcp_config/.mcp.json
+        - .fantastic/readme.md
       # nothing outside `.fantastic` (no pollution)
       # no roster file: every agent is a record under .fantastic/agents/
       files_absent: [.fantastic/messages.yaml, .fantastic/ledger.json, .fantastic/kernel.yaml, .mcp.json, .claude]

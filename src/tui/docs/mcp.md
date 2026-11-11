@@ -4,12 +4,12 @@
 
 ## `fantastic mcp`
 
-THE PROJECT'S MCP CONFIG is written for you, INSIDE `.fantastic` — nothing is
+THE PROJECT'S MCP CONFIG is written for you, INSIDE the state folder — nothing is
 created outside it: at every start the `mcp` leg sets `mcpServers.fantastic =
-{command: <this fantastic binary>, args: [mcp]}` in `.fantastic/.mcp.json`
-(through its own bridge, `mcp_config`), keeping every other server, and only
+{command: <this fantastic binary>, args: [mcp]}` in `.mcp.json`
+in its bridge's folder (`<state>/agents/user/agents/mcp_config/`, through the `mcp_config` bridge), keeping every other server, and only
 when it changed. Point a coding CLI at it: `claude --mcp-config
-.fantastic/.mcp.json`.
+<that file>` (`<state>/readme.md` names the path).
 
 MCP over stdio, protocol 2025-11-25, two tools: `reflect` and `send`. No
 arguments. Register it once as a stdio server — command `fantastic`, args

@@ -1,11 +1,11 @@
-"""E64 mcp_config — `.fantastic/.mcp.json` (nothing outside `.fantastic`), kept by the `mcp` leg
+"""E64 mcp_config — `.mcp.json` in the `mcp_config` bridge's own folder (nothing outside `.fantastic`), kept by the `mcp` leg
 through its own writable bridge (`mcp_config`), at every boot:
 
 a) a file with ANOTHER server already in it: after the first boot it also holds
    `mcpServers.fantastic = {command: <the binary, absolute>, args: [mcp]}`, the
    other server (and its key order) untouched;
 b) a second boot leaves the file byte-identical (written only when it changed);
-c) the leg reports no `mcp_config_error`; the bridge exposes only `.fantastic/.mcp.json`; no `.mcp.json` at the root."""
+c) the leg reports no `mcp_config_error`; the bridge (root `@self`) exposes only `.mcp.json`; no `.mcp.json` at the root."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def main() -> bool:
     rig.build()
     rig.make_home(None)
     rig.proj.mkdir(parents=True, exist_ok=True)
-    cfg = rig.proj / ".fantastic" / ".mcp.json"
+    cfg = rig.proj / ".fantastic/agents/user/agents/mcp_config/.mcp.json"
     r: dict = {}
     info: dict = {}
     try:
@@ -34,6 +34,7 @@ def main() -> bool:
         rig.init()
         r["written_on_first_boot"] = cfg.exists()
         rig.stop()
+        cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text(json.dumps({"mcpServers": OTHER, "keep": 1}, indent=2))
         rig.start()
         doc = json.loads(cfg.read_text())
@@ -56,7 +57,7 @@ def main() -> bool:
         # nothing is created outside `.fantastic` (owner 2026-10-12: no pollution)
         info["outside"] = sorted(x.name for x in rig.proj.iterdir() if x.name != ".fantastic")
         r["nothing_outside_fantastic"] = info["outside"] == []
-        r["bridge_only_file"] = b.get("allow") == [".fantastic/.mcp.json"] and b.get("root") == "." and not b.get("readonly")
+        r["bridge_only_file"] = b.get("allow") == [".mcp.json"] and b.get("root") == "@self" and not b.get("readonly")
     finally:
         rig.stop()
     ok = all(r.values())
