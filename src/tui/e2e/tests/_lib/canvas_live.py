@@ -247,7 +247,7 @@ class Rig:
         first = not (self.proj / ".fantastic").exists()
         args = [str(self.binary), "canvas", *(["--port", str(self.port)] if first else [])]
         with open(self.log, "a") as f:
-            f.write("\n=== start\n")
+            f.write(f"\n=== start {shlex.join(args[1:])}\n")
         self.host = subprocess.Popen(args, cwd=self.proj, env=self.env(), stdout=open(self.log, "a"), stderr=subprocess.STDOUT,
                                      **oslayer.group_kwargs())
         for _ in range(600):
@@ -257,6 +257,7 @@ class Rig:
             m = re.search(r"^fantastic: the canvas: (\S+)", run, re.M)
             if m:
                 self.url = m.group(1)
+                self.port = int(self.url.split("//", 1)[1].split("/", 1)[0].rsplit(":", 1)[1])  # what the host really serves on
                 return
             time.sleep(0.2)
         raise SystemExit("the host never announced the canvas")
@@ -264,11 +265,13 @@ class Rig:
     def stop(self) -> None:
         if self.host is None:
             return
-        oslayer.stop(self.host)
+        # the whole group: a child of the host that outlives it keeps the state folder's lock
+        oslayer.stop_group(self.host.pid)
         try:
             self.host.wait(30)
         except subprocess.TimeoutExpired:
-            self.host.kill()
+            oslayer.kill_group(self.host.pid)
+            self.host.wait()
         self.host = None
 
     def init(self, cells: list[dict] | None = None, host_agents: list[tuple[str, dict]] | None = None) -> None:
