@@ -7,6 +7,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- An anthropic provider keeps its usage (total, by_model, by_agent) in its own params store too (#547): a `usage` setting row, written when a request ends and on `usage_reset`, read on load when `usage.json` is missing; `usage.json` stays.
 - `E150_chat_provider_split` (#519): an e2e probe (Rust lane, scripted provider) for the chat and its provider apart: the local split, a swap of the chat's `provider_id`, the grants refused by name, and a provider on another kernel; the base e2e (E99, E22, E23 and the parity families) make their AI as a provider plus a chat.
 - `ram_store` and `sqlite_store` `append` emits `appended {table, id}` for each new row (#508), so a store view refreshes on a write; a refused append emits nothing.
 - The sidebar (#608): the canvas's left column is the `sidebar` agent (`sidebar.tools`, seeded under the root on a first run), whose `reflect` returns its html view: the kernels, the agent tree with each chat's state, what waits for the person, and the project's files, drawn from reads on other agents (a view's `calls` as an object). It replaces the canvas's file-tree sidebar and its `tree` view verb; a folder seeded before it has no left column.

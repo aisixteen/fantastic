@@ -43,6 +43,9 @@ completion_tokens, stop_reason} or {rid, error, transport}. An AI chat (`ai_chat
 /// The name of a provider's default-model setting (in its memory store).
 pub const DEFAULT_FIELD: &str = "default_model";
 
+/// The name of a provider's usage setting (in its memory store).
+const USAGE_FIELD: &str = "usage";
+
 /// A PROVIDER'S SETTINGS live in its memory store (`memory_store_id`), as `setting` rows
 /// under its own key — `{kind: "setting", name, value}`, the newest of a name wins. Its
 /// record holds the connection only.
@@ -57,33 +60,25 @@ fn store_of(agent_id: &AgentId, kernel: &Kernel) -> Option<AgentId> {
         .map(AgentId::from)
 }
 
-/// A provider's default model: the newest `default_model` setting in its store.
-pub async fn default_of(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Option<String> {
+/// The newest `setting` row named `name` in the provider's store: its value.
+async fn setting_of(agent_id: &AgentId, kernel: &Arc<Kernel>, name: &str) -> Option<Value> {
     let store = store_of(agent_id, kernel)?;
     let r = kernel
         .send(vec![Item::new(
             store,
-            json!({"type": "read", "kinds": [SETTING], "match": {"name": DEFAULT_FIELD}, "order": "desc", "limit": 1}),
+            json!({"type": "read", "kinds": [SETTING], "match": {"name": name}, "order": "desc", "limit": 1}),
         )])
         .await;
-    r.first()?
-        .result
-        .get("rows")?
-        .as_array()?
-        .first()?
-        .get("value")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
+    r.first()?.result.get("rows")?.as_array()?.first()?.get("value").cloned()
 }
 
-/// Keep `model` as the provider's default (a `setting` row in its store). `Err` names why.
-async fn set_default(agent_id: &AgentId, kernel: &Arc<Kernel>, model: &str) -> Result<(), String> {
-    let store = store_of(agent_id, kernel).ok_or("the provider names no memory_store_id to keep its default in")?;
+/// Keep `value` as the provider's `name` setting (a `setting` row in its store). `Err` names why.
+async fn set_setting(agent_id: &AgentId, kernel: &Arc<Kernel>, name: &str, value: Value) -> Result<(), String> {
+    let store = store_of(agent_id, kernel).ok_or("the provider names no memory_store_id to keep its settings in")?;
     let r = kernel
         .send(vec![Item::new(
             store,
-            json!({"type": "append", "rows": [{"kind": SETTING, "name": DEFAULT_FIELD, "value": model}]}),
+            json!({"type": "append", "rows": [{"kind": SETTING, "name": name, "value": value}]}),
         )])
         .await;
     match r.first().map(|o| &o.result) {
@@ -91,6 +86,35 @@ async fn set_default(agent_id: &AgentId, kernel: &Arc<Kernel>, model: &str) -> R
         Some(res) => Err(res["error"].as_str().unwrap_or("the store refused").to_string()),
         None => Err("the store did not answer".to_string()),
     }
+}
+
+/// A provider's default model: the newest `default_model` setting in its store.
+pub async fn default_of(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Option<String> {
+    setting_of(agent_id, kernel, DEFAULT_FIELD)
+        .await?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// Keep `model` as the provider's default (a `setting` row in its store). `Err` names why.
+async fn set_default(agent_id: &AgentId, kernel: &Arc<Kernel>, model: &str) -> Result<(), String> {
+    set_setting(agent_id, kernel, DEFAULT_FIELD, json!(model)).await
+}
+
+/// A provider's kept usage (total, by_model, by_agent): the newest `usage` setting in its
+/// store. None: it has no store, or has kept none yet.
+pub async fn usage_of(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Option<Value> {
+    setting_of(agent_id, kernel, USAGE_FIELD).await.filter(Value::is_object)
+}
+
+/// Keep `usage` as the provider's usage (a `usage` setting row in its store). A provider
+/// with no store keeps none: `Ok`. `Err` names why a store refused.
+pub async fn set_usage(agent_id: &AgentId, kernel: &Arc<Kernel>, usage: &Value) -> Result<(), String> {
+    if store_of(agent_id, kernel).is_none() {
+        return Ok(());
+    }
+    set_setting(agent_id, kernel, USAGE_FIELD, usage.clone()).await
 }
 
 /// The `models` verb's doc.

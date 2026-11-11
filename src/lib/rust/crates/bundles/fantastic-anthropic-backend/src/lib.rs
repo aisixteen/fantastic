@@ -780,6 +780,26 @@ fn base_of(agent_id: &AgentId, kernel: &Kernel) -> Arc<Mutex<Usage>> {
     base
 }
 
+/// Before the agent's counts are first read: with no sidecar, the base is what its
+/// params store kept (the read is async, `base_of` is not).
+async fn preload_base(agent_id: &AgentId, kernel: &Arc<Kernel>) {
+    if usage_base_table()
+        .lock()
+        .expect("usage base poisoned")
+        .contains_key(agent_id.as_str())
+        || usage_file_of(agent_id, kernel).is_some_and(|p| p.is_file())
+    {
+        return;
+    }
+    if let Some(kept) = fantastic_ai_core::remote_provider::usage_of(agent_id, kernel).await {
+        usage_base_table()
+            .lock()
+            .expect("usage base poisoned")
+            .entry(agent_id.as_str().to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(Usage::from_json(&kept))));
+    }
+}
+
 /// The agent's sidecar file, in its own dir. None for an in-memory kernel, whose
 /// agents have no dir.
 fn usage_file_of(agent_id: &AgentId, kernel: &Kernel) -> Option<std::path::PathBuf> {
@@ -841,6 +861,8 @@ struct AnthropicProvider {
     base: Arc<Mutex<Usage>>,
     /// The agent's sidecar file, where the running total is written.
     usage_file: Option<std::path::PathBuf>,
+    /// The kernel the params store is reached through.
+    kernel: Arc<Kernel>,
     report: ReportCell,
     /// The read clock: the longest the API may go without a byte, headers
     /// included ([`within`]).
@@ -989,6 +1011,7 @@ impl Provider for AnthropicProvider {
                 caller: self.caller.clone(),
                 base: Arc::clone(&self.base),
                 persist_to: self.usage_file.clone(),
+                kernel: Arc::clone(&self.kernel),
             },
         ))
     }
@@ -1014,6 +1037,7 @@ fn consume_sse(
             usage,
             billed_out: 0,
             stopped: false,
+            stored: false,
             endpoint,
             main_turn_max,
             cur_model: log.model.clone(),
@@ -1027,6 +1051,10 @@ fn consume_sse(
         init,
         move |(mut inner, mut st, mut pending, mut finished)| async move {
             loop {
+                if st.store_due(finished) {
+                    st.stored = true;
+                    st.store_total().await;
+                }
                 if let Some(ev) = pending.pop_front() {
                     return Some((ev, (inner, st, pending, finished)));
                 }
@@ -1091,6 +1119,9 @@ struct StreamLog {
     base: Arc<Mutex<Usage>>,
     /// The sidecar the running total is written to, when the agent has a dir.
     persist_to: Option<std::path::PathBuf>,
+    /// The kernel the agent's params store is reached through: the running total is
+    /// also written there, once a request ends.
+    kernel: Arc<Kernel>,
 }
 
 /// Counts one request's prompt into `u`: the base bucket, or the long-context one.
@@ -1128,6 +1159,8 @@ struct SseState {
     /// The output tokens this stream has already billed to the agent's usage.
     billed_out: i64,
     stopped: bool,
+    /// The running total is already in the params store for this request.
+    stored: bool,
     endpoint: String,
     /// `Some(bound)` on a MAIN turn, where a cut is a failure.
     main_turn_max: Option<i64>,
@@ -1273,12 +1306,35 @@ impl SseState {
         let Some(path) = &self.log.persist_to else {
             return;
         };
-        let total = {
-            let base = self.log.base.lock().expect("usage base poisoned");
-            let boot = self.usage.lock().expect("usage poisoned");
-            base.plus(&boot)
-        };
-        if let Err(e) = write_usage_file(path, &total) {
+        if let Err(e) = write_usage_file(path, &self.total()) {
+            self.usage.lock().expect("usage poisoned").log_error = Some(e);
+        }
+    }
+
+    /// The base plus this process's counts.
+    fn total(&self) -> Usage {
+        let base = self.log.base.lock().expect("usage base poisoned");
+        let boot = self.usage.lock().expect("usage poisoned");
+        base.plus(&boot)
+    }
+
+    /// The request is over (stopped, or the stream ended) with counts billed, and the
+    /// params store has not had them yet.
+    fn store_due(&self, finished: bool) -> bool {
+        !self.stored && (self.stopped || finished) && (self.cur.input > 0 || self.billed_out > 0)
+    }
+
+    /// Write the running total to the agent's params store (a provider with none keeps
+    /// none). A write error does not fail the turn: it is kept in `Usage` and reported.
+    async fn store_total(&self) {
+        let id = AgentId::from(self.log.agent_id.as_str());
+        let total = self.total().to_json();
+        let r = fantastic_kernel::send::as_agent(
+            &id,
+            fantastic_ai_core::remote_provider::set_usage(&id, &self.log.kernel, &total),
+        )
+        .await;
+        if let Err(e) = r {
             self.usage.lock().expect("usage poisoned").log_error = Some(e);
         }
     }
@@ -1402,6 +1458,7 @@ fn build_provider_with(
             usage: usage_of(agent_id),
             base: base_of(agent_id, kernel),
             usage_file: usage_file_of(agent_id, kernel),
+            kernel: Arc::clone(kernel),
             report: ReportCell::default(),
             stream_idle: stream_idle_of(&meta)?,
             long_context_tokens: positive_int(meta.get("long_context_tokens")),
@@ -1862,6 +1919,7 @@ impl Bundle for AnthropicBundle {
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        preload_base(agent_id, kernel).await;
         if verb == "reflect" {
             return Ok(Some(reflect_reply(agent_id, kernel)?));
         }
@@ -1869,7 +1927,14 @@ impl Bundle for AnthropicBundle {
             return Ok(Some(usage_reply(agent_id, payload, kernel)));
         }
         if verb == "usage_reset" {
-            return Ok(Some(usage_reset_reply(agent_id, kernel)));
+            let out = usage_reset_reply(agent_id, kernel);
+            let zero = Usage::default().to_json();
+            if let Err(e) =
+                fantastic_ai_core::remote_provider::set_usage(agent_id, kernel, &zero).await
+            {
+                usage_of(agent_id).lock().expect("usage poisoned").log_error = Some(e);
+            }
+            return Ok(Some(out));
         }
         // A verb that runs a turn first reads what the record leaves to the API; an
         // API that does not answer refuses the verb, naming the field.
