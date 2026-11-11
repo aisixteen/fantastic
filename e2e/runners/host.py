@@ -24,6 +24,7 @@ sys.path.insert(0, str(E2E))
 
 from backends import backend
 from helpers import creds, memory
+from helpers.ai import chat_pair
 from helpers import verdict
 from helpers.host.driver import BASE, HostKernel, ensure_runtime, runtime
 
@@ -117,7 +118,7 @@ def main(scenario_id: str) -> int:
     limits = sc.get("limits") or {}
     # Every id the driver will need to call, declared BEFORE boot — authority
     # flows from above, and `rest` may not raise its own (see driver docstring).
-    reach = ["store", "ai", *[e["id"] for e in roster]]
+    reach = ["store", "ai", "ai_prov", *[e["id"] for e in roster]]
     k = HostKernel(
         spec, Path(tempfile.mkdtemp(prefix=f"{rt}_{scenario_id}_")), reach=reach
     ).boot()
@@ -182,31 +183,32 @@ def main(scenario_id: str) -> int:
         # agent names it and may call it; the store accepts it (below, once the
         # AI exists).
         can_call[memory.MEMORY] = "*"
-        # ITS KEY: a keyed plug's record names `credentials: {store: creds, ...}`,
-        # so the AI may `get` from `creds` (this half) and `creds` accepts it
-        # (below) — explicit, per agent; nothing is inherited.
-        if bk.key_ref:
-            can_call[creds.CREDS] = creds.GET
-        # The plug's record (handler, model, endpoint, the one token budget, its
-        # sampling knobs) under this scenario's wiring; a keyed plug's record names
-        # its key in `creds` (the store reads the env var, `helpers/creds.py`).
-        ai = k.create(
-            parent_id=k.root_id,
-            id="ai",
-            **bk.record(
-                memory_store_id=memory.MEMORY,
-                can_call=can_call,
-                callable_by={**BASE, "rest": "*"},
-            ),
+        # THE PAIR (#615): the provider holds the plug's record (handler, model,
+        # endpoint, token budget, sampling, its key in `creds`); the chat holds every
+        # grant above and completes through it (`chat_pair`, the suite's one split).
+        prov, chat = chat_pair(
+            bk,
+            {
+                "id": "ai",
+                "parent_id": k.root_id,
+                "memory_store_id": memory.MEMORY,
+                "can_call": can_call,
+                "callable_by": {**BASE, "rest": "*"},
+            },
+            parent=k.root_id,
         )
-        assert ai.get("id"), ai
+        for payload in (prov, chat):
+            made = k.create(**{f: v for f, v in payload.items() if f != "type"})
+            assert made.get("id"), made
         # THE STORES' HALVES: `rest` is the parent of `memory` and `creds`, so it
         # writes their `callable_by` — read, add `ai`, write back (whole field).
         listed = k.send("kernel", {"type": "list_agents"})
         recs = {a.get("id"): a for a in listed.get("agents") or []}
         opens = {memory.MEMORY: "*", **({creds.CREDS: creds.GET} if bk.key_ref else {})}
         for store_id, verbs in opens.items():
-            cb = {**(recs[store_id].get("callable_by") or {}), "ai": verbs}
+            # the memory is the chat's and the provider's; the key is the provider's
+            who = ["ai", "ai_prov"] if store_id == memory.MEMORY else ["ai_prov"]
+            cb = {**(recs[store_id].get("callable_by") or {}), **{w: verbs for w in who}}
             out = k.send(
                 "kernel", {"type": "update_agent", "id": store_id, "callable_by": cb}
             )
