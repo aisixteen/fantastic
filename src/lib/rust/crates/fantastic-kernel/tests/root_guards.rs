@@ -18,23 +18,30 @@ use tempfile::TempDir;
 
 struct Noop;
 
+fantastic_kernel::stand_in_verbs!(noop_verbs { NoSuchVerbAtAllV "no_such_verb_at_all" {  }, PersistBlobV "persist_blob" { agent_id: Option<String>, name: Option<String>, content: Option<String> } });
 #[async_trait]
 impl Bundle for Noop {
     fn name(&self) -> &str {
         "noop"
     }
     fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        fantastic_kernel::fixture_verbs!("no_such_verb_at_all", "persist_blob")
+        noop_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        noop_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
-        _id: &AgentId,
-        _payload: &Value,
+        id: &AgentId,
+        payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
+        if let Err(refused) = noop_verbs::Call::parse(&id.0, &payload) {
+            return Ok(Some(refused));
+        }
         Ok(Some(json!({"ok": true})))
     }
 }

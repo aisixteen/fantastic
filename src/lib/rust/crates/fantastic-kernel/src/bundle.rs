@@ -98,9 +98,17 @@ pub trait Bundle: Send + Sync {
     }
 
     /// THE VERBS this bundle's agents answer, DECLARED (`verbs!{}` in its `verbs.rs`): the
-    /// list the kernel checks every call against — verb known, arguments known,
-    /// present and typed — and renders in `reflect` and `docs`. Required.
+    /// list the agent's own entry (`verbs::Call::parse`) checks every call against —
+    /// verb known, arguments known, present and typed — and `reflect` and `docs`
+    /// render. Required.
     fn verbs(&self) -> &'static [crate::verbs::Verb];
+
+    /// THE VERBS THIS AGENT carries beside the builtin ones: built at runtime for the
+    /// agent instance (an MCP client's tools), the same schema shape as a builtin
+    /// verb's and checked by the same engine. `reflect` and `docs` render them with
+    /// the builtin ones. Required: a bundle with none returns the explicit empty
+    /// list its `verbs!` generates (`verbs::dynamic_verbs`).
+    fn dynamic_verbs(&self, agent: &crate::agent::Agent) -> Vec<crate::verbs::DynVerb>;
 
     /// THE RECORD this bundle's agents carry, DECLARED (`record!` in its `record.rs`):
     /// the fields `create_agent` / `update_agent` may set on them, beside the fields

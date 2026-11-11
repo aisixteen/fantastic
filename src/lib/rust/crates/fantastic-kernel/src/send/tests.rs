@@ -230,26 +230,35 @@ async fn a_binary_item_routes_through_bundle_handle_binary() {
             "echo_bytes"
         }
         fn verbs(&self) -> &'static [crate::Verb] {
-            every_verb_the_tests_send()
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
         }
         fn record(&self) -> &'static crate::RecordDecl {
             crate::fixture_record!()
         }
         async fn handle(
             &self,
-            _agent_id: &AgentId,
-            _payload: &Value,
+            agent_id: &AgentId,
+            payload: &Value,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&agent_id.0, &payload) {
+                return Ok(Some(refused));
+            }
             Ok(Some(json!({"error": "text path not exercised here"})))
         }
         async fn handle_binary(
             &self,
-            _agent_id: &AgentId,
-            _header: Value,
+            agent_id: &AgentId,
+            header: Value,
             body: Option<crate::outcome::Blob>,
             _kernel: &Arc<Kernel>,
         ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&agent_id.0, &header) {
+                return Ok((Some(refused), None));
+            }
             let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
             // Echo the bytes back as the reply BODY (symmetric channel).
             let len = blob.len();
@@ -349,26 +358,35 @@ async fn a_binary_bundle_error_settles_raised() {
             "boom"
         }
         fn verbs(&self) -> &'static [crate::Verb] {
-            every_verb_the_tests_send()
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
         }
         fn record(&self) -> &'static crate::RecordDecl {
             crate::fixture_record!()
         }
         async fn handle(
             &self,
-            _agent_id: &AgentId,
-            _payload: &Value,
+            agent_id: &AgentId,
+            payload: &Value,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&agent_id.0, &payload) {
+                return Ok(Some(refused));
+            }
             Ok(None)
         }
         async fn handle_binary(
             &self,
-            _agent_id: &AgentId,
-            _header: Value,
+            agent_id: &AgentId,
+            header: Value,
             _body: Option<crate::outcome::Blob>,
             _kernel: &Arc<Kernel>,
         ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&agent_id.0, &header) {
+                return Ok((Some(refused), None));
+            }
             Err(BundleError::from("kaboom"))
         }
     }
@@ -502,17 +520,23 @@ async fn a_handler_reads_its_caller_not_itself() {
             "origin_spy"
         }
         fn verbs(&self) -> &'static [crate::Verb] {
-            every_verb_the_tests_send()
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
         }
         fn record(&self) -> &'static crate::RecordDecl {
             crate::fixture_record!()
         }
         async fn handle(
             &self,
-            _agent_id: &AgentId,
-            _payload: &Value,
+            agent_id: &AgentId,
+            payload: &Value,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&agent_id.0, &payload) {
+                return Ok(Some(refused));
+            }
             *SEEN.lock().unwrap() = Some((
                 crate::send::current_sender().map(|a| a.0),
                 current_origin().map(|a| a.0),
@@ -738,37 +762,9 @@ async fn gate_denial_keys_are_error_reason_hint_side() {
     assert_eq!(d["side"], "ingress");
 }
 
-/// The verbs these tests send to the stand-in bundles below; each stand-in declares
-/// them all and answers the ones it handles.
-fn every_verb_the_tests_send() -> &'static [crate::Verb] {
-    crate::fixture_verbs!(
-        "after_unwatch",
-        "echo",
-        "echo_error",
-        "empty",
-        "fail",
-        "frob",
-        "get",
-        "go",
-        "hello",
-        "hi",
-        "hop",
-        "ingest",
-        "load_tree",
-        "nope",
-        "paste_image",
-        "ping",
-        "poke",
-        "put",
-        "raise",
-        "say",
-        "self",
-        "set",
-        "take",
-        "work",
-        "write_stream"
-    )
-}
+// The verbs these tests send to the stand-in bundles below, as the stand-ins declare
+// them: each with the arguments the tests give it.
+crate::stand_in_verbs!(sent_verbs { AfterUnwatchV "after_unwatch" {  }, EchoV "echo" {  }, EchoErrorV "echo_error" { error: Option<serde_json::Value> }, EmptyV "empty" {  }, FailV "fail" {  }, FrobV "frob" {  }, GetV "get" {  }, GoV "go" {  }, HelloV "hello" { k: Option<i64> }, HiV "hi" {  }, HopV "hop" { next: Option<serde_json::Value> }, IngestV "ingest" {  }, LoadTreeV "load_tree" {  }, NopeV "nope" {  }, PasteImageV "paste_image" { job_id: Option<i64>, data: Option<serde_json::Value>, mime: Option<String> }, PingV "ping" {  }, PokeV "poke" { n: Option<i64> }, PutV "put" { fields: Option<serde_json::Value> }, RaiseV "raise" {  }, SayV "say" { text: Option<String> }, SelfV "self" { n: Option<i64> }, SetV "set" { r#ref: Option<String>, fields: Option<serde_json::Value> }, TakeV "take" { meta: Option<serde_json::Value>, a: Option<serde_json::Value>, #[serde(rename = "a.b")] a_b: Option<serde_json::Value>, items: Option<Vec<serde_json::Value>> }, WorkV "work" { n: Option<i64> }, WriteStreamV "write_stream" { path: Option<String>, bytes: Option<serde_json::Value> } });
 
 // ── the call row and its settle ────────────────────────────────────────
 
@@ -776,23 +772,30 @@ fn every_verb_the_tests_send() -> &'static [crate::Verb] {
 /// plain reply, `{"type":"nope"}` a domain refusal with a `reason`.
 struct C36Bundle;
 
+crate::stand_in_verbs!(c36bundle_verbs { EchoErrorV "echo_error" { error: Option<serde_json::Value> }, NopeV "nope" {  }, WorkV "work" { n: Option<i64> } });
 #[async_trait::async_trait]
 impl crate::bundle::Bundle for C36Bundle {
     fn name(&self) -> &str {
         "c36"
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        crate::fixture_verbs!("echo_error", "nope", "work")
+        c36bundle_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        c36bundle_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()
     }
     async fn handle(
         &self,
-        _agent_id: &AgentId,
+        agent_id: &AgentId,
         payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        if let Err(refused) = c36bundle_verbs::Call::parse(&agent_id.0, &payload) {
+            return Ok(Some(refused));
+        }
         match payload.get("type").and_then(Value::as_str).unwrap_or("") {
             "nope" => Ok(Some(
                 json!({"error": "х".repeat(300), "reason": "not_found", "extra": 1}),
@@ -1118,17 +1121,23 @@ impl crate::bundle::Bundle for PeekInbox {
         "peek"
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        every_verb_the_tests_send()
+        sent_verbs::VERBS
     }
-    fn record(&self) -> &'static crate::RecordDecl {
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()
     }
     async fn handle(
         &self,
         agent_id: &AgentId,
-        _payload: &Value,
+        payload: &Value,
         kernel: &Arc<Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&agent_id.0, &payload) {
+                return Ok(Some(refused));
+            }
         let mut rx = kernel.ensure_inbox(agent_id);
         let mut seen = Vec::new();
         while let Some(item) = rx.try_recv() {
@@ -1262,7 +1271,10 @@ async fn a_fork_is_rowed_before_the_dispatch_settles_and_its_body_runs_under_it(
             "forker"
         }
         fn verbs(&self) -> &'static [crate::Verb] {
-            every_verb_the_tests_send()
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
         }
         fn record(&self) -> &'static crate::RecordDecl {
             crate::fixture_record!()
@@ -1270,9 +1282,12 @@ async fn a_fork_is_rowed_before_the_dispatch_settles_and_its_body_runs_under_it(
         async fn handle(
             &self,
             a: &AgentId,
-            _p: &Value,
+            p: &Value,
             k: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&a.0, &p) {
+                return Ok(Some(refused));
+            }
             let k2 = Arc::clone(k);
             let a2 = a.clone();
             let done = Arc::clone(&self.done);
@@ -1349,26 +1364,35 @@ async fn a_watched_write_stream_reaches_the_watcher_with_its_body() {
             "sink"
         }
         fn verbs(&self) -> &'static [crate::Verb] {
-            every_verb_the_tests_send()
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
         }
         fn record(&self) -> &'static crate::RecordDecl {
             crate::fixture_record!()
         }
         async fn handle(
             &self,
-            _a: &AgentId,
-            _p: &Value,
+            a: &AgentId,
+            p: &Value,
             _k: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&a.0, &p) {
+                return Ok(Some(refused));
+            }
             Ok(Some(json!({"ok": true})))
         }
         async fn handle_binary(
             &self,
-            _a: &AgentId,
-            _h: Value,
+            a: &AgentId,
+            h: Value,
             body: Option<crate::outcome::Blob>,
             _k: &Arc<Kernel>,
         ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&a.0, &h) {
+                return Ok((Some(refused), None));
+            }
             let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
             Ok((Some(json!({"written": blob.len()})), None))
         }
@@ -1429,26 +1453,35 @@ async fn a_binary_body_rides_at_its_payload_path() {
             "echo"
         }
         fn verbs(&self) -> &'static [crate::Verb] {
-            every_verb_the_tests_send()
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
         }
         fn record(&self) -> &'static crate::RecordDecl {
             crate::fixture_record!()
         }
         async fn handle(
             &self,
-            _a: &AgentId,
-            _p: &Value,
+            a: &AgentId,
+            p: &Value,
             _k: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&a.0, &p) {
+                return Ok(Some(refused));
+            }
             Ok(Some(json!({"channel": "text"})))
         }
         async fn handle_binary(
             &self,
-            _a: &AgentId,
+            a: &AgentId,
             header: Value,
             body: Option<crate::outcome::Blob>,
             _k: &Arc<Kernel>,
         ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&a.0, &header) {
+                return Ok((Some(refused), None));
+            }
             let data = crate::outcome::body_at(body.as_ref(), "data").map(<[u8]>::len);
             let bytes = crate::outcome::body_at(body.as_ref(), "bytes").map(<[u8]>::len);
             Ok((
@@ -1564,26 +1597,35 @@ async fn a_literal_key_body_is_one_top_level_key() {
             "echo"
         }
         fn verbs(&self) -> &'static [crate::Verb] {
-            every_verb_the_tests_send()
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
         }
         fn record(&self) -> &'static crate::RecordDecl {
             crate::fixture_record!()
         }
         async fn handle(
             &self,
-            _a: &AgentId,
-            _p: &Value,
+            a: &AgentId,
+            p: &Value,
             _k: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&a.0, &p) {
+                return Ok(Some(refused));
+            }
             Ok(Some(json!({"channel": "text"})))
         }
         async fn handle_binary(
             &self,
-            _a: &AgentId,
+            a: &AgentId,
             header: Value,
             body: Option<crate::outcome::Blob>,
             _k: &Arc<Kernel>,
         ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&a.0, &header) {
+                return Ok((Some(refused), None));
+            }
             let at = crate::outcome::body_at(body.as_ref(), "a.b").map(<[u8]>::len);
             Ok((Some(json!({"header": header, "a.b": at})), None))
         }
@@ -1667,17 +1709,23 @@ async fn binary_dispatch_runs_the_same_pre_bundle_path_as_text() {
             "loader"
         }
         fn verbs(&self) -> &'static [crate::Verb] {
-            every_verb_the_tests_send()
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
         }
         fn record(&self) -> &'static crate::RecordDecl {
             crate::fixture_record!()
         }
         async fn handle(
             &self,
-            _a: &AgentId,
-            _p: &Value,
+            a: &AgentId,
+            p: &Value,
             _k: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&a.0, &p) {
+                return Ok(Some(refused));
+            }
             Ok(Some(
                 json!({"sentence": "Disk persistence/hydration root."}),
             ))
@@ -1794,6 +1842,133 @@ const KERNEL_VERB_NAMES: [&str; 14] = [
     "await_cancel",
 ];
 
+/// What `docs of=kernel` renders for EVERY kernel verb: `(verb, one-line tier, detailed
+/// tier)`, in declaration order. The one-line tier is the argument list, then the first
+/// sentence of the verb's doc; the detailed tier the whole doc, then each argument with
+/// its type, whether it is required (or its default) and its description.
+const KERNEL_VERB_TEXT: [(&str, &str, &str); 14] = [
+    (
+        "create_agent",
+        r####"args: handler_module:string?, parent_id:string (req), id:string?, bundle:string? — Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level"####,
+        r####"Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent. A handler_module that is a meta bundle (`bundles/<name>/bundle.yaml` with a base and no program) runs its base, with the `record` of the bundle under your fields; `bundle:<name>` beside the base is the same. The handler must be installed. Every argument beyond these is a field of that bundle's record (`reflect bundles=all` lists them), and a field it does not have is refused.
+
+args:
+  handler_module:string? — The bundle the agent runs (`file_bridge.tools`, or a bare bundle name such as `file_bridge`).
+  parent_id:string (req) — The agent that will OWN the new one: your own id for a tool you keep, `kernel_state` for a top-level agent.
+  id:string? — Its id. Absent: minted from the bundle's name.
+  bundle:string? — The bundle a record inherits from when it runs another base than the bundle's own."####,
+    ),
+    (
+        "update_agent",
+        r####"args: id:string (req) — EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE"####,
+        r####"EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT. Whoever holds update_agent on the root updates any agent, itself included. Every argument beyond `id` is a field of the agent's bundle's record, and a field it does not have is refused.
+
+args:
+  id:string (req) — The agent to update."####,
+    ),
+    (
+        "delete_agent",
+        r####"args: id:string (req), keep_memory:bool? — CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`"####,
+        r####"CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`. Whoever holds delete_agent on the root deletes any agent.
+
+args:
+  id:string (req) — The agent to delete.
+  keep_memory:bool? — `true` leaves the persisted memory of the whole subtree alone."####,
+    ),
+    (
+        "list_agents",
+        r####"args: limit:int?, after:string? — Every agent's record, flat"####,
+        r####"Every agent's record, flat. Paged.
+
+args:
+  limit:int? — A page size: absent, everything.
+  after:string? — The cursor `next` of the previous page."####,
+    ),
+    (
+        "ps",
+        r####"args: limit:int?, after:string? — The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}, one row per in-flight dispatch"####,
+        r####"The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}, one row per in-flight dispatch. Paged.
+
+args:
+  limit:int? — A page size: absent, everything.
+  after:string? — The cursor `next` of the previous page."####,
+    ),
+    (
+        "ledger",
+        r####"args: limit:int?, after:string? — EVERY execution and what it became — named under its id, unnamed under its minted pid — {executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}, paged, scoped to what YOU originated; read from the kernel's memory store plus what is not yet flushed"####,
+        r####"EVERY execution and what it became — named under its id, unnamed under its minted pid — {executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}, paged, scoped to what YOU originated; read from the kernel's memory store plus what is not yet flushed. `outcome` keeps the RESULT only for a named call; a dead letter keeps its error; anything else is {status, bytes} — the reply itself went to its caller. Failed/timed_out/cancelled rows are the dead-letter queue (announced by the `on_deadletter` event): inspect, retry with a NEW id if you choose, then `ack_deadletter` it — nothing is retried silently.
+
+args:
+  limit:int? — A page size: absent, everything.
+  after:string? — The cursor `next` of the previous page."####,
+    ),
+    (
+        "ack_deadletter",
+        r####"args: id:int|string (req) — Acknowledges a DEAD LETTER (failed/timed_out/cancelled) you originated: recorded in the kernel's store, it may then be pruned"####,
+        r####"Acknowledges a DEAD LETTER (failed/timed_out/cancelled) you originated: recorded in the kernel's store, it may then be pruned. Returns {acked:true, id}.
+
+args:
+  id:int|string (req) — An execution id, or its name."####,
+    ),
+    (
+        "kernel_start",
+        r####"No args — THE START SEQUENCE — the root must name `memory_store_id` (fail loud otherwise): boots the root, then that store, starts flushing the kernel's execution rows into it, then boots every other agent in registration order"####,
+        r####"THE START SEQUENCE — the root must name `memory_store_id` (fail loud otherwise): boots the root, then that store, starts flushing the kernel's execution rows into it, then boots every other agent in registration order. Idempotent. Returns {started, store, booted:[ids]}.
+
+No args."####,
+    ),
+    (
+        "cancel",
+        r####"args: task_id:int|string (req) — Kills that task AND ITS SUBTREE — the id names its own agent"####,
+        r####"Kills that task AND ITS SUBTREE — the id names its own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}.
+
+args:
+  task_id:int|string (req) — The task's id (`ps` lists them), or the name the caller gave its own execution."####,
+    ),
+    (
+        "shutdown_agents",
+        r####"No args — Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest"####,
+        r####"Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}.
+
+No args."####,
+    ),
+    (
+        "kernel_stop",
+        r####"No args — Stops the kernel PROCESS gracefully — drain, every call settles (done, or cancelled into the dead letters), the last rows flush, agents shut down, exit"####,
+        r####"Stops the kernel PROCESS gracefully — drain, every call settles (done, or cancelled into the dead letters), the last rows flush, agents shut down, exit. Under env:'container', the container.
+
+No args."####,
+    ),
+    (
+        "docs",
+        r####"args: of:string (req), tier:'oneliners'|'detailed'?, verb:string? — HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument (no `verb`: plus emits, cancel and notes)"####,
+        r####"HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument (no `verb`: plus emits, cancel and notes). Pull once per bundle; `detailed` for a verb you are about to use. Gated like every kernel verb: a `can_call` grant of `docs` on the root. Returns {of, bundle, tier, verbs, emits?, cancel?, notes?}.
+
+args:
+  of:string (req) — An agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'.
+  tier:'oneliners'|'detailed'? — How much of each verb: `oneliners` (default) or `detailed`.
+  verb:string? — One verb's entry only."####,
+    ),
+    (
+        "await_set",
+        r####"args: ids:list[string] (req), timeout_s:number?, label:string? — Waits for EVERY named agent to send YOU a message of type 'report' (its `state` and `result`); a report from a named agent is HELD for the one combined message, not delivered as its own turn"####,
+        r####"Waits for EVERY named agent to send YOU a message of type 'report' (its `state` and `result`); a report from a named agent is HELD for the one combined message, not delivered as its own turn. Returns at once {wait_id, label, ids, timeout_s}; later ONE message reaches you — {wait_id, label, done:[{id, state, result}], missing:[ids], timed_out} — when all have reported or `timeout_s` passes. Refuses a missing or empty `ids`, an id that names no agent (unknown_agent), yourself, a non-positive `timeout_s` and a non-string `label`. The wait is a row: it survives a restart.
+
+args:
+  ids:list[string] (req) — The agent ids to wait for.
+  timeout_s:number? — A positive number of seconds after which the wait ends as timed out.
+  label:string? — A name for the wait, echoed in the combined message."####,
+    ),
+    (
+        "await_cancel",
+        r####"args: wait_id:int (req) — Drops YOUR wait; the reports it held are then delivered one by one, each as its own message"####,
+        r####"Drops YOUR wait; the reports it held are then delivered one by one, each as its own message. Returns {cancelled:bool, wait_id, released:int}. A wait that is unknown or not yours ⇒ {cancelled:false}.
+
+args:
+  wait_id:int (req) — The `wait_id` `await_set` returned."####,
+    ),
+];
+
 #[test]
 fn kernel_verbs_are_declared_in_order_and_rendered() {
     let names: Vec<&str> = crate::declared::kernel::VERBS
@@ -1801,24 +1976,67 @@ fn kernel_verbs_are_declared_in_order_and_rendered() {
         .map(|v| v.name)
         .collect();
     assert_eq!(names, KERNEL_VERB_NAMES);
-    let rows = crate::docs::entries_of_decls(&[crate::declared::kernel::VERBS]);
-    let row = |verb: &str| {
-        rows.iter()
-            .find(|r| r.0 == verb)
-            .cloned()
-            .expect("declared")
+    let rows = crate::docs::entries_of_decls(&[crate::declared::kernel::VERBS], &[]);
+    assert_eq!(rows.len(), KERNEL_VERB_TEXT.len());
+    for ((verb, one, detail), (name, want_one, want_detail)) in rows.iter().zip(KERNEL_VERB_TEXT) {
+        assert_eq!(verb, name);
+        assert_eq!(one, want_one, "{name}: one line");
+        assert_eq!(detail, want_detail, "{name}: detailed");
+    }
+}
+
+#[tokio::test]
+async fn docs_of_kernel_serves_the_rendered_text_of_all_fourteen_verbs() {
+    let kernel = Arc::new(Kernel::new());
+    let root = make_agent("kernel_state");
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(root);
+    for (tier, pick) in [("oneliners", 1usize), ("detailed", 2)] {
+        let out = send_text(
+            &kernel,
+            "kernel",
+            json!({"type": "docs", "of": "kernel", "tier": tier}),
+        )
+        .await
+        .result;
+        let verbs = out["verbs"].as_object().expect("verbs");
+        assert_eq!(verbs.len(), 14, "{tier}: {out}");
+        for entry in KERNEL_VERB_TEXT {
+            let want = if pick == 1 { entry.1 } else { entry.2 };
+            assert_eq!(verbs[entry.0], want, "{tier} {}", entry.0);
+        }
+    }
+    // one verb, either tier
+    let one = send_text(
+        &kernel,
+        "kernel",
+        json!({"type": "docs", "of": "kernel", "verb": "cancel", "tier": "detailed"}),
+    )
+    .await
+    .result;
+    assert_eq!(one["verbs"].as_object().unwrap().len(), 1, "{one}");
+    assert_eq!(one["verbs"]["cancel"], KERNEL_VERB_TEXT[8].2, "{one}");
+}
+
+/// The one-line tier cuts a doc at its first top-level `. ` or the end of its first
+/// paragraph — never inside brackets — for builtin and dynamic verbs alike.
+#[test]
+fn the_one_line_tier_is_the_first_sentence_of_the_doc() {
+    let line = |doc: &str| {
+        let v = crate::DynVerb::new("v", doc, &json!({"type": "object"}));
+        crate::verbs::line(&crate::verbs::Row {
+            name: &v.name,
+            schema: &v.schema,
+        })
     };
-    assert_eq!(row("kernel_stop").1.split(" — ").next(), Some("No args"));
-    assert!(row("delete_agent")
-        .1
-        .starts_with("args: id:string (req), keep_memory:bool? — CASCADES"));
-    assert!(row("docs")
-        .1
-        .starts_with("args: of:string (req), tier:'oneliners'|'detailed'?, verb:string?"));
-    assert!(row("await_set")
-        .2
-        .contains("ids:list[string] (req) — The agent ids to wait for."));
-    assert!(row("create_agent").2.contains("parent_id:string (req)"));
+    assert_eq!(line("Finds q. Then more."), "No args — Finds q");
+    assert_eq!(
+        line("Start the loop unless `watch=false`\n(a loader). More.\n\nX."),
+        "No args — Start the loop unless `watch=false` (a loader)"
+    );
+    assert_eq!(line("A (note. inside) brackets. More."), "No args — A (note. inside) brackets");
+    assert_eq!(line("Whole paragraph only\n\nSecond."), "No args — Whole paragraph only");
+    assert_eq!(line(""), "No args");
 }
 
 // ─── one dispatch per channel ───────────────────────────────────────────────
@@ -1943,33 +2161,43 @@ async fn a_binary_reflect_or_lifecycle_verb_on_a_bare_agent_answers_as_text() {
 /// A bundle whose binary handler answers `Ok((None, body))` and whose text
 /// handler answers `Ok(None)` or raises, by verb.
 struct NoReply;
+crate::stand_in_verbs!(noreply_verbs { EchoV "echo" {  }, EmptyV "empty" {  }, RaiseV "raise" {  } });
 #[async_trait::async_trait]
 impl crate::bundle::Bundle for NoReply {
     fn name(&self) -> &str {
         "no_reply"
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        crate::fixture_verbs!("echo", "empty", "raise")
+        noreply_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        noreply_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()
     }
     async fn handle(
         &self,
-        _agent_id: &AgentId,
-        _payload: &Value,
+        agent_id: &AgentId,
+        payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        if let Err(refused) = noreply_verbs::Call::parse(&agent_id.0, &payload) {
+            return Ok(Some(refused));
+        }
         Ok(None)
     }
     async fn handle_binary(
         &self,
-        _agent_id: &AgentId,
+        agent_id: &AgentId,
         header: Value,
         body: Option<crate::outcome::Blob>,
         _kernel: &Arc<Kernel>,
     ) -> Result<(crate::bundle::Reply, Option<crate::outcome::Blob>), crate::bundle::BundleError>
     {
+        if let Err(refused) = noreply_verbs::Call::parse(&agent_id.0, &header) {
+            return Ok((Some(refused), None));
+        }
         let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
         match verb_of(&header) {
             "raise" => Err(crate::bundle::BundleError::from("kaboom")),
@@ -2083,9 +2311,12 @@ impl crate::bundle::Bundle for Hop {
         "hop"
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        every_verb_the_tests_send()
+        sent_verbs::VERBS
     }
-    fn record(&self) -> &'static crate::RecordDecl {
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()
     }
     async fn handle(
@@ -2094,6 +2325,9 @@ impl crate::bundle::Bundle for Hop {
         payload: &Value,
         kernel: &Arc<Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&agent_id.0, &payload) {
+                return Ok(Some(refused));
+            }
         if verb_of(payload) != "hop" {
             return Ok(None);
         }
@@ -2421,17 +2655,23 @@ async fn a_marked_value_is_shown_never_kept() {
             "secret_probe"
         }
         fn verbs(&self) -> &'static [crate::Verb] {
-            every_verb_the_tests_send()
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
         }
         fn record(&self) -> &'static crate::RecordDecl {
             crate::fixture_record!()
         }
         async fn handle(
             &self,
-            _agent_id: &AgentId,
+            agent_id: &AgentId,
             payload: &Value,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&agent_id.0, &payload) {
+                return Ok(Some(refused));
+            }
             Ok(Some(
                 json!({"got": payload["fields"]["api_key"], "marks": crate::secret::current_secret()}),
             ))
@@ -2514,7 +2754,10 @@ async fn a_bundle_names_its_own_secret_paths() {
             "vault_probe"
         }
         fn verbs(&self) -> &'static [crate::Verb] {
-            every_verb_the_tests_send()
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
         }
         fn record(&self) -> &'static crate::RecordDecl {
             crate::fixture_record!()
@@ -2535,10 +2778,13 @@ async fn a_bundle_names_its_own_secret_paths() {
         }
         async fn handle(
             &self,
-            _agent_id: &AgentId,
+            agent_id: &AgentId,
             payload: &Value,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&agent_id.0, &payload) {
+                return Ok(Some(refused));
+            }
             Ok(Some(match payload.get("type").and_then(Value::as_str) {
                 Some("put") => json!({"seen": payload["fields"]["api_key"]}),
                 _ => json!({"token": "tk-REAL", "host": "h"}),
@@ -2613,7 +2859,10 @@ async fn a_call_error_echoing_a_secret_is_shown_in_the_row() {
             "echo_probe"
         }
         fn verbs(&self) -> &'static [crate::Verb] {
-            every_verb_the_tests_send()
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
         }
         fn record(&self) -> &'static crate::RecordDecl {
             crate::fixture_record!()
@@ -2627,10 +2876,13 @@ async fn a_call_error_echoing_a_secret_is_shown_in_the_row() {
         }
         async fn handle(
             &self,
-            _agent_id: &AgentId,
-            _payload: &Value,
+            agent_id: &AgentId,
+            payload: &Value,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&agent_id.0, &payload) {
+                return Ok(Some(refused));
+            }
             Ok(Some(json!({"error": "bad key sk-ERR-REAL"})))
         }
     }
@@ -2680,17 +2932,23 @@ async fn a_handler_noting_reply_secret_marks_its_settle_row() {
             "relay_probe"
         }
         fn verbs(&self) -> &'static [crate::Verb] {
-            every_verb_the_tests_send()
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
         }
         fn record(&self) -> &'static crate::RecordDecl {
             crate::fixture_record!()
         }
         async fn handle(
             &self,
-            _agent_id: &AgentId,
-            _payload: &Value,
+            agent_id: &AgentId,
+            payload: &Value,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
+            if let Err(refused) = sent_verbs::Call::parse(&agent_id.0, &payload) {
+                return Ok(Some(refused));
+            }
             crate::note_reply_secret([
                 "fields.k".to_string(),
                 "type".to_string(),

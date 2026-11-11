@@ -474,23 +474,30 @@ struct Hooked {
     raises: bool,
 }
 
+crate::stand_in_verbs!(hooked_verbs { InnerV "inner" {  }, NopeV "nope" {  }, OuterV "outer" {  }, PingV "ping" {  }, TestV "test" {  }, TickV "tick" {  } });
 #[async_trait::async_trait]
 impl crate::Bundle for Hooked {
     fn name(&self) -> &str {
         "hooked.tools"
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        crate::fixture_verbs!("inner", "nope", "outer", "ping", "test", "tick")
+        hooked_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        hooked_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()
     }
     async fn handle(
         &self,
-        _id: &AgentId,
-        _payload: &Value,
+        id: &AgentId,
+        payload: &Value,
         _k: &Arc<Kernel>,
     ) -> Result<crate::Reply, crate::bundle::BundleError> {
+        if let Err(refused) = hooked_verbs::Call::parse(&id.0, &payload) {
+            return Ok(Some(refused));
+        }
         Ok(None)
     }
     async fn on_delete(
@@ -558,23 +565,30 @@ struct OnlyDelete {
     log: Arc<HookLog>,
 }
 
+crate::stand_in_verbs!(onlydelete_verbs { InnerV "inner" {  }, NopeV "nope" {  }, OuterV "outer" {  }, PingV "ping" {  }, TestV "test" {  }, TickV "tick" {  } });
 #[async_trait::async_trait]
 impl crate::Bundle for OnlyDelete {
     fn name(&self) -> &str {
         "only_delete.tools"
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        crate::fixture_verbs!("inner", "nope", "outer", "ping", "test", "tick")
+        onlydelete_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        onlydelete_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()
     }
     async fn handle(
         &self,
-        _id: &AgentId,
-        _payload: &Value,
+        id: &AgentId,
+        payload: &Value,
         _k: &Arc<Kernel>,
     ) -> Result<crate::Reply, crate::bundle::BundleError> {
+        if let Err(refused) = onlydelete_verbs::Call::parse(&id.0, &payload) {
+            return Ok(Some(refused));
+        }
         Ok(None)
     }
     async fn on_delete(
@@ -683,6 +697,8 @@ struct Declares {
     calls: Arc<AtomicUsize>,
 }
 
+crate::stand_in_verbs!(declares_shutdown_verbs { ShutdownV "shutdown" {  } });
+
 #[async_trait::async_trait]
 impl crate::Bundle for Declares {
     fn name(&self) -> &str {
@@ -690,10 +706,13 @@ impl crate::Bundle for Declares {
     }
     fn verbs(&self) -> &'static [crate::Verb] {
         if self.shutdown {
-            crate::fixture_verbs!("shutdown")
+            declares_shutdown_verbs::VERBS
         } else {
-            crate::fixture_verbs!()
+            crate::test_support::no_verbs()
         }
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        crate::test_support::no_dynamic(agent)
     }
     fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()

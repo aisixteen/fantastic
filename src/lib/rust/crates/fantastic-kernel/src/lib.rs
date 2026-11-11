@@ -45,7 +45,6 @@ pub mod persistence;
 pub mod reflect;
 pub mod refusal;
 pub mod rows;
-pub mod scalar;
 pub mod secret;
 pub mod send;
 pub mod state;
@@ -61,7 +60,7 @@ pub mod test_support;
 pub use agent::{Agent, AgentId, AgentRecord, RESERVED_RECORD_KEYS};
 pub use authz::{authorize_call, default_callable_by, default_can_call, Decision, FROM_ABOVE};
 pub use bundle::{Bundle, BundleRegistry, Reply};
-pub use verbs::{RecordDecl, Verb};
+pub use verbs::{DynVerb, RecordDecl, Verb};
 pub use errors::{KernelError, KernelResult};
 pub use kernel::{
     Kernel, StateSubscriber, SubscriberToken, DEFAULT_INBOX_BOUND, SELF_PLACEHOLDER,
@@ -72,7 +71,6 @@ pub use paging::page;
 pub use peers::{PeerCallFuture, PeerEmitFuture, PeerReply, PeerRoute};
 pub use refusal::{bad, error_text, missing, not_here, refusal, refusal_hint, unknown_agent};
 pub use rows::{Row, RowStore, RowTail};
-pub use scalar::{coerce_scalar, py_strip};
 pub use secret::{current_secret, note_reply_secret};
 pub use send::{current_origin, current_sender, Signal, ON_BATCH_LAUNCHED};
 pub use state::{KernelState, CURRENT_VERSION};

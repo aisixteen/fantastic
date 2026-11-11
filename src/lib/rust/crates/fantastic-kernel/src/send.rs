@@ -989,14 +989,11 @@ impl Kernel {
                     timeout,
                 } = *fr;
                 let read = async {
-                    // the kernel checks `reflect` like every call (the fast path is
-                    // still a dispatch of the verb every agent answers)
-                    if let Err(refused) = crate::verbs::check_call(
-                        &target.id.0,
-                        "reflect",
-                        &payload,
-                        &[crate::declared::common::VERBS],
-                    ) {
+                    // the kernel IS the agent here (the fast path answers `reflect`
+                    // itself): it parses through the shared entry of the common verbs
+                    if let Err(refused) =
+                        crate::declared::common::Call::parse(&target.id.0, &payload)
+                    {
                         return (refused, Status::Completed);
                     }
                     let mut reply = crate::reflect::reflect_identity(&target);
@@ -2070,18 +2067,8 @@ fn dispatch(
             if target.parent_id.is_some() {
                 return Ok((crate::refusal::not_here(verb, target.id.as_str()), None));
             }
-            // The call is checked against the kernel's own declaration, like any
-            // bundle's ([`crate::verbs`]): unknown, missing and mistyped
-            // arguments are refused by name before a handler reads anything.
-            let payload = match crate::verbs::check_call(
-                "kernel",
-                verb,
-                &payload,
-                &[crate::declared::kernel::VERBS],
-            ) {
-                Ok(p) => p,
-                Err(refused) => return Ok((refused, None)),
-            };
+            // The kernel is the agent of its own verbs: `handle_kernel_verb` parses
+            // the call through the shared entry and replies with its refusal.
             return handle_kernel_verb(&kernel, &target, &payload)
                 .await
                 .map(|v| (v, None));
@@ -2093,19 +2080,21 @@ fn dispatch(
         // `kernel` address. Python `_agent.py`: `if verb == "reflect" and
         // self.parent is None`.
         if verb == "reflect" && target.parent_id.is_none() {
-            if let Err(refused) = crate::verbs::check_call(
-                &target.id.0,
-                verb,
-                &payload,
-                &[crate::declared::common::VERBS],
-            ) {
+            if let Err(refused) = crate::declared::common::Call::parse(&target.id.0, &payload) {
                 return Ok((refused, None));
             }
             return Ok((crate::reflect::reflect_identity(&target), None));
         }
         // No handler_module → only system verbs answerable.
         let Some(hm) = target.handler_module.as_deref() else {
-            // Universal answers for bare agents.
+            // Universal answers for bare agents, through the shared entry of the
+            // common verbs: their arguments are checked like any agent's.
+            if matches!(verb, "boot" | "shutdown" | "reflect") {
+                if let Err(refused) = crate::declared::common::Call::parse(&target.id.0, &payload)
+                {
+                    return Ok((refused, None));
+                }
+            }
             return Ok((
                 match verb {
                     "boot" | "shutdown" => Value::Null,
@@ -2127,25 +2116,19 @@ fn dispatch(
             // cannot be answered HERE, and says so with a code.
             return Ok((not_installed_refusal(&target.id.0, hm, verb), None));
         };
-        // The bundle's declared verbs (`Bundle::verbs`) are checked here, for every
-        // caller: the verb must be one it answers (or one every agent does), and
-        // the arguments must be known, present and typed. The handler gets the
-        // payload with its numbers and bools typed.
-        let own = bundle.verbs();
-        let mut lists: Vec<&[crate::verbs::Verb]> = vec![own, crate::declared::common::VERBS];
-        if target.parent_id.is_none() {
-            // the root is `kernel`: it answers the kernel's verbs too
-            lists.push(crate::declared::kernel::VERBS);
-        }
-        let payload = match crate::verbs::check_call(&target.id.0, verb, &payload, &lists) {
-            Ok(p) => p,
-            Err(refused) => return Ok((refused, None)),
-        };
-        // `boot` and `shutdown` are answered by EVERY agent: a bundle that
-        // declares neither has nothing to open or release, and the kernel
-        // answers for it, as it does for a bare agent.
-        if matches!(verb, "boot" | "shutdown") && !own.iter().any(|v| v.name == verb) {
-            return Ok((Value::Null, None));
+        // The kernel ROUTES: the bundle's own entry (`verbs::Call::parse`, shared
+        // library code) checks the verb and its arguments and replies with the
+        // refusal. `boot` and `shutdown` are answered by EVERY agent: a bundle that
+        // declares neither has nothing to open or release, and the kernel answers for
+        // it through the shared entry of the common verbs, as it does for a bare agent.
+        if matches!(verb, "boot" | "shutdown") && !bundle.verbs().iter().any(|v| v.name == verb) {
+            return Ok((
+                match crate::declared::common::Call::parse(&target.id.0, &payload) {
+                    Ok(_) => Value::Null,
+                    Err(refused) => refused,
+                },
+                None,
+            ));
         }
         // The reply body comes back AT ITS SLOT of the reply: `bytes` for a
         // `read_stream`, a bundle's own key for its own verb, the peer's own key

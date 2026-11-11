@@ -1464,13 +1464,12 @@ async fn route_reply_gated(
         // emitting NO call. A dropped key costs a wasted turn instead of
         // the whole task, and discarding a reply is something you must SAY
         // (`reply_to: null` / "none"), which is the right way round.
-        // The tag grammar types a bare number (`<reply_to>1001</reply_to>` → 1001):
-        // a number is an id the model wrote, never "discard" — it is checked like
+        // The tag grammar reads text (`<reply_to>1001</reply_to>` is "1001"): a
+        // number is an id the model wrote, never "discard" — it is checked like
         // any id below.
         let reply_to: Option<String> = match args.get("reply_to") {
             Some(v) => match v {
                 Value::String(s) => Some(s.clone()),
-                Value::Number(n) => Some(py_str(&Value::Number(n.clone()))),
                 _ => None,
             }
             .as_deref()
@@ -1571,6 +1570,9 @@ async fn route_reply_gated(
         if target == self_id.as_str() && !payload.contains_key("client_id") {
             payload.insert("client_id".to_string(), json!(client_id));
         }
+        // THE PARSER READ TEXT: each value takes the type the target verb's schema
+        // states (a `limit` of `7` is the integer 7, a `path` of `007` stays text).
+        crate::tool_parse::typed::payload(&kernel, target, &mut payload);
         // python `payload.get("type", "?")`, then `str()` into the reply tag: a
         // NON-STRING type tags the reply with its own text (`… a 42 …`,
         // `… a True …`, `… a {'a': 'x'} …`), and `?` means the key was ABSENT.
@@ -1672,15 +1674,15 @@ async fn route_reply_gated(
             item = item.with_raw_id(id.clone());
         }
         if let Some(t) = args.get("timeout") {
-            item = item.with_raw_timeout(t.clone());
+            item = item.with_raw_timeout(crate::tool_parse::typed::routing("timeout", t));
         }
         if let Some(r) = args.get("retries") {
-            item = item.with_raw_retries(r.clone());
+            item = item.with_raw_retries(crate::tool_parse::typed::routing("retries", r));
         }
         items.push(item);
         deadlines.push(
             args.get("timeout")
-                .map(py_str)
+                .map(|t| py_str(&crate::tool_parse::typed::routing("timeout", t)))
                 .unwrap_or_else(|| fantastic_bundle::py_float_repr(send_timeout)),
         );
         // Fire-and-forget: it acted, nobody awaits the answer. Deliberately

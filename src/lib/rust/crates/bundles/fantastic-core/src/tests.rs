@@ -120,7 +120,7 @@ use fantastic_kernel::{BundleRegistry, Item, Kernel};
 use serde_json::json;
 use std::sync::Arc;
 
-/// An installed bundle that answers anything: the agents these tests create
+/// An installed bundle that declares no verbs: the agents these tests create
 /// (`create_agent` refuses a handler that is not installed).
 struct Noop;
 
@@ -130,7 +130,10 @@ impl Bundle for Noop {
         "noop"
     }
     fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        fantastic_kernel::fixture_verbs!()
+        fantastic_kernel::test_support::no_verbs()
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        fantastic_kernel::test_support::no_dynamic(agent)
     }
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         fantastic_kernel::fixture_record!()
@@ -863,9 +866,12 @@ async fn loader_verbs_refuse_non_string_ids_like_python() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);
     let root = kernel.root().expect("root").id.clone();
-    for payload in [
-        json!({"type": "persist_record", "record": {"id": "x1", "parent_id": 5}}),
-        json!({"type": "forget_record", "id": 5}),
+    for (payload, arg) in [
+        (
+            json!({"type": "persist_record", "record": {"id": "x1", "parent_id": 5}}),
+            "record.parent_id",
+        ),
+        (json!({"type": "forget_record", "id": 5}), "id"),
     ] {
         let r = kernel
             .send(vec![Item::new(root.clone(), payload.clone())])
@@ -873,9 +879,47 @@ async fn loader_verbs_refuse_non_string_ids_like_python() {
             .remove(0)
             .result;
         assert_eq!(r["reason"], "bad_arg", "{payload}: {r}");
-        assert_eq!(r["arg"], "id");
+        assert_eq!(r["arg"], arg, "{payload}: {r}");
     }
     assert!(!tmp.path().join(".fantastic/agents/x1").exists());
+}
+
+/// The declaration covers a missing id: the call is refused by the loader's own entry,
+/// by name, before any verb fn runs.
+#[tokio::test]
+async fn loader_verbs_refuse_a_missing_id_by_their_declaration() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = booted(&tmp);
+    let root = kernel.root().expect("root").id.clone();
+    for (payload, arg) in [
+        (json!({"type": "persist_record", "record": {"note": "no id"}}), "record.id"),
+        (json!({"type": "persist_record"}), "record"),
+        (json!({"type": "forget_record"}), "id"),
+        (json!({"type": "persist_blob", "agent_id": "a", "name": "n"}), "content"),
+        (json!({"type": "load_blob", "agent_id": "a"}), "name"),
+        (json!({"type": "export_subtree", "agent_id": "a"}), "path"),
+        (json!({"type": "reload_bundle"}), "name"),
+    ] {
+        let r = kernel
+            .send(vec![Item::new(root.clone(), payload.clone())])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["reason"], "missing_arg", "{payload}: {r}");
+        assert_eq!(r["arg"], arg, "{payload}: {r}");
+    }
+    // a wrongly typed argument is refused, never typed on the caller's behalf
+    let r = kernel
+        .send(vec![Item::new(
+            root.clone(),
+            json!({"type": "read_bundles", "name": 7}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["error"], "read_bundles: argument 'name' must be string, got int", "{r}");
+    assert!(!tmp.path().join(".fantastic/agents/note").exists());
 }
 
 /// python `_find_store(agent)` searches THE ADDRESSED LOADER's subtree for a
@@ -1082,10 +1126,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);
     let answers = "boot, load_tree, persist_record, forget_record, persist_blob, load_blob, \
-                   reload_bundle, read_bundles, export_subtree, reflect, shutdown, create_agent, \
-                   update_agent, delete_agent, list_agents, ps, ledger, ack_deadletter, \
-                   kernel_start, cancel, shutdown_agents, kernel_stop, docs, await_set, \
-                   await_cancel";
+                   reload_bundle, read_bundles, export_subtree, reflect, shutdown";
     for verb in ["wat", "it's"] {
         let v = root_reflect(&kernel, json!({"type": verb})).await;
         let want = json!({
@@ -1198,7 +1239,10 @@ fn root_export_subtree_is_in_the_roots_verbs_and_docs() {
         .iter()
         .find(|v| v.name == "export_subtree")
         .expect("export_subtree is a verb");
-    let doc = fantastic_kernel::verbs::detail(verb);
+    let doc = fantastic_kernel::verbs::detail(&fantastic_kernel::verbs::Row {
+        name: verb.name,
+        schema: verb.schema(),
+    });
     assert!(doc.contains("agent_id:string (req)"), "{doc}");
     assert!(doc.contains("path:string (req)"), "{doc}");
     assert!(doc.contains("{exported, path, ports, files}"), "{doc}");

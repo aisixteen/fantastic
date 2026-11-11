@@ -6,13 +6,15 @@
 //! `///` says what the verb does. [`verbs!`] lists them (`VERBS` + `enum Call`),
 //! [`record!`] declares the fields `create_agent` / `update_agent` may set.
 //!
-//! THE KERNEL, NOT THE BUNDLE, CHECKS THE CALL — at dispatch, for every caller
-//! (model, CLI, another agent): the verb is in the list, then each argument is
-//! known, present when required and of its type ([`check_call`]); a record field is
-//! known to the bundle ([`check_record`]). `reflect` and `docs` render the same
-//! declarations ([`line`], [`detail`]). A bundle contains no validation code: its
-//! `handle` parses the already-checked payload with [`Call::parse`] — the generated
-//! one, which cannot fail after the kernel's check.
+//! THE AGENT, NOT THE KERNEL, CHECKS THE CALL. The kernel routes; the entry the
+//! `verbs!` macro generates (`Call::parse`) is the shared library code every agent
+//! uses: the verb is in the list (builtin, from `verbs!`, or dynamic, from
+//! [`Bundle::dynamic_verbs`](crate::Bundle::dynamic_verbs)), then each argument is
+//! known, present when required and of its type — ONE engine, the JSON schema
+//! ([`validate`]), no coercion: a wrongly typed value is refused by name and the
+//! refusal is the agent's reply. A record field is known to the bundle's own record
+//! declaration ([`check_record`]). `reflect` and `docs` render the same
+//! declarations ([`line`], [`detail`]).
 
 use serde_json::{json, Map, Value};
 use std::sync::OnceLock;
@@ -101,36 +103,148 @@ fn parse_as<T: serde::de::DeserializeOwned>(v: Value) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// A verb that exists per AGENT INSTANCE, produced at runtime (an MCP client's
+/// tools): the same schema shape as a builtin verb's, checked by the same engine.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DynVerb {
+    /// The verb's name — `payload["type"]`.
+    pub name: String,
+    /// The JSON schema of its arguments (`type: object`, `properties`, `required`);
+    /// its `description` is what the verb does.
+    pub schema: Value,
+}
+
+impl DynVerb {
+    /// Declare a dynamic verb from a name, what it does and the JSON schema of its
+    /// arguments (an MCP tool's `name`, `description`, `inputSchema`). An absent or
+    /// non-object schema is a verb without arguments.
+    #[must_use]
+    pub fn new(name: impl Into<String>, description: &str, input_schema: &Value) -> DynVerb {
+        let mut schema = match input_schema {
+            Value::Object(o) => o.clone(),
+            _ => Map::new(),
+        };
+        schema.insert("type".to_string(), json!("object"));
+        schema.insert("description".to_string(), json!(description));
+        DynVerb {
+            name: name.into(),
+            schema: Value::Object(schema),
+        }
+    }
+}
+
+/// A call of a dynamic verb, its arguments checked against the declared schema.
+#[derive(Debug)]
+pub struct DynCall {
+    /// The verb's name.
+    pub name: String,
+    /// Its arguments (the payload without `type`).
+    pub args: Value,
+}
+
+/// What a call resolved to.
+#[doc(hidden)]
+#[derive(Debug)]
+pub enum Resolved {
+    /// A builtin verb of the bundle (or a common one): its name, arguments checked.
+    Builtin(&'static str, Value),
+    /// A dynamic verb of the agent.
+    Dynamic(DynCall),
+}
+
 /// Declare a bundle's verbs: `verbs! { "name" => Struct, … }` generates
-/// `pub static VERBS` (name → schema, read by the kernel) and `pub enum Call` with
-/// one variant per struct (named like it) and `Call::parse(&payload)`.
+/// `pub static VERBS`, `pub enum Call` with one variant per struct (named like it)
+/// and its ENTRY `Call::parse(agent_id, &payload)`: the shared parse + validation
+/// that replies with the refusal when the call is not one of the verbs. A bundle
+/// with no dynamic verbs also gets `dynamic_verbs(&agent)`, an explicit empty list.
+///
+/// `verbs! { dynamic; "name" => Struct, … }` is the form for a bundle whose agents
+/// also carry verbs built at runtime: `Call` has a `Dynamic(DynCall)` variant,
+/// `Call::parse(agent_id, &payload, &dynamic)` takes the agent's dynamic list, and
+/// the bundle writes its own `dynamic_verbs`.
 #[macro_export]
 macro_rules! verbs {
-    // The kernel's own lists (`declared`): no `Reflect` variant added.
+    // The kernel's own lists (`declared`): no `Reflect` variant added, nothing dynamic.
     (@own $($name:literal => $ty:ident),+ $(,)?) => {
-        $crate::verbs!(@list args [] [] $($name => $ty),+);
+        $crate::verbs!(
+            @list agent payload dynamic vname args
+            [] []
+            [&[VERBS]]
+            [] []
+            [
+                let (vname, args) = $crate::verbs::resolve_builtin(agent, payload, &[VERBS])?;
+                Self::arm(agent, payload, vname, args)
+            ]
+            $($name => $ty),+
+        );
     };
     // A bundle's list: `reflect`, which every agent answers and the kernel always
     // passes on, is a variant of its `Call` beside its own verbs.
+    (dynamic; $($name:literal => $ty:ident),+ $(,)?) => {
+        $crate::verbs!(
+            @list agent payload dynamic vname args
+            [, dynamic: &[$crate::verbs::DynVerb]] []
+            [&[VERBS, $crate::declared::common::VERBS]]
+            [
+                /// The `reflect` verb every agent answers.
+                Reflect($crate::declared::common::Reflect),
+                /// A verb built at runtime for this agent.
+                Dynamic($crate::verbs::DynCall),
+            ]
+            [
+                "reflect" => Self::typed::<$crate::declared::common::Reflect>("reflect", args).map(Call::Reflect),
+            ]
+            [
+                match $crate::verbs::resolve(
+                    agent,
+                    payload,
+                    &[VERBS, $crate::declared::common::VERBS],
+                    dynamic,
+                )? {
+                    $crate::verbs::Resolved::Dynamic(call) => Ok(Call::Dynamic(call)),
+                    $crate::verbs::Resolved::Builtin(vname, args) => Self::arm(agent, payload, vname, args),
+                }
+            ]
+            $($name => $ty),+
+        );
+    };
     ($($name:literal => $ty:ident),+ $(,)?) => {
         $crate::verbs!(
-            @list
-            args
+            @list agent payload dynamic vname args
+            [] []
+            [&[VERBS, $crate::declared::common::VERBS]]
             [
                 /// The `reflect` verb every agent answers.
                 Reflect($crate::declared::common::Reflect),
             ]
             [
-                "reflect" => $crate::verbs::serde_json::from_value::<$crate::declared::common::Reflect>(args)
-                    .map(Call::Reflect)
-                    .map_err(|e| e.to_string()),
+                "reflect" => Self::typed::<$crate::declared::common::Reflect>("reflect", args).map(Call::Reflect),
+            ]
+            [
+                let (vname, args) = $crate::verbs::resolve_builtin(
+                    agent,
+                    payload,
+                    &[VERBS, $crate::declared::common::VERBS],
+                )?;
+                Self::arm(agent, payload, vname, args)
             ]
             $($name => $ty),+
         );
+        /// This bundle's agents carry no verbs built at runtime: an explicit empty list
+        /// (what `Bundle::dynamic_verbs` returns).
+        #[must_use]
+        pub fn dynamic_verbs(_agent: &$crate::Agent) -> Vec<$crate::verbs::DynVerb> {
+            Vec::new()
+        }
     };
-    (@list $args:ident [$($variant:tt)*] [$($arm:tt)*] $($name:literal => $ty:ident),+) => {
-        /// Every verb this bundle declares: the list the kernel validates a call
-        /// against and renders in `reflect` and `docs`.
+    (@list $agent:ident $payload:ident $dynamic:ident $vname:ident $args:ident
+        [$($sig:tt)*] [$($setup:tt)*]
+        [$lists:expr]
+        [$($variant:tt)*] [$($arm:tt)*]
+        [$($entry:tt)*]
+        $($name:literal => $ty:ident),+) => {
+        /// Every verb this bundle declares: the list its entry validates a call
+        /// against and `reflect` and `docs` render.
         pub static VERBS: &[$crate::verbs::Verb] = &__DECLARED_VERBS;
 
         #[doc(hidden)]
@@ -149,22 +263,44 @@ macro_rules! verbs {
         }
 
         impl Call {
-            /// Parse a payload the kernel has already checked into its verb's
-            /// struct. `Err` is the serde text — unreachable after the kernel's check.
-            pub fn parse(payload: &$crate::verbs::serde_json::Value) -> Result<Call, String> {
-                let verb = payload
-                    .get("type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
-                let $args = $crate::verbs::args_of(payload);
-                match verb {
+            /// THE ENTRY of every call to this bundle's agents: resolve the verb
+            /// (unknown ⇒ the refusal listing what the agent answers), check its
+            /// arguments against the declaration (unknown, missing, mistyped ⇒ the
+            /// refusal naming the argument), then type them. `Err` is the agent's
+            /// reply; no verb fn runs before this returns `Ok`.
+            pub fn parse(
+                $agent: &str,
+                $payload: &$crate::verbs::serde_json::Value
+                $($sig)*
+            ) -> Result<Call, $crate::verbs::serde_json::Value> {
+                $($setup)*
+                $($entry)*
+            }
+
+            fn typed<T: $crate::verbs::serde::de::DeserializeOwned>(
+                verb: &str,
+                args: $crate::verbs::serde_json::Value,
+            ) -> Result<T, $crate::verbs::serde_json::Value> {
+                $crate::verbs::serde_json::from_value::<T>(args)
+                    .map_err(|e| $crate::verbs::unparsed(verb, &e.to_string()))
+            }
+
+            fn arm(
+                $agent: &str,
+                $payload: &$crate::verbs::serde_json::Value,
+                $vname: &str,
+                $args: $crate::verbs::serde_json::Value,
+            ) -> Result<Call, $crate::verbs::serde_json::Value> {
+                match $vname {
                     $($arm)*
                     $(
-                        $name => $crate::verbs::serde_json::from_value::<$ty>($args)
-                            .map(Call::$ty)
-                            .map_err(|e| e.to_string()),
+                        $name => Self::typed::<$ty>($name, $args).map(Call::$ty),
                     )+
-                    other => Err(format!("unknown verb {other:?}")),
+                    _ => Err($crate::verbs::unknown_verb(
+                        $agent,
+                        $payload.get("type").unwrap_or(&$crate::verbs::serde_json::Value::Null),
+                        &$crate::verbs::names($lists, &[]),
+                    )),
                 }
             }
         }
@@ -358,11 +494,53 @@ fn first_sentence(doc: &str) -> String {
     line.trim_end_matches('.').to_string()
 }
 
-/// The ONE-LINE tier of a declared verb: its arguments, then what it does.
+/// One verb as `reflect` and `docs` show it: its name and the schema of its
+/// arguments — a builtin's (from `verbs!`) or a dynamic one's, rendered alike.
+#[derive(Debug, Clone, Copy)]
+pub struct Row<'a> {
+    /// The verb's name.
+    pub name: &'a str,
+    /// The JSON schema of its arguments.
+    pub schema: &'a Value,
+}
+
+/// The rows of the declared lists in order, then the dynamic ones; a verb named in
+/// an earlier list is not repeated from a later one.
 #[must_use]
-pub fn line(verb: &Verb) -> String {
-    let doc = first_sentence(&verb.doc());
-    let list = arg_list(verb.schema());
+pub fn rows<'a>(lists: &[&'a [Verb]], dynamic: &'a [DynVerb]) -> Vec<Row<'a>> {
+    let mut out: Vec<Row<'a>> = Vec::new();
+    for l in lists {
+        for v in l.iter() {
+            if !out.iter().any(|r| r.name == v.name) {
+                out.push(Row {
+                    name: v.name,
+                    schema: v.schema(),
+                });
+            }
+        }
+    }
+    for d in dynamic {
+        if !out.iter().any(|r| r.name == d.name) {
+            out.push(Row {
+                name: &d.name,
+                schema: &d.schema,
+            });
+        }
+    }
+    out
+}
+
+/// The verb names of the lists, then the dynamic ones, each once.
+#[must_use]
+pub fn names<'a>(lists: &[&'a [Verb]], dynamic: &'a [DynVerb]) -> Vec<&'a str> {
+    rows(lists, dynamic).into_iter().map(|r| r.name).collect()
+}
+
+/// The ONE-LINE tier of a verb: its arguments, then what it does.
+#[must_use]
+pub fn line(row: &Row) -> String {
+    let doc = first_sentence(&doc_of(row.schema));
+    let list = arg_list(row.schema);
     if doc.is_empty() {
         list
     } else {
@@ -370,12 +548,12 @@ pub fn line(verb: &Verb) -> String {
     }
 }
 
-/// The DETAILED tier of a declared verb: the whole doc, then every argument with
-/// its type, whether it is required or its default, and its description.
+/// The DETAILED tier of a verb: the whole doc, then every argument with its type,
+/// whether it is required or its default, and its description.
 #[must_use]
-pub fn detail(verb: &Verb) -> String {
-    let mut out = verb.doc();
-    let a = args(verb.schema());
+pub fn detail(row: &Row) -> String {
+    let mut out = doc_of(row.schema);
+    let a = args(row.schema);
     if a.is_empty() {
         out.push_str("\n\nNo args.");
         return out.trim().to_string();
@@ -390,13 +568,12 @@ pub fn detail(verb: &Verb) -> String {
     out.trim().to_string()
 }
 
-/// `{verb: one line}` for a list of declarations — what `reflect` carries as its
-/// `verbs` block.
+/// `{verb: one line}` for a list of rows — what `reflect` carries as its `verbs` block.
 #[must_use]
-pub fn lines(list: &[&Verb]) -> Value {
+pub fn lines(rows: &[Row]) -> Value {
     let mut m = Map::new();
-    for v in list {
-        m.insert(v.name.to_string(), Value::String(line(v)));
+    for r in rows {
+        m.insert(r.name.to_string(), Value::String(line(r)));
     }
     Value::Object(m)
 }
@@ -440,43 +617,6 @@ fn matches_type(schema: &Value, v: &Value) -> bool {
     }
 }
 
-/// Does the schema take `v` only as a number or a bool (never as text)? Then text
-/// a caller typed is typed first ([`crate::scalar`]), as the CLI and the model's
-/// `<k>v</k>` path both would.
-fn wants_scalar(schema: &Value) -> bool {
-    if matches_type(schema, &Value::String(String::new())) {
-        return false;
-    }
-    ["integer", "number", "boolean"]
-        .iter()
-        .any(|t| matches_type(schema, &scalar_probe(t)))
-}
-
-fn scalar_probe(t: &str) -> Value {
-    match t {
-        "integer" => json!(0),
-        "number" => json!(0.5),
-        _ => json!(true),
-    }
-}
-
-/// `args` with the text of a number/bool argument typed by `scalar.rs`.
-fn typed(schema: &Value, mut args: Map<String, Value>) -> Map<String, Value> {
-    if let Some(props) = schema.get("properties").and_then(Value::as_object) {
-        for (k, p) in props {
-            if let Some(Value::String(s)) = args.get(k) {
-                if wants_scalar(p) {
-                    let t = crate::scalar::coerce_scalar(s);
-                    if !t.is_string() {
-                        args.insert(k.clone(), t);
-                    }
-                }
-            }
-        }
-    }
-    args
-}
-
 fn refuse_arg(verb: &str, code: &str, arg: &str, why: String, schema: &Value) -> Value {
     // the hint: the verb's real argument list, and what the named argument is
     let mut hint = format!("{verb} takes — {}", arg_list(schema));
@@ -491,25 +631,43 @@ fn refuse_arg(verb: &str, code: &str, arg: &str, why: String, schema: &Value) ->
     r
 }
 
-/// Check the ARGUMENTS of one call against a declaration. `Ok` carries the
-/// arguments typed (a number written as text is a number); `Err` the refusal, by
-/// argument name, with the verb's real argument list.
+/// Check the ARGUMENTS of one call against a schema — the ONE validation engine,
+/// builtin and dynamic verbs alike. `Ok` carries the arguments; `Err` the refusal, by
+/// argument name, with the verb's real argument list. NO coercion: a value of the
+/// wrong type is refused, never typed on the caller's behalf.
 ///
-/// Order: unknown → missing → wrongly typed; the declared struct then parses the
-/// result as the last word.
-pub fn check_args(verb: &Verb, payload: &Value) -> Result<Value, Value> {
-    let schema = verb.schema();
-    check_against(verb.name, schema, verb.parse, payload)
+/// Order: unknown → missing → wrongly typed.
+pub fn validate(name: &str, schema: &Value, payload: &Value) -> Result<Value, Value> {
+    let Value::Object(raw) = args_of(payload) else {
+        return Ok(Value::Object(Map::new()));
+    };
+    check_object(name, "", schema, &raw, schema)?;
+    Ok(Value::Object(raw))
 }
 
-fn check_against(
+/// Does the schema describe an object with declared properties (so its fields are
+/// checked by name, not just "is an object")?
+fn described_object(schema: &Value) -> bool {
+    schema.get("type").and_then(Value::as_str) == Some("object")
+        && (schema.get("properties").is_some() || schema.get("required").is_some())
+}
+
+/// One object against its schema: unknown → missing → wrongly typed, a nested
+/// object checked the same way under its dotted path (`record.id`). `top` is the
+/// verb's own schema, for the hint.
+fn check_object(
     name: &str,
+    path: &str,
     schema: &Value,
-    parse: fn(Value) -> Result<(), String>,
-    payload: &Value,
-) -> Result<Value, Value> {
-    let Value::Object(raw) = args_of(payload) else {
-        return Ok(Value::Null);
+    raw: &Map<String, Value>,
+    top: &Value,
+) -> Result<(), Value> {
+    let dotted = |k: &str| {
+        if path.is_empty() {
+            k.to_string()
+        } else {
+            format!("{path}.{k}")
+        }
     };
     let props = schema.get("properties").and_then(Value::as_object);
     let open = open_ended(schema);
@@ -519,56 +677,61 @@ fn check_against(
             return Err(refuse_arg(
                 name,
                 BAD_ARG,
-                k,
-                format!("unknown argument {}", fantastic_bundle::py_repr(k)),
-                schema,
+                &dotted(k),
+                format!("unknown argument {}", fantastic_bundle::py_repr(&dotted(k))),
+                top,
             ));
         }
     }
-    let raw = typed(schema, raw);
     if let Some(Value::Array(req)) = schema.get("required") {
         for r in req.iter().filter_map(Value::as_str) {
             if matches!(raw.get(r), None | Some(Value::Null)) {
                 return Err(refuse_arg(
                     name,
                     MISSING_ARG,
-                    r,
-                    format!("missing argument {}", fantastic_bundle::py_repr(r)),
-                    schema,
+                    &dotted(r),
+                    format!("missing argument {}", fantastic_bundle::py_repr(&dotted(r))),
+                    top,
                 ));
             }
         }
     }
     if let Some(props) = props {
-        for (k, v) in &raw {
+        for (k, v) in raw {
             let Some(p) = props.get(k) else { continue };
+            if let (true, Value::Object(inner)) = (described_object(p), v) {
+                check_object(name, &dotted(k), p, inner, top)?;
+                continue;
+            }
             if !matches_type(p, v) {
                 return Err(refuse_arg(
                     name,
                     BAD_ARG,
-                    k,
+                    &dotted(k),
                     format!(
                         "argument {} must be {}, got {}",
-                        fantastic_bundle::py_repr(k),
+                        fantastic_bundle::py_repr(&dotted(k)),
                         type_label(p),
                         fantastic_bundle::py_type_name(v)
                     ),
-                    schema,
+                    top,
                 ));
             }
         }
     }
-    let out = Value::Object(raw);
-    parse(out.clone()).map_err(|e| {
-        refuse_arg(
-            name,
-            BAD_ARG,
-            "",
-            format!("the arguments do not parse ({e})"),
-            schema,
-        )
-    })?;
-    Ok(out)
+    Ok(())
+}
+
+/// The refusal for arguments the schema accepted and the declared struct could not
+/// parse (a rule a schema cannot say, such as a nested field's type).
+#[doc(hidden)]
+#[must_use]
+pub fn unparsed(verb: &str, why: &str) -> Value {
+    refusal_hint(
+        BAD_ARG,
+        format!("{verb}: the arguments do not parse ({why})"),
+        format!("docs of=<agent> detailed verb={verb} lists the arguments"),
+    )
 }
 
 /// `unknown verb 'X'; <agent> answers: a, b, c` — the refusal for a verb not in the
@@ -589,39 +752,65 @@ pub fn unknown_verb(agent: &str, verb: &Value, answers: &[&str]) -> Value {
     r
 }
 
-/// Check a whole call: the verb must be one of `lists` (searched in order — the
-/// agent's bundle first, then the verbs every agent answers), and its arguments
-/// must match its declaration. `Ok` is the payload to hand the handler: the same,
-/// with a number or bool a caller wrote as text typed.
-pub fn check_call(
+fn verb_name(payload: &Value) -> Option<&str> {
+    payload.get("type").and_then(Value::as_str)
+}
+
+fn builtin_arguments(verb: &Verb, payload: &Value) -> Result<Value, Value> {
+    let args = validate(verb.name, verb.schema(), payload)?;
+    // the declared struct has the last word on what a schema cannot say
+    (verb.parse)(args.clone()).map_err(|e| unparsed(verb.name, &e))?;
+    Ok(args)
+}
+
+/// Resolve a call among BUILTIN verbs only (searched in order — the bundle's first,
+/// then the verbs every agent answers) and check its arguments: the verb's name and
+/// the arguments. The entry `verbs!` generates for a bundle with no dynamic verbs.
+pub fn resolve_builtin(
     agent: &str,
-    verb: &str,
     payload: &Value,
-    lists: &[&[Verb]],
-) -> Result<Value, Value> {
-    let found = lists.iter().find_map(|l| l.iter().find(|v| v.name == verb));
+    lists: &[&'static [Verb]],
+) -> Result<(&'static str, Value), Value> {
+    let found = verb_name(payload)
+        .and_then(|n| lists.iter().find_map(|l| l.iter().find(|v| v.name == n)));
     let Some(v) = found else {
-        let mut names: Vec<&str> = Vec::new();
-        for l in lists {
-            for v in l.iter() {
-                if !names.contains(&v.name) {
-                    names.push(v.name);
-                }
-            }
-        }
         return Err(unknown_verb(
             agent,
             payload.get("type").unwrap_or(&Value::Null),
-            &names,
+            &names(lists, &[]),
         ));
     };
-    let args = check_args(v, payload)?;
-    let mut out = match args {
-        Value::Object(m) => m,
-        _ => Map::new(),
-    };
-    out.insert("type".to_string(), Value::String(verb.to_string()));
-    Ok(Value::Object(out))
+    Ok((v.name, builtin_arguments(v, payload)?))
+}
+
+/// Resolve a call among the builtin verbs and the agent's DYNAMIC ones (a builtin
+/// of the same name wins) and check its arguments with the same engine. The entry
+/// `verbs!{ dynamic; … }` generates.
+pub fn resolve(
+    agent: &str,
+    payload: &Value,
+    lists: &[&'static [Verb]],
+    dynamic: &[DynVerb],
+) -> Result<Resolved, Value> {
+    let name = verb_name(payload);
+    if let Some(n) = name {
+        if lists.iter().any(|l| l.iter().any(|v| v.name == n)) {
+            let (vname, args) = resolve_builtin(agent, payload, lists)?;
+            return Ok(Resolved::Builtin(vname, args));
+        }
+        if let Some(d) = dynamic.iter().find(|d| d.name == n) {
+            let args = validate(&d.name, &d.schema, payload)?;
+            return Ok(Resolved::Dynamic(DynCall {
+                name: d.name.clone(),
+                args,
+            }));
+        }
+    }
+    Err(unknown_verb(
+        agent,
+        payload.get("type").unwrap_or(&Value::Null),
+        &names(lists, dynamic),
+    ))
 }
 
 /// Check the FIELDS of a record patch (`create_agent` / `update_agent`) against what
@@ -669,18 +858,7 @@ pub fn check_record(
             let Some(p) = schema.get("properties").and_then(|p| p.get(k)) else {
                 continue;
             };
-            let typed_v = match v {
-                Value::String(s) if wants_scalar(p) => {
-                    let t = crate::scalar::coerce_scalar(s);
-                    if t.is_string() {
-                        v.clone()
-                    } else {
-                        t
-                    }
-                }
-                _ => v.clone(),
-            };
-            if !matches_type(p, &typed_v) {
+            if !matches_type(p, v) {
                 let mut r = refusal_hint(
                     BAD_ARG,
                     format!(

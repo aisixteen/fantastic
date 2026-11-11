@@ -23,7 +23,10 @@ impl Bundle for Sink {
         "sink"
     }
     fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        fantastic_kernel::fixture_verbs!("read_stream", "write_stream")
+        fantastic_kernel::test_support::declared_fixtures::store_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        fantastic_kernel::test_support::declared_fixtures::store_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         fantastic_kernel::fixture_record!()

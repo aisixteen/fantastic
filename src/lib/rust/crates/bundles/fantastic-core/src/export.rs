@@ -857,20 +857,18 @@ fn read_bundle_dir(state: &Path, hm: &str) -> Vec<BundleFile> {
 /// `export_subtree {agent_id, path}` — write the agent and everything under it
 /// as a blueprint folder at `path` (relative to the running dir), which must be
 /// new or empty.
-pub async fn export_subtree(kernel: &Arc<Kernel>, p: &Value, who: &str) -> Value {
-    let (Some(agent_id), Some(path)) = (
-        p.get("agent_id")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty()),
-        p.get("path")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty()),
-    ) else {
+pub async fn export_subtree(
+    kernel: &Arc<Kernel>,
+    agent_id: &str,
+    path: &str,
+    who: &str,
+) -> Value {
+    if agent_id.is_empty() || path.is_empty() {
         return refuse(
             "bad_arg",
-            format!("{who}: agent_id (str) + path (str) required"),
+            format!("{who}: agent_id and path must not be empty"),
         );
-    };
+    }
     let rel = Path::new(path);
     if rel.components().any(|c| c == Component::ParentDir) {
         return refuse("bad_arg", format!("{who}: path may not hold `..`"));

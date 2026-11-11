@@ -2,14 +2,14 @@
 
 use super::{obj, record_value};
 use crate::agent::AgentRecord;
-use crate::scalar::coerce_scalar;
+use crate::test_support::non_finite;
 use serde_json::{json, Map, Value};
 
 #[test]
 fn json_macro_cannot_carry_a_non_finite_number() {
     // The fault, pinned so the reason this module exists stays true:
     // `to_value` re-parses the stored text and `NaN` is not JSON.
-    let nan = coerce_scalar("nan");
+    let nan = non_finite("NaN");
     assert_eq!(nan.to_string(), "NaN");
     assert!(
         serde_json::to_value(&nan).is_err(),
@@ -23,8 +23,8 @@ fn obj_carries_a_non_finite_number_verbatim() {
     let Value::Object(mut m) = payload else {
         unreachable!()
     };
-    m.insert("nan".to_string(), coerce_scalar("nan"));
-    m.insert("inf".to_string(), coerce_scalar("-inf"));
+    m.insert("nan".to_string(), non_finite("NaN"));
+    m.insert("inf".to_string(), non_finite("-Infinity"));
     let out = obj([("payload", Value::Object(m)), ("kind", Value::from("send"))]);
     assert_eq!(
         out.to_string(),
@@ -35,10 +35,10 @@ fn obj_carries_a_non_finite_number_verbatim() {
 #[test]
 fn a_record_with_a_non_finite_meta_value_still_serializes() {
     let mut meta = Map::new();
-    meta.insert("nan".to_string(), coerce_scalar("nan"));
+    meta.insert("nan".to_string(), non_finite("NaN"));
     meta.insert(
         "big".to_string(),
-        coerce_scalar("123456789012345678901234567890"),
+        serde_json::from_str::<Value>("123456789012345678901234567890").expect("a wide integer"),
     );
     let rec = AgentRecord {
         id: "coerced".to_string(),

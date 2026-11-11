@@ -20,13 +20,17 @@ struct IdBundle {
     log: Log,
 }
 
+crate::stand_in_verbs!(idbundle_verbs { BootV "boot" {  }, ForkServiceV "fork_service" {  }, ShutdownV "shutdown" {  }, SlowV "slow" {  } });
 #[async_trait]
 impl Bundle for IdBundle {
     fn name(&self) -> &str {
         "hook_identity_probe"
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        crate::fixture_verbs!("boot", "fork_service", "shutdown", "slow")
+        idbundle_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        idbundle_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()
@@ -34,10 +38,13 @@ impl Bundle for IdBundle {
 
     async fn handle(
         &self,
-        _agent_id: &AgentId,
+        agent_id: &AgentId,
         payload: &Value,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
+        if let Err(refused) = idbundle_verbs::Call::parse(&agent_id.0, &payload) {
+            return Ok(Some(refused));
+        }
         match payload.get("type").and_then(Value::as_str).unwrap_or("") {
             "boot" | "shutdown" => Ok(None),
             "slow" => {

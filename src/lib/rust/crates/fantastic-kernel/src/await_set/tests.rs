@@ -28,13 +28,17 @@ impl Rec {
 
 struct RecBundle(Arc<Rec>);
 
+crate::stand_in_verbs!(recbundle_verbs { NoteV "note" {  }, ReportV "report" { state: Option<String>, result: Option<serde_json::Value> }, SendV "send" { wait_id: Option<i64>, label: Option<String>, done: Option<Vec<serde_json::Value>>, missing: Option<Vec<String>>, timed_out: Option<bool>, text: Option<String> } });
 #[async_trait]
 impl Bundle for RecBundle {
     fn name(&self) -> &str {
         "rec"
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        crate::fixture_verbs!("note", "report", "send")
+        recbundle_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        recbundle_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()
@@ -45,6 +49,9 @@ impl Bundle for RecBundle {
         payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
+        if let Err(refused) = recbundle_verbs::Call::parse(&id.0, &payload) {
+            return Ok(Some(refused));
+        }
         if payload["type"] == json!("boot") {
             return Ok(None);
         }

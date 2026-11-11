@@ -391,7 +391,7 @@ fn readme_is_pythons_verbatim() {
 #[tokio::test]
 async fn a_row_holding_a_non_json_number_reads_back_and_the_store_survives() {
     let k = store();
-    let inf = fantastic_kernel::coerce_scalar("3e500123");
+    let inf = fantastic_kernel::test_support::non_finite("Infinity");
     assert_eq!(inf.to_string(), "Infinity", "the token under test");
     // Assembled by hand: `json!` over this value is exactly the panic.
     let mut row = Map::new();

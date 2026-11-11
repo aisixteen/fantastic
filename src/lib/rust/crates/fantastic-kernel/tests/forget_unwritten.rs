@@ -29,7 +29,10 @@ impl Bundle for DeleteLog {
         "file_bridge"
     }
     fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        fantastic_kernel::fixture_verbs!("delete", "rename", "write_stream")
+        fantastic_kernel::test_support::declared_fixtures::store_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        fantastic_kernel::test_support::declared_fixtures::store_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         fantastic_kernel::fixture_record!()
@@ -65,7 +68,10 @@ impl Bundle for Plain {
         "plain"
     }
     fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        fantastic_kernel::fixture_verbs!()
+        fantastic_kernel::test_support::no_verbs()
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        fantastic_kernel::test_support::no_dynamic(agent)
     }
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         fantastic_kernel::fixture_record!()

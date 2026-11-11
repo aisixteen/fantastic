@@ -302,13 +302,17 @@ struct Overlap {
     b_started: Arc<tokio::sync::Notify>,
 }
 
+crate::stand_in_verbs!(overlap_verbs { BV "b" {  }, BootV "boot" {  }, ShutdownV "shutdown" {  }, WaitForBV "wait_for_b" {  } });
 #[async_trait::async_trait]
 impl crate::bundle::Bundle for Overlap {
     fn name(&self) -> &str {
         "overlap"
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        crate::fixture_verbs!("b", "boot", "reflect", "shutdown", "wait_for_b")
+        overlap_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        overlap_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()

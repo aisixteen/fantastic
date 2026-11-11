@@ -17,23 +17,24 @@ use std::sync::Arc;
 /// One row of a docs answer: the verb, its ONE-LINE text and its DETAILED text.
 pub type Entry = (String, String, String);
 
-/// The rows of DECLARED verbs, rendered from the declarations ([`crate::verbs`]); a
-/// verb named in an earlier list is not repeated from a later one.
+/// The rows of DECLARED verbs, rendered from the declarations ([`crate::verbs`]): the
+/// lists in order, then the agent's dynamic verbs; a verb named earlier is not
+/// repeated.
 #[must_use]
-pub fn entries_of_decls(lists: &[&[crate::verbs::Verb]]) -> Vec<Entry> {
-    let mut out: Vec<Entry> = Vec::new();
-    for l in lists {
-        for v in l.iter() {
-            if !out.iter().any(|(n, _, _)| n == v.name) {
-                out.push((
-                    v.name.to_string(),
-                    crate::verbs::line(v),
-                    crate::verbs::detail(v),
-                ));
-            }
-        }
-    }
-    out
+pub fn entries_of_decls(
+    lists: &[&[crate::verbs::Verb]],
+    dynamic: &[crate::verbs::DynVerb],
+) -> Vec<Entry> {
+    crate::verbs::rows(lists, dynamic)
+        .iter()
+        .map(|r| {
+            (
+                r.name.to_string(),
+                crate::verbs::line(r),
+                crate::verbs::detail(r),
+            )
+        })
+        .collect()
 }
 
 /// The `docs` reply `{of, bundle, tier, verbs, emits?, cancel?, notes?}` —
@@ -158,7 +159,7 @@ pub fn docs_reply(kernel: &Arc<Kernel>, payload: &Value) -> Value {
             json!("kernel"),
             tier,
             verb,
-            &entries_of_decls(&[crate::declared::kernel::VERBS]),
+            &entries_of_decls(&[crate::declared::kernel::VERBS], &[]),
             &[],
         );
     }
@@ -200,7 +201,12 @@ pub fn docs_reply(kernel: &Arc<Kernel>, payload: &Value) -> Value {
         return render(of, json!(module), tier, verb, &[], &[]);
     };
     // The bundle's declarations, with the verbs every agent answers.
-    let table = entries_of_decls(&[bundle.verbs(), crate::declared::common::VERBS]);
+    // The agent's own dynamic verbs too (a bundle addressed by name has none).
+    let dynamic = agent
+        .as_deref()
+        .map(|a| bundle.dynamic_verbs(a))
+        .unwrap_or_default();
+    let table = entries_of_decls(&[bundle.verbs(), crate::declared::common::VERBS], &dynamic);
     render(
         of,
         json!(module),

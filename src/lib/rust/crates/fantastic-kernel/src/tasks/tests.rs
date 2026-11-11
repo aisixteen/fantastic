@@ -63,26 +63,17 @@ struct SlowBundle {
     sh: Arc<Shared>,
 }
 
+crate::stand_in_verbs!(slowbundle_verbs { BoomV "boom" {  }, BootV "boot" {  }, ChainV "chain" { next: Option<String> }, ChainForkV "chain_fork" { next: Option<String> }, CountV "count" {  }, FastV "fast" {  }, FlakyV "flaky" { succeed_on: Option<i64> }, ForkV "fork" {  }, KillV "kill" { victim: Option<String> }, RaisedReplyV "raised_reply" {  }, ShutdownV "shutdown" {  }, SlowV "slow" { hold_ms: Option<i64> } });
 #[async_trait]
 impl Bundle for SlowBundle {
     fn name(&self) -> &str {
         "slow"
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        crate::fixture_verbs!(
-            "boom",
-            "boot",
-            "chain",
-            "chain_fork",
-            "count",
-            "fast",
-            "flaky",
-            "fork",
-            "kill",
-            "raised_reply",
-            "shutdown",
-            "slow"
-        )
+        slowbundle_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        slowbundle_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()
@@ -96,6 +87,9 @@ impl Bundle for SlowBundle {
         payload: &Value,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
+        if let Err(refused) = slowbundle_verbs::Call::parse(&agent_id.0, &payload) {
+            return Ok(Some(refused));
+        }
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         let reply = match verb {
             "boot" | "shutdown" => Value::Null,
@@ -1127,4 +1121,135 @@ async fn a_task_keeps_a_parent_that_has_already_ended() {
     // And it is therefore NOT a root, so the shutdown sweep leaves it to the
     // subtree it belongs to (python's `roots only` skip).
     assert!(!kernel.tasks.is_root(&forked));
+}
+
+crate::stand_in_verbs!(per_instance_verbs { PingV "ping" {  } });
+
+/// DYNAMIC VERBS — python
+/// `test_docs_of_an_agent_read_its_own_table_when_its_bundle_names_one`: a bundle
+/// whose agents serve different verbs declares them per agent instance
+/// (`dynamic_verbs`); `docs` and `reflect` render them beside the builtin ones.
+#[tokio::test]
+async fn docs_of_an_agent_render_its_dynamic_verbs_beside_the_bundles_own() {
+    struct PerInstance;
+    #[async_trait]
+    impl Bundle for PerInstance {
+        fn name(&self) -> &str {
+            "per_instance_probe"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            per_instance_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &Agent) -> Vec<crate::DynVerb> {
+            if agent.id.as_str() == "plain" {
+                return Vec::new();
+            }
+            vec![crate::DynVerb::new(
+                format!("own_{}", agent.id.as_str()),
+                "Only mine. A second sentence.",
+                &json!({"type": "object",
+                        "properties": {"x": {"type": "integer", "description": "The x."}},
+                        "required": ["x"]}),
+            )]
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
+        }
+        async fn handle(
+            &self,
+            id: &AgentId,
+            payload: &Value,
+            kernel: &Arc<Kernel>,
+        ) -> Result<Reply, BundleError> {
+            let agent = kernel.agents.get(id).map(|e| Arc::clone(&e)).unwrap();
+            let own = self.dynamic_verbs(&agent);
+            let lists: [&'static [crate::Verb]; 2] =
+                [per_instance_verbs::VERBS, crate::declared::common::VERBS];
+            match crate::verbs::resolve(&id.0, payload, &lists, &own) {
+                Ok(_) => Ok(Some(json!({"ok": true}))),
+                Err(refused) => Ok(Some(refused)),
+            }
+        }
+    }
+    let mut kernel = Kernel::new();
+    kernel.bundles.register("per_instance_probe", PerInstance);
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        Map::new(),
+        PathBuf::new(),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(root);
+    for id in ["a1", "a2", "plain"] {
+        kernel.register(Agent::new(
+            AgentId::from(id),
+            Some("per_instance_probe".into()),
+            Some(AgentId::from("kernel_state")),
+            Map::new(),
+            PathBuf::new(),
+            false,
+        ));
+    }
+    let send = |target: &'static str, p: Value| {
+        let k = Arc::clone(&kernel);
+        async move {
+            k.send(vec![Item::new(AgentId::from(target), p)])
+                .await
+                .remove(0)
+                .result
+        }
+    };
+    let docs = |of: &'static str, extra: Value| {
+        let mut p = json!({"type": "docs", "of": of});
+        for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+            p[k] = v;
+        }
+        send("kernel", p)
+    };
+    // an agent with a dynamic verb: the bundle's verb, the common ones, then its own
+    let a1 = docs("a1", json!({})).await;
+    let names: Vec<&str> = a1["verbs"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(names, ["ping", "reflect", "boot", "shutdown", "own_a1"], "{a1}");
+    assert_eq!(a1["verbs"]["ping"], "No args", "{a1}");
+    assert_eq!(a1["verbs"]["own_a1"], "args: x:int (req) — Only mine", "{a1}");
+    // the detailed tier of one dynamic verb: the whole doc, then each argument
+    let a2 = docs("a2", json!({"tier": "detailed", "verb": "own_a2"})).await;
+    assert_eq!(
+        a2["verbs"],
+        json!({"own_a2": "Only mine. A second sentence.\n\nargs:\n  x:int (req) — The x."}),
+        "{a2}"
+    );
+    // an agent with none shows the bundle's and the common ones only
+    let plain = docs("plain", json!({})).await;
+    assert!(plain["verbs"].get("ping").is_some(), "{plain}");
+    assert!(plain["verbs"].get("own_plain").is_none(), "{plain}");
+    assert!(
+        plain["verbs"].as_object().unwrap().keys().all(|k| !k.starts_with("own_")),
+        "{plain}"
+    );
+    // another agent's dynamic verb is not this agent's
+    let gone = docs("a1", json!({"verb": "own_a2"})).await;
+    assert_eq!(gone["reason"], "bad_arg", "{gone}");
+    assert!(gone["hint"].as_str().unwrap().contains("own_a1"), "{gone}");
+    // `reflect` renders the same rows as `docs`
+    let r = send("a2", json!({"type": "reflect"})).await;
+    assert_eq!(r["verbs"]["own_a2"], "args: x:int (req) — Only mine", "{r}");
+    // the agent's own entry checks a call to a dynamic verb with the shared engine
+    assert_eq!(
+        send("a1", json!({"type": "own_a1", "x": 3})).await,
+        json!({"ok": true})
+    );
+    let r = send("a1", json!({"type": "own_a1", "x": "3"})).await;
+    assert_eq!(r["error"], "own_a1: argument 'x' must be int, got str", "{r}");
+    let r = send("a1", json!({"type": "own_a2", "x": 3})).await;
+    assert_eq!(r["reason"], "unhandled", "{r}");
 }

@@ -200,7 +200,7 @@ async fn a_row_that_is_not_json_is_refused_whole() {
     let tmp = tempfile::TempDir::new().unwrap();
     let k = kernel(tmp.path());
     add_store(&k, "mem.db");
-    let inf = fantastic_kernel::coerce_scalar("3e500123");
+    let inf = fantastic_kernel::test_support::non_finite("Infinity");
     assert_eq!(inf.to_string(), "Infinity", "the token under test");
     let mut bad = Map::new();
     bad.insert("id".to_string(), Value::from(2));

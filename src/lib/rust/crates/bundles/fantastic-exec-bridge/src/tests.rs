@@ -2346,7 +2346,7 @@ async fn job_id_is_an_int_or_absent() {
     inf.insert("type".to_string(), json!("status"));
     inf.insert(
         "job_id".to_string(),
-        fantastic_kernel::coerce_scalar("458e5912"),
+        fantastic_kernel::test_support::non_finite("Infinity"),
     );
     let r = kernel
         .send(vec![Item::new(a.clone(), Value::Object(inf))])

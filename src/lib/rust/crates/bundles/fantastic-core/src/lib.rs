@@ -370,12 +370,6 @@ impl KernelStateBundle {
             return Ok(denied);
         }
         let record = &args.record;
-        if !record.get("id").is_some_and(fantastic_bundle::py_truthy) {
-            return Ok(fantastic_kernel::missing(
-                "persist_record",
-                "record (dict with id)",
-            ));
-        }
         if let Some(bad) = guard_id("persist_record", record.get("id")) {
             return Ok(bad);
         }
@@ -408,11 +402,7 @@ impl KernelStateBundle {
         if let Some(denied) = guard_own_tree("forget_record", agent) {
             return Ok(denied);
         }
-        // `if not target: missing`; the kernel already checked the argument is a string.
         let target = args.id.as_str();
-        if target.is_empty() {
-            return Ok(fantastic_kernel::missing("forget_record", "id"));
-        }
         if let Some(bad) = fantastic_kernel::refusal::guard_agent_id("forget_record", target) {
             return Ok(bad);
         }
@@ -565,6 +555,10 @@ impl Bundle for KernelStateBundle {
         verbs::VERBS
     }
 
+    fn dynamic_verbs(&self, agent: &Agent) -> Vec<fantastic_kernel::DynVerb> {
+        verbs::dynamic_verbs(agent)
+    }
+
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         &record::RECORD
     }
@@ -600,9 +594,11 @@ impl Bundle for KernelStateBundle {
                 kernel.agents.iter().map(|e| e.key().0.clone()).collect(),
             )));
         };
-        // The kernel checked the call before it got here: the verb is known and its
-        // arguments are in order.
-        let call = verbs::Call::parse(payload).map_err(|e| -> BundleError { e.into() })?;
+        // THE ENTRY: the shared parse + validation; its refusal is this agent's reply.
+        let call = match verbs::Call::parse(&agent.id.0, payload) {
+            Ok(call) => call,
+            Err(refused) => return Ok(Some(refused)),
+        };
         let reply = match call {
             verbs::Call::Reflect(_) => json!({
                 "id": agent.id.0,
@@ -614,13 +610,22 @@ impl Bundle for KernelStateBundle {
             verbs::Call::LoadTree(_) => self.load_tree(&agent, kernel).await?,
             verbs::Call::PersistRecord(args) => self.persist_record(&agent, args, kernel).await?,
             verbs::Call::ForgetRecord(args) => self.forget_record(&agent, args, kernel).await?,
-            verbs::Call::PersistBlob(_) => {
-                persistence::persist_blob(kernel, &agent, payload).await?
+            verbs::Call::PersistBlob(args) => {
+                persistence::persist_blob(
+                    kernel,
+                    &agent,
+                    &args.agent_id,
+                    &args.name,
+                    &args.content,
+                )
+                .await?
             }
-            verbs::Call::LoadBlob(_) => persistence::load_blob(kernel, &agent, payload).await?,
+            verbs::Call::LoadBlob(args) => {
+                persistence::load_blob(kernel, &agent, &args.agent_id, &args.name).await?
+            }
             verbs::Call::ReloadBundle(args) => reload_bundle(&agent, args, kernel).await?,
-            verbs::Call::ReadBundles(_) => read_bundles(&agent, payload, kernel)?,
-            verbs::Call::ExportSubtree(_) => export_subtree_root(&agent, payload, kernel).await,
+            verbs::Call::ReadBundles(args) => read_bundles(&agent, args, kernel)?,
+            verbs::Call::ExportSubtree(args) => export_subtree_root(&agent, args, kernel).await,
         };
         if reply.is_null() {
             return Ok(None);
@@ -782,15 +787,15 @@ async fn reload_bundle(
 /// through this loader (a page kernel's proxy_loader). Parses nothing.
 fn read_bundles(
     agent: &Arc<Agent>,
-    payload: &Value,
+    args: verbs::ReadBundles,
     kernel: &Arc<Kernel>,
 ) -> Result<Value, BundleError> {
     use crate::folders::{is_folder_name, BUNDLES_DIR, BUNDLE_FILE};
     use fantastic_kernel::refusal::{bad, refusal_hint, NOT_FOUND};
     let root = clamp(kernel, &loader_root(kernel, agent)?)?;
     let shown = fantastic_fs::file_name(&root);
-    let names: Vec<String> = match payload.get("name") {
-        None | Some(Value::Null) => {
+    let names: Vec<String> = match args.name.as_deref() {
+        None => {
             if fantastic_fs::exists(&root, BUNDLES_DIR).map_err(raise_fs)?
                 && fantastic_fs::is_dir(&root, BUNDLES_DIR).map_err(raise_fs)?
             {
@@ -809,7 +814,7 @@ fn read_bundles(
                 Vec::new()
             }
         }
-        Some(Value::String(n)) if !n.is_empty() => {
+        Some(n) if !n.is_empty() => {
             let rel = format!("{BUNDLES_DIR}/{n}");
             // a name the folder rule refuses is never joined into a path
             if !(is_folder_name(n)
@@ -822,7 +827,7 @@ fn read_bundles(
                     format!("a bundle is a folder under {shown}/{BUNDLES_DIR}/ with a bundle.yaml"),
                 ));
             }
-            vec![n.clone()]
+            vec![n.to_string()]
         }
         Some(_) => return Ok(bad("read_bundles", "name", "a folder name")),
     };
@@ -843,14 +848,24 @@ fn read_bundles(
 
 /// `export_subtree {agent_id, path}` — the ROOT writes an agent and everything
 /// under it as a blueprint folder (`export.rs`; `user` answers the same verb).
-async fn export_subtree_root(agent: &Arc<Agent>, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+async fn export_subtree_root(
+    agent: &Arc<Agent>,
+    args: verbs::ExportSubtree,
+    kernel: &Arc<Kernel>,
+) -> Value {
     if agent.parent_id.is_some() {
         return fantastic_kernel::refusal::refusal(
             fantastic_kernel::refusal::BAD_ARG,
             "kernel_state.export_subtree: the ROOT answers it",
         );
     }
-    export::export_subtree(kernel, payload, "kernel_state.export_subtree").await
+    export::export_subtree(
+        kernel,
+        &args.agent_id,
+        &args.path,
+        "kernel_state.export_subtree",
+    )
+    .await
 }
 
 #[cfg(test)]

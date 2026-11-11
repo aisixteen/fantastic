@@ -57,16 +57,11 @@ pub(super) async fn handle_kernel_verb(
     payload: &Value,
 ) -> Result<Value, Value> {
     use crate::declared::kernel::Call as K;
-    // The kernel checked the call against its declaration at dispatch; the typed
-    // call is the exhaustive list of what it answers.
-    let call = match K::parse(payload) {
+    // The kernel is the agent of its own verbs: the shared entry checks the call
+    // against the declaration; the typed call is the exhaustive list it answers.
+    let call = match K::parse("kernel", payload) {
         Ok(c) => c,
-        Err(e) => {
-            return Ok(crate::refusal::refusal(
-                crate::refusal::BAD_ARG,
-                format!("the arguments do not parse ({e})"),
-            ))
-        }
+        Err(refused) => return Ok(refused),
     };
     Ok(match call {
         K::Docs(_) => match payload.get("of").and_then(Value::as_str) {

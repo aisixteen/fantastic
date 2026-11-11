@@ -20,23 +20,30 @@ use tempfile::TempDir;
 
 struct CountingBundle;
 
+fantastic_kernel::stand_in_verbs!(countingbundle_verbs { BoomV "boom" {  }, BootV "boot" {  }, ShutdownV "shutdown" {  }, WorkV "work" {  } });
 #[async_trait]
 impl Bundle for CountingBundle {
     fn name(&self) -> &str {
         "counting"
     }
     fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        fantastic_kernel::fixture_verbs!("boom", "boot", "shutdown", "work")
+        countingbundle_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        countingbundle_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
-        _id: &AgentId,
+        id: &AgentId,
         payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
+        if let Err(refused) = countingbundle_verbs::Call::parse(&id.0, &payload) {
+            return Ok(Some(refused));
+        }
         match payload.get("type").and_then(Value::as_str).unwrap_or("") {
             "boot" | "shutdown" => Ok(None),
             "work" => Ok(Some(json!({ "ok": true }))),
@@ -56,7 +63,10 @@ impl Bundle for FakeStore {
         "file_bridge"
     }
     fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        fantastic_kernel::fixture_verbs!("read_stream", "write_stream")
+        fantastic_kernel::test_support::declared_fixtures::store_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        fantastic_kernel::test_support::declared_fixtures::store_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         fantastic_kernel::fixture_record!()

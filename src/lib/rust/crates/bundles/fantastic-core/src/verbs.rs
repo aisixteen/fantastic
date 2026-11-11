@@ -1,5 +1,5 @@
 //! The verbs `kernel_state.tools` declares (issue #642): one struct per verb, then
-//! `verbs!` — the list the kernel checks every call against and renders in `reflect`
+//! `verbs!` — the list the loader's own entry (`Call::parse`) checks every call against and `reflect`
 //! and `docs`. `reflect` is the verbs every agent answers; it is declared once, in
 //! the kernel.
 
@@ -21,8 +21,23 @@ pub struct LoadTree {}
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PersistRecord {
-    /// The agent record: an object that carries the agent's `id`.
+    /// The agent record: an object that carries the agent's `id` and any other fields.
+    #[schemars(schema_with = "record_with_id")]
     pub record: Map<String, Value>,
+}
+
+/// The schema of a persisted record: an open object whose `id` (and `parent_id`,
+/// when it has one) is text — every other field is the agent's own.
+fn record_with_id(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    serde_json::from_value(serde_json::json!({
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+            "id": {"type": "string", "description": "The agent's id."},
+            "parent_id": {"type": ["string", "null"], "description": "Where a new agent sits in the tree."}
+        }
+    }))
+    .expect("a record schema")
 }
 
 /// Remove one agent's folder and everything under it.

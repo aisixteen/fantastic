@@ -18,24 +18,46 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// What a stand-in bundle's verb takes: any arguments (the stand-in reads the
-/// payload itself). A stand-in still names every verb it answers.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct AnyArgs {}
+/// A JSON number python writes bare and Rust's `f64` cannot hold: `NaN`,
+/// `Infinity` or `-Infinity`, as the exact token (see [`crate::jsonsafe`]).
+#[must_use]
+pub fn non_finite(token: &str) -> Value {
+    Value::Number(serde_json::Number::from_string_unchecked(token.to_string()))
+}
 
 /// The record of a stand-in bundle: freeform.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct AnyRecord {}
 
-/// `fixture_verbs!("a", "b")` — the declared verbs of a stand-in bundle, each taking
-/// any arguments: a `&'static [Verb]` for [`Bundle::verbs`].
+/// A stand-in's declared verbs, each with the arguments it really takes:
+/// `stand_in_verbs!(name_verbs { Ping "ping" {}, Work "work" { ms: Option<i64> } })`
+/// is a module `name_verbs` with one struct per verb (closed: an unknown argument is
+/// refused) and the `verbs!` list — `VERBS`, `Call`, `Call::parse`, `dynamic_verbs`.
 #[macro_export]
-macro_rules! fixture_verbs {
-    ($($name:literal),* $(,)?) => {{
-        static V: [$crate::Verb; <[&str]>::len(&[$(stringify!($name)),*])] =
-            [$($crate::Verb::of::<$crate::test_support::AnyArgs>($name)),*];
-        &V as &'static [$crate::Verb]
-    }};
+macro_rules! stand_in_verbs {
+    ($m:ident { $( $S:ident $name:literal { $( $(#[$fm:meta])* $f:ident : $t:ty ),* $(,)? } ),+ $(,)? }) => {
+        #[allow(missing_docs, dead_code)]
+        pub mod $m {
+            $(
+                #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+                #[serde(deny_unknown_fields)]
+                pub struct $S { $( $(#[$fm])* pub $f: $t ),* }
+            )+
+            $crate::verbs! { $( $name => $S ),+ }
+        }
+    };
+}
+
+/// A stand-in that answers no verb of its own: the explicit empty list.
+#[must_use]
+pub fn no_verbs() -> &'static [crate::Verb] {
+    &[]
+}
+
+/// A stand-in with no verbs built at runtime: the explicit empty list.
+#[must_use]
+pub fn no_dynamic(_agent: &crate::Agent) -> Vec<crate::DynVerb> {
+    Vec::new()
 }
 
 /// `fixture_record!()` — a freeform record: a `&'static RecordDecl` for [`Bundle::record`].
@@ -190,6 +212,58 @@ pub struct FakeStore {
     pub root: PathBuf,
 }
 
+impl FakeStore {
+    /// The text-channel verbs; the call is already parsed by the agent's entry.
+    fn run(&self, call: declared_fixtures::store_verbs::Call, id: &AgentId) -> Reply {
+        use declared_fixtures::store_verbs::Call;
+        match call {
+            Call::Delete(a) => {
+                let target = self.root.join(&a.path);
+                let _ = if target.is_dir() {
+                    std::fs::remove_dir_all(&target)
+                } else {
+                    std::fs::remove_file(&target)
+                };
+                Some(json!({"deleted": true}))
+            }
+            // The commit protocol's atomic op (`persistence::persist`
+            // writes a tmp sibling then renames it over the target) — a
+            // text-channel verb, no blob.
+            Call::Rename(a) => {
+                let old = self.root.join(&a.old_path);
+                let new = self.root.join(&a.new_path);
+                if let Some(parent) = new.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                match std::fs::rename(&old, &new) {
+                    Ok(()) => Some(json!({"renamed": true})),
+                    Err(e) => Some(json!({"error": format!("FakeStore rename: {e}")})),
+                }
+            }
+            // Text read/write — the verbs `yaml_state` (and ai_core) route
+            // through. Mirror the real `file_bridge`'s `{content}`/`{written}`.
+            Call::Read(a) => match std::fs::read_to_string(self.root.join(&a.path)) {
+                Ok(content) => Some(json!({"path": a.path, "content": content})),
+                Err(_) => Some(json!({"error": format!("path {:?} not found", a.path)})),
+            },
+            Call::Write(a) => {
+                let target = self.root.join(&a.path);
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                match std::fs::write(&target, &a.content) {
+                    Ok(_) => Some(json!({"path": a.path, "written": true})),
+                    Err(e) => Some(json!({"error": format!("write: {e}")})),
+                }
+            }
+            Call::Reflect(_) => Some(json!({"id": id.0, "sentence": "A stand-in file store."})),
+            Call::ReadStream(_) | Call::WriteStream(_) => Some(json!({
+                "error": "FakeStore: a stream verb rides the binary channel",
+            })),
+        }
+    }
+}
+
 #[async_trait]
 impl Bundle for FakeStore {
     fn name(&self) -> &str {
@@ -198,67 +272,21 @@ impl Bundle for FakeStore {
     fn verbs(&self) -> &'static [crate::verbs::Verb] {
         declared_fixtures::store_verbs::VERBS
     }
+    fn dynamic_verbs(&self, agent: &crate::agent::Agent) -> Vec<crate::verbs::DynVerb> {
+        declared_fixtures::store_verbs::dynamic_verbs(agent)
+    }
     fn record(&self) -> &'static crate::verbs::RecordDecl {
         &declared_fixtures::store_record::RECORD
     }
     async fn handle(
         &self,
-        _id: &AgentId,
+        id: &AgentId,
         payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        let path = payload.get("path").and_then(Value::as_str).unwrap_or("");
-        let target = self.root.join(path);
-        match verb {
-            "delete" => {
-                let _ = if target.is_dir() {
-                    std::fs::remove_dir_all(&target)
-                } else {
-                    std::fs::remove_file(&target)
-                };
-                Ok(Some(json!({"deleted": true})))
-            }
-            // The commit protocol's atomic op (`persistence::persist`
-            // writes a tmp sibling then renames it over the target) — a
-            // text-channel verb, no blob.
-            "rename" => {
-                let old_path = payload
-                    .get("old_path")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let new_path = payload
-                    .get("new_path")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let old = self.root.join(old_path);
-                let new = self.root.join(new_path);
-                if let Some(parent) = new.parent() {
-                    std::fs::create_dir_all(parent).ok();
-                }
-                match std::fs::rename(&old, &new) {
-                    Ok(()) => Ok(Some(json!({"renamed": true}))),
-                    Err(e) => Ok(Some(json!({"error": format!("FakeStore rename: {e}")}))),
-                }
-            }
-            // Text read/write — the verbs `yaml_state` (and ai_core) route
-            // through. Mirror the real `file_bridge`'s `{content}`/`{written}`.
-            "read" => match std::fs::read_to_string(&target) {
-                Ok(content) => Ok(Some(json!({"path": path, "content": content}))),
-                Err(_) => Ok(Some(json!({"error": format!("path {path:?} not found")}))),
-            },
-            "write" => {
-                let content = payload.get("content").and_then(Value::as_str).unwrap_or("");
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent).ok();
-                }
-                match std::fs::write(&target, content) {
-                    Ok(_) => Ok(Some(json!({"path": path, "written": true}))),
-                    Err(e) => Ok(Some(json!({"error": format!("write: {e}")}))),
-                }
-            }
-            // boot/shutdown/reflect etc. — harmless no-op acks.
-            _ => Ok(Some(Value::Null)),
+        match declared_fixtures::store_verbs::Call::parse(&id.0, payload) {
+            Ok(call) => Ok(self.run(call, id)),
+            Err(refused) => Ok(Some(refused)),
         }
     }
     async fn handle_binary(
@@ -266,30 +294,33 @@ impl Bundle for FakeStore {
         id: &AgentId,
         header: Value,
         body: Option<crate::outcome::Blob>,
-        kernel: &Arc<Kernel>,
+        _kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
-        // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
-        let blob = crate::outcome::body_at(body.as_ref(), "bytes").unwrap_or_default();
-        let verb = header.get("type").and_then(Value::as_str).unwrap_or("");
-        let path = header.get("path").and_then(Value::as_str).unwrap_or("");
-        let target = self.root.join(path);
-        match verb {
+        use declared_fixtures::store_verbs::Call;
+        let call = match Call::parse(&id.0, &header) {
+            Ok(c) => c,
+            Err(refused) => return Ok((Some(refused), None)),
+        };
+        match call {
             // A CHUNK-RETURNING verb answers `Some(bytes)` even when the chunk
             // is empty; anything else answers `None`.
-            "read_stream" => match std::fs::read(&target) {
+            Call::ReadStream(a) => match std::fs::read(self.root.join(&a.path)) {
                 Ok(bytes) => Ok((
                     Some(json!({"size": bytes.len()})),
                     Some(crate::outcome::Blob::key("bytes", bytes)),
                 )),
                 Err(_) => Ok((Some(json!({"error": "not found"})), None)),
             },
-            "write_stream" => {
+            Call::WriteStream(a) => {
+                // the chunk is the payload's `bytes` — python's `payload.get("bytes", b"")`
+                let blob = crate::outcome::body_at(body.as_ref(), "bytes").unwrap_or_default();
+                let target = self.root.join(&a.path);
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
                 // APPEND unless told to truncate — the real provider's
                 // contract (a second pump flush must not wipe the log's header).
-                let truncate = header.get("truncate").and_then(Value::as_bool) == Some(true);
+                let truncate = a.truncate == Some(true);
                 let mut f = std::fs::OpenOptions::new()
                     .create(true)
                     .write(true)
@@ -300,9 +331,7 @@ impl Bundle for FakeStore {
                 std::io::Write::write_all(&mut f, blob).expect("FakeStore: write");
                 Ok((Some(json!({"written": blob.len()})), None))
             }
-            // every other verb is the JSON half — the kernel dispatches
-            // EVERY call here
-            _ => Ok((self.handle(id, &header, kernel).await?, None)),
+            other => Ok((self.run(other, id), None)),
         }
     }
 }
@@ -326,6 +355,9 @@ impl Bundle for RootLoader {
     fn verbs(&self) -> &'static [crate::verbs::Verb] {
         declared_fixtures::loader_verbs::VERBS
     }
+    fn dynamic_verbs(&self, agent: &crate::agent::Agent) -> Vec<crate::verbs::DynVerb> {
+        declared_fixtures::loader_verbs::dynamic_verbs(agent)
+    }
     fn record(&self) -> &'static crate::verbs::RecordDecl {
         &declared_fixtures::loader_record::RECORD
     }
@@ -338,8 +370,13 @@ impl Bundle for RootLoader {
         let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
             return Ok(Some(json!({"error": "no agent"})));
         };
-        match payload.get("type").and_then(Value::as_str).unwrap_or("") {
-            "boot" => {
+        use declared_fixtures::loader_verbs::Call;
+        let call = match Call::parse(&agent_id.0, payload) {
+            Ok(c) => c,
+            Err(refused) => return Ok(Some(refused)),
+        };
+        match call {
+            Call::Boot(_) => {
                 let fresh = self.installed.lock().expect("loader poisoned").is_none();
                 if fresh {
                     let state = crate::persistence::boot_root_loader(kernel, &agent).await;
@@ -347,15 +384,16 @@ impl Bundle for RootLoader {
                 }
                 Ok(None)
             }
-            "persist_blob" => Ok(Some(
-                crate::persistence::persist_blob(kernel, &agent, payload).await?,
+            Call::PersistBlob(a) => Ok(Some(
+                crate::persistence::persist_blob(kernel, &agent, &a.agent_id, &a.name, &a.content)
+                    .await?,
             )),
-            "load_blob" => Ok(Some(
-                crate::persistence::load_blob(kernel, &agent, payload).await?,
+            Call::LoadBlob(a) => Ok(Some(
+                crate::persistence::load_blob(kernel, &agent, &a.agent_id, &a.name).await?,
             )),
-            other => Ok(Some(json!({
-                "error": format!("kernel_state: unknown type '{other}'"),
-                "reason": "unhandled",
+            Call::Reflect(_) => Ok(Some(json!({
+                "id": agent.id.0,
+                "sentence": "A stand-in root loader.",
             }))),
         }
     }

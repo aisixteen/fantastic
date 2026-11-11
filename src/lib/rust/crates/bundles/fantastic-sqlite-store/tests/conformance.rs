@@ -471,7 +471,7 @@ conform!(several_owners_one_file, s_several_owners_one_file);
 /// holds JSON). Everything else is identical.
 #[tokio::test]
 async fn a_non_json_number_row_is_the_one_allowed_difference() {
-    let inf = fantastic_kernel::coerce_scalar("3e500123");
+    let inf = fantastic_kernel::test_support::non_finite("Infinity");
     let mut outs = Vec::new();
     for h in [RAM, SQL] {
         let mut t = T { h, k: store(h, "nonjson"), log: Vec::new() };

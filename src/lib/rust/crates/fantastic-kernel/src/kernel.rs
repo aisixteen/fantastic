@@ -556,6 +556,7 @@ impl Kernel {
             return false;
         };
         bundle.verbs().iter().any(|v| v.name == verb)
+            || bundle.dynamic_verbs(&agent).iter().any(|v| v.name == verb)
     }
 
     /// DEPTH-FIRST `on_shutdown`, children before their parent. A hook that

@@ -23,13 +23,17 @@ const PAGE: &str = "g1";
 /// A local agent that answers every verb with its own id.
 struct Echo;
 
+fantastic_kernel::stand_in_verbs!(echo_verbs { AroundV "around" { x: Option<i64>, y: Option<i64>, radius: Option<i64> }, ClearV "clear" {  } });
 #[async_trait]
 impl Bundle for Echo {
     fn name(&self) -> &str {
         "echo"
     }
     fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        fantastic_kernel::fixture_verbs!("around", "clear")
+        echo_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        echo_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         fantastic_kernel::fixture_record!()
@@ -37,9 +41,12 @@ impl Bundle for Echo {
     async fn handle(
         &self,
         id: &AgentId,
-        _payload: &Value,
+        payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
+        if let Err(refused) = echo_verbs::Call::parse(&id.0, &payload) {
+            return Ok(Some(refused));
+        }
         Ok(Some(json!({"id": id.0})))
     }
 }

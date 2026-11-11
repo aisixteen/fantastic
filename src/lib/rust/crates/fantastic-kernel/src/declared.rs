@@ -1,6 +1,6 @@
 //! WHAT THE KERNEL DECLARES ITSELF (issue #642): its own verbs, the verbs every agent
 //! answers, and the record fields every agent carries. The same declarations as a
-//! bundle's ([`crate::verbs`]) — the kernel checks a call to itself like any other,
+//! bundle's ([`crate::verbs`]) — the kernel answers its own verbs through the same shared entry as any agent,
 //! and `reflect` / `docs` render them.
 
 use schemars::JsonSchema;

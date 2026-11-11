@@ -1,7 +1,8 @@
-//! Verbs declared once (issue #642): the kernel checks every call against the
-//! bundle's declaration and renders `reflect` and `docs` from it. The probe bundle
-//! below is written the way every bundle is: structs, `verbs!`, `record!`, and a
-//! `handle` that parses the already-checked payload.
+//! Verbs declared once (issue #642): each agent checks its own calls against its
+//! bundle's declaration (the shared entry `Call::parse`) and replies with the
+//! refusal; `reflect` and `docs` render the same declarations, builtin and dynamic.
+//! The probe bundle below is written the way every bundle is: structs, `verbs!`,
+//! `record!`, and a `handle` whose first act is the entry.
 
 use async_trait::async_trait;
 use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Reply};
@@ -67,6 +68,83 @@ mod probe_record {
 
 struct Probe;
 
+/// A bundle whose agents carry verbs built at runtime: the record's `tools` list
+/// (`{name, description, schema}`), the way an MCP client builds one verb per tool.
+struct Tools;
+
+/// What the dynamic probe declares itself: one builtin verb.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Tools0 {}
+
+mod tools_verbs {
+    use super::*;
+    fantastic_kernel::verbs! {
+        dynamic;
+        "tools" => Tools0,
+    }
+}
+
+/// The record of a dynamic probe agent.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ToolsRecord {
+    /// The tools this agent offers: `{name, description, schema}` each.
+    pub tools: Option<Vec<Value>>,
+}
+mod tools_record {
+    use super::*;
+    fantastic_kernel::record!(ToolsRecord);
+}
+
+#[async_trait]
+impl Bundle for Tools {
+    fn name(&self) -> &str {
+        "tools_probe"
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        tools_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &Agent) -> Vec<fantastic_kernel::DynVerb> {
+        let meta = agent.meta.read().unwrap();
+        meta.get("tools")
+            .and_then(Value::as_array)
+            .map(|tools| {
+                tools
+                    .iter()
+                    .map(|t| {
+                        fantastic_kernel::DynVerb::new(
+                            t["name"].as_str().unwrap_or(""),
+                            t["description"].as_str().unwrap_or(""),
+                            &t["schema"],
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &tools_record::RECORD
+    }
+    async fn handle(
+        &self,
+        id: &AgentId,
+        payload: &Value,
+        kernel: &Arc<Kernel>,
+    ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
+        let agent = kernel.agents.get(id).map(|e| Arc::clone(&e)).unwrap();
+        let dynamic = self.dynamic_verbs(&agent);
+        let call = match tools_verbs::Call::parse(&id.0, payload, &dynamic) {
+            Ok(c) => c,
+            Err(refused) => return Ok(Some(refused)),
+        };
+        match call {
+            tools_verbs::Call::Reflect(_) => Ok(Some(json!({"id": id.0, "sentence": "Tools."}))),
+            tools_verbs::Call::Tools0(_) => Ok(Some(json!({"tools": dynamic.len()}))),
+            tools_verbs::Call::Dynamic(c) => Ok(Some(json!({"ran": c.name, "args": c.args}))),
+        }
+    }
+}
+
 #[async_trait]
 impl Bundle for Probe {
     fn name(&self) -> &str {
@@ -74,6 +152,9 @@ impl Bundle for Probe {
     }
     fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
         probe_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &Agent) -> Vec<fantastic_kernel::DynVerb> {
+        probe_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         &probe_record::RECORD
@@ -84,8 +165,12 @@ impl Bundle for Probe {
         payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
-        // no validation here: the kernel checked the call
-        match probe_verbs::Call::parse(payload)? {
+        // the shared entry checks the call and its refusal is the reply
+        let call = match probe_verbs::Call::parse(&id.0, payload) {
+            Ok(c) => c,
+            Err(refused) => return Ok(Some(refused)),
+        };
+        match call {
             probe_verbs::Call::Reflect(_) => Ok(Some(json!({"id": id.0, "sentence": "A probe."}))),
             probe_verbs::Call::Greet(g) => Ok(Some(json!({
                 "said": g.name, "times": g.times,
@@ -106,23 +191,30 @@ mod open_record {
 
 struct Open;
 
+fantastic_kernel::stand_in_verbs!(open_verbs { AnythingV "anything" {  } });
 #[async_trait]
 impl Bundle for Open {
     fn name(&self) -> &str {
         "open"
     }
     fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        fantastic_kernel::fixture_verbs!("anything")
+        open_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        open_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         &open_record::RECORD
     }
     async fn handle(
         &self,
-        _id: &AgentId,
-        _payload: &Value,
+        id: &AgentId,
+        payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
+        if let Err(refused) = open_verbs::Call::parse(&id.0, &payload) {
+            return Ok(Some(refused));
+        }
         Ok(Some(json!({"ok": true})))
     }
 }
@@ -133,6 +225,7 @@ fn mk() -> (TempDir, Arc<Kernel>) {
     let mut reg = BundleRegistry::new();
     reg.register("probe.tools", Probe);
     reg.register("open.tools", Open);
+    reg.register("tools_probe.tools", Tools);
     kernel.bundles = reg;
     let kernel = Arc::new(kernel);
     let root = Agent::new(
@@ -174,11 +267,11 @@ async fn a_call_that_matches_its_declaration_reaches_the_handler_typed() {
     let (_t, k) = with_probe().await;
     let r = call(&k, "p", json!({"type": "greet", "name": "Ann"})).await;
     assert_eq!(r, json!({"said": "Ann", "times": 1, "loud": false}));
-    // a number written as text is typed first (scalar.rs), an enum by its name
+    // an enum by its name
     let r = call(
         &k,
         "p",
-        json!({"type": "greet", "name": "Ann", "times": "3", "style": "loud"}),
+        json!({"type": "greet", "name": "Ann", "times": 3, "style": "loud"}),
     )
     .await;
     assert_eq!(r, json!({"said": "Ann", "times": 3, "loud": true}));
@@ -271,6 +364,17 @@ async fn a_wrongly_typed_argument_is_refused_by_name() {
             json!({"type": "greet", "name": "Ann", "times": "many"}),
             "times",
             "greet: argument 'times' must be int, got str",
+        ),
+        // NO coercion: text that reads as a number is still text
+        (
+            json!({"type": "greet", "name": "Ann", "times": "3"}),
+            "times",
+            "greet: argument 'times' must be int, got str",
+        ),
+        (
+            json!({"type": "greet", "name": "Ann", "times": true}),
+            "times",
+            "greet: argument 'times' must be int, got bool",
         ),
         (
             json!({"type": "greet", "name": "Ann", "times": 2.5}),
@@ -442,6 +546,135 @@ async fn boot_and_shutdown_are_answered_for_a_bundle_that_declares_neither() {
     }
     let r = call(&k, "p", json!({"type": "shutdown", "reason": "reloaded"})).await;
     assert!(r.is_null(), "{r}");
+    // the common verbs are declared once and validated the same way
+    let r = call(&k, "p", json!({"type": "boot", "now": true})).await;
+    assert_eq!(r["arg"], "now", "{r}");
+    assert_eq!(r["error"], "boot: unknown argument 'now'", "{r}");
+    let r = call(&k, "p", json!({"type": "shutdown", "reason": 4})).await;
+    assert_eq!(
+        r["error"], "shutdown: argument 'reason' must be string, got int",
+        "{r}"
+    );
+}
+
+async fn with_tools() -> (TempDir, Arc<Kernel>) {
+    let (t, k) = mk();
+    let made = call(
+        &k,
+        "kernel",
+        json!({"type": "create_agent", "parent_id": "kernel_state", "id": "t",
+               "handler_module": "tools_probe.tools",
+               "tools": [
+                   {"name": "search", "description": "Find pages. Ranked.",
+                    "schema": {"type": "object",
+                               "properties": {
+                                   "q": {"type": "string", "description": "What to find."},
+                                   "limit": {"type": "integer", "description": "How many."}},
+                               "required": ["q"]}},
+                   {"name": "ping", "description": "Say pong.", "schema": {"type": "object"}}]}),
+    )
+    .await;
+    assert_eq!(made["id"], "t", "{made}");
+    (t, k)
+}
+
+#[tokio::test]
+async fn a_dynamic_verb_is_checked_by_the_same_engine() {
+    let (_t, k) = with_tools().await;
+    let ok = call(&k, "t", json!({"type": "search", "q": "rust", "limit": 3})).await;
+    assert_eq!(
+        ok,
+        json!({"ran": "search", "args": {"q": "rust", "limit": 3}})
+    );
+    let r = call(&k, "t", json!({"type": "search"})).await;
+    assert_eq!(r["reason"], "missing_arg", "{r}");
+    assert_eq!(r["error"], "search: missing argument 'q'", "{r}");
+    assert!(
+        r["hint"].as_str().unwrap().contains("q: What to find."),
+        "{r}"
+    );
+    // no coercion for a dynamic verb either
+    let r = call(&k, "t", json!({"type": "search", "q": "x", "limit": "3"})).await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(
+        r["error"], "search: argument 'limit' must be int, got str",
+        "{r}"
+    );
+    let r = call(&k, "t", json!({"type": "ping"})).await;
+    assert_eq!(r, json!({"ran": "ping", "args": {}}));
+    // an unknown verb lists the builtin and the dynamic ones
+    let r = call(&k, "t", json!({"type": "nope"})).await;
+    assert_eq!(
+        r["error"], "unknown verb 'nope'; t answers: tools, reflect, boot, shutdown, search, ping",
+        "{r}"
+    );
+    // the builtin verb of a bundle with dynamic verbs
+    assert_eq!(
+        call(&k, "t", json!({"type": "tools"})).await,
+        json!({"tools": 2})
+    );
+}
+
+#[tokio::test]
+async fn a_nested_object_is_checked_by_its_own_declared_fields() {
+    let (_t, k) = mk();
+    let made = call(
+        &k,
+        "kernel",
+        json!({"type": "create_agent", "parent_id": "kernel_state", "id": "n",
+               "handler_module": "tools_probe.tools",
+               "tools": [{"name": "put", "description": "Store one.",
+                          "schema": {"type": "object",
+                                     "properties": {"item": {
+                                         "type": "object",
+                                         "required": ["id"],
+                                         "properties": {"id": {"type": "string"},
+                                                        "qty": {"type": "integer"}}}},
+                                     "required": ["item"]}}]}),
+    )
+    .await;
+    assert_eq!(made["id"], "n", "{made}");
+    let ok = call(&k, "n", json!({"type": "put", "item": {"id": "a", "qty": 2, "x": 1}})).await;
+    assert_eq!(ok["ran"], "put", "{ok}");
+    let r = call(&k, "n", json!({"type": "put", "item": {"qty": 2}})).await;
+    assert_eq!(r["reason"], "missing_arg", "{r}");
+    assert_eq!(r["arg"], "item.id", "{r}");
+    assert_eq!(r["error"], "put: missing argument 'item.id'", "{r}");
+    let r = call(&k, "n", json!({"type": "put", "item": {"id": "a", "qty": "2"}})).await;
+    assert_eq!(r["error"], "put: argument 'item.qty' must be int, got str", "{r}");
+    let r = call(&k, "n", json!({"type": "put", "item": "a"})).await;
+    assert_eq!(r["error"], "put: argument 'item' must be object, got str", "{r}");
+}
+
+#[tokio::test]
+async fn reflect_and_docs_render_both_kinds_of_verb_from_the_agent() {
+    let (_t, k) = with_tools().await;
+    let r = call(&k, "t", json!({"type": "reflect"})).await;
+    let names: Vec<&str> = r["verbs"].as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(names, ["tools", "reflect", "boot", "shutdown", "search", "ping"]);
+    assert_eq!(
+        r["verbs"]["search"],
+        "args: q:string (req), limit:int? — Find pages"
+    );
+    assert_eq!(r["verbs"]["ping"], "No args — Say pong");
+    let one = call(&k, "kernel", json!({"type": "docs", "of": "t"})).await;
+    assert_eq!(one["verbs"]["search"], r["verbs"]["search"], "{one}");
+    assert_eq!(one["verbs"]["ping"], "No args — Say pong", "{one}");
+    let det = call(
+        &k,
+        "kernel",
+        json!({"type": "docs", "of": "t", "tier": "detailed", "verb": "search"}),
+    )
+    .await;
+    assert_eq!(
+        det["verbs"]["search"],
+        "Find pages. Ranked.\n\nargs:\n  q:string (req) — What to find.\n  limit:int? — How many.",
+        "{det}"
+    );
+    // a bundle addressed by name has no agent, so no dynamic verbs
+    let bundle = call(&k, "kernel", json!({"type": "docs", "of": "tools_probe.tools"})).await;
+    assert!(bundle["verbs"].get("search").is_none(), "{bundle}");
+    assert!(bundle["verbs"].get("tools").is_some(), "{bundle}");
 }
 
 #[tokio::test]

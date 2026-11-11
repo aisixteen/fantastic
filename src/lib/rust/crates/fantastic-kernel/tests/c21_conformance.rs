@@ -33,23 +33,30 @@ fn corpus_path() -> PathBuf {
 
 struct C21Probe;
 
+fantastic_kernel::stand_in_verbs!(c21probe_verbs { BootV "boot" {  }, PokeV "poke" { value: Option<serde_json::Value> }, ShutdownV "shutdown" {  } });
 #[async_trait]
 impl Bundle for C21Probe {
     fn name(&self) -> &str {
         "c21_echo"
     }
     fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        fantastic_kernel::fixture_verbs!("boot", "poke", "shutdown")
+        c21probe_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        c21probe_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
-        _id: &AgentId,
+        id: &AgentId,
         payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
+        if let Err(refused) = c21probe_verbs::Call::parse(&id.0, &payload) {
+            return Ok(Some(refused));
+        }
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         match verb {
             "boot" | "shutdown" => Ok(None),
@@ -58,7 +65,7 @@ impl Bundle for C21Probe {
             // in the kernel instead). The observable reply is what the corpus
             // grades, so the probe supplies the same identity either way.
             "reflect" => Ok(Some(json!({
-                "id": _id.as_str(),
+                "id": id.as_str(),
                 "sentence": "C21 probe — answers `poke` identically on every transport.",
             }))),
             "poke" => Ok(Some(

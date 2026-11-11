@@ -227,13 +227,17 @@ struct Docs {
     docs: &'static [(&'static str, &'static str)],
 }
 
+crate::stand_in_verbs!(docs_verbs { PingV "ping" {  } });
 #[async_trait::async_trait]
 impl crate::bundle::Bundle for Docs {
     fn name(&self) -> &str {
         "docs_probe"
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        crate::fixture_verbs!("ping")
+        docs_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        docs_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()
@@ -246,10 +250,13 @@ impl crate::bundle::Bundle for Docs {
     }
     async fn handle(
         &self,
-        _agent_id: &AgentId,
-        _payload: &Value,
+        agent_id: &AgentId,
+        payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        if let Err(refused) = docs_verbs::Call::parse(&agent_id.0, &payload) {
+            return Ok(Some(refused));
+        }
         Ok(None)
     }
 }
@@ -677,13 +684,17 @@ async fn tree_children_keep_creation_order() {
 /// agent named `boom`).
 struct RosterBundle;
 
+crate::stand_in_verbs!(rosterbundle_verbs { BoomV "boom" {  }, ModelessV "modeless" {  }, PingV "ping" {  } });
 #[async_trait::async_trait]
 impl crate::bundle::Bundle for RosterBundle {
     fn name(&self) -> &str {
         "roster_probe"
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        crate::fixture_verbs!("boom", "modeless", "ping")
+        rosterbundle_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        rosterbundle_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()
@@ -694,6 +705,9 @@ impl crate::bundle::Bundle for RosterBundle {
         payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        if let Err(refused) = rosterbundle_verbs::Call::parse(&agent_id.0, &payload) {
+            return Ok(Some(refused));
+        }
         if payload.get("type").and_then(Value::as_str) != Some("reflect") {
             return Ok(Some(json!({"ok": true})));
         }
@@ -1189,7 +1203,7 @@ async fn a_bad_handler_modules_is_refused_bad_arg() {
         .await
         .result;
         if wrong_type {
-            // a wrongly typed argument is refused by the kernel's check of the
+            // a wrongly typed argument is refused by the shared entry's check of the
             // declaration, whether or not a tree is asked for
             assert_eq!(off["reason"], "bad_arg", "{off}");
             assert_eq!(off["arg"], "handler_modules", "{off}");
@@ -1222,23 +1236,30 @@ async fn handler_modules_on_a_non_root_target() {
 /// A bundle that only carries a catalog name.
 struct Named(&'static str);
 
+crate::stand_in_verbs!(named_verbs { PingV "ping" {  } });
 #[async_trait::async_trait]
 impl crate::bundle::Bundle for Named {
     fn name(&self) -> &str {
         self.0
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        crate::fixture_verbs!("ping")
+        named_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        named_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()
     }
     async fn handle(
         &self,
-        _agent_id: &AgentId,
-        _payload: &Value,
+        agent_id: &AgentId,
+        payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        if let Err(refused) = named_verbs::Call::parse(&agent_id.0, &payload) {
+            return Ok(Some(refused));
+        }
         Ok(None)
     }
 }
@@ -1448,23 +1469,30 @@ mod schemaed_record {
 /// A bundle that declares a closed record.
 struct Schemaed;
 
+crate::stand_in_verbs!(schemaed_verbs { PingV "ping" {  } });
 #[async_trait::async_trait]
 impl crate::bundle::Bundle for Schemaed {
     fn name(&self) -> &str {
         "schemaed"
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        crate::fixture_verbs!("ping")
+        schemaed_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        schemaed_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static crate::RecordDecl {
         &schemaed_record::RECORD
     }
     async fn handle(
         &self,
-        _agent_id: &AgentId,
-        _payload: &Value,
+        agent_id: &AgentId,
+        payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        if let Err(refused) = schemaed_verbs::Call::parse(&agent_id.0, &payload) {
+            return Ok(Some(refused));
+        }
         Ok(None)
     }
 }

@@ -26,7 +26,10 @@ impl Bundle for Noop {
         "noop"
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        crate::fixture_verbs!()
+        crate::test_support::no_verbs()
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        crate::test_support::no_dynamic(agent)
     }
     fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()

@@ -66,11 +66,11 @@ fn write_args_inline_routing_out_bytes_verbatim() {
 }
 
 #[test]
-fn patch_nested_list_and_typed_hunks() {
+fn patch_nested_list_and_text_hunks() {
     let c = one(PATCH);
     let p = payload(&c);
     assert_eq!(p["type"], json!("patch"));
-    assert_eq!(p["edits"], json!([{"path": "hello.py", "hunks": 2}]));
+    assert_eq!(p["edits"], json!([{"path": "hello.py", "hunks": "2"}]));
     assert!(p["bytes"]
         .as_str()
         .unwrap()
@@ -117,7 +117,7 @@ fn object_with_one_field_is_not_a_list() {
 }
 
 #[test]
-fn scalars_typed_by_the_one_rule() {
+fn leaves_are_the_text_as_written() {
     let text = concat!(
         r#"<call name="send"><target_id>me</target_id><type>pull</type>"#,
         "<offset>0</offset><length>1.5</length><checkpoint>true</checkpoint>",
@@ -127,8 +127,8 @@ fn scalars_typed_by_the_one_rule() {
     assert_eq!(
         Value::Object(payload(&c).clone()),
         json!({
-            "type": "pull", "offset": 0, "length": 1.5,
-            "checkpoint": true, "why": "keep", "empty": "",
+            "type": "pull", "offset": "0", "length": "1.5",
+            "checkpoint": "true", "why": "keep", "empty": "",
         })
     );
 }
@@ -164,7 +164,7 @@ fn a_closing_call_tag_inside_bytes_does_not_end_the_call() {
         payload(&c)["bytes"],
         json!("the text says </call> and goes on\n")
     );
-    assert_eq!(payload(&c)["checkpoint"], json!(true));
+    assert_eq!(payload(&c)["checkpoint"], json!("true"));
 }
 
 #[test]
@@ -284,21 +284,15 @@ fn a_send_with_neither_target_nor_to_is_refused_naming_both() {
 }
 
 #[test]
-fn a_huge_numeric_target_is_refused() {
-    // C74/D13: coerce_scalar types a numeric-shaped target_id as a NUMBER
-    // (wide integers included, once arbitrary-precision lands) — python's
-    // `isinstance(target, str)` then fails it exactly as a bare `<target_id>
-    // 123</target_id>` does, so the send is malformed, never dispatched to an
-    // agent literally named "123456789012345678901234567890".
-    refused(
+fn a_numeric_looking_target_is_the_text_written() {
+    // The parser never types a value: a target of digits is the agent id written, so
+    // the send parses and routing answers for an agent that does not exist.
+    let c = one(
         r#"<call name="send"><target_id>123456789012345678901234567890</target_id><type>reflect</type></call>"#,
-        &["a send names its target"],
     );
-    // A small numeric-shaped target_id is refused the same way — it is a
-    // Number; this pins it stays that way.
-    refused(
-        r#"<call name="send"><target_id>42</target_id><type>reflect</type></call>"#,
-        &["a send names its target"],
+    assert_eq!(
+        c.arguments["target_id"],
+        json!("123456789012345678901234567890")
     );
 }
 
@@ -356,9 +350,9 @@ fn render_call_round_trips_the_parser_shape() {
         "title": "t",
         "payload": {
             "type": "patch",
-            "edits": [{"path": "a.py", "hunks": 2}, {"path": "b.py", "hunks": 1}],
-            "ids": [3],
-            "dry_run": true,
+            "edits": [{"path": "a.py", "hunks": "2"}, {"path": "b.py", "hunks": "1"}],
+            "ids": ["3"],
+            "dry_run": "true",
             "bytes": "x = \"1\"\n</call>\n",
         },
     });
@@ -400,7 +394,7 @@ fn a_send_may_name_several_recipients_with_to() {
     );
     let c = one(text);
     assert_eq!(c.arguments["to"], json!(["solver_2", "solver_3"]));
-    assert_eq!(c.arguments["re"], json!(412));
+    assert_eq!(c.arguments["re"], json!("412"));
     assert!(!c.arguments.contains_key("target_id"));
     assert_eq!(
         c.arguments["payload"],
@@ -454,17 +448,14 @@ fn a_call_written_inside_bytes_is_document_not_envelope() {
 }
 
 #[test]
-fn a_truthy_non_list_to_is_kept_raw() {
-    // python keeps `to` verbatim unless it is a string or a list, and refuses at
-    // PARSE only when there is no string target AND `to` is falsy. `<to>42</to>`
-    // therefore parses and routing answers with its own no-target reply — never
-    // the malformed-parse text.
+fn a_to_of_digits_is_one_recipient_written() {
+    // `<to>42</to>` is the text "42", so it is one recipient like any other text.
     let calls = extract_tool_calls("<call name=\"send\"><to>42</to><type>reflect</type></call>");
     assert_eq!(calls.len(), 1, "{calls:?}");
-    assert_eq!(calls[0].arguments.get("to"), Some(&json!(42)));
+    assert_eq!(calls[0].arguments.get("to"), Some(&json!(["42"])));
     assert!(calls[0].arguments.get("target_id").is_none());
-    // …and a FALSY one with no target is still the refusal.
-    let bad = malformed_calls("<call name=\"send\"><to>0</to><type>reflect</type></call>");
+    // a blank one with no target is the refusal.
+    let bad = malformed_calls("<call name=\"send\"><to></to><type>reflect</type></call>");
     assert_eq!(bad.len(), 1, "{bad:?}");
     assert!(
         bad[0].error.contains("a send names its target"),
@@ -475,8 +466,8 @@ fn a_truthy_non_list_to_is_kept_raw() {
 
 #[test]
 fn to_items_are_python_str() {
-    // Recipients are `str(t).strip()`: `True`, `1e+20`, and a structure's python
-    // repr. `Value::to_string` gave `true`, `1e20` and JSON.
+    // Recipients are `str(t).strip()`: the text as written, and a structure's python
+    // repr (`Value::to_string` gave JSON).
     let calls = extract_tool_calls(
         "<call name=\"send\"><to><item>true</item><item>1e20</item>\
          <item><a>x</a></item><item><item>y</item></item></to><type>reflect</type></call>",
@@ -484,7 +475,7 @@ fn to_items_are_python_str() {
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(
         calls[0].arguments.get("to"),
-        Some(&json!(["True", "1e+20", "{'a': 'x'}", "['y']"]))
+        Some(&json!(["true", "1e20", "{'a': 'x'}", "['y']"]))
     );
 }
 
@@ -577,10 +568,10 @@ fn the_routing_form_delivers_a_payload_title_and_keeps_the_routing_one() {
     );
     assert_eq!(c.arguments["target_id"], json!("github"));
     assert_eq!(c.arguments["title"], json!("open the PR"));
-    assert_eq!(c.arguments["timeout"], json!(60));
+    assert_eq!(c.arguments["timeout"], json!("60"));
     assert_eq!(
         Value::Object(payload(&c).clone()),
-        json!({"type": "pr_create", "repo": "a/b", "title": "TUI composer: Backspace", "timeout": 5})
+        json!({"type": "pr_create", "repo": "a/b", "title": "TUI composer: Backspace", "timeout": "5"})
     );
 }
 

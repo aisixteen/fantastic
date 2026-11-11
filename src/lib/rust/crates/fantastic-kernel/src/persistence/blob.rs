@@ -22,15 +22,15 @@ use std::sync::Arc;
 const RESERVED_BLOB_NAMES: [&str; 1] = [crate::persistence::RECORD_FILE];
 
 /// Validate a blob filename: one bare segment, not kernel-managed, no escape or
-/// hidden name.
+/// hidden name. The argument's presence and type are the verb declaration's.
 ///
 /// Defence in depth over the provider's own clamp, so a bad `name` fails AT the
 /// loader with a loader-scoped message instead of surfacing as a deep fs error
 /// the caller cannot act on.
-fn guard_name(name: Option<&str>) -> Result<&str, String> {
-    let Some(name) = name.filter(|n| !n.is_empty()) else {
-        return Err("name (non-empty str) required".to_string());
-    };
+fn guard_name(name: &str) -> Result<&str, String> {
+    if name.is_empty() {
+        return Err("name must be a non-empty filename".to_string());
+    }
     if name.contains('/') || name.contains('\\') {
         return Err(format!(
             "name {} must be a single filename (no path segments)",
@@ -94,12 +94,7 @@ fn err(verb: &str, why: impl std::fmt::Display) -> Value {
     json!({ "error": format!("{verb}: {why}") })
 }
 
-/// Shared preamble: validate, authorize, resolve the path.
-///
-/// PYTHON'S ORDER. `persist_blob` checks `content` BETWEEN the owner guard and
-/// the store lookup, so a bad payload is named before "no store wired" — the
-/// caller is told what IT got wrong first. `content` is the caller's to pass, so
-/// the check rides in `persist_blob` and this returns before the store lookup.
+/// Shared preamble: the path rules, then the store, then the path.
 ///
 /// `Ok(Err(reply))` = the bare `{error}` the verb answers with; `Err` = the walk
 /// RAISED ([`blob_reldir`]).
@@ -107,12 +102,12 @@ fn resolve(
     kernel: &Arc<Kernel>,
     loader: &Agent,
     verb: &str,
-    payload: &Value,
+    aid: &str,
+    name: &str,
 ) -> Result<Result<(AgentId, String), Value>, BundleError> {
-    let (aid, name) = match guard_args(verb, payload) {
-        Ok(v) => v,
-        Err(e) => return Ok(Err(e)),
-    };
+    if let Err(e) = guard_args(verb, aid, name) {
+        return Ok(Err(e));
+    }
     // THE ADDRESSED LOADER's store (python `_find_store(agent)`), never another's.
     let Some(store) = super::find_store_for(kernel, loader) else {
         return Ok(Err(err(verb, "no store wired — persistence not available")));
@@ -126,21 +121,15 @@ fn resolve(
     Ok(Ok((store, path)))
 }
 
-/// agent_id → name → owner, python's order, shared by both verbs. Answers the
-/// validated `(agent_id, name)`.
-fn guard_args<'a>(verb: &str, payload: &'a Value) -> Result<(&'a str, &'a str), Value> {
-    let aid = payload
-        .get("agent_id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| err(verb, "agent_id (str) required"))?;
-    // The id BECOMES A DIRECTORY (`agents/<agent_id>/`): one safe segment, or
-    // `../bundles/x` would write a folder bundle's `bundle.yaml`.
+/// The path rules of both verbs: the id BECOMES A DIRECTORY (`agents/<agent_id>/`),
+/// one safe segment, or `../bundles/x` would write a folder bundle's `bundle.yaml`;
+/// the name is one bare filename.
+fn guard_args(verb: &str, aid: &str, name: &str) -> Result<(), Value> {
     if let Some(r) = crate::refusal::guard_agent_id_as(verb, "agent_id", aid) {
         return Err(r);
     }
-    let name = guard_name(payload.get("name").and_then(Value::as_str)).map_err(|e| err(verb, e))?;
-    Ok((aid, name))
+    guard_name(name).map_err(|e| err(verb, e))?;
+    Ok(())
 }
 
 /// `persist_blob` — whole-file write of one sidecar, through `loader`'s store.
@@ -150,17 +139,11 @@ fn guard_args<'a>(verb: &str, payload: &'a Value) -> Result<(&'a str, &'a str), 
 pub async fn persist_blob(
     kernel: &Arc<Kernel>,
     loader: &Agent,
-    payload: &Value,
+    agent_id: &str,
+    name: &str,
+    content: &str,
 ) -> Result<Value, BundleError> {
-    if let Err(e) = guard_args("persist_blob", payload) {
-        return Ok(e);
-    }
-    // CONTENT BEFORE THE STORE (python's order): what the caller got wrong is
-    // named before what the kernel does not have.
-    let Some(content) = payload.get("content").and_then(Value::as_str) else {
-        return Ok(err("persist_blob", "content (str) required"));
-    };
-    let (store, path) = match resolve(kernel, loader, "persist_blob", payload)? {
+    let (store, path) = match resolve(kernel, loader, "persist_blob", agent_id, name)? {
         Ok(v) => v,
         Err(e) => return Ok(e),
     };
@@ -192,7 +175,7 @@ pub async fn persist_blob(
     }
     Ok(json!({
         "ok": true,
-        "name": payload.get("name").cloned().unwrap_or(Value::Null),
+        "name": name,
         "size": reply.get("size").cloned().unwrap_or(Value::Null),
     }))
 }
@@ -231,13 +214,14 @@ fn decoded_blob(name: &Value, raw: Vec<u8>) -> Value {
 pub async fn load_blob(
     kernel: &Arc<Kernel>,
     loader: &Agent,
-    payload: &Value,
+    agent_id: &str,
+    name: &str,
 ) -> Result<Value, BundleError> {
-    let (store, path) = match resolve(kernel, loader, "load_blob", payload)? {
+    let (store, path) = match resolve(kernel, loader, "load_blob", agent_id, name)? {
         Ok(v) => v,
         Err(e) => return Ok(e),
     };
-    let name = payload.get("name").cloned().unwrap_or(Value::Null);
+    let name = Value::String(name.to_string());
     let mut chunks: Vec<u8> = Vec::new();
     let mut offset: u64 = 0;
     let mut last;

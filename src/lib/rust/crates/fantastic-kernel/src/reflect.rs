@@ -584,23 +584,16 @@ pub async fn apply_reflect_flags(
     // THE VERBS, rendered from the declarations: the agent's own (its bundle's) and the
     // ones every agent answers; the root answers the kernel's too. An agent without a
     // bundle has none.
-    if let Some(own) = bundle.as_ref().map(|b| b.verbs()) {
+    if let Some(b) = bundle.as_ref() {
+        let own = b.verbs();
+        let dynamic = b.dynamic_verbs(target);
         let mut lists: Vec<&[crate::verbs::Verb]> = Vec::new();
         if target.parent_id.is_none() {
             lists.push(crate::declared::kernel::VERBS);
         }
         lists.push(own);
         lists.push(crate::declared::common::VERBS);
-        let mut seen: Vec<&str> = Vec::new();
-        let mut shown: Vec<&crate::verbs::Verb> = Vec::new();
-        for l in lists {
-            for v in l.iter() {
-                if !seen.contains(&v.name) {
-                    seen.push(v.name);
-                    shown.push(v);
-                }
-            }
-        }
+        let shown = crate::verbs::rows(&lists, &dynamic);
         obj.insert("verbs".to_string(), crate::verbs::lines(&shown));
     }
     Ok(())

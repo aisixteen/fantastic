@@ -14,7 +14,10 @@ impl crate::Bundle for CountingBundle {
         "counting"
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        crate::fixture_verbs!()
+        crate::test_support::no_verbs()
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        crate::test_support::no_dynamic(agent)
     }
     fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()
@@ -387,13 +390,17 @@ async fn agent_created_reaches_a_parent_at_any_depth() {
 #[tokio::test]
 async fn a_raised_child_boot_prints_python_line_and_an_errored_one_is_silent() {
     struct BootBundle;
+    crate::stand_in_verbs!(bootbundle_verbs { BootV "boot" {  } });
     #[async_trait::async_trait]
     impl crate::Bundle for BootBundle {
         fn name(&self) -> &str {
             "booty.tools"
         }
         fn verbs(&self) -> &'static [crate::Verb] {
-            crate::fixture_verbs!("boot")
+            bootbundle_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            bootbundle_verbs::dynamic_verbs(agent)
         }
         fn record(&self) -> &'static crate::RecordDecl {
             crate::fixture_record!()
@@ -404,6 +411,9 @@ async fn a_raised_child_boot_prints_python_line_and_an_errored_one_is_silent() {
             payload: &Value,
             _k: &Arc<Kernel>,
         ) -> Result<crate::Reply, crate::bundle::BundleError> {
+            if let Err(refused) = bootbundle_verbs::Call::parse(&id.0, &payload) {
+                return Ok(Some(refused));
+            }
             if payload.get("type").and_then(Value::as_str) == Some("boot") {
                 if id.0.starts_with("raiser") {
                     return Err("boot blew up".into());
@@ -550,7 +560,7 @@ async fn create_refusal_precedence_matches_python() {
     let kernel = mk_rooted(&tmp);
 
     // Both handler_module AND parent_id absent -> the declared REQUIRED argument
-    // (parent_id) is refused first, by the kernel's check of the declaration.
+    // (parent_id) is refused first, by the shared entry's check of the declaration.
     let r = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
@@ -934,7 +944,10 @@ impl crate::Bundle for KeepProbe {
         "keep_probe"
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        crate::fixture_verbs!()
+        crate::test_support::no_verbs()
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        crate::test_support::no_dynamic(agent)
     }
     fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()

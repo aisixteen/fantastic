@@ -24,7 +24,10 @@ impl Bundle for Noop {
         "noop"
     }
     fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        fantastic_kernel::fixture_verbs!()
+        fantastic_kernel::test_support::no_verbs()
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        fantastic_kernel::test_support::no_dynamic(agent)
     }
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         fantastic_kernel::fixture_record!()

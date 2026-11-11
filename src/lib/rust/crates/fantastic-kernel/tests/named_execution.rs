@@ -15,23 +15,30 @@ use tempfile::TempDir;
 /// Sleeps long enough that the test can act on it mid-flight.
 struct Slow;
 
+fantastic_kernel::stand_in_verbs!(slow_verbs { PingV "ping" {  }, WorkV "work" {  } });
 #[async_trait]
 impl Bundle for Slow {
     fn name(&self) -> &str {
         "slow"
     }
     fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        fantastic_kernel::fixture_verbs!("ping", "work")
+        slow_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        slow_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
-        _id: &AgentId,
+        id: &AgentId,
         payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
+        if let Err(refused) = slow_verbs::Call::parse(&id.0, &payload) {
+            return Ok(Some(refused));
+        }
         match payload.get("type").and_then(Value::as_str) {
             Some("work") => {
                 tokio::time::sleep(Duration::from_secs(30)).await;

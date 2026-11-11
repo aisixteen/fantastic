@@ -5,23 +5,30 @@ use serde_json::json;
 
 struct FakeBundle;
 
+crate::stand_in_verbs!(fakebundle_verbs { FrobV "frob" {  }, PingV "ping" {  } });
 #[async_trait]
 impl Bundle for FakeBundle {
     fn name(&self) -> &str {
         "fake"
     }
     fn verbs(&self) -> &'static [crate::Verb] {
-        crate::fixture_verbs!("frob", "ping")
+        fakebundle_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        fakebundle_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static crate::RecordDecl {
         crate::fixture_record!()
     }
     async fn handle(
         &self,
-        _agent_id: &AgentId,
-        _payload: &Value,
+        agent_id: &AgentId,
+        payload: &Value,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
+        if let Err(refused) = fakebundle_verbs::Call::parse(&agent_id.0, &payload) {
+            return Ok(Some(refused));
+        }
         Ok(Some(json!({"ok": true})))
     }
 }
@@ -51,23 +58,30 @@ fn unknown_handler_returns_none() {
 #[tokio::test]
 async fn default_handle_binary_dispatches_header_and_drops_blob() {
     struct CaptureBundle;
+    crate::stand_in_verbs!(capturebundle_verbs { FrobV "frob" {  }, PingV "ping" {  } });
     #[async_trait]
     impl Bundle for CaptureBundle {
         fn name(&self) -> &str {
             "capture"
         }
         fn verbs(&self) -> &'static [crate::Verb] {
-            crate::fixture_verbs!("frob", "ping")
+            capturebundle_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            capturebundle_verbs::dynamic_verbs(agent)
         }
         fn record(&self) -> &'static crate::RecordDecl {
             crate::fixture_record!()
         }
         async fn handle(
             &self,
-            _agent_id: &AgentId,
+            agent_id: &AgentId,
             payload: &Value,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
+            if let Err(refused) = capturebundle_verbs::Call::parse(&agent_id.0, &payload) {
+                return Ok(Some(refused));
+            }
             Ok(Some(json!({
                 "type": payload.get("type").cloned().unwrap_or(Value::Null),
                 "data": payload.get("data").cloned().unwrap_or(Value::Null),

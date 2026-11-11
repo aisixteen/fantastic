@@ -28,7 +28,7 @@
 //! named and the minimal shape to send; the model fixes it.
 
 use fantastic_bundle::{is_alnum, is_space, py_str, py_truthy};
-use fantastic_kernel::{coerce_scalar, py_strip};
+use fantastic_bundle::py_strip;
 use regex::Regex;
 use serde_json::{Map, Value};
 use std::sync::OnceLock;
@@ -540,7 +540,10 @@ fn has_tag(raw: &str) -> bool {
     next_tag(raw, 0).is_some()
 }
 
-/// One element's value: verbatim bytes, a nested dict/list, or a typed scalar.
+/// One element's value: verbatim bytes, a nested dict/list, or the TEXT as written.
+/// A leaf is never typed here: the parser does not know which verb the call
+/// targets. The router types the values from the target verb's schema
+/// ([`crate::tool_parse::typed`]).
 ///
 /// `bytes` is the one value python delivers as real bytes. JSON has no such
 /// variant, so it rides as the string it was written as — byte-identical, since
@@ -551,11 +554,11 @@ pub fn value(name: &str, raw: &str) -> Result<Value, Malformed> {
         return Ok(Value::String(raw.to_string()));
     }
     if !has_tag(raw) || !py_strip(raw).starts_with('<') {
-        return Ok(coerce_scalar(py_strip(raw)));
+        return Ok(Value::String(py_strip(raw).to_string()));
     }
     let kids = elements(raw)?;
     if kids.is_empty() {
-        return Ok(coerce_scalar(py_strip(raw)));
+        return Ok(Value::String(py_strip(raw).to_string()));
     }
     // A LIST is a tag whose children are all `<item>` — one element each, any
     // count, one element included. The same tag the reply notation renders, so
