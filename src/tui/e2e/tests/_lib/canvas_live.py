@@ -397,6 +397,7 @@ class Rig:
         try:
             async with await attach(chrome) as ws:
                 pg = Page(ws)
+                pg.rig = self
                 pg.mark = self.log_at
                 self.misses = pg.misses
                 await pg.cdp("Runtime.enable")
@@ -457,44 +458,6 @@ async def spot(pg: Page, x: int, y: int, text: str) -> None:
     await pg.cdp("Input.dispatchKeyEvent", type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13)
 
 
-CHAT_IDS = "[...document.querySelectorAll('.chat-view')].map(v=>v.closest('.agent-frame').dataset.id)"
-
-
-async def other_setups(pg: Page, cell: str) -> None:
-    """AI cell `cell`'s ⚙ settings → `‹ other set-ups`: page 1 of the wizard FOR
-    that cell (a saved set-up or a new provider rebinds it). The old chat view is
-    marked, so `rebound` can tell the new one."""
-    await pg.js(f"document.querySelector('.agent-frame[data-id=\"{cell}\"] .chat-view')?.setAttribute('data-old', '1')")
-    gear = f"[...document.querySelectorAll('.agent-frame[data-id=\"{cell}\"] > .frame-head .ext')].find(c=>c.textContent==='⚙')"
-    # the ⚙ chip comes with the mounted chat view, a moment after the cell
-    await pg.until(f"!!{gear}", 15)
-    await pg.js(f"{gear}.click()")
-    await pg.until("(document.querySelector('.wiz h1')?.textContent||'').startsWith('Settings')", 15)
-    await pg.js("[...document.querySelectorAll('.wiz button')].find(b=>b.textContent.trim()==='‹ other set-ups')?.click()")
-    await pg.until("document.querySelectorAll('.wiz .tiles button').length === 4", 10)
-
-
-async def rebound(pg: Page, cell: str, timeout: float = 8) -> bool:
-    """True once `cell` shows a NEW chat view (not the one `other_setups` marked) and the wizard is gone."""
-    return bool(await pg.until(f"!!document.querySelector('.agent-frame[data-id=\"{cell}\"] .chat-view:not([data-old])') && !document.querySelector('.wiz')", timeout))
-
-
-async def new_ai_wizard(pg: Page, x: int, y: int) -> str | None:
-    """The wizard for a new AI from the double-click's ONE `AI agent` tile: with
-    no default set-up it opens the wizard (None); with one it makes an AI cell on
-    it, and that cell's ⚙ → `‹ other set-ups` is the wizard for it (its id)."""
-    before = set(await pg.js(CHAT_IDS))
-    await spot(pg, x, y, "AI agent")
-    await pg.until(f"!!document.querySelector('.wiz .tiles button') || {CHAT_IDS}.length > {len(before)}", 20)
-    new = set(await pg.js(CHAT_IDS)) - before
-    if not new:
-        await pg.until("document.querySelectorAll('.wiz .tiles button').length === 4", 10)
-        return None
-    cell = new.pop()
-    await other_setups(pg, cell)
-    return cell
-
-
 async def open_tree(pg: Page, x: int, y: int) -> str | None:
     """Place a FILE TREE cell (a `files_view.ts` cell) at empty canvas (x, y) —
     nothing floats: it is a cell from the double-click. Returns the cell's id once
@@ -510,38 +473,36 @@ async def open_tree(pg: Page, x: int, y: int) -> str | None:
     return await pg.js(f"{frames}.pop().dataset.id")
 
 
+# THE CHAT is the html view its agent's `reflect` returns, drawn in the cell's panel
+# iframe (`fantastic-ai-core/src/chat_view.html`): the dialog `#dialog` (`.msg` rows,
+# assistant ones `.assistant`), the input `#text`, `#send`, and the phase pill `#pill`
+# (`data-phase`, `data-reason`). `cell` is the chat's frame by order on the page.
+CHAT_DOC = "[...document.querySelectorAll('.agent-frame iframe')].map(f=>{try{return f.contentDocument}catch(e){return null}}).filter(d=>d&&d.getElementById('dialog'))"
+
+
 async def say(pg: Page, text: str, cell: int = 0) -> None:
-    """Send a follow-up turn in chat cell #cell — ENTER in its input (it queues
-    even while the cell works; the button turns into STOP then, an interrupt)."""
-    await pg.js(f"(()=>{{const v=document.querySelectorAll('.chat-view')[{cell}]; const i=v.querySelector('.c-input');"
-                f" i.value={json.dumps(text)}; i.dispatchEvent(new KeyboardEvent('keydown',{{key:'Enter',bubbles:true}}));}})()")
+    """Send a turn in chat cell #cell: type into its input and press Send."""
+    await pg.js(f"(()=>{{const d={CHAT_DOC}[{cell}]; const i=d.getElementById('text');"
+                f" i.value={json.dumps(text)}; i.dispatchEvent(new Event('input',{{bubbles:true}})); d.getElementById('send').click();}})()")
 
 
 async def wait_quiet(pg: Page, total: float, quiet: float, cell: int = 0) -> bool:
-    """Until chat cell #cell's chain is OVER — its last `done` names no work
-    still awaited — or, when that event never arrives, until it has answered
+    """Until chat cell #cell's chain is OVER — its pill says idle with a reason that
+    names no work still awaited — or, when that never arrives, until it has answered
     in words and gone QUIET `quiet` s."""
     deadline = time.time() + total
     last_n, since = -1, time.time()
     seen_live = False
     ended = 0.0
-    sel = f"document.querySelectorAll('.chat-view')[{cell}]"
+    doc = f"{CHAT_DOC}[{cell}]"
     while time.time() < deadline:
-        n = await pg.js(f"({sel}?.querySelectorAll('.msg').length) ?? 0") or 0
-        said = await pg.js(f"[...({sel}?.querySelectorAll('.msg.assistant:not(.thinking):not(.c-think)') ?? [])].some(m=>m.textContent.trim())")
-        # still WORKING — the flashing placeholder, or the cell's own phase pill
-        # (thinking / streaming / tool_calling / queued; a turn that reasons
-        # between two calls shows no placeholder) — is never quiet
-        thinking = await pg.js(f"!!{sel}?.querySelector('.msg.thinking') || "
-                               f"['thinking','streaming','tool_calling','queued'].includes({sel}?.querySelector('.phase-pill')?.dataset.phase)")
+        n = await pg.js(f"({doc}?.querySelectorAll('#dialog .msg').length) ?? 0") or 0
+        said = await pg.js(f"[...({doc}?.querySelectorAll('#dialog .msg.assistant') ?? [])].some(m=>m.textContent.trim())")
+        phase = await pg.js(f"{doc}?.getElementById('pill')?.dataset.phase || ''")
+        thinking = phase in ("thinking", "streaming", "tool_calling", "queued")
         if thinking:
             seen_live = True
-        # THE TRIGGER: the turn's `done` arrived and its reason is not
-        # `awaiting` — the chain is over, nothing to wait for. Only after this
-        # wait SAW the cell work (a `done` left from an earlier turn is no end).
-        # `ok` closes EVERY generation, before its calls dispatch: the end must
-        # HOLD `ENDED_HOLD_S` with no new phase (a live chain goes tool_calling).
-        reason = await pg.js(f"{sel}?.querySelector('.phase-pill')?.dataset.reason || ''")
+        reason = await pg.js(f"{doc}?.getElementById('pill')?.dataset.reason || ''")
         if seen_live and said and not thinking and reason not in ("", "awaiting"):
             ended = ended or time.time()
             if time.time() - ended >= ENDED_HOLD_S:
@@ -551,18 +512,15 @@ async def wait_quiet(pg: Page, total: float, quiet: float, cell: int = 0) -> boo
         if n != last_n or thinking:
             last_n, since = n, time.time()
         elif said and time.time() - since >= quiet:
-            # the `done` event did not reach this cell (it is not always
-            # delivered): the old quiet rule ends the wait
             return True
         await asyncio.sleep(0.5)
     return False
 
 
 async def answer(pg: Page, cell: int = 0) -> str:
-    """The AI's last WORDS: its last assistant bubble with text, skipping one that
-    is only call markup — a malformed call (the server's dropped `<`, e.g.
-    `call name="done"></call>`) shows as text but is no answer."""
-    return await pg.js(f"(()=>{{const m=[...(document.querySelectorAll('.chat-view')[{cell}]?.querySelectorAll('.msg.assistant:not(.thinking):not(.c-think)') ?? [])]"
+    """The AI's last WORDS: its last assistant message with text, skipping one that
+    is only call markup (a malformed call shows as text but is no answer)."""
+    return await pg.js(f"(()=>{{const m=[...({CHAT_DOC}[{cell}]?.querySelectorAll('#dialog .msg.assistant') ?? [])]"
                        ".filter(x=>{const t=x.textContent.trim(); return t && !/^(<?\\/?call\\b[^>]*>\\s*)+$/.test(t);});"
                        " return m.length ? m[m.length-1].textContent : '';})()") or ""
 
@@ -586,13 +544,60 @@ def http_get(url: str, timeout: float = 5) -> tuple[int, str]:
         return 0, ""
 
 
+#: The verbs an AI's cell may call on the page's agents (the host's egress gate checks
+#: every agent a call names): the view's control plane, its cells' own verbs, the
+#: backgrounds', the skin's read, the file tree's and the previewer's.
+VIEW_VERBS = ["place", "move", "fit", "update", "wire", "remove", "hide", "show", "open", "terminal_renderer", "reflect"]
+CELL_VERBS = ["reflect", "get_html", "set_html", "emit"]
+BG_VERBS = ["set_bg", "default_bg", "clear_bg", "get_bg", "reflect"]
+BACKGROUNDS_VERBS = ["list", "set", "random", "none", "default", "delete", "restore_stock", "add", "rotate"]
+SKIN_VERBS = ["get", "schema"]
+FILES_VERBS = ["select", "expand", "collapse", "reveal"]
+PREVIEW_VERBS = ["open", "pin", "unpin", "mode", "edit", "save", "revert"]
+
+
+def peer_grants(rig: "Rig") -> dict:
+    """The page reach an AI of the canvas holds: what its cell's view lets it call."""
+    g = rig.page_guid()
+    out = {
+        f"{g}|view_root": VIEW_VERBS,
+        f"{g}|skin": SKIN_VERBS,
+        f"{g}|*": sorted({*CELL_VERBS, *VIEW_VERBS, *BACKGROUNDS_VERBS, *SKIN_VERBS, *FILES_VERBS, *PREVIEW_VERBS}),
+    }
+    for f in rig.cells_dir.glob("*/agent.yaml"):
+        r = yaml.safe_load(oslayer.read_text(f)) or {}
+        if r.get("handler_module") == "background.ts":
+            out[f"{g}|{r['id']}"] = BG_VERBS
+    return out
+
+
+async def open_chat(pg: Page, x: int, y: int) -> str:
+    """Make the canvas's AI and show it: the host spawns the AI from the saved set-up
+    (`canvas_root spawn`, with the canvas's reach), the root view places a cell that
+    shows it at (x, y) (`place {backend_id}`), and the cell draws the html chat view
+    its `reflect` returns. Returns the AI's id once the view is up."""
+    from canvas import host_call
+
+    rig = pg.rig
+    made = await host_call(rig.port, "canvas_root", {"type": "spawn", "peer_grants": peer_grants(rig)})
+    if "id" not in made:
+        raise SystemExit(f"open_chat: the AI was not made: {made}")
+    placed = await host_call(rig.port, f"{rig.page_guid()}|view_root",
+                             {"type": "place", "backend_id": made["id"], "x": x, "y": y, "width": 440, "height": 520})
+    if "placed" not in placed:
+        raise SystemExit(f"open_chat: the cell was not placed: {placed}")
+    if not await pg.until(f"{CHAT_DOC}.length > 0", 30):
+        raise SystemExit("open_chat: the chat view never drew")
+    return str(made["id"])
+
+
 async def ask(pg: Page, x: int, y: int, text: str, total: float, quiet: float) -> tuple[bool, str]:
-    """Open an AI cell at (x, y) with `text` as its first turn; wait it out."""
-    n = await pg.js("document.querySelectorAll('.chat-view').length") or 0
-    await spot(pg, x, y, text)
-    await pg.until(f"document.querySelectorAll('.chat-view').length > {n}", 30)
-    done = await wait_quiet(pg, total, quiet, cell=n)
-    return done, await answer(pg, cell=n)
+    """Open the canvas's AI at (x, y) (`open_chat`) and send it `text`. Returns
+    `(done, its last words)`."""
+    await open_chat(pg, x, y)
+    await say(pg, text)
+    done = await wait_quiet(pg, total, quiet)
+    return done, await answer(pg)
 
 
 def html_cell(cid: str, name: str, x: int, y: int, html: str, w: int = 340, h: int = 240, **extra: Any) -> dict:

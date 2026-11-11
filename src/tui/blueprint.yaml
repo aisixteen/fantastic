@@ -17,6 +17,7 @@
 #
 #   <root>                     (the kernel's own; named @root in grants)
 #   ├── kernel_memory            ram_store — the KERNEL'S store: its execution rows, in RAM
+#   ├── sidebar                  sidebar.tools — the canvas's left column (its reflect returns the html view)
 #   └── user                     the human's own face: the ONE user, everything under it
 #       ├── memory               sqlite_store at @state/memory.db — THE AI store (every AI agent's rows)
 #       ├── store                file_bridge over @state, allow: ['.'] — the kernel's provider
@@ -49,9 +50,16 @@ agents:
     admins: [kernel]
     callable_by: {user: "*"}
 
+  # THE SIDEBAR: the canvas's left column. Its `reflect` returns the html view; the human
+  # reads it through the canvas.
+  - id: sidebar
+    handler_module: sidebar.tools
+    callable_by: {user: "*"}
+
   - id: user
     handler_module: user.tools
     can_call:
+      sidebar: "*"
       memory: "*"
       store: "*"
       exec: "*"

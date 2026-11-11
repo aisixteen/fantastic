@@ -26,9 +26,6 @@ host does not hold shows `no canvas <id> on this host` (never the main canvas).
 - **terminal_view** — xterm CLIENT for a host PTY backend. Bound to any agent
   answering the PTY surface (`boot`/`write`/`ack`/`resize`/`interrupt`/`stop`) by
   a `backend_id` peer ref.
-- **ai_view** — chat CLIENT for a host LLM backend. Bound to any agent answering
-  `send`/`history`/`status` by `backend_id`; ESC cancels the in-flight turn
-  through the kernel (`ps` → `cancel`).
 - **store_view** / **scheduler_view** / **credentials_view** —
   READ-ONLY views of the agents that had only the stub (`ram_store` and `sqlite_store`,
   `scheduler`, `credential_store`). A record with no `view` gets
@@ -66,25 +63,18 @@ host does not hold shows `no canvas <id> on this host` (never the main canvas).
 - **skin** — the page's skin agent: the design tokens (W3C 2025.10) every view is
   drawn with, fixed by the backdrop (`dark` on the web, `glass` in the app's window); it
   answers `get` and `schema`, read only (`fantastic readme skins`).
-- **the canvas's own file tree sidebar** (#148, `canvas/tree_sidebar.ts`) — the file
-  tree fused into the canvas page, not an agent and not a cell: a column fixed to the
-  viewport's left edge, mounted beside the zoomed world (never in it), so a zoom or a
-  pan never moves or scales it. On a wide screen (over 768px) the canvas sits beside it
-  (the page's `tree-beside` and `tree-open` classes set the canvas's margin to the
-  sidebar's width: 300px open, 22px as a rail); on a narrow one it is an overlay, opened
-  only when asked. From a bird's-eye zoom its rows drag onto the canvas like the tree
-  cell's: the same panel (`files/tree_panel.ts`, the drawing, the marks and the drag
-  source) and the same drop on `#canvas`, which places each item by `dropPlan` (a grid
-  centred on the point in world coordinates, at any zoom). Its tree is the project
-  folder's view (#150), bound on the bridge as the tree cell binds its folder: the view's
-  id is kept on the root view (`tree_sidebar.view_agent`), and dispose lets it go. A
-  `‹`/`›` button collapses it, to a strip; its open state, its view and its tree's
-  folders and selection are kept on the root view (`tree_sidebar`), so a reload restores
-  them. Its verbs are the tree's, reached through the root view alone: `tree {verb:
-  select|expand|collapse|reveal, path | agent}`; any other view refuses it (`bad_arg`,
-  `arg: view`). The tree cell (`files_view.ts`) stays as the extra kind: a folder dropped
-  on the canvas opens a tree rooted at it. Its colours are skin tokens (`--fc-*`); its
-  widths are the two sizes in `styles.ts`.
+- **the canvas's left column** (#608, `canvas/sidebar_mount.ts`) — the host agent
+  `sidebar`'s own html view (`sidebar_view.html` in the host's `kern/sidebar.rs`, returned by
+  its `reflect`), in a panel fixed to the viewport's left edge, mounted beside the zoomed
+  world (never in it), so a zoom or a pan never moves or scales it. Its cell (`view_sidebar`,
+  a page agent under the root) is granted exactly the view's `calls`, the `"*"` reach written
+  out per host agent (`expandReach`). On a wide screen (over 768px) the canvas sits beside it
+  (the page's `sidebar-beside` and `sidebar-open` classes set the canvas's margin: 300px
+  open, 22px as a rail); on a narrow one it is an overlay. What the view emits
+  (`select {id}`) is heard on its cell's inbox and opens that agent as a click in the old
+  tree did; `select_kernel` is ignored for now. No `sidebar` agent (a folder seeded before
+  it): no column. Its open state is not kept. The tree cell (`files_view.ts`) stays as the
+  extra kind: a folder dropped on the canvas opens a tree rooted at it.
 
 A cell's head: **✕ hides** it — the view lets go of the cell, its agent keeps
 running and its stream is torn down until it is shown again (the view's `show`
@@ -95,18 +85,7 @@ folder and sends `export_subtree` for the cell's host agent to `user` (#268). Th
 (`hidden: [<cell id>…]`), so a reload keeps the cells hidden. Picking a hidden
 agent in the sidebar shows its cell where it was.
 
-**Chat cards (#339).** A chat cell (`ai_view.ts`) shows a host agent's panel INLINE, where the
-AI's `embed {id}` row sits in the conversation (`history` lists it as a row of kind `embed`;
-`unembed {id}` takes it out). The card (`ai_view/chat_card.ts`) is 100% of the chat column
-wide and as tall as its panel says, at most `CHAT_CARD_MAX_HEIGHT` = 1200 px (taller content
-scrolls inside; the twin of ai-core's constant). Its panel is the one `place {backend_id}` draws
-(`mountHostPanel`), its calls go out as the chat cell, granted from the record's `view.calls`.
-**✕ hides** the card (its hide is `embed:<chat cell>:<agent>` in the view's hidden set, so a
-reload keeps it), **Shift+✕** and the menu **delete the agent** (the delete lock refuses, said),
-the menu's *remove card* is `unembed`. The host's `removed` state frame turns a card "deleted";
-a redraw with the agent gone shows `[deleted from canvas]`, and pressing it checks again.
-The AI is told, by a short message through its `send`, when a fresh card overflows the column
-or the cap.
+**View `calls`.** An html view's `calls` is a list (verbs on its own agent) or an object `{<agent id> | "*": [verbs]}`: its own agent's verbs and READ verbs on other agents; the cell's grant is exactly that (`cellGrant`), and `watch` is added on its own agent. The AI chat's view (`ai_chat.tools` returns it from `reflect`) uses the object form for `user inquiries`.
 
 The view↔backend pairing is **never hardcoded** — each view's reflect names the
 host capability + verb surface it fronts; an LLM weaves the binding from that plus
@@ -119,7 +98,7 @@ src/main.ts            the page: boot (the library) → register → seed → mo
 src/home.ts            the Home page (home.html): boot → its records via web_loader → mount home_view
 src/bundle.ts          the esbuild entry: inlines xterm.css, then loads main.ts, or home.ts on <body data-page="home">
 src/lib.ts             the ONE seam to the library's public entry (src/lib/ts/src/index.ts)
-src/bundles/           canvas/, view.ts, terminal_view/, ai_view/, html_agent/, gl_agent/, skin/, shell.ts,
+src/bundles/           canvas/, view.ts, terminal_view/, html_agent/, gl_agent/, skin/, shell.ts,
                        agent_models/ (pure models of the read-only agent views), read_view.ts (their shared body)
 src/bundles/home_view/ the Home: home_view.ts (the view), home_model.ts (pure: state, labels, cards, shortcuts),
                        pages.ts (the canvas-frame pool), home_css.ts (its style, every colour one --home-* property)

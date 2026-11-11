@@ -10,8 +10,10 @@ const text = (rows: Row[]): string => rows.map((r) => `${"  ".repeat(r.depth ?? 
 test("store_model_counts_per_owner_and_folds_and_drops_row_bodies", () => {
   const BODY = "SENTINEL-ROW-BODY";
   const dump = {
-    rows: [1, 2, 3].map((i) => ({ owner: "alice", row: { id: i, content: BODY } })).concat([{ owner: "bob", row: { id: 1, content: BODY } }]),
-    fold_refs: [{ owner: "alice", fold: 3, members: [1, 2] }],
+    tables: {
+      rows: [1, 2, 3].map((i) => ({ owner: "alice", row: { id: i, content: BODY } })).concat([{ owner: "bob", row: { id: 1, content: BODY } }]),
+      fold_refs: [{ owner: "alice", fold: 3, members: [1, 2] }],
+    },
   };
   const s = storeState(dump);
   assert.deepEqual(s.owners, { alice: { rows: 3, folds: 1 }, bob: { rows: 1, folds: 0 } });

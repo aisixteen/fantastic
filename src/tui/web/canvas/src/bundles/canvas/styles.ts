@@ -193,16 +193,6 @@ export const CANVAS_CSS = `
   #canvas.full-view .agent-frame.full { left: 12px !important; top: 44px !important;
     width: calc(100% - 24px) !important; height: calc(100vh - 56px) !important; }
   #canvas.full-view .agent-frame.full .resize-handle { display: none; }
-  /* an AI cell not set up yet (the wizard's skip) */
-  .ai-not-set-up { height: 100%; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 10px; padding: 24px; text-align: center; background: ${tok("color.surface.panel")}; color: ${tok("color.text.muted")}; border-radius: ${tok("radius.panel")};
-    font: 14px/1.5 ${tok("font.family.sans")}; }
-  .ai-not-set-up .nsu-title { color: ${tok("color.text.primary")}; font-size: 17px; font-weight: 650; }
-  .ai-not-set-up p { margin: 0; max-width: 300px; }
-  .ai-not-set-up .nsu-row { display: flex; gap: 8px; margin-top: 6px; }
-  .ai-not-set-up button { font: inherit; color: ${tok("color.text.primary")}; background: ${tok("color.surface.button")}; border: 1px solid ${tok("color.line.button")}; border-radius: ${tok("radius.card")}; padding: 8px 14px; cursor: pointer; }
-  .ai-not-set-up button:hover { border-color: ${tok("color.accent.base")}; }
-  .ai-not-set-up .nsu-settings { background: ${tok("color.accent.base")}; border-color: ${tok("color.accent.base")}; color: ${tok("color.accent.on")}; font-weight: 700; }
   /* the viewed-full label: centred ON the frame's top border (top: 44px) */
   .full-hint { position: fixed; top: 44px; left: 50%; transform: translate(-50%, -50%); z-index: 60;
     max-width: calc(100vw - 48px); box-sizing: border-box; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -210,22 +200,22 @@ export const CANVAS_CSS = `
     background: ${tok("color.surface.pill")}; box-shadow: ${tok("shadow.pill")};
     color: ${tint("color.text.cool", 72)}; font: 400 13px/1.2 ${tok("font.family.sans")}; letter-spacing: 0.2px; }
   .full-hint[hidden] { display: none; }
-  /* THE TREE SIDEBAR (#148): beside the zoomed world, fixed to the viewport's left edge — a zoom
-     or a pan never moves or scales it. Over the canvas on a narrow screen (an overlay there). */
-  .tree-sidebar { position: fixed; top: 0; bottom: 0; left: 0; z-index: 2; display: flex; box-sizing: border-box; width: 300px; max-width: 80vw;
+  /* THE LEFT COLUMN (#608): the sidebar agent's view beside the zoomed world, fixed to the viewport's
+     left edge — a zoom or a pan never moves or scales it. Glass over the page; an overlay on a narrow screen. */
+  .sidebar-col { position: fixed; top: 0; bottom: 0; left: 0; z-index: 2; display: flex; box-sizing: border-box; width: 300px; max-width: 80vw;
     background: ${tok("color.surface.panel")}; border-right: 1px solid ${tint("color.accent.base", 30)}; }
-  .tree-sidebar.collapsed { width: 22px; }
-  .tree-sidebar .ts-toggle { flex: none; width: 22px; height: 100%; padding: 0; border: 0; background: transparent; cursor: pointer;
+  .sidebar-col.collapsed { width: 22px; }
+  .sidebar-col .sb-toggle { flex: none; width: 22px; height: 100%; padding: 0; border: 0; background: transparent; cursor: pointer;
     color: ${tint("color.text.cool", 60)}; font: 14px ${tok("font.family.mono")}; }
-  .tree-sidebar .ts-toggle:hover { color: ${tok("color.text.bright")}; background: ${tint("color.accent.base", 14)}; }
-  .tree-sidebar .ts-body { flex: 1; min-width: 0; display: flex; }
-  .tree-sidebar.collapsed .ts-body { display: none; }
-  .tree-sidebar .ts-body > .files-view { flex: 1; min-width: 0; }
-  /* ON A WIDE SCREEN the canvas sits beside the sidebar: its margin is the sidebar's width (the
-     widths of \`.tree-sidebar\` above, 300px open and 22px collapsed); a narrow screen's is an overlay */
-  .tree-beside { --tree-w: 22px; }
-  .tree-beside.tree-open { --tree-w: 300px; }
-  .tree-beside #canvas { margin-left: var(--tree-w); width: calc(100% - var(--tree-w)); }
+  .sidebar-col .sb-toggle:hover { color: ${tok("color.text.bright")}; background: ${tint("color.accent.base", 14)}; }
+  .sidebar-col .sb-body { flex: 1; min-width: 0; display: flex; }
+  .sidebar-col.collapsed .sb-body { display: none; }
+  .sidebar-col .sb-body > iframe { flex: 1; min-width: 0; width: 100%; height: 100%; border: 0; background: transparent; }
+  /* ON A WIDE SCREEN the canvas sits beside the column: its margin is the column's width (the
+     widths of \`.sidebar-col\` above, 300px open and 22px collapsed); a narrow screen's is an overlay */
+  .sidebar-beside { --sidebar-w: 22px; }
+  .sidebar-beside.sidebar-open { --sidebar-w: 300px; }
+  .sidebar-beside #canvas { margin-left: var(--sidebar-w); width: calc(100% - var(--sidebar-w)); }
   .full-hint b { color: ${tok("color.text.bright")}; font-weight: 600; }
   .full-hint kbd { font: 600 11px ${tok("font.family.mono")}; color: ${tok("color.accent.text")};
     padding: 2px 6px; margin: 0 1px; border-radius: ${tok("radius.key")}; background: ${tint("color.accent.base", 16)}; box-shadow: inset 0 0 0 1px ${tint("color.accent.base", 40)}; }

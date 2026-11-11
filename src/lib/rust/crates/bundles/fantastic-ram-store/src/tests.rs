@@ -654,3 +654,44 @@ async fn two_stores_hold_separate_tables_and_delete_frees_one() {
     let read1 = call(&k, json!({"type": "read"}), Some("alice")).await;
     assert_eq!(ids(&read1), vec![1], "mem keeps its rows");
 }
+
+#[tokio::test]
+async fn append_emits_one_appended_event_per_new_row() {
+    let k = store();
+    let state: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
+    let tap = state.clone();
+    k.add_state_subscriber(std::sync::Arc::new(move |ev: &Value, _body| {
+        tap.lock().unwrap().push(ev.clone());
+    }));
+    let mut rx = k.ensure_inbox(&AgentId::from("mem"));
+    let out = append(&k, "alice", json!([{"content": "a"}, {"content": "b"}])).await;
+    let ids = out["ids"].as_array().unwrap().clone();
+    assert_eq!(ids.len(), 2, "{out}");
+    // the inbox also holds the append request itself; keep the events
+    let mut events = Vec::new();
+    while let Some(item) = rx.try_recv() {
+        if item.payload["type"] == json!("appended") {
+            events.push(item.payload);
+        }
+    }
+    let want: Vec<Value> = ids
+        .iter()
+        .map(|id| json!({"type": "appended", "table": "rows", "id": id}))
+        .collect();
+    assert_eq!(events, want);
+    // and each one went out as an emit on the state stream too
+    let on_state: Vec<Value> = state
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|ev| ev["kind"] == json!("emit") && ev["payload"]["type"] == json!("appended"))
+        .map(|ev| ev["payload"].clone())
+        .collect();
+    assert_eq!(on_state, want);
+    // a refused append emits nothing
+    let refused = append(&k, "alice", json!([])).await;
+    assert_eq!(refused["reason"], json!("bad_arg"), "{refused}");
+    while let Some(item) = rx.try_recv() {
+        assert_ne!(item.payload["type"], json!("appended"), "{refused}");
+    }
+}

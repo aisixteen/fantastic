@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import Rig, verdict, say, spot  # noqa: E402
+from _lib.canvas_live import Rig, verdict, open_chat, say, spot  # noqa: E402
 
 E2E = Path(__file__).resolve().parents[6] / "e2e"
 MARK = "CUSTOM-SYS-63"
@@ -98,7 +98,8 @@ def main() -> bool:
             # a) seeded, the default layout
             seeded = prompt.read_text() if prompt.exists() else ""
             r["seeded"] = seeded.startswith("{tree}\n\n{self}\n\n{howto}\n\n## Building here\n") and "create_agent" in seeded
-            await spot(pg, 400, 300, "hello")
+            await open_chat(pg, 400, 300)
+            await say(pg, "hello")
             r["turn1"] = await turns(1)
             s1 = systems[0] if systems else ""
             info["turn1"] = s1[:300]

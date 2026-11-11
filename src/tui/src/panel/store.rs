@@ -217,8 +217,8 @@ impl Panel for StorePanel {
             return true;
         }
         if let (Some(rows), Some(folds)) = (
-            reply.get("rows").and_then(Value::as_array),
-            reply.get("fold_refs").and_then(Value::as_array),
+            reply.pointer("/tables/rows").and_then(Value::as_array),
+            reply.pointer("/tables/fold_refs").and_then(Value::as_array),
         ) {
             // counts only: the row object is never kept
             let mut owners: BTreeMap<String, (usize, usize)> = BTreeMap::new();
@@ -285,7 +285,7 @@ mod tests {
     const BODY: &str = "SENTINEL-ROW-BODY";
 
     fn dump() -> Value {
-        json!({
+        json!({"tables": {
             "rows":[
                 {"owner":"alice","row":{"id":1,"content":BODY}},
                 {"owner":"alice","row":{"id":2,"content":BODY}},
@@ -293,7 +293,7 @@ mod tests {
                 {"owner":"bob","row":{"id":1,"content":BODY}},
             ],
             "fold_refs":[{"owner":"alice","fold":3,"members":[1,2]}]
-        })
+        }})
     }
 
     #[test]

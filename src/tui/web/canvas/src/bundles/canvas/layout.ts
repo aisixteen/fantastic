@@ -212,16 +212,6 @@ export function showHidden(kernel: Kernel, cell: string): boolean {
   return true;
 }
 
-/** The HIDDEN cell (#133) among `cells` that shows agent `backendId`, if any: a
- *  kept dialog reopened comes back to its hidden cell, not a second one beside it. */
-export function hiddenCellFor(kernel: Kernel, backendId: string, cells: string[]): string | undefined {
-  return cells.find((id) => {
-    const a = kernel.get(id);
-    const view = a?.parentId;
-    return a !== undefined && typeof view === "string" && a.record()["backend_id"] === backendId && hiddenOf(kernel, view).has(id);
-  });
-}
-
 /** The frames a finished refresh takes down: those it did not draw, or whose agent is gone. A
  *  refresh a newer one has overtaken (`current` false) takes down NONE: its member list is a
  *  snapshot from before the newer one's changes (a cell shown meanwhile is not in it), and the

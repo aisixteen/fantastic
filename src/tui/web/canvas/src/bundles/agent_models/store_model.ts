@@ -24,9 +24,10 @@ export function storeState(reply: unknown): StoreState {
   const s: StoreState = { owners: {}, total: 0, dumpError: refusalOf(reply), loaded: false };
   const d = asDict(reply);
   if (s.dumpError !== null || d === null) return s;
-  const rows = asList(d["rows"]);
+  const tables = asDict(d["tables"]);
+  const rows = asList(tables?.["rows"]);
   for (const r of rows) (s.owners[str(r, "owner")] ??= { rows: 0, folds: 0 }).rows++;
-  for (const f of asList(d["fold_refs"])) (s.owners[str(f, "owner")] ??= { rows: 0, folds: 0 }).folds++;
+  for (const f of asList(tables?.["fold_refs"])) (s.owners[str(f, "owner")] ??= { rows: 0, folds: 0 }).folds++;
   s.total = rows.length;
   s.loaded = true;
   return s;
