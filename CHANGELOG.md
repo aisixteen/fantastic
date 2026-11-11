@@ -6,6 +6,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 ## [Unreleased]
 
 ### Added
+- Images in a chat (#622, 1/4): `ram_store` and `sqlite_store` gain `put_bytes {ref, media_type}` (the raw bytes as the request body at `data`) and `get_bytes {ref}` (the bytes back as the reply body at `data`, with `{ref, media_type, bytes}` in the JSON head), per caller like rows; blobs are not rows (never in `read`, `search` or `dump`); the imageless anthropic request body is pinned by a golden test.
 - Export (#563): `export_subtree` reads a folder bundle's files from the state folder (`<state>/bundles/<name>/`), not from `<work>/.fantastic`; the README and the E63/E64 test READMEs name the prompt and mcp config files by their new place.
 - Home (#563, 5/5): the registry's `path` is the state folder. Open Folder runs `fantastic canvas --statedir <folder>/.fantastic` with the picked folder as the working directory; the probe reads the root record's `workdir` (`Ask::Workdir`) to start a listed row and to name an unnamed one (a row with no readable record and no picked folder has no name). `Registered::display_name` takes the work folder, `Event::Open` carries `Opened {path, workdir}` (on the intent wire still one string), `Effect::Spawn` has a `workdir`, `HomeOs::spawn` takes both folders, and the home kernel's seed records are `@state` relative.
 

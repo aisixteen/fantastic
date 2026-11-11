@@ -336,7 +336,18 @@ async fn reflect_names_the_posture_and_the_verbs() {
     let verbs: Vec<&str> = VERB_DOCS.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         verbs,
-        vec!["reflect", "boot", "append", "read", "search", "prune", "inject", "dump"]
+        vec![
+            "reflect",
+            "boot",
+            "append",
+            "read",
+            "search",
+            "prune",
+            "inject",
+            "dump",
+            "put_bytes",
+            "get_bytes"
+        ]
     );
 }
 
@@ -345,7 +356,11 @@ async fn verb_docs_are_pythons_first_docstring_lines() {
     let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../../python/bundled_agents/memory/ram_store/src/ram_store/tools.py");
     let src = std::fs::read_to_string(&py).expect("python ram_store");
-    for (name, doc) in VERB_DOCS {
+    // `put_bytes` / `get_bytes` are Rust-only so far (#622): python has no twin to read
+    for &(name, doc) in VERB_DOCS
+        .iter()
+        .filter(|(n, _)| !matches!(*n, "put_bytes" | "get_bytes"))
+    {
         let head = format!("async def _{name}(id, payload, agent):\n    \"\"\"");
         let at = src
             .find(&head)
@@ -694,4 +709,146 @@ async fn append_emits_one_appended_event_per_new_row() {
     while let Some(item) = rx.try_recv() {
         assert_ne!(item.payload["type"], json!("appended"), "{refused}");
     }
+}
+
+// ─── put_bytes / get_bytes (#622) ───────────────────────────────────
+
+/// A call carrying `bytes` as the request body at `data`: the reply and its body.
+async fn call_bytes(
+    k: &Arc<Kernel>,
+    payload: Value,
+    bytes: Option<&[u8]>,
+    as_: &str,
+) -> (Value, Option<Vec<u8>>) {
+    let mut item = Item::new(AgentId::from("mem"), payload);
+    if let Some(b) = bytes {
+        item = item.with_binary_key("data", b.to_vec());
+    }
+    let out = as_agent(AgentId::from(as_), k.send(vec![item]))
+        .await
+        .remove(0);
+    let body = out.body_bytes().map(<[u8]>::to_vec);
+    (out.result, body)
+}
+
+#[tokio::test]
+async fn bytes_round_trip_under_the_callers_key() {
+    let k = store();
+    let raw: Vec<u8> = vec![0, 255, 7, 0, 128, 10, 13];
+    let (put, none) = call_bytes(
+        &k,
+        json!({"type": "put_bytes", "ref": "img-1", "media_type": "image/png"}),
+        Some(&raw),
+        "alice",
+    )
+    .await;
+    assert_eq!(
+        put,
+        json!({"ref": "img-1", "media_type": "image/png", "bytes": 7})
+    );
+    assert!(none.is_none());
+    let (got, body) = call_bytes(
+        &k,
+        json!({"type": "get_bytes", "ref": "img-1"}),
+        None,
+        "alice",
+    )
+    .await;
+    assert_eq!(
+        got,
+        json!({"ref": "img-1", "media_type": "image/png", "bytes": 7})
+    );
+    assert_eq!(body, Some(raw.clone()));
+    // another caller has its own space: the same ref is not there
+    let (other, body) = call_bytes(
+        &k,
+        json!({"type": "get_bytes", "ref": "img-1"}),
+        None,
+        "bob",
+    )
+    .await;
+    assert_eq!(other["reason"], json!("not_found"), "{other}");
+    assert!(body.is_none());
+    // a second put replaces; an empty body is a legal blob
+    call_bytes(
+        &k,
+        json!({"type": "put_bytes", "ref": "img-1", "media_type": "image/jpeg"}),
+        Some(&[]),
+        "alice",
+    )
+    .await;
+    let (got, body) = call_bytes(
+        &k,
+        json!({"type": "get_bytes", "ref": "img-1"}),
+        None,
+        "alice",
+    )
+    .await;
+    assert_eq!(got["media_type"], json!("image/jpeg"));
+    assert_eq!(body, Some(Vec::new()));
+}
+
+#[tokio::test]
+async fn bytes_verbs_refuse_a_missing_ref_or_body() {
+    let k = store();
+    let (r, _) = call_bytes(
+        &k,
+        json!({"type": "get_bytes", "ref": "nope"}),
+        None,
+        "alice",
+    )
+    .await;
+    assert_eq!(r["reason"], json!("not_found"), "{r}");
+    let (r, _) = call_bytes(&k, json!({"type": "get_bytes"}), None, "alice").await;
+    assert_eq!(r["reason"], json!("missing_arg"), "{r}");
+    let (r, _) = call_bytes(
+        &k,
+        json!({"type": "put_bytes", "media_type": "image/png"}),
+        Some(&[1]),
+        "alice",
+    )
+    .await;
+    assert_eq!(r["arg"], json!("ref"), "{r}");
+    let (r, _) = call_bytes(
+        &k,
+        json!({"type": "put_bytes", "ref": "a"}),
+        Some(&[1]),
+        "alice",
+    )
+    .await;
+    assert_eq!(r["arg"], json!("media_type"), "{r}");
+    let (r, _) = call_bytes(
+        &k,
+        json!({"type": "put_bytes", "ref": "a", "media_type": "image/png"}),
+        None,
+        "alice",
+    )
+    .await;
+    assert_eq!(r["reason"], json!("missing_arg"), "{r}");
+    let (r, _) = call_bytes(&k, json!({"type": "get_bytes", "ref": "a"}), None, "alice").await;
+    assert_eq!(r["reason"], json!("not_found"), "nothing was stored: {r}");
+}
+
+#[tokio::test]
+async fn stored_bytes_never_show_in_rows_or_the_dump() {
+    let k = store();
+    append(&k, "alice", json!([{"id": 1, "content": "hi"}])).await;
+    let rows = call(&k, json!({"type": "read"}), Some("alice")).await;
+    let dump = call(&k, json!({"type": "dump"}), None).await;
+    let hits = call(&k, json!({"type": "search", "query": "x"}), Some("alice")).await;
+    call_bytes(
+        &k,
+        json!({"type": "put_bytes", "ref": "1", "media_type": "image/png"}),
+        Some(b"xxxx"),
+        "alice",
+    )
+    .await;
+    assert_eq!(call(&k, json!({"type": "read"}), Some("alice")).await, rows);
+    assert_eq!(call(&k, json!({"type": "dump"}), None).await, dump);
+    assert_eq!(
+        call(&k, json!({"type": "search", "query": "x"}), Some("alice")).await,
+        hits
+    );
+    let r = call(&k, json!({"type": "reflect"}), None).await;
+    assert_eq!(r["rows"], json!(1));
 }

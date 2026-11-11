@@ -330,3 +330,36 @@ async fn append_emits_one_appended_event_per_new_row() {
         assert_ne!(item.payload["type"], json!("appended"), "{refused}");
     }
 }
+
+#[tokio::test]
+async fn stored_bytes_survive_a_reopen_of_the_file() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let put = |k: Arc<Kernel>| async move {
+        let item = Item::new(
+            AgentId::from("mem"),
+            json!({"type": "put_bytes", "ref": "p1", "media_type": "image/png"}),
+        )
+        .with_binary_key("data", vec![9, 0, 9]);
+        as_agent(AgentId::from("alice"), k.send(vec![item]))
+            .await
+            .remove(0)
+            .result
+    };
+    let k = kernel(tmp.path());
+    add_store(&k, "mem.db");
+    assert_eq!(put(Arc::clone(&k)).await["bytes"], json!(3));
+    close_all(&k);
+    let k2 = kernel(tmp.path());
+    add_store(&k2, "mem.db");
+    let out = as_agent(
+        AgentId::from("alice"),
+        k2.send(vec![Item::new(
+            AgentId::from("mem"),
+            json!({"type": "get_bytes", "ref": "p1"}),
+        )]),
+    )
+    .await
+    .remove(0);
+    assert_eq!(out.result["media_type"], json!("image/png"), "{}", out.result);
+    assert_eq!(out.body_bytes(), Some(&[9u8, 0, 9][..]));
+}
