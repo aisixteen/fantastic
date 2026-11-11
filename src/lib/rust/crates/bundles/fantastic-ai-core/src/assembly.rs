@@ -93,7 +93,7 @@ value is text as written (`true`, `12`, a path); a list is `<item>` children
 tags, `$` included (`<callable_by><$self>*</$self><web><item>read</item></web></callable_by>`).
 `<reply_to>` in `<routing>` picks
 where the reply goes: you by default (your next message), another id hands it to them,
-`null` discards it. `reflect` goes to the agent itself (`<target_id>runner</target_id>`)
+`null` discards it. `reflect` goes to the agent itself (`<routing><target_id>runner</target_id></routing>`)
 and says what it IS (sentence, state, tree); how to CALL it is `docs` (below). Text outside calls is your message to whoever asked — keep it
 brief, and take instructions literally. EMIT CALLS BEFORE YOU DELIBERATE: the moment you
 know the next call, send it; never end a turn on "let me do X" without X in a `<call>`.

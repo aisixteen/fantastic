@@ -3,7 +3,7 @@
 # driven over web_rest.
 id: deadletter_deadline
 group: scenario
-title: "a message to a busy AI passes its sender's deadline (root send_timeout): it is withdrawn into a dead letter, the sender is told its id and resends and drops it, the target never answers the withdrawn message, and status counts the held sender while the turn runs and its answer reaches the lead once"
+title: "a message to a busy AI passes its sender's deadline (root send_timeout): it is withdrawn into a dead letter, the sender is told its id and resends and drops it, the target never answers the withdrawn message, and status counts the held sender while the turn runs and its answer reaches the lead once; on the Rust lane the ledger store is then a sqlite_store, a second dead letter is formed, the kernel is stopped and a new one booted on the same folder, and the lead finds it in its ledger (timed_out, same id) and resends it"
 runner: probe.py
 runtimes: [python, rust]
 costs: free
