@@ -626,7 +626,9 @@ pub async fn assemble_messages(
         }
     };
     *state.view_source.lock().expect("view_source poisoned") = Some(source.to_string());
-    for r in render_history(&store, listed.as_deref(), caching.cleans()) {
+    let rendered = render_history(&store, listed.as_deref(), caching.cleans());
+    let pics = Pictures::of(self_id, state, kernel, &store, &rendered);
+    for r in rendered {
         let (msg, form) = if caching.folds() && r.res == "full" {
             crate::history_view::autofold(&store, r.idx, &r.msg, Some(user_text))
         } else {
@@ -640,6 +642,25 @@ pub async fn assemble_messages(
         } else {
             form
         };
+        // THE IMAGES OF THE ROW: whole, a line naming them, or alt text (#622)
+        let (msg, form) = match crate::images::parts_of(&msg) {
+            Some(parts) => {
+                let how = pics.form_of(
+                    r.idx,
+                    msg.get("id").and_then(Value::as_i64),
+                    parts,
+                    form == "whole",
+                );
+                let info = store[r.idx]["attributes"]["image"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let id = msg.get("id").and_then(Value::as_i64);
+                (crate::images::render(msg, &info, id, how), how.name())
+            }
+            None => (msg, form),
+        };
+        let shown = msg.get("content").and_then(Value::as_str).unwrap_or("");
         parts.push(part_entry(
             "row",
             msg.get("id").and_then(Value::as_i64),
@@ -649,8 +670,105 @@ pub async fn assemble_messages(
         messages.push(msg);
     }
     *state.request_parts.lock().expect("request_parts poisoned") = parts;
-    messages.push(json!({"role": "user", "content": user_text}));
+    let mut incoming = json!({"role": "user", "content": user_text});
+    // the images this turn attached: shown whole to a model that can see them, else alt text
+    if let Some(a) = crate::agent_loop::attached_in_flight(state) {
+        incoming["images"] = Value::Array(a.parts.clone());
+        let how = pics.form_of_new(&a.parts);
+        incoming = crate::images::render(incoming, &a.info, None, how);
+    }
+    messages.push(incoming);
     Ok((messages, store_len))
+}
+
+/// What decides how the image rows of a request show: what the chat's model can take, which
+/// rows the model has not answered yet, which a `recall` brought back, and how many images
+/// the model takes in one request (newest first).
+struct Pictures {
+    sees: bool,
+    limits: crate::images::Limits,
+    /// Store indexes of the rows shown whole.
+    whole: std::collections::HashSet<usize>,
+    /// The ids a `recall` brought back for this request.
+    recalled: Vec<i64>,
+}
+
+impl Pictures {
+    fn of(
+        self_id: &AgentId,
+        state: &Arc<BackendState>,
+        kernel: &Arc<Kernel>,
+        store: &[Value],
+        rendered: &[Rendered],
+    ) -> Self {
+        let meta = crate::helpers::agent_meta(self_id, kernel);
+        let sees = crate::images::can(&meta, crate::images::NEEDS);
+        let limits = crate::images::limits(&meta);
+        let recalled =
+            std::mem::take(&mut *state.recalled_images.lock().expect("recalled poisoned"));
+        // the turn's own images count against the bound of the model first
+        let current = crate::agent_loop::attached_in_flight(state).map_or(0, |a| a.parts.len());
+        let mut out = Self {
+            sees,
+            limits,
+            whole: Default::default(),
+            recalled,
+        };
+        if !sees {
+            return out;
+        }
+        // THE MODEL ANSWERED: the rows before its newest answer are anchors from now on
+        let answered = store.iter().rposition(|r| r["role"] == "assistant");
+        let mut room = limits.max_images.map(|n| (n - current as i64).max(0));
+        for r in rendered.iter().rev() {
+            let row = &store[r.idx];
+            let Some(parts) = crate::images::parts_of(row) else {
+                continue;
+            };
+            let wanted = answered.is_none_or(|a| r.idx > a)
+                || row
+                    .get("id")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|id| out.recalled.contains(&id));
+            let n = parts.len() as i64;
+            if wanted && room.is_none_or(|left| n <= left) {
+                room = room.map(|left| left - n);
+                out.whole.insert(r.idx);
+            }
+        }
+        out
+    }
+
+    /// The form a stored row's images take; `text_whole`: its text is shown as it is stored.
+    fn form_of(
+        &self,
+        idx: usize,
+        id: Option<i64>,
+        parts: &[Value],
+        text_whole: bool,
+    ) -> crate::images::Form {
+        use crate::images::Form;
+        if !self.sees || !parts.iter().all(|p| crate::images::fits(p, self.limits)) {
+            return Form::Alt;
+        }
+        if !text_whole || !self.whole.contains(&idx) {
+            return Form::Anchor;
+        }
+        if id.is_some_and(|id| self.recalled.contains(&id)) {
+            Form::Recalled
+        } else {
+            Form::Image
+        }
+    }
+
+    /// The form the images of the turn's own send take.
+    fn form_of_new(&self, parts: &[Value]) -> crate::images::Form {
+        if self.sees && parts.iter().all(|p| crate::images::fits(p, self.limits)) {
+            crate::images::Form::Image
+        } else {
+            crate::images::Form::Alt
+        }
+    }
 }
 
 /// One part of a request: `{part, ref?, form?, bytes, hash}` — `bytes` the length
@@ -684,7 +802,12 @@ pub(crate) fn request_parts(assembled: &[Value], sent: &[Value]) -> Vec<Value> {
         let text = m.get("content").and_then(Value::as_str).unwrap_or("");
         let id = m.get("id").and_then(Value::as_i64);
         if i == last {
-            out.push(part_entry("new_input", None, None, text));
+            out.push(part_entry(
+                "new_input",
+                None,
+                m.get("image_form").and_then(Value::as_str),
+                text,
+            ));
             continue;
         }
         let now = part_entry("row", id, Some("anchor"), text);

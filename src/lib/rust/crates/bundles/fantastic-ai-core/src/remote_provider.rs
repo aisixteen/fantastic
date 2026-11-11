@@ -345,6 +345,37 @@ impl RemoteProvider {
     }
 }
 
+impl RemoteProvider {
+    /// THE IMAGES OF A REQUEST, on the binary path: each image part of `messages` is pulled
+    /// from the chat's store (`get_bytes`) and sent to the provider as ONE `complete` item
+    /// of this `rid` (`image: {ref, media_type}`, the bytes as the body at `data`), before
+    /// the `complete` that carries the messages. A request with no image sends nothing.
+    async fn send_images(&self, messages: &[Value], rid: &str) -> Result<(), ProviderError> {
+        for part in messages.iter().filter_map(crate::images::parts_of).flatten() {
+            let Some(image_ref) = part.get("ref").and_then(Value::as_str) else {
+                continue;
+            };
+            let (media, bytes) = crate::memory::get_bytes(&self.chat, &self.kernel, image_ref)
+                .await
+                .map_err(|e| ProviderError::raised(e.0))?;
+            let header = json!({"type": "complete", "rid": rid, "image": {"ref": image_ref, "media_type": media}});
+            let out = self
+                .kernel
+                .send(vec![Item::new(self.provider.clone(), header).with_binary_key("data", bytes)])
+                .await
+                .remove(0);
+            if out.status != Status::Completed || out.result.get("error").is_some() {
+                return Err(ProviderError::raised(format!(
+                    "ai_chat: provider `{}` took no image `{image_ref}`: {}",
+                    self.provider.as_str(),
+                    out.result.get("error").and_then(Value::as_str).unwrap_or("it refused")
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The reply of a `complete`, read into the report; `Err` for a failed pass.
 fn settle(result: &Value, report: &Mutex<ProviderReport>, model: &Mutex<String>) -> Result<(), ProviderError> {
     if let Some(err) = result.get("error").and_then(Value::as_str) {
@@ -380,6 +411,7 @@ impl Provider for RemoteProvider {
     async fn chat(&self, messages: &[Value], max_tokens: Option<i64>) -> Result<ProviderStream, ProviderError> {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let rid = format!("{}~{n}", self.chat.as_str());
+        self.send_images(messages, &rid).await?;
         // the reader: an inbox of this pass only, watching the provider's stream
         let reader = AgentId::from(format!("_provider_reader_{}_{n}", self.chat.as_str()));
         let mut inbox = self.kernel.ensure_inbox(&reader);

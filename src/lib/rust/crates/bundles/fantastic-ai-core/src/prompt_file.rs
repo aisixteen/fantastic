@@ -279,8 +279,12 @@ async fn arm(self_id: &AgentId, kernel: &Arc<Kernel>, file: (String, String)) {
     }
 }
 
-/// The whole file through `read_stream`, as utf-8 → (text, None) or (None, why).
-async fn read(kernel: &Arc<Kernel>, bridge: &str, path: &str) -> (Option<String>, Option<String>) {
+/// The whole file through `read_stream`: its bytes, or why not.
+pub(crate) async fn read_bytes(
+    kernel: &Arc<Kernel>,
+    bridge: &str,
+    path: &str,
+) -> Result<Vec<u8>, String> {
     let mut bytes: Vec<u8> = Vec::new();
     let mut offset: u64 = 0;
     loop {
@@ -292,13 +296,10 @@ async fn read(kernel: &Arc<Kernel>, bridge: &str, path: &str) -> (Option<String>
             .await
             .remove(0);
         if failed(out.status, &out.result) {
-            return (
-                None,
-                Some(format!(
-                    "{bridge} read_stream {path}: {}",
-                    why(out.status, &out.result)
-                )),
-            );
+            return Err(format!(
+                "{bridge} read_stream {path}: {}",
+                why(out.status, &out.result)
+            ));
         }
         if let Some(b) = out.body.as_ref().and_then(|b| b.at("bytes")) {
             bytes.extend_from_slice(b);
@@ -312,6 +313,15 @@ async fn read(kernel: &Arc<Kernel>, bridge: &str, path: &str) -> (Option<String>
             .and_then(Value::as_u64)
             .unwrap_or(offset);
     }
+    Ok(bytes)
+}
+
+/// The whole file through `read_stream`, as utf-8 → (text, None) or (None, why).
+async fn read(kernel: &Arc<Kernel>, bridge: &str, path: &str) -> (Option<String>, Option<String>) {
+    let bytes = match read_bytes(kernel, bridge, path).await {
+        Ok(b) => b,
+        Err(why) => return (None, Some(why)),
+    };
     match String::from_utf8(bytes) {
         Ok(t) => (Some(t), None),
         Err(e) => (None, Some(format!("{bridge} {path}: not utf-8 ({e})"))),

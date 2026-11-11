@@ -34,7 +34,12 @@ pub(crate) struct PrevRequest {
 
 /// A short stable hash of `text`: the first 16 hex digits of its SHA-256.
 pub(crate) fn short_hash(text: &str) -> String {
-    Sha256::digest(text.as_bytes())[..8]
+    short_hash_bytes(text.as_bytes())
+}
+
+/// [`short_hash`] of raw bytes (an image's).
+pub(crate) fn short_hash_bytes(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)[..8]
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
