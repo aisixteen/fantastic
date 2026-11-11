@@ -283,8 +283,15 @@ pub async fn complete(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>,
         }
     }
     let r = provider.report();
-    json!({"rid": rid, "model": provider.model(), "prompt_tokens": r.prompt_tokens,
-           "completion_tokens": r.completion_tokens, "stop_reason": r.stop_reason})
+    let mut reply = json!({"rid": rid, "model": provider.model(), "prompt_tokens": r.prompt_tokens,
+           "completion_tokens": r.completion_tokens, "stop_reason": r.stop_reason});
+    // the cache counts, only when the endpoint has them
+    for (key, n) in [("cache_read", r.cache_read), ("cache_write", r.cache_write)] {
+        if let Some(n) = n {
+            reply[key] = json!(n);
+        }
+    }
+    reply
 }
 
 fn failed(rid: &str, e: &ProviderError) -> Value {
@@ -354,6 +361,8 @@ fn settle(result: &Value, report: &Mutex<ProviderReport>, model: &Mutex<String>)
     r.prompt_tokens = result.get("prompt_tokens").and_then(Value::as_i64);
     r.completion_tokens = result.get("completion_tokens").and_then(Value::as_i64);
     r.stop_reason = result.get("stop_reason").and_then(Value::as_str).map(String::from);
+    r.cache_read = result.get("cache_read").and_then(Value::as_i64);
+    r.cache_write = result.get("cache_write").and_then(Value::as_i64);
     if let Some(m) = result.get("model").and_then(Value::as_str).filter(|s| !s.is_empty()) {
         *model.lock().expect("model poisoned") = m.to_string();
     }
@@ -462,7 +471,10 @@ impl Provider for RemoteProvider {
     }
 
     fn clear_prompt_tokens(&self) {
-        self.report.lock().expect("report poisoned").prompt_tokens = None;
+        let mut r = self.report.lock().expect("report poisoned");
+        r.prompt_tokens = None;
+        r.cache_read = None;
+        r.cache_write = None;
     }
 
     fn clear_stop_reason(&self) {

@@ -294,11 +294,9 @@ pub async fn close_stopped(
     let in_id = kernel.mint_id();
     let in_parent = crate::agent_loop::incoming_parent(&entry.text);
     let (shown, notice) = crate::stream_parts::stop_rows(&entry.text_so_far, &who, &unsent);
-    let mut rows = vec![crate::agent_loop::incoming_row(
-        &entry.text,
-        in_id,
-        in_parent,
-        entry.notice,
+    let mut rows = vec![crate::row_attrs::with_source(
+        crate::agent_loop::incoming_row(&entry.text, in_id, in_parent, entry.notice),
+        &entry.origin,
     )];
     let mut prev = in_id;
     if let Some(text) = shown {
@@ -440,12 +438,16 @@ async fn store_failed_turn(
     text: &str,
     notice: bool,
     reason: &str,
+    origin: &str,
 ) -> Result<(), String> {
     let in_id = kernel.mint_id();
     let in_parent = crate::agent_loop::incoming_parent(text);
     let error_id = kernel.mint_id();
     let rows = [
-        crate::agent_loop::incoming_row(text, in_id, in_parent, notice),
+        crate::row_attrs::with_source(
+            crate::agent_loop::incoming_row(text, in_id, in_parent, notice),
+            origin,
+        ),
         json!({
             "role": "user",
             "kind": "error",
@@ -1195,11 +1197,14 @@ pub async fn send(
             kernel,
             // The SAME row the normal incoming path stores (`incoming_row`), so a
             // held message folds and recalls exactly like any other turn (#227).
-            &[crate::agent_loop::incoming_row(
-                &text,
-                row_id,
-                crate::agent_loop::incoming_parent(&text),
-                false,
+            &[crate::row_attrs::with_source(
+                crate::agent_loop::incoming_row(
+                    &text,
+                    row_id,
+                    crate::agent_loop::incoming_parent(&text),
+                    false,
+                ),
+                &origin_id,
             )],
         )
         .await?;
@@ -1339,6 +1344,7 @@ pub async fn send(
             // PROMOTED, not rebuilt — python's `{**entry, …}` carries the queue
             // row's `queued_at` into the in-flight entry, and `status` reports it.
             queued_at,
+            origin: origin_id.clone(),
             started_at: now_secs(),
             phase: "thinking".to_string(),
             text_so_far: String::new(),
@@ -1562,8 +1568,15 @@ pub async fn send(
             let message = if pe.kind == "ValueError" {
                 pe.message
             } else {
-                let stored =
-                    store_failed_turn(agent_id, kernel, &incoming_text, notice, &pe.message).await;
+                let stored = store_failed_turn(
+                    agent_id,
+                    kernel,
+                    &incoming_text,
+                    notice,
+                    &pe.message,
+                    &origin_id,
+                )
+                .await;
                 failed_reason = Some(pe.message.clone());
                 with_store_outcome(pe.message, stored)
             };
@@ -1583,8 +1596,15 @@ pub async fn send(
             .await;
             let message = format!("send: timeout after {}s", py_float_repr(timeout_secs));
             // The send ceiling ends the turn with an error row too (#177).
-            let stored =
-                store_failed_turn(agent_id, kernel, &incoming_text, notice, &message).await;
+            let stored = store_failed_turn(
+                agent_id,
+                kernel,
+                &incoming_text,
+                notice,
+                &message,
+                &origin_id,
+            )
+            .await;
             timeout_reply(with_store_outcome(message, stored), &client_id)
         }
     };

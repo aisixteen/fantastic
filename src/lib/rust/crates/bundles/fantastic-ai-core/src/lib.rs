@@ -139,6 +139,7 @@ pub mod provider;
 pub mod remote_provider;
 pub mod retrieval;
 pub mod route;
+mod row_attrs;
 pub mod schema;
 pub mod state;
 pub mod strategies;

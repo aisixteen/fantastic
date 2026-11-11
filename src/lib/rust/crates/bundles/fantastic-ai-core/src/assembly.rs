@@ -657,8 +657,6 @@ pub async fn assemble_messages(
 /// of the piece's text as the request carries it, `hash` the first 16 hex digits
 /// of its SHA-256.
 fn part_entry(part: &str, id: Option<i64>, form: Option<&str>, text: &str) -> Value {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(text.as_bytes());
     let mut e = json!({"part": part});
     if let Some(id) = id {
         e["ref"] = json!(id);
@@ -667,10 +665,7 @@ fn part_entry(part: &str, id: Option<i64>, form: Option<&str>, text: &str) -> Va
         e["form"] = json!(form);
     }
     e["bytes"] = json!(text.len());
-    e["hash"] = json!(digest[..8]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>());
+    e["hash"] = json!(crate::row_attrs::short_hash(text));
     e
 }
 

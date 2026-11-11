@@ -315,8 +315,9 @@ pub async fn save_history(
         if r.get("id").is_none_or(Value::is_null) {
             r.insert("id".to_string(), Value::from(kernel.mint_id()));
         }
-        // WHEN it was written, on every row, in the row's `attributes` (merged into
-        // what the writer already put there)
+        // WHEN it was written and BY WHOM (the agent whose chat it is, unless the
+        // writer named the sender), on every row, in the row's `attributes` (merged
+        // into what the writer already put there)
         let attrs = r
             .entry("attributes")
             .and_modify(|a| {
@@ -328,7 +329,10 @@ pub async fn save_history(
         if let Some(a) = attrs.as_object_mut() {
             a.entry("ts")
                 .or_insert_with(|| Value::from(crate::helpers::now_secs()));
+            a.entry("source")
+                .or_insert_with(|| Value::from(self_id.as_str()));
         }
+        crate::row_attrs::check_cap(self_id, &r).map_err(MemoryStoreError)?;
         rows.push(r);
     }
     if rows.is_empty() {

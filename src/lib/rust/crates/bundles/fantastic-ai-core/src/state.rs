@@ -43,6 +43,9 @@ pub struct CurrentEntry {
     /// WHOLE queued entry (`{**entry, started_at, phase, …}`), so `queued_at`
     /// survives into `status.current` and says how long the caller waited.
     pub queued_at: f64,
+    /// The sender's id (the calling agent, else the client): the `source` of the
+    /// incoming row.
+    pub origin: String,
     /// Lock-acquisition timestamp.
     pub started_at: f64,
     /// Current phase: thinking|streaming|tool_calling|done.
@@ -104,6 +107,9 @@ pub struct BackendState {
     /// form?, bytes, hash}`): kept for the assistant row the turn writes, never
     /// rendered into a request.
     pub request_parts: Mutex<Vec<Value>>,
+    /// What the previous request of this chat carried, for the next row's `parts`
+    /// delta and running totals; `None` on a fresh start and after a compaction.
+    pub(crate) prev_request: Mutex<Option<crate::row_attrs::PrevRequest>>,
     /// TOKEN CALIBRATION — python `_calib`: the prompt size the endpoint
     /// REPORTED for the last pass divided by our own estimate of what we sent.
     /// The estimate is chars/4 over the rendered messages; a real tokenizer
@@ -221,6 +227,7 @@ impl BackendState {
             recall_due: Mutex::new(false),
             view_source: Mutex::new(None),
             request_parts: Mutex::new(Vec::new()),
+            prev_request: Mutex::new(None),
             calib: Mutex::new(None),
             reported: Mutex::new(None),
             chain: Mutex::new(ChainState::default()),

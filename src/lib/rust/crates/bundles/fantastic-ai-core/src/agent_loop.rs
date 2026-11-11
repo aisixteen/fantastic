@@ -145,6 +145,17 @@ pub fn incoming_row(text: &str, id: i64, parent: Option<i64>, notice: bool) -> V
     row
 }
 
+/// Who sent the turn in flight: the `source` of its incoming row.
+fn incoming_source(state: &BackendState) -> String {
+    state
+        .current_meta
+        .lock()
+        .expect("current poisoned")
+        .as_ref()
+        .map(|c| c.origin.clone())
+        .unwrap_or_default()
+}
+
 /// Whether the turn in flight answers this layer's own text.
 fn notice_in_flight(state: &BackendState) -> bool {
     state
@@ -254,6 +265,17 @@ pub async fn run_generation(
         &state.request_parts.lock().expect("request_parts poisoned"),
         &model_messages,
     );
+    let prev_request = state
+        .prev_request
+        .lock()
+        .expect("prev_request poisoned")
+        .clone();
+    // a restart keeps counting from the newest stored row
+    let seed = if prev_request.is_none() {
+        crate::row_attrs::seed_totals(self_id, kernel).await
+    } else {
+        None
+    };
 
     // THE AGENT'S CACHE MARKS (`cache_mark`): its system message, the primer's end, the
     // last fold's, the tail. Only `provider_cache` places them; the backend forwards.
@@ -412,11 +434,9 @@ pub async fn run_generation(
         save_history(
             self_id,
             kernel,
-            &[incoming_row(
-                user_text,
-                in_id,
-                in_parent,
-                notice_in_flight(state),
+            &[crate::row_attrs::with_source(
+                incoming_row(user_text, in_id, in_parent, notice_in_flight(state)),
+                &incoming_source(state),
             )],
         )
         .await?;
@@ -461,8 +481,12 @@ pub async fn run_generation(
     let message_id = kernel.mint_id();
     // APPEND this send's user + assistant turns to the memory store so context
     // management (compaction/recall) has the FULL conversation next turn.
+    let mut next_request = None;
     let new_turns = vec![
-        incoming_row(user_text, in_id, in_parent, notice_in_flight(state)),
+        crate::row_attrs::with_source(
+            incoming_row(user_text, in_id, in_parent, notice_in_flight(state)),
+            &incoming_source(state),
+        ),
         // STRIPPED — the deliberation is not part of the conversation. The RAW
         // text (thinking included) is what the caller receives; the router parses
         // only the answer, and durable history loses the `<think>` spans, because a
@@ -485,16 +509,42 @@ pub async fn run_generation(
                 // rendered into a request (`render_for_model` carries role and content
                 // only)
                 let mut attrs = Map::new();
-                if let Some(u) = usage_row(&provider.report()) {
+                let usage = usage_row(&provider.report());
+                // WHAT SERVED IT: the provider agent (the chat itself when it names
+                // none) and the model it ran, with the pass priced from that
+                // provider's record
+                let provider_id = crate::helpers::agent_meta(self_id, kernel)
+                    .get(crate::remote_provider::PROVIDER_FIELD)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map_or_else(|| self_id.as_str().to_string(), String::from);
+                let model = provider.model();
+                if let Some(c) = crate::row_attrs::cost(
+                    usage.as_ref(),
+                    &crate::helpers::agent_meta(&AgentId::from(provider_id.as_str()), kernel),
+                    &model,
+                ) {
+                    attrs.insert("cost".to_string(), c);
+                }
+                if let Some(u) = usage {
                     attrs.insert("usage".to_string(), u);
                 }
-                attrs.insert("parts".to_string(), Value::Array(request_parts));
+                if !model.is_empty() {
+                    attrs.insert("model".to_string(), json!(model));
+                }
+                attrs.insert("provider".to_string(), json!(provider_id));
+                let (parts, totals, next) =
+                    crate::row_attrs::build(prev_request.as_ref(), seed, message_id, request_parts);
+                attrs.insert("parts".to_string(), parts);
+                attrs.insert("totals".to_string(), totals);
                 m.insert("attributes".to_string(), Value::Object(attrs));
+                next_request = Some(next);
             }
             row
         },
     ];
     save_history(self_id, kernel, &new_turns).await?;
+    *state.prev_request.lock().expect("prev_request poisoned") = next_request;
     Ok(Generation::Answered {
         text: last_text,
         message_id,
