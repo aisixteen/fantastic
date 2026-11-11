@@ -62,7 +62,7 @@ pub struct Host {
 /// agents is the user's to grow, and registering a bundle nobody declared only
 /// widens what a stray record could become. `extras` (an embedding binary's
 /// own bundles, #248; `main_with`'s for the `fantastic` binary) run AFTER the stock set.
-fn registry_with(work: &std::path::Path, extras: &[crate::Extra]) -> BundleRegistry {
+fn registry_with(state: &std::path::Path, extras: &[crate::Extra]) -> BundleRegistry {
     let mut reg = BundleRegistry::new();
     // THE ROOT. Its handler is the durable-state loader; see the module header.
     reg.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
@@ -105,12 +105,12 @@ fn registry_with(work: &std::path::Path, extras: &[crate::Extra]) -> BundleRegis
         fantastic_user_home_store::UserHomeStore::new(fantastic_user_home_store::home_dir_from_env()),
     );
     // THE USER STORE: the keys, set-ups and stored fantastic locations in the
-    // user's home; "here" is this project's dir, fixed by the binary (`kern/user_store`).
+    // user's home; "here" is this fantastic's state folder, fixed by the binary (`kern/user_store`).
     reg.register(
         fantastic_user_home_store::user_store::HANDLER_MODULE,
         fantastic_user_home_store::user_store::UserStore::new(
             fantastic_user_home_store::home_dir_from_env(),
-            std::path::absolute(work).unwrap_or_else(|_| work.to_path_buf()),
+            std::path::absolute(state).unwrap_or_else(|_| state.to_path_buf()),
         ),
     );
     // THE WEB HOST (the one HTTP/WS listener: a recorded one listens in every mode, and
@@ -273,7 +273,7 @@ impl Host {
         web_bind: Option<String>,
     ) -> Result<Self, KernelErr> {
         let booted = bootstrap::bootstrap(
-            registry_with(&paths.work, extras),
+            registry_with(&paths.store, extras),
             BootstrapOptions::daemon(&paths.store, &paths.work),
         )
         .map_err(|e| KernelErr::Boot(format!("{e}")))?;

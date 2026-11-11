@@ -35,7 +35,7 @@ effect, and answers with the matching event:
 |---|---|---|
 | `ReadRegistry` | read every `<home>/fantastics/<folder>/fantastic.yaml` | `RegistryRead { now_ms, entries }` (folder, text), or `RegistryFailed { error }` |
 | `Probe { jobs }` | each job through a `Prober` (below) | `Probed { now_ms, results }` (job key, probe) |
-| `Spawn { path }` | start `fantastic canvas` in `path` | `Spawned { path, result }` |
+| `Spawn { path, workdir }` | start `fantastic canvas --statedir path` in `workdir` | `Spawned { path, result }` |
 | `Terminate { path }` | tell the process holding `path` to stop | `Terminated { path, sent }`, or `StopFailed { path, error }` |
 | `Register { path, port }` | `register_home_folder {value: true}` to `user_store` through the kernel on `port` | `RegisterDone { path, result }` |
 | `SwitchOff { port }` | `register_home_folder {value: false}` to `user_store` on `port` | `Forgot { id, result }` |
@@ -43,13 +43,13 @@ effect, and answers with the matching event:
 
 The user's events need no effect first: `Tick { now_ms }` (look again; the
 reference shell ticks every 2 s), `Start { id, now_ms }`, `Stop { id }`,
-`Open { paths, now_ms }`, `Forget { id }`, `Select { id }`,
+`Open { paths: Vec<Opened>, now_ms }` (`Opened { path: the state folder, workdir: the picked folder or none }`), `Forget { id }`, `Select { id }`,
 `SelectPage { index }`, `ClosePage { id }` and `Dismiss`. At boot,
 `Restore { pages, selection }` gives back the pages and selection the shell
 kept from its last run; the home holds it until the first `RegistryRead`, the
 first moment a page's id can be checked.
 
-## The five questions
+## The six questions
 
 A `Prober` holds one probe procedure: `next()` is the question it needs
 answered (`None` once it is done), `answer()` feeds it, `probe()` is what is
@@ -58,7 +58,8 @@ known. Every OS layer must answer exactly as the reference one
 
 | `Ask` | the exact answer |
 |---|---|
-| `IsFantastic { path }` | `Answer::IsFantastic`: `<path>/.fantastic` exists and is a directory |
+| `IsFantastic { path }` | `Answer::IsFantastic`: `path` (the state folder) is a directory |
+| `Workdir { path }` | `Answer::Workdir`: the `workdir` of the root record in `<path>/agent.yaml`; none when the file or field is missing. Asked only for a registered row in `Lock` mode, right after `IsFantastic` |
 | `LockHolder { path }` | `Answer::LockHolder`: the pid in the folder's lock file if `pid_alive(pid)`, and then only if the lock is held (`lock::held`); a dead pid's stale file is never asked for its lock |
 | `RunFile { path }` | `Answer::RunFile`: `CanvasRun::parse` of `<path>/` + `RUN_FILE`; unreadable or invalid is `None` |
 | `CanvasUp { canvas }` | `Answer::CanvasUp`: an HTTP GET of `canvas.url` answers a status in 200–399 within 1.5 s |
@@ -97,7 +98,7 @@ assert_eq!(home.reduce(Event::Tick { now_ms }), vec![Effect::ReadRegistry]);
 // the shell reads it: one entry, `<home>/fantastics/notes/fantastic.yaml`
 let entries = vec![(
     "notes".to_string(),
-    format!("guid: g-1\npath: /w/notes\npid: 41\ncanvas: {url}\nstored_at: 1\nlast_seen: 1760799000\n"),
+    format!("guid: g-1\npath: /w/notes/.fantastic\npid: 41\ncanvas: {url}\nstored_at: 1\nlast_seen: 1760799000\n"),
 )];
 let jobs = match home.reduce(Event::RegistryRead { now_ms, entries }).as_slice() {
     [Effect::Probe { jobs }] => jobs.clone(),
@@ -107,6 +108,7 @@ let jobs = match home.reduce(Event::RegistryRead { now_ms, entries }).as_slice()
 // the scripted machine: /w/notes runs, held by 41, its canvas answers as g-1
 let machine = |ask: &Ask| match ask {
     Ask::IsFantastic { .. } => Answer::IsFantastic(true),
+    Ask::Workdir { .. } => Answer::Workdir(Some("/w/notes".to_string())),
     Ask::LockHolder { .. } => Answer::LockHolder(Some(41)),
     Ask::RunFile { .. } => Answer::RunFile(CanvasRun::parse(&format!("pid: 41\nport: 8001\nurl: {url}\n"))),
     Ask::CanvasUp { .. } => Answer::CanvasUp(true),
@@ -135,7 +137,7 @@ assert_eq!(rows[0].actions(Mode::Lock), ["stop", "open", "remove"]);
 // the user stops it: the home asks the shell to terminate the holder
 assert_eq!(
     home.reduce(Event::Stop { id: "g-1".to_string() }),
-    vec![Effect::Terminate { path: "/w/notes".to_string() }]
+    vec![Effect::Terminate { path: "/w/notes/.fantastic".to_string() }]
 );
 assert_eq!(home.problem(), None);
 ```

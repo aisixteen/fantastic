@@ -5,7 +5,8 @@
 //! what is known so far. The questions:
 //!
 //! ```text
-//!   IsFantastic { path }   does path/.fantastic/ exist as a directory
+//!   IsFantastic { path }   is path a directory (the state folder)
+//!   Workdir     { path }   the work folder the state folder's root record names
 //!   LockHolder  { path }   the pid holding the folder's lock, if any
 //!   RunFile     { path }   the folder's run file, parsed (CanvasRun::parse)
 //!   CanvasUp    { canvas } does the page answer HTTP 2xx/3xx
@@ -32,6 +33,8 @@ use crate::model::{Canvas, CanvasRun, Registered};
 pub struct Probe {
     /// Its folder has a `.fantastic/` directory.
     pub is_fantastic: bool,
+    /// The work folder its root record names (Lock mode, registered rows only).
+    pub workdir: Option<String>,
     /// The pid holding its folder's lock.
     pub holder: Option<u32>,
     /// The lock holder is the run the registry entry describes.
@@ -65,6 +68,7 @@ pub struct ProbeError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ask {
     IsFantastic { path: String },
+    Workdir { path: String },
     LockHolder { path: String },
     RunFile { path: String },
     CanvasUp { canvas: Canvas },
@@ -76,6 +80,7 @@ impl Ask {
     pub fn name(&self) -> &'static str {
         match self {
             Ask::IsFantastic { .. } => "is_fantastic",
+            Ask::Workdir { .. } => "workdir",
             Ask::LockHolder { .. } => "lock_holder",
             Ask::RunFile { .. } => "run_file",
             Ask::CanvasUp { .. } => "canvas_up",
@@ -88,6 +93,7 @@ impl Ask {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answer {
     IsFantastic(bool),
+    Workdir(Option<String>),
     LockHolder(Option<u32>),
     RunFile(Option<CanvasRun>),
     CanvasUp(bool),
@@ -118,6 +124,7 @@ pub enum Target {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
     IsFantastic,
+    Workdir,
     LockHolder,
     RunFile,
     CanvasUp,
@@ -170,6 +177,9 @@ impl Prober {
             Step::IsFantastic => Some(Ask::IsFantastic {
                 path: self.path().to_string(),
             }),
+            Step::Workdir => Some(Ask::Workdir {
+                path: self.path().to_string(),
+            }),
             Step::LockHolder => Some(Ask::LockHolder {
                 path: self.path().to_string(),
             }),
@@ -195,7 +205,15 @@ impl Prober {
         match (self.step, answer) {
             (Step::IsFantastic, Answer::IsFantastic(is)) => {
                 self.probe.is_fantastic = is;
-                self.step = if is { Step::LockHolder } else { Step::Done };
+                self.step = match (is, &self.target) {
+                    (false, _) => Step::Done,
+                    (true, Target::Registered { .. }) if self.mode == Mode::Lock => Step::Workdir,
+                    (true, _) => Step::LockHolder,
+                };
+            }
+            (Step::Workdir, Answer::Workdir(workdir)) => {
+                self.probe.workdir = workdir;
+                self.step = Step::LockHolder;
             }
             (Step::LockHolder, Answer::LockHolder(holder)) => self.on_holder(holder),
             (Step::RunFile, Answer::RunFile(run)) => self.on_run(run),
@@ -331,6 +349,7 @@ fn start(
 ) -> Probe {
     Probe {
         is_fantastic,
+        workdir: None,
         holder: None,
         owns_entry,
         canvas,
@@ -450,6 +469,7 @@ mod tests {
     ) -> Probe {
         Probe {
             is_fantastic,
+            workdir: None,
             holder,
             owns_entry,
             canvas,
@@ -464,6 +484,9 @@ mod tests {
             .iter()
             .map(|k| match *k {
                 "is" => Ask::IsFantastic {
+                    path: "/w/notes".into(),
+                },
+                "workdir" => Ask::Workdir {
                     path: "/w/notes".into(),
                 },
                 "lock" => Ask::LockHolder {
@@ -499,9 +522,13 @@ mod tests {
         let (asked, probe) = drive(
             target,
             Mode::Lock,
-            vec![Answer::IsFantastic(true), Answer::LockHolder(None)],
+            vec![
+                Answer::IsFantastic(true),
+                Answer::Workdir(None),
+                Answer::LockHolder(None),
+            ],
         );
-        assert_eq!(asked, path_asks(&["is", "lock"]));
+        assert_eq!(asked, path_asks(&["is", "workdir", "lock"]));
         assert_eq!(probe, p(true, None, false, None, false, false));
     }
 
@@ -514,9 +541,13 @@ mod tests {
         let (asked, probe) = drive(
             target,
             Mode::Lock,
-            vec![Answer::IsFantastic(true), Answer::LockHolder(Some(6))],
+            vec![
+                Answer::IsFantastic(true),
+                Answer::Workdir(None),
+                Answer::LockHolder(Some(6)),
+            ],
         );
-        assert_eq!(asked, path_asks(&["is", "lock"]));
+        assert_eq!(asked, path_asks(&["is", "workdir", "lock"]));
         assert_eq!(probe, p(true, Some(6), false, None, false, false));
     }
 
@@ -529,9 +560,13 @@ mod tests {
         let (asked, probe) = drive(
             target,
             Mode::Lock,
-            vec![Answer::IsFantastic(true), Answer::LockHolder(Some(5))],
+            vec![
+                Answer::IsFantastic(true),
+                Answer::Workdir(None),
+                Answer::LockHolder(Some(5)),
+            ],
         );
-        assert_eq!(asked, path_asks(&["is", "lock"]));
+        assert_eq!(asked, path_asks(&["is", "workdir", "lock"]));
         assert_eq!(probe, p(true, Some(5), true, None, false, false));
     }
 
@@ -543,11 +578,12 @@ mod tests {
         };
         let answers = vec![
             Answer::IsFantastic(true),
+            Answer::Workdir(None),
             Answer::LockHolder(Some(5)),
             Answer::CanvasUp(false),
         ];
         let (asked, probe) = drive(target, Mode::Lock, answers);
-        let mut want = path_asks(&["is", "lock"]);
+        let mut want = path_asks(&["is", "workdir", "lock"]);
         want.push(Ask::CanvasUp {
             canvas: canvas(8000),
         });
@@ -566,12 +602,13 @@ mod tests {
         };
         let answers = vec![
             Answer::IsFantastic(true),
+            Answer::Workdir(None),
             Answer::LockHolder(Some(5)),
             Answer::CanvasUp(true),
             Answer::Guid(Some("g-1".into())),
         ];
         let (asked, probe) = drive(target, Mode::Lock, answers);
-        let mut want = path_asks(&["is", "lock"]);
+        let mut want = path_asks(&["is", "workdir", "lock"]);
         want.push(Ask::CanvasUp {
             canvas: canvas(8000),
         });
@@ -593,6 +630,7 @@ mod tests {
             };
             let answers = vec![
                 Answer::IsFantastic(true),
+                Answer::Workdir(None),
                 Answer::LockHolder(Some(5)),
                 Answer::CanvasUp(true),
                 Answer::Guid(guid),
@@ -613,6 +651,7 @@ mod tests {
         };
         let answers = vec![
             Answer::IsFantastic(true),
+            Answer::Workdir(None),
             Answer::LockHolder(Some(5)),
             Answer::CanvasUp(true),
         ];
@@ -622,6 +661,36 @@ mod tests {
             probe,
             p(true, Some(5), true, Some(canvas(8000)), true, true)
         );
+    }
+
+    #[test]
+    fn a_registered_lock_probe_asks_the_workdir_after_is_fantastic() {
+        let target = Target::Registered {
+            reg: reg(None, None),
+            verified: false,
+        };
+        let (asked, probe) = drive(
+            target,
+            Mode::Lock,
+            vec![
+                Answer::IsFantastic(true),
+                Answer::Workdir(Some("/w/proj".into())),
+                Answer::LockHolder(None),
+            ],
+        );
+        assert_eq!(asked, path_asks(&["is", "workdir", "lock"]));
+        assert_eq!(probe.workdir.as_deref(), Some("/w/proj"));
+    }
+
+    #[test]
+    fn an_adding_probe_never_asks_it() {
+        let (asked, probe) = drive(
+            adding(),
+            Mode::Lock,
+            vec![Answer::IsFantastic(true), Answer::LockHolder(None)],
+        );
+        assert_eq!(asked, path_asks(&["is", "lock"]));
+        assert_eq!(probe.workdir, None);
     }
 
     // ── Lock / Adding ───────────────────────────────────────────────────────
@@ -822,6 +891,7 @@ mod tests {
         let mut prober = Prober::new(target, Mode::Lock);
         let ask = prober.next().expect("a question");
         prober.answer(Answer::IsFantastic(true));
+        prober.answer(Answer::Workdir(None));
         let ask2 = prober.next().expect("a question");
         assert_eq!(ask2.name(), "lock_holder");
         prober.note_error(&ask2, "the lock: Access is denied".into());

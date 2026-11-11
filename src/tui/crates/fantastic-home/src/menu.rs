@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::intent::Intent;
+use crate::model::Opened;
 use crate::viewmodel::Home;
 
 /// The spec's version; a shell refuses any other.
@@ -379,10 +380,13 @@ impl Home {
             .map(|reg| {
                 action(
                     format!("recent:{}", reg.guid),
-                    reg.display_name(),
+                    self.name_of_entry(reg),
                     None,
                     Some(Intent::Open {
-                        paths: vec![reg.path.clone()],
+                        paths: vec![Opened {
+                            path: reg.path.clone(),
+                            workdir: None,
+                        }],
                     }),
                 )
             })

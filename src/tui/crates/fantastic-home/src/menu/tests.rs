@@ -137,7 +137,7 @@ fn open_recent_is_newest_first_capped_at_ten_and_absent_when_empty() {
     assert_eq!(ids, want);
     assert!(matches!(
         &recent.items[0],
-        Item::Action { send: Some(Intent::Open { paths }), label, .. } if paths == &["/w/n12"] && label == "N12"
+        Item::Action { send: Some(Intent::Open { paths }), label, .. } if paths == &[Opened { path: "/w/n12".into(), workdir: None }] && label == "N12"
     ));
 }
 
@@ -191,7 +191,10 @@ fn open_action(id: &str, accel: Option<&str>) -> Item {
         "L".into(),
         accel.map(str::to_string),
         Some(Intent::Open {
-            paths: vec!["/a".into()],
+            paths: vec![Opened {
+                path: "/a".into(),
+                workdir: None,
+            }],
         }),
     )
 }

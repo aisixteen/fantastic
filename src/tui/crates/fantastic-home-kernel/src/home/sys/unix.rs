@@ -115,7 +115,7 @@ pub fn parse_login_env(printed: &[u8]) -> Result<Vec<(OsString, OsString)>, Stri
     Ok(out)
 }
 
-/// Start `<bin> canvas` in `path` with exactly `env` plus `FANTASTIC_HOME=<home>`,
+/// Start `<bin> canvas --statedir <path>` in the folder `workdir` with exactly `env` plus `FANTASTIC_HOME=<home>`,
 /// stdin and stdout null, stderr to `log` (`0600`). The child leads its own
 /// session (`setsid`), so it outlives the host and never gets its terminal's
 /// signals, and it inherits NO other descriptor of the host: a long-lived canvas
@@ -124,6 +124,7 @@ pub fn parse_login_env(printed: &[u8]) -> Result<Vec<(OsString, OsString)>, Stri
 pub async fn spawn(
     bin: &Path,
     path: &str,
+    workdir: &str,
     env: &[(OsString, OsString)],
     home: &Path,
     log: &Path,
@@ -137,7 +138,9 @@ pub async fn spawn(
         .map_err(|e| format!("{}: {e}", log.display()))?;
     let mut cmd = tokio::process::Command::new(bin);
     cmd.arg("canvas")
-        .current_dir(path)
+        .arg("--statedir")
+        .arg(path)
+        .current_dir(workdir)
         .env_clear()
         .envs(env.iter().map(|(k, v)| (k, v)))
         .env("FANTASTIC_HOME", home)

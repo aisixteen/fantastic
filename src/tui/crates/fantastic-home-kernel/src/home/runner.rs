@@ -329,8 +329,8 @@ impl Runner {
                     results: futures_util::future::join_all(probes).await,
                 }
             }
-            Effect::Spawn { path } => Event::Spawned {
-                result: os.spawn(&path).await,
+            Effect::Spawn { path, workdir } => Event::Spawned {
+                result: os.spawn(&path, &workdir).await,
                 path,
             },
             Effect::Terminate { path } => match os.terminate(&path).await {

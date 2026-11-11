@@ -11,7 +11,7 @@
 //! ```text
 //!   ReadRegistry              → RegistryRead
 //!   Probe { jobs }            → Probed (each job run with probe::Prober)
-//!   Spawn { path }            → Spawned
+//!   Spawn { path, workdir }   → Spawned
 //!   Terminate { path }        → Terminated
 //!   Register { path, port }   → RegisterDone
 //!   SwitchOff { port }        → Forgot
@@ -39,7 +39,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use crate::model::{last_component, registered, Canvas, Registered};
+use crate::model::{last_component, registered, Canvas, Opened, Registered};
 use crate::probe::{is_active, Mode, Probe, Status, Target};
 
 /// The prefix of a folder-being-added's entry id.
@@ -144,7 +144,7 @@ pub enum Event {
     /// A `Terminate` ran; `sent`: the fantastic was told to stop.
     Terminated { path: String, sent: bool },
     /// Open these folders (from the command line, a drop, a dialog).
-    Open { paths: Vec<String>, now_ms: u64 },
+    Open { paths: Vec<Opened>, now_ms: u64 },
     /// A `Register` ran.
     RegisterDone {
         path: String,
@@ -185,7 +185,7 @@ pub enum Effect {
     /// Run each job's probe.
     Probe { jobs: Vec<Job> },
     /// Start the fantastic in `path` with its canvas.
-    Spawn { path: String },
+    Spawn { path: String, workdir: String },
     /// Tell the fantastic in `path` to stop.
     Terminate { path: String },
     /// Turn the home-folder switch of the fantastic in `path` on, through its
@@ -247,6 +247,8 @@ pub struct Demotion {
 #[derive(Debug, Clone)]
 struct Adding {
     path: String,
+    /// The picked work folder.
+    workdir: String,
     since_ms: u64,
     /// The home started it.
     started: bool,
@@ -274,7 +276,7 @@ pub struct Home {
     selection: Option<String>,
     problem: Option<String>,
     listed: bool,
-    pending_opens: Vec<String>,
+    pending_opens: Vec<Opened>,
     /// The registry has been read at least once.
     read_once: bool,
     /// A `Restore` that arrived before the first registry read.
@@ -364,7 +366,10 @@ impl Home {
             Event::Start { id, now_ms } => {
                 self.at(now_ms);
                 match self.path_of(&id) {
-                    Some(path) => self.start(&path, now_ms),
+                    Some(path) => {
+                        let workdir = self.workdir_of(&path);
+                        self.start(&path, workdir, now_ms)
+                    }
                     None => Vec::new(),
                 }
             }
@@ -473,7 +478,7 @@ impl Home {
         let registered = self.entries.iter().map(|reg| Row {
             id: reg.guid.clone(),
             guid: Some(reg.guid.clone()),
-            name: reg.display_name(),
+            name: self.name_of_entry(reg),
             path: reg.path.clone(),
             last_seen: Some(reg.last_seen),
             status: self.status_of(reg, now_ms),
@@ -482,7 +487,7 @@ impl Home {
         let adding = self.adding.iter().map(|a| Row {
             id: adding_id(&a.path),
             guid: None,
-            name: last_component(&a.path).to_string(),
+            name: last_component(&a.workdir).to_string(),
             path: a.path.clone(),
             last_seen: None,
             status: Status::Starting,
@@ -636,7 +641,7 @@ impl Home {
                 continue;
             };
             let path = reg.path.clone();
-            let name = reg.display_name();
+            let name = self.name_of_entry(reg);
             let active = is_active(probe);
             let no_holder = probe.holder.is_none();
             let mut launching = false;
@@ -711,7 +716,7 @@ impl Home {
         effects
     }
 
-    fn start(&mut self, path: &str, now_ms: u64) -> Vec<Effect> {
+    fn start(&mut self, path: &str, workdir: Option<String>, now_ms: u64) -> Vec<Effect> {
         if self.config.mode == Mode::Canvas {
             self.problem = Some(format!(
                 "{} can only be started from the full app.",
@@ -719,10 +724,18 @@ impl Home {
             ));
             return Vec::new();
         }
+        let Some(workdir) = workdir else {
+            self.problem = Some(format!(
+                "{} has no recorded work folder",
+                self.name_of_path(path)
+            ));
+            return Vec::new();
+        };
         self.stopping.remove(path);
         self.launches.insert(path.to_string(), now_ms);
         vec![Effect::Spawn {
             path: path.to_string(),
+            workdir,
         }]
     }
 
@@ -739,22 +752,23 @@ impl Home {
         }]
     }
 
-    fn open(&mut self, paths: Vec<String>, now_ms: u64) -> Vec<Effect> {
+    fn open(&mut self, paths: Vec<Opened>, now_ms: u64) -> Vec<Effect> {
         if !self.listed {
             self.pending_opens.extend(paths);
             return Vec::new();
         }
         let lock = self.config.mode == Mode::Lock;
         let mut effects = Vec::new();
-        for path in paths {
+        for Opened { path, workdir } in paths {
             if let Some(reg) = self.entries.iter().find(|r| r.path == path) {
                 let id = reg.guid.clone();
-                let name = reg.display_name();
+                let name = self.name_of_entry(reg);
                 let stopped = self.status_of(reg, now_ms) == Status::Stopped;
                 if lock || !stopped {
                     self.open_page(&id);
                     if lock && stopped {
-                        effects.extend(self.start(&path, now_ms));
+                        let workdir = self.workdir_of(&path);
+                        effects.extend(self.start(&path, workdir, now_ms));
                     }
                 } else {
                     self.problem = Some(format!("{name} isn't running"));
@@ -766,14 +780,15 @@ impl Home {
                     .folder_probes
                     .get(&path)
                     .is_some_and(|p| p.holder.is_some());
+                let workdir = workdir.unwrap_or_default();
                 if held {
-                    self.begin_adding(&path, now_ms, false);
+                    self.begin_adding(&path, &workdir, now_ms, false);
                 } else {
-                    effects.extend(self.start(&path, now_ms));
-                    self.begin_adding(&path, now_ms, true);
+                    effects.extend(self.start(&path, Some(workdir.clone()), now_ms));
+                    self.begin_adding(&path, &workdir, now_ms, true);
                 }
             } else {
-                self.begin_adding(&path, now_ms, false);
+                self.begin_adding(&path, &workdir.unwrap_or_default(), now_ms, false);
             }
         }
         effects
@@ -781,14 +796,16 @@ impl Home {
 
     /// The add of `path` ends: its launch is dropped and `reason` is the problem.
     fn fail_adding(&mut self, path: &str, reason: &str) {
+        let name = self.name_of_path(path);
         self.adding.retain(|a| a.path != path);
         self.launches.remove(path);
-        self.problem = Some(format!("Could not add {}: {reason}", last_component(path)));
+        self.problem = Some(format!("Could not add {name}: {reason}"));
     }
 
-    fn begin_adding(&mut self, path: &str, now_ms: u64, started: bool) {
+    fn begin_adding(&mut self, path: &str, workdir: &str, now_ms: u64, started: bool) {
         self.adding.push(Adding {
             path: path.to_string(),
+            workdir: workdir.to_string(),
             since_ms: now_ms,
             started,
             probe: None,
@@ -820,7 +837,7 @@ impl Home {
             None => {
                 self.problem = Some(format!(
                     "Start any fantastic to remove {} — only a running one can change the list.",
-                    reg.display_name()
+                    self.name_of_entry(reg)
                 ));
                 Vec::new()
             }
@@ -929,17 +946,42 @@ impl Home {
 
     fn name_of_path(&self, path: &str) -> String {
         match self.entries.iter().find(|r| r.path == path) {
-            Some(reg) => reg.display_name(),
-            None => last_component(path).to_string(),
+            Some(reg) => self.name_of_entry(reg),
+            None => match self.adding.iter().find(|a| a.path == path) {
+                Some(a) => last_component(&a.workdir).to_string(),
+                None => last_component(path).to_string(),
+            },
+        }
+    }
+
+    /// An entry's name: its own, else its probed work folder's last component.
+    pub(crate) fn name_of_entry(&self, reg: &Registered) -> String {
+        let workdir = self
+            .probes
+            .get(&reg.guid)
+            .and_then(|p| p.workdir.as_deref());
+        reg.display_name(workdir)
+    }
+
+    /// The work folder of the state folder `path`: a registered entry's probed
+    /// one, an added folder's picked one.
+    fn workdir_of(&self, path: &str) -> Option<String> {
+        match self.entries.iter().find(|r| r.path == path) {
+            Some(reg) => self.probes.get(&reg.guid).and_then(|p| p.workdir.clone()),
+            None => self
+                .adding
+                .iter()
+                .find(|a| a.path == path)
+                .map(|a| a.workdir.clone()),
         }
     }
 
     /// An entry's name by its id; an unknown id is itself.
     pub(crate) fn name_of_id(&self, id: &str) -> String {
         match id.strip_prefix(ADDING) {
-            Some(path) => last_component(path).to_string(),
+            Some(path) => self.name_of_path(path),
             None => match self.entries.iter().find(|r| r.guid == id) {
-                Some(reg) => reg.display_name(),
+                Some(reg) => self.name_of_entry(reg),
                 None => id.to_string(),
             },
         }
@@ -980,7 +1022,9 @@ mod tests {
         port: Option<u16>,
         stored_at: i64,
     ) -> (String, String) {
-        let mut yaml = format!("guid: {guid}\npath: {path}\nstored_at: {stored_at}\n");
+        let name = last_component(path);
+        let mut yaml =
+            format!("guid: {guid}\nname: {name}\npath: {path}\nstored_at: {stored_at}\n");
         if let Some(pid) = pid {
             yaml.push_str(&format!("pid: {pid}\n"));
         }
@@ -993,6 +1037,7 @@ mod tests {
     fn stopped() -> Probe {
         Probe {
             is_fantastic: true,
+            workdir: None,
             holder: None,
             owns_entry: false,
             canvas: None,
@@ -1002,9 +1047,16 @@ mod tests {
         }
     }
 
+    /// `probe` with the work folder its root record names.
+    fn at(workdir: &str, mut probe: Probe) -> Probe {
+        probe.workdir = Some(workdir.into());
+        probe
+    }
+
     fn running(pid: u32, port: u16) -> Probe {
         Probe {
             is_fantastic: true,
+            workdir: None,
             holder: Some(pid),
             owns_entry: true,
             canvas: Some(canvas(port)),
@@ -1018,6 +1070,7 @@ mod tests {
     fn held(pid: u32, port: Option<u16>) -> Probe {
         Probe {
             is_fantastic: true,
+            workdir: None,
             holder: Some(pid),
             owns_entry: true,
             canvas: port.map(canvas),
@@ -1036,6 +1089,15 @@ mod tests {
 
     fn read(home: &mut Home, now_ms: u64, entries: Vec<(String, String)>) -> Vec<Job> {
         jobs(home.reduce(Event::RegistryRead { now_ms, entries }))
+    }
+
+    /// A folder opened: in these fixtures the state folder and the work folder
+    /// are one path.
+    fn opened(path: &str) -> Opened {
+        Opened {
+            path: path.into(),
+            workdir: Some(path.into()),
+        }
     }
 
     fn probed(home: &mut Home, now_ms: u64, results: Vec<(&str, Probe)>) -> Vec<Effect> {
@@ -1085,7 +1147,7 @@ mod tests {
     fn a_launch_is_starting_within_its_grace_then_a_problem() {
         let mut h = home(Mode::Lock);
         read(&mut h, 0, vec![entry("g1", "/w/a", None, None, 0)]);
-        probed(&mut h, 0, vec![("g1", stopped())]);
+        probed(&mut h, 0, vec![("g1", at("/w/a", stopped()))]);
         assert_eq!(status(&h, "g1", 0), Status::Stopped);
 
         let effects = h.reduce(Event::Start {
@@ -1095,7 +1157,8 @@ mod tests {
         assert_eq!(
             effects,
             vec![Effect::Spawn {
-                path: "/w/a".into()
+                path: "/w/a".into(),
+                workdir: "/w/a".into()
             }]
         );
         assert_eq!(status(&h, "g1", 1_000), Status::Starting);
@@ -1113,7 +1176,7 @@ mod tests {
     fn a_launch_that_runs_is_dropped() {
         let mut h = home(Mode::Lock);
         read(&mut h, 0, vec![entry("g1", "/w/a", None, None, 0)]);
-        probed(&mut h, 0, vec![("g1", stopped())]);
+        probed(&mut h, 0, vec![("g1", at("/w/a", stopped()))]);
         h.reduce(Event::Start {
             id: "g1".into(),
             now_ms: 0,
@@ -1137,7 +1200,7 @@ mod tests {
         read(&mut h, 0, vec![]);
         probed(&mut h, 0, vec![]);
         h.reduce(Event::Open {
-            paths: vec!["/w/alpha".into()],
+            paths: vec![opened("/w/alpha")],
             now_ms: 0,
         });
         h.reduce(Event::Spawned {
@@ -1149,6 +1212,80 @@ mod tests {
             Some("Could not add alpha: it did not start — no login environment: SHELL is not set")
         );
         assert!(ids(&h).is_empty());
+    }
+
+    #[test]
+    fn open_folder_spawns_the_state_folder_with_the_picked_work_folder() {
+        let mut h = home(Mode::Lock);
+        read(&mut h, 0, vec![]);
+        probed(&mut h, 0, vec![]);
+        let effects = h.reduce(Event::Open {
+            paths: vec![Opened {
+                path: "/w/alpha/.fantastic".into(),
+                workdir: Some("/w/alpha".into()),
+            }],
+            now_ms: 0,
+        });
+        assert_eq!(
+            effects,
+            vec![Effect::Spawn {
+                path: "/w/alpha/.fantastic".into(),
+                workdir: "/w/alpha".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn an_unnamed_row_is_named_after_its_recorded_workdir() {
+        let mut h = home(Mode::Lock);
+        read(
+            &mut h,
+            0,
+            vec![("f".into(), "guid: g1\npath: /w/proj/.fantastic\n".into())],
+        );
+        assert_eq!(h.rows(0)[0].name, "");
+        let mut probe = stopped();
+        probe.workdir = Some("/w/proj".into());
+        probed(&mut h, 0, vec![("g1", probe)]);
+        assert_eq!(h.rows(0)[0].name, "proj");
+    }
+
+    #[test]
+    fn an_adding_row_is_named_after_the_picked_folder() {
+        let mut h = home(Mode::Lock);
+        read(&mut h, 0, vec![]);
+        probed(&mut h, 0, vec![]);
+        h.reduce(Event::Open {
+            paths: vec![Opened {
+                path: "/w/alpha/.fantastic".into(),
+                workdir: Some("/w/alpha".into()),
+            }],
+            now_ms: 0,
+        });
+        assert_eq!(h.rows(0)[0].name, "alpha");
+    }
+
+    #[test]
+    fn a_registered_start_without_a_recorded_workdir_is_a_problem() {
+        let mut h = home(Mode::Lock);
+        read(
+            &mut h,
+            0,
+            vec![(
+                "f".into(),
+                "guid: g1\nname: a\npath: /w/a/.fantastic\n".into(),
+            )],
+        );
+        h.reduce(Event::Probed {
+            now_ms: 0,
+            results: vec![("g1".into(), stopped())],
+        });
+        let effects = h.reduce(Event::Start {
+            id: "g1".into(),
+            now_ms: 0,
+        });
+        assert_eq!(effects, vec![]);
+        assert_eq!(h.problem(), Some("a has no recorded work folder"));
     }
 
     #[test]
@@ -1284,6 +1421,7 @@ mod tests {
         // Another run holds the folder: unverified, not running.
         let other = Probe {
             is_fantastic: true,
+            workdir: None,
             holder: Some(9),
             owns_entry: false,
             canvas: None,
@@ -1420,6 +1558,7 @@ mod tests {
         assert_eq!(next.len(), 1);
         let answered = Prober::new(next[0].target.clone(), next[0].mode).run(|ask| match ask {
             Ask::IsFantastic { .. } => Answer::IsFantastic(true),
+            Ask::Workdir { .. } => Answer::Workdir(Some("/w/a".into())),
             Ask::LockHolder { .. } => Answer::LockHolder(Some(7)),
             Ask::RunFile { .. } => Answer::RunFile(None),
             Ask::CanvasUp { .. } => Answer::CanvasUp(true),
@@ -1448,7 +1587,7 @@ mod tests {
         read(&mut h, 0, vec![]);
         probed(&mut h, 0, vec![]);
         let effects = h.reduce(Event::Open {
-            paths: vec!["/w/new".into()],
+            paths: vec![opened("/w/new")],
             now_ms: 100,
         });
         assert_eq!(effects, vec![], "the sandboxed app starts nothing");
@@ -1507,13 +1646,14 @@ mod tests {
         read(&mut h, 0, vec![]);
         probed(&mut h, 0, vec![]);
         let effects = h.reduce(Event::Open {
-            paths: vec!["/w/new".into()],
+            paths: vec![opened("/w/new")],
             now_ms: 0,
         });
         assert_eq!(
             effects,
             vec![Effect::Spawn {
-                path: "/w/new".into()
+                path: "/w/new".into(),
+                workdir: "/w/new".into()
             }]
         );
         read(&mut h, 1_000, vec![]);
@@ -1545,7 +1685,7 @@ mod tests {
         read(&mut h, 0, vec![]);
         probed(&mut h, 0, vec![]);
         h.reduce(Event::Open {
-            paths: vec!["/w/new".into()],
+            paths: vec![opened("/w/new")],
             now_ms: 0,
         });
         probed(&mut h, 10, vec![("adding:/w/new", held(9, Some(8200)))]);
@@ -1580,13 +1720,14 @@ mod tests {
         probed(&mut h, 0, vec![]);
         // First open: nothing holds it as far as the home knows, so it starts it.
         let effects = h.reduce(Event::Open {
-            paths: vec!["/w/term".into()],
+            paths: vec![opened("/w/term")],
             now_ms: 0,
         });
         assert_eq!(
             effects,
             vec![Effect::Spawn {
-                path: "/w/term".into()
+                path: "/w/term".into(),
+                workdir: "/w/term".into()
             }]
         );
         probed(&mut h, 1_000, vec![("adding:/w/term", held(5, None))]);
@@ -1596,7 +1737,7 @@ mod tests {
 
         // Opened again: its last probe shows a holder, so it is not started.
         let effects = h.reduce(Event::Open {
-            paths: vec!["/w/term".into()],
+            paths: vec![opened("/w/term")],
             now_ms: 40_000,
         });
         assert_eq!(effects, vec![]);
@@ -1633,6 +1774,7 @@ mod tests {
             asked.push(ask.clone());
             match ask {
                 Ask::IsFantastic { .. } => Answer::IsFantastic(true),
+                Ask::Workdir { .. } => Answer::Workdir(Some("/w/a".into())),
                 Ask::LockHolder { .. } => Answer::LockHolder(Some(7)),
                 Ask::CanvasUp { .. } => Answer::CanvasUp(true),
                 other => panic!("asked {other:?}"),
@@ -1700,7 +1842,7 @@ mod tests {
         );
 
         let effects = h.reduce(Event::Open {
-            paths: vec!["/w/b".into(), "/w/a".into(), "/w/c".into()],
+            paths: vec![opened("/w/b"), opened("/w/a"), opened("/w/c")],
             now_ms: 2,
         });
         assert!(
@@ -1725,15 +1867,20 @@ mod tests {
                 entry("g2", "/w/b", Some(7), Some(8100), 1),
             ],
         );
-        probed(&mut h, 0, vec![("g1", stopped()), ("g2", running(7, 8100))]);
+        probed(
+            &mut h,
+            0,
+            vec![("g1", at("/w/a", stopped())), ("g2", running(7, 8100))],
+        );
         let effects = h.reduce(Event::Open {
-            paths: vec!["/w/a".into(), "/w/b".into()],
+            paths: vec![opened("/w/a"), opened("/w/b")],
             now_ms: 5,
         });
         assert_eq!(
             effects,
             vec![Effect::Spawn {
-                path: "/w/a".into()
+                path: "/w/a".into(),
+                workdir: "/w/a".into()
             }]
         );
         assert_eq!(h.pages(), ["g1", "g2"]);
@@ -1746,7 +1893,7 @@ mod tests {
         let mut h = home(Mode::Lock);
         assert_eq!(
             h.reduce(Event::Open {
-                paths: vec!["/w/a".into()],
+                paths: vec![opened("/w/a")],
                 now_ms: 0
             }),
             vec![]
@@ -1754,12 +1901,13 @@ mod tests {
         assert!(h.pages().is_empty());
         assert!(!h.listed());
         read(&mut h, 1, vec![entry("g1", "/w/a", None, None, 0)]);
-        let effects = probed(&mut h, 1, vec![("g1", stopped())]);
+        let effects = probed(&mut h, 1, vec![("g1", at("/w/a", stopped()))]);
         assert!(h.listed());
         assert_eq!(
             effects,
             vec![Effect::Spawn {
-                path: "/w/a".into()
+                path: "/w/a".into(),
+                workdir: "/w/a".into()
             }]
         );
         assert_eq!(h.pages(), ["g1"]);
@@ -1889,7 +2037,7 @@ mod tests {
             id: Some("g1".into()),
         });
         h.reduce(Event::Open {
-            paths: vec!["/w/new".into()],
+            paths: vec![opened("/w/new")],
             now_ms: 1,
         });
         assert_eq!(h.pages(), ["g1", "adding:/w/new"]);
@@ -1915,7 +2063,7 @@ mod tests {
         );
         probed(&mut h, 0, vec![("g2", running(7, 8100))]);
         h.reduce(Event::Open {
-            paths: vec!["/w/z/".into()],
+            paths: vec![opened("/w/z/")],
             now_ms: 0,
         });
         let rows = h.rows(0);
@@ -1967,7 +2115,7 @@ mod tests {
     fn a_stop_that_cannot_be_sent_is_a_problem() {
         let mut h = home(Mode::Lock);
         let mut notes = entry("g1", "/w/a", Some(7), Some(8100), 0);
-        notes.1.push_str("name: Notes\n");
+        notes.1 = notes.1.replace("name: a\n", "name: Notes\n");
         read(&mut h, 0, vec![notes]);
         probed(&mut h, 0, vec![("g1", running(7, 8100))]);
         h.reduce(Event::Stop { id: "g1".into() });
@@ -2187,7 +2335,7 @@ mod tests {
             selection: Some("g1".into()),
         });
         h.reduce(Event::Open {
-            paths: vec!["/w/b".into()],
+            paths: vec![opened("/w/b")],
             now_ms: 0,
         });
         read(

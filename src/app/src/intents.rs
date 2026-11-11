@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use fantastic_home::Intent;
+use fantastic_home::{Intent, Opened};
 use tauri::AppHandle;
 use tauri_plugin_dialog::DialogExt;
 
@@ -62,7 +62,13 @@ async fn send(app: &AppHandle, paths: Vec<PathBuf>) {
         }
     }
     if !texts.is_empty() {
-        home::send(app, Intent::Open { paths: texts }).await;
+        home::send(
+            app,
+            Intent::Open {
+                paths: texts.into_iter().map(Opened::from).collect(),
+            },
+        )
+        .await;
     }
 }
 

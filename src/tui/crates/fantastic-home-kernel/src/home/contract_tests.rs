@@ -237,11 +237,11 @@ async fn replay(doc: &Value) -> Map<String, Value> {
             assert_eq!(types, strings(want), "{name}: emitted {emitted:?}");
         }
         if let Some(want) = c.get("expect_spawned") {
-            assert_eq!(
-                r.os.spawned()[spawned..],
-                strings(want)[..],
-                "{name}: spawned"
-            );
+            let paths: Vec<String> = r.os.spawned()[spawned..]
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect();
+            assert_eq!(paths, strings(want), "{name}: spawned");
         }
         if let Some(want) = c.get("expect_terminated") {
             assert_eq!(
