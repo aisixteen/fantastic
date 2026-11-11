@@ -237,3 +237,58 @@ fn an_unusable_wrap_value_is_refused_at_the_write() {
         }
     }
 }
+
+async fn set_can_call(kernel: &Arc<Kernel>, backend: &AgentId, can_call: Value) {
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": backend.as_str(), "can_call": can_call}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(r.get("error").is_none(), "{r}");
+}
+
+/// The default block's tree primer for one chat, plus what the operator's own
+/// `reflect` renders to.
+async fn primer_run(tag: &str, grant_kernel_state: bool) -> (String, String) {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, tag).await;
+    let mut can_call = helpers::agent_meta(&backend, &kernel)["can_call"].clone();
+    if !grant_kernel_state {
+        can_call.as_object_mut().unwrap().remove("kernel_state");
+        can_call.as_object_mut().unwrap().remove("kernel");
+    }
+    set_can_call(&kernel, &backend, can_call).await;
+    let s = script(
+        &backend,
+        vec![pass(r#"ok <call name="done"></call>"#)],
+        Duration::ZERO,
+    );
+    say(&kernel, &backend, json!({"type": "send", "text": "go"})).await;
+    assert!(until_passes(&s, 1).await);
+    let operator = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "reflect", "tree": "ids", "bundles": "ids"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    (system_of(&s, 0), assembly::render_reflect(&operator))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chat_without_a_kernel_state_grant_still_gets_the_tree_primer() {
+    let (system, expected) = primer_run("sp_nogrant", false).await;
+    assert!(!system.contains("unauthorized"), "{system}");
+    assert!(!system.contains("error="), "{system}");
+    assert!(system.contains(&expected), "{system}\n--\n{expected}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chat_with_the_grant_gets_the_same_primer_text() {
+    let (system, expected) = primer_run("sp_grant", true).await;
+    assert!(system.contains(&expected), "{system}\n--\n{expected}");
+}
