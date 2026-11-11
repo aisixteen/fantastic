@@ -92,6 +92,16 @@ impl Bundle for AiChatBundle {
         Some(README)
     }
 
+    /// The write-time check of the chat's own prompt-file fields (the provider's `validate_meta`
+    /// ran it before the split): a value the file could never be read through is refused at the write.
+    fn validate_meta(
+        &self,
+        meta: &serde_json::Map<String, Value>,
+        _record: &serde_json::Map<String, Value>,
+    ) -> Option<String> {
+        crate::prompt_file::shape_error(meta)
+    }
+
     async fn handle(
         &self,
         agent_id: &AgentId,

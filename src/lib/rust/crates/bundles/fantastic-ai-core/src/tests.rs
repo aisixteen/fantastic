@@ -8361,6 +8361,16 @@ async fn an_ai_chat_holds_the_conversation_and_completes_through_its_provider() 
     let refl = kernel.send(vec![Item::new(AgentId::from("chat1"), json!({"type": "reflect"}))]).await.remove(0).result;
     assert_eq!(refl["provider_id"], "prov", "{refl}");
 
+    // a prompt file the chat could never read is refused at the write, as the provider's check did before the split
+    for (field, bad) in [("system_prompt_file", json!("")), ("file_bridge_id", json!(5))] {
+        let r = kernel
+            .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "update_agent", "id": "chat1", field: bad}))])
+            .await
+            .remove(0)
+            .result;
+        assert!(r["error"].as_str().unwrap_or_default().contains(&format!("{field} must be a non-empty")), "{field}: {r}");
+    }
+
     // the chat names its own model: the next pass runs on it, the conversation stays
     kernel.update(&AgentId::from("chat1"), json!({"model": "m-big"}).as_object().unwrap().clone());
     let r = kernel

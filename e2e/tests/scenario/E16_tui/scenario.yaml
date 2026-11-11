@@ -67,6 +67,8 @@ runs:
       key down
       wait 200
       key down
+      wait 200
+      key down
       wait 300
       key enter
       wait 1200
@@ -76,7 +78,7 @@ runs:
       key ctrl-c
       exit 8000
     frames:
-      # Activity, `kernel_memory` (the kernel's RAM store) and `user` sit under the kernel's row; mcp is user's third child: six down
+      # Activity, `kernel_memory` (the kernel's RAM store), `sidebar` and `user` sit under the kernel's row; mcp is user's third child (after exec and files): seven down
       live: {contains: [exec, files, user, "✉ Activity"], contains_block_title: false}
       # mcp has no specific view: who it is, who it talks to, its verbs (its rows
       # sit below the frame: its grant lists are long)

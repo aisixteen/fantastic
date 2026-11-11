@@ -260,7 +260,13 @@ class Page:
                 # its url, as `ws_frames` counts frames
                 fr = m["params"].get("frame") or {}
                 if fr.get("parentId"):
-                    self.navigations.append(fr.get("url", ""))
+                    # `main_frame_id` (set by a probe that names it): only the page's OWN child frames
+                    # count in `navigations`; a frame inside one of them (a cell's iframe drawing
+                    # itself) is kept apart in `nested_navigations`
+                    if fr["parentId"] == getattr(self, "main_frame_id", fr["parentId"]):
+                        self.navigations.append(fr.get("url", ""))
+                    elif hasattr(self, "nested_navigations"):
+                        self.nested_navigations.append(fr.get("url", ""))
             elif m.get("method") == "Runtime.consoleAPICalled" and m["params"]["type"] == "error":
                 self.logs.append("ERR " + " ".join(str(a.get("value", a.get("description", ""))) for a in m["params"]["args"]))
             if m.get("id") == me:

@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, watch};
 
 use crate::local::TUI;
@@ -20,7 +20,10 @@ async fn read_down<R: AsyncReadExt + Unpin>(r: &mut R) -> Option<Down> {
 
 /// Run `f` with a scratch `cli` folder: the channel's endpoint file lives there.
 fn in_scratch_dir(f: impl FnOnce(&Path)) {
-    let dir: PathBuf = std::env::temp_dir().join(format!("fantastic-share-test-{}", std::process::id()));
+    // one folder per call: the tests of this file run in parallel threads of one process
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let dir: PathBuf = std::env::temp_dir().join(format!("fantastic-share-test-{}-{n}", std::process::id()));
     let cli = dir.join(".fantastic/cli");
     std::fs::create_dir_all(&cli).expect("scratch dir");
     f(&cli);
@@ -60,6 +63,30 @@ fn thin_clients_are_greeted_by_the_kernel_they_attach_to() {
             match read_down(&mut r).await {
                 Some(Down::Hello { pid }) => assert_eq!(pid, std::process::id()),
                 other => panic!("expected a Hello, got {other:?}"),
+            }
+        });
+    });
+}
+
+/// The real client sends its size right after the Hello. The Bye must still reach it: the owner
+/// does not drop the connection with that size unread (a reset could discard the Bye).
+#[test]
+fn a_client_that_sends_its_size_still_gets_the_bye() {
+    in_scratch_dir(|cli| {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+        rt.block_on(async {
+            let (tx, _rx) = mpsc::channel(8);
+            let (_ftx, frames) = watch::channel(None);
+            let _owner = share::listen(tx, frames, false, cli).expect("listen");
+            let stream = crate::local::connect(cli, TUI).await.expect("connect");
+            let (mut r, mut w) = stream.into_split();
+            assert!(matches!(read_down(&mut r).await, Some(Down::Hello { .. })), "greeted first");
+            let body = serde_json::to_vec(&share::Up::Size { w: 80, h: 24 }).expect("size");
+            w.write_all(&(body.len() as u32).to_be_bytes()).await.expect("length");
+            w.write_all(&body).await.expect("size body");
+            match read_down(&mut r).await {
+                Some(Down::Bye(why)) => assert!(why.contains("without a terminal view"), "{why}"),
+                other => panic!("expected a Bye, got {other:?}"),
             }
         });
     });

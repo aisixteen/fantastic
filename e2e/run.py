@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import os
 import re
 import sys
@@ -372,6 +373,41 @@ def log_name(name: str) -> str:
     return name.replace(":", "@") + ".log"
 
 
+#: A MUTED test (owner 2026-11-11): its `test.yaml` / `scenario.yaml` carries `muted: "#<issue>: <one-line
+#: reason>"`. The runner does not run it: it is reported SKIP with "muted #<issue>: <reason>", counted with
+#: the skips and listed at the end. The reason is the open issue that un-mutes it.
+MUTED_FORM = re.compile(r"#\d+: \S.*")
+
+
+def mute_note(t: dict) -> str | None:
+    """`muted #<issue>: <reason>` for a muted test, else None."""
+    m = t.get("muted")
+    return None if m is None else f"muted {m}"
+
+
+def check_muted(tests) -> list[str]:
+    """Every `muted:` is `#<issue>: <reason>`: a mute without an issue is a test quietly dropped."""
+    return [
+        f"{t['group']}/{t['id']}: muted: {t['muted']!r} is not '#<issue>: <one-line reason>'"
+        for t in tests
+        if "muted" in t and not (isinstance(t["muted"], str) and MUTED_FORM.fullmatch(t["muted"]))
+    ]
+
+
+#: A BROWSER TEST SHARES THE MACHINE. Each canvas / home test drives its own headless Chrome (software
+#: rendering, a page's worth of CPU); the whole free suite at 200 lanes started 45 of them at once and the
+#: timing-bound ones failed in a different place each run (a preview that never followed, a backlog peak over
+#: its bound, a port answered by another test's host), every one green alone. These take one of
+#: `CHROME_LANES` slots (env `E2E_CHROME_LANES`) FIRST, then a lane.
+CHROME_GROUPS = ("canvas", "home", "canvas_user")
+CHROME_LANES = int(os.environ.get("E2E_CHROME_LANES", "12"))
+
+
+def uses_chrome(t: dict) -> bool:
+    """A test that drives a headless Chrome: a canvas / home group test, or a scenario on one of those runners."""
+    return t["group"] in CHROME_GROUPS or t.get("runtime") in CHROME_GROUPS
+
+
 async def run_one(
     t: dict,
     bk,
@@ -379,16 +415,24 @@ async def run_one(
     sem: asyncio.Semaphore,
     results: dict,
     long_sem: "asyncio.Semaphore | None" = None,
+    chrome_sem: "asyncio.Semaphore | None" = None,
 ):
     name = f"{t['group']}.{t['id']}"
-    if t.get("long") and long_sem is not None:
-        async with long_sem:
-            await _run_one(t, bk, logdir, sem, results, name)
-    else:
+    async with contextlib.AsyncExitStack() as slots:
+        if t.get("long") and long_sem is not None:
+            await slots.enter_async_context(long_sem)
+        if uses_chrome(t) and chrome_sem is not None and not t.get("muted"):
+            await slots.enter_async_context(chrome_sem)
         await _run_one(t, bk, logdir, sem, results, name)
 
 
 async def _run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: dict, name: str):
+    if note := mute_note(t):
+        # not run, no lane taken: a SKIP that names its issue
+        (logdir / log_name(name)).write_text(f"# {name} · {t['title']}\n\n{note}\n")
+        results[name] = {"state": "skip", "note": note, "took": 0.0, "rc": 0, "log": logdir / log_name(name), "muted": True}
+        print(f"  SKIP  {name:<34} {0:6.0f}s  {note}", flush=True)
+        return
     async with sem:
         log = logdir / log_name(name)
         # The knobs a test owns, rendered into the env its runner already reads.
@@ -674,7 +718,7 @@ async def main() -> int:
 
     if a.list:
         for t in picked:
-            print(f"{t['group']:<18} {t['id']:<20} {t['costs']:<6} {t['title']}")
+            print(f"{t['group']:<18} {t['id']:<20} {t['costs']:<6} {t['title']}" + (f"  [{mute_note(t)}]" if mute_note(t) else ""))
         return 0
 
     # A probe with no `verdict(...)` call scores `no verdict` FOREVER and nobody
@@ -706,6 +750,12 @@ async def main() -> int:
         for d in drift:
             print("  · " + d)
         print("  regenerate the roster, or fix the probe, then re-run.")
+        return 1
+
+    if badmute := check_muted(picked):
+        print("REFUSING TO RUN — a `muted:` is not '#<issue>: <one-line reason>':")
+        for b in badmute:
+            print("  · " + b)
         return 1
 
     if blockers := bk.blockers():
@@ -779,15 +829,16 @@ async def main() -> int:
 
     sem = asyncio.Semaphore(a.lanes)
     long_sem = asyncio.Semaphore(min(LONG_LANES, a.lanes))
+    chrome_sem = asyncio.Semaphore(min(CHROME_LANES, a.lanes))
     results: dict = {}
     # Written every time a test settles, so a watcher tailing this file sees
     # progress without parsing 14 transcripts.
     began = time.monotonic()
     await asyncio.gather(
-        *(run_one(t, bk, logdir, sem, results, long_sem) for t in picked if not t.get("solo"))
+        *(run_one(t, bk, logdir, sem, results, long_sem, chrome_sem) for t in picked if not t.get("solo"))
     )
     for t in (t for t in picked if t.get("solo")):
-        await run_one(t, bk, logdir, sem, results, long_sem)
+        await run_one(t, bk, logdir, sem, results, long_sem, chrome_sem)
 
     if meter is not None:
         meter.terminate()
@@ -803,6 +854,11 @@ async def main() -> int:
             f"  {r['state']:<10} {name:<34} {r.get('took', 0):6.0f}s  {r.get('note') or ''}"
         )
     print("═" * 72)
+    if muted := sorted(n for n, r in results.items() if r.get("muted")):
+        print(f"  MUTED ({len(muted)}, counted with the skips):")
+        for n in muted:
+            print(f"    {n}  {results[n]['note']}")
+        print("═" * 72)
     print(
         "  "
         + " · ".join(f"{k}={v}" for k, v in sorted(counts.items()))
