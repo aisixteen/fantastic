@@ -67,7 +67,7 @@ from helpers import (
     verdict,
 )
 from helpers.ai import TICK as POLL
-from helpers.ai import PROVIDER_CALLS, ChainEnd, make_chat
+from helpers.ai import PROVIDER_CALLS, SHARED_PROVIDER, ChainEnd, admit_chat, make_chat
 from helpers.kernel import WRAPS, open_kernel, wrap_with, home
 from helpers.rows import rows_for
 
@@ -125,8 +125,8 @@ CYCLES = int(os.environ.get("CYCLES", "3"))
 # agent it makes. The operator opens them IN ADVANCE to these named ids; every edge
 # between the creator's own children stays the creator's to grant.
 SUB_AI = "hour_ai"
-#: the provider behind `brain`: the template the model copies names it, and it admits the sub-AIs
-BRAIN_PROV = "brain_prov"
+#: the one shared provider behind `brain` and the builder: the template the model copies names it, and it admits the sub-AIs
+BRAIN_PROV = SHARED_PROVIDER
 SUB_CODE = "hour_code"
 
 TASK = (
@@ -184,7 +184,6 @@ MINE = {
     "kernel_store",
     "brain",
     BRAIN_PROV,
-    "ai_prov",
     "clock",
     "readings",
     "totals",
@@ -759,17 +758,6 @@ async def main():
     return await run()
 
 
-async def admit_chats(root, provider: str, chats: list[str]) -> None:
-    """The provider admits the chats the model will create, by id and for the
-    completion verbs only (a provider's `callable_by` is written from above)."""
-    listing = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]["result"]
-    have = next((a for a in listing.get("agents") or [] if a.get("id") == provider), {}).get("callable_by") or {}
-    out = (await root.send([{"target": root.id, "payload": {
-        "type": "update_agent", "id": provider,
-        "callable_by": {**have, **{c: PROVIDER_CALLS for c in chats}}}}]))[0]["result"]
-    assert out.get("updated") is True, out
-
-
 async def run(
     *,
     task: str = TASK,
@@ -808,17 +796,16 @@ async def run(
         root,
         _resolve_backend(brain_backend or BACKEND),
         _ai_meta("brain", store=store, root=root, backend=brain_backend),
-        provider_id=BRAIN_PROV,
     )
     # The BUILDER — the turn that walks away.
     aid, _ = await make_chat(
         root,
         BK,
         _ai_meta("ai", store=store, root=root, extra_reach=extra_reach),
-        provider_id="ai_prov",
     )
     # the model-made chats complete through BRAIN_PROV: it admits the ids the task names
-    await admit_chats(root, BRAIN_PROV, sub_ais or [SUB_AI])
+    for who in sub_ais or [SUB_AI]:
+        await admit_chat(root, BRAIN_PROV, who)
     # the store's half of each memory wire
     for who in ("brain", aid):
         await memory.open_ingress(root, memory.MEMORY, who)

@@ -150,6 +150,18 @@ def chat_pair(backend, chat: dict, *, role: str | None = None,
                   "provider_id": pid}
 
 
+async def admit_chat(root, pid: str, chat_id: str) -> None:
+    """THE SHARED PROVIDER admits one more consumer: read, add the chat, write back."""
+    listed = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]
+    have = next((a for a in ((listed.get("result") or {}).get("agents") or [])
+                 if a.get("id") == pid), {})
+    cb = {**(have.get("callable_by") or {}), chat_id: PROVIDER_CALLS}
+    upd = (await root.send([{"target": root.id, "payload": {
+        "type": "update_agent", "id": pid, "callable_by": cb}}]))[0]["result"]
+    if isinstance(upd, dict) and upd.get("error"):
+        raise SystemExit(f"admit {chat_id} on {pid} refused: {upd}")
+
+
 async def make_chat(root, backend, chat: dict, *, role: str | None = None,
                     provider_id: str | None = None) -> tuple[str, str]:
     """Create the provider and the chat (`chat_pair`) and open the provider's store halves.
@@ -168,12 +180,7 @@ async def make_chat(root, backend, chat: dict, *, role: str | None = None,
         if backend.key_ref:
             await memory.open_ingress(root, creds.CREDS, pid)
     else:
-        # THE SHARED PROVIDER admits one more consumer: read, add the chat, write back.
-        cb = {**(have.get("callable_by") or {}), payload["id"]: PROVIDER_CALLS}
-        upd = (await root.send([{"target": root.id, "payload": {
-            "type": "update_agent", "id": pid, "callable_by": cb}}]))[0]["result"]
-        if isinstance(upd, dict) and upd.get("error"):
-            raise SystemExit(f"admit {payload['id']} on {pid} refused: {upd}")
+        await admit_chat(root, pid, payload["id"])
     made = (await root.send([{"target": root.id, "payload": payload}]))[0]["result"]
     if isinstance(made, dict) and made.get("error"):
         raise SystemExit(f"create_agent({payload['id']}) refused: {made}")
