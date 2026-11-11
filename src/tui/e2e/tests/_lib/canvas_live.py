@@ -154,7 +154,7 @@ def py_typed(*args: str) -> str:
 #: The runner's hard stop per test (`e2e/run.py` HARD_STOP_S), less a margin
 #: for teardown and the verdict line.
 HARD_STOP_S = 15 * 60 - 30
-#: The page size `page()` opens with, and the one `init()`'s Chrome is launched for.
+#: The page size `page()` opens with by default, and the one `init()`'s Chrome is launched for.
 DEFAULT_SIZE = (1500, 950)
 ENDED_HOLD_S = 3  # a `done` (not awaiting) that holds this long ends the wait
 
@@ -425,23 +425,23 @@ class Rig:
 
     @asynccontextmanager
     async def page(self, width: int = 1500, height: int = 950, extra: list[str] | None = None):
-        # The Chrome `init()` left up serves the FIRST page opened the same way it was
-        # launched (default size, no extra flags); any other page closes it first (one
-        # Chrome per user-data-dir) and launches its own.
+        # The Chrome `init()` left up serves the FIRST page opened without extra flags, its
+        # window put at this page's size (what `--window-size` does at launch); a page with
+        # extra flags closes it first (one Chrome per user-data-dir) and launches its own.
         warm, self._warm = self._warm, None
-        if warm is not None and (extra or (width, height) != DEFAULT_SIZE):
+        if warm is not None and extra:
             warm.proc.terminate()
             warm.proc.wait()
             warm = None
         chrome = warm or self._launch_chrome(width, height, extra)
         try:
-            async with self._session(chrome, width, height) as pg:
+            async with self._session(chrome, width, height, resize=warm is not None) as pg:
                 yield pg
         finally:
             chrome.proc.terminate()
 
     @asynccontextmanager
-    async def _session(self, chrome: Chrome, width: int, height: int):
+    async def _session(self, chrome: Chrome, width: int, height: int, resize: bool = False):
         """One CDP session on `chrome`'s tab: the canvas open and drawn. Writes the page's final DOM and errors."""
         async with await attach(chrome) as ws:
             pg = Page(ws)
@@ -450,6 +450,16 @@ class Rig:
             self.misses = pg.misses
             await pg.cdp("Runtime.enable")
             await pg.cdp("Page.enable")
+            if resize:
+                win = await pg.cdp("Browser.getWindowForTarget")
+                await pg.cdp("Browser.setWindowBounds", windowId=win["windowId"], bounds={"width": width, "height": height})
+                seen = None
+                for _ in range(30):  # until the window has settled at its size
+                    now = await pg.js("[innerWidth, innerHeight]")
+                    if now == seen:
+                        break
+                    seen = now
+                    await asyncio.sleep(0.1)
             await pg.viewport(width, height)
             if os.environ.get("CANVAS_WS_LOG") == "1":
                 pg.ws_log = []
