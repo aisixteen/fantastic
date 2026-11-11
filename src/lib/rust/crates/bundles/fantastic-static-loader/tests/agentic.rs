@@ -121,35 +121,56 @@ fn load_scenarios() -> Vec<Scenario> {
 /// runtime ships this same small probe, exactly as each ships the conformance echo.
 struct LifecycleProbe;
 
+/// The probe's one verb: it blocks until cancelled.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Slow {}
+
+/// The probe's record: freeform.
+#[derive(schemars::JsonSchema)]
+struct ProbeRecord {}
+
+mod probe {
+    use super::{ProbeRecord, Slow};
+    fantastic_kernel::verbs! { "slow" => Slow }
+    fantastic_kernel::record!(ProbeRecord, open);
+}
+
 #[async_trait::async_trait]
-impl fantastic_kernel::bundle::Bundle for LifecycleProbe {
+impl fantastic_kernel::bundle::Handler for LifecycleProbe {
+    type Call = probe::Call;
     fn name(&self) -> &str {
         "lifecycle_probe"
+    }
+    fn man(&self) -> &'static str {
+        "A probe agent whose `slow` verb stays in flight."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        probe::VERBS
+    }
+    fn dynamic_verbs(&self, a: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        probe::dynamic_verbs(a)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &probe::RECORD
     }
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: probe::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<fantastic_kernel::bundle::Reply, fantastic_kernel::bundle::BundleError> {
-        match payload.get("type").and_then(Value::as_str).unwrap_or("") {
-            "boot" | "shutdown" => Ok(None),
-            "reflect" => Ok(Some(json!({
+        match call {
+            probe::Call::Reflect(_) => Ok(Some(json!({
                 "id": id.0,
                 "sentence": "a probe agent whose `slow` verb stays in flight",
-                "verbs": {"slow": "no args. Blocks until cancelled."},
             }))),
-            "slow" => {
+            probe::Call::Slow(_) => {
                 // Long enough that the cancel always wins the race; the step
                 // that kills it does not wait this out.
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 Ok(Some(json!({"finished": true})))
             }
-            other => Ok(Some(json!({
-                "error": format!("lifecycle_probe: unknown type {other:?}"),
-                "reason": "unhandled",
-                "verb": other,
-            }))),
         }
     }
 }

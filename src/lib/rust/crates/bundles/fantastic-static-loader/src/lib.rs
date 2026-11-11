@@ -23,7 +23,9 @@
 use async_trait::async_trait;
 use fantastic_bundle::{py_repr, py_repr_value, py_str, py_truthy};
 use fantastic_file::fs;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
+use schemars::JsonSchema;
+use serde::Deserialize;
 use fantastic_kernel::refusal::{refusal, refusal_hint, UNAUTHORIZED, UNHANDLED};
 use fantastic_kernel::{yaml_io, Agent, AgentId, Kernel};
 use serde_json::{json, Map, Value};
@@ -32,7 +34,28 @@ use std::sync::Arc;
 /// The `handler_module` value that routes to this bundle.
 pub const HANDLER_MODULE: &str = "static_loader.tools";
 
-const README: &str = include_str!("readme.md");
+/// Hydrate the declared roster — kernel bookkeeping at boot.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Boot {}
+
+mod declared {
+    use super::Boot;
+    fantastic_kernel::verbs! { "boot" => Boot }
+}
+
+/// The fields a static_loader record carries.
+#[derive(Debug, JsonSchema)]
+pub struct LoaderRecord {
+    /// The path of the YAML manifest that declares the roster.
+    #[schemars(length(min = 1))]
+    pub manifest: Option<String>,
+}
+
+fantastic_kernel::record!(LoaderRecord);
+
+/// What the bundle is for — its one short man text.
+const MAN: &str = "A declarative roster loader: at boot it reads the YAML manifest its record names and creates the agents it declares as its own children, re-applying the manifest over agents that already exist.";
 
 /// Record field naming the manifest path.
 const MANIFEST_FIELD: &str = "manifest";
@@ -289,23 +312,28 @@ fn reflect_reply(agent: &Agent) -> Value {
     })
 }
 
-/// HOW TO CALL the loader — python's first docstring lines, in `VERBS` order,
-/// served by the kernel's `docs` verb.
-fn verb_docs_json() -> Value {
-    json!({
-        "reflect": "The loader's posture: what manifest it hydrates, and that it IS a loader",
-        "boot": "Hydrate the declared roster — kernel bookkeeping at boot.",
-    })
-}
-
 #[async_trait]
-impl Bundle for StaticLoaderBundle {
+impl Handler for StaticLoaderBundle {
+    type Call = declared::Call;
+
     fn name(&self) -> &str {
         "static_loader"
     }
 
-    fn verb_docs(&self) -> Value {
-        verb_docs_json()
+    fn man(&self) -> &'static str {
+        MAN
+    }
+
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        declared::VERBS
+    }
+
+    fn dynamic_verbs(&self, agent: &Agent) -> Vec<fantastic_kernel::DynVerb> {
+        declared::dynamic_verbs(agent)
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &RECORD
     }
 
     /// The manifest's SHAPE at write time — a NAMED manifest must be a non-empty
@@ -328,34 +356,18 @@ impl Bundle for StaticLoaderBundle {
         }
     }
 
-    fn readme(&self) -> Option<&'static str> {
-        Some(README)
-    }
-
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
             return Ok(Some(json!({ "error": format!("no agent {agent_id}") })));
         };
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        let reply = match verb {
-            "reflect" => reflect_reply(&agent),
-            "boot" => boot(&agent, kernel).await,
-            // Every other verb — `shutdown` included, which this bundle does not
-            // declare — is unhandled, in the one refusal shape.
-            _ => {
-                let raw = payload.get("type").cloned().unwrap_or(Value::Null);
-                let mut v = refusal(
-                    UNHANDLED,
-                    format!("static_loader: unknown type {}", py_repr_value(&raw)),
-                );
-                fantastic_kernel::refusal::with(&mut v, "verb", raw);
-                v
-            }
+        let reply = match call {
+            declared::Call::Reflect(_) => reflect_reply(&agent),
+            declared::Call::Boot(_) => boot(&agent, kernel).await,
         };
         Ok(Some(reply))
     }

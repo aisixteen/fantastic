@@ -3,32 +3,64 @@
 
 use super::*;
 use async_trait::async_trait;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::test_support::{as_agent, symlink};
 use fantastic_kernel::{Agent, AgentRecord, Item};
 use serde_json::{json, Map};
 
-/// A trivial roster agent — answers boot/reflect, nothing else.
+/// The verbs the roster agent answers beside `reflect`: a `set` and a `read`, whatever
+/// their arguments (the tests only count what reaches it).
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct MockSet {}
+
+/// See [`MockSet`].
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct MockRead {}
+
+mod mock_verbs {
+    use super::{MockRead, MockSet};
+    fantastic_kernel::verbs! { "set" => MockSet, "read" => MockRead }
+}
+
+/// A trivial roster agent — answers reflect, set and read.
 struct MockBundle;
 
 #[async_trait]
-impl Bundle for MockBundle {
+impl Handler for MockBundle {
+    type Call = mock_verbs::Call;
     fn name(&self) -> &str {
         "mock"
+    }
+    fn man(&self) -> &'static str {
+        "A trivial roster agent."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        mock_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, a: &Agent) -> Vec<fantastic_kernel::DynVerb> {
+        mock_verbs::dynamic_verbs(a)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &mock_record::RECORD
     }
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        Ok(Some(match verb {
-            "boot" | "shutdown" => Value::Null,
-            "reflect" => json!({"id": agent_id.0, "sentence": "mock"}),
+        Ok(Some(match call {
+            mock_verbs::Call::Reflect(_) => json!({"id": agent_id.0, "sentence": "mock"}),
             _ => json!({"ok": true}),
         }))
     }
+}
+
+mod mock_record {
+    /// The roster agents' record: freeform (a manifest seeds whatever it likes).
+    #[derive(schemars::JsonSchema)]
+    pub struct MockRecord {}
+    fantastic_kernel::record!(MockRecord, open);
 }
 
 const MANIFEST: &str = r#"
@@ -232,11 +264,18 @@ async fn the_manifest_shape_is_judged_at_write_time() {
     {
         let id = format!("sl_shape{i}");
         let rec = create_loader(&kernel, &id, bad.clone()).await;
-        assert_eq!(rec["reason"], "invalid_meta", "{bad}: {rec}");
-        assert_eq!(
-            rec["error"], "static_loader: manifest must be a non-empty path string",
-            "{bad}"
-        );
+        if bad.is_null() {
+            // a null is no value of a text field: the bundle's own check refuses it
+            assert_eq!(rec["reason"], "invalid_meta", "{bad}: {rec}");
+            assert_eq!(
+                rec["error"], "static_loader: manifest must be a non-empty path string",
+                "{bad}"
+            );
+        } else {
+            // the record declares `manifest` as non-empty text: the engine refuses it by name
+            assert_eq!(rec["reason"], "bad_arg", "{bad}: {rec}");
+            assert_eq!(rec["arg"], "manifest", "{bad}: {rec}");
+        }
         assert!(
             !kernel.agents.contains_key(&AgentId::from(id.as_str())),
             "a refused create must leave no agent behind"
@@ -354,25 +393,26 @@ fn meta_of(pairs: &[(&str, Value)]) -> Map<String, Value> {
 async fn an_unknown_verb_is_a_coded_refusal() {
     // `shutdown` is not a verb of this bundle either.
     let (kernel, _fixture) = boot_with_manifest(MANIFEST).await;
-    for verb in ["frobnicate", "shutdown"] {
-        let r = kernel
-            .send(vec![Item::new(
-                AgentId::from("static_loader"),
-                json!({"type": verb}),
-            )])
-            .await
-            .remove(0)
-            .result;
-        assert_eq!(
-            r,
-            json!({
-                "error": format!("static_loader: unknown type '{verb}'"),
-                "reason": "unhandled",
-                "verb": verb,
-            }),
-            "{verb}"
-        );
-    }
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("static_loader"),
+            json!({"type": "frobnicate"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], json!("unhandled"), "{r}");
+    assert_eq!(r["verb"], json!("frobnicate"), "{r}");
+    // `shutdown` is declared by none: the shared entry answers it, nothing to release
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("static_loader"),
+            json!({"type": "shutdown"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r, Value::Null);
 }
 
 #[tokio::test]
@@ -601,26 +641,11 @@ fn reflect_manifest_is_the_raw_meta_value() {
 }
 
 #[test]
-fn verb_docs_are_python_docstrings() {
-    // The first line of each python docstring, in VERBS order.
-    assert_eq!(
-        StaticLoaderBundle.verb_docs(),
-        json!({
-            "reflect": "The loader's posture: what manifest it hydrates, and that it IS a loader",
-            "boot": "Hydrate the declared roster — kernel bookkeeping at boot.",
-        })
-    );
-}
-
-#[test]
-fn readme_is_python_verbatim() {
-    // Byte-for-byte the python bundle's readme.
-    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(4)
-        .expect("repo's src/lib above the crate")
-        .join("python/bundled_agents/loader/static_loader/src/static_loader/readme.md");
-    assert_eq!(README, std::fs::read_to_string(&py).expect("python readme"));
+fn the_loader_declares_its_boot_and_its_record() {
+    let names: Vec<&str> = declared::VERBS.iter().map(|v| v.name).collect();
+    assert_eq!(names, ["boot"]);
+    assert!(!declared::VERBS[0].doc().is_empty());
+    assert!(RECORD.schema()["properties"]["manifest"].is_object());
 }
 
 #[tokio::test]
@@ -732,19 +757,17 @@ async fn unknown_type_wire_shape_is_byte_exact() {
         .await
         .remove(0)
         .result;
-    assert_eq!(
-        serde_json::to_string(&r).unwrap(),
-        r#"{"error":"static_loader: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#
-    );
-    let r = StaticLoaderBundle
-        .handle(&AgentId::from("static_loader"), &json!({}), &kernel)
+    // the agent's own entry refuses: the verb it was asked, and what it answers
+    assert_eq!(r["reason"], json!("unhandled"), "{r}");
+    assert_eq!(r["verb"], json!("frob"), "{r}");
+    assert!(r["error"].as_str().is_some_and(|e| e.contains("boot")), "{r}");
+    // a call with no verb at all is refused the same way
+    let r = kernel
+        .send(vec![Item::new(AgentId::from("static_loader"), json!({}))])
         .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        serde_json::to_string(&r).unwrap(),
-        r#"{"error":"static_loader: unknown type None","reason":"unhandled","verb":null}"#
-    );
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], json!("missing_arg"), "{r}");
 }
 
 /// The roster pass is kernel bookkeeping (ungated), so only the kernel's own

@@ -24,9 +24,7 @@ This is `fantastic` without a terminal, so it only prints this readme: it starts
 \x20\x20fantastic readme [key]              the docs: the index, or one doc (`canvas`, `mcp`, `setup`, `bundles`, `subtrees`, and the kernel's own)\n\
 \n";
 
-/// The CLI's own docs, beside the kernel's embedded tree
-/// (`fantastic_core::DOCS`). Each opens with a `> ` one-line summary, as the
-/// kernel's do.
+/// The CLI's own docs. Each opens with a `> ` one-line summary.
 const CLI_DOCS: &[(&str, &str)] = &[
     ("canvas", include_str!("../docs/canvas.md")),
     ("mcp", include_str!("../docs/mcp.md")),
@@ -36,9 +34,9 @@ const CLI_DOCS: &[(&str, &str)] = &[
     ("subtrees", include_str!("../docs/subtrees.md")),
 ];
 
-/// Every doc, the CLI's first: `(key, text)`.
+/// Every doc: `(key, text)`.
 fn docs() -> impl Iterator<Item = (&'static str, &'static str)> {
-    CLI_DOCS.iter().chain(fantastic_core::DOCS.iter()).copied()
+    CLI_DOCS.iter().copied()
 }
 
 /// A doc's one-line summary: its leading `> ` line.

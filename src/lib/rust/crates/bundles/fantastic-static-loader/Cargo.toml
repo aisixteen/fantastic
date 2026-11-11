@@ -14,6 +14,8 @@ fantastic-kernel = { path = "../../fantastic-kernel" }
 # read is not exempt (python does the same — static_loader imports file_bridge.fs).
 fantastic-file = { path = "../fantastic-file" }
 serde_json = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
