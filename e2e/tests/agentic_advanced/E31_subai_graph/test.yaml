@@ -21,3 +21,4 @@ limits:
   turn_chars: 120000
   turn_seconds: 600
 env: {FANTASTIC_AI_SEND_TIMEOUT: "420", UNATTENDED: "240"}  # the first planning turns run long thinking; 180 s can cut a progressing run
+exclusive: true   # runs a team of AIs that takes every model slot: alone, after the pool (e2e/run.py)

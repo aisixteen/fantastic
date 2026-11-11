@@ -839,8 +839,13 @@ async def main() -> int:
     # progress without parsing 14 transcripts.
     began = time.monotonic()
     await asyncio.gather(
-        *(run_one(t, bk, logdir, sem, results, long_sem, chrome_sem) for t in longest_first(picked))
+        *(run_one(t, bk, logdir, sem, results, long_sem, chrome_sem)
+          for t in longest_first(t for t in picked if not t.get("exclusive")))
     )
+    # EXCLUSIVE: a test marked `exclusive: true` runs a team of AIs (sub-AIs, groups) that
+    # takes every model slot itself, so it runs after the pool, one at a time, nothing beside it.
+    for t in longest_first(t for t in picked if t.get("exclusive")):
+        await run_one(t, bk, logdir, sem, results, long_sem, chrome_sem)
 
     if meter is not None:
         meter.terminate()

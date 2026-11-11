@@ -27,3 +27,4 @@ env:
   EXERCISES: "phone-number,pig-latin,proverb,grade-school,transpose,wordy"
   # the master's largest turn input, in characters (system prompt + conversation)
   MASTER_INPUT_CHARS_MAX: "60000"
+exclusive: true   # runs a team of AIs that takes every model slot: alone, after the pool (e2e/run.py)
