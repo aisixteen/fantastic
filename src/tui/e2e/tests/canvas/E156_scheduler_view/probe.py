@@ -50,7 +50,7 @@ def main() -> bool:
             r["1c and no run yet"] = await until_line(pg, VIEW, lambda t: t == "last: no runs yet", 5)
             tick = await host_call(rig.port, SCHED, {"type": "tick_now", "schedule_id": sid})
             info["tick"] = tick
-            r["2 tick_now fires it with no error"] = "error" not in tick and not tick.get("error")
+            r["2 tick_now fires it with no error"] = tick.get("fired") is True and not tick.get("error")
             r["3a the view shows the run with no click"] = await until_line(pg, VIEW, lambda t: t.startswith(f"{sid}  ") and "runs 1" in t, 30)
             r["3b and its last result"] = await until_line(pg, VIEW, lambda t: t.startswith("last: ok"), 10)
             gone = await host_call(rig.port, SCHED, {"type": "unschedule", "schedule_id": sid})

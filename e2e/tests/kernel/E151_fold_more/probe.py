@@ -2,7 +2,7 @@
 
 Rust lane only. Scripted vllm plugs play the model for four `ai_chat.tools` chats (each names
 its own `vllm_backend` provider) on the PACKAGED host, next to a `file_bridge` agent (`files`,
-an 80 kB file and a folder of 600 files) and an `exec_bridge` agent (`ex`). Every fold check
+an 80 kB file and a folder of 350 files) and an `exec_bridge` agent (`ex`). Every fold check
 asserts BOTH halves: the body whole in the request that carries it, the anchor in the next.
 `context_window` is 262144, so every body below (over 64,000 chars = AUTOFOLD_AT 16000 tokens,
 under the inline cap of about 127,000) is delivered inline.
@@ -18,7 +18,7 @@ under the inline cap of about 127,000) is delivered inline.
          before it (the property that makes the provider's cache hit, through a turn that
          produces a thought and the turns after it).
   V  `cleanup` (the default), other verbs: the reply of an `exec_bridge` `run` (500 lines,
-     the verb's own cap) and of a `file_bridge` `list` (600 entries) each go through the same
+     the verb's own cap) and of a `file_bridge` `list` (350 entries) each go through the same
      cycle as the `read` reply of E141: whole in its own turn, its
      `[folded · {verb} reply from {agent} · ~N tokens · head: "…" · get: ID]` anchor in the
      next with the body gone, the store row whole, `recall` by id gives it whole and the
@@ -69,9 +69,10 @@ TOKEN = "E151-" + secrets.token_hex(4)
 DONE = '<call name="done"></call>'
 PY = sys.executable
 ALLOWED = [re.escape(shlex.quote(PY)) + r" -c .*"]
-# 600 files, 130-char names: an entry renders at least its name, so the `list` reply is over
-# 600 x 130 = 78,000 chars, past the 64,000 fold line with margin.
-MANY, MANY_N, LAST_NAME = "many", 600, "n0599-"
+# 350 files, 130-char names: the stored `list` row is about 68,000 bytes (600 files made
+# 117,000), past the 64,000 fold line, and the body stays under the inline cap (600 files made
+# a 204,000-char body, which is held, not inlined).
+MANY, MANY_N, LAST_NAME = "many", 350, "n0349-"
 # 500 lines of 170 chars (85,000): `run` keeps the last 500 (the cap of `tail`), past the 64,000
 # fold line with margin.
 RUN_PROGRAM = "for i in range(500): print('X%04d ' % i + 'x' * 164)"
@@ -99,12 +100,22 @@ def blob(turn: dict) -> str:
     return json.dumps(msgs(turn), ensure_ascii=False)
 
 
+def unmarked(ms: list[dict]) -> list[dict]:
+    """The messages without the `cache_mark` flag: the mark moves on, the bytes must not."""
+    return [{k: v for k, v in m.items() if k != "cache_mark"} for m in ms]
+
+
 def marked(m: dict) -> bool:
     return m.get("cache_mark") is True
 
 
 def last_mark(ms: list[dict]) -> int:
     return max((i for i, m in enumerate(ms) if marked(m)), default=-1)
+
+
+def peek(what: str, text: str) -> None:
+    """On a failed check: the size, head and tail of the text that was searched."""
+    print(f"     [{what}] {len(text)} chars · head {text[:240]!r} · tail {text[-240:]!r}", flush=True)
 
 
 def call(target: str, payload: str) -> str:
@@ -249,7 +260,7 @@ def main() -> int:
         seen = blob(turns[0]) if turns else ""
         bt = new_big(AI_T, set(), "T2")
         need(re.search(rf'\[folded · read reply from {FILES} · ~\d+ tokens · '
-                       rf'head: "[^"]*" · get: {bt}\]', seen) is not None
+                       rf'head: \\?"[^"]*\\?" · get: {bt}\]', seen) is not None
              and "L100 " not in seen, "T2: request 1 shows the read reply as its anchor, body gone")
         need(re.search(rf"\[thought ~\d+ tokens · id {p}\]", seen) is not None,
              "T2: request 1 shows the thought as its anchor")
@@ -279,7 +290,7 @@ def main() -> int:
              f"{[last_mark(msgs(t)) for t in allt]}")
         for k, (a, b) in enumerate(zip(allt, allt[1:])):
             i = last_mark(msgs(a))
-            need(i >= 0 and msgs(a)[:i + 1] == msgs(b)[:i + 1],
+            need(i >= 0 and unmarked(msgs(a))[:i + 1] == unmarked(msgs(b))[:i + 1],
                  f"T4: request {k + 1}: the {i + 1} messages up to its last mark are "
                  f"byte-equal in request {k + 2}")
             need(len(msgs(b)) >= len(msgs(a)),
@@ -293,6 +304,8 @@ def main() -> int:
                   verb: str, agent: str) -> None:
             """whole, anchor, store, recall by id, refold: for the reply of `verb`."""
             turns = run(AI_V, f"{label}a", send_text, 2, the_call, f"Noted.\n{DONE}")
+            if len(turns) > 1 and whole not in last_user(turns[1]):
+                peek(f"{label}a request 2 last user", last_user(turns[1]))
             need(len(turns) > 1 and whole in last_user(turns[1]),
                  f"{label}a: request 2 carries the whole {verb} reply")
             b = new_big(AI_V, known, f"{label}a")
@@ -300,7 +313,7 @@ def main() -> int:
                         call(AI_V, f"<type>recall</type><id>{b}</id>"), f"Noted.\n{DONE}")
             seen = blob(turns[0]) if turns else ""
             need(re.search(rf'\[folded · {verb} reply from {agent} · ~\d+ tokens · '
-                           rf'head: "[^"]*" · get: {b}\]', seen) is not None,
+                           rf'head: \\?"[^"]*\\?" · get: {b}\]', seen) is not None,
                  f"{label}b: request 1 shows the {verb} reply as its anchor")
             need(whole not in seen, f"{label}b: request 1 holds no {verb} body")
             last = last_user(turns[1]) if len(turns) > 1 else ""
@@ -314,6 +327,8 @@ def main() -> int:
             need(whole not in seen, f"{label}c: the {verb} body is nowhere in the request")
             need(any(r.get("id") == b and int(r.get("bytes") or 0) > 64000
                      for r in history(AI_V)), f"{label}c: the store row is still whole")
+            # the recall reply of this cycle is a large row too: not the next cycle's reply
+            known.update(r["id"] for r in big_rows(AI_V))
 
         # an exec run: `-c PROGRAM` with the interpreter allowed by the record
         run_call = call(EXEC, f"<type>run</type><command>{PY}</command>"
@@ -337,7 +352,7 @@ def main() -> int:
                     call(AI_N, f"<type>recall</type><id>{b}</id>"), f"Noted.\n{DONE}")
         allnone += turns
         seen = blob(turns[0]) if turns else ""
-        need("L100 " in seen and "[folded" not in seen,
+        need("L100 " in seen and "[folded ·" not in seen,
              "N2: request 1 holds the read reply whole, no fold anchor")
         need("[thought ~" not in seen, "N2: request 1 shows no thought anchor")
         last = last_user(turns[1]) if len(turns) > 1 else ""
@@ -346,7 +361,7 @@ def main() -> int:
         turns = run(AI_N, "N3", "again", 1, DONE)
         allnone += turns
         seen = blob(turns[0]) if turns else ""
-        need(seen.count("L100 ") >= 2 and "[folded" not in seen and "[thought ~" not in seen,
+        need(seen.count("L100 ") >= 2 and "[folded ·" not in seen and "[thought ~" not in seen,
              f"N3: the read reply and the recall reply are both whole: "
              f"{seen.count('L100 ')} bodies, no anchor")
         need(not any(marked(m) for t in allnone for m in msgs(t)),
@@ -386,7 +401,7 @@ def main() -> int:
         turns = run(AI_U, "U-next", "next", 1, DONE)
         seen = blob(turns[0]) if turns else ""
         need(re.search(rf'\[folded · read reply from {FILES} · ~\d+ tokens · '
-                       rf'head: "[^"]*" · get: {b}\]', seen) is not None
+                       rf'head: \\?"[^"]*\\?" · get: {b}\]', seen) is not None
              and "L100 " not in seen, "U: request 1 shows the read reply as its anchor")
         need(f"[fold {fold} · 2 refs · L1]" in seen and "task step 1" not in seen,
              "U: the fold line still stands in place of its rows")

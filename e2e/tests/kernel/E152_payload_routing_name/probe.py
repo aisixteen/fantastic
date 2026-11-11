@@ -10,7 +10,7 @@ SCRIPT, one model answer per request:
   1. the routing form: `<routing>` names the target and a routing `<title>` that labels the
      call; `<payload>` carries `<type>create_agent</type>` and its own `<title>`. The payload
      is delivered WHOLE: the new agent `made` holds the payload's title, not the label;
-  2. the same call in the INLINE form (`<target_id>`, `<title>` beside `<payload>`): there
+  2. the same call in the INLINE form (`<target_id>`, `<title>` beside the verb's own arguments, no `<payload>`): there
      `title` is call routing, lifted out and never sent: the new agent `made2` holds no
      title (the verb does not document `title`, so no refusal; a verb that does is refused
      loud, which the `fantastic-ai-core` unit
@@ -102,7 +102,7 @@ def main() -> int:
     routed = (f'<call name="send"><routing><target_id>kernel</target_id><title>{LABEL}</title></routing>'
               f"<payload>{made(MADE, f'<title>{TITLE}</title>')}</payload></call>")
     inline = (f'<call name="send"><target_id>kernel</target_id><title>{LABEL}</title>'
-              f"<payload>{made(MADE2, '')}</payload></call>")
+              f"{made(MADE2, '')}</call>")
     script = [routed, inline, f"Saw both. {DONE}"]
     try:
         r = hk.send(hk.root_id, {"type": "update_agent", "id": "memory",
@@ -117,7 +117,7 @@ def main() -> int:
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
                         provider_id=PROV, model=MODEL, max_tokens=8192,
                         context_window=262144, memory_store_id="memory",
-                        can_call={"$self": "*", "memory": "*", "kernel": ["create_agent"], PROV: ["complete", "watch"]},
+                        can_call={"$self": "*", "memory": "*", **{hk.root_id: ["create_agent"]}, PROV: ["complete", "watch"]},
                         callable_by={"$self": "*", "$parent": "*", "rest": "*"})
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:200]}")
 

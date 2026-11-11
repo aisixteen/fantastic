@@ -44,7 +44,7 @@ class Browser:
         self.udd = tmp / ("chrome-" + name)
         cmd = [chrome, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", DESKTOP_POINTER, f"--window-size={w['width']},{w['height']}",
                f"--remote-debugging-port={self.port}", f"--user-data-dir={self.udd}",
-               "--no-first-run", "about:blank"]
+               "--no-first-run", "--password-store=basic", "about:blank"]
         self.chrome = Chrome(cmd, tmp / f"chrome-{name}.log", self.port)  # Chrome's stdout and stderr, kept for a failure's evidence
         self.used_first = False
         self.size = (w["width"], w["height"])

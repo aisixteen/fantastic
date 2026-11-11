@@ -55,3 +55,15 @@ test("store_view_search_sends_search_and_shows_hits", async () => {
   assert.deepEqual(r.calls.filter((c) => c["type"] === "search"), [{ type: "search", query: "own" }]);
   assert.match(r.mount.textContent, /7:2 {2}my own line/);
 });
+
+test("read_view_does_not_read_again_for_the_echo_of_its_own_reads", async () => {
+  const r = rig((p) => (p["type"] === "dump" ? { tables: { rows: [], fold_refs: [] } } : { matches: [] }));
+  await storeView.mount(r.ctx);
+  const before = r.calls.length;
+  r.fire({ type: "dump" }); // the kernel mirrors the view's own call back to its watcher
+  await flush();
+  assert.equal(r.calls.length, before, "an echo of its own read reads nothing");
+  r.fire({ type: "appended", table: "rows", id: 1 });
+  await flush();
+  assert.equal(r.calls.length, before + 1, "an event of the agent reads it again");
+});
