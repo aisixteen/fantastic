@@ -90,7 +90,8 @@ SECOND LINE, with "quotes"
 `<routing>` is how the call travels: `<target_id>` names the agent. `<payload>` is
 delivered whole: `<type>` the verb, every other child an argument. A value is text as
 written (`true`, `12`, a path); a list is `<item>` children; an object is child tags
-(`<edits><item><path>PATH</path><hunks>N</hunks></item></edits>`).
+(`<edits><item><path>PATH</path><hunks>N</hunks></item></edits>`); a map's keys are its
+tags, `$` included (`<callable_by><$self>*</$self><AGENT><item>VERB</item></AGENT></callable_by>`).
 A body (a file, a patch) goes in `<bytes>`…`</bytes>` VERBATIM — real newlines and quotes,
 nothing escaped, no fence; it ends at the first `</bytes>`. `<reply_to>` in `<routing>` picks where the reply
 goes: you by default (your next message), another id hands it to them, `null` discards it.
