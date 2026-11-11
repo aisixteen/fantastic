@@ -1155,13 +1155,23 @@ async fn a_bad_handler_modules_is_refused_bad_arg() {
         assert_eq!(r["reason"], "bad_arg", "{bad}: {r}");
         assert_eq!(r["arg"], "handler_modules");
         assert!(r.get("tree").is_none());
+        let wrong_type = bad != json!([""]);
         let off = kernel_reflect(
             &kernel,
             json!({"type": "reflect", "tree": "none", "handler_modules": bad}),
         )
         .await
         .result;
-        assert!(off.get("error").is_none() && off.get("tree").is_none());
+        if wrong_type {
+            // a wrongly typed argument is refused by the kernel's check of the
+            // declaration, whether or not a tree is asked for
+            assert_eq!(off["reason"], "bad_arg", "{off}");
+            assert_eq!(off["arg"], "handler_modules", "{off}");
+        } else {
+            // a list of strings passes the declaration; the filter judges its names
+            // only when it builds a tree
+            assert!(off.get("error").is_none() && off.get("tree").is_none());
+        }
     }
     let r = kernel_reflect(&kernel, json!({"type": "reflect", "handler_modules": null}))
         .await

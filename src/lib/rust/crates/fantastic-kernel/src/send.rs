@@ -989,6 +989,16 @@ impl Kernel {
                     timeout,
                 } = *fr;
                 let read = async {
+                    // the kernel checks `reflect` like every call (the fast path is
+                    // still a dispatch of the verb every agent answers)
+                    if let Err(refused) = crate::verbs::check_call(
+                        &target.id.0,
+                        "reflect",
+                        &payload,
+                        &[crate::declared::common::VERBS],
+                    ) {
+                        return (refused, Status::Completed);
+                    }
                     let mut reply = crate::reflect::reflect_identity(&target);
                     match crate::reflect::apply_reflect_flags(self, &target, &payload, &mut reply)
                         .await
