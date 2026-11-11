@@ -1,0 +1,8 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: headless_port
+group: canvas
+title: "--headless --port N --host takes the recorded web onto N and a restart reuses it; a web with no port picks a free one once (#580)"
+runner: probe.py
+costs: free
+limits: {seconds: 240}
+env: {}
