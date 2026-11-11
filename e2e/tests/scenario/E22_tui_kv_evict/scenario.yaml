@@ -72,6 +72,9 @@ runs:
         ai_a: '*'
         ai_b: '*'
         ai_c: '*'
+        ai_a_provider: '*'
+        ai_b_provider: '*'
+        ai_c_provider: '*'
   - path: .fantastic/agents/user/agents/creds/agent.yaml
     record:
       id: creds
@@ -84,15 +87,15 @@ runs:
             api_key: VLLM_API_KEY
       callable_by:
         user: '*'
-        ai_a:
+        ai_a_provider:
         - get
-        ai_b:
+        ai_b_provider:
         - get
-        ai_c:
+        ai_c_provider:
         - get
-  - path: .fantastic/agents/user/agents/ai_a/agent.yaml
+  - path: .fantastic/agents/user/agents/ai_a_provider/agent.yaml
     record:
-      id: ai_a
+      id: ai_a_provider
       handler_module: vllm_backend.tools
       endpoint: '{vllm_endpoint}'
       model: '{vllm_model}'
@@ -109,7 +112,50 @@ runs:
         store: creds
         ref: vllm
       callable_by:
+        ai_a:
+        - complete
+        - watch
+      can_call:
+        memory: '*'
+        creds:
+        - get
+  - path: .fantastic/agents/user/agents/ai_a/agent.yaml
+    record:
+      id: ai_a
+      handler_module: ai_chat.tools
+      provider_id: ai_a_provider
+      model: '{vllm_model}'
+      context_window: 262144
+      memory_store_id: memory
+      callable_by:
         user: '*'
+      can_call:
+        memory: '*'
+        ai_a_provider:
+        - complete
+        - watch
+  - path: .fantastic/agents/user/agents/ai_b_provider/agent.yaml
+    record:
+      id: ai_b_provider
+      handler_module: vllm_backend.tools
+      endpoint: '{vllm_endpoint}'
+      model: '{vllm_model}'
+      max_tokens: 262144
+      reasoning_effort: xhigh
+      thinking_token_budget: 65536
+      context_window: 262144
+      no_repeat_ngram_size: 3
+      repetition_penalty: 1.05
+      kv_slots: 2
+      kv_overflow: evict
+      memory_store_id: memory
+      credentials:
+        store: creds
+        ref: vllm
+      callable_by:
+        ai_b:
+        - complete
+        - watch
       can_call:
         memory: '*'
         creds:
@@ -117,6 +163,21 @@ runs:
   - path: .fantastic/agents/user/agents/ai_b/agent.yaml
     record:
       id: ai_b
+      handler_module: ai_chat.tools
+      provider_id: ai_b_provider
+      model: '{vllm_model}'
+      context_window: 262144
+      memory_store_id: memory
+      callable_by:
+        user: '*'
+      can_call:
+        memory: '*'
+        ai_b_provider:
+        - complete
+        - watch
+  - path: .fantastic/agents/user/agents/ai_c_provider/agent.yaml
+    record:
+      id: ai_c_provider
       handler_module: vllm_backend.tools
       endpoint: '{vllm_endpoint}'
       model: '{vllm_model}'
@@ -133,7 +194,9 @@ runs:
         store: creds
         ref: vllm
       callable_by:
-        user: '*'
+        ai_c:
+        - complete
+        - watch
       can_call:
         memory: '*'
         creds:
@@ -141,27 +204,18 @@ runs:
   - path: .fantastic/agents/user/agents/ai_c/agent.yaml
     record:
       id: ai_c
-      handler_module: vllm_backend.tools
-      endpoint: '{vllm_endpoint}'
+      handler_module: ai_chat.tools
+      provider_id: ai_c_provider
       model: '{vllm_model}'
-      max_tokens: 262144
-      reasoning_effort: xhigh
-      thinking_token_budget: 65536
       context_window: 262144
-      no_repeat_ngram_size: 3
-      repetition_penalty: 1.05
-      kv_slots: 2
-      kv_overflow: evict
       memory_store_id: memory
-      credentials:
-        store: creds
-        ref: vllm
       callable_by:
         user: '*'
       can_call:
         memory: '*'
-        creds:
-        - get
+        ai_c_provider:
+        - complete
+        - watch
   timeout: 420
   script: |
     wait 2500

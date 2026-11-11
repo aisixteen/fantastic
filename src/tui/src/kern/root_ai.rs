@@ -1,8 +1,9 @@
-//! THE ROOT AI: `fantastic [canvas] ai BACKEND …` (`recipe.rs`). ONE agent, `ai`
+//! THE ROOT AI: `fantastic [canvas] ai BACKEND …` (`recipe.rs`). ONE chat agent, `ai`
 //! under `user`, on the project's memory store: the terminal UI opens it; on a
 //! canvas, a chat cell shows it wherever one is placed (no main chat).
 //!
-//! - `ai` on the SAME backend is RE-POINTED (its endpoint, its own fields) and
+//! - `ai` is a chat on a PROVIDER (`ai_provider`, the backend). On the SAME backend the provider
+//!   is RE-POINTED (its endpoint, its own fields) and
 //!   what the server decides is CLEARED, so the backend reads it from the server
 //!   before its first turn (and writes it back);
 //! - on a DIFFERENT backend it is remade: deleted and created again under the
@@ -98,54 +99,90 @@ fn handler_of(h: &Host, id: &str) -> Option<String> {
     h.kernel.agents.get(&fantastic_kernel::AgentId::from(id))?.value().record().handler_module
 }
 
-/// Make, re-point or remake the root AI on `b`; says what it did.
+/// The agent `id`'s record, as a `create_agent` to put it back.
+fn record_of(h: &Host, id: &str) -> Option<Map<String, Value>> {
+    let rec = h.kernel.agents.get(&fantastic_kernel::AgentId::from(id)).and_then(|a| serde_json::to_value(a.value().record()).ok())?;
+    let mut rec = rec.as_object().cloned()?;
+    rec.insert("type".into(), json!("create_agent"));
+    Some(rec)
+}
+
+/// Make, re-point or remake the root AI on `b`; says what it did. The root AI is a chat (`ai`)
+/// and its provider (the chat's `provider_id`, a backend): a re-point changes the provider's
+/// record, a remake deletes and makes both.
 pub async fn run(h: &Host, b: &Backend) -> Result<String, String> {
     // a build without the backend would skip the record at the next boot
     if h.kernel.bundles.get(b.handler()).is_none() {
         return Err(format!("this build has no {} backend — build with `--features {}`", b.handler(), b.feature()));
     }
-    let had = handler_of(h, ROOT_AI);
-    let did = if had.as_deref() == Some(b.handler()) {
+    let had_chat = handler_of(h, ROOT_AI);
+    let provider = crate::kern::backend::provider_of(h, ROOT_AI);
+    let had = provider.as_deref().and_then(|p| handler_of(h, p));
+    let did = if let (Some(p), true) = (&provider, had.as_deref() == Some(b.handler())) {
         let mut up = b.fields();
         for f in b.from_server() {
             up.entry(f.to_string()).or_insert(Value::Null);
         }
+        // the model and the window are on the chat too: cleared with the provider's, the new
+        // server is read
+        let chat_up = crate::kern::backend::chat_part(&up);
         up.insert("type".into(), json!("update_agent"));
-        up.insert("id".into(), json!(ROOT_AI));
+        up.insert("id".into(), json!(p));
         let r = h.operator("kernel", Value::Object(up)).await.result;
         if let Some(e) = err_of(&r) {
-            return Err(format!("re-pointing `{ROOT_AI}`: {e}"));
+            return Err(format!("re-pointing `{p}`: {e}"));
+        }
+        if !chat_up.is_empty() {
+            let mut up = chat_up;
+            up.insert("type".into(), json!("update_agent"));
+            up.insert("id".into(), json!(ROOT_AI));
+            let r = h.operator("kernel", Value::Object(up)).await.result;
+            if let Some(e) = err_of(&r) {
+                return Err(format!("re-pointing `{ROOT_AI}`: {e}"));
+            }
         }
         "re-pointed"
     } else {
-        // the OLD record, to put back if the new one is refused (a missing key, a
-        // field the new backend requires): a failed switch never loses the AI
-        let old = h
-            .kernel
-            .agents
-            .get(&fantastic_kernel::AgentId::from(ROOT_AI))
-            .and_then(|a| serde_json::to_value(a.value().record()).ok());
-        if had.is_some() {
+        // the OLD records (chat and provider), to put back if the new ones are refused (a missing
+        // key, a field the new backend requires): a failed switch never loses the AI
+        let old_provider = provider.as_deref().and_then(|p| record_of(h, p));
+        let old_chat = record_of(h, ROOT_AI);
+        if had_chat.is_some() {
             let r = h.operator("kernel", json!({"type": "delete_agent", "id": ROOT_AI})).await.result;
             if let Some(e) = err_of(&r) {
                 return Err(format!("removing the old `{ROOT_AI}`: {e}"));
+            }
+        }
+        if let (Some(p), Some(_)) = (&provider, &old_provider) {
+            let r = h.operator("kernel", json!({"type": "delete_agent", "id": p})).await.result;
+            if let Some(e) = err_of(&r) {
+                return Err(format!("removing the old `{p}`: {e}"));
             }
         }
         let mut spec = b.fields();
         spec.insert("handler_module".into(), json!(b.handler()));
         let user = fantastic_kernel::AgentId::from(h.cfg.user.as_str());
         if let Err(e) = crate::kern::backend::BackendBundle::make_ai(h, &user, ROOT_AI, spec, Map::new()).await {
-            if let Some(Value::Object(mut rec)) = old {
-                rec.insert("type".into(), json!("create_agent"));
-                let back = h.operator("kernel", Value::Object(rec)).await.result;
-                return Err(match err_of(&back) {
-                    None => format!("{e} — `{ROOT_AI}` is left on {}", had.unwrap_or_default()),
+            // whatever the failed make left is removed, then the old pair is put back (provider first)
+            for id in [ROOT_AI.to_string(), crate::kern::backend::provider_id(ROOT_AI)] {
+                if h.kernel.exists(&id) {
+                    let _ = h.operator("kernel", json!({"type": "delete_agent", "id": id})).await;
+                }
+            }
+            if let Some(chat) = old_chat {
+                let mut failed = None;
+                for rec in old_provider.into_iter().chain([chat]) {
+                    let back = h.operator("kernel", Value::Object(rec)).await.result;
+                    failed = failed.or_else(|| err_of(&back));
+                }
+                return Err(match failed {
+                    None => format!("{e} — `{ROOT_AI}` is left on {}", had.unwrap_or_else(|| had_chat.unwrap_or_default())),
                     Some(b2) => format!("{e} — and the old `{ROOT_AI}` could not be restored: {b2}"),
                 });
             }
             return Err(e);
         }
-        if had.is_some() { "remade" } else { "made" }
+        if had_chat.is_some() { "remade" } else { "made" }
     };
     Ok(format!("the root AI `{ROOT_AI}` ({did}, {}) speaks to {}", b.handler(), b.endpoint()))
 }
@@ -167,4 +204,73 @@ pub(crate) async fn persist(h: &Host, rec: Map<String, Value>) -> Result<(), Str
 /// Whether the page has its view yet (it is made at the page's first load).
 pub(crate) async fn has_view(h: &Host) -> Result<bool, String> {
     Ok(page_records(h).await?.iter().any(|r| r.get("id").and_then(Value::as_str) == Some(VIEW)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kern::backend::create_tests::{host, record_of};
+
+    fn vllm(port: u16) -> Backend {
+        Backend::Vllm {
+            host: "box.example".into(),
+            port,
+            kv_overflow: "evict".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_repoint_updates_the_provider_and_a_failed_remake_puts_both_records_back() {
+        let (h, dir) = host("root-ai", &["ai", "ai_provider"]).await;
+        assert_eq!(
+            run(&h, &vllm(8000)).await.unwrap(),
+            "the root AI `ai` (made, vllm_backend.tools) speaks to http://box.example:8000/v1"
+        );
+        // the same backend: the provider found through the chat is re-pointed, the chat keeps its provider
+        let out = run(&h, &vllm(8001)).await.unwrap();
+        assert!(out.contains("re-pointed"), "{out}");
+        let (chat, prov) = (record_of(&h, ROOT_AI), record_of(&h, "ai_provider"));
+        assert_eq!(prov["endpoint"], json!("http://box.example:8001/v1"));
+        assert_eq!(chat["provider_id"], json!("ai_provider"));
+        assert!(
+            chat.get("endpoint").is_none(),
+            "the endpoint is the provider's alone"
+        );
+        // another backend whose record is refused: the old chat AND provider are put back
+        let err = run(
+            &h,
+            &Backend::Ollama {
+                host: "box.example".into(),
+                port: 11434,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("is left on vllm_backend.tools"), "{err}");
+        assert_eq!(
+            record_of(&h, "ai_provider")["endpoint"],
+            json!("http://box.example:8001/v1"),
+            "the provider is back"
+        );
+        assert_eq!(
+            record_of(&h, ROOT_AI)["provider_id"],
+            json!("ai_provider"),
+            "and the chat"
+        );
+        let handler = |id: &str| {
+            h.kernel
+                .agents
+                .get(&fantastic_kernel::AgentId::from(id))
+                .unwrap()
+                .value()
+                .record()
+                .handler_module
+        };
+        assert_eq!(
+            handler("ai_provider").as_deref(),
+            Some("vllm_backend.tools")
+        );
+        assert_eq!(handler(ROOT_AI).as_deref(), Some("ai_chat.tools"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

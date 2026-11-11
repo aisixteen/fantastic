@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-from families import BASE, OPEN, VLLM, ai, call, save_kernel_log, vllm
+from families import BASE, OPEN, VLLM, ai, ai_pair, call, save_kernel_log, vllm
 
 NAME = "bundle_verbs"
 
@@ -69,7 +69,7 @@ def fixtures(work: Path, interp: str) -> list:
         # ── web ──
         ("web4", "web.tools", {}),
         # ── AI (no endpoint reached: every case is a NON-send verb) ──
-        ("ai", VLLM, ai(**vllm("http://127.0.0.1:9", model="m"))),
+        *ai_pair("ai", VLLM, ai(**vllm("http://127.0.0.1:9", model="m"))),
         ("olla", "ollama_backend.tools", ai(model="m", endpoint="http://127.0.0.1:9")),
     ]
 

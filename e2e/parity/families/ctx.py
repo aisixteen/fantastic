@@ -24,7 +24,7 @@ import re
 import threading
 import time
 
-from families import BASE, MEMORY, OPEN, ROOT_ID, VLLM, ai, call, save_kernel_log, vllm
+from families import BASE, MEMORY, OPEN, ROOT_ID, VLLM, ai, ai_pair, call, save_kernel_log, vllm
 from spec import CTX_RESERVE, CTX_WINDOW, CTX_WINDOW_TINY
 from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub, content_text
 
@@ -189,7 +189,7 @@ def run(ctx) -> None:  # noqa: C901
         return None
 
     cb = {**BASE, "rest": "*", "web": "*", "ws": "*"}
-    ids = ["store", "bigfiles", "docs", *AIS, "ai_tiny"]
+    ids = ["store", "bigfiles", "docs", *[x for a in [*AIS, "ai_tiny"] for x in (a, f"{a}_provider")]]
     k = ctx.boot(reach=ids, port=ports.take("main"))
     watchers: dict = {a: [] for a in [*AIS, "ai_tiny"]}
     ws_errors: dict = {}
@@ -240,12 +240,12 @@ def run(ctx) -> None:  # noqa: C901
                                            "callable_by": {**cb, **{a: "*" for a in [*AIS, "ai_tiny"]}}}),
         ]
         for a in AIS:
-            roster.append((a, VLLM, ai(**{
+            roster.extend(ai_pair(a, VLLM, ai(**{
                 **vllm(stub.base_url()), "context_window": CTX_WINDOW,
                 "output_reserve": CTX_RESERVE, "context_strategy": a.split("_", 1)[1],
                 "context_async": True, "context_titles": True, "recent_n": 4,
                 "callable_by": cb, "can_call": {**BASE, "docs": "*", ROOT_ID: "*"}})))
-        roster.append(("ai_tiny", VLLM, ai(**{
+        roster.extend(ai_pair("ai_tiny", VLLM, ai(**{
             **vllm(stub.base_url()), "context_window": CTX_WINDOW_TINY,
             "output_reserve": CTX_RESERVE, "context_strategy": "compact", "context_async": True,
             "context_titles": True, "recent_n": 4, "callable_by": cb,

@@ -131,14 +131,15 @@ def main() -> int:
         return hk.send("ai", {"type": "reflect"}).get("system_prompt_file_error")
 
     try:
-        # the key's ref, pinned to the stub's host; creds and memory accept the AI
+        # the key's ref, pinned to the stub's host; creds and memory accept the provider (the key
+        # is its), memory accepts the chat too
         r = update(
             "creds",
             refs={"stub": {"host": f"127.0.0.1:{stub.port}", "env": {"api_key": KEY_VAR}}},
-            callable_by={**callable_by("creds"), "ai": ["get"]},
+            callable_by={**callable_by("creds"), "ai_provider": ["get"]},
         )
-        need(r.get("updated") is True, f"creds: the stub ref + ai: {str(r)[:200]}")
-        r = update("memory", callable_by={**callable_by("memory"), "ai": "*"})
+        need(r.get("updated") is True, f"creds: the stub ref + ai_provider: {str(r)[:200]}")
+        r = update("memory", callable_by={**callable_by("memory"), "ai": "*", "ai_provider": "*"})
         need(r.get("updated") is True, f"memory accepts ai: {str(r)[:200]}")
 
         # the bridge: exposes prompt.md, admits the AI for the read + watch verbs
@@ -152,20 +153,32 @@ def main() -> int:
             callable_by={"$self": "*", "$parent": "*", "ai": FILE_VERBS},
         )
         need(rec.get("id") == "pf", f"create pf: {str(rec)[:200]}")
+        # the provider (endpoint, key) and the chat `ai` naming it: the file and its bridge are the chat's
         rec = hk.create(
             parent_id="rest",
             handler_module="responses_backend.tools",
-            id="ai",
+            id="ai_provider",
             endpoint=stub.url(),
             model="stub-model",
             credentials={"store": "creds", "ref": "stub"},
             memory_store_id="memory",
+            can_call={"$self": "*", "memory": "*", "creds": ["get"]},
+            callable_by={"$self": "*", "$parent": "*", "ai": ["complete", "watch"]},
+        )
+        need(rec.get("id") == "ai_provider", f"create ai_provider: {str(rec)[:200]}")
+        rec = hk.create(
+            parent_id="rest",
+            handler_module="ai_chat.tools",
+            id="ai",
+            provider_id="ai_provider",
+            model="stub-model",
+            memory_store_id="memory",
             can_call={
                 "$self": "*",
                 "memory": "*",
-                "creds": ["get"],
                 root: ["reflect"],
                 "pf": FILE_VERBS,
+                "ai_provider": ["complete", "watch"],
             },
             callable_by={"$self": "*", "$parent": "*", "rest": "*"},
         )
@@ -267,7 +280,7 @@ def main() -> int:
             ingress_rule="allow_all_ingress",
             callable_by={"$self": "*", "$parent": "*"},
         )
-        cc = {"$self": "*", "memory": "*", "creds": ["get"], root: ["reflect"],
+        cc = {"$self": "*", "memory": "*", root: ["reflect"], "ai_provider": ["complete", "watch"],
               "pf": FILE_VERBS, "pf_sealed": FILE_VERBS}
         update("ai", can_call=cc, file_bridge_id="pf_sealed", system_prompt_file="sealed.md")
         r = failed_turn()

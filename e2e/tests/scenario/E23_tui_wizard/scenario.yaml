@@ -89,6 +89,7 @@ runs:
       lock_released: true
       files_exist:
         - .fantastic/agents/user/agents/vllm-1/agent.yaml
+        - .fantastic/agents/user/agents/vllm-1_provider/agent.yaml
         - home/user/setups/ai_agent/vllm-1.yaml
         - home/user/setups/ai_agent/.preferred
         - home/user/keys/credentials.yaml
@@ -119,7 +120,7 @@ runs:
     after_exit:
       exit_code: 0
       lock_released: true
-      files_exist: [.fantastic/agents/user/agents/vllm-1-2/agent.yaml]
+      files_exist: [.fantastic/agents/user/agents/vllm-1-2/agent.yaml, .fantastic/agents/user/agents/vllm-1-2_provider/agent.yaml]
 
   - name: edit_and_default
     script: |
