@@ -703,7 +703,8 @@ async fn the_totals_of_a_scripted_run_validate_against_the_request_and_the_provi
     }
     for i in 0..6 {
         let body = Value::Array(s.request_messages(i)).to_string();
-        for key in ["attributes", "totals", "m-one", "prov_a", "digest"] {
+        // (`prov_a` is not listed: the tree primer names every agent, the provider too.)
+        for key in ["attributes", "totals", "m-one", "digest"] {
             assert!(!body.contains(key), "request {i} holds {key}");
         }
     }
