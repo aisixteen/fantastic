@@ -49,6 +49,8 @@ with `src/tui/e2e/wipe.sh`.
 | E142 `bounded_stop` | scripted (a stub model that never answers): SIGTERM with the model call in flight exits 0 after the quiet period (≥ 9 s, < 15 s), lock and run file removed; SIGTERM twice exits 1 at once, lock and run file removed | #562: a bounded stop | scripted |
 | E153 `launcher_seed` | scripted: each kernel mode (`--headless`, `canvas`, `mcp`) in a fresh folder gets the stock tree from the launcher; a one-shot (`readme`, no argument, `send`, `import`, a refused line) writes nothing; the test-only embedder example (`examples/embedder.rs`: the launcher plus ONE YAML blueprint) with `--statedir` far from the cwd and `--workdir`: stock tree and its record on disk and in the live `list_agents`, no `.fantastic` in the cwd or the work folder | #555: the launcher seeds | scripted |
 | E154 `headless_port` | scripted: `--headless --port N --host 127.0.0.1` moves the recorded `web` onto N and serves its page, a restart with no flags reuses N; a `web` with no port picks a free one once, records it and reuses it | #580: embedders boot through the lib | scripted |
+| E155 `store_view` | scripted, browser: a placed `ram_store.tools` shows its rows counted from `tables.rows`, and a real `append` shows in the view with no click (the `appended` event) | #505, #508: the store view | scripted |
+| E156 `scheduler_view` | scripted, browser: a real `scheduler.tools` (create, schedule, tick, unschedule) shows its job, its run and last result in the scheduler view | #507: the scheduler view | scripted |
 
 The `home` group drives the HOME (`_lib/home_live.py`, `HomeRig`): the test-only
 host `fantastic-home-host`, the `fantastic canvas` processes it lists, and Chrome
