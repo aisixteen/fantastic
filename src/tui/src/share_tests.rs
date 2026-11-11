@@ -20,7 +20,10 @@ async fn read_down<R: AsyncReadExt + Unpin>(r: &mut R) -> Option<Down> {
 
 /// Run `f` with a scratch `cli` folder: the channel's endpoint file lives there.
 fn in_scratch_dir(f: impl FnOnce(&Path)) {
-    let dir: PathBuf = std::env::temp_dir().join(format!("fantastic-share-test-{}", std::process::id()));
+    // one folder per call: the tests of this file run in parallel threads of one process
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let dir: PathBuf = std::env::temp_dir().join(format!("fantastic-share-test-{}-{n}", std::process::id()));
     let cli = dir.join(".fantastic/cli");
     std::fs::create_dir_all(&cli).expect("scratch dir");
     f(&cli);
