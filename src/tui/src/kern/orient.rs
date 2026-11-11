@@ -78,8 +78,8 @@ pub fn write_readme(h: &Host, state: &Path, work: &Path) -> Result<(), String> {
          - `prompt.md`: `{prompt}` (every AI's system block)\n\
          - `.mcp.json`: `{mcp}` (the MCP config for a coding CLI)\n\n\
          ## Reach the running kernel\n\
-         - `{bin} send '<item json>'` — one call from a shell\n\
-         - `{bin} mcp` — the MCP server\n\
+         - `{bin} send --statedir {state} '<item json>'` — one call from a shell\n\
+         - `{bin} mcp --statedir {state}` — the MCP server\n\
          - `claude --mcp-config {mcp}`\n",
         state = state.display(),
         work = work.display(),

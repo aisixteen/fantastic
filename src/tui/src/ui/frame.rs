@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn every_panel_is_boxed_and_a_click_names_the_panel_under_it() {
-        let app = App::new(crate::env::Paths::at(std::path::Path::new("/nonexistent")));
+        let app = App::new(crate::env::Paths::of("/nonexistent/.fantastic".into(), "/nonexistent".into()));
         let a = areas(&app, Rect::new(0, 0, 120, 40));
         assert_eq!(a.tree, inner(a.tree_box), "content sits inside its border");
         assert_eq!(a.page, inner(a.page_box));
@@ -497,7 +497,7 @@ mod tests {
     #[test]
     fn the_focused_panels_border_wears_the_accent_and_the_rest_do_not() {
         use ratatui::backend::TestBackend;
-        let mut app = App::new(crate::env::Paths::at(std::path::Path::new("/nonexistent")));
+        let mut app = App::new(crate::env::Paths::of("/nonexistent/.fantastic".into(), "/nonexistent".into()));
         let area = Rect::new(0, 0, 100, 30);
         let mut t = ratatui::Terminal::new(TestBackend::new(100, 30)).unwrap();
         for (focus, want) in [(Focus::Tree, 0), (Focus::Panel, 1), (Focus::Composer, 2)] {

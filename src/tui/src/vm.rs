@@ -219,7 +219,7 @@ async fn run(
                     if let Some(urls) = urls {
                         boot.say(&format!("fantastic: the canvas: {}", urls.canvas));
                         app.note(format!("the canvas: {}", urls.canvas));
-                        if let Err(e) = crate::kern::web::write_run_file(&paths.cwd, &urls) {
+                        if let Err(e) = crate::kern::web::write_run_file(&paths.store, &urls) {
                             app.note(format!("the run file: {e}"));
                         }
                         if let Err(e) = crate::kern::user_store::set_canvas(&h, &urls.canvas).await {
@@ -268,18 +268,18 @@ async fn run(
                     if boot.announce.is_some() && !boot.tui {
                         spawn_stream(Arc::clone(&h), boot.clone());
                     }
-                    // THE TUI SOCKET: a second `fantastic` here is a thin client
+                    // THE TUI CHANNEL: a second `fantastic` here is a thin client
                     // of THIS ViewModel.
-                    match crate::share::listen(input_tx.clone(), frames.subscribe(), boot.tui) {
+                    match crate::share::listen(input_tx.clone(), frames.subscribe(), boot.tui, &paths.cli) {
                         Ok(s) => share = Some(s),
                         Err(e) => {
                             boot.say(&format!("fantastic: {e}"));
                             app.note(e);
                         }
                     }
-                    // THE MCP SOCKET: a coding CLI's `fantastic mcp` attaches here.
-                    match crate::mcp::listen(crate::mcp::Served::new(Arc::clone(&h))) {
-                        // serving, and the MCP socket listens: ready, for a `Type=notify` unit
+                    // THE MCP CHANNEL: a coding CLI's `fantastic mcp` attaches here.
+                    match crate::mcp::listen(crate::mcp::Served::new(Arc::clone(&h)), &paths.cli) {
+                        // serving, and the MCP channel listens: ready, for a `Type=notify` unit
                         Ok(_) => crate::sys::notify_ready(),
                         Err(e) => {
                             boot.say(&format!("fantastic: {e}"));
@@ -436,18 +436,17 @@ async fn run(
             second,
             crate::kern::host::STOP_GRACE,
             &paths.store,
-            &paths.cwd,
         )
         .await
         {
             crate::kern::host::Stopped::Clean => {
-                crate::mcp::close_socket();
-                crate::share::close();
-                crate::kern::web::remove_run_file(&paths.cwd);
+                crate::mcp::close_socket(&paths.cli);
+                crate::share::close(&paths.cli);
+                crate::kern::web::remove_run_file(&paths.store);
             }
             crate::kern::host::Stopped::Cut => {
-                crate::mcp::close_socket();
-                crate::share::close();
+                crate::mcp::close_socket(&paths.cli);
+                crate::share::close(&paths.cli);
                 app.note(format!("the stop was cut (a hang past {:?}, or a second signal)", crate::kern::host::STOP_GRACE));
                 CUT.store(true, std::sync::atomic::Ordering::SeqCst);
             }

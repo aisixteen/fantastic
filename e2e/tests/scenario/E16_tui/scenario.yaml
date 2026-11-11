@@ -217,3 +217,19 @@ runs:
     after_exit:
       exit_code: 0
       lock_released: true
+
+  # ── 8 · a kernel runs headless on a far state folder: `fantastic --statedir`
+  #       finds it from the work dir and attaches as a thin client, which is told
+  #       the kernel has no terminal view ─────────────────────────────────────
+  - name: attach_far
+    statedir: far/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/state
+    host_argv: [--headless, --statedir, far/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/state]
+    args: "--statedir far/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/state"
+    script: |
+      wait 3000
+      shot attach
+      exit 8000
+    frames:
+      attach: {contains: ["thin client", "without a terminal view"]}
+    after_exit:
+      exit_code: 0

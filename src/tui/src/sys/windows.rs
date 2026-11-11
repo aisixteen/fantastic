@@ -1,26 +1,10 @@
-//! The Windows side of [`crate::sys`]: std handles, the console, local sockets,
+//! The Windows side of [`crate::sys`]: std handles, the console,
 //! console control events, the user's shell.
-//!
-//! THE LOCAL SOCKET is a loopback TCP connection found through a RENDEZVOUS
-//! FILE at the socket's path. Not AF_UNIX (tokio has none on Windows), not a
-//! named pipe: a pipe has no half-close, and `fantastic mcp`'s relay ends a
-//! session by shutting its write half and then reading what is still in flight
-//! (`mcp::attach`). The file plays the unix socket file's part — it exists
-//! while the socket is served (written whole, once the listener is bound),
-//! removing it is closing, and a client finds the port in it. It is PRIVATE
-//! from its first byte (`fantastic-file`'s `0o600` create), because it also
-//! holds a TOKEN a connection must open with: any local user can reach a
-//! loopback port, only this user can read the file. A connection that does not
-//! open with the token is dropped.
 
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr};
 use std::os::windows::io::{AsHandle, FromRawHandle, IntoRawHandle};
-use std::path::Path;
-use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Globalization::CP_UTF8;
 use windows_sys::Win32::System::Console::{
@@ -78,77 +62,6 @@ pub(crate) fn dup_stdout() -> io::Result<File> {
 /// A File of its own on what stderr is now — kept before stderr is redirected.
 pub(crate) fn dup_stderr() -> io::Result<File> {
     Ok(File::from(io::stderr().as_handle().try_clone_to_owned()?))
-}
-
-/// A local socket: a connected stream, its listener and its two halves.
-pub(crate) type LocalStream = tokio::net::TcpStream;
-pub(crate) type LocalReadHalf = tokio::net::tcp::OwnedReadHalf;
-pub(crate) type LocalWriteHalf = tokio::net::tcp::OwnedWriteHalf;
-
-/// The listener: a loopback port, and the token its connections open with.
-pub(crate) struct LocalListener {
-    tcp: tokio::net::TcpListener,
-    token: String,
-}
-
-/// How long a new connection has to send the token before it is dropped — so a
-/// stranger that connects and says nothing holds up the next client no longer.
-const TOKEN_WAIT: Duration = Duration::from_secs(2);
-
-impl LocalListener {
-    /// The next connection that opened with the token (and its peer); any other
-    /// is dropped unanswered.
-    pub(crate) async fn accept(&self) -> io::Result<(LocalStream, SocketAddr)> {
-        loop {
-            let (mut s, peer) = self.tcp.accept().await?;
-            let mut got = vec![0u8; self.token.len()];
-            let sent = tokio::time::timeout(TOKEN_WAIT, s.read_exact(&mut got)).await;
-            // small frames, as over a unix socket: no Nagle delay
-            if matches!(sent, Ok(Ok(_))) && same(&got, self.token.as_bytes()) && s.set_nodelay(true).is_ok() {
-                return Ok((s, peer));
-            }
-        }
-    }
-}
-
-/// Equal, in a time that does not tell where they differ.
-fn same(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
-}
-
-/// Connect to the local socket at `path`: the port its rendezvous file names,
-/// opened with the file's token.
-pub(crate) async fn connect_local(path: &str) -> io::Result<LocalStream> {
-    let text = std::fs::read_to_string(path)?;
-    let (port, token) = text
-        .trim()
-        .split_once(' ')
-        .and_then(|(p, t)| Some((p.parse::<u16>().ok()?, t)))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("{path} names no port and token")))?;
-    let mut s = LocalStream::connect((Ipv4Addr::LOCALHOST, port)).await?;
-    s.set_nodelay(true)?;
-    s.write_all(token.as_bytes()).await?;
-    Ok(s)
-}
-
-/// Serve the local socket at `path` (relative to the process cwd): listen on a
-/// free loopback port, then write the rendezvous file `<port> <token>` — private
-/// before its first byte and whole or not at all (`fantastic-file`'s atomic
-/// `0o600` write).
-pub(crate) fn bind_local(path: &str) -> io::Result<LocalListener> {
-    let l = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-    l.set_nonblocking(true)?;
-    let tcp = tokio::net::TcpListener::from_std(l)?;
-    let token = fantastic_kernel::lifecycle::token_hex(16);
-    let line = format!("{} {token}\n", tcp.local_addr()?.port());
-    fantastic_file::fs::write_bytes(Path::new("."), path, line.as_bytes(), true, Some(0o600)).map_err(io::Error::other)?;
-    Ok(LocalListener { tcp, token })
-}
-
-/// The rendezvous file at `path` is created private by [`bind_local`] (it holds
-/// the token): nothing is left to narrow.
-pub(crate) fn make_private(_path: &str) -> io::Result<()> {
-    Ok(())
 }
 
 /// What [`terminate`] answers: each Ctrl-Break, from `recv`.

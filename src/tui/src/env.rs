@@ -43,28 +43,46 @@ impl ClientCfg {
 /// Everything the shell knows before it has spoken to a kernel.
 #[derive(Debug, Clone)]
 pub struct Paths {
-    /// The directory the user ran us in. The kernel's own file clamp is rooted
-    /// here, so this is the boundary of the session, not a preference.
-    pub cwd: PathBuf,
-    /// `<cwd>/.fantastic` — the store. Its ABSENCE is what makes a run seed it.
+    /// The work folder: where the kernel's file clamp is rooted and its commands
+    /// run. The boundary of the session, not a preference. Not the state folder.
+    pub work: PathBuf,
+    /// The state folder (default `<work>/.fantastic`). Its ABSENCE is what makes
+    /// a run seed it.
     pub store: PathBuf,
-    /// `<cwd>/.fantastic/cli` — this client's own corner: the port file, the
-    /// seen set, the log.
+    /// `<store>/cli` — this client's own corner: the endpoint files, the seen
+    /// set, the log.
     pub cli: PathBuf,
 }
 
 impl Paths {
-    pub fn here() -> std::io::Result<Self> {
-        Ok(Self::at(&std::env::current_dir()?))
+    /// The two folders of a run. The state folder is `fantastic_kernel`'s one
+    /// derivation (`state_dir_for`). The work folder is `workdir` when given; else
+    /// the `workdir` the root record in the state folder keeps (a relative value
+    /// is joined to the current dir); else the current dir.
+    pub fn resolve(statedir: Option<&Path>, workdir: Option<&Path>) -> Result<Self, String> {
+        let store = fantastic_kernel::bootstrap::state_dir_for(statedir, workdir)
+            .map_err(|e| format!("no working directory: {e}"))?;
+        let cwd = || std::env::current_dir().map_err(|e| format!("no working directory: {e}"));
+        let work = match workdir {
+            Some(w) => std::path::absolute(w).map_err(|e| format!("no working directory: {e}"))?,
+            None => match recorded_workdir(&store) {
+                Some(w) if w.is_absolute() => w,
+                Some(w) => cwd()?.join(w),
+                None => cwd()?,
+            },
+        };
+        Ok(Self::of(store, work))
     }
-    pub fn at(cwd: &Path) -> Self {
-        let store = cwd.join(".fantastic");
+
+    /// Both folders as they are, for a caller that has them already.
+    pub fn of(store: PathBuf, work: PathBuf) -> Self {
         Self {
             cli: store.join("cli"),
             store,
-            cwd: cwd.to_path_buf(),
+            work,
         }
     }
+
     /// The kernel's guard, asked BEFORE this shell writes anything into the
     /// store (the seed, its log): a `.fantastic` that IS the fantastic home is
     /// never a kernel's (`fantastic_kernel::bootstrap::refuse_home_as_state_dir`).
@@ -73,11 +91,17 @@ impl Paths {
         refuse_home_as_state_dir(&self.store, fantastic_home().as_deref())
             .map_err(|e| e.to_string())
     }
+}
 
-    /// TRUE when this directory has never been used: a run here seeds it.
-    pub fn is_fresh(&self) -> bool {
-        !self.store.exists()
-    }
+/// The `workdir` the root record in `store` keeps, if there is one.
+fn recorded_workdir(store: &Path) -> Option<PathBuf> {
+    let raw =
+        std::fs::read_to_string(store.join(fantastic_kernel::persistence::RECORD_FILE)).ok()?;
+    let rec = fantastic_kernel::persistence::parse_record(&raw)?;
+    rec.get("workdir")
+        .and_then(|v| v.as_str())
+        .filter(|w| !w.is_empty())
+        .map(PathBuf::from)
 }
 
 /// `tui-<hex6>`, distinct per process. Derived from the pid and the clock, which
@@ -99,22 +123,53 @@ pub fn mint_client_id() -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_directory_without_a_store_is_fresh() {
-        let d = std::env::temp_dir().join(format!("fc-env-{}", std::process::id()));
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("fc-env-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        let p = Paths::at(&d);
-        assert!(
-            p.is_fresh(),
-            "no .fantastic yet, so a run seeds it"
+        d
+    }
+
+    #[test]
+    fn resolve_defaults_to_cwd() {
+        let cwd = std::env::current_dir().unwrap();
+        let p = Paths::resolve(None, None).unwrap();
+        assert_eq!(p.work, cwd);
+        assert_eq!(p.store, cwd.join(".fantastic"));
+        assert_eq!(p.cli, cwd.join(".fantastic").join("cli"));
+        let far = Paths::resolve(Some(Path::new("/s")), Some(Path::new("/w"))).unwrap();
+        assert_eq!(
+            (far.store, far.work),
+            (PathBuf::from("/s"), PathBuf::from("/w"))
         );
-        std::fs::create_dir_all(&p.cli).unwrap();
-        assert!(
-            !Paths::at(&d).is_fresh(),
-            "a seeded directory goes straight in"
-        );
-        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn resolve_reads_the_recorded_workdir_back() {
+        let s = scratch("rec");
+        std::fs::write(s.join("agent.yaml"), "id: root\nworkdir: /w\n").unwrap();
+        let p = Paths::resolve(Some(&s), None).unwrap();
+        assert_eq!(p.work, PathBuf::from("/w"));
+        assert_eq!(p.store, s);
+        let _ = std::fs::remove_dir_all(&s);
+    }
+
+    #[test]
+    fn a_relative_recorded_workdir_resolves_against_the_launch_cwd() {
+        let s = scratch("rel");
+        std::fs::write(s.join("agent.yaml"), "id: root\nworkdir: rel/w\n").unwrap();
+        let p = Paths::resolve(Some(&s), None).unwrap();
+        assert_eq!(p.work, std::env::current_dir().unwrap().join("rel/w"));
+        let _ = std::fs::remove_dir_all(&s);
+    }
+
+    #[test]
+    fn a_given_workdir_wins_over_the_record() {
+        let s = scratch("win");
+        std::fs::write(s.join("agent.yaml"), "id: root\nworkdir: /recorded\n").unwrap();
+        let p = Paths::resolve(Some(&s), Some(Path::new("/given"))).unwrap();
+        assert_eq!(p.work, PathBuf::from("/given"));
+        let _ = std::fs::remove_dir_all(&s);
     }
 
     #[test]
@@ -127,7 +182,7 @@ mod tests {
 
     #[test]
     fn the_homes_parent_is_refused_before_anything_is_written() {
-        let p = Paths::at(Path::new("/u"));
+        let p = Paths::resolve(None, Some(Path::new("/u"))).unwrap();
         let home = Path::new("/u/.fantastic");
         let e = fantastic_kernel::bootstrap::refuse_home_as_state_dir(&p.store, Some(home))
             .unwrap_err();
@@ -135,7 +190,7 @@ mod tests {
             e.to_string().contains("is never a kernel's state folder"),
             "{e}"
         );
-        let q = Paths::at(Path::new("/u/proj"));
+        let q = Paths::resolve(None, Some(Path::new("/u/proj"))).unwrap();
         assert!(
             fantastic_kernel::bootstrap::refuse_home_as_state_dir(&q.store, Some(home)).is_ok()
         );

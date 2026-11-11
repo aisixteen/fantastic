@@ -1,10 +1,9 @@
-//! The Unix side of [`crate::sys`]: descriptors, the controlling terminal, local
-//! sockets, signals, the user's shell and the process table.
+//! The Unix side of [`crate::sys`]: descriptors, the controlling terminal,
+//! signals, the user's shell and the process table.
 
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::fs::PermissionsExt;
 
 /// The controlling terminal the TUI draws on.
 pub(crate) const TTY: &str = "/dev/tty";
@@ -50,27 +49,6 @@ fn dup(fd: i32) -> io::Result<File> {
     }
     // SAFETY: `d` was just duplicated and is owned by this File from here on.
     Ok(unsafe { File::from_raw_fd(d) })
-}
-
-/// A local socket: a connected stream, its listener and its two halves.
-pub(crate) type LocalStream = tokio::net::UnixStream;
-pub(crate) type LocalListener = tokio::net::UnixListener;
-pub(crate) type LocalReadHalf = tokio::net::unix::OwnedReadHalf;
-pub(crate) type LocalWriteHalf = tokio::net::unix::OwnedWriteHalf;
-
-/// Connect to the local socket at `path`.
-pub(crate) async fn connect_local(path: &str) -> io::Result<LocalStream> {
-    LocalStream::connect(path).await
-}
-
-/// Bind the local socket at `path`.
-pub(crate) fn bind_local(path: &str) -> io::Result<LocalListener> {
-    LocalListener::bind(path)
-}
-
-/// Make the file at `path` readable and writable by this user only.
-pub(crate) fn make_private(path: &str) -> io::Result<()> {
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
 /// What [`terminate`] answers: each SIGTERM, from `recv`.

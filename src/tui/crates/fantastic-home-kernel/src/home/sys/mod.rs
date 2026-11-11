@@ -203,7 +203,9 @@ pub fn lock_holder(path: &str) -> Option<u32> {
 /// `path`'s run file, parsed. No file is `Ok(None)`; a file that cannot be read,
 /// or does not parse as a run file, is an `Err` naming why.
 pub fn run_file(path: &str) -> Result<Option<CanvasRun>, String> {
-    let file = Path::new(path).join(RUN_FILE);
+    let file = fantastic_kernel::bootstrap::state_dir_for(None, Some(Path::new(path)))
+        .map_err(|e| format!("{path}: {e}"))?
+        .join(RUN_FILE);
     let text = match std::fs::read_to_string(&file) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),

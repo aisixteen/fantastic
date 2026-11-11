@@ -293,22 +293,22 @@ pub fn canvas_authority(host: &str, port: u16) -> String {
 
 /// THE RUN FILE (owner 2026-10-16, for a local manager of fantastics): while this
 /// process serves the canvas, `{pid, port, url}` — written once it serves,
-/// removed at a clean exit. Under the project dir. A killed process leaves it
-/// behind: the lock (`.fantastic/lock.yaml`, flocked while the kernel runs) says
+/// removed at a clean exit. In the state folder (`<state>/cli/canvas.yaml`). A killed process leaves it
+/// behind: the lock (`<state>/lock.yaml`, flocked while the kernel runs) says
 /// whether it is live.
 pub const RUN_FILE: &str = fantastic_home::RUN_FILE;
 
-/// Write `dir`'s [`RUN_FILE`] for this process.
-pub fn write_run_file(dir: &std::path::Path, urls: &Urls) -> Result<(), String> {
+/// Write `state`'s [`RUN_FILE`] for this process.
+pub fn write_run_file(state: &std::path::Path, urls: &Urls) -> Result<(), String> {
     crate::atomic::write_yaml(
-        &dir.join(RUN_FILE),
+        &state.join(RUN_FILE),
         &json!({"pid": std::process::id(), "port": urls.port, "url": urls.canvas}),
     )
 }
 
-/// Remove `dir`'s [`RUN_FILE`] at a clean exit (none written: nothing to remove).
-pub fn remove_run_file(dir: &std::path::Path) {
-    let _ = std::fs::remove_file(dir.join(RUN_FILE));
+/// Remove `state`'s [`RUN_FILE`] at a clean exit (none written: nothing to remove).
+pub fn remove_run_file(state: &std::path::Path) {
+    let _ = std::fs::remove_file(state.join(RUN_FILE));
 }
 
 /// Create what is missing, grant, boot, mount. Returns the pages' URLs. `bind` is

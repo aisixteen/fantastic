@@ -51,7 +51,7 @@ fn run_file_parses_only_a_valid_file() {
     let (_d, dir) = temp();
     let path = dir.display().to_string();
     assert_eq!(run_file(&path), Ok(None), "no file");
-    let file = dir.join(RUN_FILE);
+    let file = fantastic_kernel::bootstrap::state_dir_for(None, Some(&dir)).unwrap().join(RUN_FILE);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(
         &file,

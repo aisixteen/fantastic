@@ -1,7 +1,7 @@
 //! `fantastic import <path> --parent <id> [--bind @port=id]… [--allow-code] [--approve]`
 //! — the `user` agent's `import_subtree` verb from a shell (#269).
 //!
-//! - ATTACH-ONLY, like `send`: one MCP call over the running kernel's socket;
+//! - ATTACH-ONLY, like `send`: one MCP call over the running kernel's MCP channel;
 //!   no live kernel → it fails loud and starts nothing.
 //! - Without `--approve` it prints the PREVIEW (the new ids, what each reaches,
 //!   the ports, the code) and creates nothing. On a terminal it then asks
@@ -168,8 +168,8 @@ fn die(code: i32, msg: impl std::fmt::Display) -> ! {
 }
 
 /// Send one item, the verb's reply back (an error text when the call itself failed).
-fn send(rt: &tokio::runtime::Runtime, item: Value) -> Result<Value, String> {
-    reply_of(&rt.block_on(crate::send::call(item))?)
+fn send(rt: &tokio::runtime::Runtime, cli: &std::path::Path, item: Value) -> Result<Value, String> {
+    reply_of(&rt.block_on(crate::send::call(item, cli))?)
 }
 
 /// The verb's reply in a `send` row. A refusal (`{error, reason}`) comes back in a row marked
@@ -186,7 +186,7 @@ fn reply_of(row: &Value) -> Result<Value, String> {
 /// Entry point, called from `main` before any runtime exists.
 pub fn main(argv: &[String]) -> ! {
     let a = parse(argv).unwrap_or_else(|e| die(2, format!("{e}\nusage: {USAGE}")));
-    let paths = Paths::here().unwrap_or_else(|e| die(2, format!("no working directory: {e}")));
+    let paths = Paths::resolve(None, None).unwrap_or_else(|e| die(2, e));
     match fantastic_kernel::lock::held(&paths.store) {
         Ok(Some(pid)) if pid != std::process::id() => {}
         Ok(_) => die(
@@ -199,7 +199,7 @@ pub fn main(argv: &[String]) -> ! {
         .enable_all()
         .build()
         .unwrap_or_else(|e| die(1, format!("no runtime: {e}")));
-    let mut reply = send(&rt, item(&a, a.approve)).unwrap_or_else(|e| die(1, e));
+    let mut reply = send(&rt, &paths.cli, item(&a, a.approve)).unwrap_or_else(|e| die(1, e));
     print!("{}", render(&reply));
     let preview = reply.get("approval_required") == Some(&json!(true));
     if preview && !a.approve && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
@@ -208,7 +208,7 @@ pub fn main(argv: &[String]) -> ! {
         let mut line = String::new();
         let _ = std::io::stdin().lock().read_line(&mut line);
         if matches!(line.trim(), "y" | "Y" | "yes") {
-            reply = send(&rt, item(&a, true)).unwrap_or_else(|e| die(1, e));
+            reply = send(&rt, &paths.cli, item(&a, true)).unwrap_or_else(|e| die(1, e));
             print!("{}", render(&reply));
         }
     }

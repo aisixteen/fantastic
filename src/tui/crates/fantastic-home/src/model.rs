@@ -2,7 +2,7 @@
 //!
 //! ```text
 //!   <home>/fantastics/<folder>/fantastic.yaml   one Registered entry
-//!   <folder>/.fantastic/cli/canvas.yaml         one CanvasRun, while a canvas serves
+//!   <state>/cli/canvas.yaml                     one CanvasRun, while a canvas serves
 //! ```
 //!
 //! A REGISTRY ENTRY is written by the CLI's `user_store` agent:
@@ -16,10 +16,10 @@
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 
-/// A folder's run file, relative to the folder: `{pid, port, url}` while
+/// A kernel's run file, relative to its STATE folder: `{pid, port, url}` while
 /// `fantastic canvas` serves there (see [`CanvasRun`]). The one definition: the
 /// CLI writes it and the home reads it.
-pub const RUN_FILE: &str = ".fantastic/cli/canvas.yaml";
+pub const RUN_FILE: &str = "cli/canvas.yaml";
 
 /// The largest pid any of the supported systems hands out (`i32::MAX`).
 const PID_MAX: i64 = 2_147_483_647;
@@ -152,7 +152,7 @@ pub fn registered(entries: Vec<(String, String)>) -> Vec<Registered> {
     kept
 }
 
-/// A folder's run file `.fantastic/cli/canvas.yaml` `{pid, port, url}`, written
+/// A state folder's run file `cli/canvas.yaml` `{pid, port, url}`, written
 /// while `fantastic canvas` serves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanvasRun {

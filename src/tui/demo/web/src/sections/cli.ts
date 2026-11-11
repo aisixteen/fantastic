@@ -15,7 +15,7 @@ export const cli: Section = {
         { id: "dir", label: ".fantastic/", sub: "records · memory · docs", kind: "store", w: 180, wide: { x: 880, y: 200 }, tall: { x: 110, y: 426 } },
         { id: "coder", label: "coding CLI", sub: "Claude Code · Codex · …", kind: "ext", w: 190, wide: { x: 330, y: 430 }, tall: { x: 440, y: 684 } },
         { id: "mcp", label: "fantastic mcp", sub: "reflect · send", kind: "agent", wide: { x: 620, y: 430 }, tall: { x: 440, y: 562 } },
-        { id: "sock", label: "mcp.sock", sub: ".fantastic/cli/", kind: "agent", w: 150, wide: { x: 880, y: 430 }, tall: { x: 440, y: 426 } },
+        { id: "sock", label: "mcp.yaml", sub: ".fantastic/cli/", kind: "agent", w: 150, wide: { x: 880, y: 430 }, tall: { x: 440, y: 426 } },
       ],
       edges: [
         { id: "e_keys", from: "you", to: "tui" },
@@ -50,7 +50,7 @@ export const cli: Section = {
           flow: [{ edge: "e_mcp", label: "reflect" }],
         },
         {
-          caption: "With a kernel already running, fantastic mcp attaches to it over .fantastic/cli/mcp.sock instead of starting its own.",
+          caption: "With a kernel already running, fantastic mcp attaches to it over a loopback port named in .fantastic/cli/mcp.yaml instead of starting its own.",
           show: ["sock", "e_sock", "e_att"],
           flow: [{ edge: "e_sock", label: "send" }, { edge: "e_att", label: "send" }],
         },

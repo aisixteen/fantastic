@@ -62,7 +62,7 @@ fn an_embedder_launcher_writes_its_blueprint_after_the_stock_one() {
     let dir = fresh("emb");
     let argv = vec!["canvas".to_string()];
     if fantastic_tui::starts_kernel(&argv) {
-        assert_eq!(fantastic_tui::seed_dir_with(&dir, &[EMB]), Ok(true));
+        assert_eq!(fantastic_tui::seed_dir_with(&dir.join(".fantastic"), &[EMB]), Ok(true));
     }
     for f in STOCK.iter().chain([
         &".fantastic/agents/user/agents/probe/agent.yaml",
@@ -71,7 +71,7 @@ fn an_embedder_launcher_writes_its_blueprint_after_the_stock_one() {
         assert!(dir.join(f).is_file(), "missing {f}");
     }
     let dir2 = fresh("emb2");
-    fantastic_tui::seed_dir(&dir2).unwrap();
+    fantastic_tui::seed_dir(&dir2.join(".fantastic")).unwrap();
     let u = ".fantastic/agents/user/agent.yaml";
     assert_eq!(
         std::fs::read(dir.join(u)).unwrap(),
@@ -81,7 +81,7 @@ fn an_embedder_launcher_writes_its_blueprint_after_the_stock_one() {
     let dir3 = fresh("emb3");
     let argv = vec!["readme".to_string()];
     if fantastic_tui::starts_kernel(&argv) {
-        fantastic_tui::seed_dir_with(&dir3, &[EMB]).unwrap();
+        fantastic_tui::seed_dir_with(&dir3.join(".fantastic"), &[EMB]).unwrap();
     }
     assert!(!dir3.join(".fantastic").exists());
     for d in [dir, dir2, dir3] {

@@ -844,7 +844,7 @@ mod tests {
     fn the_wheel_moves_the_selection_under_the_pointer_and_never_the_focus() {
         use crate::kern::model::TreeNode;
         let leaf = |id: &str| TreeNode { id: id.into(), parent_id: None, handler_module: Some("x.tools".into()), display_name: None, description: None, children: vec![] };
-        let mut app = App::new(crate::env::Paths::at(std::path::Path::new("/nonexistent")));
+        let mut app = App::new(crate::env::Paths::of("/nonexistent/.fantastic".into(), "/nonexistent".into()));
         app.screen = ratatui::layout::Rect::new(0, 0, 120, 40);
         app.tree = Some(TreeNode { children: vec![leaf("a"), leaf("b"), leaf("c")], ..leaf("root") });
         app.reflow();
@@ -867,7 +867,7 @@ mod tests {
         use crate::kern::model::TreeNode;
         use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
         let leaf = |id: &str| TreeNode { id: id.into(), parent_id: None, handler_module: Some("x.tools".into()), display_name: None, description: None, children: vec![] };
-        let mut app = App::new(crate::env::Paths::at(std::path::Path::new("/nonexistent")));
+        let mut app = App::new(crate::env::Paths::of("/nonexistent/.fantastic".into(), "/nonexistent".into()));
         app.screen = ratatui::layout::Rect::new(0, 0, 120, 40);
         app.tree = Some(TreeNode { children: vec![leaf("s")], ..leaf("root") });
         app.reflow();
