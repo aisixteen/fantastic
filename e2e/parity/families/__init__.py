@@ -71,7 +71,7 @@ CHAT_FIELDS = ("model", "context_window", "output_reserve", "context_strategy", 
                "misfire_limit", "system_prompt", "file_bridge_id", "system_prompt_file",
                "pre_system_prompt", "post_system_prompt")
 #: What a chat may call on its provider, and the provider admits it for.
-COMPLETE = ["complete", "watch"]
+COMPLETE = ["complete", "watch", "reflect"]
 
 
 def ai_split(aid: str, kind: str, meta: dict) -> tuple[dict, dict]:

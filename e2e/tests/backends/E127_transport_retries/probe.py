@@ -144,7 +144,7 @@ def main() -> int:
                         provider_id=PROV, model=MODEL, max_tokens=8192,
                         context_window=262144, memory_store_id="memory",
                         transport_retries=2, misfire_limit=2,
-                        can_call={"$self": "*", "memory": "*", PROV: ["complete", "watch"]},
+                        can_call={"$self": "*", "memory": "*", PROV: ["complete", "watch", "reflect"]},
                         callable_by={"$self": "*", "$parent": "*", "rest": "*", "ws": "*"})
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:200]}")
 

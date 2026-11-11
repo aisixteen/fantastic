@@ -133,6 +133,7 @@ fn provider_idle(
         usage_log: None,
         agent_id: "a1".into(),
         caller: None,
+        images: Images::default(),
     }
 }
 
@@ -2646,4 +2647,236 @@ fn an_imageless_request_body_is_byte_identical_to_before_images() {
     let p = provider("http://x/v1/messages", Arc::new(NoKey));
     let body = p.body(&golden_messages(), None).to_string();
     assert_eq!(body, GOLDEN_BODY);
+}
+
+fn one_image(r: i64, media: &str, bytes: &[u8]) -> Images {
+    let mut i = Images::default();
+    i.0.insert(r.to_string(), (media.to_string(), bytes.to_vec()));
+    i
+}
+
+#[test]
+fn an_image_part_becomes_a_base64_block_before_the_text_of_its_message() {
+    let messages = [
+        json!({"role": "system", "content": "s"}),
+        json!({"role": "user", "content": "before"}),
+        json!({"role": "user", "content": "look", "images": [
+            {"type": "image", "ref": 7, "media_type": "image/png", "width": 2, "height": 1}]}),
+        json!({"role": "assistant", "content": "ok"}),
+    ];
+    let (system, _, turns) = to_wire(&messages, true, &one_image(7, "image/png", b"\x89PNG"));
+    assert_eq!(system, "s");
+    assert_eq!(
+        turns,
+        vec![
+            json!({"role": "user", "content": [
+                {"type": "text", "text": "before"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                    "data": "iVBORw=="}},
+                {"type": "text", "text": "look"},
+            ]}),
+            json!({"role": "assistant", "content": "ok"}),
+        ]
+    );
+}
+
+#[test]
+fn an_image_row_with_no_text_sends_no_blank_text_block_and_keeps_its_mark() {
+    let messages = [
+        json!({"role": "user", "content": "", "images": [{"ref": "a"}]}),
+        json!({"role": "user", "content": "x", "cache_mark": true}),
+    ];
+    let mut imgs = Images::default();
+    imgs.0
+        .insert("a".into(), ("image/jpeg".into(), vec![1, 2, 3]));
+    let (_, _, turns) = to_wire(&messages, true, &imgs);
+    let blocks = turns[0]["content"].as_array().expect("blocks");
+    assert_eq!(blocks[0]["type"], json!("image"));
+    assert_eq!(blocks[1]["text"], json!("\n\nx"));
+    assert_eq!(blocks[1]["cache_control"], json!({"type": "ephemeral"}));
+    assert_eq!(blocks.len(), 2, "{blocks:?}");
+}
+
+#[test]
+fn a_message_without_images_renders_as_before_with_or_without_the_images_in_hand() {
+    let messages = [
+        json!({"role": "user", "content": "u1"}),
+        json!({"role": "user", "content": "u2", "cache_mark": true}),
+        json!({"role": "assistant", "content": "x", "images": []}),
+    ];
+    let plain = to_wire(&messages, true, &Images::default());
+    let held = to_wire(&messages, true, &one_image(1, "image/png", b"zz"));
+    assert_eq!(plain, held);
+    assert_eq!(plain.2[0]["content"][0]["text"], json!("u1\n\nu2"));
+    assert_eq!(plain.2[1]["content"], json!("x"));
+}
+
+#[test]
+fn reflect_names_the_capabilities_of_its_models_and_an_unknown_model_sees_no_images() {
+    let sees = static_capability("claude-sonnet-4-5");
+    assert_eq!(sees["images"], json!(true));
+    for k in ["max_images", "max_bytes", "max_pixels"] {
+        assert!(sees[k].as_i64().is_some_and(|n| n > 0), "{k}: {sees}");
+    }
+    for m in ["gpt-x", "claude-2.1", "claude-instant-1.2", ""] {
+        assert_eq!(static_capability(m), json!({"images": false}), "{m}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reflect_carries_capabilities_per_model() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_with(
+        &tmp,
+        "http://unused.test/v1/messages",
+        json!({"models": ["claude-opus-4-1", "mystery-1"]}),
+    )
+    .await;
+    let r = call(&kernel, "a1", json!({"type": "reflect"})).await;
+    let caps = &r["capabilities"];
+    assert_eq!(caps["claude-opus-4-1"]["images"], json!(true), "{r}");
+    assert_eq!(caps["mystery-1"], json!({"images": false}), "{r}");
+    assert_eq!(
+        caps[MODEL]["images"],
+        static_capability(MODEL)["images"],
+        "{r}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_capabilities_setting_in_the_params_store_overrides_the_static_entry() {
+    let tmp = TempDir::new().unwrap();
+    let id = "capset1";
+    let kernel = mk_unbounded_store(&tmp, "http://unused.test/v1/messages", id, json!({})).await;
+    let store = helpers::agent_meta(&AgentId::from(id), &kernel)["memory_store_id"]
+        .as_str()
+        .expect("store")
+        .to_string();
+    let kept =
+        json!({"claude-opus-4-1": {"images": false}, "tiny": {"images": true, "max_images": 1}});
+    let r = fantastic_kernel::send::as_agent(&AgentId::from(id), async {
+        kernel
+            .send(vec![Item::new(
+                AgentId::from(store.as_str()),
+                json!({"type": "append", "rows": [{"kind": "setting", "name": "capabilities", "value": kept}]}),
+            )])
+            .await
+            .remove(0)
+            .result
+    })
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+    let r = call(&kernel, id, json!({"type": "reflect"})).await;
+    assert_eq!(r["capabilities"]["tiny"]["max_images"], json!(1), "{r}");
+    assert!(r["capabilities"]["tiny"].get("max_bytes").is_none(), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn image_bytes_on_the_binary_path_reach_the_wire_as_base64() {
+    let tmp = TempDir::new().unwrap();
+    let srv = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/models/{MODEL}")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            json!({"id": MODEL, "max_input_tokens": 200_000, "max_tokens": 1000}).to_string(),
+        ))
+        .mount(&srv)
+        .await;
+    let mut events = vec![start(), text("seen")];
+    events.extend(stop("end_turn"));
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(sse(&events)))
+        .mount(&srv)
+        .await;
+    let kernel = mk_with_id(
+        &tmp,
+        &format!("{}/v1/messages", srv.uri()),
+        json!({}),
+        "img1",
+    )
+    .await;
+    let rid = "chat~1";
+    let item = Item::new(
+        AgentId::from("img1"),
+        json!({"type": "complete", "rid": rid, "image": {"ref": 5, "media_type": "image/png"}}),
+    )
+    .with_binary_key("data", vec![0xff, 0x00, 0x10]);
+    let r = kernel.send(vec![item]).await.remove(0).result;
+    assert_eq!(r["bytes"], json!(3), "{r}");
+    assert!(srv.received_requests().await.unwrap_or_default().is_empty());
+    let r = call(
+        &kernel,
+        "img1",
+        json!({"type": "complete", "rid": rid, "model": MODEL, "messages": [
+            {"role": "user", "content": "what", "images": [{"type": "image", "ref": 5}]}]}),
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+    let reqs = srv.received_requests().await.unwrap_or_default();
+    let post = reqs
+        .iter()
+        .find(|r| r.method.as_str() == "POST")
+        .expect("a POST");
+    let body: Value = serde_json::from_slice(&post.body).unwrap();
+    assert_eq!(
+        body["messages"][0]["content"],
+        json!([
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "/wAQ"}},
+            {"type": "text", "text": "what"},
+        ])
+    );
+    // the bytes were taken: a second complete naming the ref has none
+    let r = call(
+        &kernel,
+        "img1",
+        json!({"type": "complete", "rid": rid, "model": MODEL, "messages": [
+            {"role": "user", "content": "again", "images": [{"ref": 5}]}]}),
+    )
+    .await;
+    assert!(
+        r["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("image ref 5")),
+        "{r}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_image_item_without_bytes_or_media_type_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_with_id(&tmp, "http://unused.test/v1/messages", json!({}), "img2").await;
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("img2"),
+            json!({"type": "complete", "rid": "c~1", "image": {"ref": 1, "media_type": "image/png"}}),
+        )
+        .with_binary_key("other", vec![1])])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("img2"),
+            json!({"type": "complete", "rid": "c~1", "image": {"ref": 1}}),
+        )
+        .with_binary_key("data", vec![1])])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_paired_chat_may_reflect_its_provider() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_with_id(&tmp, "http://unused.test/v1/messages", json!({}), "pair1").await;
+    let chat =
+        fantastic_ai_core::remote_provider::pair_chat(&kernel, &AgentId::from("pair1")).await;
+    let grants = helpers::agent_meta(&chat, &kernel)["can_call"]["pair1"].clone();
+    assert_eq!(grants, json!(["complete", "watch", "reflect"]));
+    let admits =
+        helpers::agent_meta(&AgentId::from("pair1"), &kernel)["callable_by"][chat.as_str()].clone();
+    assert_eq!(admits, json!(["complete", "watch", "reflect"]));
 }

@@ -168,7 +168,7 @@ def main() -> int:
             need(rec.get("id") == prov, f"create {prov}: {str(rec)[:200]}")
             rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
                             provider_id=prov, model=mock.model, **common,
-                            can_call={**can_call, prov: ["complete", "watch"]}, callable_by=cb)
+                            can_call={**can_call, prov: ["complete", "watch", "reflect"]}, callable_by=cb)
             need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")
 
         make_ai(WORKER, work_m, {"$self": "*", "memory": "*"},

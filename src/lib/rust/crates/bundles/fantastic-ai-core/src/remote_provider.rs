@@ -61,7 +61,7 @@ fn store_of(agent_id: &AgentId, kernel: &Kernel) -> Option<AgentId> {
 }
 
 /// The newest `setting` row named `name` in the provider's store: its value.
-async fn setting_of(agent_id: &AgentId, kernel: &Arc<Kernel>, name: &str) -> Option<Value> {
+pub async fn setting_of(agent_id: &AgentId, kernel: &Arc<Kernel>, name: &str) -> Option<Value> {
     let store = store_of(agent_id, kernel)?;
     let r = kernel
         .send(vec![Item::new(
@@ -551,7 +551,7 @@ pub async fn pair_chat(kernel: &Arc<Kernel>, provider: &AgentId) -> AgentId {
         .and_then(|a| a.parent_id.clone())
         .map_or_else(|| "kernel".to_string(), |p| p.as_str().to_string());
     let mut can_call = pm.get("can_call").and_then(Value::as_object).cloned().unwrap_or_default();
-    can_call.insert(provider.as_str().to_string(), json!(["complete", "watch"]));
+    can_call.insert(provider.as_str().to_string(), json!(["complete", "watch", "reflect"]));
     let mut create = json!({"type": "create_agent", "parent_id": parent, "handler_module": crate::chat_bundle::HANDLER_MODULE,
                             "id": chat.as_str(), PROVIDER_FIELD: provider.as_str(), "can_call": can_call,
                             "callable_by": pm.get("callable_by").cloned().unwrap_or(json!({"$self": "*"}))});
@@ -576,7 +576,7 @@ pub async fn pair_chat(kernel: &Arc<Kernel>, provider: &AgentId) -> AgentId {
     // the other ends: the provider admits the chat, and so does everything that admits the provider
     let me = chat.as_str().to_string();
     let _ = kernel.edit_callable_by(provider, |m| {
-        m.insert(me.clone(), json!(["complete", "watch"]));
+        m.insert(me.clone(), json!(["complete", "watch", "reflect"]));
         true
     });
     let all: Vec<Arc<fantastic_kernel::Agent>> = kernel.agents.iter().map(|e| Arc::clone(e.value())).collect();

@@ -41,7 +41,7 @@ AI, PROV, PROV2 = "chat", "prov_a", "prov_b"
 NO_GRANT, NOT_ADMITTED = "chat_no_grant", "chat_not_admitted"
 REMOTE_AI, REMOTE_PROV, BRIDGE = "chat_remote", "prov_far", "br"
 MODEL_A, MODEL_B, MODEL_FAR = "mock-a", "mock-b", "mock-far"
-COMPLETE = ["complete", "watch"]
+COMPLETE = ["complete", "watch", "reflect"]
 DONE = '\n<call name="done"></call>'
 
 bad: list[str] = []

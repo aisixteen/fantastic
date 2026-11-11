@@ -151,7 +151,7 @@ def main() -> int:
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
                         provider_id=PROV, model=MODEL, max_tokens=8192,
                         context_window=262144, memory_store_id="memory",
-                        can_call={"$self": "*", "memory": "*", PROV: ["complete", "watch"],
+                        can_call={"$self": "*", "memory": "*", PROV: ["complete", "watch", "reflect"],
                                   **{p: ["reflect"] for p in batch}},
                         callable_by={"$self": "*", "$parent": "*", "rest": "*"})
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:160]}")

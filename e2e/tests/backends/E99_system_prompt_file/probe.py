@@ -163,7 +163,7 @@ def main() -> int:
             credentials={"store": "creds", "ref": "stub"},
             memory_store_id="memory",
             can_call={"$self": "*", "memory": "*", "creds": ["get"]},
-            callable_by={"$self": "*", "$parent": "*", "ai": ["complete", "watch"]},
+            callable_by={"$self": "*", "$parent": "*", "ai": ["complete", "watch", "reflect"]},
         )
         need(rec.get("id") == "ai_provider", f"create ai_provider: {str(rec)[:200]}")
         rec = hk.create(
@@ -178,7 +178,7 @@ def main() -> int:
                 "memory": "*",
                 root: ["reflect"],
                 "pf": FILE_VERBS,
-                "ai_provider": ["complete", "watch"],
+                "ai_provider": ["complete", "watch", "reflect"],
             },
             callable_by={"$self": "*", "$parent": "*", "rest": "*"},
         )
@@ -280,7 +280,7 @@ def main() -> int:
             ingress_rule="allow_all_ingress",
             callable_by={"$self": "*", "$parent": "*"},
         )
-        cc = {"$self": "*", "memory": "*", root: ["reflect"], "ai_provider": ["complete", "watch"],
+        cc = {"$self": "*", "memory": "*", root: ["reflect"], "ai_provider": ["complete", "watch", "reflect"],
               "pf": FILE_VERBS, "pf_sealed": FILE_VERBS}
         update("ai", can_call=cc, file_bridge_id="pf_sealed", system_prompt_file="sealed.md")
         r = failed_turn()

@@ -648,6 +648,7 @@ name = "fantastic-anthropic-backend"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "fantastic-ai-core",
  "fantastic-bundle",
  "fantastic-kernel",

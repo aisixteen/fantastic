@@ -152,7 +152,7 @@ def main() -> int:
             rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
                             provider_id=pv, model=model, max_tokens=8192,
                             context_window=262144, memory_store_id="memory",
-                            can_call={**can, pv: ["complete", "watch"]}, callable_by=by)
+                            can_call={**can, pv: ["complete", "watch", "reflect"]}, callable_by=by)
             need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")
 
         for w in WORKERS:
