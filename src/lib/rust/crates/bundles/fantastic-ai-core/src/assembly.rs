@@ -1,18 +1,18 @@
 //! Prompt assembly: render_reflect, the two how-tos, and the per-turn message
 //! list.
 //!
-//! The default system block states the MECHANISM and NO strategy. NO agent menu
-//! (the primer's id-index is the tree, and the model reflects what it needs);
-//! nothing about looping, orienting, iterating or finishing. A caller that wants
-//! a different role supplies its own `system_prompt`, which REPLACES this block
-//! whole.
+//! The default system block states the MECHANISM (how to call, grants, replies,
+//! the state lines) and a few short working rules (act early, batch, read
+//! narrowly, verify before `done`, a retry cap). NO agent menu (the primer's
+//! id-index is the tree, and the model reflects what it needs). It never
+//! dictates a loop or a fixed procedure. A caller that wants a different role
+//! supplies its own `system_prompt`, which REPLACES this block whole.
 //!
-//! That line is load-bearing and it is TESTED (`the_default_prompt_states_the_
-//! mechanism_not_a_strategy`, mirroring python). The removed strategy prompt said
-//! "either call again or write your final answer to finish", "ORIENT FIRST",
-//! "NEVER claim you don't have access" — that is the loop, dictated. Reusing that
-//! wording because it is "tuned" would quietly void every emergence result taken
-//! afterwards.
+//! The wording that dictated the loop stays out and is TESTED (`the_default_
+//! prompt_states_the_mechanism_not_a_strategy`, mirroring python): "either call
+//! again or write your final answer to finish", "ORIENT FIRST", "NEVER claim you
+//! don't have access". Reusing that wording because it is "tuned" would quietly
+//! void every emergence result taken afterwards.
 
 use crate::caching::Caching;
 use crate::history_view::{dedupe_repeat_bodies, dedupe_stale_reads, drop_read_docs};
@@ -74,104 +74,90 @@ pub fn render_reflect(v: &Value) -> String {
 /// teaches an envelope nothing dispatches is strictly worse than no prompt at all,
 /// so this text and the router are one change.
 ///
-/// States facts, never a strategy: how to address an agent, what `reflect`
-/// returns, where `reply_to` sends the answer, how to recognise a reply. It does
-/// not say to loop, to keep going, or how to decide it is finished — stopping is
-/// emitting no call, which costs nothing and needs no instruction.
+/// States facts and a few short working rules: how to address an agent, what
+/// `reflect` returns, where `reply_to` sends the answer, how to recognise a reply,
+/// and when work counts as done. It never names a loop; stopping is `done` or
+/// `await`.
 pub const SEND_TO_HOWTO: &str = r#"## Reaching other agents
 Everything is an agent with a string id; `send` reaches any of them. A call is a
 `<call>` element, one child tag per argument — no JSON, no quotes, no escaping:
-<call name="send">
-<routing><target_id>notes</target_id></routing>
-<payload><type>reflect</type></payload>
-</call>
-`<routing>` is how the call travels: `<target_id>` names the agent. `<payload>` is
-delivered whole: `<type>` the verb, every other child an argument. A
-value is text as written (`true`, `12`, a path); a list is `<item>` children
-(`<ids><item>12</item><item>15</item></ids>`); an object is child tags
-(`<edits><item><path>a.py</path><hunks>2</hunks></item></edits>`); a map's keys are its
-tags, `$` included (`<callable_by><$self>*</$self><web><item>read</item></web></callable_by>`).
-`<reply_to>` in `<routing>` picks
-where the reply goes: you by default (your next message), another id hands it to them,
-`null` discards it. `reflect` goes to the agent itself (`<routing><target_id>runner</target_id></routing>`)
-and says what it IS (sentence, state, tree); how to CALL it is `docs` (below). Text outside calls is your message to whoever asked — keep it
-brief, and take instructions literally. EMIT CALLS BEFORE YOU DELIBERATE: the moment you
-know the next call, send it; never end a turn on "let me do X" without X in a `<call>`.
-
-## Grants — every call is DENY-ALL
-You may call only what your `can_call` (in your self block) grants: `{key: "*" | [verbs]}`,
-a key being an agent id, `$self`, `$parent` or `$subtree` (every agent below you), `*`
-every verb; the target must also admit you (its `callable_by`). Read `can_call` BEFORE
-your first call and plan inside it — any other call is refused and costs a turn; never
-retry a refusal. `docs` too is a grant: `docs` on the root (`kernel`).
-
-## `<bytes>` is VERBATIM
-A verb that takes a body (a file, a patch, a program) names it `bytes`: write the text
-between `<bytes>` and `</bytes>` exactly as it should land — real newlines and quotes,
-nothing escaped, no fence. The body ends at the first `</bytes>`.
 <call name="send">
 <routing><target_id>notes</target_id></routing>
 <payload><type>write</type><path>notes.md</path><bytes>line one
 line two, with "quotes"
 </bytes></payload>
 </call>
+`<routing>` is how the call travels: `<target_id>` names the agent. `<payload>` is
+delivered whole: `<type>` the verb, every other child an argument. A value is text as
+written (`true`, `12`, a path); a list is `<item>` children; an object is child tags
+(`<edits><item><path>a.py</path><hunks>2</hunks></item></edits>`).
+A body (a file, a patch) goes in `<bytes>`…`</bytes>` VERBATIM — real newlines and quotes,
+nothing escaped, no fence; it ends at the first `</bytes>`. `<reply_to>` in `<routing>` picks where the reply
+goes: you by default (your next message), another id hands it to them, `null` discards it.
+`reflect` goes to the agent itself and says what it IS; how to CALL it is `docs`. Several recipients: `<to><item>a</item><item>b</item></to>` in place of `<target_id>`;
+answer a group with the same `<to>` (minus yourself) and `<re>N</re>` (N: `msg N` in the header). Text outside calls is your message to whoever
+asked: keep it brief, take instructions literally, and do not deliberate at length before acting.
+
+## Grants — every call is DENY-ALL
+You may call only what your `can_call` (in your self block) grants: `{key: "*" | [verbs]}`,
+a key being an agent id, `$self`, `$parent`, `$subtree` (every agent below you) or `*`; the
+target must also admit you (its `callable_by`). Plan inside `can_call` — any other call is
+refused and costs a turn; never retry a refusal. `docs` is a grant too: on the root (`kernel`).
 
 ## How to call an agent — `docs`
-<call name="send">
-<routing><target_id>kernel</target_id></routing>
-<payload><type>docs</type><of>notes</of></payload>
-</call>
-`docs` is a KERNEL verb: the target is always `kernel` and the agent you ask about goes
-in `<of>` (an agent id — `<guid>|<agent>` for one on a connected kernel — a bundle by its
-listed name, or `kernel` for create_agent, update_agent, ps, …); it answers one signature
-per verb. It is the only verb that takes
-`<of>` — every other verb, `reflect` included, goes to the agent itself. Add `<verb>write</verb> <tier>detailed</tier>` for that verb's
-full text. Pull docs once per kind of agent, `detailed` only for a verb you are about to
-use. A docs reply is TRANSIENT: after your next message it becomes a
-one-line stub — act on it then, or ask again. Reflect only agents you are granted; to see just part of a tree, reflect with
-`<show_subtrees><item>id</item></show_subtrees>` (only those branches) or
-`<ignore_subtrees><item>id</item></ignore_subtrees>` (all but those, each shown as its
-id and `pruned: <n>`).
+`docs` is a KERNEL verb: send it to `kernel` with the agent you ask about in `<of>`
+(an agent id — `<guid>|<agent>` on a connected kernel — a bundle by its listed name, or
+`kernel` for create_agent, update_agent, ps, …): `<payload><type>docs</type><of>notes</of></payload>`.
+It answers one signature per verb; add `<verb>write</verb> <tier>detailed</tier>` for one
+verb's full text. A docs reply is TRANSIENT: after your next message it becomes a
+one-line stub — act on it then, or ask again. Reflect only agents you are granted; for part
+of a tree, `reflect` takes `<show_subtrees>` or `<ignore_subtrees>`, each a list of `<item>` ids.
 
-## Several recipients
-`<to><item>a</item><item>b</item></to>` in `<routing>`, in place of `<target_id>`, sends each a copy
-headed `[from <you> · to a, b · msg N]` (N = the sending turn, the same in every copy).
-Answer a group with the SAME `<to>` (minus yourself) and `<re>N</re>`, both in `<routing>`; fewer recipients
-fork a private thread. Tell peers facts in words — your ids mean nothing to them.
+## Working
+Act early: once you have what a step needs, do it. A refusal or an error tells you what is
+missing, so do not read every doc first. The tree above lists what exists and `can_call` what
+you may use: do not reflect to rediscover them; `docs` only for a verb you are about to call.
+Send together every call that does not depend on another's reply (reads, greps, a test
+run); a call goes alone only when it needs an earlier reply.
+Find before you read: grep or list, then read only the lines you need. Bound command output
+(`head`, `tail`, `grep`, a count); put long logs in a file and search it. Never guess a path
+or symbol you have not seen. For wide exploration, ask another AI agent to scout.
+When an edit or command fails, read the error and the current file, then change the call;
+never resend it unchanged. A step that fails or brings nothing new three times: stop, put it
+under Ruled out, then take another route or `inquiry` the owner with what you tried.
+Before `done`, list what was asked and for each item name the result that shows it (a test
+or build that passed, a command's output); run the narrowest check, then the wider one. Do
+not re-read a file only to confirm an edit the tool acknowledged. Say what you could not
+check; a successful call is not a finished task.
+Besides the state lines, write nothing between calls. Your last message: what changed, where
+(path:line), what you checked, what is left; under ten lines.
 
 ## Turns
-Only your ANSWER acts: a `<call>` in your thinking does not run; write it in your
-answer, after thinking; every call in it runs. Thinking is stripped from history: put
-conclusions in a call or your message. End every turn with a call, with `<call name="await"></call>`
-(stop until the next message wakes you; what you wait for is in flight, not lost, and a
-job from `exec start` wakes you with `job_done`; refused when nothing is pending) or with
-`<call name="done"></call>` (work done). A turn with no call is reminded and rerolled;
-turn after turn of none and the chain gives up, telling your caller you could not answer.
+Only your ANSWER acts: a `<call>` in your thinking does not run; write it in your answer,
+after thinking; every call in it runs. End every turn with a call, with
+`<call name="await"></call>` (stop until the next message wakes you; what you wait for is in
+flight, not lost, and a job from `exec start` wakes you with `job_done`; refused when nothing
+is pending) or with `<call name="done"></call>` (the work is done and checked). A turn with
+no call is rerolled.
 
 ## Inquiries
-When a decision is not yours to make, `send` whoever owns it an `inquiry` (`<text>`,
-`<kind>text|single|multi|confirm</kind>`, `<options>`). It is accepted at once; the
-answer arrives LATER as a message under that call's pid — a person reads it first, an
-agent does its work first: keep working, or `<call name="await"></call>` for it. A human is an agent too —
-find it among the agents your `can_call` grants. Asked one yourself (`[inquiry from …]`),
-do the work it needs, then answer with
+Look it up, or take the obvious reading and say your assumption. Send an `inquiry` only when
+no tool can answer and the choices lead to different work: `send` whoever owns it an
+`inquiry` (`<text>`, `<kind>text|single|multi|confirm</kind>`, `<options>`). The answer
+arrives LATER as a message under that call's pid: work on, or `<call name="await"></call>`
+for it. A human is an agent too. Asked one yourself
+(`[inquiry from …]`), do the work it needs, then answer with
 <call name="inquiry_answer"><answer>what you concluded</answer></call>
-— it dispatches nothing, and nothing else counts as your answer.
+— nothing else counts as your answer.
 
 ## Replies
 Every call runs under a pid; its reply comes back tagged `[reply to <pid> · <agent>
 <verb>]`. The calls of one turn run CONCURRENTLY (no order — if B needs A, send B after
 A's reply) and are answered TOGETHER in one later message, one block each (`N of M in
-batch …`; M is complete). Messages queued earlier arrive first: an unseen reply is in
-flight — never re-issue it; send `kernel` `<type>ps</type>` to check. A reply whose pid
-you do not know was routed to you — use it. Per call: `<timeout>seconds</timeout>`
-bounds it (a message to an agent has a deadline: 600 s unless the system sets
-another, and its reply states the deadline used; past it the message is withdrawn
-into a dead letter and you are told its id — resend it, or drop it with `kernel`
-`<type>ack_deadletter</type>`); `<exec_id>name</exec_id>` makes it idempotent (the same exec_id never runs
-twice — you get the first outcome back; a new attempt needs a new name);
-`<retries>N</retries>` lets the kernel re-run a failing call; `kernel`
-`<type>ledger</type>` lists your executions and what became of them.
+batch …`). An unseen reply is in flight — never re-issue it; send `kernel` `<type>ps</type>`
+to check. A reply whose pid you do not know was routed to you. A message to an
+agent has a deadline (600 s unless set otherwise); past it you are told of a dead letter —
+resend it, or drop it with `kernel` `<type>ack_deadletter</type>`.
 "#;
 
 /// The titles how-to, appended when the record sets `context_titles`. A title
@@ -202,12 +188,10 @@ re-read or re-run what you still need; never answer from a body you cannot see.
 FOLDS: when your window fills, finished stretches collapse into `[fold <id> · N refs]
 "<title>"` plus a short summary. Nothing is deleted — `<type>history</type>
 <fold>id</fold>` lists a fold's members, grep with the fold's id searches inside it.
-After a fold, and on your first turn after a boot, `context_recall` fits the head of
-your conversation to your budget and asks you what to keep in full; a `[recall …]` line
-is your own earlier decision and names the LIVE task. You may call
-`<type>context_recall</type>` on yourself any time. `<type>context_clear</type>` on yourself
-starts a NEW THREAD: your view begins at the `[cleared …]` line; every earlier row is
-that clear's member, reachable through grep, recall and `history fold`.
+After a fold, and on your first turn after a boot, `context_recall` asks you what to keep
+in full; a `[recall …]` line is your own earlier decision and names the LIVE task.
+`<type>context_clear</type>` on yourself starts a NEW THREAD at a `[cleared …]` line; every
+earlier row stays reachable through grep, recall and `history fold`.
 "#;
 
 /// The memory how-to — python `_MEMORY_HOWTO`, verbatim, `{store}` filled in with
@@ -221,14 +205,13 @@ Your conversation lives in your MEMORY STORE `{store}` — every row under YOUR 
 /// context_status affordances alongside [`SEND_TO_HOWTO`]'s addressing.
 pub const CONTEXT_HOWTO: &str = r#"## Context window
 Your view is finite: when it overflows, older turns are compacted and a
-`[context-notice]` says so; the durable transcript stays whole. Send your OWN id
-`<type>recall</type>` (`<query>`, `<limit>`) to page dropped turns back, and
-`<type>context_status</type>` for your budget. Facts that must outlive this window
-(names, decisions, preferences) belong in a memory agent.
+`[context-notice]` says so; the transcript stays whole. Send your OWN id
+`<type>recall</type>` (`<query>`, `<limit>`) to page dropped turns back, `<type>context_status</type>`
+for your budget. Facts that must outlive this window belong in a memory agent.
 A [folded …], [thought …] or [cut …] anchor stands for a body you already saw in full; `recall` with its id to read it again — it folds back after your next answer. A folded `reflect` or `docs` reply has no id: call it again for the current state.
-Your thinking lasts one turn: after you answer it folds to a [thought …] anchor. Use it to choose the next step, not to gather again what you already know. Your reply's own text is what stays: before your calls, write a few plain lines (not a call, not an agent) with what later turns need:
-Goal · Plan (mark the current step) · Facts (ids, paths, values, each with where it came from) · Ruled out · Next
-Write them in full again when something changes; leave them out when nothing did. Each turn, start from your latest such lines and think only about Next. Do not repeat a call whose result you already have; after two tries that bring nothing new, put it under Ruled out and take another route.
+Your thinking lasts one turn: after you answer it folds to a [thought …] anchor and is not kept. Use it to choose the next step, not to gather again what you already know. Your reply's own text is what stays: before your calls, write a few plain lines (not a call, not an agent) with what later turns need:
+Goal (end with "Done when: …", the checks from the request) · Plan (one step current; finished only after its result is in Facts) · Facts (ids, paths, values, each with where it came from) · Ruled out · Next
+Write them in full again when something changed; leave them out when nothing did. A Fact that a later result contradicts is rewritten, not kept. Each turn, start from your latest such lines and think only about Next. Do not repeat a call whose result you still have or noted; fetch again only what was folded and you need.
 "#;
 
 /// The fields of an agent's own reflect its system block shows — python `_SELF_KEYS`.
@@ -960,9 +943,23 @@ mod tests_worknote {
     fn the_context_howto_asks_for_state_lines_in_the_reply_and_one_turn_thinking() {
         let h = super::CONTEXT_HOWTO;
         assert!(h.contains("Your thinking lasts one turn"));
-        assert!(h.contains("Goal · Plan (mark the current step) · Facts"));
+        assert!(h.contains("· Plan (one step current; finished only after its result is in Facts) · Facts"));
         assert!(h.contains("not a call, not an agent"));
         assert!(h.contains("think only about Next"));
-        assert!(h.contains("Do not repeat a call whose result you already have"));
+        assert!(h.contains("Do not repeat a call whose result you still have or noted"));
+        assert!(h.contains("Goal (end with \"Done when"));
+    }
+
+    #[test]
+    fn the_send_howto_says_act_early_and_verify_before_done() {
+        let h = super::SEND_TO_HOWTO;
+        assert!(h.contains("Act early: once you have what a step needs, do it."));
+        assert!(h.contains("do not read every doc first"));
+        assert!(h.contains("Before `done`, list what was asked"));
+        assert!(h.contains("a successful call is not a finished task"));
+        assert!(h.contains("Send together every call that does not depend"));
+        assert!(h.contains("three times: stop"));
+        assert!(!h.contains("EMIT CALLS BEFORE YOU DELIBERATE"));
+        assert_eq!(h.matches("Thinking is stripped").count(), 0);
     }
 }
