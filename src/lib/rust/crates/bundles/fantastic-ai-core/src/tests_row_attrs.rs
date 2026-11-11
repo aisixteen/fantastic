@@ -703,9 +703,18 @@ async fn the_totals_of_a_scripted_run_validate_against_the_request_and_the_provi
     }
     for i in 0..6 {
         let body = Value::Array(s.request_messages(i)).to_string();
-        // (`prov_a` is not listed: the tree primer names every agent, the provider too.)
         for key in ["attributes", "totals", "m-one", "digest"] {
             assert!(!body.contains(key), "request {i} holds {key}");
+        }
+        // The tree primer names the provider agent, so the bare id `prov_a` may
+        // appear; only the ATTRIBUTES carry it as a value of `provider`, and
+        // only they carry the usage and cost keys or their exact serialization.
+        for frag in ["\"provider\":\"prov_a\"", "\"usage\"", "\"cost\"", "\"model\":"] {
+            assert!(!body.contains(frag), "request {i} holds the attribute fragment {frag}");
+        }
+        for a in &answers {
+            let ser = a["attributes"].to_string();
+            assert!(!body.contains(&ser), "request {i} holds a row's attributes");
         }
     }
 }

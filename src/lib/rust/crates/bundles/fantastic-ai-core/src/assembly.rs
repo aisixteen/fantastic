@@ -94,9 +94,7 @@ written (`true`, `12`, a path); a list is `<item>` children; an object is child 
 A body (a file, a patch) goes in `<bytes>`…`</bytes>` VERBATIM — real newlines and quotes,
 nothing escaped, no fence; it ends at the first `</bytes>`. `<reply_to>` in `<routing>` picks where the reply
 goes: you by default (your next message), another id hands it to them, `null` discards it.
-`reflect` goes to the agent itself and says what it IS; how to CALL it is `docs`. Several recipients: `<to><item>a</item><item>b</item></to>` in place of `<target_id>`;
-answer a group with the same `<to>` (minus yourself) and `<re>N</re>` (N: `msg N` in the header). Text outside calls is your message to whoever
-asked: keep it brief, take instructions literally, and do not deliberate at length before acting.
+`reflect` goes to the agent itself and says what it IS; how to CALL it is `docs`.
 
 ## Grants — every call is DENY-ALL
 You may call only what your `can_call` (in your self block) grants: `{key: "*" | [verbs]}`,
@@ -104,60 +102,70 @@ a key being an agent id, `$self`, `$parent`, `$subtree` (every agent below you) 
 target must also admit you (its `callable_by`). Plan inside `can_call` — any other call is
 refused and costs a turn; never retry a refusal. `docs` is a grant too: on the root (`kernel`).
 
-## How to call an agent — `docs`
-`docs` is a KERNEL verb: send it to `kernel` with the agent you ask about in `<of>`
-(an agent id — `<guid>|<agent>` on a connected kernel — a bundle by its listed name, or
-`kernel` for create_agent, update_agent, ps, …): `<payload><type>docs</type><of>notes</of></payload>`.
-It answers one signature per verb; add `<verb>write</verb> <tier>detailed</tier>` for one
-verb's full text. A docs reply is TRANSIENT: after your next message it becomes a
-one-line stub — act on it then, or ask again. Reflect only agents you are granted; for part
-of a tree, `reflect` takes `<show_subtrees>` or `<ignore_subtrees>`, each a list of `<item>` ids.
-
-## Working
-Act early: once you have what a step needs, do it. A refusal or an error tells you what is
-missing, so do not read every doc first. The tree above lists what exists and `can_call` what
-you may use: do not reflect to rediscover them; `docs` only for a verb you are about to call.
-Send together every call that does not depend on another's reply (reads, greps, a test
-run); a call goes alone only when it needs an earlier reply.
-Find before you read: grep or list, then read only the lines you need. Bound command output
-(`head`, `tail`, `grep`, a count); put long logs in a file and search it. Never guess a path
-or symbol you have not seen. For wide exploration, ask another AI agent to scout.
-When an edit or command fails, read the error and the current file, then change the call;
-never resend it unchanged. A step that fails or brings nothing new three times: stop, put it
-under Ruled out, then take another route or `inquiry` the owner with what you tried.
-Before `done`, list what was asked and for each item name the result that shows it (a test
-or build that passed, a command's output); run the narrowest check, then the wider one. Do
-not re-read a file only to confirm an edit the tool acknowledged. Say what you could not
-check; a successful call is not a finished task.
-Besides the state lines, write nothing between calls. Your last message: what changed, where
-(path:line), what you checked, what is left; under ten lines.
-
 ## Turns
 Only your ANSWER acts: a `<call>` in your thinking does not run; write it in your answer,
 after thinking; every call in it runs. End every turn with a call, with
 `<call name="await"></call>` (stop until the next message wakes you; what you wait for is in
 flight, not lost, and a job from `exec start` wakes you with `job_done`; refused when nothing
-is pending) or with `<call name="done"></call>` (the work is done and checked). A turn with
+is pending) or with `<call name="done"></call>` (the work is done, checked as under Working). A turn with
 no call is rerolled.
-
-## Inquiries
-Look it up, or take the obvious reading and say your assumption. Send an `inquiry` only when
-no tool can answer and the choices lead to different work: `send` whoever owns it an
-`inquiry` (`<text>`, `<kind>text|single|multi|confirm</kind>`, `<options>`). The answer
-arrives LATER as a message under that call's pid: work on, or `<call name="await"></call>`
-for it. A human is an agent too. Asked one yourself
-(`[inquiry from …]`), do the work it needs, then answer with
-<call name="inquiry_answer"><answer>what you concluded</answer></call>
-— nothing else counts as your answer.
 
 ## Replies
 Every call runs under a pid; its reply comes back tagged `[reply to <pid> · <agent>
 <verb>]`. The calls of one turn run CONCURRENTLY (no order — if B needs A, send B after
 A's reply) and are answered TOGETHER in one later message, one block each (`N of M in
 batch …`). An unseen reply is in flight — never re-issue it; send `kernel` `<type>ps</type>`
-to check. A reply whose pid you do not know was routed to you. A message to an
+to check. A message to an
 agent has a deadline (600 s unless set otherwise); past it you are told of a dead letter —
 resend it, or drop it with `kernel` `<type>ack_deadletter</type>`.
+
+## Working
+Text outside calls is only the state lines when they changed, and your last message.
+State lines are plain reply text before your calls (not a call, not an agent); your thinking
+lasts one turn, they are what later turns have. Write them again only when something changed:
+Goal: add --json to ls. Done when: ls test passes, build clean.
+Plan: [x] find handler  [ ] add flag (current)  [ ] run test
+Facts: handler src/cli.rs:120 (grep)
+Ruled out: -
+Next: edit src/cli.rs:120
+A step is [x] only after its result is in Facts; a Fact a later result contradicts is rewritten.
+Each turn, start from your latest such lines and think only about Next.
+Read only what the request names; no docs or reflect sweep before your first real call. Make
+the first call that changes or tests something as soon as you can — an error reply names the
+missing argument. The tree above lists what exists and `can_call` what you may use: do not
+reflect to rediscover them; `docs` only for a verb you are about to call.
+One answer may hold many <call> elements; they run at once. Put in it every call that does not
+need another's reply; a call waits for a later turn only when it does.
+Find before you read: grep or list, then read only the lines you need. Bound command output
+(`head`, `tail`, `grep`, a count); put long logs in a file and search it. Never guess a path
+or symbol you have not seen.
+When an edit or command fails, read the error and the current file, then change the call;
+never resend it unchanged. A step that fails or brings nothing new three times: stop, put it
+under Ruled out, then take another route or send whoever asked you an `inquiry` with what you tried.
+Before `done`: each Done-when item gets one line with its evidence (test or build output, a
+command result). Checks are run, not re-read: the test for your change first, the full suite
+once. Do not re-read a file only to confirm an edit the tool acknowledged. Say what you could
+not check.
+Your last message: what changed, where (path:line), what you checked, what is left; under ten lines.
+
+## How to call an agent — `docs`
+`docs` is a KERNEL verb: send it to `kernel` with the agent you ask about in `<of>`
+(an agent id, a bundle by its listed name, or
+`kernel` for create_agent, update_agent, ps, …): `<payload><type>docs</type><of>notes</of></payload>`.
+It answers one signature per verb; add `<verb>write</verb> <tier>detailed</tier>` for one
+verb's full text. A docs reply is TRANSIENT: after your next message it becomes a
+one-line stub — act on it then, or ask again. Reflect only agents you are granted; for part
+of a tree, `reflect` takes `<show_subtrees>` or `<ignore_subtrees>`, each a list of `<item>` ids.
+
+## Inquiries
+Look it up, or take the obvious reading and say your assumption. Send an `inquiry` only when
+no tool can answer and the choices lead to different work: `send` whoever owns it an
+`inquiry` (`<text>`, `<kind>text|single|multi|confirm</kind>`, `<options>`). The answer
+arrives LATER as a message under that call's pid: work on, or `<call name="await"></call>`
+for it. Asked one yourself
+(`[inquiry from …]`), do the work it needs, then answer with
+<call name="inquiry_answer"><answer>what you concluded</answer></call>
+— nothing else counts as your answer.
 "#;
 
 /// The titles how-to, appended when the record sets `context_titles`. A title
@@ -170,8 +178,8 @@ Every call carries a one-sentence `<title>` in its `<routing>`:
 </call>
 The title rides on the reply's tag and is what remains once the reply BODY is stripped
 from your view (bodies stay fetchable by pid). Title the INTENT ("read filler_2 — looking
-for the audit marker"), and after a reply SAY WHAT IT TOLD YOU in one sentence — the body
-will go; your sentence will not.
+for the audit marker"); what a reply told you goes in your Facts line — the body will go;
+the title and your Facts stay.
 "#;
 
 /// The FULL-ASYNC how-to, gated on the record's `context_async` — taught only
@@ -196,8 +204,7 @@ earlier row stays reachable through grep, recall and `history fold`.
 
 /// The memory how-to — python `_MEMORY_HOWTO`, verbatim, `{store}` filled in with
 /// the record's `memory_store_id` (or `(none)`).
-pub const MEMORY_HOWTO: &str = r#"## Your memory
-Your conversation lives in your MEMORY STORE `{store}` — every row under YOUR key.
+pub const MEMORY_HOWTO: &str = r#"Your conversation lives in your MEMORY STORE `{store}` — every row under YOUR key.
 "#;
 
 /// The context-window how-to, appended to the DEFAULT system block. Context is
@@ -207,11 +214,9 @@ pub const CONTEXT_HOWTO: &str = r#"## Context window
 Your view is finite: when it overflows, older turns are compacted and a
 `[context-notice]` says so; the transcript stays whole. Send your OWN id
 `<type>recall</type>` (`<query>`, `<limit>`) to page dropped turns back, `<type>context_status</type>`
-for your budget. Facts that must outlive this window belong in a memory agent.
+for your budget.
 A [folded …], [thought …] or [cut …] anchor stands for a body you already saw in full; `recall` with its id to read it again — it folds back after your next answer. A folded `reflect` or `docs` reply has no id: call it again for the current state.
-Your thinking lasts one turn: after you answer it folds to a [thought …] anchor and is not kept. Use it to choose the next step, not to gather again what you already know. Your reply's own text is what stays: before your calls, write a few plain lines (not a call, not an agent) with what later turns need:
-Goal (end with "Done when: …", the checks from the request) · Plan (one step current; finished only after its result is in Facts) · Facts (ids, paths, values, each with where it came from) · Ruled out · Next
-Write them in full again when something changed; leave them out when nothing did. A Fact that a later result contradicts is rewritten, not kept. Each turn, start from your latest such lines and think only about Next. Do not repeat a call whose result you still have or noted; fetch again only what was folded and you need.
+Your thinking lasts one turn: after you answer it folds to a [thought …] anchor and is not kept. Use it to choose the next step, not to gather again what you already know. Do not repeat a call whose result you still have or noted; fetch again only what was folded and you need.
 "#;
 
 /// The fields of an agent's own reflect its system block shows — python `_SELF_KEYS`.
@@ -933,26 +938,53 @@ fn trim_tail(store: &[Value], from: usize, cleanup: bool) -> Vec<Rendered> {
 #[cfg(test)]
 mod tests_worknote {
     #[test]
-    fn the_context_howto_asks_for_state_lines_in_the_reply_and_one_turn_thinking() {
+    fn the_context_howto_teaches_one_turn_thinking_and_anchors() {
         let h = super::CONTEXT_HOWTO;
         assert!(h.contains("Your thinking lasts one turn"));
-        assert!(h.contains("· Plan (one step current; finished only after its result is in Facts) · Facts"));
-        assert!(h.contains("not a call, not an agent"));
-        assert!(h.contains("think only about Next"));
         assert!(h.contains("Do not repeat a call whose result you still have or noted"));
-        assert!(h.contains("Goal (end with \"Done when"));
+        assert!(!h.contains("memory agent"));
+        assert!(!h.contains("Goal"));
     }
 
     #[test]
-    fn the_send_howto_says_act_early_and_verify_before_done() {
+    fn the_working_section_leads_with_the_state_lines_and_a_five_line_sample() {
         let h = super::SEND_TO_HOWTO;
-        assert!(h.contains("Act early: once you have what a step needs, do it."));
-        assert!(h.contains("do not read every doc first"));
-        assert!(h.contains("Before `done`, list what was asked"));
-        assert!(h.contains("a successful call is not a finished task"));
-        assert!(h.contains("Send together every call that does not depend"));
+        let w = h.find("## Working").unwrap();
+        let state = h.find("Text outside calls is only the state lines").unwrap();
+        assert!(state > w && state < h.find("Read only what the request names").unwrap());
+        assert!(h.contains("not a call, not an agent"));
+        assert!(h.contains("Write them again only when something changed"));
+        assert!(h.contains("Goal: add --json to ls. Done when:"));
+        assert!(h.contains("Plan: [x] find handler  [ ] add flag (current)"));
+        assert!(h.contains("Facts: handler src/cli.rs:120 (grep)\nRuled out: -\nNext: edit"));
+        assert!(h.contains("A step is [x] only after its result is in Facts; a Fact a later result contradicts is rewritten."));
+        assert!(h.contains("think only about Next"));
+        // the sections run in the agreed order
+        let order = ["## Reaching", "## Grants", "## Turns", "## Replies", "## Working", "## How to call", "## Inquiries"];
+        let at: Vec<usize> = order.iter().map(|k| h.find(k).unwrap()).collect();
+        assert!(at.windows(2).all(|p| p[0] < p[1]), "{at:?}");
+    }
+
+    #[test]
+    fn the_send_howto_says_act_early_batch_and_verify_before_done() {
+        // (the text wraps lines; compare on single spaces)
+        let h = super::SEND_TO_HOWTO.split_whitespace().collect::<Vec<_>>().join(" ");
+        let h = h.as_str();
+        assert!(h.contains("Read only what the request names; no docs or reflect sweep before your first real call."));
+        assert!(h.contains("an error reply names the missing argument"));
+        assert!(h.contains("One answer may hold many <call> elements; they run at once."));
+        assert!(h.contains("a call waits for a later turn only when it does"));
+        assert!(h.contains("Before `done`: each Done-when item gets one line with its evidence"));
+        assert!(h.contains("the test for your change first, the full suite once"));
+        assert!(h.contains("`done` (the work is done, checked as under Working)") || h.contains("checked as under Working"));
         assert!(h.contains("three times: stop"));
+        assert!(h.contains("send whoever asked you an `inquiry`"));
         assert!(!h.contains("EMIT CALLS BEFORE YOU DELIBERATE"));
         assert_eq!(h.matches("Thinking is stripped").count(), 0);
+        // one visible-text rule; no names that may not exist
+        assert_eq!(h.matches("Text outside calls").count(), 1);
+        for gone in ["scout", "A human is an agent", "<re>N</re>", "<guid>", "was routed to you", "deliberate at length"] {
+            assert!(!h.contains(gone), "{gone}");
+        }
     }
 }
