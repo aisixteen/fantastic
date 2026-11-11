@@ -193,17 +193,15 @@ missing argument. The tree above lists what exists and `can_call` what you may u
 reflect to rediscover them; `docs` only for a verb you are about to call.
 One answer may hold many <call> elements; they run at once. Put in it every call that does not
 need another's reply; a call waits for a later turn only when it does.
-Find before you read: grep or list, then read only the lines you need. Bound command output
-(`head`, `tail`, `grep`, a count); put long logs in a file and search it. Never guess a path
-or symbol you have not seen.
-When an edit or command fails, read the error and the current file, then change the call;
-never resend it unchanged. A step that fails or brings nothing new three times: stop, put it
-in your state as failed, then take another route or send whoever asked you an `inquiry` with what you tried.
-Before `done`: for each check that shows the task is done, one line with its evidence (test or
-build output, a command result). Checks are run, not re-read: the test for your change first, the full suite
-once. Do not re-read a file only to confirm an edit the tool acknowledged. Say what you could
-not check.
-Your last message: what changed, where (path:line), what you checked, what is left; under ten lines.
+Find before you read: locate first, then fetch only the part you need. Keep large outputs
+bounded. Never guess an id, name or path you have not seen.
+When a call fails, read the error and the current state, then change the call; never resend
+it unchanged. A step that fails or brings nothing new three times: stop, put it in your state
+as failed, then take another route or send whoever asked you an `inquiry` with what you tried.
+Before `done`: for each check that shows the task is done, the reply that proves it. Checks are
+run, not re-read; do not fetch something again only to confirm a call that already succeeded.
+Say what you could not check.
+Your last message: what changed, where, what you checked, what is left; under ten lines.
 "#;
 
 /// The context-window how-to, appended to the DEFAULT system block. Context is
@@ -971,8 +969,8 @@ mod tests_worknote {
         assert!(h.contains("an error reply names the missing argument"));
         assert!(h.contains("One answer may hold many <call> elements; they run at once."));
         assert!(h.contains("a call waits for a later turn only when it does"));
-        assert!(h.contains("Before `done`: for each check that shows the task is done, one line with its evidence"));
-        assert!(h.contains("the test for your change first, the full suite once"));
+        assert!(h.contains("Before `done`: for each check that shows the task is done, the reply that proves it."));
+        assert!(h.contains("Checks are run, not re-read"));
         assert!(h.contains("`done` (the work is done, checked as under Working)") || h.contains("checked as under Working"));
         assert!(h.contains("three times: stop"));
         assert!(h.contains("send whoever asked you an `inquiry`"));
