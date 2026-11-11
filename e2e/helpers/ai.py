@@ -77,6 +77,78 @@ class Connected:
             t.cancel()
 
 
+# THE CHAT/PROVIDER SPLIT (#615). An AI is TWO agents: the PROVIDER (`<id>_prov`, the
+# backend record: endpoint, model, key, sampling, KV slots) completes turns and holds no
+# conversation; the CHAT (`ai_chat.tools`) holds the conversation and every grant, and
+# completes through the provider its `provider_id` names (`complete`, `watch`). Both
+# sides of that gate are opened here. `make_chat` is the ONE place the suite builds
+# the pair: `connect` uses it, and so does every probe that wires its own AI.
+CHAT_MODULE = "ai_chat.tools"
+PROVIDER_CALLS = ["complete", "watch", "reflect"]
+#: record fields the CHAT takes too (it sizes its own context and output)
+CHAT_SHARED = ("model", "max_tokens", "context_window")
+#: record fields that are the PROVIDER's only, wherever a probe puts them
+PROVIDER_ONLY = ("handler_module", "endpoint", "credentials", "num_ctx", "kv_slots",
+                 "kv_overflow", "no_repeat_ngram_size", "repetition_penalty",
+                 "thinking_token_budget", "temperature", "top_p", "top_k")
+
+
+def split_record(backend_record: dict, extra: dict | None = None) -> tuple[dict, dict]:
+    """(provider fields, chat fields) from a backend record and a probe's extra fields."""
+    prov, chat = dict(backend_record), {}
+    for k in CHAT_SHARED:
+        if k in prov:
+            chat[k] = prov[k]
+    for k, v in (extra or {}).items():
+        if k in PROVIDER_ONLY:
+            prov[k] = v
+        else:
+            chat[k] = v
+            if k in CHAT_SHARED:
+                prov[k] = v
+    return prov, chat
+
+
+async def make_chat(root, backend, chat: dict, *, role: str | None = None,
+                    provider_id: str | None = None) -> tuple[str, str]:
+    """Create the provider and the chat. `chat` is the chat's create_agent payload as a
+    probe would write it for ONE agent (id, parent_id, can_call, callable_by, memory,
+    and any record fields); backend fields in it go to the provider. Returns
+    (chat_id, provider_id)."""
+    chat = dict(chat)
+    chat.pop("type", None)
+    cid = chat["id"]
+    pid = provider_id or f"{cid}_prov"
+    prov_fields, chat_fields = split_record(backend.record(role=role), chat)
+    prov_fields.pop("id", None)
+    for k in ("can_call", "callable_by", "parent_id", "memory_store_id", "description"):
+        prov_fields.pop(k, None)
+    prov = {
+        "type": "create_agent", "parent_id": chat.get("parent_id") or home(root), "id": pid,
+        **prov_fields,
+        "memory_store_id": memory.MEMORY,
+        "can_call": {"$self": "*", memory.MEMORY: "*",
+                     **({creds.CREDS: creds.GET} if backend.key_ref else {})},
+        "callable_by": {"$self": "*", "$parent": "*", cid: PROVIDER_CALLS},
+    }
+    made = (await root.send([{"target": root.id, "payload": prov}]))[0]["result"]
+    if isinstance(made, dict) and made.get("error"):
+        raise SystemExit(f"create_agent({pid}) refused: {made}")
+    await memory.open_ingress(root, memory.MEMORY, pid)
+    if backend.key_ref:
+        await memory.open_ingress(root, creds.CREDS, pid)
+    chat_fields["can_call"] = {**(chat_fields.get("can_call") or {}), pid: PROVIDER_CALLS}
+    # the KEY is the provider's: the chat names no credentials and reads no `creds`
+    chat_fields.pop("credentials", None)
+    chat_fields["can_call"].pop(creds.CREDS, None)
+    payload = {"type": "create_agent", **chat_fields, "handler_module": CHAT_MODULE,
+               "provider_id": pid}
+    made = (await root.send([{"target": root.id, "payload": payload}]))[0]["result"]
+    if isinstance(made, dict) and made.get("error"):
+        raise SystemExit(f"create_agent({cid}) refused: {made}")
+    return made["id"], pid
+
+
 async def connect(
     root,
     core,
@@ -107,9 +179,7 @@ async def connect(
         "num_ctx": L.ctx,
         # ITS MEMORY — the conversation lives in the kernel's `memory` store, named
         # on the record and reachable by an explicit egress (ingress opened below).
-        **memory.ai_memory_meta(
-            {**can_call, **({creds.CREDS: creds.GET} if backend.key_ref else {})}
-        ),
+        **memory.ai_memory_meta(can_call),
         # THE INGRESS HALF. A peer granted `can_call: {ai: [...]}` still cannot
         # reach the AI: the gate is two-sided and a sibling has no baseline edge.
         # A fixture that opens only the egress half builds a wire that carries
@@ -135,19 +205,12 @@ async def connect(
             if getattr(root, "leg_id", None)
             else ({"callable_by": callable_by} if callable_by else {})
         ),
-        **backend.record(),
         **(record or {}),
     }
-    made = (await root.send([{"target": root.id, "payload": meta}]))[0]["result"]
-    if isinstance(made, dict) and made.get("error"):
-        raise SystemExit(f"create_agent({agent_id}) refused: {made}")
-    aid = made["id"]
+    # THE PAIR: the provider from the backend record, the chat from the rest (make_chat).
+    aid, _ = await make_chat(root, backend, meta)
     # THE STORE'S HALF of the memory wire: its `callable_by` names the agent.
     await memory.open_ingress(root, meta.get("memory_store_id") or memory.MEMORY, aid)
-    # THE KEY'S WIRE, both halves: the AI may `get` from `creds` (above) and `creds`
-    # accepts it — explicit, per agent; nothing is inherited.
-    if backend.key_ref:
-        await memory.open_ingress(root, creds.CREDS, aid)
     # EVERY EGRESS THE FIXTURE NAMED, BOTH HALVES. The gate is two-sided with no
     # stamped baseline — the root included: a kernel verb (`list_agents`,
     # `create_agent`) needs the ROOT's `callable_by` to accept the AI as well. So each
