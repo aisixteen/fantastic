@@ -3,7 +3,7 @@
 Free, Rust lane: no model. Scripted vllm plugs (`e2e/mocks/vllm.py` `ThinkingVllmMock`, vLLM's
 `reasoning_content` channel) play the model for four `ai_chat.tools` chats on the PACKAGED host,
 each with its own `vllm_backend` provider, next to a `file_bridge` agent (`files`: an 80 kB
-file and a folder of 600 files) and an `exec_bridge` agent (`ex`). `context_window` is 262144, so
+file and a folder of 350 files) and an `exec_bridge` agent (`ex`). `context_window` is 262144, so
 every body (over 64,000 chars = AUTOFOLD_AT, under the inline cap) is delivered inline. Every
 fold check asserts both halves: whole in the request that carries it, the anchor in the next.
 
@@ -13,7 +13,7 @@ fold check asserts both halves: whole in the request that carries it, the anchor
   store; across all five requests the messages up to the last cache mark are byte-equal in the
   next request and the message count never drops.
 - V (`cleanup`): an `exec_bridge` `run` reply (500 lines, the verb's cap) and a `file_bridge`
-  `list` reply (600 entries) fold to `[folded · {verb} reply from {agent} …]`, recall by id gives
+  `list` reply (350 entries) fold to `[folded · {verb} reply from {agent} …]`, recall by id gives
   them whole, the recall reply refolds, the store row stays whole. `history` is covered by a unit
   instead: its reply is a digest cut to what fits inline (about 25,000 tokens), so 16,000 tokens
   need about 450 rows; the rule is verb-blind (`fantastic-ai-core` `tests_autofold.rs`).

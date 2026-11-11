@@ -220,7 +220,7 @@ class HomeRig(Rig):
         cdp = free_port()
         mode = [] if os.environ.get("CANVAS_HEADFUL") == "1" else ["--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
         chrome = Chrome([os.environ.get("CHROME") or MAC_CHROME, *mode, DESKTOP_POINTER, f"--window-size={width},{height}",
-                         f"--remote-debugging-port={cdp}", f"--user-data-dir={self.art / f'chrome-{tab}'}", "--no-first-run", "about:blank"],
+                         f"--remote-debugging-port={cdp}", f"--user-data-dir={self.art / f'chrome-{tab}'}", "--no-first-run", "--password-store=basic", "about:blank"],
                         self.art / f"chrome-{tab}.log", cdp)
         try:
             async with await attach(chrome) as ws:

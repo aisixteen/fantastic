@@ -58,7 +58,13 @@ export async function mountReadView<T>(ctx: ViewContext, spec: ReadViewSpec<T>):
   const root = el("div", `ro-view ${spec.name}`);
   ctx.mount.appendChild(root);
   const host = new Host(ctx.kernel, ctx.selfId);
-  const call: Call = (p) => host.call(ctx.backend, p as never).catch((e: Error) => ({ error: e.message }));
+  // the verbs this view reads with: the kernel mirrors every call to a watcher, so its own
+  // reads come back as events, and an event that only echoes a read must not read again
+  const reads = new Set<string>();
+  const call: Call = (p) => {
+    reads.add(String(p["type"]));
+    return host.call(ctx.backend, p as never).catch((e: Error) => ({ error: e.message }));
+  };
   const bar = el("div", "bar");
   const again = el("button", "refresh", "⟳ refresh");
   again.title = "read it again";
@@ -86,8 +92,10 @@ export async function mountReadView<T>(ctx: ViewContext, spec: ReadViewSpec<T>):
   again.addEventListener("click", () => void refresh());
   spec.controls?.(ctl, { call, redraw });
   await refresh();
-  // LIVE: an event on the agent reads it again
-  const off = ctx.kernel.onInbox(ctx.backend, () => void refresh());
+  // LIVE: an event on the agent reads it again (the echo of one of its own reads does not)
+  const off = ctx.kernel.onInbox(ctx.backend, (ev) => {
+    if (!reads.has(String((ev as Dict)["type"]))) void refresh();
+  });
   ctx.kernel.watch(ctx.backend, ctx.selfId);
   return {
     unmount(): void {

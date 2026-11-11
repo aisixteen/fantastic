@@ -401,7 +401,7 @@ class Rig:
         # headless: software WebGL (SwiftShader) — the terminals draw with WebGL
         mode = [] if os.environ.get("CANVAS_HEADFUL") == "1" else ["--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
         chrome = Chrome([os.environ.get("CHROME") or MAC_CHROME, *mode, DESKTOP_POINTER, f"--window-size={width},{height}", f"--remote-debugging-port={cdp}",
-                         f"--user-data-dir={self.art / 'chrome'}", "--no-first-run",
+                         f"--user-data-dir={self.art / 'chrome'}", "--no-first-run", "--password-store=basic",
                          "--autoplay-policy=no-user-gesture-required", *(extra or []), "about:blank"], self.art / f"chrome-{cdp}.log", cdp)
         try:
             async with await attach(chrome) as ws:

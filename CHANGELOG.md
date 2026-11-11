@@ -235,6 +235,8 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   app's port.
 
 ### Fixed
+- The canvas read-only views (store, scheduler, credentials) no longer read again for the echo of their own reads (#507): the kernel mirrors every call to a watcher, so the first event of a scheduler started an endless list/history loop that closed the page socket.
+- A `vllm_backend` or `ollama_backend` provider reads what its record leaves to the server (model, max_tokens, context_window, kv_slots) before a `complete`, the verb an `ai_chat` uses on it (#519); before, only `send`, `inquiry` and `context_recall` did, so a chat through a record without `max_tokens` failed its turn. `anthropic_backend` already did.
 
 - The store views (canvas and TUI panel) read the real `dump` reply, `{tables: {rows, fold_refs}}`, so per-owner counts show (#505).
 - Role agents (a meta bundle over a backend or `ai_chat.tools`) are listed by `reflect handler_modules` under their base again, and count as AI agents for the reach, the row watch and the rows reader (#605).

@@ -724,10 +724,11 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
             bad.append(f"load_tree has no canvas with its root view: {state.get('tree')}")
         if "canvas" in want and tree.get("background") != "view_root":
             bad.append(f"load_tree has no background singleton under the root view: {state.get('tree')}")
+        # the sidebar cell (#608) is seeded under the page root on a first run, like the skin
         # the page's skin (phase 4, #49): a delete-locked singleton under the page root
         if "canvas" in want and tree.get("skin") != "canvas":
             bad.append(f"load_tree has no skin singleton under the page root: {state.get('tree')}")
-        others = [i for i in tree if i not in ("canvas", "view_root", "web_loader", "background", "skin") and i not in state.get("tree_layouts", [])]
+        others = [i for i in tree if i not in ("canvas", "view_root", "web_loader", "background", "skin", "view_sidebar") and i not in state.get("tree_layouts", [])]
         if "member_parent" in want:
             if len(others) != 1 or tree[others[0]] != want["member_parent"]:
                 bad.append(f"load_tree members {[(i, tree[i]) for i in others]}, want one under {want['member_parent']}")
@@ -758,7 +759,7 @@ async def run_all(sc: dict, tmp: Path) -> bool:
     w = sc["window"]
     br = Chrome([exe, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", DESKTOP_POINTER, f"--window-size={w['width']},{w['height']}",
                  f"--remote-debugging-port={cdp_port}", f"--user-data-dir={tmp / 'chrome'}",
-                 "--no-first-run", "about:blank"], tmp / "chrome.log", cdp_port)
+                 "--no-first-run", "--password-store=basic", "about:blank"], tmp / "chrome.log", cdp_port)
     host = Host(binary, cwd, port)
     failures = 0
     try:

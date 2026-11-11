@@ -339,7 +339,10 @@ def main() -> int:
             w_after = [last_user(t["body"]) for t in work_m.turns()[seen_w:]]
             need(any(f"RESEND-{TOKEN2}" in u for u in w_after),
                  f"the resent message reached the worker: {[u[:120] for u in w_after]}")
-            need(not any(f"PING-{TOKEN2}" in u for u in w_after),
+            # a restarted chat first lists its stored rows (the context rebuild, which
+            # names the withdrawn row's head); that listing is not a turn to answer it
+            need(not any(f"PING-{TOKEN2}" in u and not u.startswith("You are rebuilding your own working context")
+                         for u in w_after),
                  "the withdrawn message was never the worker's turn to answer")
             last2 = l_after[-1] if l_after else ""
             need("Got RESEND again" in last2 and last2.count("Got RESEND again") == 1,

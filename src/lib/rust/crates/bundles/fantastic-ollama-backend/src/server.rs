@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// The verbs that run a turn of the model — the ones the server is read for.
-pub const TURN_VERBS: [&str; 3] = ["send", "inquiry", "context_recall"];
+pub const TURN_VERBS: [&str; 4] = ["send", "inquiry", "context_recall", "complete"];
 /// Seconds to reach the server.
 pub const CONNECT_TIMEOUT: f64 = 5.0;
 /// Seconds to wait on the model list.

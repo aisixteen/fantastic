@@ -37,7 +37,7 @@ use std::time::Duration;
 /// The fields a record may leave to the server, in the order they are read.
 pub const INFERRED: [&str; 4] = ["model", "max_tokens", "context_window", "kv_slots"];
 /// The verbs that run a turn of the model — the ones the server is read for.
-pub const TURN_VERBS: [&str; 3] = ["send", "inquiry", "context_recall"];
+pub const TURN_VERBS: [&str; 4] = ["send", "inquiry", "context_recall", "complete"];
 
 const INFO: &str = "vllm:cache_config_info";
 
