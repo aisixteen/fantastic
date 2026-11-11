@@ -146,12 +146,19 @@ async def make_chat(root, backend, chat: dict, *, role: str | None = None,
     prov, payload = chat_pair(backend, chat, role=role, provider_id=provider_id,
                               parent=home(root))
     pid = prov["id"]
-    made = (await root.send([{"target": root.id, "payload": prov}]))[0]["result"]
-    if isinstance(made, dict) and made.get("error"):
-        raise SystemExit(f"create_agent({pid}) refused: {made}")
+    # A REBOOTED kernel hydrates the pair from its state folder: what is already
+    # there is that same pair, so only a missing half is created.
+    listed = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]
+    live = {a.get("id") for a in ((listed.get("result") or {}).get("agents") or [])}
+    if pid not in live:
+        made = (await root.send([{"target": root.id, "payload": prov}]))[0]["result"]
+        if isinstance(made, dict) and made.get("error"):
+            raise SystemExit(f"create_agent({pid}) refused: {made}")
     await memory.open_ingress(root, memory.MEMORY, pid)
     if backend.key_ref:
         await memory.open_ingress(root, creds.CREDS, pid)
+    if payload["id"] in live:
+        return payload["id"], pid
     made = (await root.send([{"target": root.id, "payload": payload}]))[0]["result"]
     if isinstance(made, dict) and made.get("error"):
         raise SystemExit(f"create_agent({payload['id']}) refused: {made}")
