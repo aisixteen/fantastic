@@ -39,7 +39,7 @@ sys.path.insert(
     ),
 )
 from helpers.kernel import home
-from helpers import memory, verdict  # noqa: E402
+from helpers import creds, memory, verdict  # noqa: E402
 from helpers.ai import IDLE_END, QuietWatch  # noqa: E402
 from tests.agentic_advanced.E30_subai import probe as P  # noqa: E402
 from tests.agentic_advanced.E36_multisubai import probe as S  # noqa: E402
@@ -78,6 +78,8 @@ def solver_instructions(k: int) -> str:
 #: endpoint and key are its provider's, named by `provider_id`): the handler, the
 #: provider, the conversation store and the window.
 COPY = ["handler_module", "provider_id", "memory_store_id", "context_window"]
+#: …and into each solver's PROVIDER (copied from `brain_prov`): every field the plug put there
+PROV_COPY = [*P.BK.record(), "memory_store_id"]
 
 TASK = (
     "You are the CREATOR here — the mind building the structure. I am going to walk "
@@ -94,20 +96,27 @@ TASK = (
     "DO EXACTLY THIS, in as few turns as you can — every step is spelled out so you "
     "need no exploration beyond one `list_agents`:\n\n"
     f"STEP 1 — CREATE THREE SOLVERS as YOUR OWN CHILDREN, ids `{SOLVERS[0]}`, "
-    f"`{SOLVERS[1]}`, `{SOLVERS[2]}`, in ONE batch of three `create_agent` calls to "
-    "`kernel`. Send `kernel` `<type>list_agents</type>` once and copy from the "
-    "`brain` record these fields verbatim into each solver: "
+    f"`{SOLVERS[1]}`, `{SOLVERS[2]}`. Each solver is a PAIR: a provider `<solver_k>_prov` "
+    "and the chat `<solver_k>` that completes through it. Send them in ONE batch of six "
+    "`create_agent` calls to `kernel`, the three providers first. Send `kernel` "
+    "`<type>list_agents</type>` once. Copy from the `brain_prov` record these fields "
+    "verbatim into each provider: "
+    + ", ".join(f"`{f}`" for f in PROV_COPY)
+    + f", with its `can_call` and `callable_by` maps as `{P.BRAIN_PROV}` has them, except that "
+    "`callable_by` names `<solver_k>` instead of `brain`. Copy from the "
+    "`brain` record these fields verbatim into each chat, with `provider_id` set to "
+    "`<solver_k>_prov`: "
     + ", ".join(f"`{f}`" for f in COPY)
     + ". Set "
-    "`parent_id` to YOUR id. Set `description` to what the solver is for "
+    "`parent_id` to YOUR id on all six. Set `description` to what the solver is for "
     f"(solver k holds the ledger of `oracle_k`). Give each solver these grant maps "
     "(a map is a tag whose children are keyed by agent id or a relative token):\n"
     f"  `<can_call>`: `<$self>*</$self> <$parent>*</$parent> <$subtree>*</$subtree> "
     f"<oracle_k>*</oracle_k> <notes>*</notes> <memory>*</memory>"
-    + f" <{P.BRAIN_PROV}>*</{P.BRAIN_PROV}>"
+    + " <solver_k_prov>complete watch reflect</solver_k_prov>"
     + "` (`memory` is the store their conversation lives in, "
-    f"`{P.BRAIN_PROV}` is the provider their completions come from — both doors are "
-    "already open for them) and one "
+    "`<solver_k>_prov` is the provider their completions come from — the doors of "
+    "`memory` and the model key are already open for the providers) and one "
     "`<solver_j>*</solver_j>` for EACH of the two other solvers.\n"
     "  `<callable_by>`: `<$self>*</$self> <$parent>*</$parent> <$subtree>*</$subtree>` "
     "and one `<solver_j>*</solver_j>` for EACH of the two other solvers.\n"
@@ -125,9 +134,10 @@ TASK = (
     "is the same 3-digit code the message names, and tell me `VALIDATED <code>` (or "
     "`MISMATCH` with what you saw).\n\n"
     "STEP 5 — CLEAN UP THE FLEET: the team's work is over. Send `kernel` ONE batch of "
-    f"three `delete_agent` calls, `<id>{SOLVERS[0]}</id>`, `<id>{SOLVERS[1]}</id>`, "
-    f"`<id>{SOLVERS[2]}</id>` (they are your children, so this needs no extra grant), "
-    "confirm to me that the three are gone, and call `done`. Nothing else.\n\n"
+    f"six `delete_agent` calls, the three solvers `{SOLVERS[0]}`, `{SOLVERS[1]}`, "
+    f"`{SOLVERS[2]}` and their providers `<solver_k>_prov` (they are your children, so "
+    "this needs no extra grant), "
+    "confirm to me that the six are gone, and call `done`. Nothing else.\n\n"
     "THE SOLVERS' INSTRUCTIONS (send each block verbatim as that solver's `<text>`):\n\n"
     + "\n\n".join(f"=== {SOLVERS[k]} ===\n{solver_instructions(k)}" for k in range(N))
 )
@@ -210,6 +220,11 @@ async def fixture(root, *, interpreter=None):
     # call it; the store's own ingress is the fixture's to grant.
     for sid in SOLVERS:
         await memory.open_ingress(root, memory.MEMORY, sid)
+        await memory.open_ingress(root, memory.MEMORY, f"{sid}_prov")
+        if P.BK.key_ref:
+            # The STORE's half only: the provider does not exist yet, and its own
+            # `can_call` is its creator's to write.
+            await creds.open_store(root, f"{sid}_prov")
     return store
 
 

@@ -60,14 +60,14 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
-from helpers import memory
+from helpers import creds, memory
 from helpers import (
     Watch,
     distinct_calls,
     verdict,
 )
 from helpers.ai import TICK as POLL
-from helpers.ai import PROVIDER_CALLS, SHARED_PROVIDER, ChainEnd, admit_chat, make_chat
+from helpers.ai import ChainEnd, make_chat
 from helpers.kernel import WRAPS, open_kernel, wrap_with, home
 from helpers.rows import rows_for
 
@@ -125,8 +125,10 @@ CYCLES = int(os.environ.get("CYCLES", "3"))
 # agent it makes. The operator opens them IN ADVANCE to these named ids; every edge
 # between the creator's own children stays the creator's to grant.
 SUB_AI = "hour_ai"
-#: the one shared provider behind `brain` and the builder: the template the model copies names it, and it admits the sub-AIs
-BRAIN_PROV = SHARED_PROVIDER
+#: an AI is a PAIR (a provider and a chat); the model builds its own pair on the template of
+#: `brain` and `brain_prov`, with these ids
+SUB_PROV = f"{SUB_AI}_prov"
+BRAIN_PROV = "brain_prov"
 SUB_CODE = "hour_code"
 
 TASK = (
@@ -134,10 +136,11 @@ TASK = (
     "away, but I am an AGENT here too: if you genuinely cannot proceed without a "
     "decision that is mine, reflect the tree, find me, and send me an `inquiry`.\n\n"
     "Build me a ROUTINE made of THREE things, all of them yours to create:\n"
-    f"1. A NEW AI agent with id `{SUB_AI}` (a chat like `brain` — it holds the conversation "
-    "and completes through the provider its `provider_id` names; `brain` is "
-    "only your example of what such a record looks like; list the agents to read it, "
-    f"then create your own with its own instructions, on `{BRAIN_PROV}`, which already admits it).\n"
+    f"1. A NEW AI agent with id `{SUB_AI}`: a PAIR like `brain` and `{BRAIN_PROV}` — the chat "
+    f"`{SUB_AI}` holds the conversation and completes through its own provider `{SUB_PROV}` "
+    "(named by `provider_id`); `brain` and `brain_prov` are "
+    "only your example of what such records look like; list the agents to read them, "
+    "then create your own pair, the chat with its own instructions.\n"
     f"2. A NEW code agent with id `{SUB_CODE}` — a command runner with a program file "
     "YOU write. The program "
     f"holds the multiplier {MULTIPLIER} and, when run, computes the CURRENT HOUR (0-23, "
@@ -150,7 +153,7 @@ TASK = (
     "NOTHING can call anything by default: wiring means granting the authority in "
     "BOTH directions for every edge (clock → AI, AI → code agent, AI → `totals`, "
     "and whatever the code agent's `allowed` needs). The agents that are not yours — "
-    f"`clock`, `totals` and the memory store — are ALREADY open to `{SUB_AI}` "
+    f"`clock`, `totals`, the memory store and the key store — are ALREADY open to `{SUB_AI}` and `{SUB_PROV}` "
     f"on THEIR side (their `callable_by`); `{SUB_AI}`'s own `can_call` must still name each "
     "of them it calls, and every edge between agents you create is yours to grant. Build it, trigger a tick, "
     "verify the stored value is right, and tell me what you made."
@@ -184,6 +187,7 @@ MINE = {
     "kernel_store",
     "brain",
     BRAIN_PROV,
+    "ai_prov",
     "clock",
     "readings",
     "totals",
@@ -281,9 +285,6 @@ def _ai_meta(
             "ws": "*",
         },
     }
-    if agent_id != "brain":
-        # the builder writes its sub-AIs' `can_call` on BRAIN_PROV, so it holds that edge too
-        meta["can_call"][BRAIN_PROV] = PROVIDER_CALLS
     if extra_reach:
         meta["can_call"].update(extra_reach)
     if agent_id == "brain":
@@ -803,15 +804,16 @@ async def run(
         BK,
         _ai_meta("ai", store=store, root=root, extra_reach=extra_reach),
     )
-    # the model-made chats complete through BRAIN_PROV: it admits the ids the task names
-    for who in sub_ais or [SUB_AI]:
-        await admit_chat(root, BRAIN_PROV, who)
     # the store's half of each memory wire
     for who in ("brain", aid):
         await memory.open_ingress(root, memory.MEMORY, who)
-    # the store's half for the sub-AIs the creator will make (see SUB_AI)
+    # the stores' halves for the pairs the creator will make (see SUB_AI): the chat's
+    # conversation store, and the provider's memory and key stores
     for who in sub_ais or [SUB_AI]:
         await memory.open_ingress(root, memory.MEMORY, who)
+        await memory.open_ingress(root, memory.MEMORY, f"{who}_prov")
+        if BK.key_ref:
+            await creds.open_store(root, f"{who}_prov")
     # FORENSICS: pin the moment any grant on the store changes.
     _grants_watch = asyncio.create_task(memory.watch_store_grants(root))
     # …and WHO wrote it: every `update_agent` naming the store, with its sender,
