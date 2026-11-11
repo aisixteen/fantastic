@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import os
 import re
 import sys
@@ -393,6 +394,20 @@ def check_muted(tests) -> list[str]:
     ]
 
 
+#: A BROWSER TEST SHARES THE MACHINE. Each canvas / home test drives its own headless Chrome (software
+#: rendering, a page's worth of CPU); the whole free suite at 200 lanes started 45 of them at once and the
+#: timing-bound ones failed in a different place each run (a preview that never followed, a backlog peak over
+#: its bound, a port answered by another test's host), every one green alone. These take one of
+#: `CHROME_LANES` slots (env `E2E_CHROME_LANES`) FIRST, then a lane.
+CHROME_GROUPS = ("canvas", "home", "canvas_user")
+CHROME_LANES = int(os.environ.get("E2E_CHROME_LANES", "12"))
+
+
+def uses_chrome(t: dict) -> bool:
+    """A test that drives a headless Chrome: a canvas / home group test, or a scenario on one of those runners."""
+    return t["group"] in CHROME_GROUPS or t.get("runtime") in CHROME_GROUPS
+
+
 async def run_one(
     t: dict,
     bk,
@@ -400,12 +415,14 @@ async def run_one(
     sem: asyncio.Semaphore,
     results: dict,
     long_sem: "asyncio.Semaphore | None" = None,
+    chrome_sem: "asyncio.Semaphore | None" = None,
 ):
     name = f"{t['group']}.{t['id']}"
-    if t.get("long") and long_sem is not None:
-        async with long_sem:
-            await _run_one(t, bk, logdir, sem, results, name)
-    else:
+    async with contextlib.AsyncExitStack() as slots:
+        if t.get("long") and long_sem is not None:
+            await slots.enter_async_context(long_sem)
+        if uses_chrome(t) and chrome_sem is not None and not t.get("muted"):
+            await slots.enter_async_context(chrome_sem)
         await _run_one(t, bk, logdir, sem, results, name)
 
 
@@ -812,15 +829,16 @@ async def main() -> int:
 
     sem = asyncio.Semaphore(a.lanes)
     long_sem = asyncio.Semaphore(min(LONG_LANES, a.lanes))
+    chrome_sem = asyncio.Semaphore(min(CHROME_LANES, a.lanes))
     results: dict = {}
     # Written every time a test settles, so a watcher tailing this file sees
     # progress without parsing 14 transcripts.
     began = time.monotonic()
     await asyncio.gather(
-        *(run_one(t, bk, logdir, sem, results, long_sem) for t in picked if not t.get("solo"))
+        *(run_one(t, bk, logdir, sem, results, long_sem, chrome_sem) for t in picked if not t.get("solo"))
     )
     for t in (t for t in picked if t.get("solo")):
-        await run_one(t, bk, logdir, sem, results, long_sem)
+        await run_one(t, bk, logdir, sem, results, long_sem, chrome_sem)
 
     if meter is not None:
         meter.terminate()

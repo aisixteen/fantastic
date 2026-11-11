@@ -4,6 +4,7 @@ A scenario or test declares `muted: "#<issue>: <one-line reason>"`. `run.py` the
   a) does not run it: its command is one that would fail loudly if it were started;
   b) reports it SKIP with the text `muted #<issue>: <reason>`, counted with the skips;
   c) refuses a mute that is not of that form (no issue, no reason);
+  e) the browser tests (`uses_chrome`) are told apart from the rest (they share `CHROME_LANES` slots);
   d) reads the key from both declaration files the suite loads (`test.yaml`, `scenario.yaml`)
      — here, the real suite: every `muted:` in the tree is well formed."""
 
@@ -51,6 +52,12 @@ def main() -> int:
         log = (Path(tmp) / run.log_name("g.t:rust")).read_text()
         need("STARTED" not in log, "its command was not started")
         need("muted #616: waits for the redesign" in log, "its log carries the text")
+
+    # a browser test takes one of the Chrome slots first; a kernel-only one does not
+    need(run.uses_chrome({"group": "canvas"}) and run.uses_chrome({"group": "home"}), "canvas and home tests are browser tests")
+    need(run.uses_chrome({"group": "scenario", "runtime": "canvas"}), "a scenario on the canvas runner is a browser test")
+    need(not run.uses_chrome({"group": "kernel", "runtime": "rust"}) and not run.uses_chrome({"group": "scenario", "runtime": "tui"}),
+         "a kernel or TUI test is not")
 
     # the real suite: the declaration files are read, every mute is well formed
     tests = run.load_suite()
