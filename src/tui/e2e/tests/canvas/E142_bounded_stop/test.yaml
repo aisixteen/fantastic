@@ -6,3 +6,4 @@ runner: probe.py
 costs: free
 limits: {seconds: 240}
 env: {}
+duration: 30   # seconds in a green run (rig 2026-11-11): the pool starts the longest first (e2e/run.py)

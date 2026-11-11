@@ -15,6 +15,7 @@ message stream), the project dir, the page's final DOM and a summary — and
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
 import os
 import re
@@ -153,6 +154,10 @@ def py_typed(*args: str) -> str:
 #: The runner's hard stop per test (`e2e/run.py` HARD_STOP_S), less a margin
 #: for teardown and the verdict line.
 HARD_STOP_S = 15 * 60 - 30
+#: The page size `page()` opens with by default, and the one `init()`'s Chrome is launched for.
+DEFAULT_SIZE = (1500, 950)
+#: The narrowest page that takes over the Chrome `init()` left up.
+REUSE_MIN_WIDTH = 800
 ENDED_HOLD_S = 3  # a `done` (not awaiting) that holds this long ends the wait
 
 
@@ -179,6 +184,7 @@ class Rig:
         self.live = live
         self.plug = None
         self.host: subprocess.Popen | None = None
+        self._warm: Chrome | None = None  # the Chrome init() leaves up for the first page()
         self.url: str | None = None
         self.port = free_port()
         self.summary: dict[str, Any] = {"id": self.id}
@@ -197,8 +203,8 @@ class Rig:
         return None
 
     def build(self, *features: str, example: str | None = None) -> None:
-        """Build the CLI, and copy it to `self.binary`. `example`: also build that cargo example of
-        the CLI crate (an embedder) and copy it to `self.example`."""
+        """Build the CLI, and copy it to `self.binary`. `example`: also copy that cargo example of
+        the CLI crate (an embedder) to `self.example` — the run's prebuilt `FANTASTIC_EMBEDDER`, else built here."""
         feats = sorted({*features, *([FEATURES[self.plug.handler_module]] if self.plug else [])})
         args = ["cargo", "build", "-p", "fantastic-tui", *(["--features", ",".join(feats)] if feats else [])]
         # the build AND the copy under one lock: another test's build (other
@@ -212,12 +218,17 @@ class Rig:
             self.binary = oslayer.exe(self.art / "fantastic")
             shutil.copy2(src, self.binary)  # a private copy: another build cannot swap it mid-run
             if example:
-                r = subprocess.run([*args, "--example", example], cwd=SRC, capture_output=True, text=True,
-                                   env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
-                if r.returncode != 0:
-                    raise SystemExit(f"{' '.join(args)} --example {example} failed:\n{r.stderr[-2000:]}")
+                # the run's prebuilt embedder (e2e/build.py), else built here
+                if built := os.environ.get("FANTASTIC_EMBEDDER"):
+                    ex_src = Path(built).expanduser().resolve()
+                else:
+                    r = subprocess.run([*args, "--example", example], cwd=SRC, capture_output=True, text=True,
+                                       env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
+                    if r.returncode != 0:
+                        raise SystemExit(f"{' '.join(args)} --example {example} failed:\n{r.stderr[-2000:]}")
+                    ex_src = oslayer.exe(E2E_TARGET / "debug" / "examples" / example)
                 self.example = oslayer.exe(self.art / example)
-                shutil.copy2(oslayer.exe(E2E_TARGET / "debug" / "examples" / example), self.example)
+                shutil.copy2(ex_src, self.example)
 
     def make_home(self, record: dict | None = None, name: str = "plug") -> None:
         """A throwaway FANTASTIC_HOME — with `record` saved as the default, or none."""
@@ -275,9 +286,12 @@ class Rig:
 
     async def _touch(self) -> None:
         # until the page has STORED its root view: seeds written before that land
-        # under a view the next boot makes afresh, and never load
+        # under a view the next boot makes afresh, and never load. The Chrome stays
+        # up (self._warm): `page()` takes it over, so a scenario launches ONE Chrome.
         root = self.cells_dir.parent / "agent.yaml"
-        async with self.page() as pg:
+        self._warm = self._launch_chrome(*DEFAULT_SIZE, None)
+        atexit.register(self._drop_warm)  # a probe that dies before its page() leaves no Chrome
+        async with self._session(self._warm, *DEFAULT_SIZE) as pg:
             for _ in range(120):
                 if root.is_file():
                     break
@@ -287,6 +301,8 @@ class Rig:
                 (self.art / "touch_page.html").write_text(await pg.js("document.documentElement.outerHTML") or "")
                 raise SystemExit(f"the page never stored its root view: {root}")
             await asyncio.sleep(1.0)
+            # the host stops next: this tab must not sit on a dead canvas, retrying
+            await pg.cdp("Page.navigate", url="about:blank")
 
     # ── the disk: seeding and reading the two trees ─────────────────────────
     @property
@@ -393,43 +409,78 @@ class Rig:
         return out
 
     # ── the browser ───────────────────────────────────────────────────────
-    @asynccontextmanager
-    async def page(self, width: int = 1500, height: int = 950, extra: list[str] | None = None):
+    def _launch_chrome(self, width: int, height: int, extra: list[str] | None) -> Chrome:
         cdp = free_port()
         # CANVAS_HEADFUL=1: a visible Chrome on the real GPU (a load test's frame
         # rate is the GPU's, not the software rasterizer's)
         # headless: software WebGL (SwiftShader) — the terminals draw with WebGL
         mode = [] if os.environ.get("CANVAS_HEADFUL") == "1" else ["--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
-        chrome = Chrome([os.environ.get("CHROME") or MAC_CHROME, *mode, DESKTOP_POINTER, f"--window-size={width},{height}", f"--remote-debugging-port={cdp}",
-                         f"--user-data-dir={self.art / 'chrome'}", "--no-first-run", "--password-store=basic",
-                         "--autoplay-policy=no-user-gesture-required", *(extra or []), "about:blank"], self.art / f"chrome-{cdp}.log", cdp)
+        return Chrome([os.environ.get("CHROME") or MAC_CHROME, *mode, DESKTOP_POINTER, f"--window-size={width},{height}", f"--remote-debugging-port={cdp}",
+                       f"--user-data-dir={self.art / 'chrome'}", "--no-first-run", "--password-store=basic",
+                       "--autoplay-policy=no-user-gesture-required", *(extra or []), "about:blank"], self.art / f"chrome-{cdp}.log", cdp)
+
+    def _drop_warm(self) -> None:
+        """Close the Chrome `init()` left up, if nothing took it over."""
+        w, self._warm = self._warm, None
+        if w is not None:
+            w.proc.terminate()
+
+    @asynccontextmanager
+    async def page(self, width: int = 1500, height: int = 950, extra: list[str] | None = None):
+        # The Chrome `init()` left up serves the FIRST page opened without extra flags, its
+        # window put at this page's size (what `--window-size` does at launch); a page with
+        # extra flags, or a phone-wide one (a headless window has a width floor, so that
+        # window must be launched at its size), closes it first (one Chrome per
+        # user-data-dir) and launches its own.
+        warm, self._warm = self._warm, None
+        if warm is not None and (extra or width < REUSE_MIN_WIDTH):
+            warm.proc.terminate()
+            warm.proc.wait()
+            warm = None
+        chrome = warm or self._launch_chrome(width, height, extra)
         try:
-            async with await attach(chrome) as ws:
-                pg = Page(ws)
-                pg.rig = self
-                pg.mark = self.log_at
-                self.misses = pg.misses
-                await pg.cdp("Runtime.enable")
-                await pg.cdp("Page.enable")
-                await pg.viewport(width, height)
-                if os.environ.get("CANVAS_WS_LOG") == "1":
-                    pg.ws_log = []
-                    await pg.cdp("Network.enable")
-                if os.environ.get("CANVAS_COUNT_RO") == "1":
-                    # count ResizeObserver callbacks (a load probe's suspect)
-                    await pg.cdp("Page.addScriptToEvaluateOnNewDocument", source="""(()=>{const R=window.ResizeObserver; window.__ro=0;
-                      window.ResizeObserver=class extends R{constructor(cb){super((...a)=>{window.__ro++; return cb(...a)})}}})()""")
-                await pg.open(self.url)
-                await pg.until("!!document.getElementById('canvas')", 30)
-                await asyncio.sleep(1.5)
+            async with self._session(chrome, width, height, resize=warm is not None) as pg:
                 yield pg
-                html = await pg.js("document.documentElement.outerHTML")
-                (self.art / "page.html").write_text(html or "")
-                (self.art / "page_errors.json").write_text(json.dumps(pg.logs, indent=1))
-                if hasattr(pg, "ws_log"):
-                    (self.art / "ws_frames.log").write_text("\n".join(pg.ws_log))
         finally:
             chrome.proc.terminate()
+
+    @asynccontextmanager
+    async def _session(self, chrome: Chrome, width: int, height: int, resize: bool = False):
+        """One CDP session on `chrome`'s tab: the canvas open and drawn. Writes the page's final DOM and errors."""
+        async with await attach(chrome) as ws:
+            pg = Page(ws)
+            pg.rig = self
+            pg.mark = self.log_at
+            self.misses = pg.misses
+            await pg.cdp("Runtime.enable")
+            await pg.cdp("Page.enable")
+            if resize:
+                win = await pg.cdp("Browser.getWindowForTarget")
+                await pg.cdp("Browser.setWindowBounds", windowId=win["windowId"], bounds={"width": width, "height": height})
+                seen = None
+                for _ in range(30):  # until the window has settled at its size
+                    now = await pg.js("[innerWidth, innerHeight]")
+                    if now == seen:
+                        break
+                    seen = now
+                    await asyncio.sleep(0.1)
+            await pg.viewport(width, height)
+            if os.environ.get("CANVAS_WS_LOG") == "1":
+                pg.ws_log = []
+                await pg.cdp("Network.enable")
+            if os.environ.get("CANVAS_COUNT_RO") == "1":
+                # count ResizeObserver callbacks (a load probe's suspect)
+                await pg.cdp("Page.addScriptToEvaluateOnNewDocument", source="""(()=>{const R=window.ResizeObserver; window.__ro=0;
+                  window.ResizeObserver=class extends R{constructor(cb){super((...a)=>{window.__ro++; return cb(...a)})}}})()""")
+            await pg.open(self.url)
+            await pg.until("!!document.getElementById('canvas')", 30)
+            await asyncio.sleep(1.5)
+            yield pg
+            html = await pg.js("document.documentElement.outerHTML")
+            (self.art / "page.html").write_text(html or "")
+            (self.art / "page_errors.json").write_text(json.dumps(pg.logs, indent=1))
+            if hasattr(pg, "ws_log"):
+                (self.art / "ws_frames.log").write_text("\n".join(pg.ws_log))
 
     def left(self, reserve: float = 0.0) -> float:
         """Seconds still usable under the runner's 15-minute hard stop, keeping
@@ -443,6 +494,7 @@ class Rig:
     def finish(self, ok: bool, note: str) -> tuple[bool, str]:
         """Record the summary; the probe prints the machine verdict itself
         (`return verdict(*rig.finish(ok, note))`)."""
+        self._drop_warm()
         self.summary.update({"ok": ok, "note": note, "page_calls": self.page_calls()})
         (self.art / "summary.json").write_text(json.dumps(self.summary, indent=1, ensure_ascii=False))
         if not ok and self.misses:

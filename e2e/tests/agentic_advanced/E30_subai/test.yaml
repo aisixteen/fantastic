@@ -23,3 +23,4 @@ limits:
   turn_seconds: 600
 env: {FANTASTIC_AI_SEND_TIMEOUT: "420", UNATTENDED: "240"}  # the first planning turns run long thinking; 180 s can cut a progressing run
 # No free selftest: a perfect actor for this task needs a live sub-AI turn (costs turns).
+exclusive: true   # runs a team of AIs that takes every model slot: alone, after the pool (e2e/run.py)

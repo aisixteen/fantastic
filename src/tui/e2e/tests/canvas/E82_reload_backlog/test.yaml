@@ -7,5 +7,4 @@ costs: free
 limits:
   seconds: 120
 env: {}
-# the peaks are a measure of the machine (a whole suite at 200 lanes pushed the first reloads past the bound, alone it peaks near 12000)
-solo: true
+duration: 53   # seconds in a green run (rig 2026-11-11): the pool starts the longest first (e2e/run.py)

@@ -7,7 +7,6 @@ title: "load: 1000 agents hydrate at boot (time vs the bare seed), all listed an
 runner: probe.py
 runtimes: [python, rust]
 costs: free
-solo: true
 limits:
   idle_seconds: 300
   turn_seconds: 600

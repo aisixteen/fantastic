@@ -1,6 +1,6 @@
 # `kernel_load` (E120) — hydration and batch throughput at scale
 
-Free: no model. Runs SOLO (`solo: true`): it measures time. On the PACKAGED host
+Free: no model. On the PACKAGED host
 of `RUNTIME`, over `web_rest`: the driver's seed boots alone (baseline), then with
 1000 `ram_store` records on disk (hydrated at boot — every one listed by
 `list_agents`, indexed by `reflect tree=ids`, a sample answering `reflect`); 500

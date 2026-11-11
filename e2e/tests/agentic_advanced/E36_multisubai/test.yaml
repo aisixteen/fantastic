@@ -15,3 +15,4 @@ limits:
   turn_chars: 120000
   turn_seconds: 600
 env: {FANTASTIC_AI_SEND_TIMEOUT: "420", UNATTENDED: "1200"}
+exclusive: true   # runs a team of AIs that takes every model slot: alone, after the pool (e2e/run.py)

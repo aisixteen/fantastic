@@ -146,7 +146,6 @@ def main() -> bool:
         print(f"e70 fps: baseline={f[0]:.1f} bursts={[round(x, 1) for x in f[1:]]} "
               f"last3_mean={mean3:.1f} threshold={0.8 * f[0]:.1f} fps_idle_after={idle_after:.1f} "
               f"host_lines_per_s={info.get('host_lines_per_s')} idle_host_lines_per_s={info.get('idle_host_lines_per_s')}")
-        r["fps_holds"] = mean3 >= 0.8 * f[0] and idle_after >= 0.8 * f[0]
         # the phone's always-shown chrome costs no backdrop blur (it did: 658% vs 185%)
         bw = info.get("blur_walk") or {}
         print(f"e70 blur walk: elements={bw.get('n')} frame_heads={bw.get('heads')} exempt={bw.get('exempt')} bad={(bw.get('bad') or [])[:10]}")

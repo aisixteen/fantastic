@@ -1,6 +1,6 @@
 # `recall_scale` (E122) — a fresh execution name vs the stored-call count
 
-Free: no model. Run SOLO (`solo: true`): it measures latency.
+Free: no model.
 
 The PACKAGED kernel of `RUNTIME`, driven over `web_rest`. A call that carries a
 caller-chosen execution name (`X-Fantastic-Execution-Id`) the kernel does not hold
