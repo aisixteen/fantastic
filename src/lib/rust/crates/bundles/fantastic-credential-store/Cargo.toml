@@ -14,6 +14,8 @@ fantastic-kernel = { path = "../../fantastic-kernel" }
 # (python imports `file_bridge.fs` the same way).
 fantastic-file = { path = "../fantastic-file" }
 serde_json = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
 async-trait = { workspace = true }
 
 # `sys::unix` — getpwuid_r / getpwnam_r: `~` expansion.

@@ -33,16 +33,6 @@ fn field_marks_names_each_field_or_the_whole_map() {
     assert!(field_marks(None).is_empty());
 }
 
-#[test]
-fn readme_is_python_verbatim() {
-    let py = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(4)
-        .expect("repo's src/lib above the crate")
-        .join("python/bundled_agents/security/credential_store/src/credential_store/readme.md");
-    assert_eq!(README, std::fs::read_to_string(&py).expect("python readme"));
-}
-
 struct Fixture {
     k: Arc<Kernel>,
     keychain: Arc<MemoryKeychain>,
@@ -352,12 +342,9 @@ async fn set_takes_no_host_the_declaration_is_the_binding() {
         Some("bob"),
     )
     .await;
-    assert_eq!(
-        rebind.result,
-        json!({"error": "credential_store set: takes no host — a ref's host is its \
-                         declaration, written by update_agent on this store's refs",
-               "reason": "bad_arg", "arg": "host"})
-    );
+    // `set` declares no host: its own entry refuses one by name
+    assert_eq!(rebind.result["reason"], json!("bad_arg"), "{}", rebind.result);
+    assert_eq!(rebind.result["arg"], json!("host"), "{}", rebind.result);
     assert_eq!(
         store_meta(&f.k, "refs")["openai/main"]["host"],
         json!("api.openai.com")
@@ -531,10 +518,6 @@ async fn the_file_is_an_absolute_path_a_relative_one_is_refused() {
     assert_eq!(
         v(json!({"file": "~/.fantastic/user/credentials/x.yaml"})),
         None
-    );
-    assert_eq!(
-        v(json!({"keychain_namespace": ""})).as_deref(),
-        Some("keychain_namespace must be a non-empty string")
     );
     // past the write: refused at use, nothing written under the running dir
     k.register(Agent::new(
@@ -868,26 +851,15 @@ async fn a_bad_record_is_refused_at_the_write() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["reason"], json!("invalid_meta"), "{r}");
-    assert_eq!(
-        r["error"],
-        json!("backend='vault' is not one of file, keychain, env")
-    );
+    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    assert_eq!(r["arg"], json!("backend"), "{r}");
 }
 
 #[test]
-fn validate_meta_texts_are_pythons() {
+fn validate_meta_texts_cover_what_the_declaration_cannot_say() {
     let b = CredentialStoreBundle::default();
     let v = |m: Value| b.validate_meta(m.as_object().unwrap(), &Map::new());
     assert_eq!(v(json!({"backend": null})), None);
-    assert_eq!(
-        v(json!({"file": " "})).as_deref(),
-        Some("file must be a non-empty string")
-    );
-    assert_eq!(
-        v(json!({"keychain_namespace": 3})).as_deref(),
-        Some("keychain_namespace must be a non-empty string")
-    );
     assert_eq!(
         v(json!({"file": " creds.yaml"})).as_deref(),
         Some(
@@ -896,10 +868,6 @@ fn validate_meta_texts_are_pythons() {
         )
     );
     assert_eq!(v(json!({"file": "/abs/creds.yaml"})), None);
-    assert_eq!(
-        v(json!({"refs": []})).as_deref(),
-        Some("refs must be a map of ref to {host, fields, env}")
-    );
     assert_eq!(
         v(json!({"refs": {" ": {}}})).as_deref(),
         Some("a ref must be a non-empty string")
@@ -940,8 +908,8 @@ async fn reflect_is_posture_never_a_value_or_a_ref_name() {
     assert_eq!(r["refs"], json!(1));
     assert_eq!(r["file"], json!(f.file().to_string_lossy()));
     assert_eq!(
-        VERBS.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
-        ["reflect", "boot", "set", "get", "list", "forget"]
+        crate::declared::VERBS.iter().map(|v| v.name).collect::<Vec<_>>(),
+        ["set", "get", "list", "forget"]
     );
     let text = r.to_string();
     assert!(!text.contains(KEY) && !text.contains("openai/main"));
@@ -953,31 +921,19 @@ async fn reflect_is_posture_never_a_value_or_a_ref_name() {
 }
 
 #[tokio::test]
-async fn missing_args_and_unknown_verbs_are_refused_in_pythons_words() {
+async fn missing_args_and_unknown_verbs_are_refused_by_the_agents_entry() {
     let f = mk(json!({})).await;
-    for (payload, err, arg) in [
-        (
-            json!({"type": "set", "host": "h", "fields": {"k": "v"}}),
-            "credential_store set: ref required",
-            "ref",
-        ),
-        (
-            json!({"type": "get", "ref": " "}),
-            "credential_store get: ref required",
-            "ref",
-        ),
-        (
-            json!({"type": "forget"}),
-            "credential_store forget: ref required",
-            "ref",
-        ),
+    for (payload, reason, arg) in [
+        (json!({"type": "set", "fields": {"k": "v"}}), "missing_arg", "ref"),
+        (json!({"type": "get", "ref": ""}), "missing_arg", "ref"),
+        (json!({"type": "forget"}), "missing_arg", "ref"),
+        (json!({"type": "set", "host": "h", "ref": "r", "fields": {"k": "v"}}), "bad_arg", "host"),
     ] {
-        let out = call(&f.k, payload, None).await.result;
-        assert_eq!(
-            out,
-            json!({"error": err, "reason": "missing_arg", "arg": arg})
-        );
+        let out = call(&f.k, payload.clone(), None).await.result;
+        assert_eq!(out["reason"], json!(reason), "{payload}: {out}");
+        assert_eq!(out["arg"], json!(arg), "{payload}: {out}");
     }
+    // a value that is not text is refused by the bundle's own check of the map
     let bad = call(
         &f.k,
         json!({"type": "set", "ref": "r", "fields": {"k": 1}}),
@@ -985,17 +941,12 @@ async fn missing_args_and_unknown_verbs_are_refused_in_pythons_words() {
     )
     .await
     .result;
-    assert_eq!(
-        bad,
-        json!({"error": "credential_store set: fields must be a non-empty map of field name to \
-                         string value", "reason": "bad_arg", "arg": "fields"})
-    );
-    let unk = call(&f.k, json!({"type": "shutdown"}), None).await.result;
-    assert_eq!(
-        unk,
-        json!({"error": "credential_store: unknown type 'shutdown'", "reason": "unhandled",
-               "verb": "shutdown"})
-    );
+    assert_eq!(bad["reason"], json!("bad_arg"), "{bad}");
+    assert_eq!(bad["arg"], json!("fields"), "{bad}");
+    // `shutdown` is no verb of this bundle: the shared entry answers it, nothing to release
+    let unk = call(&f.k, json!({"type": "nonsense"}), None).await.result;
+    assert_eq!(unk["reason"], json!("unhandled"), "{unk}");
+    assert_eq!(unk["verb"], json!("nonsense"), "{unk}");
 }
 
 /// Concurrent writes lose nothing: python's read-modify-write runs with no await

@@ -1,118 +1,81 @@
 //! The render sink's contract. Output goes to stdout, so what is pinned here is
-//! the DISPATCH — which verbs are handled, which are dropped, which raise — and
+//! the DISPATCH — which verbs are declared, what its own entry refuses — and
 //! the RENDERED LINE, through the pure renderers the handler prints.
-//!
-//! Every text is python's (`PB/cli/src/cli/tools.py`).
 
 use super::*;
+use fantastic_kernel::Item;
 use serde_json::json;
 
-fn kernel() -> Arc<Kernel> {
-    Arc::new(Kernel::new())
+/// A kernel with one `cli` agent, answering through its own entry.
+async fn rig() -> Arc<Kernel> {
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(HANDLER_MODULE, CliBundle);
+    let kernel = Arc::new(kernel);
+    let root = fantastic_kernel::Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        Map::new(),
+        std::path::PathBuf::new(),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(root);
+    let cli = fantastic_kernel::Agent::new(
+        AgentId::from("cli"),
+        Some(HANDLER_MODULE.to_string()),
+        Some(AgentId::from("kernel_state")),
+        json!({"callable_by": {"*": "*"}}).as_object().cloned().unwrap(),
+        std::path::PathBuf::new(),
+        false,
+    );
+    kernel.register(cli);
+    kernel
 }
 
-async fn dispatch(payload: Value) -> Result<Reply, BundleError> {
-    CliBundle
-        .handle(&AgentId("cli".into()), &payload, &kernel())
+async fn dispatch(payload: Value) -> Value {
+    let kernel = rig().await;
+    kernel
+        .send(vec![Item::new(AgentId::from("cli"), payload)])
         .await
+        .remove(0)
+        .result
 }
 
-fn status(payload: Value) -> Result<Option<String>, BundleError> {
-    render_status(&payload)
+fn status(payload: Value) -> Option<String> {
+    render_status(&serde_json::from_value(payload).expect("a status call"))
 }
 
-fn context(payload: Value) -> Result<Option<String>, BundleError> {
-    render_context(&payload)
+fn context(payload: Value) -> Option<String> {
+    render_context(&serde_json::from_value(payload).expect("a context call"))
 }
 
 #[tokio::test]
 async fn reflect_advertises_exactly_what_it_accepts() {
-    let reply = dispatch(json!({"type": "reflect"})).await.unwrap().unwrap();
-    // Python's `_reflect` builds the dict in this order.
-    let keys: Vec<&str> = reply
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(keys, ["id", "sentence", "accepts"]);
-    let accepts: Vec<String> = reply["accepts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect();
-    // The list and the dispatch must not drift: a verb advertised but not
-    // rendered is a promise this sink does not keep.
+    let reply = dispatch(json!({"type": "reflect"})).await;
+    assert_eq!(reply["accepts"], json!(ACCEPTS), "{reply}");
+    // The list and the declarations must not drift: a verb advertised but not
+    // declared is a promise this sink does not keep.
     for verb in ACCEPTS {
-        assert!(accepts.contains(&verb.to_string()), "missing {verb}");
         assert!(
-            CliBundle.verb_docs().get(verb).is_some(),
-            "{verb} accepted but undocumented"
+            declared::VERBS.iter().any(|v| v.name == verb),
+            "{verb} accepted but not declared"
         );
     }
 }
 
-/// The verb table is python's `VERBS`, in order, each doc the first line
-/// of the python docstring. Two of them are cut mid-sentence on python; copying
-/// the whole sentence would be a divergence, not a courtesy.
-#[tokio::test]
-async fn verb_docs_are_pythons_first_docstring_lines() {
-    let docs = CliBundle.verb_docs();
-    let verbs = docs.as_object().unwrap();
-    let names: Vec<&str> = verbs.keys().map(String::as_str).collect();
+#[test]
+fn the_verbs_are_declared_in_order_each_with_what_it_does() {
+    let names: Vec<&str> = declared::VERBS.iter().map(|v| v.name).collect();
     assert_eq!(
         names,
-        [
-            "reflect",
-            "token",
-            "done",
-            "say",
-            "error",
-            "status",
-            "context",
-            "intro_booting",
-            "booted"
-        ]
+        ["token", "done", "say", "error", "status", "context", "intro_booting", "booted"]
     );
-    assert_eq!(
-        verbs["token"],
-        json!("args: text:str. Writes to stdout (no newline). Returns None.")
-    );
-    assert_eq!(
-        verbs["say"],
-        json!(
-            "args: text:str, source:str?. Prints `  [source] text` on its own line. Returns None."
-        )
-    );
-    assert_eq!(
-        verbs["status"],
-        json!("args: phase:str, source:str?, detail:dict?. Renders one-line phase markers for queued / thinking / tool_calling (entry+exit). `streaming` and `done` produce no output (token + done handlers cover them). Returns None.")
-    );
-    assert_eq!(
-        verbs["context"],
-        json!("args: phase:str ('compacted'|'too_small'), source:str?, detail:dict?. Renders a one-line context-protocol notice.")
-    );
-    assert_eq!(
-        verbs["intro_booting"],
-        json!("First PTY push, BEFORE boot. Identity + the pull/push control-plane map — port-independent, so it prints instantly. No args. Returns None.")
-    );
-    // …and so is `_booted`'s, quotes included.
-    assert_eq!(
-        verbs["booted"],
-        json!("Final PTY push — the kernel's \"all booted\" signal, sent AFTER the boot loop.")
-    );
-}
-
-/// The vendored readme is python's, byte for byte.
-#[test]
-fn readme_is_pythons_verbatim() {
-    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(4)
-        .expect("repo's src/lib above the crate")
-        .join("python/bundled_agents/cli/src/cli/readme.md");
-    assert_eq!(README, std::fs::read_to_string(&py).expect("python readme"));
+    for v in declared::VERBS {
+        assert!(!v.doc().is_empty(), "{} says what it does", v.name);
+    }
+    let token = declared::VERBS.iter().find(|v| v.name == "token").unwrap();
+    assert_eq!(token.schema()["required"], json!(["text"]));
 }
 
 /// The vendored cheatsheet is python's `cli/help.md`, byte for byte.
@@ -129,32 +92,43 @@ fn help_md_is_pythons_verbatim() {
 }
 
 #[tokio::test]
-async fn an_unknown_verb_is_dropped_not_refused() {
-    // A render surface that answered `unknown verb` would turn a cosmetic gap
-    // into a FAILED SEND for whoever was streaming to it.
-    let reply = dispatch(json!({"type": "nonsense_verb"}))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(reply, Value::Null);
-    assert!(reply.get("error").is_none());
+async fn an_unknown_verb_is_refused_by_the_agents_own_entry() {
+    let reply = dispatch(json!({"type": "nonsense_verb"})).await;
+    assert_eq!(reply["reason"], json!("unhandled"), "{reply}");
+    assert_eq!(reply["verb"], json!("nonsense_verb"));
 }
 
 #[tokio::test]
-async fn every_accepted_verb_answers_null_rather_than_an_error() {
-    for verb in ACCEPTS {
-        let reply = dispatch(json!({"type": verb, "text": "x"}))
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(reply.get("error").is_none(), "{verb} refused");
+async fn a_token_that_is_not_text_is_refused_by_name() {
+    for text in [json!(5), json!(null), json!(1.5), json!(true), json!([1]), json!({"a": 1})] {
+        let reply = dispatch(json!({"type": "token", "text": text})).await;
+        assert_eq!(reply["arg"], json!("text"), "{text}: {reply}");
+    }
+    let reply = dispatch(json!({"type": "token"})).await;
+    assert_eq!(reply["reason"], json!("missing_arg"), "{reply}");
+}
+
+#[tokio::test]
+async fn every_declared_verb_answers_null_rather_than_an_error() {
+    for call in [
+        json!({"type": "token", "text": "x"}),
+        json!({"type": "done"}),
+        json!({"type": "say", "text": "x"}),
+        json!({"type": "error", "text": "x"}),
+        json!({"type": "status", "phase": "thinking"}),
+        json!({"type": "context", "phase": "compacted"}),
+        json!({"type": "intro_booting"}),
+        json!({"type": "booted"}),
+    ] {
+        let reply = dispatch(call.clone()).await;
+        assert_eq!(reply, Value::Null, "{call}");
     }
 }
 
 /// The intro is the python map, and the identity names THIS runtime.
 #[tokio::test]
 async fn intro_booting_prints_the_control_plane_map() {
-    let k = kernel();
+    let k = Arc::new(Kernel::new());
     let lines = intro_booting_lines(&k);
     assert_eq!(lines.len(), 5);
     // No root yet in a bare kernel — python falls back to its own root id, so
@@ -182,28 +156,15 @@ async fn intro_booting_prints_the_control_plane_map() {
         lines[4],
         "  REACH one call by id, any unit: compute(exec_bridge) · infer(ai) · memory(file_bridge) · shell(exec_bridge pty)"
     );
-    assert_eq!(
-        dispatch(json!({"type": "intro_booting"})).await.unwrap(),
-        Some(Value::Null)
-    );
 }
 
-/// `booted` is a DUMB SINK: one fixed line, no tree inspection. The
-/// bare kernel here has no agents at all, and the verb still answers.
-#[tokio::test]
-async fn booted_is_a_dumb_sink_no_tree_inspection() {
+/// `booted` is a DUMB SINK: one fixed line, no tree inspection.
+#[test]
+fn booted_is_a_dumb_sink_no_tree_inspection() {
     assert_eq!(
         BOOTED_LINE,
         "[kernel] up — all booted. attach via the map above, or reflect readme=true"
     );
-    let k = kernel();
-    assert!(k.root().is_none());
-    let reply = CliBundle
-        .handle(&AgentId("cli".into()), &json!({"type": "booted"}), &k)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(reply, Value::Null);
 }
 
 /// The tool-call entry line renders `json.dumps(args or {})`, not
@@ -216,197 +177,90 @@ fn status_handler_renders_phase_markers() {
         "source": "ai",
         "detail": {"tool": {"verb": "read", "target": "notes", "args": {"path": "é", "n": 2}}},
     }))
-    .unwrap()
     .unwrap();
     assert_eq!(
         line,
         "  [ai] → read(notes)  {\"path\": \"\\u00e9\", \"n\": 2}"
     );
-    // A falsy `args` is python's `or {}`.
+    // No `args` is an empty object.
     assert_eq!(
         status(json!({"phase": "tool_calling", "detail": {"tool": {"verb": "v", "target": "t", "args": null}}}))
-            .unwrap()
             .unwrap(),
         "  → v(t)  {}"
     );
     // The exit line is chosen by KEY PRESENCE, so a null preview still exits.
     assert_eq!(
         status(json!({"phase": "tool_calling", "detail": {"tool": {"verb": "v", "target": "t", "reply_preview": null}}}))
-            .unwrap()
             .unwrap(),
         "  ← v(t)  None"
     );
     // queued / thinking.
     assert_eq!(
-        status(json!({"phase": "queued", "detail": {"ahead": 3}}))
-            .unwrap()
-            .unwrap(),
+        status(json!({"phase": "queued", "detail": {"ahead": 3}})).unwrap(),
         "  queued (3 ahead)"
     );
     assert_eq!(
-        status(json!({"phase": "queued", "source": "ai"}))
-            .unwrap()
-            .unwrap(),
+        status(json!({"phase": "queued", "source": "ai"})).unwrap(),
         "  [ai] queued (0 ahead)"
     );
-    assert_eq!(
-        status(json!({"phase": "thinking"})).unwrap().unwrap(),
-        "  thinking…"
-    );
+    assert_eq!(status(json!({"phase": "thinking"})).unwrap(), "  thinking…");
     // `streaming` and `done` are silent; so is an unknown phase.
-    assert!(status(json!({"phase": "streaming"})).unwrap().is_none());
-    assert!(status(json!({"phase": "done"})).unwrap().is_none());
-    assert!(status(json!({})).unwrap().is_none());
+    assert!(status(json!({"phase": "streaming"})).is_none());
+    assert!(status(json!({"phase": "done"})).is_none());
 }
 
-/// Every value goes through python's `str()`, every default is keyed on
-/// PRESENCE, and the prefix is decided by python truthiness.
+/// Detail values are rendered as text (`str()`), every default is keyed on
+/// PRESENCE, and an empty source takes the plain prefix.
 #[test]
-fn status_values_render_like_python_str() {
-    // A present null is `None`, a bool is `True`, a container is a python repr.
+fn status_values_render_as_text() {
     assert_eq!(
-        status(json!({"phase": "queued", "detail": {"ahead": null}}))
-            .unwrap()
-            .unwrap(),
+        status(json!({"phase": "queued", "detail": {"ahead": null}})).unwrap(),
         "  queued (None ahead)"
     );
     assert_eq!(
-        status(json!({"phase": "queued", "source": true, "detail": {"ahead": [1, "a"]}}))
-            .unwrap()
-            .unwrap(),
-        "  [True] queued ([1, 'a'] ahead)"
+        status(json!({"phase": "queued", "source": "ai", "detail": {"ahead": [1, "a"]}})).unwrap(),
+        "  [ai] queued ([1, 'a'] ahead)"
     );
-    // A falsy source takes the one-space prefix; a truthy non-string is str()ed.
     assert_eq!(
-        status(json!({"phase": "thinking", "source": null}))
-            .unwrap()
-            .unwrap(),
+        status(json!({"phase": "thinking", "source": null})).unwrap(),
         "  thinking…"
     );
     assert_eq!(
-        status(json!({"phase": "thinking", "source": 0}))
-            .unwrap()
-            .unwrap(),
+        status(json!({"phase": "thinking", "source": ""})).unwrap(),
         "  thinking…"
     );
-    assert_eq!(
-        status(json!({"phase": "thinking", "source": 7}))
-            .unwrap()
-            .unwrap(),
-        "  [7] thinking…"
-    );
-    // Non-string verb/target/preview: python's f-string str()s them.
     assert_eq!(
         status(json!({"phase": "tool_calling", "detail": {"tool": {"verb": 1, "target": {"a": 1}, "reply_preview": true}}}))
-            .unwrap()
             .unwrap(),
         "  ← 1({'a': 1})  True"
     );
-    // Context values go the same way.
     assert_eq!(
-        context(json!({"phase": "compacted", "detail": {}}))
-            .unwrap()
-            .unwrap(),
+        context(json!({"phase": "compacted", "detail": {}})).unwrap(),
         "  ⟲ context compacted (?, 0 dropped; recall to page back)"
     );
     assert_eq!(
         context(json!({"phase": "compacted", "source": "ai", "detail": {"strategy": null, "dropped_messages": 2}}))
-            .unwrap()
             .unwrap(),
         "  [ai] ⟲ context compacted (None, 2 dropped; recall to page back)"
     );
     assert_eq!(
-        context(json!({"phase": "too_small", "detail": {"hint": 5}}))
-            .unwrap()
-            .unwrap(),
+        context(json!({"phase": "too_small", "detail": {"hint": 5}})).unwrap(),
         "  ✗ context too small — 5"
     );
     assert_eq!(
-        context(json!({"phase": "too_small"})).unwrap().unwrap(),
+        context(json!({"phase": "too_small"})).unwrap(),
         "  ✗ context too small — "
     );
-    assert!(context(json!({"phase": "nonsense"})).unwrap().is_none());
+    assert!(context(json!({"phase": "nonsense"})).is_none());
 }
 
-/// The raise paths. Python does not render these; it dies, and the
-/// kernel answers `{"error": …, "raised": true}`.
+/// A `detail` that is not an object is refused by the entry, by name.
 #[tokio::test]
-async fn python_raise_paths_raise_here_too() {
-    // `sys.stdout.write(5)` — note the clinic's `None`, not `NoneType`.
-    for (text, name) in [
-        (json!(5), "int"),
-        (json!(null), "None"),
-        (json!(1.5), "float"),
-        (json!(true), "bool"),
-        (json!([1]), "list"),
-        (json!({"a": 1}), "dict"),
-    ] {
-        let err = dispatch(json!({"type": "token", "text": text}))
-            .await
-            .expect_err("a non-str write raises");
-        assert_eq!(
-            err.to_string(),
-            format!("TypeError: write() argument must be str, not {name}")
-        );
+async fn a_detail_that_is_not_an_object_is_refused_by_name() {
+    for detail in [json!("x"), json!(5), json!(true), json!([1])] {
+        let reply = dispatch(json!({"type": "status", "phase": "queued", "detail": detail})).await;
+        assert_eq!(reply["arg"], json!("detail"), "{reply}");
     }
-    // An absent `text` is python's `""` default — no raise, no output.
-    assert_eq!(
-        dispatch(json!({"type": "token"})).await.unwrap(),
-        Some(Value::Null)
-    );
-    // A truthy non-dict `detail` has no `.get`.
-    for (detail, name) in [
-        (json!("x"), "str"),
-        (json!(5), "int"),
-        (json!(true), "bool"),
-        (json!([1]), "list"),
-        (json!(1.5), "float"),
-    ] {
-        let err = status(json!({"phase": "queued", "detail": detail.clone()}))
-            .expect_err("a truthy non-dict detail raises");
-        assert_eq!(
-            err.to_string(),
-            format!("AttributeError: '{name}' object has no attribute 'get'")
-        );
-        let err = context(json!({"phase": "compacted", "detail": detail}))
-            .expect_err("a truthy non-dict detail raises");
-        assert_eq!(
-            err.to_string(),
-            format!("AttributeError: '{name}' object has no attribute 'get'")
-        );
-    }
-    // …and so does a truthy non-dict `tool`.
-    let err = status(json!({"phase": "tool_calling", "detail": {"tool": "x"}}))
-        .expect_err("a truthy non-dict tool raises");
-    assert_eq!(
-        err.to_string(),
-        "AttributeError: 'str' object has no attribute 'get'"
-    );
-    // A FALSY non-dict is python's `or {}` — no raise.
-    assert_eq!(
-        status(json!({"phase": "queued", "detail": 0}))
-            .unwrap()
-            .unwrap(),
-        "  queued (0 ahead)"
-    );
-    assert_eq!(
-        status(json!({"phase": "tool_calling", "detail": {"tool": ""}}))
-            .unwrap()
-            .unwrap(),
-        "  → ()  {}"
-    );
-    // A non-string `text` on `say`/`error` is str()ed, not a raise: python
-    // renders those through an f-string, not through `stdout.write`.
-    assert_eq!(
-        dispatch(json!({"type": "say", "text": 5})).await.unwrap(),
-        Some(Value::Null)
-    );
-    assert_eq!(
-        dispatch(json!({"type": "error", "text": null}))
-            .await
-            .unwrap(),
-        Some(Value::Null)
-    );
 }
 
 /// Every line this sink prints loses its C0/C1 control characters

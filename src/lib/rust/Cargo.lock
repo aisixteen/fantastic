@@ -557,6 +557,8 @@ dependencies = [
  "fantastic-bundle",
  "fantastic-core",
  "fantastic-kernel",
+ "schemars",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -588,6 +590,8 @@ dependencies = [
  "fantastic-ram-store",
  "keyring",
  "libc",
+ "schemars",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
