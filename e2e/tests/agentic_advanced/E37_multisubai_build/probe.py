@@ -242,8 +242,8 @@ async def score(root, store_id, total, new_total, transcript):
     print(f"  puzzle seed={S.PUZZLE_SEED} code={S.CODE}")
     listing = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]["result"]
     records = {a["id"]: a for a in (listing.get("agents") or [])}
-    ai_module = records.get("brain", {}).get("handler_module")
-    solvers = [a["id"] for a in records.values() if a["id"] not in MINE and a.get("handler_module") == ai_module]
+    ai_module = P.bundle(records.get("brain", {}))
+    solvers = [a["id"] for a in records.values() if a["id"] not in MINE and P.bundle(a) == ai_module]
 
     # ── 1. STRUCTURE: three solvers, the creator's children, one oracle each, pairs both ways ──
     def cc(aid):

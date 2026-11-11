@@ -297,6 +297,12 @@ def _ai_meta(
     return meta
 
 
+def bundle(rec: dict) -> str:
+    """The bundle a record names: `ai_chat` and `ai_chat.tools` are the same handler, and a
+    model may write either (the kernel keeps the spelling it was given)."""
+    return str((rec or {}).get("handler_module") or "").split(".")[0]
+
+
 def walk(node: dict, out: list[dict]) -> None:
     out.append(node)
     for c in node.get("children", []):
@@ -614,11 +620,11 @@ async def score(root, store_id, total, new_total, transcript):
     )[0]["result"]
     records = {a["id"]: a for a in (listing.get("agents") or [])}
     made = [n for n in nodes if n.get("id") not in MINE]
-    ai_module = records.get("brain", {}).get("handler_module")
+    ai_module = bundle(records.get("brain", {}))
 
     # ── 1. STRUCTURE: a sub-AI AND a code agent, both the model's ──
-    sub_ais = [n for n in made if records.get(n["id"], {}).get("handler_module") == ai_module]
-    runners = [n for n in made if records.get(n["id"], {}).get("handler_module") == EXEC_MODULE]
+    sub_ais = [n for n in made if bundle(records.get(n["id"], {})) == ai_module]
+    runners = [n for n in made if bundle(records.get(n["id"], {})) == bundle({"handler_module": EXEC_MODULE})]
     c1 = bool(sub_ais) and bool(runners)
     print(
         f"    1. sub-AI + code agent      {'OK' if c1 else 'NO'} "
@@ -635,7 +641,7 @@ async def score(root, store_id, total, new_total, transcript):
     clocks = ["clock"] + [
         n["id"]
         for n in made
-        if records.get(n["id"], {}).get("handler_module") == "scheduler.tools"
+        if bundle(records.get(n["id"], {})) == "scheduler"
     ]
 
     async def _schedules() -> list[dict]:
