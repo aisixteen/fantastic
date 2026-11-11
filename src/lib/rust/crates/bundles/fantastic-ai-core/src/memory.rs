@@ -315,10 +315,20 @@ pub async fn save_history(
         if r.get("id").is_none_or(Value::is_null) {
             r.insert("id".to_string(), Value::from(kernel.mint_id()));
         }
-        // WHEN it was written, on every row; a row that already carries its own
-        // (a view) keeps it
-        r.entry("ts")
-            .or_insert_with(|| Value::from(crate::helpers::now_secs()));
+        // WHEN it was written, on every row, in the row's `attributes` (merged into
+        // what the writer already put there)
+        let attrs = r
+            .entry("attributes")
+            .and_modify(|a| {
+                if !a.is_object() {
+                    *a = Value::Object(Map::new());
+                }
+            })
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(a) = attrs.as_object_mut() {
+            a.entry("ts")
+                .or_insert_with(|| Value::from(crate::helpers::now_secs()));
+        }
         rows.push(r);
     }
     if rows.is_empty() {

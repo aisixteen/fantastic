@@ -481,12 +481,15 @@ pub async fn run_generation(
             });
             if let Some(m) = row.as_object_mut() {
                 m.extend(crate::think::thinking_fields(&last_text));
-                // stored and returned by the retrieval verbs, never rendered into a
-                // request (`render_for_model` carries role and content only)
+                // stored in `attributes` and returned by the retrieval verbs, never
+                // rendered into a request (`render_for_model` carries role and content
+                // only)
+                let mut attrs = Map::new();
                 if let Some(u) = usage_row(&provider.report()) {
-                    m.insert("usage".to_string(), u);
+                    attrs.insert("usage".to_string(), u);
                 }
-                m.insert("parts".to_string(), Value::Array(request_parts));
+                attrs.insert("parts".to_string(), Value::Array(request_parts));
+                m.insert("attributes".to_string(), Value::Object(attrs));
             }
             row
         },

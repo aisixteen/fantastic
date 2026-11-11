@@ -751,3 +751,36 @@ async fn the_request_parts_name_each_row_by_the_form_it_took() {
         }
     }
 }
+
+#[tokio::test]
+async fn an_attribute_of_any_key_leaves_the_request_bytes_alone() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, agent) = mk_kernel(&tmp, "cm_any_attr").await;
+    let with = |content: &str, role: &str| {
+        json!({"role": role, "content": content, "attributes": {
+            "ts": 1.0, "any_future_key": {"x": "a long value ".repeat(40)}}})
+    };
+    put_row(&kernel, &agent, with("hello", "user")).await;
+    put_row(&kernel, &agent, with("answer", "assistant")).await;
+    for mode in [Caching::None, Caching::Cleanup] {
+        let msgs = view_with(&kernel, &agent, mode).await;
+        let sent = crate::agent_loop::render_for_model(&msgs);
+        let body = Value::Array(sent.clone()).to_string();
+        assert!(!body.contains("any_future_key") && !body.contains("a long value"));
+        assert_eq!(
+            &sent[1..],
+            [
+                json!({"role": "user", "content": "hello"}),
+                json!({"role": "assistant", "content": "answer"}),
+                json!({"role": "user", "content": "next"}),
+            ],
+            "{mode:?}"
+        );
+        // and the window estimate does not count it
+        let bare = json!({"role": "user", "content": "hello"});
+        assert_eq!(
+            crate::context::estimate_one(&with("hello", "user")),
+            crate::context::estimate_one(&bare)
+        );
+    }
+}

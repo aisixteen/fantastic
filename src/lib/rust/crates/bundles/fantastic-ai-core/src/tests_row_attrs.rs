@@ -1,5 +1,6 @@
-//! What a row carries about itself (#618): `ts` on every row, `usage` and `parts` on
-//! the assistant row, returned by `rows` and `history` and never part of a request.
+//! What a row carries about itself (#618): its `attributes` map: `ts` on every row,
+//! `usage` and `parts` on the assistant row. Returned whole by `rows` and `history`,
+//! never part of a request, whatever keys it holds.
 
 use super::*;
 use crate::provider::ProviderReport;
@@ -72,11 +73,14 @@ async fn the_assistant_row_keeps_usage_and_every_row_a_ts() {
     let all = rows(&kernel, &agent).await;
     assert!(all.len() >= 2, "{all:?}");
     for r in &all {
-        assert!(r["ts"].as_f64().is_some_and(|t| t > 0.0), "no ts: {r}");
+        assert!(
+            r["attributes"]["ts"].as_f64().is_some_and(|t| t > 0.0),
+            "no ts: {r}"
+        );
     }
     let answer = last_answer(&kernel, &agent).await;
     assert_eq!(
-        answer["usage"],
+        answer["attributes"]["usage"],
         json!({"input": 100, "output": 40, "cache_read": 600, "cache_write": 300})
     );
     // `history` returns them too
@@ -87,9 +91,8 @@ async fn the_assistant_row_keeps_usage_and_every_row_a_ts() {
         .iter()
         .find(|d| d["role"] == "assistant")
         .unwrap();
-    assert_eq!(digest["usage"], answer["usage"]);
-    assert_eq!(digest["ts"], answer["ts"]);
-    assert!(h["rows"][0]["ts"].is_number(), "{h}");
+    assert_eq!(digest["attributes"], answer["attributes"]);
+    assert!(h["rows"][0]["attributes"]["ts"].is_number(), "{h}");
 
     // an endpoint with no cache counts leaves them absent, never 0
     *s.report.lock().unwrap() = ProviderReport {
@@ -99,7 +102,10 @@ async fn the_assistant_row_keeps_usage_and_every_row_a_ts() {
     };
     say(&kernel, &agent, "again").await;
     let answer = last_answer(&kernel, &agent).await;
-    assert_eq!(answer["usage"], json!({"input": 1000, "output": 40}));
+    assert_eq!(
+        answer["attributes"]["usage"],
+        json!({"input": 1000, "output": 40})
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -109,8 +115,8 @@ async fn an_endpoint_that_reports_nothing_leaves_no_usage() {
     let _s = script(&agent, passes(1), Duration::ZERO);
     say(&kernel, &agent, "go").await;
     let answer = last_answer(&kernel, &agent).await;
-    assert!(answer.get("usage").is_none(), "{answer}");
-    assert!(answer["parts"].is_array(), "{answer}");
+    assert!(answer["attributes"].get("usage").is_none(), "{answer}");
+    assert!(answer["attributes"]["parts"].is_array(), "{answer}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -119,15 +125,15 @@ async fn the_parts_follow_the_request_and_the_request_is_unchanged() {
     let (kernel, agent) = mk_kernel(&tmp, "ra_parts").await;
     let s = script(&agent, passes(2), Duration::ZERO);
     say(&kernel, &agent, "go").await;
-    let first = last_answer(&kernel, &agent).await;
+    let first = last_answer(&kernel, &agent).await["attributes"]["parts"].clone();
     assert_eq!(
-        names(&first["parts"]),
+        names(&first),
         ["reflect_tree", "self_reflect", "verb_docs", "new_input"]
     );
     say(&kernel, &agent, "again").await;
-    let second = last_answer(&kernel, &agent).await;
+    let second = last_answer(&kernel, &agent).await["attributes"]["parts"].clone();
     assert_eq!(
-        names(&second["parts"]),
+        names(&second),
         [
             "reflect_tree",
             "self_reflect",
@@ -139,7 +145,7 @@ async fn the_parts_follow_the_request_and_the_request_is_unchanged() {
     );
     let all = rows(&kernel, &agent).await;
     let (user, answer) = (&all[0], &all[1]);
-    let held: Vec<&Value> = second["parts"]
+    let held: Vec<&Value> = second
         .as_array()
         .unwrap()
         .iter()
@@ -149,9 +155,9 @@ async fn the_parts_follow_the_request_and_the_request_is_unchanged() {
     assert_eq!(held[0]["form"], "whole");
     assert_eq!(held[1]["ref"], answer["id"]);
     // the same text, the same hash: the first turn's new input is the user row now
-    assert_eq!(held[0]["hash"], part(&first["parts"], "new_input")["hash"]);
+    assert_eq!(held[0]["hash"], part(&first, "new_input")["hash"]);
     assert_eq!(held[0]["bytes"], json!(2));
-    for p in second["parts"].as_array().unwrap() {
+    for p in second.as_array().unwrap() {
         let hash = p["hash"].as_str().unwrap();
         assert!(hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()));
     }
@@ -166,7 +172,7 @@ async fn the_parts_follow_the_request_and_the_request_is_unchanged() {
     let system = sent[0]["content"].as_str().unwrap();
     let pieces: usize = ["reflect_tree", "self_reflect", "verb_docs"]
         .iter()
-        .map(|n| part(&second["parts"], n)["bytes"].as_u64().unwrap() as usize)
+        .map(|n| part(&second, n)["bytes"].as_u64().unwrap() as usize)
         .sum();
     assert_eq!(system.len(), pieces + 4, "two blank lines between pieces");
     assert_eq!(sent[1], json!({"role": "user", "content": "go"}));
