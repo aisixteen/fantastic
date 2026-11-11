@@ -129,6 +129,11 @@ def main() -> bool:
             s2.kill()
     finally:
         rig.stop()
+        if not all(r.values()):
+            # the evidence of a call that never reached the model: what `send` said, what the host said last
+            sl = rig.art / "send.log"
+            print("send.log:\n" + (sl.read_text()[-1500:] if sl.exists() else "(none)"), flush=True)
+            print("host log (tail):\n" + rig.log.read_text()[-1500:], flush=True)
         for p in senders:
             if p.poll() is None:
                 p.kill()
