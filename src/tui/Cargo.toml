@@ -140,3 +140,8 @@ portable-pty = "0.8"
 [[example]]
 name = "screenshot"
 path = "e2e/screenshot.rs"
+
+# The e2e tests' embedder (E153): the launcher plus one extra blueprint, on the public API only.
+[[example]]
+name = "embedder"
+path = "examples/embedder.rs"

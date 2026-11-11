@@ -1,0 +1,8 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: launcher_seed
+group: canvas
+title: "the launcher seeds a fresh state folder before the kernel starts (#555): each kernel mode, a one-shot writes nothing, an embedder with one extra blueprint and --statedir far from the cwd"
+runner: probe.py
+costs: free
+limits: {seconds: 300}
+env: {}

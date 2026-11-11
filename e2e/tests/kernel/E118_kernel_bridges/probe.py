@@ -55,7 +55,7 @@ sys.path.insert(0, str(E2E))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import helpers.host.driver as drv
-from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.host.driver import HostKernel, ensure_runtime, excluded, runtime
 from helpers.host.ws import WSWatcher
 from helpers.verdict import verdict
 from stub_relay import StubRelay
@@ -390,6 +390,9 @@ def dead_peer_checks(K: HostKernel, P: HostKernel, pspec: dict, pwork: Path) -> 
 def main() -> int:
     if PEER == RUNTIME:
         raise SystemExit("RUNTIME must be named")
+    if excluded(PEER):
+        print(f"E2E-SKIP: the {PEER} peer is excluded from this run", flush=True)
+        return 0
     name, _ = runtime(REPO, RUNTIME)
     kspec, pspec = ensure_runtime(REPO, name), ensure_runtime(REPO, PEER)
     os.environ[PW_VAR] = PW  # the creds STORE reads it (env backend); before boot

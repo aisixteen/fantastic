@@ -661,6 +661,9 @@ async def main() -> int:
     else:
         picked = select(tests, a.group, a.id, bk.name, a.free, a.runtime, a.exclude_runtime)
 
+    # Probes that boot a second runtime beside their own read this and leave it out.
+    os.environ["E2E_EXCLUDE_RUNTIME"] = ",".join(a.exclude_runtime)
+
     if a.shard:
         m = re.fullmatch(r"(\d+)/(\d+)", a.shard)
         if not m or not 1 <= int(m.group(1)) <= int(m.group(2)):

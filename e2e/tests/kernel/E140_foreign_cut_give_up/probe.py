@@ -26,7 +26,6 @@ import shutil
 import sys
 import tempfile
 import time
-import uuid
 from pathlib import Path
 
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
@@ -34,8 +33,7 @@ sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
 from helpers.verdict import verdict
-from mocks import halves, sse
-from mocks.vllm import VllmMock
+from mocks.vllm import ThinkingVllmMock
 
 REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
@@ -50,38 +48,6 @@ GAVE_UP = ("The LLM was not able to answer — 9 turns in a row were cut at a fo
            "call syntax. Reiterate the inquiry.")
 
 
-class ThinkingVllm(VllmMock):
-    """The vllm mock, plus vLLM's thought channel: a scripted answer
-    `<think>T</think>A` streams T as `reasoning_content` deltas, then A as
-    `content` — the shape a reasoning model's server sends."""
-
-    def turn(self, h, req, text):
-        think, answer = "", text
-        if text.startswith("<think>") and "</think>" in text:
-            think, answer = text[len("<think>"):].split("</think>", 1)
-        cid = "chatcmpl-" + uuid.uuid4().hex
-        created = int(time.time())
-
-        def chunk(delta, finish=None):
-            return sse(None, {"id": cid, "object": "chat.completion.chunk",
-                              "created": created, "model": self.model,
-                              "choices": [{"index": 0, "delta": delta, "logprobs": None,
-                                           "finish_reason": finish}]})
-
-        out = [chunk({"role": "assistant", "content": ""})]
-        out += [chunk({"reasoning_content": p}) for p in halves(think)]
-        out += [chunk({"content": p}) for p in halves(answer)]
-        out.append(chunk({}, "stop"))
-        if (req.get("stream_options") or {}).get("include_usage"):
-            p, c = self.usage(text)
-            out.append(sse(None, {"id": cid, "object": "chat.completion.chunk",
-                                  "created": created, "model": self.model, "choices": [],
-                                  "usage": {"prompt_tokens": p, "completion_tokens": c,
-                                            "total_tokens": p + c}}))
-        out.append(b"data: [DONE]\n\n")
-        h.stream("text/event-stream; charset=utf-8", out)
-
-
 def last_user(req: dict) -> str:
     """The last user message of a chat request, as text."""
     for m in reversed(req.get("messages") or []):
@@ -94,8 +60,8 @@ def last_user(req: dict) -> str:
 def main() -> int:
     name, _ = runtime(REPO, RUNTIME)
     spec = ensure_runtime(REPO, name)
-    m = ThinkingVllm(model=MODEL).start()
-    mb = ThinkingVllm(model=MODEL).start()
+    m = ThinkingVllmMock(model=MODEL).start()
+    mb = ThinkingVllmMock(model=MODEL).start()
     work = Path(tempfile.mkdtemp(prefix="e2e-foreign-cut-"))
     hk = HostKernel(spec, work, reach=[AI, BOSS, *PROVS.values()]).boot()
     root = hk.root_id

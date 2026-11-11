@@ -1,0 +1,12 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: scripted OpenAI-compatible servers play the
+# model for the kernel's own chats (ai_chat.tools + a vllm_backend provider each) on the Rust
+# host, driven over web_rest.
+id: fold_more
+group: kernel
+title: "fold, the rest of the cycle (#556, #532): a folded thought recalled by id is whole and refolds; a large exec run reply and a large file list reply fold to anchors the same way; under caching none nothing folds and nothing is marked; a person's context_fold puts a fold line in place of its rows and a large reply still folds after it; the bytes before the cache mark never change"
+runner: probe.py
+runtimes: [rust]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300

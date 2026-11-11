@@ -2,7 +2,7 @@
 against the kernel's own backends. NO MODEL.
 
 One mock per provider, and on the PACKAGED host of `RUNTIME` (python |
-rust), every call through `web_rest`, one AI agent per provider whose record
+rust), every call through `web_rest`, one provider agent per provider (and an `ai_chat.tools` chat completing through it) whose record
 names the mock's `url` and an env-backed credential ref pinned to its host. The
 record leaves to the server what the backend reads from it (vllm: model,
 max_tokens, context_window, kv_slots; ollama: model; anthropic: max_tokens,
@@ -104,7 +104,8 @@ def main() -> int:
     mocks = {p: PROVIDERS[p][0](model=f"mock-{p}").start() for p in PROVIDERS}
     work = Path(tempfile.mkdtemp(prefix="e2e-provider-mocks-"))
     ids = [f"ai_{p}" for p in PROVIDERS]
-    hk = HostKernel(spec, work, reach=ids).boot()
+    chats = [f"chat_{p}" for p in PROVIDERS]
+    hk = HostKernel(spec, work, reach=ids + chats).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -130,21 +131,32 @@ def main() -> int:
                    refs={p: {"host": m.host, "env": {"api_key": KEY_VAR}} for p, m in mocks.items()},
                    callable_by={**callable_by("creds"), **{a: ["get"] for a in ids}})
         need(r.get("updated") is True, f"creds: one ref per mock: {str(r)[:200]}")
-        r = update("memory", callable_by={**callable_by("memory"), **{a: "*" for a in ids}})
+        r = update("memory", callable_by={**callable_by("memory"), **{a: "*" for a in ids + chats}})
         need(r.get("updated") is True, f"memory accepts the AIs: {str(r)[:200]}")
 
         for p, (_cls, module, fields, read) in PROVIDERS.items():
-            m, aid = mocks[p], f"ai_{p}"
+            m, pid, aid = mocks[p], f"ai_{p}", f"chat_{p}"
             print(f"── {p}  {m.url}", flush=True)
             m.require_key(KEY)
-            rec = hk.create(parent_id="rest", handler_module=module, id=aid,
+            # the provider holds endpoint, key and the probes; the chat holds the
+            # conversation and completes through it (`ai_chat.tools` + `provider_id`)
+            rec = hk.create(parent_id="rest", handler_module=module, id=pid,
                             endpoint=m.url, credentials={"store": "creds", "ref": p},
                             memory_store_id="memory",
                             can_call={"$self": "*", "memory": "*", "creds": ["get"],
                                       root: ["reflect"]},
-                            callable_by={"$self": "*", "$parent": "*", "rest": "*", "ws": "*"},
+                            callable_by={"$self": "*", "$parent": "*",
+                                         aid: ["complete", "watch"]},
                             **fields)
-            need(rec.get("id") == aid, f"{p}: create: {str(rec)[:200]}")
+            need(rec.get("id") == pid, f"{p}: create provider: {str(rec)[:200]}")
+            rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
+                            provider_id=pid, model=f"mock-{p}",
+                            context_window=read.get("context_window", fields.get("context_window", 32768)),
+                            memory_store_id="memory",
+                            can_call={"$self": "*", "memory": "*", pid: ["complete", "watch"],
+                                      root: ["reflect"]},
+                            callable_by={"$self": "*", "$parent": "*", "rest": "*", "ws": "*"})
+            need(rec.get("id") == aid, f"{p}: create chat: {str(rec)[:200]}")
 
             # 1 · a turn answers the mock's text; the server-read fields land
             word = f"MOCK-{p.upper()}-{secrets.token_hex(3)}"
@@ -163,7 +175,7 @@ def main() -> int:
             stop.set()
             need(word in str(out.get("response")) and not out.get("error"),
                  f"{p}: the turn answers the mock's text: {str(out)[:200]}")
-            got = record(aid)
+            got = record(pid)
             need(all(got.get(k) == v for k, v in read.items()),
                  f"{p}: read from the server: {({k: got.get(k) for k in read})}")
             done = [

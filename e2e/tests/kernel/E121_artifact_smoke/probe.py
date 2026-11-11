@@ -36,7 +36,7 @@ from pathlib import Path
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 
-from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.host.driver import HostKernel, ensure_runtime, excluded, runtime
 from helpers.verdict import verdict
 
 REPO = E2E.parent
@@ -198,7 +198,17 @@ def main() -> int:
         need(not undoc, f"docs of=<handler_module> answers for every kind: {undoc}")
 
         # 7 · vs python
-        if name != "python":
+        if name != "python" and excluded("python"):
+            # Comparing the kernel with itself would pass vacuously: SKIP, never PASS.
+            # A real failure in steps 1-6 still wins (run.py reads E2E-SKIP first, so it
+            # is printed only when nothing failed).
+            if bad:
+                verdict(False, f"{RUNTIME}: {len(bad)} failed — first: {bad[0]}")
+                return 1
+            print("E2E-SKIP: step 7 (vs python) needs the python runtime, which the run excludes",
+                  flush=True)
+            return 0
+        elif name != "python":
             ref_work = Path(tempfile.mkdtemp(prefix="e2e-artifact-ref-"))
             ref = HostKernel(ensure_runtime(REPO, "python"), ref_work, reach=[]).boot()
             pcat = catalog(ref)

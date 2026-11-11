@@ -1,0 +1,8 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: store_view
+group: canvas
+title: "the canvas store view counts a store's rows from tables.rows and refreshes by itself when an agent appends (#505, #508)"
+runner: probe.py
+costs: free
+limits: {seconds: 300}
+env: {}
