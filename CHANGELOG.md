@@ -5,6 +5,8 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ## [Unreleased]
 
+- AI chats: the system block keeps the task state in general terms (no fixed template or checkmarks), and every example uses placeholders (AGENT, VERB, PATH, <title>) — no invented files, values or e2e fixture names (filler_2, "audit marker", notes.md) in the prompt.
+
 - AI chats: the Working rules (state lines, act early, batch, verify) move to the END of the system block, where a long task brief no longer buries them (an LLM e2e run wrote no state lines with them mid-block).
 
 - AI chats: the system block's tree primer no longer needs a `kernel_state` grant: it reads the kernel's tree and bundle ids through `Kernel::tree_ids_primer()` (no call, no gate), the same text the gated `reflect` rendered; no new verb, field or setting.
