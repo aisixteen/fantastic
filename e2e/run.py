@@ -364,9 +364,14 @@ def longest_first(tests) -> list[dict]:
 
 
 # SHORTEST FIRST (`--order short`): the smallest tests first, so a broken basic shows up in the
-# first minutes of a model run. Size = the `duration:` hint, else the test's `limits.seconds`.
+# first minutes of a model run. Size: `long: true` tests after all others; then the `duration:`
+# hint (seconds), else the turn budget `limits.max_turns`, else `limits.seconds`; a test that
+# declares none goes after the sized ones.
 def shortest_first(tests) -> list[dict]:
-    size = lambda t: float(t.get("duration") or (t.get("limits") or {}).get("seconds") or 0)  # noqa: E731
+    def size(t: dict) -> tuple:
+        lim = t.get("limits") or {}
+        guess = t.get("duration") or lim.get("max_turns") or lim.get("seconds")
+        return (bool(t.get("long")), guess is None, float(guess or 0))
     return sorted(tests, key=size)
 
 
