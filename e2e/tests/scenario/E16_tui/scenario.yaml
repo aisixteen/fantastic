@@ -28,7 +28,7 @@ runs:
     frames:
       # no docked title: the live shell gives every row to the work
       # the `mcp` leg is made at boot (it keeps the project's
-      # .fantastic/.mcp.json right before any client connects), with its bridge
+      # its .mcp.json right before any client connects), with its bridge
       live: {contains: [exec, files, user, store, memory, mcp], contains_block_title: false}
     after_exit:
       exit_code: 0
@@ -42,21 +42,20 @@ runs:
         - .fantastic/memory.db
         - .fantastic/agents/user/agents/mcp/agent.yaml
         - .fantastic/agents/user/agents/mcp_config/agent.yaml
-        - .fantastic/prompt.md
-        - .fantastic/.mcp.json
+        - .fantastic/agents/user/agents/prompt_file/prompt.md
+        - .fantastic/agents/user/agents/mcp_config/.mcp.json
+        - .fantastic/readme.md
       # nothing outside `.fantastic` (no pollution)
       # no roster file: every agent is a record under .fantastic/agents/
       files_absent: [.fantastic/messages.yaml, .fantastic/ledger.json, .fantastic/kernel.yaml, .mcp.json, .claude]
 
   # ── 2 · the same directory: no intro, straight to the tree, log grows ──────
-  #       (under `user`: bundles_watch, exec, files, mcp … — sorted)
+  #       (under `user`: exec, files, mcp … — sorted)
   #       …and an agent with no view of its own opens in the DEFAULT view
   - name: rehydrate
     script: |
       wait 2500
       shot live
-      key down
-      wait 200
       key down
       wait 200
       key down
@@ -77,7 +76,7 @@ runs:
       key ctrl-c
       exit 8000
     frames:
-      # Activity, `kernel_memory` (the kernel's RAM store) and `user` sit under the kernel's row; mcp is user's fourth child: seven down
+      # Activity, `kernel_memory` (the kernel's RAM store) and `user` sit under the kernel's row; mcp is user's third child: six down
       live: {contains: [exec, files, user, "✉ Activity"], contains_block_title: false}
       # mcp has no specific view: who it is, who it talks to, its verbs (its rows
       # sit below the frame: its grant lists are long)
@@ -218,3 +217,19 @@ runs:
     after_exit:
       exit_code: 0
       lock_released: true
+
+  # ── 8 · a kernel runs headless on a far state folder: `fantastic --statedir`
+  #       finds it from the work dir and attaches as a thin client, which is told
+  #       the kernel has no terminal view ─────────────────────────────────────
+  - name: attach_far
+    statedir: far/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/state
+    host_argv: [--headless, --statedir, far/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/state]
+    args: "--statedir far/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/state"
+    script: |
+      wait 3000
+      shot attach
+      exit 8000
+    frames:
+      attach: {contains: ["thin client", "without a terminal view"]}
+    after_exit:
+      exit_code: 0

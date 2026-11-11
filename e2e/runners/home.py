@@ -69,6 +69,11 @@ def lock_pid(folder: Path) -> int | None:
     return pid if isinstance(pid, int) and oslayer.pid_alive(pid) else None
 
 
+def state_of(folder: Path) -> str:
+    """The registry's `path` for the fantastic run in `folder`: its state folder."""
+    return os.path.join(canonical(folder), ".fantastic")
+
+
 def registry_files() -> list[Path]:
     return sorted((HOME / "fantastics").glob("*/fantastic.yaml"))
 
@@ -260,7 +265,7 @@ class Run:
             bad.append(f"a second host did not name the first's pid: {r.stderr[-500:]}")
 
     async def open_adds(self, bad: list[str]) -> None:
-        a = canonical(self.a)
+        a = state_of(self.a)
         reply = await self.call({"type": "open", "paths": [str(self.a)]})
         if reply.get("type") != "state":
             bad.append(f"open refused: {reply}")
@@ -289,7 +294,7 @@ class Run:
             bad.append(f"pages {state['pages']} selection {state['selection']}")
 
     async def stop(self, bad: list[str]) -> None:
-        a = canonical(self.a)
+        a = state_of(self.a)
         reply = await self.call({"type": "stop", "id": self.a_id})
         if reply.get("type") != "state":
             bad.append(f"stop refused: {reply}")
@@ -307,7 +312,7 @@ class Run:
             bad.append("A's run file is still there")
 
     async def start(self, bad: list[str]) -> None:
-        a = canonical(self.a)
+        a = state_of(self.a)
         reply = await self.call({"type": "start", "id": self.a_id})
         if reply.get("type") != "state":
             bad.append(f"start refused: {reply}")
@@ -315,7 +320,7 @@ class Run:
         await self.until("A running again", lambda s: (self.row(s, a) or {}).get("status") == "running", 30)
 
     async def outside_run(self, bad: list[str]) -> None:
-        b = canonical(self.b)
+        b = state_of(self.b)
         self.outside.start()
         r = await host_call(self.outside.port, "user_store", {"type": "register_home_folder", "value": True})
         if r.get("error"):
@@ -337,7 +342,7 @@ class Run:
             bad.append(f"B's entry after its stop: {entry}")
 
     async def remove(self, bad: list[str]) -> None:
-        b = canonical(self.b)
+        b = state_of(self.b)
         self.outside.start()
         await self.until("B running again", lambda s: (self.row(s, b) or {}).get("status") == "running", 30)
         folder = (entry_of(b) or {}).get("_file")
@@ -367,7 +372,7 @@ class Run:
             bad.append(f"the registry names the home's own folder: {named}")
 
     async def restart_keeps_pages(self, bad: list[str]) -> None:
-        a = canonical(self.a)
+        a = state_of(self.a)
         state = await self.call({"type": "select", "id": self.a_id})
         if state.get("selection") != self.a_id:
             bad.append(f"select: {state}")
@@ -388,7 +393,7 @@ class Run:
             bad.append(f"after a restart: pages {state['pages']} selection {state['selection']}")
 
     async def host_leaves_them_running(self, bad: list[str]) -> None:
-        a = canonical(self.a)
+        a = state_of(self.a)
         state = await self.call({"type": "list"})
         url = ((self.row(state, a) or {}).get("canvas") or {}).get("url")
         await self.stream.close()

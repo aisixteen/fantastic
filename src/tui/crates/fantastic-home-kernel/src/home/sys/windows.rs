@@ -49,13 +49,14 @@ pub async fn login_env(_home: &Path) -> Result<Vec<(OsString, OsString)>, String
     Ok(std::env::vars_os().collect())
 }
 
-/// Start `<bin> canvas` in `path` with exactly `env` plus `FANTASTIC_HOME=<home>`,
+/// Start `<bin> canvas --statedir <path>` in the folder `workdir` with exactly `env` plus `FANTASTIC_HOME=<home>`,
 /// stdin and stdout null, stderr to `log`, leading its own process group in a
 /// hidden console of its own: no window shows, and the host's own Ctrl-C and
 /// Ctrl-Break never reach it.
 pub async fn spawn(
     bin: &Path,
     path: &str,
+    workdir: &str,
     env: &[(OsString, OsString)],
     home: &Path,
     log: &Path,
@@ -63,7 +64,9 @@ pub async fn spawn(
     let err = std::fs::File::create(log).map_err(|e| format!("{}: {e}", log.display()))?;
     let mut child = tokio::process::Command::new(bin)
         .arg("canvas")
-        .current_dir(path)
+        .arg("--statedir")
+        .arg(path)
+        .current_dir(workdir)
         .env_clear()
         .envs(env.iter().map(|(k, v)| (k, v)))
         .env("FANTASTIC_HOME", home)

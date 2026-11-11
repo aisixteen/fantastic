@@ -356,11 +356,14 @@ mod tests {
             results: vec![],
         });
         home.reduce(fantastic_home::Event::Open {
-            paths: vec!["/w/alpha".into()],
+            paths: vec![fantastic_home::Opened {
+                path: "/w/alpha/.fantastic".into(),
+                workdir: Some("/w/alpha".into()),
+            }],
             now_ms: 0,
         });
         home.reduce(fantastic_home::Event::Spawned {
-            path: "/w/alpha".into(),
+            path: "/w/alpha/.fantastic".into(),
             result: Err("no login environment: SHELL is not set".into()),
         });
         wire::state(&home, 0, 1, &|_| None)

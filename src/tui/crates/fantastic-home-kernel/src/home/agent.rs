@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
-use fantastic_home::{Config as HomeConfig, Event, Intent, Mode, Row};
+use fantastic_home::{Config as HomeConfig, Event, Intent, Mode, Opened, Row};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::refusal::{missing, refusal, with, BAD_ARG, NOT_FOUND, UNHANDLED};
 use fantastic_kernel::{AgentId, Kernel};
@@ -232,18 +232,21 @@ fn row_of(rows: &[Row], id: &str) -> Result<Row, Value> {
         .ok_or_else(|| not_found(format!("home: no fantastic \"{id}\" in the list"), "id"))
 }
 
-/// One folder for `open` or `register`: a listed row's path as it is, else an
-/// absolute path resolved to the folder a kernel there would name — never the
-/// home's own.
+/// One folder for `open` or `register`: a listed row's path (its state folder)
+/// as it is, else an absolute path resolved to the picked folder — its state
+/// folder `<folder>/.fantastic`, its work folder itself — never the home's own.
 fn folder_of(
     runner: &Runner,
     rows: &[Row],
     verb: &str,
     arg: &str,
     path: &str,
-) -> Result<String, Value> {
+) -> Result<Opened, Value> {
     if rows.iter().any(|r| r.path == path) {
-        return Ok(path.to_string());
+        return Ok(Opened {
+            path: path.to_string(),
+            workdir: None,
+        });
     }
     if !Path::new(path).is_absolute() {
         return Err(bad(
@@ -263,7 +266,12 @@ fn folder_of(
             arg,
         ));
     }
-    Ok(folder)
+    let state = fantastic_kernel::bootstrap::state_dir_for(None, Some(Path::new(&folder)))
+        .map_err(|e| bad(format!("home: {verb}: \"{path}\": {e}"), arg))?;
+    Ok(Opened {
+        path: state.display().to_string(),
+        workdir: Some(folder),
+    })
 }
 
 /// Run one verb of the agent (every verb but the lifecycle and `reflect`),
@@ -293,7 +301,7 @@ fn intent(runner: &Arc<Runner>, payload: &Value) -> Result<Option<Event>, Value>
         "register" => {
             let path = string_arg(payload, "register", "path")?;
             let folder = folder_of(runner, &rows, "register", "path", path)?;
-            if let Some(r) = rows.iter().find(|r| r.path == folder) {
+            if let Some(r) = rows.iter().find(|r| r.path == folder.path) {
                 return Err(bad(
                     format!("home: {} is in the list already — open it", r.name),
                     "path",
@@ -354,7 +362,10 @@ fn typed(payload: &Value, verb: &str) -> Result<Intent, Value> {
                         "paths",
                     ));
                 };
-                out.push(p.to_string());
+                out.push(Opened {
+                    path: p.to_string(),
+                    workdir: None,
+                });
             }
             Intent::Open { paths: out }
         }
@@ -406,7 +417,7 @@ fn checked(
         Intent::Open { paths } => {
             let mut folders = Vec::with_capacity(paths.len());
             for p in &paths {
-                folders.push(folder_of(runner, rows, "open", "paths", p)?);
+                folders.push(folder_of(runner, rows, "open", "paths", &p.path)?);
             }
             Ok(Intent::Open { paths: folders })
         }
@@ -458,9 +469,9 @@ pub const COMPAT: &str = "v1 never removes or renames a verb, an argument, a sta
 fn verb_docs_json() -> Value {
     let docs = json!({
         "list": "args: version:int?. Returns the state (see emits.state). Refuses: bad_arg (version).",
-        "open": "args: paths:[str] (req, ≥ 1), version:int?. Opens each folder's page, the last one shown: a listed row's path as it is, else an absolute folder; a stopped one is started, an unlisted one is started and added to the list. Returns the state. Refuses: missing_arg (paths absent or empty), bad_arg (paths not a list of strings, a path not absolute, not a folder, or the home's own folder), bad_arg (version).",
+        "open": "args: paths:[str] (req, ≥ 1), version:int?. Opens each folder's page, the last one shown: a listed row's path (its state folder) as it is, else an absolute work folder (its state folder is `<folder>/.fantastic`); a stopped one is started, an unlisted one is started and added to the list. Returns the state. Refuses: missing_arg (paths absent or empty), bad_arg (paths not a list of strings, a path not absolute, not a folder, or the home's own folder), bad_arg (version).",
         "register": "args: path:str (req), version:int?. Adds an absolute folder the list does not hold, as `open` does. Returns the state. Refuses: missing_arg (path), bad_arg (path not a string, not absolute, not a folder, the home's own folder, or listed already), bad_arg (version).",
-        "start": "args: id:str (req), version:int?. Starts the stopped fantastic `id` (`fantastic canvas` in its folder). Returns the state. Refuses: missing_arg (id), not_found (no such id), bad_arg (its actions lack start — it is <status>), bad_arg (version).",
+        "start": "args: id:str (req), version:int?. Starts the stopped fantastic `id` (`fantastic canvas --statedir <its path>`, run in the work folder its root record names). Returns the state. Refuses: missing_arg (id), not_found (no such id), bad_arg (its actions lack start — it is <status>), bad_arg (version).",
         "stop": "args: id:str (req), version:int?. Asks the process holding the folder of `id` to stop. Returns the state. Refuses: missing_arg (id), not_found (no such id), bad_arg (its actions lack stop — it is <status>), bad_arg (version).",
         "remove": "args: id:str (req), version:int?. Removes the registry row `id` from the list, through its running fantastic's kernel (or a running one's, when it is stopped). Returns the state. Refuses: missing_arg (id), not_found (no such id), bad_arg (its actions lack remove — a folder being added), bad_arg (version).",
         "select": "args: id:str|null (key req), version:int?. Shows the page of row `id` (opened if it is not), or the Home for null. Returns the state. Refuses: missing_arg (id), not_found (no such id), bad_arg (id neither a string nor null), bad_arg (version).",

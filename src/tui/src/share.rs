@@ -5,7 +5,7 @@
 //! focus, scroll, panels, the composer, the seen set — and every frame it
 //! renders goes to every attached View. A second `fantastic` in the directory
 //! is a THIN CLIENT: it keeps no state, sends its keys and its size up
-//! `.fantastic/cli/tui.sock`, and paints the frames that come down. Connecting
+//! the loopback channel named in `<state>/cli/tui.yaml` (`local`), and paints the frames that come down. Connecting
 //! restores the exact picture; all attached terminals move in lockstep.
 //!
 //! VIEWS: every View gets the frame laid out for IT (`vm::Frames`, keyed by
@@ -32,10 +32,6 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::env::Paths;
 use crate::vm::{Frame, Frames, ViewId, VmIn};
-
-/// The socket, RELATIVE to the directory (every process runs in the directory
-/// it serves; a relative path never meets the unix address-length limit).
-pub const SOCKET: &str = ".fantastic/cli/tui.sock";
 
 /// #210: said to a thin client when the kernel it attached to has no terminal
 /// view at all — there is nothing to paint, so it is told why and exits.
@@ -109,8 +105,6 @@ impl Share {
     }
 }
 
-/// Serve the socket. The caller holds the directory's lock, so a socket file
-/// already there is stale.
 /// #210: what an attaching client is told. With a terminal view, the Hello; without
 /// one, the Hello and then a Bye — a kernel with no view has no frames to send.
 fn greeting(has_view: bool, pid: u32) -> Vec<Down> {
@@ -121,15 +115,20 @@ fn greeting(has_view: bool, pid: u32) -> Vec<Down> {
     }
 }
 
-pub fn listen(input: mpsc::Sender<VmIn>, frames: watch::Receiver<Option<Arc<Frames>>>, has_view: bool) -> Result<Arc<Share>, String> {
-    let _ = std::fs::remove_file(SOCKET);
-    let l = crate::sys::bind_local(SOCKET).map_err(|e| format!("could not open the TUI socket `{SOCKET}`: {e}"))?;
-    crate::sys::make_private(SOCKET)
-        .map_err(|e| format!("could not make `{SOCKET}` private: {e}"))?;
+/// Serve the shared view's channel into `cli`. The caller holds the state folder's
+/// lock, so an endpoint file already there is stale (`local::bind` replaces it).
+pub fn listen(
+    input: mpsc::Sender<VmIn>,
+    frames: watch::Receiver<Option<Arc<Frames>>>,
+    has_view: bool,
+    cli: &std::path::Path,
+) -> Result<Arc<Share>, String> {
+    let l = crate::local::bind(cli, crate::local::TUI)
+        .map_err(|e| format!("could not open the TUI channel `{}`: {e}", cli.join(crate::local::TUI).display()))?;
     let share = Arc::new(Share::default());
     let s = Arc::clone(&share);
     tokio::spawn(async move {
-        while let Ok((stream, _)) = l.accept().await {
+        while let Ok(stream) = l.accept().await {
             let id = NEXT.fetch_add(1, Ordering::SeqCst);
             let (bye_tx, bye_rx) = oneshot::channel();
             s.bye.lock().expect("share poisoned").insert(id, bye_tx);
@@ -139,14 +138,14 @@ pub fn listen(input: mpsc::Sender<VmIn>, frames: watch::Receiver<Option<Arc<Fram
     Ok(share)
 }
 
-/// Remove the socket file, after the ViewModel has stopped.
-pub fn close() {
-    let _ = std::fs::remove_file(SOCKET);
+/// Remove the endpoint file, after the ViewModel has stopped.
+pub fn close(cli: &std::path::Path) {
+    crate::local::close(cli, crate::local::TUI);
 }
 
 async fn serve(
     id: ViewId,
-    stream: crate::sys::LocalStream,
+    stream: tokio::net::TcpStream,
     input: mpsc::Sender<VmIn>,
     mut frames: watch::Receiver<Option<Arc<Frames>>>,
     mut bye: oneshot::Receiver<String>,
@@ -213,15 +212,17 @@ async fn serve(
 /// no state of its own. Returns when the owner ends or this client detaches;
 /// the reason is said after the screen is restored.
 pub async fn attach(paths: &Paths, pid: u32) -> Result<()> {
-    let stream = crate::sys::connect_local(SOCKET).await.with_context(|| {
-        format!("a kernel (pid {pid}) runs in this directory, but its terminal UI socket `{SOCKET}` does not answer (is it `fantastic mcp`?)")
+    let stream = crate::local::connect(&paths.cli, crate::local::TUI).await.with_context(|| {
+        format!(
+            "a kernel (pid {pid}) runs on this state folder, but its terminal UI channel `{}` does not answer (is it `fantastic mcp`?)",
+            paths.cli.join(crate::local::TUI).display()
+        )
     })?;
     let (mut r, mut w) = stream.into_split();
     match read_msg::<_, Down>(&mut r).await? {
         Some(Down::Hello { .. }) => {}
-        other => anyhow::bail!("the TUI socket did not greet (got {other:?})"),
+        other => anyhow::bail!("the TUI channel did not greet (got {other:?})"),
     }
-    let _ = paths;
     let mut screen = crate::tty::open(std::path::Path::new(crate::sys::NULL_DEVICE))?;
     let why = run_client(&mut screen.term, &mut r, &mut w, pid).await;
     crate::tty::restore();
@@ -234,8 +235,8 @@ pub async fn attach(paths: &Paths, pid: u32) -> Result<()> {
 
 async fn run_client(
     term: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::fs::File>>,
-    r: &mut crate::sys::LocalReadHalf,
-    w: &mut crate::sys::LocalWriteHalf,
+    r: &mut tokio::net::tcp::OwnedReadHalf,
+    w: &mut tokio::net::tcp::OwnedWriteHalf,
     pid: u32,
 ) -> Result<String> {
     let size = term.size()?;

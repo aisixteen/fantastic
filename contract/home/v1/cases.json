@@ -42,15 +42,16 @@
   "now_ms": 1760800000000,
   "own_folder": "/w/home",
   "registry": {
-   "g-run": "guid: g-run\npath: /w/run\npid: 41\ncanvas: http://127.0.0.1:8001/canvas_page/file/index.html\nstored_at: 1\nlast_seen: 1760799000\n",
-   "g-stop": "guid: g-stop\npath: /w/stop\nstored_at: 2\nlast_seen: 1760790000\n",
-   "g-gone": "guid: g-gone\npath: /w/gone\nstored_at: 3\n",
+   "g-run": "guid: g-run\npath: /w/run/.fantastic\npid: 41\ncanvas: http://127.0.0.1:8001/canvas_page/file/index.html\nstored_at: 1\nlast_seen: 1760799000\n",
+   "g-stop": "guid: g-stop\npath: /w/stop/.fantastic\nstored_at: 2\nlast_seen: 1760790000\n",
+   "g-gone": "guid: g-gone\npath: /w/gone/.fantastic\nstored_at: 3\n",
    "g-self": "guid: g-self\npath: /w/home\nstored_at: 4\n",
-   "g-broken": "guid: g-broken\npath: /w/broken\nstored_at: 5\nlast_seen: 1760700000\n",
-   "g-two": "guid: g-two\npath: /w/two\npid: 43\ncanvas: http://127.0.0.1:8003/canvas_page/file/index.html\nstored_at: 6\nlast_seen: 1760799500\n"
+   "g-broken": "guid: g-broken\npath: /w/broken/.fantastic\nstored_at: 5\nlast_seen: 1760700000\n",
+   "g-two": "guid: g-two\npath: /w/two/.fantastic\npid: 43\ncanvas: http://127.0.0.1:8003/canvas_page/file/index.html\nstored_at: 6\nlast_seen: 1760799500\n"
   },
   "folders": {
-   "/w/run": {
+   "/w/run/.fantastic": {
+    "workdir": "/w/run",
     "fantastic": true,
     "holder": 41,
     "run": {
@@ -61,26 +62,31 @@
     "canvas_up": true,
     "guid": "g-run"
    },
-   "/w/stop": {
+   "/w/stop/.fantastic": {
+    "workdir": "/w/stop",
     "fantastic": true,
     "holder": null
    },
-   "/w/gone": {
+   "/w/gone/.fantastic": {
     "fantastic": false
    },
    "/w/home": {
+    "workdir": "/w/home",
     "fantastic": true,
     "holder": 7
    },
-   "/w/broken": {
+   "/w/broken/.fantastic": {
+    "workdir": "/w/broken",
     "fantastic": true,
     "holder": null
    },
-   "/w/new": {
+   "/w/new/.fantastic": {
+    "workdir": "/w/new",
     "fantastic": true,
     "holder": null
    },
-   "/w/two": {
+   "/w/two/.fantastic": {
+    "workdir": "/w/two",
     "fantastic": true,
     "holder": 43,
     "run": {
@@ -93,9 +99,9 @@
    }
   },
   "spawn": {
-   "/w/stop": "ok",
-   "/w/new": "ok",
-   "/w/broken": "fantastic: no such file or directory"
+   "/w/stop/.fantastic": "ok",
+   "/w/new/.fantastic": "ok",
+   "/w/broken/.fantastic": "fantastic: no such file or directory"
   },
   "forward": {
    "8001 user_store": {
@@ -104,7 +110,7 @@
    }
   },
   "logs": {
-   "/w/stop": {
+   "/w/stop/.fantastic": {
     "file": "/w/logs/stop-0a1b2c3d.log",
     "tail": "the canvas: http://127.0.0.1:8002/canvas_page/file/index.html"
    }
@@ -561,7 +567,7 @@
     "rows.3.status": "starting"
    },
    "expect_spawned": [
-    "/w/broken"
+    "/w/broken/.fantastic"
    ],
    "after": {
     "problem_contains": "no such file or directory"
@@ -590,7 +596,7 @@
     ]
    },
    "expect_spawned": [
-    "/w/stop"
+    "/w/stop/.fantastic"
    ]
   },
   {
@@ -600,18 +606,18 @@
     "path": "/w/new"
    },
    "expect": {
-    "rows.5.id": "adding:/w/new",
+    "rows.5.id": "adding:/w/new/.fantastic",
     "rows.5.guid": null,
-    "rows.5.path": "/w/new",
+    "rows.5.path": "/w/new/.fantastic",
     "rows.5.status": "starting",
     "pages": [
      "g-run",
-     "adding:/w/new"
+     "adding:/w/new/.fantastic"
     ],
-    "selection": "adding:/w/new"
+    "selection": "adding:/w/new/.fantastic"
    },
    "expect_spawned": [
-    "/w/new"
+    "/w/new/.fantastic"
    ]
   },
   {
@@ -682,7 +688,7 @@
     "id": "g-two"
    },
    "expect_terminated": [
-    "/w/two"
+    "/w/two/.fantastic"
    ],
    "after": {
     "expect": {
@@ -709,7 +715,7 @@
       "id": "g-run",
       "guid": "g-run",
       "name": "run",
-      "path": "/w/run",
+      "path": "/w/run/.fantastic",
       "last_seen": 1760799000,
       "status": "running",
       "canvas": {
@@ -728,7 +734,7 @@
       "id": "g-stop",
       "guid": "g-stop",
       "name": "stop",
-      "path": "/w/stop",
+      "path": "/w/stop/.fantastic",
       "last_seen": 1760790000,
       "status": "stopped",
       "canvas": null,
@@ -743,8 +749,8 @@
      {
       "id": "g-gone",
       "guid": "g-gone",
-      "name": "gone",
-      "path": "/w/gone",
+      "name": "",
+      "path": "/w/gone/.fantastic",
       "last_seen": 0,
       "status": "missing",
       "canvas": null,
@@ -759,7 +765,7 @@
       "id": "g-broken",
       "guid": "g-broken",
       "name": "broken",
-      "path": "/w/broken",
+      "path": "/w/broken/.fantastic",
       "last_seen": 1760700000,
       "status": "stopped",
       "canvas": null,
@@ -775,7 +781,7 @@
       "id": "g-two",
       "guid": "g-two",
       "name": "two",
-      "path": "/w/two",
+      "path": "/w/two/.fantastic",
       "last_seen": 1760799500,
       "status": "running",
       "canvas": {

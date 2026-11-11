@@ -13,7 +13,13 @@ use crate::recipe::Opts;
 use crate::vm::{self, VmIn};
 
 pub async fn main_loop(opts: Opts) -> Result<()> {
-    let paths = Paths::here()?;
+    let paths = match Paths::resolve(opts.statedir.as_deref(), opts.workdir.as_deref()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("fantastic: {e}");
+            std::process::exit(2);
+        }
+    };
     if let Err(e) = paths.refuse_the_home() {
         eprintln!("fantastic: {e}");
         std::process::exit(2);
@@ -22,11 +28,11 @@ pub async fn main_loop(opts: Opts) -> Result<()> {
     // — the owner drives recipes, so a thin client takes none.
     if let Ok(Some(pid)) = fantastic_kernel::lock::held(&paths.store) {
         if pid != std::process::id() {
-            // ANY argument is refused, even one that would change nothing: a
-            // command silently swallowed would confuse more than a refusal.
-            if opts.headless || !opts.recipes.is_empty() || opts.port.is_some() || opts.bind.is_some() {
+            // ANY argument that would change it is refused: a command silently
+            // swallowed would confuse more than a refusal.
+            if changes_a_running_kernel(&opts) {
                 eprintln!(
-                    "fantastic: already running in this directory (pid {pid}) — this command cannot change it while it runs; stop it first, or run bare `fantastic` to attach"
+                    "fantastic: already running on this state folder (pid {pid}) — this command cannot change it while it runs; stop it first, or run bare `fantastic` to attach"
                 );
                 std::process::exit(2);
             }
@@ -71,6 +77,13 @@ pub async fn main_loop(opts: Opts) -> Result<()> {
         std::process::exit(1);
     }
     res
+}
+
+/// True when this command line would change a kernel that already runs: a
+/// mode, a recipe, the web host's flags or the work folder. `--statedir` is how a
+/// client FINDS the kernel, so it alone changes nothing.
+fn changes_a_running_kernel(o: &Opts) -> bool {
+    o.headless || !o.recipes.is_empty() || o.port.is_some() || o.bind.is_some() || o.workdir.is_some()
 }
 
 /// Keys and size in, frames out, until the ViewModel ends.
@@ -128,4 +141,26 @@ async fn paint(
         let _ = crossterm::execute!(term.backend_mut(), crossterm::event::DisableMouseCapture);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts(s: &str) -> Opts {
+        crate::recipe::parse(&s.split_whitespace().map(str::to_string).collect::<Vec<_>>()).unwrap()
+    }
+
+    #[test]
+    fn a_workdir_change_is_refused_while_a_kernel_runs() {
+        assert!(changes_a_running_kernel(&opts("--workdir /w")));
+        assert!(changes_a_running_kernel(&opts("--headless --statedir /s")));
+        assert!(changes_a_running_kernel(&opts("ai")));
+    }
+
+    #[test]
+    fn statedir_alone_still_attaches() {
+        assert!(!changes_a_running_kernel(&opts("--statedir /s")));
+        assert!(!changes_a_running_kernel(&opts("")));
+    }
 }

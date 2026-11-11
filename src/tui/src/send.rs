@@ -1,9 +1,10 @@
 //! `fantastic send '<item json>'` — ONE call into the kernel running in this
 //! directory, from a shell (owner, 2026-10-01: credentials decision 2).
 //!
-//! - ATTACH-ONLY: it speaks MCP once over the running kernel's socket
-//!   (`.fantastic/cli/mcp.sock`), as the `mcp` leg; no live kernel → it fails
-//!   loud and starts nothing.
+//! - ATTACH-ONLY: it speaks MCP once over the running kernel's MCP channel
+//!   (`<state>/cli/mcp.yaml`: a loopback port and a token), as the `mcp` leg; no
+//!   live kernel → it fails loud and starts nothing. `--statedir DIR` names the
+//!   kernel's state folder, else it is `<current dir>/.fantastic`.
 //! - `$env:NAME`: a string value that is exactly `$env:NAME`, anywhere in the
 //!   payload, is replaced by THIS shell's `NAME` — the only place one is ever
 //!   resolved (the kernel never reads its own env for it). A missing variable
@@ -16,16 +17,21 @@ use std::io::Write as _;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::env::Paths;
-use crate::mcp::SOCKET;
+use std::path::{Path, PathBuf};
+
+use crate::local::MCP;
 
 const PREFIX: &str = "$env:";
 
 /// Entry point, called from `main` before any runtime exists.
 pub fn main(argv: &[String]) -> ! {
-    let [raw] = argv else {
-        eprintln!("fantastic send: one argument — an item: '{{\"target\":…,\"payload\":{{\"type\":…}}}}' (got {})", argv.len());
-        std::process::exit(2);
+    let (statedir, raw) = match argv {
+        [raw] => (None, raw),
+        [flag, dir, raw] if flag == "--statedir" && !dir.is_empty() => (Some(PathBuf::from(dir)), raw),
+        _ => {
+            eprintln!("fantastic send: `[--statedir DIR] <item>` — an item: '{{\"target\":…,\"payload\":{{\"type\":…}}}}' (got {} arguments)", argv.len());
+            std::process::exit(2);
+        }
     };
     let item = match prepare(raw, |n| std::env::var(n).ok()) {
         Ok(i) => i,
@@ -34,17 +40,17 @@ pub fn main(argv: &[String]) -> ! {
             std::process::exit(2);
         }
     };
-    let paths = match Paths::here() {
-        Ok(p) => p,
+    let state = match fantastic_kernel::bootstrap::state_dir_for(statedir.as_deref(), None) {
+        Ok(s) => s,
         Err(e) => {
             eprintln!("fantastic send: no working directory: {e}");
             std::process::exit(2);
         }
     };
-    match fantastic_kernel::lock::held(&paths.store) {
+    match fantastic_kernel::lock::held(&state) {
         Ok(Some(pid)) if pid != std::process::id() => {}
         Ok(_) => {
-            eprintln!("fantastic send: no kernel runs in this directory — start `fantastic` or `fantastic mcp` here first");
+            eprintln!("fantastic send: no kernel runs on this state folder — start `fantastic` or `fantastic mcp` for it first");
             std::process::exit(1);
         }
         Err(e) => {
@@ -59,7 +65,7 @@ pub fn main(argv: &[String]) -> ! {
             std::process::exit(1);
         }
     };
-    let code = match rt.block_on(call(item)) {
+    let code = match rt.block_on(call(item, &state.join("cli"))) {
         Ok(row) => {
             let _ = writeln!(std::io::stdout(), "{}", serde_json::to_string_pretty(&row).unwrap_or_else(|_| row.to_string()));
             i32::from(row.get("status").and_then(Value::as_str) != Some("completed"))
@@ -110,12 +116,12 @@ fn resolve(v: &mut Value, env: &impl Fn(&str) -> Option<String>) -> Result<(), S
     Ok(())
 }
 
-/// One MCP session over the socket: initialize, the `send` tool with the one
-/// item, its row back.
-pub(crate) async fn call(item: Value) -> Result<Value, String> {
-    let sock = crate::sys::connect_local(SOCKET)
+/// One MCP session over the kernel's channel in `cli`: initialize, the `send`
+/// tool with the one item, its row back.
+pub(crate) async fn call(item: Value, cli: &Path) -> Result<Value, String> {
+    let sock = crate::local::connect(cli, MCP)
         .await
-        .map_err(|e| format!("the kernel's socket `{SOCKET}` does not answer: {e}"))?;
+        .map_err(|e| format!("the kernel's MCP channel `{}` does not answer: {e}", cli.join(MCP).display()))?;
     let (r, mut w) = sock.into_split();
     let mut lines = BufReader::new(r).lines();
     let msgs = [
@@ -148,7 +154,7 @@ pub(crate) async fn call(item: Value) -> Result<Value, String> {
             _ => Err(text.to_string()),
         };
     }
-    Err("the kernel closed the socket without an answer".into())
+    Err("the kernel closed the channel without an answer".into())
 }
 
 #[cfg(test)]

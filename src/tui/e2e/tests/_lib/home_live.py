@@ -47,6 +47,12 @@ def canonical(p: Path) -> str:
     return os.path.abspath(p) if oslayer.WINDOWS else os.path.realpath(p)
 
 
+def state_of(folder: Path) -> str:
+    """The registry's `path` (and a row's) for the fantastic run in `folder`: its
+    state folder, `<canonical folder>/.fantastic`."""
+    return os.path.join(canonical(folder), ".fantastic")
+
+
 def yaml_of(p: Path) -> dict:
     return yaml.safe_load(oslayer.read_text(p)) or {}
 

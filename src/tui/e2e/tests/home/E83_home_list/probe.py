@@ -1,8 +1,10 @@
 """E83 home_list — the Home page lists the home's fantastics.
 
 The fixture: `alpha` running, `beta` registered and then stopped cleanly, and
-`gamma` registered and stopped, then its folder renamed away. The Home shows
-three `.home-row`s in registry order — each its name, its folder, its status
+`gamma` registered and stopped, then its folder renamed away: its record is
+unreadable and nobody picked it, so its row has no name (a row is named only from
+its recorded work folder or the picked one). The Home shows three `.home-row`s
+in registry order — each its name, its state folder, its status
 (running / stopped / missing, labelled), beta's last seen — with the buttons its
 actions offer (open is the row's own click). A plain tab (no native shell) has a
 path field, and the page stored its root `home_page` through `web_loader`."""
@@ -15,7 +17,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.home_live import HomeRig, canonical, page_errors, q, verdict  # noqa: E402
+from _lib.home_live import HomeRig, state_of, page_errors, q, verdict  # noqa: E402
 
 ROWS = ("[...document.querySelectorAll('#home .home-row')].map(r=>({id:r.dataset.id,"
         " name:r.querySelector('.name')?.textContent, path:r.querySelector('.path')?.textContent, title:r.querySelector('.path')?.title,"
@@ -35,7 +37,7 @@ def main() -> bool:
         beta = await rig.fantastic("beta", running=False)
         gamma = await rig.fantastic("gamma", running=False)
         gamma.rename(rig.art / "gamma-gone")
-        want = {canonical(alpha): "running", canonical(beta): "stopped", canonical(gamma): "missing"}
+        want = {state_of(alpha): "running", state_of(beta): "stopped", state_of(gamma): "missing"}
         state = await rig.until_state("alpha running, beta stopped, gamma missing",
                                       lambda s: {x["path"]: x["status"] for x in s["rows"]} == want, 30)
         info["state_rows"] = [(x["name"], x["status"], x["actions"]) for x in state["rows"]]
@@ -46,13 +48,13 @@ def main() -> bool:
             info["rows"] = rows
             r["registry_order"] = [x["id"] for x in rows] == rig.registry_order()
             by = {x["name"]: x for x in rows}
-            r["names"] = sorted(by) == ["alpha", "beta", "gamma"]
-            paths = {"alpha": canonical(alpha), "beta": canonical(beta), "gamma": canonical(gamma)}
+            r["names"] = sorted(by) == ["", "alpha", "beta"]
+            paths = {"alpha": state_of(alpha), "beta": state_of(beta), "": state_of(gamma)}  # gamma: no readable record, no picked folder: no name
             r["paths"] = all(by.get(n, {}).get("path") == p and by[n].get("title") == p for n, p in paths.items())
-            r["statuses"] = [by.get(n, {}).get("status") for n in ("alpha", "beta", "gamma")] == ["running", "stopped", "missing"]
-            r["labels"] = [by.get(n, {}).get("label") for n in ("alpha", "beta", "gamma")] == ["Running", "Stopped", "Folder not found"]
+            r["statuses"] = [by.get(n, {}).get("status") for n in ("alpha", "beta", "")] == ["running", "stopped", "missing"]
+            r["labels"] = [by.get(n, {}).get("label") for n in ("alpha", "beta", "")] == ["Running", "Stopped", "Folder not found"]
             r["beta_last_seen"] = (by.get("beta", {}).get("seen") or "").startswith("last seen ")
-            r["buttons"] = ([sorted(by.get(n, {}).get("buttons", [])) for n in ("alpha", "beta", "gamma")]
+            r["buttons"] = ([sorted(by.get(n, {}).get("buttons", [])) for n in ("alpha", "beta", "")]
                             == [["remove", "stop"], ["remove", "start"], ["remove"]])
             r["path_field"] = bool(await pg.js(f"!!{q('#home form.open-path input[name=path]')} && !{q('#home button.open-folder')}"))
             r["title"] = await pg.js("document.title") == "Aisixteen Fantastic · home"

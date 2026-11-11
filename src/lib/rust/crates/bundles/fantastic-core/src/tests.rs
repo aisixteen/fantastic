@@ -1198,6 +1198,41 @@ async fn root_export_subtree_exports_a_three_level_subtree() {
 }
 
 #[tokio::test]
+async fn root_export_subtree_reads_bundles_from_the_state_folder_not_the_work_folder() {
+    let state = TempDir::new().unwrap();
+    let work = TempDir::new().unwrap();
+    let mut reg = BundleRegistry::new();
+    reg.register(HANDLER_MODULE, KernelStateBundle::default());
+    let kernel = bootstrap(reg, BootstrapOptions::daemon(state.path(), work.path()))
+        .expect("boot")
+        .kernel;
+    let b = state.path().join("bundles").join("folder_b");
+    std::fs::create_dir_all(&b).unwrap();
+    std::fs::write(b.join("note.txt"), "from the state folder\n").unwrap();
+    // a decoy under the work folder is never read
+    let decoy = work.path().join(".fantastic/bundles/folder_b");
+    std::fs::create_dir_all(&decoy).unwrap();
+    std::fs::write(decoy.join("note.txt"), "from the work folder\n").unwrap();
+    let root = kernel.root().unwrap().id.0.clone();
+    let made = root_reflect(
+        &kernel,
+        json!({"type": "create_agent", "parent_id": root, "id": "a",
+               "handler_module": "folder_b"}),
+    )
+    .await;
+    assert_eq!(made["id"], json!("a"), "{made}");
+    let r = root_reflect(
+        &kernel,
+        json!({"type": "export_subtree", "agent_id": "a", "path": "out_a"}),
+    )
+    .await;
+    assert_eq!(r["exported"], json!(1), "{r}");
+    // the output path stays on the work folder
+    let got = std::fs::read_to_string(work.path().join("out_a/bundles/folder_b/note.txt")).unwrap();
+    assert_eq!(got, "from the state folder\n");
+}
+
+#[tokio::test]
 async fn root_export_subtree_refuses_the_root_id_and_unknown_id_and_bad_args() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);

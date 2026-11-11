@@ -23,12 +23,12 @@ fn lock_holder_none_without_a_lock_and_self_with_one() {
     let (_d, dir) = temp();
     let path = dir.display().to_string();
     assert_eq!(lock_holder(&path), None);
-    lock::acquire(&dir.join(".fantastic")).expect("the lock");
+    lock::acquire(&dir).expect("the lock");
     assert_eq!(lock_holder(&path), Some(std::process::id()));
-    lock::release(&dir.join(".fantastic")).expect("released");
+    lock::release(&dir).expect("released");
     assert_eq!(lock_holder(&path), None);
     // a stale file whose pid is dead is no holder
-    std::fs::write(dir.join(".fantastic/lock.yaml"), "pid: 2147483646\n").unwrap();
+    std::fs::write(dir.join("lock.yaml"), "pid: 2147483646\n").unwrap();
     assert_eq!(lock_holder(&path), None);
 }
 
@@ -36,9 +36,9 @@ fn lock_holder_none_without_a_lock_and_self_with_one() {
 fn a_lock_that_cannot_be_read_is_an_error_naming_why() {
     let (_d, dir) = temp();
     let path = dir.display().to_string();
-    lock::acquire(&dir.join(".fantastic")).expect("the lock");
-    lock::release(&dir.join(".fantastic")).expect("released");
-    std::fs::write(dir.join(".fantastic/lock.yaml"), "not: [a lock").unwrap();
+    lock::acquire(&dir).expect("the lock");
+    lock::release(&dir).expect("released");
+    std::fs::write(dir.join("lock.yaml"), "not: [a lock").unwrap();
     let error = lock_holder_checked(&path).expect_err("a malformed lock");
     assert!(error.starts_with(&format!("{path}: the lock: ")), "{error}");
     assert!(error.contains("lock.yaml malformed"), "{error}");
@@ -74,23 +74,41 @@ fn run_file_parses_only_a_valid_file() {
 }
 
 #[test]
-fn is_fantastic_names_a_look_that_failed() {
+fn is_fantastic_is_the_state_folder_itself() {
     let (_d, dir) = temp();
     let path = dir.display().to_string();
-    assert_eq!(is_fantastic(&path), Ok(false), "no .fantastic");
-    std::fs::write(dir.join(".fantastic"), "").unwrap();
-    assert_eq!(is_fantastic(&path), Ok(false), "a file is not a folder");
-    std::fs::remove_file(dir.join(".fantastic")).unwrap();
-    std::fs::create_dir(dir.join(".fantastic")).unwrap();
-    assert_eq!(is_fantastic(&path), Ok(true));
+    assert_eq!(is_fantastic(&path), Ok(true), "a directory");
+    let state = dir.join("state");
+    assert_eq!(is_fantastic(&state.display().to_string()), Ok(false));
+    std::fs::write(&state, "").unwrap();
+    assert_eq!(
+        is_fantastic(&state.display().to_string()),
+        Ok(false),
+        "a file is not a folder"
+    );
     // a folder under a regular file cannot be looked into: not "absent"
     #[cfg(unix)]
     {
         let blocked = dir.join("plain.txt");
         std::fs::write(&blocked, "").unwrap();
-        let err = is_fantastic(&blocked.display().to_string()).expect_err("a file has no children");
+        let below = blocked.join("state").display().to_string();
+        let err = is_fantastic(&below).expect_err("a file has no children");
         assert!(err.contains("plain.txt"), "{err}");
     }
+}
+
+#[test]
+fn workdir_reads_the_root_record() {
+    let (_d, dir) = temp();
+    let path = dir.display().to_string();
+    assert_eq!(workdir(&path), Ok(None), "no record");
+    std::fs::write(dir.join("agent.yaml"), "id: root\n").unwrap();
+    assert_eq!(workdir(&path), Ok(None), "a record without the field");
+    std::fs::write(dir.join("agent.yaml"), "id: root\nworkdir: /w/proj\n").unwrap();
+    assert_eq!(workdir(&path), Ok(Some("/w/proj".to_string())));
+    std::fs::write(dir.join("agent.yaml"), "id: [unclosed").unwrap();
+    let err = workdir(&path).expect_err("not yaml");
+    assert!(err.contains("agent.yaml"), "{err}");
 }
 
 #[test]
@@ -485,7 +503,7 @@ mod unix_only {
     }
 
     #[tokio::test]
-    async fn the_spawned_binary_is_config_fantastic_bin() {
+    async fn the_canvas_starts_with_statedir_and_runs_in_the_work_folder() {
         use std::os::unix::fs::PermissionsExt;
         let (_d, dir) = temp();
         let out = dir.join("ran.txt");
@@ -500,13 +518,21 @@ mod unix_only {
         .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let folder = dir.join("notes");
-        std::fs::create_dir(&folder).unwrap();
+        let state = folder.join("far-state");
+        std::fs::create_dir_all(&state).unwrap();
         let home = dir.join("home");
         let log = dir.join("notes.log");
         let env = vec![(OsString::from("PATH"), OsString::from("/usr/bin:/bin"))];
-        spawn(&bin, folder.to_str().unwrap(), &env, &home, &log)
-            .await
-            .expect("spawned");
+        spawn(
+            &bin,
+            state.to_str().unwrap(),
+            folder.to_str().unwrap(),
+            &env,
+            &home,
+            &log,
+        )
+        .await
+        .expect("spawned");
         let mut text = String::new();
         for _ in 0..500 {
             if let Ok(t) = std::fs::read_to_string(&out) {
@@ -519,7 +545,12 @@ mod unix_only {
         }
         assert_eq!(
             text,
-            format!("canvas|{}|{}", folder.display(), home.display())
+            format!(
+                "canvas --statedir {}|{}|{}",
+                state.display(),
+                folder.display(),
+                home.display()
+            )
         );
         assert!(log.is_file(), "stderr goes to the log");
         use std::os::unix::fs::MetadataExt;
@@ -558,6 +589,7 @@ if [ -e /dev/fd/{fd} ]; then echo open; else echo closed; fi > '{}'
         spawn(
             &bin,
             dir.to_str().unwrap(),
+            dir.to_str().unwrap(),
             &env,
             &dir.join("home"),
             &dir.join("c.log"),
@@ -591,7 +623,10 @@ if [ -e /dev/fd/{fd} ]; then echo open; else echo closed; fi > '{}'
         std::fs::create_dir(&folder).unwrap();
         let os = sys_os(&dir, "no-such-binary");
         let path = folder.to_str().unwrap();
-        let error = os.spawn(path).await.expect_err("the binary is missing");
+        let error = os
+            .spawn(path, path)
+            .await
+            .expect_err("the binary is missing");
         assert!(error.contains("no-such-binary"), "{error}");
         let log = log_path(&dir.join("home"), path).unwrap();
         assert_eq!(std::fs::read_to_string(log).unwrap(), format!("{error}\n"));
@@ -610,7 +645,7 @@ if [ -e /dev/fd/{fd} ]; then echo open; else echo closed; fi > '{}'
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let os = sys_os(&dir, "fantastic");
         let path = folder.to_str().unwrap();
-        os.spawn(path).await.expect("it starts");
+        os.spawn(path, path).await.expect("it starts");
         assert_eq!(os.log_tail(path).as_deref(), Some(""));
     }
 
@@ -623,7 +658,7 @@ if [ -e /dev/fd/{fd} ]; then echo open; else echo closed; fi > '{}'
         // SHELL unset: the spawn fails in the login step, before any process starts
         let os = crate::home::os::SysOs::with_shell(dir.join("home"), dir.join("fantastic"), None);
         let path = folder.to_str().unwrap();
-        let error = os.spawn(path).await.expect_err("SHELL is not set");
+        let error = os.spawn(path, path).await.expect_err("SHELL is not set");
         assert_eq!(error, "no login environment: SHELL is not set");
         let log = log_path(&dir.join("home"), path).unwrap();
         assert_eq!(std::fs::read_to_string(log).unwrap(), format!("{error}\n"));

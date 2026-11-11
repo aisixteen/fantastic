@@ -3,16 +3,17 @@
 A tree of agents; everything is one verb — `send(target, payload) → reply`.
 
 ## Is it running?
-- `.fantastic/lock.yaml` names the pid of the kernel that holds this folder;
-  `.fantastic/cli/mcp.sock` exists while it runs (a canvas, the terminal UI,
-  or `--headless`). Only ONE kernel runs per folder: never start a second.
+- `lock.yaml` beside this file names the pid of the kernel that holds this
+  folder (a canvas, the terminal UI, or `--headless`). Only ONE kernel runs
+  per folder: never start a second.
 - Check from a shell (attaches, starts nothing):
   `<fantastic> send '{"target":"kernel","payload":{"type":"reflect","tree":"ids"}}'`
-  where `<fantastic>` is the `command` in `.fantastic/.mcp.json`.
+  where `<fantastic>` is the `command` in the `.mcp.json` that `readme.md` names.
 
 ## Connect (MCP)
-- `.fantastic/.mcp.json` names the server `fantastic` (start your CLI with
-  `claude --mcp-config .fantastic/.mcp.json`); it attaches to the running
+- Read `readme.md` beside this file: where `prompt.md` and `.mcp.json` are,
+  the work folder, how to reach the kernel. `.mcp.json` names the server
+  `fantastic` (start your CLI with `claude --mcp-config <its path>`); it attaches to the running
   kernel. No `mcp__fantastic__*` tools in your session? Run `/mcp` and
   approve / reconnect `fantastic` (a server added after your session started
   needs this). Until then, `<fantastic> send '<item json>'` reaches the same
@@ -28,7 +29,7 @@ A tree of agents; everything is one verb — `send(target, payload) → reply`.
 ## Building an agentic system here
 - Make every agent with a `create_agent` call to `kernel` (send `kernel`
   `{type: create_agent, handler_module: <a bundle reflect lists>, …}`).
-- Write a bundle (`.fantastic/bundles/<name>/`) ONLY when the user asks for
+- Write a bundle (`bundles/<name>/` beside this file) ONLY when the user asks for
   one. Otherwise build from the bundles reflect already lists.
 - After adding (or updating) an html cell, size it to its content: send the
   view `<page guid>|<view id>` `{type: fit, id: <cell id>}`.
@@ -40,8 +41,8 @@ allow_all_ingress` in the same `create_agent`, or `update_agent`), then TELL
 the user which agents you unsealed — they may seal them again later.
 
 ## What you may edit
-- `.fantastic/prompt.md` — every in-canvas AI's system block (`{tree}`,
+- `prompt.md` (path in `readme.md`) — every in-canvas AI's system block (`{tree}`,
   `{self}`, `{howto}` placeholders); a save is live on the AIs' next turn.
-- `.fantastic/bundles/<name>/` — a bundle the user asked for; changes reload live.
-- Never hand-edit `.fantastic/agents/**`: records change through `update_agent`
+- `bundles/<name>/` beside this file — a bundle the user asked for; changes reload live.
+- Never hand-edit `agents/**` beside this file: records change through `update_agent`
   while the kernel runs.

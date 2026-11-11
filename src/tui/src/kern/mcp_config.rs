@@ -1,15 +1,15 @@
-//! THE PROJECT'S MCP CONFIG — `.fantastic/.mcp.json`, kept by the `mcp` leg itself
-//! (owner 2026-10-08; INSIDE `.fantastic` since 2026-10-12: nothing is created
-//! outside it — a project is never polluted). A coding CLI points at it
-//! (`claude --mcp-config .fantastic/.mcp.json`) to find THIS kernel:
+//! THE PROJECT'S MCP CONFIG — `.mcp.json`, in the folder of its own bridge
+//! (`<state>/agents/user/agents/mcp_config/`), kept by the `mcp` leg itself
+//! (owner 2026-10-08; inside the state folder: a project is never polluted).
+//! A coding CLI points at it (`claude --mcp-config <that file>`; `<state>/readme.md`
+//! names the path) to find THIS kernel:
 //! `mcpServers.fantastic = {command: <this binary>, args: [mcp]}`. Only the `mcp`
 //! agent writes that file, through its own bridge (`fantastic-web-mcp`: on its
 //! boot, read → set its entry → write if changed, every other server kept). So,
 //! at every boot, the CLI makes:
 //!
-//! - [`BRIDGE`]: a WRITABLE file_bridge rooted at the project, exposing only
-//!   [`FILE`] (open ingress) — never rooted at `.fantastic` itself (the kernel
-//!   would persist its records through it);
+//! - [`BRIDGE`]: a WRITABLE file_bridge rooted at `@self` (its own folder),
+//!   exposing only [`FILE`] (open ingress);
 //! - the leg itself, when missing (it used to wait for the first connection —
 //!   the file must be right BEFORE any client connects), naming
 //!   `file_bridge_id` + `mcp_config_file`; `kern/reach` grants both edges;
@@ -21,8 +21,8 @@ use crate::kern::host::Host;
 
 /// The bridge the leg writes through.
 pub const BRIDGE: &str = "mcp_config";
-/// The file, inside the project's `.fantastic`.
-pub const FILE: &str = ".fantastic/.mcp.json";
+/// The file, in the bridge's own folder.
+pub const FILE: &str = ".mcp.json";
 
 fn err_of(r: &Value) -> Option<String> {
     r.get("error").and_then(Value::as_str).map(str::to_string)
@@ -33,10 +33,10 @@ fn err_of(r: &Value) -> Option<String> {
 pub async fn ensure(h: &Host) -> Result<(), String> {
     let r = if h.kernel.exists(BRIDGE) {
         // the binary fixes what it exposes: [`FILE`], however the record says
-        h.operator("kernel", json!({"type": "update_agent", "id": BRIDGE, "allow": [FILE]})).await.result
+        h.operator("kernel", json!({"type": "update_agent", "id": BRIDGE, "root": "@self", "allow": [FILE]})).await.result
     } else {
         h.operator("kernel", json!({"type": "create_agent", "parent_id": crate::env::HUMAN, "id": BRIDGE,
-            "handler_module": "file_bridge.tools", "root": ".", "readonly": false,
+            "handler_module": "file_bridge.tools", "root": "@self", "readonly": false,
             "allow": [FILE], "ingress_rule": "allow_all_ingress"}))
             .await
             .result

@@ -821,14 +821,14 @@ fn write_folder(tmp: &Path, ex: &Exported) -> Result<(), String> {
     Ok(())
 }
 
-/// The top-level files of `<base>/.fantastic/bundles/<hm>/`, sorted by name;
+/// The top-level files of `<state>/bundles/<hm>/`, sorted by name;
 /// empty when `hm` is no folder bundle. Symlinks, non-UTF-8 files and files
 /// over [`MAX_FILE`] come back as `Err(why)`, and are never read.
-fn read_bundle_dir(base: &Path, hm: &str) -> Vec<BundleFile> {
+fn read_bundle_dir(state: &Path, hm: &str) -> Vec<BundleFile> {
     if !crate::folders::is_folder_name(hm) {
         return Vec::new();
     }
-    let dir = base.join(".fantastic").join("bundles").join(hm);
+    let dir = state.join("bundles").join(hm);
     let Ok(rd) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
@@ -921,8 +921,12 @@ pub async fn export_subtree(kernel: &Arc<Kernel>, p: &Value, who: &str) -> Value
             .or_else(|| Some(base.join(fp)).filter(|p| p.is_file()))
             .and_then(|p| std::fs::read_to_string(p).ok())
     };
-    // a folder bundle's plain top-level files: `<workdir>/.fantastic/bundles/<hm>/`
-    let read_bundle = |hm: &str| -> Vec<BundleFile> { read_bundle_dir(&base, hm) };
+    // a folder bundle's plain top-level files: `<state>/bundles/<hm>/`
+    let state = match kernel.state_dir() {
+        Ok(s) => s,
+        Err(e) => return refuse("failed", format!("{who}: {e}")),
+    };
+    let read_bundle = |hm: &str| -> Vec<BundleFile> { read_bundle_dir(&state, hm) };
     let ex = match build(
         &recs,
         agent_id,

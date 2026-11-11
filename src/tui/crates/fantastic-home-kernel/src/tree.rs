@@ -2,14 +2,14 @@
 //!
 //! ```text
 //! kernel_state          kernel_state.tools   the root: guid, next_id, memory_store_id: home_memory
-//! ├── home_memory       sqlite_store.tools   path: home.db                               (seed)
-//! ├── store             file_bridge.tools    root: ., allow: ["."]                       (seed)
+//! ├── home_memory       sqlite_store.tools   path: @state/home.db                         (seed)
+//! ├── store             file_bridge.tools    root: @state, allow: ["."]                  (seed)
 //! └── user              user.tools           every page call goes out through it
 //!     ├── home          home.tools           display_name: home; pages, selection
 //!     └── web           web.tools            the HTTP host on 127.0.0.1, port
 //!         ├── home_ws       web_ws.tools        the socket leg, ingress_rule: allow_all_ingress
 //!         └── canvas_page   canvas_page.tools   serves home.html (and the canvas bundle)
-//!             └── web_loader kernel_state.tools root: web, watch: false
+//!             └── web_loader kernel_state.tools root: @state/web, watch: false
 //! ```
 //!
 //! WHAT THE PAGE'S SOCKET REACHES. The leg `home_ws` holds `forward` on `user`
@@ -154,7 +154,7 @@ pub async fn ensure(kernel: &Arc<Kernel>, port: Option<u16>) -> Result<u16, Stri
         (
             WEB_LOADER,
             json!({"parent_id": CANVAS_PAGE, "handler_module": fantastic_core::HANDLER_MODULE,
-                   "root": "web", "watch": false}),
+                   "root": "@state/web", "watch": false}),
         ),
     ];
     for (id, mut spec) in made {

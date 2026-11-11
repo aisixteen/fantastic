@@ -1,5 +1,5 @@
 import { registerBackgrounds } from "./bundles/backgrounds/backgrounds_agent.ts";
-import { Agent, Host, Kernel, ProxyLoader, WsBridge, loadBundle, registerRamStore } from "./lib.ts";
+import { Agent, Kernel, ProxyLoader, WsBridge, loadBundle, registerRamStore } from "./lib.ts";
 import type { FolderText } from "./lib.ts";
 import { GATEWAY, UserBridge } from "./user_bridge.ts";
 import { registerGlAgent } from "./bundles/gl_agent/gl_agent.ts";
@@ -155,50 +155,6 @@ for (const f of folders) loadBundle(kernel, f);
 const records = await loader.loadTree();
 if (records.length > 0) kernel.load(records);
 else seed(kernel);
-// LIVE PAGE BUNDLES, ON THE DISK'S EVENTS (owner 2026-10-08: no idle loops):
-// the host's `bundles_watch` bridge reports `changed {path}` under this page's
-// own `bundles/` (watched, and each folder in it — not recursive); a burst is
-// taken together, then each touched folder's `reload_bundle` restarts its
-// live instances and their panels draw again. Nothing runs while nothing changes.
-const BRIDGE = "bundles_watch";
-// the loader's `root` is a record path (`@state/web`); the host's watch bridge is
-// read from the work folder, where the default layout keeps the state folder as
-// `.fantastic` (this watch goes away with `bundles_watch`)
-const dir = `${here.root.replace(/^@state(?=\/|$)/, ".fantastic")}/bundles`;
-const watchPath = async (path: string): Promise<void> => {
-  const r = (await kernel.callHost(BRIDGE, { type: "watch_path", path } as never)) as Record<string, unknown> | null;
-  if (typeof r?.["error"] === "string") console.error(`[canvas] page bundles: watch ${path}: ${r["error"]}`);
-};
-const touched = new Set<string>();
-let settle: ReturnType<typeof setTimeout> | null = null;
-const reloadTouched = async (): Promise<void> => {
-  settle = null;
-  const names = [...touched];
-  touched.clear();
-  for (const name of names) {
-    const r = (await kernel.send([{ target: "kernel", payload: { type: "reload_bundle", name } as never }]))[0]?.result as Record<string, unknown> | undefined;
-    if (typeof r?.["error"] === "string") {
-      console.error(`[canvas] page bundle ${name}: ${r["error"]}`);
-      continue;
-    }
-    // its instances restarted on the new load: their panels draw it again
-    for (const id of Array.isArray(r?.["instances"]) ? (r!["instances"] as unknown[]) : []) {
-      if (typeof id === "string") kernel.emit(id, { type: "reload_html" } as never);
-    }
-  }
-};
-new Host(kernel, "canvas").on(BRIDGE, "changed", (ev) => {
-  const path = typeof ev["path"] === "string" ? ev["path"].replace(/^\.\//, "") : "";
-  if (!path.startsWith(`${dir}/`)) return; // another canvas's, or the host's
-  const rest = path.slice(dir.length + 1).split("/");
-  const name = rest[0];
-  if (!name) return;
-  if (rest.length === 1 && ev["kind"] === "added") void watchPath(`${dir}/${name}`); // a new folder: its files too
-  touched.add(name);
-  if (settle === null) settle = setTimeout(() => void reloadTouched(), 150);
-});
-// ARMED BEFORE the tree loads: an edit made once the page shows is never missed
-await Promise.all([watchPath(dir), ...folders.map((f) => watchPath(`${dir}/${f.name}`))]);
 inner.announce();
 loader.start();
 // THE HOST STOPS (its shutdown calls `<guid>|canvas` `host_stopping` before it

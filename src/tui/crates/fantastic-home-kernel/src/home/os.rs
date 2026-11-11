@@ -19,7 +19,7 @@ pub trait HomeOs: Send + Sync + 'static {
     /// The answer to `ask`, and the error the machine met giving it, if any: the
     /// answer then is the one a missing reading gives, and the error is evidence.
     async fn answer(&self, ask: &Ask) -> (Answer, Option<String>);
-    async fn spawn(&self, path: &str) -> Result<(), String>;
+    async fn spawn(&self, path: &str, workdir: &str) -> Result<(), String>;
     /// Ok(true): asked to stop; Ok(false): nothing holds the folder; Err: could not ask.
     async fn terminate(&self, path: &str) -> Result<bool, String>;
     async fn forward(
@@ -110,6 +110,7 @@ impl HomeOs for SysOs {
             Ask::IsFantastic { path } => {
                 answered(sys::is_fantastic(path), false, Answer::IsFantastic)
             }
+            Ask::Workdir { path } => answered(sys::workdir(path), None, Answer::Workdir),
             Ask::LockHolder { path } => {
                 let read = sys::lock_holder_checked(path);
                 if let Err(e) = &read {
@@ -127,11 +128,11 @@ impl HomeOs for SysOs {
 
     /// The logs dir and the log file, then the login environment, are resolved
     /// first; any failure is the spawn's, and it is written to the launch log.
-    async fn spawn(&self, path: &str) -> Result<(), String> {
+    async fn spawn(&self, path: &str, workdir: &str) -> Result<(), String> {
         let log = sys::log_path(&self.home, path)?;
         let started = async {
             let env = self.env.get_or_try_init(|| self.login_env()).await?;
-            sys::spawn(&self.fantastic_bin, path, env, &self.home, &log).await
+            sys::spawn(&self.fantastic_bin, path, workdir, env, &self.home, &log).await
         };
         started
             .await

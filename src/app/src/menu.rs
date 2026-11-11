@@ -220,7 +220,13 @@ pub fn clicked(app: &AppHandle, id: &str) {
         match pick {
             Some(Pick::Folders) => match intents::ask_folders(&app).await {
                 Ok(paths) if paths.is_empty() => {}
-                Ok(paths) => home::send(&app, Intent::Open { paths }).await,
+                Ok(paths) => {
+                    let paths = paths
+                        .into_iter()
+                        .map(fantastic_home::Opened::from)
+                        .collect();
+                    home::send(&app, Intent::Open { paths }).await
+                }
                 Err(e) => home::warn(&app, &e),
             },
             None => home::send(&app, send).await,
