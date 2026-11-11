@@ -7,6 +7,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- Views reach the canvas as `view.bytes`: the bundle watcher watches through the root loader's discovered store (no `bundles_watch` bridge), `refresh_views` puts the view file's text (`{{agent}}` replaced) in the instance's `view.bytes`, and the canvas reads no file and no longer watches its own page bundles (#563, 3/5).
 - `prompt.md` and `.mcp.json` live in their bridges' own folders (`root: @self`; the AI's `system_prompt_file` is `prompt.md`, the leg's `mcp_config_file` `.mcp.json`), and `<state>/readme.md` is rewritten at every boot with the live paths, the work folder, how to reach the kernel and the main agents (#563, 2/5).
 - `E150_chat_provider_split` (#519): an e2e probe (Rust lane, scripted provider) for the chat and its provider apart: the local split, a swap of the chat's `provider_id`, the grants refused by name, and a provider on another kernel; the base e2e (E99, E22, E23 and the parity families) make their AI as a provider plus a chat.
 - `ram_store` and `sqlite_store` `append` emits `appended {table, id}` for each new row (#508), so a store view refreshes on a write; a refused append emits nothing.

@@ -50,14 +50,12 @@ runs:
       files_absent: [.fantastic/messages.yaml, .fantastic/ledger.json, .fantastic/kernel.yaml, .mcp.json, .claude]
 
   # ── 2 · the same directory: no intro, straight to the tree, log grows ──────
-  #       (under `user`: bundles_watch, exec, files, mcp … — sorted)
+  #       (under `user`: exec, files, mcp … — sorted)
   #       …and an agent with no view of its own opens in the DEFAULT view
   - name: rehydrate
     script: |
       wait 2500
       shot live
-      key down
-      wait 200
       key down
       wait 200
       key down
@@ -78,7 +76,7 @@ runs:
       key ctrl-c
       exit 8000
     frames:
-      # Activity, `kernel_memory` (the kernel's RAM store) and `user` sit under the kernel's row; mcp is user's fourth child: seven down
+      # Activity, `kernel_memory` (the kernel's RAM store) and `user` sit under the kernel's row; mcp is user's third child: six down
       live: {contains: [exec, files, user, "✉ Activity"], contains_block_title: false}
       # mcp has no specific view: who it is, who it talks to, its verbs (its rows
       # sit below the frame: its grant lists are long)

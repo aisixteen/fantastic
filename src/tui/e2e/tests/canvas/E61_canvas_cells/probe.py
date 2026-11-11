@@ -163,7 +163,7 @@ def main() -> bool:
         g1 = (yaml.safe_load(main_rec.read_text()) or {}).get("guid") if main_rec.exists() else None
         g2 = (yaml.safe_load(peer_rec.read_text()) or {}).get("guid") if peer_rec.exists() else None
         r["peer_own_records"] = bool(g1 and g2 and g1 != g2)
-        # f) a page bundle in the peer's own folder, an instance seeded, edited live
+        # f) a page bundle in the peer's own folder, an instance seeded
         rig.stop()
         folder = rig.proj / f".fantastic/web/{PEER}/bundles/card"
         folder.mkdir(parents=True, exist_ok=True)
@@ -181,7 +181,7 @@ def main() -> bool:
                     # the peer page never drew: record what it logged and showed, instead of two bundle misses
                     info["peer_page_logs"] = pg.logs[-20:]
                     info["peer_page_state"] = await pg.js("document.readyState + ' ' + location.href + ' ' + (document.body ? document.body.innerHTML.slice(0, 600) : 'no body')")
-                    r["bundle_runs"] = r["bundle_reloads"] = False
+                    r["bundle_runs"] = False
                     return
 
                 async def body_has(text: str) -> bool:
@@ -192,8 +192,6 @@ def main() -> bool:
                     return False
 
                 r["bundle_runs"] = await body_has("card-one")
-                (folder / "bundle.yaml").write_text("base: html_agent\nsentence: A card.\nhtml: |\n  <p id=v>card-two</p>\n")
-                r["bundle_reloads"] = await body_has("card-two")
 
         asyncio.run(second())
     finally:

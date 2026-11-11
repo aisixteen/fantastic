@@ -14,4 +14,4 @@ real coding agent (it prints a marker, then echoes what is typed).
 | tree_cell · tree_lists_backend | a `file tree` cell from the double-click; the terminal's host agent is a folder in it |
 | canvases_cell | a `canvases` cell marks the open canvas |
 | peer_opened · peer_empty · peer_marks_elsewhere · peer_own_records | `+ new canvas` opens `canvas_second`: empty, its file tree shows the whole project and marks the first canvas's agent `.elsewhere`, with no ↗ to open it; its own records and guid |
-| bundle_runs · bundle_reloads | a page bundle (`base: html_agent`, `html: \|`) in the peer's own `bundles/` runs its seeded instance; an edit of its bundle.yaml re-renders it |
+| bundle_runs | a page bundle (`base: html_agent`, `html: \|`) in the peer's own `bundles/` runs its seeded instance |
