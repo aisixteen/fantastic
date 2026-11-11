@@ -254,7 +254,10 @@ async fn sqlite_store_refusals_are_kernel_shape() {
     .await;
     assert_eq!(out["reason"], json!("exists"), "{out}");
     let sentence = out["error"].as_str().unwrap();
-    assert!(sentence.contains("duplicate row") && sentence != "exists", "{out}");
+    assert!(
+        sentence.contains("duplicate row") && sentence != "exists",
+        "{out}"
+    );
 }
 
 #[test]
@@ -271,4 +274,59 @@ fn path_at_state_lands_in_the_state_folder_and_a_plain_path_in_work() {
     assert_eq!(plain, real(tmp.path()).join("plain.db"));
     let err = resolve_path(&rec(json!({"path": "@state/../x.db"})), &k, own).unwrap_err();
     assert!(err.contains("inside its folder"), "{err}");
+}
+
+#[tokio::test]
+async fn append_emits_one_appended_event_per_new_row() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(tmp.path());
+    add_store(&k, "mem.db");
+    let state: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
+    let tap = state.clone();
+    k.add_state_subscriber(std::sync::Arc::new(move |ev: &Value, _body| {
+        tap.lock().unwrap().push(ev.clone());
+    }));
+    let mut rx = k.ensure_inbox(&AgentId::from("mem"));
+    let out = call(
+        &k,
+        "mem",
+        json!({"type": "append", "rows": [{"content": "a"}, {"content": "b"}]}),
+        Some("alice"),
+    )
+    .await;
+    let ids = out["ids"].as_array().unwrap().clone();
+    assert_eq!(ids.len(), 2, "{out}");
+    // the inbox also holds the append request itself; keep the events
+    let mut events = Vec::new();
+    while let Some(item) = rx.try_recv() {
+        if item.payload["type"] == json!("appended") {
+            events.push(item.payload);
+        }
+    }
+    let want: Vec<Value> = ids
+        .iter()
+        .map(|id| json!({"type": "appended", "table": "rows", "id": id}))
+        .collect();
+    assert_eq!(events, want);
+    // and each one went out as an emit on the state stream too
+    let on_state: Vec<Value> = state
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|ev| ev["kind"] == json!("emit") && ev["payload"]["type"] == json!("appended"))
+        .map(|ev| ev["payload"].clone())
+        .collect();
+    assert_eq!(on_state, want);
+    // a refused append emits nothing
+    let refused = call(
+        &k,
+        "mem",
+        json!({"type": "append", "rows": []}),
+        Some("alice"),
+    )
+    .await;
+    assert_eq!(refused["reason"], json!("bad_arg"), "{refused}");
+    while let Some(item) = rx.try_recv() {
+        assert_ne!(item.payload["type"], json!("appended"), "{refused}");
+    }
 }

@@ -42,7 +42,7 @@ test("credentials_view_dom_has_no_secret_text", async () => {
 
 test("store_view_search_sends_search_and_shows_hits", async () => {
   const r = rig((p) =>
-    p["type"] === "dump" ? { rows: [{ owner: "alice", row: { content: "SENTINEL-BODY" } }], fold_refs: [] }
+    p["type"] === "dump" ? { tables: { rows: [{ owner: "alice", row: { content: "SENTINEL-BODY" } }], fold_refs: [] } }
     : { matches: [{ id: 7, line: 2, text: "my own line" }], total: 1, truncated: false },
   );
   await storeView.mount(r.ctx);

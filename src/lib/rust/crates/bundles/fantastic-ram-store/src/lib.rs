@@ -860,7 +860,24 @@ impl Bundle for RamStoreBundle {
             "reflect" => self.reflect(agent_id),
             // No-op — the tables start empty (RAM) or are filled by `inject`.
             "boot" => return Ok(None),
-            "append" => self.append(agent_id, payload, kernel),
+            "append" => {
+                let out = self.append(agent_id, payload, kernel);
+                // one `appended` event per new row; a refusal has no `ids`
+                for id in out
+                    .get("ids")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    kernel
+                        .emit(
+                            agent_id,
+                            json!({"type": "appended", "table": "rows", "id": id}),
+                        )
+                        .await;
+                }
+                out
+            }
             "read" => self.read(agent_id, payload, kernel),
             "search" => self.search(agent_id, payload, kernel),
             "prune" => self.prune(agent_id, payload, kernel)?,

@@ -7,6 +7,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- `ram_store` and `sqlite_store` `append` emits `appended {table, id}` for each new row (#508), so a store view refreshes on a write; a refused append emits nothing.
 - The sidebar (#608): the canvas's left column is the `sidebar` agent (`sidebar.tools`, seeded under the root on a first run), whose `reflect` returns its html view: the kernels, the agent tree with each chat's state, what waits for the person, and the project's files, drawn from reads on other agents (a view's `calls` as an object). It replaces the canvas's file-tree sidebar and its `tree` view verb; a folder seeded before it has no left column.
 - `reflect` takes `handler_modules` (#605): a list of handler names; with `tree` `all` or `ids` only the agents whose `handler_module` is listed come back, as a flat `tree` list, and an agent outside the list is not asked. A value that is not a list of names is refused `bad_arg`.
 - `boot_kernel` / `stop_kernel` in `fantastic_tui` (#580): a host that runs the kernel in its own
@@ -221,6 +222,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Fixed
 
+- The store views (canvas and TUI panel) read the real `dump` reply, `{tables: {rows, fold_refs}}`, so per-owner counts show (#505).
 - Role agents (a meta bundle over a backend or `ai_chat.tools`) are listed by `reflect handler_modules` under their base again, and count as AI agents for the reach, the row watch and the rows reader (#605).
 - fantastic-exec-bridge: the monitor end-delivery unit test waits on the delivery and the monitor leaving, not on fixed sleeps (#65, #92)
 - ai-core `rows` test (`rows_is_a_view_of_what_the_agent_holds`, #65, #91): the paging test now waits until the turn's head has settled (all four rows, the nudge pass's answer included) before reading its two pages, so a row appended by the nudge pass can no longer make the pages disagree with the total. Rust and Python twin; 200/200 local runs.
