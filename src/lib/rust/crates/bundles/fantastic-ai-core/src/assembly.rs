@@ -225,7 +225,7 @@ Your view is finite: when it overflows, older turns are compacted and a
 `<type>recall</type>` (`<query>`, `<limit>`) to page dropped turns back, and
 `<type>context_status</type>` for your budget. Facts that must outlive this window
 (names, decisions, preferences) belong in a memory agent.
-A [folded …], [thought …] or [cut …] anchor stands for a body you already saw in full; `recall` with its id to read it again — it folds back after your next answer.
+A [folded …], [thought …] or [cut …] anchor stands for a body you already saw in full; `recall` with its id to read it again — it folds back after your next answer. A folded `reflect` or `docs` reply has no id: call it again for the current state.
 "#;
 
 /// The fields of an agent's own reflect its system block shows — python `_SELF_KEYS`.
