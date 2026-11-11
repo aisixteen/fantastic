@@ -156,6 +156,8 @@ def py_typed(*args: str) -> str:
 HARD_STOP_S = 15 * 60 - 30
 #: The page size `page()` opens with by default, and the one `init()`'s Chrome is launched for.
 DEFAULT_SIZE = (1500, 950)
+#: The narrowest page that takes over the Chrome `init()` left up.
+REUSE_MIN_WIDTH = 800
 ENDED_HOLD_S = 3  # a `done` (not awaiting) that holds this long ends the wait
 
 
@@ -427,9 +429,11 @@ class Rig:
     async def page(self, width: int = 1500, height: int = 950, extra: list[str] | None = None):
         # The Chrome `init()` left up serves the FIRST page opened without extra flags, its
         # window put at this page's size (what `--window-size` does at launch); a page with
-        # extra flags closes it first (one Chrome per user-data-dir) and launches its own.
+        # extra flags, or a phone-wide one (a headless window has a width floor, so that
+        # window must be launched at its size), closes it first (one Chrome per
+        # user-data-dir) and launches its own.
         warm, self._warm = self._warm, None
-        if warm is not None and extra:
+        if warm is not None and (extra or width < REUSE_MIN_WIDTH):
             warm.proc.terminate()
             warm.proc.wait()
             warm = None
