@@ -2620,3 +2620,30 @@ async fn by_agent_keeps_a_deleted_agent_survives_a_restart_and_resets() {
     let after = call(&kernel, "g_prov", json!({"type": "usage"})).await;
     assert_eq!(after["usage_since_boot"]["by_agent"], json!({}), "{after}");
 }
+
+// ─── the imageless golden (#622) ────────────────────────────────────────────
+
+/// A fixed imageless conversation, marks and merged turns included.
+fn golden_messages() -> Vec<Value> {
+    let mut m = flagged_sys(&[
+        ("user", "p1", None),
+        ("assistant", "p2", Some("cache_mark")),
+        ("user", "f1", None),
+        ("user", "f2", Some("cache_mark")),
+        ("user", "t1 \u{e9}\u{4e2d}", None),
+        ("assistant", "t2", None),
+        ("user", "live", None),
+    ]);
+    m.push(json!({"role": "system", "content": "extra system"}));
+    m
+}
+
+/// The bytes the request body of [`golden_messages`] had on main before images (#622).
+const GOLDEN_BODY: &str = r#"{"model":"claude-test-5","max_tokens":8000,"messages":[{"role":"user","content":"p1"},{"role":"assistant","content":[{"type":"text","text":"p2","cache_control":{"type":"ephemeral"}}]},{"role":"user","content":[{"type":"text","text":"f1\n\nf2","cache_control":{"type":"ephemeral"}},{"type":"text","text":"\n\nt1 é中"}]},{"role":"assistant","content":"t2"},{"role":"user","content":"live"}],"stream":true,"system":[{"type":"text","text":"S\n\nextra system","cache_control":{"type":"ephemeral"}}]}"#;
+
+#[test]
+fn an_imageless_request_body_is_byte_identical_to_before_images() {
+    let p = provider("http://x/v1/messages", Arc::new(NoKey));
+    let body = p.body(&golden_messages(), None).to_string();
+    assert_eq!(body, GOLDEN_BODY);
+}
