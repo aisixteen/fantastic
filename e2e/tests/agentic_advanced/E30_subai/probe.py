@@ -67,7 +67,7 @@ from helpers import (
     verdict,
 )
 from helpers.ai import TICK as POLL
-from helpers.ai import ChainEnd
+from helpers.ai import ChainEnd, make_chat
 from helpers.kernel import WRAPS, open_kernel, wrap_with, home
 from helpers.rows import rows_for
 
@@ -125,6 +125,10 @@ CYCLES = int(os.environ.get("CYCLES", "3"))
 # agent it makes. The operator opens them IN ADVANCE to these named ids; every edge
 # between the creator's own children stays the creator's to grant.
 SUB_AI = "hour_ai"
+#: an AI is a PAIR (a provider and a chat); the model builds its own pair on the template of
+#: `brain` and `brain_prov`, with these ids
+SUB_PROV = f"{SUB_AI}_prov"
+BRAIN_PROV = "brain_prov"
 SUB_CODE = "hour_code"
 
 TASK = (
@@ -132,9 +136,11 @@ TASK = (
     "away, but I am an AGENT here too: if you genuinely cannot proceed without a "
     "decision that is mine, reflect the tree, find me, and send me an `inquiry`.\n\n"
     "Build me a ROUTINE made of THREE things, all of them yours to create:\n"
-    f"1. A NEW AI agent with id `{SUB_AI}` (an inference unit like `brain` — `brain` is "
-    "only your example of what such a record looks like; list the agents to read it, "
-    "then create your own with its own instructions).\n"
+    f"1. A NEW AI agent with id `{SUB_AI}`: a PAIR like `brain` and `{BRAIN_PROV}` — the chat "
+    f"`{SUB_AI}` holds the conversation and completes through its own provider `{SUB_PROV}` "
+    "(named by `provider_id`); `brain` and `brain_prov` are "
+    "only your example of what such records look like; list the agents to read them, "
+    "then create your own pair, the chat with its own instructions.\n"
     f"2. A NEW code agent with id `{SUB_CODE}` — a command runner with a program file "
     "YOU write. The program "
     f"holds the multiplier {MULTIPLIER} and, when run, computes the CURRENT HOUR (0-23, "
@@ -147,7 +153,7 @@ TASK = (
     "NOTHING can call anything by default: wiring means granting the authority in "
     "BOTH directions for every edge (clock → AI, AI → code agent, AI → `totals`, "
     "and whatever the code agent's `allowed` needs). The agents that are not yours — "
-    f"`clock`, `totals`, the memory store and the key store — are ALREADY open to `{SUB_AI}` "
+    f"`clock`, `totals`, the memory store and the key store — are ALREADY open to `{SUB_AI}` and `{SUB_PROV}` "
     f"on THEIR side (their `callable_by`); `{SUB_AI}`'s own `can_call` must still name each "
     "of them it calls, and every edge between agents you create is yours to grant. Build it, trigger a tick, "
     "verify the stored value is right, and tell me what you made."
@@ -180,6 +186,8 @@ MINE = {
     "core",
     "kernel_store",
     "brain",
+    BRAIN_PROV,
+    "ai_prov",
     "clock",
     "readings",
     "totals",
@@ -213,8 +221,8 @@ def _ai_meta(
     backend: str | None = None,
     extra_reach: dict | None = None,
 ) -> dict:
-    """One record shape, its model half from the plug. `brain` is one completion per
-    send, no loop; `ai` is the BUILDER.
+    """One chat payload (`make_chat` adds the provider from the plug). `brain` is one
+    completion per send, no loop; `ai` is the BUILDER.
 
     `backend` overrides the global for ONE agent, so the builder and that agent can be
     different models. That is the interesting composition: a strong builder wiring a
@@ -277,16 +285,22 @@ def _ai_meta(
             "ws": "*",
         },
     }
+    if agent_id == "ai":
+        # the builder READS `brain_prov`'s record as its template, as it reads `brain`'s
+        meta["can_call"][BRAIN_PROV] = ["reflect"]
     if extra_reach:
         meta["can_call"].update(extra_reach)
     if agent_id == "brain":
         meta["description"] = "A AI agent: one completion per send. No loop of its own."
-    # The plug describes ITSELF (e2e/backends): its handler, model, endpoint,
-    # required fields and key reference come from the plug, never from a branch
-    # here. The probe's own wiring (grants, description) wins over the plug's.
-    for k, v in _resolve_backend(backend).record().items():
-        meta.setdefault(k, v)
+    # The CHAT's payload only: the plug describes the PROVIDER (e2e/backends) and
+    # `make_chat` splits the two, so the provider's fields never ride on the chat.
     return meta
+
+
+def bundle(rec: dict) -> str:
+    """The bundle a record names: `ai_chat` and `ai_chat.tools` are the same handler, and a
+    model may write either (the kernel keeps the spelling it was given)."""
+    return str((rec or {}).get("handler_module") or "").split(".")[0]
 
 
 def walk(node: dict, out: list[dict]) -> None:
@@ -606,11 +620,11 @@ async def score(root, store_id, total, new_total, transcript):
     )[0]["result"]
     records = {a["id"]: a for a in (listing.get("agents") or [])}
     made = [n for n in nodes if n.get("id") not in MINE]
-    ai_module = records.get("brain", {}).get("handler_module")
+    ai_module = bundle(records.get("brain", {}))
 
     # ── 1. STRUCTURE: a sub-AI AND a code agent, both the model's ──
-    sub_ais = [n for n in made if records.get(n["id"], {}).get("handler_module") == ai_module]
-    runners = [n for n in made if records.get(n["id"], {}).get("handler_module") == EXEC_MODULE]
+    sub_ais = [n for n in made if bundle(records.get(n["id"], {})) == ai_module]
+    runners = [n for n in made if bundle(records.get(n["id"], {})) == bundle({"handler_module": EXEC_MODULE})]
     c1 = bool(sub_ais) and bool(runners)
     print(
         f"    1. sub-AI + code agent      {'OK' if c1 else 'NO'} "
@@ -627,7 +641,7 @@ async def score(root, store_id, total, new_total, transcript):
     clocks = ["clock"] + [
         n["id"]
         for n in made
-        if records.get(n["id"], {}).get("handler_module") == "scheduler.tools"
+        if bundle(records.get(n["id"], {})) == "scheduler"
     ]
 
     async def _schedules() -> list[dict]:
@@ -766,6 +780,7 @@ async def run(
     mine: set | None = None,
     extra_reach: dict | None = None,
     prefix: str = "subai_",
+    sub_ais: list[str] | None = None,
 ):
     """The probe, parameterized. ONE fixture and ONE `score` for every arm — a second
     copy of the scoring path is how two arms diverge silently, which the emergence
@@ -787,44 +802,34 @@ async def run(
         await extra_agents(root)
 
     # The AI agent: one pass, no loop, no agency. Named `brain` so the model can find it.
-    (
-        await root.send(
-            [
-                {
-                    "target": root.id,
-                    "payload": _ai_meta(
-                        "brain",
-                        store=store,
-                        root=root,
-                        backend=brain_backend,
-                    ),
-                }
-            ]
-        )
-    )[0]["result"]
+    await make_chat(
+        root,
+        _resolve_backend(brain_backend or BACKEND),
+        _ai_meta("brain", store=store, root=root, backend=brain_backend),
+    )
     # The BUILDER — the turn that walks away.
-    ai = (
-        await root.send(
-            [
-                {
-                    "target": root.id,
-                    "payload": _ai_meta(
-                        "ai", store=store, root=root, extra_reach=extra_reach
-                    ),
-                }
-            ]
-        )
-    )[0]["result"]
-    aid = ai["id"]
+    aid, _ = await make_chat(
+        root,
+        BK,
+        _ai_meta("ai", store=store, root=root, extra_reach=extra_reach),
+    )
     # the store's half of each memory wire
     for who in ("brain", aid):
         await memory.open_ingress(root, memory.MEMORY, who)
+    # the provider's half of that read: it admits the builder for `reflect` only
+    listing = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]["result"]
+    have = next((a for a in listing.get("agents") or [] if a.get("id") == BRAIN_PROV), {})
+    out = (await root.send([{"target": root.id, "payload": {
+        "type": "update_agent", "id": BRAIN_PROV,
+        "callable_by": {**(have.get("callable_by") or {}), aid: ["reflect"]}}}]))[0]["result"]
+    assert isinstance(out, dict) and out.get("updated") is True, out
+    # the stores' halves for the pairs the creator will make (see SUB_AI): the chat's
+    # conversation store, and the provider's memory and key stores
+    for who in sub_ais or [SUB_AI]:
+        await memory.open_ingress(root, memory.MEMORY, who)
+        await memory.open_ingress(root, memory.MEMORY, f"{who}_prov")
         if BK.key_ref:
-            await creds.grant_reader(root, who)
-    # the stores' halves for the sub-AI the creator will make (see SUB_AI)
-    await memory.open_ingress(root, memory.MEMORY, SUB_AI)
-    if BK.key_ref:
-        await creds.open_store(root, SUB_AI)
+            await creds.open_store(root, f"{who}_prov")
     # FORENSICS: pin the moment any grant on the store changes.
     _grants_watch = asyncio.create_task(memory.watch_store_grants(root))
     # …and WHO wrote it: every `update_agent` naming the store, with its sender,
