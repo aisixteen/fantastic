@@ -83,3 +83,12 @@ async fn default_handle_binary_dispatches_header_and_drops_blob() {
     // "this verb answers no chunk" apart from a 0-byte one.
     assert_eq!(body, None);
 }
+
+#[test]
+fn a_bare_bundle_name_resolves_to_its_tools_module() {
+    let mut reg = BundleRegistry::new();
+    reg.register("fake.tools", FakeBundle);
+    assert!(reg.get("fake").is_some());
+    assert!(reg.get("fake.tools").is_some());
+    assert!(reg.get("missing").is_none());
+}
