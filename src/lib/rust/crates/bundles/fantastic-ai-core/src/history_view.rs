@@ -25,7 +25,7 @@
 //! AUTOFOLD ([`autofold`], #556) then shows a thought, a cut answer and a large or
 //! recalled reply as a short anchor, at assembly time and never stored.
 
-use crate::constants::{AUTOFOLD_AT, CHARS_PER_TOKEN};
+use crate::constants::{AUTOFOLD_AT, CHARS_PER_TOKEN, REFERENCE_FOLD_AT};
 use serde_json::{json, Value};
 
 /// The verbs whose reply is WHOLE STATE, so a later reply strictly supersedes an
@@ -501,14 +501,25 @@ fn recalled_what(store: &[Value], tag_line: &str, agent: &str, nth: usize) -> St
     find().unwrap_or_default()
 }
 
+/// The token count over which a block of this `verb` folds once answered:
+/// reference replies (`reflect`, `docs`) fold sooner than any other body (#634).
+fn fold_limit(verb: &str) -> usize {
+    if matches!(verb, "reflect" | "docs") {
+        REFERENCE_FOLD_AT
+    } else {
+        AUTOFOLD_AT
+    }
+}
+
 /// Whether a user turn's content will fold once it is answered: it opens with a
-/// reply tag and carries a recall reply or a body over [`AUTOFOLD_AT`] tokens.
+/// reply tag and carries a recall reply or a body over its verb's fold limit
+/// ([`AUTOFOLD_AT`] tokens; [`REFERENCE_FOLD_AT`] for `reflect` and `docs`).
 #[must_use]
 pub fn will_fold(content: &str) -> bool {
     parse_reply_tag(content).is_some()
         && reply_blocks(content).into_iter().any(|b| {
-            matches!(parse_reply_tag(b), Some((_, "recall")))
-                || body_tokens(body_of(b)) > AUTOFOLD_AT
+            let verb = parse_reply_tag(b).map_or("", |(_, v)| v);
+            verb == "recall" || body_tokens(body_of(b)) > fold_limit(verb)
         })
 }
 
@@ -586,12 +597,19 @@ pub fn autofold(
                         format!(
                             "[folded · recall reply from {agent}{what} · ~{x} tokens · get: {id}]"
                         )
-                    } else if x > AUTOFOLD_AT {
+                    } else if x > fold_limit(verb) {
                         changed = true;
                         let head = cap120(body.split('\n').next().unwrap_or("").trim());
-                        format!(
-                            "[folded · {verb} reply from {agent} · ~{x} tokens · head: \"{head}\" · get: {id}]"
-                        )
+                        if matches!(verb, "reflect" | "docs") {
+                            // re-called, never recalled: no `get:` pointer
+                            format!(
+                                "[folded · {verb} reply from {agent} · ~{x} tokens · {verb} again for the current state]"
+                            )
+                        } else {
+                            format!(
+                                "[folded · {verb} reply from {agent} · ~{x} tokens · head: \"{head}\" · get: {id}]"
+                            )
+                        }
                     } else {
                         b.to_string()
                     }
@@ -968,6 +986,38 @@ mod tests {
         }
         let shown = folded(&[a.clone()], 0, Some(not_run));
         assert!(shown.starts_with("[thought ~"), "{shown}");
+    }
+
+    #[test]
+    fn reflect_and_docs_replies_fold_over_the_reference_limit_only() {
+        use crate::constants::REFERENCE_FOLD_AT;
+        let over = "x".repeat(REFERENCE_FOLD_AT * 4 + 4);
+        let at = "x".repeat(REFERENCE_FOLD_AT * 4);
+        for verb in ["reflect", "docs"] {
+            let tag = format!("[reply to 3 \u{b7} ai {verb}]\n");
+            assert!(will_fold(&format!("{tag}{over}")), "{verb}");
+            assert!(!will_fold(&format!("{tag}{at}")), "{verb}");
+            let store = [
+                row(7, "user", &format!("{tag}head line\n{over}")),
+                row(8, "assistant", "ok"),
+            ];
+            let (out, form) = autofold(&store, 0, &store[0], None);
+            assert_eq!(form, "anchor");
+            assert_eq!(
+                out["content"].as_str().unwrap(),
+                format!(
+                    "[folded \u{b7} {verb} reply from ai \u{b7} ~{} tokens \u{b7} {verb} again for the current state]",
+                    REFERENCE_FOLD_AT + 4
+                )
+            );
+            // one under the limit stays inline; so does an unanswered one
+            let small = [row(7, "user", &format!("{tag}{at}")), row(8, "assistant", "ok")];
+            assert_eq!(autofold(&small, 0, &small[0], None).1, "whole");
+            assert_eq!(autofold(&store[..1], 0, &store[0], None).1, "whole");
+        }
+        // any other verb keeps the large-body limit
+        let other = format!("[reply to 3 \u{b7} ai read]\n{}", "x".repeat(REFERENCE_FOLD_AT * 4 + 4));
+        assert!(!will_fold(&other));
     }
 
     #[test]
