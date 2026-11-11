@@ -78,17 +78,6 @@ fn refusal(msg: String, reason: &str, hint: &str) -> Value {
     json!({"error": msg, "reason": reason, "arg": "id", "hint": hint})
 }
 
-fn id_arg(verb: &str, payload: &Value) -> Result<String, Value> {
-    match payload.get("id").and_then(Value::as_str) {
-        Some(s) if !s.trim().is_empty() => Ok(s.trim().to_string()),
-        _ => Err(json!({
-            "error": format!("{verb}: `id` is required — the host agent's id"),
-            "reason": "bad_arg",
-            "arg": "id",
-        })),
-    }
-}
-
 const MAKE_HINT: &str = "create_agent a host agent with view {kind:html, bytes_file:<panel file>, \
     calls:[get_html, watch]} and callable_by {user:[get_html, watch]}, then embed it by id";
 
@@ -102,11 +91,8 @@ fn allows(grant: &Value, verb: &str) -> bool {
 }
 
 /// `embed` verb: store a card row for host agent `id`. See the module doc.
-pub async fn embed(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> MemResult<Value> {
-    let id = match id_arg("embed", payload) {
-        Ok(i) => i,
-        Err(e) => return Ok(e),
-    };
+pub async fn embed(agent_id: &AgentId, id: &str, kernel: &Arc<Kernel>) -> MemResult<Value> {
+    let id = id.trim().to_string();
     if id == agent_id.0 {
         return Ok(refusal(
             "embed: a chat cannot embed itself".to_string(),
@@ -191,15 +177,8 @@ pub async fn embed(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) ->
 
 /// `unembed` verb: take the card of agent `id` out of the chat (a tombstone row).
 /// Works for a live and for a deleted agent; never reads or writes the agent.
-pub async fn unembed(
-    agent_id: &AgentId,
-    payload: &Value,
-    kernel: &Arc<Kernel>,
-) -> MemResult<Value> {
-    let id = match id_arg("unembed", payload) {
-        Ok(i) => i,
-        Err(e) => return Ok(e),
-    };
+pub async fn unembed(agent_id: &AgentId, id: &str, kernel: &Arc<Kernel>) -> MemResult<Value> {
+    let id = id.trim().to_string();
     if !cards(&card_rows(agent_id, kernel).await?).contains(&id) {
         return Ok(json!({"unembedded": id, "was_embedded": false}));
     }

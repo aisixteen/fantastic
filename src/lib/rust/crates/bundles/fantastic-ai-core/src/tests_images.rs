@@ -3,7 +3,7 @@
 //! alt text for a model that cannot, and the capability map the chat keeps of its provider.
 
 use super::*;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use std::io::Cursor;
 
 const GO: &str = r#"ok <call name="done"></call>"#;
@@ -387,19 +387,37 @@ fn seen() -> &'static Seen {
     SEEN.get_or_init(Seen::default)
 }
 
+mod pics_verbs {
+    use crate::declared::Complete;
+    fantastic_kernel::verbs! { "complete" => Complete }
+}
+
 #[async_trait]
-impl Bundle for Pics {
+impl Handler for Pics {
+    type Call = pics_verbs::Call;
     fn name(&self) -> &str {
         "pics"
+    }
+    fn man(&self) -> &'static str {
+        "A provider stand-in that keeps the images it is handed."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        pics_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, a: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        pics_verbs::dynamic_verbs(a)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &crate::tests_decl::any::RECORD
     }
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        match payload["type"].as_str() {
-            Some("reflect") => {
+        match call {
+            pics_verbs::Call::Reflect(_) => {
                 let meta = helpers::agent_meta(id, kernel);
                 match meta.get("reflect_refuses") {
                     Some(_) => Ok(Some(json!({"error": "refused", "reason": "unauthorized"}))),
@@ -408,31 +426,30 @@ impl Bundle for Pics {
                     )),
                 }
             }
-            Some("complete") => Ok(Some(
-                json!({"rid": payload["rid"], "model": "m", "prompt_tokens": 1,
+            pics_verbs::Call::Complete(a) => Ok(Some(
+                json!({"rid": a.rid, "model": "m", "prompt_tokens": 1,
                                                "completion_tokens": 1, "stop_reason": "end_turn"}),
             )),
-            _ => Ok(Some(json!({"error": "no such verb"}))),
         }
     }
     async fn handle_binary(
         &self,
-        id: &AgentId,
-        header: Value,
+        _id: &AgentId,
+        call: Self::Call,
         body: Option<fantastic_kernel::outcome::Blob>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<fantastic_kernel::outcome::Blob>), BundleError> {
-        if let (Some(image), Some(bytes)) =
-            (header.get("image"), body.and_then(|b| b.into_at("data")))
-        {
-            seen().lock().unwrap().push((
-                header["rid"].as_str().unwrap().to_string(),
-                image["ref"].as_str().unwrap().to_string(),
-                bytes,
-            ));
-            return Ok((Some(json!({"rid": header["rid"]})), None));
+        if let pics_verbs::Call::Complete(a) = &call {
+            if let (Some(image), Some(bytes)) = (&a.image, body.and_then(|b| b.into_at("data"))) {
+                seen().lock().unwrap().push((
+                    a.rid.clone(),
+                    image.image_ref.clone(),
+                    bytes,
+                ));
+                return Ok((Some(json!({"rid": a.rid})), None));
+            }
         }
-        Ok((self.handle(id, &header, kernel).await?, None))
+        Ok((Handler::handle(self, _id, call, kernel).await?, None))
     }
 }
 

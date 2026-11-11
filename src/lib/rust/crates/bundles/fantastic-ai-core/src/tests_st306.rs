@@ -8,7 +8,8 @@ use std::time::Duration;
 use crate::agent_loop::BackendConfig;
 use crate::provider::{Provider, ProviderError, ProviderEvent, ProviderStream};
 use async_trait::async_trait;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
+use crate::tests_decl::chat_decls;
 use fantastic_kernel::inbox::InboxReceiver;
 use fantastic_kernel::{Agent, AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
@@ -99,26 +100,33 @@ fn first_pass(agent: &str) -> String {
 struct MockBundle;
 
 #[async_trait]
-impl Bundle for MockBundle {
+impl Handler for MockBundle {
+    chat_decls!();
     fn name(&self) -> &str {
         CFG.name
     }
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         let served = served_for(agent_id.as_str());
         let first = first_pass(agent_id.as_str());
-        let reply = crate::verbs::handle_common(agent_id, payload, kernel, CFG, move |_client| {
-            Arc::new(Mock {
-                served: Arc::clone(&served),
-                first: first.clone(),
-            }) as Arc<dyn Provider>
-        })
-        .await?
-        .unwrap_or_else(|| json!({"error": "st306_mock: unknown type"}));
+        let reply = crate::verbs::handle(
+            agent_id,
+            call,
+            kernel,
+            CFG,
+            move |_client| {
+                Arc::new(Mock {
+                    served: Arc::clone(&served),
+                    first: first.clone(),
+                }) as Arc<dyn Provider>
+            },
+            || json!({"id": "st306_mock"}),
+        )
+        .await?;
         Ok(Some(reply))
     }
 }
@@ -127,21 +135,62 @@ impl Bundle for MockBundle {
 /// (and otherwise sleeps briefly, as a live wait would); `tail` returns its output.
 struct FakeExec;
 
+/// `start` of the fake exec agent: a command to run.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct StartJob {
+    /// What to run.
+    command: String,
+}
+
+/// `status` of the fake exec agent: the jobs it runs.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct JobStatus {
+    /// One job; absent, all.
+    job_id: Option<i64>,
+}
+
+/// `tail` of the fake exec agent: a job's output.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct TailJob {
+    /// The job.
+    job_id: Option<i64>,
+}
+
+mod exec_verbs {
+    use super::{JobStatus, StartJob, TailJob};
+    fantastic_kernel::verbs! { "start" => StartJob, "status" => JobStatus, "tail" => TailJob }
+}
+
 #[async_trait]
-impl Bundle for FakeExec {
+impl Handler for FakeExec {
+    type Call = exec_verbs::Call;
     fn name(&self) -> &str {
         "st306_fake_exec"
+    }
+    fn man(&self) -> &'static str {
+        "A fake exec agent."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        exec_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, a: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        exec_verbs::dynamic_verbs(a)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &crate::tests_decl::any::RECORD
     }
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
+        use exec_verbs::Call;
         let id = agent_id.as_str().to_string();
-        let reply = match payload.get("type").and_then(Value::as_str) {
-            Some("start") => json!({"job_id": 1, "status": "running", "pty": false}),
-            Some("status") => {
+        let reply = match call {
+            Call::Reflect(_) => json!({"id": id}),
+            Call::StartJob(_) => json!({"job_id": 1, "status": "running", "pty": false}),
+            Call::JobStatus(_) => {
                 let done = released()
                     .lock()
                     .unwrap()
@@ -155,12 +204,11 @@ impl Bundle for FakeExec {
                     json!({"jobs": [{"job_id": 1, "status": "running"}]})
                 }
             }
-            Some("tail") => json!({
+            Call::TailJob(_) => json!({
                 "job_id": 1,
                 "status": "done",
                 "lines": [{"n": 1, "stream": "stdout", "line": "hello from the job"}]
             }),
-            _ => json!({"error": "st306_fake_exec: unknown type"}),
         };
         Ok(Some(reply))
     }

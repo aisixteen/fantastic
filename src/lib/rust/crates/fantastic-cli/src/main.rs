@@ -432,7 +432,10 @@ async fn dispatch(
             Some(first) if !first.contains('=') => (first.clone(), &rest[1..]),
             _ => (DEFAULT_ROOT_ID.to_string(), rest),
         };
-        let payload = typed_payload(&booted.kernel, &target, "reflect", kvs);
+        let payload = match typed_payload(&booted.kernel, &target, "reflect", kvs) {
+            Ok(p) => p,
+            Err(refused) => return Ok(refuse_args(&refused)),
+        };
         let reply = booted
             .kernel
             .send(vec![Item::new(
@@ -534,7 +537,10 @@ async fn dispatch(
         apply_ledger_cap(&booted, cap);
         // THE VALUES take the type the verb's declaration asks for (the kernel is up, so
         // its bundles' declared verbs are known).
-        let payload = typed_payload(&booted.kernel, &id, &verb, &args[2..]);
+        let payload = match typed_payload(&booted.kernel, &id, &verb, &args[2..]) {
+            Ok(p) => p,
+            Err(refused) => return Ok(refuse_args(&refused)),
+        };
         // BOOT THE ROOT LOADER so this call's mutations (create/update/delete)
         // subscribe and persist. The debounce never ticks before we exit, so
         // the writer is drained synchronously after the call — python's `call`
@@ -687,19 +693,25 @@ async fn dispatch(
     Ok(ExitCode::SUCCESS)
 }
 
-/// The payload of a one-shot `fantastic <id> <verb> k=v …` call: each value takes the
-/// type the verb's OWN declaration asks for for that argument (`limit=7` is the integer 7
+/// A `k=v` that is not the type its verb declares: the refusal, on stderr, exit 1.
+fn refuse_args(refused: &Value) -> ExitCode {
+    eprintln!("{}", serde_json::to_string_pretty(refused).unwrap_or_default());
+    ExitCode::from(1)
+}
+
+/// The payload of a one-shot `fantastic <id> <verb> k=v …` call: each value is read as
+/// the type the verb's OWN declaration asks for that argument (`limit=7` is the integer 7
 /// where the verb declares an integer, the text `7` where it declares text; a JSON
-/// literal is a list or an object only where the verb declares one). The typing is the
+/// literal is a list or an object only where the verb declares one). The reader is the
 /// kernel's ([`fantastic_kernel::typing`]), the same code the model's `<k>v</k>` goes
-/// through; an agent or verb this kernel does not declare leaves the text as written, and
-/// the target refuses a wrongly typed value by name.
+/// through; a value that is not its declared type is refused by argument name, and an
+/// agent or verb this kernel does not declare leaves the text as written.
 fn typed_payload(
     kernel: &std::sync::Arc<fantastic_kernel::Kernel>,
     target: &str,
     verb: &str,
     kvs: &[String],
-) -> Map<String, Value> {
+) -> Result<Map<String, Value>, Value> {
     let pairs: Vec<(String, String)> = kvs
         .iter()
         .filter_map(|kv| kv.split_once('='))
@@ -727,7 +739,8 @@ mod typed_payload_tests {
                 "w=[1]".into(),
                 "no_equals".into(),
             ],
-        );
+        )
+        .unwrap();
         assert_eq!(
             serde_json::Value::Object(p),
             json!({"type": "ping", "n": "42", "flag": "true", "w": "[1]"})

@@ -492,7 +492,11 @@ fn recalled_what(store: &[Value], tag_line: &str, agent: &str, nth: usize) -> St
             })
             .nth(nth)?;
         let payload = call.arguments.get("payload")?;
-        if let Some(id) = payload.get("id").and_then(crate::retrieval::as_id) {
+        if let Some(id) = payload
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(crate::retrieval::id_text)
+        {
             return Some(format!(" · id {id}"));
         }
         let q = payload.get("query").and_then(Value::as_str)?;

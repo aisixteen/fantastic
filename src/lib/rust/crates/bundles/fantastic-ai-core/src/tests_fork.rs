@@ -221,11 +221,17 @@ async fn fork_refuses_an_at_that_names_no_row() {
     let view = put_row(&kernel, &parent, json!({"kind": "view", "ids": []})).await;
     let out = verb(&kernel, &parent, json!({"type": "fork", "at": view})).await;
     assert_eq!(out["reason"], "no_such_row", "{out}");
-    for bad in [json!(null), json!("x"), json!(-1)] {
+    // an `at` that is not a row id (an integer) is refused by name; none at all is missing
+    for bad in [json!("x"), json!(1.5)] {
         let out = verb(&kernel, &parent, json!({"type": "fork", "at": bad})).await;
         assert_eq!(out["reason"], "bad_arg", "{out}");
         assert_eq!(out["arg"], "at", "{out}");
     }
+    let out = verb(&kernel, &parent, json!({"type": "fork"})).await;
+    assert_eq!(out["reason"], "missing_arg", "{out}");
+    assert_eq!(out["arg"], "at", "{out}");
+    let out = verb(&kernel, &parent, json!({"type": "fork", "at": -1})).await;
+    assert_eq!(out["reason"], "no_such_row", "{out}");
 }
 
 #[tokio::test]
@@ -472,9 +478,14 @@ async fn mark_lands_on_a_turn_boundary_outside_a_fold() {
         assert_eq!(out["reason"], "mid_turn", "{out}");
     }
     // a label is required
-    for bad in [json!(null), json!(""), json!("  "), json!(3)] {
+    for (bad, reason) in [
+        (json!(null), "missing_arg"),
+        (json!(""), "missing_arg"),
+        (json!("  "), "bad_arg"),
+        (json!(3), "bad_arg"),
+    ] {
         let out = verb(&kernel, &parent, json!({"type": "mark", "label": bad})).await;
-        assert_eq!(out["reason"], "bad_arg", "{out}");
+        assert_eq!(out["reason"], reason, "{out}");
         assert_eq!(out["arg"], "label", "{out}");
     }
     // inside an open chain: refused

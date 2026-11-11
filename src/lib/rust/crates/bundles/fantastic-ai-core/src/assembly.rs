@@ -458,7 +458,7 @@ pub(crate) async fn system_pieces(
     let meta = crate::helpers::agent_meta(self_id, kernel);
     let inner = inner_system_pieces(self_id, kernel, system_prompt).await?;
     let wrap = |key: &str| {
-        crate::schema::record_wrap_prompt(&meta, key).map(|s| vec![piece("system_text", s)])
+        crate::record::record_wrap_prompt(&meta, key).map(|s| vec![piece("system_text", s)])
     };
     let mut out: Vec<SystemPiece> = Vec::new();
     for group in [
@@ -490,7 +490,7 @@ async fn inner_system_pieces(
         return Ok(render_prompt(s, self_id, kernel, "system_text").await);
     }
     if let Some(s) =
-        crate::schema::record_system_prompt(&crate::helpers::agent_meta(self_id, kernel))
+        crate::record::record_system_prompt(&crate::helpers::agent_meta(self_id, kernel))
     {
         return Ok(render_prompt(&s, self_id, kernel, "system_text").await);
     }

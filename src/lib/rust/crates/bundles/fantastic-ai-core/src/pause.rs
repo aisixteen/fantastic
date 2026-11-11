@@ -68,7 +68,7 @@ pub async fn view(agent_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<PauseVi
 /// run it. A record with no store is left to the send's own refusal.
 pub async fn hold_if_paused(
     agent_id: &AgentId,
-    payload: &Value,
+    args: &crate::declared::Send,
     kernel: &Arc<Kernel>,
 ) -> Result<Option<Value>, BundleError> {
     if store_of(agent_id, kernel).is_err() {
@@ -81,17 +81,28 @@ pub async fn hold_if_paused(
     save_history(
         agent_id,
         kernel,
-        &[json!({"kind": HELD, "payload": payload})],
+        &[json!({"kind": HELD, "payload": held_call(args)})],
     )
     .await?;
     Ok(Some(json!({"held": v.held.len() + 1, "paused": true})))
+}
+
+/// The held call as the stored row keeps it: the `send` verb and its arguments, which
+/// `resume` hands back to the agent's entry.
+fn held_call(args: &crate::declared::Send) -> Value {
+    let mut call = serde_json::to_value(args).unwrap_or_default();
+    if let Value::Object(m) = &mut call {
+        m.retain(|_, v| !v.is_null());
+        m.insert("type".to_string(), json!("send"));
+    }
+    call
 }
 
 /// `pause` — stop the in-flight generation and hold incoming messages. Already
 /// paused: a no-op with the same reply.
 pub async fn pause(
     agent_id: &AgentId,
-    payload: &Value,
+    reason: Option<&str>,
     kernel: &Arc<Kernel>,
 ) -> Result<Value, BundleError> {
     let v = view(agent_id, kernel).await?;
@@ -99,14 +110,14 @@ pub async fn pause(
         return Ok(json!({"paused": true, "held": v.held.len()}));
     }
     // The stop writes the `[stopped by …]` marker and closes the open parts.
-    let _ = crate::verbs::stop(agent_id, &json!({}), kernel).await;
+    let _ = crate::verbs::stop(agent_id, None, kernel).await;
     save_history(
         agent_id,
         kernel,
         &[json!({
             "kind": PAUSE,
             "paused_since": now_secs(),
-            "reason": payload.get("reason").cloned().unwrap_or(Value::Null),
+            "reason": reason,
         })],
     )
     .await?;
@@ -117,7 +128,7 @@ pub async fn pause(
 /// in order as if they had just arrived. Not paused: a no-op.
 pub async fn resume(
     agent_id: &AgentId,
-    payload: &Value,
+    note: Option<&str>,
     kernel: &Arc<Kernel>,
 ) -> Result<Value, BundleError> {
     let v = view(agent_id, kernel).await?;
@@ -127,7 +138,7 @@ pub async fn resume(
     let since = v.since.unwrap_or_else(now_secs);
     let secs = (now_secs() - since).max(0.0);
     let mut content = format!("[resumed after a pause of {secs:.0}s]");
-    if let Some(note) = payload.get("note").and_then(Value::as_str) {
+    if let Some(note) = note {
         content.push_str(&format!(" {note}"));
     }
     save_history(

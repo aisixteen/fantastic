@@ -1,10 +1,9 @@
-//! TEXT TYPED FROM A VERB'S SCHEMA — the one place text a caller wrote (a model's
-//! `<k>v</k>`, an operator's `k=v`) becomes the value the verb's declaration asks
-//! for. Which type a string stands for is the verb's own declaration: a `path` of
-//! `007` is the text `007`, a `limit` of `7` is the integer 7. There is no guessing
-//! rule and no coercion at the receiving end — the agent's entry
-//! ([`crate::verbs::Parse`]) takes only the declared types; a value that is not of
-//! the type it should be is left as written and refused there, by name.
+//! THE PARSER'S TEXT READER — where a text surface (a model's `<k>v</k>`, an operator's
+//! `k=v`) becomes the value the verb's schema declares. The surface has only text; the
+//! declaration says what each argument is, so the reader produces exactly that type or
+//! REFUSES the call by argument name: a `limit` of `7` is the integer 7, a `path` of
+//! `007` is the text `007`, a `limit` of `many` is a refusal. There is no guessing and no
+//! second try — the agent's entry ([`crate::verbs::Parse`]) takes only declared types.
 
 use crate::kernel::Kernel;
 use crate::verbs::{rows, Verb};
@@ -35,34 +34,39 @@ fn kinds(schema: &Value) -> Vec<&str> {
     out
 }
 
-/// The text `s` as the value the schema asks for, or `None` when the schema takes
-/// text (or any value) or `s` does not read as what it asks for.
-fn scalar(schema: &Value, s: &str) -> Option<Value> {
+/// The text `s` as the value the schema declares: text stays text where the schema
+/// takes text (or states nothing), a number or boolean is read where it declares one.
+/// `Err(want)` names the declared kind the text is not.
+fn read(schema: &Value, s: &str) -> Result<Value, String> {
     let ks = kinds(schema);
     if ks.is_empty() || ks.contains(&"string") {
-        return None;
+        return Ok(Value::String(s.to_string()));
     }
     let t = s.trim();
     if ks.contains(&"boolean") {
         match t {
-            "true" => return Some(Value::Bool(true)),
-            "false" => return Some(Value::Bool(false)),
+            "true" => return Ok(Value::Bool(true)),
+            "false" => return Ok(Value::Bool(false)),
             _ => {}
         }
     }
     if ks.contains(&"integer") && is_integer(t) {
         // exact digits, any width (the workspace keeps big integers whole)
-        return serde_json::from_str::<Number>(t).ok().map(Value::Number);
+        if let Ok(n) = serde_json::from_str::<Number>(t) {
+            return Ok(Value::Number(n));
+        }
     }
     if ks.contains(&"number") {
         if is_integer(t) {
-            return serde_json::from_str::<Number>(t).ok().map(Value::Number);
+            if let Ok(n) = serde_json::from_str::<Number>(t) {
+                return Ok(Value::Number(n));
+            }
         }
-        if let Ok(f) = t.parse::<f64>() {
-            return Number::from_f64(f).map(Value::Number);
+        if let Some(n) = t.parse::<f64>().ok().and_then(Number::from_f64) {
+            return Ok(Value::Number(n));
         }
     }
-    None
+    Err(ks.join(" or "))
 }
 
 fn is_integer(t: &str) -> bool {
@@ -72,45 +76,43 @@ fn is_integer(t: &str) -> bool {
         && (digits == "0" || !digits.starts_with('0'))
 }
 
-/// `v` typed by `schema`: leaves by [`scalar`], a list by its `items`, an object by
-/// its `properties`.
-#[must_use]
-pub fn typed(schema: &Value, v: &Value) -> Value {
+/// `v`, a value the text surface produced for the argument `name`, read by `schema`:
+/// leaves by [`read`], a list by its `items`, an object by its `properties`.
+fn read_value(verb: &str, name: &str, schema: &Value, v: &Value) -> Result<Value, Value> {
     match v {
-        Value::String(s) => scalar(schema, s).unwrap_or_else(|| v.clone()),
+        Value::String(s) => read(schema, s).map_err(|want| crate::refusal::bad(verb, name, &want)),
         Value::Array(items) => {
             let it = schema.get("items").cloned().unwrap_or(Value::Null);
-            Value::Array(items.iter().map(|x| typed(&it, x)).collect())
+            items
+                .iter()
+                .map(|x| read_value(verb, name, &it, x))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::Array)
         }
         Value::Object(m) => {
             let props = schema.get("properties").and_then(Value::as_object);
-            Value::Object(
-                m.iter()
-                    .map(|(k, x)| {
-                        let p = props.and_then(|p| p.get(k)).cloned().unwrap_or(Value::Null);
-                        (k.clone(), typed(&p, x))
-                    })
-                    .collect::<Map<String, Value>>(),
-            )
+            let mut out = Map::new();
+            for (k, x) in m {
+                let p = props.and_then(|p| p.get(k)).cloned().unwrap_or(Value::Null);
+                out.insert(k.clone(), read_value(verb, k, &p, x)?);
+            }
+            Ok(Value::Object(out))
         }
-        other => other.clone(),
+        other => Ok(other.clone()),
     }
 }
 
-/// One `k=v` an OPERATOR typed, as the value the argument's schema asks for: a JSON
-/// literal where it asks for a list or an object, else [`typed`] text.
-#[must_use]
-pub fn operator_text(schema: &Value, text: &str) -> Value {
+/// One `k=v` an OPERATOR typed, as the value the argument's schema declares: a JSON
+/// literal where it declares a list or an object, else the [`read`] text.
+fn operator_text(verb: &str, name: &str, schema: &Value, text: &str) -> Result<Value, Value> {
     let ks = kinds(schema);
     let wants = |k: &str| ks.contains(&k);
-    let looks_json = (text.starts_with('{') && text.ends_with('}') && wants("object"))
-        || (text.starts_with('[') && text.ends_with(']') && wants("array"));
-    if looks_json {
-        if let Ok(parsed) = serde_json::from_str::<Value>(text) {
-            return typed(schema, &parsed);
-        }
+    if (wants("object") && !wants("string")) || (wants("array") && !wants("string")) {
+        let parsed = serde_json::from_str::<Value>(text)
+            .map_err(|_| crate::refusal::bad(verb, name, &ks.join(" or ")))?;
+        return read_value(verb, name, schema, &parsed);
     }
-    typed(schema, &Value::String(text.to_string()))
+    read_value(verb, name, schema, &Value::String(text.to_string()))
 }
 
 /// The schema of the verb `verb` of `target`, as an object schema: its `properties` are
@@ -189,15 +191,20 @@ pub fn verb_schema(
     Some(schema)
 }
 
-/// The payload of a call to `target`, its values typed by the schema of the verb it
-/// names; a target or verb not declared here leaves the text as written.
-pub fn payload(kernel: &Arc<Kernel>, target: &str, payload: &mut Map<String, Value>) {
+/// The payload of a call to `target`, its values read by the schema of the verb it
+/// names; a target or verb not declared here leaves the text as written. `Err` is the
+/// refusal naming the argument that is not what its declaration asks for.
+pub fn payload(
+    kernel: &Arc<Kernel>,
+    target: &str,
+    payload: &mut Map<String, Value>,
+) -> Result<(), Value> {
     let Some(verb) = payload
         .get("type")
         .and_then(Value::as_str)
         .map(str::to_string)
     else {
-        return;
+        return Ok(());
     };
     let args: Map<String, Value> = payload
         .iter()
@@ -205,26 +212,31 @@ pub fn payload(kernel: &Arc<Kernel>, target: &str, payload: &mut Map<String, Val
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let Some(schema) = verb_schema(kernel, target, &verb, &args) else {
-        return;
+        return Ok(());
     };
-    if let Value::Object(done) = typed(&schema, &Value::Object(args)) {
+    if let Value::Object(done) = read_value(&verb, "", &schema, &Value::Object(args))? {
         for (k, v) in done {
             payload.insert(k, v);
         }
     }
+    Ok(())
 }
 
-/// The payload of a one-shot call an OPERATOR typed as `k=v` pairs: each value takes the
-/// type its argument's declaration asks for ([`operator_text`]); an agent or verb not
-/// declared here leaves the text as written, and the target refuses a wrongly typed
-/// value by name.
-#[must_use]
+/// A routing field of a call (not an argument of its verb) read as `kind`
+/// (`"number"` or `"integer"`).
+pub fn routing(name: &str, kind: &str, v: &Value) -> Result<Value, Value> {
+    read_value("send", name, &serde_json::json!({ "type": kind }), v)
+}
+
+/// The payload of a one-shot call an OPERATOR typed as `k=v` pairs: each value is read as
+/// its argument's declaration asks ([`operator_text`]); an agent or verb not declared
+/// here leaves the text as written. `Err` names the argument that is not its type.
 pub fn operator_payload(
     kernel: &Arc<Kernel>,
     target: &str,
     verb: &str,
     pairs: &[(String, String)],
-) -> Map<String, Value> {
+) -> Result<Map<String, Value>, Value> {
     let text: Map<String, Value> = pairs
         .iter()
         .map(|(k, v)| (k.clone(), Value::String(v.clone())))
@@ -239,9 +251,9 @@ pub fn operator_payload(
             .and_then(|p| p.get(k))
             .cloned()
             .unwrap_or(Value::Null);
-        out.insert(k.clone(), operator_text(&prop, v));
+        out.insert(k.clone(), operator_text(verb, k, &prop, v)?);
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -261,23 +273,26 @@ mod tests {
         let args = json!({"limit": "7", "ratio": "1.5", "force": "true", "path": "007",
                           "ids": ["1", "2"]});
         assert_eq!(
-            typed(&schema, &args),
+            read_value("v", "", &schema, &args).unwrap(),
             json!({"limit": 7, "ratio": 1.5, "force": true, "path": "007", "ids": [1, 2]})
         );
     }
 
     #[test]
-    fn text_that_is_not_the_type_stays_text_for_the_target_to_refuse() {
+    fn text_that_is_not_the_type_is_refused_by_argument_name() {
         let schema =
             json!({"properties": {"limit": {"type": "integer"}, "force": {"type": "boolean"}}});
-        let args = json!({"limit": "many", "force": "True"});
-        assert_eq!(typed(&schema, &args), args);
+        let e = read_value("v", "", &schema, &json!({"limit": "many"})).unwrap_err();
+        assert_eq!(e["arg"], json!("limit"));
+        assert_eq!(e["reason"], json!("bad_arg"));
+        assert!(read_value("v", "", &schema, &json!({"force": "True"})).is_err());
         // a leading zero is not an integer's spelling; an enum of text stays text
         let schema =
             json!({"properties": {"n": {"type": "integer"}, "tier": {"enum": ["1", "2"]}}});
+        assert!(read_value("v", "", &schema, &json!({"n": "007"})).is_err());
         assert_eq!(
-            typed(&schema, &json!({"n": "007", "tier": "1"})),
-            json!({"n": "007", "tier": "1"})
+            read_value("v", "", &schema, &json!({"tier": "1"})).unwrap(),
+            json!({"tier": "1"})
         );
     }
 
@@ -307,9 +322,9 @@ mod tests {
                 .collect()
         };
         // an integer where `list_agents` declares one, text where `docs` declares text
-        let p = operator_payload(&kernel, "kernel", "list_agents", &pairs(&[("limit", "7")]));
+        let p = operator_payload(&kernel, "kernel", "list_agents", &pairs(&[("limit", "7")])).unwrap();
         assert_eq!(p["limit"], json!(7));
-        let p = operator_payload(&kernel, "kernel", "docs", &pairs(&[("of", "7")]));
+        let p = operator_payload(&kernel, "kernel", "docs", &pairs(&[("of", "7")])).unwrap();
         assert_eq!(p["of"], json!("7"));
         // a list only where the verb declares one
         let p = operator_payload(
@@ -317,7 +332,7 @@ mod tests {
             "kernel",
             "await_set",
             &pairs(&[("ids", r#"["a","b"]"#), ("timeout_s", "2.5")]),
-        );
+        ).unwrap();
         assert_eq!(p["ids"], json!(["a", "b"]));
         assert_eq!(p["timeout_s"], json!(2.5));
         // the fields of the record a create or update concerns are typed by ITS declaration
@@ -330,7 +345,7 @@ mod tests {
                 ("allow", r#"["."]"#),
                 ("root", "12"),
             ]),
-        );
+        ).unwrap();
         assert_eq!(p["allow"], json!(["."]));
         assert_eq!(p["root"], json!("12"));
         let p = operator_payload(
@@ -338,26 +353,30 @@ mod tests {
             "kernel",
             "update_agent",
             &pairs(&[("id", "kernel_state"), ("delete_lock", "true")]),
-        );
+        ).unwrap();
         assert_eq!(p["delete_lock"], json!(true));
         // a verb the agent does not declare types nothing
-        let p = operator_payload(&kernel, "kernel", "make_tea", &pairs(&[("limit", "7")]));
+        let p = operator_payload(&kernel, "kernel", "make_tea", &pairs(&[("limit", "7")])).unwrap();
         assert_eq!(p["limit"], json!("7"));
-        let p = operator_payload(&kernel, "nobody", "list_agents", &pairs(&[("limit", "7")]));
+        let p = operator_payload(&kernel, "nobody", "list_agents", &pairs(&[("limit", "7")])).unwrap();
         assert_eq!(p["limit"], json!("7"));
     }
 
     #[test]
     fn an_operators_text_is_json_only_where_the_schema_asks_for_a_list_or_object() {
         let list = json!({"type": "array", "items": {"type": "integer"}});
-        assert_eq!(operator_text(&list, "[1,2]"), json!([1, 2]));
+        assert_eq!(operator_text("v", "a", &list, "[1,2]").unwrap(), json!([1, 2]));
+        assert!(operator_text("v", "a", &list, "one").is_err());
         let text = json!({"type": "string"});
-        assert_eq!(operator_text(&text, "[1,2]"), json!("[1,2]"));
-        assert_eq!(operator_text(&json!({"type": "integer"}), "42"), json!(42));
+        assert_eq!(operator_text("v", "a", &text, "[1,2]").unwrap(), json!("[1,2]"));
         assert_eq!(
-            operator_text(&json!({"type": "boolean"}), "true"),
+            operator_text("v", "a", &json!({"type": "integer"}), "42").unwrap(),
+            json!(42)
+        );
+        assert_eq!(
+            operator_text("v", "a", &json!({"type": "boolean"}), "true").unwrap(),
             json!(true)
         );
-        assert_eq!(operator_text(&Value::Null, "42"), json!("42"));
+        assert_eq!(operator_text("v", "a", &Value::Null, "42").unwrap(), json!("42"));
     }
 }

@@ -333,13 +333,11 @@ fn tokens(w: u32, h: u32) -> u64 {
 pub(crate) async fn attach(
     agent_id: &AgentId,
     kernel: &Arc<Kernel>,
-    specs: Option<&Value>,
+    specs: Option<&[crate::declared::Image]>,
 ) -> Result<Option<Attached>, String> {
     let list = match specs {
-        None | Some(Value::Null) => return Ok(None),
-        Some(Value::Array(a)) if a.is_empty() => return Ok(None),
-        Some(Value::Array(a)) => a,
-        Some(_) => return Err("send: `images` must be a list of {path | ref}".to_string()),
+        None | Some([]) => return Ok(None),
+        Some(a) => a,
     };
     let meta = crate::helpers::agent_meta(agent_id, kernel);
     let limits = limits(&meta);
@@ -354,14 +352,8 @@ pub(crate) async fn attach(
     let mut info = Vec::new();
     for (i, spec) in list.iter().enumerate() {
         let at = format!("send: images[{i}]");
-        let path = spec
-            .get("path")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty());
-        let named = spec
-            .get("ref")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty());
+        let path = spec.path.as_deref().filter(|s| !s.is_empty());
+        let named = spec.image_ref.as_deref().filter(|s| !s.is_empty());
         let (raw, name, from_ref) = match (path, named) {
             (Some(p), None) => {
                 let bridge = meta

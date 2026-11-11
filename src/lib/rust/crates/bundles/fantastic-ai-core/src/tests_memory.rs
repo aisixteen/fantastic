@@ -137,7 +137,7 @@ async fn a_turn_records_what_the_endpoint_reported() {
     let out = crate::verbs::send(
         provider,
         &ai,
-        &json!({"type": "send", "text": "hello"}),
+        &serde_json::from_value(json!({"text": "hello"})).expect("a send"),
         &kernel,
         CFG,
     )
@@ -276,7 +276,7 @@ async fn a_turns_rows_are_minted_when_appended_so_id_order_is_append_order() {
     let out = crate::verbs::send(
         provider,
         &ai,
-        &json!({"type": "send", "text": "hello"}),
+        &serde_json::from_value(json!({"text": "hello"})).expect("a send"),
         &kernel,
         CFG,
     )

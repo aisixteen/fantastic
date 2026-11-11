@@ -981,7 +981,11 @@ async fn keep_note(
     self_id: &AgentId,
     call: &crate::tool_parse::ToolCall,
 ) -> Option<String> {
-    let of = call.arguments.get("of").and_then(crate::retrieval::as_id);
+    let of = call
+        .arguments
+        .get("of")
+        .and_then(Value::as_str)
+        .and_then(crate::retrieval::id_text);
     let summary = call.arguments.get("summary").map(py_str);
     let (Some(of), Some(summary)) = (of, summary) else {
         return Some(
@@ -1567,12 +1571,57 @@ async fn route_reply_gated(
         // per-client, and a call the MODEL makes belongs to the client whose
         // turn it is — without this, a model-issued `grep` lands on the default
         // client and returns `total=0` against a store full of matches.
-        if target == self_id.as_str() && !payload.contains_key("client_id") {
+        if target == self_id.as_str()
+            && !payload.contains_key("client_id")
+            && payload
+                .get("type")
+                .and_then(Value::as_str)
+                .and_then(|verb| {
+                    fantastic_kernel::typing::verb_schema(&kernel, target, verb, &Map::new())
+                })
+                .is_some_and(|schema| schema["properties"].get("client_id").is_some())
+        {
             payload.insert("client_id".to_string(), json!(client_id));
         }
         // THE PARSER READ TEXT: each value takes the type the target verb's schema
         // states (a `limit` of `7` is the integer 7, a `path` of `007` stays text).
-        crate::tool_parse::typed::payload(&kernel, target, &mut payload);
+        if let Err(refused) = crate::tool_parse::typed::payload(&kernel, target, &mut payload) {
+            if let Some(rt) = reply_to {
+                units.push(Unit {
+                    dest: rt,
+                    target: target.to_string(),
+                    verb: "-".to_string(),
+                    idx: None,
+                    body: Some(crate::tool_parse::render_reply(&refused)),
+                    title: None,
+                });
+            }
+            continue;
+        }
+        // The call's own bounds are read as the numbers they are, or the call is refused.
+        let (timeout_read, retries_read) = match (
+            args.get("timeout")
+                .map(|t| crate::tool_parse::typed::routing("timeout", t))
+                .transpose(),
+            args.get("retries")
+                .map(|r| crate::tool_parse::typed::routing("retries", r))
+                .transpose(),
+        ) {
+            (Ok(t), Ok(r)) => (t, r),
+            (Err(refused), _) | (_, Err(refused)) => {
+                if let Some(rt) = reply_to {
+                    units.push(Unit {
+                        dest: rt,
+                        target: target.to_string(),
+                        verb: "-".to_string(),
+                        idx: None,
+                        body: Some(crate::tool_parse::render_reply(&refused)),
+                        title: None,
+                    });
+                }
+                continue;
+            }
+        };
         // python `payload.get("type", "?")`, then `str()` into the reply tag: a
         // NON-STRING type tags the reply with its own text (`… a 42 …`,
         // `… a True …`, `… a {'a': 'x'} …`), and `?` means the key was ABSENT.
@@ -1673,16 +1722,17 @@ async fn route_reply_gated(
         if let Some(id) = args.get("exec_id") {
             item = item.with_raw_id(id.clone());
         }
-        if let Some(t) = args.get("timeout") {
-            item = item.with_raw_timeout(crate::tool_parse::typed::routing("timeout", t));
+        if let Some(t) = &timeout_read {
+            item = item.with_raw_timeout(t.clone());
         }
-        if let Some(r) = args.get("retries") {
-            item = item.with_raw_retries(crate::tool_parse::typed::routing("retries", r));
+        if let Some(r) = &retries_read {
+            item = item.with_raw_retries(r.clone());
         }
         items.push(item);
         deadlines.push(
-            args.get("timeout")
-                .map(|t| py_str(&crate::tool_parse::typed::routing("timeout", t)))
+            timeout_read
+                .as_ref()
+                .map(py_str)
                 .unwrap_or_else(|| fantastic_bundle::py_float_repr(send_timeout)),
         );
         // Fire-and-forget: it acted, nobody awaits the answer. Deliberately

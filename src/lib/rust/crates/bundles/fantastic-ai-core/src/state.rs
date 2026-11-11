@@ -4,7 +4,6 @@
 //! (built per agent) is the only per-backend seam.
 
 use crate::helpers::{now_secs, safe_client};
-use fantastic_bundle::py_truthy;
 use fantastic_kernel::AgentId;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -389,22 +388,16 @@ fn current_out(c: &CurrentEntry, requesting: Option<&str>) -> Value {
 }
 
 /// Build the `status` verb reply (privacy-filtered).
-pub fn status_snapshot(agent_id: &AgentId, payload: &Value) -> Value {
-    // PYTHON TRUTHINESS DECIDES, and the reply ECHOES what it decided on:
-    // `cid = payload.get("client_id"); if cid: cid = _safe_client(cid)`. An
-    // EMPTY string is falsy — it takes the redacted branch and comes back as
-    // `''`. Rust ran `safe_client` unconditionally, so `''` became `'cli'` and a
-    // caller asking for the redacted view was answered as if it were `cli`.
-    let raw_client = payload.get("client_id").cloned().unwrap_or(Value::Null);
-    let requesting = if py_truthy(&raw_client) {
-        // `str(client_id)` for a truthy non-string (python).
-        Some(safe_client(&fantastic_bundle::py_str(&raw_client)))
-    } else {
-        None
-    };
-    let echoed_client = match &requesting {
-        Some(c) => json!(c),
-        None => raw_client,
+pub fn status_snapshot(agent_id: &AgentId, client_id: Option<&str>) -> Value {
+    // A CLIENT THAT NAMES ITSELF gets its own entries in full; an EMPTY or absent one
+    // takes the redacted branch and the reply echoes what it sent.
+    let requesting = client_id
+        .filter(|c| !c.is_empty())
+        .map(safe_client);
+    let echoed_client = match (&requesting, client_id) {
+        (Some(c), _) => json!(c),
+        (None, Some(raw)) => json!(raw),
+        (None, None) => Value::Null,
     };
     let state = state_for(agent_id);
     let cur = state.current_meta.lock().expect("current poisoned").clone();

@@ -29,7 +29,7 @@ use crate::strategies::ProjectionCtx;
 use crate::think::without_thinking;
 use crate::view::{apply_res, res_of};
 use fantastic_bundle::{
-    py_int, py_int_or, py_split_whitespace, py_splitlines, py_str, py_strip, py_truthy,
+    py_split_whitespace, py_splitlines, py_str, py_strip, py_truthy,
 };
 use fantastic_kernel::{AgentId, Kernel};
 use futures_util::StreamExt;
@@ -37,30 +37,24 @@ use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// A message id as an int — an int, or its decimal string (a model quotes what
-/// it copied out of a tag). Anything else is not an id. Python `_as_id`.
-///
-/// THE TWO BRANCHES DIFFER ON PURPOSE: an int must be POSITIVE, a digit string
-/// need not be (`'0'` → 0, which a lookup then answers as a readable not_found).
-/// The string is python-stripped and its digits are ASCII only (python's
-/// `isascii() and isdigit()`): `'٣'` and `'²'` are not ids, and `'+5'` is not a
-/// digit string either.
+/// A message id from a JSON number: a positive integer, nothing else.
 #[must_use]
 pub fn as_id(x: &Value) -> Option<i64> {
     match x {
-        Value::Bool(_) => None,
-        // python: a float is not an `int`.
-        Value::Number(n) if n.is_f64() => None,
-        Value::Number(n) => n.as_i64().filter(|&i| i > 0),
-        Value::String(s) => {
-            let t = py_strip(s);
-            if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
-                py_int(&Value::String(t.to_string())).ok()
-            } else {
-                None
-            }
-        }
+        Value::Number(n) if !n.is_f64() => n.as_i64().filter(|&i| i > 0),
         _ => None,
+    }
+}
+
+/// A message id the model WROTE as text (a pid or id it copied out of a tag): ASCII
+/// digits only, whitespace around them ignored.
+#[must_use]
+pub fn id_text(text: &str) -> Option<i64> {
+    let t = py_strip(text);
+    if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
+        t.parse::<i64>().ok()
+    } else {
+        None
     }
 }
 
@@ -82,47 +76,17 @@ fn bad_arg(msg: &str, arg: &str) -> Value {
 /// is measured against.
 pub async fn grep(
     agent_id: &AgentId,
-    payload: &Value,
+    args: &crate::declared::Grep,
     kernel: &Arc<Kernel>,
     model_window: i64,
 ) -> MemResult<Value> {
-    let null = Value::Null;
-    // python `str(payload.get("query") or "").strip().lower()` — a NUMERIC query
-    // is its digits, not "no query".
-    let raw_q = payload.get("query").unwrap_or(&null);
-    let q = py_strip(&if py_truthy(raw_q) {
-        py_str(raw_q)
-    } else {
-        String::new()
-    })
-    .to_lowercase();
+    let q = py_strip(&args.query).to_lowercase();
     if q.is_empty() {
         return Ok(bad_arg("grep: `query` is required", "query"));
     }
-    // python `int(payload.get(k) or dflt)`, each knob under its OWN try.
-    let num = |k: &str, dflt: i64| py_int_or(payload.get(k).unwrap_or(&null), dflt);
-    let limit = num("limit", 100).map_or(100, |l| l.clamp(1, 100)) as usize;
-    let width = num("width", 200).map_or(200, |w| w.clamp(20, 20_000)) as usize;
-
-    let ids: Option<Vec<i64>> = match payload.get("ids") {
-        None | Some(Value::Null) => None,
-        Some(Value::Array(a)) => {
-            let parsed: Vec<Option<i64>> = a.iter().map(as_id).collect();
-            if parsed.iter().any(Option::is_none) {
-                return Ok(bad_arg(
-                    "grep: `ids` must be a list of message ids / pids (ints)",
-                    "ids",
-                ));
-            }
-            Some(parsed.into_iter().flatten().collect())
-        }
-        Some(_) => {
-            return Ok(bad_arg(
-                "grep: `ids` must be a list of message ids / pids (ints)",
-                "ids",
-            ))
-        }
-    };
+    let limit = args.limit.unwrap_or(100).clamp(1, 100) as usize;
+    let width = args.width.unwrap_or(200).clamp(20, 20_000) as usize;
+    let ids: Option<Vec<i64>> = args.ids.clone();
 
     let mut matches: Vec<Value> = Vec::new();
     let mut total = 0usize;
@@ -165,7 +129,7 @@ pub async fn grep(
             }
             let c = m.get("content").and_then(Value::as_str).unwrap_or("");
             for block in reply_blocks(c) {
-                if let Some(p) = pid_of(block).and_then(|t| as_id(&Value::String(t.to_string()))) {
+                if let Some(p) = pid_of(block).and_then(id_text) {
                     reach.insert(p);
                 }
             }
@@ -289,7 +253,7 @@ async fn compose(provider: &Arc<dyn Provider>, prompt: &str) -> String {
 /// `{cleared, rows}`. Mirrors python `_context_clear`.
 pub async fn context_clear(
     agent_id: &AgentId,
-    payload: &Value,
+    why: Option<&str>,
     kernel: &Arc<Kernel>,
     model_window: i64,
 ) -> MemResult<Value> {
@@ -304,14 +268,7 @@ pub async fn context_clear(
         })
         .filter_map(|r| r.get("id").and_then(Value::as_i64))
         .collect();
-    // python `" ".join(str(payload.get("why") or "").split())[:200]`.
-    let raw = payload.get("why").cloned().unwrap_or(Value::Null);
-    let text = if py_truthy(&raw) {
-        py_str(&raw)
-    } else {
-        String::new()
-    };
-    let why: String = py_split_whitespace(&text)
+    let why: String = py_split_whitespace(why.unwrap_or(""))
         .join(" ")
         .chars()
         .take(200)
@@ -398,7 +355,7 @@ fn is_boundary(row: &Value) -> bool {
 /// as an automatic fold does).
 pub async fn context_fold(
     agent_id: &AgentId,
-    payload: &Value,
+    args: &crate::declared::ContextFold,
     kernel: &Arc<Kernel>,
     provider: &Arc<dyn Provider>,
     model_window: i64,
@@ -432,23 +389,12 @@ pub async fn context_fold(
             return Ok(v);
         }
     };
-    // `from` / `to`: absent or null is the default; anything else must be an id.
-    let id_arg = |key: &str| -> Result<Option<i64>, Value> {
-        match payload.get(key).filter(|v| !v.is_null()) {
-            None => Ok(None),
-            Some(raw) => as_id(raw)
-                .map(Some)
-                .ok_or_else(|| bad(verb, key, "a row id (int)")),
-        }
-    };
-    let (from, to) = match (id_arg("from"), id_arg("to")) {
-        (Ok(f), Ok(t)) => (f, t),
-        (Err(e), _) | (_, Err(e)) => return Ok(e),
-    };
-    // `summary`: absent or null writes the summarizer's; a given one is the text.
-    let summary = match payload.get("summary").filter(|v| !v.is_null()) {
+    // `from` / `to`: absent is the default.
+    let (from, to) = (args.from, args.to);
+    // `summary`: absent writes the summarizer's; a given one is the text.
+    let summary = match args.summary.as_deref() {
         None => None,
-        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.as_str()),
+        Some(s) if !s.trim().is_empty() => Some(s),
         Some(_) => return Ok(bad(verb, "summary", "a non-empty string")),
     };
     let rows = load_history(agent_id, kernel, false).await?;
@@ -575,22 +521,11 @@ pub async fn context_fold(
 /// The memory store refused a read, the append or the prune.
 pub async fn context_forget(
     agent_id: &AgentId,
-    payload: &Value,
+    include_cleared: bool,
     kernel: &Arc<Kernel>,
 ) -> MemResult<Value> {
     use crate::folds::{anchors_of, chains, is_fold, is_open, recorded_anchors, refs_of};
     use crate::memory::{refresh_head, rows_of, BOOKKEEPING, TURN_ROLES};
-    let include_cleared = match payload.get("include_cleared") {
-        None => false,
-        Some(Value::Bool(b)) => *b,
-        Some(_) => {
-            return Ok(fantastic_kernel::refusal::bad(
-                "context_forget",
-                "include_cleared",
-                "a bool",
-            ))
-        }
-    };
     let st = crate::state::state_for(agent_id);
     let lock = Arc::clone(&st.lock);
     let _turn = lock.lock().await;
@@ -798,7 +733,7 @@ pub(crate) fn standing(view: &[Value]) -> Vec<usize> {
 /// `{kept, expanded, dropped, folded, budget, why, degraded}`.
 pub async fn context_recall(
     agent_id: &AgentId,
-    payload: &Value,
+    dry: bool,
     kernel: &Arc<Kernel>,
     provider: Option<&Arc<dyn Provider>>,
     model_window: i64,
@@ -821,10 +756,6 @@ pub async fn context_recall(
     let body_budget = (agent_budget(&meta, model_window) - sys_tokens - NOTICE_ENVELOPE_RESERVE)
         .max(BUDGET_FLOOR);
     let target = (body_budget as f64 * LOW) as i64;
-    // PYTHON TRUTHINESS: `dry:1`, `dry:"false"` and `dry:[0]` are all dry.
-    // `as_bool` accepted only a JSON `true`, so a model that wrote `1` got a
-    // model call it had asked not to make.
-    let dry = payload.get("dry").is_some_and(py_truthy);
     let provider = provider.filter(|_| !dry);
     // A HEAD LONGER THAN THE BUDGET FOLDS FIRST. A store
     // written under a larger window — another model, a planted past — is folded

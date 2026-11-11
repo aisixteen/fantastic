@@ -121,6 +121,7 @@ pub mod agent_loop;
 pub mod assembly;
 pub mod caching;
 pub mod chat_bundle;
+pub mod declared;
 pub mod call_check;
 pub mod constants;
 pub mod context;
@@ -141,7 +142,7 @@ pub mod remote_provider;
 pub mod retrieval;
 pub mod route;
 mod row_attrs;
-pub mod schema;
+pub mod record;
 pub mod state;
 pub mod strategies;
 pub mod stream_parts;
@@ -156,10 +157,12 @@ pub use helpers::DEFAULT_CLIENT_ID;
 pub use provider::{Provider, ProviderEvent, ProviderStream};
 pub use route::route_reply;
 pub use think::{without_thinking, ThinkWrap, THINK_CLOSE, THINK_OPEN};
-pub use verbs::{CANCEL_DOC, SEND_TIMEOUT_SECS};
+pub use verbs::SEND_TIMEOUT_SECS;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_decl;
 #[cfg(test)]
 mod tests_context_none;
 #[cfg(test)]

@@ -1,6 +1,6 @@
 //! The split: a chat completes through a provider agent it knows only by id.
 use super::*;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 
 /// A provider agent: `complete` streams the words of its record's `say`.
 struct Echo;
@@ -22,12 +22,34 @@ impl Provider for Words {
     }
 }
 
+mod provider_verbs {
+    use crate::declared::{Complete, Models, SetDefaultModel};
+    fantastic_kernel::verbs! {
+        "complete" => Complete,
+        "models" => Models,
+        "set_default_model" => SetDefaultModel,
+    }
+}
+
 #[async_trait]
-impl Bundle for Echo {
+impl Handler for Echo {
+    type Call = provider_verbs::Call;
     fn name(&self) -> &str {
         "echo"
     }
-    async fn handle(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
+    fn man(&self) -> &'static str {
+        "A provider stand-in that streams a fixed answer."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        provider_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, a: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        provider_verbs::dynamic_verbs(a)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &crate::tests_decl::any::RECORD
+    }
+    async fn handle(&self, id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
         // the record's `cache_read` / `cache_write` are what the endpoint reports
         let build = |m: Map<String, Value>| -> Arc<dyn Provider> {
             let report = crate::provider::ProviderReport {
@@ -39,7 +61,13 @@ impl Bundle for Echo {
             };
             Arc::new(Words(vec!["hel".into(), "lo".into()], report))
         };
-        Ok(provider_verbs(id, payload, kernel, build, NO_LIVE).await)
+        use provider_verbs::Call;
+        Ok(Some(match call {
+            Call::Reflect(_) => json!({"id": id.as_str()}),
+            Call::Complete(a) => crate::remote_provider::complete_verb(id, &a, kernel, build).await,
+            Call::Models(_) => crate::remote_provider::models_verb(id, kernel, NO_LIVE).await,
+            Call::SetDefaultModel(a) => crate::remote_provider::set_default_verb(id, &a, kernel).await,
+        }))
     }
 }
 

@@ -13,6 +13,8 @@ fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
 # `getentropy` — the OS CSPRNG behind python's `secrets` module.

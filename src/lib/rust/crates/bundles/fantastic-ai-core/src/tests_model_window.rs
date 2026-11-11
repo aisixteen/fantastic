@@ -36,31 +36,6 @@ fn an_unnamed_window_is_the_backends_own() {
     );
 }
 
-#[test]
-fn the_schema_defaults_context_window_to_the_backends_window() {
-    let at = |s: &Value| {
-        s["fields"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|f| f["name"] == json!("context_window"))
-            .unwrap()["default"]
-            .clone()
-    };
-    assert_eq!(
-        at(&crate::schema::schema_with_window(vec![], 4096)),
-        json!(4096)
-    );
-    assert_eq!(
-        at(&crate::schema::schema(vec![])),
-        json!(DEFAULT_CONTEXT_WINDOW)
-    );
-    // otherwise the same fields, byte for byte
-    let a = crate::schema::schema(vec![]).to_string();
-    let b = crate::schema::schema_with_window(vec![], DEFAULT_CONTEXT_WINDOW).to_string();
-    assert_eq!(a, b);
-}
-
 struct Quiet;
 
 #[async_trait]

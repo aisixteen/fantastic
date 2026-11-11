@@ -231,7 +231,7 @@ pub async fn run_generation(
     if due {
         crate::retrieval::context_recall(
             self_id,
-            &json!({}),
+            false,
             kernel,
             Some(provider),
             cfg.model_window,
