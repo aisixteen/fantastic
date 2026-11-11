@@ -135,6 +135,11 @@ def ensure_runtime(repo, name: str) -> dict:
     return spec
 
 
+def excluded(name: str) -> bool:
+    """True when the run left runtime `name` out (`run.py --exclude-runtime`)."""
+    return name in os.environ.get("E2E_EXCLUDE_RUNTIME", "").split(",")
+
+
 #: The record store's id (`seed`).
 RECORDS = "records"
 
