@@ -46,7 +46,7 @@ use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub mod server;
 
@@ -238,21 +238,30 @@ impl Images {
     }
 }
 
-/// The images that arrived on the binary path, kept until their `complete` takes them:
-/// `(this provider agent, rid)` → the images of that request.
-fn stash() -> &'static Mutex<HashMap<(String, String), Images>> {
-    static STASH: OnceLock<Mutex<HashMap<(String, String), Images>>> = OnceLock::new();
+/// The images that arrived on the binary path, kept until their `complete` takes them
+/// (every `complete` does, whatever its outcome): `(this provider agent, rid)` → when
+/// the last image arrived, and the images of that request. An entry whose `complete`
+/// never came is dropped once it is older than the request timeout.
+type Stash = HashMap<(String, String), (Instant, Images)>;
+
+fn stash() -> &'static Mutex<Stash> {
+    static STASH: OnceLock<Mutex<Stash>> = OnceLock::new();
     STASH.get_or_init(Mutex::default)
 }
 
 /// Keep one image's bytes for the request `rid` of this provider.
 fn stash_image(agent: &str, rid: &str, image_ref: &Value, media_type: &str, bytes: Vec<u8>) {
-    stash()
-        .lock()
-        .expect("image stash poisoned")
+    let max_age = Duration::from_secs_f64(fantastic_ai_core::constants::SEND_TIMEOUT_SECS);
+    let now = Instant::now();
+    let mut held = stash().lock().expect("image stash poisoned");
+    held.retain(|_, (at, _)| now.duration_since(*at) < max_age);
+    let entry = held
         .entry((agent.to_string(), rid.to_string()))
-        .or_default()
-        .0
+        .or_insert_with(|| (now, Images::default()));
+    entry.0 = now;
+    entry
+        .1
+         .0
         .insert(ref_key(image_ref), (media_type.to_string(), bytes));
 }
 
@@ -262,6 +271,7 @@ fn take_images(agent: &str, rid: &str) -> Images {
         .lock()
         .expect("image stash poisoned")
         .remove(&(agent.to_string(), rid.to_string()))
+        .map(|(_, images)| images)
         .unwrap_or_default()
 }
 
@@ -2141,6 +2151,17 @@ impl Bundle for AnthropicBundle {
             }
             return Ok(Some(out));
         }
+        // A `complete` takes its request's images out of the stash here, before any
+        // path that can refuse or fail it, so none keeps them.
+        let images = if verb == "complete" {
+            payload
+                .get("rid")
+                .and_then(Value::as_str)
+                .map(|rid| take_images(agent_id.as_str(), rid))
+                .unwrap_or_default()
+        } else {
+            Images::default()
+        };
         // A verb that runs a turn first reads what the record leaves to the API; an
         // API that does not answer refuses the verb, naming the field.
         if server::TURN_VERBS.contains(&verb) {
@@ -2162,14 +2183,7 @@ impl Bundle for AnthropicBundle {
             agent_id,
             payload,
             kernel,
-            |m| {
-                let images = payload
-                    .get("rid")
-                    .and_then(Value::as_str)
-                    .map(|rid| take_images(agent_id.as_str(), rid))
-                    .unwrap_or_default();
-                build_provider_with(agent_id, kernel, m, caller_of(payload), images)
-            },
+            |m| build_provider_with(agent_id, kernel, m, caller_of(payload), images.clone()),
             Some(|| async {
                 let meta = helpers::agent_meta(agent_id, kernel);
                 let endpoint = meta

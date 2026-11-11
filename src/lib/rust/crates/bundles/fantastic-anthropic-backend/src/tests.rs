@@ -2848,6 +2848,93 @@ async fn image_bytes_on_the_binary_path_reach_the_wire_as_base64() {
     );
 }
 
+fn stashed(agent: &str, rid: &str) -> bool {
+    stash()
+        .lock()
+        .unwrap()
+        .contains_key(&(agent.to_string(), rid.to_string()))
+}
+
+async fn send_image(kernel: &Arc<Kernel>, agent: &str, rid: &str) {
+    let item = Item::new(
+        AgentId::from(agent),
+        json!({"type": "complete", "rid": rid, "image": {"ref": 5, "media_type": "image/png"}}),
+    )
+    .with_binary_key("data", vec![1, 2, 3]);
+    let r = kernel.send(vec![item]).await.remove(0).result;
+    assert_eq!(r["bytes"], json!(3), "{r}");
+    assert!(stashed(agent, rid));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_complete_refused_before_the_build_releases_its_images() {
+    let tmp = TempDir::new().unwrap();
+    // the model entry cannot be read: the pass is refused before any provider is built
+    let kernel = mk_with_id(&tmp, "http://unused.test/v1/messages", json!({}), "img3").await;
+    send_image(&kernel, "img3", "c~3").await;
+    let r = call(
+        &kernel,
+        "img3",
+        json!({"type": "complete", "rid": "c~3", "model": MODEL, "messages": [
+            {"role": "user", "content": "x", "images": [{"ref": 5}]}]}),
+    )
+    .await;
+    assert!(r.get("error").is_some(), "{r}");
+    assert!(!stashed("img3", "c~3"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_complete_that_errors_releases_its_images() {
+    let tmp = TempDir::new().unwrap();
+    let srv = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/models/{MODEL}")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            json!({"id": MODEL, "max_input_tokens": 200_000, "max_tokens": 1000}).to_string(),
+        ))
+        .mount(&srv)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("{}"))
+        .mount(&srv)
+        .await;
+    let kernel = mk_with_id(
+        &tmp,
+        &format!("{}/v1/messages", srv.uri()),
+        json!({}),
+        "img4",
+    )
+    .await;
+    send_image(&kernel, "img4", "c~4").await;
+    let r = call(
+        &kernel,
+        "img4",
+        json!({"type": "complete", "rid": "c~4", "model": MODEL, "messages": [
+            {"role": "user", "content": "x", "images": [{"ref": 5}]}]}),
+    )
+    .await;
+    assert!(r.get("error").is_some(), "{r}");
+    assert!(!stashed("img4", "c~4"));
+}
+
+#[test]
+fn an_entry_whose_complete_never_comes_is_dropped_after_the_request_timeout() {
+    let old = Instant::now()
+        .checked_sub(Duration::from_secs_f64(
+            fantastic_ai_core::constants::SEND_TIMEOUT_SECS + 1.0,
+        ))
+        .expect("an instant that far back");
+    stash()
+        .lock()
+        .unwrap()
+        .insert(("img5".into(), "c~old".into()), (old, Images::default()));
+    stash_image("img5", "c~new", &json!(1), "image/png", vec![1]);
+    assert!(!stashed("img5", "c~old"));
+    assert!(stashed("img5", "c~new"));
+    take_images("img5", "c~new");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_image_item_without_bytes_or_media_type_is_refused() {
     let tmp = TempDir::new().unwrap();
