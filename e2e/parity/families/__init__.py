@@ -62,6 +62,44 @@ def ai(**meta) -> dict:
     return {**meta, "memory_store_id": MEMORY, "can_call": can}
 
 
+#: THE AI AGENT: a chat (`ai_chat.tools`) completing through a provider agent
+#: (a `*_backend.tools`) its record names. The conversation's own fields sit on
+#: the chat; the endpoint, key, sampling and server fields on the provider.
+CHAT = "ai_chat.tools"
+CHAT_FIELDS = ("model", "context_window", "output_reserve", "context_strategy", "context_async",
+               "context_titles", "recent_n", "caching", "cache_primer_until", "transport_retries",
+               "misfire_limit", "system_prompt", "file_bridge_id", "system_prompt_file",
+               "pre_system_prompt", "post_system_prompt")
+#: What a chat may call on its provider, and the provider admits it for.
+COMPLETE = ["complete", "watch"]
+
+
+def ai_split(aid: str, kind: str, meta: dict) -> tuple[dict, dict]:
+    """The provider's and the chat's record fields (`id`, `handler_module` and
+    the grants included) for the AI `aid` that `meta` (an `ai(...)` record of
+    handler `kind`) describes as one agent: the provider `<aid>_provider` and the
+    chat `aid` naming it. The caller's `can_call` / `callable_by` are the chat's;
+    the provider is reached by the chat alone (and its parent)."""
+    pid = f"{aid}_provider"
+    chat = {k: v for k, v in meta.items() if k in CHAT_FIELDS or k in ("memory_store_id", "callable_by")}
+    chat["can_call"] = {**meta.get("can_call", BASE), pid: COMPLETE}
+    provider = {k: v for k, v in meta.items()
+                if k not in CHAT_FIELDS[2:] and k not in ("can_call", "callable_by")}
+    provider["can_call"] = {"$self": "*", MEMORY: "*"}
+    if "credentials" in meta:
+        provider["can_call"][meta["credentials"]["store"]] = ["get"]
+    provider["callable_by"] = {"$self": "*", "$parent": "*", aid: COMPLETE}
+    return ({"id": pid, "handler_module": kind, **provider},
+            {"id": aid, "handler_module": CHAT, "provider_id": pid, **chat})
+
+
+def ai_pair(aid: str, kind: str, meta: dict) -> list:
+    """[`ai_split`] as two roster rows `(id, handler, meta)`: provider, then chat."""
+    prov, chat = ai_split(aid, kind, meta)
+    return [(prov.pop("id"), prov.pop("handler_module"), prov),
+            (chat.pop("id"), chat.pop("handler_module"), chat)]
+
+
 @dataclass
 class Ctx:
     runtime: str

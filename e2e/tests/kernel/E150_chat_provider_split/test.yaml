@@ -1,0 +1,12 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: scripted OpenAI-compatible servers play the
+# model for an ai_chat.tools chat and its vllm_backend provider apart, on the Rust host (and a
+# second Rust kernel for the provider across a ws_bridge), driven over web_rest.
+id: chat_provider_split
+group: kernel
+title: "a chat and its provider apart: the chat answers send and holds the transcript, the provider none; the chat's provider_id swapped to another provider keeps the rows; a chat without complete/watch on its provider, and a provider that does not admit the chat, are refused by name; the provider on another kernel across the bridge"
+runner: probe.py
+runtimes: [rust]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300

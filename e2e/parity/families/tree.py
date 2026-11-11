@@ -24,7 +24,7 @@ import re
 import sys
 import time
 
-from families import MEMORY, OPEN, ROOT_ID, VLLM, ai, call, save_kernel_log, vllm
+from families import MEMORY, OPEN, ROOT_ID, VLLM, ai, ai_pair, call, save_kernel_log, vllm
 from spec import CTX_RESERVE, CTX_WINDOW
 from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub
 
@@ -69,8 +69,8 @@ def roster(stub_url: str, cb: dict, interp: str) -> list:
         ("purchase", "purchase_probe.tools", {}),
         ("user", "user_probe.tools", {}),
         ("oracle", "oracle_probe.tools", dict(lines=["the answer is 42"])),
-        ("ai", VLLM,
-         ai(**vllm(stub_url, context_window=CTX_WINDOW), sampling={"x": 1, "y": None},
+        *ai_pair("ai", VLLM,
+                 ai(**vllm(stub_url, context_window=CTX_WINDOW), sampling={"x": 1, "y": None},
               output_reserve=CTX_RESERVE,
               can_call={"readings": "*", "totals": "*", "runner": "*",
                         "kernel_store": "*", ROOT_ID: "*"})),
