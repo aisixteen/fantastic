@@ -77,7 +77,7 @@ class Connected:
             t.cancel()
 
 
-# THE CHAT/PROVIDER SPLIT (#615). An AI is TWO agents: the PROVIDER (`<id>_prov`, the
+# THE CHAT/PROVIDER SPLIT (#615). An AI is TWO agents: the PROVIDER (shared `ai_prov`, the
 # backend record: endpoint, model, key, sampling, KV slots) completes turns and holds no
 # conversation; the CHAT (`ai_chat.tools`) holds the conversation and every grant, and
 # completes through the provider its `provider_id` names (`complete`, `watch`). Both
