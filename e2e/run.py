@@ -359,6 +359,14 @@ LONG_LANES = 2
 # numbers. Solo tests run after
 # the rest, one at a time, nothing else running.
 
+# LONGEST FIRST. The pool takes tests in order of their `duration:` (seconds, an optional hint in
+# test.yaml / scenario.yaml: the test's time in a green run), so the longest start first and
+# the run ends with the short ones, not with one long test begun last. No hint = 0, and ties
+# keep the suite's order. Only the order changes: every test still runs.
+def longest_first(tests) -> list[dict]:
+    return sorted(tests, key=lambda t: -float(t.get("duration", 0)))
+
+
 # THE HARD STOP: 15 minutes per test. A test still running then is
 # stopped (its whole process group, kernel included) and scored FAIL with the reason
 # in its log — a run that needs longer is a finding, not a wait. A test that names its
@@ -634,8 +642,8 @@ async def main() -> int:
 
     # BUILD OR USE BUILT. `E2E_ARTIFACTS=<dir>` hands the run prebuilt binaries:
     # the kernels' tarballs (`helpers/host/artifacts.py`) and the CLI product —
-    # `fantastic` and its PTY rig `screenshot` — which every runner takes as
-    # FANTASTIC_BIN / FANTASTIC_TUI_RIG (cells inherit them). Unset, each is
+    # `fantastic`, its PTY rig `screenshot` and the test-only `embedder` — which every
+    # runner takes as FANTASTIC_BIN / FANTASTIC_TUI_RIG / FANTASTIC_EMBEDDER (cells inherit them). Unset, each is
     # built from source here.
     if built := os.environ.get("E2E_ARTIFACTS"):
         built_dir = Path(built).resolve()
@@ -643,6 +651,7 @@ async def main() -> int:
             ("FANTASTIC_BIN", "fantastic"),
             ("FANTASTIC_TUI_RIG", "screenshot"),
             ("FANTASTIC_HOME_HOST", "fantastic-home-host"),
+            ("FANTASTIC_EMBEDDER", "embedder"),
         ):
             path = oslayer.exe(built_dir / name)
             if not path.is_file():
@@ -784,9 +793,9 @@ async def main() -> int:
     # progress without parsing 14 transcripts.
     began = time.monotonic()
     await asyncio.gather(
-        *(run_one(t, bk, logdir, sem, results, long_sem) for t in picked if not t.get("solo"))
+        *(run_one(t, bk, logdir, sem, results, long_sem) for t in longest_first(t for t in picked if not t.get("solo")))
     )
-    for t in (t for t in picked if t.get("solo")):
+    for t in longest_first(t for t in picked if t.get("solo")):
         await run_one(t, bk, logdir, sem, results, long_sem)
 
     if meter is not None:

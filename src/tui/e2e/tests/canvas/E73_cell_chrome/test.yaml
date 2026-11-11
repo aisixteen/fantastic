@@ -8,3 +8,4 @@ solo: true   # measures frame rate and GPU: runs alone (e2e/run.py)
 limits:
   seconds: 150
 env: {}
+duration: 24   # seconds in a green run (rig 2026-11-11): the pool starts the longest first (e2e/run.py)

@@ -7,7 +7,7 @@ title: "load: 1000 agents hydrate at boot (time vs the bare seed), all listed an
 runner: probe.py
 runtimes: [python, rust]
 costs: free
-solo: true
+# not solo (#627 S1): its BOUNDS are gross-regression ones (probe.py BOUNDS, 15-90 s) and it holds its own port and tempdir
 limits:
   idle_seconds: 300
   turn_seconds: 600

@@ -14,3 +14,4 @@ hard_stop_minutes: 120
 limits:
   idle_seconds: 1800
   turn_seconds: 3600
+duration: 100   # seconds in a green run (rig 2026-11-11): the pool starts the longest first (e2e/run.py)

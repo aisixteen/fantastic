@@ -9,3 +9,4 @@ solo: true   # measures frame rate under load: runs alone (e2e/run.py)
 limits:
   seconds: 600
 env: {}
+duration: 31   # seconds in a green run (rig 2026-11-11): the pool starts the longest first (e2e/run.py)
