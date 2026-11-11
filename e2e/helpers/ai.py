@@ -77,7 +77,7 @@ class Connected:
             t.cancel()
 
 
-# THE CHAT/PROVIDER SPLIT (#615). An AI is TWO agents: the PROVIDER (shared `ai_prov`, the
+# THE CHAT/PROVIDER SPLIT (#615). An AI is TWO agents: the PROVIDER (`<id>_prov`, the
 # backend record: endpoint, model, key, sampling, KV slots) completes turns and holds no
 # conversation; the CHAT (`ai_chat.tools`) holds the conversation and every grant, and
 # completes through the provider its `provider_id` names (`complete`, `watch`). Both
@@ -85,17 +85,6 @@ class Connected:
 # the pair: `connect` uses it, and so does every probe that wires its own AI.
 CHAT_MODULE = "ai_chat.tools"
 PROVIDER_CALLS = ["complete", "watch", "reflect"]
-#: ONE provider per model per kernel, shared by every chat: the provider owns the
-#: endpoint's KV-slot accounting (`kv_slots`), so one provider per chat would let N
-#: chats each claim every slot of the same server.
-SHARED_PROVIDER = "ai_prov"
-
-
-def provider_id_for(backend, role: str | None = None) -> str:
-    """The shared provider's id: `ai_prov`, or `ai_prov_<role>` for a role on another model."""
-    if role and backend.model_for(role) != backend.model:
-        return SHARED_PROVIDER + "_" + re.sub(r"\W", "_", role)
-    return SHARED_PROVIDER
 #: record fields the CHAT takes too (it sizes its own context and output)
 CHAT_SHARED = ("model", "max_tokens", "context_window")
 #: record fields that are the PROVIDER's only, wherever a probe puts them
@@ -129,7 +118,7 @@ def chat_pair(backend, chat: dict, *, role: str | None = None,
     chat = dict(chat)
     chat.pop("type", None)
     cid = chat["id"]
-    pid = provider_id or provider_id_for(backend, role)
+    pid = provider_id or f"{cid}_prov"
     prov_fields, chat_fields = split_record(backend.record(role=role), chat)
     prov_fields.pop("id", None)
     for k in ("can_call", "callable_by", "parent_id", "memory_store_id", "description"):
@@ -157,23 +146,12 @@ async def make_chat(root, backend, chat: dict, *, role: str | None = None,
     prov, payload = chat_pair(backend, chat, role=role, provider_id=provider_id,
                               parent=home(root))
     pid = prov["id"]
-    listed = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]
-    have = next((a for a in ((listed.get("result") or {}).get("agents") or [])
-                 if a.get("id") == pid), None)
-    if have is None:
-        made = (await root.send([{"target": root.id, "payload": prov}]))[0]["result"]
-        if isinstance(made, dict) and made.get("error"):
-            raise SystemExit(f"create_agent({pid}) refused: {made}")
-        await memory.open_ingress(root, memory.MEMORY, pid)
-        if backend.key_ref:
-            await memory.open_ingress(root, creds.CREDS, pid)
-    else:
-        # THE SHARED PROVIDER admits one more consumer: read, add the chat, write back.
-        cb = {**(have.get("callable_by") or {}), payload["id"]: PROVIDER_CALLS}
-        upd = (await root.send([{"target": root.id, "payload": {
-            "type": "update_agent", "id": pid, "callable_by": cb}}]))[0]["result"]
-        if isinstance(upd, dict) and upd.get("error"):
-            raise SystemExit(f"admit {payload['id']} on {pid} refused: {upd}")
+    made = (await root.send([{"target": root.id, "payload": prov}]))[0]["result"]
+    if isinstance(made, dict) and made.get("error"):
+        raise SystemExit(f"create_agent({pid}) refused: {made}")
+    await memory.open_ingress(root, memory.MEMORY, pid)
+    if backend.key_ref:
+        await memory.open_ingress(root, creds.CREDS, pid)
     made = (await root.send([{"target": root.id, "payload": payload}]))[0]["result"]
     if isinstance(made, dict) and made.get("error"):
         raise SystemExit(f"create_agent({payload['id']}) refused: {made}")
