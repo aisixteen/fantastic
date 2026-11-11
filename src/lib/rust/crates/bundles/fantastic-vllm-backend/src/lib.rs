@@ -40,11 +40,13 @@ use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell, Stalled,
     Unconfigured,
 };
-use fantastic_ai_core::schema::{self, Field};
+use fantastic_ai_core::record::{AiRecord, Credentials};
 use fantastic_ai_core::think::{decode_openai_delta, ThinkWrap};
 use fantastic_ai_core::{agent_loop::BackendConfig, caching, helpers, verbs};
-use fantastic_bundle::{py_float, py_int, py_repr_value, py_str, py_truthy};
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_bundle::{py_str, py_truthy};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
+use schemars::JsonSchema;
+use serde::Deserialize;
 use fantastic_kernel::{AgentId, Kernel, TaskId};
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
@@ -55,9 +57,6 @@ use std::time::{Duration, Instant};
 
 /// The handler module id a record names to select this bundle.
 pub const HANDLER_MODULE: &str = "vllm_backend.tools";
-
-/// The bundle readme — python's, byte for byte.
-pub const README: &str = include_str!("readme.md");
 
 /// The name every refusal carries.
 const NAME: &str = "vllm_backend";
@@ -388,21 +387,8 @@ fn usage_now(agent_id: &str) -> Value {
 }
 
 /// The `usage` verb's doc.
-const USAGE_DOC: &str = "usage — args: reset? (bool). The agent's token usage since its kernel \
-     started: requests, prompt_tokens, output_tokens. reset: true returns the counts, then \
-     zeroes them.";
-
-/// `usage` — args: reset? (bool). `reset: true` returns the counts, then zeroes them.
-fn usage_reply(agent_id: &str, payload: &Value) -> Value {
-    let reset = payload.get("reset").cloned().unwrap_or(json!(false));
-    let Some(reset) = reset.as_bool() else {
-        let mut r = fantastic_kernel::refusal::refusal(
-            fantastic_kernel::refusal::BAD_ARG,
-            "usage: reset must be true or false",
-        );
-        fantastic_kernel::refusal::with(&mut r, "arg", json!("reset"));
-        return r;
-    };
+/// `usage` — `reset: true` returns the counts, then zeroes them.
+fn usage_reply(agent_id: &str, reset: bool) -> Value {
     let out = usage_now(agent_id);
     if reset {
         *usage_of(agent_id).lock().expect("usage poisoned") = Usage::default();
@@ -473,7 +459,9 @@ impl VllmProvider {
         else {
             return Ok(None);
         };
-        let budget = py_int(v).map_err(|e| ProviderError::value_error(e.to_string()))?;
+        let budget = v.as_i64().ok_or_else(|| {
+            ProviderError::value_error("thinking_token_budget must be an integer".to_string())
+        })?;
         if self.explicit_budget && !side_call {
             return Ok(Some(budget));
         }
@@ -1079,7 +1067,9 @@ fn sampling(meta: &Map<String, Value>) -> (Map<String, Value>, bool) {
 /// python `float(rec.get(key) or default)`.
 fn seconds(meta: &Map<String, Value>, key: &str, default: f64) -> Result<f64, ProviderError> {
     match meta.get(key).filter(|v| py_truthy(v)) {
-        Some(v) => py_float(v).map_err(|e| ProviderError::value_error(e.to_string())),
+        Some(v) => v
+            .as_f64()
+            .ok_or_else(|| ProviderError::value_error(format!("{key} must be a number"))),
         None => Ok(default),
     }
 }
@@ -1100,15 +1090,6 @@ fn read_clock_of(meta: &Map<String, Value>, read_timeout: f64) -> Result<f64, Pr
                 ))
             }),
     }
-}
-
-/// The provider this agent is configured for — python `make_provider`, with
-/// its checks in python's order: `kv_overflow`, then `endpoint`, `model`,
-/// `max_tokens`, `kv_slots`. Built per call (cheap, and the record can change
-/// between turns). A record missing a required field yields a provider whose
-/// every pass raises that refusal.
-fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>, _client_id: &str) -> Arc<dyn Provider> {
-    build_provider_with(agent_id, kernel, helpers::agent_meta(agent_id, kernel))
 }
 
 /// [`build_provider`] from a record (`complete` lays the pass's `model` over the agent's).
@@ -1169,7 +1150,9 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleErr
     let (sampling, explicit) = sampling(&meta);
     let secs = |key: &str, default: f64| -> Result<f64, BundleError> {
         match meta.get(key).filter(|v| py_truthy(v)) {
-            Some(v) => Ok(py_float(v)?),
+            Some(v) => v.as_f64().ok_or_else(|| -> BundleError {
+                format!("{key} must be a number").into()
+            }),
             None => Ok(default),
         }
     };
@@ -1249,21 +1232,6 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
         merged.insert(k.clone(), v.clone());
     }
     let set = |k: &str| meta.get(k).filter(|v| !v.is_null());
-    for key in ["max_tokens", "context_window", "kv_slots"] {
-        if set(key).is_some_and(|v| !positive(v, true)) {
-            return Some(format!("{key} must be a positive int"));
-        }
-    }
-    for key in [
-        "kv_ttl",
-        "connect_timeout",
-        "read_timeout",
-        "stream_idle_seconds",
-    ] {
-        if set(key).is_some_and(|v| !positive(v, false)) {
-            return Some(format!("{key} must be a positive number of seconds"));
-        }
-    }
     if let Some(url) = set("metrics_url") {
         let ok = url
             .as_str()
@@ -1285,30 +1253,7 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
              page) or kv_slots"
         ));
     }
-    if let Some(v) = set("kv_overflow") {
-        if !v.as_str().is_some_and(|s| KV_OVERFLOWS.contains(&s)) {
-            return Some(format!(
-                "kv_overflow={} is not a rotation policy — legal values: evict (the \
-                 least-recently-used conversation rotates out), reject (refuse the \
-                 newcomer)",
-                py_repr_value(v)
-            ));
-        }
-    }
-    if let Some(v) = set("reasoning_effort") {
-        if !v.as_str().is_some_and(|s| REASONING_EFFORTS.contains(&s)) {
-            return Some(format!(
-                "reasoning_effort={} is not one vLLM accepts — legal values: low, medium, \
-                 xhigh (\"high\" answers 400; xhigh needs a thinking_token_budget or it can \
-                 think without answering)",
-                py_repr_value(v)
-            ));
-        }
-    }
     let budget = merged.get("thinking_token_budget").filter(|v| !v.is_null());
-    if set("thinking_token_budget").is_some() && budget.is_some_and(|b| !positive(b, true)) {
-        return Some("thinking_token_budget must be a positive int".to_string());
-    }
     let mx = merged.get("max_tokens");
     if let (Some(b), Some(m)) = (budget, mx) {
         if positive(b, true) && positive(m, true) {
@@ -1325,11 +1270,6 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
             }
         }
     }
-    if let Some(v) = set("server_dialect") {
-        if !v.as_str().is_some_and(|s| DIALECTS.contains(&s)) {
-            return Some("server_dialect must be one of vllm, strata, llamacpp".to_string());
-        }
-    }
     let dialect = merged.get("server_dialect").and_then(Value::as_str);
     if dialect == Some("llamacpp") && budget.is_some() {
         return Some(
@@ -1343,169 +1283,170 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
     // could use would fail only later, on every turn, far from the create that
     // caused it. Named ALL at once, from the schema, so one retry fixes the
     // record.
-    schema::validate(record_schema(), NAME, meta, record)
+    fantastic_ai_core::record::validate_meta(meta)
         .or_else(|| caching::refusal(meta, record, NAME, CFG.provider_cache))
 }
 
-/// The sampling default for `key` — the one table the provider fills from.
-fn sampling_default(key: &str) -> Value {
-    sampling_defaults()
-        .into_iter()
-        .find(|(k, _)| *k == key)
-        .map_or(Value::Null, |(_, v)| v)
+/// How much the model wants to think.
+#[derive(Debug, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    /// Low.
+    Low,
+    /// Medium.
+    Medium,
+    /// Extra high: needs a thinking_token_budget.
+    Xhigh,
 }
 
-/// THE RECORD SCHEMA — what this kind's record takes, read with
-/// no agent existing (`reflect bundles=all`). Built from the constants the
-/// provider runs on, and enforced by [`validate`], so the page, the write check
-/// and the turn cannot disagree. `endpoint` and `kv_overflow` are required; the
-/// counts a record leaves out are READ FROM THE SERVER before a turn
-/// ([`server`]), never given a default. Python `RECORD_SCHEMA`, field for field.
-#[must_use]
-pub fn record_schema() -> &'static Value {
-    static SCHEMA: OnceLock<Value> = OnceLock::new();
-    SCHEMA.get_or_init(|| {
-        const FROM_SERVER: &str = "; left out, read from the server before a turn and written here";
-        schema::schema(vec![
-            Field::new("endpoint", "str", "the vLLM server's /v1 URL").required(),
-            Field::new(
-                "model",
-                "str",
-                format!("the served model name{FROM_SERVER} (the one model it serves)"),
-            ),
-            Field::new(
-                "max_tokens",
-                "int",
-                format!(
-                    "a turn's output budget (tokens){FROM_SERVER} (260000, plus \
-                     thinking_token_budget, never above max_model_len)"
-                ),
-            ),
-            Field::new(
-                "context_window",
-                "int",
-                format!("the server's window (tokens){FROM_SERVER} (max_model_len)"),
-            ),
-            Field::new(
-                "kv_slots",
-                "int",
-                format!(
-                    "how many conversations may be live on the endpoint{FROM_SERVER} \
-                         (floor of kv_cache_max_concurrency on metrics_url)"
-                ),
-            ),
-            Field::new(
-                "metrics_url",
-                "str",
-                "the server's Prometheus page, read for kv_slots; left out, the endpoint \
-                     with /v1 replaced by /metrics",
-            ),
-            Field::new(
-                "kv_overflow",
-                "enum",
-                "all slots live: evict (the least-recently-used rotates out) or reject \
-                     (the newcomer is refused)",
-            )
-            .required()
-            .one_of(&KV_OVERFLOWS),
-            Field::new(
-                "server_dialect",
-                "enum",
-                "how this server names things: vllm (default) sends thinking_token_budget; \
-                 strata sends reasoning_budget_tokens; llamacpp takes no per-request budget \
-                 (a server flag) — set explicitly, never guessed (#207)",
-            )
-            .one_of(&DIALECTS),
-            Field::new("temperature", "float", "sampling temperature")
-                .default(sampling_default("temperature")),
-            Field::new("top_p", "float", "nucleus sampling").default(sampling_default("top_p")),
-            Field::new("top_k", "int", "top-k sampling").default(sampling_default("top_k")),
-            Field::new(
-                "reasoning_effort",
-                "enum",
-                "how much the model wants to think (xhigh needs a thinking_token_budget)",
-            )
-            .one_of(&REASONING_EFFORTS)
-            .default(sampling_default("reasoning_effort")),
-            Field::new(
-                "thinking_token_budget",
-                "int",
-                "the hard cap on thinking tokens, below max_tokens; unset, a turn sends \
-                     min(default, max_tokens/2)",
-            )
-            .default(sampling_default("thinking_token_budget")),
-            Field::new("min_p", "float", "min-p sampling; sent only when set"),
-            Field::new("presence_penalty", "float", "sent only when set"),
-            Field::new("frequency_penalty", "float", "sent only when set"),
-            Field::new("repetition_penalty", "float", "sent only when set"),
-            Field::new("no_repeat_ngram_size", "int", "sent only when set"),
-            Field::new("seed", "int", "sent only when set"),
-            Field::new("stop", "list", "stop sequences; sent only when set"),
-            Field::new(
-                "kv_ttl",
-                "float",
-                "seconds an idle conversation keeps its slot",
-            )
-            .default(json!(KV_TTL)),
-            Field::new("connect_timeout", "float", "seconds to reach the server")
-                .default(json!(CONNECT_TIMEOUT)),
-            Field::new("read_timeout", "float", "seconds to wait on a generation")
-                .default(json!(READ_TIMEOUT)),
-            Field::new(
-                "stream_idle_seconds",
-                "float",
-                "the read clock on the answer stream: seconds with no byte from the server \
-                 (headers included) before the turn is judged stalled and ends with an error \
-                 row; default read_timeout",
-            ),
-            // the door's key, when it wants one — absent = no Authorization header
-            schema::credentials_field(false),
-        ])
-    })
+/// What happens when all slots are live.
+#[derive(Debug, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum KvOverflow {
+    /// The least-recently-used conversation rotates out.
+    Evict,
+    /// The newcomer is refused.
+    Reject,
 }
 
-/// The fields a turn cannot run without — refused at the write when absent. The
-/// schema's required fields, not a second list (python `REQUIRED`).
-#[must_use]
-pub fn required() -> Vec<String> {
-    schema::required_names(record_schema())
+/// How a server names things.
+#[derive(Debug, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ServerDialect {
+    /// vllm sends thinking_token_budget.
+    Vllm,
+    /// strata sends reasoning_budget_tokens.
+    Strata,
+    /// llamacpp takes no per-request budget (a server flag).
+    Llamacpp,
 }
 
-// ─── bundle impl ────────────────────────────────────────────────────────────
+/// The fields a vllm_backend record carries.
+#[derive(Debug, JsonSchema)]
+pub struct VllmRecord {
+    /// The vLLM server's /v1 URL.
+    #[schemars(length(min = 1))]
+    pub endpoint: String,
+    /// The served model name; left out, read from the server before a turn and written here.
+    pub model: Option<String>,
+    /// A turn's output budget (tokens); left out, read from the server (260000, plus thinking_token_budget, never above max_model_len).
+    #[schemars(range(min = 1))]
+    pub max_tokens: Option<i64>,
+    /// The server's window (tokens); left out, read from the server (max_model_len).
+    #[schemars(range(min = 1))]
+    pub context_window: Option<i64>,
+    /// How many conversations may be live on the endpoint; left out, read from the server (floor of kv_cache_max_concurrency on metrics_url).
+    #[schemars(range(min = 1))]
+    pub kv_slots: Option<i64>,
+    /// The server's Prometheus page, read for kv_slots; left out, the endpoint with /v1 replaced by /metrics.
+    pub metrics_url: Option<String>,
+    /// All slots live: evict (the least-recently-used rotates out) or reject (the newcomer is refused).
+    pub kv_overflow: KvOverflow,
+    /// How this server names things — set explicitly, never guessed.
+    pub server_dialect: Option<ServerDialect>,
+    /// Sampling temperature.
+    pub temperature: Option<f64>,
+    /// Nucleus sampling.
+    pub top_p: Option<f64>,
+    /// Top-k sampling.
+    pub top_k: Option<i64>,
+    /// How much the model wants to think (xhigh needs a thinking_token_budget).
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// The hard cap on thinking tokens, below max_tokens; unset, a turn sends min(default, max_tokens/2).
+    #[schemars(range(min = 1))]
+    pub thinking_token_budget: Option<i64>,
+    /// Min-p sampling; sent only when set.
+    pub min_p: Option<f64>,
+    /// Sent only when set.
+    pub presence_penalty: Option<f64>,
+    /// Sent only when set.
+    pub frequency_penalty: Option<f64>,
+    /// Sent only when set.
+    pub repetition_penalty: Option<f64>,
+    /// Sent only when set.
+    pub no_repeat_ngram_size: Option<i64>,
+    /// Sent only when set.
+    pub seed: Option<i64>,
+    /// Stop sequences; sent only when set.
+    pub stop: Option<Vec<String>>,
+    /// Seconds an idle conversation keeps its slot.
+    #[schemars(schema_with = "fantastic_ai_core::record::positive_seconds")]
+    #[serde(default)]
+    pub kv_ttl: Option<f64>,
+    /// Seconds to reach the server.
+    #[schemars(schema_with = "fantastic_ai_core::record::positive_seconds")]
+    #[serde(default)]
+    pub connect_timeout: Option<f64>,
+    /// Seconds to wait on a generation.
+    #[schemars(schema_with = "fantastic_ai_core::record::positive_seconds")]
+    #[serde(default)]
+    pub read_timeout: Option<f64>,
+    /// The read clock on the answer stream: seconds with no byte from the server (headers included) before the turn is judged stalled; default read_timeout.
+    #[schemars(schema_with = "fantastic_ai_core::record::positive_seconds")]
+    #[serde(default)]
+    pub stream_idle_seconds: Option<f64>,
+    /// The door's key, when it wants one — absent = no Authorization header.
+    pub credentials: Option<Credentials>,
+    /// The memory store agent that keeps this agent's settings (e.g. a ram_store).
+    pub memory_store_id: String,
+    /// The models this provider lists.
+    pub models: Option<Vec<Value>>,
+    /// The fields every ai_core agent takes.
+    #[serde(flatten)]
+    pub ai: AiRecord,
+}
+
+fantastic_kernel::record!(VllmRecord);
+
+/// The agent's token usage since its kernel started: requests, prompt_tokens, output_tokens.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UsageVerb {
+    /// `true` returns the counts, then zeroes them.
+    pub reset: Option<bool>,
+}
+
+mod declared {
+    use super::UsageVerb;
+    use fantastic_ai_core::declared::{Boot, Complete, Models, SetDefaultModel};
+
+    fantastic_kernel::verbs! {
+        "boot" => Boot,
+        "complete" => Complete,
+        "models" => Models,
+        "set_default_model" => SetDefaultModel,
+        "usage" => UsageVerb,
+    }
+}
+
+/// What the bundle is for — its one short man text.
+const MAN: &str = "A vLLM provider: it streams one completion pass for a chat that names it, keeps the endpoint's conversation slots, lists its models, keeps a default model and counts token usage.";
 
 /// The vLLM backend bundle.
 pub struct VllmBundle;
 
 #[async_trait]
-impl Bundle for VllmBundle {
+impl Handler for VllmBundle {
+    type Call = declared::Call;
+
     fn name(&self) -> &str {
         NAME
     }
 
-    fn verb_docs(&self) -> Value {
-        let mut docs = fantastic_ai_core::verbs::verb_docs();
-        if let Some(m) = docs.as_object_mut() {
-            m.insert("usage".into(), json!(USAGE_DOC));
-        }
-        docs
+    fn man(&self) -> &'static str {
+        MAN
     }
 
-    fn emits_doc(&self) -> Option<Value> {
-        Some(fantastic_ai_core::verbs::emits())
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        declared::VERBS
     }
 
-    fn cancel_doc(&self) -> Option<Value> {
-        Some(Value::String(
-            fantastic_ai_core::verbs::CANCEL_DOC.to_string(),
-        ))
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        declared::dynamic_verbs(agent)
     }
 
-    fn notes_doc(&self) -> Option<Value> {
-        Some(fantastic_ai_core::verbs::notes())
-    }
-
-    fn readme(&self) -> Option<&'static str> {
-        Some(README)
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &RECORD
     }
 
     fn validate_meta(
@@ -1516,63 +1457,41 @@ impl Bundle for VllmBundle {
         validate(meta, record)
     }
 
-    fn record_schema(&self) -> Option<Value> {
-        Some(record_schema().clone())
-    }
-
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        if verb == "reflect" {
-            return Ok(Some(reflect_reply(agent_id, kernel)?));
-        }
-        if verb == "usage" {
-            return Ok(Some(usage_reply(agent_id.as_str(), payload)));
-        }
-        // A verb that runs a turn first reads what the record leaves to the server;
-        // a server that does not answer refuses the verb, naming the field.
-        if server::TURN_VERBS.contains(&verb) {
-            if let Some(refused) = server::resolve(agent_id, kernel).await {
-                return Ok(Some(refused));
+        use declared::Call;
+        let reply = match call {
+            Call::Reflect(_) => reflect_reply(agent_id, kernel)?,
+            Call::Boot(_) => verbs::boot(agent_id, kernel),
+            Call::UsageVerb(a) => usage_reply(agent_id.as_str(), a.reset == Some(true)),
+            Call::Complete(a) => {
+                // A verb that runs a turn first reads what the record leaves to the server;
+                // a server that does not answer refuses the verb, naming the field.
+                if let Some(refused) = server::resolve(agent_id, kernel).await {
+                    return Ok(Some(refused));
+                }
+                fantastic_ai_core::remote_provider::complete_verb(agent_id, &a, kernel, |m| {
+                    build_provider_with(agent_id, kernel, m)
+                })
+                .await
             }
-        }
-        // EVERY OTHER ai_core VERB, one table for every backend (python `build`).
-        // THE PROVIDER VERBS (`complete`, `models`, `default_model`): an AI chat completes here
-        if let Some(r) = fantastic_ai_core::remote_provider::provider_verbs(
-            agent_id,
-            payload,
-            kernel,
-            |m| build_provider_with(agent_id, kernel, m),
-            fantastic_ai_core::remote_provider::NO_LIVE,
-        )
-        .await
-        {
-            return Ok(Some(r));
-        }
-        // A PROVIDER ONLY: a chat verb belongs to an `ai_chat` agent that names this one
-        {
-            let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-            if fantastic_ai_core::remote_provider::is_chat_verb(verb) {
-                return Ok(Some(fantastic_ai_core::remote_provider::chat_refusal(NAME, verb)));
+            Call::Models(_) => {
+                fantastic_ai_core::remote_provider::models_verb(
+                    agent_id,
+                    kernel,
+                    fantastic_ai_core::remote_provider::NO_LIVE,
+                )
+                .await
             }
-        }
-        let provider = |client: &str| build_provider(agent_id, kernel, client);
-        if let Some(reply) = verbs::handle_common(agent_id, payload, kernel, CFG, provider).await? {
-            return Ok(Some(reply));
-        }
-        Ok(Some({
-            let raw = payload.get("type").cloned().unwrap_or(Value::Null);
-            let mut r = fantastic_kernel::refusal::refusal(
-                fantastic_kernel::refusal::UNHANDLED,
-                format!("{NAME}: unknown type {}", py_repr_value(&raw)),
-            );
-            fantastic_kernel::refusal::with(&mut r, "verb", raw);
-            r
-        }))
+            Call::SetDefaultModel(a) => {
+                fantastic_ai_core::remote_provider::set_default_verb(agent_id, &a, kernel).await
+            }
+        };
+        Ok((!reply.is_null()).then_some(reply))
     }
 
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
@@ -1597,6 +1516,14 @@ impl Bundle for VllmBundle {
     ) -> Result<(), BundleError> {
         verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel).await
     }
+}
+
+/// The sampling default for `key` — the one table the provider fills from.
+fn sampling_default(key: &str) -> Value {
+    sampling_defaults()
+        .into_iter()
+        .find(|(k, _)| *k == key)
+        .map_or(Value::Null, |(_, v)| v)
 }
 
 #[cfg(test)]

@@ -151,18 +151,6 @@ fn decode_all(body: &str, bounded: bool) -> (String, Option<String>, ReportCell)
     (out, verdict, report)
 }
 
-#[test]
-fn readme_is_python_verbatim() {
-    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(4)
-        .expect("repo's src/lib above the crate")
-        .join(
-            "python/bundled_agents/ai/responses/responses_backend/src/responses_backend/readme.md",
-        );
-    assert_eq!(README, std::fs::read_to_string(&py).expect("python readme"));
-}
-
 /// The error a `chat` call returns when the endpoint answers `code` before any stream.
 async fn status_refusal(code: u16) -> ProviderError {
     let server = MockServer::start().await;
@@ -577,14 +565,8 @@ async fn a_record_without_an_endpoint_is_refused_at_the_write_naming_it() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["reason"], json!("invalid_meta"), "{r}");
-    assert_eq!(
-        r["error"],
-        json!(
-            "responses_backend: required on the record and missing: endpoint — nothing is \
-             guessed. endpoint = the full Responses API URL (…/v1/responses)"
-        )
-    );
+    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    assert_eq!(r["arg"], json!("endpoint"), "{r}");
 }
 
 /// `store:false` keeps the conversation ours and `model` is the record's — a
@@ -739,7 +721,7 @@ async fn send_once(kernel: &Arc<Kernel>, id: &AgentId) -> Value {
     kernel
         .send(vec![Item::new(
             fantastic_ai_core::remote_provider::pair_chat(&kernel, &id).await,
-            json!({"type": "send", "text": "go", "client_id": "t", "reply_to": null}),
+            json!({"type": "send", "text": "go", "client_id": "t"}),
         )])
         .await
         .remove(0)
@@ -826,10 +808,11 @@ async fn unknown_type_wire_shape_is_byte_exact() {
         .await
         .remove(0)
         .result;
-    assert_eq!(
-        serde_json::to_string(&r).unwrap(),
-        r#"{"error":"responses_backend: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#
-    );
+    // the agent's own entry refuses: the verb it was asked, and what it answers
+    assert_eq!(r["reason"], json!("unhandled"));
+    assert_eq!(r["verb"], json!("frob"));
+    let answers = "boot, complete, models, set_default_model, reflect";
+    assert!(r["error"].as_str().is_some_and(|e| e.contains(answers)), "{r}");
 }
 
 /// A 200 whose body starts and then stops: the connection stays open and silent,
@@ -948,12 +931,15 @@ fn caching_none_and_cleanup_are_accepted_and_provider_cache_is_refused_here() {
     assert!(ResponsesBundle
         .validate_meta(&Map::new(), stored.as_object().unwrap())
         .is_some());
-    // an unknown mode is the schema's enum refusal
+    // an unknown mode is the record declaration's refusal, by field name
     let meta = json!({"caching": "always"});
-    assert_eq!(
-        ResponsesBundle
-            .validate_meta(meta.as_object().unwrap(), rec)
-            .as_deref(),
-        Some("caching='always' is not one of the legal values: none, cleanup, provider_cache")
-    );
+    let refused = fantastic_kernel::verbs::check_record(
+        "update_agent",
+        "responses_backend",
+        meta.as_object().unwrap(),
+        &fantastic_kernel::declared::record::RECORD,
+        &RECORD,
+    )
+    .expect_err("an unknown mode");
+    assert_eq!(refused["arg"], json!("caching"), "{refused}");
 }

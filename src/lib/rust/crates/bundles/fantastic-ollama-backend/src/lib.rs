@@ -29,23 +29,21 @@ use fantastic_ai_core::provider::{
     stream_idle_of, within, Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream,
     ReportCell, Unconfigured,
 };
-use fantastic_ai_core::schema::{self, Field};
+use fantastic_ai_core::declared::provider;
+use fantastic_ai_core::record::{Credentials, ProviderRecord};
 use fantastic_ai_core::think::ThinkWrap;
 use fantastic_ai_core::{agent_loop::BackendConfig, caching, helpers, verbs};
-use fantastic_bundle::{py_float, py_int, py_repr_value, py_truthy};
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
+use schemars::JsonSchema;
 use fantastic_kernel::{AgentId, Kernel, TaskId};
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 use std::collections::VecDeque;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// `handler_module` key under which this bundle registers.
 pub const HANDLER_MODULE: &str = "ollama_backend.tools";
-
-/// readme.md auto-seeded into the agent's dir on creation.
-pub const README: &str = include_str!("readme.md");
 
 /// Hard ceiling per `send` (mirrors Python's `SEND_TIMEOUT`).
 pub const SEND_TIMEOUT_SECS: f64 = fantastic_ai_core::SEND_TIMEOUT_SECS;
@@ -400,89 +398,67 @@ fn decode_chunk_into(
 
 // ── bundle impl ─────────────────────────────────────────────────────
 
-/// THE RECORD SCHEMA — what this kind's record takes, read
-/// with no agent existing (`reflect bundles=all`), from the constants the
-/// provider runs on. `validate_meta` enforces it at the write, so the page and
-/// the kernel cannot disagree about what a record needs. Python
-/// `RECORD_SCHEMA`, field for field.
-#[must_use]
-pub fn record_schema() -> &'static Value {
-    static SCHEMA: OnceLock<Value> = OnceLock::new();
-    SCHEMA.get_or_init(|| {
-        schema::schema(vec![
-            Field::new("endpoint", "str", "the ollama server URL").required(),
-            Field::new(
-                "model",
-                "str",
-                "the model name; left out, read from the server before a turn and written \
-                 here (the one model GET /api/tags lists)",
-            ),
-            Field::new(
-                "num_ctx",
-                "int",
-                "the context window ollama loads the model with",
-            ),
-            Field::new("temperature", "float", "sampling temperature")
-                .default(json!(DEFAULT_TEMPERATURE)),
-            Field::new(
-                "num_predict",
-                "int",
-                "a turn's output budget (tokens); unset, 260000",
-            ),
-            Field::new(
-                "think",
-                "bool",
-                "turn the model's thinking channel on or off",
-            ),
-            Field::new(
-                "stream_idle_seconds",
-                "float",
-                format!(
-                    "the read clock on the answer stream: seconds with no byte from the \
-                     server (headers included) before the turn is judged stalled and ends \
-                     with an error row; default {}",
-                    fantastic_ai_core::constants::STREAM_IDLE_SECONDS
-                ),
-            ),
-            // a door's key, when the server sits behind one — absent = no header
-            schema::credentials_field(false),
-        ])
-    })
+/// What the bundle is for — its one short man text.
+const MAN: &str = "A local LLM provider on an ollama server: it streams one completion pass for a chat that names it, lists the server's models and keeps a default model.";
+
+/// The fields an ollama_backend record carries.
+#[derive(Debug, JsonSchema)]
+pub struct OllamaRecord {
+    /// The ollama server URL.
+    #[schemars(length(min = 1))]
+    pub endpoint: String,
+    /// The model name; left out, read from the server before a turn and written here (the one model `GET /api/tags` lists).
+    pub model: Option<String>,
+    /// The context window ollama loads the model with.
+    pub num_ctx: Option<i64>,
+    /// Sampling temperature.
+    pub temperature: Option<f64>,
+    /// A turn's output budget (tokens).
+    pub num_predict: Option<i64>,
+    /// Turn the model's thinking channel on or off.
+    pub think: Option<bool>,
+    /// The read clock on the answer stream: seconds with no byte from the server (headers included) before the turn is judged stalled and ends with an error row.
+    pub stream_idle_seconds: Option<f64>,
+    /// A door's key, when the server sits behind one — absent = no header.
+    pub credentials: Option<Credentials>,
+    /// The memory store agent that keeps this agent's settings (e.g. a ram_store).
+    pub memory_store_id: String,
+    /// The fields every provider takes.
+    #[serde(flatten)]
+    pub provider: ProviderRecord,
 }
+
+fantastic_kernel::record!(OllamaRecord);
 
 /// The ollama backend bundle.
 pub struct OllamaBackendBundle;
 
 #[async_trait]
-impl Bundle for OllamaBackendBundle {
+impl Handler for OllamaBackendBundle {
+    type Call = provider::Call;
+
     fn name(&self) -> &str {
         "ollama_backend"
     }
 
-    fn verb_docs(&self) -> Value {
-        fantastic_ai_core::verbs::verb_docs()
+    fn man(&self) -> &'static str {
+        MAN
     }
 
-    fn emits_doc(&self) -> Option<Value> {
-        Some(fantastic_ai_core::verbs::emits())
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        provider::VERBS
     }
 
-    fn cancel_doc(&self) -> Option<Value> {
-        Some(Value::String(
-            fantastic_ai_core::verbs::CANCEL_DOC.to_string(),
-        ))
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        provider::dynamic_verbs(agent)
     }
 
-    fn notes_doc(&self) -> Option<Value> {
-        Some(fantastic_ai_core::verbs::notes())
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &RECORD
     }
 
-    fn readme(&self) -> Option<&'static str> {
-        Some(README)
-    }
-
-    /// Refuse, AT THE WRITE, a record missing a required field or naming an enum
-    /// value outside its set — every missing field named at once, from the schema.
+    /// Refuse, AT THE WRITE, what a type cannot say: a stall clock out of range, a
+    /// blank text, a caching mode this backend cannot do.
     fn validate_meta(
         &self,
         meta: &Map<String, Value>,
@@ -491,66 +467,33 @@ impl Bundle for OllamaBackendBundle {
         if let Err(e) = stream_idle_of(meta) {
             return Some(e.message);
         }
-        schema::validate(record_schema(), "ollama_backend", meta, record)
+        fantastic_ai_core::record::validate_meta(meta)
             .or_else(|| caching::refusal(meta, record, "ollama_backend", CFG.provider_cache))
-    }
-
-    fn record_schema(&self) -> Option<Value> {
-        Some(record_schema().clone())
     }
 
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        if verb == "reflect" {
-            return Ok(Some(reflect_reply(agent_id, kernel)?));
-        }
         // A verb that runs a turn first reads a `model` the record leaves out; a
         // server that does not answer refuses the verb, naming it.
-        if server::TURN_VERBS.contains(&verb) {
+        if matches!(call, provider::Call::Complete(_)) {
             if let Some(refused) = server::resolve(agent_id, kernel).await {
                 return Ok(Some(refused));
             }
         }
-        // EVERY OTHER ai_core VERB, one table for every backend (python `build`).
-        // THE PROVIDER VERBS (`complete`, `models`, `default_model`): an AI chat completes here
-        if let Some(r) = fantastic_ai_core::remote_provider::provider_verbs(
+        // THE PROVIDER VERBS (`complete`, `models`, `set_default_model`): an AI chat completes here
+        fantastic_ai_core::remote_provider::handle(
             agent_id,
-            payload,
+            call,
             kernel,
             |m| build_provider_with(agent_id, kernel, m),
             fantastic_ai_core::remote_provider::NO_LIVE,
+            || reflect_reply(agent_id, kernel),
         )
         .await
-        {
-            return Ok(Some(r));
-        }
-        // A PROVIDER ONLY: a chat verb belongs to an `ai_chat` agent that names this one
-        {
-            let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-            if fantastic_ai_core::remote_provider::is_chat_verb(verb) {
-                return Ok(Some(fantastic_ai_core::remote_provider::chat_refusal(BACKEND, verb)));
-            }
-        }
-        let provider = |_client: &str| build_provider(agent_id, kernel);
-        if let Some(reply) = verbs::handle_common(agent_id, payload, kernel, CFG, provider).await? {
-            return Ok(Some(reply));
-        }
-        // python's VERBS map has no `shutdown` — it is an unknown type like any
-        // other, and the value is rendered with python's `repr`.
-        Ok(Some({
-            let raw = payload.get("type").cloned().unwrap_or(Value::Null);
-            let mut r = fantastic_kernel::refusal::refusal(
-                fantastic_kernel::refusal::UNHANDLED,
-                format!("ollama_backend: unknown type {}", py_repr_value(&raw)),
-            );
-            fantastic_kernel::refusal::with(&mut r, "verb", raw);
-            r
-        }))
     }
 
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
@@ -624,34 +567,19 @@ fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<Strin
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleError> {
     let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, CFG.model_window);
     let meta = helpers::agent_meta(agent_id, kernel);
+    // the record's values are typed by its declaration: what is named is shown as it is
     out.insert(
         "temperature".to_string(),
-        match meta.get("temperature").filter(|v| !v.is_null()) {
-            Some(v) => json!(py_float(v)?),
-            None => json!(DEFAULT_TEMPERATURE),
-        },
+        meta.get("temperature")
+            .and_then(Value::as_f64)
+            .map_or_else(|| json!(DEFAULT_TEMPERATURE), |t| json!(t)),
     );
-    out.insert(
-        "num_ctx".to_string(),
-        match meta.get("num_ctx").filter(|v| py_truthy(v)) {
-            Some(v) => json!(py_int(v)?),
-            None => Value::Null,
-        },
-    );
-    out.insert(
-        "num_predict".to_string(),
-        match meta.get("num_predict").filter(|v| py_truthy(v)) {
-            Some(v) => json!(py_int(v)?),
-            None => Value::Null,
-        },
-    );
-    out.insert(
-        "think".to_string(),
-        match meta.get("think").filter(|v| !v.is_null()) {
-            Some(v) => json!(py_truthy(v)),
-            None => Value::Null,
-        },
-    );
+    for key in ["num_ctx", "num_predict", "think"] {
+        out.insert(
+            key.to_string(),
+            meta.get(key).cloned().unwrap_or(Value::Null),
+        );
+    }
     Ok(Value::Object(out))
 }
 

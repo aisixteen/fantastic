@@ -2,7 +2,7 @@
 //! `vllm_backend/server.py`, text for text.
 //!
 //! `model`, `max_tokens`, `context_window` and `kv_slots` may be left off the
-//! record. Before a verb that runs a turn ([`TURN_VERBS`]), every one still absent
+//! record. Before `complete`, the verb that runs a turn, every one still absent
 //! is read from the server the record's `endpoint` names and WRITTEN BACK to the
 //! record — it then holds a measured value like one the operator set: reflect
 //! shows it, a reboot keeps it, and the server is not asked again until the field
@@ -37,7 +37,6 @@ use std::time::Duration;
 /// The fields a record may leave to the server, in the order they are read.
 pub const INFERRED: [&str; 4] = ["model", "max_tokens", "context_window", "kv_slots"];
 /// The verbs that run a turn of the model — the ones the server is read for.
-pub const TURN_VERBS: [&str; 4] = ["send", "inquiry", "context_recall", "complete"];
 
 const INFO: &str = "vllm:cache_config_info";
 

@@ -52,8 +52,10 @@ pub struct Credentials {
 #[derive(Debug, JsonSchema)]
 pub struct AiRecord {
     /// Tokens the model sees per turn.
+    #[schemars(range(min = 1))]
     pub context_window: Option<i64>,
     /// Tokens of the window held back for the model's reply.
+    #[schemars(range(min = 0))]
     pub output_reserve: Option<i64>,
     /// How the conversation is fitted into the window.
     pub context_strategy: Option<ContextStrategy>,
@@ -146,4 +148,26 @@ pub fn validate_meta(meta: &Map<String, Value>) -> Option<String> {
         }
     }
     crate::prompt_file::shape_error(meta)
+}
+
+/// What a provider backend's record carries beside the fields of its own server: the
+/// models it lists and what they cost. Flattened into each backend's record.
+#[derive(Debug, JsonSchema)]
+pub struct ProviderRecord {
+    /// The names this provider lists in `models` (strings, or objects with an `id` or `name`).
+    pub models: Option<Vec<Value>>,
+    /// What each model costs per token, by model name.
+    pub prices: Option<Value>,
+    /// The fields every ai_core agent takes.
+    #[serde(flatten)]
+    pub ai: AiRecord,
+}
+
+/// The schema of a positive number of seconds, or none.
+pub fn positive_seconds(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    serde_json::from_value(serde_json::json!({
+        "type": ["number", "null"],
+        "exclusiveMinimum": 0,
+    }))
+    .expect("a number schema")
 }

@@ -368,3 +368,16 @@ pub mod chat {
         "unwatch" => Unwatch,
     }
 }
+
+/// Every verb of a provider backend: what its agents answer (a chat's verbs belong to
+/// an `ai_chat.tools` agent that names the provider; it completes here).
+pub mod provider {
+    use super::*;
+
+    fantastic_kernel::verbs! {
+        "boot" => Boot,
+        "complete" => Complete,
+        "models" => Models,
+        "set_default_model" => SetDefaultModel,
+    }
+}

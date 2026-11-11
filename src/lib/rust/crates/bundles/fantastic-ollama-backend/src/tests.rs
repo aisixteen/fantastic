@@ -154,19 +154,6 @@ async fn drain(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<Value> {
     out
 }
 
-#[test]
-fn readme_is_python_verbatim() {
-    // The readme a model reads about this backend is the PYTHON bundle's,
-    // byte for byte. Each runtime had written its own, so the same agent
-    // described itself differently depending on where it ran.
-    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(4)
-        .expect("repo's src/lib above the crate")
-        .join("python/bundled_agents/ai/ollama/ollama_backend/src/ollama_backend/readme.md");
-    assert_eq!(README, std::fs::read_to_string(&py).expect("python readme"));
-}
-
 #[tokio::test]
 async fn send_streams_tokens_and_emits_done() {
     let tmp = TempDir::new().unwrap();
@@ -352,7 +339,7 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
     let h = kernel
         .send(vec![Item::new(
             fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
-            json!({"type": "history", "client_id": "c_think"}),
+            json!({"type": "history"}),
         )])
         .await
         .remove(0)
@@ -481,10 +468,13 @@ async fn list_models_is_unknown_type() {
         .await
         .remove(0)
         .result;
-    assert_eq!(
-        reply["error"],
-        json!("ollama_backend: unknown type 'list_models'")
+    assert!(
+        reply["error"]
+            .as_str()
+            .is_some_and(|e| e.starts_with("unknown verb 'list_models'")),
+        "{reply}"
     );
+    assert_eq!(reply["reason"], json!("unhandled"));
     assert!(reply.get("models").is_none());
     // And it is gone from the verb menu the model reads.
     let reflect = kernel
@@ -573,7 +563,7 @@ async fn history_persists_and_round_trips() {
     let h = kernel
         .send(vec![Item::new(
             fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
-            json!({"type": "history", "client_id": client_id}),
+            json!({"type": "history"}),
         )])
         .await
         .remove(0)
@@ -722,14 +712,13 @@ async fn reflect_extras_match_python() {
     assert_eq!(r["num_predict"], Value::Null);
     assert_eq!(r["think"], Value::Null);
 
-    // Set them, and python's conversions apply: `float(t)`, `int(x) if x`,
-    // `bool(x) if x is not None`.
+    // Set them: what the record names is shown as it is.
     let _ = kernel
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": backend.as_str(),
-                   "temperature": "0.7", "num_ctx": "4096", "num_predict": 0,
-                   "think": 0}),
+                   "temperature": 0.7, "num_ctx": 4096, "num_predict": 0,
+                   "think": false}),
         )])
         .await;
     let r = kernel
@@ -739,8 +728,8 @@ async fn reflect_extras_match_python() {
         .result;
     assert_eq!(r["temperature"], 0.7);
     assert_eq!(r["num_ctx"], 4096);
-    assert_eq!(r["num_predict"], Value::Null, "0 is falsy → None");
-    assert_eq!(r["think"], false, "present-and-not-null → bool(x)");
+    assert_eq!(r["num_predict"], 0);
+    assert_eq!(r["think"], false);
 }
 
 /// Python `handler`'s `{name}: unknown type {t!r}`: python's repr (single
@@ -752,16 +741,22 @@ async fn unknown_type_is_pythons_repr_and_shutdown_is_unknown() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "unk", "http://127.0.0.1:1").await;
     for (verb, want) in [
-        ("garbage", "ollama_backend: unknown type 'garbage'"),
-        ("shutdown", "ollama_backend: unknown type 'shutdown'"),
+        ("garbage", "unknown verb 'garbage'; "),
     ] {
         let r = kernel
             .send(vec![Item::new(agent.clone(), json!({"type": verb}))])
             .await
             .remove(0)
             .result;
-        assert_eq!(r["error"], json!(want));
+        assert!(r["error"].as_str().is_some_and(|e| e.starts_with(want)), "{r}");
     }
+    // `shutdown` is no verb of this bundle: the shared entry answers it, nothing to release
+    let r = kernel
+        .send(vec![Item::new(agent.clone(), json!({"type": "shutdown"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r, Value::Null);
 }
 
 /// PROVIDER-REPORTED USAGE off the NDJSON stream: `prompt_eval_count` calibrates
@@ -894,7 +889,7 @@ async fn send_once(kernel: &Arc<Kernel>, backend: &AgentId, client: &str) -> Val
     kernel
         .send(vec![Item::new(
             fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
-            json!({"type": "send", "text": "hi", "client_id": client, "reply_to": null}),
+            json!({"type": "send", "text": "hi", "client_id": client}),
         )])
         .await
         .remove(0)
@@ -969,10 +964,11 @@ async fn unknown_type_wire_shape_is_byte_exact() {
         .await
         .remove(0)
         .result;
-    assert_eq!(
-        serde_json::to_string(&r).unwrap(),
-        r#"{"error":"ollama_backend: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#
-    );
+    // the agent's own entry refuses: the verb it was asked, and what it answers
+    assert_eq!(r["reason"], json!("unhandled"));
+    assert_eq!(r["verb"], json!("frob"));
+    let answers = "boot, complete, models, set_default_model, reflect";
+    assert!(r["error"].as_str().is_some_and(|e| e.contains(answers)), "{r}");
 }
 
 /// ollama builds a FRESH client per pass — two passes, two connections, even
@@ -1021,14 +1017,20 @@ async fn a_bad_system_prompt_is_refused_at_the_write() {
                 .result
         }
     };
-    for bad in [json!(""), json!("   "), json!(7), json!(["x"])] {
+    // not text or empty: refused by the record's declaration; blank text: by the bundle
+    for bad in [json!(""), json!(7), json!(["x"])] {
         let r = write(bad.clone()).await;
-        assert_eq!(
-            r["error"],
-            json!(fantastic_ai_core::schema::SYSTEM_PROMPT_REFUSAL),
+        assert!(
+            r["error"].as_str().is_some_and(|e| e.contains("system_prompt")),
             "{bad}: {r}"
         );
     }
+    let r = write(json!("   ")).await;
+    assert_eq!(
+        r["error"],
+        json!(fantastic_ai_core::record::SYSTEM_PROMPT_REFUSAL),
+        "{r}"
+    );
     let r = write(json!("be terse")).await;
     assert!(r.get("error").is_none(), "{r}");
     let r = write(Value::Null).await;

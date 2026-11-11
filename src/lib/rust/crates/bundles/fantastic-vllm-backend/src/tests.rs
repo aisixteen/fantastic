@@ -701,12 +701,28 @@ fn the_budget_goes_out_under_the_dialects_name() {
     assert!(b.get("reasoning_budget_tokens").is_none());
 }
 
+
+/// What a write of `meta` to this bundle's record answers: the engine's refusal of a
+/// field, else the bundle's own check on the merged record. `None`: taken.
+pub(crate) fn at_the_write(meta: &Map<String, Value>, record: &Map<String, Value>) -> Option<String> {
+    match fantastic_kernel::verbs::check_record(
+        "update_agent",
+        NAME,
+        meta,
+        &fantastic_kernel::declared::record::RECORD,
+        &RECORD,
+    ) {
+        Err(r) => Some(fantastic_kernel::refusal::error_text(&r).unwrap_or_default()),
+        Ok(()) => validate(meta, record),
+    }
+}
+
 #[test]
 fn validate_refuses_a_bad_dialect_and_a_llamacpp_budget() {
     let record = serde_json::Map::new();
     let meta = json!({"server_dialect": "bogus"});
-    let msg = validate(meta.as_object().unwrap(), &record).expect("refused");
-    assert!(msg.contains("server_dialect must be one of vllm, strata, llamacpp"));
+    let msg = at_the_write(meta.as_object().unwrap(), &record).expect("refused");
+    assert!(msg.contains("server_dialect"), "{msg}");
 
     let meta = json!({"server_dialect": "llamacpp", "thinking_token_budget": 4000});
     let msg = validate(meta.as_object().unwrap(), &record).expect("refused");
@@ -720,7 +736,7 @@ fn validate_refuses_a_bad_dialect_and_a_llamacpp_budget() {
         "thinking_token_budget": 4000,
         "max_tokens": 8000
     });
-    assert!(validate(meta.as_object().unwrap(), &record).is_none());
+    assert!(at_the_write(meta.as_object().unwrap(), &record).is_none());
 }
 
 // ─── the KV-cache session table ─────────────────────────────────────────────
@@ -840,27 +856,27 @@ fn a_write_the_backend_cannot_honour_is_refused() {
         (
             json!({"reasoning_effort": "high"}),
             json!({}),
-            "legal values: low, medium, xhigh",
+            "reasoning_effort",
         ),
         (
             json!({"kv_overflow": "drop"}),
             json!({}),
-            "legal values: evict",
+            "kv_overflow",
         ),
         (
             json!({"kv_slots": 0}),
             json!({}),
-            "kv_slots must be a positive int",
+            "kv_slots",
         ),
         (
             json!({"max_tokens": true}),
             json!({}),
-            "max_tokens must be a positive int",
+            "max_tokens",
         ),
         (
             json!({"kv_ttl": -1}),
             json!({}),
-            "kv_ttl must be a positive number",
+            "kv_ttl",
         ),
         (
             json!({"thinking_token_budget": 8000}),
@@ -874,36 +890,34 @@ fn a_write_the_backend_cannot_honour_is_refused() {
         ),
     ];
     for (meta, record, fragment) in cases {
-        let why = validate(&obj(meta.clone()), &obj(record)).unwrap_or_default();
+        let why = at_the_write(&obj(meta.clone()), &obj(record)).unwrap_or_default();
         assert!(why.contains(fragment), "{meta}: {why}");
     }
-    assert_eq!(
-        validate(&obj(json!({"kv_overflow": "drop"})), &Map::new()).unwrap(),
-        "kv_overflow='drop' is not a rotation policy — legal values: evict (the \
-         least-recently-used conversation rotates out), reject (refuse the newcomer)"
-    );
 }
 
 #[test]
-fn a_record_missing_required_fields_is_refused_at_the_write_naming_all() {
+fn a_record_missing_required_fields_is_refused_at_create_naming_one() {
     // what a model spawning a sub-AI wrote (E37): the fields it could see
     let meta = json!({
         "endpoint": "http://vllm.test/v1",
         "model": "qwen3.8-27b",
         "max_tokens": 65536,
     });
-    let err = validate(&obj(meta.clone()), &Map::new()).expect("refused");
-    assert!(
-        err.contains("missing: kv_overflow, memory_store_id —"),
-        "{err}"
-    );
-    // each missing field is named WITH its hint, from the schema
-    assert!(err.contains("kv_overflow = all slots live: evict"), "{err}");
+    let refused = fantastic_kernel::verbs::check_record(
+        "create_agent",
+        NAME,
+        &obj(meta.clone()),
+        &fantastic_kernel::declared::record::RECORD,
+        &RECORD,
+    )
+    .expect_err("refused");
+    assert_eq!(refused["reason"], json!("missing_arg"), "{refused}");
+    assert_eq!(refused["arg"], json!("kv_overflow"), "{refused}");
     // an update to a complete record is judged on the MERGED state
     let mut full = obj(meta);
     full.insert("kv_overflow".into(), json!("evict"));
     full.insert("memory_store_id".into(), json!("memory"));
-    assert_eq!(validate(&obj(json!({"seed": 3})), &full), None);
+    assert_eq!(at_the_write(&obj(json!({"seed": 3})), &full), None);
 }
 
 #[test]
@@ -983,13 +997,9 @@ async fn the_kernel_refuses_a_bad_record_at_the_write() {
         json!({"id": unique_id(&tmp), "max_tokens": 4000, "thinking_token_budget": 4000}),
     )
     .await;
-    assert_eq!(r["reason"], json!("invalid_meta"), "{r}");
-    assert!(
-        r["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("not below max_tokens=4000")),
-        "{r}"
-    );
+    // the record is checked by its own bundle's declaration first (no endpoint here)
+    assert_eq!(r["reason"], json!("missing_arg"), "{r}");
+    assert_eq!(r["arg"], json!("endpoint"), "{r}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1033,19 +1043,6 @@ async fn reflect_shows_the_effective_posture_and_the_shared_table() {
         }),
         "{out}"
     );
-}
-
-#[test]
-fn readme_is_python_verbatim() {
-    // the readme a model reads about this backend is the PYTHON bundle's, byte
-    // for byte — each runtime writing its own is how one agent described itself
-    // differently depending on where it ran
-    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(4)
-        .expect("repo's src/lib above the crate")
-        .join("python/bundled_agents/ai/vllm/vllm_backend/src/vllm_backend/readme.md");
-    assert_eq!(README, std::fs::read_to_string(&py).expect("python readme"));
 }
 
 // ─── the key (an HTTPS door in front of the GPU) ────────────────────────────
@@ -1112,17 +1109,21 @@ async fn a_refused_key_says_to_name_credentials() {
 }
 
 #[test]
-fn the_schema_takes_optional_credentials() {
-    assert!(record_schema().get("key_var").is_none());
-    let f = record_schema()["fields"]
+fn the_record_takes_optional_credentials() {
+    let declared = fantastic_kernel::verbs::record_fields(&RECORD);
+    let f = declared["fields"]
         .as_array()
         .unwrap()
         .iter()
         .find(|f| f["name"] == "credentials")
         .cloned()
         .unwrap();
-    assert_eq!(f["type"], json!("credentials"));
     assert_eq!(f["required"], json!(false));
+    assert!(declared["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|f| f["name"] != "key_var"));
 }
 
 // ─── PINS ───────────────────────────────────────────────────────────────────
@@ -1149,10 +1150,11 @@ async fn unknown_type_wire_shape_is_byte_exact() {
         .await
         .remove(0)
         .result;
-    assert_eq!(
-        serde_json::to_string(&r).unwrap(),
-        r#"{"error":"vllm_backend: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#
-    );
+    // the agent's own entry refuses: the verb it was asked, and what it answers
+    assert_eq!(r["reason"], json!("unhandled"));
+    assert_eq!(r["verb"], json!("frob"));
+    let answers = "boot, complete, models, set_default_model, usage, reflect";
+    assert!(r["error"].as_str().is_some_and(|e| e.contains(answers)), "{r}");
 }
 
 /// The per-agent `last_thinking_budget` is THIS agent's (a sibling of the same
@@ -1203,7 +1205,7 @@ async fn the_last_budget_is_per_agent_and_freed_on_delete() {
     let out = kernel
         .send(vec![Item::new(
             fantastic_ai_core::remote_provider::pair_chat(&kernel, &AgentId::from(id.as_str())).await,
-            json!({"type": "send", "text": "hi", "client_id": "t", "reply_to": null}),
+            json!({"type": "send", "text": "hi", "client_id": "t"}),
         )])
         .await
         .remove(0)
@@ -1312,12 +1314,9 @@ fn stream_idle_seconds_is_validated_and_read_clock_defaults_to_read_timeout() {
         m
     };
     for bad in [json!(0), json!(-1), json!("soon"), json!(true)] {
-        let msg =
-            validate(&meta(bad.clone()), &Map::new()).unwrap_or_else(|| panic!("{bad} is refused"));
-        assert!(
-            msg.contains("stream_idle_seconds must be a positive number"),
-            "{msg}"
-        );
+        let msg = at_the_write(&meta(bad.clone()), &Map::new())
+            .unwrap_or_else(|| panic!("{bad} is refused"));
+        assert!(msg.contains("stream_idle_seconds"), "{msg}");
     }
     assert_eq!(read_clock_of(&Map::new(), 900.0).ok(), Some(900.0));
     assert_eq!(read_clock_of(&meta(json!(2.5)), 900.0).ok(), Some(2.5));

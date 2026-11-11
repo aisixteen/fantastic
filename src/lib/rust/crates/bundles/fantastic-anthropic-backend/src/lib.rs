@@ -35,12 +35,14 @@ use fantastic_ai_core::provider::{
     stream_idle_of, within, Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream,
     ReportCell, Unconfigured,
 };
-use fantastic_ai_core::schema::{self, Field};
+use fantastic_ai_core::record::{AiRecord, Credentials};
 use fantastic_ai_core::think::ThinkWrap;
 use fantastic_ai_core::USAGE_KEYS;
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, verbs};
-use fantastic_bundle::{py_float, py_repr_value};
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_bundle::py_float;
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
+use schemars::JsonSchema;
+use serde::Deserialize;
 use fantastic_kernel::{AgentId, Kernel, TaskId};
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
@@ -53,21 +55,11 @@ pub mod server;
 /// The handler module id a record names to select this bundle.
 pub const HANDLER_MODULE: &str = "anthropic_backend.tools";
 
-/// The bundle readme — python's, byte for byte.
-pub const README: &str = include_str!("readme.md");
-
 /// The name every refusal carries.
 const NAME: &str = "anthropic_backend";
 
-/// The `usage` verb's doc — python `_usage`'s docstring, the verb's own.
-const USAGE_DOC: &str = "usage — args: reset? (bool). The agent's token usage since it was created:\nrequests, input, cache write and read, output, the derived prompt_tokens, hit_rate\nand saved_tokens (cost_usd and saved_usd when the record's prices name a model it served), and\nusage_since_boot: the same counts over this kernel process only. by_model: a map from model name to {requests, input, cache_write, cache_read, output, hit_rate, saved_tokens, cost_usd}, counted from each response's model; a model with no entry in the record's prices carries unpriced: true instead of cost_usd, and unpriced_models lists them beside the total cost_usd (the sum over the priced models). by_agent: a map from the calling chat's id to {requests, input, cache_write, cache_read, output, cost_usd?}, counted from the chat that sent each complete and kept after that chat is deleted. usage_since_boot carries both. reset: true returns\nthe counts, then zeroes the since-boot counts (the total is kept: see usage_reset).";
-/// The `usage_reset` verb's doc.
-const USAGE_RESET_DOC: &str = "usage_reset — no args. Returns the agent's token usage since it was created (as\n`usage` does), then zeroes it for good: the counts in the agent's usage.json are\nrewritten as zeros. Deleting the agent drops them too.";
 /// The agent's sidecar of persisted counts, in its own dir beside `agent.yaml`.
 const USAGE_FILE: &str = "usage.json";
-
-/// The `models` verb's doc.
-const MODELS_DOC: &str = "models — args: none. The models this agent's key can use: [{id, display_name, max_input_tokens, max_tokens}], read from the API.";
 
 /// What `reflect` says this agent IS — python `tools.py`'s `sentence`.
 pub const SENTENCE: &str = "Anthropic Messages-API LLM agent (raw prompt-and-parse tool-calling).";
@@ -1559,8 +1551,7 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
 }
 
 /// The chat that sent a `complete`: its `rid` is `<chat id>~<n>`.
-fn caller_of(payload: &Value) -> Option<String> {
-    let rid = payload.get("rid").and_then(Value::as_str)?;
+fn caller_of(rid: &str) -> Option<String> {
     let (chat, _) = rid.rsplit_once('~')?;
     (!chat.is_empty()).then(|| chat.to_string())
 }
@@ -1644,16 +1635,7 @@ fn usage_since_boot_now(agent_id: &AgentId, kernel: &Kernel) -> Value {
 /// `usage_since_boot` over this process. `reset: true` returns the counts, then
 /// zeroes the since-boot counts (the total is kept: see `usage_reset`). Python
 /// `_usage`.
-fn usage_reply(agent_id: &AgentId, payload: &Value, kernel: &Kernel) -> Value {
-    let reset = payload.get("reset").cloned().unwrap_or(json!(false));
-    let Some(reset) = reset.as_bool() else {
-        let mut r = fantastic_kernel::refusal::refusal(
-            fantastic_kernel::refusal::BAD_ARG,
-            "usage: reset must be true or false",
-        );
-        fantastic_kernel::refusal::with(&mut r, "arg", json!("reset"));
-        return r;
-    };
+fn usage_reply(agent_id: &AgentId, reset: bool, kernel: &Kernel) -> Value {
     let mut out = usage_now(agent_id, kernel);
     if let Some(m) = out.as_object_mut() {
         m.insert(
@@ -1862,58 +1844,13 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
     for (k, v) in meta {
         merged.insert(k.clone(), v.clone());
     }
-    for key in ["max_tokens", "context_window", "thinking_budget"] {
-        if let Some(v) = meta.get(key).filter(|v| !v.is_null()) {
-            if positive_int(Some(v)).is_none() || v.is_boolean() {
-                return Some(format!("{key} must be a positive int"));
-            }
-        }
-    }
-    if let Some(t) = meta.get("temperature").filter(|v| !v.is_null()) {
-        if !t.is_number() {
-            return Some("temperature must be a number".to_string());
-        }
-    }
-    for key in [
-        "price_input_long_per_mtok",
-        "price_output_long_per_mtok",
-        "price_cache_write_1h_per_mtok",
-    ] {
-        if let Some(p) = meta.get(key).filter(|v| !v.is_null()) {
-            if !p.is_number() || p.as_f64().unwrap_or(0.0) < 0.0 {
-                return Some(format!("{key} must be a number, zero or more"));
-            }
-        }
-    }
     if let Some(p) = meta.get("prices").filter(|v| !v.is_null()) {
         if let Some(bad) = prices_refusal(p) {
             return Some(bad);
         }
     }
-    if let Some(t) = meta.get("long_context_tokens").filter(|v| !v.is_null()) {
-        if positive_int(Some(t)).is_none() || t.is_boolean() {
-            return Some("long_context_tokens must be a positive int".to_string());
-        }
-    }
-    if let Some(u) = meta.get("usage_log").filter(|v| !v.is_null()) {
-        if !u.as_str().is_some_and(|s| !s.is_empty()) {
-            return Some("usage_log must be a non-empty string".to_string());
-        }
-    }
     if let Err(e) = stream_idle_of(meta) {
         return Some(e.message);
-    }
-    if let Some(e) = meta.get("effort").filter(|v| !v.is_null()) {
-        let e = e.as_str().unwrap_or("");
-        if !["low", "medium", "high", "xhigh", "max"].contains(&e) {
-            return Some("effort must be one of low, medium, high, xhigh, max".to_string());
-        }
-    }
-    if let Some(d) = meta.get("thinking_display").filter(|v| !v.is_null()) {
-        let d = d.as_str().unwrap_or("");
-        if !["summarized", "omitted"].contains(&d) {
-            return Some("thinking_display must be summarized or omitted".to_string());
-        }
     }
     let has_display = merged
         .get("thinking_display")
@@ -1965,153 +1902,147 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
             left.join(", ")
         ));
     }
-    schema::validate(record_schema(), NAME, meta, record)
+    fantastic_ai_core::record::validate_meta(meta)
         .or_else(|| caching::refusal(meta, record, NAME, CFG.provider_cache))
 }
 
-/// THE RECORD SCHEMA — python `RECORD_SCHEMA`, field for field.
-#[must_use]
-pub fn record_schema() -> &'static Value {
-    static SCHEMA: OnceLock<Value> = OnceLock::new();
-    SCHEMA.get_or_init(|| {
-        const FROM_API: &str = "; left out, read from the API before a turn and written here";
-        schema::schema(vec![
-            Field::new(
-                "endpoint",
-                "str",
-                "the Messages API URL, e.g. https://api.anthropic.com/v1/messages",
-            )
-            .required(),
-            Field::new("model", "str", "the model id, e.g. claude-sonnet-5 (absent: the call's `model`, else `default_model`)"),
-            Field::new(
-                "max_tokens",
-                "int",
-                format!("a turn's output budget (tokens){FROM_API} (260000, plus thinking_budget, never above the \
-                     model's max_tokens)"),
-            ),
-            Field::new(
-                "context_window",
-                "int",
-                format!("the model's input window (tokens){FROM_API} (max_input_tokens)"),
-            ),
-            Field::new(
-                "temperature",
-                "float",
-                "sampling temperature; sent only when set",
-            ),
-            Field::new(
-                "thinking_budget",
-                "int",
-                format!(
-                    "extended thinking per turn (tokens, at least {THINKING_FLOOR}, below \
-                     max_tokens); unset, no thinking is asked for — not for 4.7+ or 5.x \
-                     models: use thinking_display and effort"
-                ),
-            ),
-            Field::new(
-                "effort",
-                "enum",
-                "the model's effort per turn, sent as output_config.effort; unset, the model's default",
-            )
-            .one_of(&["low", "medium", "high", "xhigh", "max"]),
-            Field::new(
-                "thinking_display",
-                "enum",
-                "adaptive thinking with its text shown (summarized) or hidden (omitted); unset, \
-                 the API default — set summarized so long thinking streams",
-            )
-            .one_of(&["summarized", "omitted"]),
-            Field::new(
-                "prices",
-                "map",
-                "USD per million tokens by model: {<model>: {input, output, cache_read?, \
-                 cache_write_5m?}} — cache rates unset = the model defaults from input (0.05x \
-                 read for claude-sonnet-5-5 and claude-opus-5-5, else 0.1x; 1.25x 5-minute \
-                 write). reflect and usage report cost_usd per model and in total; a model \
-                 with no entry is unpriced (never $0); a dated id uses its base id's entry",
-            ),
-            Field::new(
-                "price_input_long_per_mtok",
-                "float",
-                "USD per million input tokens for a long-context request, for every model in prices; unset = the model's input price",
-            ),
-            Field::new(
-                "price_output_long_per_mtok",
-                "float",
-                "USD per million output tokens for a long-context request, for every model in prices; unset = the model's output price",
-            ),
-            Field::new(
-                "price_cache_write_1h_per_mtok",
-                "float",
-                "USD per million 1-hour cache-write input tokens, for every model in prices; unset = 2x input",
-            ),
-            Field::new(
-                "long_context_tokens",
-                "int",
-                "prompt tokens above which a request is billed at the long-context prices",
-            ),
-            Field::new(
-                "usage_log",
-                "str",
-                "a file every request appends one JSON usage line to",
-            ),
-            Field::new(
-                "stream_idle_seconds",
-                "float",
-                format!(
-                    "the read clock on the answer stream: seconds with no byte from the API \
-                     (headers included) before the turn is judged stalled and ends with an \
-                     error row; default {}",
-                    fantastic_ai_core::constants::STREAM_IDLE_SECONDS
-                ),
-            ),
-            // the API key — optional on the record: absent, no key header goes out
-            schema::credentials_field(false),
-        ])
-    })
+/// The model's effort per turn.
+#[derive(Debug, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    /// Low.
+    Low,
+    /// Medium.
+    Medium,
+    /// High.
+    High,
+    /// Extra high.
+    Xhigh,
+    /// Maximum.
+    Max,
 }
+
+/// How adaptive thinking is shown.
+#[derive(Debug, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingDisplay {
+    /// Thinking text shown, summarized.
+    Summarized,
+    /// Thinking text hidden.
+    Omitted,
+}
+
+/// The fields an anthropic_backend record carries.
+#[derive(Debug, JsonSchema)]
+pub struct AnthropicRecord {
+    /// The Messages API URL, e.g. https://api.anthropic.com/v1/messages.
+    #[schemars(length(min = 1))]
+    pub endpoint: String,
+    /// The model id (absent: the call's `model`, else `default_model`).
+    pub model: Option<String>,
+    /// A turn's output budget (tokens); left out, read from the API before a turn and written here.
+    #[schemars(range(min = 1))]
+    pub max_tokens: Option<i64>,
+    /// The model's input window (tokens); left out, read from the API (max_input_tokens).
+    #[schemars(range(min = 1))]
+    pub context_window: Option<i64>,
+    /// Sampling temperature; sent only when set.
+    pub temperature: Option<f64>,
+    /// Extended thinking per turn (tokens, at least the API's floor, below max_tokens); not for 4.7+ or 5.x models: use thinking_display and effort.
+    #[schemars(range(min = 1))]
+    pub thinking_budget: Option<i64>,
+    /// The model's effort per turn, sent as output_config.effort.
+    pub effort: Option<Effort>,
+    /// Adaptive thinking with its text shown (summarized) or hidden (omitted).
+    pub thinking_display: Option<ThinkingDisplay>,
+    /// USD per million tokens by model: {<model>: {input, output, cache_read?, cache_write_5m?}}; a model with no entry is unpriced (never $0).
+    pub prices: Option<Value>,
+    /// USD per million input tokens for a long-context request, for every model in prices.
+    #[schemars(range(min = 0))]
+    pub price_input_long_per_mtok: Option<f64>,
+    /// USD per million output tokens for a long-context request, for every model in prices.
+    #[schemars(range(min = 0))]
+    pub price_output_long_per_mtok: Option<f64>,
+    /// USD per million 1-hour cache-write input tokens, for every model in prices.
+    #[schemars(range(min = 0))]
+    pub price_cache_write_1h_per_mtok: Option<f64>,
+    /// Prompt tokens above which a request is billed at the long-context prices.
+    #[schemars(range(min = 1))]
+    pub long_context_tokens: Option<i64>,
+    /// A file every request appends one JSON usage line to.
+    #[schemars(length(min = 1))]
+    pub usage_log: Option<String>,
+    /// The read clock on the answer stream: seconds with no byte from the API (headers included) before the turn is judged stalled.
+    pub stream_idle_seconds: Option<f64>,
+    /// The API key's credential store and ref; absent, no key header goes out.
+    pub credentials: Option<Credentials>,
+    /// The memory store agent that keeps this agent's settings (e.g. a ram_store).
+    pub memory_store_id: String,
+    /// The models this provider lists.
+    pub models: Option<Vec<Value>>,
+    /// The fields every ai_core agent takes.
+    #[serde(flatten)]
+    pub ai: AiRecord,
+}
+
+fantastic_kernel::record!(AnthropicRecord);
+
+/// The agent's token usage since it was created and over this process: requests, input,
+/// cache write and read, output, hit rate, saved tokens, cost by model and by calling chat.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UsageVerb {
+    /// `true` returns the counts, then zeroes the since-boot counts (the total is kept).
+    pub reset: Option<bool>,
+}
+
+/// Returns the agent's token usage since it was created (as `usage` does), then zeroes it for good: the counts in the agent's usage.json are rewritten as zeros.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UsageResetVerb {}
+
+mod declared {
+    use super::{UsageResetVerb, UsageVerb};
+    use fantastic_ai_core::declared::{Boot, Complete, Models, SetDefaultModel};
+
+    fantastic_kernel::verbs! {
+        "boot" => Boot,
+        "complete" => Complete,
+        "models" => Models,
+        "set_default_model" => SetDefaultModel,
+        "usage" => UsageVerb,
+        "usage_reset" => UsageResetVerb,
+    }
+}
+
+/// What the bundle is for — its one short man text.
+const MAN: &str = "An Anthropic Messages-API provider: it streams one completion pass for a chat that names it, lists the models its key can use, keeps a default model and counts token usage and cost.";
 
 /// The Anthropic backend bundle.
 pub struct AnthropicBundle;
 
 #[async_trait]
-impl Bundle for AnthropicBundle {
+impl Handler for AnthropicBundle {
+    type Call = declared::Call;
+
     fn name(&self) -> &str {
         NAME
     }
 
-    fn verb_docs(&self) -> Value {
-        // `usage` right after `history`, where python's build() merges extra_verbs.
-        let core = fantastic_ai_core::verbs::verb_docs();
-        let mut out = serde_json::Map::new();
-        for (k, v) in core.as_object().cloned().unwrap_or_default() {
-            let after = k == "history";
-            out.insert(k, v);
-            if after {
-                out.insert("usage".into(), json!(USAGE_DOC));
-                out.insert("usage_reset".into(), json!(USAGE_RESET_DOC));
-                out.insert("models".into(), json!(MODELS_DOC));
-            }
-        }
-        Value::Object(out)
+    fn man(&self) -> &'static str {
+        MAN
     }
 
-    fn emits_doc(&self) -> Option<Value> {
-        Some(fantastic_ai_core::verbs::emits())
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        declared::VERBS
     }
 
-    fn cancel_doc(&self) -> Option<Value> {
-        Some(Value::String(
-            fantastic_ai_core::verbs::CANCEL_DOC.to_string(),
-        ))
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        declared::dynamic_verbs(agent)
     }
 
-    fn notes_doc(&self) -> Option<Value> {
-        Some(fantastic_ai_core::verbs::notes())
-    }
-
-    fn readme(&self) -> Option<&'static str> {
-        Some(README)
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &RECORD
     }
 
     fn validate_meta(
@@ -2122,151 +2053,113 @@ impl Bundle for AnthropicBundle {
         validate(meta, record)
     }
 
-    fn record_schema(&self) -> Option<Value> {
-        Some(record_schema().clone())
-    }
-
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        use declared::Call;
         preload_base(agent_id, kernel).await;
-        if verb == "reflect" {
-            let capabilities = capabilities_of(agent_id, kernel).await;
-            return Ok(Some(reflect_reply(agent_id, kernel, capabilities)?));
-        }
-        if verb == "usage" {
-            return Ok(Some(usage_reply(agent_id, payload, kernel)));
-        }
-        if verb == "usage_reset" {
-            let out = usage_reset_reply(agent_id, kernel);
-            let zero = Usage::default().to_json();
-            if let Err(e) =
-                fantastic_ai_core::remote_provider::set_usage(agent_id, kernel, &zero).await
-            {
-                usage_of(agent_id).lock().expect("usage poisoned").log_error = Some(e);
+        let reply = match call {
+            Call::Reflect(_) => {
+                let capabilities = capabilities_of(agent_id, kernel).await;
+                reflect_reply(agent_id, kernel, capabilities)?
             }
-            return Ok(Some(out));
-        }
-        // A `complete` takes its request's images out of the stash here, before any
-        // path that can refuse or fail it, so none keeps them.
-        let images = if verb == "complete" {
-            payload
-                .get("rid")
-                .and_then(Value::as_str)
-                .map(|rid| take_images(agent_id.as_str(), rid))
-                .unwrap_or_default()
-        } else {
-            Images::default()
+            Call::Boot(_) => verbs::boot(agent_id, kernel),
+            Call::UsageVerb(a) => usage_reply(agent_id, a.reset == Some(true), kernel),
+            Call::UsageResetVerb(_) => {
+                let out = usage_reset_reply(agent_id, kernel);
+                let zero = Usage::default().to_json();
+                if let Err(e) =
+                    fantastic_ai_core::remote_provider::set_usage(agent_id, kernel, &zero).await
+                {
+                    usage_of(agent_id).lock().expect("usage poisoned").log_error = Some(e);
+                }
+                out
+            }
+            Call::Complete(a) => {
+                // A `complete` takes its request's images out of the stash here, before any
+                // path that can refuse or fail it, so none keeps them.
+                let images = take_images(agent_id.as_str(), &a.rid);
+                // The API is read for what the record leaves to it before a turn runs; an
+                // API that does not answer refuses the verb, naming the field. The model of
+                // the pass, as `complete` resolves it: the call's, else the default.
+                let model = match a.model.as_deref().filter(|s| !s.is_empty()) {
+                    Some(m) => Some(m.to_string()),
+                    None => fantastic_ai_core::remote_provider::default_of(agent_id, kernel).await,
+                };
+                if let Some(refused) = server::resolve(agent_id, kernel, model).await {
+                    return Ok(Some(refused));
+                }
+                let caller = caller_of(&a.rid);
+                fantastic_ai_core::remote_provider::complete_verb(agent_id, &a, kernel, |m| {
+                    build_provider_with(agent_id, kernel, m, caller.clone(), images.clone())
+                })
+                .await
+            }
+            Call::Models(_) => {
+                fantastic_ai_core::remote_provider::models_verb(
+                    agent_id,
+                    kernel,
+                    Some(|| async {
+                        let meta = helpers::agent_meta(agent_id, kernel);
+                        let endpoint = meta
+                            .get("endpoint")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        server::list(&endpoint, &key_reader(agent_id, kernel, NAME, false))
+                            .await
+                            .map(|ms| {
+                                ms.iter()
+                                    .filter_map(|m| {
+                                        m.get("id").and_then(Value::as_str).map(String::from)
+                                    })
+                                    .collect()
+                            })
+                    }),
+                )
+                .await
+            }
+            Call::SetDefaultModel(a) => {
+                fantastic_ai_core::remote_provider::set_default_verb(agent_id, &a, kernel).await
+            }
         };
-        // A verb that runs a turn first reads what the record leaves to the API; an
-        // API that does not answer refuses the verb, naming the field.
-        if server::TURN_VERBS.contains(&verb) {
-            // the model of the pass, as `complete` resolves it: the call's, else the default
-            let model = match payload
-                .get("model")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            {
-                Some(m) => Some(m.to_string()),
-                None => fantastic_ai_core::remote_provider::default_of(agent_id, kernel).await,
-            };
-            if let Some(refused) = server::resolve(agent_id, kernel, model).await {
-                return Ok(Some(refused));
-            }
-        }
-        // THE PROVIDER VERBS (`complete`, `models`, `default_model`): an AI chat completes here
-        if let Some(r) = fantastic_ai_core::remote_provider::provider_verbs(
-            agent_id,
-            payload,
-            kernel,
-            |m| build_provider_with(agent_id, kernel, m, caller_of(payload), images.clone()),
-            Some(|| async {
-                let meta = helpers::agent_meta(agent_id, kernel);
-                let endpoint = meta
-                    .get("endpoint")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                server::list(&endpoint, &key_reader(agent_id, kernel, NAME, false))
-                    .await
-                    .map(|ms| {
-                        ms.iter()
-                            .filter_map(|m| m.get("id").and_then(Value::as_str).map(String::from))
-                            .collect()
-                    })
-            }),
-        )
-        .await
-        {
-            return Ok(Some(r));
-        }
-        // A PROVIDER ONLY: a chat verb belongs to an `ai_chat` agent that names this one
-        {
-            let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-            if fantastic_ai_core::remote_provider::is_chat_verb(verb) {
-                return Ok(Some(fantastic_ai_core::remote_provider::chat_refusal(
-                    NAME, verb,
-                )));
-            }
-        }
-        let provider = |_client: &str| build_provider(agent_id, kernel);
-        if let Some(reply) = verbs::handle_common(agent_id, payload, kernel, CFG, provider).await? {
-            return Ok(Some(reply));
-        }
-        Ok(Some({
-            let raw = payload.get("type").cloned().unwrap_or(Value::Null);
-            let mut r = fantastic_kernel::refusal::refusal(
-                fantastic_kernel::refusal::UNHANDLED,
-                format!("{NAME}: unknown type {}", py_repr_value(&raw)),
-            );
-            fantastic_kernel::refusal::with(&mut r, "verb", raw);
-            r
-        }))
+        Ok((!reply.is_null()).then_some(reply))
     }
 
     /// An image's bytes for a request: a `complete` header `{rid, image: {ref,
     /// media_type}}` with the bytes as the body at `data`. They are kept for the
     /// `complete` of that `rid` (one item per image, sent before it); no pass runs.
-    /// Every other header is `handle`'s, its body dropped.
+    /// Every other call is `handle`'s, its body dropped.
     async fn handle_binary(
         &self,
         agent_id: &AgentId,
-        header: Value,
+        call: Self::Call,
         body: Option<fantastic_kernel::outcome::Blob>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<fantastic_kernel::outcome::Blob>), BundleError> {
-        let image = header.get("image").filter(|i| i.is_object());
-        if header.get("type").and_then(Value::as_str) != Some("complete") || image.is_none() {
-            let reply = self.handle(agent_id, &header, kernel).await?;
+        let declared::Call::Complete(a) = &call else {
+            let reply = Handler::handle(self, agent_id, call, kernel).await?;
             return Ok((reply, None));
-        }
-        let bad = |why: &str| {
-            Ok((
-                Some(
-                    json!({"error": format!("{NAME}: complete image: {why}"), "reason": "bad_arg"}),
-                ),
-                None,
-            ))
         };
-        let image = image.expect("checked above");
-        let rid = header.get("rid").and_then(Value::as_str).unwrap_or("");
-        let media = image
-            .get("media_type")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let (Some(r), true, false) = (image.get("ref"), !rid.is_empty(), media.is_empty()) else {
-            return bad("rid, image.ref and image.media_type are required");
+        let Some(image) = a.image.as_ref() else {
+            let reply = Handler::handle(self, agent_id, call, kernel).await?;
+            return Ok((reply, None));
         };
         let Some(bytes) = body.and_then(|b| b.into_at("data")) else {
-            return bad("the image bytes are required as the body at `data`");
+            return Ok((
+                Some(json!({
+                    "error": format!("{NAME}: complete image: the image bytes are required as the body at `data`"),
+                    "reason": "bad_arg",
+                })),
+                None,
+            ));
         };
         let n = bytes.len();
-        stash_image(agent_id.as_str(), rid, r, media, bytes);
-        Ok((Some(json!({"rid": rid, "image": r, "bytes": n})), None))
+        stash_image(agent_id.as_str(), &a.rid, &json!(image.image_ref), &image.media_type, bytes);
+        Ok((Some(json!({"rid": a.rid, "image": image.image_ref, "bytes": n})), None))
     }
 
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {

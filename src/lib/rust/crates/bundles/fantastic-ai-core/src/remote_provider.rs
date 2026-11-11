@@ -589,3 +589,32 @@ pub async fn pair_chat(kernel: &Arc<Kernel>, provider: &AgentId) -> AgentId {
     }
     chat
 }
+
+/// EVERY VERB OF A PROVIDER BACKEND, answered from its typed call: `boot` is the
+/// shared incarnation reset, `reflect` is the backend's own (handed in), and the
+/// rest are the provider verbs above. `build` makes the backend's provider from a
+/// record; `live` lists the models the API serves when the record names none.
+pub async fn handle<B, L, Fut, R>(
+    agent_id: &AgentId,
+    call: crate::declared::provider::Call,
+    kernel: &Arc<Kernel>,
+    build: B,
+    live: Option<L>,
+    reflect: R,
+) -> Result<Option<Value>, fantastic_kernel::bundle::BundleError>
+where
+    B: Fn(Map<String, Value>) -> Arc<dyn Provider>,
+    L: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<String>, String>>,
+    R: FnOnce() -> Result<Value, fantastic_kernel::bundle::BundleError>,
+{
+    use crate::declared::provider::Call;
+    let reply = match call {
+        Call::Reflect(_) => reflect()?,
+        Call::Boot(_) => crate::verbs::boot(agent_id, kernel),
+        Call::Complete(a) => complete_verb(agent_id, &a, kernel, build).await,
+        Call::Models(_) => models_verb(agent_id, kernel, live).await,
+        Call::SetDefaultModel(a) => set_default_verb(agent_id, &a, kernel).await,
+    };
+    Ok((!reply.is_null()).then_some(reply))
+}

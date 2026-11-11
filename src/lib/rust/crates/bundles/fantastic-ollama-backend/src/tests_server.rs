@@ -121,7 +121,8 @@ fn a_record_with_only_endpoint_and_a_store_is_accepted() {
     let b = OllamaBackendBundle;
     let ok = json!({"endpoint": "http://o.test", "memory_store_id": "memory"});
     assert_eq!(b.validate_meta(ok.as_object().unwrap(), &Map::new()), None);
-    let fields = record_schema()["fields"].as_array().unwrap();
+    let declared = fantastic_kernel::verbs::record_fields(&RECORD);
+    let fields = declared["fields"].as_array().unwrap();
     let model = fields.iter().find(|f| f["name"] == "model").unwrap();
     assert_eq!(model["required"], json!(false));
     let cred = fields.iter().find(|f| f["name"] == "credentials").unwrap();
@@ -153,12 +154,17 @@ fn caching_none_and_cleanup_are_accepted_and_provider_cache_is_refused_here() {
     assert!(b
         .validate_meta(&Map::new(), stored.as_object().unwrap())
         .is_some());
-    // an unknown mode is the schema's enum refusal
+    // an unknown mode is the record declaration's refusal, by field name
     let meta = json!({"caching": "always"});
-    assert_eq!(
-        b.validate_meta(meta.as_object().unwrap(), rec).as_deref(),
-        Some("caching='always' is not one of the legal values: none, cleanup, provider_cache")
-    );
+    let refused = fantastic_kernel::verbs::check_record(
+        "update_agent",
+        "ollama_backend",
+        meta.as_object().unwrap(),
+        &fantastic_kernel::declared::record::RECORD,
+        &RECORD,
+    )
+    .expect_err("an unknown mode");
+    assert_eq!(refused["arg"], json!("caching"), "{refused}");
 }
 
 // ─── through the kernel ─────────────────────────────────────────────────────
@@ -197,14 +203,14 @@ async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_send_reads_the_model_first() {
+async fn a_complete_reads_the_model_first() {
     let tmp = TempDir::new().unwrap();
     let srv = ollama(tags(&["qwen3:8b"]), 200).await;
     let kernel = mk(&tmp, &srv.uri()).await;
     call(
         &kernel,
         "o1",
-        json!({"type": "send", "text": "hi", "client_id": "t"}),
+        json!({"type": "complete", "rid": "r1", "messages": [{"role": "user", "content": "hi"}]}),
     )
     .await;
     let rec = helpers::agent_meta(&AgentId::from("o1"), &kernel);
@@ -212,14 +218,14 @@ async fn a_send_reads_the_model_first() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_send_the_server_cannot_answer_is_refused() {
+async fn a_complete_the_server_cannot_answer_is_refused() {
     let tmp = TempDir::new().unwrap();
     let srv = ollama("nope".into(), 404).await;
     let kernel = mk(&tmp, &srv.uri()).await;
     let r = call(
         &kernel,
         "o1",
-        json!({"type": "send", "text": "hi", "client_id": "t"}),
+        json!({"type": "complete", "rid": "r1", "messages": [{"role": "user", "content": "hi"}]}),
     )
     .await;
     assert_eq!(
@@ -236,7 +242,7 @@ async fn a_verb_that_runs_no_turn_reads_nothing() {
     let tmp = TempDir::new().unwrap();
     let srv = ollama(tags(&["m"]), 200).await;
     let kernel = mk(&tmp, &srv.uri()).await;
-    for verb in ["reflect", "status", "context_status", "rows"] {
+    for verb in ["reflect", "models"] {
         call(&kernel, "o1", json!({"type": verb})).await;
     }
     assert!(seen(&srv).await.is_empty());

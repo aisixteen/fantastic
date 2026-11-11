@@ -15,8 +15,6 @@ const OFF_DEVICE_REFUSAL: &str = "foundation_models_backend: `{key}` has no mean
 const MISSING_STORE: &str = "foundation_models_backend: required on the record and missing: memory_store_id — nothing is guessed. memory_store_id = the memory store agent that keeps this agent's conversation (e.g. a ram_store)";
 const TOO_BIG_4096: &str = "context_window must be a positive int no larger than the on-device model's window (4096 tokens)";
 const NOT_A_USER_TURN: &str = "RuntimeError: foundation_models_backend: the last message is not a user turn (role {role}) — the on-device session answers a prompt";
-const TEMPERATURE_HINT: &str = "sampling temperature (>= 0); unset, the on-device model's own";
-const MAX_TOKENS_HINT: &str = "a turn's output budget (tokens); unset, the on-device model's own";
 
 fn bundle(engine: FakeEngine) -> FoundationModelsBackendBundle {
     FoundationModelsBackendBundle::new(Arc::new(engine))
@@ -112,7 +110,10 @@ async fn kernel(engine: &Arc<FakeEngine>, meta: Value) -> Fx {
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     // a chat verb goes to an ai_chat completing through this provider
     let verb = payload.get("type").and_then(Value::as_str).unwrap_or("").to_string();
-    let to = if fantastic_ai_core::remote_provider::is_chat_verb(&verb) {
+    // a verb the provider does not declare is a chat's: it goes to an ai_chat completing here
+    let to = if verb != "boot"
+        && fantastic_ai_core::declared::chat::VERBS.iter().any(|v| v.name == verb)
+    {
         fantastic_ai_core::remote_provider::pair_chat(k, &AgentId::from(target)).await
     } else {
         AgentId::from(target)
@@ -126,11 +127,9 @@ async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
 // ── the record schema ───────────────────────────────────────────────
 
 #[test]
-fn the_schema_is_two_knobs_then_the_ai_fields_with_the_models_window() {
-    let schema = bundle(FakeEngine::new().context_size(4096))
-        .record_schema()
-        .unwrap();
-    let fields = schema["fields"].as_array().unwrap();
+fn the_record_is_two_knobs_a_store_then_the_ai_fields() {
+    let declared = fantastic_kernel::verbs::record_fields(&RECORD);
+    let fields = declared["fields"].as_array().unwrap();
     let names: Vec<&str> = fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
     assert_eq!(
         names,
@@ -153,38 +152,28 @@ fn the_schema_is_two_knobs_then_the_ai_fields_with_the_models_window() {
             "post_system_prompt"
         ]
     );
-    // the window is the MODEL'S, read from the engine — not the kernel's 128k
-    assert_eq!(fields[3]["default"], json!(4096));
-    // the knobs have no default of ours: unset is the model's own
-    assert!(fields[0].get("default").is_none() && fields[1].get("default").is_none());
     let required: Vec<&str> = fields
         .iter()
         .filter(|f| f["required"] == json!(true))
         .map(|f| f["name"].as_str().unwrap())
         .collect();
     assert_eq!(required, ["memory_store_id"]);
-    // the exact field bytes swift publishes
-    assert_eq!(
-        fields[0].to_string(),
-        json!({"name": "temperature", "type": "float", "required": false, "hint": TEMPERATURE_HINT})
-            .to_string()
-    );
-    assert_eq!(
-        fields[1].to_string(),
-        json!({"name": "max_tokens", "type": "int", "required": false, "hint": MAX_TOKENS_HINT})
-            .to_string()
-    );
-    // another engine, another window
-    let big = bundle(FakeEngine::new().context_size(8192))
-        .record_schema()
-        .unwrap();
-    assert_eq!(big["fields"][3]["default"], json!(8192));
-    // every other field is ai-core's, byte for byte
-    let ai = schema::schema_with_window(vec![], 4096);
-    assert_eq!(
-        Value::Array(fields[2..].to_vec()).to_string(),
-        ai["fields"].to_string()
-    );
+}
+
+/// What a write of `meta` to this bundle's record answers: the engine's refusal of a
+/// field, else the bundle's own check. `None`: taken.
+fn at_the_write(b: &FoundationModelsBackendBundle, meta: Value) -> Option<String> {
+    let m = obj(meta);
+    match fantastic_kernel::verbs::check_record(
+        "update_agent",
+        NAME,
+        &m,
+        &fantastic_kernel::declared::record::RECORD,
+        &RECORD,
+    ) {
+        Err(r) => Some(fantastic_kernel::refusal::error_text(&r).unwrap_or_default()),
+        Ok(()) => b.validate_meta(&m, &Map::new()),
+    }
 }
 
 #[tokio::test]
@@ -220,7 +209,7 @@ async fn the_catalog_carries_the_schema_with_no_agent_existing() {
         .iter()
         .find(|b| b["name"] == json!(NAME))
         .unwrap_or_else(|| panic!("no {NAME} in {r}"));
-    assert_eq!(fm["schema"]["fields"][3]["default"], json!(4096), "{fm}");
+    assert!(fm["schema"]["fields"].is_array(), "{fm}");
 }
 
 // ── validate_meta ───────────────────────────────────────────────────
@@ -228,56 +217,49 @@ async fn the_catalog_carries_the_schema_with_no_agent_existing() {
 #[test]
 fn an_off_device_field_is_refused_at_the_write() {
     let b = bundle(FakeEngine::new());
+    // the record declares no endpoint, model or credentials: the engine refuses them by name
     for key in ["endpoint", "model", "credentials"] {
-        assert_eq!(
-            b.validate_meta(
-                &obj(json!({key: "x", "memory_store_id": "memory"})),
-                &Map::new()
-            ),
-            Some(OFF_DEVICE_REFUSAL.replace("{key}", key))
-        );
+        let refused = at_the_write(&b, json!({key: "x", "memory_store_id": "memory"}));
+        assert!(refused.is_some_and(|e| e.contains(key)), "{key}");
     }
-    // a null clears nothing that was never there — not a refusal
-    assert_eq!(
-        b.validate_meta(
-            &obj(json!({"model": null, "memory_store_id": "memory"})),
-            &Map::new()
-        ),
-        None
-    );
+    // a null clears nothing that was never there — still no such field
+    assert!(at_the_write(&b, json!({"model": null, "memory_store_id": "memory"})).is_some());
 }
 
 #[test]
 fn the_knobs_are_refused_outside_their_shape() {
     let b = bundle(FakeEngine::new().context_size(4096));
     let check = |extra: Value| {
-        let mut m = obj(json!({"memory_store_id": "memory"}));
-        m.extend(obj(extra));
-        b.validate_meta(&m, &Map::new())
+        let mut m = json!({"memory_store_id": "memory"});
+        m.as_object_mut().unwrap().extend(obj(extra));
+        at_the_write(&b, m)
     };
-    let temp = Some("temperature must be a number >= 0".to_string());
-    assert_eq!(check(json!({"temperature": -0.1})), temp);
-    assert_eq!(check(json!({"temperature": "hot"})), temp);
-    assert_eq!(check(json!({"temperature": true})), temp);
+    for bad in [json!({"temperature": -0.1}), json!({"temperature": "hot"}), json!({"temperature": true})] {
+        assert!(check(bad.clone()).is_some_and(|e| e.contains("temperature")), "{bad}");
+    }
     assert_eq!(check(json!({"temperature": 0})), None);
     assert_eq!(check(json!({"temperature": 0.7})), None);
-    let max = Some("max_tokens must be a positive int".to_string());
-    assert_eq!(check(json!({"max_tokens": 0})), max);
-    assert_eq!(check(json!({"max_tokens": 5.5})), max);
+    for bad in [json!({"max_tokens": 0}), json!({"max_tokens": 5.5})] {
+        assert!(check(bad.clone()).is_some_and(|e| e.contains("max_tokens")), "{bad}");
+    }
     assert_eq!(check(json!({"max_tokens": 256})), None);
     let too_big = Some(TOO_BIG_4096.to_string());
     assert_eq!(check(json!({"context_window": 8192})), too_big);
-    assert_eq!(check(json!({"context_window": 0})), too_big);
+    assert!(check(json!({"context_window": 0})).is_some_and(|e| e.contains("context_window")));
     assert_eq!(check(json!({"context_window": 2048})), None);
     assert_eq!(check(json!({"context_window": 4096})), None);
 }
 
-#[test]
-fn a_record_without_a_store_is_refused_naming_it() {
-    let b = bundle(FakeEngine::new());
-    assert_eq!(
-        b.validate_meta(&Map::new(), &Map::new()),
-        Some(MISSING_STORE.to_string())
+#[tokio::test]
+async fn a_record_without_a_store_is_refused_at_create_naming_it() {
+    let engine = Arc::new(FakeEngine::new());
+    let fx = kernel(&engine, json!({"memory_store_id": null})).await;
+    assert!(
+        fx.created["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("memory_store_id")),
+        "{}",
+        fx.created
     );
 }
 
@@ -288,7 +270,7 @@ async fn create_agent_refuses_an_off_device_field() {
     assert!(
         fx.created["error"]
             .as_str()
-            .is_some_and(|e| e.contains("`model` has no meaning here")),
+            .is_some_and(|e| e.contains("model")),
         "{}",
         fx.created
     );
@@ -335,7 +317,8 @@ async fn reflect_shows_availability_the_window_and_the_knobs() {
         ]
     );
     assert!(keys.iter().position(|k| *k == "generating").unwrap() < i);
-    assert!(!keys.contains(&"concurrency") && !keys.contains(&"verbs"));
+    // the verb list is rendered by the kernel from the declarations, not carried by the bundle
+    assert!(!keys.contains(&"concurrency"));
 
     engine.set_availability(FmAvailability::Unavailable(
         FmReason::MODEL_NOT_READY.to_string(),
@@ -767,9 +750,10 @@ async fn an_unknown_type_names_the_bundle() {
     let engine = Arc::new(FakeEngine::new());
     let fx = kernel(&engine, json!({})).await;
     let r = fx.call(json!({"type": "nope"})).await;
-    assert_eq!(
-        r["error"],
-        json!("foundation_models_backend: unknown type 'nope'")
+    assert_eq!(r["reason"], json!("unhandled"), "{r}");
+    assert!(
+        r["error"].as_str().is_some_and(|e| e.starts_with("unknown verb 'nope'; ")),
+        "{r}"
     );
 }
 
@@ -812,12 +796,6 @@ fn joined(src: &str) -> String {
         i += ch.len_utf8();
     }
     out
-}
-
-#[test]
-fn the_readme_is_the_bundles_one_file() {
-    assert_eq!(bundle(FakeEngine::new()).readme(), Some(README));
-    assert!(README.starts_with("# foundation_models_backend — "));
 }
 
 /// The FMCore texts this crate spells itself, found verbatim in `FMCore.swift`

@@ -1,8 +1,8 @@
 //! What the record leaves out is READ FROM THE API — python
 //! `anthropic_backend/server.py`, text for text.
 //!
-//! `max_tokens` and `context_window` may be left off the record. Before a verb that
-//! runs a turn ([`TURN_VERBS`]), each one still absent is read from the API's model
+//! `max_tokens` and `context_window` may be left off the record. Before `complete`, the verb that
+//! runs a turn, each one still absent is read from the API's model
 //! entry — `GET {models}/{model}`, `{models}` being the endpoint with its
 //! `/messages` replaced by `/models` — and WRITTEN BACK: `max_tokens` from the
 //! entry's `max_tokens` BOUNDED to [`default_max_tokens`] (260000, plus the record's
@@ -21,7 +21,6 @@ use std::time::Duration;
 /// The fields a record may leave to the API, in the order they are read.
 pub const INFERRED: [&str; 2] = ["max_tokens", "context_window"];
 /// The verbs that run a turn of the model — the ones the API is read for.
-pub const TURN_VERBS: [&str; 4] = ["send", "inquiry", "context_recall", "complete"];
 /// Seconds to wait on the model entry.
 pub const READ_TIMEOUT: f64 = 30.0;
 
