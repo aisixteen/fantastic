@@ -1,6 +1,7 @@
 """E142 bounded_stop — #562: a signal stop is bounded.
 
-A stub model never answers, so a call is in flight at the stop.
+A stub model never answers, so a call is in flight at the stop (a `complete` sent to the
+provider, `ai_provider`: a chat completes through its provider).
 a) SIGTERM: the kernel's clean stop runs (waits the quiet period), exits 0 inside
    the 15 s grace, the lock and the run file gone.
 b) SIGTERM, then SIGTERM again: the second exits 1 at once, lock and run file gone."""
@@ -58,7 +59,7 @@ def main() -> bool:
     run = rig.proj / ".fantastic" / "cli" / "canvas.yaml"
 
     def in_flight(n: int) -> subprocess.Popen:
-        p = subprocess.Popen([str(rig.binary), "send", json.dumps({"target": "ai", "payload": {"type": "complete", "rid": "r562", "model": "stub", "messages": [{"role": "user", "content": "hello"}]}})],
+        p = subprocess.Popen([str(rig.binary), "send", json.dumps({"target": "ai_provider", "payload": {"type": "complete", "rid": "r562", "model": "stub", "messages": [{"role": "user", "content": "hello"}]}})],
                              cwd=rig.proj, env=rig.env(), stdout=open(rig.art / "send.log", "a"), stderr=subprocess.STDOUT,
                              **oslayer.group_kwargs())
         senders.append(p)
@@ -69,7 +70,7 @@ def main() -> bool:
         return p
 
     try:
-        # first boot creates the root AI
+        # first boot creates the root AI: a chat `ai` and its provider `ai_provider` (the model's endpoint, #615)
         rig.host = subprocess.Popen([str(rig.binary), "canvas", "--port", str(rig.port), "ai", "vllm", "-p", str(stub_port)], cwd=rig.proj,
                                     env=rig.env(), stdout=open(rig.log, "a"), stderr=subprocess.STDOUT, **oslayer.group_kwargs())
         for _ in range(600):
@@ -81,7 +82,7 @@ def main() -> bool:
         else:
             raise SystemExit("the host never announced the canvas")
         rig.stop()
-        rig.patch_host_agent("ai", {"model": "stub", "context_window": 32768, "max_tokens": 4096, "kv_slots": 4, "kv_overflow": "evict"})
+        rig.patch_host_agent("ai_provider", {"model": "stub", "context_window": 32768, "max_tokens": 4096, "kv_slots": 4, "kv_overflow": "evict"})
 
         # a) a clean stop with a call in flight
         rig.start()

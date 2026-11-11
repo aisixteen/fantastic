@@ -372,6 +372,27 @@ def log_name(name: str) -> str:
     return name.replace(":", "@") + ".log"
 
 
+#: A MUTED test (owner 2026-11-11): its `test.yaml` / `scenario.yaml` carries `muted: "#<issue>: <one-line
+#: reason>"`. The runner does not run it: it is reported SKIP with "muted #<issue>: <reason>", counted with
+#: the skips and listed at the end. The reason is the open issue that un-mutes it.
+MUTED_FORM = re.compile(r"#\d+: \S.*")
+
+
+def mute_note(t: dict) -> str | None:
+    """`muted #<issue>: <reason>` for a muted test, else None."""
+    m = t.get("muted")
+    return None if m is None else f"muted {m}"
+
+
+def check_muted(tests) -> list[str]:
+    """Every `muted:` is `#<issue>: <reason>`: a mute without an issue is a test quietly dropped."""
+    return [
+        f"{t['group']}/{t['id']}: muted: {t['muted']!r} is not '#<issue>: <one-line reason>'"
+        for t in tests
+        if "muted" in t and not (isinstance(t["muted"], str) and MUTED_FORM.fullmatch(t["muted"]))
+    ]
+
+
 async def run_one(
     t: dict,
     bk,
@@ -389,6 +410,12 @@ async def run_one(
 
 
 async def _run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: dict, name: str):
+    if note := mute_note(t):
+        # not run, no lane taken: a SKIP that names its issue
+        (logdir / log_name(name)).write_text(f"# {name} · {t['title']}\n\n{note}\n")
+        results[name] = {"state": "skip", "note": note, "took": 0.0, "rc": 0, "log": logdir / log_name(name), "muted": True}
+        print(f"  SKIP  {name:<34} {0:6.0f}s  {note}", flush=True)
+        return
     async with sem:
         log = logdir / log_name(name)
         # The knobs a test owns, rendered into the env its runner already reads.
@@ -674,7 +701,7 @@ async def main() -> int:
 
     if a.list:
         for t in picked:
-            print(f"{t['group']:<18} {t['id']:<20} {t['costs']:<6} {t['title']}")
+            print(f"{t['group']:<18} {t['id']:<20} {t['costs']:<6} {t['title']}" + (f"  [{mute_note(t)}]" if mute_note(t) else ""))
         return 0
 
     # A probe with no `verdict(...)` call scores `no verdict` FOREVER and nobody
@@ -706,6 +733,12 @@ async def main() -> int:
         for d in drift:
             print("  · " + d)
         print("  regenerate the roster, or fix the probe, then re-run.")
+        return 1
+
+    if badmute := check_muted(picked):
+        print("REFUSING TO RUN — a `muted:` is not '#<issue>: <one-line reason>':")
+        for b in badmute:
+            print("  · " + b)
         return 1
 
     if blockers := bk.blockers():
@@ -803,6 +836,11 @@ async def main() -> int:
             f"  {r['state']:<10} {name:<34} {r.get('took', 0):6.0f}s  {r.get('note') or ''}"
         )
     print("═" * 72)
+    if muted := sorted(n for n, r in results.items() if r.get("muted")):
+        print(f"  MUTED ({len(muted)}, counted with the skips):")
+        for n in muted:
+            print(f"    {n}  {results[n]['note']}")
+        print("═" * 72)
     print(
         "  "
         + " · ".join(f"{k}={v}" for k, v in sorted(counts.items()))

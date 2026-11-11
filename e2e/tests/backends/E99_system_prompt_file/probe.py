@@ -59,7 +59,7 @@ def main() -> int:
     os.environ[KEY_VAR] = KEY  # the STORE reads it (env backend), never a record
     work = Path(tempfile.mkdtemp(prefix="e2e-system-prompt-file-"))
     prompt = work / "prompt.md"
-    hk = HostKernel(spec, work, reach=["ai", "pf", "pf_sealed"]).boot()
+    hk = HostKernel(spec, work, reach=["ai", "ai_provider", "pf", "pf_sealed"]).boot()
     root = hk.root_id
     bad: list[str] = []
 

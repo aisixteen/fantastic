@@ -6,7 +6,8 @@ recorded and every child-frame navigation from then on is counted:
 
 - the pill to alpha, mod+2 to beta, mod+1 to alpha — after each, the home's own
   `list` names the shown page as its selection; mod+0 shows the Home;
-- no child frame navigated, and both frames are the ones born before;
+- no child frame of the page navigated (a frame inside a canvas drawing its own cells is
+  not one), and both frames are the ones born before;
 - a second tab shows the same `aria-current` page (the state is the agent's),
   and a shortcut sent there moves the first tab too;
 - mod+W with alpha shown closes alpha's page; alpha still runs (its lock is
@@ -97,7 +98,9 @@ def main() -> bool:
             born = json.loads(await pg.js(born_js) or "{}")
             info["born"] = born
             r["two_frames"] = sorted(born) == sorted([aid, bid])
+            pg.main_frame_id = (await pg.cdp("Page.getFrameTree"))["frameTree"]["frame"]["id"]
             pg.navigations = []
+            pg.nested_navigations = []
             # every state from here on: a frame dropped (not reloaded) would follow
             # a state where its row was not running at its url
             log = await StateLog(rig.home_port).__aenter__()
@@ -114,6 +117,7 @@ def main() -> bool:
             await asyncio.sleep(1.0)  # a late reload would show by now
             await pg.js("1")  # drain the events that arrived meanwhile
             info["navigations"] = list(pg.navigations)
+            info["nested_navigations"] = list(pg.nested_navigations)
             r["no_child_navigation"] = pg.navigations == []
             r["frames_kept"] = json.loads(await pg.js(born_js) or "{}") == born
 

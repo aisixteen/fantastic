@@ -5,7 +5,8 @@ bundling"):
 a) double-click → `html` places an html cell with its starter body;
 b) `set_html` sent to `<guid>|<cell>` through the host re-renders it;
 c) its body written as a page folder bundle (`.fantastic/web/bundles/card_e68/`,
-   `base: html_agent`) is a tile in the popup's `page · bundles` group;
+   `base: html_agent`) is a tile in the popup's `page · bundles` group once the page
+   opens again (a page loads its folder bundles when it opens);
 d) that tile places an instance showing the body;
 e) the edited cell of (b) keeps its own body."""
 
@@ -66,6 +67,10 @@ def main() -> bool:
                 folder = rig.proj / ".fantastic" / "web" / "bundles" / NAME
                 folder.mkdir(parents=True)
                 (folder / "bundle.yaml").write_text(bundle_yaml(body))
+                # the page loads its folder bundles when it OPENS (the live page-bundle watch went
+                # with `bundles_watch`, #620): a reload shows the new folder
+                await pg.open(rig.url)
+                await pg.until(f"{CELLS}.some(id=>id==={json.dumps(cell)})", 20)
                 await asyncio.sleep(2.0)
                 for c in (1, 2):
                     await pg.mouse("mousePressed", 900, 200, c)

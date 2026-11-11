@@ -108,7 +108,7 @@ def main() -> bool:
             # b) the AI names the file
             import yaml
             recs = [yaml.safe_load(p.read_text()) or {} for p in (rig.proj / ".fantastic" / "agents").rglob("agent.yaml")]
-            rec = next((x for x in recs if x.get("handler_module") == "vllm_backend.tools"), {})
+            rec = next((x for x in recs if x.get("handler_module") == "ai_chat.tools"), {})  # the chat names the file; its provider is another agent (#615)
             info["ai"] = rec.get("id")
             r["ai_names_file"] = rec.get("file_bridge_id") == "prompt_file" and rec.get("system_prompt_file") == "prompt.md"
             r["records_persist"] = "persist through 'prompt_file' failed" not in (rig.proj / ".fantastic" / "cli" / "kernel.log").read_text(errors="ignore")

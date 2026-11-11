@@ -129,8 +129,11 @@ def main() -> bool:
                 info["fps"], info["host_lines_per_s"] = fps, calls
                 await asyncio.sleep(2.0)
                 l0 = len(rig.log.read_text().splitlines())
-                await asyncio.sleep(3.0)
-                info["idle_host_lines_per_s"] = round((len(rig.log.read_text().splitlines()) - l0) / 3)
+                # the sidebar's own tick (`sidebar_view.html`, every 5 s) is a burst of host lines: a
+                # window shorter than two ticks catches one or none (0 or ~5 lines/s), so the rest is
+                # measured over 10 s
+                await asyncio.sleep(10.0)
+                info["idle_host_lines_per_s"] = round((len(rig.log.read_text().splitlines()) - l0) / 10)
                 info["fps_idle_after"] = await pg.js(FPS)
                 info["console"] = pg.logs[:10]
 

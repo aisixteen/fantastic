@@ -417,7 +417,14 @@ def main(argv: list[str]) -> int:
                 if not hits:
                     bad.append(f"no frame {label!r}")
                     continue
-                bad += check_frame(label, hits[-1].read_text(), want)
+                got = check_frame(label, hits[-1].read_text(), want)
+                if got:
+                    # a failed frame is shown whole: the frames are not kept, and a
+                    # wrong expectation cannot be told from a wrong screen without it
+                    print(f"  frame {label!r}:", flush=True)
+                    for ln in hits[-1].read_text().splitlines():
+                        print("    | " + ln, flush=True)
+                bad += got
             bad += after(run, cwd, out, state)
             print(f"  {'✓' if not bad else '✕'} {name}" + ("" if not bad else "  — " + " · ".join(bad)), flush=True)
             failures += [f"{name}: {b}" for b in bad]
