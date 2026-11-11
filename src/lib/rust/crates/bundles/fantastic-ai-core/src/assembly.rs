@@ -119,35 +119,6 @@ to check. A message to an
 agent has a deadline (600 s unless set otherwise); past it you are told of a dead letter —
 resend it, or drop it with `kernel` `<type>ack_deadletter</type>`.
 
-## Working
-Text outside calls is only the state lines when they changed, and your last message.
-State lines are plain reply text before your calls (not a call, not an agent); your thinking
-lasts one turn, they are what later turns have. Write them again only when something changed:
-Goal: add --json to ls. Done when: ls test passes, build clean.
-Plan: [x] find handler  [ ] add flag (current)  [ ] run test
-Facts: handler src/cli.rs:120 (grep)
-Ruled out: -
-Next: edit src/cli.rs:120
-A step is [x] only after its result is in Facts; a Fact a later result contradicts is rewritten.
-Each turn, start from your latest such lines and think only about Next.
-Read only what the request names; no docs or reflect sweep before your first real call. Make
-the first call that changes or tests something as soon as you can — an error reply names the
-missing argument. The tree above lists what exists and `can_call` what you may use: do not
-reflect to rediscover them; `docs` only for a verb you are about to call.
-One answer may hold many <call> elements; they run at once. Put in it every call that does not
-need another's reply; a call waits for a later turn only when it does.
-Find before you read: grep or list, then read only the lines you need. Bound command output
-(`head`, `tail`, `grep`, a count); put long logs in a file and search it. Never guess a path
-or symbol you have not seen.
-When an edit or command fails, read the error and the current file, then change the call;
-never resend it unchanged. A step that fails or brings nothing new three times: stop, put it
-under Ruled out, then take another route or send whoever asked you an `inquiry` with what you tried.
-Before `done`: each Done-when item gets one line with its evidence (test or build output, a
-command result). Checks are run, not re-read: the test for your change first, the full suite
-once. Do not re-read a file only to confirm an edit the tool acknowledged. Say what you could
-not check.
-Your last message: what changed, where (path:line), what you checked, what is left; under ten lines.
-
 ## How to call an agent — `docs`
 `docs` is a KERNEL verb: send it to `kernel` with the agent you ask about in `<of>`
 (an agent id, a bundle by its listed name, or
@@ -205,6 +176,38 @@ earlier row stays reachable through grep, recall and `history fold`.
 /// The memory how-to — python `_MEMORY_HOWTO`, verbatim, `{store}` filled in with
 /// the record's `memory_store_id` (or `(none)`).
 pub const MEMORY_HOWTO: &str = r#"Your conversation lives in your MEMORY STORE `{store}` — every row under YOUR key.
+"#;
+
+/// The working rules, placed LAST in the default system block: the model follows the
+/// most recent instructions most closely, and these must survive a long task brief.
+pub const WORKING_HOWTO: &str = r#"## Working
+Text outside calls is only the state lines when they changed, and your last message.
+State lines are plain reply text before your calls (not a call, not an agent); your thinking
+lasts one turn, they are what later turns have. Write them again only when something changed:
+Goal: add --json to ls. Done when: ls test passes, build clean.
+Plan: [x] find handler  [ ] add flag (current)  [ ] run test
+Facts: handler src/cli.rs:120 (grep)
+Ruled out: -
+Next: edit src/cli.rs:120
+A step is [x] only after its result is in Facts; a Fact a later result contradicts is rewritten.
+Each turn, start from your latest such lines and think only about Next.
+Read only what the request names; no docs or reflect sweep before your first real call. Make
+the first call that changes or tests something as soon as you can — an error reply names the
+missing argument. The tree above lists what exists and `can_call` what you may use: do not
+reflect to rediscover them; `docs` only for a verb you are about to call.
+One answer may hold many <call> elements; they run at once. Put in it every call that does not
+need another's reply; a call waits for a later turn only when it does.
+Find before you read: grep or list, then read only the lines you need. Bound command output
+(`head`, `tail`, `grep`, a count); put long logs in a file and search it. Never guess a path
+or symbol you have not seen.
+When an edit or command fails, read the error and the current file, then change the call;
+never resend it unchanged. A step that fails or brings nothing new three times: stop, put it
+under Ruled out, then take another route or send whoever asked you an `inquiry` with what you tried.
+Before `done`: each Done-when item gets one line with its evidence (test or build output, a
+command result). Checks are run, not re-read: the test for your change first, the full suite
+once. Do not re-read a file only to confirm an edit the tool acknowledged. Say what you could
+not check.
+Your last message: what changed, where (path:line), what you checked, what is left; under ten lines.
 "#;
 
 /// The context-window how-to, appended to the DEFAULT system block. Context is
@@ -353,6 +356,8 @@ async fn parts(
         if flag("context_async") {
             blocks.push(ASYNC_HOWTO.to_string());
         }
+        // LAST: the working rules are what the model reads right before the task.
+        blocks.push(WORKING_HOWTO.to_string());
         out.insert("howto", blocks.join("\n\n"));
     }
     out
@@ -948,7 +953,7 @@ mod tests_worknote {
 
     #[test]
     fn the_working_section_leads_with_the_state_lines_and_a_five_line_sample() {
-        let h = super::SEND_TO_HOWTO;
+        let h = super::WORKING_HOWTO;
         let w = h.find("## Working").unwrap();
         let state = h.find("Text outside calls is only the state lines").unwrap();
         assert!(state > w && state < h.find("Read only what the request names").unwrap());
@@ -960,15 +965,17 @@ mod tests_worknote {
         assert!(h.contains("A step is [x] only after its result is in Facts; a Fact a later result contradicts is rewritten."));
         assert!(h.contains("think only about Next"));
         // the sections run in the agreed order
-        let order = ["## Reaching", "## Grants", "## Turns", "## Replies", "## Working", "## How to call", "## Inquiries"];
-        let at: Vec<usize> = order.iter().map(|k| h.find(k).unwrap()).collect();
+        let s = super::SEND_TO_HOWTO;
+        assert!(!s.contains("## Working"));
+        let order = ["## Reaching", "## Grants", "## Turns", "## Replies", "## How to call", "## Inquiries"];
+        let at: Vec<usize> = order.iter().map(|k| s.find(k).unwrap()).collect();
         assert!(at.windows(2).all(|p| p[0] < p[1]), "{at:?}");
     }
 
     #[test]
     fn the_send_howto_says_act_early_batch_and_verify_before_done() {
         // (the text wraps lines; compare on single spaces)
-        let h = super::SEND_TO_HOWTO.split_whitespace().collect::<Vec<_>>().join(" ");
+        let h = format!("{} {}", super::SEND_TO_HOWTO, super::WORKING_HOWTO).split_whitespace().collect::<Vec<_>>().join(" ");
         let h = h.as_str();
         assert!(h.contains("Read only what the request names; no docs or reflect sweep before your first real call."));
         assert!(h.contains("an error reply names the missing argument"));
