@@ -126,6 +126,7 @@ fn provider_idle(
         usage: Arc::new(Mutex::new(Usage::default())),
         base: Arc::new(Mutex::new(Usage::default())),
         usage_file: None,
+        kernel: Arc::new(Kernel::new()),
         report: ReportCell::default(),
         stream_idle,
         long_context_tokens: None,

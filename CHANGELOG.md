@@ -7,6 +7,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- An anthropic provider keeps its usage (total, by_model, by_agent) in its own params store too (#547): a `usage` setting row, written when a request ends and on `usage_reset`, read on load when `usage.json` is missing; `usage.json` stays.
 - `ram_store` and `sqlite_store` `append` emits `appended {table, id}` for each new row (#508), so a store view refreshes on a write; a refused append emits nothing.
 - The sidebar (#608): the canvas's left column is the `sidebar` agent (`sidebar.tools`, seeded under the root on a first run), whose `reflect` returns its html view: the kernels, the agent tree with each chat's state, what waits for the person, and the project's files, drawn from reads on other agents (a view's `calls` as an object). It replaces the canvas's file-tree sidebar and its `tree` view verb; a folder seeded before it has no left column.
 - `reflect` takes `handler_modules` (#605): a list of handler names; with `tree` `all` or `ids` only the agents whose `handler_module` is listed come back, as a flat `tree` list, and an agent outside the list is not asked. A value that is not a list of names is refused `bad_arg`.
