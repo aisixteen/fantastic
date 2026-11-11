@@ -205,3 +205,72 @@ pub(crate) async fn persist(h: &Host, rec: Map<String, Value>) -> Result<(), Str
 pub(crate) async fn has_view(h: &Host) -> Result<bool, String> {
     Ok(page_records(h).await?.iter().any(|r| r.get("id").and_then(Value::as_str) == Some(VIEW)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kern::backend::create_tests::{host, record_of};
+
+    fn vllm(port: u16) -> Backend {
+        Backend::Vllm {
+            host: "box.example".into(),
+            port,
+            kv_overflow: "evict".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_repoint_updates_the_provider_and_a_failed_remake_puts_both_records_back() {
+        let (h, dir) = host("root-ai", &["ai", "ai_provider"]).await;
+        assert_eq!(
+            run(&h, &vllm(8000)).await.unwrap(),
+            "the root AI `ai` (made, vllm_backend.tools) speaks to http://box.example:8000/v1"
+        );
+        // the same backend: the provider found through the chat is re-pointed, the chat keeps its provider
+        let out = run(&h, &vllm(8001)).await.unwrap();
+        assert!(out.contains("re-pointed"), "{out}");
+        let (chat, prov) = (record_of(&h, ROOT_AI), record_of(&h, "ai_provider"));
+        assert_eq!(prov["endpoint"], json!("http://box.example:8001/v1"));
+        assert_eq!(chat["provider_id"], json!("ai_provider"));
+        assert!(
+            chat.get("endpoint").is_none(),
+            "the endpoint is the provider's alone"
+        );
+        // another backend whose record is refused: the old chat AND provider are put back
+        let err = run(
+            &h,
+            &Backend::Ollama {
+                host: "box.example".into(),
+                port: 11434,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("is left on vllm_backend.tools"), "{err}");
+        assert_eq!(
+            record_of(&h, "ai_provider")["endpoint"],
+            json!("http://box.example:8001/v1"),
+            "the provider is back"
+        );
+        assert_eq!(
+            record_of(&h, ROOT_AI)["provider_id"],
+            json!("ai_provider"),
+            "and the chat"
+        );
+        let handler = |id: &str| {
+            h.kernel
+                .agents
+                .get(&fantastic_kernel::AgentId::from(id))
+                .unwrap()
+                .value()
+                .record()
+                .handler_module
+        };
+        assert_eq!(
+            handler("ai_provider").as_deref(),
+            Some("vllm_backend.tools")
+        );
+        assert_eq!(handler(ROOT_AI).as_deref(), Some("ai_chat.tools"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

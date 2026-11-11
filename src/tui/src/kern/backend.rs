@@ -382,6 +382,8 @@ impl BackendBundle {
         if !alone {
             crate::kern::keys::attach(host, &handler, &mut spec)?;
         }
+        // a chat alone admitted to a provider here: undone if the chat is then refused
+        let mut admitted: Option<String> = None;
         let (provider, chat) = Self::pair_specs(me, ai, &store, spec, peer);
         if let Some(provider) = provider {
             let named = provider.clone();
@@ -394,12 +396,15 @@ impl BackendBundle {
                 return Err(e);
             }
         } else if let Some(p) = chat.get(PROVIDER_FIELD).and_then(Value::as_str) {
-            Self::admit_chat(host, p, ai)?;
+            admitted = Self::admit_chat(host, p, ai)?.then(|| p.to_string());
         }
         let r = host.operator("kernel", Value::Object(chat)).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
             if !alone {
                 let _ = host.operator("kernel", json!({"type": "delete_agent", "id": prov})).await;
+            }
+            if let Some(p) = admitted {
+                let _ = host.kernel.edit_callable_by(&AgentId::from(p.as_str()), |m| m.remove(ai).is_some());
             }
             return Err(e.to_string());
         }
@@ -412,19 +417,26 @@ impl BackendBundle {
     }
 
     /// A provider on this kernel admits the chat `ai`: `complete` and `watch`, merged into its
-    /// `callable_by`. A provider on another kernel (`<guid>|<id>`) is that kernel's to admit.
-    fn admit_chat(host: &Host, provider: &str, ai: &str) -> Result<(), String> {
+    /// `callable_by`; says whether that added `ai`. An agent here that is not a provider (its
+    /// handler is no `*_backend.tools`) is refused by name: a chat is admitted to providers only.
+    /// A provider on another kernel (`<guid>|<id>`) is that kernel's to admit.
+    fn admit_chat(host: &Host, provider: &str, ai: &str) -> Result<bool, String> {
         let id = AgentId::from(provider);
-        if !host.kernel.agents.contains_key(&id) {
-            return Ok(());
+        let Some(handler) = host.kernel.agents.get(&id).map(|a| a.value().record().handler_module) else {
+            return Ok(false);
+        };
+        if !handler.as_deref().is_some_and(|m| m.ends_with("_backend.tools")) {
+            return Err(format!("`{provider}` is not a provider (a `*_backend.tools` agent): `{ai}` is not admitted to it"));
         }
+        let mut added = false;
         host.kernel
             .edit_callable_by(&id, |m| {
+                added = !m.contains_key(ai);
                 m.insert(ai.to_string(), json!(PROVIDER_VERBS));
                 true
             })
-            .map(|_| ())
-            .map_err(|e| format!("could not admit `{ai}` to `{provider}`: {e}"))
+            .map_err(|e| format!("could not admit `{ai}` to `{provider}`: {e}"))?;
+        Ok(added)
     }
 
     /// The `create_agent` specs (pure) of the PROVIDER of AI `ai` and of the CHAT `ai`, under `me`,
@@ -872,13 +884,13 @@ impl Bundle for BackendBundle {
 /// The canvas's `create` of an AI record, on a real kernel (the memory store the AI names,
 /// its grants, and the spec it is made from).
 #[cfg(test)]
-mod create_tests {
+pub(crate) mod create_tests {
     use super::*;
     use fantastic_kernel::{Agent, Kernel};
     use std::path::PathBuf;
 
     /// A registered AI handler, registered under the name it carries.
-    struct FakeAi(&'static str);
+    pub(crate) struct FakeAi(pub(crate) &'static str);
 
     #[async_trait]
     impl Bundle for FakeAi {
@@ -891,10 +903,50 @@ mod create_tests {
         }
     }
 
+    /// A backend whose record is refused at the write: the make of a pair on it fails.
+    struct RefusingAi;
+
+    #[async_trait]
+    impl Bundle for RefusingAi {
+        fn name(&self) -> &str {
+            "ollama_backend.tools"
+        }
+
+        async fn handle(&self, _id: &AgentId, _p: &Value, _k: &Arc<Kernel>) -> Result<Option<Value>, BundleError> {
+            Ok(None)
+        }
+
+        fn validate_meta(&self, _meta: &Map<String, Value>, _record: &Map<String, Value>) -> Option<String> {
+            Some("a required field is missing".to_string())
+        }
+    }
+
+    /// A memory store that keeps the rows appended to it and answers a read with all of them.
+    #[derive(Default)]
+    struct FakeStore(std::sync::Mutex<Vec<Value>>);
+
+    #[async_trait]
+    impl Bundle for FakeStore {
+        fn name(&self) -> &str {
+            "fake_store.tools"
+        }
+
+        async fn handle(&self, _id: &AgentId, p: &Value, _k: &Arc<Kernel>) -> Result<Option<Value>, BundleError> {
+            let mut rows = self.0.lock().unwrap();
+            Ok(Some(match p.get("type").and_then(Value::as_str) {
+                Some("append") => {
+                    rows.extend(p["rows"].as_array().cloned().unwrap_or_default());
+                    json!({"ok": true})
+                }
+                _ => json!({"rows": *rows}),
+            }))
+        }
+    }
+
     /// A host on a kernel whose root is `kernel`, the human `user` (its can_call names
     /// the AI the test creates: the reach's grant, already in place), a canvas `canvas_root`
     /// and the memory store `memory`.
-    async fn host(name: &str, ai_ids: &[&str]) -> (Host, PathBuf) {
+    pub(crate) async fn host(name: &str, ai_ids: &[&str]) -> (Host, PathBuf) {
         let dir = std::env::temp_dir().join(format!("fc-create-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -909,6 +961,8 @@ mod create_tests {
         kernel.bundles.register(HANDLER_MODULE, BackendBundle);
         kernel.bundles.register("vllm_backend.tools", FakeAi("vllm_backend.tools"));
         kernel.bundles.register("ai_chat.tools", FakeAi("ai_chat.tools"));
+        kernel.bundles.register("ollama_backend.tools", RefusingAi);
+        kernel.bundles.register("fake_store.tools", FakeStore::default());
         // `user` is real: the host admits an AI to the store AS `user` (`Host::act`)
         kernel.bundles.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
         let kernel = Arc::new(kernel);
@@ -944,13 +998,13 @@ mod create_tests {
         (h, dir)
     }
 
-    fn record_of(h: &Host, id: &str) -> Map<String, Value> {
+    pub(crate) fn record_of(h: &Host, id: &str) -> Map<String, Value> {
         h.kernel.agents.get(&AgentId::from(id)).map(|a| a.value().record().meta.clone()).unwrap_or_default()
     }
 
-    const PV: [&str; 2] = ["complete", "watch"];
+    pub(crate) const PV: [&str; 2] = ["complete", "watch"];
 
-    fn rec_ai(extra: Value) -> Value {
+    pub(crate) fn rec_ai(extra: Value) -> Value {
         let mut r = json!({"handler_module": "vllm_backend.tools", "id": "helper", "memory_store_id": "memory",
             "endpoint": "http://box.example:8000/v1", "model": "m1", "kv_overflow": "evict", "context_strategy": "none"});
         r.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap_or_default());
@@ -1055,6 +1109,51 @@ mod create_tests {
         assert!(!h.kernel.agents.contains_key(&AgentId::from("mine_provider")), "no second provider");
         assert_eq!(record_of(&h, "mine")["can_call"]["prov"], json!(PV));
         assert_eq!(record_of(&h, "prov")["callable_by"]["mine"], json!(PV));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_chat_alone_is_admitted_to_a_provider_only_and_a_refused_chat_is_not_left_admitted() {
+        let (h, dir) = host("admit", &["mine", "other"]).await;
+        let me = AgentId::from("canvas_root");
+        // a chat naming an agent that is no provider is refused by name, and that agent is untouched
+        let r = BackendBundle::create(&h, &me, &json!({"record": {"handler_module": "ai_chat.tools", "id": "mine", "provider_id": "memory", "memory_store_id": "memory"}})).await;
+        assert!(r["error"].as_str().is_some_and(|e| e.contains("`memory` is not a provider")), "{r}");
+        assert!(!h.kernel.agents.contains_key(&AgentId::from("mine")));
+        // a chat refused after the admit leaves the provider as it was
+        let prov = h
+            .operator("kernel", json!({"type": "create_agent", "parent_id": "kernel", "id": "prov", "handler_module": "vllm_backend.tools", "callable_by": {"$self": "*"}}))
+            .await;
+        assert!(prov.result.get("error").is_none(), "{:?}", prov.result);
+        let ok = BackendBundle::create(&h, &me, &json!({"record": {"handler_module": "ai_chat.tools", "id": "other", "provider_id": "prov", "memory_store_id": "memory"}})).await;
+        assert_eq!(ok, json!({"id": "other"}), "{ok}");
+        let again = BackendBundle::make_ai(&h, &me, "other", json!({"handler_module": "ai_chat.tools", "provider_id": "prov", "memory_store_id": "memory"}).as_object().unwrap().clone(), Map::new()).await;
+        assert!(again.is_err(), "the chat `other` exists");
+        assert_eq!(record_of(&h, "prov")["callable_by"]["other"], json!(PV), "an admit that was already there stays");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn keep_records_the_pair_as_one_provider_shaped_record() {
+        let (h, dir) = host("keep", &["helper", "helper_provider", "memory"]).await;
+        let me = AgentId::from("canvas_root");
+        let made = BackendBundle::make_ai(&h, &me, "helper", rec_ai(json!({})).as_object().unwrap().clone(), Map::new()).await;
+        assert!(made.is_ok(), "{made:?}");
+        // the kept dialog is a row on the project's store: that store keeps rows
+        h.operator("kernel", json!({"type": "delete_agent", "id": "memory"})).await;
+        let store = h
+            .operator("kernel", json!({"type": "create_agent", "parent_id": "kernel", "id": "memory", "handler_module": "fake_store.tools", "callable_by": {"$self": "*", crate::env::HUMAN: "*"}}))
+            .await;
+        assert!(store.result.get("error").is_none(), "{:?}", store.result);
+        h.kernel.edit_can_call(&AgentId::from(crate::env::HUMAN), |m| m.insert("memory".into(), json!("*")).is_none()).unwrap();
+        let out = BackendBundle::keep(&h, &json!({"id": "helper", "name": "kept"})).await;
+        assert_eq!(out["kept"], json!("helper"), "{out}");
+        let rows = BackendBundle::dialogs_map(&h).await.unwrap();
+        let rec = &rows["helper"]["record"];
+        assert_eq!(rec["handler_module"], json!("vllm_backend.tools"), "the provider's handler, not the chat's");
+        assert_eq!(rec["endpoint"], json!("http://box.example:8000/v1"), "the provider's fields");
+        assert_eq!(rec["context_strategy"], json!("none"), "under the chat's");
+        assert!(rec.get("provider_id").is_none(), "the saved set-up names no provider: it is made again at reopen");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

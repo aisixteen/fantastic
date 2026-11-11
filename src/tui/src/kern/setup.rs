@@ -213,3 +213,51 @@ pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
     }
     Ok(format!(".fantastic/agents/{PARENT}/agents/{id}/agent.yaml"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kern::backend::create_tests::{host, record_of};
+
+    #[tokio::test]
+    async fn write_makes_the_provider_and_the_chat_naming_it_both_booted() {
+        let (h, dir) = host("setup-write", &["mine", "mine_provider"]).await;
+        let mut fields = Map::new();
+        fields.insert("endpoint".into(), json!("http://box.example:8000/v1"));
+        fields.insert("model".into(), json!("m1"));
+        // what `kern/reach` does at each new agent: `user` is granted it (the boot is `user`'s call)
+        let weak = std::sync::Arc::downgrade(&h.kernel);
+        let cfg = h.cfg.clone();
+        h.kernel.add_state_subscriber(std::sync::Arc::new(move |v: &Value, _b: Option<&fantastic_kernel::Blob>| {
+            if v.get("kind").and_then(Value::as_str) != Some("added") {
+                return;
+            }
+            if let Some(kernel) = weak.upgrade() {
+                let host = Host { kernel, cfg: cfg.clone(), root: "kernel".to_string() };
+                let _ = futures_util::FutureExt::now_or_never(crate::kern::reach::grant_all(&host));
+            }
+        }));
+        let rec = Record {
+            id: "mine".into(),
+            handler: "vllm_backend.tools".into(),
+            fields,
+            may_call: vec![],
+        };
+        let at = write(&h, &rec).await.unwrap();
+        assert!(at.ends_with("/agents/mine/agent.yaml"), "{at}");
+        for id in ["mine", "mine_provider"] {
+            assert!(
+                h.kernel
+                    .agents
+                    .contains_key(&fantastic_kernel::AgentId::from(id)),
+                "{id} is written"
+            );
+        }
+        let (chat, prov) = (record_of(&h, "mine"), record_of(&h, "mine_provider"));
+        assert_eq!(chat["provider_id"], json!("mine_provider"));
+        assert!(chat.get("endpoint").is_none(), "the chat holds no endpoint");
+        assert_eq!(prov["endpoint"], json!("http://box.example:8000/v1"));
+        assert!(prov.get("provider_id").is_none(), "the provider is no chat");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
