@@ -13,7 +13,7 @@ its `provider_id` names (`complete`, `watch`). Rust lane (`runtimes: [rust]`), d
   3. grants: a chat without `complete` / `watch` on its provider, and a provider that does not
      admit the chat, are each refused by the provider's name (`cannot watch provider …`), and
      the server sees no request from them;
-  4. across the bridge: the provider on a SECOND kernel that dials the first through a
+  4. across the bridge (MUTED while `MUTED_4` is set, #616): the provider on a SECOND kernel that dials the first through a
      `ws_bridge` (as E118): the chat names it `<guid>|<id>`, the second kernel's bridge is the
      leg that serves the call there (the provider admits it), and the turn completes through it.
 """
@@ -43,6 +43,11 @@ REMOTE_AI, REMOTE_PROV, BRIDGE = "chat_remote", "prov_far", "br"
 MODEL_A, MODEL_B, MODEL_FAR = "mock-a", "mock-b", "mock-far"
 COMPLETE = ["complete", "watch", "reflect"]
 DONE = '\n<call name="done"></call>'
+
+#: Part 4 is muted (owner 2026-11-11): the chat's call across the bridge needs the autogrant redesign,
+#: fantastic#616 (the bridge's ingress and grants are not changed meanwhile). Parts 1-3 run and assert.
+#: Un-mute by setting this to "".
+MUTED_4 = "#616: the call across the bridge waits for the autogrant redesign (edge sealed by policy)"
 
 bad: list[str] = []
 
@@ -133,19 +138,57 @@ def refused_by_name(hk: HostKernel, cid: str, pid: str, bound: float = 30) -> st
     return seen
 
 
+def across_the_bridge(spec: dict, hk: HostKernel) -> None:
+    """Part 4: the provider on a SECOND kernel, reached through a `ws_bridge`. It boots that kernel
+    and its scripted server itself and stops both."""
+    mfar = VllmMock(model=MODEL_FAR).start()
+    pwork = Path(tempfile.mkdtemp(prefix="e2e-split-far-"))
+    far = HostKernel(spec, pwork, reach=[REMOTE_PROV, BRIDGE]).boot()
+    try:
+        admit(far, "memory", REMOTE_PROV, "*")
+        # the far kernel dials this one: this kernel then reaches its agents as `<guid>|<id>`
+        rec = far.create(parent_id="rest", handler_module="ws_bridge.tools", id=BRIDGE,
+                         host="127.0.0.1", port=hk.port, peer_id="ws",
+                         callable_by={"$self": "*", "$parent": "*", "ws": "*"})
+        need(rec.get("id") == BRIDGE, f"create {BRIDGE} → :{hk.port}: {short(rec, 160)}")
+        up = far.send(BRIDGE, {"type": "reflect"})
+        need(up.get("connected") is True, f"the far bridge is up: {short(up, 160)}")
+        guid = far.send(far.root_id, {"type": "reflect", "tree": "none"}).get("guid")
+        need(bool(guid), f"the far kernel's guid: {guid}")
+        # the far provider admits the bridge that serves this kernel's calls there
+        provider(far, REMOTE_PROV, mfar, MODEL_FAR, {BRIDGE: COMPLETE})
+        bcc = dict(record(far, BRIDGE).get("can_call") or {})
+        r = far.send(far.root_id, {"type": "update_agent", "id": BRIDGE,
+                                   "can_call": {**bcc, REMOTE_PROV: COMPLETE}})
+        need(r.get("updated") is True, f"the far bridge may call its provider: {short(r, 160)}")
+        far_id = f"{guid}|{REMOTE_PROV}"
+        chat(hk, REMOTE_AI, far_id, MODEL_FAR, {far_id: COMPLETE})
+        mfar.reply("Answer from the far kernel." + DONE)
+        out = hk.send(REMOTE_AI, {"type": "send", "text": "Ask the far provider."})
+        need(not out.get("error"), f"the chat accepts a send: {short(out, 160)}")
+        turns_f = turns_at_least(mfar, 1)
+        need(idle(hk, REMOTE_AI), "the remote-provider turn settles")
+        need(len(turns_f) == 1, f"the far kernel's server saw the request: {len(turns_f)}")
+        need("Answer from the far kernel." in history_text(hk, REMOTE_AI),
+             "the transcript is on the chat's kernel; the provider's is on the far one")
+        need("Answer from the far kernel." not in history_text(far, REMOTE_PROV),
+             "the far provider holds none of it")
+    finally:
+        far.close()
+        mfar.stop()
+        shutil.rmtree(pwork, ignore_errors=True)
+
+
 def main() -> int:
     name, _ = runtime(REPO, RUNTIME)
     spec = ensure_runtime(REPO, name)
-    ma, mb, mfar = (VllmMock(model=m).start() for m in (MODEL_A, MODEL_B, MODEL_FAR))
+    ma, mb = (VllmMock(model=m).start() for m in (MODEL_A, MODEL_B))
     work = Path(tempfile.mkdtemp(prefix="e2e-split-"))
-    pwork = Path(tempfile.mkdtemp(prefix="e2e-split-far-"))
     reach = [AI, PROV, PROV2, NO_GRANT, NOT_ADMITTED, REMOTE_AI]
     hk = HostKernel(spec, work, reach=reach).boot()
-    far = HostKernel(spec, pwork, reach=[REMOTE_PROV, BRIDGE]).boot()
     try:
         for who in (AI, PROV, PROV2, NO_GRANT, NOT_ADMITTED, REMOTE_AI):
             admit(hk, "memory", who, "*")
-        admit(far, "memory", REMOTE_PROV, "*")
 
         # ── 1 · the local split ──
         print("\n── 1 · local split ──", flush=True)
@@ -206,40 +249,15 @@ def main() -> int:
 
         # ── 4 · the provider on another kernel, across the bridge ──
         print("\n── 4 · across the bridge ──", flush=True)
-        # the far kernel dials this one: this kernel then reaches its agents as `<guid>|<id>`
-        rec = far.create(parent_id="rest", handler_module="ws_bridge.tools", id=BRIDGE,
-                         host="127.0.0.1", port=hk.port, peer_id="ws",
-                         callable_by={"$self": "*", "$parent": "*", "ws": "*"})
-        need(rec.get("id") == BRIDGE, f"create {BRIDGE} → :{hk.port}: {short(rec, 160)}")
-        up = far.send(BRIDGE, {"type": "reflect"})
-        need(up.get("connected") is True, f"the far bridge is up: {short(up, 160)}")
-        guid = far.send(far.root_id, {"type": "reflect", "tree": "none"}).get("guid")
-        need(bool(guid), f"the far kernel's guid: {guid}")
-        # the far provider admits the bridge that serves this kernel's calls there
-        provider(far, REMOTE_PROV, mfar, MODEL_FAR, {BRIDGE: COMPLETE})
-        bcc = dict(record(far, BRIDGE).get("can_call") or {})
-        r = far.send(far.root_id, {"type": "update_agent", "id": BRIDGE,
-                                   "can_call": {**bcc, REMOTE_PROV: COMPLETE}})
-        need(r.get("updated") is True, f"the far bridge may call its provider: {short(r, 160)}")
-        far_id = f"{guid}|{REMOTE_PROV}"
-        chat(hk, REMOTE_AI, far_id, MODEL_FAR, {far_id: COMPLETE})
-        mfar.reply("Answer from the far kernel." + DONE)
-        out = hk.send(REMOTE_AI, {"type": "send", "text": "Ask the far provider."})
-        need(not out.get("error"), f"the chat accepts a send: {short(out, 160)}")
-        turns_f = turns_at_least(mfar, 1)
-        need(idle(hk, REMOTE_AI), "the remote-provider turn settles")
-        need(len(turns_f) == 1, f"the far kernel's server saw the request: {len(turns_f)}")
-        need("Answer from the far kernel." in history_text(hk, REMOTE_AI),
-             "the transcript is on the chat's kernel; the provider's is on the far one")
-        need("Answer from the far kernel." not in history_text(far, REMOTE_PROV),
-             "the far provider holds none of it")
+        if MUTED_4:
+            print(f"part 4 muted {MUTED_4}", flush=True)
+        else:
+            across_the_bridge(spec, hk)
     finally:
         hk.close()
-        far.close()
-        for m in (ma, mb, mfar):
+        for m in (ma, mb):
             m.stop()
         shutil.rmtree(work, ignore_errors=True)
-        shutil.rmtree(pwork, ignore_errors=True)
 
     verdict(not bad, f"{RUNTIME}: {len(bad)} failed" + (f" — first: {bad[0]}" if bad else ""))
     return 0 if not bad else 1

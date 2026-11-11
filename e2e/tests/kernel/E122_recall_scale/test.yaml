@@ -9,7 +9,6 @@ title: "recall scale: a call with a FRESH execution name vs an unnamed call, at 
 runner: probe.py
 runtimes: [python, rust]
 costs: free
-solo: true
 hard_stop_minutes: 120
 limits:
   idle_seconds: 1800

@@ -201,6 +201,13 @@ async fn serve(
             sent = Some(f);
         }
     }
+    if !has_view {
+        // Nothing but the Bye was sent: close the write side and let the client leave first. Dropped
+        // at once, with the client's size still unread, the socket is reset and the reset can
+        // discard the Bye the client has not read yet ("Broken pipe" instead of the sentence).
+        let _ = w.shutdown().await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), &mut up).await;
+    }
     up.abort();
     share.bye.lock().expect("share poisoned").remove(&id);
     let _ = input.send(VmIn::Gone(id)).await;

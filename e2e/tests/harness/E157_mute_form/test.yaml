@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL, NO KERNEL: the launcher's own `muted:` form.
+id: mute_form
+group: harness
+title: "a test declared `muted: \"#<issue>: <reason>\"` is not run and is reported SKIP \"muted #<issue>: <reason>\", counted with the skips; a malformed mute is refused"
+runner: probe.py
+costs: free
+limits:
+  idle_seconds: 60
+  turn_seconds: 60

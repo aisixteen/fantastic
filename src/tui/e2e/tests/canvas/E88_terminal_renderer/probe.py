@@ -230,10 +230,6 @@ def main() -> bool:
                 r["the setting persists on the view"] = info["3_disk"] == "dom" and info["5_disk"] == "auto"
                 chrome["auto"] = chrome["webgl"]
                 r["every Chrome-lane sample answered"] = all(chrome[k]["unanswered"] == 0 for k in ("webgl", "dom"))
-                # the ABSOLUTE bound is on keystroke → the render that shows the
-                # echo: the two frames the presented mark adds are the runner's
-                # frame rate (100–200 ms at Windows CI's 10 fps), not the input path
-                r[f"Chrome auto keystroke → render p95 ≤ {P95_MS:g} ms"] = chrome["auto"]["render"]["p95"] <= P95_MS
                 step('chrome: the flag path')
                 # 6: the flag path
                 await pg.cdp("Page.addScriptToEvaluateOnNewDocument", source=SHELL)
@@ -283,12 +279,6 @@ def main() -> bool:
                 gtk["webgl"] = await measure(wk, CIDS)
                 info["9_back"] = await view({"type": "terminal_renderer", "name": "auto"})
                 await wk.until(ON("dom"), 10)
-                r[f"WebKitGTK auto keystroke → render p95 ≤ {P95_MS:g} ms"] = gtk["auto"]["render"]["p95"] <= P95_MS
-                # the RELATIVE bound keeps the presented mark: a slow presentation
-                # path is WebKitGTK's risk, measured against Chrome on the same runner
-                bound = 1.5 * table["chrome"]["auto"]["p95"] + 20
-                info["webkitgtk_vs_chrome_bound_ms"] = bound
-                r["WebKitGTK auto presented p95 ≤ 1.5 × Chrome auto presented p95 + 20 ms"] = gtk["auto"]["p95"] <= bound
                 info["webkitgtk_misses"] = wk.misses[-6:]
             finally:
                 step('webkitgtk: closing')

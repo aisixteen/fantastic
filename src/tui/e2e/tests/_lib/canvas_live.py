@@ -537,14 +537,33 @@ async def open_tree(pg: Page, x: int, y: int) -> str | None:
 # THE CHAT is the html view its agent's `reflect` returns, drawn in the cell's panel
 # iframe (`fantastic-ai-core/src/chat_view.html`): the dialog `#dialog` (`.msg` rows,
 # assistant ones `.assistant`), the input `#text`, `#send`, and the phase pill `#pill`
-# (`data-phase`, `data-reason`). `cell` is the chat's frame by order on the page.
-CHAT_DOC = "[...document.querySelectorAll('.agent-frame iframe')].map(f=>{try{return f.contentDocument}catch(e){return null}}).filter(d=>d&&d.getElementById('dialog'))"
+# (`data-phase`, `data-reason`). `cell` is the chat's frame by order on the page. The panel
+# is SANDBOXED (null origin), so the page cannot look inside it: the chat is read and driven
+# through CDP, in the frame itself (`dev_surface.frame_eval`).
+async def chat_eval(pg: Page, expr: str, cell: int = 0) -> Any:
+    """`expr` (JS; `d` is the chat's document) evaluated inside chat cell #cell's panel;
+    `None` when that chat has not drawn."""
+    from _lib.dev_surface import frame_eval
+
+    wrapped = f"(()=>{{const d=document; if(!d.getElementById('dialog')) return null; return {{v:({expr})}};}})()"
+    hits = [h for h in await frame_eval(pg, wrapped) if isinstance(h, dict)]
+    return hits[cell]["v"] if len(hits) > cell else None
+
+
+async def chat_drawn(pg: Page, secs: float, cell: int = 0) -> bool:
+    """Until chat cell #cell has drawn its dialog, at most `secs`."""
+    end = time.time() + secs
+    while time.time() < end:
+        if await chat_eval(pg, "true", cell):
+            return True
+        await asyncio.sleep(0.5)
+    return False
 
 
 async def say(pg: Page, text: str, cell: int = 0) -> None:
     """Send a turn in chat cell #cell: type into its input and press Send."""
-    await pg.js(f"(()=>{{const d={CHAT_DOC}[{cell}]; const i=d.getElementById('text');"
-                f" i.value={json.dumps(text)}; i.dispatchEvent(new Event('input',{{bubbles:true}})); d.getElementById('send').click();}})()")
+    await chat_eval(pg, f"(()=>{{const i=d.getElementById('text'); i.value={json.dumps(text)};"
+                        " i.dispatchEvent(new Event('input',{bubbles:true})); d.getElementById('send').click(); return true;})()", cell)
 
 
 async def wait_quiet(pg: Page, total: float, quiet: float, cell: int = 0) -> bool:
@@ -555,15 +574,16 @@ async def wait_quiet(pg: Page, total: float, quiet: float, cell: int = 0) -> boo
     last_n, since = -1, time.time()
     seen_live = False
     ended = 0.0
-    doc = f"{CHAT_DOC}[{cell}]"
+    look = ("({n: d.querySelectorAll('#dialog .msg').length,"
+            " said: [...d.querySelectorAll('#dialog .msg.assistant')].some(m=>m.textContent.trim()),"
+            " phase: d.getElementById('pill')?.dataset.phase || '',"
+            " reason: d.getElementById('pill')?.dataset.reason || ''})")
     while time.time() < deadline:
-        n = await pg.js(f"({doc}?.querySelectorAll('#dialog .msg').length) ?? 0") or 0
-        said = await pg.js(f"[...({doc}?.querySelectorAll('#dialog .msg.assistant') ?? [])].some(m=>m.textContent.trim())")
-        phase = await pg.js(f"{doc}?.getElementById('pill')?.dataset.phase || ''")
+        got = await chat_eval(pg, look, cell) or {}
+        n, said, phase, reason = got.get("n", 0), got.get("said", False), got.get("phase", ""), got.get("reason", "")
         thinking = phase in ("thinking", "streaming", "tool_calling", "queued")
         if thinking:
             seen_live = True
-        reason = await pg.js(f"{doc}?.getElementById('pill')?.dataset.reason || ''")
         if seen_live and said and not thinking and reason not in ("", "awaiting"):
             ended = ended or time.time()
             if time.time() - ended >= ENDED_HOLD_S:
@@ -581,9 +601,9 @@ async def wait_quiet(pg: Page, total: float, quiet: float, cell: int = 0) -> boo
 async def answer(pg: Page, cell: int = 0) -> str:
     """The AI's last WORDS: its last assistant message with text, skipping one that
     is only call markup (a malformed call shows as text but is no answer)."""
-    return await pg.js(f"(()=>{{const m=[...({CHAT_DOC}[{cell}]?.querySelectorAll('#dialog .msg.assistant') ?? [])]"
-                       ".filter(x=>{const t=x.textContent.trim(); return t && !/^(<?\\/?call\\b[^>]*>\\s*)+$/.test(t);});"
-                       " return m.length ? m[m.length-1].textContent : '';})()") or ""
+    return await chat_eval(pg, "(()=>{const m=[...d.querySelectorAll('#dialog .msg.assistant')]"
+                               ".filter(x=>{const t=x.textContent.trim(); return t && !/^(<?\\/?call\\b[^>]*>\\s*)+$/.test(t);});"
+                               " return m.length ? m[m.length-1].textContent : '';})()", cell) or ""
 
 
 async def in_frame(pg: Page, cell_id: str, expr: str) -> Any:
@@ -647,7 +667,7 @@ async def open_chat(pg: Page, x: int, y: int) -> str:
                              {"type": "place", "backend_id": made["id"], "x": x, "y": y, "width": 440, "height": 520})
     if "placed" not in placed:
         raise SystemExit(f"open_chat: the cell was not placed: {placed}")
-    if not await pg.until(f"{CHAT_DOC}.length > 0", 30):
+    if not await chat_drawn(pg, 30):
         raise SystemExit("open_chat: the chat view never drew")
     return str(made["id"])
 

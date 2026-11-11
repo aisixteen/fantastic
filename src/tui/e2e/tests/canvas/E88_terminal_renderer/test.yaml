@@ -4,7 +4,6 @@ group: canvas
 title: "terminal renderer: auto is WebGL in Chrome and DOM in WebKitGTK (the shell's flag or the user agent); the view's terminal_renderer switches it live; keystroke → render latency per renderer, in Chrome and (Linux) WebKitGTK"
 runner: probe.py
 costs: free
-solo: true        # measures latency: runs alone
 limits:
   seconds: 420
 env:

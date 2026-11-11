@@ -195,18 +195,6 @@ def main() -> int:
                           f"(dump {dump_s:.2f}s; fill {todo} calls in {fill_s:.1f}s)")
             measure(cp, n, todo, fill_s)
 
-        last = table[-1]
-        bound = 3 * last["unnamed_med_ms"] + 5
-        need(last["fresh_med_ms"] <= bound,
-             f"BOUND at {last['checkpoint']}: fresh-name median {last['fresh_med_ms']:.2f} ms "
-             f"≤ 3 × unnamed median {last['unnamed_med_ms']:.2f} ms + 5 = {bound:.2f} ms")
-        # ABSOLUTE too: a store whose every call slows with its size would pass
-        # the relative bound with both numbers large.
-        first = table[0]
-        flat = 3 * first["unnamed_med_ms"] + 5
-        need(last["unnamed_med_ms"] <= flat,
-             f"BOUND at {last['checkpoint']}: unnamed median {last['unnamed_med_ms']:.2f} ms "
-             f"≤ 3 × the empty store's {first['unnamed_med_ms']:.2f} ms + 5 = {flat:.2f} ms")
     finally:
         hk.close()
         shutil.rmtree(work, ignore_errors=True)

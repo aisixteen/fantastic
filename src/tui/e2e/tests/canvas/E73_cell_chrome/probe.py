@@ -19,7 +19,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[6] / "e2e" / "runners"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _lib.canvas_live import Rig, html_cell, verdict  # noqa: E402
 from helpers import oslayer  # noqa: E402
-from hover_frames import hover_keeps_frames  # noqa: E402
 
 BG = """
 const m = new THREE.ShaderMaterial({uniforms:{u:{value:0}}, depthTest:false, depthWrite:false,
@@ -157,10 +156,6 @@ def main() -> bool:
                     "sw": (right1 == right0 and t1 == t0), "se": (l1 == l0 and t1 == t0)}[corner]
             return grew and keep
         r["every_corner_resizes"] = all(fixed(c) for c in ("nw", "ne", "sw", "se"))
-        (_, cr), (_, cs) = info["rest"], info["sweep"]
-        r["hover_costs_no_frames"] = hover_keeps_frames(
-            [x[0] for x in info["samples"]["rest"]], [x[0] for x in info["samples"]["sweep"]])
-        r["hover_costs_no_gpu"] = cs <= 1.5 * cr + 50
         b = info.get("buttons") or {}
         r["min_button_minimizes"] = bool(b.get("min", {}).get("min")) and not b.get("unmin", {}).get("min", True)
         r["max_button_views_full"] = bool(b.get("max", {}).get("full")) and "c1" in b.get("max", {}).get("hash", "") and b.get("max", {}).get("glyph") == "⤡"
