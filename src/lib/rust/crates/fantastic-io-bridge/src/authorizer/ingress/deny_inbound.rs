@@ -17,8 +17,8 @@ use super::super::{Action, Decision, Denial, IngressRule};
 /// it could act on from the ports, which had `inbound calls denied by policy`
 /// and no hint at all.
 const OPEN_IT: &str = "this edge is sealed — open it: update_agent <id> \
-     ingress_rule=allow_all_ingress (or password); reflect readme=true on this \
-     agent for the channel model";
+     ingress_rule=allow_all_ingress (or password); `reflect` on this agent \
+     lists its verbs and record fields";
 
 /// Refuse every inbound `call` (the peer can't `call`/`reflect` us). Inbound
 /// `watch`/`unwatch` are already ignored by the read loop ⇒ denied-by-omission.
@@ -99,8 +99,8 @@ mod tests {
         assert_eq!(
             d.hint,
             "this edge is sealed — open it: update_agent <id> \
-             ingress_rule=allow_all_ingress (or password); reflect readme=true on \
-             this agent for the channel model"
+             ingress_rule=allow_all_ingress (or password); `reflect` on this agent \
+             lists its verbs and record fields"
         );
         assert_eq!(d.see, "");
     }

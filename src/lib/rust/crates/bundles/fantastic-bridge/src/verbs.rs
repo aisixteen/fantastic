@@ -28,6 +28,7 @@ pub struct Forward {
     /// The call to run there: a verb frame with its own `type`.
     pub payload: Map<String, Value>,
     /// Seconds to wait for the reply (not `timeout`, which is a call's own routing field).
+    #[serde(default = "crate::record::default_timeout")]
     pub forward_timeout: f64,
 }
 
@@ -54,6 +55,7 @@ pub struct UnwatchRemote {
 #[serde(deny_unknown_fields)]
 pub struct ListPeers {
     /// Seconds to wait for the relay's answer (not `timeout`, which is a call's own routing field).
+    #[serde(default = "crate::record::default_timeout")]
     pub list_timeout: f64,
 }
 

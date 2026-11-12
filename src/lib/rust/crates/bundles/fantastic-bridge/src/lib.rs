@@ -931,12 +931,10 @@ async fn build_relay_transport(
     let (Some(relay_url), Some(partner)) = (relay_url, partner) else {
         return Err("relay_connector requires relay_url, partner_guid".to_string());
     };
-    let (Some(heartbeat), Some(reconnect)) = (
-        meta_f64(agent_id, kernel, "heartbeat"),
-        meta_f64(agent_id, kernel, "reconnect"),
-    ) else {
-        return Err("relay_connector requires heartbeat, reconnect".to_string());
-    };
+    let heartbeat = meta_f64(agent_id, kernel, "heartbeat")
+        .unwrap_or(crate::record::DEFAULT_HEARTBEAT_SECS);
+    let reconnect = meta_f64(agent_id, kernel, "reconnect")
+        .unwrap_or(crate::record::DEFAULT_RECONNECT_SECS);
     // The relay password lives in a credential_store, named by `credentials`:
     // no field ⇒ the boot fails loud, before any identity is minted or anything
     // dialed.

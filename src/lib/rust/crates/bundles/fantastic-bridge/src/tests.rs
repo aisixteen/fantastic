@@ -2049,12 +2049,8 @@ async fn directory_replies_match_python() {
         ask(&kernel, &relay, json!({"type": "unwatch_directory"})).await,
         json!({"ok": true})
     );
-    let r = ask(
-        &kernel,
-        &relay,
-        json!({"type": "list_peers", "list_timeout": 30.0}),
-    )
-    .await;
+    // the declared 30 s default stands in for an absent `list_timeout`
+    let r = ask(&kernel, &relay, json!({"type": "list_peers"})).await;
     assert_eq!(
         r["error"],
         json!("relay_connector.list_peers: not connected")
@@ -2326,10 +2322,17 @@ async fn forward_timeout_is_a_number() {
                "forward_timeout": timeout})
     };
     // a `forward_timeout` that is not a number is refused by name — no string is
-    // coerced to one — and an absent or null one is missing
+    // coerced to one; an ABSENT one takes the declared 30 s default
     let r = ask(&kernel, &leg, fwd(Value::Null)).await;
-    assert_eq!(r["reason"], "missing_arg", "{r}");
+    assert_eq!(r["reason"], "bad_arg", "{r}");
     assert_eq!(r["arg"], "forward_timeout", "{r}");
+    let r = ask(
+        &kernel,
+        &leg,
+        json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}}),
+    )
+    .await;
+    assert_eq!(r["reason"], "not_connected", "{r}");
     for bad in [json!("soon"), json!("5")] {
         let r = ask(&kernel, &leg, fwd(bad.clone())).await;
         assert_eq!(r["reason"], "bad_arg", "{bad}: {r}");
@@ -2483,7 +2486,7 @@ async fn a_binary_non_forward_verb_is_answered_by_the_text_dispatch() {
             // `forward` IS the binary verb: it validates its own envelope
             assert_eq!(
                 bin.result["error"],
-                json!("forward: missing argument 'forward_timeout'"),
+                json!("forward: missing argument 'payload'"),
                 "{:?}",
                 bin.result
             );
@@ -2831,8 +2834,8 @@ async fn every_bridge_verb_is_checked_by_its_declaration() {
             "forward: unknown argument 'timeout'",
         ),
         (
-            json!({"type": "forward", "target": "t", "payload": {"type": "x"}}),
-            "forward: missing argument 'forward_timeout'",
+            json!({"type": "forward", "target": "t"}),
+            "forward: missing argument 'payload'",
         ),
         (
             json!({"type": "watch_remote"}),
@@ -2857,10 +2860,6 @@ async fn every_bridge_verb_is_checked_by_its_declaration() {
         }
     }
     for (payload, want) in [
-        (
-            json!({"type": "list_peers"}),
-            "list_peers: missing argument 'list_timeout'",
-        ),
         (
             json!({"type": "list_peers", "list_timeout": "5"}),
             "list_peers: argument 'list_timeout' must be",
@@ -2937,8 +2936,6 @@ async fn a_bridge_record_is_born_with_its_required_fields() {
     for (handler, meta, arg) in [
         (WS_HANDLER_MODULE, json!({}), "transport"),
         (RELAY_HANDLER_MODULE, json!({"heartbeat": 0, "reconnect": 0}), "transport"),
-        (RELAY_HANDLER_MODULE, json!({"transport": "relay", "reconnect": 0}), "heartbeat"),
-        (RELAY_HANDLER_MODULE, json!({"transport": "relay", "heartbeat": 0}), "reconnect"),
     ] {
         let id = id_for(&format!("req_{arg}"), &tmp);
         let mut payload = meta.as_object().cloned().unwrap();
@@ -2957,6 +2954,24 @@ async fn a_bridge_record_is_born_with_its_required_fields() {
         assert_eq!(r["reason"], json!("missing_arg"), "{handler} {arg}: {r}");
         assert_eq!(r["arg"], json!(arg), "{handler} {arg}: {r}");
     }
+}
+
+/// The relay record's `heartbeat` and `reconnect` and a call's timeouts are API
+/// defaults: reflect shows them, an absent field is born without error.
+#[tokio::test]
+async fn declared_timeout_defaults_show_in_reflect() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_two_family_kernel(&tmp).await;
+    let id = id_for("dflt_relay", &tmp);
+    create_leg(&kernel, RELAY_HANDLER_MODULE, &id, json!({"transport": "memory"})).await;
+    let r = ask(&kernel, &id, json!({"type": "reflect"})).await;
+    let text = r.to_string();
+    for want in ["forward_timeout:number (default 30.0)", "list_timeout:number (default 30.0)"] {
+        assert!(text.contains(want), "{want}: {text}");
+    }
+    let schema = crate::record::relay::RECORD.schema().clone();
+    assert_eq!(schema["properties"]["heartbeat"]["default"], json!(30.0), "{schema}");
+    assert_eq!(schema["properties"]["reconnect"]["default"], json!(10.0), "{schema}");
 }
 
 /// A forwarded `set` names its fields as secret in the CALLER's records (the far
