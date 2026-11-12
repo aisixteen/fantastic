@@ -197,10 +197,11 @@ async fn a_route_mounts_only_its_literal() {
     );
 }
 
-/// A `route` of the wrong type, or empty, is refused by the record declaration.
+/// A `route` of the wrong type, empty, not starting with `/`, or holding `{`/`}`, is refused by the record declaration.
 #[test]
 fn the_record_declaration_refuses_a_route_of_the_wrong_type() {
-    for bad in [json!(5), json!(true), json!(["/a"]), json!("")] {
+    for bad in [json!(5), json!(true), json!(["/a"]), json!(""),
+        json!("page_ws"), json!("/{host_id}/ws"), json!("/a/{x}"), json!("/a}")] {
         let mut meta = Map::new();
         meta.insert("route".into(), bad.clone());
         let refused = <WebWsBundle as fantastic_kernel::Bundle>::check_record(

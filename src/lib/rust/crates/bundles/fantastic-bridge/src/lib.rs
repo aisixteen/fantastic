@@ -357,6 +357,45 @@ async fn forward_call(
     .await
 }
 
+/// The calls whose secret paths the CALLER's records can name before sending.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Marked {
+    /// A `forward` carrying the call to run on the far kernel.
+    Forward { payload: ForwardedCall },
+}
+
+/// The far call inside a `forward`: only a `set` carries secret fields.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ForwardedCall {
+    /// A credential store's `set`.
+    Set { fields: Option<Value> },
+}
+
+/// The secret paths of a FORWARDED call: a `forward` of a `set` marks each
+/// `payload.fields.<name>` (a name that is empty or holds a dot marks the whole
+/// `payload.fields`, as the credential store's own `field_marks` does). The
+/// caller cannot know the far bundle before sending, so this is deliberate
+/// over-redaction in the CALLER's records for every forwarded `set`: the far
+/// kernel's own record is exact. A `get`'s reply marks come back on the reply
+/// frame instead.
+fn forward_payload_secret(payload: &Value) -> Vec<String> {
+    let Ok(Marked::Forward {
+        payload: ForwardedCall::Set { fields },
+    }) = serde_json::from_value::<Marked>(payload.clone())
+    else {
+        return Vec::new();
+    };
+    match fields {
+        Some(Value::Object(m)) if m.keys().all(|k| !k.is_empty() && !k.contains('.')) => {
+            m.keys().map(|k| format!("payload.fields.{k}")).collect()
+        }
+        Some(Value::Object(_)) => vec!["payload.fields".to_string()],
+        _ => Vec::new(),
+    }
+}
+
 /// What the bundle is for — its one short man text (ws_bridge).
 const WS_MAN: &str = "A cross-kernel bridge: it dials a far kernel's web_ws leg and forwards calls to it, watches its agents and serves the far side's calls and watches as this leg, gated as the leg. Emits bridge_up and bridge_down on its inbox.";
 
@@ -385,6 +424,10 @@ impl Handler for WsBridgeBundle {
 
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         &record::ws::RECORD
+    }
+
+    fn payload_secret(&self, payload: &Value) -> Vec<String> {
+        forward_payload_secret(payload)
     }
 
     /// The JSON half of [`Self::handle_binary`] — a `forward` reply body is not carried.
@@ -466,6 +509,10 @@ impl Handler for RelayConnectorBundle {
 
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         &record::relay::RECORD
+    }
+
+    fn payload_secret(&self, payload: &Value) -> Vec<String> {
+        forward_payload_secret(payload)
     }
 
     /// The JSON half of [`Self::handle_binary`] — a `forward` reply body is not carried.

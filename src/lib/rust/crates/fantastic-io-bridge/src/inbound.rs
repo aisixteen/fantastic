@@ -19,6 +19,17 @@ use std::sync::Arc;
 use fantastic_kernel::{AgentId, Blob, Item, Kernel, Outcome};
 use serde_json::Value;
 
+/// The one part of an inbound call a hand-in reads: the secret marks of its `item`.
+#[derive(serde::Deserialize)]
+struct Handed {
+    item: Option<HandedItem>,
+}
+
+/// The `secret` marks of the onward call.
+#[derive(serde::Deserialize)]
+struct HandedItem {
+    secret: Option<Vec<String>>,
+}
 
 /// THE TRANSPORT'S ONE SEND: hand one admitted frame to the leg `leg` as an
 /// inbound verb and return the leg's outcome (its reply body at its slot). Made
@@ -33,15 +44,11 @@ pub async fn hand_in(
     // An inbound call's `secret` marks (paths into ITS payload) mark the hand-in
     // too: the leg's own call row holds the item, so its values are shown as the
     // onward call's are (`fantastic_kernel::secret`).
-    let marks: Option<Vec<String>> = payload
-        .get("item")
-        .and_then(|i| i.get("secret"))
-        .and_then(Value::as_array)
-        .and_then(|a| {
-            a.iter()
-                .map(|m| m.as_str().map(|m| format!("item.payload.{m}")))
-                .collect()
-        });
+    let marks: Option<Vec<String>> = serde_json::from_value::<Handed>(payload.clone())
+        .ok()
+        .and_then(|h| h.item)
+        .and_then(|i| i.secret)
+        .map(|s| s.into_iter().map(|m| format!("item.payload.{m}")).collect());
     let mut item = Item::new(leg.clone(), payload);
     if let Some(m) = marks {
         item = item.with_secret(m);

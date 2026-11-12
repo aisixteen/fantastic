@@ -524,11 +524,11 @@ async fn a_text_write_stream_keeps_the_clients_bytes_value() {
         .find(|f| f["id"] == "s1")
         .unwrap_or_else(|| panic!("no reply for s1: {text:?}"));
     assert_eq!(
-        reply["data"]["error"], "write_stream: bytes (one raw chunk) required",
+        reply["data"]["error"], "write_stream: unknown argument 'bytes'",
         "{reply}"
     );
-    assert_eq!(reply["data"]["reason"], "missing_arg", "{reply}");
-    assert_eq!(reply["data"]["arg"], "bytes (one raw chunk)", "{reply}");
+    assert_eq!(reply["data"]["reason"], "bad_arg", "{reply}");
+    assert_eq!(reply["data"]["arg"], "bytes", "{reply}");
     assert!(!files.join("t.txt").exists(), "the refusal still wrote");
 
     // NO key at all — python's `payload.get("bytes", b"")`: an empty chunk.
@@ -1857,10 +1857,10 @@ async fn octet_leg_header_contract_matches_python() {
         .await
         .expect("post");
     let body: Value = resp.json().await.expect("json");
-    assert_eq!(body["reason"], "missing_arg", "body: {body}");
+    assert_eq!(body["reason"], "bad_arg", "body: {body}");
     assert_eq!(
         body["error"],
-        "write_stream: bytes (one raw chunk) required"
+        "write_stream: unknown argument 'bytes'"
     );
     assert!(!tmp.path().join("served/bf3.bin").exists());
     stop(&kernel, "web_oct").await;
@@ -2658,10 +2658,10 @@ async fn json_leg_read_stream_answers_octet_including_empty_chunk() {
 }
 
 /// A JSON `write_stream` naming `bytes` as a JSON string is
-/// `missing_arg`, and NOTHING is written: JSON has no bytes type, so the only
+/// `bad_arg` (unknown argument), and NOTHING is written: JSON has no bytes type, so the only
 /// raw chunk on this leg is the octet body.
 #[tokio::test]
-async fn json_leg_write_stream_string_bytes_is_missing_arg() {
+async fn json_leg_write_stream_string_bytes_is_bad_arg() {
     let tmp = TempDir::new().unwrap();
     let port = free_port();
     let kernel = stage_host(&tmp, port, "web_jsonwr", "rest", "fb_jsonwr").await;
@@ -2676,9 +2676,9 @@ async fn json_leg_write_stream_string_bytes_is_missing_arg() {
         .expect("post");
     assert_eq!(resp.status().as_u16(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["reason"], "missing_arg", "{body}");
+    assert_eq!(body["reason"], "bad_arg", "{body}");
     assert_eq!(
-        body["error"], "write_stream: bytes (one raw chunk) required",
+        body["error"], "write_stream: unknown argument 'bytes'",
         "{body}"
     );
     assert!(

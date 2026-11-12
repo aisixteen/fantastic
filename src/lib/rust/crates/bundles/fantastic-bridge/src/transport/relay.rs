@@ -417,21 +417,35 @@ async fn send_to_partner(
         .map_err(TransportError::from)
 }
 
+/// A relay envelope, typed once: the two kinds the connector reads.
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum RelayEnv {
+    Reply {
+        id: Option<String>,
+        data: Option<Value>,
+    },
+    Event {
+        source: Option<String>,
+        payload: Option<Value>,
+    },
+}
+
 /// Classify a text relay frame. Resolves a directory `reply` (side effect, no
 /// frame); surfaces a `source:"relay"` event as `{type:"event", src:"relay",
 /// payload}`; unwraps a `source:partner` delivery. Returns None for anything else.
 fn classify_text(env: Value, partner: &str, relay_pending: &RelayPending) -> Option<Frame> {
-    match env.get("type").and_then(Value::as_str) {
-        Some("reply") => {
-            if let Some(id) = env.get("id").and_then(Value::as_str) {
+    match serde_json::from_value::<RelayEnv>(env).ok()? {
+        RelayEnv::Reply { id, data } => {
+            if let Some(id) = id {
                 if let Some(tx) = relay_pending
                     .lock()
                     .expect("relay_pending poisoned")
-                    .remove(id)
+                    .remove(&id)
                 {
                     // python `msg.get("data") or {}`.
-                    let data = match env.get("data") {
-                        Some(v) if fantastic_bundle::py_truthy(v) => v.clone(),
+                    let data = match data {
+                        Some(v) if fantastic_bundle::py_truthy(&v) => v,
                         _ => json!({}),
                     };
                     let _ = tx.send(data);
@@ -439,24 +453,24 @@ fn classify_text(env: Value, partner: &str, relay_pending: &RelayPending) -> Opt
             }
             None
         }
-        Some("event") => match env.get("source").and_then(Value::as_str) {
-            // python skips ANY event whose payload is not a dict, directory
-            // included, before it ever looks at the source.
-            _ if !env.get("payload").is_some_and(Value::is_object) => None,
-            // Directory event → an `event` from the directory, which the engine
-            // re-emits on the connector inbox while `watch_directory` holds it in
-            // the leg's `watching`.
-            Some(DIRECTORY_SRC) => Some(Frame::Text(json!({
-                "type": "event",
-                "src": DIRECTORY_SRC,
-                "payload": env.get("payload").cloned().unwrap_or(Value::Null),
-            }))),
-            // Partner tunnel delivery → the inner bridge frame.
-            Some(s) if s == partner => Some(Frame::Text(
-                env.get("payload").cloned().unwrap_or(Value::Null),
-            )),
-            _ => None,
-        },
+        // python skips ANY event whose payload is not a dict, directory included.
+        RelayEnv::Event { payload, .. } if !payload.as_ref().is_some_and(Value::is_object) => None,
+        // Directory event → an `event` from the directory, which the engine
+        // re-emits on the connector inbox while `watch_directory` holds it in
+        // the leg's `watching`.
+        RelayEnv::Event {
+            source: Some(s),
+            payload,
+        } if s == DIRECTORY_SRC => Some(Frame::Text(json!({
+            "type": "event",
+            "src": DIRECTORY_SRC,
+            "payload": payload.unwrap_or(Value::Null),
+        }))),
+        // Partner tunnel delivery → the inner bridge frame.
+        RelayEnv::Event {
+            source: Some(s),
+            payload,
+        } if s == partner => Some(Frame::Text(payload.unwrap_or(Value::Null))),
         _ => None,
     }
 }
@@ -613,20 +627,18 @@ async fn heartbeat_loop(
 /// the inner frame, which is then a plain envelope.
 fn unwrap_binary(f: BinaryFrame, partner: &str) -> Option<Frame> {
     let BinaryFrame {
-        mut head,
+        head,
         path,
         body,
     } = f;
-    if head.get("type").and_then(Value::as_str) != Some("event")
-        || head.get("source").and_then(Value::as_str) != Some(partner)
-    {
+    let Ok(RelayEnv::Event {
+        source: Some(source),
+        payload: Some(inner),
+    }) = serde_json::from_value::<RelayEnv>(head)
+    else {
         return None;
-    }
-    let inner = head
-        .get_mut("payload")
-        .map(Value::take)
-        .unwrap_or(Value::Null);
-    if !inner.is_object() {
+    };
+    if source != partner || !inner.is_object() {
         return None;
     }
     Some(

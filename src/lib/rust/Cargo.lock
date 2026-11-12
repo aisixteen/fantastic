@@ -668,6 +668,7 @@ dependencies = [
  "fantastic-kernel",
  "flate2",
  "httparse",
+ "serde",
  "serde_json",
  "tokio",
 ]
