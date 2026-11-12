@@ -92,44 +92,27 @@ pub fn row_refs(row: &Map<String, Value>) -> Option<&Vec<Value>> {
     row.get("refs").filter(|v| !v.is_null()).and_then(Value::as_array)
 }
 
-/// The rows of an `append`, typed — shared by every store that answers the verb:
-/// each row gets the id it carries (a kernel int) or one minted, no id twice in
-/// the batch, and `refs` is a list of row ids. What a store still checks is
+/// The rows of an `append` as maps — shared by every store that answers the verb:
+/// each row gets the id it carries or one minted, no id twice in the batch. The
+/// engine already checked the types of `id` and `refs`; a store still checks
 /// whether the rows and the refs exist for its owner.
 pub fn stage_rows(
-    rows: &[Map<String, Value>],
+    rows: &[crate::verbs::AppendRow],
     mut mint: impl FnMut() -> i64,
 ) -> Result<Vec<Map<String, Value>>, Value> {
     let mut staged: Vec<Map<String, Value>> = Vec::new();
     let mut batch: HashSet<i64> = HashSet::new();
     for r in rows {
-        let rid = match r.get("id") {
-            None | Some(Value::Null) => mint(),
-            Some(v) => match (v, as_id(v)) {
-                (Value::Number(_), Some(n)) => n,
-                _ => {
-                    let mut e = refusal(
-                        BAD_ARG,
-                        format!("append: a row id is a kernel int, got {}", py_repr_value(v)),
-                    );
-                    with(&mut e, "arg", json!("rows"));
-                    return Err(e);
-                }
-            },
-        };
+        let rid = r.id.unwrap_or_else(&mut mint);
         if !batch.insert(rid) {
             let mut e = refusal(EXISTS, format!("append: row {rid} already exists for this owner"));
             with(&mut e, "id", json!(rid));
             return Err(e);
         }
-        let mut row = r.clone();
+        let mut row = r.rest.clone();
         row.insert("id".to_string(), Value::from(rid));
-        if let Some(refs) = row.get("refs").filter(|v| !v.is_null()) {
-            if !refs.as_array().is_some_and(|a| a.iter().all(|m| as_id(m).is_some())) {
-                let mut e = refusal(BAD_ARG, format!("append: row {rid} refs must be row ids"));
-                with(&mut e, "arg", json!("rows"));
-                return Err(e);
-            }
+        if let Some(refs) = &r.refs {
+            row.insert("refs".to_string(), json!(refs));
         }
         staged.push(row);
     }

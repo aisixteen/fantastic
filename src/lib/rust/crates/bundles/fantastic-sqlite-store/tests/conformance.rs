@@ -321,7 +321,7 @@ async fn s_digit_string_refs_are_refused_as_not_row_ids(t: &mut T) {
     let rid = first["ids"][0].as_i64().unwrap();
     let r = t.append("alice", json!([{"id": 9, "kind": "fold", "content": "f", "refs": [rid.to_string()]}])).await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
-    assert_eq!(r["error"], "append: row 9 refs must be row ids", "{r}");
+    assert_eq!(r["arg"], "rows", "{r}");
     let r = t.append("alice", json!([{"id": 9, "kind": "fold", "content": "f", "refs": [rid]}])).await;
     assert_eq!(r["appended"], 1, "{r}");
 }
@@ -374,18 +374,14 @@ async fn s_unknown_type_is_coded_unhandled_with_the_raw_verb(t: &mut T) {
 
 async fn s_arg_refusals_carry_error_reason_arg_in_that_order(t: &mut T) {
     t.append("alice", json!([{"id": 1, "content": "a"}])).await;
-    for (payload, want) in [
-        (
-            json!({"type": "append", "rows": [{"id": "5"}]}),
-            r#"{"error":"append: a row id is a kernel int, got '5'","reason":"bad_arg","arg":"rows"}"#,
-        ),
-        (
-            json!({"type": "append", "rows": [{"id": 7, "refs": ["x"]}]}),
-            r#"{"error":"append: row 7 refs must be row ids","reason":"bad_arg","arg":"rows"}"#,
-        ),
+    for payload in [
+        json!({"type": "append", "rows": [{"id": "5"}]}),
+        json!({"type": "append", "rows": [{"id": 0}]}),
+        json!({"type": "append", "rows": [{"id": 7, "refs": ["x"]}]}),
     ] {
         let got = t.call(payload.clone(), Some("alice")).await;
-        assert_eq!(wire(&got), want, "{payload}");
+        assert_eq!(got["reason"], "bad_arg", "{payload}: {got}");
+        assert_eq!(got["arg"], "rows", "{payload}: {got}");
     }
     for (payload, reason) in [
         (json!({"type": "append", "rows": []}), "missing_arg"),

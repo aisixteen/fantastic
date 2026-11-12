@@ -399,10 +399,8 @@ async fn digit_string_refs_are_refused_as_not_row_ids() {
     )
     .await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
-    assert!(
-        r["error"].as_str().unwrap().ends_with("refs must be row ids"),
-        "{r}"
-    );
+    assert_eq!(r["arg"], "rows", "{r}");
+    assert!(r["error"].as_str().unwrap().starts_with("append: argument 'rows' must be"), "{r}");
     // The int ref is found.
     let r = append(
         &k,
@@ -518,18 +516,16 @@ async fn unknown_type_is_coded_unhandled_with_the_raw_verb_in_order() {
 async fn arg_refusals_carry_error_reason_arg_in_that_order() {
     let k = store();
     append(&k, "alice", json!([{"id": 1, "content": "a"}])).await;
-    for (payload, want) in [
-        (
-            json!({"type": "append", "rows": [{"id": "5"}]}),
-            r#"{"error":"append: a row id is a kernel int, got '5'","reason":"bad_arg","arg":"rows"}"#,
-        ),
-        (
-            json!({"type": "append", "rows": [{"id": 7, "refs": ["x"]}]}),
-            r#"{"error":"append: row 7 refs must be row ids","reason":"bad_arg","arg":"rows"}"#,
-        ),
+    // a row id that is not a kernel int and refs that are not row ids are the engine's refusals
+    for payload in [
+        json!({"type": "append", "rows": [{"id": "5"}]}),
+        json!({"type": "append", "rows": [{"id": 0}]}),
+        json!({"type": "append", "rows": [{"id": 7, "refs": ["x"]}]}),
     ] {
         let got = call(&k, payload.clone(), Some("alice")).await;
-        assert_eq!(wire(&got), want, "{payload}");
+        assert_eq!(got["reason"], "bad_arg", "{payload}: {got}");
+        assert_eq!(got["arg"], "rows", "{payload}: {got}");
+        assert!(got["error"].as_str().unwrap().starts_with("append: argument 'rows' must be"), "{got}");
     }
     // an empty list, a missing list and a wrongly typed one are the entry's refusals
     for (payload, reason) in [
