@@ -1359,7 +1359,10 @@ fn the_catalog_carries_the_on_device_backend() {
             "file_bridge_id",
             "system_prompt_file",
             "pre_system_prompt",
-            "post_system_prompt"
+            "post_system_prompt",
+            "image_max_bytes",
+            "image_max_pixels",
+            "provider_capabilities"
         ]
     );
     // the window is the model's own, read at use: the record declares no default

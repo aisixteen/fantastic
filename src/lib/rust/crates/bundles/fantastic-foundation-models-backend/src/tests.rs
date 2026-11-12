@@ -154,7 +154,10 @@ fn the_record_is_two_knobs_a_store_then_the_ai_fields() {
             "file_bridge_id",
             "system_prompt_file",
             "pre_system_prompt",
-            "post_system_prompt"
+            "post_system_prompt",
+            "image_max_bytes",
+            "image_max_pixels",
+            "provider_capabilities"
         ]
     );
     let required: Vec<&str> = fields
