@@ -282,7 +282,7 @@ async fn reflect_shows_availability_the_window_and_the_knobs() {
     let fx = kernel(&engine, json!({"temperature": 0.3})).await;
     assert_eq!(fx.created["id"], json!(fx.id), "{}", fx.created);
     let r = fx.call(json!({"type": "reflect"})).await;
-    assert_eq!(r["sentence"], json!(SENTENCE));
+    assert_eq!(r["sentence"], json!(MAN));
     assert!(
         r["model"].is_null() && r["endpoint"].is_null(),
         "nothing off-device on the record"

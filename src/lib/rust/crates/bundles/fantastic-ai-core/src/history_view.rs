@@ -260,7 +260,7 @@ pub fn point_to_docs(target: &str, verb: &str, result: &Value) -> Option<Value> 
     let hint = if reason == Some("unhandled") && o.get("verb").and_then(Value::as_str) == Some(verb)
     {
         format!("the verbs {target} answers: send kernel {{type: docs, of: '{target}'}}")
-    } else if reason == Some("missing_arg") && o.get("arg").is_some_and(fantastic_bundle::py_truthy)
+    } else if reason == Some("missing_arg") && o.get("arg").is_some_and(Value::is_string)
     {
         format!(
             "how to call it: send kernel {{type: docs, of: '{target}', verb: '{verb}', tier: detailed}}"
@@ -363,7 +363,7 @@ pub fn dedupe_repeat_bodies(history: &[Value]) -> Vec<Value> {
                 Some(first) => {
                     kept.push(format!(
                         "{head}\n[identical to the reply in row {} — the same {} bytes, not repeated]",
-                        fantastic_bundle::py_str(first),
+                        crate::helpers::shown(first),
                         body.chars().count()
                     ));
                     changed = true;

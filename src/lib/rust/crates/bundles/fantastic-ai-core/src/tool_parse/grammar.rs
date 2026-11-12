@@ -27,7 +27,7 @@
 //! Nothing is repaired. A call that does not parse is reported with its fault
 //! named and the minimal shape to send; the model fixes it.
 
-use fantastic_bundle::{is_alnum, is_space, py_str, py_truthy};
+use fantastic_bundle::{is_alnum, is_space};
 use fantastic_bundle::py_strip;
 use regex::Regex;
 use serde_json::{Map, Value};
@@ -708,7 +708,7 @@ pub fn parse_call(block: &str) -> Result<Option<ToolCall>, Malformed> {
         .and_then(Value::as_str)
         .map(py_strip)
         .filter(|t| !t.is_empty());
-    if target.is_none() && !to.as_ref().is_some_and(py_truthy) {
+    if target.is_none() && !to.as_ref().is_some_and(given) {
         return Err(Malformed::new(
             "a send names its target: `<target_id>agent id</target_id>`, or several \
              recipients as `<to><item>id</item><item>id</item></to>`",
@@ -719,7 +719,7 @@ pub fn parse_call(block: &str) -> Result<Option<ToolCall>, Malformed> {
         args.insert("target_id".to_string(), Value::String(t.to_string()));
     }
     // python `if to:` — inserted whenever TRUTHY, whatever shape it has.
-    if let Some(list) = to.filter(py_truthy) {
+    if let Some(list) = to.filter(given) {
         args.insert("to".to_string(), list);
     }
     for key in &ROUTING[2..] {
@@ -782,7 +782,7 @@ fn routed(mut fields: Map<String, Value>) -> Result<ToolCall, Malformed> {
         .filter(|t| !t.is_empty())
         .map(str::to_string);
     let to = normalize_to(routing.shift_remove("to"));
-    if target.is_none() && !to.as_ref().is_some_and(py_truthy) {
+    if target.is_none() && !to.as_ref().is_some_and(given) {
         return Err(Malformed::new(
             "a routed send names its target in `<routing>`: `<target_id>agent id</target_id>`, \
              or several recipients as `<to><item>id</item><item>id</item></to>`",
@@ -792,7 +792,7 @@ fn routed(mut fields: Map<String, Value>) -> Result<ToolCall, Malformed> {
     if let Some(t) = target {
         args.insert("target_id".to_string(), Value::String(t));
     }
-    if let Some(list) = to.filter(py_truthy) {
+    if let Some(list) = to.filter(given) {
         args.insert("to".to_string(), list);
     }
     for key in &ROUTING[2..] {
@@ -802,6 +802,16 @@ fn routed(mut fields: Map<String, Value>) -> Result<ToolCall, Malformed> {
     }
     args.insert(PAYLOAD_TAG.to_string(), Value::Object(payload));
     Ok(ToolCall::new("send", args))
+}
+
+/// Does a `to` name anyone: a non-empty text or list, or any other value the notation produced.
+fn given(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::String(s) => !s.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        _ => true,
+    }
 }
 
 /// `to` as python leaves it — and python leaves MOST of it alone.
@@ -838,5 +848,5 @@ fn normalize_to(raw: Option<Value>) -> Option<Value> {
 /// produced: `True`, `1e+20`, `{'a': 'x'}`, `['y']`. `Value::to_string`'s JSON
 /// (`true`, `1e20`, `{"a":"x"}`) was a second dialect for the same list.
 fn scalar_text(v: &Value) -> String {
-    py_strip(&py_str(v)).to_string()
+    py_strip(&crate::helpers::shown(v)).to_string()
 }

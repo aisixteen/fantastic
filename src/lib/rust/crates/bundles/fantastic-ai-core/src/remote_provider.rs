@@ -19,6 +19,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use fantastic_kernel::refusal::{
+    refusal, with, MISSING_ARG, NOT_FOUND, STORE_REFUSED, TRANSPORT_ERROR,
+};
 use fantastic_kernel::{AgentId, Item, Kernel, Status};
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
@@ -112,20 +115,12 @@ pub async fn set_usage(agent_id: &AgentId, kernel: &Arc<Kernel>, usage: &Value) 
 /// For a provider that cannot ask its API for its models: `provider_verbs(…, NO_LIVE)`.
 pub const NO_LIVE: Option<fn() -> std::future::Ready<Result<Vec<String>, String>>> = None;
 
-/// The names a provider's record lists in `models` (strings, or `{id|name}` objects).
+/// The names a provider's record lists in `models`.
 #[must_use]
 pub fn listed_models(meta: &Map<String, Value>) -> Vec<String> {
     meta.get("models")
         .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|m| {
-                    m.as_str()
-                        .map(String::from)
-                        .or_else(|| m.get("id").or_else(|| m.get("name")).and_then(Value::as_str).map(String::from))
-                })
-                .collect()
-        })
+        .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
         .unwrap_or_default()
 }
 
@@ -190,7 +185,9 @@ where
             match l().await {
                 Ok(n) => names = n,
                 Err(e) => {
-                    return json!({"error": e, "reason": "unhandled", "default": default_of(agent_id, kernel).await})
+                    let mut r = refusal(TRANSPORT_ERROR, e);
+                    with(&mut r, "default", json!(default_of(agent_id, kernel).await));
+                    return r;
                 }
             }
         }
@@ -205,12 +202,16 @@ pub async fn set_default_verb(agent_id: &AgentId, args: &SetDefaultModel, kernel
     let m = args.model.as_str();
     let names = listed_models(&meta);
     if !names.is_empty() && !names.iter().any(|n| n == m) {
-        return json!({"error": format!("set_default_model: `{m}` is not one of this provider's models {names:?}"),
-                      "reason": "bad_arg"});
+        let mut r = refusal(
+            NOT_FOUND,
+            format!("set_default_model: `{m}` is not one of this provider's models {names:?}"),
+        );
+        with(&mut r, "arg", json!("model"));
+        return r;
     }
     match set_default(agent_id, kernel, m).await {
         Ok(()) => json!({"default": m}),
-        Err(e) => json!({"error": format!("set_default_model: {e}"), "reason": "unhandled"}),
+        Err(e) => refusal(STORE_REFUSED, format!("set_default_model: {e}")),
     }
 }
 
@@ -218,8 +219,13 @@ pub async fn set_default_verb(agent_id: &AgentId, args: &SetDefaultModel, kernel
 /// tokens on `agent_id`'s own stream, tagged with the caller's `rid`.
 pub async fn complete(agent_id: &AgentId, args: &Complete, kernel: &Arc<Kernel>, provider: Arc<dyn Provider>) -> Value {
     let rid = args.rid.clone();
+    // the schema lets a call carry `image` instead of `messages`; such a call's bytes are
+    // taken at the binary entry, so a pass is never asked for without them
     let Some(messages) = args.messages.as_ref() else {
-        return json!({"rid": rid, "error": "complete: messages required", "reason": "missing_arg"});
+        let mut r = refusal(MISSING_ARG, "complete: messages required");
+        with(&mut r, "arg", json!("messages"));
+        with(&mut r, "rid", json!(rid));
+        return r;
     };
     let messages: Vec<Value> = messages.iter().cloned().map(Value::Object).collect();
     let max_tokens = args.max_tokens;
@@ -606,11 +612,11 @@ where
     B: Fn(Map<String, Value>) -> Arc<dyn Provider>,
     L: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<Vec<String>, String>>,
-    R: FnOnce() -> Result<Value, fantastic_kernel::bundle::BundleError>,
+    R: FnOnce() -> Value,
 {
     use crate::declared::provider::Call;
     let reply = match call {
-        Call::Reflect(_) => reflect()?,
+        Call::Reflect(_) => reflect(),
         Call::Boot(_) => crate::verbs::boot(agent_id, kernel),
         Call::Complete(a) => complete_verb(agent_id, &a, kernel, build).await,
         Call::Models(_) => models_verb(agent_id, kernel, live).await,

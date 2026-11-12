@@ -9,10 +9,8 @@
 //! lists them — its dynamic verbs ([`fantastic_kernel::verbs::DynVerb`]), built from
 //! each tool's `inputSchema` and `description`. A grant names tools like verbs.
 //!
-//! Streamable HTTP, DUAL-ERA ([`wire`]): protocol 2026-07-28 (stateless) first; a
-//! server that speaks only an `initialize`-era version (2025-11-25, 2025-06-18,
-//! 2025-03-26, 2024-11-05) is spoken to in that version, through its session.
-//! `reflect` names the version agreed. AUTH = a static key: the ref's `api_key`, read from the credential store before EVERY
+//! Streamable HTTP, protocol 2026-07-28 ([`wire`]), stateless. AUTH = a static key:
+//! the ref's `api_key`, read from the credential store before EVERY
 //! request (as an AI backend reads its key) and sent as `Authorization: Bearer`
 //! to the ref's host only.
 //!
@@ -47,7 +45,7 @@ use fantastic_kernel::refusal::{
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
 
-use crate::wire::{Era, McpError, Mirror, Opts, Session};
+use crate::wire::{McpError, Mirror, Opts};
 
 /// The handler module a record names.
 pub const HANDLER_MODULE: &str = "mcp_client.tools";
@@ -75,8 +73,6 @@ struct State {
 #[derive(Default)]
 pub struct McpClientBundle {
     state: Mutex<HashMap<String, State>>,
-    /// What each instance agreed with its server (era, version, session id).
-    sessions: Mutex<HashMap<String, Session>>,
 }
 
 impl McpClientBundle {
@@ -87,20 +83,6 @@ impl McpClientBundle {
             .get(id)
             .cloned()
             .unwrap_or_default()
-    }
-    fn session(&self, id: &str) -> Session {
-        self.sessions
-            .lock()
-            .expect("sessions")
-            .get(id)
-            .cloned()
-            .unwrap_or_default()
-    }
-    fn set_session(&self, id: &str, s: Session) {
-        self.sessions
-            .lock()
-            .expect("sessions")
-            .insert(id.to_string(), s);
     }
     fn put(&self, id: &str, f: impl FnOnce(&mut State)) {
         f(self
@@ -115,7 +97,10 @@ impl McpClientBundle {
 /// Verbs the kernel and this bundle answer first — a tool by one of these names
 /// is skipped, never shadowed silently.
 fn reserved(name: &str) -> bool {
-    matches!(name, "reflect" | "boot" | "shutdown")
+    declared::VERBS
+        .iter()
+        .chain(fantastic_kernel::declared::common::VERBS.iter())
+        .any(|v| v.name == name)
         || fantastic_kernel::declared::kernel_verbs()
             .iter()
             .any(|v| v.name == name)
@@ -155,8 +140,8 @@ async fn no_note(_: Value) {}
 /// The fields an mcp_client record carries.
 #[derive(Debug, JsonSchema)]
 pub struct McpRecord {
-    /// The MCP server's endpoint, e.g. https://mcp.example.com/mcp.
-    #[schemars(length(min = 1))]
+    /// The MCP server's endpoint: an absolute http(s) URL with a host and no fragment, e.g. https://mcp.example.com/mcp.
+    #[schemars(length(min = 1), regex(pattern = r"^https?://[^/?#\s]+[^#\s]*$"))]
     pub url: String,
     /// The credential store and ref holding `api_key`, sent as a Bearer key to that host only; absent = keyless.
     pub credentials: Option<Credentials>,
@@ -301,29 +286,13 @@ impl McpClientBundle {
             .cloned()
             .unwrap_or(Value::Null);
         let st = self.get(id.as_str());
-        let shown = fantastic_bundle::py_str(&url);
         let mut out = Map::new();
         out.insert("id".into(), json!(id.as_str()));
-        out.insert(
-            "sentence".into(),
-            json!(format!(
-                "The MCP server at {} — its tools are this agent's verbs (docs of={}).",
-                if url.is_null() {
-                    "None".to_string()
-                } else {
-                    shown
-                },
-                id.as_str()
-            )),
-        );
+        out.insert("sentence".into(), json!(MAN));
         out.insert("url".into(), url);
-        out.insert(
-            "protocol_version".into(),
-            json!(self.session(id.as_str()).version),
-        );
         out.insert("tools".into(), json!(st.tools.as_ref().map_or(0, Vec::len)));
         for (k, v) in [("server", &st.server), ("instructions", &st.instructions)] {
-            if fantastic_bundle::py_truthy(v) {
+            if !v.is_null() {
                 out.insert(k.into(), v.clone());
             }
         }
@@ -341,7 +310,7 @@ impl McpClientBundle {
         match self.list(id, kernel, &url).await {
             Ok(v) => v,
             Err(McpError(reply)) => {
-                let err = reply.get("error").map(fantastic_bundle::py_str);
+                let err = fantastic_kernel::refusal::error_text(&reply);
                 self.put(id.as_str(), |s| s.error = err);
                 reply
             }
@@ -350,10 +319,7 @@ impl McpClientBundle {
 
     async fn list(&self, id: &AgentId, kernel: &Arc<Kernel>, url: &str) -> Result<Value, McpError> {
         let key = read_key(id, kernel, url).await?;
-        let mut sess = self.session(id.as_str());
-        let connected = wire::connect(url, key.as_deref(), &mut sess).await;
-        self.set_session(id.as_str(), sess.clone());
-        let disc = connected?;
+        let disc = wire::connect(url, key.as_deref()).await?;
         let mut tools: Vec<Value> = Vec::new();
         let has_tools = disc
             .get("capabilities")
@@ -375,11 +341,9 @@ impl McpClientBundle {
                         key: key.as_deref(),
                         headers: vec![],
                     },
-                    &mut sess,
                     no_note,
                 )
                 .await;
-                self.set_session(id.as_str(), sess.clone());
                 let page = page?;
                 tools.extend(
                     page.get("tools")
@@ -389,7 +353,7 @@ impl McpClientBundle {
                 );
                 cursor = page
                     .get("nextCursor")
-                    .filter(|c| fantastic_bundle::py_truthy(c))
+                    .filter(|c| c.as_str().is_some_and(|s| !s.is_empty()))
                     .cloned();
                 let Some(c) = &cursor else { break };
                 if seen.contains(c) {
@@ -420,13 +384,7 @@ impl McpClientBundle {
                 continue;
             }
             let schema = t.get("inputSchema").cloned().unwrap_or_else(|| json!({}));
-            // `x-mcp-header` is a 2026-07-28 rule: a legacy server's schema mirrors nothing
-            let found = if sess.era == Some(Era::Modern) {
-                wire::mirrors(&schema)
-            } else {
-                Ok(vec![])
-            };
-            match found {
+            match wire::mirrors(&schema) {
                 Err(why) => {
                     skipped.push(json!({"name": n, "why": why}));
                     continue;
@@ -458,7 +416,6 @@ impl McpClientBundle {
             .await;
         let mut out = Map::new();
         out.insert("server".into(), server);
-        out.insert("protocol_version".into(), json!(sess.version));
         out.insert("tools".into(), json!(names));
         if !skipped.is_empty() {
             out.insert("skipped".into(), Value::Array(skipped));
@@ -505,7 +462,6 @@ impl McpClientBundle {
                 k.emit(&me, Value::Object(out)).await;
             }
         };
-        let mut sess = self.session(id.as_str());
         let result = wire::rpc(
             &url,
             "tools/call",
@@ -514,12 +470,9 @@ impl McpClientBundle {
                 key: key.as_deref(),
                 headers,
             },
-            &mut sess,
             note,
         )
-        .await;
-        self.set_session(id.as_str(), sess);
-        let result = result?;
+        .await?;
         answer(&url, tool, &result)
     }
 }
@@ -568,30 +521,6 @@ impl Handler for McpClientBundle {
         &RECORD
     }
 
-    fn validate_meta(
-        &self,
-        meta: &Map<String, Value>,
-        _record: &Map<String, Value>,
-    ) -> Option<String> {
-        if let Some(url) = meta.get("url").filter(|v| !v.is_null()) {
-            let ok = url
-                .as_str()
-                .and_then(|s| reqwest::Url::parse(s).ok())
-                .is_some_and(|u| {
-                    matches!(u.scheme(), "http" | "https")
-                        && u.host_str().is_some_and(|h| !h.is_empty())
-                        && u.fragment().is_none()
-                });
-            if !ok {
-                return Some(format!(
-                    "url={} must be an absolute http(s) URL of the MCP endpoint, with no fragment (e.g. https://mcp.example.com/mcp)",
-                    py_repr_value(url)
-                ));
-            }
-        }
-        fantastic_ai_core::record::validate_meta(meta)
-    }
-
     async fn handle(
         &self,
         agent_id: &AgentId,
@@ -634,10 +563,6 @@ impl Handler for McpClientBundle {
         _kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
         self.state.lock().expect("state").remove(agent_id.as_str());
-        self.sessions
-            .lock()
-            .expect("sessions")
-            .remove(agent_id.as_str());
         Ok(())
     }
 }

@@ -33,8 +33,8 @@ use fantastic_ai_core::provider::{
 };
 use fantastic_ai_core::declared::provider;
 use fantastic_ai_core::record::{Credentials, ProviderRecord};
-use fantastic_ai_core::{agent_loop::BackendConfig, caching, helpers, verbs};
-use fantastic_bundle::{py_repr_value, py_str, py_truthy};
+use fantastic_ai_core::{agent_loop::BackendConfig, helpers, verbs};
+use fantastic_bundle::py_repr_value;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use schemars::JsonSchema;
 use fantastic_kernel::{AgentId, Kernel, TaskId};
@@ -51,12 +51,8 @@ pub const HANDLER_MODULE: &str = "responses_backend.tools";
 /// The name a required-field refusal carries.
 const BACKEND: &str = "responses_backend";
 
-/// What `reflect` says this agent IS — python `responses_backend/tools.py`'s
-/// `sentence`, verbatim.
-pub const SENTENCE: &str = "OpenAI Responses-API LLM agent (raw prompt-and-parse tool-calling).";
-
-/// Per-turn output budget (`max_output_tokens`) when the record names none.
-pub const DEFAULT_MAX_TOKENS: u64 = 8192;
+/// Per-turn output budget (`max_output_tokens`): the declared default of the record's `max_tokens`.
+pub const DEFAULT_MAX_TOKENS: i64 = 8192;
 
 /// EDGE TRANSPORT FAILURES. A 4xx, or any 5xx
 /// carrying a JSON body, is the endpoint deliberately answering and stays loud;
@@ -168,26 +164,23 @@ fn drop_cached_client(self_id: &AgentId) {
 /// `(no content)`; every other role is dropped. Tool calls and replies are already
 /// inline text, so there is no function_call/function_call_output translation.
 fn to_responses(messages: &[Value]) -> (Option<Value>, Vec<Value>) {
-    let mut instructions: Option<Value> = None;
+    let mut instructions: Option<String> = None;
     let mut items: Vec<Value> = Vec::new();
     for m in messages {
         let role = m.get("role").and_then(Value::as_str).unwrap_or("");
-        let content = match m.get("content") {
-            Some(v) if py_truthy(v) => v.clone(),
-            _ => json!(""),
-        };
+        let content = m.get("content").and_then(Value::as_str).unwrap_or("");
         match role {
-            "system" => instructions = Some(content),
+            "system" => instructions = Some(content.to_string()),
             "user" | "assistant" => {
                 let part = if role == "user" {
                     "input_text"
                 } else {
                     "output_text"
                 };
-                let text = if py_truthy(&content) {
-                    content
+                let text = if content.is_empty() {
+                    "(no content)"
                 } else {
-                    json!("(no content)")
+                    content
                 };
                 items.push(json!({
                     "type": "message",
@@ -198,7 +191,10 @@ fn to_responses(messages: &[Value]) -> (Option<Value>, Vec<Value>) {
             _ => {}
         }
     }
-    (instructions.filter(py_truthy), items)
+    (
+        instructions.filter(|s| !s.is_empty()).map(Value::String),
+        items,
+    )
 }
 
 // ── the provider ────────────────────────────────────────────────────
@@ -412,14 +408,11 @@ impl SseState {
     fn finish(&self) -> Option<String> {
         let status = self.status();
         let reason = self.reason();
+        let named = |v: &Value| v.as_str().filter(|s| !s.is_empty()).map(str::to_string);
         let stop = if reason.as_str() == Some("max_output_tokens") {
             Some("max_tokens".to_string())
-        } else if py_truthy(&reason) {
-            Some(py_str(&reason))
-        } else if py_truthy(&status) {
-            Some(py_str(&status))
         } else {
-            None
+            named(&reason).or_else(|| named(&status))
         };
         self.report.lock().expect("report poisoned").stop_reason = stop.clone();
         if self.bounded && stop.as_deref() == Some("max_tokens") {
@@ -528,10 +521,10 @@ fn decode_sse_line(st: &mut SseState, line: &str) -> Result<Vec<ProviderEvent>, 
                 .and_then(|r| r.get("error"))
                 .cloned()
                 .unwrap_or(Value::Null);
-            return Err(format!("responses stream failed: {}", py_str(&err)));
+            return Err(format!("responses stream failed: {}", fantastic_ai_core::helpers::shown(&err)));
         }
         "error" => {
-            return Err(format!("responses stream error: {}", py_str(&obj)));
+            return Err(format!("responses stream error: {}", fantastic_ai_core::helpers::shown(&obj)));
         }
         _ => {} // created / in_progress / *.done / content_part.* — ignored
     }
@@ -669,9 +662,13 @@ pub struct ResponsesRecord {
     /// The model name (absent: the call's `model`, else `default_model`).
     pub model: Option<String>,
     /// The read clock on the answer stream: seconds with no byte from the endpoint (headers included) before the turn is judged stalled and ends with an error row.
+    #[schemars(schema_with = "fantastic_ai_core::record::stream_idle_seconds")]
     pub stream_idle_seconds: Option<f64>,
     /// A turn's output budget (tokens).
+    #[schemars(range(min = 1), default = "default_max_tokens")]
     pub max_tokens: Option<i64>,
+    /// How the conversation is kept in the model's view.
+    pub caching: Option<fantastic_ai_core::record::UncachedMode>,
     /// Runner params merged verbatim into the request body.
     pub sampling: Option<Map<String, Value>>,
     /// The credential store and ref holding the key, read at each request.
@@ -681,6 +678,10 @@ pub struct ResponsesRecord {
     /// The fields every provider takes.
     #[serde(flatten)]
     pub provider: ProviderRecord,
+}
+
+fn default_max_tokens() -> Option<i64> {
+    Some(DEFAULT_MAX_TOKENS)
 }
 
 fantastic_kernel::record!(ResponsesRecord);
@@ -712,20 +713,6 @@ impl Handler for ResponsesBundle {
         &RECORD
     }
 
-    /// Refuse, AT THE WRITE, what a type cannot say: a stall clock out of range, a
-    /// blank text, a caching mode this backend cannot do.
-    fn validate_meta(
-        &self,
-        meta: &Map<String, Value>,
-        record: &Map<String, Value>,
-    ) -> Option<String> {
-        if let Err(e) = stream_idle_of(meta) {
-            return Some(e.message);
-        }
-        fantastic_ai_core::record::validate_meta(meta)
-            .or_else(|| caching::refusal(meta, record, "responses_backend", CFG.provider_cache))
-    }
-
     async fn handle(
         &self,
         agent_id: &AgentId,
@@ -739,7 +726,7 @@ impl Handler for ResponsesBundle {
             kernel,
             |m| build_provider_with(agent_id, kernel, m),
             fantastic_ai_core::remote_provider::NO_LIVE,
-            || Ok(reflect_reply(agent_id, kernel)),
+            || reflect_reply(agent_id, kernel),
         )
         .await
     }
@@ -777,10 +764,10 @@ fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<Strin
         (Ok(e), Ok(m)) => (e, m),
         (Err(e), _) | (_, Err(e)) => return Arc::new(Unconfigured(e)),
     };
-    let max_tokens = match py_int_or(meta.get("max_tokens"), DEFAULT_MAX_TOKENS) {
-        Ok(n) => n,
-        Err(e) => return Arc::new(Unconfigured(ProviderError::value_error(e))),
-    };
+    let max_tokens = meta
+        .get("max_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(DEFAULT_MAX_TOKENS);
     let raw_sampling = meta.get("sampling").and_then(Value::as_object);
     let mut owned: Vec<&str> = raw_sampling
         .map(|m| {
@@ -806,10 +793,7 @@ fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<Strin
                 .collect()
         })
         .unwrap_or_default();
-    let stream_idle = match stream_idle_of(&meta) {
-        Ok(idle) => idle,
-        Err(e) => return Arc::new(Unconfigured(e)),
-    };
+    let stream_idle = stream_idle_of(&meta);
     Arc::new(ResponsesProvider {
         self_id: agent_id.clone(),
         endpoint,
@@ -833,51 +817,12 @@ const OWNED_KEYS: [&str; 6] = [
     "store",
 ];
 
-/// python `int(v or default)`: a falsy value takes the default; an int is itself;
-/// a float truncates; a bool is 0/1; a numeric string parses. Anything else is
-/// python's `int()` error.
-fn py_int_or(v: Option<&Value>, default: u64) -> Result<i64, String> {
-    let default = i64::try_from(default).unwrap_or(i64::MAX);
-    let Some(v) = v.filter(|v| py_truthy(v)) else {
-        return Ok(default);
-    };
-    match v {
-        Value::Bool(_) => Ok(1),
-        Value::Number(n) => Ok(n
-            .as_i64()
-            .or_else(|| n.as_f64().map(|f| f.trunc() as i64))
-            .unwrap_or(default)),
-        Value::String(s) => {
-            let t = s.trim();
-            let digits_ok = !t.is_empty() && !t.starts_with('_') && !t.ends_with('_');
-            t.replace('_', "")
-                .parse::<i64>()
-                .ok()
-                .filter(|_| digits_ok)
-                .ok_or_else(|| {
-                    format!(
-                        "invalid literal for int() with base 10: {}",
-                        fantastic_bundle::py_repr(s)
-                    )
-                })
-        }
-        Value::Array(_) => Err(
-            "int() argument must be a string, a bytes-like object or a real number, not 'list'"
-                .to_string(),
-        ),
-        _ => Err(
-            "int() argument must be a string, a bytes-like object or a real number, not 'dict'"
-                .to_string(),
-        ),
-    }
-}
-
 /// `reflect` — python `_make_reflect` with no `reflect_extra`.
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
     Value::Object(verbs::reflect_base(
         agent_id,
         kernel,
-        SENTENCE,
+        MAN,
         CFG.model_window,
     ))
 }

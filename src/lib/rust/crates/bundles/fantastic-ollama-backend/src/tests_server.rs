@@ -116,11 +116,23 @@ async fn the_key_rides_the_model_list_when_the_record_names_one() {
     assert_eq!(seen(&srv).await[0].1.as_deref(), Some("Bearer sekret"));
 }
 
+/// What a write of `meta` to an ollama_backend record answers: the engine's refusal
+/// (by field name), `None` when it is taken.
+fn at_the_write(meta: &Value) -> Option<Value> {
+    fantastic_kernel::verbs::check_record(
+        "update_agent",
+        "ollama_backend",
+        meta.as_object().unwrap(),
+        &fantastic_kernel::declared::record::RECORD,
+        &RECORD,
+    )
+    .err()
+}
+
 #[test]
 fn a_record_with_only_endpoint_and_a_store_is_accepted() {
-    let b = OllamaBackendBundle;
     let ok = json!({"endpoint": "http://o.test", "memory_store_id": "memory"});
-    assert_eq!(b.validate_meta(ok.as_object().unwrap(), &Map::new()), None);
+    assert_eq!(at_the_write(&ok), None);
     let declared = fantastic_kernel::verbs::record_fields(&RECORD);
     let fields = declared["fields"].as_array().unwrap();
     let model = fields.iter().find(|f| f["name"] == "model").unwrap();
@@ -131,40 +143,16 @@ fn a_record_with_only_endpoint_and_a_store_is_accepted() {
 
 #[test]
 fn caching_none_and_cleanup_are_accepted_and_provider_cache_is_refused_here() {
-    // ollama declares no provider caching: the mode is refused at the write, naming
-    // the backend; the two modes that send no marker are accepted.
-    let b = OllamaBackendBundle;
-    let rec = json!({"endpoint": "http://o.test", "memory_store_id": "memory"});
-    let rec = rec.as_object().unwrap();
+    // ollama declares no provider caching: its record's `caching` has no such value,
+    // so the engine refuses it by field name; the two modes that send no marker are
+    // accepted.
     for mode in ["none", "cleanup"] {
-        let meta = json!({"caching": mode});
-        assert_eq!(
-            b.validate_meta(meta.as_object().unwrap(), rec),
-            None,
-            "{mode}"
-        );
+        assert_eq!(at_the_write(&json!({"caching": mode})), None, "{mode}");
     }
-    let meta = json!({"caching": "provider_cache"});
-    assert_eq!(
-        b.validate_meta(meta.as_object().unwrap(), rec).as_deref(),
-        Some("ollama_backend cannot do provider caching: caching=provider_cache is refused — use none or cleanup")
-    );
-    // a record already in provider_cache is refused on any write to it
-    let stored = json!({"endpoint": "http://o.test", "memory_store_id": "memory", "caching": "provider_cache"});
-    assert!(b
-        .validate_meta(&Map::new(), stored.as_object().unwrap())
-        .is_some());
-    // an unknown mode is the record declaration's refusal, by field name
-    let meta = json!({"caching": "always"});
-    let refused = fantastic_kernel::verbs::check_record(
-        "update_agent",
-        "ollama_backend",
-        meta.as_object().unwrap(),
-        &fantastic_kernel::declared::record::RECORD,
-        &RECORD,
-    )
-    .expect_err("an unknown mode");
-    assert_eq!(refused["arg"], json!("caching"), "{refused}");
+    for mode in ["provider_cache", "always"] {
+        let refused = at_the_write(&json!({"caching": mode})).expect("refused");
+        assert_eq!(refused["arg"], json!("caching"), "{refused}");
+    }
 }
 
 // ─── through the kernel ─────────────────────────────────────────────────────

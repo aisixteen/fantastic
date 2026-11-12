@@ -4,7 +4,7 @@
 //! The FoundationModels calls live in ONE implementation, the swift
 //! `FantasticFMCore` in this crate's `swift/` package; this crate links it as a
 //! static library through `FantasticFMBridge`'s C ABI (`build.rs`, [`system`]).
-//! Python has none (Apple-only native). The bundle's readme is `src/readme.md`.
+//! Python has none (Apple-only native).
 //!
 //! A thin shell over `fantastic-ai-core`, like every backend: this crate supplies
 //! the [`Provider`] (messages -> one FMCore request, raw text out) and the
@@ -40,8 +40,7 @@ use fantastic_ai_core::provider::{
 };
 use fantastic_ai_core::declared::provider;
 use fantastic_ai_core::record::AiRecord;
-use fantastic_ai_core::{agent_loop::BackendConfig, caching, helpers, verbs};
-use fantastic_bundle::py_str;
+use fantastic_ai_core::{agent_loop::BackendConfig, helpers, verbs};
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use schemars::JsonSchema;
 use fantastic_kernel::{AgentId, Kernel, TaskId};
@@ -53,9 +52,6 @@ pub const HANDLER_MODULE: &str = "foundation_models_backend.tools";
 
 /// The bundle's name — the prefix of every refusal it raises.
 pub const NAME: &str = "foundation_models_backend";
-
-/// What `reflect` says this agent IS — the sentence the kernels have always shown.
-pub const SENTENCE: &str = "Apple Foundation Models LLM agent — the on-device system model (raw prompt-and-parse tool-calling; no endpoint, no model choice, no key).";
 
 /// The model id the provider reports — swift's `FoundationModelsProvider.model`.
 pub const MODEL: &str = "SystemLanguageModel.default";
@@ -102,12 +98,12 @@ impl FoundationModelsBackendBundle {
             .map(|r| ProviderError::raised(format!("{NAME}: {}", unavailable_message(r))));
         Arc::new(FoundationModelsProvider {
             engine: Arc::clone(&self.engine),
-            temperature: meta.get("temperature").and_then(number),
+            temperature: meta.get("temperature").and_then(Value::as_f64),
             // a record that names none gets the bounded default, never above the
             // model's window (#495)
             max_tokens: Some(
                 meta.get("max_tokens")
-                    .and_then(int)
+                    .and_then(Value::as_i64)
                     .unwrap_or_else(|| default_max_tokens(None, self.engine.context_size())),
             ),
             refusal,
@@ -119,7 +115,7 @@ impl FoundationModelsBackendBundle {
     /// answer and why not, its real window, and the two knobs as the record sets
     /// them (null = the model's own). Swift `reflectExtra`.
     fn reflect_reply(&self, agent_id: &AgentId, kernel: &Kernel) -> Value {
-        let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, self.cfg().model_window);
+        let mut out = verbs::reflect_base(agent_id, kernel, MAN, self.cfg().model_window);
         let meta = helpers::agent_meta(agent_id, kernel);
         let a = self.engine.availability();
         out.insert("available".to_string(), json!(a.is_available()));
@@ -153,6 +149,8 @@ pub struct FoundationRecord {
     /// A turn's output budget (tokens); unset, the on-device model's own.
     #[schemars(range(min = 1))]
     pub max_tokens: Option<i64>,
+    /// How the conversation is kept in the model's view.
+    pub caching: Option<fantastic_ai_core::record::UncachedMode>,
     /// The memory store agent that keeps this agent's settings (e.g. a ram_store).
     pub memory_store_id: String,
     /// The fields every ai_core agent takes; `context_window` no larger than the model's.
@@ -161,22 +159,6 @@ pub struct FoundationRecord {
 }
 
 fantastic_kernel::record!(FoundationRecord);
-
-/// An int or a float as an `f64` — a bool is neither.
-fn number(v: &Value) -> Option<f64> {
-    match v {
-        Value::Number(n) => n.as_f64(),
-        _ => None,
-    }
-}
-
-/// A JSON INT — never a float, even an integral one (`5.0`), never a bool.
-fn int(v: &Value) -> Option<i64> {
-    match v {
-        Value::Number(n) if !n.is_f64() => n.as_i64(),
-        _ => None,
-    }
-}
 
 #[async_trait]
 impl Handler for FoundationModelsBackendBundle {
@@ -202,24 +184,23 @@ impl Handler for FoundationModelsBackendBundle {
         &RECORD
     }
 
-    /// Refuse, AT THE WRITE, what a type cannot say: a window larger than the
-    /// on-device model's, a blank text, a caching mode this backend cannot do.
+    /// Refuse, AT THE WRITE, a window larger than the on-device model's: the engine's
+    /// window is known only at runtime, so no static declaration can state it.
     fn validate_meta(
         &self,
         meta: &Map<String, Value>,
-        record: &Map<String, Value>,
+        _record: &Map<String, Value>,
     ) -> Option<String> {
-        if let Some(v) = meta.get("context_window").filter(|v| !v.is_null()) {
-            let size = self.engine.context_size();
-            if !int(v).is_some_and(|n| n >= 1 && n <= size) {
-                return Some(format!(
+        let size = self.engine.context_size();
+        meta.get("context_window")
+            .and_then(Value::as_i64)
+            .filter(|n| *n > size)
+            .map(|_| {
+                format!(
                     "context_window must be a positive int no larger than the on-device \
                      model's window ({size} tokens)"
-                ));
-            }
-        }
-        fantastic_ai_core::record::validate_meta(meta)
-            .or_else(|| caching::refusal(meta, record, NAME, self.cfg().provider_cache))
+                )
+            })
     }
 
     async fn handle(
@@ -235,7 +216,7 @@ impl Handler for FoundationModelsBackendBundle {
             kernel,
             |m| self.build_provider_with(agent_id, kernel, m),
             fantastic_ai_core::remote_provider::NO_LIVE,
-            || Ok(self.reflect_reply(agent_id, kernel)),
+            || self.reflect_reply(agent_id, kernel),
         )
         .await
     }
@@ -289,7 +270,7 @@ impl FoundationModelsProvider {
         max_tokens: Option<i64>,
     ) -> Result<FmRequest, ProviderError> {
         let role = |m: &Value| m.get("role").cloned().unwrap_or(Value::Null);
-        let content = |m: &Value| m.get("content").map_or_else(String::new, py_str);
+        let content = |m: &Value| m.get("content").map_or_else(String::new, fantastic_ai_core::helpers::shown);
         let is_system = |m: &Value| m.get("role").and_then(Value::as_str) == Some("system");
         let instructions: Vec<String> = messages
             .iter()
@@ -303,7 +284,7 @@ impl FoundationModelsProvider {
         else {
             let r = rest
                 .last()
-                .map_or_else(|| "none".to_string(), |m| py_str(&role(m)));
+                .map_or_else(|| "none".to_string(), |m| fantastic_ai_core::helpers::shown(&role(m)));
             return Err(ProviderError::raised(format!(
                 "{NAME}: the last message is not a user turn (role {r}) — the on-device \
                  session answers a prompt"
@@ -314,7 +295,7 @@ impl FoundationModelsProvider {
             turns: earlier
                 .iter()
                 .map(|m| FmTurn {
-                    role: py_str(&role(m)),
+                    role: fantastic_ai_core::helpers::shown(&role(m)),
                     content: content(m),
                 })
                 .collect(),

@@ -27,6 +27,7 @@
 
 use fantastic_ai_core::constants::default_max_tokens;
 use fantastic_ai_core::credentials::{key_reader, KeySource};
+use crate::seconds;
 use fantastic_ai_core::helpers;
 use fantastic_kernel::refusal::{refusal, with, BAD_ARG};
 use fantastic_kernel::{AgentId, Kernel};
@@ -286,13 +287,6 @@ fn netloc(url: &str) -> &str {
     rest.split(['/', '?', '#']).next().unwrap_or("")
 }
 
-fn seconds(rec: &Map<String, Value>, key: &str, default: f64) -> f64 {
-    rec.get(key)
-        .and_then(Value::as_f64)
-        .filter(|s| *s > 0.0)
-        .unwrap_or(default)
-}
-
 /// The values for the record's absent fields, read from the server.
 ///
 /// # Errors
@@ -316,9 +310,13 @@ pub async fn read(
         .connect_timeout(Duration::from_secs_f64(seconds(
             rec,
             "connect_timeout",
-            5.0,
+            crate::CONNECT_TIMEOUT,
         )))
-        .read_timeout(Duration::from_secs_f64(seconds(rec, "read_timeout", 900.0)))
+        .read_timeout(Duration::from_secs_f64(seconds(
+            rec,
+            "read_timeout",
+            crate::READ_TIMEOUT,
+        )))
         .build()
         .map_err(|e| fail(want.first().copied().unwrap_or("model"), e.to_string()))?;
     let mut out = Map::new();

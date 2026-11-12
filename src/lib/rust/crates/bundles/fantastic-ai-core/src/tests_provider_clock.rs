@@ -15,40 +15,36 @@ fn meta(v: Value) -> Map<String, Value> {
 #[test]
 fn the_idle_window_defaults_and_takes_a_positive_number() {
     assert_eq!(
-        stream_idle_of(&Map::new()).expect("unset"),
+        stream_idle_of(&Map::new()),
         Duration::from_secs(60)
     );
     // a JSON null is the same as unset
     assert_eq!(
-        stream_idle_of(&meta(Value::Null)).expect("null"),
+        stream_idle_of(&meta(Value::Null)),
         Duration::from_secs(60)
     );
     assert_eq!(
-        stream_idle_of(&meta(json!(2.5))).expect("set"),
+        stream_idle_of(&meta(json!(2.5))),
         Duration::from_millis(2500)
     );
     assert_eq!(
-        stream_idle_of(&meta(json!(90))).expect("int"),
+        stream_idle_of(&meta(json!(90))),
         Duration::from_secs(90)
     );
 }
 
 #[test]
-fn a_window_that_is_not_a_positive_number_is_refused_by_name() {
-    for bad in [
-        json!(0),
-        json!(-1.5),
-        json!("soon"),
-        json!(true),
-        json!([1]),
-    ] {
-        let err = stream_idle_of(&meta(bad.clone())).expect_err("refused");
-        assert_eq!(err.kind, "ValueError", "{bad}");
+fn a_window_that_is_not_a_positive_number_is_refused_at_the_write() {
+    let schema = {
+        let mut gen = schemars::gen::SchemaGenerator::default();
+        serde_json::to_value(crate::record::stream_idle_seconds(&mut gen)).unwrap()
+    };
+    for bad in [json!(0), json!(-1.5), json!("soon"), json!(true), json!([1])] {
+        let decl = json!({"properties": {"stream_idle_seconds": schema}});
+        let call = json!({"type": "update", "stream_idle_seconds": bad});
         assert!(
-            err.message
-                .starts_with("stream_idle_seconds must be a positive number of seconds"),
-            "{}",
-            err.message
+            fantastic_kernel::verbs::validate("update", &decl, &call).is_err(),
+            "{bad}"
         );
     }
 }

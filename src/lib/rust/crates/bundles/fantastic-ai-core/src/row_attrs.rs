@@ -294,7 +294,6 @@ fn price_entry<'a>(meta: &'a Map<String, Value>, model: &str) -> Option<&'a Valu
                 .max_by_key(|(id, _)| id.len())
                 .map(|(_, v)| v)
         })
-        .filter(|v| v.is_object())
 }
 
 /// The cost of one pass: `{usd, prices}`, the price entry of the serving provider's

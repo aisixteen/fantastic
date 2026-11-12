@@ -72,6 +72,11 @@ pub fn safe_client(client_id: &str) -> String {
         .collect()
 }
 
+/// A JSON value as it reads inside a sentence: a text as itself, anything else as its JSON.
+pub fn shown(v: &Value) -> String {
+    v.as_str().map_or_else(|| v.to_string(), str::to_string)
+}
+
 /// Current unix time in fractional seconds.
 pub fn now_secs() -> f64 {
     SystemTime::now()

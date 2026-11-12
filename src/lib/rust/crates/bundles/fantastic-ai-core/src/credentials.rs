@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use fantastic_bundle::{py_repr, py_str, py_strip, py_truthy};
+use fantastic_bundle::py_repr;
 use fantastic_kernel::{AgentId, Item, Kernel, Status};
 use serde_json::{json, Value};
 
@@ -63,24 +63,6 @@ pub fn header_safe(key: &str) -> bool {
         && key
             .chars()
             .all(|c| c == ' ' || c == '\t' || ('!'..='~').contains(&c))
-}
-
-/// Why a `credentials` value is malformed, or `None`: a map of exactly a
-/// non-empty `store` id and a non-empty `ref`. Python `shape_error`.
-#[must_use]
-pub fn shape_error(v: &Value) -> Option<String> {
-    let Some(m) = v
-        .as_object()
-        .filter(|m| m.len() == 2 && m.contains_key("store") && m.contains_key("ref"))
-    else {
-        return Some("credentials must be {store: <credential_store id>, ref: <ref>}".to_string());
-    };
-    for k in ["store", "ref"] {
-        if !m[k].as_str().is_some_and(|s| !py_strip(s).is_empty()) {
-            return Some(format!("credentials.{k} must be a non-empty string"));
-        }
-    }
-    None
 }
 
 /// What a provider awaits before EACH request — python's `key` callable,
@@ -212,9 +194,6 @@ impl KeyReader {
             }
             return Ok(None);
         };
-        if let Some(bad) = shape_error(&cred) {
-            return Err(CredentialError(format!("{backend}: {bad}")));
-        }
         let store = cred["store"].as_str().unwrap_or("").to_string();
         let r = cred["ref"].as_str().unwrap_or("").to_string();
         // THIS AGENT'S send: the read runs inside its own turn (its dispatch, or a
@@ -227,12 +206,10 @@ impl KeyReader {
         let res = &out.result;
         let failed = out.status != Status::Completed
             || !res.is_object()
-            || res.get("error").is_some_and(py_truthy);
+            || res.get("error").is_some_and(|e| !e.is_null());
         if failed {
-            let err = match res.as_object() {
-                Some(m) => m.get("error").map_or_else(|| "None".to_string(), py_str),
-                None => out.status.as_str().to_string(),
-            };
+            let err = fantastic_kernel::refusal::error_text(res)
+                .unwrap_or_else(|| out.status.as_str().to_string());
             return Err(CredentialError(format!(
                 "{backend}: credentials {store}/{r}: {err}"
             )));

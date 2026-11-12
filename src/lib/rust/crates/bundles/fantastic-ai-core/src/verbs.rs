@@ -14,10 +14,13 @@ use crate::provider::Provider;
 use crate::state::{state_for, status_snapshot, CurrentEntry, QueuedEntry};
 use crate::stream_parts::{Part, PartKind};
 use fantastic_bundle::{
-    py_float_repr, py_json_dumps, py_repr, py_str, py_strip, py_truthy,
+    py_float_repr, py_json_dumps, py_repr, py_strip,
 };
 use fantastic_kernel::bundle::BundleError;
 use fantastic_kernel::call_guard::{check_call_stack, CallStackRefusal};
+use fantastic_kernel::refusal::{
+    refusal, refusal_hint, with, BAD_ARG, MISSING_ARG, NOT_FOUND, NO_CONSUMER, UNAUTHORIZED,
+};
 use fantastic_kernel::{current_task, AgentId, Kernel, TaskId};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -470,13 +473,13 @@ fn digest(r: &Value) -> Value {
     // python `str(r.get("content", ""))`: an ABSENT content is the empty string, a
     // null one is `None` (4 bytes), a dict one is its repr.
     let content = r.get("content").cloned().unwrap_or_else(|| json!(""));
-    let text = py_str(&content);
+    let text = crate::helpers::shown(&content);
     let mut d = json!({
         "id": r.get("id"),
         "parent": r.get("parent"),
-        // `kind` FALLS BACK TO `role` on PYTHON TRUTHINESS (`kind or role`).
+        // `kind` falls back to `role` when the row has none.
         "kind": match r.get("kind") {
-            Some(k) if py_truthy(k) => k.clone(),
+            Some(k) if !k.is_null() => k.clone(),
             _ => r.get("role").cloned().unwrap_or(Value::Null),
         },
         "role": r.get("role"),
@@ -488,7 +491,7 @@ fn digest(r: &Value) -> Value {
         d["attributes"] = a.clone();
     }
     // a row that kept its generation's thinking says so (python `has_thinking`)
-    if r.get("thinking").is_some_and(py_truthy) {
+    if r.get("thinking").and_then(Value::as_str).is_some_and(|t| !t.is_empty()) {
         d["has_thinking"] = json!(true);
     }
     d
@@ -521,11 +524,12 @@ pub async fn history(
                 )
             });
             let Some(f) = f else {
-                return Ok(json!({
-                    "error": format!("history: {fold_id} is not a fold in your conversation"),
-                    "reason": "not_found",
-                    "arg": "fold",
-                }));
+                let mut r = refusal(
+                    NOT_FOUND,
+                    format!("history: {fold_id} is not a fold in your conversation"),
+                );
+                with(&mut r, "arg", json!("fold"));
+                return Ok(r);
             };
             let refs: Vec<i64> = f
                 .get("refs")
@@ -536,7 +540,7 @@ pub async fn history(
                 "id": fold_id,
                 "kind": f.get("kind"),
                 "title": f.get("title"),
-                "summary": f.get("body").filter(|b| py_truthy(b)).cloned().unwrap_or(json!("")),
+                "summary": f.get("body").filter(|b| !b.is_null()).cloned().unwrap_or(json!("")),
                 "members": refs.len(),
             }));
             refs.iter()
@@ -547,7 +551,7 @@ pub async fn history(
     };
     let mut digests: Vec<Value> = rows
         .iter()
-        .filter(|r| r.get("id").is_some_and(py_truthy))
+        .filter(|r| r.get("id").and_then(Value::as_i64).is_some())
         .map(digest)
         .collect();
     // CHAT CARDS (#339): embed / unembed rows have no role, so `load_history` drops
@@ -557,7 +561,7 @@ pub async fn history(
         let cards: Vec<Value> = crate::embed::card_rows(agent_id, kernel)
             .await?
             .iter()
-            .filter(|r| r.get("id").is_some_and(py_truthy))
+            .filter(|r| r.get("id").and_then(Value::as_i64).is_some())
             .map(digest)
             .collect();
         card_count = cards.len();
@@ -566,7 +570,6 @@ pub async fn history(
             digests.sort_by_key(|d| d["id"].as_i64().unwrap_or(0));
         }
     }
-    let limit = args.limit.unwrap_or(0);
     if let Some(after) = args.after {
         // AN UNKNOWN CURSOR PAGES NOTHING, rather than starting over.
         digests = match digests.iter().position(|d| d["id"].as_i64() == Some(after)) {
@@ -580,7 +583,7 @@ pub async fn history(
     let (kept, truncated) = crate::context::fit_reply(
         &digests,
         crate::context::inline_cap(&meta, model_window),
-        (limit != 0).then_some(limit),
+        args.limit,
     );
     let next = truncated
         .then(|| kept.last().map(|d| d["id"].clone()))
@@ -631,10 +634,12 @@ pub async fn recall(
             .enumerate()
             .find(|(_, r)| r.get("id").and_then(Value::as_i64) == Some(id))
         else {
-            return Ok(json!({
-                "error": format!("recall: {id} is not a row in your conversation"),
-                "reason": "not_found", "arg": "id",
-            }));
+            let mut r = refusal(
+                NOT_FOUND,
+                format!("recall: {id} is not a row in your conversation"),
+            );
+            with(&mut r, "arg", json!("id"));
+            return Ok(r);
         };
         let mut m = json!({"index": i, "role": row.get("role"), "content": recall_render(row)});
         if let Some(t) = row
@@ -672,16 +677,15 @@ pub async fn recall(
         }
         return Ok(json!({"messages": [m], "total": 1, "truncated": false}));
     }
-    let q_owned = args.query.clone().unwrap_or_default().to_lowercase();
-    let q = py_strip(&q_owned);
-    let limit = args.limit.unwrap_or(20).clamp(1, 100) as usize;
+    let q = args.query.as_deref().map(str::to_lowercase);
+    let limit = args.limit as usize;
     let before = args.before;
     let mut indexed: Vec<(usize, &Value)> = full.iter().enumerate().collect();
     if let Some(before) = before {
         indexed.retain(|(i, _)| (*i as i64) < before);
     }
-    if !q.is_empty() {
-        indexed.retain(|(_, m)| py_json_dumps(m, true, None).to_lowercase().contains(q));
+    if let Some(q) = &q {
+        indexed.retain(|(_, m)| py_json_dumps(m, true, None).to_lowercase().contains(q.as_str()));
     }
     let total = indexed.len();
     let truncated = total > limit;
@@ -737,7 +741,7 @@ pub async fn recall(
             .as_ref()
             .and_then(|p| p.get("fired").and_then(Value::as_bool))
             .unwrap_or(false);
-        let note = if !q.is_empty() && !full.is_empty() {
+        let note = if let (Some(q), false) = (&q, full.is_empty()) {
             format!(
                 "query {} matched none of the {} stored turns.",
                 py_repr(q),
@@ -1025,7 +1029,10 @@ pub async fn send(
     }
     // NO STORE, NO TURN — said up front, not discovered mid-generation.
     if let Err(e) = crate::memory::store_of(agent_id, kernel) {
-        return Ok(json!({"error": e.0, "reason": "missing_arg", "client_id": client_id}));
+        let mut r = refusal(MISSING_ARG, e.0);
+        with(&mut r, "arg", json!("memory_store_id"));
+        with(&mut r, "client_id", json!(client_id));
+        return Ok(r);
     }
     if args.late == Some(true) {
         // A reply to a call a PREVIOUS incarnation made (see `route::deliver`):
@@ -1040,7 +1047,12 @@ pub async fn send(
     crate::images::refresh(agent_id, kernel, &state).await;
     let attached = match crate::images::attach(agent_id, kernel, args.images.as_deref()).await {
         Ok(a) => a,
-        Err(e) => return Ok(json!({"error": e, "reason": "bad_arg", "client_id": client_id})),
+        Err(e) => {
+            let mut r = refusal(BAD_ARG, e);
+            with(&mut r, "arg", json!("images"));
+            with(&mut r, "client_id", json!(client_id));
+            return Ok(r);
+        }
     };
     // ONE CHAIN PER AGENT (#227): a message that lands while this agent's chain
     // is alive is HELD — stored as a row, read by the chain's next pass — unless
@@ -1235,8 +1247,7 @@ pub async fn send(
     let retries = agent_meta(agent_id, kernel)
         .get("transport_retries")
         .and_then(Value::as_i64)
-        .unwrap_or(0)
-        .clamp(0, 5) as u32;
+        .unwrap_or(crate::constants::TRANSPORT_RETRIES) as u32;
     let mut attempt: u32 = 0;
     let outcome = loop {
         let r = tokio::select! {
@@ -1721,7 +1732,9 @@ pub fn boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         .expect("chain poisoned")
         .reset("send: the agent rebooted before a turn read this message");
     if let Err(e) = crate::memory::store_of(agent_id, kernel) {
-        return json!({"error": e.0, "reason": "missing_arg", "arg": "memory_store_id"});
+        let mut r = refusal(MISSING_ARG, e.0);
+        with(&mut r, "arg", json!("memory_store_id"));
+        return r;
     }
     // A new incarnation reads its store afresh; bodies are this run's only.
     crate::memory::forget_head(agent_id, kernel);
@@ -1747,19 +1760,20 @@ pub async fn watch(agent_id: &AgentId, args: &Watch, kernel: &Arc<Kernel>) -> Me
         None => match args.watcher.as_deref() {
             Some(w) if !w.is_empty() => w.to_string(),
             _ => {
-                return Ok(json!({
-                    "error": "watch: the operator must name a `watcher` inbox",
-                    "reason": "missing_arg",
-                    "arg": "watcher",
-                }))
+                let mut r = refusal(
+                    MISSING_ARG,
+                    "watch: the operator must name a `watcher` inbox",
+                );
+                with(&mut r, "arg", json!("watcher"));
+                return Ok(r);
             }
         },
         Some(c) => {
             if args.watcher.as_deref().is_some_and(|w| w != c.as_str()) {
-                return Ok(json!({
-                    "error": "watch: an agent watches for ITSELF — `watcher` is the operator's",
-                    "reason": "unauthorized",
-                }));
+                return Ok(refusal(
+                    UNAUTHORIZED,
+                    "watch: an agent watches for ITSELF — `watcher` is the operator's",
+                ));
             }
             c.0.clone()
         }
@@ -1768,17 +1782,17 @@ pub async fn watch(agent_id: &AgentId, args: &Watch, kernel: &Arc<Kernel>) -> Me
         .inboxes
         .contains_key(&AgentId::from(watcher.as_str()))
     {
-        return Ok(json!({
-            "error": format!(
+        return Ok(refusal_hint(
+            NO_CONSUMER,
+            format!(
                 "watch: {} has no registered inbox, so nothing would read the row events",
                 py_repr(&watcher)
             ),
-            "reason": "no_consumer",
-            "hint": format!(
+            format!(
                 "register the reader first — ctx.ensure_inbox({}) — then watch",
                 py_repr(&watcher)
             ),
-        }));
+        ));
     }
     let body = args.body == Some(true);
     crate::memory::add_watcher(agent_id, kernel, &watcher, body);

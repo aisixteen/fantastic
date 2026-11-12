@@ -36,22 +36,15 @@ pub(crate) use chat_decls;
 
 
 /// What a write of `meta` to a chat's record answers: the engine's refusal of a field
-/// (its name or type), else the bundle's own check of what a type cannot say.
-/// `None`: the write is taken.
+/// (its name, type, range or pattern). `None`: the write is taken.
 pub fn refused_at_the_write(meta: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
-    use fantastic_kernel::bundle::Handler;
-    match fantastic_kernel::verbs::check_record(
+    fantastic_kernel::verbs::check_record(
         "update_agent",
         "ai_chat",
         meta,
         &fantastic_kernel::declared::record::RECORD,
         &crate::chat_bundle::RECORD,
-    ) {
-        Err(refused) => Some(fantastic_kernel::refusal::error_text(&refused).unwrap_or_default()),
-        Ok(()) => Handler::validate_meta(
-            &crate::chat_bundle::AiChatBundle,
-            meta,
-            &serde_json::Map::new(),
-        ),
-    }
+    )
+    .err()
+    .map(|refused| fantastic_kernel::refusal::error_text(&refused).unwrap_or_default())
 }

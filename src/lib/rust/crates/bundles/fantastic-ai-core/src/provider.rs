@@ -117,18 +117,14 @@ impl Provider for Unconfigured {
 pub type ProviderStream = BoxStream<'static, Result<ProviderEvent, ProviderError>>;
 
 /// The read clock a provider's stream runs on: the record's `stream_idle_seconds`
-/// (a positive number of seconds), else [`STREAM_IDLE_SECONDS`]. Anything else is
-/// refused by name — a window the backend cannot run on is never guessed at.
-pub fn stream_idle_of(meta: &Map<String, Value>) -> Result<Duration, ProviderError> {
-    match meta.get("stream_idle_seconds").filter(|v| !v.is_null()) {
-        None => Ok(Duration::from_secs_f64(STREAM_IDLE_SECONDS)),
-        Some(v) => match v.as_f64().filter(|s| *s > 0.0 && s.is_finite()) {
-            Some(secs) => Ok(Duration::from_secs_f64(secs)),
-            None => Err(ProviderError::value_error(format!(
-                "stream_idle_seconds must be a positive number of seconds, not {v}"
-            ))),
-        },
-    }
+/// (declared as positive seconds, see [`crate::record::stream_idle_seconds`]), else
+/// the declared default [`STREAM_IDLE_SECONDS`].
+pub fn stream_idle_of(meta: &Map<String, Value>) -> Duration {
+    Duration::from_secs_f64(
+        meta.get("stream_idle_seconds")
+            .and_then(Value::as_f64)
+            .unwrap_or(STREAM_IDLE_SECONDS),
+    )
 }
 
 /// A provider's read clock tripped: nothing arrived within the idle window.

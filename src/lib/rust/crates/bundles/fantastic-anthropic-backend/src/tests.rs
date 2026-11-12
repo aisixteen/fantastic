@@ -313,16 +313,15 @@ fn stream_idle_seconds_defaults_and_is_validated() {
         m.insert("stream_idle_seconds".to_string(), v);
         m
     };
-    let default = fantastic_ai_core::provider::stream_idle_of(&Map::new()).expect("default");
+    let default = fantastic_ai_core::provider::stream_idle_of(&Map::new());
     assert_eq!(default, Duration::from_secs(60));
-    let set = fantastic_ai_core::provider::stream_idle_of(&meta(json!(2.5))).expect("set");
+    let set = fantastic_ai_core::provider::stream_idle_of(&meta(json!(2.5)));
     assert_eq!(set, Duration::from_millis(2500));
     for bad in [json!(0), json!(-1), json!("soon"), json!(true)] {
         let m = meta(bad.clone());
-        assert!(validate(&m, &Map::new()).is_some(), "{bad} is refused");
         assert!(
-            fantastic_ai_core::provider::stream_idle_of(&m).is_err(),
-            "{bad} is refused at the read too"
+            at_the_write(&m, &Map::new()).is_some_and(|e| e.contains("stream_idle_seconds")),
+            "{bad} is refused at the write"
         );
     }
 }
@@ -1665,15 +1664,15 @@ fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
     }
     assert!(check(json!({"prices": {"m": {"input": 3, "output": "x"}}}))
         .unwrap()
-        .contains("must be a number"));
+        .contains("prices.m.output"));
     assert!(
         check(json!({"prices": {"m": {"input": true, "output": 1}}}))
             .unwrap()
-            .contains("must be a number")
+            .contains("prices.m.input")
     );
     assert!(check(json!({"prices": {"m": {"input": -1, "output": 1}}}))
         .unwrap()
-        .contains("zero or more"));
+        .contains("prices.m.input"));
     assert!(check(json!({"prices": {"m": {"input": 1}}}))
         .unwrap()
         .contains("prices.m.output"));
@@ -1682,9 +1681,7 @@ fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
             .unwrap()
             .contains("prices.m.cache_read")
     );
-    assert!(check(json!({"prices": [1]}))
-        .unwrap()
-        .contains("prices must be a map"));
+    assert!(check(json!({"prices": [1]})).unwrap().contains("prices"));
     let declared = fantastic_kernel::verbs::record_fields(&RECORD);
     let names: Vec<&str> = declared["fields"]
         .as_array()

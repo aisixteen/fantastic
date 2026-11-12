@@ -8,6 +8,18 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+fn default_recall_limit() -> i64 {
+    20
+}
+
+fn default_grep_limit() -> i64 {
+    100
+}
+
+fn default_grep_width() -> i64 {
+    200
+}
+
 /// Start a new incarnation: lazy — it never touches the memory store, it checks the record names one and marks the view for rebuilding (the first turn reads the head from the store).
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -120,6 +132,7 @@ pub struct History {
     /// A fold or clear id: list ITS members instead.
     pub fold: Option<i64>,
     /// At most this many rows; absent, as many as fit inline.
+    #[schemars(range(min = 1))]
     pub limit: Option<i64>,
     /// A row id: page forward from it.
     pub after: Option<i64>,
@@ -163,9 +176,12 @@ pub struct Recall {
     /// A row id: that row whole (query, limit and before are then ignored).
     pub id: Option<i64>,
     /// A substring of a serialized turn, tool args and replies included.
+    #[schemars(length(min = 1))]
     pub query: Option<String>,
-    /// At most this many turns (1-100).
-    pub limit: Option<i64>,
+    /// At most this many turns.
+    #[schemars(range(min = 1, max = 100))]
+    #[serde(default = "default_recall_limit")]
+    pub limit: i64,
     /// A store index: page backward from it.
     pub before: Option<i64>,
 }
@@ -175,14 +191,18 @@ pub struct Recall {
 #[serde(deny_unknown_fields)]
 pub struct Grep {
     /// A case-insensitive substring.
-    #[schemars(length(min = 1))]
+    #[schemars(length(min = 1), regex(pattern = r"\S"))]
     pub query: String,
     /// Row, pid or fold ids to search; a fold id searches its members.
     pub ids: Option<Vec<i64>>,
-    /// At most this many matches (1-100).
-    pub limit: Option<i64>,
-    /// Characters of each matched line (20-20000).
-    pub width: Option<i64>,
+    /// At most this many matches.
+    #[schemars(range(min = 1, max = 100))]
+    #[serde(default = "default_grep_limit")]
+    pub limit: i64,
+    /// Characters of each matched line.
+    #[schemars(range(min = 20, max = 20000))]
+    #[serde(default = "default_grep_width")]
+    pub width: i64,
 }
 
 /// Rebuild this agent's VIEW from its store: fold a head longer than the budget, fit it, ask the model which rows it wants in full, persist the id list. Returns {kept, expanded, dropped, folded, budget, why, degraded}.

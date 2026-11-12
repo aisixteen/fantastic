@@ -16,7 +16,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use fantastic_bundle::py_truthy;
 use fantastic_kernel::refusal::bad;
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
@@ -254,7 +253,7 @@ pub async fn fork(
         ));
     };
     let made = fantastic_kernel::lifecycle::create_agent(kernel, &root, create).await;
-    if made.get("error").is_some_and(py_truthy) {
+    if made.get("error").is_some_and(|e| !e.is_null()) {
         let mut m = made;
         m["at"] = Value::from(at);
         return Ok(m);

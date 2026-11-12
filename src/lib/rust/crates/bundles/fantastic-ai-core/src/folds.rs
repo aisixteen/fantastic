@@ -349,7 +349,7 @@ pub fn member_anchor(
                     FoldAnchorError(format!(
                         "fold: member fold {} has no anchor",
                         r.get("id")
-                            .map_or_else(|| "None".to_string(), fantastic_bundle::py_str)
+                            .map_or_else(|| "None".to_string(), crate::helpers::shown)
                     ))
                 })?
         } else {

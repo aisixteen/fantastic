@@ -4402,7 +4402,7 @@ async fn history_answers_the_digest_and_the_full_turns() {
 /// A NEGATIVE `limit` is already satisfied by the empty page — python
 /// `_fit_reply(digest, cap, limit or None)` returns `([], True)`.
 #[tokio::test]
-async fn history_negative_limit_is_an_empty_page() {
+async fn history_limit_below_one_is_refused_by_name() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "hneg").await;
     script(
@@ -4427,9 +4427,8 @@ async fn history_negative_limit_is_an_empty_page() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["rows"], json!([]), "{r:#?}");
-    assert_eq!(r["next"], Value::Null);
-    assert!(r["total"].as_u64().unwrap() >= 2, "{r:#?}");
+    assert_eq!(r["reason"], json!("bad_arg"), "{r:#?}");
+    assert_eq!(r["arg"], json!("limit"), "{r:#?}");
 }
 
 /// Paging: `limit` cuts the page, `next` names where to resume, and an `after`
@@ -5410,10 +5409,10 @@ fn render_reflect_matches_python_one() {
         })),
         "S  one=1  two=2  three=3"
     );
-    // A list of scalars uses python `str()`, so a bool is `True`.
+    // A list of scalars is joined by their text, a bool as `true`.
     assert_eq!(
         crate::assembly::render_reflect(&json!({"sentence": "", "t": [true, 2]})),
-        "t=True,2"
+        "t=true,2"
     );
 }
 
@@ -5433,13 +5432,13 @@ fn budget_meta_reads_integers_only() {
     // a record's numbers are integers (the engine refuses anything else at the
     // write); what is not one is not read: the window falls to the backend's, the
     // reserve to 1024
-    let m = meta(json!({"context_window": 0.5, "output_reserve": "-5", "recent_n": 1000}));
+    let m = meta(json!({"context_window": 0.5, "output_reserve": "-5", "recent_n": "x"}));
     assert_eq!(
         crate::context::resolve_context_window(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
         131_072
     );
     assert_eq!(crate::context::output_reserve(&m), 1024);
-    assert_eq!(crate::context::recent_n(&m), 50);
+    assert_eq!(crate::context::recent_n(&m), 6);
     let m = meta(json!({"context_window": 12, "output_reserve": 1000}));
     assert_eq!(
         crate::context::resolve_context_window(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
@@ -5490,11 +5489,9 @@ fn ids_are_numbers() {
 }
 
 #[test]
-fn recent_n_is_an_integer_clamped_to_its_range() {
+fn recent_n_is_an_integer_and_its_range_is_the_records() {
     let m = json!({"recent_n": 7}).as_object().unwrap().clone();
     assert_eq!(crate::context::recent_n(&m), 7);
-    let m = json!({"recent_n": 500}).as_object().unwrap().clone();
-    assert_eq!(crate::context::recent_n(&m), 50);
     let m = json!({"recent_n": "nope"}).as_object().unwrap().clone();
     assert_eq!(crate::context::recent_n(&m), 6, "text is not read: the default");
 }

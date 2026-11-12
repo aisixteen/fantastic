@@ -36,7 +36,7 @@ use crate::helpers::mint_batch_token;
 use crate::history_view::{docs_head, example_verb, point_to_docs};
 use crate::state::state_for;
 use crate::tool_parse::{malformed_calls, terminated_calls};
-use fantastic_bundle::{py_repr, py_repr_value, py_str, py_strip, py_truthy};
+use fantastic_bundle::{py_repr, py_repr_value, py_strip};
 use fantastic_kernel::outcome::Status;
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
@@ -272,7 +272,7 @@ pub(crate) async fn deliver(
     // FAILED IS `failed`/`timed_out` — python `out["status"] in ("failed",
     // "timed_out")` — plus any truthy `error` on the reply itself. `cancelled`
     // is NOT announced: an operator kill already told whoever asked for it.
-    let reply_error = out.result.get("error").filter(|v| py_truthy(v));
+    let reply_error = out.result.get("error").filter(|v| !v.is_null());
     let failed = matches!(out.status, Status::Failed | Status::TimedOut) || reply_error.is_some();
     // A failed provider pass that was RETRIED (#533) has already delivered the chain's
     // next turn and counted itself into the streak: resetting the chain here would
@@ -921,9 +921,9 @@ async fn deliver_answer(
         )])
         .await
         .remove(0);
-    let err = out.result.get("error").filter(|v| py_truthy(v));
+    let err = fantastic_kernel::refusal::error_text(&out.result);
     if err.is_some() || matches!(out.status, Status::Failed | Status::TimedOut) {
-        let why = err.map_or_else(|| out.status.as_str().to_string(), py_str);
+        let why = err.unwrap_or_else(|| out.status.as_str().to_string());
         deliver_soon(
             kernel,
             self_id,
@@ -985,14 +985,14 @@ async fn keep_note(
         .arguments
         .get("of")
         .and_then(|v| crate::tool_parse::typed::integer("of", v).ok());
-    let summary = call.arguments.get("summary").map(py_str);
+    let summary = call.arguments.get("summary").and_then(Value::as_str);
     let (Some(of), Some(summary)) = (of, summary) else {
         return Some(
             "keep: it takes `<of>` the id of the reply and `<summary>` what to keep of it"
                 .to_string(),
         );
     };
-    crate::memory::save_keep(self_id, kernel, of, &summary)
+    crate::memory::save_keep(self_id, kernel, of, summary)
         .await
         .err()
 }
@@ -1145,11 +1145,7 @@ pub(crate) fn route_deadline(kernel: &Kernel) -> f64 {
                 .ok()
                 .and_then(|m| m.get("send_timeout").cloned())
         })
-        .and_then(|v| match v {
-            Value::Number(n) => n.as_f64(),
-            _ => None,
-        })
-        .filter(|f| f.is_finite() && *f > 0.0)
+        .and_then(|v| v.as_f64())
         .unwrap_or_else(crate::constants::send_timeout_secs)
 }
 
@@ -1446,10 +1442,7 @@ async fn route_reply_gated(
             continue;
         }
         let args = &call.arguments;
-        let chosen: Option<&Value> = match args.get("target_id") {
-            Some(v) if py_truthy(v) => Some(v),
-            _ => args.get("target"),
-        };
+        let chosen: Option<&Value> = args.get("target_id").or_else(|| args.get("target"));
         let target: Option<&str> = chosen
             .and_then(Value::as_str)
             .map(str::trim)
@@ -1512,7 +1505,7 @@ async fn route_reply_gated(
         if let Some(rt) = reply_to.as_deref() {
             if rt != self_id.as_str() && !rt.contains('|') && kernel.resolve_target(rt).is_none() {
                 let verb = match args.get("payload") {
-                    Some(Value::Object(p)) => p.get("type").map_or("?".to_string(), py_str),
+                    Some(Value::Object(p)) => p.get("type").map_or("?".to_string(), crate::helpers::shown),
                     _ => "-".to_string(),
                 };
                 let body = json!({
@@ -1570,15 +1563,18 @@ async fn route_reply_gated(
         // per-client, and a call the MODEL makes belongs to the client whose
         // turn it is — without this, a model-issued `grep` lands on the default
         // client and returns `total=0` against a store full of matches.
-        if target == self_id.as_str()
-            && !payload.contains_key("client_id")
-            && payload
+        let declares = |payload: &Map<String, Value>, field: &str| {
+            payload
                 .get("type")
                 .and_then(Value::as_str)
                 .and_then(|verb| {
                     fantastic_kernel::typing::verb_schema(&kernel, target, verb, &Map::new())
                 })
-                .is_some_and(|schema| schema["properties"].get("client_id").is_some())
+                .is_some_and(|schema| schema["properties"].get(field).is_some())
+        };
+        if target == self_id.as_str()
+            && !payload.contains_key("client_id")
+            && declares(&payload, "client_id")
         {
             payload.insert("client_id".to_string(), json!(client_id));
         }
@@ -1626,7 +1622,7 @@ async fn route_reply_gated(
         // `… a True …`, `… a {'a': 'x'} …`), and `?` means the key was ABSENT.
         // `as_str().unwrap_or("?")` printed `?` for every one of them.
         let verb = match payload.get("type") {
-            Some(v) => py_str(v),
+            Some(v) => crate::helpers::shown(v),
             None => "?".to_string(),
         };
         // A ROUTING NAME THE VERB ALSO TAKES IS LOST. `title`,
@@ -1691,7 +1687,7 @@ async fn route_reply_gated(
         }
         // THE ASKER'S THREAD rides an inquiry, so the answer that comes back later
         // (fully async) lands where this chain is working.
-        if payload.get("type").and_then(Value::as_str) == Some("inquiry") {
+        if declares(&payload, "reply_client_id") {
             payload.insert("reply_client_id".to_string(), json!(client_id));
         }
         payloads.push((target.to_string(), Value::Object(payload.clone())));
@@ -1731,7 +1727,7 @@ async fn route_reply_gated(
         deadlines.push(
             timeout_read
                 .as_ref()
-                .map(py_str)
+                .map(crate::helpers::shown)
                 .unwrap_or_else(|| fantastic_bundle::py_float_repr(send_timeout)),
         );
         // Fire-and-forget: it acted, nobody awaits the answer. Deliberately
@@ -1788,10 +1784,10 @@ async fn route_reply_gated(
     // AN ACCEPTED INQUIRY IS OWED AN ANSWER — counted until a message under its pid
     // arrives (`settle_owed`). Python: the same loop after `kernel.send(items)`.
     for ((_, sent), out) in payloads.iter().zip(outcomes.iter()) {
-        let accepted = out.result.get("accepted").is_some_and(py_truthy);
+        let accepted = out.result.get("accepted").and_then(Value::as_bool) == Some(true);
         if sent.get("type").and_then(Value::as_str) == Some("inquiry") && accepted {
             let pid = out.pid.map_or_else(
-                || py_str(out.result.get("re").unwrap_or(&Value::Null)),
+                || crate::helpers::shown(out.result.get("re").unwrap_or(&Value::Null)),
                 |p| p.0.to_string(),
             );
             owe(self_id.as_str(), &pid);
@@ -2498,17 +2494,14 @@ mod tests {
         );
     }
 
-    /// `target` is accepted beside `target_id`, and the fall-through is python's
-    /// `or`: a falsy `target_id` yields to `target`, a truthy non-string one does
-    /// not (it earns the shape error instead of being silently re-read).
+    /// `target` is accepted beside `target_id`: an absent `target_id` yields to
+    /// `target`, a present one of any shape does not (a non-string one earns the
+    /// shape error instead of being silently re-read).
     #[test]
-    fn target_fallthrough_matches_python_truthiness() {
+    fn target_fallthrough_is_absence_only() {
         let f = |v: Value| {
             let obj = v.as_object().unwrap().clone();
-            let chosen: Option<&Value> = match obj.get("target_id") {
-                Some(v) if py_truthy(v) => Some(v),
-                _ => obj.get("target"),
-            };
+            let chosen: Option<&Value> = obj.get("target_id").or_else(|| obj.get("target"));
             chosen
                 .and_then(Value::as_str)
                 .map(str::trim)
@@ -2517,11 +2510,7 @@ mod tests {
         };
         assert_eq!(f(json!({"target_id": "a"})), Some("a".to_string()));
         assert_eq!(f(json!({"target": " b "})), Some("b".to_string()));
-        assert_eq!(f(json!({"target_id": "", "target": "b"})), Some("b".into()));
-        assert_eq!(
-            f(json!({"target_id": null, "target": "b"})),
-            Some("b".into())
-        );
+        assert_eq!(f(json!({"target_id": "", "target": "b"})), None);
         assert_eq!(f(json!({"target_id": 7, "target": "b"})), None);
         assert_eq!(f(json!({"reply_to": "self"})), None);
     }

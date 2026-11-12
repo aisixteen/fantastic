@@ -25,9 +25,6 @@ use crate::verbs;
 /// The handler module this bundle registers under.
 pub const HANDLER_MODULE: &str = "ai_chat.tools";
 const NAME: &str = "ai_chat";
-/// What `reflect` says the agent is.
-pub const SENTENCE: &str =
-    "An AI chat: holds its conversation and completes each turn through its provider agent (`provider_id`).";
 /// What the bundle is for — its one short man text.
 const MAN: &str = "An AI agent: it holds a conversation in its memory store, folds and recalls it to fit the model's window, reads the calls the model writes and routes each to the agent it names, and completes every turn through the provider agent its record names.";
 
@@ -64,6 +61,8 @@ pub struct ChatRecord {
     pub provider_id: Option<String>,
     /// The model this chat asks its provider for.
     pub model: Option<String>,
+    /// How the conversation is kept in the model's view; `provider_cache` asks the provider for its cache markers.
+    pub caching: Option<crate::record::CachingMode>,
     /// The fields every ai_core agent takes.
     #[serde(flatten)]
     pub ai: AiRecord,
@@ -98,16 +97,6 @@ impl Handler for AiChatBundle {
         &RECORD
     }
 
-    /// The write-time check of what a type cannot say about the chat's fields: a
-    /// blank system text, the prompt-file pairing.
-    fn validate_meta(
-        &self,
-        meta: &serde_json::Map<String, Value>,
-        _record: &serde_json::Map<String, Value>,
-    ) -> Option<String> {
-        crate::record::validate_meta(meta)
-    }
-
     async fn handle(
         &self,
         agent_id: &AgentId,
@@ -116,7 +105,7 @@ impl Handler for AiChatBundle {
     ) -> Result<Reply, BundleError> {
         let provider = |_client: &str| chat_provider(agent_id, kernel);
         let reflect = || {
-            let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, CFG.model_window);
+            let mut out = verbs::reflect_base(agent_id, kernel, MAN, CFG.model_window);
             let meta = crate::helpers::agent_meta(agent_id, kernel);
             out.insert(
                 PROVIDER_FIELD.into(),

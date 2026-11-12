@@ -1017,20 +1017,14 @@ async fn a_bad_system_prompt_is_refused_at_the_write() {
                 .result
         }
     };
-    // not text or empty: refused by the record's declaration; blank text: by the bundle
-    for bad in [json!(""), json!(7), json!(["x"])] {
+    // not text, empty or blank: refused by the record's declaration
+    for bad in [json!(""), json!("   "), json!(7), json!(["x"])] {
         let r = write(bad.clone()).await;
         assert!(
             r["error"].as_str().is_some_and(|e| e.contains("system_prompt")),
             "{bad}: {r}"
         );
     }
-    let r = write(json!("   ")).await;
-    assert_eq!(
-        r["error"],
-        json!(fantastic_ai_core::record::SYSTEM_PROMPT_REFUSAL),
-        "{r}"
-    );
     let r = write(json!("be terse")).await;
     assert!(r.get("error").is_none(), "{r}");
     let r = write(Value::Null).await;
@@ -1117,17 +1111,18 @@ fn stream_idle_seconds_is_validated_at_the_write() {
         m.insert("stream_idle_seconds".to_string(), v);
         m
     };
+    let at_the_write = |v: Value| {
+        fantastic_kernel::verbs::check_record(
+            "update_agent",
+            "ollama_backend",
+            &meta(v),
+            &fantastic_kernel::declared::record::RECORD,
+            &RECORD,
+        )
+    };
     for bad in [json!(0), json!(-1), json!("soon"), json!(true)] {
-        let msg = OllamaBackendBundle
-            .validate_meta(&meta(bad.clone()), &Map::new())
-            .unwrap_or_else(|| panic!("{bad} is refused"));
-        assert!(
-            msg.contains("stream_idle_seconds must be a positive number"),
-            "{msg}"
-        );
+        let refused = at_the_write(bad.clone()).expect_err("refused");
+        assert_eq!(refused["arg"], json!("stream_idle_seconds"), "{bad}: {refused}");
     }
-    let ok = OllamaBackendBundle
-        .validate_meta(&meta(json!(2.5)), &Map::new())
-        .unwrap_or_default();
-    assert!(!ok.contains("stream_idle_seconds"), "{ok}");
+    assert!(at_the_write(json!(2.5)).is_ok());
 }

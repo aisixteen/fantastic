@@ -220,10 +220,7 @@ fn an_unusable_wrap_value_is_refused_at_the_write() {
             let mut meta = serde_json::Map::new();
             meta.insert(name.to_string(), bad.clone());
             let refused = crate::tests_decl::refused_at_the_write(&meta);
-            assert!(refused.is_some(), "{name}={bad}");
-            if bad == json!("   ") {
-                assert_eq!(refused, Some(crate::record::wrap_prompt_refusal(name)));
-            }
+            assert!(refused.is_some_and(|e| e.contains(name)), "{name}={bad}");
         }
         for ok in [json!("FINE"), Value::Null] {
             let mut meta = serde_json::Map::new();
