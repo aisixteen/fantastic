@@ -42,21 +42,19 @@ pub fn spawn(host: Arc<Host>, tx: mpsc::Sender<Ev>) -> mpsc::Sender<Cmd> {
             if matches!(cmd, Cmd::Quit) {
                 break;
             }
-            if let Cmd::Send { target, payload } = &cmd {
-                if payload.get("type").and_then(Value::as_str) == Some("write") {
-                    let w = writers.entry(target.clone()).or_insert_with(|| {
-                        let (wtx, mut wrx) = mpsc::unbounded_channel::<Cmd>();
-                        let r = Arc::clone(&r);
-                        tokio::spawn(async move {
-                            while let Some(c) = wrx.recv().await {
-                                r.one(c).await;
-                            }
-                        });
-                        wtx
+            if let Cmd::Typed { target, .. } = &cmd {
+                let w = writers.entry(target.to_string()).or_insert_with(|| {
+                    let (wtx, mut wrx) = mpsc::unbounded_channel::<Cmd>();
+                    let r = Arc::clone(&r);
+                    tokio::spawn(async move {
+                        while let Some(c) = wrx.recv().await {
+                            r.one(c).await;
+                        }
                     });
-                    let _ = w.send(cmd);
-                    continue;
-                }
+                    wtx
+                });
+                let _ = w.send(cmd);
+                continue;
             }
             let r = Arc::clone(&r);
             tokio::spawn(async move { r.one(cmd).await });
@@ -264,28 +262,10 @@ impl Runner {
                 }
             }
 
-            Cmd::Send { target, payload } => {
-                let out = self.host.act(target, payload.clone()).await;
-                let failed = out.status != fantastic_kernel::Status::Completed;
-                match Host::read(out) {
-                    Ok(reply) => {
-                        self.got(Got::Sent {
-                            target: target.clone(),
-                            reply,
-                        })
-                        .await;
-                        if failed {
-                            self.note(format!("{target}: the call did not complete"))
-                                .await;
-                        }
-                        // The act moved the kernel. Re-read rather than guessing
-                        // from the reply: the log is the truth.
-                        let (rows, loaded) = self.host.rows(target, None).await;
-                        self.got(Got::Rows { agent: target.clone(), rows, full: true, loaded }).await;
-                        self.got(Got::Ps(self.host.tasks())).await;
-                    }
-                    Err(e) => self.refused(&cmd, e).await,
-                }
+            Cmd::Send { target, payload } => self.act_send(&cmd, target, payload.clone()).await,
+            Cmd::Typed { target, job_id, data } => {
+                let payload = json!({"type":"write","job_id":job_id,"data":data});
+                self.act_send(&cmd, target, payload).await
             }
 
             Cmd::Cancel { task_id } => {
@@ -356,6 +336,30 @@ impl Runner {
 
     /// A refusal is filed under the command that earned it, so the pane that asked
     /// is the pane that shows the answer.
+    /// One act: the call goes out as the person, and the agent's log is re-read after it.
+    async fn act_send(&self, cmd: &Cmd, target: &crate::kern::model::AgentId, payload: Value) {
+        let out = self.host.act(target, payload).await;
+        let failed = out.status != fantastic_kernel::Status::Completed;
+        match Host::read(out) {
+            Ok(reply) => {
+                self.got(Got::Sent {
+                    target: target.clone(),
+                    reply,
+                })
+                .await;
+                if failed {
+                    self.note(format!("{target}: the call did not complete")).await;
+                }
+                // The act moved the kernel. Re-read rather than guessing
+                // from the reply: the log is the truth.
+                let (rows, loaded) = self.host.rows(target, None).await;
+                self.got(Got::Rows { agent: target.clone(), rows, full: true, loaded }).await;
+                self.got(Got::Ps(self.host.tasks())).await;
+            }
+            Err(e) => self.refused(cmd, e).await,
+        }
+    }
+
     async fn refused(&self, cmd: &Cmd, err: KernelErr) {
         self.got(Got::Refused {
             what: cmd.what(),
@@ -422,9 +426,6 @@ pub async fn spawn_row_watch(host: Arc<Host>, tx: mpsc::Sender<Ev>) {
     let mut rx = host.kernel.ensure_inbox(&w);
     tokio::spawn(async move {
         while let Some(item) = rx.recv().await {
-            if item.payload.get("type").and_then(Value::as_str) != Some("row") {
-                continue;
-            }
             let Some(agent) = item.payload.get("source").and_then(Value::as_str) else { continue };
             let ev = Ev::Link(crate::ev::LinkEv::RowsMoved { agent: agent.to_string() });
             if tx.send(ev).await.is_err() {

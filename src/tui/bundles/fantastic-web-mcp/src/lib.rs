@@ -286,7 +286,7 @@ async fn inbound_send(a: verbs::InboundSend, kernel: &Arc<Kernel>) -> Value {
         .items
         .into_iter()
         .map(|it| {
-            let mut item = Item::new(AgentId::from(it.target.as_str()), Value::Object(it.payload));
+            let mut item = Item::new(AgentId::from(it.target.as_str()), it.payload.into_value());
             item.timeout = it.timeout;
             item
         })
@@ -335,9 +335,7 @@ The server must start in the project directory.\n\
 /// are addressed to a connected client.
 pub const LEAD_IN: &str = "What a connected MCP client is told (its `initialize` instructions):\n\n";
 
-const REFLECT_DESC: &str = "Ask the kernel what exists. With NO arguments: the kernel's own primer — `tree` (every agent id) and `bundles` (what it can run). With `target`: that agent describes itself — its sentence, its verbs and their args. Extra arguments are passed through to the reflect, e.g. tree=\"ids\". Reflect before you send: verbs are discovered here, never guessed.";
 
-const SEND_DESC: &str = "Dispatch to agents — the kernel's one verb, batch form: send([{target, payload:{type:<verb>, ...args}, timeout?}]) -> [{pid, status: completed|failed|cancelled|timed_out, result}]. The verb goes in payload.type. Discover verbs with reflect on the target; `kernel` is the alias for the root. A `timeout` (seconds) on an item CANCELS it when it expires. The call answers when it ends; each call is a kernel task, listed by send [{target:\"kernel\", payload:{type:\"ps\"}}]. A refusal (no grant) comes back as a result with an `error`, and a ledger row, like any other call.";
 
 /// The carrier-agnostic MCP handler for one leg.
 pub struct McpCore {
@@ -449,67 +447,29 @@ impl McpCore {
     }
 }
 
-/// The two tools, in a deterministic order.
+/// The two tools, in a deterministic order; each one's input schema is its declared struct.
 pub fn tools() -> Vec<Value> {
-    vec![
-        json!({
-            "name": "reflect",
-            "description": REFLECT_DESC,
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "target": {"type": "string", "description": "Agent id to reflect. Omit for the kernel's own primer."}
-                },
-                "additionalProperties": true
-            }
-        }),
-        json!({
-            "name": "send",
-            "description": SEND_DESC,
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "items": {
-                        "type": "array",
-                        "description": "The batch. One item is one dispatch.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "target": {"type": "string", "description": "Agent id, or `kernel` for the root."},
-                                "payload": {
-                                    "type": "object",
-                                    "description": "{type:<verb>, ...args} — verbs and args come from reflect on the target.",
-                                    "properties": {"type": {"type": "string"}},
-                                    "required": ["type"],
-                                    "additionalProperties": true
-                                },
-                                "timeout": {"type": "number", "description": "Seconds. CANCELS the item when it expires."}
-                            },
-                            "required": ["target", "payload"]
-                        }
-                    }
-                },
-                "required": ["items"]
-            }
-        }),
-    ]
+    [&verbs::REFLECT_TOOL, &verbs::SEND_TOOL]
+        .into_iter()
+        .map(|t| json!({"name": t.name, "description": t.doc(), "inputSchema": t.schema()}))
+        .collect()
+}
+
+/// The tool's arguments, checked by the kernel's one engine against the declared struct,
+/// then typed. The refusal's text is the tool error.
+fn tool_args<T: serde::de::DeserializeOwned>(tool: &fantastic_kernel::Verb, args: &Value) -> Result<T, String> {
+    let refused = |r: Value| r["error"].as_str().map_or_else(|| r.to_string(), str::to_string);
+    let checked = fantastic_kernel::verbs::validate(tool.name, tool.schema(), args).map_err(refused)?;
+    fantastic_kernel::verbs::decode(tool.name, &checked).map_err(refused)
 }
 
 /// `reflect` → one reflect item. No target = the root's primer: the same view
 /// the kernel's own AI agents are given.
 fn reflect_items(args: &Value) -> Result<Vec<Item>, String> {
-    let mut payload = match args {
-        Value::Object(m) => m.clone(),
-        Value::Null => Map::new(),
-        _ => return Err("reflect: arguments must be an object".into()),
-    };
-    let target = match payload.remove("target") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) if !s.is_empty() => Some(s),
-        Some(_) => return Err("reflect: `target` must be an agent id".into()),
-    };
+    let a: verbs::ReflectTool = tool_args(&verbs::REFLECT_TOOL, args)?;
+    let mut payload = a.args;
     payload.insert("type".into(), json!("reflect"));
-    let target = match target {
+    let target = match a.target {
         Some(t) => t,
         None => {
             for (k, v) in [("tree", json!("ids")), ("bundles", json!("ids"))] {
@@ -521,37 +481,17 @@ fn reflect_items(args: &Value) -> Result<Vec<Item>, String> {
     Ok(vec![Item::new(AgentId::from(target.as_str()), Value::Object(payload))])
 }
 
-/// `send` → the batch, item for item. Shape errors are the CLIENT's to fix, so
-/// they come back as a tool error naming the item.
+/// `send` → the batch, item for item.
 fn send_items(args: &Value) -> Result<Vec<Item>, String> {
-    let list = args
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or("send: `items` must be a list of {target, payload}")?;
-    if list.is_empty() {
-        return Err("send: `items` is empty — nothing to dispatch".into());
-    }
-    let mut out = Vec::with_capacity(list.len());
-    for (i, it) in list.iter().enumerate() {
-        let target = it
-            .get("target")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| format!("send: item {i} has no `target`"))?;
-        let payload = it
-            .get("payload")
-            .filter(|p| p.is_object())
-            .ok_or_else(|| format!("send: item {i} has no `payload` object"))?;
-        if payload.get("type").and_then(Value::as_str).is_none() {
-            return Err(format!(
-                "send: item {i}: the verb goes in payload.type — reflect on `{target}` for its verbs"
-            ));
-        }
-        let mut item = Item::new(AgentId::from(target), payload.clone());
-        item.timeout = it.get("timeout").and_then(Value::as_f64);
-        out.push(item);
-    }
-    Ok(out)
+    let a: verbs::SendTool = tool_args(&verbs::SEND_TOOL, args)?;
+    Ok(a.items
+        .into_iter()
+        .map(|it| {
+            let mut item = Item::new(AgentId::from(it.target.as_str()), it.payload.into_value());
+            item.timeout = it.timeout;
+            item
+        })
+        .collect())
 }
 
 /// The settled batch, as the send contract states it. `isError` only when
@@ -623,7 +563,7 @@ mod tests {
     fn send_refuses_an_item_whose_verb_is_not_in_payload_type() {
         let err = send_items(&json!({"items": [{"target": "files", "payload": {"verb": "read"}}]}))
             .unwrap_err();
-        assert!(err.contains("payload.type"), "{err}");
+        assert!(err.contains("type"), "{err}");
     }
 
     #[test]
