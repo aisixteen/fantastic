@@ -14,9 +14,11 @@ const PROBE: &str = "boot_probe.tools";
 
 struct Probe;
 
+fantastic_kernel::stand_in_verbs!(probe_verbs { Ping "ping" {} });
+
 #[async_trait::async_trait]
 impl fantastic_kernel::bundle::Handler for Probe {
-    type Call = fantastic_kernel::test_support::NoCall;
+    type Call = probe_verbs::Call;
 
     fn name(&self) -> &str {
         "boot_probe"
@@ -27,11 +29,11 @@ impl fantastic_kernel::bundle::Handler for Probe {
     }
 
     fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        fantastic_kernel::test_support::no_verbs()
+        probe_verbs::VERBS
     }
 
     fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
-        fantastic_kernel::test_support::no_dynamic(agent)
+        probe_verbs::dynamic_verbs(agent)
     }
 
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
@@ -41,10 +43,13 @@ impl fantastic_kernel::bundle::Handler for Probe {
     async fn handle(
         &self,
         _id: &AgentId,
-        _call: Self::Call,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Option<Value>, fantastic_kernel::bundle::BundleError> {
-        Ok(Some(json!({"probe": "pong"})))
+        Ok(match call {
+            probe_verbs::Call::Ping(_) => Some(json!({"probe": "pong"})),
+            probe_verbs::Call::Reflect(_) => None,
+        })
     }
 }
 

@@ -237,7 +237,7 @@ pub fn clicked(app: &AppHandle, id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fantastic_home::menu::{System, MENU_VERSION};
+    use fantastic_home::menu::System;
     use fantastic_home::{Config, Home, Mode};
 
     #[test]
@@ -251,7 +251,6 @@ mod tests {
     #[test]
     fn a_role_the_os_cannot_build_is_refused() {
         let spec = Spec {
-            version: MENU_VERSION,
             bar: vec![SpecMenu {
                 label: "Edit".into(),
                 os: vec![],

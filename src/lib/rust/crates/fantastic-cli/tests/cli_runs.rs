@@ -916,22 +916,24 @@ fn init_refuses_a_live_lock_with_python_text() {
     fantastic_kernel::lock::release(&tmp.path().join(".fantastic")).unwrap();
 }
 
-/// A CLI kv argument that reads as a non-finite float or an int wider than 64 bits
-/// stays the text as written where the call declares no type for it (a loader's record
-/// is open: it carries whatever fields it is given): nothing is coerced,
-/// and it must round-trip to the reply, not take the process down.
+/// A CLI kv argument python coerces to a non-finite float or an int wider
+/// than 64 bits must round-trip to the reply, not take the process down.
 ///
-/// `fantastic_kernel kernel create_agent … inf=inf nan=nan big2=<30 digits>` once
-/// exited 101 with `panicked … invalid number`, and printed nothing.
+/// `fantastic_kernel kernel create_agent … inf=inf nan=nan big2=<30 digits>`
+/// exited 101 with `panicked … invalid number`, and printed nothing where
+/// python prints the record (`e2e/parity` `cli/cli/call_create_coerce_*`). Two
+/// causes, both from the arbitrary-precision number: `json!` and
+/// `serde_json::to_value` re-parse the stored text (`crate::jsonsafe`), and
+/// `py_json_dumps` read it through `as_f64().unwrap_or(0.0)`.
 #[test]
-fn a_non_finite_kv_argument_stays_its_text_instead_of_panicking() {
+fn a_non_finite_kv_argument_round_trips_instead_of_panicking() {
     let tmp = tempfile::TempDir::new().unwrap();
     let out = Command::new(fantastic_bin())
         .args([
             "kernel",
             "create_agent",
             "parent_id=kernel",
-            "handler_module=kernel_state.tools",
+            "handler_module=file_bridge.tools",
             "id=coerced",
             "big2=123456789012345678901234567890",
             "inf=inf",
@@ -949,12 +951,13 @@ fn a_non_finite_kv_argument_stays_its_text_instead_of_panicking() {
         out.status.code()
     );
     assert!(!stderr.contains("panicked"), "{stderr}");
-    // the text as written, never a number
+    // python `json.dumps(record, indent=2, default=str)` — the bare tokens, and
+    // the wide integer's exact digits.
     for want in [
-        "\"big2\": \"123456789012345678901234567890\"",
-        "\"inf\": \"inf\"",
-        "\"nan\": \"nan\"",
-        "\"neg_inf\": \"-Infinity\"",
+        "\"big2\": 123456789012345678901234567890",
+        "\"inf\": Infinity",
+        "\"nan\": NaN",
+        "\"neg_inf\": -Infinity",
         "\"id\": \"coerced\"",
     ] {
         assert!(stdout.contains(want), "missing {want} in:\n{stdout}");
@@ -1123,16 +1126,6 @@ fn a_daemon_without_a_memory_store_does_not_start() {
     );
 }
 
-/// Set fields on a persisted record file, as the next start loads them.
-fn patch_record(file: &std::path::Path, fields: &[(&str, serde_json::Value)]) {
-    let text = std::fs::read_to_string(file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
-    let mut record = fantastic_kernel::yaml_io::load(&text).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
-    for (k, v) in fields {
-        record[*k] = v.clone();
-    }
-    std::fs::write(file, fantastic_kernel::yaml_io::dump(&record)).unwrap();
-}
-
 /// A DAEMON with its memory store named stops cleanly at SIGTERM: a live REST
 /// call settles, the signal exits 0, and `lock.yaml` is gone — the graceful stop
 /// (whose final flush lands the last execution rows in the store) finishes
@@ -1159,8 +1152,13 @@ fn a_daemon_with_a_store_stops_cleanly_and_releases_its_lock() {
             "handler_module=web.tools",
             "id=web",
             &port_kv,
+            // the host pulls its legs' routes: an explicit edge, both ends
+            "can_call={\"$subtree\": [\"get_routes\"]}",
         ],
     );
+    // The relay dispatches into the kernel AS ITSELF: `ingress_rule` says who
+    // may call IN, `can_call` says where into the kernel it may land, and
+    // root's own `callable_by` must name the grandchild.
     run_cli(
         tmp.path(),
         &[
@@ -1170,28 +1168,18 @@ fn a_daemon_with_a_store_stops_cleanly_and_releases_its_lock() {
             "handler_module=web_rest.tools",
             "id=rest",
             "ingress_rule=allow_all_ingress",
+            "can_call={\"kernel_state\": \"*\"}",
+            "callable_by={\"$parent\": [\"get_routes\"]}",
         ],
     );
-    // A grant is a MAP, which a `k=v` call cannot carry (it declares no object for a
-    // grant): the records are written as the files the next start loads. The host
-    // pulls its legs' routes: an explicit edge, both ends. The relay dispatches into
-    // the kernel AS ITSELF: `ingress_rule` says who may call IN, `can_call` says where
-    // into the kernel it may land, and root's own `callable_by` must name the grandchild.
-    let state = tmp.path().join(".fantastic");
-    patch_record(
-        &state.join("agents/web/agent.yaml"),
-        &[("can_call", serde_json::json!({"$self": "*", "$subtree": ["get_routes"]}))],
-    );
-    patch_record(
-        &state.join("agents/web/agents/rest/agent.yaml"),
+    run_cli(
+        tmp.path(),
         &[
-            ("can_call", serde_json::json!({"$self": "*", "kernel_state": "*"})),
-            ("callable_by", serde_json::json!({"$self": "*", "$parent": ["get_routes"]})),
+            "kernel_state",
+            "update_agent",
+            "id=kernel_state",
+            "callable_by={\"$self\": \"*\", \"rest\": \"*\"}",
         ],
-    );
-    patch_record(
-        &state.join("agent.yaml"),
-        &[("callable_by", serde_json::json!({"$self": "*", "rest": "*"}))],
     );
 
     let mut child = sys::stoppable(&mut Command::new(fantastic_bin()))
@@ -1277,15 +1265,11 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
         .filter(|f| f["required"] == serde_json::json!(true))
         .map(|f| f["name"].as_str().unwrap())
         .collect();
-    let mut required = required;
-    required.sort_unstable();
     assert_eq!(required, ["endpoint", "kv_overflow", "memory_store_id"]);
     // a required field has no default; the counts a record leaves out are read
     // from the server before a turn — no default either
     assert!(required.iter().all(|n| fields[n].get("default").is_none()));
-    // context_window: the record declares no default (the server's window is read at run time)
-    assert!(fields["context_window"].get("default").is_none(), "context_window");
-    for n in ["model", "max_tokens", "kv_slots"] {
+    for n in ["model", "max_tokens", "context_window", "kv_slots"] {
         assert!(fields[n].get("default").is_none(), "{n}");
         assert!(
             fields[n]["hint"]
@@ -1294,22 +1278,25 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
             "{n}"
         );
     }
-    // the sampling values (temperature 0.2, thinking_token_budget 16000) are the
-    // provider's own defaults, shown in its reflect: the record declares their types only
-    assert_eq!(fields["temperature"]["type"], serde_json::json!("number"));
-    assert!(fields["temperature"].get("default").is_none());
-    // an enum is its declared set
+    // the defaulted fields carry THE BACKEND'S OWN values
+    assert_eq!(fields["temperature"]["default"], serde_json::json!(0.2));
     assert_eq!(
-        fields["kv_overflow"]["type"],
-        serde_json::json!("'evict'|'reject'")
+        fields["thinking_token_budget"]["default"],
+        serde_json::json!(16000)
     );
     assert_eq!(
-        fields["reasoning_effort"]["type"],
-        serde_json::json!("'low'|'medium'|'xhigh'")
+        fields["kv_overflow"]["enum"],
+        serde_json::json!(["evict", "reject"])
     );
-    // the key: a `credentials` object (a store ref), optional where a server may
-    // be keyless, required where it never is
-    assert_eq!(fields["credentials"]["type"], serde_json::json!("object"));
+    assert_eq!(
+        fields["reasoning_effort"]["enum"],
+        serde_json::json!(["low", "medium", "xhigh"])
+    );
+    // the key: optional where a server may be keyless, required where it never is
+    assert_eq!(
+        fields["credentials"]["type"],
+        serde_json::json!("credentials")
+    );
     assert_eq!(fields["credentials"]["required"], serde_json::json!(false));
     let sch = &by["responses_backend"]["schema"];
     assert!(sch.get("key_var").is_none());
@@ -1320,20 +1307,14 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
         .find(|f| f["name"] == "credentials")
         .expect("responses_backend: no credentials field");
     assert_eq!(cred["required"], serde_json::json!(true));
-    // the credential store is an installed bundle, and publishes the record it declares
+    // the credential store is an installed bundle, and publishes no schema
     assert_eq!(
         by["credential_store"]["handler_module"],
         serde_json::json!("credential_store.tools")
     );
-    let store_fields: Vec<&str> = by["credential_store"]["schema"]["fields"]
-        .as_array()
-        .expect("the store's declared record")
-        .iter()
-        .filter_map(|f| f["name"].as_str())
-        .collect();
-    assert!(store_fields.contains(&"refs"), "{store_fields:?}");
-    // every bundle publishes the record it declares, a bundle that is not a backend too
-    assert!(by["file_bridge"]["schema"]["fields"].as_array().is_some_and(|f| !f.is_empty()));
+    assert!(by["credential_store"].get("schema").is_none());
+    // a bundle that is not a backend publishes none
+    assert!(by["file_bridge"].get("schema").is_none());
 }
 
 /// The on-device backend is in the REAL catalog of this binary, in every tier,
@@ -1376,9 +1357,9 @@ fn the_catalog_carries_the_on_device_backend() {
             "post_system_prompt"
         ]
     );
-    // the window: a positive integer; the record declares no static default (the model's own window is read at run time)
-    assert_eq!(fields[3]["type"], serde_json::json!("int >= 1"));
-    assert!(fields[3].get("default").is_none());
+    // the on-device model's own window — 0 on a Mac with no model (a CI VM)
+    let window = fields[3]["default"].as_i64().expect("an int window");
+    assert!(window >= 0, "{window}");
 }
 
 /// Python `test_the_schema_is_what_the_write_enforces`: ONE
@@ -1399,8 +1380,14 @@ fn the_schema_is_what_the_write_enforces() {
         one_shot_json(tmp.path(), &args)
     };
     let r = create(&["id=a1"]);
-    assert_eq!(r["reason"], "missing_arg", "{r}");
-    assert!(r["error"].as_str().unwrap().contains("needs field"), "{r}");
+    assert_eq!(r["reason"], "invalid_meta", "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .contains("missing: endpoint, credentials, memory_store_id"),
+        "{r}"
+    );
     let r = create(&[
         "id=a2",
         "endpoint=http://127.0.0.1:9/stub",
@@ -1409,8 +1396,11 @@ fn the_schema_is_what_the_write_enforces() {
         r#"credentials={"store": "creds", "ref": "claude"}"#,
         "context_strategy=bogus",
     ]);
-    assert_eq!(r["reason"], "bad_arg", "{r}");
-    assert_eq!(r["arg"], "context_strategy", "{r}");
+    assert_eq!(r["reason"], "invalid_meta", "{r}");
+    assert!(
+        r["error"].as_str().unwrap().contains("context_strategy"),
+        "{r}"
+    );
     let r = create(&[
         "id=a3",
         "endpoint=http://127.0.0.1:9/stub",
@@ -1418,8 +1408,14 @@ fn the_schema_is_what_the_write_enforces() {
         "memory_store_id=memory",
         r#"credentials={"store": "creds"}"#,
     ]);
-    assert_eq!(r["reason"], "missing_arg", "{r}");
-    assert_eq!(r["arg"], "credentials.ref", "{r}");
+    assert_eq!(r["reason"], "invalid_meta", "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .contains("credentials must be {store"),
+        "{r}"
+    );
     let r = create(&[
         "id=a4",
         "endpoint=http://127.0.0.1:9/stub",
@@ -1511,6 +1507,7 @@ fn sqlite_store_is_in_the_headless_catalog_and_survives_a_stop() {
             "handler_module=web.tools",
             "id=web",
             &port_kv,
+            "can_call={\"$subtree\": [\"get_routes\"]}",
         ],
     );
     let mut child = sys::stoppable(&mut Command::new(fantastic_bin()))

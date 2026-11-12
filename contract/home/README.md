@@ -5,9 +5,9 @@ sides of it. The reference is the `home` agent's declared verbs (`src/tui/crates
 
 ```
 contract/home/
-  v1/cases.json   protocol fantastic.home v1: its verbs, events, statuses and
-                  actions; a scripted machine (fixture); the cases, in order;
-                  valid and invalid states
+  cases.json   protocol fantastic.home: its verbs, events, statuses and
+               actions; a scripted machine (fixture); the cases, in order;
+               valid and invalid states
 ```
 
 ## What it pins
@@ -17,8 +17,7 @@ contract/home/
   and what it must answer: a state with given fields, a refusal with its
   `reason` and `arg`, the payloads it emits, the folders it starts or stops, and
   what it sends to fantastics' kernels. The cases cover every verb and every
-  refusal kind (`missing_arg`, `bad_arg`, `not_found`, `unhandled`, a version
-  other than 1). `cases.json`'s `_doc` defines each key.
+  refusal kind (`missing_arg`, `bad_arg`, `not_found`, `unhandled`). `cases.json`'s `_doc` defines each key.
 - **The state's shape**: `states.valid[0]` is the exact state the `first-look`
   case answers (golden); `states.invalid` are states a client must refuse, each
   with the field it must name.
@@ -43,7 +42,3 @@ there. Adding a case puts both replays on the hook, and a runtime that cannot
 run one skips it BY NAME, with the reason in its driver — never silently. The
 Rust replay runs every case today; the TS replay holds the client to the
 vocabulary and the states.
-
-Changing what a v1 case says is the compatibility rule's business
-v1 only grows: an optional argument, a state field, an emitted payload type or a
-verb may be added; anything else is `v2/`.

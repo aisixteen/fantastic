@@ -16,8 +16,8 @@
 //! one, an app) follows the same pattern with its own blueprints, extras and readme sections:
 //! each [`Extra`] it passes registers on the host's registry AFTER the stock
 //! set, in every mode that boots a kernel (the UI, `--headless`, `canvas`,
-//! `mcp`). Each readme section is printed after fantastic's own readme (`readme`,
-//! and the readme printed with no terminal), in order. THE LAUNCHER SEEDS, before the kernel starts. `main_with` and the
+//! `mcp`). Each readme section is printed after fantastic's own readme (the readme
+//! printed with no terminal), in order. THE LAUNCHER SEEDS, before the kernel starts. `main_with` and the
 //! kernel never seed. A folder that is not fresh is left alone (no-op), and the
 //! fantastic home folder is refused inside [`seed_dir_with`]. The blueprints are
 //! written after the stock one, ids as written, and every later run rehydrates
@@ -150,7 +150,7 @@ pub fn state_dir_of(args: &[String]) -> Result<std::path::PathBuf, String> {
 
 /// THE LAUNCHER'S PREDICATE. True when `main_with(args, …)` would boot a kernel
 /// in the current directory: the UI (on a terminal), `--headless`, `canvas`, and
-/// an `mcp` with no flag but `--statedir` and `--workdir`. False for the one-shot commands (`send`, `readme`, `import`,
+/// an `mcp` with no flag but `--statedir` and `--workdir`. False for the one-shot commands (`send`, `import`,
 /// `migrate-home`, `__ctrl_break`), for the readme printed when there is no
 /// terminal and no argument, and for a refused command line (a parse error,
 /// `mcp` with another argument, the UI with no terminal). A launcher calls it before
@@ -169,7 +169,7 @@ fn kernel_mode(args: &[String], stdout_is_terminal: bool, has_tty: &dyn Fn() -> 
     }
     match args.first().map(String::as_str) {
         Some("mcp") => return mcp::flags(&args[1..]).is_ok(),
-        Some("readme" | "send" | "import" | "migrate-home" | "__ctrl_break") => return false,
+        Some("send" | "import" | "migrate-home" | "__ctrl_break") => return false,
         _ => {}
     }
     match recipe::parse(args) {
@@ -181,7 +181,7 @@ fn kernel_mode(args: &[String], stdout_is_terminal: bool, has_tty: &dyn Fn() -> 
 /// The whole `fantastic` command line. `args` WITHOUT the program name
 /// (`std::env::args().skip(1)`); `extras`: the embedder's bundles (`&[]` for
 /// `fantastic` itself). `readme_sections`: the embedder's readme sections (`&[]`
-/// for `fantastic`): `readme` and the no-terminal readme print fantastic's text,
+/// for `fantastic`): the no-terminal readme prints fantastic's text,
 /// then each, in order. The mode dispatch and nothing else: the loop lives in
 /// `run`, the state in `app`, the headless carrier in `mcp`. It never seeds; the
 /// launcher has done that.
@@ -198,9 +198,6 @@ pub fn main_with(args: Vec<String>, extras: &[Extra], readme_sections: &[&str]) 
     if args.first().map(String::as_str) == Some("mcp") {
         mcp::main(&args[1..])
     }
-    if args.first().map(String::as_str) == Some("readme") {
-        readme::main(&args[1..], readme_sections)
-    }
     if args.first().map(String::as_str) == Some("send") {
         send::main(&args[1..])
     }
@@ -211,7 +208,7 @@ pub fn main_with(args: Vec<String>, extras: &[Extra], readme_sections: &[&str]) 
         migrate::main(&args[1..])
     }
     // THE STOP HELPER (Windows): a hidden mode the home kernel runs to stop a
-    // canvas in another console. Not in `fantastic readme`.
+    // canvas in another console.
     if args.first().map(String::as_str) == Some("__ctrl_break") {
         sys::ctrl_break_main(&args[1..])
     }
@@ -271,7 +268,7 @@ mod tests {
     #[test]
     fn starts_kernel_is_false_for_one_shots_and_refusals() {
         for s in [
-            "readme", "readme mcp", "send x", "import p --parent user", "migrate-home", "migrate-home --dry-run",
+            "send x", "import p --parent user", "migrate-home", "migrate-home --dry-run",
             "__ctrl_break 1", "mcp --can-call files", "mcp --bogus", "bogus", "--headless canvas",
         ] {
             assert!(!kernel_mode(&a(s), true, &|| true), "{s:?}");

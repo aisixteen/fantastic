@@ -146,8 +146,6 @@ Then READ before running anything — **doc mode** starts nothing and writes not
 
 ```sh
 ./fantastic                  # stdout not a terminal (an agent's shell): the readme + every command
-./fantastic readme           # the docs index, one line per doc
-./fantastic readme mcp       # one doc: canvas, mcp, setup, bundles, and the kernel's own
 ```
 
 From there, run the mode the user asks for (see [Commands](#commands)): `fantastic mcp`
@@ -278,8 +276,6 @@ paste:
 
 Without a terminal, as an agent's shell runs it, `fantastic` is in **doc mode**:
 it prints its readme and the command list, and starts and writes nothing.
-`fantastic readme [key]` prints any doc: `canvas`, `mcp`, `setup`, `bundles`, and
-the kernel's own.
 
 ### Commands
 
@@ -292,7 +288,6 @@ fantastic [canvas] run CMD [ARGS] # your own program from $PATH in a terminal (w
 fantastic mcp                     # MCP over stdio (tools `reflect`, `send`); attaches to a running kernel, or runs it
 fantastic send '<item json>'      # one call into the running kernel; `$env:NAME` values come from this shell, marked secret
 fantastic migrate-home [--dry-run] # move an older layout's files into ~/.fantastic
-fantastic readme [key]            # the docs
 ```
 
 These words are **recipes**: each adds its agents only if they are missing, then

@@ -23,9 +23,11 @@ fantastic_kernel::record!(NeedsModelRecord);
 /// A target bundle whose declared record a saved set-up must pass: it needs a `model`.
 struct NeedsModel;
 
+fantastic_kernel::stand_in_verbs!(needs_model_verbs { Ping "ping" {} });
+
 #[async_trait]
 impl Handler for NeedsModel {
-    type Call = fantastic_kernel::test_support::NoCall;
+    type Call = needs_model_verbs::Call;
     fn name(&self) -> &str {
         "demo_backend.tools"
     }
@@ -33,16 +35,19 @@ impl Handler for NeedsModel {
         "A test stand-in backend."
     }
     fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        fantastic_kernel::test_support::no_verbs()
+        needs_model_verbs::VERBS
     }
     fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
-        fantastic_kernel::test_support::no_dynamic(agent)
+        needs_model_verbs::dynamic_verbs(agent)
     }
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         &RECORD
     }
-    async fn handle(&self, _a: &AgentId, _c: Self::Call, _k: &Arc<Kernel>) -> Result<Reply, BundleError> {
-        Ok(None)
+    async fn handle(&self, _a: &AgentId, call: Self::Call, _k: &Arc<Kernel>) -> Result<Reply, BundleError> {
+        Ok(match call {
+            needs_model_verbs::Call::Ping(_) => Some(json!({"pong": true})),
+            needs_model_verbs::Call::Reflect(_) => None,
+        })
     }
 }
 

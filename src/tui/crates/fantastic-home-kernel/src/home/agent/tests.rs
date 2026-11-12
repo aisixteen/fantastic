@@ -161,7 +161,7 @@ async fn list_answers_the_state_shape() {
     let mut got = t.call(json!({"type": "list"})).await;
     assert!(got["seq"].as_u64().is_some_and(|s| s >= 1), "{got}");
     got["seq"] = json!(7);
-    let golden = json!({"type":"state","protocol":"fantastic.home","version":1,"seq":7,"mode":"lock","listed":true,
+    let golden = json!({"type":"state","protocol":"fantastic.home","seq":7,"mode":"lock","listed":true,
         "rows":[{"id":"g-1","guid":"g-1","name":"notes","path":"/home/a/notes","last_seen":1760800000,
                  "status":"running","canvas":{"url":"http://127.0.0.1:8123/canvas_page/file/index.html","port":8123},
                  "pid":4242,"actions":["stop","open","remove"],"log":"/home/a/.fantastic/logs/notes-1a2b3c4d.log"}],
@@ -174,7 +174,6 @@ async fn list_answers_the_state_shape() {
         [
             "type",
             "protocol",
-            "version",
             "seq",
             "mode",
             "listed",
@@ -524,12 +523,11 @@ async fn an_unknown_verb_is_unhandled() {
 }
 
 #[tokio::test]
-async fn reflect_names_the_protocol_and_version() {
+async fn reflect_names_the_protocol() {
     let t = t();
     let r = t.call(json!({"type": "reflect"})).await;
     assert_eq!(r["id"], json!("home"));
     assert_eq!(r["protocol"], json!("fantastic.home"));
-    assert_eq!(r["version"], json!(1));
     assert_eq!(r["mode"], json!("lock"));
     assert_eq!(r["home"], json!(&format!("{D}/h")));
     assert_eq!(r["poll_ms"], json!(2000));
@@ -677,39 +675,6 @@ async fn every_intent_in_the_default_menu_is_a_verb_home_accepts() {
         assert_eq!(r["type"], json!("state"), "{id}: {r}");
         t.shutdown().await;
     }
-}
-
-#[tokio::test]
-async fn a_version_other_than_1_is_refused() {
-    let t = t();
-    t.boot().await;
-    let before = t.call(json!({"type": "list"})).await;
-    for verb in ["list", "dismiss", "focus", "start"] {
-        let r = t.call(json!({"type": verb, "version": 2, "id": "x"})).await;
-        // `id` is start's only: the entry names the first argument it cannot take
-        assert_eq!(r["reason"], json!("bad_arg"), "{verb}: {r}");
-        assert!(r["arg"] == json!("version") || r["arg"] == json!("id"), "{verb}: {r}");
-        let r = t.call(json!({"type": verb, "version": 2})).await;
-        if verb == "start" {
-            assert_eq!(r["reason"], json!("missing_arg"), "{verb}: {r}");
-        } else {
-            assert_eq!(r["arg"], json!("version"), "{verb}: {r}");
-            assert!(
-                r["error"].as_str().is_some_and(|e| e.contains("argument 'version' must be int")),
-                "{verb}: {r}"
-            );
-        }
-    }
-    let r = t.call(json!({"type": "list", "version": "1"})).await;
-    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("version")), "{r}");
-    // `reflect` takes no version: it is not a client verb
-    let r = t.call(json!({"type": "reflect", "version": 1})).await;
-    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("version")), "{r}");
-    // 1, or none, is v1
-    assert_eq!(t.call(json!({"type": "list", "version": 1})).await, before);
-    // a refused call changed nothing
-    assert_eq!(t.call(json!({"type": "list"})).await, before);
-    t.shutdown().await;
 }
 
 #[tokio::test]

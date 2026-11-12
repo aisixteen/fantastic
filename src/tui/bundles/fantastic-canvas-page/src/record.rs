@@ -7,7 +7,7 @@ use serde_json::Value;
 /// A canvas page's own record field.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct Record {
-    /// The source verbs the page declares to its `web` host (`read_stream`, as [`crate::read_stream_declared`] renders it); the host serves an agent that declares `read_stream`.
+    /// The source verbs the page declares to its `web` host (`read_stream`, as [`crate::read_stream_declared`] declares it); the host serves an agent that declares `read_stream`.
     pub verbs: Option<Value>,
 }
 

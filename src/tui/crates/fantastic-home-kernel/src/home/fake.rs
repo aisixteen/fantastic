@@ -83,7 +83,7 @@ impl FakeOs {
         }
     }
 
-    /// The machine a contract fixture describes (`contract/home/v1/cases.json`,
+    /// The machine a contract fixture describes (`contract/home/cases.json`,
     /// `fixture`). Every key is read strictly: an unknown one panics, naming it.
     ///
     /// ```text

@@ -1,10 +1,9 @@
 // THE HOME'S MODEL — pure: no DOM, no kernel. The `home` agent's state as the
-// view reads it (protocol `fantastic.home`, version 1, `home/wire.rs`), what each
+// view reads it (protocol `fantastic.home`, `home/wire.rs`), what each
 // status is called and coloured, the card a page shows when its fantastic is not
 // running, and which key is which intent. Tested by `tests/home_model.test.ts`.
 
 export const PROTOCOL = "fantastic.home";
-export const VERSION = 1;
 
 /** Every status a row can have (`wire.rs` `status_name`). */
 export const STATUSES = ["stopped", "starting", "stopping", "running", "no_canvas", "unverified", "missing"] as const;
@@ -39,7 +38,6 @@ export interface HomeRow {
 export interface HomeState {
   type: "state";
   protocol: typeof PROTOCOL;
-  version: typeof VERSION;
   seq: number;
   mode: "lock" | "canvas";
   listed: boolean;
@@ -82,7 +80,6 @@ export function decodeState(v: unknown): HomeState | string {
   if (!isRec(v)) return `state: ${show(v)} is not an object`;
   if (v["type"] !== "state") return `state: \`type\` is ${show(v["type"])}, not "state"`;
   if (v["protocol"] !== PROTOCOL) return `state: \`protocol\` is ${show(v["protocol"])}, not "${PROTOCOL}"`;
-  if (v["version"] !== VERSION) return `state: \`version\` is ${show(v["version"])}, not ${VERSION}`;
   if (typeof v["seq"] !== "number" || !Number.isInteger(v["seq"])) return `state: \`seq\` is ${show(v["seq"])}, not an integer`;
   if (v["mode"] !== "lock" && v["mode"] !== "canvas") return `state: \`mode\` is ${show(v["mode"])}, not "lock" or "canvas"`;
   if (typeof v["listed"] !== "boolean") return `state: \`listed\` is ${show(v["listed"])}, not a boolean`;

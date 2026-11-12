@@ -825,7 +825,7 @@ impl Handler for BackendBundle {
             verbs::Call::Reopen(a) => Self::reopen(&host, agent_id, a).await,
             verbs::Call::NewCanvas(a) => match crate::kern::web::new_canvas(&host, &agent_id.0, &a.name).await {
                 Ok(id) => json!({"id": id}),
-                Err(e) => refuse("bad_arg", e, "name it: new_canvas {name: \"research\"}"),
+                Err(e) => refuse("bad_arg", e, "name it: new_canvas {name: <name>}"),
             },
             verbs::Call::Canvases(_) => Self::canvases(&host),
             verbs::Call::AddMcp(a) => Self::add_mcp(&host, agent_id, a).await,
@@ -845,9 +845,11 @@ pub(crate) mod create_tests {
     /// A registered AI handler, registered under the name it carries.
     pub(crate) struct FakeAi(pub(crate) &'static str);
 
+    fantastic_kernel::stand_in_verbs!(fake_ai_verbs { Ping "ping" {} });
+
     #[async_trait]
     impl Handler for FakeAi {
-        type Call = fantastic_kernel::test_support::NoCall;
+        type Call = fake_ai_verbs::Call;
 
         fn name(&self) -> &str {
             self.0
@@ -858,19 +860,22 @@ pub(crate) mod create_tests {
         }
 
         fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-            fantastic_kernel::test_support::no_verbs()
+            fake_ai_verbs::VERBS
         }
 
         fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
-            fantastic_kernel::test_support::no_dynamic(agent)
+            fake_ai_verbs::dynamic_verbs(agent)
         }
 
         fn record(&self) -> &'static fantastic_kernel::RecordDecl {
             fantastic_kernel::fixture_record!()
         }
 
-        async fn handle(&self, _id: &AgentId, _c: Self::Call, _k: &Arc<Kernel>) -> Result<Option<Value>, BundleError> {
-            Ok(None)
+        async fn handle(&self, _id: &AgentId, call: Self::Call, _k: &Arc<Kernel>) -> Result<Option<Value>, BundleError> {
+            Ok(match call {
+                fake_ai_verbs::Call::Ping(_) => Some(json!({"pong": true})),
+                fake_ai_verbs::Call::Reflect(_) => None,
+            })
         }
     }
 
@@ -890,9 +895,11 @@ pub(crate) mod create_tests {
     /// A backend whose record is refused at the write (a required field is missing): the make of a pair on it fails.
     struct RefusingAi;
 
+    fantastic_kernel::stand_in_verbs!(refusing_ai_verbs { Ping "ping" {} });
+
     #[async_trait]
     impl Handler for RefusingAi {
-        type Call = fantastic_kernel::test_support::NoCall;
+        type Call = refusing_ai_verbs::Call;
 
         fn name(&self) -> &str {
             "ollama_backend.tools"
@@ -903,19 +910,22 @@ pub(crate) mod create_tests {
         }
 
         fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-            fantastic_kernel::test_support::no_verbs()
+            refusing_ai_verbs::VERBS
         }
 
         fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
-            fantastic_kernel::test_support::no_dynamic(agent)
+            refusing_ai_verbs::dynamic_verbs(agent)
         }
 
         fn record(&self) -> &'static fantastic_kernel::RecordDecl {
             &needs_field::RECORD
         }
 
-        async fn handle(&self, _id: &AgentId, _c: Self::Call, _k: &Arc<Kernel>) -> Result<Option<Value>, BundleError> {
-            Ok(None)
+        async fn handle(&self, _id: &AgentId, call: Self::Call, _k: &Arc<Kernel>) -> Result<Option<Value>, BundleError> {
+            Ok(match call {
+                refusing_ai_verbs::Call::Ping(_) => Some(json!({"pong": true})),
+                refusing_ai_verbs::Call::Reflect(_) => None,
+            })
         }
     }
 

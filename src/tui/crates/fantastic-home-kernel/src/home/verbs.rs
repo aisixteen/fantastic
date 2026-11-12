@@ -2,13 +2,12 @@
 //! the list the agent's own entry checks every call against, and that `reflect` and
 //! `docs` render. `reflect` is declared once, in the kernel.
 //!
-//! Every client verb carries the protocol `version` (absent is 1; any other is refused
-//! by the entry) and answers the state right after its event.
+//! Every client verb answers the state right after its event.
 
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-/// One client verb: its arguments, then the protocol `version` every one of them takes.
+/// One client verb: its arguments.
 macro_rules! client_verb {
     ($(#[$m:meta])* $name:ident { $( $(#[$fm:meta])* $f:ident : $t:ty ),* $(,)? }) => {
         $(#[$m])*
@@ -16,9 +15,6 @@ macro_rules! client_verb {
         #[serde(deny_unknown_fields)]
         pub struct $name {
             $( $(#[$fm])* pub $f: $t, )*
-            /// The protocol version the caller speaks; 1 when absent, and no other is served.
-            #[schemars(range(min = 1, max = 1))]
-            pub version: Option<u32>,
         }
     };
 }

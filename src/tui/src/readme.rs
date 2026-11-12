@@ -3,8 +3,7 @@
 //! CLI that runs `fantastic` in its shell reads what this is and how to drive
 //! it; nothing is written to the directory and no kernel starts. On a terminal
 //! the same command opens the terminal UI. An embedding launcher's readme
-//! sections (passed to `main_with`) are printed after this text, in order; the
-//! same for `fantastic readme`. What an agent is and how to call it is never written
+//! sections (passed to `main_with`) are printed after this text, in order. What an agent is and how to call it is never written
 //! here: it is rendered from the agents' own declarations (`reflect`, `docs`).
 
 use fantastic_web_mcp::INSTRUCTIONS;
@@ -23,17 +22,6 @@ fn with_sections(base: String, sections: &[&str]) -> String {
         }
     }
     out
-}
-
-/// `fantastic readme` → the readme text, then each embedder section. Reads only
-/// what is embedded: nothing starts, nothing is written.
-pub fn main(argv: &[String], sections: &[&str]) -> ! {
-    if !argv.is_empty() {
-        eprintln!("fantastic readme: takes no argument (got {})", argv.len());
-        std::process::exit(2);
-    }
-    print!("{}", text(sections));
-    std::process::exit(0);
 }
 
 /// The whole text: what a connected MCP client is told, then each embedder section the launcher passed

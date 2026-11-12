@@ -44,10 +44,6 @@ pub struct Inquiries {
     open: Mutex<Vec<Held>>,
 }
 
-fn bad(msg: &str, arg: &str) -> Value {
-    json!({"error": format!("user: {msg}"), "reason": "bad_arg", "arg": arg})
-}
-
 /// An answer as the asker reads it: words, a list joined, a yes / no.
 fn answer_text(v: &Answer) -> String {
     match v {
@@ -66,10 +62,6 @@ impl Inquiries {
 
     /// `inquiry`: held as open; the pid it runs under is its `re`.
     pub fn ask(&self, a: Inquiry) -> Value {
-        // a question of a kind that offers choices needs them
-        if matches!(a.kind, Kind::Single | Kind::Multi) && a.options.is_none() {
-            return bad("inquiry: a `single` or `multi` question needs `options`", "options");
-        }
         let Some(re) = fantastic_kernel::current_task().map(|t| t.0) else {
             return json!({"error": "user: inquiry outside a task — nothing to answer under", "reason": "not_connected"});
         };

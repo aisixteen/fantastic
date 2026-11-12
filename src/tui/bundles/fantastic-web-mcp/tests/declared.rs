@@ -89,16 +89,12 @@ async fn inbound_send_sends_the_batch_as_the_leg() {
     // an item is a declared shape too
     let r = op(&k, "mcp", json!({"type": "inbound_send", "items": [{"target": "kernel"}]})).await;
     assert_eq!(why(&r), (Some("bad_arg"), None), "{r}");
-    assert!(r["error"].as_str().unwrap().contains("do not parse") || r.get("arg").is_some(), "{r}");
+    assert!(r["error"].as_str().unwrap().starts_with("inbound_send: the arguments do not parse"), "{r}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_choice_question_needs_its_options() {
+async fn a_choice_question_keeps_its_options() {
     let k = setup().await;
-    // the only rule a declaration cannot state: the choices of `single` and `multi`
-    let r = op(&k, "mcp", json!({"type": "inquiry", "text": "which?", "kind": "single"})).await;
-    // outside a task there is nothing to answer under: the options rule comes first
-    assert_eq!(why(&r), (Some("bad_arg"), Some("options")), "{r}");
     let r = op(&k, "mcp", json!({"type": "inquiry", "text": "which?", "kind": "single", "options": ["a", "b"]})).await;
     assert_eq!(r["accepted"], true, "{r}");
     let r = op(&k, "mcp", json!({"type": "inquiries"})).await;

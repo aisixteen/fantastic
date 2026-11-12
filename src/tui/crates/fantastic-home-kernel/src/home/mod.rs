@@ -4,7 +4,7 @@
 //! ```text
 //!   agent    HomeBundle (`home.tools`): the verbs → Events, validation, replies
 //!   runner   owns the Home: Event → reduce → Effects → HomeOs → Events; the poll; the sinks
-//!   wire     the state JSON (protocol "fantastic.home", version 1)
+//!   wire     the state JSON (protocol "fantastic.home")
 //!   os       trait HomeOs, and SysOs (delegates every call to sys)
 //!   sys      every OS call of the crate
 //! ```

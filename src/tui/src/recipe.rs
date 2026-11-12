@@ -79,7 +79,7 @@ impl Opts {
     }
 }
 
-const USAGE: &str = "run `fantastic [canvas [--port N] [--host ADDR] | --headless [--port N] [--host ADDR]] [--statedir DIR] [--workdir DIR] [ai [vllm|ollama|responses|anthropic …]] [run COMMAND …]`, `fantastic mcp [--statedir DIR] [--workdir DIR]`, `fantastic send [--statedir DIR] <item>`, `fantastic import <path> --parent <id>`, `fantastic migrate-home [--dry-run]` or `fantastic readme`";
+const USAGE: &str = "run `fantastic [canvas [--port N] [--host ADDR] | --headless [--port N] [--host ADDR]] [--statedir DIR] [--workdir DIR] [ai [vllm|ollama|responses|anthropic …]] [run COMMAND …]`, `fantastic mcp [--statedir DIR] [--workdir DIR]`, `fantastic send [--statedir DIR] <item>`, `fantastic import <path> --parent <id>` or `fantastic migrate-home [--dry-run]`";
 
 fn port_of(v: &str, flag: &str) -> Result<u16, String> {
     v.parse::<u16>().ok().filter(|p| *p > 0).ok_or_else(|| format!("{flag} must be 1..65535, got `{v}`"))

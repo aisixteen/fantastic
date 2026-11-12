@@ -105,7 +105,7 @@ pub struct Inquiry {
     /// The shape of the question.
     #[serde(default)]
     pub kind: Kind,
-    /// The choices; required for `single` and `multi`.
+    /// The choices offered for `single` and `multi`.
     #[schemars(length(min = 1))]
     pub options: Option<Vec<String>>,
     /// Names this inquiry in the answer.

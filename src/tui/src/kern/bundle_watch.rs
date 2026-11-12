@@ -359,9 +359,11 @@ mod tests {
 
     struct Plain;
 
+    fantastic_kernel::stand_in_verbs!(plain_verbs { Ping "ping" {} });
+
     #[async_trait]
     impl Handler for Plain {
-        type Call = fantastic_kernel::test_support::NoCall;
+        type Call = plain_verbs::Call;
 
         fn name(&self) -> &str {
             "board"
@@ -372,11 +374,11 @@ mod tests {
         }
 
         fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-            fantastic_kernel::test_support::no_verbs()
+            plain_verbs::VERBS
         }
 
         fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
-            fantastic_kernel::test_support::no_dynamic(agent)
+            plain_verbs::dynamic_verbs(agent)
         }
 
         fn record(&self) -> &'static fantastic_kernel::RecordDecl {
@@ -386,10 +388,13 @@ mod tests {
         async fn handle(
             &self,
             _id: &fantastic_kernel::AgentId,
-            _c: Self::Call,
+            call: Self::Call,
             _k: &Arc<Kernel>,
         ) -> Result<Option<Value>, BundleError> {
-            Ok(None)
+            Ok(match call {
+                plain_verbs::Call::Ping(_) => Some(json!({"pong": true})),
+                plain_verbs::Call::Reflect(_) => None,
+            })
         }
     }
 

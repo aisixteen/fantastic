@@ -29,12 +29,11 @@ pub mod verbs;
 const MAN: &str = "The canvas page's files, served read-only: the canvas app's pack embedded in the binary, streamed to the web host's file route.";
 
 /// What a `canvas_page` record's `verbs` field carries so the web host serves it:
-/// the `read_stream` verb as the declaration renders it.
+/// the `read_stream` verb as it is declared (its argument schema).
 #[must_use]
 pub fn read_stream_declared() -> Value {
-    let rows = fantastic_kernel::verbs::rows(&[verbs::VERBS], &[]);
-    let row = rows.iter().find(|r| r.name == "read_stream").expect("read_stream is declared");
-    json!({"read_stream": fantastic_kernel::verbs::line(row)})
+    let verb = verbs::VERBS.iter().find(|v| v.name == "read_stream").expect("read_stream is declared");
+    json!({"read_stream": verb.schema()})
 }
 
 /// The `handler_module` this bundle registers under.
@@ -268,7 +267,9 @@ mod tests {
         assert_eq!(head["next_offset"], json!(6), "{head}");
         assert_eq!(body.unwrap().bytes, INDEX_HTML.as_bytes()[..6]);
         // the declaration the web host reads off the record names `read_stream`
-        assert!(read_stream_declared()["read_stream"].as_str().unwrap().starts_with("args: path:"));
+        let declared = read_stream_declared();
+        assert!(declared["read_stream"]["properties"].get("path").is_some(), "{declared}");
+        assert_eq!(declared["read_stream"]["required"], json!(["path"]), "{declared}");
     }
 
     #[test]

@@ -68,9 +68,9 @@ async fn main() -> Result<(), String> {
 
     // watch first, then list: nothing is missed
     let mut events = hk.events();
-    let state = hk.call(json!({"type": "list", "version": 1})).await?;
+    let state = hk.call(json!({"type": "list"})).await?;
     let mut drawn = state["seq"].as_u64().unwrap_or(0);
-    hk.call(json!({"type": "open", "paths": folders, "version": 1})).await?;
+    hk.call(json!({"type": "open", "paths": folders})).await?;
 
     tokio::spawn(async move {
         while let Some(payload) = events.recv().await {

@@ -44,8 +44,7 @@ fn starts_kernel_is_public_and_bound_to_the_mode() {
         assert!(fantastic_tui::starts_kernel(&sv(a)), "{a:?}");
     }
     for a in [
-        &["readme"][..],
-        &["send", "x"],
+        &["send", "x"][..],
         &["import", "p", "--parent", "user"],
         &["migrate-home", "--dry-run"],
         &["__ctrl_break", "1"],
@@ -79,7 +78,7 @@ fn an_embedder_launcher_writes_its_blueprint_after_the_stock_one() {
     );
 
     let dir3 = fresh("emb3");
-    let argv = vec!["readme".to_string()];
+    let argv = vec!["send".to_string(), "x".to_string()];
     if fantastic_tui::starts_kernel(&argv) {
         fantastic_tui::seed_dir_with(&dir3.join(".fantastic"), &[EMB]).unwrap();
     }
@@ -91,8 +90,7 @@ fn an_embedder_launcher_writes_its_blueprint_after_the_stock_one() {
 
 #[test]
 fn a_one_shot_command_writes_nothing() {
-    let cases: [(&[&str], i32); 4] = [
-        (&["readme"], 0),
+    let cases: [(&[&str], i32); 3] = [
         (&[], 0),
         (&["mcp", "--can-call", "files"], 2),
         (&["bogus"], 2),

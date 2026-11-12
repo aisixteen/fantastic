@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 use super::os::HomeOs;
 use super::runner::{Runner, POLL};
 use super::verbs::{self, Call};
-use super::wire::{mode_name, status_name, PROTOCOL, VERSION};
+use super::wire::{mode_name, status_name, PROTOCOL};
 use super::{record, ID};
 
 /// The kernel the agent emits on and keeps its record in, from its first
@@ -132,7 +132,6 @@ pub(crate) fn reflection(runner: &Runner, id: &str, home: Option<String>) -> Val
         "id": id,
         "sentence": "The home: your fantastics, listed with their status — open a folder, start, stop, remove; the open pages and the selection are kept across restarts. Watch `home` for its `state`.",
         "protocol": PROTOCOL,
-        "version": VERSION,
         "mode": mode_name(mode),
         "home": home,
         "poll_ms": POLL.as_millis() as u64,

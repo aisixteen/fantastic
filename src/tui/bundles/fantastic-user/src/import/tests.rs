@@ -38,7 +38,7 @@ fn run(
         .as_object()
         .map(|m| {
             m.iter()
-                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                .map(|(k, v)| (k.clone(), v.as_str().expect("a bind value is text").to_string()))
                 .collect()
         })
         .unwrap_or_default();

@@ -2,7 +2,7 @@
 
 a) each kernel-starting mode (`--headless`, `canvas`, `mcp`) started in a fresh folder: the stock tree
    is there and the kernel holds the lock.
-b) a one-shot command (`readme`, no argument and no terminal, `send`, `import`, a refused command line)
+b) a one-shot command (no argument and no terminal, `send`, `import`, a refused command line)
    writes nothing: no `.fantastic` in the folder.
 c) the test-only embedder (`examples/embedder.rs`: the launcher plus ONE extra blueprint, public API
    only), `--headless --statedir <far> --workdir <work>` run from another folder: the stock tree and the
@@ -85,7 +85,6 @@ def main() -> bool:
         r[f"a {kind}: a fresh folder gets the stock tree, written by the launcher, and the kernel runs on it"] = seeded
     # b) a one-shot writes nothing
     one_shots = {
-        "readme": (["readme"], 0),
         "no argument and no terminal": ([], 0),
         "send": (["send", json.dumps({"target": "kernel", "payload": {"type": "reflect"}})], 1),
         "import": (["import", "p", "--parent", "user"], None),
@@ -97,7 +96,7 @@ def main() -> bool:
         p = subprocess.run([str(rig.binary), *argv], cwd=cwd, env=rig.env(), capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
         info[f"one-shot {name}"] = p.returncode
         ok = not (cwd / ".fantastic").exists() and (code is None or p.returncode == code)
-        if name in ("readme", "no argument and no terminal"):
+        if name == "no argument and no terminal":
             ok = ok and bool(p.stdout.strip())
         r[f"b {name}: writes nothing to a fresh folder"] = ok
     # c) the embedder: its blueprint, the far state folder, the work folder

@@ -484,9 +484,7 @@ async fn every_verb_of_user_is_checked_by_its_declaration() {
         let r = op(&k, &root, p.clone()).await;
         assert_eq!(r["reason"], "bad_arg", "{p}: {r}");
     }
-    // a choice question needs its choices; a held one is listed, answered and closed
-    let r = op(&k, "user", json!({"type": "inquiry", "text": "which?", "kind": "single"})).await;
-    assert_eq!(why(&r), (Some("bad_arg"), Some("options")), "{r}");
+    // an answer to a question nobody asked is not found
     let r = op(&k, "user", json!({"type": "answer_inquiry", "re": 99, "answer": "yes"})).await;
     assert_eq!(r["reason"], "not_found", "{r}");
 }

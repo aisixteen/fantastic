@@ -20,9 +20,6 @@ use crate::intent::Intent;
 use crate::model::Opened;
 use crate::viewmodel::Home;
 
-/// The spec's version; a shell refuses any other.
-pub const MENU_VERSION: u32 = 1;
-
 /// How many entries File ▸ Open Recent lists.
 pub const RECENT_CAP: usize = 10;
 
@@ -44,7 +41,6 @@ pub struct MenuSpecMsg {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Menu {
-    pub version: u32,
     pub bar: Vec<Submenu>,
 }
 
@@ -195,7 +191,6 @@ impl Menu {
     /// What `which` shows: every menu and item marked for other systems dropped.
     pub fn for_os(&self, which: Os) -> Menu {
         Menu {
-            version: self.version,
             bar: self
                 .bar
                 .iter()
@@ -222,17 +217,11 @@ impl Menu {
         out
     }
 
-    /// The checks a shell relies on: the version; unique action ids and
+    /// The checks a shell relies on: unique action ids and
     /// non-empty labels; `enabled` implies `send`; `pick: folders` only with
     /// `send = open {paths: []}`; at most one Window and one Help menu; no two
     /// items one OS shows share an accelerator.
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != MENU_VERSION {
-            return Err(format!(
-                "menu: version {} (this shell reads {MENU_VERSION})",
-                self.version
-            ));
-        }
         for s in self.submenus() {
             if s.label.is_empty() {
                 return Err("menu: a menu has an empty label".into());
@@ -460,7 +449,6 @@ impl Home {
         );
 
         Menu {
-            version: MENU_VERSION,
             bar: vec![
                 app,
                 menu("File", ALL, None, file),

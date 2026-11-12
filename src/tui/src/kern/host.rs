@@ -829,9 +829,11 @@ mod tests {
 
     const PROBE: &str = "extra_probe.tools";
 
+    fantastic_kernel::stand_in_verbs!(extra_probe_verbs { Ping "ping" {} });
+
     #[async_trait::async_trait]
     impl fantastic_kernel::bundle::Handler for ExtraProbe {
-        type Call = fantastic_kernel::test_support::NoCall;
+        type Call = extra_probe_verbs::Call;
 
         fn name(&self) -> &str {
             "extra_probe"
@@ -842,11 +844,11 @@ mod tests {
         }
 
         fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-            fantastic_kernel::test_support::no_verbs()
+            extra_probe_verbs::VERBS
         }
 
         fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
-            fantastic_kernel::test_support::no_dynamic(agent)
+            extra_probe_verbs::dynamic_verbs(agent)
         }
 
         fn record(&self) -> &'static fantastic_kernel::RecordDecl {
@@ -856,10 +858,13 @@ mod tests {
         async fn handle(
             &self,
             _id: &AgentId,
-            _call: Self::Call,
+            call: Self::Call,
             _kernel: &Arc<Kernel>,
         ) -> Result<Option<Value>, fantastic_kernel::bundle::BundleError> {
-            Ok(Some(json!({"probe": "pong"})))
+            Ok(match call {
+                extra_probe_verbs::Call::Ping(_) => Some(json!({"probe": "pong"})),
+                extra_probe_verbs::Call::Reflect(_) => None,
+            })
         }
     }
 
@@ -1073,27 +1078,29 @@ mod tests {
         assert_eq!(web["tree"], json!([]), "no web agent exists: {web}");
     }
 
-    /// A bundle that answers nothing, registered under any handler name.
+    /// A bundle that answers only `ping`, registered under any handler name.
     struct Stub(&'static str);
+
+    fantastic_kernel::stand_in_verbs!(stub_verbs { Ping "ping" {} });
 
     #[async_trait::async_trait]
     impl fantastic_kernel::bundle::Handler for Stub {
-        type Call = fantastic_kernel::test_support::NoCall;
+        type Call = stub_verbs::Call;
 
         fn name(&self) -> &str {
             self.0
         }
 
         fn man(&self) -> &'static str {
-            "A test stand-in that answers nothing."
+            "A test stand-in that answers only ping."
         }
 
         fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-            fantastic_kernel::test_support::no_verbs()
+            stub_verbs::VERBS
         }
 
         fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
-            fantastic_kernel::test_support::no_dynamic(agent)
+            stub_verbs::dynamic_verbs(agent)
         }
 
         fn record(&self) -> &'static fantastic_kernel::RecordDecl {
@@ -1103,10 +1110,13 @@ mod tests {
         async fn handle(
             &self,
             _id: &AgentId,
-            _c: Self::Call,
+            call: Self::Call,
             _k: &Arc<Kernel>,
         ) -> Result<Option<Value>, fantastic_kernel::bundle::BundleError> {
-            Ok(None)
+            Ok(match call {
+                stub_verbs::Call::Ping(_) => Some(json!({"pong": true})),
+                stub_verbs::Call::Reflect(_) => None,
+            })
         }
     }
 

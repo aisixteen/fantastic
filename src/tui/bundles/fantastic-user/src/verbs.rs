@@ -88,7 +88,7 @@ pub struct Inquiry {
     /// The shape of the question.
     #[serde(default)]
     pub kind: Kind,
-    /// The choices; required for `single` and `multi`.
+    /// The choices offered for `single` and `multi`.
     #[schemars(length(min = 1))]
     pub options: Option<Vec<String>>,
     /// Names this inquiry in the answer.
@@ -134,6 +134,15 @@ pub struct AnswerInquiry {
     pub answer: Answer,
 }
 
+/// A map of port name to a non-empty agent id.
+fn agent_ids(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    serde_json::from_value(serde_json::json!({
+        "type": "object",
+        "additionalProperties": {"type": "string", "minLength": 1},
+    }))
+    .expect("a map schema")
+}
+
 /// The other half of `export_subtree`: the blueprint folder at `path` becomes agents under `parent_id`, every id fresh (one `_<k>` suffix), every port bound on both ends. Without `approve: true` it only shows what the team will reach and the code it carries ({approval_required, agents, new_ids, reaches, ports, code}) and nothing is created; with it, the agents are made and the bound agents granted back ({imported, ids, parent_id, ports}). Refused: unbound_ports, bad_binding, secret_found, code_not_allowed.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -145,6 +154,8 @@ pub struct ImportSubtree {
     #[schemars(length(min = 1))]
     pub parent_id: String,
     /// Every declared port, bound to an agent of its kind: `{"@port": "<agent id>"}`.
+    #[serde(default)]
+    #[schemars(schema_with = "agent_ids")]
     pub bind: Option<std::collections::BTreeMap<String, String>>,
     /// `true` allows code (a handler that is not a registered bundle, or a file other than the blueprint and directives).
     pub allow_code: Option<bool>,

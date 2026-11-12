@@ -1,4 +1,4 @@
-//! THE CONTRACT REPLAY: `contract/home/v1/cases.json`, the `home` protocol v1
+//! THE CONTRACT REPLAY: `contract/home/cases.json`, the `home` protocol
 //! as data, replayed in order against one runner on `FakeOs::from_fixture`,
 //! through the agent's entry and `agent::call`, and against the rendered docs. The TS
 //! client replays the same file
@@ -23,9 +23,9 @@ fn corpus() -> Value {
     // crate → crates → tui → src → the repo root; embedded, so the test reads no file
     let text = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../../../contract/home/v1/cases.json"
+        "/../../../../contract/home/cases.json"
     ));
-    let doc: Value = serde_json::from_str(text).expect("contract/home/v1/cases.json");
+    let doc: Value = serde_json::from_str(text).expect("contract/home/cases.json");
     if cfg!(windows) {
         rooted(doc)
     } else {
@@ -298,7 +298,6 @@ async fn every_case_replays_against_the_agent() {
         "the golden state"
     );
     assert_eq!(doc["protocol"], json!(wire::PROTOCOL));
-    assert_eq!(doc["version"], json!(wire::VERSION));
 }
 
 #[test]
@@ -319,12 +318,6 @@ fn every_verb_and_refusal_kind_has_a_case() {
             "no case is refused {reason}"
         );
     }
-    assert!(
-        cases
-            .iter()
-            .any(|c| c["expect_refusal"]["arg"] == json!("version")),
-        "no case refuses a version"
-    );
 }
 
 #[test]
@@ -348,13 +341,13 @@ fn the_verbs_are_the_agents_and_its_docs() {
         .collect();
     documented.sort_unstable();
     assert_eq!(documented, corpus_verbs, "the corpus verbs are the rendered verbs");
-    // the oneliner of every client verb is its signature, the protocol version last
+    // the oneliner of every client verb is its signature, its arguments
     for (verb, line, _) in &rendered {
         if verb == "boot" || verb == "shutdown" || verb == "reflect" {
             continue;
         }
         assert!(
-            line.starts_with("args: ") && line.contains("version:"),
+            line.starts_with("args: ") || line.starts_with("No args"),
             "{verb}: {line}"
         );
     }

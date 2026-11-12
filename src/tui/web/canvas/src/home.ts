@@ -1,7 +1,7 @@
 import { Agent, Kernel, ProxyLoader, WsBridge, registerRamStore } from "./lib.ts";
 import { GATEWAY, UserBridge } from "./user_bridge.ts";
 import { homeView } from "./bundles/home_view/home_view.ts";
-import { PROTOCOL, VERSION } from "./bundles/home_view/home_model.ts";
+import { PROTOCOL } from "./bundles/home_view/home_model.ts";
 import { readShell } from "./bundles/shell.ts";
 import { bootSkin, installSkin } from "./bundles/skin/apply.ts";
 import { tok } from "./bundles/skin/css.ts";
@@ -60,8 +60,8 @@ if (me?.["reason"] === "unauthorized") await stop(`The host refused this page â€
 const home = (await kernel.callHost(HOME, { type: "reflect" } as never)) as Record<string, unknown> | null;
 if (home === null || typeof home !== "object") await stop(`This host serves no home: its reflect answered ${JSON.stringify(home)}.`);
 if (typeof home!["error"] === "string") await stop(`This host serves no home: ${home!["error"]}.`);
-if (home!["protocol"] !== PROTOCOL || home!["version"] !== VERSION) {
-  await stop(`This home speaks ${String(home!["protocol"])} v${String(home!["version"])}; this page speaks ${PROTOCOL} v${VERSION}.`);
+if (home!["protocol"] !== PROTOCOL) {
+  await stop(`This home speaks ${String(home!["protocol"])}; this page speaks ${PROTOCOL}.`);
 }
 
 // THE PAGE'S RECORDS, through the home's page loader. Its refusal is loud: the

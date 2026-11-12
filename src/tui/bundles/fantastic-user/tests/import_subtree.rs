@@ -527,6 +527,19 @@ async fn import_subtree_args_and_docs() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_empty_bind_target_is_refused_by_the_shared_engine() {
+    let k = setup().await;
+    let n = k.agents.len();
+    for bind in [json!({"@memory": ""}), json!({"@memory": 3})] {
+        let p = json!({"type": "import_subtree", "path": "x", "parent_id": "other", "bind": bind});
+        let r = op(&k, "user", p.clone()).await;
+        assert_eq!(r["reason"], "bad_arg", "{p}: {r}");
+        assert!(r["error"].as_str().is_some_and(|e| e.contains("bind")), "{r}");
+    }
+    assert_eq!(k.agents.len(), n, "nothing created");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn import_refuses_bind_to_a_missing_agent_naming_the_port() {
     let k = setup().await;
     let d = exported(&k, "ghost").await;

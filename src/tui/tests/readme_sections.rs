@@ -27,14 +27,10 @@ fn home(tag: &str) -> PathBuf {
 /// Not a test of its own: the test binary re-execs itself as the launcher.
 #[test]
 fn readme_launcher_child() {
-    let Ok(mode) = std::env::var("FC_README_LAUNCHER") else {
+    if std::env::var("FC_README_LAUNCHER").is_err() {
         return;
-    };
-    let args: Vec<String> = if mode == "readme" {
-        vec!["readme".into()]
-    } else {
-        vec![]
-    };
+    }
+    let args: Vec<String> = vec![];
     print!("{MARK}");
     std::io::stdout().flush().unwrap();
     let _ = fantastic_tui::main_with(args, &[], &[SECTION]);
@@ -44,13 +40,10 @@ fn readme_launcher_child() {
 
 #[test]
 fn a_launcher_with_one_section_prints_the_base_then_the_section() {
-    for mode in ["readme", "bare"] {
+    for mode in ["bare"] {
         let cwd = fresh(&format!("cwd-{mode}"));
         let h = home(mode);
         let mut base_cmd = Command::new(env!("CARGO_BIN_EXE_fantastic"));
-        if mode == "readme" {
-            base_cmd.arg("readme");
-        }
         let base_out = base_cmd
             .current_dir(&cwd)
             .env("FANTASTIC_HOME", &h)

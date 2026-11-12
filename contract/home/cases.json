@@ -1,7 +1,6 @@
 {
- "_doc": "THE home PROTOCOL v1, as DATA (contract/home/README.md). Replayed IN ORDER against one runner by the Rust agent (src/tui/crates/fantastic-home-kernel/src/home/contract_tests.rs, through agent::call on FakeOs::from_fixture) and by the TS client (src/tui/web/canvas/tests/home_contract.test.ts). Keys of a case: call (the payload sent to home); before ['look'] (one tick, settled, first); expect (dotted path → value); expect_keys (the reply's keys, in order); expect_absent (dotted path with * → a value no element may have); expect_refusal {reason, arg (null: none), error_contains?}; expect_same_state (settle, list, then the call: its reply equals that list reply, seq included); expect_same_seq (the same, for seq only); expect_emits (the payload types the call emitted on home besides state, in order); expect_spawned / expect_terminated (the folders the call started / asked to stop, once settled); expect_forwarded ([{port, target, payload}] the call sent to fantastics' kernels, once settled); after {expect?, problem_contains?} (the state once settled: dotted path → value, and what its problem says). Every call is settled before the next case. Paths are POSIX; a runner on Windows roots every '/w/' at 'C:/w/'.",
+ "_doc": "THE home PROTOCOL, as DATA (contract/home/README.md). Replayed IN ORDER against one runner by the Rust agent (src/tui/crates/fantastic-home-kernel/src/home/contract_tests.rs, through agent::call on FakeOs::from_fixture) and by the TS client (src/tui/web/canvas/tests/home_contract.test.ts). Keys of a case: call (the payload sent to home); before ['look'] (one tick, settled, first); expect (dotted path → value); expect_keys (the reply's keys, in order); expect_absent (dotted path with * → a value no element may have); expect_refusal {reason, arg (null: none), error_contains?}; expect_same_state (settle, list, then the call: its reply equals that list reply, seq included); expect_same_seq (the same, for seq only); expect_emits (the payload types the call emitted on home besides state, in order); expect_spawned / expect_terminated (the folders the call started / asked to stop, once settled); expect_forwarded ([{port, target, payload}] the call sent to fantastics' kernels, once settled); after {expect?, problem_contains?} (the state once settled: dotted path → value, and what its problem says). Every call is settled before the next case. Paths are POSIX; a runner on Windows roots every '/w/' at 'C:/w/'.",
  "protocol": "fantastic.home",
- "version": 1,
  "verbs": [
   "reflect",
   "list",
@@ -124,20 +123,7 @@
    },
    "expect": {
     "protocol": "fantastic.home",
-    "version": 1,
     "mode": "lock"
-   }
-  },
-  {
-   "name": "reflect-takes-no-version",
-   "call": {
-    "type": "reflect",
-    "version": 2
-   },
-   "expect_refusal": {
-    "reason": "bad_arg",
-    "arg": "version",
-    "error_contains": "unknown argument"
    }
   },
   {
@@ -151,7 +137,6 @@
    "expect_keys": [
     "type",
     "protocol",
-    "version",
     "seq",
     "mode",
     "listed",
@@ -195,37 +180,6 @@
    "expect_absent": {
     "rows.*.id": "g-self"
    }
-  },
-  {
-   "name": "a-future-version-is-refused",
-   "call": {
-    "type": "list",
-    "version": 2
-   },
-   "expect_refusal": {
-    "reason": "bad_arg",
-    "arg": "version",
-    "error_contains": "argument 'version' must be int"
-   }
-  },
-  {
-   "name": "a-version-that-is-no-integer-is-refused",
-   "call": {
-    "type": "dismiss",
-    "version": "1"
-   },
-   "expect_refusal": {
-    "reason": "bad_arg",
-    "arg": "version"
-   }
-  },
-  {
-   "name": "version-1-is-v1",
-   "call": {
-    "type": "list",
-    "version": 1
-   },
-   "expect_same_state": true
   },
   {
    "name": "an-unknown-verb-is-unhandled",
@@ -640,8 +594,7 @@
     "spec"
    ],
    "expect": {
-    "type": "menu_spec",
-    "spec.version": 1
+    "type": "menu_spec"
    },
    "expect_same_seq": true,
    "expect_emits": []
@@ -705,7 +658,6 @@
    {
     "type": "state",
     "protocol": "fantastic.home",
-    "version": 1,
     "seq": 3,
     "mode": "lock",
     "listed": true,
@@ -805,23 +757,7 @@
    {
     "state": {
      "type": "state",
-     "protocol": "fantastic.home",
-     "version": 2,
-     "seq": 1,
-     "mode": "lock",
-     "listed": true,
-     "rows": [],
-     "pages": [],
-     "selection": null,
-     "problem": null
-    },
-    "why": "version"
-   },
-   {
-    "state": {
-     "type": "state",
      "protocol": "fantastic.canvas",
-     "version": 1,
      "seq": 1,
      "mode": "lock",
      "listed": true,
@@ -836,7 +772,6 @@
     "state": {
      "type": "state",
      "protocol": "fantastic.home",
-     "version": 1,
      "seq": 1,
      "mode": "lock",
      "listed": true,
@@ -851,7 +786,6 @@
     "state": {
      "type": "state",
      "protocol": "fantastic.home",
-     "version": 1,
      "seq": 1,
      "mode": "lock",
      "listed": true,
@@ -883,7 +817,6 @@
     "state": {
      "type": "state",
      "protocol": "fantastic.home",
-     "version": 1,
      "seq": 1,
      "mode": "lock",
      "listed": true,
@@ -913,7 +846,6 @@
     "state": {
      "type": "state",
      "protocol": "fantastic.home",
-     "version": 1,
      "seq": "7",
      "mode": "lock",
      "listed": true,
@@ -928,7 +860,6 @@
     "state": {
      "type": "state",
      "protocol": "fantastic.home",
-     "version": 1,
      "seq": 1,
      "mode": "lock",
      "listed": true,
