@@ -447,7 +447,7 @@ async fn start_refuses_unlisted_command_and_sealed_leg_denies() {
         .await
         .remove(0)
         .result;
-    assert_eq!(refl["sealed"], json!(true), "{refl}");
+    assert_eq!(refl["ingress_rule"], json!("deny_ingress"), "{refl}");
     assert!(
         refl["allowed"].is_array(),
         "discovery must work sealed: {refl}"
@@ -2046,12 +2046,11 @@ fn reflect_reports_egress_posture() {
     let r = reflect_reply(&id, &kernel);
     let keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(
-        &keys[keys.len() - 3..],
-        ["ingress_rule", "egress_rule", "sealed"]
+        &keys[keys.len() - 2..],
+        ["ingress_rule", "egress_rule"]
     );
     assert_eq!(r["ingress_rule"], "deny_ingress");
     assert_eq!(r["egress_rule"], "silent_egress");
-    assert_eq!(r["sealed"], true);
 }
 
 // ─── python parity ───────────────────────────────────────────────

@@ -809,7 +809,6 @@ async fn deny_inbound_refuses_inbound_call() {
         .remove(0)
         .result;
     assert_eq!(reflect["ingress_rule"], "deny_ingress");
-    assert_eq!(reflect["sealed"], true);
 
     peer.send_frame(json!({
         "type": "call",
@@ -994,7 +993,6 @@ async fn deny_inbound_default_refuses_inbound_call() {
         .remove(0)
         .result;
     assert_eq!(reflect["ingress_rule"], "deny_ingress");
-    assert_eq!(reflect["sealed"], true);
 
     peer.send_frame(json!({
         "type": "call",
@@ -1068,7 +1066,6 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
         .remove(0)
         .result;
     assert_eq!(reflect["ingress_rule"], "password_ingress");
-    assert_eq!(reflect["sealed"], true);
 
     // (1) inbound call WITH the matching envelope token dispatches.
     peer.send_frame(json!({
@@ -1186,7 +1183,6 @@ async fn asymmetric_ingress_egress_via_engine() {
     assert_eq!(reflect["egress_rule"], "password_egress");
     // no `auth` in reflect — a WRITE shorthand only (py parity)
     assert!(reflect.get("auth").is_none());
-    assert_eq!(reflect["sealed"], true);
 
     // inbound is refused even with a token (ingress = deny_inbound, not password)
     peer.send_frame(json!({
@@ -1526,30 +1522,27 @@ async fn unknown_type_is_refused_by_the_leg_s_entry() {
 }
 
 /// A bridge reflects exactly what its gate enforces: the rule names the record
-/// holds, and `sealed` while the leg does not allow every inbound action.
+/// holds.
 #[tokio::test]
 async fn a_bridge_reflects_exactly_what_its_gate_enforces() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_two_family_kernel(&tmp).await;
-    for (i, (record, ingress, egress, sealed)) in [
-        (json!({}), "deny_ingress", "silent_egress", true),
+    for (i, (record, ingress, egress)) in [
+        (json!({}), "deny_ingress", "silent_egress"),
         (
             json!({"ingress_rule": "allow_all_ingress"}),
             "allow_all_ingress",
             "silent_egress",
-            false,
         ),
         (
             json!({"ingress_rule": "password_ingress", "egress_rule": "password_egress", "token_env": "X"}),
             "password_ingress",
             "password_egress",
-            true,
         ),
         (
             json!({"ingress_rule": "deny_ingress"}),
             "deny_ingress",
             "silent_egress",
-            true,
         ),
     ]
     .into_iter()
@@ -1561,8 +1554,8 @@ async fn a_bridge_reflects_exactly_what_its_gate_enforces() {
         create_leg(&kernel, WS_HANDLER_MODULE, &id, Value::Object(fields)).await;
         let r = ask(&kernel, &id, json!({"type": "reflect"})).await;
         assert_eq!(
-            (&r["ingress_rule"], &r["egress_rule"], &r["sealed"]),
-            (&json!(ingress), &json!(egress), &json!(sealed)),
+            (&r["ingress_rule"], &r["egress_rule"]),
+            (&json!(ingress), &json!(egress)),
             "{record}: {r}"
         );
     }
@@ -1592,7 +1585,7 @@ async fn reflect_key_order_per_family() {
         .unwrap()
         .keys()
         .map(String::as_str)
-        .take(11)
+        .take(10)
         .collect();
     assert_eq!(
         keys,
@@ -1604,7 +1597,6 @@ async fn reflect_key_order_per_family() {
             "pending_count",
             "ingress_rule",
             "egress_rule",
-            "sealed",
             "host",
             "peer_id",
             "port",
@@ -1616,7 +1608,6 @@ async fn reflect_key_order_per_family() {
     );
     assert_eq!(r["transport"], json!("ws"), "the record's transport");
     assert_eq!(r["connected"], json!(false));
-    assert_eq!(r["sealed"], json!(true));
     // the declared verbs, in declaration order
     let names: Vec<&str> = Handler::verbs(&WsBridgeBundle).iter().map(|v| v.name).collect();
     assert_eq!(
@@ -1630,7 +1621,7 @@ async fn reflect_key_order_per_family() {
         .unwrap()
         .keys()
         .map(String::as_str)
-        .take(15)
+        .take(14)
         .collect();
     assert_eq!(
         keys,
@@ -1642,7 +1633,6 @@ async fn reflect_key_order_per_family() {
             "pending_count",
             "ingress_rule",
             "egress_rule",
-            "sealed",
             "relay_url",
             "guid",
             "partner_guid",
