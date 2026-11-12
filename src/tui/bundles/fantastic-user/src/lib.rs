@@ -213,7 +213,7 @@ impl UserBundle {
         // other caller by its own page grants (the canvas leg holds `*|*`)
         let judge = fantastic_kernel::current_origin();
         let (recs, guid) = Self::tree(kernel, &loader).await;
-        let view = a.view.unwrap_or_else(|| ROOT_VIEW.to_string());
+        let view = a.view;
         if !recs
             .iter()
             .any(|r| r.get("id").and_then(Value::as_str) == Some(view.as_str()))

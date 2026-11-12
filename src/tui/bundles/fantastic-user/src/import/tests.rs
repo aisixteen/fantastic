@@ -414,3 +414,18 @@ fn plan_refuses_undeclared_port_and_unknown_outside_id() {
         e.message
     );
 }
+
+#[test]
+fn import_subtree_refuses_an_empty_bind_target_by_the_declared_schema() {
+    let verb = fantastic_kernel::Verb::of::<crate::verbs::ImportSubtree>("import_subtree");
+    let call = |bind: Value| {
+        fantastic_kernel::verbs::validate(
+            "import_subtree",
+            verb.schema(),
+            &json!({"path": "p", "parent_id": "a", "bind": bind}),
+        )
+    };
+    let refused = call(json!({"port": ""})).expect_err("an empty bind target is refused");
+    assert!(refused["error"].as_str().unwrap_or("").contains("bind"), "{refused}");
+    assert!(call(json!({"port": "agent_1"})).is_ok());
+}

@@ -35,9 +35,10 @@ pub struct Around {
     /// A canvas node id; absent, the main canvas (this record's `page_loader`).
     #[schemars(length(min = 1))]
     pub canvas: Option<String>,
-    /// The page view; `view_root` by default.
-    #[schemars(length(min = 1))]
-    pub view: Option<String>,
+    /// The page view.
+    #[serde(default = "root_view_id")]
+    #[schemars(schema_with = "root_view")]
+    pub view: String,
     /// The point's x.
     pub x: f64,
     /// The point's y.
@@ -72,6 +73,15 @@ pub struct AnswerInquiry {
     pub re: i64,
     /// The answer.
     pub answer: Answer,
+}
+
+fn root_view_id() -> String {
+    crate::ROOT_VIEW.to_string()
+}
+
+/// A page view id: non-empty, the page's root view by default.
+fn root_view(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    serde_json::from_value(serde_json::json!({"type": "string", "minLength": 1, "default": crate::ROOT_VIEW})).expect("a view schema")
 }
 
 /// A map of port name to a non-empty agent id.

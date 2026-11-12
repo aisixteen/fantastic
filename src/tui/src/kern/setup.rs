@@ -91,6 +91,18 @@ impl Backend {
 pub const BACKENDS: [&str; 5] =
     ["anthropic_backend.tools", "ollama_backend.tools", "responses_backend.tools", "vllm_backend.tools", "foundation_models_backend.tools"];
 
+/// The schema of a set-up's backend: one of the five backend bundle names.
+pub fn handler_schema() -> Value {
+    json!({"type": "string", "minLength": 1, "enum": BACKENDS})
+}
+
+/// A set-up record's declared schema as the shared engine reads it: its
+/// `handler_module` is one of [`BACKENDS`].
+pub fn check_backend(handler: &str) -> Result<(), Value> {
+    let schema = json!({"type": "object", "required": ["handler_module"], "properties": {"handler_module": handler_schema()}});
+    fantastic_kernel::verbs::validate("set-up", &schema, &json!({"handler_module": handler})).map(|_| ())
+}
+
 /// The backends this build links — every registered module with a record
 /// schema that is one of the five backend names — with their schemas.
 pub fn backends(host: &Host) -> Vec<Backend> {
@@ -175,11 +187,12 @@ pub fn typed(host: &Host, handler: &str, texts: &Map<String, Value>) -> Result<M
 /// properties (the write-owned ones left out), nothing else allowed, none required
 /// (a change names only what it sets).
 pub fn fields_schema(host: &Host, handler: &str) -> Result<Value, String> {
+    check_backend(handler).map_err(|r| r["error"].as_str().unwrap_or("not a backend").to_string())?;
     let (_, bundle) = host
         .kernel
         .bundles
         .catalog()
-        .find(|(m, _)| *m == handler && BACKENDS.contains(m))
+        .find(|(m, _)| *m == handler)
         .ok_or_else(|| format!("this build links no backend {handler:?}"))?;
     let mut props = bundle.record().schema()["properties"].as_object().cloned().unwrap_or_default();
     props.retain(|k, _| !WRITE_OWNED.contains(&k.as_str()));
