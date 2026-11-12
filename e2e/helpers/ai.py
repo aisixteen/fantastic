@@ -100,6 +100,8 @@ def split_record(backend_record: dict, extra: dict | None = None) -> tuple[dict,
         if k in prov:
             chat[k] = prov[k]
     for k, v in (extra or {}).items():
+        if k == "num_ctx" and not str(prov.get("handler_module", "")).startswith("ollama"):
+            continue  # the window ollama LOADS the model with; no other provider has the field
         if k in PROVIDER_ONLY:
             prov[k] = v
         else:
