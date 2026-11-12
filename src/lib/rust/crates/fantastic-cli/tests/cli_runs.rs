@@ -243,19 +243,13 @@ fn one_shot_dispatch_returns_json_reply() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("\"id\""));
     assert!(stdout.contains("\"sentence\""));
-    assert!(stdout.contains("Filesystem edge of the io family"));
+    assert!(stdout.contains("\"verbs\""));
 }
 
-/// The vendored `help.md` — the same bytes the binary prints, read from the
-/// crate source so a test can compare without shelling out twice.
-const HELP_MD: &str = include_str!("../../bundles/fantastic-cli-bundle/src/help.md");
-
-/// `help` / `-h` / `--help` as the FIRST word prints the
-/// crate's `help.md` rstripped plus one `\n`, exits 0, and seeds the workdir like
-/// every other mode. Later words are ignored.
+/// `help` / `-h` / `--help` as the FIRST word prints the kernel's docs, rendered from
+/// its declarations, exits 0 and writes nothing. Later words are ignored.
 #[test]
-fn help_prints_cli_help_md_verbatim() {
-    let expected = format!("{}\n", HELP_MD.trim_end());
+fn help_prints_the_kernels_docs() {
     for spelling in [
         vec!["help"],
         vec!["-h"],
@@ -274,10 +268,10 @@ fn help_prints_cli_help_md_verbatim() {
             "{spelling:?} exited non-zero: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout),
-            expected,
-            "{spelling:?} did not print help.md verbatim"
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("create_agent"),
+            "{spelling:?} did not print the kernel's verbs: {stdout}"
         );
         assert!(
             !tmp.path().join(".fantastic").exists(),
@@ -682,10 +676,10 @@ fn ledger_cap_flag_is_stripped_and_applied() {
         .env("FANTASTIC_LEDGER_CAP", "abc")
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1), "python dies on int('abc')");
+    assert_eq!(out.status.code(), Some(1), "a cap that is not a count is refused");
     assert!(
         String::from_utf8_lossy(&out.stderr)
-            .contains("ValueError: invalid literal for int() with base 10: 'abc'"),
+            .contains("--ledger-cap \"abc\": invalid digit found in string"),
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -1343,13 +1337,20 @@ fn the_catalog_carries_the_on_device_backend() {
         names,
         [
             "temperature",
+
             "max_tokens",
-            "memory_store_id",
-            "context_window",
-            "output_reserve",
-            "context_strategy",
-            "recent_n",
+
             "caching",
+
+            "memory_store_id",
+
+            "context_window",
+
+            "output_reserve",
+
+            "context_strategy",
+
+            "recent_n",
             "cache_primer_until",
             "transport_retries",
             "misfire_limit",

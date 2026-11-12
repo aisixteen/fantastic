@@ -149,7 +149,7 @@ async fn a_malformed_record_or_a_missing_field_is_named() {
             .await
             .unwrap_err(),
         CredentialError(
-            "responses_backend: credentials must be {store: <credential_store id>, ref: <ref>}"
+            "responses_backend: credentials creds/: get: argument 'ref' must be string of at least 1 character(s), got str"
                 .to_string()
         )
     );

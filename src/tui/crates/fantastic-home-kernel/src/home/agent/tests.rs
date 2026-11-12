@@ -253,7 +253,7 @@ async fn open_refuses_a_relative_path_or_a_file_and_opens_nothing() {
     );
     for (payload, reason) in [
         (json!({"type": "open"}), "missing_arg"),
-        (json!({"type": "open", "paths": []}), "missing_arg"),
+        (json!({"type": "open", "paths": []}), "bad_arg"),
         (
             json!({"type": "open", "paths": &format!("{D}/w/ok")}),
             "bad_arg",
@@ -710,11 +710,11 @@ async fn every_verb_is_checked_by_its_declaration() {
         let r = t.call(p.clone()).await;
         assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some(arg)), "{p}: {r}");
     }
-    // an empty list or text is as good as none
+    // an empty list or text is a wrong value
     let r = t.call(json!({"type": "open", "paths": []})).await;
-    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("missing_arg"), Some("paths")), "{r}");
+    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("paths")), "{r}");
     let r = t.call(json!({"type": "log", "id": ""})).await;
-    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("missing_arg"), Some("id")), "{r}");
+    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("id")), "{r}");
     // a refused call changed nothing
     assert_eq!(t.call(json!({"type": "list"})).await, before);
     // the record declares the kept pages and selection and no other field

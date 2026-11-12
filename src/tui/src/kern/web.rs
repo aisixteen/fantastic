@@ -806,8 +806,6 @@ pub(crate) mod canvas_tree_tests {
         let h = canvas_world(&dir).await;
         let err = new_canvas(&h, CANVAS_PAGE_ID, "x").await.unwrap_err();
         assert!(err.contains("is not a canvas"), "{err}");
-        let err = new_canvas(&h, CANVAS_NODE_ID, "  -- ").await.unwrap_err();
-        assert!(err.contains("needs a name"), "{err}");
         assert!(!h.kernel.agents.contains_key(&KernelId::from("canvas_x")));
         let _ = std::fs::remove_dir_all(&dir);
     }

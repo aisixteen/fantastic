@@ -133,13 +133,20 @@ fn the_record_is_two_knobs_a_store_then_the_ai_fields() {
         names,
         [
             "temperature",
+
             "max_tokens",
-            "memory_store_id",
-            "context_window",
-            "output_reserve",
-            "context_strategy",
-            "recent_n",
+
             "caching",
+
+            "memory_store_id",
+
+            "context_window",
+
+            "output_reserve",
+
+            "context_strategy",
+
+            "recent_n",
             "cache_primer_until",
             "transport_retries",
             "misfire_limit",

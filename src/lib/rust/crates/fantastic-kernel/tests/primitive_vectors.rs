@@ -1,7 +1,6 @@
 //! PINS — the primitive python-format helpers of `fantastic-bundle`'s `text.rs` /
-//! `int.rs`, every expected value CPython 3.11's (`str.strip`, `str.isspace`, `int()`).
+//! `str.isspace`), every expected value CPython 3.11's (`str.strip`, `str.isspace`).
 
-use fantastic_bundle::PyError;
 use serde_json::json;
 
 /// `str.isspace()` is True, so `strip()` takes it.
@@ -39,37 +38,6 @@ fn py_strip_takes_exactly_cpythons_whitespace() {
         let s = format!("{c}x{c}");
         assert_eq!(fantastic_bundle::py_strip(&s), "x", "bundle U+{cp:04X}");
     }
-}
-
-#[test]
-fn py_int_saturates_at_the_i64_edges() {
-    use fantastic_bundle::py_int;
-    assert_eq!(py_int(&json!("99999999999999999999")), Ok(i64::MAX));
-    assert_eq!(py_int(&json!("-99999999999999999999")), Ok(i64::MIN));
-    assert_eq!(py_int(&json!("9223372036854775808")), Ok(i64::MAX));
-    assert_eq!(py_int(&json!("١٢")), Ok(12));
-    assert_eq!(py_int(&json!("1١")), Ok(11));
-    assert_eq!(py_int(&json!("1_0")), Ok(10));
-    assert_eq!(py_int(&json!(" 7 ")), Ok(7));
-    assert_eq!(py_int(&json!("\u{a0}7\u{3000}")), Ok(7));
-    assert_eq!(
-        py_int(&json!("\u{1c}7")),
-        Err(PyError::ValueError(
-            "invalid literal for int() with base 10: '\\x1c7'".into()
-        ))
-    );
-    assert_eq!(
-        py_int(&json!("²")),
-        Err(PyError::ValueError(
-            "invalid literal for int() with base 10: '²'".into()
-        ))
-    );
-    assert_eq!(
-        py_int(&json!("1__0")),
-        Err(PyError::ValueError(
-            "invalid literal for int() with base 10: '1__0'".into()
-        ))
-    );
 }
 
 fn lower_hex(s: &str) -> bool {

@@ -403,7 +403,7 @@ async fn an_unknown_verb_is_a_coded_refusal() {
         .result;
     assert_eq!(r["reason"], json!("unhandled"), "{r}");
     assert_eq!(r["verb"], json!("frobnicate"), "{r}");
-    // `shutdown` is declared by none: the shared entry answers it, nothing to release
+    // `shutdown` is declared by none: refused like any unknown verb
     let r = kernel
         .send(vec![Item::new(
             AgentId::from("static_loader"),
@@ -412,7 +412,7 @@ async fn an_unknown_verb_is_a_coded_refusal() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r, Value::Null);
+    assert_eq!(r["reason"], json!("unhandled"), "{r}");
 }
 
 #[tokio::test]
@@ -520,8 +520,8 @@ fn a_symlinked_manifest_escaping_the_state_folder_is_refused() {
 
 #[test]
 fn a_falsy_yaml_document_boots_empty() {
-    // `yaml.safe_load(text) or {}`.
-    for doc in ["", "~", "0", "false", "[]", "{}"] {
+    // an empty document is an empty mapping
+    for doc in ["", "~", "{}"] {
         let (fixture, rel) = write_manifest(doc);
         let agent = loader_with_meta(meta_of(&[("manifest", json!(rel))]));
         assert_eq!(
@@ -544,41 +544,8 @@ fn a_falsy_yaml_document_boots_empty() {
 }
 
 #[tokio::test]
-async fn handler_module_absent_or_falsy_is_refused_truthy_passes() {
-    // Python tests `not spec.get("handler_module")`.
-    for entry in [
-        "  - id: a\n",
-        "  - id: a\n    handler_module: ''\n",
-        "  - id: a\n    handler_module: 0\n",
-    ] {
-        let (kernel, _fixture) = boot_with_manifest(&format!("agents:\n{entry}")).await;
-        let r = kernel
-            .send(vec![Item::new(
-                AgentId::from("static_loader"),
-                json!({"type": "boot"}),
-            )])
-            .await
-            .remove(0)
-            .result;
-        assert_eq!(r["booted"], json!(false), "{entry}");
-        let want_spec = if entry.contains("handler_module: ''") {
-            "{'id': 'a', 'handler_module': ''}"
-        } else if entry.contains("handler_module: 0") {
-            "{'id': 'a', 'handler_module': 0}"
-        } else {
-            "{'id': 'a'}"
-        };
-        assert_eq!(
-            r["error"],
-            json!(format!(
-                "static_loader: each roster entry needs a handler_module: {want_spec}"
-            )),
-            "{entry}"
-        );
-    }
-    // A truthy non-string passes this check and is judged by `create_agent`.
-    let (kernel, _fixture) =
-        boot_with_manifest("agents:\n  - id: a\n    handler_module: 5\n").await;
+async fn a_roster_entry_without_a_handler_module_is_refused_and_a_bad_one_is_judged_by_create() {
+    let (kernel, _fixture) = boot_with_manifest("agents:\n  - id: a\n").await;
     let r = kernel
         .send(vec![Item::new(
             AgentId::from("static_loader"),
@@ -588,22 +555,36 @@ async fn handler_module_absent_or_falsy_is_refused_truthy_passes() {
         .remove(0)
         .result;
     assert_eq!(r["booted"], json!(false), "{r}");
-    assert!(
-        r["error"]
-            .as_str()
-            .unwrap()
-            .starts_with("static_loader: create failed for {'id': 'a', 'handler_module': 5}: "),
-        "{r}"
+    assert_eq!(
+        r["error"],
+        json!("static_loader: each roster entry needs a handler_module: {'id': 'a'}")
     );
+    // a handler_module that is empty or not text is judged by `create_agent`
+    for value in ["''", "0", "5"] {
+        let (kernel, _fixture) =
+            boot_with_manifest(&format!("agents:\n  - id: a\n    handler_module: {value}\n")).await;
+        let r = kernel
+            .send(vec![Item::new(
+                AgentId::from("static_loader"),
+                json!({"type": "boot"}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["booted"], json!(false), "{r}");
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("static_loader: create failed for {'id': 'a', 'handler_module': "),
+            "{r}"
+        );
+    }
 }
 
+/// A spec's own `type` key never changes the verb: the entry is created.
 #[tokio::test]
-async fn a_spec_type_key_overrides_the_create_verb() {
-    // Python spreads the spec OVER the verb, so an entry naming `type` decides what
-    // is sent. Here the manifest sends `reflect` to the kernel with the spec's own
-    // fields: the kernel checks that call against the declaration of `reflect`
-    // and refuses the first argument it does not take, naming it. No agent is
-    // created.
+async fn a_spec_type_key_cannot_change_the_create_verb() {
     let (kernel, _fixture) = boot_with_manifest(
         "agents:\n  - id: a\n    handler_module: mock.tools\n    type: reflect\n",
     )
@@ -616,10 +597,8 @@ async fn a_spec_type_key_overrides_the_create_verb() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["booted"], json!(false), "{r}");
-    let error = r["error"].as_str().unwrap_or("");
-    assert!(error.contains("reflect: unknown argument 'id'"), "{r}");
-    assert!(!kernel.agents.contains_key(&AgentId::from("a")), "{r}");
+    assert_eq!(r["booted"], json!(true), "{r}");
+    assert!(kernel.agents.contains_key(&AgentId::from("a")), "{r}");
 }
 
 #[test]

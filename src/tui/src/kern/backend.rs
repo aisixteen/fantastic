@@ -1209,7 +1209,7 @@ pub(crate) mod create_tests {
         let out = BackendBundle::spawn_instance_in(&h, &me, "fakeb", Map::new(), &state).await;
         assert_eq!(out["reason"], "bad_arg", "{out}");
         let e = out["error"].as_str().unwrap();
-        assert!(e.contains("view.tui[0].show") && e.contains("grid"), "{e}");
+        assert!(e.contains("view.tui[0]") && e.contains("show"), "{e}");
         // a good declaration spawns, and the instance carries it
         std::fs::write(bundle.join("bundle.yaml"), doc("kv")).unwrap();
         let out = BackendBundle::spawn_instance_in(&h, &me, "fakeb", Map::new(), &state).await;
@@ -1260,9 +1260,9 @@ pub(crate) mod create_tests {
             let r = ask(p.clone()).await;
             assert_eq!(why(&r), (Some("bad_arg".into()), Some(arg.into())), "{p}: {r}");
         }
-        // an empty required text is as good as none
+        // an empty required text is a wrong value
         let r = ask(json!({"type": "new_canvas", "name": ""})).await;
-        assert_eq!(why(&r), (Some("missing_arg".into()), Some("name".into())), "{r}");
+        assert_eq!(why(&r), (Some("bad_arg".into()), Some("name".into())), "{r}");
         let r = ask(json!({"type": "create", "record": {}})).await;
         assert_eq!(why(&r), (Some("missing_arg".into()), Some("record.handler_module".into())), "{r}");
         // a structural field makes a different agent: refused by the declared schema

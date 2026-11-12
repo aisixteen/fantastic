@@ -465,9 +465,8 @@ fn a_to_of_digits_is_one_recipient_written() {
 }
 
 #[test]
-fn to_items_are_python_str() {
-    // Recipients are `str(t).strip()`: the text as written, and a structure's python
-    // repr (`Value::to_string` gave JSON).
+fn to_items_are_their_text() {
+    // Recipients are the text as written, and a structure's JSON.
     let calls = extract_tool_calls(
         "<call name=\"send\"><to><item>true</item><item>1e20</item>\
          <item><a>x</a></item><item><item>y</item></item></to><type>reflect</type></call>",
@@ -475,7 +474,7 @@ fn to_items_are_python_str() {
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(
         calls[0].arguments.get("to"),
-        Some(&json!(["true", "1e20", "{'a': 'x'}", "['y']"]))
+        Some(&json!(["true", "1e20", "{\"a\":\"x\"}", "[\"y\"]"]))
     );
 }
 

@@ -20,7 +20,7 @@
 //!   producer.
 
 use async_trait::async_trait;
-use fantastic_bundle::{py_json_dumps, py_str};
+use fantastic_bundle::py_json_dumps;
 use fantastic_kernel::bootstrap::DEFAULT_ROOT_ID;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use schemars::JsonSchema;
@@ -184,9 +184,17 @@ fn line_prefix(src: Option<&str>) -> String {
     }
 }
 
+/// A detail value as it reads on a line: a text as itself, anything else as its JSON.
+fn text_of(v: &Value) -> String {
+    v.as_str().map_or_else(|| v.to_string(), str::to_string)
+}
+
 /// The text of one key of a detail map, `default` when absent.
 fn text_or(map: &Map<String, Value>, key: &str, default: &str) -> String {
-    map.get(key).map_or_else(|| default.to_string(), py_str)
+    match map.get(key) {
+        None | Some(Value::Null) => default.to_string(),
+        Some(v) => text_of(v),
+    }
 }
 
 /// `text` without its C0/C1 control characters (and DEL), newline and tab kept —
@@ -225,7 +233,7 @@ fn render_status(args: &Status) -> Option<String> {
             let target = text_or(&tool, "target", "");
             if let Some(preview) = tool.get("reply_preview") {
                 // exit — decided by KEY PRESENCE, so a null preview still exits
-                format!("{prefix} ← {verb}({target})  {}", py_str(preview))
+                format!("{prefix} ← {verb}({target})  {}", if preview.is_null() { String::new() } else { text_of(preview) })
             } else {
                 // entry — args summary on the line, python's `json.dumps`
                 let args = tool

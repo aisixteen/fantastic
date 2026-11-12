@@ -135,7 +135,7 @@ async fn a_live_egress_change_stamps_the_next_frame() {
     op(
         &k,
         json!({"type": "update_agent", "id": bid,
-               "egress_rule": {"type": "password_egress", "env": env}}),
+               "egress_rule": "password_egress", "token_env": env}),
     )
     .await;
     assert_eq!(forward_frame(&k, &bid, &peer).await["auth_token"], "grp-1");
@@ -150,27 +150,19 @@ async fn a_live_egress_change_stamps_the_next_frame() {
         .is_none());
 }
 
-/// An egress rule is resolved per forward now, so one the registry does not know
-/// refuses that forward, loud — nothing goes on the wire.
+/// An egress rule no list spells is refused at the write: the record keeps the
+/// rule it had, so no forward ever meets an unknown one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_unknown_egress_rule_written_live_refuses_the_forward() {
+async fn an_unknown_egress_rule_is_refused_at_the_write() {
     let tmp = TempDir::new().unwrap();
     let (k, bid, _peer) = leg(&tmp, "brg_badegress").await;
-    op(
+    let r = op(
         &k,
         json!({"type": "update_agent", "id": bid, "egress_rule": "nope_egress"}),
     )
     .await;
-    let out = ask(
-        &k,
-        &bid,
-        json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}, "forward_timeout": 30.0}),
-    )
-    .await;
-    assert_eq!(
-        out,
-        json!({"error": "bridge: bad auth rule: unknown egress rule type 'nope_egress'"})
-    );
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "egress_rule", "{r}");
 }
 
 /// `<bridge id>-<boot nonce>-<n>`: the id keeps bridges apart, the nonce keeps

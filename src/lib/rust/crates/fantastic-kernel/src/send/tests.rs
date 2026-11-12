@@ -955,46 +955,35 @@ async fn an_errored_call_row_stamps_the_python_error_and_reason() {
 }
 
 #[tokio::test]
-async fn a_falsy_non_string_error_settles_completed() {
-    // Python `ERRORED if isinstance(reply, dict) and reply.get("error")
-    // else COMPLETED` (`_agent.py:1051-1052`) — FULL truthiness, not "the key
-    // is present". `0`, `0.0`, `[]`, `{}` and `""` are all falsy.
+async fn only_a_null_or_empty_error_settles_completed() {
+    // An `error` that is null or empty text is no refusal; any other value is one.
     let (kernel, worker) = c36_kernel();
-    for falsy in [
-        json!(0),
-        json!(0.0),
-        json!([]),
-        json!({}),
-        json!(""),
-        json!(false),
-        Value::Null,
-    ] {
+    for none in [json!(""), Value::Null] {
         let out = kernel
             .send(vec![Item::new(
                 worker.id.clone(),
-                json!({"type": "echo_error", "error": falsy}),
+                json!({"type": "echo_error", "error": none}),
             )])
             .await
             .remove(0);
         assert_eq!(
             out.status,
             Status::Completed,
-            "a falsy error must settle completed: {falsy:?}"
+            "no error must settle completed: {none:?}"
         );
     }
-    // The contrast case: a TRUTHY non-string/non-bool error still errors.
-    for truthy in [json!(1), json!(-1), json!([1]), json!({"k": 1})] {
+    for some in [json!(0), json!(false), json!([]), json!({}), json!(1), json!([1]), json!({"k": 1})] {
         let out = kernel
             .send(vec![Item::new(
                 worker.id.clone(),
-                json!({"type": "echo_error", "error": truthy}),
+                json!({"type": "echo_error", "error": some}),
             )])
             .await
             .remove(0);
         assert_eq!(
             out.status,
             Status::Errored,
-            "a truthy error must still settle errored: {truthy:?}"
+            "an error must settle errored: {some:?}"
         );
     }
 }
@@ -1848,30 +1837,30 @@ const KERNEL_VERB_NAMES: [&str; 14] = [
 const KERNEL_VERB_TEXT: [(&str, &str, &str); 14] = [
     (
         "create_agent",
-        r####"args: handler_module:string?, parent_id:string (req), id:string?, bundle:string? — Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level"####,
-        r####"Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent. A handler_module that is a meta bundle (`bundles/<name>/bundle.yaml` with a base and no program) runs its base, with the `record` of the bundle under your fields; `bundle:<name>` beside the base is the same. The handler must be installed. Every argument beyond these is a field of that bundle's record (`reflect bundles=all` lists them), and a field it does not have is refused.
+        r####"args: handler_module:string of at least 1 character(s) (req), parent_id:string of at least 1 character(s) (req), id:string matching /^[0-9]*[^/\\|.0-9](?:[^/\\|.]|\.[^/\\|.])*\.?$/?, bundle:string? — Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level"####,
+        r####"Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent. A handler_module that is a meta bundle (`bundles/<name>/bundle.yaml` with a base and no program) runs its base, with the `record` of the bundle under your fields; `bundle:<name>` beside another handler_module names the bundle the record inherits from. The handler must be installed. Every argument beyond these is a field of that bundle's record (`reflect bundles=all` lists them), and a field it does not have is refused.
 
 args:
-  handler_module:string? — The bundle the agent runs (`file_bridge.tools`, or a bare bundle name such as `file_bridge`).
-  parent_id:string (req) — The agent that will OWN the new one: your own id for a tool you keep, `kernel_state` for a top-level agent.
-  id:string? — Its id. Absent: minted from the bundle's name.
+  handler_module:string of at least 1 character(s) (req) — The bundle the agent runs (`file_bridge.tools`, or a bare bundle name such as `file_bridge`).
+  parent_id:string of at least 1 character(s) (req) — The agent that will OWN the new one: your own id for a tool you keep, `kernel_state` for a top-level agent.
+  id:string matching /^[0-9]*[^/\\|.0-9](?:[^/\\|.]|\.[^/\\|.])*\.?$/? — Its id (one safe path segment: no separator, no `|`, not hidden, no `..`, not all digits). Absent: minted from the bundle's name.
   bundle:string? — The bundle a record inherits from when it runs another base than the bundle's own."####,
     ),
     (
         "update_agent",
-        r####"args: id:string (req) — EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE"####,
+        r####"args: id:string of at least 1 character(s) (req) — EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE"####,
         r####"EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT. Whoever holds update_agent on the root updates any agent, itself included. Every argument beyond `id` is a field of the agent's bundle's record, and a field it does not have is refused.
 
 args:
-  id:string (req) — The agent to update."####,
+  id:string of at least 1 character(s) (req) — The agent to update."####,
     ),
     (
         "delete_agent",
-        r####"args: id:string (req), keep_memory:bool? — CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`"####,
+        r####"args: id:string of at least 1 character(s) (req), keep_memory:bool? — CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`"####,
         r####"CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`. Whoever holds delete_agent on the root deletes any agent.
 
 args:
-  id:string (req) — The agent to delete.
+  id:string of at least 1 character(s) (req) — The agent to delete.
   keep_memory:bool? — `true` leaves the persisted memory of the whole subtree alone."####,
     ),
     (
@@ -1940,11 +1929,11 @@ No args."####,
     ),
     (
         "docs",
-        r####"args: of:string (req), tier:'oneliners'|'detailed'?, verb:string? — HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument"####,
+        r####"args: of:string matching /^[^|]+(?:\|[^|]+)?$/ (req), tier:'oneliners'|'detailed'?, verb:string? — HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument"####,
         r####"HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument. Without `verb` the reply also carries the bundle's short `man` text. Pull once per bundle; `detailed` for a verb you are about to use. Gated like every kernel verb: a `can_call` grant of `docs` on the root. Returns {of, bundle, tier, verbs, man?}.
 
 args:
-  of:string (req) — An agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'.
+  of:string matching /^[^|]+(?:\|[^|]+)?$/ (req) — An agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'.
   tier:'oneliners'|'detailed'? — How much of each verb: `oneliners` (default) or `detailed`.
   verb:string? — One verb's entry only."####,
     ),
@@ -2616,7 +2605,7 @@ async fn ack_deadletter_refusals_and_acks_are_byte_exact() {
         .remove(0);
     let did = done.pid.expect("an id").0;
 
-    let missing = r#"{"error":"ack_deadletter: missing argument 'id'","reason":"missing_arg","hint":"ack_deadletter takes — args: id:int|string (req). id: An execution id, or its name.","arg":"id","verb":"ack_deadletter"}"#;
+    let missing = r#"{"error":"ack_deadletter: argument 'id' must be int|string, got NoneType","reason":"bad_arg","hint":"ack_deadletter takes — args: id:int|string (req). id: An execution id, or its name.","arg":"id","verb":"ack_deadletter"}"#;
     assert_eq!(ack(Value::Null).await, missing);
     // text is a NAME, never a number: an empty one names no execution
     assert_eq!(

@@ -228,6 +228,10 @@ pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
     spec.insert("handler_module".into(), json!(rec.handler));
     crate::kern::backend::BackendBundle::make_ai(host, &fantastic_kernel::AgentId::from(PARENT), id, spec, peer).await?;
     for agent in [crate::kern::backend::provider_id(id), id.to_string()] {
+        // only an agent whose bundle declares `boot` is sent it
+        if !host.kernel.advertises(&fantastic_kernel::AgentId::from(agent.as_str()), "boot").await {
+            continue;
+        }
         let r = host.act(&agent, json!({"type": "boot"})).await;
         if let Some(e) = err_of(&r) {
             return Err(format!("`{agent}` was written but did not boot: {e}"));
@@ -270,7 +274,7 @@ mod tests {
             assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some(name)), "{r}");
         }
         // `type` is the call's own verb key, never a field: it is dropped, the verb stays
-        assert!(ok(json!({"type": "delete_agent"})).unwrap().is_empty());
+        assert!(!ok(json!({"type": "delete_agent"})).unwrap().contains_key("type"));
         // the ones the write sets itself are not the caller's
         for name in WRITE_OWNED {
             assert!(ok(json!({ name: "x" })).is_err(), "{name}");

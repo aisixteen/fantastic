@@ -4,7 +4,7 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::response::Response;
-use fantastic_bundle::{py_json_dumps, py_repr, py_str};
+use fantastic_bundle::{py_json_dumps, py_repr};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 
@@ -26,7 +26,7 @@ pub(crate) fn effective_host(rec: &Map<String, Value>) -> String {
 /// spellings when it binds loopback. NEVER derived from the request Host header.
 pub(crate) fn own_origins(rec: &Map<String, Value>) -> BTreeSet<String> {
     let host = effective_host(rec);
-    let port = rec.get("port").map_or_else(|| "None".to_string(), py_str);
+    let port = rec.get("port").and_then(Value::as_u64).map_or_else(|| "None".to_string(), |p| p.to_string());
     let mut out = BTreeSet::from([format!("http://{host}:{port}")]);
     if matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1") {
         out.insert(format!("http://127.0.0.1:{port}"));
@@ -43,7 +43,7 @@ pub(crate) fn own_origins(rec: &Map<String, Value>) -> BTreeSet<String> {
 /// answers only `0.0.0.0:<port>`.
 pub(crate) fn own_authorities(rec: &Map<String, Value>) -> BTreeSet<String> {
     let host = effective_host(rec);
-    let port = rec.get("port").map_or_else(|| "None".to_string(), py_str);
+    let port = rec.get("port").and_then(Value::as_u64).map_or_else(|| "None".to_string(), |p| p.to_string());
     let own = if host.contains(':') {
         format!("[{host}]:{port}")
     } else {

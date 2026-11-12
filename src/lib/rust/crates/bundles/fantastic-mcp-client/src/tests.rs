@@ -367,7 +367,7 @@ async fn docs_serve_this_agents_own_table_built_from_the_schemas() {
         "args: city:string (req), days:int?, region:string? — Current weather for a city"
     );
     assert!(d["verbs"]["picture"].as_str().unwrap().starts_with("No args"), "{d}");
-    assert_eq!(d["verbs"].as_object().unwrap().len(), 11, "{d}");
+    assert_eq!(d["verbs"].as_object().unwrap().len(), 10, "{d}");
     let full = send(
         &r.kernel,
         "kernel",
@@ -387,7 +387,7 @@ async fn docs_serve_this_agents_own_table_built_from_the_schemas() {
     .await
     .result;
     let verbs: Vec<&String> = b["verbs"].as_object().unwrap().keys().collect();
-    assert_eq!(verbs, ["boot", "reflect", "shutdown"]);
+    assert_eq!(verbs, ["boot", "reflect"]);
 }
 
 // ─── the wire ────────────────────────────────────────────────────────

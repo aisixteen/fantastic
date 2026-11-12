@@ -39,7 +39,7 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_bundle::{py_repr_value, py_str};
+use fantastic_bundle::py_repr_value;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::yaml_io;
 use fantastic_kernel::{AgentId, Item, Kernel, Status, SubscriberToken};
@@ -499,7 +499,7 @@ async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
                     // err.get("error"))` — an ABSENT `error` key reads `None`.
                     log_line(format!(
                         "scheduler {agent_id}: persist failed: {}",
-                        py_str(e.get("error").unwrap_or(&Value::Null))
+                        fantastic_kernel::refusal::error_text(&e).unwrap_or_default()
                     ));
                 }
                 fire_many(&agent_id, &kernel, &due).await;
@@ -542,31 +542,32 @@ fn fire_item(sch: &Value) -> Item {
         AgentId::from(sched_target(sch).as_str()),
         sched_payload(sch),
     );
-    // python `if sch.get("fire_timeout") is not None: item["timeout"] = sch["fire_timeout"]`
-    // — the value AS STORED, so the kernel validates it and its prose prints the
-    // number the schedule holds (`5` → `5s`, not `5.0s`).
-    if let Some(t) = sch.get("fire_timeout").filter(|v| !v.is_null()) {
-        item = item.with_raw_timeout(t.clone());
+    // the stored `fire_timeout` (a number, declared by the record) bounds the fire
+    if let Some(t) = sch.get("fire_timeout").and_then(Value::as_f64) {
+        item = item.with_timeout(t);
     }
     item
 }
 
 /// One fire's `(result, error)` pair for the `schedule_fired` event.
 ///
-/// `completed` ⇒ result is the reply and error stays NULL — even when that reply
-/// carries an `error` key, because the status is the verdict. Anything else ⇒
-/// `f"{status}: {detail}"`, where `detail` is `res["error"]` for a dict (ABSENT
-/// reads `None`) and the whole result otherwise, both through python's `str()`. A
-/// cancelled fire therefore reads `cancelled: None`.
+/// `completed` => result is the reply and error stays NULL, even when that reply
+/// carries an `error` key, because the status is the verdict. Anything else =>
+/// `"{status}: {detail}"`, where `detail` is the reply's error (an object) or the
+/// result's text, and just `"{status}"` when there is none.
 fn fire_outcome(status: Status, result: Value) -> (Value, Value) {
     if status == Status::Completed {
         return (result, Value::Null);
     }
     let detail = match &result {
-        Value::Object(m) => m.get("error").cloned().unwrap_or(Value::Null),
-        other => other.clone(),
+        Value::Object(_) => fantastic_kernel::refusal::error_text(&result).unwrap_or_default(),
+        Value::Null => String::new(),
+        other => other.as_str().map_or_else(|| other.to_string(), str::to_string),
     };
-    (Value::Null, json!(format!("{status}: {}", py_str(&detail))))
+    if detail.is_empty() {
+        return (Value::Null, json!(status.to_string()));
+    }
+    (Value::Null, json!(format!("{status}: {detail}")))
 }
 
 /// Fire every due schedule AS THE SCHEDULER — one batch send, its items
@@ -600,7 +601,7 @@ async fn fire_many(agent_id: &AgentId, kernel: &Arc<Kernel>, due: &[Value]) -> V
             // sid, err.get("error"))`.
             log_line(format!(
                 "scheduler {agent_id}: history persist failed: {}",
-                py_str(e.get("error").unwrap_or(&Value::Null))
+                fantastic_kernel::refusal::error_text(&e).unwrap_or_default()
             ));
         }
         // ONE delivery per tick (py-canonical): the payload send IS the tick; a

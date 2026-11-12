@@ -12,7 +12,7 @@ use serde_json::{json, Map, Value};
 
 use super::agent::{self, reflection};
 use super::verbs::Call;
-use fantastic_kernel::{Parse, Routed};
+use fantastic_kernel::Parse;
 use super::fake::FakeOs;
 use super::runner::Runner;
 use super::{wire, HomeOs, ID};
@@ -122,9 +122,8 @@ impl Replay {
         // THE ENTRY, with no kernel: the call is parsed and checked against the declared verbs
         match <Call as Parse>::parse(ID, payload, &[]) {
             Err(refused) => refused,
-            Ok(Routed::Answered(reply)) => reply,
-            Ok(Routed::Call(Call::Reflect(_))) => reflection(&self.runner, ID, None),
-            Ok(Routed::Call(call)) => agent::call(&self.runner, call).await,
+            Ok(Call::Reflect(_)) => reflection(&self.runner, ID, None),
+            Ok(call) => agent::call(&self.runner, call).await,
         }
     }
 

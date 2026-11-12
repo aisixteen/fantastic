@@ -806,7 +806,7 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        assert!(shown.contains("refused: view.tui[0].show"), "{shown}");
+        assert!(shown.contains("refused: view.tui[0]"), "{shown}");
         // a good declaration afterwards clears it
         p.set_decl(&two());
         assert!(p.decl_error.is_none() && p.sections.len() == 2);

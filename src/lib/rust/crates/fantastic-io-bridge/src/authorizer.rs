@@ -154,6 +154,19 @@ impl IngressName {
     }
 }
 
+/// The inbound filters an edge with no wire envelope takes (the file and process
+/// edges): the password rule reads a token off an envelope, which such an edge never
+/// has, so it is not a name there. The names spell as [`IngressName`]'s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum EnvelopelessIngress {
+    /// Permit every inbound action.
+    #[serde(rename = "allow_all_ingress")]
+    AllowAll,
+    /// Refuse every inbound action.
+    #[serde(rename = "deny_ingress")]
+    Deny,
+}
+
 /// The outbound DECORATOR a leg's record names (`egress_rule`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 pub enum EgressName {

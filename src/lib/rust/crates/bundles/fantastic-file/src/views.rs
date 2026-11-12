@@ -37,7 +37,11 @@ static WATCH: Verb = Verb::of::<verbs::Watch>("watch");
 static REVEAL: Verb = Verb::of::<verbs::Reveal>("reveal");
 
 fn dynamic(v: &Verb) -> DynVerb {
-    DynVerb::new(v.name, &v.doc(), v.schema())
+    DynVerb::new(
+        v.name,
+        &v.doc(),
+        v.schema().as_object().expect("a verb schema is an object"),
+    )
 }
 
 /// The verbs a view record answers beside the bridge's (`read`, `write` of a file,

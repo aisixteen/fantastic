@@ -479,8 +479,8 @@ async fn mark_lands_on_a_turn_boundary_outside_a_fold() {
     }
     // a label is required
     for (bad, reason) in [
-        (json!(null), "missing_arg"),
-        (json!(""), "missing_arg"),
+        (json!(null), "bad_arg"),
+        (json!(""), "bad_arg"),
         (json!("  "), "bad_arg"),
         (json!(3), "bad_arg"),
     ] {

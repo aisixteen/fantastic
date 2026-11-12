@@ -628,7 +628,8 @@ async fn the_totals_of_a_scripted_run_validate_against_the_request_and_the_provi
         assert_eq!(a["attributes"]["model"], p.model);
         assert_eq!(a["attributes"]["source"], agent.as_str());
     }
-    for r in all.iter().filter(|r| r["role"] == "user") {
+    // a harness notice is the agent's own text: its source is the agent
+    for r in all.iter().filter(|r| r["role"] == "user" && r["kind"] != "notice") {
         assert_eq!(r["attributes"]["source"], "cli", "{r}");
     }
     assert_eq!(

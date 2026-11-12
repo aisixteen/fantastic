@@ -496,6 +496,7 @@ impl Handler for McpClientBundle {
     /// THE SERVER'S CURRENT TOOL LIST: each tool is a verb of this agent, its arguments
     /// the tool's own `inputSchema`, checked by the one engine like any declared verb.
     fn dynamic_verbs(&self, agent: &Agent) -> Vec<DynVerb> {
+        let no_schema = Map::new();
         self.get(agent.id.as_str())
             .tools
             .unwrap_or_default()
@@ -511,7 +512,9 @@ impl Handler for McpClientBundle {
                 DynVerb::new(
                     name.clone(),
                     desc,
-                    tool.get("inputSchema").unwrap_or(&Value::Null),
+                    tool.get("inputSchema")
+                        .and_then(Value::as_object)
+                        .unwrap_or(&no_schema),
                 )
             })
             .collect()

@@ -118,32 +118,29 @@ async fn reflect_keys_match_python() {
     assert_eq!(obj["sealed"], json!(true));
 }
 
-/// The one write-time check every leg makes (python
-/// `validate_meta` → `io_bridge.unknown_ingress_refusal`): an unknown name or a
-/// malformed spec is refused with the wire legal values; a rule it implements is
-/// not.
+/// The record declaration judges the ingress rule: a name no rule spells, a number, an
+/// object, or a bad `token_env` is refused; each rule it implements is not.
 #[test]
-fn validate_meta_refuses_an_unknown_or_malformed_ingress_rule() {
-    for (spec, shown) in [
-        (json!("open_sesame"), "'open_sesame'"),
-        (json!(7), "7"),
-        (json!({"type": ["x"]}), "{'type': ['x']}"),
-        (
-            json!({"type": "password_ingress", "env": 7}),
-            "{'type': 'password_ingress', 'env': 7}",
-        ),
+fn the_record_declaration_judges_the_ingress_rule() {
+    let check = |meta: serde_json::Value| {
+        fantastic_kernel::verbs::check_record(
+            "update_agent",
+            "web_rest",
+            meta.as_object().unwrap(),
+            &fantastic_kernel::declared::record::RECORD,
+            &crate::record::RECORD,
+        )
+    };
+    for bad in [
+        json!({"ingress_rule": "open_sesame"}),
+        json!({"ingress_rule": 7}),
+        json!({"ingress_rule": {"type": "password_ingress", "env": "X"}}),
+        json!({"token_env": 7}),
     ] {
-        let mut meta = Map::new();
-        meta.insert("ingress_rule".into(), spec);
-        assert_eq!(
-            WebRestBundle.validate_meta(&meta, &Map::new()),
-            Some(format!(
-                "ingress_rule={shown} is not a rule this bundle implements — legal \
-                 values: allow_all_ingress, deny_ingress, password_ingress"
-            ))
-        );
+        let r = check(bad.clone()).expect_err("refused");
+        assert_eq!(r["reason"], "bad_arg", "{bad}: {r}");
     }
-    let mut meta = Map::new();
-    meta.insert("ingress_rule".into(), json!("password_ingress"));
-    assert_eq!(WebRestBundle.validate_meta(&meta, &Map::new()), None);
+    for ok in ["allow_all_ingress", "deny_ingress", "password_ingress"] {
+        assert!(check(json!({"ingress_rule": ok})).is_ok(), "{ok}");
+    }
 }

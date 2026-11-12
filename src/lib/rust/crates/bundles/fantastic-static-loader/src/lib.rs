@@ -21,7 +21,7 @@
 //! could match it and each reboot would mint another agent beside the last.
 
 use async_trait::async_trait;
-use fantastic_bundle::{py_repr, py_repr_value, py_str, py_truthy};
+use fantastic_bundle::{py_repr, py_repr_value};
 use fantastic_file::fs;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use schemars::JsonSchema;
@@ -113,9 +113,8 @@ fn load_manifest(agent: &Agent, base: &std::path::Path) -> Result<Vec<Value>, St
             py_repr(&path)
         )
     })?;
-    // `yaml.safe_load(text) or {}`: a python-FALSY document (empty, `~`, `0`,
-    // `false`, `[]`, `{}`) is an empty mapping, not a shape complaint.
-    let data = if py_truthy(&data) { data } else { json!({}) };
+    // an empty document is an empty mapping, not a shape complaint
+    let data = if data.is_null() { json!({}) } else { data };
     let Some(obj) = data.as_object() else {
         return Err(format!(
             "static_loader: manifest {} must be a mapping with `agents:`",
@@ -159,11 +158,10 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
     let mut created: Vec<String> = Vec::new();
     let mut reapplied: Vec<String> = Vec::new();
     for spec in agents {
-        // python: `not isinstance(spec, dict) or not spec.get("handler_module")`
-        // — a FALSY handler_module is as absent as none at all; any truthy value
-        // passes here and is judged by `create_agent`.
+        // an entry without a handler_module is no entry; the value is judged by
+        // `create_agent`.
         let handler_module = spec.as_object().and_then(|o| o.get("handler_module"));
-        if !handler_module.is_some_and(py_truthy) {
+        if !handler_module.is_some_and(|h| !h.is_null()) {
             return json!({
                 "error": format!(
                     "static_loader: each roster entry needs a handler_module: {}",
@@ -239,22 +237,21 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
                 }
             }
             if !patch.is_empty() {
-                // python spreads `**declared` LAST: a declared `type` key
-                // overrides the verb, and the verb keeps its leading position.
+                // the verb is set AFTER the declared fields: a declared `type` key can
+                // never change which verb is called.
                 let mut call = Map::new();
-                call.insert("type".to_string(), json!("update_agent"));
                 call.insert("id".to_string(), json!(id));
                 for (k, v) in patch {
                     call.insert(k, v);
                 }
+                call.insert("type".to_string(), json!("update_agent"));
                 let r = tree_verb(kernel, Value::Object(call)).await;
-                // Only a TRUTHY error is a failure — python tests `r.get("error")`.
-                if let Some(e) = r.get("error").filter(|e| py_truthy(e)) {
+                if let Some(e) = fantastic_kernel::refusal::error_text(&r) {
                     return json!({
                         "error": format!(
                             "static_loader: re-applying {}: {}",
                             py_repr(id),
-                            py_str(e)
+                            e
                         ),
                         "booted": false,
                     });
@@ -269,15 +266,11 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
         // grant is stamped + the manifest's explicit `can_call` merges on top;
         // the child boots inside create_agent. Kernel bookkeeping: the loader
         // hydrating the roster it was told to build.
-        // python: `{"type": "create_agent", **spec, "parent_id": agent.id}` — the
-        // verb leads (a spec `type` key overrides its VALUE, in place) and
-        // `parent_id` lands AFTER the spread, so an entry naming its own parent
-        // cannot place the agent outside the loader's subtree.
-        let mut payload = Map::new();
+        // The verb and `parent_id` land AFTER the spread: an entry cannot change the
+        // verb, and one naming its own parent cannot place the agent outside the
+        // loader's subtree.
+        let mut payload = obj.clone();
         payload.insert("type".to_string(), json!("create_agent"));
-        for (k, v) in obj.clone() {
-            payload.insert(k, v);
-        }
         payload.insert("parent_id".to_string(), json!(agent.id.0));
         let rec = tree_verb(kernel, Value::Object(payload)).await;
         match rec.get("id").and_then(Value::as_str) {
@@ -287,7 +280,7 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
                     "error": format!(
                         "static_loader: create failed for {}: {}",
                         py_repr_value(&spec),
-                        py_str(&rec)
+                        fantastic_kernel::refusal::error_text(&rec).unwrap_or_else(|| rec.to_string())
                     ),
                     "booted": false,
                 })

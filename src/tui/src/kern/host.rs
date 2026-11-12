@@ -222,11 +222,7 @@ async fn boot_the_rest(kernel: &Arc<Kernel>, done: &[String], web_port: Option<u
         if done.contains(&id.0) {
             continue;
         }
-        let declares_boot = kernel.agents.get(&id).map(|a| Arc::clone(&a)).is_some_and(|agent| {
-            agent.handler_module.as_deref().and_then(|hm| kernel.bundles.get(hm)).is_some_and(|b| {
-                b.verbs().iter().any(|v| v.name == "boot") || b.dynamic_verbs(&agent).iter().any(|v| v.name == "boot")
-            })
-        });
+        let declares_boot = kernel.advertises(&id, "boot").await;
         if web.contains(&id.0) {
             // No `--port` and none recorded (a `web` seeded without one): a free port is
             // picked once and recorded, as the first `canvas` does; later runs reuse it.

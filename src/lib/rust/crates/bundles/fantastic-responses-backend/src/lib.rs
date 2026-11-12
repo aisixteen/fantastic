@@ -662,6 +662,7 @@ pub struct ResponsesRecord {
     /// The model name (absent: the call's `model`, else `default_model`).
     pub model: Option<String>,
     /// The read clock on the answer stream: seconds with no byte from the endpoint (headers included) before the turn is judged stalled and ends with an error row.
+    #[serde(default)]
     #[schemars(schema_with = "fantastic_ai_core::record::stream_idle_seconds")]
     pub stream_idle_seconds: Option<f64>,
     /// A turn's output budget (tokens).

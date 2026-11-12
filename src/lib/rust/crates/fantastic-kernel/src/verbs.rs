@@ -308,6 +308,42 @@ macro_rules! verbs {
             }
         }
     };
+    // A bundle with no verb of its own: it answers the `reflect` every agent answers.
+    () => {
+        /// Every verb this bundle declares: none of its own.
+        pub static VERBS: &[$crate::verbs::Verb] = &[];
+
+        /// A call of this bundle's agents: `reflect` alone.
+        #[derive(Debug)]
+        pub enum Call {
+            /// The `reflect` verb every agent answers.
+            Reflect($crate::declared::common::Reflect),
+        }
+
+        impl $crate::verbs::Parse for Call {
+            fn parse(
+                agent: &str,
+                payload: &$crate::verbs::serde_json::Value,
+                _dynamic: &[$crate::verbs::DynVerb],
+            ) -> Result<Call, $crate::verbs::serde_json::Value> {
+                let (_, args) = $crate::verbs::resolve_builtin(
+                    agent,
+                    payload,
+                    &[VERBS, $crate::declared::common::VERBS],
+                )?;
+                $crate::verbs::serde_json::from_value::<$crate::declared::common::Reflect>(args)
+                    .map(Call::Reflect)
+                    .map_err(|e| $crate::verbs::unparsed("reflect", &e.to_string()))
+            }
+        }
+
+        /// This bundle's agents carry no verbs built at runtime: an explicit empty list
+        /// (what `Handler::dynamic_verbs` returns).
+        #[must_use]
+        pub fn dynamic_verbs(_agent: &$crate::Agent) -> Vec<$crate::verbs::DynVerb> {
+            Vec::new()
+        }
+    };
     ($($name:literal => $ty:ident),+ $(,)?) => {
         $crate::verbs!(
             @list args
@@ -1267,7 +1303,8 @@ pub fn check_record(
         for schema in [cs, os] {
             if let Some(Value::Array(req)) = schema.get("required") {
                 for r in req.iter().filter_map(Value::as_str) {
-                    if is_missing(fields.get(r)) {
+                    // a record field set to null is unset: it is not born with it
+                    if fields.get(r).map_or(true, Value::is_null) {
                         let mut refused = refusal_hint(
                             MISSING_ARG,
                             format!(

@@ -4,7 +4,6 @@
 use fantastic_ai_core::record::Credentials;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 /// What a relay_connector is in the relay's directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -50,12 +49,9 @@ pub struct WsRecord {
     /// The id of the `web_ws` leg on the far kernel (the URL's first segment).
     #[schemars(length(min = 1))]
     pub peer_id: Option<String>,
-    /// Who may reach this leg: a rule name (`allow_all_ingress`, `deny_ingress`, `password_ingress`) or `{type, env}`; absent, the leg is sealed.
-    pub ingress_rule: Option<Value>,
-    /// What this leg presents on a frame it sends: a rule name or `{type, env}`; absent, nothing.
-    pub egress_rule: Option<Value>,
-    /// The shorthand stem a rule name is built from per direction (`password`).
-    pub auth: Option<Value>,
+    /// The leg's ingress, egress and token rules.
+    #[serde(flatten)]
+    pub rules: fantastic_io_bridge::authorizer::Rules,
 }
 
 /// Seconds a forward or a directory read waits for its reply, when the call names none.
@@ -103,12 +99,9 @@ pub struct RelayRecord {
     pub owner_guid: Option<String>,
     /// What this peer exposes, as the directory lists it.
     pub exposes: Option<Vec<String>>,
-    /// Who may reach this leg: a rule name or `{type, env}`; absent, the leg is sealed.
-    pub ingress_rule: Option<Value>,
-    /// What this leg presents on a frame it sends: a rule name or `{type, env}`; absent, nothing.
-    pub egress_rule: Option<Value>,
-    /// The shorthand stem a rule name is built from per direction (`password`).
-    pub auth: Option<Value>,
+    /// The leg's ingress, egress and token rules.
+    #[serde(flatten)]
+    pub rules: fantastic_io_bridge::authorizer::Rules,
 }
 
 /// The ws_bridge's record declaration.

@@ -533,7 +533,7 @@ mod tests {
         )
         .await;
         let e = refresh_views(&h, "board", &dir).await.expect_err("refused");
-        assert!(e.contains("view.tui[0].show") && e.contains("grid"), "{e}");
+        assert!(e.contains("view.tui[0]") && e.contains("show"), "{e}");
         assert_eq!(view_of(&h), own, "the instance keeps its view");
     }
 

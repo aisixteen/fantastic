@@ -547,7 +547,7 @@ impl Kernel {
     ///
     /// False for a bare agent and for a handler_module no registry holds
     /// (python's unimportable bundle advertises nothing).
-    pub(crate) async fn advertises(self: &Arc<Self>, id: &AgentId, verb: &str) -> bool {
+    pub async fn advertises(self: &Arc<Self>, id: &AgentId, verb: &str) -> bool {
         let Some(agent) = self.agents.get(id).map(|e| Arc::clone(&e)) else {
             return false;
         };

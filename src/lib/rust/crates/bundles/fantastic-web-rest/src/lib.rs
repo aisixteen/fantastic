@@ -88,20 +88,6 @@ impl Handler for WebRestBundle {
         &record::RECORD
     }
 
-    /// The leg's `ingress_rule`, refused at the WRITE when no rule implements it
-    /// — the one check every leg makes (python `validate_meta` →
-    /// `io_bridge.unknown_ingress_refusal`).
-    fn validate_meta(
-        &self,
-        meta: &Map<String, Value>,
-        _record: &Map<String, Value>,
-    ) -> Option<String> {
-        fantastic_io_bridge::authorizer::ingress::unknown_refusal(
-            meta,
-            &fantastic_io_bridge::authorizer::ingress::REGISTRY,
-        )
-    }
-
     /// `inbound_call` — an admitted request the HTTP server hands in, sent onward
     /// as this leg, a raw body riding either way.
     async fn handle_binary(
@@ -137,7 +123,10 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         .get(agent_id)
         .map(|a| a.meta.read().expect("meta poisoned").clone())
         .unwrap_or_default();
-    if let Some(posture) = fantastic_io_bridge::authorizer::describe(&meta).as_object() {
+    if let Some(posture) = fantastic_io_bridge::authorizer::Rules::of(&meta)
+        .unwrap_or_default()
+        .describe()
+        .as_object() {
         for (k, v) in posture {
             out.insert(k.clone(), v.clone());
         }

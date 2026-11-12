@@ -65,7 +65,7 @@
 //! the handshake.
 
 use crate::AppState;
-use fantastic_io_bridge::authorizer::{ingress, manifold_spec, Action, Decision};
+use fantastic_io_bridge::authorizer::{ingress, Action, Decision, Rules};
 use fantastic_io_bridge::codec::{decode_binary_frame, encode_frame};
 use fantastic_io_bridge::ws_deflate::DeflateStream;
 use fantastic_kernel::{AgentId, Kernel};
@@ -180,12 +180,9 @@ struct Verbed {
 /// payload's `type`, otherwise the verb IS the kind (python `gate_inbound`).
 /// The credential rides the frame ENVELOPE (`auth_token`), never the payload.
 fn gate_leg(kernel: &Arc<Kernel>, leg: &AgentId, kind: &str, env: &Envelope) -> Decision {
-    let (primary, auth) = match kernel.agents.get(leg).map(|e| Arc::clone(&e)) {
-        Some(a) => {
-            let meta = a.meta.read().expect("meta poisoned");
-            (meta.get("ingress_rule").cloned(), meta.get("auth").cloned())
-        }
-        None => (None, None),
+    let rules = match kernel.agents.get(leg).map(|e| Arc::clone(&e)) {
+        Some(a) => Rules::of(&a.meta.read().expect("meta poisoned")).unwrap_or_default(),
+        None => Rules::default(),
     };
     let verb = if kind == "call" {
         env.payload
@@ -204,8 +201,7 @@ fn gate_leg(kernel: &Arc<Kernel>, leg: &AgentId, kind: &str, env: &Envelope) -> 
         .filter(|t| !t.is_empty())
         .or(env.src.as_deref())
         .unwrap_or("");
-    let spec = manifold_spec(primary.as_ref(), auth.as_ref(), "_ingress");
-    ingress::resolve(spec.as_ref()).authorize(&Action {
+    ingress::resolve(&rules).authorize(&Action {
         kind,
         target: addr,
         verb: &verb,
@@ -754,9 +750,8 @@ pub(crate) async fn ws_loop(
                 )
                 .await
                 .result;
-                let denial = asked
-                    .get("error")
-                    .is_some_and(fantastic_bundle::py_truthy)
+                let denial = fantastic_kernel::refusal::error_text(&asked)
+                    .is_some()
                     .then_some(asked);
                 if let Some(d) = denial {
                     let _ = out
@@ -803,8 +798,9 @@ pub(crate) async fn ws_loop(
                                             .read()
                                             .expect("meta lock poisoned")
                                             .get("display_name")
-                                            .filter(|v| fantastic_bundle::py_truthy(v))
-                                            .cloned()
+                                            .and_then(Value::as_str)
+                                            .filter(|s| !s.is_empty())
+                                            .map(Value::from)
                                     })
                                     .unwrap_or_else(|| Value::String(aid.to_string()));
                                 frame.insert("name".into(), name);
@@ -943,9 +939,8 @@ async fn watch_path(
     )
     .await
     .result;
-    let denial = asked
-        .get("error")
-        .is_some_and(fantastic_bundle::py_truthy)
+    let denial = fantastic_kernel::refusal::error_text(&asked)
+        .is_some()
         .then_some(asked);
     if let Some(d) = denial {
         kernel.remove_inbox(&reader);

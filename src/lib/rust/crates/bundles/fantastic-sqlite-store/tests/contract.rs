@@ -112,7 +112,9 @@ fn alpha(cases: &mut Value) {
             let text_in_ids = send["ids"]
                 .as_array()
                 .is_some_and(|a| a.iter().any(Value::is_string));
-            !(text_id("after") || text_id("limit") || text_in_ids)
+            // a limit of 0 is refused by the declared minimum (its own scenario below)
+            let zero_limit = send.get("limit") == Some(&json!(0));
+            !(text_id("after") || text_id("limit") || text_in_ids || zero_limit)
         });
         for st in list.iter_mut() {
             let send = st["send"].clone();
@@ -136,8 +138,8 @@ fn alpha(cases: &mut Value) {
                     });
                 }
                 ("refusals", "append") if send["rows"] == json!([]) => {
-                    // an empty list is below the declared `minItems`: the engine's missing_arg
-                    st["expect"] = json!({"reason": "missing_arg", "arg": "rows"});
+                    // an empty list is below the declared `minItems`: a wrong value
+                    st["expect"] = json!({"reason": "bad_arg", "arg": "rows"});
                 }
                 ("digit-string-refs-are-not-found", "append") if send["rows"][0]["refs"] == json!(["4"]) => {
                     // a text ref is no row id: refused, not looked up

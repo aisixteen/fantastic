@@ -194,6 +194,10 @@ async fn the_record_declaration_shapes_the_fields() {
         ("env", json!({"A": ["no"]}), "env.A"),
         ("inherit_env", json!([""]), "inherit_env"),
         ("inherit_env", json!("PATH"), "inherit_env"),
+        // a leg with no wire envelope takes no password rule; no other name is a rule
+        ("ingress_rule", json!("password_ingress"), "ingress_rule"),
+        ("ingress_rule", json!("open_sesame"), "ingress_rule"),
+        ("ingress_rule", json!({"type": "allow_all_ingress"}), "ingress_rule"),
     ] {
         let r = kernel
             .send(vec![Item::new(
@@ -206,35 +210,6 @@ async fn the_record_declaration_shapes_the_fields() {
         assert_eq!(r["reason"], "bad_arg", "{field}={value}: {r}");
         assert_eq!(r["arg"], json!(arg), "{field}={value}: {r}");
     }
-}
-
-#[test]
-fn password_ingress_is_refused_on_fs_and_process_legs() {
-    // The process half (the fs half lives in fantastic-file): a leg with no wire
-    // envelope can never present a token, so both spellings refuse at the write.
-    let b = ExecBridgeBundle;
-    for (field, spec) in [
-        ("ingress_rule", json!("password_ingress")),
-        (
-            "ingress_rule",
-            json!({"type": "password_ingress", "env": "X"}),
-        ),
-        ("auth", json!("password")),
-    ] {
-        let mut meta = Map::new();
-        meta.insert(field.to_string(), spec);
-        let e = b
-            .validate_meta(&meta, &Map::new())
-            .unwrap_or_else(|| panic!("{field} password must be refused"));
-        assert!(e.contains("wire envelope"), "{e}");
-        assert!(
-            e.contains("allow_all_ingress"),
-            "must teach the legal set: {e}"
-        );
-    }
-    let mut ok = Map::new();
-    ok.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
-    assert!(b.validate_meta(&ok, &Map::new()).is_none());
 }
 
 #[tokio::test]
@@ -262,7 +237,7 @@ async fn reflect_advertises_the_allowlist_not_interpreters() {
         [
             "shutdown", "start", "run", "status", "stop", "interrupt", "clear", "write", "resize",
             "ack", "output", "tail", "grep", "paste_image", "connector", "monitor", "monitors",
-            "unmonitor", "declare_verbs", "reflect", "shutdown"
+            "unmonitor", "declare_verbs", "reflect"
         ],
         "{r}"
     );
@@ -933,7 +908,7 @@ async fn a_declared_verb_is_queued_to_the_running_program() {
     // A slow cold start: the program registers its handler ~2.5 s after spawn.
     let code = r#"
 import threading, time
-kernel.send(kernel.self_id, {'type': 'declare_verbs', 'verbs': [{'name': 'ping'}]})
+kernel.send(kernel.self_id, {'type': 'declare_verbs', 'verbs': [{'name': 'ping', 'description': 'a ping', 'inputSchema': {'type': 'object'}}]})
 time.sleep(2.5)
 seen = []
 def _on(m):
@@ -982,7 +957,7 @@ async fn mail_sent_before_on_message_registers_is_not_delivered_and_the_ack_does
     let mut rx = inbox(&kernel, &a);
     let code = r#"
 import threading, time
-kernel.send(kernel.self_id, {'type': 'declare_verbs', 'verbs': [{'name': 'ping'}]})
+kernel.send(kernel.self_id, {'type': 'declare_verbs', 'verbs': [{'name': 'ping', 'description': 'a ping', 'inputSchema': {'type': 'object'}}]})
 time.sleep(2.5)
 seen = []
 def _on(m):
@@ -1035,7 +1010,7 @@ async fn an_undeclared_verb_is_refused_by_name() {
     assert_eq!(r["reason"], "unhandled", "{r}");
     assert_eq!(r["verb"], "ping", "{r}");
     assert!(
-        r["error"].as_str().unwrap_or("").contains("answers: start"),
+        r["error"].as_str().unwrap_or("").contains("answers: shutdown, start"),
         "{r}"
     );
 }
@@ -1048,7 +1023,7 @@ async fn declare_verbs_needs_a_running_job_and_a_free_name() {
     let r = kernel
         .send(vec![Item::new(
             a.clone(),
-            json!({"type": "declare_verbs", "verbs": [{"name": "ping"}]}),
+            json!({"type": "declare_verbs", "verbs": [{"name": "ping", "description": "a ping", "inputSchema": {"type": "object"}}]}),
         )])
         .await
         .remove(0)
@@ -1056,7 +1031,7 @@ async fn declare_verbs_needs_a_running_job_and_a_free_name() {
     assert_eq!(r["reason"], "not_found", "{r}");
     assert!(crate::mail::declared(&a).is_empty());
     // a name the agent answers is refused by the shared registry
-    let list = json!([{"name": "start"}]);
+    let list = json!([{"name": "start", "description": "x", "inputSchema": {"type": "object"}}]);
     let r = crate::mail::declare_for_test_result(&a, &list).expect_err("reserved");
     assert!(r["error"].as_str().unwrap().contains("already a verb"), "{r}");
 }
@@ -2155,10 +2130,10 @@ async fn refusal_texts_use_python_repr() {
     );
 }
 
-/// `validate_meta`'s texts are python's up to the engine tail after `': '`
+/// A broken `allowed` regex is refused with its text up to the engine tail after `': '`
 /// (that tail is the regex engine's own).
 #[test]
-fn validate_meta_texts_match_python() {
+fn a_broken_allowed_regex_names_the_pattern() {
     let b = ExecBridgeBundle;
     let mut broken = Map::new();
     broken.insert("allowed".to_string(), json!(["("]));
@@ -2166,38 +2141,6 @@ fn validate_meta_texts_match_python() {
     assert!(
         e.starts_with("allowed contains a broken regex '(': "),
         "{e}"
-    );
-    // The spec is repr'd, not JSON-printed.
-    let mut pw = Map::new();
-    pw.insert("auth".to_string(), json!("password"));
-    assert_eq!(
-        b.validate_meta(&pw, &Map::new()).expect("refused"),
-        "auth='password' is not applicable to the process edge: a leg with no wire \
-         envelope can never present a token — legal values: allow_all_ingress, deny_ingress"
-    );
-}
-
-/// Only an UNKNOWN RULE NAME is refused. A falsy spec and a type-less rule
-/// object are a plain seal (python resolves them to `DenyInbound()` with no
-/// `unknown`), and `password_ingress` resolves fine here — it is the stem check that
-/// refuses it on this edge.
-#[test]
-fn validate_meta_refuses_only_unknown_ingress_rules() {
-    let b = ExecBridgeBundle;
-    for silent in [json!(""), json!(null), json!({"env": "X"})] {
-        let mut meta = Map::new();
-        meta.insert("ingress_rule".to_string(), silent.clone());
-        assert!(
-            b.validate_meta(&meta, &Map::new()).is_none(),
-            "{silent} must seal silently"
-        );
-    }
-    let mut bogus = Map::new();
-    bogus.insert("ingress_rule".to_string(), json!({"type": "nope"}));
-    assert_eq!(
-        b.validate_meta(&bogus, &Map::new()).expect("refused"),
-        "ingress_rule={'type': 'nope'} is not a rule this bundle implements — \
-         legal values: allow_all_ingress, deny_ingress"
     );
 }
 
@@ -2764,10 +2707,8 @@ fn the_record_auth_token_is_never_a_credential() {
     let env = "FANTASTIC_GROUP_TOKEN_EXEC_A4_16";
     std::env::set_var(env, "s3cret");
     let mut meta = Map::new();
-    meta.insert(
-        "ingress_rule".to_string(),
-        json!({"type": "password_ingress", "env": env}),
-    );
+    meta.insert("ingress_rule".to_string(), json!("password_ingress"));
+    meta.insert("token_env".to_string(), json!(env));
     meta.insert("auth_token".to_string(), json!("s3cret"));
     let denied = gate(&meta, &AgentId::from("px"), "start")
         .expect("a record-held token must not satisfy the rule");

@@ -175,6 +175,10 @@ pub async fn ensure(kernel: &Arc<Kernel>, port: Option<u16>) -> Result<u16, Stri
         boots.push(WEB);
     }
     for id in boots {
+        // only an agent whose bundle declares `boot` is sent it
+        if !kernel.advertises(&AgentId::from(id), "boot").await {
+            continue;
+        }
         operator(kernel, id, json!({"type": "boot"}))
             .await
             .map_err(|e| format!("`{id}` did not boot: {e}"))?;

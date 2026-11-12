@@ -436,11 +436,6 @@ async fn sent_num_predict(tag: &str, extra: Value) -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_record_with_no_num_predict_sends_the_bounded_default() {
     assert_eq!(sent_num_predict("npd", json!({})).await, json!(260_000));
-    // 0 reads as unset (as in reflect): the default bounds it too
-    assert_eq!(
-        sent_num_predict("np0", json!({"num_predict": 0})).await,
-        json!(260_000)
-    );
     // the record's own wins, above or below the default
     assert_eq!(
         sent_num_predict("npw", json!({"num_predict": 200})).await,
@@ -703,10 +698,7 @@ async fn reflect_extras_match_python() {
         .collect::<Vec<_>>(),
         "{r:#?}"
     );
-    assert_eq!(
-        r["sentence"],
-        "Ollama-backed LLM agent (raw prompt-and-parse tool-calling)."
-    );
+    assert_eq!(r["sentence"], crate::MAN);
     assert_eq!(r["temperature"], 0.3);
     assert_eq!(r["num_ctx"], Value::Null);
     assert_eq!(r["num_predict"], Value::Null);
@@ -717,7 +709,7 @@ async fn reflect_extras_match_python() {
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": backend.as_str(),
-                   "temperature": 0.7, "num_ctx": 4096, "num_predict": 0,
+                   "temperature": 0.7, "num_ctx": 4096, "num_predict": 200,
                    "think": false}),
         )])
         .await;
@@ -728,7 +720,7 @@ async fn reflect_extras_match_python() {
         .result;
     assert_eq!(r["temperature"], 0.7);
     assert_eq!(r["num_ctx"], 4096);
-    assert_eq!(r["num_predict"], 0);
+    assert_eq!(r["num_predict"], 200);
     assert_eq!(r["think"], false);
 }
 
@@ -750,13 +742,13 @@ async fn unknown_type_is_pythons_repr_and_shutdown_is_unknown() {
             .result;
         assert!(r["error"].as_str().is_some_and(|e| e.starts_with(want)), "{r}");
     }
-    // `shutdown` is no verb of this bundle: the shared entry answers it, nothing to release
+    // `shutdown` is no verb of this bundle: refused like any unknown one
     let r = kernel
         .send(vec![Item::new(agent.clone(), json!({"type": "shutdown"}))])
         .await
         .remove(0)
         .result;
-    assert_eq!(r, Value::Null);
+    assert_eq!(r["reason"], "unhandled");
 }
 
 /// PROVIDER-REPORTED USAGE off the NDJSON stream: `prompt_eval_count` calibrates

@@ -322,9 +322,9 @@ mod tests {
             assert_eq!(r["reason"], "bad_arg", "{p}: {r}");
             assert_eq!(r["arg"], json!(arg), "{p}: {r}");
         }
-        // an empty required text is as good as none
+        // an empty required text is a wrong value
         let r = ask(json!({"type": "store_key", "module": "m", "endpoint": "e", "secret": ""})).await;
-        assert_eq!(why(&r), (Some("missing_arg"), Some("secret")), "{r}");
+        assert_eq!(why(&r), (Some("bad_arg"), Some("secret")), "{r}");
         // the one answer needing no host: reflect
         let r = ask(json!({"type": "reflect"})).await;
         assert_eq!(r["handler_module"], HANDLER_MODULE, "{r}");

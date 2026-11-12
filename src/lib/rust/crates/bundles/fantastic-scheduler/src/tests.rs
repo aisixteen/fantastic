@@ -411,7 +411,7 @@ async fn schedule_requires_target_and_payload_type() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r4["reason"], "missing_arg", "{r4}");
+    assert_eq!(r4["reason"], "bad_arg", "{r4}");
     assert_eq!(r4["arg"], "payload.type", "{r4}");
 }
 
@@ -929,11 +929,11 @@ async fn reflect_renders_every_declared_verb() {
     ] {
         assert!(verbs.contains_key(name), "{name} missing: {r}");
     }
-    // the eight declared, and the `reflect` and `shutdown` every agent answers
+    // the nine declared (`boot` and `shutdown` among them), and the `reflect` every agent answers
     assert_eq!(verbs.len(), 10, "{r}");
     let unschedule = verbs["unschedule"].as_str().unwrap();
     assert!(
-        unschedule.starts_with("args: schedule_id:string (req)"),
+        unschedule.starts_with("args: schedule_id:string of at least 1 character(s) (req)"),
         "{unschedule}"
     );
     let schedule = verbs["schedule"].as_str().unwrap();
@@ -947,23 +947,6 @@ async fn reflect_renders_every_declared_verb() {
         history.contains("limit:int >= 1 (default 100)"),
         "{history}"
     );
-}
-
-/// `shutdown` is not a declared verb: the shared entry answers it `null`, and the
-/// tick loop keeps running — it dies only with the agent (`on_delete`).
-#[tokio::test]
-async fn undeclared_shutdown_answers_null_and_stops_nothing() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, sch) = mk_kernel(&tmp).await;
-    assert!(!verbs::VERBS.iter().any(|v| v.name == "shutdown"));
-    let r = kernel
-        .send(vec![Item::new(sch.clone(), json!({"type": "shutdown"}))])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r, Value::Null, "{r}");
-    let r = reflect_reply(&sch, &kernel);
-    assert_eq!(r["running"], true, "{r}");
 }
 
 /// Refusals quote with python's `repr`.
@@ -1181,27 +1164,27 @@ async fn recreated_scheduler_drops_the_process_cache() {
     );
 }
 
-/// A non-`completed` fire reads `'<status>: ' + str(detail)`, and a detail
-/// python never had reads `None`. `completed` keeps `error` null even when the
-/// reply itself carries an `error` key: the STATUS is the verdict.
+/// A non-`completed` fire reads `<status>: <detail>`, and no detail reads the status
+/// alone. `completed` keeps `error` null even when the reply itself carries an
+/// `error` key: the STATUS is the verdict.
 #[test]
-fn cancelled_fire_error_reads_none() {
+fn cancelled_fire_error_reads_the_status() {
     assert_eq!(
         fire_outcome(Status::Cancelled, Value::Null),
-        (Value::Null, json!("cancelled: None"))
+        (Value::Null, json!("cancelled"))
     );
     assert_eq!(
         fire_outcome(Status::Cancelled, json!({})),
-        (Value::Null, json!("cancelled: None"))
+        (Value::Null, json!("cancelled"))
     );
     assert_eq!(
         fire_outcome(Status::TimedOut, json!({"error": "gone"})),
         (Value::Null, json!("timed_out: gone"))
     );
-    // A non-dict result is `str()`'d whole.
+    // A non-object result is its JSON text.
     assert_eq!(
         fire_outcome(Status::Failed, json!([1, "x"])),
-        (Value::Null, json!("failed: [1, 'x']"))
+        (Value::Null, json!("failed: [1,\"x\"]"))
     );
     // `completed` carries the reply through and leaves `error` null.
     assert_eq!(
@@ -1392,16 +1375,13 @@ async fn a_failed_persist_prints_python_line() {
     assert!(history.contains("no store"), "{history}");
 }
 
-/// python `item["timeout"] = sch["fire_timeout"]`: a fire carries the timeout AS
-/// STORED (an int stays an int), so the kernel's prose and call row print the
-/// schedule's own number.
+/// A fire carries the stored `fire_timeout` as the item's timeout; none stored, none set.
 #[test]
-fn a_fire_carries_the_stored_timeout_raw() {
+fn a_fire_carries_the_stored_timeout() {
     let item = fire_item(&json!({"target": "t", "payload": {"type": "x"}, "fire_timeout": 5}));
-    assert_eq!(item.raw_timeout, Some(json!(5)));
-    assert!(item.timeout.is_none());
+    assert_eq!(item.timeout, Some(5.0));
     let item = fire_item(&json!({"target": "t", "payload": {"type": "x"}, "fire_timeout": null}));
-    assert!(item.raw_timeout.is_none());
+    assert!(item.timeout.is_none());
 }
 
 /// An unknown verb is refused by the agent's own entry, naming what it answers; the

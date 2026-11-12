@@ -117,28 +117,13 @@ fn scoped_path(call: &verbs::Call) -> Option<&str> {
 impl Handler for FileBundle {
     type Call = verbs::Call;
 
-    /// Refuse an `ingress_rule` no resolver implements. Mirrors py
-    /// `file_bridge.validate_meta`: an unknown rule now SEALS rather than erroring,
-    /// so the edge is safe either way — but reporting `{"updated": true}` for a
-    /// security control that does not exist is its own failure, and the complaint
-    /// belongs at the write, next to the typo.
-    ///
-    /// Only a PRESENT `ingress_rule` is judged, as python judges it: the `auth`
-    /// stem is a both-directions shorthand whose ingress half this registry may
-    /// legitimately not name.
+    /// What the declared record cannot say: a view's path shape.
     fn validate_meta(
         &self,
         meta: &Map<String, Value>,
         _record: &Map<String, Value>,
     ) -> Option<String> {
-        if let Some(bad) = views::view_refusal(meta) {
-            return Some(bad);
-        }
-        fantastic_io_bridge::authorizer::ingress::unknown_refusal(
-            meta,
-            &["allow_all_ingress", "deny_ingress"],
-        )
-        .or_else(|| password_refusal(meta, "fs edge"))
+        views::view_refusal(meta)
     }
 
     fn name(&self) -> &str {
@@ -350,17 +335,13 @@ fn view_scope(
 /// `None` to admit. Shared by the text (`handle`) and binary (`handle_binary`)
 /// channels so a sealed bridge refuses streamed bytes exactly like a text call.
 fn gate(meta: &Map<String, Value>, agent_id: &AgentId, verb: &str) -> Option<Value> {
-    let spec = fantastic_io_bridge::authorizer::manifold_spec(
-        meta.get("ingress_rule"),
-        meta.get("auth"),
-        "_ingress",
-    );
-    let rule = fantastic_io_bridge::authorizer::ingress::resolve(spec.as_ref());
+    let rules = fantastic_io_bridge::authorizer::Rules::of(meta).unwrap_or_default();
+    let rule = fantastic_io_bridge::authorizer::ingress::resolve(&rules);
     // NO token: the fs edge has no wire envelope, so nothing can present one.
     // The gate never reads the record for a credential: a persisted secret in
     // the portable workdir satisfying a `password_ingress` leg is the one thing
-    // the password rule exists to prevent. `password_ingress` is refused at
-    // `validate_meta`.
+    // the password rule exists to prevent. `password_ingress` is not a name of
+    // this edge's record.
     let action = fantastic_io_bridge::authorizer::Action {
         kind: "call",
         target: agent_id.0.as_str(),
@@ -641,30 +622,6 @@ fn one_file(a: &str, b: &str) -> bool {
     norm(a).is_some_and(|n| n != "." && Some(&n) == norm(b).as_ref())
 }
 
-/// `password_ingress` is meaningless on an in-process leg: the token is read
-/// off a WIRE ENVELOPE, and the fs/process edges have none — no frame ever
-/// presents one, so the rule could only ever refuse or, worse, be
-/// satisfied by a secret persisted ON THE RECORD. Refused at the write, next
-/// to the mistake. Both
-/// spellings: the scoped `ingress_rule` and the `auth` stem. Shared with
-/// `fantastic-exec-bridge`.
-pub fn password_refusal(meta: &Map<String, Value>, edge: &str) -> Option<String> {
-    for (field, stem) in [("ingress_rule", "password_ingress"), ("auth", "password")] {
-        let Some(spec) = meta.get(field) else {
-            continue;
-        };
-        if fantastic_io_bridge::authorizer::rule_name(Some(spec), "") == stem {
-            return Some(format!(
-                "{field}={} is not applicable to the {edge}: a leg with no wire \
-                 envelope can never present a token — legal values: \
-                 allow_all_ingress, deny_ingress",
-                py_repr_value(spec)
-            ));
-        }
-    }
-    None
-}
-
 // ─── the allow list (what this bridge exposes) ──────────────────
 //
 // DENY-ALL AT THE PATH LEVEL — python `file_bridge` is canonical. The record's
@@ -882,7 +839,10 @@ fn reflect_reply(
     out.insert("compose".to_string(), json!(COMPOSE));
     // The auth POSTURE, python's `describe(rec)`: rule NAMES (never config),
     // keyed by the field a caller WRITES (read-key == write-key), + `sealed`.
-    if let Some(posture) = fantastic_io_bridge::authorizer::describe(meta).as_object() {
+    if let Some(posture) = fantastic_io_bridge::authorizer::Rules::of(meta)
+        .unwrap_or_default()
+        .describe()
+        .as_object() {
         for (k, v) in posture {
             out.insert(k.clone(), v.clone());
         }

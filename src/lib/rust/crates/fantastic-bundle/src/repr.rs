@@ -90,34 +90,17 @@ fn write_repr(v: &Value, out: &mut String) {
     }
 }
 
-/// `str(x)` — what `{x}` and `%s` print: a `str` as itself, everything else as
-/// its repr (a container's elements are always repr'd).
+/// python's type name for the object a JSON value decodes to (`type(x).__name__`).
 #[must_use]
-pub fn py_str(v: &Value) -> String {
+pub fn py_type_name(v: &Value) -> &'static str {
     match v {
-        Value::String(s) => s.clone(),
-        other => py_repr_value(other),
-    }
-}
-
-/// python truthiness: `None`, `False`, `0`, `0.0`, `""`, `[]` and `{}` are false.
-#[must_use]
-pub fn py_truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                i != 0
-            } else if let Some(u) = n.as_u64() {
-                u != 0
-            } else {
-                n.as_f64().is_some_and(|f| f != 0.0)
-            }
-        }
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(n) if n.is_f64() => "float",
+        Value::Number(_) => "int",
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
     }
 }
 

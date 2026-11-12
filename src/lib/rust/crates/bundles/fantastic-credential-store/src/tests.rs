@@ -829,7 +829,7 @@ async fn the_refs_declaration_judges_each_entry_by_name() {
     for (refs, reason, arg) in [
         (json!({"r": 1}), "bad_arg", "refs.r"),
         (json!({"r": {}}), "missing_arg", "refs.r.host"),
-        (json!({"r": {"host": null}}), "missing_arg", "refs.r.host"),
+        (json!({"r": {"host": null}}), "bad_arg", "refs.r.host"),
         (json!({"r": {"host": "://"}}), "bad_arg", "refs.r.host"),
         (json!({"r": {"host": "  "}}), "bad_arg", "refs.r.host"),
         (json!({"r": {"host": "h", "env": {"api_key": ""}}}), "bad_arg", "refs.r.env.api_key"),
@@ -874,7 +874,7 @@ async fn missing_args_and_unknown_verbs_are_refused_by_the_agents_entry() {
     let f = mk(json!({})).await;
     for (payload, reason, arg) in [
         (json!({"type": "set", "fields": {"k": "v"}}), "missing_arg", "ref"),
-        (json!({"type": "get", "ref": ""}), "missing_arg", "ref"),
+        (json!({"type": "get", "ref": ""}), "bad_arg", "ref"),
         (json!({"type": "forget"}), "missing_arg", "ref"),
         (json!({"type": "set", "host": "h", "ref": "r", "fields": {"k": "v"}}), "bad_arg", "host"),
     ] {

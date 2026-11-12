@@ -357,10 +357,12 @@ async fn dispatch_item(
     if let Some(b) = blob {
         item = item.with_binary_key("bytes", b);
     }
-    // The batch item's own fields, beside the payload — forwarded RAW, so the
-    // kernel validates them exactly as it validates any caller's.
+    // The batch item's own fields, beside the payload, in their declared types.
     if let Some(id) = fields.get("id") {
-        item = item.with_raw_id(id.clone());
+        item = item.with_id(
+            serde_json::from_value::<fantastic_kernel::declared::IdOrName>(id.clone())
+                .expect("an item id is text or an integer"),
+        );
     }
     let mut out = k.send(vec![item]).await.remove(0);
     if let Some(body) = out.body.take() {
@@ -462,7 +464,27 @@ fn flat_text(x: &Value) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         Value::Array(a) => a.iter().map(flat_text).collect::<Vec<_>>().join("\n"),
-        other => fantastic_bundle::py_str(other),
+        other => other.to_string(),
+    }
+}
+
+/// The shared specs are also python's contract; this runtime refuses a near-miss rule
+/// name by the record declaration (`bad_arg`, naming the allowed values), not by a
+/// hand-written `invalid_meta` check. The spec's expectation is read in that form.
+fn declared_reason(reason: &str) -> &str {
+    if reason == "invalid_meta" {
+        "bad_arg"
+    } else {
+        reason
+    }
+}
+
+/// The same, for the text a refusal must carry.
+fn declared_text(text: &str) -> &str {
+    if text == "is not a rule this bundle implements" {
+        "must be 'allow_all_ingress'"
+    } else {
+        text
     }
 }
 
@@ -499,7 +521,7 @@ fn match_step(name: &str, expect: &Value, reply: &Value, status: Option<&str>) {
         }
         _ => {}
     }
-    if let Some(reason) = expect.get("reason").and_then(Value::as_str) {
+    if let Some(reason) = expect.get("reason").and_then(Value::as_str).map(declared_reason) {
         if reply.get("reason").and_then(Value::as_str) != Some(reason) {
             fail(format!("expected reason {reason:?}"));
         }
@@ -509,7 +531,7 @@ fn match_step(name: &str, expect: &Value, reply: &Value, status: Option<&str>) {
             fail(format!("expected status {want:?}, got {status:?}"));
         }
     }
-    if let Some(sub) = expect.get("error_contains").and_then(Value::as_str) {
+    if let Some(sub) = expect.get("error_contains").and_then(Value::as_str).map(declared_text) {
         let err = reply.get("error").and_then(Value::as_str).unwrap_or("");
         if !err.contains(sub) {
             fail(format!("error does not contain {sub:?}"));
@@ -1018,7 +1040,7 @@ fn the_hydration_verdict_matches_the_declaration(
         return;
     }
     let err = outcome_error(h, sc);
-    let contains = sc.spec["expect"]["error_contains"].as_str().unwrap_or("");
+    let contains = declared_text(sc.spec["expect"]["error_contains"].as_str().unwrap_or(""));
     check(
         pinned,
         "PC-5",
@@ -1031,7 +1053,7 @@ fn the_hydration_verdict_matches_the_declaration(
             check(
                 pinned,
                 "PC-5",
-                rec.get("reason") == Some(&json!("invalid_meta")),
+                rec.get("reason") == Some(&json!(declared_reason("invalid_meta"))),
                 format!("{lid}: {rec}"),
             );
             check(

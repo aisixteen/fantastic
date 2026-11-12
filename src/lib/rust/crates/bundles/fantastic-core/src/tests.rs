@@ -102,7 +102,6 @@ async fn root_with_handler_reflects_identity() {
     }
     // The loader's contribution, python's distilled set.
     assert!(v["persistence"].is_object());
-    assert!(v.get("self_extension").is_some());
 }
 
 /// The FULL frame's key order — persistence, guid, self_extension — appended after
@@ -760,8 +759,10 @@ async fn loader_verbs_refuse_a_missing_id_by_their_declaration() {
         .remove(0)
         .result;
     assert_eq!(r["reason"], "bad_arg", "{r}");
-    assert_eq!(
-        r["error"], "read_bundles: argument 'name' must be string, got int",
+    assert!(
+        r["error"]
+            .as_str()
+            .is_some_and(|e| e.starts_with("read_bundles: argument 'name' must be string") && e.ends_with("got int")),
         "{r}"
     );
     assert!(!tmp.path().join(".fantastic/agents/note").exists());
@@ -1088,8 +1089,8 @@ fn root_export_subtree_is_in_the_roots_verbs_and_docs() {
         name: verb.name,
         schema: verb.schema(),
     });
-    assert!(doc.contains("agent_id:string (req)"), "{doc}");
-    assert!(doc.contains("path:string (req)"), "{doc}");
+    assert!(doc.contains("agent_id:string of at least 1 character(s) (req)"), "{doc}");
+    assert!(doc.contains("path:string of at least 1 character(s) matching"), "{doc}");
     assert!(doc.contains("{exported, path, ports, files}"), "{doc}");
 }
 

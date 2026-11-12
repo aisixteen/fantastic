@@ -1703,25 +1703,33 @@ async fn route_reply_gated(
         // as a refusal the model can read.
         item = item.with_timeout(send_timeout);
         // The model may NAME the execution (dedup/join across retries) and may
-        // bound its own call. FORWARDED RAW — the kernel is what
-        // validates all three and produces python's exact refusals; this used
-        // to coerce with `.and_then(Value::as_str/as_f64/as_u64)`, which
-        // silently DROPPED anything that did not already match the expected
-        // shape (an int `exec_id` never attempted the join python performs; a
-        // malformed `timeout` like `"soon"` vanished, defaulting to
-        // `send_timeout`, instead of settling the kernel's `bad_arg` refusal).
-        // `exec_id`, not `id`: arguments are INLINE now, so a bare `<id>` would
-        // collide with the many verbs whose payload has one (`delete_agent`,
-        // `update_agent`, …). The parser keeps the name at the call level; here
-        // it becomes the item's execution name.
+        // bound its own call; each is carried in its declared type. `exec_id`, not
+        // `id`: arguments are INLINE, so a bare `<id>` would collide with the many
+        // verbs whose payload has one (`delete_agent`, `update_agent`, ...).
         if let Some(id) = args.get("exec_id") {
-            item = item.with_raw_id(id.clone());
+            match serde_json::from_value::<fantastic_kernel::declared::IdOrName>(id.clone()) {
+                Ok(id) => item = item.with_id(id),
+                Err(_) => {
+                    let refused = fantastic_kernel::refusal::bad("send", "exec_id", "text or an integer");
+                    if let Some(rt) = reply_to {
+                        units.push(Unit {
+                            dest: rt,
+                            target: target.to_string(),
+                            verb: "-".to_string(),
+                            idx: None,
+                            body: Some(crate::tool_parse::render_reply(&refused)),
+                            title: None,
+                        });
+                    }
+                    continue;
+                }
+            }
         }
-        if let Some(t) = &timeout_read {
-            item = item.with_raw_timeout(t.clone());
+        if let Some(t) = timeout_read.as_ref().and_then(Value::as_f64) {
+            item = item.with_timeout(t);
         }
-        if let Some(r) = &retries_read {
-            item = item.with_raw_retries(r.clone());
+        if let Some(r) = retries_read.as_ref().and_then(Value::as_u64) {
+            item = item.with_retries(u32::try_from(r).unwrap_or(u32::MAX));
         }
         items.push(item);
         deadlines.push(

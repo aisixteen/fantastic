@@ -231,18 +231,18 @@ fn any_of_requires_one_alternative_and_names_them_in_the_refusal() {
         &json!({"type":"cut","before_id":"a","ids":["b"]})
     )
     .is_ok());
-    for none in [json!({"type":"cut"}), json!({"type":"cut","ids":[]})] {
-        let r = validate("cut", &s, &none).expect_err("refused");
-        let text = r.to_string();
-        assert!(
-            text.contains("one of before_id | ids is required"),
-            "{text}"
-        );
-        assert!(
-            text.contains("missing_arg") || text.contains("MISSING"),
-            "{text}"
-        );
-    }
+    let r = validate("cut", &s, &json!({"type":"cut"})).expect_err("refused");
+    let text = r.to_string();
+    assert!(
+        text.contains("one of before_id | ids is required"),
+        "{text}"
+    );
+    assert!(
+        text.contains("missing_arg") || text.contains("MISSING"),
+        "{text}"
+    );
+    // an empty list is a wrong value, refused by the list's own bound
+    assert!(validate("cut", &s, &json!({"type":"cut","ids":[]})).is_err());
 }
 
 #[test]

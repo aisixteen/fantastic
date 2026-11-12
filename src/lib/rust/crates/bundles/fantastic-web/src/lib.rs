@@ -331,10 +331,10 @@ fn browser_reachable(web_id: &AgentId, kernel: &Kernel) -> Vec<String> {
 
 /// The io leg's own resolved ingress rule (python `gate_inbound(resolve_ingress(rec), …)`).
 fn leg_admits(meta: &Map<String, Value>, target: &str, verb: &str) -> bool {
-    use fantastic_io_bridge::authorizer::{ingress, manifold_spec, Action, Decision};
-    let spec = manifold_spec(meta.get("ingress_rule"), meta.get("auth"), "_ingress");
+    use fantastic_io_bridge::authorizer::{ingress, Action, Decision, Rules};
+    let rules = Rules::of(meta).unwrap_or_default();
     matches!(
-        ingress::resolve(spec.as_ref()).authorize(&Action {
+        ingress::resolve(&rules).authorize(&Action {
             kind: "call",
             target,
             verb,

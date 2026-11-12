@@ -156,7 +156,7 @@ fn status_handler_renders_phase_markers() {
     assert_eq!(
         status(json!({"phase": "tool_calling", "detail": {"tool": {"verb": "v", "target": "t", "reply_preview": null}}}))
             .unwrap(),
-        "  ← v(t)  None"
+        "  ← v(t)  "
     );
     // queued / thinking.
     assert_eq!(
@@ -179,11 +179,11 @@ fn status_handler_renders_phase_markers() {
 fn status_values_render_as_text() {
     assert_eq!(
         status(json!({"phase": "queued", "detail": {"ahead": null}})).unwrap(),
-        "  queued (None ahead)"
+        "  queued (0 ahead)"
     );
     assert_eq!(
         status(json!({"phase": "queued", "source": "ai", "detail": {"ahead": [1, "a"]}})).unwrap(),
-        "  [ai] queued ([1, 'a'] ahead)"
+        "  [ai] queued ([1,\"a\"] ahead)"
     );
     assert_eq!(
         status(json!({"phase": "thinking", "source": null})).unwrap(),
@@ -196,7 +196,7 @@ fn status_values_render_as_text() {
     assert_eq!(
         status(json!({"phase": "tool_calling", "detail": {"tool": {"verb": 1, "target": {"a": 1}, "reply_preview": true}}}))
             .unwrap(),
-        "  ← 1({'a': 1})  True"
+        "  ← 1({\"a\":1})  true"
     );
     assert_eq!(
         context(json!({"phase": "compacted", "detail": {}})),
@@ -204,7 +204,7 @@ fn status_values_render_as_text() {
     );
     assert_eq!(
         context(json!({"phase": "compacted", "source": "ai", "detail": {"strategy": null, "dropped_messages": 2}})),
-        "  [ai] ⟲ context compacted (None, 2 dropped; recall to page back)"
+        "  [ai] ⟲ context compacted (?, 2 dropped; recall to page back)"
     );
     assert_eq!(
         context(json!({"phase": "too_small", "detail": {"hint": 5}})),

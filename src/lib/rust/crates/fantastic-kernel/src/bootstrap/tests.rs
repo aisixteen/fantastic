@@ -781,7 +781,7 @@ fn bootstrap_refuses_a_tree_that_fails_validation() {
             "id: rp\nroot_path: /elsewhere\n",
             "record 'rp' carries reserved key(s) ['root_path'] — these are Agent constructor parameters",
         ),
-        ("seven", "id: 7\n", "record 7: load: id must be a non-empty string"),
+        ("seven", "id: 7\n", "snapshot record missing id"),
     ] {
         let tmp = TempDir::new().unwrap();
         let at = tmp.path().join(".fantastic/agents").join(dir);

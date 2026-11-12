@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use fantastic_bundle::py_repr;
+use fantastic_bundle::{py_repr, py_strip};
 use fantastic_kernel::{AgentId, Item, Kernel, Status, TaskId};
 use serde_json::{json, Map, Value};
 

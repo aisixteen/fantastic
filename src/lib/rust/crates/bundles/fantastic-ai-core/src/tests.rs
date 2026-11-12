@@ -5854,39 +5854,6 @@ fn a_null_context_strategy_is_refused_with_pythons_text() {
 // ─── the self-verb replies a MODEL reads (python-canonical bytes) ───────────
 
 #[tokio::test]
-async fn history_digest_of_caller_rows_follows_python() {
-    // `kind or role`, `str(content)[:120]` and `len(str(content))` — rust's
-    // `as_str` gave head '' / bytes 0 for a dict content and kept an EMPTY kind.
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "hdigpy").await;
-    put_row(
-        &kernel,
-        &backend,
-        json!({"role": "user", "kind": "", "content": {"a": 1}}),
-    )
-    .await;
-    put_row(&kernel, &backend, json!({"role": "user", "content": null})).await;
-    put_row(
-        &kernel,
-        &backend,
-        json!({"role": "user", "kind": 5, "content": "x"}),
-    )
-    .await;
-    let h = kernel
-        .send(vec![Item::new(backend, json!({"type": "history"}))])
-        .await
-        .remove(0)
-        .result;
-    let rows = h["rows"].as_array().expect("rows");
-    assert_eq!(rows[0]["kind"], "user", "a falsy kind falls back to role");
-    assert_eq!(rows[0]["head"], "{'a': 1}");
-    assert_eq!(rows[0]["bytes"], 8);
-    assert_eq!(rows[1]["head"], "None", "str(None) is the head");
-    assert_eq!(rows[1]["bytes"], 4);
-    assert_eq!(rows[2]["kind"], 5, "a non-string kind is kept RAW");
-}
-
-#[tokio::test]
 async fn recall_renders_non_string_content_like_python_json_dumps() {
     // `json.dumps(content, default=str)` with ensure_ascii — `{"k":"é"}` renders
     // `{"k": "\u00e9"}`, and an EMPTY string content renders as itself, never as
@@ -5937,8 +5904,8 @@ async fn recall_empty_page_says_why() {
 }
 
 #[tokio::test]
-async fn grep_digits_query_and_empty_ids() {
-    // a digits query is text; an EMPTY `ids` list means NO SCOPE.
+async fn grep_digits_query() {
+    // a digits query is text.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "grepnum").await;
     put_row(
@@ -5950,7 +5917,7 @@ async fn grep_digits_query_and_empty_ids() {
     let r = kernel
         .send(vec![Item::new(
             backend.clone(),
-            json!({"type": "grep", "query": "586", "ids": []}),
+            json!({"type": "grep", "query": "586"}),
         )])
         .await
         .remove(0)
@@ -6074,23 +6041,6 @@ async fn a_null_context_strategy_is_reported_raw_and_refused() {
     assert!(st.get("last_projection").is_some());
 }
 
-#[tokio::test]
-async fn context_titles_flag_is_python_truthy() {
-    // `if rec.get("context_titles")` — `1` turns the block on; `as_bool` did not.
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "ctxtitles").await;
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "update_agent", "id": backend.as_str(), "context_titles": 1}),
-        )])
-        .await;
-    let sys = crate::assembly::default_system_content(&backend, &kernel).await;
-    assert!(
-        sys.contains("## Titling your calls"),
-        "the titles block is on"
-    );
-}
 #[tokio::test]
 async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
     // A rebooted agent woken by answers to calls its PREVIOUS incarnation made
@@ -6309,17 +6259,20 @@ async fn an_empty_json_recall_answer_stays_degraded() {
 }
 
 #[tokio::test]
-async fn a_numeric_why_is_its_python_str() {
-    // `str(ans.get("why") or "")[:300] or "chosen"`: 42 reads `42`, `["a"]` reads
-    // `['a']`, and only a FALSY why is `chosen`.
-    for (answer, want) in [
-        ("{\"why\": 42}", "42"),
-        ("{\"why\": [\"a\"]}", "['a']"),
+async fn only_a_text_why_is_kept() {
+    // the answer's `why` is its text; a number, a list or an empty text is `chosen`.
+    for (i, (answer, want)) in [
+        ("{\"why\": 42}", "chosen"),
+        ("{\"why\": [\"a\"]}", "chosen"),
         ("{\"why\": 0}", "chosen"),
         ("{\"why\": \"\"}", "chosen"),
-    ] {
+        ("{\"why\": \"fits\"}", "fits"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let tmp = TempDir::new().unwrap();
-        let (kernel, backend) = mk_kernel(&tmp, &format!("why_{want}")).await;
+        let (kernel, backend) = mk_kernel(&tmp, &format!("why_{i}")).await;
         script(&backend, vec![pass(answer)], Duration::ZERO);
         put_row(
             &kernel,
@@ -8428,7 +8381,7 @@ async fn a_provider_completes_on_its_default_model_field_and_lists_and_sets_it()
     assert_eq!(call("prov", json!({"type": "set_default_model", "model": "m-big"})).await, json!({"default": "m-big"}));
     assert_eq!(call("prov", json!({"type": "models"})).await["default"], "m-big");
     let no = call("prov", json!({"type": "set_default_model", "model": "m-huge"})).await;
-    assert_eq!(no["reason"], "bad_arg", "not one of its models: {no}");
+    assert_eq!(no["reason"], "not_found", "not one of its models: {no}");
     let r = call("prov", json!({"type": "complete", "messages": msg, "rid": "r4"})).await;
     assert_eq!(r["model"], "m-big", "the new default: {r}");
 }

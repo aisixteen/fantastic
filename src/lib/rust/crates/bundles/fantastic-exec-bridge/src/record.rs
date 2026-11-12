@@ -49,10 +49,8 @@ fn shell(_gen: &mut SchemaGenerator) -> Schema {
 /// An exec_bridge's own record fields.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct Record {
-    /// Who may reach the bridge: `allow_all_ingress` or `deny_ingress`; absent, the bridge is sealed.
-    pub ingress_rule: Option<Value>,
-    /// The both-directions shorthand of the ingress and egress rules.
-    pub auth: Option<Value>,
+    /// Who may reach the bridge; absent, the bridge is sealed.
+    pub ingress_rule: Option<fantastic_io_bridge::authorizer::EnvelopelessIngress>,
     /// Regexes a command line (command + args, shell-joined) must fullmatch to run; none runs nothing.
     #[serde(default)]
     #[schemars(schema_with = "patterns")]

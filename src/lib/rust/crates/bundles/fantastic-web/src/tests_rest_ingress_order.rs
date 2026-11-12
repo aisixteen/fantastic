@@ -33,6 +33,9 @@ async fn host(
                           "handler_module": "web_rest.tools", "callable_by": {"$parent": ["get_routes"]}, "id": leg,
                           "can_call": {"kernel_state": "*"}});
     if let Some(rule) = ingress {
+        if rule == json!("password_ingress") {
+            rest["token_env"] = json!(TOKEN_ENV);
+        }
         rest["ingress_rule"] = rule;
     }
     for item in [
@@ -187,7 +190,7 @@ async fn a_wrong_credential_is_refused_before_reading_the_body() {
         port,
         "web_order_pw",
         "pw",
-        Some(json!({"type": "password_ingress", "env": TOKEN_ENV})),
+        Some(json!("password_ingress")),
     )
     .await;
     let reflect = br#"{"type": "reflect"}"#;

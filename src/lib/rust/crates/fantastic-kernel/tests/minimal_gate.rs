@@ -420,6 +420,6 @@ async fn an_unknown_grant_key_is_refused_at_the_write() {
     .await;
     assert_eq!(
         r["error"],
-        "callable_by['a'] must be \"*\" or a list of verb strings"
+        "create_agent: argument 'callable_by.a' must be '*'|list[string], got dict"
     );
 }

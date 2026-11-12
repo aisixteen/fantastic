@@ -330,7 +330,8 @@ async fn the_kernel_env_reaches_a_child_only_by_name() {
         ("env_all", json!(["*"]), "s3cret/open"),
     ] {
         let tmp = TempDir::new().unwrap();
-        let k = kernel_with(&tmp, id, json!({"inherit_env": inherit})).await;
+        let extra = if inherit.is_null() { json!({}) } else { json!({"inherit_env": inherit}) };
+        let k = kernel_with(&tmp, id, extra).await;
         let mut rx = k.ensure_inbox(&AgentId::from(id));
         call(
             &k,

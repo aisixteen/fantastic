@@ -25,7 +25,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use fantastic_bundle::py_truthy;
 use fantastic_io_bridge::codec::{decode_binary_frame, encode_binary_frame};
 use fantastic_kernel::{AgentId, Blob, Item, Kernel, TaskId};
 use serde_json::{json, Value};
@@ -355,13 +354,12 @@ pub async fn serve(
         match m.get("op").and_then(Value::as_str) {
             Some("send") => {
                 let target = m.get("target").and_then(Value::as_str).unwrap_or("");
-                // py `m.get("payload") or {}` — TRUTHINESS, so an explicit null, `0`
-                // or `[]` is an empty payload rather than a value the kernel has to
-                // make sense of.
-                let payload = match m.get("payload").filter(|v| py_truthy(v)) {
-                    Some(p) => p.clone(),
-                    None => json!({}),
-                };
+                // an absent or null payload is an empty one
+                let payload = m
+                    .get("payload")
+                    .filter(|v| !v.is_null())
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
                 // RELAYED UNTOUCHED, as python's `_serve_ctrl` relays it: one
                 // `kernel.send([{target, payload}])`, no tag added, nothing refused
                 // here — the kernel's gate is the only judge. This loop is a task
@@ -395,10 +393,11 @@ pub async fn serve(
             }
             Some("emit") => {
                 // A program emits on its OWNER agent — the one it runs as.
-                let payload = match m.get("payload").filter(|v| py_truthy(v)) {
-                    Some(p) => p.clone(),
-                    None => json!({}),
-                };
+                let payload = m
+                    .get("payload")
+                    .filter(|v| !v.is_null())
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
                 // a payload holding bytes is emitted WHOLE: watchers get the body
                 // at its path, as python's `kernel.emit` hands them the dict
                 let item = match payload_body(framed) {

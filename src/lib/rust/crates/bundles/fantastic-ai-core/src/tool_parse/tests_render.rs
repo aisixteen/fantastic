@@ -78,11 +78,9 @@ fn render_call_nests_tighter_than_render_reply() {
 }
 
 #[test]
-fn reply_scalars_are_python_str() {
-    // python `_reply_text`: `None` is empty, a bool is lower-case, and everything
-    // else is `str(v)` — a float's PYTHON repr (`1e-05`, `1e+16`, `inf`, `nan`)
-    // and a structure's python repr inside a mixed list.
-    assert_eq!(render_reply(&json!(1e-5)), "1e-05");
+fn reply_scalars_are_their_json_text() {
+    // `None` is empty, a bool is lower-case, and everything else is its JSON text.
+    assert_eq!(render_reply(&json!(1e-5)), "0.00001");
     assert_eq!(render_reply(&json!(1e16)), "1e+16");
     assert_eq!(render_reply(&json!(0.5)), "0.5");
     assert_eq!(render_reply(&json!(3.0)), "3.0");
@@ -94,7 +92,7 @@ fn reply_scalars_are_python_str() {
         render_reply(&json!(["a", {"a": 1}])),
         "<items>\n<item>a</item>\n<item>\n<a>1</a>\n</item>\n</items>"
     );
-    // Nested, a structure is still a python repr on the line.
+    // Nested, a structure is its tags.
     assert_eq!(
         render_reply(&json!({"v": {"a": 1, "b": [true, null]}})),
         "<v>\n<a>1</a>\n<b>\n<item>true</item>\n<item></item>\n</b>\n</v>"

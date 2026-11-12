@@ -842,7 +842,12 @@ async fn call_frame_without_id_or_payload_replies_like_python() {
         .find(|f| f["type"] == "reply")
         .unwrap_or_else(|| panic!("no reply: {t:?}"));
     assert_eq!(reply["id"], "", "an absent id echoes as the empty string");
-    assert_eq!(reply["data"]["error"], "send: target required", "{reply}");
+    assert!(
+        reply["data"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("item.target")),
+        "{reply}"
+    );
 
     // A non-string id is echoed VERBATIM and names no execution.
     let frame =
@@ -1633,8 +1638,8 @@ async fn stop(kernel: &Arc<Kernel>, web_id: &str) {
 
 /// The response header BLOCK, in python's order: uvicorn writes `date`
 /// then `server`, starlette then the handler's own headers, then
-/// `content-length`, then `content-type`; a `204` carries neither of the last
-/// two. Read off the raw socket, because that is where order lives.
+/// `content-length`, then `content-type`. Read off the raw socket, because that
+/// is where order lives.
 #[tokio::test]
 async fn rest_response_header_order_matches_python() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1692,17 +1697,6 @@ async fn rest_response_header_order_matches_python() {
         names,
         ["date", "server", "allow", "content-length", "content-type"]
     );
-
-    // 204: date, server only.
-    let (status, names) = header_names(
-        port,
-        &format!(
-            "POST /rest/fb_hdr HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\ncontent-type: application/json\r\ncontent-length: 15\r\n\r\n{{\"type\":\"boot\"}}"
-        ),
-    )
-    .await;
-    assert!(status.starts_with("HTTP/1.1 204"), "{status}");
-    assert_eq!(names, ["date", "server"]);
 
     // octet: date, server, x-fantastic-payload, x-fantastic-bytes-field,
     // content-length, content-type.
@@ -1961,7 +1955,7 @@ async fn reflect_sentence_and_verbs_match_python() {
             .iter()
             .map(|v| v.name)
             .collect::<Vec<_>>(),
-        vec!["boot", "stop", "mount", "unmount", "fetch_file"]
+        vec!["boot", "shutdown", "stop", "mount", "unmount", "fetch_file"]
     );
     let verbs = reply["verbs"].as_object().expect("a verbs block");
     // `reflect` is the common verb every agent answers: its rendered line
@@ -1973,7 +1967,7 @@ async fn reflect_sentence_and_verbs_match_python() {
         verbs["mount"]
             .as_str()
             .unwrap()
-            .starts_with("args: child_id:string (req)"),
+            .starts_with("args: child_id:string of at least 1 character(s) (req)"),
         "{}",
         verbs["mount"]
     );
@@ -2120,7 +2114,7 @@ async fn mount_unmount_and_unknown_verb_match_python() {
         call(json!({"type": "unmount", "child_id": "rest"})).await,
         json!({"unmounted": "rest"})
     );
-    // `shutdown` is a verb every agent answers (null: nothing to release by call)
+    // `shutdown` is a declared verb (null: nothing to release by call)
     assert_eq!(call(json!({"type": "shutdown"})).await, Value::Null);
     let r = call(json!({"type": "render_html"})).await;
     assert_eq!(r["reason"], json!("unhandled"), "{r}");
@@ -2129,7 +2123,7 @@ async fn mount_unmount_and_unknown_verb_match_python() {
         r["error"]
             .as_str()
             .unwrap()
-            .starts_with("unknown verb 'render_html'; web_m answers: boot, stop, mount, unmount, fetch_file"),
+            .starts_with("unknown verb 'render_html'; web_m answers: boot, shutdown, stop, mount, unmount, fetch_file"),
         "{r}"
     );
     stop(&kernel, "web_m").await;

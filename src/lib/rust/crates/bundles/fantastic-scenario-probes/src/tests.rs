@@ -495,34 +495,6 @@ async fn oracle_tallies_per_agent() {
 
 // ── oracle ──────────────────────────────────────────────────────────────────
 
-/// A non-string ledger line is rendered with python's `str()`: a dict reads
-/// `{'a': 'alpha'}`, not JSON's `{"a":"alpha"}`.
-#[tokio::test]
-async fn oracle_renders_non_string_lines_with_python_str() {
-    let k = kernel();
-    let id = agent(
-        &k,
-        "oracle_str",
-        ORACLE_MODULE,
-        json!({"lines": [777, true, null, {"a": "alpha"}]}),
-    );
-    let r = call(
-        &k,
-        &id,
-        json!({"type": "ask", "question": "true none 777 alpha", "limit": 6}),
-    )
-    .await;
-    // One hit each, so python's `(-hits, line)` sort orders them by the RENDERED
-    // line — which is the rendering this test is about.
-    assert_eq!(
-        r,
-        json!({
-            "answers": ["777", "None", "True", "{'a': 'alpha'}"],
-            "matched": 4,
-        })
-    );
-}
-
 /// `limit` is an integer of 1 to 20, six when absent; 0 or less and a value of another
 /// type is refused by name, never coerced.
 #[tokio::test]

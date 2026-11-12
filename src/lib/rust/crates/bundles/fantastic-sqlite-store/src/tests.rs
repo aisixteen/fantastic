@@ -307,7 +307,7 @@ async fn append_emits_one_appended_event_per_new_row() {
         Some("alice"),
     )
     .await;
-    assert_eq!(refused["reason"], json!("missing_arg"), "{refused}");
+    assert_eq!(refused["reason"], json!("bad_arg"), "{refused}");
     while let Some(item) = rx.try_recv() {
         assert_ne!(item.payload["type"], json!("appended"), "{refused}");
     }

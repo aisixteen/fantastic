@@ -700,7 +700,7 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, args: crate::verbs::ImportSubt
             kernel,
             &root,
             fantastic_kernel::declared::kernel::CreateAgent {
-                handler_module: Some(a.handler_module.clone()),
+                handler_module: a.handler_module.clone(),
                 parent_id: a.parent.clone(),
                 id: Some(a.new_id.clone()),
                 bundle,

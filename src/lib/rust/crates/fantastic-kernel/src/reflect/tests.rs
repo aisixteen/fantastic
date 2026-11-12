@@ -41,7 +41,6 @@ async fn bare_reflect(kernel: &Arc<Kernel>, agent: &Arc<Agent>, payload: &Value)
     let mut r = reflect_identity(agent);
     let args = match crate::declared::common::Call::parse(&agent.id.0, payload) {
         Ok(crate::declared::common::Call::Reflect(a)) => a,
-        Ok(other) => panic!("not a reflect: {other:?}"),
         Err(refused) => return refused,
     };
     apply_reflect_flags(kernel, agent, &args, &mut r)

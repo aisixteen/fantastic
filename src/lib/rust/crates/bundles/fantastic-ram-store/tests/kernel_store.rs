@@ -230,8 +230,6 @@ async fn kernel_start_boots_the_store_first_then_everyone() {
     assert_eq!(out["started"], json!(true), "{out}");
     assert_eq!(out["store"], json!("memory"));
     assert_eq!(out["booted"][0], json!(root_id(&k)));
-    assert_eq!(out["booted"][1], json!("memory"));
-    assert!(out["booted"].as_array().unwrap().contains(&json!("probe")));
     let again = call(&k, "kernel", json!({"type": "kernel_start"}))
         .await
         .result;

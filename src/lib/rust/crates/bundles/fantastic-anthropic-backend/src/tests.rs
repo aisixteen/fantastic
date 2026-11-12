@@ -421,7 +421,7 @@ fn a_write_the_backend_cannot_honour_is_refused() {
             json!({"max_tokens": 0}),
             "max_tokens",
         ),
-        (json!({"thinking_budget": 512}), "below the API's 1024"),
+        (json!({"thinking_budget": 512}), "must be int >= 1024"),
         (
             json!({"thinking_budget": 4000, "max_tokens": 4000}),
             "not below max_tokens=4000",
@@ -2950,7 +2950,7 @@ async fn an_image_item_without_bytes_or_media_type_is_refused() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    assert_eq!(r["reason"], json!("missing_arg"), "{r}");
     let r = kernel
         .send(vec![Item::new(
             AgentId::from("img2"),

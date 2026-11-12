@@ -78,7 +78,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use fantastic_bundle::{py_json_dumps, py_repr, py_repr_value, py_str, py_strip, py_truthy};
+use fantastic_bundle::{py_json_dumps, py_repr, py_repr_value, py_strip};
 use fantastic_file::fs;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use serde::Deserialize;
@@ -280,9 +280,9 @@ struct FileBackend {
 
 impl FileBackend {
     fn new(id: &AgentId, rec: &Map<String, Value>) -> Result<Self, BundleError> {
-        let p = match rec.get("file") {
-            Some(v) if py_truthy(v) => py_str(v),
-            _ => default_file(&id.0)?,
+        let p = match rec.get("file").and_then(Value::as_str) {
+            Some(f) => f.to_string(),
+            None => default_file(&id.0)?,
         };
         let (parent, name) = sys::split_path(&expanduser(&p)?);
         Ok(Self {
@@ -377,10 +377,10 @@ fn raise_keychain(e: String) -> BundleError {
 
 impl KeychainBackend {
     fn new(kc: Arc<dyn Keychain>, id: &AgentId, rec: &Map<String, Value>) -> Self {
-        let namespace = match rec.get("keychain_namespace") {
-            Some(v) if py_truthy(v) => py_str(v),
-            _ => KEYCHAIN_NAMESPACE.to_string(),
-        };
+        let namespace = rec
+            .get("keychain_namespace")
+            .and_then(Value::as_str)
+            .map_or_else(|| KEYCHAIN_NAMESPACE.to_string(), str::to_string);
         Self {
             kc,
             namespace,
@@ -443,8 +443,8 @@ fn env_get(rec: &Map<String, Value>, r: &str) -> Result<Option<Map<String, Value
     };
     let mut out = Map::new();
     for (field, var) in names {
-        let var = py_str(var);
-        match std::env::var(&var) {
+        let var = var.as_str().unwrap_or_default();
+        match std::env::var(var) {
             Ok(val) if !val.is_empty() => {
                 out.insert(field.clone(), Value::String(val));
             }
@@ -573,10 +573,10 @@ impl CredentialStoreBundle {
         );
         out.insert("refs".into(), json!(refs_of(rec).len()));
         if matches!(backend, record::BackendKind::File) {
-            let file = match rec.get("file") {
-                Some(v) if py_truthy(v) => v.clone(),
+            let file = match rec.get("file").filter(|v| !v.is_null()) {
+                Some(v) => v.clone(),
                 // python's `default_file`, which raises where this cannot be read
-                _ => json!(default_file(&id.0).unwrap_or_else(|e| e.to_string())),
+                None => json!(default_file(&id.0).unwrap_or_else(|e| e.to_string())),
             };
             out.insert("file".into(), file);
         }
@@ -671,9 +671,9 @@ impl CredentialStoreBundle {
         let mut out = Vec::new();
         for (r, entry) in refs {
             let entry = entry_map(&entry);
-            let fields = match entry.get("fields") {
-                Some(v) if py_truthy(v) => v.clone(),
-                _ => {
+            let fields = match entry.get("fields").filter(|v| !v.is_null()) {
+                Some(v) => v.clone(),
+                None => {
                     let mut names: Vec<String> = entry
                         .get("env")
                         .and_then(Value::as_object)
@@ -746,9 +746,9 @@ fn field_marks(fields: Option<&Value>) -> Vec<String> {
 /// `fields`) is marked whole, since its values were never checked. Shared with
 /// every bundle that forwards calls to a store.
 pub fn set_marks(payload: &Value) -> Vec<String> {
-    use fantastic_kernel::verbs::{Parse, Routed};
+    use fantastic_kernel::verbs::Parse;
     match verbs::Call::parse(NAME, payload, &[]) {
-        Ok(Routed::Call(verbs::Call::Set(a))) => field_marks(Some(&json!(a.fields))),
+        Ok(verbs::Call::Set(a)) => field_marks(Some(&json!(a.fields))),
         Err(refusal) if refusal.get("verb") == Some(&json!("set")) => vec!["fields".to_string()],
         _ => Vec::new(),
     }
@@ -789,9 +789,9 @@ impl Handler for CredentialStoreBundle {
     /// A `get` reply's field values are secret: recorded as `[secret]`; the
     /// caller gets them whole.
     fn reply_secret(&self, payload: &Value, reply: &Value) -> Vec<String> {
-        use fantastic_kernel::verbs::{Parse, Routed};
+        use fantastic_kernel::verbs::Parse;
         match verbs::Call::parse(NAME, payload, &[]) {
-            Ok(Routed::Call(verbs::Call::Get(_))) => match serde_json::from_value::<Answer>(reply.clone()) {
+            Ok(verbs::Call::Get(_)) => match serde_json::from_value::<Answer>(reply.clone()) {
                 Ok(a) => field_marks(a.fields.as_ref()),
                 Err(_) => Vec::new(),
             },

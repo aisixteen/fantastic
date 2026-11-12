@@ -232,8 +232,17 @@ pub async fn fork(
     let bundle = meta
         .remove("bundle")
         .and_then(|b| b.as_str().map(str::to_string));
+    let Some(handler_module) = parent.handler_module.clone() else {
+        return Ok(refuse(
+            verb,
+            "no_such_agent",
+            "the agent runs no bundle",
+            "",
+            Some(at),
+        ));
+    };
     let create = fantastic_kernel::declared::kernel::CreateAgent {
-        handler_module: parent.handler_module.clone(),
+        handler_module,
         parent_id: parent
             .parent_id
             .as_ref()

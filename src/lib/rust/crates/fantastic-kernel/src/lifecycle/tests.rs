@@ -518,7 +518,7 @@ async fn missing_hint_orders_hint_before_arg() {
     let hint = r["hint"].as_str().unwrap();
     assert!(
         hint.starts_with(
-            "create_agent takes — args: handler_module:string (req), parent_id:string (req)"
+            "create_agent takes — args: handler_module:string of at least 1 character(s) (req), parent_id:string of at least 1 character(s) (req)"
         ),
         "{hint}"
     );

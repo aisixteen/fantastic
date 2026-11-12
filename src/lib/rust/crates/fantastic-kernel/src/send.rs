@@ -208,13 +208,8 @@ fn kernel_reflect_args(
     payload: &Value,
 ) -> Result<crate::declared::common::Reflect, Value> {
     use crate::declared::common::Call;
-    match Call::parse(&target.id.0, payload)? {
-        Call::Reflect(args) => Ok(args),
-        _ => Err(crate::refusal::refusal(
-            crate::refusal::UNHANDLED,
-            "the kernel's reflect fast path answers `reflect` alone",
-        )),
-    }
+    let Call::Reflect(args) = Call::parse(&target.id.0, payload)?;
+    Ok(args)
 }
 
 /// Extract `payload["type"]` as `&str`, or `""` if missing/wrong type.

@@ -44,11 +44,11 @@ pub fn thinking_fields(text: &str) -> serde_json::Map<String, serde_json::Value>
         let a = i + rel + THINK_OPEN.len();
         match text[a..].find(THINK_CLOSE) {
             Some(relb) => {
-                spans.push(crate::helpers::shownip(&text[a..a + relb]));
+                spans.push(fantastic_bundle::py_strip(&text[a..a + relb]));
                 i = a + relb + THINK_CLOSE.len();
             }
             None => {
-                spans.push(crate::helpers::shownip(&text[a..]));
+                spans.push(fantastic_bundle::py_strip(&text[a..]));
                 break;
             }
         }

@@ -75,7 +75,7 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_bundle::{py_float_repr, py_repr, py_str, py_truthy};
+use fantastic_bundle::{py_float_repr, py_repr};
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::refusal::{refusal_hint, NOT_CONNECTED};
 use fantastic_kernel::{AgentId, Blob, Item, Kernel};
@@ -264,7 +264,7 @@ async fn directory_reply(agent_id: &AgentId, op: DirectoryOp) -> Result<Value, B
                 .transport
                 .watch_directory(DIRECTORY_WATCH_TIMEOUT_SECS)
                 .await;
-            if out.get("error").is_some_and(py_truthy) {
+            if fantastic_kernel::refusal::error_text(&out).is_some() {
                 state
                     .watching
                     .lock()
@@ -374,18 +374,18 @@ fn forward_marks(f: &verbs::Forward) -> Vec<String> {
 
 /// [`forward_marks`] of a `ws_bridge` call.
 fn ws_payload_secret(payload: &Value) -> Vec<String> {
-    use fantastic_kernel::verbs::{Parse, Routed};
+    use fantastic_kernel::verbs::Parse;
     match verbs::ws::Call::parse("ws_bridge", payload, &[]) {
-        Ok(Routed::Call(verbs::ws::Call::Forward(f))) => forward_marks(&f),
+        Ok(verbs::ws::Call::Forward(f)) => forward_marks(&f),
         _ => Vec::new(),
     }
 }
 
 /// [`forward_marks`] of a `relay_connector` call.
 fn relay_payload_secret(payload: &Value) -> Vec<String> {
-    use fantastic_kernel::verbs::{Parse, Routed};
+    use fantastic_kernel::verbs::Parse;
     match verbs::relay::Call::parse("relay_connector", payload, &[]) {
-        Ok(Routed::Call(verbs::relay::Call::Forward(f))) => forward_marks(&f),
+        Ok(verbs::relay::Call::Forward(f)) => forward_marks(&f),
         _ => Vec::new(),
     }
 }
@@ -472,13 +472,6 @@ impl Handler for WsBridgeBundle {
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
         self.on_delete(agent_id, kernel).await
-    }
-    fn validate_meta(
-        &self,
-        meta: &Map<String, Value>,
-        _record: &Map<String, Value>,
-    ) -> Option<String> {
-        validate_bridge_meta(meta)
     }
 }
 
@@ -568,15 +561,6 @@ impl Handler for RelayConnectorBundle {
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
         self.on_delete(agent_id, kernel).await
-    }
-    /// The leg's `ingress_rule`, refused at the WRITE when no rule implements it.
-    /// Python `relay_connector.tools.validate_meta`.
-    fn validate_meta(
-        &self,
-        meta: &Map<String, Value>,
-        _record: &Map<String, Value>,
-    ) -> Option<String> {
-        validate_bridge_meta(meta)
     }
 }
 
@@ -681,21 +665,14 @@ fn meta_value(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<Value> {
     meta.get(key).cloned()
 }
 
-/// The rule spec for one direction: the per-direction field if present, else the
-/// `auth` shorthand — which carries a bare STEM that each manifold scopes with its own
-/// suffix (`auth:"password"` ⇒ `password_ingress` + `password_egress`). See
-/// `authorizer::manifold_spec`.
-fn rule_spec(agent_id: &AgentId, kernel: &Kernel, primary: &str) -> Option<Value> {
-    let suffix = if primary == "egress_rule" {
-        "_egress"
-    } else {
-        "_ingress"
+/// The leg's rules, read off the LIVE record. A record that holds what no rule is
+/// (edited past its schema) seals the leg.
+fn rules_of(agent_id: &AgentId, kernel: &Kernel) -> authorizer::Rules {
+    let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
+        return authorizer::Rules::default();
     };
-    authorizer::manifold_spec(
-        meta_value(agent_id, kernel, primary).as_ref(),
-        meta_value(agent_id, kernel, "auth").as_ref(),
-        suffix,
-    )
+    let meta = agent.meta.read().expect("meta poisoned");
+    authorizer::Rules::of(&meta).unwrap_or_default()
 }
 
 // ── verb implementations ────────────────────────────────────────────
@@ -725,16 +702,11 @@ fn reflect_reply(family: Family, agent_id: &AgentId, kernel: &Kernel) -> Value {
     out.insert("pending_count".into(), json!(pending));
     // Read-key == write-key (py parity): `ingress_rule`/`egress_rule`, so a
     // `reflect` → `update_agent` edit is a direct mirror. No `auth` in the
-    // reflect (it's a WRITE shorthand only). `sealed` = the leg still
+    // reflect. `sealed` = the leg still
     // denies inbound (the conscious-open signal). The SAME `describe` every leg
     // reflects with (python `**describe(rec)`) — the gate's own scoping, so a
     // bridge never reports a rule its gate resolves differently.
-    let rec = kernel
-        .agents
-        .get(agent_id)
-        .map(|e| e.meta.read().expect("meta poisoned").clone())
-        .unwrap_or_default();
-    if let Some(posture) = authorizer::describe(&rec).as_object() {
+    if let Some(posture) = rules_of(agent_id, kernel).describe().as_object() {
         for (k, v) in posture {
             out.insert(k.clone(), v.clone());
         }
@@ -801,12 +773,7 @@ async fn boot_carrying_inner(
         }
     }
     // The leg's rules are NOT cached here: the gate and `forward` read them off
-    // the live record per frame. Boot only refuses an egress rule the registry
-    // does not know, before dialing.
-    if let Err(e) = authorizer::egress::resolve(rule_spec(agent_id, kernel, "egress_rule").as_ref())
-    {
-        return json!({"error": format!("bridge: bad auth rule: {e}")});
-    }
+    // the live record per frame.
 
     // The record declares its `transport` (required); the builder is chosen by
     // the derivation, not by the kind.
@@ -1071,16 +1038,7 @@ async fn forward_core(
     };
     // The leg's EGRESS rule, off the live record per forward (never a boot-time
     // copy): an operator's `update_agent egress_rule=…` stamps the next frame.
-    let egress =
-        match authorizer::egress::resolve(rule_spec(agent_id, kernel, "egress_rule").as_ref()) {
-            Ok(rule) => rule,
-            Err(e) => {
-                return (
-                    json!({"error": format!("bridge: bad auth rule: {e}")}),
-                    None,
-                )
-            }
-        };
+    let egress = authorizer::egress::resolve(&rules_of(agent_id, kernel));
     let n = state.corr_counter.fetch_add(1, Ordering::SeqCst) + 1;
     // DASH, not colon: `<agent>:<hex>` is the kernel's minted-pid namespace, and
     // a bridge correlator that borrowed it would read as a REFERENCE to an
@@ -1283,7 +1241,7 @@ async fn serve_inbound_call(
     // LIVE record, per frame, as every web/file/exec leg does — decides whether
     // this inbound call dispatches locally; on deny we reply {error,
     // reason:"unauthorized"} (fail-fast, not a silent drop).
-    let decision = authorizer::ingress::resolve(rule_spec(&leg, &kernel, "ingress_rule").as_ref())
+    let decision = authorizer::ingress::resolve(&rules_of(&leg, &kernel))
         .authorize(&Action {
             kind: "call",
             target: &target,
@@ -1430,7 +1388,7 @@ async fn serve_watch(leg: &AgentId, state: &Arc<BridgeState>, kernel: &Arc<Kerne
     {
         return;
     }
-    let decision = authorizer::ingress::resolve(rule_spec(leg, kernel, "ingress_rule").as_ref())
+    let decision = authorizer::ingress::resolve(&rules_of(leg, kernel))
         .authorize(&Action {
             kind: "watch",
             target: src,
@@ -1510,12 +1468,6 @@ async fn drop_served(state: &Arc<BridgeState>, kernel: &Arc<Kernel>) {
     for s in all {
         drop_watch(kernel, s).await;
     }
-}
-
-/// Write-time check of the leg's `ingress_rule` (`ingress::unknown_refusal`, the
-/// one write-time check every leg makes). Python `io_bridge._engine.validate_meta`.
-fn validate_bridge_meta(meta: &Map<String, Value>) -> Option<String> {
-    authorizer::ingress::unknown_refusal(meta, &authorizer::ingress::REGISTRY)
 }
 
 /// The kinds of frame a bridge's read loop serves, decoded from the frame's `type`.
@@ -1617,7 +1569,10 @@ async fn read_loop(
                 let data = data.unwrap_or(Value::Null);
                 // optional `secret`: dotted paths into `data` the far reply's
                 // bundle marked. Malformed ⇒ none (the reply is still delivered).
-                let marks = fantastic_kernel::secret::check(secret.as_ref()).unwrap_or_default();
+                let marks = secret
+                    .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+                    .and_then(|m| fantastic_kernel::secret::check(&m).ok())
+                    .unwrap_or_default();
                 let tx = state.pending.lock().expect("pending poisoned").remove(&id);
                 if let Some(tx) = tx {
                     // Carry the reply body alongside, at its slot of the reply
@@ -1631,7 +1586,7 @@ async fn read_loop(
             Wire::Error { id, error } => {
                 // python RESOLVES the pending future with this value — the
                 // forward returns it verbatim, with no `bridge.forward:` prefix.
-                let err = py_str(error.as_ref().unwrap_or(&Value::Null));
+                let err = fantastic_kernel::refusal::error_text(&json!({ "error": error })).unwrap_or_default();
                 let tx = state.pending.lock().expect("pending poisoned").remove(&id);
                 if let Some(tx) = tx {
                     let _ = tx.send(Ok((

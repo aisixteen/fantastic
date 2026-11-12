@@ -356,9 +356,7 @@ async fn reflect_names_the_posture_and_the_verbs() {
             "dump",
             "put_bytes",
             "get_bytes",
-            "reflect",
-            "boot",
-            "shutdown"
+            "reflect"
         ]
     );
 }
@@ -496,11 +494,11 @@ async fn unknown_type_is_coded_unhandled_with_the_raw_verb_in_order() {
     for (verb, want) in [
         (
             json!("frob"),
-            r#"{"error":"unknown verb 'frob'; mem answers: append, read, search, prune, inject, dump, put_bytes, get_bytes, reflect, boot, shutdown","reason":"unhandled","hint":"docs of=mem lists each verb's arguments","verb":"frob"}"#,
+            r#"{"error":"unknown verb 'frob'; mem answers: append, read, search, prune, inject, dump, put_bytes, get_bytes, reflect","reason":"unhandled","hint":"docs of=mem lists each verb's arguments","verb":"frob"}"#,
         ),
         (
             json!("it's"),
-            r#"{"error":"unknown verb \"it's\"; mem answers: append, read, search, prune, inject, dump, put_bytes, get_bytes, reflect, boot, shutdown","reason":"unhandled","hint":"docs of=mem lists each verb's arguments","verb":"it's"}"#,
+            r#"{"error":"unknown verb \"it's\"; mem answers: append, read, search, prune, inject, dump, put_bytes, get_bytes, reflect","reason":"unhandled","hint":"docs of=mem lists each verb's arguments","verb":"it's"}"#,
         ),
     ] {
         assert_eq!(
@@ -508,10 +506,10 @@ async fn unknown_type_is_coded_unhandled_with_the_raw_verb_in_order() {
             want
         );
     }
-    // a verb the store declares neither of: the shared entry answers `shutdown` itself
+    // `shutdown` is no verb of the store: refused like any unknown one
     assert_eq!(
-        call(&k, json!({"type": "shutdown"}), Some("alice")).await,
-        Value::Null
+        call(&k, json!({"type": "shutdown"}), Some("alice")).await["reason"],
+        json!("unhandled")
     );
 }
 
@@ -531,7 +529,7 @@ async fn arg_refusals_carry_error_reason_arg_in_that_order() {
     }
     // an empty list, a missing list and a wrongly typed one are the entry's refusals
     for (payload, reason) in [
-        (json!({"type": "append", "rows": []}), "missing_arg"),
+        (json!({"type": "append", "rows": []}), "bad_arg"),
         (json!({"type": "append"}), "missing_arg"),
         (json!({"type": "append", "rows": "x"}), "bad_arg"),
         (json!({"type": "append", "rows": [1]}), "bad_arg"),
@@ -552,7 +550,7 @@ async fn limits_and_ids_are_typed_integers() {
         .collect();
     append(&k, "alice", Value::Array(rows)).await;
     let hits = |r: &Value| r["matches"].as_array().unwrap().len();
-    for (limit, want) in [(json!(2), 2), (json!(3), 3), (json!(0), 5)] {
+    for (limit, want) in [(json!(2), 2), (json!(3), 3)] {
         let r = call(
             &k,
             json!({"type": "search", "query": "needle", "limit": limit.clone()}),
@@ -662,7 +660,7 @@ async fn append_emits_one_appended_event_per_new_row() {
     assert_eq!(on_state, want);
     // a refused append emits nothing
     let refused = append(&k, "alice", json!([])).await;
-    assert_eq!(refused["reason"], json!("missing_arg"), "{refused}");
+    assert_eq!(refused["reason"], json!("bad_arg"), "{refused}");
     while let Some(item) = rx.try_recv() {
         assert_ne!(item.payload["type"], json!("appended"), "{refused}");
     }

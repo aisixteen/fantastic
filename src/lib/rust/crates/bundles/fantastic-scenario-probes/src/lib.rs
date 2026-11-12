@@ -18,7 +18,6 @@
 //! on — a model that claims it bought once cannot fake the desk's own tally.
 
 use async_trait::async_trait;
-use fantastic_bundle::py_str;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
@@ -560,7 +559,7 @@ impl Handler for OracleProbe {
                         // python renders every ledger line through `str(ln)`,
                         // so a number, a bool or a dict on the record reads as
                         // python writes it — not as JSON.
-                        .map(|a| a.iter().map(py_str).collect())
+                        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
                         .unwrap_or_default();
                     if lines.is_empty() {
                         // NO DEFAULT. An unwired oracle says so rather than
@@ -739,7 +738,7 @@ impl Handler for VaultProbe {
                 "opened": self.opened.get(agent_id),
             }),
             Call::Open(a) => {
-                let serial = meta.get("serial").map(py_str).unwrap_or_default();
+                let serial = meta.get("serial").and_then(Value::as_str).unwrap_or_default();
                 let want = format!("V-{}", serial.chars().rev().collect::<String>());
                 if a.code.trim() == want {
                     self.opened.with(agent_id, |n| *n += 1);

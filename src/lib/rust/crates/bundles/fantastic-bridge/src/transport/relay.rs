@@ -443,11 +443,7 @@ fn classify_text(env: Value, partner: &str, relay_pending: &RelayPending) -> Opt
                     .expect("relay_pending poisoned")
                     .remove(&id)
                 {
-                    // python `msg.get("data") or {}`.
-                    let data = match data {
-                        Some(v) if fantastic_bundle::py_truthy(&v) => v,
-                        _ => json!({}),
-                    };
+                    let data = data.filter(|v| !v.is_null()).unwrap_or_else(|| json!({}));
                     let _ = tx.send(data);
                 }
             }

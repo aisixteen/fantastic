@@ -417,8 +417,9 @@ impl FolderBundle {
                     Some("result") => {
                         let rid = m
                             .get("rid")
-                            .map(fantastic_bundle::py_str)
-                            .unwrap_or_default();
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
                         if let Some(tx) = r.pending.lock().expect("pending").remove(&rid) {
                             let _ = tx.send(m.get("result").cloned().unwrap_or(Value::Null));
                         }
@@ -582,7 +583,9 @@ impl Handler for FolderBundle {
                 DynVerb::new(
                     name,
                     decl["doc"].as_str().expect("verb_decl checked the doc"),
-                    &decl["schema"],
+                    decl["schema"]
+                        .as_object()
+                        .expect("verb_decl checked the schema"),
                 )
             })
             .collect()

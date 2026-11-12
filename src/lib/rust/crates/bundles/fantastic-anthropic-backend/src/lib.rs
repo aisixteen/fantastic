@@ -1899,6 +1899,7 @@ pub struct AnthropicRecord {
     #[schemars(length(min = 1))]
     pub usage_log: Option<String>,
     /// The read clock on the answer stream: seconds with no byte from the API (headers included) before the turn is judged stalled.
+    #[serde(default)]
     #[schemars(schema_with = "fantastic_ai_core::record::stream_idle_seconds")]
     pub stream_idle_seconds: Option<f64>,
     /// The API key's credential store and ref; absent, no key header goes out.

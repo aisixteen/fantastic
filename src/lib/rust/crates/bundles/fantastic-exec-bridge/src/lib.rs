@@ -297,41 +297,13 @@ impl Handler for ExecBridgeBundle {
     }
 
     /// Refuse a write this bundle cannot honour, at the WRITE, next to the typo
-    /// (py-canonical `validate_meta`): what the declared record cannot say — the
-    /// ingress posture, and `allowed` as compilable regexes.
+    /// (py-canonical `validate_meta`): what the declared record cannot say, `allowed`
+    /// as compilable regexes.
     fn validate_meta(
         &self,
         meta: &Map<String, Value>,
         _record: &Map<String, Value>,
     ) -> Option<String> {
-        // ONLY an UNKNOWN RULE NAME is refused (py `resolve_ingress(...).unknown`):
-        // a falsy spec and a type-less object both seal silently, and
-        // `password_ingress` resolves fine here — it is the stem check below that
-        // refuses it on this edge.
-        if let Some(bad) = fantastic_io_bridge::authorizer::ingress::unknown_refusal(
-            meta,
-            &["allow_all_ingress", "deny_ingress"],
-        ) {
-            return Some(bad);
-        }
-        // `password_ingress` is meaningless on an in-process leg: the token is
-        // read off a WIRE ENVELOPE and the process edge has none — no frame ever
-        // presents one, so the rule could only refuse, or be satisfied by a
-        // secret persisted ON THE RECORD. Refused at the write. Same rule as
-        // `fantastic_file::password_refusal`.
-        for (field, stem) in [("ingress_rule", "password_ingress"), ("auth", "password")] {
-            let Some(spec) = meta.get(field) else {
-                continue;
-            };
-            if fantastic_io_bridge::authorizer::rule_name(Some(spec), "") == stem {
-                return Some(format!(
-                    "{field}={} is not applicable to the process edge: a leg with \
-                     no wire envelope can never present a token — legal values: \
-                     allow_all_ingress, deny_ingress",
-                    py_repr_value(spec)
-                ));
-            }
-        }
         // `allowed` must hold compilable regexes: what a declaration cannot say.
         for pat in allowed_patterns(meta) {
             if let Err(e) = compile_pattern(&pat) {
@@ -492,7 +464,7 @@ impl Handler for ExecBridgeBundle {
 // ── the auth gate (io_bridge leg — SEALED by default) ───────────────
 
 /// Deny an owned verb on a sealed leg. Same shape as `fantastic-file`'s gate:
-/// absent `ingress_rule` (or `auth`) resolves to deny-inbound, and every denial
+/// absent `ingress_rule` resolves to deny-inbound, and every denial
 /// teaches the fix. `kind="spawn"` — that is what is being authorized; no rule
 /// inspects the kind, so a new one costs nothing and the audit trail is honest.
 ///
@@ -500,12 +472,8 @@ impl Handler for ExecBridgeBundle {
 /// hand-rolled here would teach a different repair per bundle and per runtime;
 /// the rule that refused is the thing that knows the repair.
 fn gate(meta: &Map<String, Value>, agent_id: &AgentId, verb: &str) -> Option<Value> {
-    let spec = fantastic_io_bridge::authorizer::manifold_spec(
-        meta.get("ingress_rule"),
-        meta.get("auth"),
-        "_ingress",
-    );
-    let rule = fantastic_io_bridge::authorizer::ingress::resolve(spec.as_ref());
+    let rules = fantastic_io_bridge::authorizer::Rules::of(meta).unwrap_or_default();
+    let rule = fantastic_io_bridge::authorizer::ingress::resolve(&rules);
     let action = fantastic_io_bridge::authorizer::Action {
         kind: "spawn",
         target: agent_id.0.as_str(),
@@ -570,7 +538,10 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
     // thing python's reflect spreads, so these keys land last and in its order.
     if let (Some(o), Some(posture)) = (
         out.as_object_mut(),
-        fantastic_io_bridge::authorizer::describe(&meta).as_object(),
+        fantastic_io_bridge::authorizer::Rules::of(&meta)
+            .unwrap_or_default()
+            .describe()
+            .as_object(),
     ) {
         for (k, v) in posture {
             o.insert(k.clone(), v.clone());

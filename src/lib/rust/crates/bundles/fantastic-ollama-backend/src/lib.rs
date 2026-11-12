@@ -406,6 +406,7 @@ pub struct OllamaRecord {
     /// Turn the model's thinking channel on or off.
     pub think: Option<bool>,
     /// The read clock on the answer stream: seconds with no byte from the server (headers included) before the turn is judged stalled and ends with an error row.
+    #[serde(default)]
     #[schemars(schema_with = "fantastic_ai_core::record::stream_idle_seconds")]
     pub stream_idle_seconds: Option<f64>,
     /// How the conversation is kept in the model's view.

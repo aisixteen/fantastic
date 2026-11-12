@@ -544,7 +544,11 @@ impl PeerLink {
             .remove(fid);
         let Some(tx) = waiting else { return };
         // the reply's own secret paths (malformed ⇒ none; the reply still lands)
-        let marks = fantastic_kernel::secret::check(frame.get("secret")).unwrap_or_default();
+        let marks = frame
+            .get("secret")
+            .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+            .and_then(|m| fantastic_kernel::secret::check(&m).ok())
+            .unwrap_or_default();
         let (data, wrapped) = match frame.get("data") {
             Some(d @ Value::Object(_)) => (d.clone(), false),
             other => (

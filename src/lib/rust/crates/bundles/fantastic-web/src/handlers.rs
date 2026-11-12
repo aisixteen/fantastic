@@ -215,7 +215,7 @@ async fn file_proxy(state: AppState, agent_id: String, path: String) -> Response
                     (Some(Step::Next(m)), kernel, target, path, web),
                 )),
                 Step::Next(m) => {
-                    if fantastic_bundle::py_truthy(m.get("eof").unwrap_or(&Value::Null)) {
+                    if m.get("eof").and_then(Value::as_bool) == Some(true) {
                         return None;
                     }
                     let Some(n) = m.get("next_offset").cloned() else {
@@ -684,18 +684,14 @@ fn rest_gate(
     verb: &str,
     token: Option<&str>,
 ) -> Option<Response> {
-    use fantastic_io_bridge::authorizer::{ingress, manifold_spec, Action, Decision};
+    use fantastic_io_bridge::authorizer::{ingress, Action, Decision, Rules};
 
-    let (primary, auth) = match state.kernel.agents.get(owner).map(|e| Arc::clone(&e)) {
-        Some(a) => {
-            let meta = a.meta.read().expect("meta poisoned");
-            (meta.get("ingress_rule").cloned(), meta.get("auth").cloned())
-        }
+    let rules = match state.kernel.agents.get(owner).map(|e| Arc::clone(&e)) {
+        Some(a) => Rules::of(&a.meta.read().expect("meta poisoned")).unwrap_or_default(),
         // No record for the mounting leg ⇒ nothing granted it anything. Sealed.
-        None => (None, None),
+        None => Rules::default(),
     };
-    let spec = manifold_spec(primary.as_ref(), auth.as_ref(), "_ingress");
-    let decision = ingress::resolve(spec.as_ref()).authorize(&Action {
+    let decision = ingress::resolve(&rules).authorize(&Action {
         kind: "call",
         target,
         verb,

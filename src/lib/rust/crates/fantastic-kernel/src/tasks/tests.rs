@@ -1233,7 +1233,7 @@ async fn docs_of_an_agent_render_its_dynamic_verbs_beside_the_bundles_own() {
         .collect();
     assert_eq!(
         names,
-        ["ping", "reflect", "boot", "shutdown", "own_a1"],
+        ["ping", "reflect", "own_a1"],
         "{a1}"
     );
     assert_eq!(a1["verbs"]["ping"], "No args — Answer a ping", "{a1}");

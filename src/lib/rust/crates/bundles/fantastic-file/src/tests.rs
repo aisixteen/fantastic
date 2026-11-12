@@ -43,10 +43,9 @@ fn resolve_refuses_absolute_path() {
         err.starts_with("fs: path '/etc/passwd' escapes root"),
         "{err}"
     );
-    // The agent layer answers the same shape with `bad_arg` BEFORE reaching fs.
+    // The agent layer answers the same refusal as a transport error.
     let r = read_stream_reply(&fb(), &at(tmp.path()), &args(json!({"path": "/etc/passwd"}))).0;
-    assert_eq!(r["reason"], "bad_arg");
-    assert_eq!(r["arg"], "path");
+    assert_eq!(r["reason"], "transport_error");
 }
 
 #[test]
@@ -623,16 +622,17 @@ fn entry_refuses(payload: &Value) -> Value {
 
 #[test]
 fn empty_or_absent_path_delete_rename_mkdir_are_refused_by_the_entry() {
-    for payload in [
-        json!({"type": "delete", "path": "", "recursive": true}),
-        json!({"type": "delete", "recursive": true}),
-        json!({"type": "rename", "old_path": "", "new_path": "x"}),
-        json!({"type": "rename", "old_path": "a", "new_path": ""}),
-        json!({"type": "mkdir", "path": ""}),
-        json!({"type": "mkdir"}),
+    // an empty path is a wrong value; an absent one is a missing argument
+    for (payload, reason) in [
+        (json!({"type": "delete", "path": "", "recursive": true}), "bad_arg"),
+        (json!({"type": "delete", "recursive": true}), "missing_arg"),
+        (json!({"type": "rename", "old_path": "", "new_path": "x"}), "bad_arg"),
+        (json!({"type": "rename", "old_path": "a", "new_path": ""}), "bad_arg"),
+        (json!({"type": "mkdir", "path": ""}), "bad_arg"),
+        (json!({"type": "mkdir"}), "missing_arg"),
     ] {
         let r = entry_refuses(&payload);
-        assert_eq!(r["reason"], "missing_arg", "{payload} → {r}");
+        assert_eq!(r["reason"], reason, "{payload} → {r}");
     }
 }
 
@@ -798,74 +798,12 @@ fn root_ok(p: &Path) -> Result<PathBuf, String> {
     at(p)
 }
 
+/// The gate presents NO record token: a persisted `auth_token` opens nothing.
 #[test]
-fn auth_stem_is_not_judged_as_an_ingress_rule() {
-    // Python judges only a PRESENT `ingress_rule`.
-    let b = FileBundle::default();
-    let mut auth_only = Map::new();
-    auth_only.insert("auth".into(), json!("nonsense"));
-    assert!(b.validate_meta(&auth_only, &Map::new()).is_none());
-    let mut scoped = Map::new();
-    scoped.insert("ingress_rule".into(), json!("nonsense"));
-    assert_eq!(
-        b.validate_meta(&scoped, &Map::new()).unwrap(),
-        "ingress_rule='nonsense' is not a rule this bundle implements — \
-         legal values: allow_all_ingress, deny_ingress"
-    );
-    // A rule OBJECT is reported as python's dict repr.
-    let mut obj = Map::new();
-    obj.insert("ingress_rule".into(), json!({"type": "nope", "env": "X"}));
-    assert_eq!(
-        b.validate_meta(&obj, &Map::new()).unwrap(),
-        "ingress_rule={'type': 'nope', 'env': 'X'} is not a rule this bundle implements — \
-         legal values: allow_all_ingress, deny_ingress"
-    );
-    // A type-less rule object is a plain seal, not a refusal.
-    let mut typeless = Map::new();
-    typeless.insert("ingress_rule".into(), json!({"env": "X"}));
-    assert!(b.validate_meta(&typeless, &Map::new()).is_none());
-}
-
-#[test]
-fn password_ingress_is_refused_on_fs_and_process_legs() {
-    // The fs half (the process half lives in fantastic-exec-bridge).
-    let b = FileBundle::default();
-    for (field, spec, shown) in [
-        (
-            "ingress_rule",
-            json!("password_ingress"),
-            "'password_ingress'",
-        ),
-        (
-            "ingress_rule",
-            json!({"type": "password_ingress", "env": "X"}),
-            "{'type': 'password_ingress', 'env': 'X'}",
-        ),
-        ("auth", json!("password"), "'password'"),
-    ] {
-        let mut meta = Map::new();
-        meta.insert(field.to_string(), spec);
-        let e = b
-            .validate_meta(&meta, &Map::new())
-            .unwrap_or_else(|| panic!("{field} password must be refused"));
-        assert_eq!(
-            e,
-            format!(
-                "{field}={shown} is not applicable to the fs edge: a leg with no wire \
-                 envelope can never present a token — legal values: \
-                 allow_all_ingress, deny_ingress"
-            )
-        );
-    }
-    let mut ok = Map::new();
-    ok.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
-    assert!(b.validate_meta(&ok, &Map::new()).is_none());
-    // and the gate presents NO record token: a persisted `auth_token` opens nothing.
+fn a_record_token_opens_nothing() {
     let mut pw = Map::new();
-    pw.insert(
-        "ingress_rule".into(),
-        json!({"type": "password_ingress", "env": "FANTASTIC_GROUP_TOKEN_FILE_UNIT"}),
-    );
+    pw.insert("ingress_rule".into(), json!("password_ingress"));
+    pw.insert("token_env".into(), json!("FANTASTIC_GROUP_TOKEN_FILE_UNIT"));
     pw.insert("auth_token".into(), json!("s3cret"));
     std::env::set_var("FANTASTIC_GROUP_TOKEN_FILE_UNIT", "s3cret");
     let denied =
@@ -997,31 +935,14 @@ async fn reflect_root_is_resolved_absolute_path() {
 }
 
 #[test]
-fn reflect_posture_scopes_an_auth_stem_like_the_gate() {
-    // python `test_describe_scopes_like_the_gate`: an already-suffixed `auth`
-    // stem is suffixed AGAIN — exactly what the gate resolves (an unknown rule,
-    // so the leg is sealed) — and reflect reports that, not a name it would
-    // not honour.
+fn reflect_posture_names_the_rules_the_gate_resolves() {
     let mut meta = Map::new();
-    meta.insert("auth".into(), json!("allow_all_ingress"));
-    let r = reflect_reply(&AgentId::from("fb"), &meta, &Ok(PathBuf::from("/")));
-    assert_eq!(r["ingress_rule"], "allow_all_ingress_ingress");
-    assert_eq!(r["egress_rule"], "allow_all_ingress_egress");
-    assert_eq!(r["sealed"], true);
-    // `allow_all` / `deny` are the two stems that mean "present nothing" outbound.
-    let mut meta = Map::new();
-    meta.insert("auth".into(), json!("allow_all"));
+    meta.insert("ingress_rule".into(), json!("allow_all_ingress"));
     let r = reflect_reply(&AgentId::from("fb"), &meta, &Ok(PathBuf::from("/")));
     assert_eq!(r["ingress_rule"], "allow_all_ingress");
     assert_eq!(r["egress_rule"], "silent_egress");
-    // A bare stem is scoped per manifold.
-    let mut meta = Map::new();
-    meta.insert("auth".into(), json!("password"));
-    let r = reflect_reply(&AgentId::from("fb"), &meta, &Ok(PathBuf::from("/")));
-    assert_eq!(r["ingress_rule"], "password_ingress");
-    assert_eq!(r["egress_rule"], "password_egress");
-    assert_eq!(r["sealed"], true);
-    // No posture at all ⇒ sealed by default.
+    assert_eq!(r["sealed"], false);
+    // No posture at all => sealed by default.
     let r = reflect_reply(&AgentId::from("fb"), &Map::new(), &Ok(PathBuf::from("/")));
     assert_eq!(r["ingress_rule"], "deny_ingress");
     assert_eq!(r["egress_rule"], "silent_egress");
@@ -1193,7 +1114,7 @@ async fn pump_ends_default_to_this_bridge() {
         r["error"]
             .as_str()
             .unwrap()
-            .starts_with("pump: read from 'nobody' failed: {'error':"),
+            .starts_with("pump: read from 'nobody' failed: {\"error\":"),
         "{r}"
     );
 }
@@ -1670,16 +1591,12 @@ async fn a_leg_that_is_not_registered_says_no_agent_on_both_channels() {
     let b = FileBundle::default();
     for verb in ["read_stream", "write", "list"] {
         let call = || {
-            let routed = <verbs::Call as fantastic_kernel::verbs::Parse>::parse(
+            <verbs::Call as fantastic_kernel::verbs::Parse>::parse(
                 "ghost_fb",
                 &json!({"type": verb, "path": "a"}),
                 &[],
             )
-            .expect("a call");
-            match routed {
-                fantastic_kernel::verbs::Routed::Call(c) => c,
-                other => panic!("{other:?}"),
-            }
+            .expect("a call")
         };
         let (bin, body) = b
             .handle_binary(

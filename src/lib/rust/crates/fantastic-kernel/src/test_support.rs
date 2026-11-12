@@ -378,7 +378,7 @@ impl Handler for FakeStore {
             // is empty; anything else answers `None`.
             Call::ReadStream(a) => match std::fs::read(self.root.join(&a.path)) {
                 Ok(bytes) => Ok((
-                    Some(json!({"size": bytes.len()})),
+                    Some(json!({"size": bytes.len(), "eof": true})),
                     Some(crate::outcome::Blob::key("bytes", bytes)),
                 )),
                 Err(_) => Ok((Some(json!({"error": "not found"})), None)),

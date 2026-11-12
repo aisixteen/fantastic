@@ -360,9 +360,11 @@ pub mod record {
         /// One line saying what the agent is for; every reflect shows it.
         pub description: Option<String>,
         /// What this agent may call: a map of target → verbs (`*` for all). Sent WHOLE.
+        #[serde(default)]
         #[schemars(schema_with = "grant_map")]
         pub can_call: Option<Value>,
         /// Who may call this agent: a map of caller → verbs (`*` for all). Sent WHOLE.
+        #[serde(default)]
         #[schemars(schema_with = "grant_map")]
         pub callable_by: Option<Value>,
         /// `true` refuses a delete of this agent or an ancestor.

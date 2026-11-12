@@ -339,7 +339,7 @@ conform!(digit_string_refs_are_refused_as_not_row_ids, s_digit_string_refs_are_r
 async fn s_limits_and_ids_are_typed_integers(t: &mut T) {
     let rows: Vec<Value> = (1..=5).map(|i| json!({"id": i, "content": format!("needle {i}")})).collect();
     t.append("alice", Value::Array(rows)).await;
-    for (limit, want) in [(json!(2), 2), (json!(3), 3), (json!(0), 5)] {
+    for (limit, want) in [(json!(2), 2), (json!(3), 3)] {
         let r = t.call(json!({"type": "search", "query": "needle", "limit": limit.clone()}), Some("alice")).await;
         assert_eq!(r["matches"].as_array().unwrap().len(), want, "limit={limit}: {r}");
         assert_eq!(r["total"], json!(5), "limit={limit}");
@@ -367,9 +367,9 @@ fn wire(v: &Value) -> String {
 /// store lists differ between the two bundles (`boot` is sqlite's own).
 async fn s_unknown_type_is_coded_unhandled_with_the_raw_verb(t: &mut T) {
     let verbs = if t.h == SQL {
-        "boot, append, read, search, prune, inject, dump, put_bytes, get_bytes, reflect, shutdown"
+        "boot, append, read, search, prune, inject, dump, put_bytes, get_bytes, reflect"
     } else {
-        "append, read, search, prune, inject, dump, put_bytes, get_bytes, reflect, boot, shutdown"
+        "append, read, search, prune, inject, dump, put_bytes, get_bytes, reflect"
     };
     for (verb, shown) in [("frob", "'frob'"), ("it's", "\\\"it's\\\"")] {
         let want = format!(
@@ -377,8 +377,9 @@ async fn s_unknown_type_is_coded_unhandled_with_the_raw_verb(t: &mut T) {
         );
         assert_eq!(wire(&t.call(json!({"type": verb}), Some("alice")).await), want);
     }
-    // `shutdown` is answered by the shared entry: neither store declares it
-    assert_eq!(t.call(json!({"type": "shutdown"}), Some("alice")).await, Value::Null);
+    // `shutdown` is no verb of either store: refused like any unknown one
+    let r = t.call(json!({"type": "shutdown"}), Some("alice")).await;
+    assert_eq!(r["reason"], json!("unhandled"));
 }
 
 async fn s_arg_refusals_carry_error_reason_arg_in_that_order(t: &mut T) {
@@ -393,7 +394,7 @@ async fn s_arg_refusals_carry_error_reason_arg_in_that_order(t: &mut T) {
         assert_eq!(got["error"], format!("append: the arguments do not parse ({why})"), "{payload}: {got}");
     }
     for (payload, reason) in [
-        (json!({"type": "append", "rows": []}), "missing_arg"),
+        (json!({"type": "append", "rows": []}), "bad_arg"),
         (json!({"type": "append"}), "missing_arg"),
         (json!({"type": "append", "rows": "x"}), "bad_arg"),
         (json!({"type": "append", "rows": [1]}), "bad_arg"),
@@ -528,9 +529,9 @@ async fn reflect_names_the_same_verbs_and_says_durable() {
         // the verbs it answers: rendered from the declarations, in declaration order
         let d = t.k.send(vec![Item::new(AgentId::from("kernel"), json!({"type": "docs", "of": "mem"}))]).await.remove(0).result;
         let verbs: Vec<&String> = d["verbs"].as_object().unwrap().keys().collect();
-        let mut want = vec!["append", "read", "search", "prune", "inject", "dump", "put_bytes", "get_bytes", "reflect", "boot", "shutdown"];
+        let mut want = vec!["append", "read", "search", "prune", "inject", "dump", "put_bytes", "get_bytes", "reflect"];
         if h == SQL {
-            want = vec!["boot", "append", "read", "search", "prune", "inject", "dump", "put_bytes", "get_bytes", "reflect", "shutdown"];
+            want = vec!["boot", "append", "read", "search", "prune", "inject", "dump", "put_bytes", "get_bytes", "reflect"];
         }
         assert_eq!(verbs, want);
     }

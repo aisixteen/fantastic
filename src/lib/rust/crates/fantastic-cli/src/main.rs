@@ -341,11 +341,6 @@ fn py_strip(s: &str) -> &str {
     s.trim_matches(is_space)
 }
 
-/// python `str.rstrip()`.
-fn py_rstrip(s: &str) -> &str {
-    s.trim_end_matches(is_space)
-}
-
 /// python `_ledger_cap_from` (`P/main.py:66-85`). `--ledger-cap <v>` is removed
 /// from argv wherever it sits — but ONLY when a value follows, so a trailing bare
 /// flag stays an ordinary word. With no flag the value comes from
@@ -410,8 +405,17 @@ async fn dispatch(
         let opts = BootstrapOptions::one_shot(&state_dir, &work_dir);
         let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
         apply_ledger_cap(&booted, cap);
-        // python `print(src.read_text(...).rstrip())` — rstripped, one newline.
-        println!("{}", py_rstrip(fantastic_cli_bundle::HELP));
+        // The help is the kernel's own docs, rendered from its declarations.
+        let reply = booted
+            .kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel"),
+                json!({"type": "docs", "of": "kernel"}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        println!("{}", py_json_dumps(&reply, true, Some(2)));
         // Every non-daemon mode ends with an idempotent kernel
         // shutdown (python's atexit → `Kernel.shutdown`), even here where no
         // lock was ever taken.
@@ -791,7 +795,7 @@ mod catalog_tests {
 /// writes to the PROCESS environment, which the whole test binary shares.
 #[cfg(test)]
 mod cli_shell_tests {
-    use super::{ledger_cap_from, load_dotenv, py_rstrip, py_splitlines, USAGE};
+    use super::{ledger_cap_from, load_dotenv, py_splitlines, USAGE};
 
     fn write_env(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -886,13 +890,6 @@ mod cli_shell_tests {
     }
 
     #[test]
-    fn rstrip_takes_the_ascii_separators_trim_end_leaves() {
-        assert_eq!(py_rstrip("help\n"), "help");
-        assert_eq!(py_rstrip("help\u{1f}\u{1c} \n"), "help");
-        assert_eq!(py_rstrip("  keep left"), "  keep left");
-    }
-
-    #[test]
     fn usage_is_pythons_four_lines() {
         let lines: Vec<&str> = USAGE.split('\n').collect();
         assert_eq!(lines.len(), 4);
@@ -924,16 +921,18 @@ mod cli_shell_tests {
             ledger_cap_from(argv(&["--ledger-cap", "inf"])).unwrap().1,
             Some(None)
         );
-        // python's `int()`, so `_` and a sign parse and a bad literal raises.
+        // a count is plain digits; anything else is refused.
         assert_eq!(
-            ledger_cap_from(argv(&["--ledger-cap", " +1_000 "]))
-                .unwrap()
-                .1,
+            ledger_cap_from(argv(&["--ledger-cap", "1000"])).unwrap().1,
             Some(Some(1000))
         );
         assert_eq!(
+            ledger_cap_from(argv(&["--ledger-cap", " +1_000 "])).unwrap_err(),
+            "--ledger-cap \" +1_000 \": invalid digit found in string"
+        );
+        assert_eq!(
             ledger_cap_from(argv(&["--ledger-cap", "abc"])).unwrap_err(),
-            "ValueError: invalid literal for int() with base 10: 'abc'"
+            "--ledger-cap \"abc\": invalid digit found in string"
         );
     }
 }

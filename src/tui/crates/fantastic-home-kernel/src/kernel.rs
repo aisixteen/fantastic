@@ -270,7 +270,7 @@ impl HomeKernel {
         // Every hydrated agent the start did not boot, in registration order.
         // Every agent here is the home's: a refusal is fatal.
         for id in kernel.agent_ids() {
-            if done.contains(&id.0) || !declares_boot(kernel, &id) {
+            if done.contains(&id.0) || !kernel.advertises(&id, "boot").await {
                 continue;
             }
             let out = Arc::clone(kernel)
@@ -394,14 +394,3 @@ impl HomeKernel {
     }
 }
 
-/// Does the agent's bundle declare `boot`? Only such an agent is sent it.
-fn declares_boot(kernel: &Kernel, id: &fantastic_kernel::AgentId) -> bool {
-    let Some(agent) = kernel.agents.get(id).map(|a| Arc::clone(&a)) else {
-        return false;
-    };
-    let Some(bundle) = agent.handler_module.as_deref().and_then(|hm| kernel.bundles.get(hm)) else {
-        return false;
-    };
-    bundle.verbs().iter().any(|v| v.name == "boot")
-        || bundle.dynamic_verbs(&agent).iter().any(|v| v.name == "boot")
-}

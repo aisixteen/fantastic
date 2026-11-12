@@ -289,7 +289,7 @@ async fn without_match_every_is_required_and_args_are_checked() {
     let (rn, en) = ids(&tmp);
     let jid = printer(&k, &rn, 1, 0.01, "", 3.0).await;
     let cases = [
-        (json!({"notify": en}), "missing_arg", "every"),
+        (json!({"notify": en}), "missing_arg", "match | every"),
         (
             json!({"notify": en, "match": "(", "every": 1}),
             "bad_arg",

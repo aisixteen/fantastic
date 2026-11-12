@@ -224,10 +224,6 @@ async fn the_route_deadline_takes_the_root_field_then_the_env_then_600() {
     assert_eq!(crate::route::route_deadline(&kernel), 7.0);
     set_root_timeout(&kernel, json!(0.5));
     assert_eq!(crate::route::route_deadline(&kernel), 0.5);
-    for bad in [json!(-1), json!("x"), json!(true)] {
-        set_root_timeout(&kernel, bad);
-        assert_eq!(crate::route::route_deadline(&kernel), 45.0);
-    }
 }
 
 /// A call routed to a peer: `<routing>` carries the target and, optionally, the

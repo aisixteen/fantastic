@@ -857,6 +857,7 @@ dependencies = [
  "fantastic-kernel",
  "flate2",
  "httparse",
+ "schemars",
  "serde",
  "serde_json",
  "tokio",
@@ -953,20 +954,6 @@ dependencies = [
  "fantastic-kernel",
  "futures-util",
  "reqwest",
- "schemars",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "fantastic-scenario-probes"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fantastic-bundle",
- "fantastic-kernel",
- "libc",
  "schemars",
  "serde",
  "serde_json",
