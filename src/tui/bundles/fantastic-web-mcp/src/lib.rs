@@ -302,38 +302,10 @@ fn row(o: &Outcome) -> Value {
 
 // ── the protocol ────────────────────────────────────────────────────────────
 
-/// What a cold client is told in `initialize`. It is the whole onboarding: the
-/// client is never told what agents exist, only how to ask — and what the
-/// product is, what is optional, and what it must never touch.
-pub const INSTRUCTIONS: &str = "This server is a live Aisixteen Fantastic kernel running in this project directory: a tree of agents that all answer one verb, send. You are connected as the `mcp` agent, with god-mode grants on every agent (every verb); the human can narrow them later with update_agent.\n\
-\n\
-Start with `reflect` and no arguments — it returns the kernel's own primer: the agent tree and the bundles it can run. Reflect an agent before you send to it: verbs are discovered, never guessed. Then act with `send`. A refusal is an ordinary result, not a failure of the tool.\n\
-\n\
-AN AI IS OPTIONAL. Nothing is configured by default and the kernel works without one: you can be the brain yourself, driving agents, terminals and the canvas through send. The human works from the terminal UI (`fantastic`) or the browser canvas (`fantastic canvas`); the canvas and the terminal UI both open shell terminals, where a coding CLI like you can run too.\n\
-\n\
-SETTING UP AN AI is the human's: never pick a backend, model, host or port yourself — ASK the human which they want.\n\
-\n\
-KEYS live in the kernel's credential store, the `credentials` agent (it exists once the human chose where keys are kept, plain or secure): a key is a ref `<provider>/<host>` bound to its endpoint's host, read by the AI agent's backend at use time. ASK the human how the key gets there: they type it in a set-up surface (the canvas's ⚙ AI set-up, the terminal UI's set-up page), or you store it from a shell with `fantastic send`, the value written as `$env:NAME` — resolved only by that shell:\n\
-\x20\x20KEY=$(op read op://vault/openai/key) fantastic send '{\"target\":\"credentials\",\"payload\":{\"type\":\"set\",\"ref\":\"responses/api.openai.com\",\"fields\":{\"api_key\":\"$env:KEY\"}}}'\n\
-`set` only stores a value for a DECLARED ref: a new one is declared first with update_agent on `credentials`, its `refs` map ({<ref>: {host}} — the host lives only there; written WHOLE — keep every ref already there). Only the store's parent, `user`, may write that record: send it through `user` — {target: user, payload: {type: forward, target: kernel, payload: {type: update_agent, id: credentials, refs: {…}}}}. Never print, echo or write a key value anywhere.";
-
-/// What `fantastic mcp` prints to stderr on start, for a coding CLI that ran it
-/// in a shell to learn what it is: the onboarding above, and how to register
-/// it as an MCP server in each client's own configuration.
-pub const SHAPE: &str = "fantastic mcp — the MCP face of the Aisixteen Fantastic kernel in this directory (stdio, protocol 2025-11-25; tools: reflect, send).\n\
-\n\
-Register it ONCE as a stdio MCP server — command `fantastic`, args [\"mcp\"] — and it serves the project directory it is started in: it attaches to the kernel already running there (the terminal UI or the canvas), or runs it itself.\n\
-\x20\x20Claude Code: claude mcp add --scope user fantastic -- fantastic mcp\n\
-\x20\x20Codex:       ~/.codex/config.toml   [mcp_servers.fantastic] command = \"fantastic\", args = [\"mcp\"]\n\
-\x20\x20Cursor:      ~/.cursor/mcp.json     {\"mcpServers\": {\"fantastic\": {\"command\": \"fantastic\", \"args\": [\"mcp\"]}}}\n\
-\x20\x20Gemini CLI:  ~/.gemini/settings.json  {\"mcpServers\": {\"fantastic\": {\"command\": \"fantastic\", \"args\": [\"mcp\"]}}}\n\
-\x20\x20VS Code:     .vscode/mcp.json       {\"servers\": {\"fantastic\": {\"type\": \"stdio\", \"command\": \"fantastic\", \"args\": [\"mcp\"]}}}\n\
-The server must start in the project directory.\n\
-\n";
-
-/// Said before [`INSTRUCTIONS`] wherever a human or a shell reads them: they
-/// are addressed to a connected client.
-pub const LEAD_IN: &str = "What a connected MCP client is told (its `initialize` instructions):\n\n";
+/// The one short generic text of what this bundle is for: told to a client in
+/// `initialize`, and printed by `fantastic readme`. Everything else a client
+/// learns is rendered from the agents' own declarations (`reflect`).
+pub const INSTRUCTIONS: &str = "A live Aisixteen Fantastic kernel: a tree of agents that all answer one verb, send. Start with `reflect` and no arguments for the agent tree and the bundles; reflect an agent before you send to it. A refusal is an ordinary result.";
 
 
 

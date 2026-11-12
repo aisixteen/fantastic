@@ -38,13 +38,15 @@ pub struct Field {
     pub hint: String,
 }
 
-/// The options of an enum label (`'a'|'b'`); none for any other type.
-fn enum_of(label: &str) -> Vec<String> {
-    let opts: Vec<&str> = label.split('|').collect();
-    if opts.iter().all(|o| o.len() >= 2 && o.starts_with('\'') && o.ends_with('\'')) {
-        opts.iter().map(|o| o[1..o.len() - 1].to_string()).collect()
-    } else {
-        Vec::new()
+/// The enum set a property schema declares: its own `enum`, or the `enum` of each
+/// documented variant under `oneOf`.
+fn enum_set(prop: &Value) -> Vec<String> {
+    let names = |e: &Value| -> Vec<String> {
+        e["enum"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default()
+    };
+    match prop["oneOf"].as_array() {
+        Some(alts) => alts.iter().flat_map(names).collect(),
+        None => names(prop),
     }
 }
 
@@ -60,29 +62,27 @@ pub struct Backend {
 }
 
 impl Backend {
-    /// A backend from its catalog schema.
+    /// A backend from its declared record schema (`Bundle::record().schema()`, a JSON
+    /// schema object): each property's rendered type, required flag, default and doc
+    /// come from the kernel's own reading of it, the enum set from the property's
+    /// `enum`.
     pub fn from_schema(module: &str, schema: &Value) -> Self {
-        let fields = schema["fields"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|f| {
-                        let name = f["name"].as_str()?.to_string();
-                        (!WRITE_OWNED.contains(&name.as_str())).then(|| Field {
-                            name,
-                            one_of: enum_of(f["type"].as_str().unwrap_or("")),
-                            ty: f["type"].as_str().unwrap_or("string").to_string(),
-                            required: f["required"].as_bool().unwrap_or(false),
-                            default: f.get("default").cloned().filter(|v| !v.is_null()),
-                            hint: f["hint"].as_str().unwrap_or("").to_string(),
-                        })
-                    })
-                    .collect()
+        let fields = fantastic_kernel::verbs::args(schema)
+            .into_iter()
+            .filter(|a| !WRITE_OWNED.contains(&a.name.as_str()))
+            .map(|a| Field {
+                one_of: enum_set(&schema["properties"][a.name.as_str()]),
+                name: a.name,
+                ty: a.ty,
+                required: a.required,
+                default: a.default,
+                hint: a.doc,
             })
-            .unwrap_or_default();
-        let key = schema["fields"].as_array().and_then(|a| {
-            a.iter().find(|f| f["name"] == "credentials").map(|f| f["required"].as_bool().unwrap_or(false))
-        });
+            .collect();
+        let key = fantastic_kernel::verbs::args(schema)
+            .into_iter()
+            .find(|a| a.name == "credentials")
+            .map(|a| a.required);
         Self { module: module.to_string(), fields, key }
     }
 }
@@ -99,7 +99,7 @@ pub fn backends(host: &Host) -> Vec<Backend> {
         .bundles
         .catalog()
         .filter(|(m, _)| BACKENDS.contains(m))
-        .map(|(m, b)| Backend::from_schema(m, &fantastic_kernel::verbs::record_fields(b.record())))
+        .map(|(m, b)| Backend::from_schema(m, b.record().schema()))
         .collect();
     v.sort_by(|a, b| a.module.cmp(&b.module));
     v
@@ -221,6 +221,20 @@ pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::kern::backend::create_tests::{host, record_of};
+
+    #[test]
+    fn a_fields_enum_set_comes_from_its_schema_plain_or_documented() {
+        let b = Backend::from_schema(
+            "x.tools",
+            &json!({"type": "object", "properties": {
+                "a": {"type": "string", "enum": ["p", "q"]},
+                "b": {"oneOf": [{"type": "string", "enum": ["r"]}, {"type": "string", "enum": ["s"]}]},
+                "c": {"type": "string"},
+            }}),
+        );
+        let sets: Vec<String> = b.fields.iter().map(|f| f.one_of.join(",")).collect();
+        assert_eq!(sets, ["p,q", "r,s", ""]);
+    }
 
     #[tokio::test]
     async fn write_makes_the_provider_and_the_chat_naming_it_both_booted() {

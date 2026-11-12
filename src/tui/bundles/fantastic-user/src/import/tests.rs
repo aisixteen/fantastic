@@ -34,7 +34,14 @@ fn run(
         .iter()
         .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
         .collect();
-    let bind = bind.as_object().cloned().unwrap_or_default();
+    let bind: BTreeMap<String, String> = bind
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
     let agent = |id: &str| existing(id, taken);
     let w = World {
         parent_id: "home",

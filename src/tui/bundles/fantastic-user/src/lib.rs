@@ -358,14 +358,17 @@ impl Handler for UserBundle {
             verbs::Call::Around(a) => Self::around(agent_id, a, kernel).await,
             // A SUBTREE AS A BLUEPRINT, outside references as ports (`export.rs`)
             verbs::Call::ExportSubtree(a) => {
-                let p = json!({"type": "export_subtree", "agent_id": a.agent_id, "path": a.path});
-                export::export_subtree(kernel, &p).await
+                fantastic_core::export::export_subtree(
+                    kernel,
+                    &a.agent_id,
+                    &a.path,
+                    "user.export_subtree",
+                )
+                .await
             }
             // A BLUEPRINT AS A LIVE SUBTREE: fresh ids, ports bound, approved (`import.rs`)
             verbs::Call::ImportSubtree(a) => {
-                let p = json!({"type": "import_subtree", "path": a.path, "parent_id": a.parent_id,
-                    "bind": a.bind, "allow_code": a.allow_code, "approve": a.approve});
-                import::import_subtree(kernel, &p).await
+                import::import_subtree(kernel, a).await
             }
             // THE PERSON'S INQUIRIES: held, listed, answered (`inquiries.rs`)
             verbs::Call::Inquiry(a) => self.inquiries.ask(a),
