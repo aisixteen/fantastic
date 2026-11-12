@@ -217,9 +217,7 @@ impl DynRegistry {
         self.lock().remove(agent);
     }
 
-    fn lock(
-        &self,
-    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Vec<DynVerb>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Vec<DynVerb>>> {
         self.by_agent
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -521,6 +519,65 @@ fn map_value(schema: &Value) -> Option<&Value> {
     schema.get("additionalProperties").filter(|v| v.is_object())
 }
 
+/// The alternatives an OBJECT schema requires (`anyOf`/`oneOf` whose every entry is
+/// only a `required` list): the key (`anyOf` = at least one, `oneOf` = exactly one)
+/// and each alternative's field names. `None` when the schema declares none.
+fn required_alternatives(schema: &Value) -> Option<(&'static str, Vec<Vec<&str>>)> {
+    for key in ["anyOf", "oneOf"] {
+        let Some(Value::Array(alts)) = schema.get(key) else {
+            continue;
+        };
+        let groups: Option<Vec<Vec<&str>>> = alts
+            .iter()
+            .map(|a| {
+                let o = a.as_object()?;
+                if o.len() != 1 {
+                    return None;
+                }
+                let names: Vec<&str> = o
+                    .get("required")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect();
+                (!names.is_empty()).then_some(names)
+            })
+            .collect();
+        if let Some(g) = groups.filter(|g| !g.is_empty()) {
+            return Some((key, g));
+        }
+    }
+    None
+}
+
+fn group_text(group: &[&str]) -> String {
+    if group.len() == 1 {
+        group[0].to_string()
+    } else {
+        format!("({})", group.join(" + "))
+    }
+}
+
+/// `one of before_id | ids` — the alternatives, named.
+fn alternatives_names(groups: &[Vec<&str>]) -> String {
+    groups
+        .iter()
+        .map(|g| group_text(g))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// The constraint as `reflect` and `docs` show it, when the schema has one.
+fn alternatives_text(schema: &Value) -> Option<String> {
+    let (key, groups) = required_alternatives(schema)?;
+    let how = if key == "oneOf" {
+        "exactly one of"
+    } else {
+        "one of"
+    };
+    Some(format!("{how} {} is required", alternatives_names(&groups)))
+}
+
 fn base_label(s: &Value) -> String {
     let Some(o) = s.as_object() else {
         return "any".to_string();
@@ -536,6 +593,9 @@ fn base_label(s: &Value) -> String {
         return names.join("|");
     }
     for key in ["anyOf", "oneOf"] {
+        if required_alternatives(s).is_some() {
+            break;
+        }
         if let Some(Value::Array(alts)) = o.get(key) {
             let labels: Vec<String> = alts
                 .iter()
@@ -623,13 +683,18 @@ fn arg_text(a: &Arg) -> String {
 #[must_use]
 pub fn arg_list(schema: &Value) -> String {
     let a = args(schema);
+    let rule = alternatives_text(schema);
     if a.is_empty() {
         return "No args".to_string();
     }
-    format!(
+    let mut out = format!(
         "args: {}",
         a.iter().map(arg_text).collect::<Vec<_>>().join(", ")
-    )
+    );
+    if let Some(r) = rule {
+        out.push_str(&format!("; {r}"));
+    }
+    out
 }
 
 /// Does the schema accept ANY field it does not name, unchecked? Only
@@ -735,6 +800,9 @@ pub fn detail(row: &Row) -> String {
             out.push_str(&format!(" — {}", x.doc.replace('\n', " ")));
         }
     }
+    if let Some(r) = alternatives_text(row.schema) {
+        out.push_str(&format!("\n  {r}."));
+    }
     out.trim().to_string()
 }
 
@@ -758,6 +826,9 @@ fn matches_type(schema: &Value, v: &Value) -> bool {
         return vals.contains(v);
     }
     for key in ["anyOf", "oneOf"] {
+        if required_alternatives(schema).is_some() {
+            break;
+        }
         if let Some(Value::Array(alts)) = o.get(key) {
             return alts.iter().any(|a| matches_type(a, v));
         }
@@ -815,8 +886,9 @@ fn matches_type(schema: &Value, v: &Value) -> bool {
 /// text; anchor with `^…$`)? A pattern that is not a valid regex matches nothing:
 /// the declaration is wrong and every value is refused by it.
 fn pattern_matches(pattern: &str, text: &str) -> bool {
-    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<String, Option<regex::Regex>>>> =
-        OnceLock::new();
+    static CACHE: OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Option<regex::Regex>>>,
+    > = OnceLock::new();
     let mut cache = CACHE
         .get_or_init(Default::default)
         .lock()
@@ -1000,6 +1072,29 @@ fn check_object(
                     top,
                 ));
             }
+        }
+    }
+    if let Some((key, groups)) = required_alternatives(schema) {
+        let given = |g: &Vec<&str>| g.iter().all(|f| !is_missing(schema, f, raw.get(*f)));
+        let n = groups.iter().filter(|g| given(g)).count();
+        let names = alternatives_names(&groups);
+        if n == 0 {
+            return Err(refuse_arg(
+                name,
+                MISSING_ARG,
+                &dotted(&names),
+                format!("one of {names} is required"),
+                top,
+            ));
+        }
+        if key == "oneOf" && n > 1 {
+            return Err(refuse_arg(
+                name,
+                BAD_ARG,
+                &dotted(&names),
+                format!("only one of {names} may be given"),
+                top,
+            ));
         }
     }
     if let Some(props) = props {

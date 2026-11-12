@@ -322,7 +322,8 @@ mod tests {
                 .collect()
         };
         // an integer where `list_agents` declares one, text where `docs` declares text
-        let p = operator_payload(&kernel, "kernel", "list_agents", &pairs(&[("limit", "7")])).unwrap();
+        let p =
+            operator_payload(&kernel, "kernel", "list_agents", &pairs(&[("limit", "7")])).unwrap();
         assert_eq!(p["limit"], json!(7));
         let p = operator_payload(&kernel, "kernel", "docs", &pairs(&[("of", "7")])).unwrap();
         assert_eq!(p["of"], json!("7"));
@@ -332,7 +333,8 @@ mod tests {
             "kernel",
             "await_set",
             &pairs(&[("ids", r#"["a","b"]"#), ("timeout_s", "2.5")]),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(p["ids"], json!(["a", "b"]));
         assert_eq!(p["timeout_s"], json!(2.5));
         // the fields of the record a create or update concerns are typed by ITS declaration
@@ -345,7 +347,8 @@ mod tests {
                 ("allow", r#"["."]"#),
                 ("root", "12"),
             ]),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(p["allow"], json!(["."]));
         assert_eq!(p["root"], json!("12"));
         let p = operator_payload(
@@ -353,22 +356,30 @@ mod tests {
             "kernel",
             "update_agent",
             &pairs(&[("id", "kernel_state"), ("delete_lock", "true")]),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(p["delete_lock"], json!(true));
         // a verb the agent does not declare types nothing
         let p = operator_payload(&kernel, "kernel", "make_tea", &pairs(&[("limit", "7")])).unwrap();
         assert_eq!(p["limit"], json!("7"));
-        let p = operator_payload(&kernel, "nobody", "list_agents", &pairs(&[("limit", "7")])).unwrap();
+        let p =
+            operator_payload(&kernel, "nobody", "list_agents", &pairs(&[("limit", "7")])).unwrap();
         assert_eq!(p["limit"], json!("7"));
     }
 
     #[test]
     fn an_operators_text_is_json_only_where_the_schema_asks_for_a_list_or_object() {
         let list = json!({"type": "array", "items": {"type": "integer"}});
-        assert_eq!(operator_text("v", "a", &list, "[1,2]").unwrap(), json!([1, 2]));
+        assert_eq!(
+            operator_text("v", "a", &list, "[1,2]").unwrap(),
+            json!([1, 2])
+        );
         assert!(operator_text("v", "a", &list, "one").is_err());
         let text = json!({"type": "string"});
-        assert_eq!(operator_text("v", "a", &text, "[1,2]").unwrap(), json!("[1,2]"));
+        assert_eq!(
+            operator_text("v", "a", &text, "[1,2]").unwrap(),
+            json!("[1,2]")
+        );
         assert_eq!(
             operator_text("v", "a", &json!({"type": "integer"}), "42").unwrap(),
             json!(42)
@@ -377,6 +388,9 @@ mod tests {
             operator_text("v", "a", &json!({"type": "boolean"}), "true").unwrap(),
             json!(true)
         );
-        assert_eq!(operator_text("v", "a", &Value::Null, "42").unwrap(), json!("42"));
+        assert_eq!(
+            operator_text("v", "a", &Value::Null, "42").unwrap(),
+            json!("42")
+        );
     }
 }
