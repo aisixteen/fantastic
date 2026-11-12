@@ -19,7 +19,7 @@ pub struct Schedule {
     #[schemars(length(min = 1))]
     pub target: String,
     /// The call itself: an object whose `type` is any verb `target` answers, with that verb's arguments.
-    #[schemars(schema_with = "call_with_type")]
+    #[schemars(schema_with = "fantastic_kernel::verbs::call_with_type")]
     pub payload: Map<String, Value>,
     /// Seconds between fires.
     #[serde(default = "sixty")]
@@ -58,18 +58,6 @@ fn positive_seconds(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::sche
         "exclusiveMinimum": 0.0
     }))
     .expect("a seconds schema")
-}
-
-/// The schema of a schedule's call: an object whose `type` is text.
-fn call_with_type(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-    serde_json::from_value(serde_json::json!({
-        "type": "object",
-        "required": ["type"],
-        "properties": {
-            "type": {"type": "string", "minLength": 1, "description": "The verb the target answers."}
-        }
-    }))
-    .expect("a call schema")
 }
 
 /// Remove one schedule. Returns {removed:bool, schedule_id}.

@@ -138,20 +138,8 @@ pub mod user {
         #[schemars(length(min = 1))]
         pub target: String,
         /// The call: an object naming a `type`.
-        #[schemars(schema_with = "call_with_type")]
+        #[schemars(schema_with = "fantastic_kernel::verbs::call_with_type")]
         pub payload: Map<String, Value>,
-    }
-
-    /// The schema of a sent call: an object whose `type` is text.
-    fn call_with_type(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        serde_json::from_value(serde_json::json!({
-            "type": "object",
-            "required": ["type"],
-            "properties": {
-                "type": {"type": "string", "minLength": 1, "description": "The verb the target answers."}
-            }
-        }))
-        .expect("a call schema")
     }
 
     fantastic_kernel::verbs! {

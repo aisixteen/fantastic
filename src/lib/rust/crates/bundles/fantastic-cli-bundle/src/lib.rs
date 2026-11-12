@@ -278,7 +278,7 @@ pub fn intro_booting_lines(kernel: &Kernel) -> Vec<String> {
         format!("[fantastic] {} — booting…", identity(kernel)),
         concat!(
             "  one envelope: send(<id>, {\"type\":\"<verb>\", …})",
-            "   ·   kernel = root   ·   full map: reflect readme=true"
+            "   ·   kernel = root   ·   full map: reflect · verbs: docs of=<id>"
         )
         .to_string(),
         "  PULL  ask → reply        REST POST /<rest>/<id>        ·  this REPL: @<id> <verb> k=v"
@@ -295,7 +295,7 @@ pub fn intro_booting_lines(kernel: &Kernel) -> Vec<String> {
 
 /// python's `_booted` line — the "all booted" close.
 pub const BOOTED_LINE: &str =
-    "[kernel] up — all booted. attach via the map above, or reflect readme=true";
+    "[kernel] up — all booted. attach via the map above, or reflect";
 
 /// The cli render-sink bundle.
 pub struct CliBundle;

@@ -29,11 +29,10 @@ Strict rules:
   remaining tests and flag it.
 - Do not invent expected output — ask if the spec is unclear.
 - A correctly-deployed `fantastic` answers `kernel.reflect` over WS
-  with the agent tree, the bundle catalog (`bundles=all`), and the root
-  readme (`readme=true`) — the readme carries the transport/wire docs
-  you need to issue your first send. Open `ws://host/<any-agent>/ws` and
-  send `{"type":"call","target":"kernel","payload":{"type":"reflect",
-  "readme":true},"id":"1"}`. If you find yourself reading
+  with the agent tree, the bundle catalog (`bundles=all`), and the kernel's
+  verbs (`docs of=kernel`). Open `ws://host/<any-agent>/ws` and
+  send `{"type":"call","target":"kernel","payload":{"type":"docs",
+  "of":"kernel"},"id":"1"}`. If you find yourself reading
   `crates/fantastic-kernel/src/` or `crates/bundles/fantastic-web/src/`
   to figure out a transport URL — that belongs in the root readme. Stop
   and flag it.

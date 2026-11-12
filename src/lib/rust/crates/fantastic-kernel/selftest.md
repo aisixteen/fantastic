@@ -30,8 +30,7 @@ jq -e '.id == "kernel_state"' .fantastic/agent.yaml
 Expect: `.fantastic/agent.yaml` exists with `id=kernel_state` after first
 invocation. Reflect returns the uniform identity + tree (default
 `tree=all`); `reflect bundles=all` lists the installable catalog and
-`reflect readme=true` attaches the root readme. Transport/wire docs
-live in the readme, not the reflect JSON.
+`docs of=kernel` lists the kernel's verbs; they are not in the reflect JSON.
 
 ### Test 2: persistence round-trip — merge-only
 

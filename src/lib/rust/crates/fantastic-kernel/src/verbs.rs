@@ -1123,6 +1123,20 @@ fn check_object(
     Ok(())
 }
 
+/// The schema of a call carried as an argument (`schedule`'s stored call, `send`'s
+/// payload): an object whose `type` is the verb the target answers. Used through
+/// `#[schemars(schema_with = "fantastic_kernel::verbs::call_with_type")]`.
+pub fn call_with_type(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    serde_json::from_value(serde_json::json!({
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+            "type": {"type": "string", "minLength": 1, "description": "The verb the target answers."}
+        }
+    }))
+    .expect("a call schema")
+}
+
 /// The typed form of a call an agent's entry ALREADY checked (the agent answered
 /// it): the arguments, decoded into the declared struct. A decode that fails means
 /// the struct and its schema disagree.

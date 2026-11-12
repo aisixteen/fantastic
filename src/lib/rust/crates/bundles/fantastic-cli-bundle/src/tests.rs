@@ -142,7 +142,7 @@ async fn intro_booting_prints_the_control_plane_map() {
     );
     assert_eq!(
         lines[1],
-        "  one envelope: send(<id>, {\"type\":\"<verb>\", …})   ·   kernel = root   ·   full map: reflect readme=true"
+        "  one envelope: send(<id>, {\"type\":\"<verb>\", …})   ·   kernel = root   ·   full map: reflect · verbs: docs of=<id>"
     );
     assert_eq!(
         lines[2],
@@ -163,7 +163,7 @@ async fn intro_booting_prints_the_control_plane_map() {
 fn booted_is_a_dumb_sink_no_tree_inspection() {
     assert_eq!(
         BOOTED_LINE,
-        "[kernel] up — all booted. attach via the map above, or reflect readme=true"
+        "[kernel] up — all booted. attach via the map above, or reflect"
     );
 }
 

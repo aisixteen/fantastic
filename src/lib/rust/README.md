@@ -100,7 +100,7 @@ BIN=$(pwd)/target/release/fantastic_kernel
 # One-shot RPCs:
 $BIN reflect                                  # substrate identity + tree of root (id="kernel_state")
 $BIN reflect kernel_state bundles=all                 # add the registered-bundle catalog
-$BIN reflect kernel_state readme=true                 # attach the agent's readme (transport/wire docs)
+$BIN kernel_state docs of=kernel                       # the kernel's verbs
 $BIN kernel_state list_agents                         # every agent in this workdir
 $BIN kernel_state create_agent handler_module=web.tools id=w port=8888
 
@@ -111,9 +111,7 @@ $BIN
 
 `reflect` is the param-driven discovery verb: with no flags it returns
 the addressed agent's substrate identity + nested `tree`; `bundles=all|ids`
-adds the registered-bundle catalog and `readme=true` attaches the agent's
-readme. There is no separate "primer" — transport and wire-protocol docs
-live in the root readme (reachable via `reflect readme=true`).
+adds the registered-bundle catalog. Every agent's verbs come from `docs of=<id>`.
 
 Composition rule: `fantastic` blocks only when the workdir has a
 `web` agent persisted (HTTP daemon) or `stdin` is a tty (REPL).

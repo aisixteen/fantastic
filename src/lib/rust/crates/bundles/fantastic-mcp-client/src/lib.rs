@@ -6,7 +6,7 @@
 //! asks the server who it is (`server/discover`) and lists its tools
 //! (`tools/list`, every page); from then on EACH TOOL IS A VERB of this agent:
 //! `send {type: <tool>, …its arguments}` is a `tools/call`. `docs of=<this agent>`
-//! lists them — the agent's own table ([`Bundle::instance_verb_docs`]), built from
+//! lists them — its dynamic verbs ([`fantastic_kernel::verbs::DynVerb`]), built from
 //! each tool's `inputSchema` and `description`. A grant names tools like verbs.
 //!
 //! Streamable HTTP, DUAL-ERA ([`wire`]): protocol 2026-07-28 (stateless) first; a
