@@ -150,6 +150,8 @@ fn the_record_is_two_knobs_a_store_then_the_ai_fields() {
             "cache_primer_until",
             "transport_retries",
             "misfire_limit",
+
+            "reflect_fold",
             "system_prompt",
             "file_bridge_id",
             "system_prompt_file",

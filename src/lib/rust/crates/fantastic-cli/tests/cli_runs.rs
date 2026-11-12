@@ -1355,6 +1355,7 @@ fn the_catalog_carries_the_on_device_backend() {
             "cache_primer_until",
             "transport_retries",
             "misfire_limit",
+            "reflect_fold",
             "system_prompt",
             "file_bridge_id",
             "system_prompt_file",
@@ -1392,14 +1393,27 @@ fn the_schema_is_what_the_write_enforces() {
         r["error"].as_str().unwrap().contains("'credentials'"),
         "{r}"
     );
-    let r = create(&[
-        "id=a2",
-        "endpoint=http://127.0.0.1:9/stub",
-        "model=m",
-        "memory_store_id=memory",
-        r#"credentials={"store": "creds", "ref": "claude"}"#,
-        "context_strategy=bogus",
-    ]);
+    // an enum value outside its set never reaches the kernel: the CLI types each
+    // `k=v` by the verb's declaration and refuses it on stderr, exit 1
+    let out = Command::new(fantastic_bin())
+        .args([
+            "kernel_state",
+            "create_agent",
+            "parent_id=kernel",
+            "handler_module=responses_backend.tools",
+            "id=a2",
+            "endpoint=http://127.0.0.1:9/stub",
+            "model=m",
+            "memory_store_id=memory",
+            r#"credentials={"store": "creds", "ref": "claude"}"#,
+            "context_strategy=bogus",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("one-shot");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let r: serde_json::Value = serde_json::from_slice(&out.stderr).expect("the refusal on stderr");
     assert_eq!(r["reason"], "bad_arg", "{r}");
     assert!(
         r["error"].as_str().unwrap().contains("context_strategy"),
