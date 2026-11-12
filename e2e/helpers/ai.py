@@ -85,8 +85,8 @@ class Connected:
 # the pair: `connect` uses it, and so does every probe that wires its own AI.
 CHAT_MODULE = "ai_chat.tools"
 PROVIDER_CALLS = ["complete", "watch", "reflect"]
-#: record fields the CHAT takes too (it sizes its own context and output)
-CHAT_SHARED = ("model", "max_tokens", "context_window")
+#: record fields the CHAT takes too (it sizes its own context; output is the provider's max_tokens)
+CHAT_SHARED = ("model", "context_window")
 #: record fields that are the PROVIDER's only, wherever a probe puts them
 PROVIDER_ONLY = ("handler_module", "endpoint", "credentials", "num_ctx", "kv_slots",
                  "kv_overflow", "no_repeat_ngram_size", "repetition_penalty",
