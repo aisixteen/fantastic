@@ -40,7 +40,7 @@
 #![deny(missing_docs)]
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -49,6 +49,7 @@ use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::outcome::{body_at, Blob};
 use fantastic_kernel::refusal::{missing, refusal, refusal_hint, with, BAD_ARG, EXISTS, NOT_FOUND, UNHANDLED};
 use fantastic_kernel::{AgentId, Kernel};
+use fantastic_ram_store::{as_id, prune_selector_missing, row_refs, stage_rows};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 
@@ -100,14 +101,6 @@ CREATE TRIGGER IF NOT EXISTS rows_text_gone AFTER DELETE ON rows BEGIN
   DELETE FROM text_idx WHERE owner = old.owner AND id = old.id;
 END;
 "#;
-
-/// A row id inside a stored row or a dump: a positive JSON integer.
-fn as_id(x: &Value) -> Option<i64> {
-    match x {
-        Value::Number(n) => n.as_i64().filter(|i| *i > 0),
-        _ => None,
-    }
-}
 
 /// ram_store `_text_of`: the content as text, a title prefixed on its own line.
 fn text_of(row: &Row) -> String {
@@ -507,21 +500,6 @@ fn fold_closure(db: &Db<'_>, owner: &str, fold: i64) -> rusqlite::Result<HashSet
     Ok(out)
 }
 
-/// Why a record's `path` cannot name the file: it is required, relative, and
-/// never climbs out of its base (the work folder, or `@state/…` / `@self/…`).
-pub fn check_path(rec: &Map<String, Value>) -> Result<&Path, String> {
-    let p = rec
-        .get("path")
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .ok_or("sqlite_store needs `path`: the database file, relative to the work folder, or @state/… (no default)")?;
-    let path = Path::new(p);
-    if path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
-        return Err(format!("sqlite_store: `path` must stay inside its folder (relative to the work folder, or @state/…), got {p:?}"));
-    }
-    Ok(path)
-}
-
 /// Where the file is: `path` by the kernel's one rule ([`Kernel::record_root`]:
 /// `@state/…` under the state folder, `@self/…` under the agent's own folder
 /// `own`, else under the work folder). A kernel without folders has nowhere
@@ -531,7 +509,10 @@ pub fn resolve_path(
     kernel: &Kernel,
     own: &Path,
 ) -> Result<PathBuf, String> {
-    let raw = check_path(rec)?.to_string_lossy().into_owned();
+    // the record was checked against its declaration (`record.rs`) when it was written
+    let raw = serde_json::from_value::<record::Record>(Value::Object(rec.clone()))
+        .map_err(|e| format!("sqlite_store: the record's `path`: {e}"))?
+        .path;
     let no_disk = "sqlite_store needs a disk-backed kernel: an in-memory kernel has no folder to hold the file";
     if kernel.storage.is_in_memory() {
         return Err(no_disk.to_string());
@@ -540,12 +521,6 @@ pub fn resolve_path(
         .record_root(&raw, own)
         .map_err(|e| format!("sqlite_store: {e}"))?;
     let path = Path::new(&rel);
-    if path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
-        return Err(format!(
-            "sqlite_store: `path` must stay inside its folder, got {raw:?}"
-        ));
-    }
-    let work = work.as_path();
     // Clamp like python `fs.resolve`: the deepest part of the path that exists is
     // followed through its symlinks and must still lie under the real base —
     // a `stores -> /elsewhere` link must not carry the file out of its folder.
@@ -704,40 +679,21 @@ impl SqliteStoreBundle {
             Err(r) => return r,
         };
         self.tx(id, kernel, |db| {
-            let mut staged: Vec<Row> = Vec::new();
-            let mut batch: HashSet<i64> = HashSet::new();
-            for r in &a.rows {
-                let rid = match r.get("id") {
-                    None | Some(Value::Null) => kernel.mint_id(),
-                    Some(v) => match (v, as_id(v)) {
-                        (Value::Number(_), Some(n)) => n,
-                        _ => {
-                            let mut e = refusal(BAD_ARG, format!("append: a row id is a kernel int, got {}", py_repr_value(v)));
-                            with(&mut e, "arg", json!("rows"));
-                            return Err(e);
-                        }
-                    },
-                };
-                if db.has(&owner, rid).map_err(db_err)? || batch.contains(&rid) {
+            let staged = stage_rows(&a.rows, || kernel.mint_id())?;
+            let batch: HashSet<i64> = staged.iter().filter_map(|r| r.get("id").and_then(as_id)).collect();
+            for r in &staged {
+                let rid = r.get("id").and_then(Value::as_i64).unwrap_or(0);
+                if db.has(&owner, rid).map_err(db_err)? {
                     let mut e = refusal(EXISTS, format!("append: row {rid} already exists for this owner"));
                     with(&mut e, "id", json!(rid));
                     return Err(e);
                 }
-                batch.insert(rid);
-                let mut row = r.clone();
-                row.insert("id".to_string(), Value::from(rid));
-                staged.push(row);
             }
             for r in &staged {
-                let Some(refs) = r.get("refs").filter(|v| !v.is_null()) else {
+                let Some(list) = row_refs(r) else {
                     continue;
                 };
                 let rid = r.get("id").and_then(Value::as_i64).unwrap_or(0);
-                let Some(list) = refs.as_array().filter(|a| a.iter().all(|m| as_id(m).is_some())) else {
-                    let mut e = refusal(BAD_ARG, format!("append: row {rid} refs must be row ids"));
-                    with(&mut e, "arg", json!("rows"));
-                    return Err(e);
-                };
                 let mut missing_refs: Vec<Value> = Vec::new();
                 for m in list {
                     let held = match as_id(m) {
@@ -874,9 +830,6 @@ impl SqliteStoreBundle {
 
     fn search(&self, id: &AgentId, a: &verbs::Search, kernel: &Arc<Kernel>) -> Value {
         let q = py_strip(&a.query).to_lowercase();
-        if q.is_empty() {
-            return missing("search", "query");
-        }
         self.tx(id, kernel, |db| {
             let (owner, _) = caller(kernel)?;
             let mut ids = db.ids(&owner).map_err(db_err)?;
@@ -931,8 +884,8 @@ impl SqliteStoreBundle {
             Ok(o) => o,
             Err(r) => return r,
         };
-        if a.before_id.is_none() && a.ids.is_none() {
-            return missing("prune", "before_id");
+        if let Some(e) = prune_selector_missing(a) {
+            return e;
         }
         let wanted: HashSet<i64> = a.ids.iter().flatten().copied().collect();
         let keep: &[Value] = a.keep.as_deref().unwrap_or(&[]);
@@ -1071,15 +1024,6 @@ impl Handler for SqliteStoreBundle {
 
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         &record::RECORD
-    }
-
-    /// `path` — required, relative, inside.
-    fn validate_meta(&self, meta: &Map<String, Value>, record: &Map<String, Value>) -> Option<String> {
-        let mut merged = record.clone();
-        for (k, v) in meta {
-            merged.insert(k.clone(), v.clone());
-        }
-        check_path(&merged).err()
     }
 
     async fn handle(&self, agent_id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {

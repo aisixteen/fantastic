@@ -9,16 +9,25 @@ use schemars::schema::Schema;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-/// Which store backs the refs.
-#[derive(Debug, Deserialize, JsonSchema)]
+/// Which store backs the refs: `file` (a YAML file at an absolute path), `keychain` (the OS
+/// keychain) or `env` (environment variables, read-only). The variants carry no docs of their
+/// own: documented variants render as `const` alternatives the engine does not check, plain
+/// ones as an `enum` it does.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
+#[allow(missing_docs)]
 pub enum BackendKind {
-    /// A YAML file at an absolute path.
+    #[default]
     File,
-    /// The OS keychain.
     Keychain,
-    /// Environment variables, read-only.
     Env,
+}
+
+/// The one field of a stored record that picks the backend.
+#[derive(Debug, Default, Deserialize)]
+pub struct Kind {
+    /// The record's `backend`; absent, the default.
+    pub backend: Option<BackendKind>,
 }
 
 /// A list of non-empty names.

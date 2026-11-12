@@ -197,12 +197,11 @@ fn host(h: Option<&Value>) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-/// The record's `backend`, python `agent.record.get("backend") or "file"`.
-fn backend_kind(rec: &Map<String, Value>) -> String {
-    match rec.get("backend") {
-        Some(v) if py_truthy(v) => py_str(v),
-        _ => "file".to_string(),
-    }
+/// The record's `backend` — the declared enum, `file` when the record names none.
+fn backend_kind(rec: &Map<String, Value>) -> Result<record::BackendKind, BundleError> {
+    serde_json::from_value::<record::Kind>(Value::Object(rec.clone()))
+        .map(|k| k.backend.unwrap_or_default())
+        .map_err(|e| raise("ValueError", format!("{NAME}: the record's backend: {e}")))
 }
 
 // ─── where the values live ───────────────────────────────────────
@@ -547,26 +546,36 @@ impl CredentialStoreBundle {
     }
 
     fn backend(&self, id: &AgentId, rec: &Map<String, Value>) -> Result<Backend, BundleError> {
-        match backend_kind(rec).as_str() {
-            "file" => Ok(Backend::File(FileBackend::new(id, rec)?)),
-            "keychain" => Ok(Backend::Keychain(KeychainBackend::new(
+        use record::BackendKind;
+        match backend_kind(rec)? {
+            BackendKind::File => Ok(Backend::File(FileBackend::new(id, rec)?)),
+            BackendKind::Keychain => Ok(Backend::Keychain(KeychainBackend::new(
                 Arc::clone(&self.keychain),
                 id,
                 rec,
             ))),
-            "env" => Ok(Backend::Env(rec.clone())),
-            other => Err(raise("KeyError", py_repr(other))),
+            BackendKind::Env => Ok(Backend::Env(rec.clone())),
         }
     }
 
     fn reflect(id: &AgentId, rec: &Map<String, Value>) -> Value {
-        let backend = backend_kind(rec);
+        let backend = match backend_kind(rec) {
+            Ok(b) => b,
+            Err(e) => return json!({"error": e.to_string()}),
+        };
         let mut out = Map::new();
         out.insert("id".into(), json!(id.0));
         out.insert("sentence".into(), json!(SENTENCE));
-        out.insert("backend".into(), json!(backend));
+        out.insert(
+            "backend".into(),
+            json!(match backend {
+                record::BackendKind::File => "file",
+                record::BackendKind::Keychain => "keychain",
+                record::BackendKind::Env => "env",
+            }),
+        );
         out.insert("refs".into(), json!(refs_of(rec).len()));
-        if backend == "file" {
+        if matches!(backend, record::BackendKind::File) {
             let file = match rec.get("file") {
                 Some(v) if py_truthy(v) => v.clone(),
                 // python's `default_file`, which raises where this cannot be read
@@ -581,23 +590,14 @@ impl CredentialStoreBundle {
         // the binding is the declaration's alone: `set` declares no host argument, so
         // the entry refuses one by name
         let r = args.ref_name.as_str();
-        // the entry checked every name and value (non-empty text); a map with no entry
-        // at all is the one thing a type cannot say
-        if args.fields.is_empty() {
-            let mut out = refusal(
-                BAD_ARG,
-                format!("{NAME} set: fields must hold at least one field name and value"),
-            );
-            with(&mut out, "arg", json!("fields"));
-            return Ok(out);
-        }
+        // the entry checked the map (at least one entry) and every name and value
         let fields: Map<String, Value> = args
             .fields
             .iter()
             .map(|(k, v)| (k.clone(), Value::String(v.clone())))
             .collect();
         let rec = record(kernel, id);
-        if backend_kind(&rec) == "env" {
+        if matches!(backend_kind(&rec)?, record::BackendKind::Env) {
             let mut out = refusal(
                 BAD_ARG,
                 format!(
@@ -698,7 +698,7 @@ impl CredentialStoreBundle {
     fn forget(&self, id: &AgentId, args: &verbs::Forget, kernel: &Kernel) -> Result<Value, BundleError> {
         let r = args.ref_name.as_str();
         let rec = record(kernel, id);
-        if backend_kind(&rec) == "env" {
+        if matches!(backend_kind(&rec)?, record::BackendKind::Env) {
             let mut out = refusal(
                 BAD_ARG,
                 format!(

@@ -814,12 +814,10 @@ async fn start_job(
         None => String::new(),
         Some(v) => v.to_string(),
     };
-    // py `not isinstance(command, str) or not command.strip()`: a string of nothing
-    // but WHITESPACE is missing, and `str.strip()` strips every python space
-    // character, not just ASCII. A pipe job always names its command; so does a
-    // PTY start that passed one explicitly (an empty string is a typo, not "use
-    // the shell").
-    if !command.chars().any(|ch| !fantastic_bundle::is_space(ch)) {
+    // A given `command` is never blank (the declared `pattern`); a pipe job always
+    // names one, so what is left is the absent one (a PTY start without it took the
+    // shell above).
+    if command.is_empty() {
         return Err(missing("start", "command"));
     }
     // The FULL argv, shell-joined, matched against the allowlist BEFORE spawning.

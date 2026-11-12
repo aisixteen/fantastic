@@ -123,6 +123,10 @@ fn alpha(cases: &mut Value) {
                 ("owner-is-never-a-writable-field", "append" | "read") if send.get("owner").is_some() => {
                     st["expect"] = refused("owner");
                 }
+                // a blank query does not match the declared pattern: bad_arg by name
+                (_, "search") if send["query"].as_str().is_some_and(|q| q.trim().is_empty()) => {
+                    st["expect"] = refused("query");
+                }
                 ("refusals", "append") if send["rows"] == json!([]) => {
                     // an empty list is below the declared `minItems`: the engine's missing_arg
                     st["expect"] = json!({"reason": "missing_arg", "arg": "rows"});

@@ -1383,22 +1383,11 @@ async fn nothing_outside_the_root_can_be_read() {
 
 #[tokio::test]
 async fn the_list_is_validated_at_write() {
-    // what a type says (a list of text) is the declared record's; what it cannot say
-    // (relative, inside the root, non-empty) is the bundle's
-    for bad in [json!(["../up"]), json!([""]), json!(["/abs"])] {
-        let mut m = JsonMap::new();
-        m.insert("allow".to_string(), bad.clone());
-        assert!(
-            FileBundle::default()
-                .validate_meta(&m, &JsonMap::new())
-                .is_some(),
-            "{bad}"
-        );
-    }
+    // the declared record states the whole rule: a list of non-empty paths relative to the root
     let tmp = tempfile::TempDir::new().unwrap();
     served(&tmp);
     let kernel = mk_kernel_with(&tmp, json!({})).await;
-    for bad in [json!("docs"), json!([1])] {
+    for bad in [json!(["../up"]), json!([""]), json!(["/abs"]), json!("docs"), json!([1])] {
         let r = call_root(
             &kernel,
             json!({"type": "update_agent", "id": "fb", "allow": bad}),
@@ -1407,11 +1396,12 @@ async fn the_list_is_validated_at_write() {
         assert_eq!(r["reason"], "bad_arg", "{bad}: {r}");
         assert_eq!(r["arg"], "allow", "{bad}: {r}");
     }
-    let mut ok = JsonMap::new();
-    ok.insert("allow".to_string(), json!([".", "docs/a.pdf"]));
-    assert!(FileBundle::default()
-        .validate_meta(&ok, &JsonMap::new())
-        .is_none());
+    let r = call_root(
+        &kernel,
+        json!({"type": "update_agent", "id": "fb", "allow": [".", "docs/a.pdf", "a..b/"]}),
+    )
+    .await;
+    assert!(r.get("reason").is_none(), "{r}");
 }
 
 #[tokio::test]

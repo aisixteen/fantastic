@@ -15,6 +15,7 @@ pub struct Record {
     /// `true` refuses every mutating verb.
     pub readonly: Option<bool>,
     /// What the bridge exposes, relative to `root`: a file, or everything under a directory (`.` is the whole root). No list, or an empty one, exposes nothing.
+    #[schemars(inner(length(min = 1), regex(pattern = r"^(?:(?:[^./][^/]*|\.|\.[^./][^/]*|\.\.[^/]+)/+)*(?:[^./][^/]*|\.|\.[^./][^/]*|\.\.[^/]+)/*$")))]
     pub allow: Option<Vec<String>>,
     /// Who may reach the bridge: `allow_all_ingress` or `deny_ingress`; absent, the bridge is sealed.
     pub ingress_rule: Option<Value>,

@@ -80,11 +80,67 @@ const OPERATOR: &str = "kernel";
 type Row = Map<String, Value>;
 
 /// A row id inside a stored row or a dump: a positive JSON integer.
-fn as_id(x: &Value) -> Option<i64> {
+pub fn as_id(x: &Value) -> Option<i64> {
     match x {
         Value::Number(n) => n.as_i64().filter(|i| *i > 0),
         _ => None,
     }
+}
+
+/// The `refs` list of a staged row, when it has one ([`stage_rows`] checked it).
+pub fn row_refs(row: &Map<String, Value>) -> Option<&Vec<Value>> {
+    row.get("refs").filter(|v| !v.is_null()).and_then(Value::as_array)
+}
+
+/// `prune` needs one of `before_id` and `ids`: the schema language of the one
+/// engine states a field's type, not "one of these two", so this stays one shared
+/// rule, used by every store that answers the verb.
+pub fn prune_selector_missing(a: &verbs::Prune) -> Option<Value> {
+    (a.before_id.is_none() && a.ids.is_none()).then(|| missing("prune", "before_id"))
+}
+
+/// The rows of an `append`, typed — shared by every store that answers the verb:
+/// each row gets the id it carries (a kernel int) or one minted, no id twice in
+/// the batch, and `refs` is a list of row ids. What a store still checks is
+/// whether the rows and the refs exist for its owner.
+pub fn stage_rows(
+    rows: &[Map<String, Value>],
+    mut mint: impl FnMut() -> i64,
+) -> Result<Vec<Map<String, Value>>, Value> {
+    let mut staged: Vec<Map<String, Value>> = Vec::new();
+    let mut batch: HashSet<i64> = HashSet::new();
+    for r in rows {
+        let rid = match r.get("id") {
+            None | Some(Value::Null) => mint(),
+            Some(v) => match (v, as_id(v)) {
+                (Value::Number(_), Some(n)) => n,
+                _ => {
+                    let mut e = refusal(
+                        BAD_ARG,
+                        format!("append: a row id is a kernel int, got {}", py_repr_value(v)),
+                    );
+                    with(&mut e, "arg", json!("rows"));
+                    return Err(e);
+                }
+            },
+        };
+        if !batch.insert(rid) {
+            let mut e = refusal(EXISTS, format!("append: row {rid} already exists for this owner"));
+            with(&mut e, "id", json!(rid));
+            return Err(e);
+        }
+        let mut row = r.clone();
+        row.insert("id".to_string(), Value::from(rid));
+        if let Some(refs) = row.get("refs").filter(|v| !v.is_null()) {
+            if !refs.as_array().is_some_and(|a| a.iter().all(|m| as_id(m).is_some())) {
+                let mut e = refusal(BAD_ARG, format!("append: row {rid} refs must be row ids"));
+                with(&mut e, "arg", json!("rows"));
+                return Err(e);
+            }
+        }
+        staged.push(row);
+    }
+    Ok(staged)
 }
 
 /// python `_text_of`: the content as text (a non-string JSON-dumped), a title
@@ -442,27 +498,14 @@ impl RamStoreBundle {
         };
         let rows = &a.rows;
         self.with_tables(id, |t| {
-            let mut staged: Vec<Row> = Vec::new();
-            let mut batch: HashSet<i64> = HashSet::new();
-            for r in rows {
-                let rid = match r.get("id") {
-                    None | Some(Value::Null) => kernel.mint_id(),
-                    Some(v) => match (v, as_id(v)) {
-                        (Value::Number(_), Some(n)) => n,
-                        _ => {
-                            let mut e = refusal(
-                                BAD_ARG,
-                                format!(
-                                    "append: a row id is a kernel int, got {}",
-                                    py_repr_value(v)
-                                ),
-                            );
-                            with(&mut e, "arg", json!("rows"));
-                            return e;
-                        }
-                    },
-                };
-                if t.has(&owner, rid) || batch.contains(&rid) {
+            let staged = match stage_rows(rows, || kernel.mint_id()) {
+                Ok(s) => s,
+                Err(e) => return e,
+            };
+            let batch: HashSet<i64> = staged.iter().filter_map(|r| r.get("id").and_then(as_id)).collect();
+            for r in &staged {
+                let rid = r.get("id").and_then(Value::as_i64).unwrap_or(0);
+                if t.has(&owner, rid) {
                     let mut e = refusal(
                         EXISTS,
                         format!("append: row {rid} already exists for this owner"),
@@ -470,24 +513,12 @@ impl RamStoreBundle {
                     with(&mut e, "id", json!(rid));
                     return e;
                 }
-                batch.insert(rid);
-                let mut row = r.clone();
-                row.insert("id".to_string(), Value::from(rid));
-                staged.push(row);
             }
             for r in &staged {
-                let Some(refs) = r.get("refs").filter(|v| !v.is_null()) else {
+                let Some(list) = row_refs(r) else {
                     continue;
                 };
                 let rid = r.get("id").and_then(Value::as_i64).unwrap_or(0);
-                let list = refs
-                    .as_array()
-                    .filter(|a| a.iter().all(|m| as_id(m).is_some()));
-                let Some(list) = list else {
-                    let mut e = refusal(BAD_ARG, format!("append: row {rid} refs must be row ids"));
-                    with(&mut e, "arg", json!("rows"));
-                    return e;
-                };
                 let missing_refs: Vec<Value> = list
                     .iter()
                     .filter(|m| !as_id(m).is_some_and(|i| t.has(&owner, i) || batch.contains(&i)))
@@ -598,9 +629,6 @@ impl RamStoreBundle {
 
     fn search(&self, id: &AgentId, a: &verbs::Search, kernel: &Arc<Kernel>) -> Value {
         let q = py_strip(&a.query).to_lowercase();
-        if q.is_empty() {
-            return missing("search", "query");
-        }
         self.with_tables(id, |t| {
             let (owner, _) = match caller(kernel) {
                 Ok(r) => r,
@@ -653,8 +681,8 @@ impl RamStoreBundle {
             Ok(o) => o,
             Err(r) => return r,
         };
-        if a.before_id.is_none() && a.ids.is_none() {
-            return missing("prune", "before_id");
+        if let Some(e) = prune_selector_missing(a) {
+            return e;
         }
         let wanted: HashSet<i64> = a.ids.iter().flatten().copied().collect();
         let keep: &[Value] = a.keep.as_deref().unwrap_or(&[]);

@@ -14,6 +14,7 @@ fn text_fields(_gen: &mut SchemaGenerator) -> Schema {
     serde_json::from_value(serde_json::json!({
         "type": "object",
         "additionalProperties": {"type": "string", "minLength": 1},
+        "minProperties": 1,
     }))
     .expect("a map schema")
 }

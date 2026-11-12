@@ -268,7 +268,7 @@ async fn reflect_advertises_the_allowlist_not_interpreters() {
         "{r}"
     );
     assert!(
-        r["verbs"]["start"].as_str().unwrap().starts_with("args: command:string?"),
+        r["verbs"]["start"].as_str().unwrap().starts_with("args: command:string matching /\\S/?"),
         "{r}"
     );
 }
@@ -2324,9 +2324,10 @@ async fn start_checks_its_arguments_and_coerces_none() {
         let a = a.clone();
         async move { kernel.send(vec![Item::new(a, p)]).await.remove(0).result }
     };
-    // A command of nothing but whitespace is MISSING, not a spawn of "".
+    // A command of nothing but whitespace does not match the declared pattern: refused,
+    // not a spawn of "".
     let r = call(json!({"type": "start", "command": "  \t "})).await;
-    assert_eq!(r["reason"], "missing_arg", "{r}");
+    assert_eq!(r["reason"], "bad_arg", "{r}");
     assert_eq!(r["arg"], "command", "{r}");
     // `args` is a list: a text is refused, never split or wrapped.
     let r = call(json!({"type": "start", "command": "ls", "args": "-l"})).await;

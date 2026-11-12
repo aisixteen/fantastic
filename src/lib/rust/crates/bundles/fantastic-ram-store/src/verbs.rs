@@ -53,7 +53,7 @@ pub struct Read {
 #[serde(deny_unknown_fields)]
 pub struct Search {
     /// The text to find, case-insensitive substring.
-    #[schemars(length(min = 1))]
+    #[schemars(length(min = 1), regex(pattern = "\\S"))]
     pub query: String,
     /// The rows to search; a fold id includes its members. Absent, every row.
     pub ids: Option<Vec<i64>>,

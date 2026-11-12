@@ -65,56 +65,38 @@ fn rec(v: Value) -> Map<String, Value> {
     v.as_object().cloned().unwrap()
 }
 
-const BAD_PATHS: [(Option<&str>, &str); 6] = [
-    (None, "needs `path`"),
-    (Some(""), "needs `path`"),
-    (Some("  "), "needs `path`"),
-    (Some("/tmp/x.db"), "must stay inside its folder"),
-    (Some("../x.db"), "must stay inside its folder"),
-    (Some("a/../../x.db"), "must stay inside its folder"),
+/// A `path` the declared record refuses: absent, empty, blank, absolute, climbing.
+const BAD_PATHS: [Option<&str>; 8] = [
+    None,
+    Some(""),
+    Some("  "),
+    Some("/tmp/x.db"),
+    Some("../x.db"),
+    Some("a/../../x.db"),
+    Some("@state/../x.db"),
+    Some("a/.."),
 ];
 
 #[tokio::test]
 async fn path_is_required_relative_and_inside() {
     let tmp = tempfile::TempDir::new().unwrap();
     let k = kernel(tmp.path());
-    for (path, says) in BAD_PATHS {
-        let meta = path.map_or_else(Map::new, |p| rec(json!({"path": p})));
-        let err = check_path(&meta).expect_err("refused");
-        assert!(err.contains(says), "{path:?}: {err}");
-        // …and through the kernel: the agent is never created
+    for path in BAD_PATHS {
+        // the agent is never created
         let mut p = json!({"type": "create_agent", "parent_id": "kernel_state", "handler_module": HANDLER_MODULE});
         if let Some(path) = path {
             p["path"] = json!(path);
         }
         let out = call(&k, "kernel_state", p, None).await;
-        match path {
-            // the declared record refuses a missing or empty `path` by name
-            None => {
-                assert_eq!(out["reason"], json!("missing_arg"), "{path:?}: {out}");
-                assert_eq!(out["arg"], json!("path"), "{path:?}: {out}");
-            }
-            Some("") => {
-                assert_eq!(out["reason"], json!("bad_arg"), "{path:?}: {out}");
-                assert_eq!(out["arg"], json!("path"), "{path:?}: {out}");
-            }
-            // what a type cannot say is the bundle's own refusal
-            Some(_) => {
-                assert!(
-                    SqliteStoreBundle
-                        .validate_meta(&meta, &Map::new())
-                        .is_some_and(|e| e.contains(says)),
-                    "{path:?}"
-                );
-                assert_eq!(out["reason"], json!("invalid_meta"), "{path:?}: {out}");
-                assert!(
-                    out["error"].as_str().unwrap().contains(says),
-                    "{path:?}: {out}"
-                );
-            }
-        }
+        let reason = if path.is_none() { "missing_arg" } else { "bad_arg" };
+        assert_eq!(out["reason"], json!(reason), "{path:?}: {out}");
+        assert_eq!(out["arg"], json!("path"), "{path:?}: {out}");
     }
-    assert!(check_path(&rec(json!({"path": "stores/mem.db"}))).is_ok());
+    for good in ["stores/mem.db", "mem.db", "./mem.db", "@state/memory.db", "@self/m.db", "a..b/c.db", ".hidden.db"] {
+        let p = json!({"type": "create_agent", "parent_id": "kernel_state", "handler_module": HANDLER_MODULE, "path": good});
+        let out = call(&k, "kernel_state", p, None).await;
+        assert!(out.get("error").is_none() && out.get("reason").is_none(), "{good}: {out}");
+    }
 }
 
 #[tokio::test]
@@ -122,36 +104,25 @@ async fn path_cannot_be_dropped_by_update() {
     let tmp = tempfile::TempDir::new().unwrap();
     let k = kernel(tmp.path());
     add_store(&k, "mem.db");
-    let good = rec(json!({"path": "mem.db"}));
-    assert!(SqliteStoreBundle
-        .validate_meta(&rec(json!({"path": ""})), &good)
-        .is_some());
-    assert!(SqliteStoreBundle
-        .validate_meta(&rec(json!({"path": "../x"})), &good)
-        .is_some());
-    assert!(SqliteStoreBundle
-        .validate_meta(&rec(json!({"path": "other.db"})), &good)
-        .is_none());
-    assert!(SqliteStoreBundle
-        .validate_meta(&rec(json!({"callable_by": {}})), &good)
-        .is_none());
+    for bad in ["", "../x", "/abs.db"] {
+        let out = call(
+            &k,
+            "kernel_state",
+            json!({"type": "update_agent", "id": "mem", "path": bad}),
+            None,
+        )
+        .await;
+        assert_eq!(out["reason"], json!("bad_arg"), "{bad}: {out}");
+        assert_eq!(out["arg"], json!("path"), "{bad}: {out}");
+    }
     let out = call(
         &k,
         "kernel_state",
-        json!({"type": "update_agent", "id": "mem", "path": ""}),
+        json!({"type": "update_agent", "id": "mem", "path": "other.db"}),
         None,
     )
     .await;
-    assert_eq!(out["reason"], json!("bad_arg"), "{out}");
-    assert_eq!(out["arg"], json!("path"), "{out}");
-    let out = call(
-        &k,
-        "kernel_state",
-        json!({"type": "update_agent", "id": "mem", "path": "../x"}),
-        None,
-    )
-    .await;
-    assert_eq!(out["reason"], json!("invalid_meta"), "{out}");
+    assert!(out.get("reason").is_none(), "{out}");
 }
 
 #[cfg(unix)]
@@ -285,8 +256,6 @@ fn path_at_state_lands_in_the_state_folder_and_a_plain_path_in_work() {
     assert_eq!(at_state, real(&state).join("memory.db"));
     let plain = resolve_path(&rec(json!({"path": "plain.db"})), &k, own).unwrap();
     assert_eq!(plain, real(tmp.path()).join("plain.db"));
-    let err = resolve_path(&rec(json!({"path": "@state/../x.db"})), &k, own).unwrap_err();
-    assert!(err.contains("inside its folder"), "{err}");
 }
 
 #[tokio::test]

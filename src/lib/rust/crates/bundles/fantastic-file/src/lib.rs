@@ -135,19 +135,6 @@ impl Handler for FileBundle {
         if let Some(bad) = views::view_refusal(meta) {
             return Some(bad);
         }
-        if let Some(items) = meta.get("allow").and_then(Value::as_array) {
-            let ok = items.iter().all(|x| {
-                x.as_str()
-                    .is_some_and(|s| !s.is_empty() && !is_absolute(s) && norm(s).is_some())
-            });
-            if !ok {
-                return Some(
-                    "allow must be a list of paths relative to the root (a file, or a \
-                     directory exposing everything under it; `.` = the whole root)"
-                        .to_string(),
-                );
-            }
-        }
         fantastic_io_bridge::authorizer::ingress::unknown_refusal(
             meta,
             &["allow_all_ingress", "deny_ingress"],

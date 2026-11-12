@@ -121,6 +121,7 @@ pub struct Boot {}
 #[serde(deny_unknown_fields)]
 pub struct Start {
     /// The executable ALONE (e.g. `grep`). On a PTY start, absent = the child's $SHELL, and with no `args` the record's whole shell line (`$SHELL -l` under shell="login").
+    #[schemars(regex(pattern = "\\S"))]
     pub command: Option<String>,
     /// Its arguments, one item each.
     pub args: Option<Vec<String>>,
@@ -133,6 +134,7 @@ pub struct Start {
 #[serde(deny_unknown_fields)]
 pub struct Run {
     /// The executable ALONE.
+    #[schemars(regex(pattern = "\\S"))]
     pub command: Option<String>,
     /// Its arguments, one item each.
     pub args: Option<Vec<String>>,

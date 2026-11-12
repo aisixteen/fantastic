@@ -40,6 +40,18 @@ pub struct Wire {
     pub host: String,
     /// An optional count, no default.
     pub limit: Option<u32>,
+    /// A non-empty map of text.
+    #[serde(default)]
+    #[schemars(schema_with = "some_text")]
+    pub fields: Option<BTreeMap<String, String>>,
+}
+fn some_text(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    serde_json::from_value(json!({
+        "type": ["object", "null"],
+        "additionalProperties": {"type": "string"},
+        "minProperties": 1,
+    }))
+    .expect("a map schema")
 }
 fn loopback() -> String {
     "127.0.0.1".to_string()
@@ -188,4 +200,19 @@ fn a_program_cannot_declare_a_reserved_or_repeated_or_malformed_verb() {
     }
     // a refused declaration leaves the agent's list as it was
     assert!(reg.of("a1").is_empty());
+}
+
+#[test]
+fn min_properties_refuses_a_map_with_fewer_entries() {
+    let base = json!({"type":"wire","store":"abc","routes":{}});
+    let mut with = |f: Value| {
+        let mut v = base.clone();
+        v["fields"] = f;
+        call(v)
+    };
+    let r = with(json!({})).expect_err("an empty map is below minProperties");
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "fields", "{r}");
+    assert!(r["error"].as_str().unwrap().contains("with at least 1 entry"), "{r}");
+    assert!(with(json!({"a": "b"})).is_ok());
 }

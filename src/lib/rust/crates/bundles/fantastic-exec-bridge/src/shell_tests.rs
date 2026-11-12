@@ -250,7 +250,7 @@ async fn a_pipe_job_always_names_its_command() {
     .await;
     assert_eq!(
         (&r["reason"], &r["arg"]),
-        (&json!("missing_arg"), &json!("command")),
+        (&json!("bad_arg"), &json!("command")),
         "{r}"
     );
 }
