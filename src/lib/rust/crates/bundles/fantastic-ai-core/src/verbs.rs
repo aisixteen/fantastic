@@ -1851,7 +1851,7 @@ where
         Call::Grep(a) => crate::retrieval::grep(agent_id, &a, kernel, cfg.model_window).await?,
         // Rebuild the view from the store: on boot, after folds, on request.
         Call::ContextRecall(a) => {
-            let p = provider_for(&crate::declared::default_client_id());
+            let p = provider_for(&fantastic_kernel::inquiry::default_client_id());
             crate::retrieval::context_recall(
                 agent_id,
                 a.dry == Some(true),
@@ -1870,7 +1870,7 @@ where
         }
         // Fold a chosen stretch of the view into one fold row — the operator's mark.
         Call::ContextFold(a) => {
-            let p = provider_for(&crate::declared::default_client_id());
+            let p = provider_for(&fantastic_kernel::inquiry::default_client_id());
             crate::retrieval::context_fold(agent_id, &a, kernel, &p, cfg.model_window).await?
         }
         // Compact the store: drop the rows the folds already summarise.

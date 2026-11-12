@@ -45,13 +45,23 @@ pub struct Inquiry {
     /// Names this inquiry in the answer.
     pub request_id: Option<String>,
     /// The client the answer is addressed to.
-    #[serde(default = "cli")]
-    #[schemars(length(min = 1))]
+    #[serde(default = "default_client_id")]
+    #[schemars(schema_with = "client_id")]
     pub reply_client_id: String,
 }
 
-fn cli() -> String {
+/// The caller a message belongs to when it names none: the headless / REPL one.
+pub fn default_client_id() -> String {
     "cli".to_string()
+}
+
+/// The schema of a client id: text with a character that is not whitespace.
+pub fn client_id(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    serde_json::from_value(json!({
+        "type": "string",
+        "pattern": r"[^\s\x1c-\x1f]"
+    }))
+    .expect("a client id schema")
 }
 
 /// The open questions, oldest first. Returns {inquiries:[{re, asker, text, kind, options, request_id, reply_client_id, ts}]}.

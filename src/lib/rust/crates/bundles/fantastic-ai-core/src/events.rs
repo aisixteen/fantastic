@@ -24,7 +24,7 @@ pub async fn to_caller(kernel: &Arc<Kernel>, self_id: &AgentId, client_id: &str,
         obj.entry("source")
             .or_insert_with(|| Value::String(self_id.as_str().to_string()));
     }
-    if client_id == crate::declared::default_client_id() {
+    if client_id == fantastic_kernel::inquiry::default_client_id() {
         let _ = kernel
             .send(vec![Item::new(AgentId::from("cli"), ev)])
             .await
@@ -131,7 +131,7 @@ impl PartPublisher {
         let quiet = ev.get("type").and_then(Value::as_str) == Some("part_delta");
         if part.kind != PartKind::Call || addrs.is_empty() {
             // The terminal renders tokens, not parts.
-            if self.client_id == crate::declared::default_client_id() {
+            if self.client_id == fantastic_kernel::inquiry::default_client_id() {
                 return;
             }
             ev.insert("client_id".to_string(), json!(self.client_id));

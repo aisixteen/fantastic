@@ -58,7 +58,7 @@ pub struct ReflectTool {
     pub args: Map<String, Value>,
 }
 
-/// Dispatch to agents — the kernel's one verb, batch form: send([{target, payload:{type:<verb>, ...args}, timeout?}]) -> [{pid, status: completed|failed|cancelled|timed_out, result}]. Discover verbs with reflect on the target; `kernel` is the alias for the root. A `timeout` (seconds) on an item CANCELS it when it expires. The call answers when it ends; each call is a kernel task, listed by send [{target:"kernel", payload:{type:"ps"}}]. A refusal (no grant) comes back as a result with an `error`, and a ledger row, like any other call.
+/// Dispatch a batch to agents: items [{target, payload:{type:<verb>, ...args}, timeout?}], one dispatch each, answered with one outcome per item {pid, status: completed|failed|cancelled|timed_out, result}. Discover verbs with reflect on the target; `kernel` is the alias for the root. A `timeout` (seconds) on an item CANCELS it when it expires. The call answers when it ends; each call is a kernel task, listed by send [{target:"kernel", payload:{type:"ps"}}]. A refusal (no grant) comes back as a result with an `error`, and a ledger row, like any other call.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SendBatch {
