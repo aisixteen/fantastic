@@ -181,12 +181,6 @@ fn folder_of(
             workdir: None,
         });
     }
-    if !Path::new(path).is_absolute() {
-        return Err(bad(
-            format!("home: {verb}: \"{path}\" is not an absolute path"),
-            arg,
-        ));
-    }
     let folder = runner.os().folder(path).map_err(|why| {
         let mut r = bad(format!("home: {verb}: \"{path}\" is not a folder"), arg);
         with(&mut r, "hint", json!(why));

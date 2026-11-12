@@ -31,7 +31,7 @@
 mod tests;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path};
+use std::path::Path;
 use std::sync::Arc;
 
 use fantastic_kernel::{AgentId, Kernel};
@@ -625,9 +625,6 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, args: crate::verbs::ImportSubt
     let parent_id = args.parent_id.as_str();
     let bind = args.bind.unwrap_or_default();
     let rel = Path::new(path);
-    if rel.components().any(|c| c == Component::ParentDir) {
-        return refuse("bad_arg", "user.import_subtree: path may not hold `..`");
-    }
     let Some(root) = kernel.root() else {
         return refuse("failed", "user.import_subtree: the kernel has no root");
     };

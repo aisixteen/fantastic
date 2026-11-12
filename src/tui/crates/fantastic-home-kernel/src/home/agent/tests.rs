@@ -223,12 +223,9 @@ async fn open_refuses_a_relative_path_or_a_file_and_opens_nothing() {
     t.boot().await;
     let before = t.call(json!({"type": "list"})).await;
     let r = t.call(json!({"type": "open", "paths": ["notes"]})).await;
-    refused(
-        &r,
-        "bad_arg",
-        "home: open: \"notes\" is not an absolute path",
-    );
-    assert_eq!(r["arg"], json!("paths"));
+    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    assert_eq!(r["arg"], json!("paths"), "{r}");
+    assert!(r["error"].as_str().is_some_and(|e| e.contains("/^(?:/")), "{r}");
     t.os.set_resolve(
         &format!("{D}/w/file.txt"),
         Err(format!("{D}/w/file.txt is not a directory")),

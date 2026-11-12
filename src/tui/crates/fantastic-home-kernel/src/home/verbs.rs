@@ -40,8 +40,8 @@ client_verb! {
 client_verb! {
     /// Open each folder's page, the last one shown: a listed row's path (its state folder) as it is, else an absolute work folder (its state folder is `<folder>/.fantastic`); a stopped one is started, an unlisted one is started and added to the list. Returns the state. Refuses a path that is not absolute, not a folder, or the home's own folder.
     Open {
-        /// The folders to open.
-        #[schemars(length(min = 1))]
+        /// The folders to open: each an absolute path.
+        #[schemars(length(min = 1), inner(length(min = 1), regex(pattern = r"^(?:/|[A-Za-z]:[\\/]|\\\\)")))]
         paths: Vec<String>,
     }
 }
@@ -49,8 +49,8 @@ client_verb! {
 client_verb! {
     /// Add an absolute folder the list does not hold, as `open` does. Returns the state. Refuses a path that is not absolute, not a folder, the home's own folder, or listed already.
     Register {
-        /// The folder.
-        #[schemars(length(min = 1))]
+        /// The folder: an absolute path.
+        #[schemars(length(min = 1), regex(pattern = r"^(?:/|[A-Za-z]:[\\/]|\\\\)"))]
         path: String,
     }
 }

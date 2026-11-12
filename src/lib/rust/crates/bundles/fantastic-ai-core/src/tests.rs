@@ -3138,7 +3138,7 @@ async fn a_failed_handoff_is_a_status_event_with_detail() {
         .as_str()
         .unwrap_or_else(|| panic!("the announcement must say WHY: {status:#?}"));
     assert!(!why.starts_with("delivery "), "{status:#?}");
-    assert!(why.contains("unknown type"), "{status:#?}");
+    assert!(why.contains("unknown verb"), "{status:#?}");
     assert_eq!(status["source"], leg.as_str(), "{status:#?}");
     assert!(status.get("ts").is_some(), "{status:#?}");
     assert_eq!(status["client_id"], "probe", "{status:#?}");

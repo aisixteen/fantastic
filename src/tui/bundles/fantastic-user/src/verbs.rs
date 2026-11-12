@@ -88,7 +88,7 @@ fn agent_ids(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Sch
 #[serde(deny_unknown_fields)]
 pub struct ImportSubtree {
     /// A blueprint folder, relative to the running dir (no `..`).
-    #[schemars(length(min = 1))]
+    #[schemars(length(min = 1), regex(pattern = r"^/?(?:(?:[^./][^/]*|\.|\.[^./][^/]*|\.\.[^/]+)/+)*(?:[^./][^/]*|\.|\.[^./][^/]*|\.\.[^/]+)/*$"))]
     pub path: String,
     /// The agent the imported team goes under.
     #[schemars(length(min = 1))]
