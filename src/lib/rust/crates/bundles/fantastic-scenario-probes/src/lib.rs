@@ -337,14 +337,7 @@ impl Handler for UserProbe {
             // any agent, dispatched AS THIS AGENT — work, an inquiry of its own,
             // a kernel verb. No agent carries a narrower repertoire than another.
             Call::Send(a) => {
-                if !a
-                    .payload
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .is_some_and(|t| !t.is_empty())
                 {
-                    json!({"error": "user_probe: send: `payload.type` must be a non-empty string", "reason": "bad_arg", "arg": "payload"})
-                } else {
                     // THE SENDER IS THIS AGENT. A handler runs inside its own
                     // dispatch scope, so this is a gated `user -> <target>` send
                     // with its own ledger row — not an operator injection.
@@ -371,9 +364,6 @@ impl UserProbe {
         a: verbs::user::Inquiry,
         kernel: &Arc<Kernel>,
     ) -> Value {
-        if a.text.trim().is_empty() {
-            return json!({"error": "user_probe: inquiry: `text` must be a non-empty string", "reason": "bad_arg", "arg": "text"});
-        }
         let answer = kernel
             .agents
             .get(agent_id)
@@ -561,12 +551,7 @@ impl Handler for OracleProbe {
             }),
             Call::Ask(a) => {
                 let q = a.question;
-                if q.trim().is_empty() {
-                    json!({
-                        "error": "oracle_probe: ask: `question` must be a non-empty string",
-                        "reason": "bad_arg", "arg": "question",
-                    })
-                } else {
+                {
                     let lines: Vec<String> = kernel
                         .agents
                         .get(agent_id)
@@ -677,17 +662,13 @@ impl Handler for SlowProbe {
             Call::Work(_) => json!({"runs": self.runs.bump()}),
             Call::Fail(_) => return Err(raised("RuntimeError", "slow_probe: failed on purpose")),
             Call::Started(_) => json!({"started": self.started.get()}),
-            Call::Sleep(a) => match a.seconds.as_f64() {
-                Some(secs) if secs >= 0.0 => {
-                    tokio::time::sleep(std::time::Duration::from_secs_f64(secs)).await;
-                    json!({"slept": a.seconds})
-                }
-                _ => json!({
-                    "error": "slow_probe: sleep needs seconds, a non-negative number",
-                    "reason": "bad_arg",
-                    "arg": "seconds",
-                }),
-            },
+            Call::Sleep(a) => {
+                tokio::time::sleep(std::time::Duration::from_secs_f64(
+                    a.seconds.as_f64().expect("a JSON number is a float"),
+                ))
+                .await;
+                json!({"slept": a.seconds})
+            }
         };
         Ok(Some(reply))
     }

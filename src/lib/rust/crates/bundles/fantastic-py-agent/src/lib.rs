@@ -593,11 +593,10 @@ impl Handler for FolderBundle {
             verbs::Call::Boot(_) => self.start(agent_id, kernel).await,
             verbs::Call::Shutdown(a) => {
                 // a reload (`reload_bundle`: shutdown, then boot) or a stop
-                let reason = a
-                    .reason
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "the kernel stopped".to_string());
-                stop_by_id(agent_id, format!("{}: {reason}", agent_id.as_str()));
+                // The kernel's own stop sends no reason: `on_shutdown` stops it, saying so.
+                if let Some(reason) = a.reason {
+                    stop_by_id(agent_id, format!("{}: {reason}", agent_id.as_str()));
+                }
                 Value::Null
             }
             // one of the program's verbs: forwarded as the call it was

@@ -105,6 +105,7 @@ pub mod user {
     #[serde(deny_unknown_fields)]
     pub struct Inquiry {
         /// The question.
+        #[schemars(length(min = 1))]
         pub text: String,
         /// The shape the UI renders; `text` when absent.
         pub kind: Option<Kind>,
@@ -146,7 +147,7 @@ pub mod user {
             "type": "object",
             "required": ["type"],
             "properties": {
-                "type": {"type": "string", "description": "The verb the target answers."}
+                "type": {"type": "string", "minLength": 1, "description": "The verb the target answers."}
             }
         }))
         .expect("a call schema")
@@ -215,6 +216,7 @@ pub mod slow {
     #[serde(deny_unknown_fields)]
     pub struct Sleep {
         /// How long, in seconds; not negative.
+        #[schemars(range(min = 0))]
         pub seconds: serde_json::Number,
     }
 

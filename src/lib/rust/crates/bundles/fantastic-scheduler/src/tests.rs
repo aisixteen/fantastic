@@ -408,7 +408,8 @@ async fn schedule_requires_target_and_payload_type() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r4["error"], "schedule: payload.type required", "{r4}");
+    assert_eq!(r4["reason"], "missing_arg", "{r4}");
+    assert_eq!(r4["arg"], "payload.type", "{r4}");
 }
 
 #[tokio::test]

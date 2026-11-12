@@ -26,11 +26,21 @@ pub struct Schedule {
     #[schemars(range(min = 1))]
     pub interval_seconds: u64,
     /// Seconds each fire may take; absent = wait forever. Not `timeout`, which is a call's own routing field.
+    #[schemars(schema_with = "positive_seconds")]
     pub fire_timeout: Option<serde_json::Number>,
 }
 
 fn sixty() -> u64 {
     60
+}
+
+/// The schema of a per-fire bound: a number greater than zero.
+fn positive_seconds(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    serde_json::from_value(serde_json::json!({
+        "type": ["number", "null"],
+        "exclusiveMinimum": 0.0
+    }))
+    .expect("a seconds schema")
 }
 
 /// The schema of a schedule's call: an object whose `type` is text.
@@ -39,7 +49,7 @@ fn call_with_type(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema
         "type": "object",
         "required": ["type"],
         "properties": {
-            "type": {"type": "string", "description": "The verb the target answers."}
+            "type": {"type": "string", "minLength": 1, "description": "The verb the target answers."}
         }
     }))
     .expect("a call schema")

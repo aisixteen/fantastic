@@ -723,22 +723,9 @@ async fn schedule_reply(agent_id: &AgentId, a: verbs::Schedule, kernel: &Arc<Ker
     let sched_payload = Value::Object(a.payload);
     let interval = a.interval_seconds;
     let target = json!(a.target);
-    if !sched_payload.get("type").is_some_and(py_truthy) {
-        return json!({"error": "schedule: payload.type required"});
-    }
     // Per-fire bound, seconds. Optional: absent = wait forever (never defaulted).
     // It is STORED AS SENT — an int `5` stays `5`, it does not become `5.0`.
-    let timeout = match a.fire_timeout {
-        None => None,
-        Some(n) if n.as_f64().is_some_and(|t| t > 0.0) => Some(Value::Number(n)),
-        Some(_) => {
-            return fantastic_kernel::bad(
-                "schedule",
-                "fire_timeout",
-                "a positive number of seconds",
-            )
-        }
-    };
+    let timeout = a.fire_timeout.map(Value::Number);
     let now = now_secs();
     let mut sch = json!({
         "id": mint_id(),
