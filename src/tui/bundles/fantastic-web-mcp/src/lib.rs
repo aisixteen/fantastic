@@ -30,13 +30,15 @@
 //! outcome, whenever the task ends; an item `timeout` cancels that item.
 
 pub mod inquiries;
+pub mod record;
+pub mod verbs;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use fantastic_kernel::{
-    bundle::BundleError, AgentId, Bundle, Item, Kernel, Outcome, Reply, Status, TaskId,
+    bundle::BundleError, AgentId, Handler, Item, Kernel, Outcome, Reply, Status, TaskId,
 };
 use serde_json::{json, Map, Value};
 
@@ -53,44 +55,51 @@ pub const PROTOCOL_VERSION: &str = "2025-11-25";
 #[derive(Default)]
 pub struct WebMcpBundle;
 
+/// What the bundle is for: its one short man text; how to call it is rendered from its
+/// declared verbs (`docs`, `reflect`).
+const MAN: &str = "An MCP leg: an external client (Claude Code, any MCP host) drives this kernel through it, with exactly its grants, never as the operator. It also holds the questions agents ask the person who drives it.";
+
 #[async_trait]
-impl Bundle for WebMcpBundle {
+impl Handler for WebMcpBundle {
+    type Call = verbs::Call;
+
     fn name(&self) -> &str {
         "web_mcp"
     }
 
-    /// HOW TO CALL it — served by the kernel's `docs` verb, never on a reflect.
-    fn verb_docs(&self) -> Value {
-        json!({
-            "inbound_send": INBOUND_SEND_DOC,
-            "inquiry": inquiries::INQUIRY_DOC,
-            "inquiries": inquiries::INQUIRIES_DOC,
-            "answer": inquiries::ANSWER_DOC,
-        })
+    fn man(&self) -> &'static str {
+        MAN
+    }
+
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        verbs::VERBS
+    }
+
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        verbs::dynamic_verbs(agent)
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &record::RECORD
     }
 
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        Ok(Some(match verb {
-            "boot" => match sync_config(agent_id, kernel).await {
+        Ok(Some(match call {
+            verbs::Call::Boot(_) => match sync_config(agent_id, kernel).await {
                 Ok(()) => Value::Null,
                 Err(e) => json!({"error": e, "reason": "mcp_config"}),
             },
-            "shutdown" => {
-                config_errors().lock().expect("config errors").remove(&error_key(kernel, agent_id));
-                Value::Null
-            }
-            "inbound_send" => inbound_send(payload, kernel).await,
+            verbs::Call::InboundSend(a) => inbound_send(a, kernel).await,
             // THE PERSON'S INQUIRIES (#307): held on the record, listed, answered.
-            "inquiry" => inquiries::ask(agent_id, payload, kernel),
-            "inquiries" => inquiries::list(agent_id, payload, kernel),
-            "answer" => inquiries::answer(agent_id, payload, kernel).await,
-            "reflect" => {
+            verbs::Call::Inquiry(a) => inquiries::ask(agent_id, a, kernel),
+            verbs::Call::Inquiries(a) => inquiries::list(agent_id, &a, kernel),
+            verbs::Call::AnswerInquiry(a) => inquiries::answer(agent_id, a, kernel).await,
+            verbs::Call::Reflect(_) => {
                 let mut r = json!({
                     "id": agent_id.as_str(),
                     "sentence": "An MCP leg: an external client (Claude Code, any MCP host) drives this kernel through me, with exactly my grants — never as the operator. My carrier speaks MCP; the verbs I dispatch are the kernel's own.",
@@ -104,12 +113,17 @@ impl Bundle for WebMcpBundle {
                 }
                 r
             }
-            other => json!({
-                "error": format!("web_mcp: no verb `{other}` — this leg is driven by its carrier; reflect for what it is"),
-                "reason": "unhandled",
-                "verb": other,
-            }),
         }))
+    }
+
+    /// The leg stops: the config error it recorded goes.
+    async fn on_shutdown(
+        &self,
+        agent_id: &AgentId,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        config_errors().lock().expect("config errors").remove(&error_key(kernel, agent_id));
+        Ok(())
     }
 }
 
@@ -265,24 +279,18 @@ fn why(o: &Outcome) -> String {
     }
 }
 
-/// `inbound_send`'s doc line.
-pub const INBOUND_SEND_DOC: &str = "args: items:[{target, payload, timeout?}] (req). Sends the batch onward AS THIS LEG and returns {outcomes:[{pid, status, result}]} — how the carrier's batch becomes the leg's own calls, gated as the leg.";
-
 /// `inbound_send {items}`: the batch, sent from inside the leg's own dispatch —
 /// so every item is the leg's call.
-async fn inbound_send(payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let items = match payload.get("items").and_then(Value::as_array) {
-        Some(list) => list
-            .iter()
-            .filter_map(|it| {
-                let target = it.get("target").and_then(Value::as_str)?;
-                let mut item = Item::new(AgentId::from(target), it.get("payload").cloned().unwrap_or(Value::Null));
-                item.timeout = it.get("timeout").and_then(Value::as_f64);
-                Some(item)
-            })
-            .collect::<Vec<_>>(),
-        None => return json!({"error": "inbound_send: `items` must be a list of {target, payload}", "reason": "bad_arg", "arg": "items"}),
-    };
+async fn inbound_send(a: verbs::InboundSend, kernel: &Arc<Kernel>) -> Value {
+    let items = a
+        .items
+        .into_iter()
+        .map(|it| {
+            let mut item = Item::new(AgentId::from(it.target.as_str()), Value::Object(it.payload));
+            item.timeout = it.timeout;
+            item
+        })
+        .collect::<Vec<_>>();
     let outs = Arc::clone(kernel).send(items).await;
     json!({"outcomes": outs.iter().map(row).collect::<Vec<_>>()})
 }
@@ -299,7 +307,7 @@ fn row(o: &Outcome) -> Value {
 /// product is, what is optional, and what it must never touch.
 pub const INSTRUCTIONS: &str = "This server is a live Aisixteen Fantastic kernel running in this project directory: a tree of agents that all answer one verb, send. You are connected as the `mcp` agent, with god-mode grants on every agent (every verb); the human can narrow them later with update_agent.\n\
 \n\
-Start with `reflect` and no arguments — it returns the kernel's own primer: the agent tree, the bundles it can run, and a readme index you drill into with `reflect` + readme=<key>. Reflect an agent before you send to it: verbs are discovered, never guessed. Then act with `send`. A refusal is an ordinary result, not a failure of the tool.\n\
+Start with `reflect` and no arguments — it returns the kernel's own primer: the agent tree and the bundles it can run. Reflect an agent before you send to it: verbs are discovered, never guessed. Then act with `send`. A refusal is an ordinary result, not a failure of the tool.\n\
 \n\
 AN AI IS OPTIONAL. Nothing is configured by default and the kernel works without one: you can be the brain yourself, driving agents, terminals and the canvas through send. The human works from the terminal UI (`fantastic`) or the browser canvas (`fantastic canvas`); the canvas and the terminal UI both open shell terminals, where a coding CLI like you can run too.\n\
 \n\
@@ -327,7 +335,7 @@ The server must start in the project directory.\n\
 /// are addressed to a connected client.
 pub const LEAD_IN: &str = "What a connected MCP client is told (its `initialize` instructions):\n\n";
 
-const REFLECT_DESC: &str = "Ask the kernel what exists. With NO arguments: the kernel's own primer — `tree` (every agent id), `bundles` (what it can run) and `readme` (an index of docs). With `target`: that agent describes itself — its sentence, its verbs and their args. Extra arguments are passed through to the reflect, e.g. readme=\"agents\" to read one doc of the index. Reflect before you send: verbs are discovered here, never guessed.";
+const REFLECT_DESC: &str = "Ask the kernel what exists. With NO arguments: the kernel's own primer — `tree` (every agent id) and `bundles` (what it can run). With `target`: that agent describes itself — its sentence, its verbs and their args. Extra arguments are passed through to the reflect, e.g. tree=\"ids\". Reflect before you send: verbs are discovered here, never guessed.";
 
 const SEND_DESC: &str = "Dispatch to agents — the kernel's one verb, batch form: send([{target, payload:{type:<verb>, ...args}, timeout?}]) -> [{pid, status: completed|failed|cancelled|timed_out, result}]. The verb goes in payload.type. Discover verbs with reflect on the target; `kernel` is the alias for the root. A `timeout` (seconds) on an item CANCELS it when it expires. The call answers when it ends; each call is a kernel task, listed by send [{target:\"kernel\", payload:{type:\"ps\"}}]. A refusal (no grant) comes back as a result with an `error`, and a ledger row, like any other call.";
 
@@ -450,8 +458,7 @@ pub fn tools() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "target": {"type": "string", "description": "Agent id to reflect. Omit for the kernel's own primer."},
-                    "readme": {"description": "true, or one key of the readme index to read (e.g. \"agents\", \"daemon\", \"transports\", \"orchestration\")."}
+                    "target": {"type": "string", "description": "Agent id to reflect. Omit for the kernel's own primer."}
                 },
                 "additionalProperties": true
             }
@@ -505,7 +512,7 @@ fn reflect_items(args: &Value) -> Result<Vec<Item>, String> {
     let target = match target {
         Some(t) => t,
         None => {
-            for (k, v) in [("tree", json!("ids")), ("bundles", json!("ids")), ("readme", json!(true))] {
+            for (k, v) in [("tree", json!("ids")), ("bundles", json!("ids"))] {
                 payload.entry(k).or_insert(v);
             }
             "kernel".to_string()
@@ -602,14 +609,13 @@ mod tests {
         assert_eq!(p["type"], "reflect");
         assert_eq!(p["tree"], "ids");
         assert_eq!(p["bundles"], "ids");
-        assert_eq!(p["readme"], true);
     }
 
     #[test]
     fn a_targeted_reflect_passes_its_extra_args_through() {
-        let items = reflect_items(&json!({"target": "files", "readme": "agents"})).unwrap();
+        let items = reflect_items(&json!({"target": "files", "detail": "full"})).unwrap();
         assert_eq!(items[0].target.as_str(), "files");
-        assert_eq!(items[0].payload["readme"], "agents");
+        assert_eq!(items[0].payload["detail"], "full");
         assert!(items[0].payload.get("tree").is_none(), "the primer defaults are for the root only");
     }
 

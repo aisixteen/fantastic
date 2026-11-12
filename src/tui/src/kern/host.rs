@@ -830,15 +830,33 @@ mod tests {
     const PROBE: &str = "extra_probe.tools";
 
     #[async_trait::async_trait]
-    impl fantastic_kernel::bundle::Bundle for ExtraProbe {
+    impl fantastic_kernel::bundle::Handler for ExtraProbe {
+        type Call = fantastic_kernel::test_support::NoCall;
+
         fn name(&self) -> &str {
             "extra_probe"
+        }
+
+        fn man(&self) -> &'static str {
+            "A test stand-in an embedder registers."
+        }
+
+        fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+            fantastic_kernel::test_support::no_verbs()
+        }
+
+        fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+            fantastic_kernel::test_support::no_dynamic(agent)
+        }
+
+        fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+            fantastic_kernel::fixture_record!()
         }
 
         async fn handle(
             &self,
             _id: &AgentId,
-            _payload: &Value,
+            _call: Self::Call,
             _kernel: &Arc<Kernel>,
         ) -> Result<Option<Value>, fantastic_kernel::bundle::BundleError> {
             Ok(Some(json!({"probe": "pong"})))
@@ -1059,15 +1077,33 @@ mod tests {
     struct Stub(&'static str);
 
     #[async_trait::async_trait]
-    impl fantastic_kernel::bundle::Bundle for Stub {
+    impl fantastic_kernel::bundle::Handler for Stub {
+        type Call = fantastic_kernel::test_support::NoCall;
+
         fn name(&self) -> &str {
             self.0
+        }
+
+        fn man(&self) -> &'static str {
+            "A test stand-in that answers nothing."
+        }
+
+        fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+            fantastic_kernel::test_support::no_verbs()
+        }
+
+        fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+            fantastic_kernel::test_support::no_dynamic(agent)
+        }
+
+        fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+            fantastic_kernel::fixture_record!()
         }
 
         async fn handle(
             &self,
             _id: &AgentId,
-            _p: &Value,
+            _c: Self::Call,
             _k: &Arc<Kernel>,
         ) -> Result<Option<Value>, fantastic_kernel::bundle::BundleError> {
             Ok(None)
@@ -1126,19 +1162,42 @@ mod tests {
     /// A bundle that answers `rows` with one row, registered under any handler name.
     struct RowsStub(&'static str);
 
+    fantastic_kernel::stand_in_verbs!(rows_verbs { Rows "rows" { after: Option<i64> } });
+
     #[async_trait::async_trait]
-    impl fantastic_kernel::bundle::Bundle for RowsStub {
+    impl fantastic_kernel::bundle::Handler for RowsStub {
+        type Call = rows_verbs::Call;
+
         fn name(&self) -> &str {
             self.0
+        }
+
+        fn man(&self) -> &'static str {
+            "A test stand-in that holds one row."
+        }
+
+        fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+            rows_verbs::VERBS
+        }
+
+        fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+            rows_verbs::dynamic_verbs(agent)
+        }
+
+        fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+            fantastic_kernel::fixture_record!()
         }
 
         async fn handle(
             &self,
             _id: &AgentId,
-            p: &Value,
+            call: Self::Call,
             _k: &Arc<Kernel>,
         ) -> Result<Option<Value>, fantastic_kernel::bundle::BundleError> {
-            Ok((p["type"] == "rows").then(|| json!({"rows": [{"id": 900001, "role": "user", "content": "hi"}]})))
+            Ok(match call {
+                rows_verbs::Call::Rows(_) => Some(json!({"rows": [{"id": 900001, "role": "user", "content": "hi"}]})),
+                rows_verbs::Call::Reflect(_) => None,
+            })
         }
     }
 
@@ -1324,19 +1383,39 @@ mod tests {
 
     static ENTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+    fantastic_kernel::stand_in_verbs!(hang_verbs { Hang "hang" {} });
+
     #[async_trait::async_trait]
-    impl fantastic_kernel::bundle::Bundle for StopHang {
+    impl fantastic_kernel::bundle::Handler for StopHang {
+        type Call = hang_verbs::Call;
+
         fn name(&self) -> &str {
             "stop_hang"
+        }
+
+        fn man(&self) -> &'static str {
+            "A test stand-in whose `hang` never answers."
+        }
+
+        fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+            hang_verbs::VERBS
+        }
+
+        fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+            hang_verbs::dynamic_verbs(agent)
+        }
+
+        fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+            fantastic_kernel::fixture_record!()
         }
 
         async fn handle(
             &self,
             _id: &AgentId,
-            payload: &Value,
+            call: Self::Call,
             _kernel: &Arc<Kernel>,
         ) -> Result<Option<Value>, fantastic_kernel::bundle::BundleError> {
-            if payload["type"] == "hang" {
+            if let hang_verbs::Call::Hang(_) = call {
                 ENTERED.store(true, std::sync::atomic::Ordering::SeqCst);
                 std::future::pending::<()>().await;
             }

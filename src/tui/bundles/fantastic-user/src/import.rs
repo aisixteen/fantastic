@@ -41,6 +41,7 @@ use crate::export::{
     has_key_token, is_absolute, port_kind, BLUEPRINT_FILE, ROOT_PORT, SECRET_KEYS,
 };
 use crate::refuse;
+use crate::verbs::ImportSubtree;
 
 /// Record fields that hold one agent id.
 const REF_FIELDS: [&str; 3] = ["memory_store_id", "file_bridge_id", "backend_id"];
@@ -122,7 +123,7 @@ pub struct World<'a> {
     /// The root's id (what `@root` becomes).
     pub root_id: &'a str,
     /// `{port: agent id}`.
-    pub bind: &'a Map<String, Value>,
+    pub bind: &'a BTreeMap<String, String>,
     /// Whether code may come in.
     pub allow_code: bool,
     /// An existing agent's handler (`Some("")` when it has none); `None` = no such agent.
@@ -383,7 +384,7 @@ pub fn plan(yaml: &str, files: &BTreeMap<String, String>, w: &World) -> Result<P
         ));
     }
     let mut ports = BTreeMap::new();
-    for (name, v) in w.bind {
+    for (name, target) in w.bind {
         let Some(kind) = declared.get(name) else {
             return Err(err(
                 "bad_binding",
@@ -391,12 +392,6 @@ pub fn plan(yaml: &str, files: &BTreeMap<String, String>, w: &World) -> Result<P
                     "bind names {name}, which is not a port of this blueprint (ports: {})",
                     declared.keys().cloned().collect::<Vec<_>>().join(", ")
                 ),
-            ));
-        };
-        let Some(target) = v.as_str().filter(|s| !s.is_empty()) else {
-            return Err(err(
-                "bad_binding",
-                format!("bind {name}: an agent id (str)"),
             ));
         };
         let Some(hm) = (w.agent)(target) else {
@@ -412,7 +407,7 @@ pub fn plan(yaml: &str, files: &BTreeMap<String, String>, w: &World) -> Result<P
                 format!("bind {name}: the port wants a {kind} agent; {target} is {found} ({hm})"),
             ));
         }
-        ports.insert(name.clone(), target.to_string());
+        ports.insert(name.clone(), target.clone());
     }
 
     // d. FRESH IDS: one suffix for all
@@ -597,11 +592,6 @@ fn read_folder(dir: &Path) -> Result<BTreeMap<String, String>, String> {
     Ok(out)
 }
 
-/// Only the literal `true` counts.
-fn literal_true(p: &Value, k: &str) -> bool {
-    p.get(k) == Some(&Value::Bool(true))
-}
-
 /// Delete what an import made (the top agent, cascading) and take back the
 /// edges it wrote.
 async fn roll_back(kernel: &Arc<Kernel>, top: Option<&str>, edges: &[Edge]) {
@@ -629,32 +619,11 @@ async fn roll_back(kernel: &Arc<Kernel>, top: Option<&str>, edges: &[Edge]) {
 /// `import_subtree {path, parent_id, bind?, allow_code?, approve?}` — plan the
 /// import of the blueprint folder at `path` (relative to the running dir) under
 /// `parent_id`; without `approve: true` the reply is the preview and nothing is
-/// created.
-pub async fn import_subtree(kernel: &Arc<Kernel>, p: &Value) -> Value {
-    let (Some(path), Some(parent_id)) = (
-        p.get("path")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty()),
-        p.get("parent_id")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty()),
-    ) else {
-        return refuse(
-            "bad_arg",
-            "user.import_subtree: path (str) + parent_id (str) required",
-        );
-    };
-    let empty = Map::new();
-    let bind = match p.get("bind") {
-        None | Some(Value::Null) => &empty,
-        Some(Value::Object(m)) => m,
-        Some(_) => {
-            return refuse(
-                "bad_arg",
-                "user.import_subtree: bind is a map {\"@port\": \"<agent id>\"}",
-            )
-        }
-    };
+/// created. The arguments are the verb's declared ones, already checked.
+pub async fn import_subtree(kernel: &Arc<Kernel>, a: &ImportSubtree) -> Value {
+    let (path, parent_id) = (a.path.as_str(), a.parent_id.as_str());
+    let bind = a.bind.clone().unwrap_or_default();
+    let bind = &bind;
     let rel = Path::new(path);
     if rel.components().any(|c| c == Component::ParentDir) {
         return refuse("bad_arg", "user.import_subtree: path may not hold `..`");
@@ -701,7 +670,7 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, p: &Value) -> Value {
             parent_id,
             root_id: &root.id.0,
             bind,
-            allow_code: literal_true(p, "allow_code"),
+            allow_code: a.allow_code == Some(true),
             agent: &agent,
             known_bundle: &known,
         };
@@ -713,7 +682,7 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, p: &Value) -> Value {
     };
 
     // THE PREVIEW: what it will reach and what code it carries; nothing made
-    if !literal_true(p, "approve") {
+    if a.approve != Some(true) {
         return json!({
             "approval_required": true,
             "agents": plan.agents.len(),

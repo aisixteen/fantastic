@@ -422,7 +422,7 @@ async fn dispatch(
     // Mode 2: `reflect [<id>] [k=v ...]`. The first token after `reflect`
     // is the target unless it's a `k=v` pair (then target defaults to the
     // root); remaining `k=v` compose the reflect payload — `tree=ids`,
-    // `bundles=all`, `readme=true`, etc. (mirrors the Python CLI).
+    // `bundles=all`, etc. (mirrors the Python CLI).
     if args.first().map(String::as_str) == Some("reflect") {
         let opts = BootstrapOptions::one_shot(&state_dir, &work_dir);
         let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;

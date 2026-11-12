@@ -130,9 +130,3 @@ test("every tok() and tint() path is in SKIN_SCHEMA and every tinted path is opa
     for (const p of opaque) assert.equal((c.skin.values.get(p) as ColorValue).alpha, 1, `${s.name}: ${p}`);
   }
 });
-
-test("docs/skins.md lists every schema token", () => {
-  const doc = readFileSync(join(APP, "../../docs/skins.md"), "utf8");
-  const missing = SKIN_SCHEMA.filter((t) => !doc.includes(`\`${t.path}\``)).map((t) => t.path);
-  assert.deepEqual(missing, [], "tokens missing from src/tui/docs/skins.md");
-});

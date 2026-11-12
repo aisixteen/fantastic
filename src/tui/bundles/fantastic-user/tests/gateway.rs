@@ -7,84 +7,133 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use fantastic_kernel::{
     bootstrap::{bootstrap, BootstrapOptions},
-    bundle::BundleError,
-    AgentId, Bundle, BundleRegistry, Item, Kernel, Reply,
+    bundle::{BundleError, Handler},
+    AgentId, BundleRegistry, Item, Kernel, Reply,
 };
 use fantastic_user::{UserBundle, HANDLER_MODULE};
 use serde_json::{json, Value};
 
 const G: &str = "g0";
 
+fantastic_kernel::stand_in_verbs!(loader_verbs {
+    LoadTree "load_tree" {},
+    PersistRecord "persist_record" { record: serde_json::Value },
+    ForgetRecord "forget_record" { id: serde_json::Value },
+});
+
 /// Page records in RAM: load_tree / persist_record / forget_record.
 #[derive(Default)]
 struct Loader(Mutex<Vec<Value>>);
 
 #[async_trait]
-impl Bundle for Loader {
+impl Handler for Loader {
+    type Call = loader_verbs::Call;
     fn name(&self) -> &str {
         "loader"
     }
+    fn man(&self) -> &'static str {
+        "A test stand-in that holds page records in RAM."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        loader_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        loader_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
     async fn handle(
         &self,
-        _id: &AgentId,
-        p: &Value,
+        id: &AgentId,
+        call: Self::Call,
         _k: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         let mut recs = self.0.lock().unwrap();
-        Ok(Some(match p["type"].as_str() {
-            Some("load_tree") => json!({"records": *recs}),
-            Some("persist_record") => {
-                let r = p["record"].clone();
+        Ok(Some(match call {
+            loader_verbs::Call::LoadTree(_) => json!({"records": *recs}),
+            loader_verbs::Call::PersistRecord(p) => {
+                let r = p.record;
                 recs.retain(|x| x["id"] != r["id"]);
                 recs.push(r);
                 json!({"ok": true})
             }
-            Some("forget_record") => {
-                recs.retain(|x| x["id"] != p["id"]);
+            loader_verbs::Call::ForgetRecord(p) => {
+                recs.retain(|x| x["id"] != p.id);
                 json!({"ok": true})
             }
-            _ => Value::Null,
+            loader_verbs::Call::Reflect(_) => json!({"id": id.as_str(), "sentence": "a loader"}),
         }))
     }
 }
+
+fantastic_kernel::stand_in_verbs!(echo_verbs { Ping "ping" {} });
 
 /// Echo: the payload it was called with. Only `user` may call it.
 struct Echo;
 
 #[async_trait]
-impl Bundle for Echo {
+impl Handler for Echo {
+    type Call = echo_verbs::Call;
     fn name(&self) -> &str {
         "echo"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in that answers with what it was given."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        echo_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        echo_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         _id: &AgentId,
-        p: &Value,
+        call: Self::Call,
         _k: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        Ok(Some(json!({"echo": p})))
+        Ok(Some(json!({"echo": call.payload()})))
     }
 }
+
+fantastic_kernel::stand_in_verbs!(relay_verbs { Relay "relay" { to: String, inner: serde_json::Value } });
 
 /// A LEG: what arrives at it is sent onward from its own handler, as the leg —
 /// the way a wire call reaches the host (a call to the leg, which sends on).
 struct Relay;
 
 #[async_trait]
-impl Bundle for Relay {
+impl Handler for Relay {
+    type Call = relay_verbs::Call;
     fn name(&self) -> &str {
         "relay"
     }
+    fn man(&self) -> &'static str {
+        "A test stand-in leg that sends what it is given onward."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        relay_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        relay_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
     async fn handle(
         &self,
-        _id: &AgentId,
-        p: &Value,
+        id: &AgentId,
+        call: Self::Call,
         k: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let item = Item::new(
-            AgentId::from(p["to"].as_str().unwrap_or("")),
-            p["inner"].clone(),
-        );
+        let relay_verbs::Call::Relay(r) = call else {
+            return Ok(Some(json!({"id": id.as_str(), "sentence": "a leg"})));
+        };
+        let item = Item::new(AgentId::from(r.to.as_str()), r.inner);
         Ok(Some(Arc::clone(k).send(vec![item]).await.remove(0).result))
     }
 }
@@ -315,13 +364,7 @@ async fn around_answers_from_the_page_records_by_the_callers_page_grants() {
         json!({"type": "around", "theme": "mobile", "x": 50, "y": 25, "radius": 10}),
     )
     .await;
-    let got: Vec<&str> = r["members"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{r}"))
-        .iter()
-        .filter_map(|m| m["id"].as_str())
-        .collect();
-    assert_eq!(got, vec!["cv1", "cv2"], "no theme argument: it still reads layout_canvas: {r}");
+    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("theme")), "no theme argument: {r}");
     let r = tab(&k, json!({"type": "around", "x": "a", "y": 0, "radius": 5})).await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
     // a cell's AI: judged by its own page grants (cv2 only)
@@ -360,7 +403,7 @@ async fn around_answers_from_the_page_records_by_the_callers_page_grants() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_shell_forwards_and_other_verbs_are_the_probes() {
+async fn the_shell_forwards_and_user_answers_its_own_verbs() {
     let k = setup().await;
     // the shell (no origin)
     let r = op(
@@ -370,13 +413,13 @@ async fn the_shell_forwards_and_other_verbs_are_the_probes() {
     )
     .await;
     assert_eq!(r["echo"]["type"], "ping", "{r}");
-    // the probe's own verbs, unchanged
+    // its inquiries and its reflect
     let r = op(&k, "user", json!({"type": "inquiries"})).await;
     assert!(r.get("inquiries").is_some(), "{r}");
     let r = op(&k, "user", json!({"type": "reflect"})).await;
     assert_eq!(r["handler_module"], HANDLER_MODULE, "{r}");
-    assert!(r.get("verbs").is_none(), "a reflect carries no verbs: {r}");
-    // HOW TO CALL it: the kernel's `docs` — its own verbs and the probe's
+    assert!(r["verbs"].get("forward").is_some(), "a reflect renders the declared verbs: {r}");
+    // HOW TO CALL it: the kernel's `docs`, rendered from the declared verbs
     let d = op(&k, "kernel", json!({"type": "docs", "of": "user"})).await;
     assert!(
         d["verbs"].get("forward").is_some()
@@ -384,4 +427,66 @@ async fn the_shell_forwards_and_other_verbs_are_the_probes() {
             && d["verbs"].get("inquiry").is_some(),
         "{d}"
     );
+}
+
+fn why(r: &Value) -> (Option<&str>, Option<&str>) {
+    (r["reason"].as_str(), r["arg"].as_str())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_verb_of_user_is_checked_by_its_declaration() {
+    let k = setup().await;
+    let r = op(&k, "user", json!({"type": "zzz_nope"})).await;
+    assert_eq!(r["reason"], "unhandled", "{r}");
+    for v in fantastic_user::verbs::VERBS.iter().map(|v| v.name).chain(["reflect"]) {
+        assert!(r["error"].as_str().unwrap().contains(v), "{v} in {r}");
+    }
+    for v in fantastic_user::verbs::VERBS {
+        let r = op(&k, "user", json!({"type": v.name, "zzz_unknown": 1})).await;
+        assert_eq!(why(&r), (Some("bad_arg"), Some("zzz_unknown")), "{}: {r}", v.name);
+    }
+    // a verb's required argument missing is refused by its name
+    for v in fantastic_user::verbs::VERBS {
+        let required: Vec<String> = fantastic_kernel::verbs::args(v.schema())
+            .into_iter()
+            .filter(|a| a.required)
+            .map(|a| a.name)
+            .collect();
+        if required.is_empty() {
+            continue;
+        }
+        let r = op(&k, "user", json!({"type": v.name})).await;
+        assert_eq!(r["reason"], "missing_arg", "{}: {r}", v.name);
+        assert!(required.iter().any(|n| r["arg"] == json!(n)), "{}: {r}", v.name);
+    }
+    // wrongly typed, never coerced
+    for (p, arg) in [
+        (json!({"type": "forward", "target": "echo", "payload": "x"}), "payload"),
+        (json!({"type": "forward", "target": "echo", "payload": {}, "timeout": "5"}), "timeout"),
+        (json!({"type": "around", "x": 1, "y": 2, "radius": 0}), "radius"),
+        (json!({"type": "around", "x": 1, "y": 2, "radius": 5, "view": 3}), "view"),
+        (json!({"type": "path", "rescan": "yes"}), "rescan"),
+        (json!({"type": "inquiry", "text": "q", "kind": "poll"}), "kind"),
+        (json!({"type": "inquiries", "asker": 3}), "asker"),
+        (json!({"type": "answer_inquiry", "re": 1, "answer": 3}), "answer"),
+        (json!({"type": "answer_inquiry", "re": 1, "answer": ""}), "answer"),
+        (json!({"type": "import_subtree", "path": "x", "parent_id": "p", "approve": "true"}), "approve"),
+    ] {
+        let r = op(&k, "user", p.clone()).await;
+        assert_eq!(why(&r), (Some("bad_arg"), Some(arg)), "{p}: {r}");
+    }
+    // the record declares `page_loader` and no other field
+    let root = k.root().unwrap().id.0.clone();
+    for p in [
+        json!({"type": "update_agent", "id": "user", "page_loader": ""}),
+        json!({"type": "update_agent", "id": "user", "stray": 1}),
+    ] {
+        let r = op(&k, &root, p.clone()).await;
+        assert_eq!(r["reason"], "bad_arg", "{p}: {r}");
+    }
+    // a choice question needs its choices; a held one is listed, answered and closed
+    let r = op(&k, "user", json!({"type": "inquiry", "text": "which?", "kind": "single"})).await;
+    assert_eq!(why(&r), (Some("bad_arg"), Some("options")), "{r}");
+    let r = op(&k, "user", json!({"type": "answer_inquiry", "re": 99, "answer": "yes"})).await;
+    assert_eq!(r["reason"], "not_found", "{r}");
 }

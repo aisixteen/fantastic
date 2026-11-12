@@ -361,7 +361,7 @@ pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<U
     // THE CANVAS.
     if !h.kernel.exists(CANVAS_PAGE_ID) {
         create(h, json!({"parent_id": WEB_ID, "id": CANVAS_PAGE_ID, "handler_module": fantastic_canvas_page::HANDLER_MODULE,
-            "verbs": {"read_stream": fantastic_canvas_page::READ_STREAM_DOC}})).await?;
+            "verbs": fantastic_canvas_page::read_stream_declared()})).await?;
     }
     let fresh_canvas_ws = !h.kernel.exists(CANVAS_WS_ID);
     if fresh_canvas_ws {
@@ -403,7 +403,7 @@ pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<U
         merge_verbs(h, WEB_ID, "can_call", served, json!(["read_stream"])).await?;
     }
     // `user`: the leg's one reach (its verbs), and the page loader it reads.
-    let gw_verbs = json!(fantastic_user::VERBS);
+    let gw_verbs = json!(fantastic_user::page_verbs());
     let r = h
         .operator(
             "kernel",

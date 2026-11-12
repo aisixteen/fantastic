@@ -1,25 +1,47 @@
 use std::sync::Arc;
 
 use fantastic_kernel::agent::Agent;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::test_support::as_agent;
 use fantastic_kernel::{AgentId, Item, Kernel};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use super::*;
 
-/// A target bundle whose own rule a saved set-up must pass: it needs a `model`.
+/// What a saved set-up for the stand-in backend may carry: it needs a `model`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+pub struct NeedsModelRecord {
+    /// The model to use.
+    pub model: String,
+    /// Where the backend listens.
+    pub endpoint: Option<String>,
+}
+
+fantastic_kernel::record!(NeedsModelRecord);
+
+/// A target bundle whose declared record a saved set-up must pass: it needs a `model`.
 struct NeedsModel;
 
 #[async_trait]
-impl Bundle for NeedsModel {
+impl Handler for NeedsModel {
+    type Call = fantastic_kernel::test_support::NoCall;
     fn name(&self) -> &str {
         "demo_backend.tools"
     }
-    fn validate_meta(&self, meta: &Map<String, Value>, _record: &Map<String, Value>) -> Option<String> {
-        (!meta.contains_key("model")).then(|| "model is required".to_string())
+    fn man(&self) -> &'static str {
+        "A test stand-in backend."
     }
-    async fn handle(&self, _a: &AgentId, _p: &Value, _k: &Arc<Kernel>) -> Result<Reply, BundleError> {
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::test_support::no_verbs()
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        fantastic_kernel::test_support::no_dynamic(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &RECORD
+    }
+    async fn handle(&self, _a: &AgentId, _c: Self::Call, _k: &Arc<Kernel>) -> Result<Reply, BundleError> {
         Ok(None)
     }
 }
@@ -99,7 +121,7 @@ async fn a_saved_setup_carries_no_identity_wiring_or_grants_and_passes_its_bundl
         assert!(err(&r).contains(field), "{field}: {r}");
     }
     let r = call(&k, "user", json!({"type": "persist_record", "name": "t", "record": {"handler_module": "demo_backend.tools"}})).await;
-    assert!(err(&r).contains("model is required"), "the target bundle's own rule: {r}");
+    assert!(err(&r).contains("required and missing: model"), "the target bundle's declared record: {r}");
     let r = call(&k, "user", json!({"type": "persist_record", "name": "t", "record": {"handler_module": "nope.tools", "model": "m"}})).await;
     assert!(err(&r).contains("no bundle"), "{r}");
     let r = call(&k, "user", json!({"type": "persist_record", "name": "../x", "record": {"handler_module": "demo_backend.tools", "model": "m"}})).await;
@@ -150,4 +172,45 @@ async fn the_default_is_explicit_and_forgetting_its_saved_setup_clears_it() {
     assert_eq!(call(&k, "user", json!({"type": "load_tree"})).await["preferred"], "opus");
     call(&k, "user", json!({"type": "forget_record", "name": "opus"})).await;
     assert_eq!(call(&k, "user", json!({"type": "load_tree"})).await["preferred"], Value::Null);
+}
+
+#[tokio::test]
+async fn every_verb_is_checked_by_its_declaration() {
+    let td = tempfile::tempdir().unwrap();
+    let k = kernel(&td.path().join("home"));
+    let r = call(&k, "user", json!({"type": "zzz_nope"})).await;
+    assert_eq!(r["reason"], "unhandled", "{r}");
+    for v in verbs::VERBS.iter().map(|v| v.name).chain(["reflect"]) {
+        assert!(err(&r).contains(v), "{v} in {r}");
+    }
+    for v in verbs::VERBS {
+        let r = call(&k, "user", json!({"type": v.name, "zzz_unknown": 1})).await;
+        assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("zzz_unknown")), "{}: {r}", v.name);
+    }
+    for (verb, arg) in [("persist_record", "name"), ("forget_record", "name")] {
+        let r = call(&k, "user", json!({"type": verb})).await;
+        assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("missing_arg"), Some(arg)), "{verb}: {r}");
+    }
+    let r = call(&k, "user", json!({"type": "persist_record", "name": "x"})).await;
+    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("missing_arg"), Some("record")), "{r}");
+    let r = call(&k, "user", json!({"type": "persist_record", "name": "x", "record": {}})).await;
+    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("missing_arg"), Some("record.handler_module")), "{r}");
+    for (p, arg) in [
+        (json!({"type": "persist_record", "name": "../x", "record": {"handler_module": "demo_backend.tools"}}), "name"),
+        (json!({"type": "persist_record", "name": "x", "record": [], "if_match": 1}), "record"),
+        (json!({"type": "forget_record", "name": 5}), "name"),
+        (json!({"type": "prefer", "name": "a b"}), "name"),
+        (json!({"type": "prefer", "name": 5}), "name"),
+    ] {
+        let r = call(&k, "user", p.clone()).await;
+        assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some(arg)), "{p}: {r}");
+    }
+    // a saved set-up's fields are the target bundle's declared ones: an unknown field is refused by name
+    let r = call(&k, "user", json!({"type": "persist_record", "name": "x", "record": {"handler_module": "demo_backend.tools", "model": "m", "stray": 1}})).await;
+    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("stray")), "{r}");
+    let r = call(&k, "user", json!({"type": "persist_record", "name": "x", "record": {"handler_module": "demo_backend.tools", "model": 3}})).await;
+    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("model")), "{r}");
+    // reflect renders the declared verbs
+    let r = call(&k, "user", json!({"type": "reflect"})).await;
+    assert_eq!(r["handler_module"], HANDLER_MODULE, "{r}");
 }

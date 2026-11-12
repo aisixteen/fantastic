@@ -26,16 +26,16 @@
 //! existing folder's `pid` and `canvas` are set to `null`: a stopped fantastic
 //! reads as stopped from the file alone (a killed one still names its last pid).
 //!
-//! Verbs: `list`; `register_home_folder {value}`; `name_home_folder {name}`;
-//! `set_canvas {url}`; `unstore {guid}` (another fantastic), `unstore_others`.
+//! Its verbs are declared in [`verbs`] (`reflect` and `docs` render them), its record in
+//! [`record`].
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::refusal::{missing, refusal, refusal_hint, with, BAD_ARG, NOT_FOUND, UNHANDLED};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
+use fantastic_kernel::refusal::{refusal, refusal_hint, with, BAD_ARG, NOT_FOUND};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
 
@@ -43,6 +43,13 @@ use crate::{private, private_dirs, read_private, secrets::Secrets, saved_dir, va
 
 /// The `handler_module` this bundle answers to.
 pub const HANDLER_MODULE: &str = "user_store.tools";
+
+pub mod record;
+pub mod verbs;
+
+/// What the bundle is for: its one short man text; how to call it is rendered from its
+/// declared verbs (`docs`, `reflect`).
+const MAN: &str = "The user store: the keys and set-ups kept in the user's home, and a folder per registered fantastic that other tools read.";
 
 /// The record field holding the switch; absent or anything but `true` = off.
 pub const SWITCH: &str = "register_home_folder";
@@ -260,16 +267,7 @@ impl UserStore {
     /// The switch: checked against the home first (no home, no guid, a taken name:
     /// refused, nothing touched), then the RECORD lands, then the home follows —
     /// a home write that fails puts the switch back.
-    async fn register_home_folder(&self, agent_id: &AgentId, kernel: &Arc<Kernel>, me: &Me, payload: &Value) -> Result<Value, Value> {
-        let on = match payload.get("value") {
-            None | Some(Value::Null) => return Err(missing(SWITCH, "value")),
-            Some(Value::Bool(b)) => *b,
-            Some(v) => {
-                let mut r = refusal(BAD_ARG, format!("{SWITCH}: value must be true or false, got {v}"));
-                with(&mut r, "arg", json!("value"));
-                return Err(r);
-            }
-        };
+    async fn register_home_folder(&self, agent_id: &AgentId, kernel: &Arc<Kernel>, me: &Me, on: bool) -> Result<Value, Value> {
         let set = Me { guid: me.guid.clone(), on, name: me.name.clone() };
         let at = if on { self.place(&set)?.1 } else { self.find(set.guid()?)? };
         Self::persist(agent_id, kernel, SWITCH, Value::Bool(on)).await;
@@ -293,21 +291,7 @@ impl UserStore {
     /// The name: with the switch on, checked against the home first (a taken name:
     /// refused, nothing touched), then the RECORD lands, then the folder is
     /// renamed — a rename that fails puts the name back. `null` (or "") = the guid.
-    async fn name_home_folder(&self, agent_id: &AgentId, kernel: &Arc<Kernel>, me: &Me, payload: &Value) -> Result<Value, Value> {
-        let name = match payload.get("name") {
-            None => return Err(missing("name_home_folder", "name")),
-            Some(Value::Null) => None,
-            Some(Value::String(n)) if n.is_empty() => None,
-            Some(Value::String(n)) if valid_name(n) => Some(n.clone()),
-            Some(v) => {
-                let mut r = refusal(
-                    BAD_ARG,
-                    format!("name_home_folder: name {v} is not a folder name — 1–64 of letters, digits, '-' and '_', starting with a letter or digit; null for the guid"),
-                );
-                with(&mut r, "arg", json!("name"));
-                return Err(r);
-            }
-        };
+    async fn name_home_folder(&self, agent_id: &AgentId, kernel: &Arc<Kernel>, me: &Me, name: Option<String>) -> Result<Value, Value> {
         let named = Me { guid: me.guid.clone(), on: me.on, name: name.clone() };
         let mut out = json!({"name": name, "folder": named.folder()?});
         if me.on {
@@ -328,17 +312,7 @@ impl UserStore {
 
     /// The canvas this run serves (`null`: none): kept for the run, and with the
     /// switch on written into the folder at once.
-    fn set_canvas(&self, me: &Me, payload: &Value) -> Result<Value, Value> {
-        let url = match payload.get("url") {
-            None => return Err(missing("set_canvas", "url")),
-            Some(Value::Null) => None,
-            Some(Value::String(u)) if !u.is_empty() => Some(u.clone()),
-            Some(v) => {
-                let mut r = refusal(BAD_ARG, format!("set_canvas: url must be a non-empty string or null, got {v}"));
-                with(&mut r, "arg", json!("url"));
-                return Err(r);
-            }
-        };
+    fn set_canvas(&self, me: &Me, url: Option<String>) -> Result<Value, Value> {
         let was = std::mem::replace(&mut *self.canvas.lock().expect("canvas poisoned"), url.clone());
         let mut out = json!({"canvas": url});
         if me.on {
@@ -353,8 +327,7 @@ impl UserStore {
         Ok(out)
     }
 
-    fn unstore(&self, me: &Me, payload: &Value) -> Result<Value, Value> {
-        let guid = payload.get("guid").and_then(Value::as_str).filter(|g| !g.is_empty()).ok_or_else(|| missing("unstore", "guid"))?;
+    fn unstore(&self, me: &Me, guid: &str) -> Result<Value, Value> {
         if me.guid.as_deref() == Some(guid) {
             let mut r = refusal_hint(
                 BAD_ARG,
@@ -442,41 +415,41 @@ impl UserStore {
 }
 
 #[async_trait]
-impl Bundle for UserStore {
+impl Handler for UserStore {
+    type Call = verbs::Call;
+
     fn name(&self) -> &str {
         HANDLER_MODULE
     }
 
-    fn verb_docs(&self) -> Value {
-        json!({
-            "list": "No args. Returns {home, here: {path, guid, name, folder, stored, register_home_folder}, keys: [{ref, host}] (never values), saved: [name], locations: [{folder, guid, name, path, pid, canvas, stored_at, last_seen, here, exists}]}.",
-            "register_home_folder": "args: value:bool. On: records the switch and writes this fantastic's folder (<home>/fantastics/<name or guid>/fantastic.yaml), written again on every start while on; off: records it and removes the folder. Default off. Returns {register_home_folder, stored|unstored}.",
-            "name_home_folder": "args: name:str|null (letters, digits, '-', '_'; null = the guid). Records the folder's name; with the switch on the folder is renamed now. Returns {name, folder, stored?}.",
-            "set_canvas": "args: url:str|null. The canvas this run serves, written into the folder (with the switch on). Returns {canvas, stored?}.",
-            "unstore": "args: guid:str (another fantastic's; this one follows register_home_folder). Removes its folder. Returns {unstored}.",
-            "unstore_others": "No args. Removes every fantastic's folder but this one's. Returns {unstored: [guid]}.",
-            "shutdown": "Kernel lifecycle — the kernel sends it at a clean stop. With the switch on, this fantastic's folder gets pid and canvas null. Returns {stopped}.",
-        })
+    fn man(&self) -> &'static str {
+        MAN
     }
 
-    async fn handle(&self, agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        verbs::VERBS
+    }
+
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        verbs::dynamic_verbs(agent)
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &record::RECORD
+    }
+
+    async fn handle(&self, agent_id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
         let me = Me::of(agent_id, kernel);
-        let out = match verb {
-            "boot" => return Ok(self.boot(&me)),
-            "reflect" => return Ok(Some(self.reflect(&me))),
-            "list" => self.list(&me),
-            SWITCH => self.register_home_folder(agent_id, kernel, &me, payload).await,
-            "name_home_folder" => self.name_home_folder(agent_id, kernel, &me, payload).await,
-            "set_canvas" => self.set_canvas(&me, payload),
-            "unstore" => self.unstore(&me, payload),
-            "unstore_others" => self.unstore_others(&me),
-            "shutdown" => self.shutdown(&me),
-            _ => {
-                let mut r = refusal(UNHANDLED, format!("user_store: unknown type {verb:?}"));
-                with(&mut r, "verb", json!(verb));
-                Err(r)
-            }
+        let out = match call {
+            verbs::Call::Boot(_) => return Ok(self.boot(&me)),
+            verbs::Call::Reflect(_) => return Ok(Some(self.reflect(&me))),
+            verbs::Call::List(_) => self.list(&me),
+            verbs::Call::RegisterHomeFolder(a) => self.register_home_folder(agent_id, kernel, &me, a.value).await,
+            verbs::Call::NameHomeFolder(a) => self.name_home_folder(agent_id, kernel, &me, a.name).await,
+            verbs::Call::SetCanvas(a) => self.set_canvas(&me, a.url),
+            verbs::Call::Unstore(a) => self.unstore(&me, &a.guid),
+            verbs::Call::UnstoreOthers(_) => self.unstore_others(&me),
+            verbs::Call::Shutdown(_) => self.shutdown(&me),
         };
         Ok(Some(out.unwrap_or_else(|r| r)))
     }
@@ -515,7 +488,8 @@ mod tests {
     }
 
     async fn call(s: &UserStore, k: &Arc<Kernel>, id: &AgentId, p: Value) -> Value {
-        s.handle(id, &p, k).await.unwrap().unwrap_or(Value::Null)
+        // THE ENTRY: the call is parsed and checked against the declared verbs first
+        fantastic_kernel::Bundle::handle_binary(s, id, p, None, k).await.unwrap().0.unwrap_or(Value::Null)
     }
 
     fn info(h: &Path, folder: &str) -> Option<Value> {
@@ -654,8 +628,6 @@ mod tests {
             let r = call(&sa, &ka, &a, json!({"type": "name_home_folder", "name": bad})).await;
             assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some(BAD_ARG), Some("name")), "{bad}: {r}");
         }
-        let r = call(&sa, &ka, &a, json!({"type": "name_home_folder"})).await;
-        assert_eq!(r["reason"], "missing_arg");
         // another fantastic's folder, by name or by guid
         for taken in ["bee", "g-b"] {
             fs::create_dir_all(fantastics_dir(&h).join("g-b")).ok();
@@ -693,7 +665,7 @@ mod tests {
         assert_eq!(r["stored"]["canvas"], Value::Null, "{r}");
         assert_eq!(info(&h, "g-1").unwrap()["canvas"], Value::Null);
         assert!(!meta(&k, &id).contains_key("canvas"), "never on the record");
-        for bad in [json!({"type": "set_canvas"}), json!({"type": "set_canvas", "url": ""}), json!({"type": "set_canvas", "url": 1})] {
+        for bad in [json!({"type": "set_canvas", "url": ""}), json!({"type": "set_canvas", "url": 1})] {
             assert_eq!(call(&s, &k, &id, bad.clone()).await["arg"], "url", "{bad}");
         }
     }
@@ -735,7 +707,7 @@ mod tests {
         let before = info(&h, "g-1").unwrap();
         assert!(before["pid"].is_u64() && before["canvas"].is_string());
         // the kernel's stop tells it: the bundle advertises the verb
-        assert!(s.verb_docs().as_object().unwrap().contains_key("shutdown"));
+        assert!(fantastic_kernel::Handler::verbs(&s).iter().any(|v| v.name == "shutdown"));
         assert_eq!(call(&s, &k, &id, json!({"type": "shutdown"})).await, json!({"stopped": true}));
         let after = info(&h, "g-1").unwrap();
         assert_eq!((after["pid"].clone(), after["canvas"].clone()), (Value::Null, Value::Null));
@@ -825,6 +797,53 @@ mod tests {
         call(&s, &k, &id, json!({"type": "name_home_folder", "name": "n"})).await;
         let changed: Vec<Value> = seen.lock().unwrap().iter().filter(|e| e["kind"] == "updated" && e["agent_id"] == "user_store").map(|e| e["changed"].clone()).collect();
         assert_eq!(changed, vec![json!([SWITCH]), json!([NAME])], "the loader persists each changed field");
+    }
+
+    #[tokio::test]
+    async fn the_entry_refuses_what_the_declaration_does_not_name() {
+        let h = home();
+        let s = UserStore::new(Ok(h.clone()), h.parent().unwrap().join("proj"));
+        let (k, id) = fantastic(Some("g-1"), json!({}));
+        // an unknown verb answers the list; an unknown argument is named; a missing one too
+        let r = call(&s, &k, &id, json!({"type": "nope"})).await;
+        assert_eq!(r["reason"], "unhandled", "{r}");
+        for verb in ["list", SWITCH, "name_home_folder", "set_canvas", "unstore", "unstore_others", "shutdown", "boot"] {
+            assert!(r["error"].as_str().unwrap().contains(verb), "{verb} in {r}");
+        }
+        for verb in ["list", "unstore_others", "boot", "shutdown"] {
+            let r = call(&s, &k, &id, json!({"type": verb, "extra": 1})).await;
+            assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some(BAD_ARG), Some("extra")), "{verb}: {r}");
+        }
+        let r = call(&s, &k, &id, json!({"type": "unstore", "guid": 3})).await;
+        assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some(BAD_ARG), Some("guid")), "{r}");
+        for verb in verbs::VERBS {
+            let r = call(&s, &k, &id, json!({"type": verb.name, "zzz_unknown": 1})).await;
+            assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some(BAD_ARG), Some("zzz_unknown")), "{}: {r}", verb.name);
+        }
+        for (p, arg) in [
+            (json!({"type": SWITCH}), "value"),
+            (json!({"type": "unstore"}), "guid"),
+        ] {
+            let r = call(&s, &k, &id, p.clone()).await;
+            assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("missing_arg"), Some(arg)), "{p}: {r}");
+        }
+        for (p, arg) in [
+            (json!({"type": SWITCH, "value": "yes"}), "value"),
+            (json!({"type": "name_home_folder", "name": "../up"}), "name"),
+            (json!({"type": "set_canvas", "url": 1}), "url"),
+        ] {
+            let r = call(&s, &k, &id, p.clone()).await;
+            assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some(BAD_ARG), Some(arg)), "{p}: {r}");
+        }
+        // no name is the guid: the folder is named by it
+        call(&s, &k, &id, json!({"type": SWITCH, "value": true})).await;
+        let r = call(&s, &k, &id, json!({"type": "name_home_folder"})).await;
+        assert_eq!(r["folder"], "g-1", "{r}");
+        // the record declares its two fields and no other
+        let bundle = &s as &dyn fantastic_kernel::Bundle;
+        assert!(bundle.check_record("update_agent", json!({SWITCH: true, NAME: "n"}).as_object().unwrap()).is_ok());
+        assert!(bundle.check_record("update_agent", json!({"stray": 1}).as_object().unwrap()).is_err());
+        assert!(bundle.check_record("update_agent", json!({SWITCH: "yes"}).as_object().unwrap()).is_err());
     }
 
     #[test]

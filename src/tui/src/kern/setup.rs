@@ -2,8 +2,8 @@
 //!
 //! The page asks the human for the id, the handler (one of the backends this
 //! build links, from the kernel's own bundle catalog), and then THE BACKEND'S
-//! OWN FIELDS as its record schema declares them (`Bundle::record_schema`:
-//! name, type, required, enum, the backend's default, a hint) — generic, so a
+//! OWN FIELDS as its declared record names them (`Bundle::record`: name,
+//! type, required, enum, the backend's default, a hint) — generic, so a
 //! new backend needs no page change. Required fields start empty (nothing is
 //! guessed); a field with a default starts at the BACKEND's value. The backend
 //! validates at the create — one truth — and its refusal names every missing
@@ -78,6 +78,83 @@ impl Backend {
     }
 }
 
+/// What a page needs of a backend's DECLARED record: `{fields:[{name, type, required,
+/// enum?, default?, hint}]}` — the record's fields in declaration order, each one's
+/// kind read from its schema (`str`, `int`, `float`, `bool`, `enum`, `list`, `map`;
+/// `credentials` for the field naming a stored key).
+pub fn schema_of(decl: &fantastic_kernel::RecordDecl) -> Value {
+    let schema = decl.schema();
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|r| r.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    // a field's schema, or its non-null alternatives (an optional field is `anyOf` null)
+    fn parts(p: &Value) -> Vec<&Value> {
+        match p.get("anyOf").or_else(|| p.get("oneOf")).and_then(Value::as_array) {
+            Some(alts) => alts.iter().filter(|a| a.get("type").and_then(Value::as_str) != Some("null")).collect(),
+            None => vec![p],
+        }
+    }
+    let kind = |name: &str, p: &Value| -> &'static str {
+        if name == "credentials" {
+            return "credentials";
+        }
+        for part in parts(p) {
+            if part.get("enum").is_some() {
+                return "enum";
+            }
+            let types: Vec<&str> = match part.get("type") {
+                Some(Value::String(t)) => vec![t.as_str()],
+                Some(Value::Array(ts)) => ts.iter().filter_map(Value::as_str).collect(),
+                _ => Vec::new(),
+            };
+            for t in types {
+                match t {
+                    "integer" => return "int",
+                    "number" => return "float",
+                    "boolean" => return "bool",
+                    "array" => return "list",
+                    "object" => return "map",
+                    _ => {}
+                }
+            }
+        }
+        "str"
+    };
+    let fields: Vec<Value> = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|props| {
+            props
+                .iter()
+                .map(|(name, p)| {
+                    let one_of: Vec<&Value> = parts(p)
+                        .into_iter()
+                        .filter_map(|part| part.get("enum").and_then(Value::as_array))
+                        .flatten()
+                        .filter(|v| v.is_string())
+                        .collect();
+                    let mut f = json!({
+                        "name": name,
+                        "type": kind(name, p),
+                        "required": required.contains(&name.as_str()),
+                        "hint": p.get("description").and_then(Value::as_str).unwrap_or(""),
+                    });
+                    if !one_of.is_empty() {
+                        f["enum"] = json!(one_of);
+                    }
+                    if let Some(d) = p.get("default").filter(|d| !d.is_null()) {
+                        f["default"] = d.clone();
+                    }
+                    f
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({"fields": fields})
+}
+
 /// The backends this build links — every registered module with a record
 /// schema that is one of the five backend names — with their schemas.
 pub fn backends(host: &Host) -> Vec<Backend> {
@@ -91,7 +168,7 @@ pub fn backends(host: &Host) -> Vec<Backend> {
                 "anthropic_backend.tools" | "ollama_backend.tools" | "responses_backend.tools" | "vllm_backend.tools" | "foundation_models_backend.tools"
             )
         })
-        .filter_map(|(m, b)| b.record_schema().map(|s| Backend::from_schema(m, &s)))
+        .map(|(m, b)| Backend::from_schema(m, &schema_of(b.record())))
         .collect();
     v.sort_by(|a, b| a.module.cmp(&b.module));
     v

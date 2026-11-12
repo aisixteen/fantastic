@@ -11,28 +11,43 @@ use std::time::Duration;
 use async_trait::async_trait;
 use fantastic_kernel::{
     bootstrap::{bootstrap, BootstrapOptions},
-    bundle::BundleError,
-    AgentId, Bundle, BundleRegistry, Item, Kernel, Reply,
+    bundle::{BundleError, Handler},
+    AgentId, BundleRegistry, Item, Kernel, Reply,
 };
 use fantastic_web_mcp::{McpCore, WebMcpBundle, HANDLER_MODULE};
 use serde_json::{json, Value};
+
+fantastic_kernel::stand_in_verbs!(sleeper_verbs { Wait "wait" { ms: Option<u64> } });
 
 /// Sleeps for `ms`, then answers. The only fake in this file.
 struct Sleeper;
 
 #[async_trait]
-impl Bundle for Sleeper {
+impl Handler for Sleeper {
+    type Call = sleeper_verbs::Call;
     fn name(&self) -> &str {
         "sleeper"
     }
-    async fn handle(&self, _id: &AgentId, p: &Value, _k: &Arc<Kernel>) -> Result<Reply, BundleError> {
-        match p.get("type").and_then(Value::as_str) {
-            Some("wait") => {
-                let ms = p.get("ms").and_then(Value::as_u64).unwrap_or(0);
+    fn man(&self) -> &'static str {
+        "A test stand-in that sleeps."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        sleeper_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        sleeper_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
+    async fn handle(&self, id: &AgentId, call: Self::Call, _k: &Arc<Kernel>) -> Result<Reply, BundleError> {
+        match call {
+            sleeper_verbs::Call::Wait(w) => {
+                let ms = w.ms.unwrap_or(0);
                 tokio::time::sleep(Duration::from_millis(ms)).await;
                 Ok(Some(json!({"slept_ms": ms})))
             }
-            _ => Ok(Some(json!({"verbs": {"wait": "args: ms:int"}}))),
+            sleeper_verbs::Call::Reflect(_) => Ok(Some(json!({"id": id.as_str(), "sentence": "a sleeper"}))),
         }
     }
 }

@@ -1,14 +1,10 @@
 //! THE HUMAN'S INQUIRIES (owner 2026-10-11): an agent asks the person, the person
-//! answers later.
-//!
-//! - `inquiry {text, kind?, options?, request_id?, reply_client_id?}` — ACCEPTED at
-//!   once and HELD here as open: `{re, asker, text, kind, options, request_id, ts}`.
-//!   `re` is the inquiry's pid (the task it runs under), the handle the answer
-//!   goes back under. Nothing suspends: the asker keeps working, or awaits.
-//! - `inquiries {asker?}` — the open ones (an asker's only, when named).
-//! - `answer_inquiry {re, answer}` — the person's answer, sent to the asker as
-//!   `[reply to <re> · user inquiry]` — the shape every asker reads (ai_core
-//!   settles what it is owed by it) — on the asker's own thread. Then closed.
+//! answers later. Accepted at once and HELD here as open under the pid the inquiry
+//! runs under (`re`), the handle the answer goes back under. Nothing suspends: the
+//! asker keeps working, or awaits. The answer is sent to the asker as
+//! `[reply to <re> · user inquiry]` — the shape every asker reads (ai_core settles
+//! what it is owed by it) — on the asker's own thread, then the question is closed.
+//! The verbs are declared in [`crate::verbs`].
 //!
 //! RAM only: a host restart forgets the open ones (the asker's own history keeps
 //! the question).
@@ -16,14 +12,36 @@
 use std::sync::{Arc, Mutex};
 
 use fantastic_kernel::{AgentId, Item, Kernel};
+use serde::Serialize;
 use serde_json::{json, Value};
 
-/// The kinds a question takes.
-pub const KINDS: [&str; 4] = ["text", "single", "multi", "confirm"];
+use crate::verbs::{Answer, AnswerInquiry, Inquiries as ListArgs, Inquiry, Kind};
 
+/// One open question, as `inquiries` lists it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Held {
+    /// The pid the inquiry runs under: the handle the answer goes back under.
+    pub re: i64,
+    /// Who asked.
+    pub asker: Option<String>,
+    /// The question.
+    pub text: String,
+    /// The shape of the question.
+    pub kind: Kind,
+    /// The choices.
+    pub options: Option<Vec<String>>,
+    /// Names the inquiry in the answer.
+    pub request_id: Option<String>,
+    /// The client the answer is addressed to.
+    pub reply_client_id: String,
+    /// Epoch seconds the question was held.
+    pub ts: f64,
+}
+
+/// The open questions.
 #[derive(Default)]
 pub struct Inquiries {
-    open: Mutex<Vec<Value>>,
+    open: Mutex<Vec<Held>>,
 }
 
 fn bad(msg: &str, arg: &str) -> Value {
@@ -31,117 +49,89 @@ fn bad(msg: &str, arg: &str) -> Value {
 }
 
 /// An answer as the asker reads it: words, a list joined, a yes / no.
-fn answer_text(v: &Value) -> Option<String> {
+fn answer_text(v: &Answer) -> String {
     match v {
-        Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
-        Value::Array(a) if !a.is_empty() => Some(
-            a.iter()
-                .map(|x| x.as_str().map_or_else(|| x.to_string(), str::to_string))
-                .collect::<Vec<_>>()
-                .join(", "),
-        ),
-        Value::Bool(b) => Some(if *b { "yes" } else { "no" }.to_string()),
-        _ => None,
+        Answer::Words(s) => s.trim().to_string(),
+        Answer::Picks(a) => a.join(", "),
+        Answer::Flag(b) => if *b { "yes" } else { "no" }.to_string(),
     }
 }
 
 impl Inquiries {
+    /// How many are open.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.open.lock().expect("inquiries poisoned").len()
+    }
+
     /// `inquiry`: held as open; the pid it runs under is its `re`.
-    pub fn ask(&self, p: &Value) -> Value {
-        let text = p
-            .get("text")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or("");
-        if text.is_empty() {
-            return bad("inquiry: `text` must be a non-empty string", "text");
-        }
-        let kind = p.get("kind").and_then(Value::as_str).unwrap_or("text");
-        if !KINDS.contains(&kind) {
-            return bad(
-                &format!("inquiry: `kind` must be one of {}", KINDS.join("|")),
-                "kind",
-            );
-        }
-        let options = p.get("options").cloned().unwrap_or(Value::Null);
-        if matches!(kind, "single" | "multi") && !options.as_array().is_some_and(|a| !a.is_empty())
-        {
-            return bad(
-                &format!("inquiry: a `{kind}` question needs `options`"),
-                "options",
-            );
+    pub fn ask(&self, a: Inquiry) -> Value {
+        // a question of a kind that offers choices needs them
+        if matches!(a.kind, Kind::Single | Kind::Multi) && a.options.is_none() {
+            return bad("inquiry: a `single` or `multi` question needs `options`", "options");
         }
         let Some(re) = fantastic_kernel::current_task().map(|t| t.0) else {
             return json!({"error": "user: inquiry outside a task — nothing to answer under", "reason": "not_connected"});
         };
-        let asker = fantastic_kernel::current_origin().map(|a| a.0);
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0.0, |d| d.as_secs_f64());
-        let held = json!({
-            "re": re, "asker": asker, "text": text, "kind": kind, "options": options,
-            "request_id": p.get("request_id").cloned().unwrap_or(Value::Null),
-            "reply_client_id": p.get("reply_client_id").and_then(Value::as_str).unwrap_or("cli"),
-            "ts": ts,
-        });
+        let request_id = a.request_id.clone();
+        let held = Held {
+            re,
+            asker: fantastic_kernel::current_origin().map(|o| o.0),
+            text: a.text.trim().to_string(),
+            kind: a.kind,
+            options: a.options,
+            request_id: a.request_id,
+            reply_client_id: a.reply_client_id,
+            ts,
+        };
         let mut open = self.open.lock().expect("inquiries poisoned");
         open.push(held);
-        json!({"accepted": true, "re": re, "request_id": p.get("request_id").cloned().unwrap_or(Value::Null), "open": open.len()})
+        json!({"accepted": true, "re": re, "request_id": request_id, "open": open.len()})
     }
 
     /// `inquiries`: the open ones, oldest first.
-    pub fn list(&self, p: &Value) -> Value {
-        let asker = p.get("asker").and_then(Value::as_str);
+    pub fn list(&self, a: &ListArgs) -> Value {
         let open = self.open.lock().expect("inquiries poisoned");
-        let mine: Vec<Value> = open
+        let mine: Vec<&Held> = open
             .iter()
-            .filter(|q| asker.is_none_or(|a| q["asker"].as_str() == Some(a)))
-            .cloned()
+            .filter(|q| a.asker.as_deref().is_none_or(|w| q.asker.as_deref() == Some(w)))
             .collect();
         json!({"inquiries": mine})
     }
 
     /// `answer_inquiry`: the answer to the asker under the inquiry's pid; closed.
-    pub async fn answer(&self, me: &AgentId, p: &Value, kernel: &Arc<Kernel>) -> Value {
-        let Some(re) = p.get("re").and_then(Value::as_u64) else {
-            return bad("answer_inquiry: `re` (the inquiry's pid) is required", "re");
-        };
-        let Some(text) = p.get("answer").and_then(answer_text) else {
-            return bad(
-                "answer_inquiry: `answer` must be words, a list of picks, or true/false",
-                "answer",
-            );
-        };
+    pub async fn answer(&self, me: &AgentId, a: AnswerInquiry, kernel: &Arc<Kernel>) -> Value {
+        let re = a.re;
+        let text = answer_text(&a.answer);
         let q = {
             let mut open = self.open.lock().expect("inquiries poisoned");
-            let Some(at) = open.iter().position(|q| q["re"].as_u64() == Some(re)) else {
+            let Some(at) = open.iter().position(|q| q.re == re) else {
                 return json!({"error": format!("user: answer_inquiry: no open inquiry {re}"), "reason": "not_found", "arg": "re"});
             };
             open.remove(at)
         };
-        let Some(asker) = q["asker"].as_str() else {
+        let Some(asker) = q.asker.clone() else {
             return json!({"error": "user: answer_inquiry: the inquiry has no asker to answer", "reason": "not_found"});
         };
-        let rid = q["request_id"].as_str().unwrap_or("");
+        let rid = q.request_id.as_deref().unwrap_or("");
         let body = format!(
             "[reply to {re} · {} inquiry]\n<answer>{text}</answer>\n<request_id>{rid}</request_id>",
             me.as_str()
         );
-        let client = q["reply_client_id"].as_str().unwrap_or("cli").to_string();
         let out = kernel
             .send(vec![Item::new(
-                AgentId::from(asker),
-                json!({"type": "send", "text": body, "client_id": client}),
+                AgentId::from(asker.as_str()),
+                json!({"type": "send", "text": body, "client_id": q.reply_client_id}),
             )])
             .await
             .remove(0);
         match out.result.get("error").and_then(Value::as_str) {
             // the answer did not reach the asker: the question stays open
             Some(e) => {
-                self.open
-                    .lock()
-                    .expect("inquiries poisoned")
-                    .push(q.clone());
+                self.open.lock().expect("inquiries poisoned").push(q.clone());
                 json!({"error": format!("user: answer_inquiry: the answer did not reach {asker}: {e}"), "reason": "refused"})
             }
             None => json!({"answered": re, "asker": asker}),

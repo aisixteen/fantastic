@@ -354,20 +354,39 @@ pub fn scaffold(store: &Path, kind: &str, name: &str) -> Result<PathBuf, String>
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use fantastic_kernel::bundle::{Bundle, BundleError};
+    use fantastic_kernel::bundle::{BundleError, Handler};
     use fantastic_kernel::{Agent, Kernel};
 
     struct Plain;
 
     #[async_trait]
-    impl Bundle for Plain {
+    impl Handler for Plain {
+        type Call = fantastic_kernel::test_support::NoCall;
+
         fn name(&self) -> &str {
             "board"
         }
+
+        fn man(&self) -> &'static str {
+            "A test stand-in bundle."
+        }
+
+        fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+            fantastic_kernel::test_support::no_verbs()
+        }
+
+        fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+            fantastic_kernel::test_support::no_dynamic(agent)
+        }
+
+        fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+            fantastic_kernel::fixture_record!()
+        }
+
         async fn handle(
             &self,
             _id: &fantastic_kernel::AgentId,
-            _p: &Value,
+            _c: Self::Call,
             _k: &Arc<Kernel>,
         ) -> Result<Option<Value>, BundleError> {
             Ok(None)

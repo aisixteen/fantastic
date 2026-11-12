@@ -9,7 +9,7 @@ pure ViewModel (`fantastic-home`, `../fantastic-home/README.md`) to the kernel
 protocol. No exec, no file leg, no AI.
 
 The protocol every client speaks, this library's `call` and `events` included,
-is `docs/home.md` (`docs of=home` serves it as data). `src/home/` is the
+is the `home` agent's declared verbs (`docs of=home` renders them). `src/home/` is the
 reference OS layer (`sys`, the one place that touches the OS, behind the
 `HomeOs` trait) and effect runner (`runner.rs`) for a shell that links only
 `fantastic-home`.

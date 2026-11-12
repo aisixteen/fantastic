@@ -129,7 +129,7 @@
    }
   },
   {
-   "name": "reflect-refuses-a-future-version",
+   "name": "reflect-takes-no-version",
    "call": {
     "type": "reflect",
     "version": 2
@@ -137,7 +137,7 @@
    "expect_refusal": {
     "reason": "bad_arg",
     "arg": "version",
-    "error_contains": "asked for v2"
+    "error_contains": "unknown argument"
    }
   },
   {
@@ -205,7 +205,7 @@
    "expect_refusal": {
     "reason": "bad_arg",
     "arg": "version",
-    "error_contains": "home speaks fantastic.home v1; this client asked for v2"
+    "error_contains": "argument 'version' must be int"
    }
   },
   {
@@ -236,7 +236,7 @@
    "expect_refusal": {
     "reason": "unhandled",
     "arg": null,
-    "error_contains": "unknown type"
+    "error_contains": "unknown verb"
    }
   },
   {
@@ -382,13 +382,12 @@
    }
   },
   {
-   "name": "select-needs-the-id-key",
+   "name": "select-with-no-id-shows-the-home",
    "call": {
     "type": "select"
    },
-   "expect_refusal": {
-    "reason": "missing_arg",
-    "arg": "id"
+   "expect": {
+    "selection": null
    }
   },
   {

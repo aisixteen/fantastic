@@ -1,7 +1,7 @@
 # `contract/home/` — the `home` protocol, as DATA
 
 What the home's protocol promises a client, stated once and replayed by both
-sides of it. The reference is `src/tui/crates/fantastic-home-kernel/docs/home.md`.
+sides of it. The reference is the `home` agent's declared verbs (`src/tui/crates/fantastic-home-kernel/src/home/verbs.rs`, rendered by `docs of=home`).
 
 ```
 contract/home/
@@ -28,10 +28,8 @@ contract/home/
 - **Rust, the agent**: `src/tui/crates/fantastic-home-kernel/src/home/contract_tests.rs`
   (`cargo test` in `src/`). It runs every case in order through `agent::call`
   against one runner on `FakeOs::from_fixture`, then holds the vocabulary to
-  the agent (`home::VERBS`, the `docs` verb texts, `emits_doc`, the `Status`
-  serde names, every value `Row::actions` returns), the golden to `first-look`,
-  and `docs/home.md` to every verb, status, field and event. It also asks the
-  kernel's `docs` verb (`docs of=home tier=detailed`).
+  the agent (the declared verbs and their rendered docs, the `Status` serde
+  names, every value `Row::actions` returns) and the golden to `first-look`.
 - **TS, the client**: `src/tui/web/canvas/tests/home_contract.test.ts`
   (`npm test` in `src/tui/web/canvas`). It holds the Home's model to the
   vocabulary (`STATUSES`, `ACTIONS`, a `label` per status), its grant
@@ -47,5 +45,5 @@ Rust replay runs every case today; the TS replay holds the client to the
 vocabulary and the states.
 
 Changing what a v1 case says is the compatibility rule's business
-(`docs/home.md`, "Versioning"): v1 only grows. Anything that is not an addition
-is `v2/`.
+v1 only grows: an optional argument, a state field, an emitted payload type or a
+verb may be added; anything else is `v2/`.

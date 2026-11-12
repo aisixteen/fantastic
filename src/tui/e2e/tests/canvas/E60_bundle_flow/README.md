@@ -1,7 +1,7 @@
 # E60 bundle_flow — the owner's python-agent workflow, a → f
 
 A BUNDLE is code (`.fantastic/bundles/<name>/`); an AGENT is an instance naming it
-(`fantastic readme bundles`). Checks, in order (each depends on the last):
+(`reflect` and `docs` on the `kernel`). Checks, in order (each depends on the last):
 
 | step | what | checks |
 |---|---|---|

@@ -7,8 +7,8 @@
 // `opaque` marks a token the CSS mixes with `tint()` (`css.ts`): a skin must give
 // it alpha 1, or the tint's alpha would multiply with its own.
 //
-// What stays literal (font sizes, weights, layout geometry) is said in
-// `src/tui/docs/skins.md`: a skin must never move a cell.
+// What stays literal (font sizes, weights, layout geometry) is never a token:
+// a skin must never move a cell.
 
 export type TokenType = "color" | "dimension" | "duration" | "cubicBezier" | "fontFamily" | "fontWeight" | "number" | "shadow";
 

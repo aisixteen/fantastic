@@ -33,6 +33,7 @@ tokio = { version = "1.40", features = [
   "rt-multi-thread", "macros", "time", "sync", "process", "net", "io-util", "signal",
 ] }
 serde = { version = "1", features = ["derive"] }
+schemars = { version = "0.8", features = ["preserve_order"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 regex = "1"
 serde_yaml = "0.9"

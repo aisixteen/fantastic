@@ -45,7 +45,7 @@ pub const LOADER_VERBS: [&str; 3] = ["load_tree", "persist_record", "forget_reco
 /// Every grant of the tree: `(agent, can_call, callable_by)`, the `$self`
 /// baseline left to the kernel.
 pub fn grants() -> Vec<(&'static str, Value, Value)> {
-    let verbs = json!(home::VERBS);
+    let verbs = json!(home::verbs::page_verbs());
     let kernel_verbs = json!(["reflect", "docs"]);
     let loader = json!(LOADER_VERBS);
     vec![
@@ -149,7 +149,7 @@ pub async fn ensure(kernel: &Arc<Kernel>, port: Option<u16>) -> Result<u16, Stri
         (
             CANVAS_PAGE,
             json!({"parent_id": WEB, "handler_module": fantastic_canvas_page::HANDLER_MODULE,
-                   "verbs": {"read_stream": fantastic_canvas_page::READ_STREAM_DOC}}),
+                   "verbs": fantastic_canvas_page::read_stream_declared()}),
         ),
         (
             WEB_LOADER,

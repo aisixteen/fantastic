@@ -189,7 +189,7 @@ pub fn keyed(h: &Host, module: &str) -> Option<bool> {
         .bundles
         .catalog()
         .find(|(m, _)| *m == module)
-        .and_then(|(_, b)| b.record_schema())
+        .map(|(_, b)| crate::kern::setup::schema_of(b.record()))
         .and_then(|s| {
             s["fields"].as_array().and_then(|a| {
                 a.iter().find(|f| f["type"] == "credentials").map(|f| f["required"].as_bool().unwrap_or(false))

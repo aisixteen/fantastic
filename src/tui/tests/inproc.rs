@@ -196,7 +196,7 @@ async fn the_human_drives_the_specified_set_in_process() {
     let settles = kernel
         .send(vec![Item::new(
             AgentId::from("memory"),
-            json!({"type":"read","owner":"kernel","kinds":["settle"]}),
+            json!({"type":"read","kinds":["settle"]}),
         )])
         .await
         .remove(0)

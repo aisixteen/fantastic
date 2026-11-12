@@ -19,7 +19,7 @@ Link this crate when your shell has an OS layer of its own. To host the home
 with the reference OS layer, link `fantastic-home-kernel` instead
 (`../fantastic-home-kernel/README.md`): its `src/home/` is the reference OS
 layer (`sys`, behind the `HomeOs` trait) and effect runner (`runner.rs`), and
-the `home` protocol (`docs/home.md` there) is this crate's state on the wire.
+the `home` protocol (the `home` agent's declared verbs there) is this crate's state on the wire.
 
 ## The loop
 

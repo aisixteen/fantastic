@@ -648,6 +648,11 @@ mod tests {
     const PROBE_AI: &str = "ai_chat.tools";
     const SINK: &str = "sink.tools";
 
+    fantastic_kernel::stand_in_verbs!(probe_ai_verbs {
+        Send "send" { text: String },
+        Make "make" { id: Option<String> },
+    });
+
     /// A scripted AI, no model. `send` is its FIRST TURN: one tool call, to `sink`, made as
     /// itself and so gated by its own grants; the outcome goes to `turns`. `make` creates a
     /// child AI and sends it a message at once (an AI's `create_agent`, then `send`).
@@ -656,14 +661,33 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl fantastic_kernel::bundle::Bundle for ProbeAi {
+    impl fantastic_kernel::bundle::Handler for ProbeAi {
+        type Call = probe_ai_verbs::Call;
+
         fn name(&self) -> &str {
             PROBE_AI
         }
+
+        fn man(&self) -> &'static str {
+            "A test stand-in scripted AI."
+        }
+
+        fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+            probe_ai_verbs::VERBS
+        }
+
+        fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+            probe_ai_verbs::dynamic_verbs(agent)
+        }
+
+        fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+            fantastic_kernel::fixture_record!()
+        }
+
         async fn handle(
             &self,
             agent_id: &AgentId,
-            payload: &Value,
+            call_: Self::Call,
             kernel: &std::sync::Arc<Kernel>,
         ) -> Result<fantastic_kernel::bundle::Reply, fantastic_kernel::bundle::BundleError> {
             let call = |target: &str, payload: Value| {
@@ -671,47 +695,66 @@ mod tests {
                 let target = AgentId::from(target);
                 async move { kernel.send(vec![fantastic_kernel::Item::new(target, payload)]).await.remove(0).result }
             };
-            Ok(match payload.get("type").and_then(Value::as_str).unwrap_or("") {
-                "boot" | "shutdown" => None,
-                "send" => {
+            Ok(match call_ {
+                probe_ai_verbs::Call::Send(_) => {
                     let tool = call("sink", json!({"type": "ping"})).await;
                     let _ = self.turns.send((agent_id.0.clone(), tool.clone()));
                     Some(json!({"tool": tool}))
                 }
-                "make" => {
-                    let id = payload["id"].as_str().unwrap_or("child_ai");
+                probe_ai_verbs::Call::Make(m) => {
+                    let id = m.id.unwrap_or_else(|| "child_ai".to_string());
                     let made = call(
                         "kernel",
                         json!({"type": "create_agent", "parent_id": agent_id.0, "id": id,
                                "handler_module": PROBE_AI, "memory_store_id": "m"}),
                     )
                     .await;
-                    let first = call(id, json!({"type": "send", "text": "go"})).await;
+                    let first = call(&id, json!({"type": "send", "text": "go"})).await;
                     Some(json!({"made": made, "first": first}))
                 }
-                other => Some(json!({"error": format!("probe ai: no verb {other}")})),
+                probe_ai_verbs::Call::Reflect(_) => None,
             })
         }
     }
+
+    fantastic_kernel::stand_in_verbs!(sink_verbs { Ping "ping" {} });
 
     /// An agent any granted caller reaches: it answers `ping`.
     struct Sink;
 
     #[async_trait::async_trait]
-    impl fantastic_kernel::bundle::Bundle for Sink {
+    impl fantastic_kernel::bundle::Handler for Sink {
+        type Call = sink_verbs::Call;
+
         fn name(&self) -> &str {
             SINK
         }
+
+        fn man(&self) -> &'static str {
+            "A test stand-in that answers `ping`."
+        }
+
+        fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+            sink_verbs::VERBS
+        }
+
+        fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+            sink_verbs::dynamic_verbs(agent)
+        }
+
+        fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+            fantastic_kernel::fixture_record!()
+        }
+
         async fn handle(
             &self,
             _agent_id: &AgentId,
-            payload: &Value,
+            call: Self::Call,
             _kernel: &std::sync::Arc<Kernel>,
         ) -> Result<fantastic_kernel::bundle::Reply, fantastic_kernel::bundle::BundleError> {
-            Ok(match payload.get("type").and_then(Value::as_str).unwrap_or("") {
-                "boot" | "shutdown" => None,
-                "ping" => Some(json!({"pong": true})),
-                other => Some(json!({"error": format!("sink: no verb {other}")})),
+            Ok(match call {
+                sink_verbs::Call::Ping(_) => Some(json!({"pong": true})),
+                sink_verbs::Call::Reflect(_) => None,
             })
         }
     }

@@ -213,7 +213,7 @@ impl Runner {
             Cmd::Reflect { agent } => {
                 let out = self
                     .host
-                    .operator(agent, json!({"type":"reflect","tree":"none","readme":true}))
+                    .operator(agent, json!({"type":"reflect","tree":"none"}))
                     .await;
                 match Host::read(out) {
                     Ok(mut reply) => {

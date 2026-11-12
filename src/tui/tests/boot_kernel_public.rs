@@ -15,15 +15,33 @@ const PROBE: &str = "boot_probe.tools";
 struct Probe;
 
 #[async_trait::async_trait]
-impl fantastic_kernel::bundle::Bundle for Probe {
+impl fantastic_kernel::bundle::Handler for Probe {
+    type Call = fantastic_kernel::test_support::NoCall;
+
     fn name(&self) -> &str {
         "boot_probe"
+    }
+
+    fn man(&self) -> &'static str {
+        "A test stand-in an embedder registers."
+    }
+
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::test_support::no_verbs()
+    }
+
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        fantastic_kernel::test_support::no_dynamic(agent)
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
 
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Option<Value>, fantastic_kernel::bundle::BundleError> {
         Ok(Some(json!({"probe": "pong"})))

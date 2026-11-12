@@ -4,7 +4,8 @@
 //! it; nothing is written to the directory and no kernel starts. On a terminal
 //! the same command opens the terminal UI. An embedding launcher's readme
 //! sections (passed to `main_with`) are printed after this text, in order; the
-//! same for `fantastic readme`.
+//! same for `fantastic readme`. What an agent is and how to call it is never written
+//! here: it is rendered from the agents' own declarations (`reflect`, `docs`).
 
 use fantastic_web_mcp::{INSTRUCTIONS, LEAD_IN, SHAPE};
 
@@ -21,28 +22,8 @@ This is `fantastic` without a terminal, so it only prints this readme: it starts
 \x20\x20fantastic send [--statedir DIR] '<item json>'  one call into the running kernel, as the `mcp` leg; `$env:NAME` values come from this shell, marked secret\n\
 \x20\x20fantastic import PATH --parent ID  import a blueprint folder as agents under ID: prints the preview, then asks (`--bind @port=ID`, `--allow-code`, `--approve` skips the question)\n\
 \x20\x20fantastic migrate-home [--dry-run]  move the files of an older layout (~/.config/fantastic, ~/.fantastic/credentials) into ~/.fantastic; --dry-run only prints the moves\n\
-\x20\x20fantastic readme [key]              the docs: the index, or one doc (`canvas`, `mcp`, `setup`, `bundles`, `subtrees`, and the kernel's own)\n\
+\x20\x20fantastic readme                  this text\n\
 \n";
-
-/// The CLI's own docs. Each opens with a `> ` one-line summary.
-const CLI_DOCS: &[(&str, &str)] = &[
-    ("canvas", include_str!("../docs/canvas.md")),
-    ("mcp", include_str!("../docs/mcp.md")),
-    ("setup", include_str!("../docs/setup.md")),
-    ("bundles", include_str!("../docs/bundles.md")),
-    ("skins", include_str!("../docs/skins.md")),
-    ("subtrees", include_str!("../docs/subtrees.md")),
-];
-
-/// Every doc: `(key, text)`.
-fn docs() -> impl Iterator<Item = (&'static str, &'static str)> {
-    CLI_DOCS.iter().copied()
-}
-
-/// A doc's one-line summary: its leading `> ` line.
-fn summary(text: &str) -> &str {
-    text.lines().next().and_then(|l| l.strip_prefix("> ")).unwrap_or("")
-}
 
 /// `base`, then each section in order, set off by a blank line, each ended by a newline.
 fn with_sections(base: String, sections: &[&str]) -> String {
@@ -60,52 +41,23 @@ fn with_sections(base: String, sections: &[&str]) -> String {
     out
 }
 
-/// `fantastic readme` → the index; `fantastic readme <key>` → that doc. Reads
-/// only what is embedded: nothing starts, nothing is written.
+/// `fantastic readme` → the readme text, then each embedder section. Reads only
+/// what is embedded: nothing starts, nothing is written.
 pub fn main(argv: &[String], sections: &[&str]) -> ! {
-    match argv {
-        [] => {
-            print!("{}", listing(sections));
-            std::process::exit(0);
-        }
-        [key] => match docs().find(|(k, _)| k == key) {
-            Some((_, text)) => {
-                print!("{text}");
-                std::process::exit(0);
-            }
-            None => {
-                eprintln!("fantastic readme: no doc `{key}`\n\n{}", index());
-                std::process::exit(2);
-            }
-        },
-        _ => {
-            eprintln!("fantastic readme: one key at most (got {})", argv.len());
-            std::process::exit(2);
-        }
+    if !argv.is_empty() {
+        eprintln!("fantastic readme: takes no argument (got {})", argv.len());
+        std::process::exit(2);
     }
+    print!("{}", text(sections));
+    std::process::exit(0);
 }
 
-/// The keys, each with its summary.
-pub fn index() -> String {
-    let w = docs().map(|(k, _)| k.len()).max().unwrap_or(0);
-    let mut out = String::from("fantastic readme <key>:\n");
-    for (k, t) in docs() {
-        out.push_str(&format!("  {k:<w$}  {}\n", summary(t)));
-    }
-    out
-}
-
-/// `fantastic readme` with no key: the index, then each embedder section.
-pub fn listing(sections: &[&str]) -> String {
-    with_sections(index(), sections)
-}
-
-/// The whole text: the commands, how to register the MCP face, what a
-/// connected MCP client is told, and where the docs are, then each embedder
-/// section the launcher passed (none for `fantastic`).
+/// The whole text: the commands, how to register the MCP face and what a
+/// connected MCP client is told, then each embedder section the launcher passed
+/// (none for `fantastic`).
 pub fn text(sections: &[&str]) -> String {
     with_sections(
-        format!("{COMMANDS}{SHAPE}{LEAD_IN}{INSTRUCTIONS}\n\nDetails: `fantastic readme` lists the docs, `fantastic readme <key>` prints one.\n"),
+        format!("{COMMANDS}{SHAPE}{LEAD_IN}{INSTRUCTIONS}\n\nDetails: `reflect` an agent for what it is and `docs` for how to call it — both are rendered from what the agent declares.\n"),
         sections,
     )
 }
@@ -115,35 +67,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_doc_has_a_summary_and_a_unique_key() {
-        let mut keys = std::collections::HashSet::new();
-        for (k, t) in docs() {
-            assert!(!summary(t).is_empty(), "`{k}` opens with no `> ` summary");
-            assert!(keys.insert(k), "`{k}` twice");
-        }
-        assert!(keys.contains("canvas") && keys.contains("mcp") && keys.contains("setup") && keys.contains("agents"));
-    }
-
-    #[test]
-    fn the_index_lists_every_key() {
-        let i = index();
-        for (k, _) in docs() {
-            assert!(i.contains(&format!("  {k} ")), "{k} missing from\n{i}");
-        }
-    }
-
-    #[test]
     fn the_readme_with_no_sections_is_the_base_text() {
-        assert_eq!(listing(&[]), index());
         let t = text(&[]);
         assert!(t.starts_with(COMMANDS));
-        assert!(t.ends_with("`fantastic readme <key>` prints one.\n"));
+        assert!(t.ends_with("both are rendered from what the agent declares.\n"));
     }
 
     #[test]
     fn one_section_follows_the_base_text() {
         const S: &str = "## extra\n\nan embedder's own section\n";
-        assert_eq!(listing(&[S]), format!("{}\n{S}", index()));
         assert_eq!(text(&[S]), format!("{}\n{S}", text(&[])));
     }
 

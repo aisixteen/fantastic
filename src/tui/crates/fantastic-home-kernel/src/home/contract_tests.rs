@@ -1,22 +1,21 @@
 //! THE CONTRACT REPLAY: `contract/home/v1/cases.json`, the `home` protocol v1
 //! as data, replayed in order against one runner on `FakeOs::from_fixture`,
-//! through `agent::call` — and through the kernel's `docs`, and against
-//! `docs/home.md`. The TS client replays the same file
+//! through the agent's entry and `agent::call`, and against the rendered docs. The TS
+//! client replays the same file
 //! (`src/tui/web/canvas/tests/home_contract.test.ts`).
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use fantastic_home::{Canvas, Config as HomeConfig, Mode, Row, Status};
-use fantastic_kernel::agent::Agent;
-use fantastic_kernel::bundle::{Bundle, BundleRegistry};
-use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
 
-use super::agent::{self, reflect_call, HomeBundle};
+use super::agent::{self, reflection};
+use super::verbs::Call;
+use fantastic_kernel::{Parse, Routed};
 use super::fake::FakeOs;
 use super::runner::Runner;
-use super::{wire, HomeOs, HANDLER_MODULE, ID, VERBS};
+use super::{wire, HomeOs, ID};
 
 /// The corpus, as this OS reads it: on Windows every `/w/` is rooted at `C:/w/`
 /// (the corpus's paths are POSIX, and `/w/x` is not absolute there).
@@ -120,10 +119,13 @@ impl Replay {
     }
 
     async fn call(&self, payload: &Value) -> Value {
-        if payload["type"] == json!("reflect") {
-            return reflect_call(&self.runner, ID, None, payload);
+        // THE ENTRY, with no kernel: the call is parsed and checked against the declared verbs
+        match <Call as Parse>::parse(ID, payload, &[]) {
+            Err(refused) => refused,
+            Ok(Routed::Answered(reply)) => reply,
+            Ok(Routed::Call(Call::Reflect(_))) => reflection(&self.runner, ID, None),
+            Ok(Routed::Call(call)) => agent::call(&self.runner, call).await,
         }
-        agent::call(&self.runner, payload).await
     }
 
     async fn look(&self) {
@@ -329,42 +331,33 @@ fn every_verb_and_refusal_kind_has_a_case() {
 fn the_verbs_are_the_agents_and_its_docs() {
     let doc = corpus();
     let verbs = strings(&doc["verbs"]);
-    let mut agent: Vec<&str> = VERBS.to_vec();
+    let mut agent: Vec<String> = super::verbs::page_verbs().into_iter().map(str::to_string).collect();
     agent.sort_unstable();
-    let mut corpus_verbs: Vec<&str> = verbs.iter().map(String::as_str).collect();
+    let mut corpus_verbs = verbs.clone();
     corpus_verbs.sort_unstable();
-    assert_eq!(corpus_verbs, agent, "the corpus verbs are home::VERBS");
-    let bundle = HomeBundle::new(Arc::new(FakeOs::new()), HomeConfig::new(Mode::Lock));
-    let mut documented: Vec<String> = bundle
-        .verb_docs()
-        .as_object()
-        .unwrap()
-        .keys()
-        .filter(|k| *k != "boot" && *k != "shutdown")
-        .cloned()
+    assert_eq!(corpus_verbs, agent, "the corpus verbs are the declared client verbs and reflect");
+    // `docs` renders every one of them from its declaration
+    let rendered = fantastic_kernel::docs::entries_of_decls(
+        &[super::verbs::VERBS, fantastic_kernel::declared::common::VERBS],
+        &[],
+    );
+    let mut documented: Vec<String> = rendered
+        .iter()
+        .map(|(name, _, _)| name.clone())
+        .filter(|k| k != "boot" && k != "shutdown")
         .collect();
     documented.sort_unstable();
-    let mut want = verbs.clone();
-    want.sort_unstable();
-    assert_eq!(
-        documented, want,
-        "the corpus verbs are the documented verbs"
-    );
-}
-
-#[test]
-fn the_events_are_the_emits_doc() {
-    let doc = corpus();
-    let bundle = HomeBundle::new(Arc::new(FakeOs::new()), HomeConfig::new(Mode::Lock));
-    let emits: Vec<String> = bundle
-        .emits_doc()
-        .expect("emits")
-        .as_object()
-        .unwrap()
-        .keys()
-        .cloned()
-        .collect();
-    assert_eq!(strings(&doc["events"]), emits);
+    assert_eq!(documented, corpus_verbs, "the corpus verbs are the rendered verbs");
+    // the oneliner of every client verb is its signature, the protocol version last
+    for (verb, line, _) in &rendered {
+        if verb == "boot" || verb == "shutdown" || verb == "reflect" {
+            continue;
+        }
+        assert!(
+            line.starts_with("args: ") && line.contains("version:"),
+            "{verb}: {line}"
+        );
+    }
 }
 
 fn every_status() -> Vec<Status> {
@@ -430,110 +423,4 @@ fn the_actions_cover_every_row() {
     }
     let want: BTreeSet<String> = strings(&doc["actions"]).into_iter().collect();
     assert_eq!(seen, want);
-}
-
-/// A kernel holding `home`, the way the agent tests build one.
-fn kernel() -> Arc<Kernel> {
-    let mut k = Kernel::new();
-    let mut reg = BundleRegistry::new();
-    reg.register(
-        HANDLER_MODULE,
-        HomeBundle::new(Arc::new(FakeOs::new()), HomeConfig::new(Mode::Lock)),
-    );
-    k.bundles = reg;
-    let k = Arc::new(k);
-    k.register(Agent::new(
-        AgentId::from(ID),
-        Some(HANDLER_MODULE.into()),
-        None,
-        Map::new(),
-        std::path::PathBuf::new(),
-        false,
-    ));
-    k
-}
-
-#[test]
-fn docs_of_home_answer_every_verb_the_emits_and_the_notes() {
-    let doc = corpus();
-    let k = kernel();
-    let r = fantastic_kernel::docs::docs_reply(&k, &json!({"of": "home", "tier": "detailed"}));
-    let verbs: Vec<String> = r["verbs"]
-        .as_object()
-        .expect("verbs")
-        .keys()
-        .cloned()
-        .collect();
-    let mut want = strings(&doc["verbs"]);
-    want.extend(["boot".to_string(), "shutdown".to_string()]);
-    let (mut a, mut b) = (verbs.clone(), want);
-    a.sort_unstable();
-    b.sort_unstable();
-    assert_eq!(a, b, "{r}");
-    for e in ["state", "focus"] {
-        assert!(r["emits"].get(e).is_some(), "emits {e}: {r}");
-    }
-    let notes = &r["notes"];
-    assert_eq!(notes["protocol"], json!("fantastic.home"));
-    assert_eq!(notes["version"], json!(1));
-    for k in ["host", "calls", "events", "origin", "compat", "doc"] {
-        assert!(
-            notes[k].as_str().is_some_and(|s| !s.is_empty()),
-            "notes.{k}: {r}"
-        );
-    }
-    // the oneliner of every client verb is its signature
-    let short = fantastic_kernel::docs::docs_reply(&k, &json!({"of": "home"}));
-    for (verb, line) in short["verbs"].as_object().unwrap() {
-        let line = line.as_str().unwrap();
-        if verb == "boot" || verb == "shutdown" {
-            assert!(line.starts_with("Kernel lifecycle"), "{verb}: {line}");
-        } else {
-            assert!(
-                line.starts_with("args: ") && line.ends_with("version:int?"),
-                "{verb}: {line}"
-            );
-        }
-    }
-}
-
-#[test]
-fn home_md_names_every_verb_status_and_state_field() {
-    let doc = corpus();
-    let md = include_str!("../../docs/home.md");
-    assert!(
-        md.starts_with("> "),
-        "home.md opens with a `> ` summary line"
-    );
-    for verb in strings(&doc["verbs"]) {
-        assert!(
-            md.contains(&format!("\n### `{verb}`\n")),
-            "home.md has no `### `{verb}`` heading"
-        );
-    }
-    for status in strings(&doc["statuses"]) {
-        assert!(
-            md.contains(&format!("`{status}`")),
-            "home.md does not name {status}"
-        );
-    }
-    let state = &doc["states"]["valid"][0];
-    let row = &state["rows"][0];
-    for field in state
-        .as_object()
-        .unwrap()
-        .keys()
-        .chain(row.as_object().unwrap().keys())
-    {
-        assert!(
-            md.contains(&format!("`{field}`")),
-            "home.md does not name the field {field}"
-        );
-    }
-    for event in strings(&doc["events"]) {
-        assert!(
-            md.contains(&format!("`{event}`")),
-            "home.md does not name the event {event}"
-        );
-    }
 }

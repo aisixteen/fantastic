@@ -13,16 +13,12 @@ use std::sync::Arc;
 
 use fantastic_kernel::Kernel;
 
-/// `user.export_subtree {agent_id, path}` — see the engine. The arguments are the
-/// verb's declared ones (`fantastic_core::verbs::ExportSubtree`), typed.
-pub async fn export_subtree(kernel: &Arc<Kernel>, p: &serde_json::Value) -> serde_json::Value {
-    let args = match fantastic_kernel::verbs::decode::<fantastic_core::verbs::ExportSubtree>(
-        "export_subtree",
-        p,
-    ) {
-        Ok(a) => a,
-        Err(refused) => return refused,
-    };
+/// `user.export_subtree {agent_id, path}` — see the engine; the arguments are the
+/// verb's declared ones (`fantastic_core::verbs::ExportSubtree`), already checked.
+pub async fn export_subtree(
+    kernel: &Arc<Kernel>,
+    args: &fantastic_core::verbs::ExportSubtree,
+) -> serde_json::Value {
     fantastic_core::export::export_subtree(
         kernel,
         &args.agent_id,
