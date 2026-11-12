@@ -16,8 +16,13 @@ pub struct Boot {}
 #[serde(deny_unknown_fields)]
 pub struct Shutdown {
     /// Why the program stops; it is said to the calls in flight.
+    #[serde(default = "stopped")]
     #[schemars(length(min = 1))]
-    pub reason: Option<String>,
+    pub reason: String,
+}
+
+fn stopped() -> String {
+    "the kernel stopped".to_string()
 }
 
 fantastic_kernel::verbs! {

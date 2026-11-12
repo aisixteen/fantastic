@@ -39,7 +39,7 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_bundle::{py_repr_value, py_str, py_truthy};
+use fantastic_bundle::{py_repr_value, py_str};
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::yaml_io;
 use fantastic_kernel::{AgentId, Item, Kernel, Status, SubscriberToken};
@@ -477,7 +477,7 @@ async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
             let mut schedules = load_schedules(&agent_id, &kernel).await;
             let mut due: Vec<Value> = Vec::new();
             for sch in schedules.iter_mut() {
-                if sch.get("paused").is_some_and(py_truthy) {
+                if sch.get("paused").and_then(Value::as_bool) == Some(true) {
                     continue;
                 }
                 let next_run = sch.get("next_run").and_then(Value::as_f64).unwrap_or(0.0);
@@ -534,9 +534,9 @@ fn sched_target(sch: &Value) -> String {
     }
 }
 
-/// A schedule's `payload` under py `sch.get("payload") or {}`.
+/// A schedule's `payload`: the stored call object, `{}` when none.
 fn sched_payload(sch: &Value) -> Value {
-    match sch.get("payload").filter(|v| py_truthy(v)) {
+    match sch.get("payload").filter(|v| v.is_object()) {
         Some(p) => p.clone(),
         None => json!({}),
     }

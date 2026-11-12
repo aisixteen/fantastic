@@ -948,7 +948,7 @@ async fn reflect_renders_every_declared_verb() {
 /// `shutdown` is not a declared verb: the shared entry answers it `null`, and the
 /// tick loop keeps running — it dies only with the agent (`on_delete`).
 #[tokio::test]
-async fn shutdown_is_not_a_verb_and_stops_nothing() {
+async fn undeclared_shutdown_answers_null_and_stops_nothing() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
     assert!(!verbs::VERBS.iter().any(|v| v.name == "shutdown"));

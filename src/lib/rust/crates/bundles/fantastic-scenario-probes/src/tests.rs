@@ -296,12 +296,13 @@ async fn inquiry_text_is_required_and_not_blank() {
     let r = call(&k, &id, json!({"type": "inquiry", "reply_client_id": "cli"})).await;
     assert_eq!(r["reason"], "missing_arg", "{r}");
     assert_eq!(r["arg"], "text", "{r}");
+    // the reply client defaults to `cli`
     let r = call(&k, &id, json!({"type": "inquiry", "text": "q"})).await;
-    assert_eq!(r["reason"], "missing_arg", "{r}");
-    assert_eq!(r["arg"], "reply_client_id", "{r}");
-    let r = call(&k, &id, json!({"type": "inquiry", "text": "", "reply_client_id": "cli"})).await;
-    assert_eq!(r["reason"], "missing_arg", "{r}");
-    assert_eq!(r["arg"], "text", "{r}");
+    assert_eq!(r["accepted"], true, "{r}");
+    for blank in ["", "  \n\t "] {
+        let r = call(&k, &id, json!({"type": "inquiry", "text": blank, "reply_client_id": "cli"})).await;
+        assert_eq!(r["arg"], "text", "{blank:?}: {r}");
+    }
     // an unwired human says so
     let bare = agent(&k, "user_bare", USER_MODULE, json!({}));
     let r = call(&k, &bare, json!({"type": "inquiry", "text": "q", "reply_client_id": "cli"})).await;
@@ -517,13 +518,14 @@ async fn oracle_limit_is_clamped_and_typed() {
         assert_eq!(r["arg"], "limit", "{wrong}: {r}");
     }
     let r = call(&k, &id, json!({"type": "ask", "question": "fact here"})).await;
-    assert_eq!(r["reason"], "missing_arg", "{r}");
-    assert_eq!(r["arg"], "limit", "{r}");
+    assert_eq!(r["answers"].as_array().expect("answers").len(), 6, "{r}");
     let r = call(&k, &id, json!({"type": "ask", "question": "fact here", "limit": 6})).await;
     assert_eq!(r["answers"].as_array().expect("answers").len(), 6);
     // a question is text; a blank one is refused, an unwired oracle says so
-    let r = call(&k, &id, json!({"type": "ask", "question": "", "limit": 6})).await;
-    assert_eq!(r["arg"], "question", "{r}");
+    for blank in ["", " \t\n"] {
+        let r = call(&k, &id, json!({"type": "ask", "question": blank, "limit": 6})).await;
+        assert_eq!(r["arg"], "question", "{blank:?}: {r}");
+    }
     let r = call(&k, &id, json!({"type": "ask", "question": 5, "limit": 6})).await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
     let bare = agent(&k, "oracle_bare", ORACLE_MODULE, json!({}));

@@ -114,27 +114,17 @@ impl Handler for PyAgentBundle {
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         // no agent of the base itself exists (`validate_meta` refuses the create)
-        let verb = match call {
-            verbs::Call::Reflect(_) => {
-                return Ok(Some(json!({
-                    "id": agent_id.as_str(),
-                    "sentence": "The base a folder bundle with a program extends — create an \
-                                 agent of the bundle, not of py_agent.",
-                })))
+        match call {
+            verbs::Call::Reflect(_) => Ok(Some(json!({
+                "id": agent_id.as_str(),
+                "sentence": "The base a folder bundle with a program extends — create an \
+                             agent of the bundle, not of py_agent.",
+            }))),
+            verbs::Call::Boot(_) | verbs::Call::Shutdown(_) | verbs::Call::Dynamic(_) => {
+                Ok(Some(Value::Null))
             }
-            verbs::Call::Boot(_) => "boot",
-            verbs::Call::Shutdown(_) => "shutdown",
-            verbs::Call::Dynamic(c) => return Ok(Some(no_verb(&json!(c.name)))),
-        };
-        Ok(Some(no_verb(&json!(verb))))
+        }
     }
-}
-
-/// The base answers no program verb: the refusal naming the verb.
-fn no_verb(t: &Value) -> Value {
-    let mut r = refusal(UNHANDLED, format!("py_agent: no verb {}", py_repr_value(t)));
-    with(&mut r, "verb", t.clone());
-    r
 }
 
 // ─── a folder bundle that extends it ────────────────────────────────
@@ -593,10 +583,7 @@ impl Handler for FolderBundle {
             verbs::Call::Boot(_) => self.start(agent_id, kernel).await,
             verbs::Call::Shutdown(a) => {
                 // a reload (`reload_bundle`: shutdown, then boot) or a stop
-                let why = match a.reason {
-                    Some(reason) => format!("{}: {reason}", agent_id.as_str()),
-                    None => agent_id.as_str().to_string(),
-                };
+                let why = format!("{}: {}", agent_id.as_str(), a.reason);
                 stop_by_id(agent_id, why);
                 Value::Null
             }

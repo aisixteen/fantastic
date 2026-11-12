@@ -84,6 +84,10 @@ pub mod user {
     use serde::Deserialize;
     use serde_json::{Map, Value};
 
+    fn cli() -> String {
+        "cli".to_string()
+    }
+
     /// The four shapes a UI can render. Advisory for this human: it answers the same way regardless.
     #[derive(Debug, Deserialize, JsonSchema)]
     #[serde(rename_all = "lowercase")]
@@ -105,7 +109,7 @@ pub mod user {
     #[serde(deny_unknown_fields)]
     pub struct Inquiry {
         /// The question.
-        #[schemars(length(min = 1))]
+        #[schemars(length(min = 1), regex(pattern = "\\S"))]
         pub text: String,
         /// The shape the UI renders; `text` when absent.
         pub kind: Option<Kind>,
@@ -116,6 +120,7 @@ pub mod user {
         /// Names this inquiry in the answer.
         pub request_id: Option<String>,
         /// The client the answer is addressed to.
+        #[serde(default = "cli")]
         pub reply_client_id: String,
     }
 
@@ -165,10 +170,15 @@ pub mod oracle {
     #[serde(deny_unknown_fields)]
     pub struct Ask {
         /// The question; every word of three letters or more is a keyword.
-        #[schemars(length(min = 1))]
+        #[schemars(length(min = 1), regex(pattern = "\\S"))]
         pub question: String,
         /// How many lines at most; clamped to 1..20.
+        #[serde(default = "six")]
         pub limit: i64,
+    }
+
+    fn six() -> i64 {
+        6
     }
 
     fantastic_kernel::verbs! {
