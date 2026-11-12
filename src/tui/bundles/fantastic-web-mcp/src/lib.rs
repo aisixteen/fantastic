@@ -29,7 +29,6 @@
 //! `notifications/cancelled`) kills the whole subtree. The reply is the call's
 //! outcome, whenever the task ends; an item `timeout` cancels that item.
 
-pub mod inquiries;
 pub mod record;
 pub mod verbs;
 
@@ -94,16 +93,16 @@ impl Handler for WebMcpBundle {
                 Ok(()) => Value::Null,
                 Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::INVALID_META, e),
             },
-            verbs::Call::InboundSend(a) => inbound_send(a, kernel).await,
+            verbs::Call::SendBatch(a) => inbound_send(a, kernel).await,
             // THE PERSON'S INQUIRIES (#307): held on the record, listed, answered.
-            verbs::Call::Inquiry(a) => inquiries::ask(agent_id, a, kernel),
-            verbs::Call::Inquiries(a) => inquiries::list(agent_id, &a, kernel),
-            verbs::Call::AnswerInquiry(a) => inquiries::answer(agent_id, a, kernel).await,
+            verbs::Call::Inquiry(a) => fantastic_kernel::inquiry::ask(agent_id, a, kernel),
+            verbs::Call::Inquiries(a) => fantastic_kernel::inquiry::list(agent_id, &a, kernel),
+            verbs::Call::AnswerInquiry(a) => fantastic_kernel::inquiry::answer(agent_id, a, kernel).await,
             verbs::Call::Reflect(_) => {
                 let mut r = json!({
                     "id": agent_id.as_str(),
                     "protocol": PROTOCOL_VERSION,
-                    "inquiries_open": inquiries::open_count(kernel, agent_id),
+                    "inquiries_open": fantastic_kernel::inquiry::open_count(kernel, agent_id),
                 });
                 if let Some(e) = config_error(kernel, agent_id) {
                     r["mcp_config_error"] = json!(e);
@@ -280,17 +279,8 @@ fn why(o: &Outcome) -> String {
 
 /// `inbound_send {items}`: the batch, sent from inside the leg's own dispatch —
 /// so every item is the leg's call.
-async fn inbound_send(a: verbs::InboundSend, kernel: &Arc<Kernel>) -> Value {
-    let items = a
-        .items
-        .into_iter()
-        .map(|it| {
-            let mut item = Item::new(AgentId::from(it.target.as_str()), it.payload.into_value());
-            item.timeout = it.timeout;
-            item
-        })
-        .collect::<Vec<_>>();
-    let outs = Arc::clone(kernel).send(items).await;
+async fn inbound_send(a: verbs::SendBatch, kernel: &Arc<Kernel>) -> Value {
+    let outs = Arc::clone(kernel).send(a.into_items()).await;
     json!({"outcomes": outs.iter().map(row).collect::<Vec<_>>()})
 }
 
@@ -454,15 +444,8 @@ fn reflect_items(args: &Value) -> Result<Vec<Item>, String> {
 
 /// `send` → the batch, item for item.
 fn send_items(args: &Value) -> Result<Vec<Item>, String> {
-    let a: verbs::SendTool = tool_args(&verbs::SEND_TOOL, args)?;
-    Ok(a.items
-        .into_iter()
-        .map(|it| {
-            let mut item = Item::new(AgentId::from(it.target.as_str()), it.payload.into_value());
-            item.timeout = it.timeout;
-            item
-        })
-        .collect())
+    let a: verbs::SendBatch = tool_args(&verbs::SEND_TOOL, args)?;
+    Ok(a.into_items())
 }
 
 /// The settled batch, as the send contract states it. `isError` only when

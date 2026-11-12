@@ -153,7 +153,7 @@ async fn answering_it_reaches_the_asker_under_its_pid() {
     let r = op(
         &k,
         "mcp",
-        json!({"type": "answer", "re": re, "text": "ship it"}),
+        json!({"type": "answer_inquiry", "re": re, "answer": "ship it"}),
     )
     .await;
     assert_eq!(r["answered"].as_u64(), Some(re), "{r}");
@@ -177,7 +177,7 @@ async fn answering_it_reaches_the_asker_under_its_pid() {
     let again = op(
         &k,
         "mcp",
-        json!({"type": "answer", "re": re, "text": "twice"}),
+        json!({"type": "answer_inquiry", "re": re, "answer": "twice"}),
     )
     .await;
     assert_eq!(again["reason"], "not_found", "{again}");
@@ -206,7 +206,7 @@ async fn an_unanswered_inquiry_survives_a_restart() {
     let r = op(
         &b,
         "mcp",
-        json!({"type": "answer", "re": re, "text": "yes"}),
+        json!({"type": "answer_inquiry", "re": re, "answer": "yes"}),
     )
     .await;
     assert_eq!(r["answered"].as_u64(), Some(re), "{r}");

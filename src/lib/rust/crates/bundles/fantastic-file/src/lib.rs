@@ -38,7 +38,7 @@ mod views;
 mod watch;
 
 use async_trait::async_trait;
-use fantastic_bundle::{is_absolute, py_repr, py_repr_value};
+use fantastic_bundle::{is_absolute, py_repr};
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::refusal as rf;
 use fantastic_kernel::{body_at, current_origin, AgentId, Blob, Item, Kernel};
@@ -370,9 +370,12 @@ pub(crate) fn clamped(root: &Result<PathBuf, String>) -> Result<&Path, Value> {
     }
 }
 
-/// The record's `readonly` flag (declared a boolean; absent, off).
+/// The record's `readonly` flag (declared a boolean with its default).
 pub(crate) fn readonly_flag(meta: &Map<String, Value>) -> bool {
-    meta.get("readonly").and_then(Value::as_bool).unwrap_or(false)
+    record::RECORD
+        .get(meta, "readonly")
+        .and_then(|v| v.as_bool())
+        .expect("readonly declares a default")
 }
 
 /// python's `_root_str`: the configured root string (`rec.get("root", "") or ""`).

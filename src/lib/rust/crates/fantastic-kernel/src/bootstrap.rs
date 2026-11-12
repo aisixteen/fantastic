@@ -262,20 +262,12 @@ fn read_tree(fantastic_dir: &Path, root_id: &str) -> KernelResult<Vec<Map<String
         .map_err(refused)?;
     let mut out: Vec<Value> = Vec::new();
     match root_rec {
-        None => persistence::walk_tree(
-            fantastic_dir,
-            crate::kernel::DEFAULT_CHILDREN_DIR,
-            &Value::from(root_id),
-            &mut out,
-            crate::kernel::DEFAULT_CHILDREN_DIR,
-        ),
+        None => {
+            let cd = crate::declared::record::children_dir(&Map::new());
+            persistence::walk_tree(fantastic_dir, &cd, &Value::from(root_id), &mut out, &cd)
+        }
         Some(rec) => {
-            let cd = rec
-                .get("children_dir")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(crate::kernel::DEFAULT_CHILDREN_DIR)
-                .to_string();
+            let cd = crate::declared::record::children_dir(&rec);
             let id = rec.get("id").cloned().unwrap_or(Value::Null);
             out.push(Value::Object(rec));
             persistence::walk_tree(fantastic_dir, &cd, &id, &mut out, &cd)

@@ -6,11 +6,6 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-/// A set-up's backend: one of the backend bundles' names.
-fn backend_handler(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-    serde_json::from_value(crate::kern::setup::handler_schema()).expect("a handler schema")
-}
-
 /// The AI backends this build links and the fields each one's record declares. Returns {backends:[{module, key, fields:[{name, type, required, enum, default, hint}]}]}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -50,7 +45,7 @@ pub struct WriteAi {
     #[schemars(length(min = 1), regex(pattern = "\\S"))]
     pub id: String,
     /// The backend: one of `backends`' modules.
-    #[schemars(schema_with = "backend_handler")]
+    #[schemars(length(min = 1))]
     pub handler: String,
     /// The backend's own fields: `{name: value}`, each of the type its record declares.
     #[serde(default)]
@@ -111,7 +106,7 @@ pub struct Save {
     #[schemars(length(min = 1))]
     pub name: String,
     /// The backend: one of `backends`' modules.
-    #[schemars(schema_with = "backend_handler")]
+    #[schemars(length(min = 1))]
     pub handler: String,
     /// The backend's own fields: `{name: value}`, each of the type its record declares.
     #[serde(default)]

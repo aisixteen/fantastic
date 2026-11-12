@@ -1837,14 +1837,13 @@ const KERNEL_VERB_NAMES: [&str; 14] = [
 const KERNEL_VERB_TEXT: [(&str, &str, &str); 14] = [
     (
         "create_agent",
-        r####"args: handler_module:string of at least 1 character(s) (req), parent_id:string of at least 1 character(s) (req), id:string matching /^[0-9]*[^/\\|.0-9](?:[^/\\|.]|\.[^/\\|.])*\.?$/?, bundle:string? — Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level"####,
-        r####"Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent. A handler_module that is a meta bundle (`bundles/<name>/bundle.yaml` with a base and no program) runs its base, with the `record` of the bundle under your fields; `bundle:<name>` beside another handler_module names the bundle the record inherits from. The handler must be installed. Every argument beyond these is a field of that bundle's record (`reflect bundles=all` lists them), and a field it does not have is refused.
+        r####"args: handler_module:string of at least 1 character(s) (req), parent_id:string of at least 1 character(s) (req), id:string matching /^[0-9]*[^/\\|.0-9](?:[^/\\|.]|\.[^/\\|.])*\.?$/? — Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level"####,
+        r####"Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent. A handler_module that is a meta bundle (`bundles/<name>/bundle.yaml` with a base and no program) runs its base, with the `record` of the bundle under your fields; The handler must be installed. Every argument beyond these is a field of that bundle's record (`reflect bundles=all` lists them), and a field it does not have is refused.
 
 args:
   handler_module:string of at least 1 character(s) (req) — The bundle the agent runs (`file_bridge.tools`, or a bare bundle name such as `file_bridge`).
   parent_id:string of at least 1 character(s) (req) — The agent that will OWN the new one: your own id for a tool you keep, `kernel_state` for a top-level agent.
-  id:string matching /^[0-9]*[^/\\|.0-9](?:[^/\\|.]|\.[^/\\|.])*\.?$/? — Its id (one safe path segment: no separator, no `|`, not hidden, no `..`, not all digits). Absent: minted from the bundle's name.
-  bundle:string? — The bundle a record inherits from when it runs another base than the bundle's own."####,
+  id:string matching /^[0-9]*[^/\\|.0-9](?:[^/\\|.]|\.[^/\\|.])*\.?$/? — Its id (one safe path segment: no separator, no `|`, not hidden, no `..`, not all digits). Absent: minted from the bundle's name."####,
     ),
     (
         "update_agent",

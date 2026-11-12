@@ -5,9 +5,7 @@
 //! own: at `create_agent`, when a record is loaded, and on `reload_bundle`. The loader
 //! only reads files; it knows nothing of this.
 //!
-//! A record's KIND is its `handler_module`, or its `bundle` when it runs a meta bundle
-//! on another base than the bundle's own (an AI role on whichever backend its spawner
-//! uses): `handler_module: vllm_backend.tools, bundle: worker`.
+//! A record's KIND is its `handler_module`: the one field.
 
 use std::sync::Arc;
 
@@ -17,26 +15,15 @@ use crate::agent::Agent;
 use crate::bundle::BundleRegistry;
 use crate::kernel::Kernel;
 
-/// The bundle a record inherits from: its `bundle`, else its `handler_module`.
-#[must_use]
-pub fn kind_of(handler_module: &str, meta: &Map<String, Value>) -> String {
-    meta.get("bundle")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(handler_module)
-        .to_string()
-}
-
-/// Lay the fields of the record's bundle ([`kind_of`]) under `meta`'s own.
+/// Lay the fields of the record's bundle (its `handler_module`) under `meta`'s own.
 pub fn apply(bundles: &BundleRegistry, handler_module: &str, meta: &mut Map<String, Value>) {
-    for (k, v) in bundles.defaults(&kind_of(handler_module, meta)) {
+    for (k, v) in bundles.defaults(handler_module) {
         meta.entry(k).or_insert(v);
     }
 }
 
 /// What a `create_agent` makes of its arguments once the bundle's fields are under
-/// them: the handler module the agent runs and its record's fields. A `bundle` that
-/// is not the handler module names the bundle the record inherits from.
+/// them: the handler module the agent runs and its record's fields.
 #[must_use]
 pub fn create_args(
     bundles: &BundleRegistry,
@@ -44,15 +31,11 @@ pub fn create_args(
 ) -> (String, Map<String, Value>) {
     let crate::declared::kernel::CreateAgent {
         handler_module,
-        bundle,
         fields,
         ..
     } = args;
     let mut meta = fields;
     let hm = handler_module;
-    if let Some(b) = bundle.filter(|b| *b != hm) {
-        meta.insert("bundle".into(), Value::String(b));
-    }
     apply(bundles, &hm, &mut meta);
     (hm, meta)
 }
@@ -67,9 +50,8 @@ pub fn inheriting(kernel: &Kernel, name: &str) -> Vec<(Arc<Agent>, Map<String, V
         .iter()
         .filter_map(|e| {
             let hm = e.value().handler_module.clone()?;
-            let kind = kind_of(&hm, &e.value().meta.read().expect("meta"));
-            let from = kind == name || kernel.bundles.meta_chain(&kind).iter().any(|m| m == name);
-            from.then(|| (Arc::clone(e.value()), kernel.bundles.defaults(&kind)))
+            let from = hm == name || kernel.bundles.meta_chain(&hm).iter().any(|m| m == name);
+            from.then(|| (Arc::clone(e.value()), kernel.bundles.defaults(&hm)))
         })
         .collect()
 }
@@ -82,7 +64,7 @@ pub fn reapply(kernel: &Kernel, before: &[(Arc<Agent>, Map<String, Value>)]) -> 
     for (a, old) in before {
         let hm = a.handler_module.clone().unwrap_or_default();
         let mine = a.meta.read().expect("meta").clone();
-        let new = kernel.bundles.defaults(&kind_of(&hm, &mine));
+        let new = kernel.bundles.defaults(&hm);
         let mut patch = Map::new();
         let mut gone = Vec::new();
         for (k, v) in old {

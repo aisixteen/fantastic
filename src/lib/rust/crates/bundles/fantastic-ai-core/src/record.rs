@@ -60,15 +60,15 @@ pub struct Credentials {
 }
 
 fn default_output_reserve() -> Option<i64> {
-    Some(crate::constants::DEFAULT_OUTPUT_RESERVE)
+    Some(1024)
 }
 
 fn default_recent_n() -> Option<i64> {
-    Some(crate::constants::RECENT_N)
+    Some(6)
 }
 
 fn default_transport_retries() -> Option<i64> {
-    Some(crate::constants::TRANSPORT_RETRIES)
+    Some(0)
 }
 
 fn default_misfire_limit() -> Option<i64> {
@@ -239,9 +239,22 @@ pub fn positive_seconds(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::
     .expect("a number schema")
 }
 
-/// The schema of the record's `stream_idle_seconds`: a positive number of seconds, or
-/// none (the default is [`crate::constants::STREAM_IDLE_SECONDS`]).
-pub fn stream_idle_seconds(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-    positive_seconds_of(crate::constants::STREAM_IDLE_SECONDS)
+fn default_stream_idle() -> Option<f64> {
+    Some(60.0)
+}
+
+/// The read clock of a provider's answer stream, flattened into each provider backend's record.
+#[derive(Debug, JsonSchema)]
+pub struct StreamClock {
+    /// The read clock on the answer stream: seconds with no byte from the server (headers included) before the turn is judged stalled and ends with an error row. A bound BETWEEN bytes, never a widened send ceiling.
+    #[schemars(range(min = 0.001), default = "default_stream_idle")]
+    pub stream_idle_seconds: Option<f64>,
+}
+
+/// The declaration of the stream clock, for a reader of it
+/// ([`fantastic_kernel::RecordDecl::get`]: the record's value, else the declared default).
+pub mod clock {
+    fantastic_kernel::record!(StreamClock);
+    use super::StreamClock;
 }
 

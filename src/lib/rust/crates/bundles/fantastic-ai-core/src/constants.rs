@@ -27,15 +27,8 @@ pub const CHARS_PER_TOKEN: usize = 4;
 /// named on the record (`context_window`, or ollama's `num_ctx`) — the explicit
 /// lever always wins.
 pub const DEFAULT_CONTEXT_WINDOW: i64 = 131_072;
-/// Default output headroom reserved out of the window.
-pub const DEFAULT_OUTPUT_RESERVE: i64 = 1024;
 /// Never project to a budget below this.
 pub const BUDGET_FLOOR: i64 = 256;
-/// How many of the most recent turns a compaction keeps verbatim: the declared
-/// default of the record's `recent_n`. Python `RECENT_N`.
-pub const RECENT_N: i64 = 6;
-/// The declared default of the record's `transport_retries`: off.
-pub const TRANSPORT_RETRIES: i64 = 0;
 
 // ─── the turn loop (python core.py) ─────────────────────────────────────────
 
@@ -72,13 +65,6 @@ pub fn default_max_tokens(thinking_budget: Option<i64>, model_max: i64) -> i64 {
         .min(model_max)
 }
 
-/// The READ CLOCK on a provider stream, in seconds: the longest the endpoint may
-/// go without sending a byte (headers included) before the stream is judged
-/// stalled and the turn ends with an error row (#177). A record's
-/// `stream_idle_seconds` replaces it; it is a bound BETWEEN bytes, never a widened
-/// [`SEND_TIMEOUT_SECS`].
-pub const STREAM_IDLE_SECONDS: f64 = 60.0;
-
 /// The effective per-`send` ceiling: `FANTASTIC_AI_SEND_TIMEOUT` if set, else
 /// [`SEND_TIMEOUT_SECS`]. python `SEND_TIMEOUT = float(os.environ.get(
 /// "FANTASTIC_AI_SEND_TIMEOUT", "600"))`.
@@ -101,9 +87,6 @@ pub fn send_timeout_secs() -> f64 {
         Err(e) => panic!("FANTASTIC_AI_SEND_TIMEOUT is not a number: {e}"),
     }
 }
-
-/// Headless / REPL caller default. Matches Python's `DEFAULT_CLIENT_ID`.
-pub const DEFAULT_CLIENT_ID: &str = "cli";
 
 /// Recursion guard: AI→AI→… chains refuse past this depth (python
 /// `MAX_CALL_DEPTH`). In rust the guard is the KERNEL's (`call_guard`), shared by
