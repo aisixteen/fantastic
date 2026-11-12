@@ -80,11 +80,10 @@ nothing more: whoever holds one on the root acts on any agent. IDENTITY COMES ON
 2026-10-04): the sends an agent's handler makes, and the tasks it spawns, are
 that agent's; a send made outside every dispatch is the operator's and is
 ungated. A wire leg (web_ws, web_rest, a bridge) never sends as anyone else: it
-hands an admitted frame to itself (`inbound_call`, …) and sends onward AS THE
+hands an admitted frame to itself and sends onward AS THE
 LEG. The kernel's own bookkeeping (a child's boot, `shutdown`, the ledger flush,
 a write through the loader) runs the handler directly, ungated. Lifecycle verbs:
-`kernel_start`, `shutdown_agents`, `kernel_stop`. Manual: `reflect kernel
-readme=memory`. A static `readme-contract` lint
+`kernel_start`, `shutdown_agents`, `kernel_stop`. Each agent's verbs: `docs of=<id>`. A static `readme-contract` lint
 (`integration_tests/decoupling/test_readme_contract.py`) scans every host
 bundle's readme/sentence across python/rust and fails on any
 client-intent word (iframe, transport.js, browser, …), so the host stays
@@ -102,7 +101,7 @@ $BIN reflect                                  # substrate identity + tree of roo
 $BIN reflect kernel_state bundles=all                 # add the registered-bundle catalog
 $BIN kernel_state docs of=kernel                       # the kernel's verbs
 $BIN kernel_state list_agents                         # every agent in this workdir
-$BIN kernel_state create_agent handler_module=web.tools id=w port=8888
+$BIN kernel_state create_agent handler_module=web.tools id=w <fields from docs of=web>
 
 # Daemon mode (blocks if a `web` agent is persisted in the workdir):
 $BIN
@@ -193,14 +192,14 @@ Bundles that compile under either tier:
 | `fantastic-core`               | the `kernel_state.tools` root loader (id="kernel_state") — records, blobs, the record-owner guard |
 | `fantastic-ram-store`          | the MEMORY STORE in RAM — every message (AI conversations, the kernel's execution rows), fold refs, search, inject/dump; a caller reads and writes only its own rows |
 | `fantastic-sqlite-store`       | the DURABLE MEMORY STORE — `ram_store`'s tables, keys and verbs over one SQLite file per store (the record's `path`, relative to the project dir); a caller cannot tell the two apart, except that this one survives the process; the stop folds the WAL into the file (`close_all`) |
-| `fantastic-credential-store`   | SECRETS BY REF — a ref holds named fields bound to ONE host; whoever the call gate admits may `set`/`get`/`forget` a declared ref (values ride the call; a `set`'s and a `get` reply's field values are recorded as `[secret]`, the caller gets them whole); a ref is DECLARED only by `update_agent` on the store's `refs` — `set` stores a declared ref's value, takes no `host` and never creates one; `forget` drops the value and keeps the declaration; the file is read through ONE `O_NOFOLLOW` open judged on its own descriptor; backends `file` (0600 YAML at an ABSOLUTE path — a relative `file` is refused; python's bytes), `keychain` (the OS keychain, items under `keychain_namespace`), `env` (read-only). Every AI backend reads its key here before each request (`credentials: {store, ref}`) |
+| `fantastic-credential-store`   | SECRETS BY REF — a ref holds named fields bound to ONE host; a ref is declared only on the store's record, never created by a call; secret values are recorded as `[secret]`; the file is read through ONE `O_NOFOLLOW` open judged on its own descriptor. Every AI backend reads its key here before each request. Verbs, fields and defaults: `reflect` / `docs of=<id>` |
 | `fantastic-static-loader`      | declarative YAML roster loader — hydrates the declared agents at boot as kernel bookkeeping (the root's `create_agent` run directly) |
-| `fantastic-file`               | filesystem-as-agent (the fs edge of the io family; sealed by default, deny-all `allow` list) + the text verbs — read/write/edit/append/undo, version/if_match |
+| `fantastic-file`               | filesystem-as-agent (the fs edge of the io family; sealed by default, deny-all `allow` list) + text editing with versions |
 | `fantastic-web`                | axum HTTP host — rendering routes; mounts child call surfaces; the file route hands each fetch to the host (`fetch_file`), which reads AS ITSELF |
-| `fantastic-web-ws`             | WS verb channel (mounted onto a parent web); sealed by default; an admitted frame is handed to the leg (`inbound_call`/`inbound_emit`/`inbound_watch`/`inbound_state_subscribe`) and sent onward AS THE LEG |
-| `fantastic-web-rest`           | REST verb channel (mounted onto a parent web); sealed by default; the gate runs BEFORE the body is read, and a body past 16 MiB (io_bridge `MAX_FRAME`) is a 413; an admitted call is handed to the leg (`inbound_call`) and sent onward AS THE LEG |
+| `fantastic-web-ws`             | WS verb channel (mounted onto a parent web); sealed by default; an admitted frame is handed to the leg and sent onward AS THE LEG |
+| `fantastic-web-rest`           | REST verb channel (mounted onto a parent web); sealed by default; the gate runs BEFORE the body is read, and a body past 16 MiB (io_bridge `MAX_FRAME`) is a 413; an admitted call is handed to the leg and sent onward AS THE LEG |
 | `fantastic-scheduler`          | recurring tasks on a tokio tick; a schedule fires AS THE SCHEDULER (its `can_call` decides), and every caller the gate admits sees and drives every schedule |
-| `fantastic-bridge`             | cross-kernel bridge — two bundles, `ws_bridge.tools` and `relay_connector.tools` — WS-only, asymmetric (memory / WS); an inbound `call` frame is served AS THE LEG (its `can_call`, the target's `callable_by`); a leg's rules are read off its record per frame; frame ids are `<leg>-<boot nonce>-<n>`; a relay leg reads its password from a credential_store ref (`credentials: {store, ref}`) before every dial |
+| `fantastic-bridge`             | cross-kernel bridge — two bundles, `ws_bridge.tools` and `relay_connector.tools` — WS-only, asymmetric (memory / WS); an inbound `call` frame is served AS THE LEG (its `can_call`, the target's `callable_by`); a leg's rules are read off its record per frame; a relay leg reads its password from a credential_store ref before every dial |
 | `fantastic-ollama-backend`     | local LLM via ollama |
 | `fantastic-responses-backend`  | the OpenAI Responses API |
 | `fantastic-vllm-backend`       | a vLLM server, directly (OpenAI chat wire) — KV-cache session table per endpoint |

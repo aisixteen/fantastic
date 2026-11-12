@@ -28,9 +28,11 @@ go through that daemon's web surface instead (a `web` agent's
 
 There is no `--port` flag. Persist a web agent first, then boot:
 
-    fantastic kernel create_agent parent_id=kernel_state handler_module=web.tools port=8888
+    fantastic kernel create_agent parent_id=kernel_state handler_module=web.tools <fields>
     fantastic kernel create_agent parent_id=<web_id> handler_module=web_ws.tools
     fantastic kernel create_agent parent_id=<web_id> handler_module=web_rest.tools
     fantastic                          # rehydrates + serves
+
+The fields of each bundle (names, types, defaults) are in `fantastic kernel docs of=<id>`.
 
 Start with `fantastic reflect` and `fantastic kernel docs of=kernel`.

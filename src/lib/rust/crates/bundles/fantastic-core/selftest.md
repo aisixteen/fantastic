@@ -4,8 +4,7 @@
 > requires: `cargo build --release --bin fantastic_kernel`
 > out-of-scope: HTTP, WS, bundles other than core itself
 
-Root orchestrator. System verbs (create_agent / delete_agent /
-update_agent / list_agents) + reflect. No
+Root orchestrator (its verbs: `docs of=kernel_state`). No
 handler_module — dispatch is native to the Agent class.
 
 ## Pre-flight

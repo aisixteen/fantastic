@@ -24,7 +24,7 @@ host does not hold shows `no canvas <id> on this host` (never the main canvas).
 - **canvas** — the compositor root; renders the frontend's own member tree, each
   member mounted inline (its view bundle) or as an iframe (external content).
 - **terminal_view** — xterm CLIENT for a host PTY backend. Bound to any agent
-  answering the PTY surface (`boot`/`write`/`ack`/`resize`/`interrupt`/`stop`) by
+  answering the PTY surface (its verbs: `docs of=<id>`) by
   a `backend_id` peer ref.
 - **store_view** / **scheduler_view** / **credentials_view** —
   READ-ONLY views of the agents that had only the stub (`ram_store` and `sqlite_store`,
@@ -48,7 +48,7 @@ host does not hold shows `no canvas <id> on this host` (never the main canvas).
   agent** of that path (`open_view` on the bridge, `src/bundles/files/file_bridge.ts`):
   a preview then carries `view_agent` and is that file agent's view, a tree rooted at
   a folder is its folder agent's view. Its reads, saves and live changes go through
-  the agent (its `read`/`write`, or its `list` and `watch`); what the agent does not
+  the agent (its own verbs: `docs of=<id>`); what the agent does not
   answer (the stream reads, undo, the tree's own file operations) stays with the
   bridge. A cell saved before this is bound to the view of its path when it mounts
   (`bindCellToView`): its view is named on the cell, and the page waits for its grant
@@ -62,7 +62,7 @@ host does not hold shows `no canvas <id> on this host` (never the main canvas).
   removed releases every path it serves (`release`, `onStateFrame`).
 - **skin** — the page's skin agent: the design tokens (W3C 2025.10) every view is
   drawn with, fixed by the backdrop (`dark` on the web, `glass` in the app's window); it
-  answers `get` and `schema`, read only (`fantastic readme skins`).
+  is read only (its verbs: `docs of=<id>`).
 - **the canvas's left column** (#608, `canvas/sidebar_mount.ts`) — the host agent
   `sidebar`'s own html view (`sidebar_view.html` in the host's `kern/sidebar.rs`, returned by
   its `reflect`), in a panel fixed to the viewport's left edge, mounted beside the zoomed
@@ -148,7 +148,7 @@ holds exactly three entries:
 4. **Prereq (operator, one-time)** — the host must expose HTTP + a WS surface +
    the loader the frontend federates to: a `web` agent (HTTP), a `web_ws` child
    (the WS verb surface), and a `kernel_state` rooted at `.fantastic/web` aliased
-   `web_loader`. (See the host root readme — `reflect readme=true`.)
+   `web_loader`. (Agents and verbs of the host: `reflect`, `docs of=<id>`.)
 5. **Provide a trivial mount page** and serve it from the same file root. The
    CSS and all vendors are inlined, so the page needs **NO import map and NO
    stylesheet link** — just the one script tag:

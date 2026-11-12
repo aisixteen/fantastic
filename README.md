@@ -319,9 +319,8 @@ content (`html`, `gl`).
   `▶`. A terminal re-attaches to its live job after a reload and redraws.
 - **html cells** run sandboxed (null origin) unless `trusted: true`. Their only
   way out is the connector: `fantastic.send`, `emit`, `onMessage`, `watch`. An AI
-  builds them with the view's verbs `place`, `update`, `fit`, `move`, `wire`
-  and `remove`.
-- **Canvases** are flat peers. `new_canvas {name}` makes one, and
+  builds them with the view's verbs (`docs of=<view id>`).
+- **Canvases** are flat peers. `new_canvas` makes one, and
   `?canvas=<node id>` opens it. Each has its own page kernel and shows only its
   own subtree. A tab under 768px wide draws the cells as one column, any other
   as the free canvas; the layout moves cells, never the agents.
