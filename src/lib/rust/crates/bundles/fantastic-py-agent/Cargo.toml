@@ -11,6 +11,8 @@ fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }
 serde_json = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 

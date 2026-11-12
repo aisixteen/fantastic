@@ -23,29 +23,33 @@ use async_trait::async_trait;
 use fantastic_bundle::{py_repr, py_repr_value};
 use fantastic_exec_bridge::relay::{serve, Extra};
 use fantastic_exec_bridge::spawn::{kill_session, spawn_job, NoPath};
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{Bundle, BundleError, Handler, Reply};
 use fantastic_kernel::refusal::{
     refusal, refusal_hint, with, MISSING_ARG, TRANSPORT_CLOSED, TRANSPORT_ERROR, UNHANDLED,
 };
 use fantastic_kernel::{AgentId, Kernel, TaskId};
+use fantastic_kernel::{DynVerb, Verb};
 use serde_json::{json, Map, Value};
 use tokio::sync::{mpsc, oneshot, watch, Notify};
+
+pub mod record;
+pub mod verbs;
+
+/// What the base is for — its one short man text; the verbs are rendered from their
+/// declarations (`docs`, `reflect`).
+const MAN: &str = "The base a folder bundle with a program extends: the kernel runs the program, and the program answers the verbs the bundle's bundle.yaml names, over the connector channel.";
 
 /// The base's handler module.
 pub const HANDLER_MODULE: &str = "py_agent.tools";
 /// The base's name — what a `bundle.yaml` writes as `base`.
 pub const NAME: &str = "py_agent";
-/// Said in every instance's reflect and in the docs notes.
+/// Said in every instance's reflect.
 pub const SECURITY: &str = "a py_agent program runs with the user's OS rights — its own \
                             subprocesses, files and network never pass a gate";
 /// Chars of the program's stderr kept for its instance's reflect.
 pub const STDERR_TAIL: usize = 2000;
 /// Verbs the kernel and this base answer; a bundle cannot declare them.
 const RESERVED: [&str; 3] = ["reflect", "boot", "shutdown"];
-
-const NOTES: &str = "A folder bundle `<root>/bundles/<name>/bundle.yaml` with `base: py_agent`: \
-                     `sentence`, `command` (argv, cwd = the folder), `verbs` (verb → doc), optional \
-                     `emits`, `notes`, `record` (defaults under each instance). ";
 
 // ─── the base itself ────────────────────────────────────────────────
 
@@ -54,9 +58,28 @@ const NOTES: &str = "A folder bundle `<root>/bundles/<name>/bundle.yaml` with `b
 pub struct PyAgentBundle;
 
 #[async_trait]
-impl Bundle for PyAgentBundle {
+impl Handler for PyAgentBundle {
+    type Call = verbs::Call;
+
     fn name(&self) -> &str {
         NAME
+    }
+
+    fn man(&self) -> &'static str {
+        MAN
+    }
+
+    fn verbs(&self) -> &'static [Verb] {
+        verbs::VERBS
+    }
+
+    /// The base carries no program's verbs: those are its folder bundles'.
+    fn dynamic_verbs(&self, _agent: &fantastic_kernel::Agent) -> Vec<DynVerb> {
+        Vec::new()
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &record::RECORD
     }
 
     fn folder_base(&self) -> bool {
@@ -84,35 +107,34 @@ impl Bundle for PyAgentBundle {
         )
     }
 
-    fn verb_docs(&self) -> Value {
-        json!({"reflect": "No args. → {id, sentence}."})
-    }
-
-    fn notes_doc(&self) -> Option<Value> {
-        Some(json!(format!("{NOTES}{SECURITY}.")))
-    }
-
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let t = payload.get("type").cloned().unwrap_or(Value::Null);
-        if t.as_str() == Some("reflect") {
-            return Ok(Some(json!({
-                "id": agent_id.as_str(),
-                "sentence": "The base a folder bundle with a program extends — create an \
-                             agent of the bundle, not of py_agent.",
-            })));
-        }
-        let mut r = refusal(
-            UNHANDLED,
-            format!("py_agent: no verb {}", py_repr_value(&t)),
-        );
-        with(&mut r, "verb", t);
-        Ok(Some(r))
+        // no agent of the base itself exists (`validate_meta` refuses the create)
+        let verb = match call {
+            verbs::Call::Reflect(_) => {
+                return Ok(Some(json!({
+                    "id": agent_id.as_str(),
+                    "sentence": "The base a folder bundle with a program extends — create an \
+                                 agent of the bundle, not of py_agent.",
+                })))
+            }
+            verbs::Call::Boot(_) => "boot",
+            verbs::Call::Shutdown(_) => "shutdown",
+            verbs::Call::Dynamic(c) => return Ok(Some(no_verb(&json!(c.name)))),
+        };
+        Ok(Some(no_verb(&json!(verb))))
     }
+}
+
+/// The base answers no program verb: the refusal naming the verb.
+fn no_verb(t: &Value) -> Value {
+    let mut r = refusal(UNHANDLED, format!("py_agent: no verb {}", py_repr_value(t)));
+    with(&mut r, "verb", t.clone());
+    r
 }
 
 // ─── a folder bundle that extends it ────────────────────────────────
@@ -124,8 +146,6 @@ pub struct FolderBundle {
     command: Vec<String>,
     verbs: Map<String, Value>,
     sentence: String,
-    emits: Option<Value>,
-    notes: String,
 }
 
 impl FolderBundle {
@@ -177,14 +197,6 @@ impl FolderBundle {
                 )
             }
         };
-        let notes = match spec
-            .get("notes")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-        {
-            Some(n) => format!("{n}\n\n{SECURITY}."),
-            None => format!("{SECURITY}."),
-        };
         Ok(Self {
             name: name.to_string(),
             folder: folder.to_path_buf(),
@@ -196,8 +208,6 @@ impl FolderBundle {
                 .unwrap_or("")
                 .trim()
                 .to_string(),
-            emits: spec.get("emits").filter(|v| !v.is_null()).cloned(),
-            notes,
         })
     }
 }
@@ -544,54 +554,60 @@ fn stop_by_id(id: &AgentId, why: String) {
 }
 
 #[async_trait]
-impl Bundle for FolderBundle {
+impl Handler for FolderBundle {
+    type Call = verbs::Call;
+
     fn name(&self) -> &str {
         &self.name
     }
 
-    fn verb_docs(&self) -> Value {
-        Value::Object(self.verbs.clone())
+    fn man(&self) -> &'static str {
+        MAN
     }
 
-    fn emits_doc(&self) -> Option<Value> {
-        self.emits.clone()
+    fn verbs(&self) -> &'static [Verb] {
+        verbs::VERBS
     }
 
-    fn notes_doc(&self) -> Option<Value> {
-        Some(json!(self.notes))
+    /// The program's verbs, as `bundle.yaml` names them: each with its doc and no
+    /// declared arguments (the program judges them).
+    fn dynamic_verbs(&self, _agent: &fantastic_kernel::Agent) -> Vec<DynVerb> {
+        self.verbs
+            .iter()
+            .map(|(name, doc)| DynVerb::new(name, doc.as_str().unwrap_or_default(), &json!({})))
+            .collect()
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &record::RECORD
     }
 
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let t = payload.get("type").cloned().unwrap_or(Value::Null);
-        let verb = t.as_str().unwrap_or("");
-        let reply = match verb {
-            "reflect" => self.instance_reflect(agent_id),
-            "boot" => self.start(agent_id, kernel).await,
-            "shutdown" => {
+        let reply = match call {
+            verbs::Call::Reflect(_) => self.instance_reflect(agent_id),
+            verbs::Call::Boot(_) => self.start(agent_id, kernel).await,
+            verbs::Call::Shutdown(a) => {
                 // a reload (`reload_bundle`: shutdown, then boot) or a stop
-                let reason = payload
-                    .get("reason")
-                    .and_then(Value::as_str)
+                let reason = a
+                    .reason
                     .filter(|s| !s.is_empty())
-                    .unwrap_or("the kernel stopped");
+                    .unwrap_or_else(|| "the kernel stopped".to_string());
                 stop_by_id(agent_id, format!("{}: {reason}", agent_id.as_str()));
                 Value::Null
             }
-            v if self.verbs.contains_key(v) => self.call(agent_id, payload).await,
-            _ => {
-                let names: Vec<&str> = self.verbs.keys().map(String::as_str).collect();
-                let mut r = refusal_hint(
-                    UNHANDLED,
-                    format!("{}: no verb {}", self.name, py_repr_value(&t)),
-                    format!("its verbs: {}", names.join(", ")),
-                );
-                with(&mut r, "verb", t);
-                r
+            // one of the program's verbs: forwarded as the call it was
+            verbs::Call::Dynamic(c) => {
+                let mut payload = Map::new();
+                payload.insert("type".to_string(), json!(c.name));
+                if let Value::Object(args) = c.args {
+                    payload.extend(args);
+                }
+                self.call(agent_id, &Value::Object(payload)).await
             }
         };
         if reply.is_null() {
