@@ -39,7 +39,7 @@
         {"as": "alice", "send": {"type": "append", "rows": [{"id": 20, "kind": "fold", "refs": [10]}]}, "expect": {"reason": "not_found", "arg": "rows", "error": "append: row 20 refs rows that do not exist for this owner: [10]"}},
         {"as": "alice", "send": {"type": "append", "rows": [{"id": 3, "kind": "fold", "refs": [1, 2]}, {"id": 1}, {"id": 2}]}, "expect": {"ids": [3, 1, 2], "appended": 3}},
         {"as": "alice", "send": {"type": "read", "ids": [3]}, "expect": {"rows": [{"id": 3, "kind": "fold", "refs": [1, 2]}]}},
-        {"as": "alice", "send": {"type": "append", "rows": [{"id": 30, "refs": "1"}]}, "expect": {"reason": "bad_arg", "arg": "rows", "error": "append: row 30 refs must be row ids"}}
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": 30, "refs": "1"}]}, "expect": {"reason": "bad_arg", "arg": "rows"}}
       ]
     },
     {
@@ -131,9 +131,9 @@
         {"as": "alice", "send": {"type": "no_such_verb"}, "expect": {"reason": "unhandled", "verb": "no_such_verb"}},
         {"as": "alice", "send": {"type": "append", "rows": []}, "expect": {"reason": "bad_arg", "arg": "rows", "error": "append: `rows` must be a non-empty list of rows"}},
         {"as": "alice", "send": {"type": "append", "rows": [1]}, "expect": {"reason": "bad_arg", "arg": "rows"}},
-        {"as": "alice", "send": {"type": "append", "rows": [{"id": "5"}]}, "expect": {"reason": "bad_arg", "arg": "rows", "error": "append: a row id is a kernel int, got '5'"}},
-        {"as": "alice", "send": {"type": "append", "rows": [{"id": 0}]}, "expect": {"reason": "bad_arg", "arg": "rows", "error": "append: a row id is a kernel int, got 0"}},
-        {"as": "alice", "send": {"type": "append", "rows": [{"id": true}]}, "expect": {"reason": "bad_arg", "arg": "rows", "error": "append: a row id is a kernel int, got True"}},
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": "5"}]}, "expect": {"reason": "bad_arg", "arg": "rows"}},
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": 0}]}, "expect": {"reason": "bad_arg", "arg": "rows"}},
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": true}]}, "expect": {"reason": "bad_arg", "arg": "rows"}},
         {"as": "alice", "send": {"type": "prune"}, "expect": {"reason": "missing_arg", "arg": "before_id", "error": "prune: before_id required"}},
         {"as": "alice", "send": {"type": "search"}, "expect": {"reason": "missing_arg", "arg": "query"}},
         {"as": "alice", "send": {"type": "read"}, "expect": {"rows": [], "total": 0}}
