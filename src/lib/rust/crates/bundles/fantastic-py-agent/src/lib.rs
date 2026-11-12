@@ -121,7 +121,10 @@ impl Handler for PyAgentBundle {
                              agent of the bundle, not of py_agent.",
             }))),
             verbs::Call::Boot(_) | verbs::Call::Shutdown(_) | verbs::Call::Dynamic(_) => {
-                Ok(Some(Value::Null))
+                Ok(Some(refusal(
+                    UNHANDLED,
+                    "py_agent: the base has no instance to boot, shut down or call",
+                )))
             }
         }
     }

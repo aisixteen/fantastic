@@ -480,7 +480,11 @@ async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
                 if sch.get("paused").and_then(Value::as_bool) == Some(true) {
                     continue;
                 }
-                let next_run = sch.get("next_run").and_then(Value::as_f64).unwrap_or(0.0);
+                if let Err(why) = check_stored(sch) {
+                    log_line(format!("scheduler {agent_id}: skipping a schedule: {why}"));
+                    continue;
+                }
+                let next_run = sch["next_run"].as_f64().unwrap_or_default();
                 if now < next_run {
                     delay = Some(delay.map_or(next_run - now, |d: f64| d.min(next_run - now)));
                     continue;
@@ -488,11 +492,8 @@ async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
                 // Persist BEFORE the fire: run_count/next_run are bumped and saved
                 // first, so a crash inside the fire window does not re-fire the same
                 // tick on reboot (at-most-once restart semantics).
-                let count = sch.get("run_count").and_then(Value::as_u64).unwrap_or(0);
-                let interval = sch
-                    .get("interval_seconds")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(60.0);
+                let count = sch["run_count"].as_u64().unwrap_or_default();
+                let interval = sch["interval_seconds"].as_f64().unwrap_or_default();
                 sch["run_count"] = json!(count + 1);
                 sch["next_run"] = json!(now + interval);
                 due.push(sch.clone());
@@ -523,15 +524,26 @@ async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
     }
 }
 
-/// A schedule's `target`, python's way: whatever was stored, as text. `schedule`
-/// only checks the field for TRUTHINESS, so a non-string target is stored verbatim
-/// and fired verbatim.
-fn sched_target(sch: &Value) -> String {
-    match sch.get("target") {
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => py_str(other),
-        None => String::new(),
+/// Refuse a stored schedule whose fields are not the types `schedule` writes —
+/// no coercion, no defaults for stored data.
+fn check_stored(sch: &Value) -> Result<(), String> {
+    let kinds: [(&str, fn(&Value) -> bool); 4] = [
+        ("target", Value::is_string),
+        ("next_run", Value::is_number),
+        ("interval_seconds", Value::is_number),
+        ("run_count", Value::is_u64),
+    ];
+    for (key, ok) in kinds {
+        if !sch.get(key).is_some_and(ok) {
+            return Err(format!("stored field `{key}` is missing or wrongly typed"));
+        }
     }
+    Ok(())
+}
+
+/// A schedule's `target`; `check_stored` has already required a string.
+fn sched_target(sch: &Value) -> String {
+    sch["target"].as_str().unwrap_or_default().to_string()
 }
 
 /// A schedule's `payload`: the stored call object, `{}` when none.
@@ -830,11 +842,11 @@ async fn tick_now_reply(agent_id: &AgentId, sid: &str, kernel: &Arc<Kernel>) -> 
     let Some(idx) = schedules.iter().position(|s| is_sched(s, &sid)) else {
         return json!({"error": format!("schedule {} not found", py_repr_value(&sid))});
     };
+    if let Err(why) = check_stored(&schedules[idx]) {
+        return json!({"error": format!("tick_now: {why}")});
+    }
     // Same order as the tick: bump → persist → fire.
-    let count = schedules[idx]
-        .get("run_count")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
+    let count = schedules[idx]["run_count"].as_u64().unwrap_or_default();
     schedules[idx]["run_count"] = json!(count + 1);
     if let Err(e) = save_schedules(agent_id, kernel, &schedules).await {
         // ROLL THE BUMP BACK (py `s["run_count"] -= 1`): `save_schedules` already
