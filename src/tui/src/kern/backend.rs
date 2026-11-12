@@ -843,7 +843,7 @@ pub(crate) mod create_tests {
     /// A registered AI handler, registered under the name it carries.
     pub(crate) struct FakeAi(pub(crate) &'static str);
 
-    fantastic_kernel::stand_in_verbs!(fake_ai_verbs { Ping "ping" {} });
+    fantastic_kernel::stand_in_verbs!(fake_ai_verbs { Ping "ping" {}, Complete "complete" {} });
 
     #[async_trait]
     impl Handler for FakeAi {
@@ -872,6 +872,7 @@ pub(crate) mod create_tests {
         async fn handle(&self, _id: &AgentId, call: Self::Call, _k: &Arc<Kernel>) -> Result<Option<Value>, BundleError> {
             Ok(match call {
                 fake_ai_verbs::Call::Ping(_) => Some(json!({"pong": true})),
+                fake_ai_verbs::Call::Complete(_) => Some(json!({"done": true})),
                 fake_ai_verbs::Call::Reflect(_) => None,
             })
         }

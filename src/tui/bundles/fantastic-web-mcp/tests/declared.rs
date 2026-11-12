@@ -53,7 +53,7 @@ async fn every_verb_is_checked_by_its_declaration() {
         let r = op(&k, "mcp", json!({"type": v.name, "zzz_unknown": 1})).await;
         assert_eq!(why(&r), (Some("bad_arg"), Some("zzz_unknown")), "{}: {r}", v.name);
     }
-    for (verb, arg) in [("inbound_send", "items"), ("inquiry", "text"), ("answer_inquiry", "re")] {
+    for (verb, arg) in [("inbound_send", "items"), ("inquiry", "text"), ("answer_inquiry", "answer")] {
         let r = op(&k, "mcp", json!({"type": verb})).await;
         assert_eq!(why(&r), (Some("missing_arg"), Some(arg)), "{verb}: {r}");
     }

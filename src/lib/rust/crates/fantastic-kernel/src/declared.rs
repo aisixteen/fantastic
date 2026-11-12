@@ -399,10 +399,15 @@ pub mod record {
     /// `children_dir`, else the declared default.
     #[must_use]
     pub fn children_dir(meta: &serde_json::Map<String, serde_json::Value>) -> String {
-        RECORD
-            .get(meta, "children_dir")
-            .and_then(|v| v.as_str().map(str::to_string))
-            .expect("children_dir declares a default")
+        // the record's own text is kept as written (a malformed one is refused where the
+        // tree is walked, never replaced by the default); only an absent one takes the default
+        match meta.get("children_dir") {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            _ => RECORD
+                .get(&serde_json::Map::new(), "children_dir")
+                .and_then(|v| v.as_str().map(str::to_string))
+                .expect("children_dir declares a default"),
+        }
     }
 
     crate::record!(CommonRecord);
