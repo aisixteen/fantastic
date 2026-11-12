@@ -1,5 +1,5 @@
 // Rolled-up bundle entry — the esbuild entrypoint for this app's zip (see
-// ../scripts/pack.sh, ../readme.md). It exists ONLY for the bundle build: the
+// ../scripts/pack.sh). It exists ONLY for the bundle build: the
 // bundle has no HTML scaffold, so every vendor byte + the css must live inside
 // the single output file. Here `xterm.css` is inlined via esbuild's `text`
 // loader and injected once, then the page loads (the canvas, `main.ts`, or the Home, `home.ts`). esbuild's

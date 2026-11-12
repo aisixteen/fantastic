@@ -196,22 +196,6 @@ pub fn canvases(h: &Host) -> Vec<(String, String)> {
     out
 }
 
-/// The node id a canvas named `name` takes: `canvas_<slug>`, the slug its letters
-/// and digits (other characters `_`, the ends trimmed). A name with none is refused.
-pub fn canvas_node_id(name: &str) -> Result<String, String> {
-    let slug: String = name
-        .trim()
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    let slug = slug.trim_matches('_');
-    if slug.is_empty() {
-        return Err("new_canvas needs a name (letters or digits)".into());
-    }
-    Ok(format!("canvas_{slug}"))
-}
-
 /// The page records dir of a canvas `node` spawned by a canvas whose own records
 /// dir is `parent_root`: nested under it, `<parent_root>/<node>`.
 pub fn child_records_root(parent_root: &str, node: &str) -> String {
@@ -233,7 +217,7 @@ pub async fn new_canvas(h: &Host, parent: &str, name: &str) -> Result<String, St
     if !canvas_parent {
         return Err(format!("new_canvas: `{parent}` is not a canvas"));
     }
-    let node = canvas_node_id(name)?;
+    let node = format!("canvas_{name}");
     if h.kernel.exists(&node) {
         return Err(format!("a canvas `{node}` already exists"));
     }
@@ -490,18 +474,6 @@ fn web_record(user: &str, port: u16, bind: Option<&str>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_canvas_takes_its_node_id_from_its_name_or_is_refused_without_one() {
-        assert_eq!(canvas_node_id("research").unwrap(), "canvas_research");
-        assert_eq!(
-            canvas_node_id("  Research Team! ").unwrap(),
-            "canvas_research_team"
-        );
-        assert_eq!(canvas_node_id("a-b").unwrap(), "canvas_a_b");
-        assert!(canvas_node_id("").unwrap_err().contains("needs a name"));
-        assert!(canvas_node_id(" -- ").unwrap_err().contains("needs a name"));
-    }
 
     #[test]
     fn a_child_canvas_records_nest_under_its_parents_records_dir() {

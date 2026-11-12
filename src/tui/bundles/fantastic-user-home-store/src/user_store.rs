@@ -290,7 +290,7 @@ impl UserStore {
 
     /// The name: with the switch on, checked against the home first (a taken name:
     /// refused, nothing touched), then the RECORD lands, then the folder is
-    /// renamed — a rename that fails puts the name back. `null` (or "") = the guid.
+    /// renamed — a rename that fails puts the name back. `null` = the guid.
     async fn name_home_folder(&self, agent_id: &AgentId, kernel: &Arc<Kernel>, me: &Me, name: Option<String>) -> Result<Value, Value> {
         let named = Me { guid: me.guid.clone(), on: me.on, name: name.clone() };
         let mut out = json!({"name": name, "folder": named.folder()?});
@@ -405,7 +405,7 @@ impl UserStore {
     fn reflect(&self, me: &Me) -> Value {
         json!({
             "handler_module": HANDLER_MODULE,
-            "sentence": "The user store: the keys and set-ups kept in the user's home, and a folder per registered fantastic — register this one (kept on every start while on), name its folder, unstore another, or unstore every other.",
+            "sentence": MAN,
             "home": self.home.as_ref().map(|h| h.display().to_string()).ok(),
             "here": self.here.display().to_string(),
             SWITCH: me.on,

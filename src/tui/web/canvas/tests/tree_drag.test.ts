@@ -278,7 +278,7 @@ test("open refuses: no target, both targets, a bad x, an unknown path, an outsid
   const k = page(b);
   setHostRecords((id) => HOST[id]);
   setHostSync(async () => {});
-  assert.equal((await call(k, { type: "open" }))["reason"], "bad_arg");
+  assert.equal((await call(k, { type: "open" }))["reason"], "missing_arg");
   assert.equal((await call(k, { type: "open", path: "docs", agent: "ea" }))["reason"], "bad_arg");
   assert.equal((await call(k, { type: "open", path: "docs", x: 1 }))["reason"], "bad_arg");
   assert.equal((await call(k, { type: "open", path: "nope/x" }))["reason"], "not_found");

@@ -17,7 +17,7 @@ contract/home/
   and what it must answer: a state with given fields, a refusal with its
   `reason` and `arg`, the payloads it emits, the folders it starts or stops, and
   what it sends to fantastics' kernels. The cases cover every verb and every
-  refusal kind (`missing_arg`, `bad_arg`, `not_found`, `unhandled`). `cases.json`'s `_doc` defines each key.
+  refusal kind. `cases.json`'s `_doc` defines each key.
 - **The state's shape**: `states.valid[0]` is the exact state the `first-look`
   case answers (golden); `states.invalid` are states a client must refuse, each
   with the field it must name.

@@ -14,7 +14,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 APP=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 cd "$APP"
 
-sh ../../../lib/ts/scripts/pack.sh src/main.ts dist/demo.zip readme.md >/dev/null
+sh ../../../lib/ts/scripts/pack.sh src/main.ts dist/demo.zip >/dev/null
 BUNDLE="dist/pack/bundle.min.js"
 [ -s "$BUNDLE" ] || { echo "pack.sh: no bundle at $BUNDLE" >&2; exit 1; }
 

@@ -79,7 +79,7 @@ impl Opts {
     }
 }
 
-const USAGE: &str = "run `fantastic [canvas [--port N] [--host ADDR] | --headless [--port N] [--host ADDR]] [--statedir DIR] [--workdir DIR] [ai [vllm|ollama|responses|anthropic …]] [run COMMAND …]`, `fantastic mcp [--statedir DIR] [--workdir DIR]`, `fantastic send [--statedir DIR] <item>`, `fantastic import <path> --parent <id>` or `fantastic migrate-home [--dry-run]`";
+const USAGE: &str = "run `fantastic [canvas [--port N] [--host ADDR] | --headless [--port N] [--host ADDR]] [--statedir DIR] [--workdir DIR] [ai [vllm|ollama|responses|anthropic …]] [run COMMAND …]`, `fantastic mcp [--statedir DIR] [--workdir DIR]`, `fantastic send [--statedir DIR] <item>` or `fantastic import <path> --parent <id>`";
 
 fn port_of(v: &str, flag: &str) -> Result<u16, String> {
     v.parse::<u16>().ok().filter(|p| *p > 0).ok_or_else(|| format!("{flag} must be 1..65535, got `{v}`"))
@@ -247,7 +247,6 @@ mod tests {
         assert_eq!(o.recipes, vec![Recipe::Canvas, Recipe::Ai]);
         assert_eq!(o.shows(), Some(Recipe::Ai));
         assert!(o.canvas() && o.headless && o.ai.is_none(), "the canvas runs headless");
-        assert!(p("web").is_err(), "`web` is no longer a word");
         assert_eq!(p("ai canvas").unwrap().shows(), Some(Recipe::Canvas));
         assert_eq!(p("canvas ai canvas").unwrap().recipes, vec![Recipe::Ai, Recipe::Canvas], "named twice runs once, last");
     }

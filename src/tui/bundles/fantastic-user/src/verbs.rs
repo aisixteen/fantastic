@@ -89,6 +89,7 @@ fn agent_ids(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Sch
     serde_json::from_value(serde_json::json!({
         "type": "object",
         "additionalProperties": {"type": "string", "minLength": 1},
+        "default": {},
     }))
     .expect("a map schema")
 }
@@ -97,7 +98,7 @@ fn agent_ids(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Sch
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImportSubtree {
-    /// A blueprint folder, relative to the running dir (no `..`).
+    /// A blueprint folder: a path under the running dir, or absolute (no `..`).
     #[schemars(length(min = 1), regex(pattern = r"^/?(?:(?:[^./][^/]*|\.|\.[^./][^/]*|\.\.[^/]+)/+)*(?:[^./][^/]*|\.|\.[^./][^/]*|\.\.[^/]+)/*$"))]
     pub path: String,
     /// The agent the imported team goes under.
@@ -106,7 +107,7 @@ pub struct ImportSubtree {
     /// Every declared port, bound to an agent of its kind: `{"@port": "<agent id>"}`.
     #[serde(default)]
     #[schemars(schema_with = "agent_ids")]
-    pub bind: Option<std::collections::BTreeMap<String, String>>,
+    pub bind: std::collections::BTreeMap<String, String>,
     /// `true` allows code (a handler that is not a registered bundle, or a file other than the blueprint and directives).
     pub allow_code: Option<bool>,
     /// `true` creates the agents; absent or `false`, the preview.

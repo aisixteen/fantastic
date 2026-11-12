@@ -6,11 +6,6 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-/// The kernel starts the store: nothing to open. Answers nothing.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Boot {}
-
 /// Save a set-up under a name: the target bundle's declared record must accept it (every field known and of its type, the required ones present). A set-up carries no identity, wiring or grants. Returns {name, version, path}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -85,7 +80,6 @@ pub struct Prefer {
 }
 
 fantastic_kernel::verbs! {
-    "boot" => Boot,
     "persist_record" => PersistRecord,
     "forget_record" => ForgetRecord,
     "load_tree" => LoadTree,

@@ -9,8 +9,10 @@ use fantastic_kernel::inquiry::Held;
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct Record {
     /// The file bridge the leg reads and writes the client's MCP config through; absent, the config is left alone.
+    #[schemars(length(min = 1))]
     pub file_bridge_id: Option<String>,
     /// The config's path on that bridge (e.g. `.mcp.json`); required when `file_bridge_id` is set.
+    #[schemars(length(min = 1))]
     pub mcp_config_file: Option<String>,
     /// The questions held for the person, open until answered (written by the leg).
     pub open_inquiries: Option<Vec<Held>>,

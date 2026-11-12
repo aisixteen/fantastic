@@ -170,7 +170,7 @@ pub async fn ensure(kernel: &Arc<Kernel>, port: Option<u16>) -> Result<u16, Stri
     }
     // `web`'s boot mounts its children and then listens: last, and only when it
     // was made here (a hydrated host is listening already).
-    let mut boots = vec![CANVAS_PAGE, HOME_WS, WEB_LOADER, HOME];
+    let mut boots = vec![HOME_WS, WEB_LOADER, HOME];
     if fresh_web {
         boots.push(WEB);
     }

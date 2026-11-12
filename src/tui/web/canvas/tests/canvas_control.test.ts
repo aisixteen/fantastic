@@ -103,11 +103,9 @@ test("a body that calls an agent the cell is not granted SAYS so, with the fix",
   assert.equal(u["grants_missing"], undefined);
 });
 
-test("the page kernel's docs answer the page agents' verbs (documentPage)", async () => {
-  const { documentPage } = await import("../src/bundles/verb_docs.ts");
+test("the page kernel's docs answer the page agents' verbs, rendered from their declarations", async () => {
   const k = page();
   await call(k, { type: "place", kind: "html", id: "h", x: 0, y: 0 });
-  documentPage(k);
   const d = (await k.send([{ target: "kernel", payload: { type: "docs", of: "view_root" } as Payload }]))[0]!.result as Payload;
   assert.ok(Object.keys(d["verbs"] as object).includes("wire"), JSON.stringify(d));
   const h = (await k.send([{ target: "kernel", payload: { type: "docs", of: "h", verb: "set_html" } as Payload }]))[0]!.result as Payload;

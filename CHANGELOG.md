@@ -287,9 +287,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   `%LOCALAPPDATA%\fantastic\logs`). The home kernel's folder is `<home>/app`,
   its workdir and its state dir (was `<home>/.fantastic/app`, with its state
   in `<home>/.fantastic/app/.fantastic`). The home was `~/.config/fantastic`.
-  Nothing moves by itself: `fantastic migrate-home` moves an older layout's
-  files (`--dry-run` prints the moves), and refuses while a fantastic or the app
-  runs or a target exists.
+  Nothing moves by itself.
 - Every runtime's disk bootstrap refuses a workdir whose `.fantastic` is the
   fantastic home: `<dir>: its .fantastic is the fantastic home (<home>) — run
   fantastic in a project folder`.

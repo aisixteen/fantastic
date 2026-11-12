@@ -287,7 +287,6 @@ fantastic [canvas] ai BACKEND     # the root AI `ai`: vllm -p PORT | ollama -p P
 fantastic [canvas] run CMD [ARGS] # your own program from $PATH in a terminal (with canvas: a terminal cell)
 fantastic mcp                     # MCP over stdio (tools `reflect`, `send`); attaches to a running kernel, or runs it
 fantastic send '<item json>'      # one call into the running kernel; `$env:NAME` values come from this shell, marked secret
-fantastic migrate-home [--dry-run] # move an older layout's files into ~/.fantastic
 ```
 
 These words are **recipes**: each adds its agents only if they are missing, then
@@ -320,7 +319,7 @@ content (`html`, `gl`).
 - **html cells** run sandboxed (null origin) unless `trusted: true`. Their only
   way out is the connector: `fantastic.send`, `emit`, `onMessage`, `watch`. An AI
   builds them with the view's verbs (`docs of=<view id>`).
-- **Canvases** are flat peers. `new_canvas` makes one, and
+- **Canvases** are flat peers. A canvas node makes another (read its `docs`), and
   `?canvas=<node id>` opens it. Each has its own page kernel and shows only its
   own subtree. A tab under 768px wide draws the cells as one column, any other
   as the free canvas; the layout moves cells, never the agents.
@@ -375,18 +374,6 @@ Each project keeps its own state in its own `.fantastic/`.
 No `.fantastic` is nested in the home, so a fantastic is never run in `~`
 itself: its `.fantastic` would be the home, and every runtime refuses that.
 
-**Moving from an older layout.** Earlier versions kept these files in
-`~/.config/fantastic/` (the registry, `agents/ai_agent/saved/` and
-`agents/ai_agent/keys/`) and `~/.fantastic/credentials/`. Nothing moves by
-itself; stop every fantastic and the app, then:
-
-```sh
-fantastic migrate-home --dry-run   # print every move
-fantastic migrate-home             # move them
-```
-
-It refuses, and moves nothing, when a target already exists, a fantastic is
-running, or the app is open. Each file keeps its permissions.
 
 ### How the CLI is tested
 

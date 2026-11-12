@@ -62,7 +62,7 @@ test("a view sets its background agent's source, and it persists with that agent
     // AS THE VIEW: the background's parent reaches it by the grants on both ends
     const via = async (relay: string, inner: Record<string, unknown>): Promise<Payload> =>
       (await k.send([{ target: relay, payload: { type: "relay", to: "background", inner } as unknown as Payload }]))[0]!.result as Payload;
-    assert.deepEqual(await via("view_root", { type: "set_bg", source: SRC }), { ok: true, bytes: SRC.length });
+    assert.deepEqual(await via("view_root", { type: "set_bg", bytes: SRC }), { ok: true, bytes: SRC.length });
     assert.equal(k.get("background")?.meta["bg_source"], SRC);
     // a SIBLING panel holds no grant
     const refused = await via("panel", { type: "get_bg" });
@@ -88,11 +88,11 @@ test("a view sets its background agent's source, and it persists with that agent
   }
 });
 
-test("set_bg refuses an empty or missing source, naming the arg", async () => {
+test("set_bg refuses a missing or mistyped source, naming the arg", async () => {
   const { k } = page();
-  for (const payload of [{ type: "set_bg" }, { type: "set_bg", source: "  " }, { type: "set_bg", source: 3 }]) {
+  for (const [payload, reason] of [[{ type: "set_bg" }, "missing_arg"], [{ type: "set_bg", bytes: 3 }, "bad_arg"]] as const) {
     const r = (await k.send([{ target: "background", payload: payload as unknown as Payload }]))[0]!.result as Payload;
-    assert.equal(r["reason"], "bad_arg");
+    assert.equal(r["reason"], reason);
     assert.equal(r["arg"], "bytes", "the body is `bytes`, verbatim");
   }
   assert.equal(k.get("background")?.meta["bg_source"], undefined, "nothing was written");

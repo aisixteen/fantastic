@@ -196,11 +196,11 @@ fn version(bytes: &[u8]) -> String {
     d.iter().map(|b| format!("{b:02x}")).collect::<String>()[..16].to_string()
 }
 
+/// Is `n` a name `forget_record` would take: its declared `name` (one pattern, in the
+/// verb's declaration) read by the shared engine, for a name found on disk.
 pub(crate) fn valid_name(n: &str) -> bool {
-    let mut cs = n.chars();
-    matches!(cs.next(), Some(c) if c.is_ascii_alphanumeric())
-        && n.len() <= 64
-        && cs.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    let verb = verbs::VERBS.iter().find(|v| v.name == "forget_record").expect("forget_record is declared");
+    fantastic_kernel::verbs::validate("forget_record", verb.schema(), &json!({"name": n})).is_ok()
 }
 
 /// Write `bytes` to `path` atomically, created `0600`.
@@ -338,7 +338,7 @@ impl UserHomeStore {
     fn reflect(&self) -> Value {
         json!({
             "handler_module": HANDLER_MODULE,
-            "sentence": "The user's saved set-ups: named agent-record blueprints in the home dir (~/.fantastic), applied by the CLI when it creates an agent.",
+            "sentence": MAN,
             "dir": self.home.as_ref().map(|h| saved_dir(h).display().to_string()).ok(),
         })
     }
@@ -370,7 +370,6 @@ impl Handler for UserHomeStore {
 
     async fn handle(&self, _agent_id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
         let out = match call {
-            verbs::Call::Boot(_) => return Ok(None),
             verbs::Call::Reflect(_) => return Ok(Some(self.reflect())),
             verbs::Call::PersistRecord(a) => self.persist(a, kernel),
             verbs::Call::ForgetRecord(a) => self.forget(a),

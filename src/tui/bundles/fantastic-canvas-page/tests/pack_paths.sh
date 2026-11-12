@@ -39,7 +39,6 @@ else echo "FAIL: lib pack.sh must zip via zip.sh" >&2; FAIL=1; fi
 # ── 2. canvas pack.sh against a stub library, in a throwaway tree ───────────
 mkdir -p "$T/src/tui/web/canvas/scripts" "$T/src/lib/ts/scripts"
 cp "$CANVAS_PACK" "$T/src/tui/web/canvas/scripts/pack.sh"
-: > "$T/src/tui/web/canvas/readme.md"
 cat > "$T/src/lib/ts/scripts/pack.sh" <<'STUB'
 #!/bin/sh
 # stub packer: stages $(dirname ZIP)/pack/bundle.min.js like the real one.

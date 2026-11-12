@@ -84,7 +84,7 @@ fn files() -> &'static BTreeMap<String, Vec<u8>> {
 pub struct CanvasPageBundle;
 
 fn read_stream(a: &verbs::ReadStream) -> (Value, Option<Vec<u8>>) {
-    let path = a.path.trim_start_matches('/');
+    let path = a.path.as_str();
     let Some(bytes) = files().get(path) else {
         return (
             json!({
@@ -95,7 +95,7 @@ fn read_stream(a: &verbs::ReadStream) -> (Value, Option<Vec<u8>>) {
         );
     };
     let size = bytes.len() as u64;
-    let offset = a.offset.unwrap_or(0).min(size);
+    let offset = a.offset.min(size);
     let length = a.length.unwrap_or(size - offset);
     let end = offset.saturating_add(length).min(size);
     let body = bytes[offset as usize..end as usize].to_vec();
@@ -108,6 +108,7 @@ fn read_stream(a: &verbs::ReadStream) -> (Value, Option<Vec<u8>>) {
 fn reflect(agent_id: &AgentId) -> Value {
     json!({
         "id": agent_id.as_str(),
+        "sentence": MAN,
         "files": files().keys().collect::<Vec<_>>(),
     })
 }
@@ -144,8 +145,6 @@ impl Handler for CanvasPageBundle {
     ) -> Result<Reply, BundleError> {
         Ok(Some(match call {
             verbs::Call::Reflect(_) => reflect(agent_id),
-            verbs::Call::Boot(_) => json!({"booted": true}),
-            verbs::Call::List(_) => json!({"files": files().keys().collect::<Vec<_>>()}),
             // Text-only callers get the head; the bytes ride a binary reply.
             verbs::Call::ReadStream(a) => read_stream(&a).0,
         }))
@@ -172,17 +171,14 @@ mod tests {
     use super::*;
 
     fn rs(path: &str, offset: Option<u64>, length: Option<u64>) -> verbs::ReadStream {
-        verbs::ReadStream { path: path.into(), offset, length }
+        verbs::ReadStream { path: path.into(), offset: offset.unwrap_or(0), length }
     }
 
     #[test]
     fn the_embedded_page_is_the_pack_and_its_index() {
         let f = files();
-        assert!(f.contains_key("bundle.min.js") && f.contains_key("readme.md") && f.contains_key("index.html"));
+        assert!(f.contains_key("bundle.min.js") && f.contains_key("index.html"));
         assert!(f["bundle.min.js"].len() > 500_000, "vendors are inlined");
-        // the readme stamps the sha256 of the bundle it ships (verify-before-serve)
-        let readme = String::from_utf8_lossy(&f["readme.md"]);
-        assert!(readme.contains("expected: "), "the pack stamped the readme");
     }
 
     #[test]
@@ -239,7 +235,7 @@ mod tests {
         let kernel = kernel_with("canvas_page");
         let r = ask(&kernel, "canvas_page", json!({"type": "zzz_nope"})).await.0;
         assert_eq!(r["reason"], "unhandled", "{r}");
-        for n in ["boot", "list", "read_stream", "reflect"] {
+        for n in ["read_stream", "reflect"] {
             assert!(r["error"].as_str().unwrap().contains(n), "{n} in {r}");
         }
         for v in verbs::VERBS {
@@ -252,17 +248,17 @@ mod tests {
         assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("path")), "{r}");
         let r = ask(&kernel, "canvas_page", json!({"type": "read_stream", "path": "index.html", "offset": "0"})).await.0;
         assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("offset")), "{r}");
+        let r = ask(&kernel, "canvas_page", json!({"type": "read_stream", "path": "/index.html"})).await.0;
+        assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("path")), "{r}");
     }
 
     #[tokio::test]
-    async fn boot_list_reflect_and_read_stream_answer() {
+    async fn reflect_and_read_stream_answer() {
         let kernel = kernel_with("canvas_page");
-        assert_eq!(ask(&kernel, "canvas_page", json!({"type": "boot"})).await.0, json!({"booted": true}));
-        let listed = ask(&kernel, "canvas_page", json!({"type": "list"})).await.0;
-        assert!(listed["files"].as_array().unwrap().iter().any(|f| f == "index.html"), "{listed}");
         let r = ask(&kernel, "canvas_page", json!({"type": "reflect"})).await.0;
         assert_eq!(r["id"], "canvas_page", "{r}");
-        let (head, body) = ask(&kernel, "canvas_page", json!({"type": "read_stream", "path": "/index.html", "length": 6})).await;
+        assert!(r["files"].as_array().unwrap().iter().any(|f| f == "index.html"), "{r}");
+        let (head, body) = ask(&kernel, "canvas_page", json!({"type": "read_stream", "path": "index.html", "length": 6})).await;
         assert_eq!(head["next_offset"], json!(6), "{head}");
         assert_eq!(body.unwrap().bytes, INDEX_HTML.as_bytes()[..6]);
         // the declaration the web host reads off the record names `read_stream`

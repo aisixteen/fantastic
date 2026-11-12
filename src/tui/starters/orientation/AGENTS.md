@@ -20,19 +20,18 @@ A tree of agents; everything is one verb — `send(target, payload) → reply`.
   kernel from a shell.
 
 ## Look, then call
-- `reflect` (target `kernel`, `tree: ids`) — the whole tree, the bundles, the peers.
-- How to call any agent: send `kernel` `{type: docs, of: <id>}`.
+- `reflect` (target `kernel`) — the whole tree, the bundles, the peers.
+- How to call any agent: `docs` of it, sent to `kernel`.
 - The CANVAS page is a second kernel: its agents are `<page guid>|<id>` (the
-  guid is in reflect's peers). E.g. the background:
-  send `<guid>|background` `{type: set_bg, bytes: <three.js source>}`.
+  guid is in reflect's peers); `docs` of one says how to call it.
 
 ## Building an agentic system here
-- Make every agent with a `create_agent` call to `kernel` (send `kernel`
-  `{type: create_agent, handler_module: <a bundle reflect lists>, …}`).
+- Make every agent with a `create_agent` call to `kernel` (`docs of=kernel` says how;
+  `handler_module` is a bundle reflect lists).
 - Write a bundle (`bundles/<name>/` beside this file) ONLY when the user asks for
   one. Otherwise build from the bundles reflect already lists.
-- After adding (or updating) an html cell, size it to its content: send the
-  view `<page guid>|<view id>` `{type: fit, id: <cell id>}`.
+- After adding (or updating) an html cell, size it to its content: the view's `docs`
+  names the verb.
 
 The canvas is for DEVELOPMENT. A new agent may start SEALED (`exec_bridge`:
 `ingress_rule: deny_ingress`) — every call refused, grants or not. When you

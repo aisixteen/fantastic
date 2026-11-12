@@ -84,17 +84,15 @@ loader.
 ## Packing an app's page
 
 The library has no page, so `scripts/pack.sh` has no default: the app names its
-entry, its output zip and its readme (the revive guide that travels inside the
-zip), plus any esbuild flags its page needs:
+entry and its output zip, plus any esbuild flags its page needs:
 
 ```sh
-sh src/lib/ts/scripts/pack.sh <entry.ts> <out.zip> <readme.md> [esbuild flags …]
+sh src/lib/ts/scripts/pack.sh <entry.ts> <out.zip> [esbuild flags …]
 ```
 
 It verifies the vendored esbuild against `tools/esbuild/SHA256SUMS`, bundles the
 entry (and everything it imports — this library included) into ONE
-`bundle.min.js` + map, stamps the bundle's sha256 into the readme copy, and zips
-the three. No npm, no node. The canvas: `sh src/tui/web/canvas/scripts/pack.sh`
+`bundle.min.js` + map, and zips the two. No npm, no node. The canvas: `sh src/tui/web/canvas/scripts/pack.sh`
 → `src/tui/web/canvas/dist/canvas.zip`.
 
 ## Tests

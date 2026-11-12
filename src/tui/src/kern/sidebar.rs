@@ -21,8 +21,6 @@ pub mod verbs;
 /// declared verbs (`docs`, `reflect`).
 const MAN: &str = "The canvas's left column as one html view its `reflect` returns: the kernels, the agent tree with each chat's state, what waits for the person, and the project's files.";
 
-const SENTENCE: &str = "The canvas's left column: kernels, the agent tree with each chat's state, what waits for the person, and the project's files. One html view; reflect only.";
-
 const VIEW: &str = include_str!("sidebar_view.html");
 
 /// What the view calls: the root's reflect and listing, the person's open inquiries, the
@@ -72,13 +70,12 @@ impl Handler for SidebarBundle {
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         match call {
-            verbs::Call::Boot(_) => Ok(None),
             verbs::Call::Reflect(_) => {
                 let id = agent_id.as_str();
                 Ok(Some(json!({
                     "id": id,
                     "handler_module": HANDLER_MODULE,
-                    "sentence": SENTENCE,
+                    "sentence": MAN,
                     "view": {"kind": "html", "bytes": VIEW.replace("{{agent}}", id), "calls": calls(id)},
                 })))
             }
@@ -91,7 +88,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn the_sidebar_answers_boot_and_reflect_and_refuses_the_rest_by_declaration() {
+    async fn the_sidebar_answers_reflect_and_refuses_the_rest_by_declaration() {
         let kernel = Arc::new(Kernel::new());
         kernel.register(fantastic_kernel::Agent::new(
             AgentId::from("sidebar"),
@@ -110,11 +107,10 @@ mod tests {
                     .0
             }
         };
-        assert_eq!(ask(json!({"type": "boot"})).await, None);
         let r = ask(json!({"type": "launch"})).await.unwrap();
         assert_eq!(r["reason"], "unhandled", "{r}");
-        assert!(r["error"].as_str().unwrap().contains("boot") && r["error"].as_str().unwrap().contains("reflect"), "{r}");
-        for v in ["boot", "reflect"] {
+        assert!(r["error"].as_str().unwrap().contains("reflect"), "{r}");
+        for v in ["reflect"] {
             let r = ask(json!({"type": v, "zzz_unknown": 1})).await.unwrap();
             assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("zzz_unknown")), "{v}: {r}");
         }

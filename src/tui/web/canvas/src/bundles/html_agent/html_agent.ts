@@ -1,7 +1,9 @@
 import { str } from "../../lib.ts";
 import { bodyText } from "../body_text.ts";
 import { htmlRefusal } from "../html_check.ts";
-import { panelRelay } from "../panel_relay.ts";
+import { docsOf, entry } from "../declared.ts";
+import type { Declared } from "../declared.ts";
+import { PANEL_VERBS, panelRelay } from "../panel_relay.ts";
 import { grantHint } from "./grant_hint.ts";
 import type { FolderBase, Handler, Json, Kernel } from "../../lib.ts";
 
@@ -28,7 +30,17 @@ export function htmlBodyOf(kernel: Kernel, id: string): string {
   return FOLDER_HTML.get(String(a?.record().handler_module ?? "")) ?? "";
 }
 
-export const htmlAgent: Handler = (id, payload, kernel): Json | Promise<Json> => {
+/** The verbs an html cell answers. */
+export const HTML_DECL: Declared = {
+  get_html: { doc: "The body (its own, else its bundle's). Returns {id, html}.", args: {} },
+  set_html: {
+    doc: "This cell's own body from now on; reloads the panel. Returns {ok, bytes, grants_missing?, hint?}.",
+    args: { bytes: { type: "bytes", required: true, doc: "The html body, verbatim." } },
+  },
+  ...PANEL_VERBS,
+};
+
+const htmlHandler: Handler = (id, payload, kernel): Json | Promise<Json> => {
   // the panel's own calls, as this agent (`panel_relay.ts`)
   const relayed = panelRelay(kernel, payload);
   if (relayed !== undefined) return relayed;
@@ -36,15 +48,10 @@ export const htmlAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
   const body = (): string => htmlBodyOf(kernel, id);
   switch (str(payload, "type")) {
     case "get_html":
-    case "render_html":
       return { id, html: body() };
     case "set_html": {
-      // the body is `bytes` (ai_core's convention: a body of text is VERBATIM
-      // under `bytes`); `html` is its name here too. A parsed object is not html.
-      const raw = bodyText(payload["bytes"] ?? payload["html"]);
-      if (raw === null) {
-        return { error: "html_agent: set_html needs the html as a string", reason: "bad_arg", arg: "bytes", hint: "send the markup as <bytes>…</bytes> — verbatim, nothing escaped" };
-      }
+      // the body is `bytes` (ai_core's convention: a body of text is VERBATIM under `bytes`)
+      const raw = bodyText(payload["bytes"]) as string;
       const bad = htmlRefusal("html_agent", raw);
       if (bad !== null) return bad as Json;
       const html = raw;
@@ -53,21 +60,11 @@ export const htmlAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       return { ok: true, bytes: html.length, ...grantHint(id, html, agent?.meta["can_call"]) } as Json;
     }
     default:
-      return {
-        error: `html_agent: unknown verb '${str(payload, "type")}' — a cell answers get_html and set_html only`,
-        reason: "unhandled",
-        verb: str(payload, "type"),
-        hint: "placing, moving, updating, wiring (grants) and removing cells are the VIEW's verbs: send place / move / update / wire / remove to the view (view_root), naming this cell by id",
-      };
+      throw new Error(`html_agent: ${str(payload, "type")} is declared and not handled`);
   }
 };
 
-/** Register the html_agent bundle so `handler_module: "html_agent.ts"` records
- *  run locally (and weak-load elsewhere). */
-const HTML_VERBS = {
-  get_html: "No args. {id, html}: the body (its own, else its bundle's).",
-  set_html: "args: bytes:str (req — the html body, verbatim). This cell's own body from now on.",
-};
+export const htmlAgent: Handler = entry("html_agent", HTML_DECL, htmlHandler);
 
 /** The html BASE: a folder that extends it is an html agent whose body starts
  *  as the folder's `html`. */
@@ -79,9 +76,9 @@ export const htmlFolderBase: FolderBase = (name, _folder, spec) => {
     if (bad !== null) return `html: ${String(bad["error"])}`;
   }
   FOLDER_HTML.set(name, typeof html === "string" ? html : "");
-  return { handler: htmlAgent, verbs: { ...HTML_VERBS }, readme: String(spec["sentence"]) };
+  return { handler: htmlAgent, verbs: docsOf(HTML_DECL), readme: String(spec["sentence"]) };
 };
 
 export function registerHtmlAgent(kernel: Kernel): void {
-  kernel.registerBundle(HTML_AGENT, htmlAgent, { ...HTML_VERBS }, { folderBundle: htmlFolderBase });
+  kernel.registerBundle(HTML_AGENT, htmlAgent, docsOf(HTML_DECL), { folderBundle: htmlFolderBase });
 }

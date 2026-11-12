@@ -100,11 +100,9 @@ impl HomeBundle {
         if self.runner.polling() {
             return json!({"booted": true});
         }
-        let meta = kernel
-            .agents
-            .get(agent_id)
-            .map(|a| a.value().record().meta.clone())
-            .unwrap_or_default();
+        let Some(meta) = kernel.agents.get(agent_id).map(|a| a.value().record().meta.clone()) else {
+            return not_found(format!("home: boot: no agent {agent_id:?}"), "id");
+        };
         let (pages, selection) = match kept_of(&meta) {
             Ok(kept) => kept,
             Err(r) => return r,
@@ -130,7 +128,7 @@ pub(crate) fn reflection(runner: &Runner, id: &str, home: Option<String>) -> Val
     let mode = runner.read(|h| h.config().mode);
     json!({
         "id": id,
-        "sentence": "The home: your fantastics, listed with their status — open a folder, start, stop, remove; the open pages and the selection are kept across restarts. Watch `home` for its `state`.",
+        "sentence": MAN,
         "protocol": PROTOCOL,
         "mode": mode_name(mode),
         "home": home,
@@ -143,7 +141,7 @@ pub(crate) fn reflection(runner: &Runner, id: &str, home: Option<String>) -> Val
 fn kept_of(meta: &Map<String, Value>) -> Result<(Vec<String>, Option<String>), Value> {
     let kept: record::Record = serde_json::from_value(Value::Object(meta.clone()))
         .map_err(|e| bad(format!("home: its record's `pages` or `selection` is malformed: {e}"), "pages"))?;
-    Ok((kept.pages.unwrap_or_default(), kept.selection))
+    Ok((kept.pages, kept.selection))
 }
 
 fn bad(text: String, arg: &str) -> Value {

@@ -2,7 +2,6 @@ import { TIPS_HTML } from "../tips/tips_html.ts";
 import { BACKGROUNDS, grantsFor } from "../backgrounds/backgrounds_agent.ts";
 import { backgroundsView } from "../backgrounds/backgrounds_view.ts";
 import { DEFAULT_BG_SOURCE } from "./default_bg.ts";
-import { documentPage } from "../verb_docs.ts";
 import { Agent, Host } from "../../lib.ts";
 import type { Json, Kernel, Payload } from "../../lib.ts";
 import { CANVAS_CSS } from "./styles.ts";
@@ -1932,9 +1931,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   });
 
   kernel.addStateSubscriber(renderSoon);
-  // every page agent is documented as it appears (the page kernel's `docs`)
-  documentPage(kernel);
-  kernel.addStateSubscriber(() => documentPage(kernel));
   ensureBackground(ROOT_VIEW);
   if (isContainer(look, viewed)) ensureBackground(viewed);
   // THE SKIN (`skin_agent.ts`): its read-only agent, made once; the skin shown

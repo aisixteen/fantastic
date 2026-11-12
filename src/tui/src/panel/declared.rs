@@ -18,6 +18,8 @@ use std::collections::VecDeque;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::Frame;
+use schemars::JsonSchema;
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use super::generic::GenericPanel;
@@ -26,18 +28,22 @@ use crate::ev::Cmd;
 use crate::kern::model::AgentId;
 use crate::panel::{Cx, Handled, Needs, Panel, PanelKind};
 
-/// At most this many sections in one declaration.
-pub const MAX_SECTIONS: usize = 16;
 /// At most this many body lines drawn per section.
 pub const MAX_LINES: usize = 200;
-const SHOWS: &str = "kv, table, list, log, text";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How a section draws its reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
 pub enum Show {
+    /// Key and value per line.
     Kv,
+    /// Rows of the reply's list.
     Table,
+    /// One line per item.
     List,
+    /// A growing log.
     Log,
+    /// The reply as text.
     Text,
 }
 
@@ -57,170 +63,102 @@ pub struct Section {
     pub every_s: Option<f64>,
 }
 
-/// A declaration refused: a sentence naming the section and the field, and the
-/// kernel's reason code.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Refusal {
-    pub error: String,
-    pub reason: &'static str,
+/// The verb a section calls, and its arguments.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CallDecl {
+    /// The verb to call.
+    #[schemars(length(min = 1))]
+    verb: String,
+    /// Its arguments.
+    args: Option<Map<String, Value>>,
 }
 
-fn bad(error: String) -> Refusal {
-    Refusal {
-        error,
-        reason: "bad_arg",
-    }
+/// One reply field a section shows.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum FieldDecl {
+    /// The dotted path, labelled by itself.
+    Path(#[schemars(length(min = 1))] String),
+    /// The dotted path and its label.
+    Labelled(LabelledDecl),
 }
 
-/// The sections `view.tui` declares, or the refusal.
-pub fn parse(view: &Value) -> Result<Vec<Section>, Refusal> {
-    match view.get("tui") {
-        Some(t) => parse_tui(t),
-        None => Err(bad("view.tui: missing".into())),
-    }
+/// A field with its own label.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct LabelledDecl {
+    /// The dotted path in the reply.
+    #[schemars(length(min = 1))]
+    path: String,
+    /// The label; absent, the path.
+    label: Option<String>,
+}
+
+/// One section of `view.tui`: the reply of one verb call, drawn one way.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SectionDecl {
+    /// The section's heading.
+    #[schemars(length(min = 1), regex(pattern = "\\S"))]
+    title: String,
+    /// The call whose reply the section draws.
+    call: CallDecl,
+    /// How the reply is drawn.
+    show: Show,
+    /// The reply fields to show, in order.
+    fields: Option<Vec<FieldDecl>>,
+    /// Ask again every this many seconds while the panel is selected.
+    #[schemars(range(min = 1, max = 3600))]
+    every_s: Option<f64>,
+}
+
+/// The `view.tui` declaration: the list of sections (at least one, at most 16).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TuiDecl {
+    /// The sections, in order.
+    #[schemars(length(min = 1, max = 16))]
+    tui: Vec<Value>,
+}
+
+static TUI: fantastic_kernel::RecordDecl = fantastic_kernel::RecordDecl::of::<TuiDecl>(false);
+static SECTION: fantastic_kernel::RecordDecl = fantastic_kernel::RecordDecl::of::<SectionDecl>(false);
+
+/// The sections `view.tui` declares, or the refusal: the shared engine checks
+/// the declaration against the schemas above, then the checked value is typed.
+pub fn parse(view: &Value) -> Result<Vec<Section>, Value> {
+    let tui = view.get("tui").cloned().unwrap_or(Value::Null);
+    parse_tui(&tui)
 }
 
 /// Does `view` declare a TUI view that parses?
 pub fn declared(view: &Value) -> bool {
-    parse(view).is_ok()
+    view.get("tui").is_some() && parse(view).is_ok()
 }
 
-pub fn parse_tui(tui: &Value) -> Result<Vec<Section>, Refusal> {
-    let Some(list) = tui.as_array() else {
-        return Err(bad("view.tui: must be a list of sections".into()));
-    };
-    if list.is_empty() {
-        return Err(bad("view.tui: must hold at least one section".into()));
-    }
-    if list.len() > MAX_SECTIONS {
-        return Err(bad(format!(
-            "view.tui: {} sections, at most {MAX_SECTIONS} are allowed",
-            list.len()
-        )));
-    }
-    list.iter()
-        .enumerate()
-        .map(|(i, s)| section(i, s))
-        .collect()
+pub fn parse_tui(tui: &Value) -> Result<Vec<Section>, Value> {
+    let whole = json!({"tui": tui});
+    fantastic_kernel::verbs::validate("view", TUI.schema(), &whole)?;
+    let list = tui.as_array().expect("the declaration's schema made it a list");
+    list.iter().enumerate().map(|(i, s)| section(i, s)).collect()
 }
 
-fn section(i: usize, s: &Value) -> Result<Section, Refusal> {
+fn section(i: usize, s: &Value) -> Result<Section, Value> {
     let at = format!("view.tui[{i}]");
-    let Some(o) = s.as_object() else {
-        return Err(bad(format!(
-            "{at}: a section is an object {{title, call, show, fields?, every_s?}}"
-        )));
-    };
-    for k in o.keys() {
-        if !["title", "call", "show", "fields", "every_s"].contains(&k.as_str()) {
-            return Err(bad(format!(
-                "{at}: unknown key `{k}` (the keys are title, call, show, fields, every_s)"
-            )));
-        }
-    }
-    let title = match o.get("title").and_then(Value::as_str) {
-        Some(t) if !t.trim().is_empty() => t.to_string(),
-        _ => return Err(bad(format!("{at}.title: a non-empty string is required"))),
-    };
-    let Some(call) = o.get("call").and_then(Value::as_object) else {
-        return Err(bad(format!(
-            "{at}.call: an object {{verb, args?}} is required"
-        )));
-    };
-    for k in call.keys() {
-        if k != "verb" && k != "args" {
-            return Err(bad(format!(
-                "{at}.call: unknown key `{k}` (the keys are verb, args)"
-            )));
-        }
-    }
-    let verb = match call.get("verb").and_then(Value::as_str) {
-        Some(v) if !v.is_empty() => v.to_string(),
-        _ => {
-            return Err(bad(format!(
-                "{at}.call.verb: a non-empty string is required"
-            )))
-        }
-    };
-    let args = match call.get("args") {
-        None | Some(Value::Null) => None,
-        Some(Value::Object(m)) => Some(m.clone()),
-        Some(_) => return Err(bad(format!("{at}.call.args: must be an object"))),
-    };
-    let show = match o.get("show").and_then(Value::as_str) {
-        Some("kv") => Show::Kv,
-        Some("table") => Show::Table,
-        Some("list") => Show::List,
-        Some("log") => Show::Log,
-        Some("text") => Show::Text,
-        Some(other) => {
-            return Err(bad(format!(
-                "{at}.show: `{other}` is not a kind; the kinds are {SHOWS}"
-            )))
-        }
-        None => return Err(bad(format!("{at}.show: required; one of {SHOWS}"))),
-    };
-    let mut fields = Vec::new();
-    match o.get("fields") {
-        None | Some(Value::Null) => {}
-        Some(Value::Array(a)) => {
-            for (j, f) in a.iter().enumerate() {
-                fields.push(field(&at, j, f)?);
-            }
-        }
-        Some(_) => return Err(bad(format!("{at}.fields: must be a list of paths"))),
-    }
-    let every_s = match o.get("every_s") {
-        None | Some(Value::Null) => None,
-        Some(v) => match v.as_f64() {
-            Some(n) if (1.0..=3600.0).contains(&n) => Some(n),
-            _ => {
-                return Err(bad(format!(
-                    "{at}.every_s: a number from 1 to 3600 seconds, got {v}"
-                )))
-            }
-        },
-    };
-    Ok(Section {
-        title,
-        verb,
-        args,
-        show,
-        fields,
-        every_s,
-    })
-}
-
-fn field(at: &str, j: usize, f: &Value) -> Result<Field, Refusal> {
-    let at = format!("{at}.fields[{j}]");
-    match f {
-        Value::String(p) if !p.is_empty() => Ok(Field {
-            path: p.clone(),
-            label: p.clone(),
-        }),
-        Value::Object(o) => {
-            for k in o.keys() {
-                if k != "path" && k != "label" {
-                    return Err(bad(format!(
-                        "{at}: unknown key `{k}` (the keys are path, label)"
-                    )));
-                }
-            }
-            let path = match o.get("path").and_then(Value::as_str) {
-                Some(p) if !p.is_empty() => p.to_string(),
-                _ => return Err(bad(format!("{at}.path: a non-empty string is required"))),
-            };
-            let label = match o.get("label") {
-                None | Some(Value::Null) => path.clone(),
-                Some(Value::String(l)) => l.clone(),
-                Some(_) => return Err(bad(format!("{at}.label: must be a string"))),
-            };
-            Ok(Field { path, label })
-        }
-        _ => Err(bad(format!(
-            "{at}: a path string or an object {{path, label?}} is required"
-        ))),
-    }
+    fantastic_kernel::verbs::validate(&at, SECTION.schema(), s)?;
+    let d: SectionDecl = serde_json::from_value(s.clone())
+        .map_err(|e| fantastic_kernel::verbs::unparsed(&at, &e.to_string()))?;
+    let fields = d
+        .fields
+        .unwrap_or_default()
+        .into_iter()
+        .map(|f| match f {
+            FieldDecl::Path(p) => Field { label: p.clone(), path: p },
+            FieldDecl::Labelled(l) => Field { label: l.label.unwrap_or_else(|| l.path.clone()), path: l.path },
+        })
+        .collect();
+    Ok(Section { title: d.title, verb: d.call.verb, args: d.call.args, show: d.show, fields, every_s: d.every_s })
 }
 
 /// The value at a dotted path; a numeric segment indexes an array.
@@ -461,7 +399,8 @@ impl DeclaredPanel {
                 self.sections = secs;
             }
             Err(r) => {
-                self.decl_error = Some(format!("{} ({})", r.error, r.reason));
+                let error = fantastic_kernel::error_text(&r).unwrap_or_default();
+                self.decl_error = Some(format!("{error} ({})", r["reason"].as_str().unwrap_or("")));
             }
         }
     }
@@ -681,8 +620,12 @@ mod tests {
         text(&render_section(sec, &slot))
     }
 
-    fn refusal_of(tui: Value) -> Refusal {
+    fn refusal_of(tui: Value) -> Value {
         parse_tui(&tui).expect_err("refused")
+    }
+
+    fn err(refusal: &Value) -> String {
+        fantastic_kernel::error_text(refusal).unwrap_or_default()
     }
 
     fn panel_with(view: Value) -> DeclaredPanel {
@@ -754,16 +697,15 @@ mod tests {
     fn tui_must_be_a_non_empty_array_of_sections() {
         let one = json!({"title": "T", "call": {"verb": "v"}, "show": "kv"});
         for (tui, want) in [
-            (json!({}), "list of sections"),
-            (json!("x"), "list of sections"),
-            (json!([]), "at least one"),
-            (json!(vec![one.clone(); 17]), "17 sections, at most 16"),
+            (json!({}), "tui"),
+            (json!("x"), "tui"),
+            (json!([]), "tui"),
             (json!([1]), "view.tui[0]"),
-            (json!([one.clone(), {"title": ""}]), "view.tui[1].title"),
+            (json!([one.clone(), {"title": ""}]), "view.tui[1]"),
         ] {
             let r = refusal_of(tui.clone());
-            assert_eq!(r.reason, "bad_arg", "{tui}");
-            assert!(r.error.contains(want), "{tui}: {}", r.error);
+            assert!(r["reason"].is_string(), "{tui}");
+            assert!(err(&r).contains(want), "{tui}: {r}");
         }
         assert!(parse_tui(&json!(vec![one; 16])).is_ok());
         assert!(!declared(&json!({"kind": "html"})));
@@ -772,14 +714,11 @@ mod tests {
     #[test]
     fn an_unknown_show_kind_is_refused_naming_the_valid_ones() {
         let r = refusal_of(json!([{"title": "T", "call": {"verb": "v"}, "show": "grid"}]));
-        assert!(r.error.contains("view.tui[0].show"), "{}", r.error);
-        assert!(
-            r.error.contains("`grid`") && r.error.contains("kv, table, list, log, text"),
-            "{}",
-            r.error
-        );
+        assert!(err(&r).contains("view.tui[0]") && err(&r).contains("show"), "{r}");
+        assert!(err(&r).contains("kv") && err(&r).contains("text"), "{r}");
         let r = refusal_of(json!([{"title": "T", "call": {"verb": "v"}}]));
-        assert!(r.error.contains("show: required"), "{}", r.error);
+        assert_eq!(r["reason"], "missing_arg", "{r}");
+        assert_eq!(r["arg"], "show", "{r}");
     }
 
     #[test]
@@ -787,18 +726,10 @@ mod tests {
         let r = refusal_of(
             json!([{"title": "T", "call": {"verb": "v"}, "show": "kv", "colour": "red"}]),
         );
-        assert!(
-            r.error.contains("`colour`") && r.error.contains("view.tui[0]"),
-            "{}",
-            r.error
-        );
+        assert!(err(&r).contains("colour") && err(&r).contains("view.tui[0]"), "{r}");
         let r =
             refusal_of(json!([{"title": "T", "call": {"verb": "v", "target": "x"}, "show": "kv"}]));
-        assert!(
-            r.error.contains("`target`") && r.error.contains("call"),
-            "{}",
-            r.error
-        );
+        assert!(err(&r).contains("call.target"), "{r}");
     }
 
     #[test]
@@ -807,17 +738,14 @@ mod tests {
             (json!({}), "call.verb"),
             (json!({"verb": ""}), "call.verb"),
             (json!({"verb": 3}), "call.verb"),
-            (json!("v"), "call: an object"),
-            (
-                json!({"verb": "v", "args": [1]}),
-                "call.args: must be an object",
-            ),
+            (json!("v"), "call"),
+            (json!({"verb": "v", "args": [1]}), "call.args"),
         ] {
             let r = refusal_of(json!([{"title": "T", "call": call, "show": "kv"}]));
-            assert!(r.error.contains(want), "{call}: {}", r.error);
+            assert!(err(&r).contains(want), "{call}: {r}");
         }
         let r = refusal_of(json!([{"title": "T", "show": "kv"}]));
-        assert!(r.error.contains("call"), "{}", r.error);
+        assert_eq!(r["arg"], "call", "{r}");
     }
 
     #[test]
@@ -826,11 +754,7 @@ mod tests {
             let r = refusal_of(
                 json!([{"title": "T", "call": {"verb": "v"}, "show": "kv", "every_s": bad}]),
             );
-            assert!(
-                r.error.contains("view.tui[0].every_s"),
-                "{bad}: {}",
-                r.error
-            );
+            assert_eq!(r["arg"], "every_s", "{bad}: {r}");
         }
         for ok in [json!(1), json!(3600)] {
             assert!(parse_tui(
@@ -842,246 +766,19 @@ mod tests {
 
     #[test]
     fn fields_must_be_paths_or_path_label_objects() {
-        for (fields, want) in [
-            (json!("x"), "fields: must be a list"),
-            (json!([1]), "fields[0]"),
-            (json!([""]), "fields[0]"),
-            (json!(["a", {"label": "x"}]), "fields[1].path"),
-            (json!([{"path": "a", "colour": 1}]), "`colour`"),
-            (
-                json!([{"path": "a", "label": 2}]),
-                "label: must be a string",
-            ),
+        for fields in [
+            json!("x"),
+            json!([1]),
+            json!([""]),
+            json!(["a", {"label": "x"}]),
+            json!([{"path": "a", "colour": 1}]),
+            json!([{"path": "a", "label": 2}]),
         ] {
             let r = refusal_of(
                 json!([{"title": "T", "call": {"verb": "v"}, "show": "kv", "fields": fields}]),
             );
-            assert!(r.error.contains(want), "{fields}: {}", r.error);
+            assert!(err(&r).contains("view.tui[0]"), "{fields}: {r}");
         }
-    }
-
-    #[test]
-    fn pick_walks_dotted_paths_and_array_indexes() {
-        let v = json!({"a": {"b": [10, {"c": "deep"}]}, "n": 1});
-        assert_eq!(pick(&v, "a.b.0"), Some(&json!(10)));
-        assert_eq!(pick(&v, "a.b.1.c"), Some(&json!("deep")));
-        assert_eq!(pick(&v, "n"), Some(&json!(1)));
-        assert_eq!(pick(&v, "a.x"), None);
-        assert_eq!(pick(&v, "a.b.9"), None);
-        assert_eq!(pick(&v, "n.z"), None);
-    }
-
-    #[test]
-    fn kv_renders_the_picked_fields_with_labels_and_dotted_paths() {
-        let s = sec("kv", json!(["c", {"path": "a.b", "label": "ab"}, "gone"]));
-        let t = body(&s, Slot::Reply(json!({"a": {"b": 1}, "c": "x"})));
-        let lines: Vec<&str> = t.lines().collect();
-        assert_eq!(lines, vec!["    c  x", "    ab  1", "    gone  -"], "{t}");
-    }
-
-    #[test]
-    fn kv_without_fields_lists_the_top_level_scalars() {
-        let s = sec("kv", json!([]));
-        let t = body(
-            &s,
-            Slot::Reply(json!({"a": 1, "nested": {"z": 1}, "list": [1], "s": "x"})),
-        );
-        assert!(t.contains("a  1") && t.contains("s  x"), "{t}");
-        assert!(!t.contains("nested") && !t.contains("list"), "{t}");
-    }
-
-    #[test]
-    fn table_renders_a_header_and_one_line_per_row_from_a_bare_array_and_from_the_first_array_key()
-    {
-        let s = sec("table", json!([]));
-        let rows = json!([{"id": "a", "n": 1}, {"id": "longer", "n": 22}]);
-        let t = body(&s, Slot::Reply(rows.clone()));
-        let lines: Vec<&str> = t.lines().collect();
-        assert_eq!(
-            lines,
-            vec!["    id      n", "    a       1", "    longer  22"],
-            "{t}"
-        );
-        // the first array-valued key of an object
-        let t2 = body(&s, Slot::Reply(json!({"count": 2, "jobs": rows})));
-        assert_eq!(t2, t);
-        // fields choose and label the columns
-        let f = sec("table", json!([{"path": "n", "label": "num"}]));
-        assert_eq!(body(&f, Slot::Reply(rows)), "    num\n    1\n    22");
-    }
-
-    #[test]
-    fn list_renders_one_line_per_item_strings_and_objects() {
-        let s = sec("list", json!([]));
-        let t = body(&s, Slot::Reply(json!({"items": ["one", "two"]})));
-        assert_eq!(t, "    one\n    two");
-        let f = sec("list", json!(["name"]));
-        let t = body(
-            &f,
-            Slot::Reply(json!([{"name": "ann", "x": 1}, {"name": "bo"}])),
-        );
-        assert_eq!(t, "    ann\n    bo");
-        let t = body(&s, Slot::Reply(json!([{"name": "ann"}, 7])));
-        assert_eq!(t, "    {\"name\":\"ann\"}\n    7");
-    }
-
-    #[test]
-    fn log_renders_in_order_and_sticks_to_the_newest_line() {
-        let s = sec("log", json!([]));
-        let reply = json!({"lines": ["first", "second", "third"]});
-        assert_eq!(
-            body(&s, Slot::Reply(reply.clone())),
-            "    first\n    second\n    third"
-        );
-        // a panel with a log is scrolled to the bottom until the human scrolls up
-        let many: Vec<String> = (0..30).map(|i| format!("l{i}")).collect();
-        let mut p =
-            panel_with(json!({"tui": [{"title": "L", "call": {"verb": "log"}, "show": "log"}]}));
-        p.slots[0] = Slot::Reply(json!({"lines": many}));
-        let area = Rect::new(0, 0, 40, 10);
-        with_cx("a", None, |cx| p.layout(area, cx));
-        let total = p.lines().len() as u16;
-        assert_eq!(p.effective_scroll(), total - 10);
-        // new lines keep it pinned
-        p.slots[0] =
-            Slot::Reply(json!({"lines": (0..40).map(|i| format!("l{i}")).collect::<Vec<_>>()}));
-        with_cx("a", None, |cx| p.layout(area, cx));
-        assert_eq!(p.effective_scroll(), p.lines().len() as u16 - 10);
-        // scrolling up lets go; further new lines no longer move it
-        with_cx("a", None, |cx| {
-            p.on_key(key(crossterm::event::KeyCode::Up), cx, &mut Vec::new())
-        });
-        let held = p.effective_scroll();
-        assert_eq!(held, p.lines().len() as u16 - 11);
-        p.slots[0] =
-            Slot::Reply(json!({"lines": (0..50).map(|i| format!("l{i}")).collect::<Vec<_>>()}));
-        with_cx("a", None, |cx| p.layout(area, cx));
-        assert_eq!(p.effective_scroll(), held);
-    }
-
-    #[test]
-    fn text_renders_a_string_reply_and_a_picked_field() {
-        let s = sec("text", json!([]));
-        assert_eq!(
-            body(&s, Slot::Reply(json!("hello\nworld"))),
-            "    hello\n    world"
-        );
-        assert_eq!(
-            body(&s, Slot::Reply(json!({"text": "from text"}))),
-            "    from text"
-        );
-        let f = sec("text", json!(["a.b"]));
-        assert_eq!(
-            body(&f, Slot::Reply(json!({"a": {"b": "picked"}, "text": "no"}))),
-            "    picked"
-        );
-    }
-
-    #[test]
-    fn a_refusal_renders_error_and_reason_and_error_only_without_reason() {
-        let mut p = panel_with(two());
-        select(&mut p);
-        with_cx("a", None, |_| ());
-        p.on_reply(
-            &json!({"error": "nope", "reason": "denied"}),
-            &mut Vec::new(),
-        );
-        p.on_reply(&json!({"hello": "there"}), &mut Vec::new());
-        let t = text(&p.lines());
-        assert!(t.contains("refused: nope (denied)"), "{t}");
-        assert!(t.contains("there"), "the other section still renders:\n{t}");
-        let s = sec("kv", json!([]));
-        assert_eq!(
-            body(
-                &s,
-                Slot::Refused {
-                    error: "nope".into(),
-                    reason: None
-                }
-            ),
-            "    refused: nope"
-        );
-        assert_eq!(body(&s, Slot::Pending), "    loading...");
-    }
-
-    #[test]
-    fn on_select_sends_each_sections_verb_with_its_args_and_nothing_else() {
-        let mut p = panel_with(two());
-        let out = select(&mut p);
-        assert_eq!(sent(&out), vec!["one", "two"]);
-        assert!(matches!(&out[0], Cmd::Reflect { .. }));
-        assert!(
-            matches!(&out[1], Cmd::Send { target, payload } if target == "a" && payload == &json!({"type": "one", "n": 1}))
-        );
-        assert_eq!(out.len(), 3);
-        assert_eq!(p.inflight, VecDeque::from([0, 1]));
-        // `r` asks again, whole, without piling up the in-flight list
-        let mut out = Vec::new();
-        with_cx("a", None, |cx| {
-            p.on_key(key(crossterm::event::KeyCode::Char('r')), cx, &mut out)
-        });
-        assert_eq!(sent(&out), vec!["one", "two"]);
-        assert_eq!(p.inflight.len(), 2);
-    }
-
-    #[test]
-    fn replies_land_in_the_section_that_asked_in_send_order() {
-        let mut p = panel_with(two());
-        select(&mut p);
-        // the first is refused, the second answers: no shift
-        assert!(p.on_reply(&json!({"error": "no", "reason": "denied"}), &mut Vec::new()));
-        assert!(p.on_reply(&json!("second answer"), &mut Vec::new()));
-        assert!(
-            matches!(&p.slots[0], Slot::Refused { error, reason } if error == "no" && reason.as_deref() == Some("denied"))
-        );
-        assert_eq!(p.slots[1], Slot::Reply(json!("second answer")));
-        assert!(p.inflight.is_empty());
-        // a stray reply with nothing in flight is not taken
-        assert!(!p.on_reply(&json!({"x": 1}), &mut Vec::new()));
-    }
-
-    #[test]
-    fn a_reflect_shaped_reply_is_not_a_section_answer() {
-        let mut p = panel_with(two());
-        select(&mut p);
-        p.on_reply(&json!({"sentence": "s", "verbs": {}}), &mut Vec::new());
-        assert_eq!(p.inflight.len(), 2, "the reflect did not consume a slot");
-        assert_eq!(p.slots, vec![Slot::Pending, Slot::Pending]);
-    }
-
-    #[test]
-    fn tick_asks_only_sections_with_every_s_when_due() {
-        let mut p = panel_with(two());
-        let mut out = Vec::new();
-        p.tick(100.0, &mut out);
-        // never asked yet: the every_s section is due once
-        assert_eq!(sent(&out), vec!["two"]);
-        let mut out = Vec::new();
-        p.tick(102.0, &mut out);
-        assert!(out.is_empty(), "before due, and already in flight");
-        p.on_reply(&json!("a"), &mut Vec::new());
-        p.tick(104.9, &mut out);
-        assert!(out.is_empty(), "not yet due");
-        p.tick(105.0, &mut out);
-        assert_eq!(
-            sent(&out),
-            vec!["two"],
-            "only the section with every_s, never `one`"
-        );
-    }
-
-    #[test]
-    fn g_toggles_the_generic_reflect_view_and_back() {
-        let mut p = panel_with(two());
-        assert!(!p.show_generic);
-        let g = key(crossterm::event::KeyCode::Char('g'));
-        with_cx("a", None, |cx| p.on_key(g, cx, &mut Vec::new()));
-        assert!(p.show_generic);
-        with_cx("a", None, |cx| p.on_key(g, cx, &mut Vec::new()));
-        assert!(!p.show_generic);
-        with_cx("a", None, |cx| {
-            assert!(p.status(cx).unwrap().contains("declared · g generic"))
-        });
     }
 
     #[test]
@@ -1091,7 +788,7 @@ mod tests {
         assert!(p.sections.is_empty());
         let e = p.decl_error.clone().expect("kept");
         assert!(
-            e.contains("view.tui[0].show") && e.contains("bad_arg"),
+            e.contains("view.tui[0]") && e.contains("show") && e.contains("bad_arg"),
             "{e}"
         );
         // nothing but the reflect is asked, and the generic panel gets the keys

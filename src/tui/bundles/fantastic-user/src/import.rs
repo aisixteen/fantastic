@@ -623,7 +623,7 @@ async fn roll_back(kernel: &Arc<Kernel>, top: Option<&str>, edges: &[Edge]) {
 pub async fn import_subtree(kernel: &Arc<Kernel>, args: crate::verbs::ImportSubtree) -> Value {
     let path = args.path.as_str();
     let parent_id = args.parent_id.as_str();
-    let bind = args.bind.unwrap_or_default();
+    let bind = args.bind;
     let rel = Path::new(path);
     let Some(root) = kernel.root() else {
         return refuse("failed", "user.import_subtree: the kernel has no root");
@@ -638,11 +638,8 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, args: crate::verbs::ImportSubt
         Ok(b) => b,
         Err(e) => return refuse("failed", format!("user.import_subtree: {e}")),
     };
-    let dir = if rel.is_absolute() {
-        rel.to_path_buf()
-    } else {
-        base.join(rel)
-    };
+    // one path shape: `join` keeps an absolute path as it is and puts a relative one under the running dir
+    let dir = base.join(rel);
     if !dir.join(BLUEPRINT_FILE).is_file() {
         return refuse(
             "not_found",
