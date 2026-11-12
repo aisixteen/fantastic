@@ -613,6 +613,8 @@ dependencies = [
  "indexmap 2.14.0",
  "libc",
  "nix",
+ "schemars",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

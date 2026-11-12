@@ -1,5 +1,5 @@
 //! `sqlite_store`'s own unit tests: the record's `path` rules, the file's pragmas,
-//! the readme and the one row ram_store accepts that a file cannot hold. The verbs
+//! the one row ram_store accepts that a file cannot hold. The verbs
 //! themselves are ram_store's suite, run against both stores in
 //! `tests/conformance.rs` and `tests/contract.rs`.
 

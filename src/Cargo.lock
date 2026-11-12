@@ -765,6 +765,8 @@ dependencies = [
  "indexmap 2.14.2",
  "libc",
  "nix 0.29.0",
+ "schemars",
+ "serde",
  "serde_json",
  "tokio",
  "windows-sys 0.61.2",

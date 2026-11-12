@@ -5,6 +5,8 @@
 //! Python `exec_bridge.tools._tail` / `_grep`.
 
 use crate::jobs::{self, Job};
+use crate::verbs::{self, Stream};
+use crate::JobRef;
 use fancy_regex::Regex;
 use fantastic_bundle::{py_repr, py_splitlines, py_str};
 use fantastic_kernel::refusal::bad;
@@ -52,51 +54,19 @@ fn job_lines(job: &Job, stream: &str) -> (Vec<(u64, String, String)>, u64) {
     (rows, job.line_ring_dropped)
 }
 
-fn lines_arg(verb: &str, payload: &Value, default: i64) -> Result<usize, Value> {
-    match payload.get("lines") {
-        None => Ok(default as usize),
-        Some(Value::Number(n))
-            if n.is_i64() && (1..=MAX_LINES).contains(&n.as_i64().unwrap_or(0)) =>
-        {
-            Ok(n.as_i64().unwrap_or(default) as usize)
-        }
-        Some(_) => Err(bad(verb, "lines", &format!("an integer 1–{MAX_LINES}"))),
-    }
-}
-
-fn stream_arg(verb: &str, payload: &Value) -> Result<String, Value> {
-    match payload.get("stream") {
-        None => Ok("both".to_string()),
-        Some(Value::String(s)) if matches!(s.as_str(), "stdout" | "stderr" | "both") => {
-            Ok(s.clone())
-        }
-        Some(_) => Err(bad(verb, "stream", "one of stdout, stderr, both")),
-    }
-}
-
 fn row(r: &(u64, String, String)) -> Value {
     json!({"n": r.0, "stream": r.1, "line": r.2})
 }
 
-/// `tail {job_id, lines?, stream?}` — the last lines a job has printed so far.
-pub fn tail_reply(owner: &AgentId, payload: &Value) -> Value {
-    let jid = match crate::require_job("tail", payload) {
-        Ok(j) => j,
-        Err(e) => return e,
-    };
-    let n = match lines_arg("tail", payload, 20) {
-        Ok(n) => n,
-        Err(e) => return e,
-    };
-    let stream = match stream_arg("tail", payload) {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
+/// `tail {job_id, lines, stream}` — the last lines a job has printed so far.
+pub fn tail_reply(owner: &AgentId, jid: &JobRef, lines: i64, stream: Stream) -> Value {
+    let n = usize::try_from(lines).unwrap_or(0);
+    let stream = stream.as_str();
     let g = jobs::jobs();
     let Some(job) = jid.find(&g, owner) else {
-        return crate::no_such_job(&jid);
+        return crate::no_such_job(jid);
     };
-    let (rows, dropped) = job_lines(job, &stream);
+    let (rows, dropped) = job_lines(job, stream);
     let printed = if job.pty.is_some() {
         rows.len() as u64
     } else {
@@ -115,32 +85,20 @@ pub fn tail_reply(owner: &AgentId, payload: &Value) -> Value {
 
 /// `grep {job_id, match, lines?, stream?}` — the lines printed so far matching a
 /// regex (the last `lines` of them).
-pub fn grep_reply(owner: &AgentId, payload: &Value) -> Value {
-    let jid = match crate::require_job("grep", payload) {
-        Ok(j) => j,
-        Err(e) => return e,
-    };
-    let pat = match payload.get("match") {
-        Some(Value::String(s)) if !s.is_empty() => s.clone(),
-        _ => return bad("grep", "match", "a regex string"),
-    };
+pub fn grep_reply(owner: &AgentId, a: &verbs::Grep) -> Value {
+    let jid = JobRef::of(a.job_id);
+    let pat = a.pattern.clone();
     let rx = match Regex::new(&pat) {
         Ok(r) => r,
         Err(e) => return bad("grep", "match", &format!("a valid regex ({e})")),
     };
-    let n = match lines_arg("grep", payload, 50) {
-        Ok(n) => n,
-        Err(e) => return e,
-    };
-    let stream = match stream_arg("grep", payload) {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
+    let n = usize::try_from(a.lines).unwrap_or(0);
+    let stream = a.stream.as_str();
     let g = jobs::jobs();
     let Some(job) = jid.find(&g, owner) else {
         return crate::no_such_job(&jid);
     };
-    let (rows, dropped) = job_lines(job, &stream);
+    let (rows, dropped) = job_lines(job, stream);
     let hits: Vec<&(u64, String, String)> = rows
         .iter()
         .filter(|r| rx.is_match(&r.2).unwrap_or(false))

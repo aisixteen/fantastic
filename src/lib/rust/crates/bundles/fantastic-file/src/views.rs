@@ -235,12 +235,12 @@ fn scope(verb: &str, kind: &str, own: &str, rel: Option<&str>) -> Result<String,
 
 /// python `send_bridge`: one send to the bridge, as the calling view. A send that
 /// never settled with a reply is a refusal of its own, never a silent empty answer.
-pub(crate) async fn send_bridge(kernel: &Arc<Kernel>, bridge: &str, payload: Value) -> Value {
-    let verb = payload
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+pub(crate) async fn send_bridge(
+    kernel: &Arc<Kernel>,
+    bridge: &str,
+    verb: &str,
+    payload: Value,
+) -> Value {
     let out = kernel
         .send(vec![Item::new(AgentId::from(bridge), payload)])
         .await
@@ -525,7 +525,7 @@ async fn watch(
     }
     let inbox = relay_inbox(&view.0);
     let rx = kernel.ensure_inbox(&inbox);
-    let r = send_bridge(kernel, bridge, json!({"type": "watch_path", "path": own})).await;
+    let r = send_bridge(kernel, bridge, "watch_path", json!({"type": "watch_path", "path": own})).await;
     if r.get("error").is_some() {
         kernel.remove_inbox(&inbox);
         return r;
@@ -561,6 +561,7 @@ pub(crate) async fn stop(kernel: &Arc<Kernel>, relays: &Relays, view: &AgentId) 
     send_bridge(
         kernel,
         &st.bridge,
+        "unwatch_path",
         json!({"type": "unwatch_path", "path": st.path}),
     )
     .await;
@@ -610,7 +611,7 @@ pub(crate) async fn dispatch(
                 if let Some(n) = a.limit {
                     body.insert("limit".into(), json!(n));
                 }
-                send_bridge(kernel, &bridge, Value::Object(body)).await
+                send_bridge(kernel, &bridge, "read", Value::Object(body)).await
             }
         },
         (FILE, Call::Write(a)) => match scope("write", FILE, &own, a.path.as_deref()) {
@@ -625,7 +626,7 @@ pub(crate) async fn dispatch(
                 if let Some(m) = &a.if_match {
                     body.insert("if_match".into(), json!(m));
                 }
-                send_bridge(kernel, &bridge, Value::Object(body)).await
+                send_bridge(kernel, &bridge, "write", Value::Object(body)).await
             }
         },
         (FILE | FOLDER, Call::Dynamic(c)) if c.name == "watch" => {
@@ -634,7 +635,7 @@ pub(crate) async fn dispatch(
         (FOLDER, Call::List(a)) => match scope("list", FOLDER, &own, a.path.as_deref()) {
             Err(e) => e,
             Ok(target) => {
-                send_bridge(kernel, &bridge, json!({"type": "list", "path": target})).await
+                send_bridge(kernel, &bridge, "list", json!({"type": "list", "path": target})).await
             }
         },
         (FOLDER, Call::Dynamic(c)) if c.name == "reveal" => {
@@ -685,7 +686,7 @@ async fn reveal(kernel: &Arc<Kernel>, own: &str, bridge: &str, a: &verbs::Reveal
         Some((d, _)) => d.to_string(),
         None => ".".to_string(),
     };
-    let listed = send_bridge(kernel, bridge, json!({"type": "list", "path": parent})).await;
+    let listed = send_bridge(kernel, bridge, "list", json!({"type": "list", "path": parent})).await;
     if listed.get("error").is_some() {
         return listed;
     }

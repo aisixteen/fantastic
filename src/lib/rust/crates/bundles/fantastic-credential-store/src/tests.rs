@@ -14,7 +14,6 @@ use fantastic_kernel::test_support::as_agent;
 use fantastic_kernel::test_support::register_root_loader;
 use fantastic_kernel::test_support::symlink;
 use fantastic_kernel::{Item, Outcome};
-use std::path::Path;
 
 const KEY: &str = "sk-live-0123456789abcdef";
 const KEY2: &str = "sk-live-rotated-fedcba98";
@@ -399,12 +398,9 @@ async fn a_ref_is_declared_with_its_host() {
                "refs": {"nohost": {}}}),
     )
     .await;
-    assert_eq!(
-        r,
-        json!({"error": "refs['nohost'].host is required — the one host this ref's value \
-                         may be sent to",
-               "reason": "invalid_meta", "id": "creds"})
-    );
+    assert_eq!(r["reason"], json!("missing_arg"), "{r}");
+    assert_eq!(r["arg"], json!("refs.nohost.host"), "{r}");
+    assert!(store_meta(&f.k, "refs").get("nohost").is_none());
 }
 
 /// The env backend is read-only: its value is the variable, so `forget` — which
@@ -456,17 +452,9 @@ async fn a_file_others_can_read_is_refused_loud() {
         .contains("must be a regular file"));
 }
 
-fn relative(p: &str) -> String {
-    format!(
-        "file={} must be an absolute path (starting with / or ~) — a relative path is refused",
-        py_repr(p)
-    )
-}
-
-/// `file` is `/…` or `~…` — never relative to the kernel's running dir. A
-/// relative one is refused AT THE WRITE (create and update alike), and a record
-/// that carries one past the write (an in-process register) is refused at use,
-/// loud, with nothing read or written.
+/// `file` is `/…` or `~…` — never relative to the kernel's running dir. The
+/// declaration's pattern refuses a relative one AT THE WRITE (create and update
+/// alike), by the field's name.
 #[tokio::test]
 async fn the_file_is_an_absolute_path_a_relative_one_is_refused() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -480,17 +468,18 @@ async fn the_file_is_an_absolute_path_a_relative_one_is_refused() {
     .expect("boot")
     .kernel;
     let root = k.root().unwrap().id.clone();
-    for rel in ["creds.yaml", "sub/creds.yaml", "./creds.yaml"] {
+    for rel in ["creds.yaml", "sub/creds.yaml", "./creds.yaml", " /creds.yaml"] {
         let r = op(
             &k,
             json!({"type": "create_agent", "parent_id": root.0, "id": "rel",
                    "handler_module": HANDLER_MODULE, "file": rel}),
         )
         .await;
-        assert_eq!(
-            r,
-            json!({"error": relative(rel), "reason": "invalid_meta"}),
-            "{rel}"
+        assert_eq!(r["reason"], json!("bad_arg"), "{rel}: {r}");
+        assert_eq!(r["arg"], json!("file"), "{rel}: {r}");
+        assert!(
+            r["error"].as_str().unwrap().contains("must be string matching"),
+            "{rel}: {r}"
         );
         assert!(!k.agents.contains_key(&AgentId::from("rel")));
     }
@@ -507,47 +496,17 @@ async fn the_file_is_an_absolute_path_a_relative_one_is_refused() {
         json!({"type": "update_agent", "id": "creds", "file": "creds.yaml"}),
     )
     .await;
-    assert_eq!(
-        r,
-        json!({"error": relative("creds.yaml"), "reason": "invalid_meta", "id": "creds"})
-    );
+    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    assert_eq!(r["arg"], json!("file"), "{r}");
     assert_eq!(store_meta(&k, "file"), json!(abs));
-    // `~…` passes the write (no disk is touched to judge it)
-    let b = CredentialStoreBundle::default();
-    let v = |m: Value| b.validate_meta(m.as_object().unwrap(), &Map::new());
-    assert_eq!(
-        v(json!({"file": "~/.fantastic/user/credentials/x.yaml"})),
-        None
-    );
-    // past the write: refused at use, nothing written under the running dir
-    k.register(Agent::new(
-        AgentId::from("sneaky"),
-        Some(HANDLER_MODULE.to_string()),
-        Some(root.clone()),
-        json!({"file": "creds.yaml", "refs": {"r": {"host": "h"}}})
-            .as_object()
-            .cloned()
-            .unwrap(),
-        std::path::PathBuf::new(),
-        false,
-    ));
-    let out = k
-        .send(vec![Item::new(
-            AgentId::from("sneaky"),
-            json!({"type": "set", "ref": "r", "fields": {"api_key": KEY}}),
-        )])
-        .await
-        .remove(0);
-    assert_eq!(out.status.as_str(), "failed", "{}", out.result);
-    assert_eq!(
-        out.result["error"],
-        json!(format!(
-            "ValueError: credential_store: {}",
-            relative("creds.yaml")
-        ))
-    );
-    assert!(!k.work_dir().unwrap().join("creds.yaml").exists());
-    assert!(!tmp.path().join("creds.yaml").exists());
+    // `~…` is an absolute spelling too
+    let r = op(
+        &k,
+        json!({"type": "update_agent", "id": "creds",
+               "file": "~/.fantastic/user/credentials/x.yaml"}),
+    )
+    .await;
+    assert_eq!(r["updated"], json!(true), "{r}");
 }
 
 // ─── the keychain backend (an in-memory keychain — never the real one) ───────
@@ -855,46 +814,36 @@ async fn a_bad_record_is_refused_at_the_write() {
     assert_eq!(r["arg"], json!("backend"), "{r}");
 }
 
-#[test]
-fn validate_meta_texts_cover_what_the_declaration_cannot_say() {
-    let b = CredentialStoreBundle::default();
-    let v = |m: Value| b.validate_meta(m.as_object().unwrap(), &Map::new());
-    assert_eq!(v(json!({"backend": null})), None);
-    assert_eq!(
-        v(json!({"file": " creds.yaml"})).as_deref(),
-        Some(
-            "file=' creds.yaml' must be an absolute path (starting with / or ~) — a relative \
-             path is refused"
-        )
-    );
-    assert_eq!(v(json!({"file": "/abs/creds.yaml"})), None);
-    assert_eq!(
-        v(json!({"refs": {" ": {}}})).as_deref(),
-        Some("a ref must be a non-empty string")
-    );
-    assert_eq!(
-        v(json!({"refs": {"r": 1}})).as_deref(),
-        Some("refs['r'] must be a map")
-    );
-    assert_eq!(
-        v(json!({"refs": {"r": {"host": "://"}}})).as_deref(),
-        Some("refs['r'].host must be a non-empty host")
-    );
-    for nohost in [json!({}), json!({"host": null})] {
-        assert_eq!(
-            v(json!({"refs": {"r": nohost}})).as_deref(),
-            Some("refs['r'].host is required — the one host this ref's value may be sent to")
-        );
+/// The record's refs are a declared map: a ref that is not a map, has no host,
+/// has a host that names none, or names an empty variable is refused by its
+/// dotted name; a good one is stored.
+#[tokio::test]
+async fn the_refs_declaration_judges_each_entry_by_name() {
+    let f = mk(json!({})).await;
+    let refuse = |refs: Value| {
+        let k = Arc::clone(&f.k);
+        async move {
+            op(&k, json!({"type": "update_agent", "id": "creds", "refs": refs})).await
+        }
+    };
+    for (refs, reason, arg) in [
+        (json!({"r": 1}), "bad_arg", "refs.r"),
+        (json!({"r": {}}), "missing_arg", "refs.r.host"),
+        (json!({"r": {"host": null}}), "missing_arg", "refs.r.host"),
+        (json!({"r": {"host": "://"}}), "bad_arg", "refs.r.host"),
+        (json!({"r": {"host": "  "}}), "bad_arg", "refs.r.host"),
+        (json!({"r": {"host": "h", "env": {"api_key": ""}}}), "bad_arg", "refs.r.env.api_key"),
+        (json!({"r": {"host": "h", "fields": [""]}}), "bad_arg", "refs.r.fields"),
+        (json!({"r": {"host": "h", "extra": 1}}), "bad_arg", "refs.r.extra"),
+    ] {
+        let r = refuse(refs.clone()).await;
+        assert_eq!(r["reason"], json!(reason), "{refs}: {r}");
+        assert_eq!(r["arg"], json!(arg), "{refs}: {r}");
     }
-    assert_eq!(
-        v(json!({"refs": {"r": {"host": "h", "env": {"api_key": ""}}}})).as_deref(),
-        Some("refs['r'].env must map field names to variable names")
-    );
-    assert_eq!(
-        v(json!({"refs": {"r": {"host": "h", "fields": ["k"],
-                                "env": {"k": "V"}}}})),
-        None
-    );
+    let ok = refuse(json!({"r": {"host": "https://api.example/v1", "fields": ["k"],
+                                "env": {"k": "V"}}}))
+    .await;
+    assert_eq!(ok["updated"], json!(true), "{ok}");
 }
 
 #[tokio::test]
@@ -908,7 +857,7 @@ async fn reflect_is_posture_never_a_value_or_a_ref_name() {
     assert_eq!(r["refs"], json!(1));
     assert_eq!(r["file"], json!(f.file().to_string_lossy()));
     assert_eq!(
-        crate::declared::VERBS.iter().map(|v| v.name).collect::<Vec<_>>(),
+        crate::verbs::VERBS.iter().map(|v| v.name).collect::<Vec<_>>(),
         ["set", "get", "list", "forget"]
     );
     let text = r.to_string();
@@ -933,10 +882,22 @@ async fn missing_args_and_unknown_verbs_are_refused_by_the_agents_entry() {
         assert_eq!(out["reason"], json!(reason), "{payload}: {out}");
         assert_eq!(out["arg"], json!(arg), "{payload}: {out}");
     }
-    // a value that is not text is refused by the bundle's own check of the map
+    // a value that is not non-empty text is refused by name, in the map's entry
+    for (fields, arg) in [(json!({"k": 1}), "fields.k"), (json!({"k": ""}), "fields.k")] {
+        let bad = call(
+            &f.k,
+            json!({"type": "set", "ref": "r", "fields": fields}),
+            None,
+        )
+        .await
+        .result;
+        assert_eq!(bad["reason"], json!("bad_arg"), "{bad}");
+        assert_eq!(bad["arg"], json!(arg), "{bad}");
+    }
+    // a map with no entry at all is the one thing the declaration cannot say
     let bad = call(
         &f.k,
-        json!({"type": "set", "ref": "r", "fields": {"k": 1}}),
+        json!({"type": "set", "ref": "r", "fields": {}}),
         None,
     )
     .await
