@@ -204,7 +204,7 @@ async fn a_recall_reply_refolds_after_the_next_answer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_reflect_reply_folds_over_the_reference_limit_and_get_returns_it_whole() {
+async fn a_reflect_reply_never_folds() {
     use crate::constants::REFERENCE_FOLD_AT;
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "af_reflect").await;
@@ -224,21 +224,9 @@ async fn a_reflect_reply_folds_over_the_reference_limit_and_get_returns_it_whole
     tokio::time::sleep(Duration::from_millis(300)).await;
     say(&kernel, &agent, "next").await;
     assert!(until_passes(&s, 2).await);
-    let kept = rows(&kernel, &agent).await;
-    let stored = kept
-        .iter()
-        .find(|r| r["content"].as_str() == Some(text.as_str()))
-        .expect("the store row is whole");
     let seen = s.request(1);
-    assert!(
-        seen.contains("[folded · reflect reply from notes · ~1504 tokens · reflect again for the current state]"),
-        "{}",
-        &seen[seen.len().saturating_sub(900)..]
-    );
-    assert!(!seen.contains(&"x".repeat(1000)));
-    assert!(!seen.contains("get: "), "no recall pointer on a reflect anchor");
-    let r = verb(&kernel, &agent, json!({"type": "recall", "id": stored["id"]})).await;
-    assert_eq!(r["messages"][0]["content"].as_str(), Some(text.as_str()));
+    assert!(seen.contains(&"x".repeat(1000)), "still whole after it is answered");
+    assert!(!seen.contains("[folded · reflect reply"), "a reflect never folds");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

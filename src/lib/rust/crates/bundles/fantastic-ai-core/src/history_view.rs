@@ -505,9 +505,9 @@ fn recalled_what(store: &[Value], tag_line: &str, agent: &str, nth: usize) -> St
 }
 
 /// The token count over which a block of this `verb` folds once answered:
-/// reference replies (`reflect`, `docs`) fold sooner than any other body (#634).
+/// `docs` replies fold sooner than any other body (#634); a `reflect` never folds.
 fn fold_limit(verb: &str) -> usize {
-    if matches!(verb, "reflect" | "docs") {
+    if verb == "docs" {
         REFERENCE_FOLD_AT
     } else {
         AUTOFOLD_AT
@@ -516,7 +516,7 @@ fn fold_limit(verb: &str) -> usize {
 
 /// Whether a user turn's content will fold once it is answered: it opens with a
 /// reply tag and carries a recall reply or a body over its verb's fold limit
-/// ([`AUTOFOLD_AT`] tokens; [`REFERENCE_FOLD_AT`] for `reflect` and `docs`).
+/// ([`AUTOFOLD_AT`] tokens; [`REFERENCE_FOLD_AT`] for `docs`; a `reflect` never folds).
 #[must_use]
 pub fn will_fold(content: &str) -> bool {
     parse_reply_tag(content).is_some() && reply_blocks(content).into_iter().any(block_folds)
@@ -526,7 +526,7 @@ pub fn will_fold(content: &str) -> bool {
 /// verb's fold limit.
 fn block_folds(block: &str) -> bool {
     let verb = parse_reply_tag(block).map_or("", |(_, v)| v);
-    verb == "recall" || body_tokens(body_of(block)) > fold_limit(verb)
+    verb == "recall" || (verb != "reflect" && body_tokens(body_of(block)) > fold_limit(verb))
 }
 
 /// The pid a reply block names (`[reply to <pid> · …]`), when it is a number.
@@ -675,11 +675,11 @@ pub fn autofold(
                             ),
                             kept_summary(row, reply_pid(b)),
                         )
-                    } else if x > fold_limit(verb) {
+                    } else if verb != "reflect" && x > fold_limit(verb) {
                         changed = true;
                         let head = cap120(body.split('\n').next().unwrap_or("").trim());
                         let summary = kept_summary(row, reply_pid(b));
-                        if matches!(verb, "reflect" | "docs") {
+                        if verb == "docs" {
                             // re-called, never recalled: no `get:` pointer
                             with_kept(
                                 format!(
@@ -1079,11 +1079,16 @@ mod tests {
     }
 
     #[test]
-    fn reflect_and_docs_replies_fold_over_the_reference_limit_only() {
+    fn docs_replies_fold_over_the_reference_limit_and_a_reflect_never_folds() {
         use crate::constants::REFERENCE_FOLD_AT;
         let over = "x".repeat(REFERENCE_FOLD_AT * 4 + 4);
         let at = "x".repeat(REFERENCE_FOLD_AT * 4);
-        for verb in ["reflect", "docs"] {
+        // a reflect stays whole at any size, answered or not
+        let big = format!("[reply to 3 \u{b7} ai reflect]\nhead line\n{}", "x".repeat(AUTOFOLD_AT * 8));
+        assert!(!will_fold(&big));
+        let kept = [row(7, "user", &big), row(8, "assistant", "ok")];
+        assert_eq!(autofold(&kept, 0, &kept[0], None).1, "whole");
+        for verb in ["docs"] {
             let tag = format!("[reply to 3 \u{b7} ai {verb}]\n");
             assert!(will_fold(&format!("{tag}{over}")), "{verb}");
             assert!(!will_fold(&format!("{tag}{at}")), "{verb}");

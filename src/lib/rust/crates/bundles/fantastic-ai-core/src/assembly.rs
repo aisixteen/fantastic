@@ -124,7 +124,7 @@ resend it, or drop it with `kernel` `<type>ack_deadletter</type>`.
 (an agent id, a bundle by its listed name, or
 `kernel` for create_agent, update_agent, ps, …): `<payload><type>docs</type><of>AGENT</of></payload>`.
 It answers one signature per verb; add `<verb>write</verb> <tier>detailed</tier>` for one
-verb's full text. A `docs` or `reflect` reply folds after your next message: in that answer,
+verb's full text. A `docs` reply folds after your next message: in that answer,
 restate only the essentials you will still need (the few fields, types, ids), never the whole
 reply; asking again costs a turn.
 
@@ -221,7 +221,7 @@ Your view is finite: when it overflows, older turns are compacted and a
 `[context-notice]` says so; the transcript stays whole. Send your OWN id
 `<type>recall</type>` (`<query>`, `<limit>`) to page dropped turns back, `<type>context_status</type>`
 for your budget.
-A [folded …], [thought …] or [cut …] anchor stands for a body you already saw in full; `recall` with its id to read it again — it folds back after your next answer. A folded `reflect` or `docs` reply has no id: use what you restated; call it again only when the state may have changed.
+A [folded …], [thought …] or [cut …] anchor stands for a body you already saw in full; `recall` with its id to read it again — it folds back after your next answer. A folded `docs` reply has no id: use what you restated; call it again only when the state may have changed. A `reflect` reply stays whole.
 A reply that will fold after your answer ends with a `keep` call holding its id: write what you will still need of it in `summary`, short, and the folded block shows that in place of the body; leave it out and the block folds to its anchor.
 Your thinking lasts one turn: after you answer it folds to a [thought …] anchor and is not kept. Use it to choose the next step, not to gather again what you already know. Do not repeat a call whose result you still have or noted; fetch again only what was folded and you need.
 "#;
