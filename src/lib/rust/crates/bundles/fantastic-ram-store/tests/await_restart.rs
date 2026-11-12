@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
-use fantastic_kernel::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+use fantastic_kernel::bundle::{BundleError, BundleRegistry, Handler, Reply};
 use fantastic_kernel::test_support::{as_agent, register_root_loader, wire};
 use fantastic_kernel::{AgentId, Item, Kernel, Outcome};
 use fantastic_ram_store::RamStoreBundle;
@@ -29,25 +29,48 @@ impl Seen {
 
 struct Rec(Arc<Seen>);
 
+fantastic_kernel::stand_in_verbs!(rec_verbs {
+    ReportV "report" { state: Option<String>, result: Option<serde_json::Value> },
+    SendV "send" {
+        wait_id: Option<i64>,
+        label: Option<String>,
+        done: Option<Vec<serde_json::Value>>,
+        missing: Option<Vec<String>>,
+        timed_out: Option<bool>,
+        text: Option<String>,
+    },
+});
+
 #[async_trait]
-impl Bundle for Rec {
+impl Handler for Rec {
+    type Call = rec_verbs::Call;
     fn name(&self) -> &str {
         "rec.tools"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        rec_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        rec_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        if payload["type"] == json!("boot") {
-            return Ok(None);
-        }
+        let payload = call.payload();
         self.0
              .0
             .lock()
             .unwrap()
-            .push((id.0.clone(), payload.clone()));
+            .push((id.0.clone(), payload));
         Ok(Some(json!({"ok": true})))
     }
 }

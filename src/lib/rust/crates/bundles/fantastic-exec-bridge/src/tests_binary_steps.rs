@@ -11,7 +11,7 @@
 //! A child of `tests`, so it drives the same helpers.
 
 use super::*;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::{Blob, Step};
 use std::sync::Mutex;
 
@@ -24,34 +24,56 @@ type Got = Arc<Mutex<Vec<Value>>>;
 /// `x.y` beside a nested `x` → `y`, so the reply crosses the same way back.
 struct BinEcho(Got);
 
+fantastic_kernel::stand_in_verbs!(echo_verbs {
+    TakeV "take" {
+        a: Option<serde_json::Value>,
+        #[serde(rename = "a.b")]
+        a_b: Option<serde_json::Value>,
+        items: Option<Vec<serde_json::Value>>,
+    },
+    ChunksV "chunks" { items: Option<Vec<serde_json::Value>> },
+});
+
 #[async_trait::async_trait]
-impl Bundle for BinEcho {
+impl Handler for BinEcho {
+    type Call = echo_verbs::Call;
     fn name(&self) -> &str {
         "binpath_echo.tools"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        echo_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        echo_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         _id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         Ok(Some(
-            json!({"error": format!("text channel: {}", payload["type"])}),
+            json!({"error": format!("text channel: {}", call.payload()["type"])}),
         ))
     }
     async fn handle_binary(
         &self,
         id: &AgentId,
-        header: Value,
+        call: Self::Call,
         body: Option<Blob>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<Blob>), BundleError> {
-        // the kernel dispatches EVERY call here — lifecycle verbs are not a take
-        if matches!(
-            header["type"].as_str(),
-            Some("boot" | "shutdown" | "reflect")
-        ) {
-            return Ok((self.handle(id, &header, kernel).await?, None));
+        // the call as the guest sent it: the keys it carried, beside the body's own
+        let header = call.payload();
+        // `reflect` is no take
+        if matches!(call, echo_verbs::Call::Reflect(_)) {
+            return Ok((self.handle(id, call, kernel).await?, None));
         }
         let mut keys: Vec<String> = header
             .as_object()

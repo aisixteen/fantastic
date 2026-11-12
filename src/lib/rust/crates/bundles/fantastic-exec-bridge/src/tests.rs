@@ -9,6 +9,7 @@
 //! tests need no interpreter at all.
 
 use super::*;
+use fantastic_kernel::Parse;
 use fantastic_kernel::Agent;
 use fantastic_kernel::Item;
 use serde_json::Map;
@@ -125,21 +126,6 @@ async fn mk_kernel_with(tmp: &TempDir, extra: Map<String, Value>) -> (Arc<Kernel
     (kernel, AgentId::from(pid.as_str()))
 }
 
-#[test]
-fn readme_present_and_titled() {
-    assert!(!README.is_empty());
-    assert!(README.contains("exec_bridge"));
-}
-
-/// The readme teaches the general-purpose COMMAND model, gated by the allowlist,
-/// and is honest that it is not a sandbox.
-#[test]
-fn readme_states_the_command_model() {
-    assert!(README.contains("COMMAND"), "{README}");
-    assert!(README.contains("allowlist"), "{README}");
-    assert!(README.contains("Not a sandbox"), "{README}");
-}
-
 // ─── the command gate: a REGEX allowlist ─────────────────────────
 
 #[test]
@@ -179,12 +165,8 @@ fn command_permitted_fullmatches_and_refuses() {
 }
 
 #[test]
-fn validate_meta_refuses_a_bad_allowed() {
+fn validate_meta_refuses_a_broken_allowed_regex() {
     let b = ExecBridgeBundle;
-    // `allowed` must be a non-empty list of compilable regexes.
-    let mut empty = Map::new();
-    empty.insert("allowed".to_string(), json!([]));
-    assert!(b.validate_meta(&empty, &Map::new()).is_some());
     let mut broken = Map::new();
     broken.insert("allowed".to_string(), json!(["("]));
     let e = b
@@ -195,6 +177,35 @@ fn validate_meta_refuses_a_bad_allowed() {
     let mut ok = Map::new();
     ok.insert("allowed".to_string(), json!(["ls( .*)?", ".*"]));
     assert!(b.validate_meta(&ok, &Map::new()).is_none());
+}
+
+/// The record's declaration judges what a type can say: `allowed` is a non-empty list
+/// of text, `cwd` non-empty text, `env` a map of scalars, `inherit_env` a list of names.
+#[tokio::test]
+async fn the_record_declaration_shapes_the_fields() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    for (field, value, arg) in [
+        ("allowed", json!([]), "allowed"),
+        ("allowed", json!("ls"), "allowed"),
+        ("allowed", json!([7]), "allowed"),
+        ("cwd", json!(""), "cwd"),
+        ("env", json!(["A=1"]), "env"),
+        ("env", json!({"A": ["no"]}), "env.A"),
+        ("inherit_env", json!([""]), "inherit_env"),
+        ("inherit_env", json!("PATH"), "inherit_env"),
+    ] {
+        let r = kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel_state"),
+                json!({"type": "update_agent", "id": a.as_str(), field: value.clone()}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["reason"], "bad_arg", "{field}={value}: {r}");
+        assert_eq!(r["arg"], json!(arg), "{field}={value}: {r}");
+    }
 }
 
 #[test]
@@ -245,25 +256,21 @@ async fn reflect_advertises_the_allowlist_not_interpreters() {
     assert_eq!(r["running"], 0);
     // THE GATE is advertised.
     assert_eq!(r["allowed"], json!(["ls( .*)?"]));
-    assert!(r.get("wire").is_none() && r.get("verbs").is_none(), "{r}");
-    assert!(ExecBridgeBundle.notes_doc().unwrap()["wire"]
-        .as_str()
-        .unwrap_or("")
-        .contains("FANTASTIC_CTRL_FD"));
-    for v in [
-        "reflect",
-        "start",
-        "status",
-        "clear",
-        "interrupt",
-        "stop",
-        "boot",
-    ] {
-        assert!(
-            ExecBridgeBundle.verb_docs()[v].is_string(),
-            "verb {v} missing from docs"
-        );
-    }
+    // THE VERBS are rendered from the declaration: builtin ones, in declared order.
+    let names: Vec<&str> = r["verbs"].as_object().expect("verbs").keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        [
+            "boot", "start", "run", "status", "stop", "interrupt", "clear", "write", "resize",
+            "ack", "output", "tail", "grep", "paste_image", "connector", "monitor", "monitors",
+            "unmonitor", "declare_verbs", "reflect", "shutdown"
+        ],
+        "{r}"
+    );
+    assert!(
+        r["verbs"]["start"].as_str().unwrap().starts_with("args: command:string matching /\\S/?"),
+        "{r}"
+    );
 }
 
 /// EVERY refusal on `start` carries a CODE — `args`/`env`, `command`/`code` and
@@ -285,7 +292,7 @@ async fn every_start_refusal_carries_a_code() {
     let r = ask(json!({"type": "start"})).await;
     assert_eq!(
         (&r["reason"], &r["arg"]),
-        (&json!("missing_arg"), &json!("command")),
+        (&json!("missing_arg"), &json!("command | pty")),
         "{r}"
     );
     let r = ask(json!({"type": "start", "command": "echo", "args": [{"no": 1}]})).await;
@@ -731,6 +738,19 @@ async fn wait_inbox_ready(kernel: &Arc<Kernel>, owner: &AgentId, secs: u64) {
     }
 }
 
+/// Waits until the running program has declared its verbs (mail is refused by name
+/// before that).
+async fn wait_declared(owner: &AgentId, secs: u64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    while crate::mail::declared(owner).is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{owner} never declared its verbs"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 /// A bare command is found on the CHILD's `PATH` only (python `proc.resolve`): no
 /// `PATH` in the child env refuses naming it, and the kernel's own PATH is never
 /// searched — std's own lookup would fall back to it, or to `/usr/bin:/bin`.
@@ -901,10 +921,10 @@ async fn the_program_can_send_to_another_agent_and_read_the_reply() {
     );
 }
 
-/// An unknown verb is MAIL for the running program, ACKed `{queued:true}` — and
+/// A verb the program DECLARED is MAIL for it, ACKed `{queued:true}` — and
 /// delivered exactly once (the fanout already did it; re-emitting would double it).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_unknown_verb_is_queued_to_the_running_program() {
+async fn a_declared_verb_is_queued_to_the_running_program() {
     let Some(py) = find_real_python() else {
         return;
     };
@@ -914,6 +934,7 @@ async fn an_unknown_verb_is_queued_to_the_running_program() {
     // A slow cold start: the program registers its handler ~2.5 s after spawn.
     let code = r#"
 import threading, time
+kernel.send(kernel.self_id, {'type': 'declare_verbs', 'verbs': [{'name': 'ping'}]})
 time.sleep(2.5)
 seen = []
 def _on(m):
@@ -950,7 +971,7 @@ threading.Event().wait()
 /// `on_message` handler is ACKed `{queued:true}` and dropped: no `_xbself_`
 /// watcher exists yet, so the fanout mirrors it to nobody. This pins the
 /// deterministic cause behind the slow-start flake of
-/// `an_unknown_verb_is_queued_to_the_running_program`.
+/// `a_declared_verb_is_queued_to_the_running_program`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mail_sent_before_on_message_registers_is_not_delivered_and_the_ack_does_not_prove_delivery(
 ) {
@@ -962,6 +983,7 @@ async fn mail_sent_before_on_message_registers_is_not_delivered_and_the_ack_does
     let mut rx = inbox(&kernel, &a);
     let code = r#"
 import threading, time
+kernel.send(kernel.self_id, {'type': 'declare_verbs', 'verbs': [{'name': 'ping'}]})
 time.sleep(2.5)
 seen = []
 def _on(m):
@@ -976,7 +998,8 @@ threading.Event().wait()
         .await
         .remove(0)
         .result;
-    // Sent immediately: the program is still in its 2.5 s startup sleep.
+    // Sent as soon as the program declared `ping`: it is still in its 2.5 s startup sleep.
+    wait_declared(&a, 30).await;
     let ack = kernel
         .send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
         .await
@@ -999,9 +1022,10 @@ threading.Event().wait()
         .result;
 }
 
-/// No running job ⇒ a loud error, never a silent drop.
+/// A verb nobody declared is refused by name, with the list the agent answers: there
+/// is no "accept any verb" mode.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_unknown_verb_without_a_job_errors_loudly() {
+async fn an_undeclared_verb_is_refused_by_name() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let r = kernel
@@ -1009,10 +1033,33 @@ async fn an_unknown_verb_without_a_job_errors_loudly() {
         .await
         .remove(0)
         .result;
+    assert_eq!(r["reason"], "unhandled", "{r}");
+    assert_eq!(r["verb"], "ping", "{r}");
     assert!(
-        r["error"].as_str().unwrap_or("").contains("no running job"),
+        r["error"].as_str().unwrap_or("").contains("answers: boot, start"),
         "{r}"
     );
+}
+
+/// Only a running program declares verbs, and never one the agent answers itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn declare_verbs_needs_a_running_job_and_a_free_name() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "declare_verbs", "verbs": [{"name": "ping"}]}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "not_found", "{r}");
+    assert!(crate::mail::declared(&a).is_empty());
+    // a name the agent answers is refused by the shared registry
+    let list = json!([{"name": "start"}]);
+    let r = crate::mail::declare_for_test_result(&a, &list).expect_err("reserved");
+    assert!(r["error"].as_str().unwrap().contains("already a verb"), "{r}");
 }
 
 /// PARITY WITH PYTHON: a program's sends carry the RUNNER's identity and are
@@ -1091,25 +1138,43 @@ async fn the_connector_verb_hands_over_the_reference_client() {
 /// `read_stream` hands it back as the reply BODY — the binary channel only.
 struct BlobStore(std::sync::Mutex<Vec<u8>>);
 
+fantastic_kernel::stand_in_verbs!(blob_verbs {
+    WriteStreamV "write_stream" { path: Option<String>, bytes: Option<String> },
+    ReadStreamV "read_stream" { path: Option<String>, bytes: Option<String> },
+});
+
 #[async_trait::async_trait]
-impl fantastic_kernel::bundle::Bundle for BlobStore {
-    fn name(&self) -> &'static str {
+impl Handler for BlobStore {
+    type Call = blob_verbs::Call;
+    fn name(&self) -> &str {
         "blob"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        blob_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        blob_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         _id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<fantastic_kernel::bundle::Reply, fantastic_kernel::bundle::BundleError> {
         Ok(Some(
-            json!({"error": format!("text channel: {}", payload["type"])}),
+            json!({"error": format!("text channel: {}", call.payload()["type"])}),
         ))
     }
     async fn handle_binary(
         &self,
         _id: &AgentId,
-        header: Value,
+        call: Self::Call,
         body: Option<fantastic_kernel::Blob>,
         _kernel: &Arc<Kernel>,
     ) -> Result<
@@ -1120,13 +1185,13 @@ impl fantastic_kernel::bundle::Bundle for BlobStore {
         fantastic_kernel::bundle::BundleError,
     > {
         let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
-        match header["type"].as_str() {
-            Some("write_stream") => {
+        match call {
+            blob_verbs::Call::WriteStreamV(_) => {
                 let n = blob.len();
                 *self.0.lock().unwrap() = blob;
                 Ok((Some(json!({"written": n})), None))
             }
-            Some("read_stream") => {
+            blob_verbs::Call::ReadStreamV(_) => {
                 let b = self.0.lock().unwrap().clone();
                 Ok((
                     Some(json!({"eof": true, "size": b.len()})),
@@ -1538,6 +1603,7 @@ async fn stopping_a_watching_program_leaves_no_proxy_or_watcher() {
 async fn a_sealed_leg_refuses_mail_and_relays_nothing() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
+    crate::mail::declare_for_test(&a, &["probe_mail", "after"]);
     let (mut child, stop, relay) = wire(&kernel, &a, 9006);
     wire_write(&mut child, &json!({"op": "onmessage"})).await;
     let proxy = AgentId::from("_xbself_9006");
@@ -1624,6 +1690,7 @@ async fn send_to(kernel: &Arc<Kernel>, owner: &AgentId, p: Value) -> Value {
 async fn a_refused_mail_is_dropped_even_if_the_leg_reopens_before_the_drain_runs() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
+    crate::mail::declare_for_test(&a, &["probe_mail", "after"]);
     let mut rx = manual_owner_inbox(&kernel, &a, 9101);
     let proxy = AgentId::from("_xbself_9101");
     assert!(kernel.watch(&a, proxy).await.is_none());
@@ -1632,17 +1699,16 @@ async fn a_refused_mail_is_dropped_even_if_the_leg_reopens_before_the_drain_runs
     assert_eq!(out["reason"], "unauthorized", "{out}");
     set_rule(&kernel, &a, "allow_all_ingress").await;
     send_to(&kernel, &a, json!({"type": "after"})).await;
-    let job = TaskId(9101);
     let first = rx.recv().await.expect("probe_mail queued");
     let second = rx.recv().await.expect("after queued");
     assert_eq!(first.payload, json!({"type": "probe_mail"}));
     assert_eq!(
-        crate::relay::drain_verdict(&first.payload, &a, job, &kernel),
+        crate::relay::drain_verdict(&first.payload, &a, &kernel),
         None,
         "refused mail must not reach the fd"
     );
     assert_eq!(
-        crate::relay::drain_verdict(&second.payload, &a, job, &kernel),
+        crate::relay::drain_verdict(&second.payload, &a, &kernel),
         Some(json!({"op": "inbox", "payload": {"type": "after"}}))
     );
 }
@@ -1652,6 +1718,7 @@ async fn a_refused_mail_is_dropped_even_if_the_leg_reopens_before_the_drain_runs
 async fn a_refused_mail_entry_is_consumed_once() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
+    crate::mail::declare_for_test(&a, &["probe_mail"]);
     let mut rx = manual_owner_inbox(&kernel, &a, 9102);
     assert!(kernel
         .watch(&a, AgentId::from("_xbself_9102"))
@@ -1663,11 +1730,10 @@ async fn a_refused_mail_entry_is_consumed_once() {
     send_to(&kernel, &a, mail.clone()).await;
     set_rule(&kernel, &a, "allow_all_ingress").await;
     send_to(&kernel, &a, mail.clone()).await;
-    let job = TaskId(9102);
     let mut verdicts = Vec::new();
     for _ in 0..3 {
         let it = rx.recv().await.expect("queued");
-        verdicts.push(crate::relay::drain_verdict(&it.payload, &a, job, &kernel));
+        verdicts.push(crate::relay::drain_verdict(&it.payload, &a, &kernel));
     }
     assert_eq!(
         verdicts,
@@ -1680,6 +1746,7 @@ async fn a_refused_mail_entry_is_consumed_once() {
 async fn the_refused_ledger_is_released_with_the_owner_inbox() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
+    crate::mail::declare_for_test(&a, &["probe_mail"]);
     let _rx = manual_owner_inbox(&kernel, &a, 9103);
     set_rule(&kernel, &a, "deny_ingress").await;
     send_to(&kernel, &a, json!({"type": "probe_mail"})).await;
@@ -1691,28 +1758,22 @@ async fn the_refused_ledger_is_released_with_the_owner_inbox() {
     assert_eq!(crate::relay::refused_len(&a), 0);
 }
 
-/// A refused DRIVE verb (`write` with no job_id) is mirrored too, and the framer's
-/// job_id filter does not drop it: it must be bound to the send-time rule as well.
+/// A verb the agent answers itself (`write`) is no mail: the fanout mirrors it to the
+/// owner inbox, and the drain never hands it to the program, sealed or open.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_refused_drive_verb_is_dropped_even_if_the_leg_reopens_before_the_drain_runs() {
+async fn a_builtin_verb_is_never_mail() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
+    crate::mail::declare_for_test(&a, &["probe_mail"]);
     let mut rx = manual_owner_inbox(&kernel, &a, 9104);
     assert!(kernel
         .watch(&a, AgentId::from("_xbself_9104"))
         .await
         .is_none());
-    set_rule(&kernel, &a, "deny_ingress").await;
-    let w = json!({"type": "write", "data": "rm -rf\n"});
-    let out = send_to(&kernel, &a, w.clone()).await;
-    assert_eq!(out["reason"], "unauthorized", "{out}");
-    set_rule(&kernel, &a, "allow_all_ingress").await;
-    let job = TaskId(9104);
+    let w = json!({"type": "write", "job_id": 1, "data": "keys\n"});
+    send_to(&kernel, &a, w).await;
     let it = rx.recv().await.expect("write queued");
-    assert_eq!(
-        crate::relay::drain_verdict(&it.payload, &a, job, &kernel),
-        None
-    );
+    assert_eq!(crate::relay::drain_verdict(&it.payload, &a, &kernel), None);
 }
 
 /// The drain may dequeue and drop an item BEFORE the handler notes its refusal; the
@@ -1721,18 +1782,18 @@ async fn a_refused_drive_verb_is_dropped_even_if_the_leg_reopens_before_the_drai
 async fn a_late_refusal_note_does_not_swallow_later_identical_mail() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
+    crate::mail::declare_for_test(&a, &["probe_mail"]);
     let _rx = manual_owner_inbox(&kernel, &a, 9105);
     let mail = json!({"type": "probe_mail", "x": 7});
     set_rule(&kernel, &a, "deny_ingress").await;
-    let job = TaskId(9105);
     // the drain wins: live gate drops it, nothing noted yet
-    assert_eq!(crate::relay::drain_verdict(&mail, &a, job, &kernel), None);
+    assert_eq!(crate::relay::drain_verdict(&mail, &a, &kernel), None);
     // the handler then refuses the same send and notes it late
     crate::relay::note_refused(&a, &mail);
     assert_eq!(crate::relay::refused_len(&a), 0);
     set_rule(&kernel, &a, "allow_all_ingress").await;
     assert_eq!(
-        crate::relay::drain_verdict(&mail, &a, job, &kernel),
+        crate::relay::drain_verdict(&mail, &a, &kernel),
         Some(json!({"op": "inbox", "payload": mail}))
     );
 }
@@ -1755,16 +1816,15 @@ fn the_refused_ledger_is_bounded() {
     ));
 }
 
-/// The fanout mirrors every payload sent to the leg into the owner
-/// inbox, so a program started by one caller saw another caller's `write`
-/// keystrokes, paste bytes and drive calls aimed at that caller's job. A drive
-/// verb whose int `job_id` names ANOTHER job is dropped; one with no `job_id`
-/// (bulk) or naming this job is forwarded, and so is one whose id names no job
-/// (a string). Other mail is unchanged.
+/// The fanout mirrors every payload sent to the leg into the owner inbox; the program
+/// is handed only the mail it declared. Calls of the verbs the agent answers itself
+/// (a caller's `write` keystrokes, paste bytes, drive calls), for this job or any
+/// other, never reach it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_inbox_drops_a_drive_verb_naming_another_job() {
+async fn the_inbox_hands_the_program_only_its_declared_mail() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
+    crate::mail::declare_for_test(&a, &["mail"]);
     let (mut child, stop, relay) = wire(&kernel, &a, 9008);
     wire_write(&mut child, &json!({"op": "onmessage"})).await;
     let proxy = AgentId::from("_xbself_9008");
@@ -1783,25 +1843,17 @@ async fn the_inbox_drops_a_drive_verb_naming_another_job() {
         json!({"type": "stop", "job_id": 9009}),
         json!({"type": "interrupt", "job_id": 9009}),
         json!({"type": "clear", "job_id": 9009}),
-        // the bulk forms name no job — forwarded
+        // the bulk forms and this job's own are calls of the agent too
         json!({"type": "stop"}),
         json!({"type": "interrupt"}),
         json!({"type": "clear"}),
-        json!({"type": "write", "job_id": "9008", "data": "str"}),
         json!({"type": "write", "job_id": 9008, "data": "own"}),
         json!({"type": "mail", "n": 1}),
     ] {
         kernel.send(vec![Item::new(a.clone(), p)]).await;
     }
-    // every frame down the fd, in order: none of them names job 9009
-    for want in [
-        json!({"type": "stop"}),
-        json!({"type": "interrupt"}),
-        json!({"type": "clear"}),
-        json!({"type": "write", "job_id": "9008", "data": "str"}),
-        json!({"type": "write", "job_id": 9008, "data": "own"}),
-        json!({"type": "mail", "n": 1}),
-    ] {
+    // the one frame down the fd: the declared mail
+    for want in [json!({"type": "mail", "n": 1})] {
         assert_eq!(
             wire_read(&mut child).await,
             json!({"op": "inbox", "payload": want})
@@ -2049,117 +2101,21 @@ fn reflect_reports_egress_posture() {
 // (`PB/io/exec_bridge/src/exec_bridge/tools.py`). Where python's own behaviour is a
 // quirk, the quirk is what is pinned.
 
-/// The vendored readme is python's, byte for byte.
-///
-/// Skips (loudly) when the python tree is absent, like
-/// `connector_matches_python_source`: the container's rust stage copies only
-/// `src/lib/rust/`.
-#[test]
-fn readme_matches_python_source() {
-    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(4) // src/lib above crates/bundles/<crate>
-        .expect("src/lib above the crate")
-        .join("python/bundled_agents/io/exec_bridge/src/exec_bridge/readme.md");
-    let Ok(src) = std::fs::read_to_string(&py) else {
-        eprintln!("skipping: python tree not present at {}", py.display());
-        return;
-    };
-    assert_eq!(src, README, "readme has drifted from {}", py.display());
-}
-
-/// Reflect's prose blocks are python's, verbatim.
-#[tokio::test]
-async fn docs_texts_match_python_verbatim() {
-    let notes = ExecBridgeBundle.notes_doc().unwrap();
-    assert_eq!(
-        notes
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        ["wire", "inbox", "tasks"]
-    );
-    assert_eq!(
-        notes["inbox"],
-        "Any verb this bundle does not answer is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is refused — a script that only defines something exits before its first message arrives."
-    );
-    assert_eq!(
-        ExecBridgeBundle.emits_doc().unwrap()["progress"],
-        "{type:'progress', job_id, n, line, stream} — one per output line"
-    );
-}
-
-/// `verbs` is python's `VERBS` order, each entry the FIRST LINE of that
-/// verb's docstring. Several are truncated mid-sentence; that is the python text.
-#[tokio::test]
-async fn verb_docs_are_python_first_docstring_lines() {
-    let docs = ExecBridgeBundle.verb_docs();
-    let verbs = docs.as_object().expect("verbs object");
-    assert_eq!(
-        verbs.keys().map(String::as_str).collect::<Vec<_>>(),
-        [
-            "start",
-            "run",
-            "status",
-            "stop",
-            "interrupt",
-            "clear",
-            "write",
-            "resize",
-            "ack",
-            "output",
-            "tail",
-            "grep",
-            "paste_image",
-            "connector",
-            "monitor",
-            "monitors",
-            "unmonitor",
-            "reflect",
-            "boot"
-        ]
-    );
-    assert_eq!(
-        verbs["start"],
-        "args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL, and with no `args` the record's whole shell line: `$SHELL -l` under shell=\"login\"), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits."
-    );
-    assert_eq!(
-        verbs["run"],
-        "args: command:str (req), args?, cwd?, wait_s:float? (default 60, max 600), tail:int? (default 200) — start, wait, and return the output in ONE reply: {job_id, status, exit_code, lines}. Use run for short commands; a job still running at wait_s comes back running (continue with status wait_s / tail). Read files with files.read, not run."
-    );
-    assert_eq!(
-        verbs["clear"],
-        "args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM"
-    );
-    assert_eq!(
-        verbs["boot"],
-        "No-op. Nothing auto-restarts: a command is started by a caller, not by the record."
-    );
-    assert_eq!(
-        verbs["reflect"],
-        "Identity + running job count + auth posture. No args."
-    );
-}
-
 /// Reflect reports the record's `cwd` as written (null when unset — there
-/// is no process default any more) and the `inherit_env` it runs with; `allowed`
-/// items go through `str()`.
+/// is no process default any more) and the `inherit_env` it runs with.
 #[tokio::test]
-async fn reflect_coerces_like_python() {
+async fn reflect_reports_the_record_as_written() {
     let tmp = TempDir::new().unwrap();
     let mut meta = Map::new();
     meta.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
     meta.insert("cwd".to_string(), json!("/wd"));
     meta.insert("inherit_env".to_string(), json!(["PATH"]));
-    meta.insert("allowed".to_string(), json!(["ls", 7, true]));
+    meta.insert("allowed".to_string(), json!(["ls"]));
     let (kernel, a) = mk_kernel_with(&tmp, meta).await;
     let r = reflect_reply(&a, &kernel);
     assert_eq!(r["cwd"], "/wd");
     assert_eq!(r["inherit_env"], json!(["PATH"]));
-    // `str(7)` and `str(True)` — not JSON's `7`/`true`.
-    assert_eq!(r["allowed"], json!(["ls", "7", "True"]));
+    assert_eq!(r["allowed"], json!(["ls"]));
 
     let tmp2 = TempDir::new().unwrap();
     let mut m2 = Map::new();
@@ -2171,11 +2127,10 @@ async fn reflect_coerces_like_python() {
     assert_eq!(r2["inherit_env"], json!([]));
 }
 
-/// `shutdown` is not a verb here: python's `VERBS` has no such key, so it is
-/// MAIL like any other unowned type — never a `null` that reads as a successful
-/// lifecycle call.
+/// `shutdown` is a common verb this bundle does not declare: the shared entry
+/// answers it itself, nothing to release, and it is never mail.
 #[tokio::test]
-async fn shutdown_is_mail_not_a_verb() {
+async fn shutdown_is_answered_by_the_shared_entry() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let r = kernel
@@ -2183,10 +2138,7 @@ async fn shutdown_is_mail_not_a_verb() {
         .await
         .remove(0)
         .result;
-    assert_eq!(
-        r["error"],
-        "exec_bridge: unknown type 'shutdown' (no running job to receive it)"
-    );
+    assert_eq!(r, Value::Null, "{r}");
 }
 
 /// Every refusal quotes with python's `repr`, and an ABSENT `type` is `None`.
@@ -2194,17 +2146,10 @@ async fn shutdown_is_mail_not_a_verb() {
 async fn refusal_texts_use_python_repr() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    // `unknown type {t!r}` over the RAW value — an ABSENT type is `None`. Driven
-    // through the bundle directly: `kernel.send` refuses a typeless payload before
-    // any handler sees it.
-    let r = fantastic_kernel::bundle::Bundle::handle(&ExecBridgeBundle, &a, &json!({}), &kernel)
-        .await
-        .expect("handle")
-        .expect("reply");
-    assert_eq!(
-        r["error"],
-        "exec_bridge: unknown type None (no running job to receive it)"
-    );
+    // an ABSENT type is `null` in the refusal, which lists what the agent answers.
+    let r = crate::verbs::Call::parse(a.as_str(), &json!({}), &[]).expect_err("refused");
+    assert_eq!(r["reason"], "unhandled", "{r}");
+    assert_eq!(r["verb"], Value::Null, "{r}");
     // `no job {jid!r}`.
     let r = kernel
         .send(vec![Item::new(
@@ -2231,12 +2176,6 @@ async fn refusal_texts_use_python_repr() {
 #[test]
 fn validate_meta_texts_match_python() {
     let b = ExecBridgeBundle;
-    let mut empty = Map::new();
-    empty.insert("allowed".to_string(), json!([]));
-    assert_eq!(
-        b.validate_meta(&empty, &Map::new()).expect("refused"),
-        "allowed must be a non-empty list of regexes, e.g. <allowed><item>ls( .*)?</item></allowed>"
-    );
     let mut broken = Map::new();
     broken.insert("allowed".to_string(), json!(["("]));
     let e = b.validate_meta(&broken, &Map::new()).expect("refused");
@@ -2375,9 +2314,9 @@ async fn job_id_is_an_int_or_absent() {
     assert_eq!(r["job_id"], json!(7), "the raw value is echoed: {r}");
 }
 
-/// `start` coerces exactly as python does.
+/// `start` checks its arguments against its declaration: nothing is coerced.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn start_coerces_args_env_and_cwd_like_python() {
+async fn start_checks_its_arguments_and_coerces_none() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let call = |p: Value| {
@@ -2385,12 +2324,13 @@ async fn start_coerces_args_env_and_cwd_like_python() {
         let a = a.clone();
         async move { kernel.send(vec![Item::new(a, p)]).await.remove(0).result }
     };
-    // A command of nothing but whitespace is MISSING, not a spawn of "".
+    // A command of nothing but whitespace does not match the declared pattern: refused,
+    // not a spawn of "".
     let r = call(json!({"type": "start", "command": "  \t "})).await;
-    assert_eq!(r["reason"], "missing_arg", "{r}");
+    assert_eq!(r["reason"], "bad_arg", "{r}");
     assert_eq!(r["arg"], "command", "{r}");
-    // An explicit null `args` is not a list.
-    let r = call(json!({"type": "start", "command": "ls", "args": null})).await;
+    // `args` is a list: a text is refused, never split or wrapped.
+    let r = call(json!({"type": "start", "command": "ls", "args": "-l"})).await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
     assert_eq!(r["arg"], "args", "{r}");
     // `env` and `cwd` are the RECORD's: any per-call value refuses (py `is not
@@ -2410,8 +2350,8 @@ async fn start_coerces_args_env_and_cwd_like_python() {
             "{r}"
         );
     }
-    // A wake-up is a monitor's: `notify`/`match`/`every` on `start` refuse naming
-    // `monitor`, never dropped silently.
+    // A wake-up is a monitor's: `notify`/`match`/`every` are no argument of `start`,
+    // refused by name, never dropped silently.
     for (arg, val) in [
         ("notify", json!("ai")),
         ("match", json!("WAKE")),
@@ -2423,25 +2363,17 @@ async fn start_coerces_args_env_and_cwd_like_python() {
             (&json!("bad_arg"), &json!(arg)),
             "{r}"
         );
-        assert!(
-            r["error"].as_str().unwrap_or("").contains("`monitor` it"),
-            "{r}"
-        );
     }
     let r = call(json!({"type": "start", "command": py.to_string_lossy(),
-                        "args": ["-c", "pass"], "env": null, "cwd": null}))
-    .await;
-    assert!(r["job_id"].is_i64(), "an explicit null is absent: {r}");
-    // Bools are ints in python, so they are legal argv items — as `True`/`False`.
-    let r = call(json!({"type": "start", "command": py.to_string_lossy(),
-                        "args": ["-c", "import sys; print(sys.argv[1:])", true, 2, 1.5]}))
+                        "args": ["-c", "pass"]}))
     .await;
     assert!(r["job_id"].is_i64(), "{r}");
-    let st = call(json!({"type": "status", "job_id": r["job_id"].clone()})).await;
-    assert_eq!(
-        st["jobs"][0]["args"],
-        json!(["-c", "import sys; print(sys.argv[1:])", "True", "2", "1.5"])
-    );
+    // an argv item that is not text is refused, not stringified
+    let r = call(json!({"type": "start", "command": py.to_string_lossy(),
+                        "args": ["-c", "pass", true, 2, 1.5]}))
+    .await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert!(r["arg"].as_str().unwrap_or("").starts_with("args"), "{r}");
 }
 
 /// `status` lists this agent's jobs in START order (python's dict is
@@ -2722,6 +2654,7 @@ async fn liveness_is_process_exit_not_pipe_eof() {
         1,
         "reflect counts a live process whose pipes are closed"
     );
+    crate::mail::declare_for_test(&a, &["ping"]);
     let mail = kernel
         .send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
         .await
@@ -3058,31 +2991,6 @@ async fn the_relay_forwards_a_send_untouched_and_a_binary_one_through_the_batch(
         .await
         .expect("relay did not stop")
         .expect("relay");
-}
-
-/// With no running job the unknown type is a BARE
-/// `{error}` carrying the "no running job" tail; with one it is mail, queued.
-#[tokio::test]
-async fn unknown_type_wire_shape_is_byte_exact() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "frob"}))])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(
-        serde_json::to_string(&r).unwrap(),
-        r#"{"error":"exec_bridge: unknown type 'frob' (no running job to receive it)","reason":"unhandled","verb":"frob"}"#
-    );
-    let r = fantastic_kernel::bundle::Bundle::handle(&ExecBridgeBundle, &a, &json!({}), &kernel)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        serde_json::to_string(&r).unwrap(),
-        r#"{"error":"exec_bridge: unknown type None (no running job to receive it)","reason":"unhandled","verb":null}"#
-    );
 }
 
 /// The three `arg` refusals carry `error, reason, hint,

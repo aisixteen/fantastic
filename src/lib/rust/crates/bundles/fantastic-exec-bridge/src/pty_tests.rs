@@ -242,7 +242,7 @@ async fn a_pty_job_is_gated_like_any_start_and_its_verbs_want_a_pty_job() {
     let r = call(
         &k,
         "term_g",
-        json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", "0"], "pty": {"cols": 0}}),
+        json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", "0"], "pty": {"cols": 0, "rows": 24}}),
     )
     .await;
     assert_eq!(r["reason"], "bad_arg", "{r}");

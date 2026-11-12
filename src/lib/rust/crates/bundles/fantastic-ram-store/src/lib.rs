@@ -40,14 +40,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use fantastic_bundle::{
-    py_json_dumps, py_repr_value, py_splitlines, py_str, py_strip, py_truthy, py_type_name,
-};
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_bundle::{py_json_dumps, py_repr_value, py_splitlines, py_strip};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::outcome::{body_at, Blob};
-use fantastic_kernel::refusal::{
-    missing, refusal, refusal_hint, with, BAD_ARG, EXISTS, NOT_FOUND, UNHANDLED,
-};
+use fantastic_kernel::refusal::{missing, refusal, refusal_hint, with, BAD_ARG, EXISTS, NOT_FOUND};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
 
@@ -75,58 +71,52 @@ fn obj<const N: usize>(pairs: [(&str, Value); N]) -> Value {
 
 pub mod test_support;
 
-/// The short orientation readme — python's, verbatim.
-pub const README: &str = include_str!("readme.md");
+pub mod record;
+pub mod verbs;
 
 const OPERATOR: &str = "kernel";
 
 /// One stored row (without `refs` — those live in `fold_refs`).
 type Row = Map<String, Value>;
 
-/// python `_as_id`: a positive int, or the decimal digits a caller wrote.
-fn as_id(x: &Value) -> Option<i64> {
+/// A row id inside a stored row or a dump: a positive JSON integer.
+pub fn as_id(x: &Value) -> Option<i64> {
     match x {
-        Value::Bool(_) => None,
         Value::Number(n) => n.as_i64().filter(|i| *i > 0),
-        Value::String(s) => {
-            let t = py_strip(s);
-            if !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()) {
-                t.parse::<i64>().ok()
-            } else {
-                None
-            }
-        }
         _ => None,
     }
 }
 
-/// python `x in container` for the JSON value a payload carried. `Err` is the
-/// TypeError python raises (`'in <string>' requires string as left operand`,
-/// `argument of type 'int' is not iterable`, `unhashable type: 'list'`).
-fn py_in(x: &Value, container: &Value) -> Result<bool, BundleError> {
-    let type_error = |m: String| -> BundleError { format!("TypeError: {m}").into() };
-    match container {
-        Value::Array(items) => Ok(items.contains(x)),
-        Value::String(s) => match x {
-            Value::String(needle) => Ok(s.contains(needle.as_str())),
-            other => Err(type_error(format!(
-                "'in <string>' requires string as left operand, not {}",
-                py_type_name(other)
-            ))),
-        },
-        Value::Object(m) => match x {
-            Value::String(k) => Ok(m.contains_key(k)),
-            Value::Array(_) | Value::Object(_) => Err(type_error(format!(
-                "unhashable type: '{}'",
-                py_type_name(x)
-            ))),
-            _ => Ok(false),
-        },
-        other => Err(type_error(format!(
-            "argument of type '{}' is not iterable",
-            py_type_name(other)
-        ))),
+/// The `refs` list of a staged row, when it has one ([`stage_rows`] checked it).
+pub fn row_refs(row: &Map<String, Value>) -> Option<&Vec<Value>> {
+    row.get("refs").filter(|v| !v.is_null()).and_then(Value::as_array)
+}
+
+/// The rows of an `append` as maps — shared by every store that answers the verb:
+/// each row gets the id it carries or one minted, no id twice in the batch. The
+/// engine already checked the types of `id` and `refs`; a store still checks
+/// whether the rows and the refs exist for its owner.
+pub fn stage_rows(
+    rows: &[crate::verbs::AppendRow],
+    mut mint: impl FnMut() -> i64,
+) -> Result<Vec<Map<String, Value>>, Value> {
+    let mut staged: Vec<Map<String, Value>> = Vec::new();
+    let mut batch: HashSet<i64> = HashSet::new();
+    for r in rows {
+        let rid = r.id.map_or_else(&mut mint, |n| i64::try_from(n.get()).unwrap_or(i64::MAX));
+        if !batch.insert(rid) {
+            let mut e = refusal(EXISTS, format!("append: row {rid} already exists for this owner"));
+            with(&mut e, "id", json!(rid));
+            return Err(e);
+        }
+        let mut row = r.rest.clone();
+        row.insert("id".to_string(), Value::from(rid));
+        if let Some(refs) = &r.refs {
+            row.insert("refs".to_string(), json!(refs));
+        }
+        staged.push(row);
     }
+    Ok(staged)
 }
 
 /// python `_text_of`: the content as text (a non-string JSON-dumped), a title
@@ -314,19 +304,10 @@ fn bad_tables(msg: &str) -> Value {
 
 /// Build a `Tables` from a `dump` — every key and FK checked; a refusal on the
 /// first violation (nothing half-loaded).
-fn load_tables(tables: &Value) -> Result<Tables, Value> {
-    let Some(tables) = tables.as_object() else {
-        return Err(bad_tables("inject: `tables` must be a dump dict"));
-    };
+fn load_tables(tables: &verbs::StoreTables) -> Result<Tables, Value> {
     let mut t = Tables::default();
-    let rows = match tables.get("rows") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(a)) => a.clone(),
-        Some(v) if !py_truthy(v) => Vec::new(),
-        Some(_) => return Err(bad_tables("inject: tables.rows must be a list")),
-    };
     let mut by_owner: Vec<(String, Vec<Row>)> = Vec::new();
-    for item in &rows {
+    for item in tables.rows.iter().flatten() {
         let owner = item.get("owner").and_then(Value::as_str);
         let (Some(_), Some(owner)) = (item.as_object(), owner) else {
             return Err(bad_tables("inject: every row needs {owner, row}"));
@@ -359,12 +340,7 @@ fn load_tables(tables: &Value) -> Result<Tables, Value> {
         }
         t.insert(&owner, rs);
     }
-    let empty = Vec::new();
-    for fr in tables
-        .get("fold_refs")
-        .and_then(Value::as_array)
-        .unwrap_or(&empty)
-    {
+    for fr in tables.fold_refs.iter().flatten() {
         let owner = fr
             .get("owner")
             .and_then(Value::as_str)
@@ -459,19 +435,8 @@ fn fold_closure(t: &Tables, owner: &str, fold: i64) -> HashSet<i64> {
     out
 }
 
-/// One line per verb — python's first-docstring-line rule, in `VERBS` order.
-const VERB_DOCS: [(&str, &str); 10] = [
-    ("reflect", "Identity + posture: how many owners/rows, which optional verbs exist. No args."),
-    ("boot", "No-op — the tables start empty (RAM) or are filled by `inject`."),
-    ("append", "args: rows:list[dict] (req). Appends rows under the CALLER's key, all or none. A row carries the kernel id it was minted with, or none and the next id is taken from the kernel's counter; `refs` must name rows of the same owner (this batch included). Returns {ids:[int], appended:int}."),
-    ("read", "args: after:int?, before:int?, limit:int?, order:'asc'|'desc'?, kinds:list?, match:dict? (exact field equality), ids:list?, from_last_kind:str? (start at the newest row of that kind). Rows whole, oldest first by default. Returns {rows, next, total}."),
-    ("search", "args: query:str (req — case-insensitive substring), ids:list? (rows to search; a fold id includes its members), limit:int? (default 100), width:int? (chars per line, default 200). Every matching LINE with its row id and line number. Returns {matches:[{id, line, text}], total, truncated}."),
-    ("prune", "args: before_id:int? and/or ids:list? (req — one of them), keep:list? (kinds kept). Deletes YOUR rows below `before_id` (or exactly `ids`) except kinds in `keep`; every fold ref naming a deleted row goes with it (FK cascade). Returns {pruned}."),
-    ("inject", "args: tables:dict (req — a `dump`). Replaces the WHOLE store with the given tables, every key and FK checked; nothing changes on a refusal. Returns {rows}."),
-    ("dump", "No args. The whole store as tables — {rows:[{owner, row}], fold_refs:[{owner, fold, members}]} — exactly what `inject` takes back. Returns {tables}."),
-    ("put_bytes", "args: ref:str (req), media_type:str (req), and the raw bytes as the request body at `data`. Stores them under the CALLER's key and `ref` (a second put to the same ref replaces them). They are not rows: `read`, `search` and `dump` never show them. Returns {ref, media_type, bytes} (the byte count)."),
-    ("get_bytes", "args: ref:str (req). The bytes the caller put under `ref`, as the reply body at `data`. Returns {ref, media_type, bytes} (the byte count), or not_found."),
-];
+/// What the bundle is for — its one short man text.
+const MAN: &str = "A memory store held in RAM: conversation rows per owner (the caller), folds, search, and raw bytes by ref. Everything is lost when the process exits.";
 
 impl RamStoreBundle {
     fn with_tables<T>(&self, id: &AgentId, f: impl FnOnce(&mut Tables) -> T) -> T {
@@ -502,43 +467,21 @@ impl RamStoreBundle {
         Value::Object(out)
     }
 
-    fn append(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    fn append(&self, id: &AgentId, a: &verbs::Append, kernel: &Arc<Kernel>) -> Value {
         let (owner, _) = match caller(kernel) {
             Ok(o) => o,
             Err(r) => return r,
         };
-        let rows = payload.get("rows").and_then(Value::as_array);
-        let rows = match rows {
-            Some(r) if !r.is_empty() && r.iter().all(Value::is_object) => r,
-            _ => {
-                let mut r = refusal(BAD_ARG, "append: `rows` must be a non-empty list of rows");
-                with(&mut r, "arg", json!("rows"));
-                return r;
-            }
-        };
+        let rows = &a.rows;
         self.with_tables(id, |t| {
-            let mut staged: Vec<Row> = Vec::new();
-            let mut batch: HashSet<i64> = HashSet::new();
-            for r in rows {
-                let r = r.as_object().expect("checked");
-                let rid = match r.get("id") {
-                    None | Some(Value::Null) => kernel.mint_id(),
-                    Some(v) => match (v, as_id(v)) {
-                        (Value::Number(_), Some(n)) => n,
-                        _ => {
-                            let mut e = refusal(
-                                BAD_ARG,
-                                format!(
-                                    "append: a row id is a kernel int, got {}",
-                                    py_repr_value(v)
-                                ),
-                            );
-                            with(&mut e, "arg", json!("rows"));
-                            return e;
-                        }
-                    },
-                };
-                if t.has(&owner, rid) || batch.contains(&rid) {
+            let staged = match stage_rows(rows, || kernel.mint_id()) {
+                Ok(s) => s,
+                Err(e) => return e,
+            };
+            let batch: HashSet<i64> = staged.iter().filter_map(|r| r.get("id").and_then(as_id)).collect();
+            for r in &staged {
+                let rid = r.get("id").and_then(Value::as_i64).unwrap_or(0);
+                if t.has(&owner, rid) {
                     let mut e = refusal(
                         EXISTS,
                         format!("append: row {rid} already exists for this owner"),
@@ -546,34 +489,15 @@ impl RamStoreBundle {
                     with(&mut e, "id", json!(rid));
                     return e;
                 }
-                batch.insert(rid);
-                let mut row = r.clone();
-                row.insert("id".to_string(), Value::from(rid));
-                staged.push(row);
             }
             for r in &staged {
-                let Some(refs) = r.get("refs").filter(|v| !v.is_null()) else {
+                let Some(list) = row_refs(r) else {
                     continue;
                 };
                 let rid = r.get("id").and_then(Value::as_i64).unwrap_or(0);
-                let list = refs
-                    .as_array()
-                    .filter(|a| a.iter().all(|m| as_id(m).is_some()));
-                let Some(list) = list else {
-                    let mut e = refusal(BAD_ARG, format!("append: row {rid} refs must be row ids"));
-                    with(&mut e, "arg", json!("rows"));
-                    return e;
-                };
-                // python `t.has(owner, m) or m in batch` on the RAW ref: the
-                // tables are keyed by int, so a digit STRING passes `_as_id`
-                // and is still never found.
                 let missing_refs: Vec<Value> = list
                     .iter()
-                    .filter(|m| {
-                        let held = m.is_number()
-                            && as_id(m).is_some_and(|i| t.has(&owner, i) || batch.contains(&i));
-                        !held
-                    })
+                    .filter(|m| !as_id(m).is_some_and(|i| t.has(&owner, i) || batch.contains(&i)))
                     .cloned()
                     .collect();
                 if !missing_refs.is_empty() {
@@ -598,7 +522,7 @@ impl RamStoreBundle {
         })
     }
 
-    fn read(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    fn read(&self, id: &AgentId, a: &verbs::Read, kernel: &Arc<Kernel>) -> Value {
         self.with_tables(id, |t| {
             let (owner, _) = match caller(kernel) {
                 Ok(r) => r,
@@ -606,8 +530,9 @@ impl RamStoreBundle {
             };
             // A `name` to match starts from the rows carrying it — the same ids, in
             // the same order, as the scan below would keep.
-            let mut ids = match payload
-                .get("match")
+            let mut ids = match a
+                .r#match
+                .as_ref()
                 .and_then(|m| m.get("name"))
                 .and_then(Value::as_str)
             {
@@ -616,11 +541,7 @@ impl RamStoreBundle {
             };
             // Borrowed, never cloned: a filter reads one field of each row.
             let field = |i: &i64, k: &str| t.row(&owner, *i).and_then(|r| r.get(k));
-            if let Some(flk) = payload
-                .get("from_last_kind")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            {
+            if let Some(flk) = a.from_last_kind.as_deref().filter(|s| !s.is_empty()) {
                 let last = t
                     .ids(&owner)
                     .iter()
@@ -631,45 +552,33 @@ impl RamStoreBundle {
                     ids.retain(|i| *i >= last);
                 }
             }
-            if let Some(kinds) = payload
-                .get("kinds")
-                .and_then(Value::as_array)
-                .filter(|k| !k.is_empty())
-            {
+            if let Some(kinds) = a.kinds.as_ref().filter(|k| !k.is_empty()) {
                 ids.retain(|i| kinds.contains(field(i, "kind").unwrap_or(&Value::Null)));
             }
-            if let Some(m) = payload
-                .get("match")
-                .and_then(Value::as_object)
-                .filter(|m| !m.is_empty())
-            {
+            if let Some(m) = a.r#match.as_ref().filter(|m| !m.is_empty()) {
                 ids.retain(|i| {
                     m.iter()
                         .all(|(k, v)| field(i, k).unwrap_or(&Value::Null) == v)
                 });
             }
-            if let Some(want) = payload.get("ids").and_then(Value::as_array) {
-                let wanted: HashSet<Option<i64>> = want.iter().map(as_id).collect();
-                ids.retain(|i| wanted.contains(&Some(*i)));
+            if let Some(want) = &a.ids {
+                let wanted: HashSet<i64> = want.iter().copied().collect();
+                ids.retain(|i| wanted.contains(i));
             }
-            let after = payload.get("after").and_then(as_id);
-            let before = payload.get("before").and_then(as_id);
-            let desc = payload.get("order").and_then(Value::as_str) == Some("desc");
-            if desc {
+            if a.order == Some(verbs::Order::Desc) {
                 ids.reverse();
-                if let Some(a) = after {
-                    ids.retain(|i| *i < a);
+                if let Some(after) = a.after {
+                    ids.retain(|i| *i < after);
                 }
-            } else if let Some(a) = after {
-                ids.retain(|i| *i > a);
+            } else if let Some(after) = a.after {
+                ids.retain(|i| *i > after);
             }
-            if let Some(b) = before {
+            if let Some(b) = a.before {
                 ids.retain(|i| *i < b);
             }
             let total = ids.len();
-            // `ids[:limit] if limit else ids` — a `0` (the string "0" included,
-            // which `_as_id` passes) is falsy: no limit.
-            let limit = payload.get("limit").and_then(as_id).filter(|l| *l != 0);
+            // `limit` 0 is no limit.
+            let limit = a.limit.filter(|l| *l != 0);
             let page: Vec<i64> = match limit {
                 Some(l) => ids
                     .iter()
@@ -694,48 +603,24 @@ impl RamStoreBundle {
         })
     }
 
-    fn search(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-        let q = py_strip(
-            &payload
-                .get("query")
-                .filter(|v| py_truthy(v))
-                .map(py_str)
-                .unwrap_or_default(),
-        )
-        .to_lowercase();
-        if q.is_empty() {
-            return missing("search", "query");
-        }
+    fn search(&self, id: &AgentId, a: &verbs::Search, kernel: &Arc<Kernel>) -> Value {
+        let q = py_strip(&a.query).to_lowercase();
         self.with_tables(id, |t| {
             let (owner, _) = match caller(kernel) {
                 Ok(r) => r,
                 Err(e) => return e,
             };
             let mut ids = t.ids(&owner);
-            if let Some(want) = payload
-                .get("ids")
-                .and_then(Value::as_array)
-                .filter(|w| !w.is_empty())
-            {
+            if let Some(want) = a.ids.as_ref().filter(|w| !w.is_empty()) {
                 let mut scope: HashSet<i64> = HashSet::new();
-                for x in want {
-                    if let Some(rid) = as_id(x) {
-                        scope.extend(fold_closure(t, &owner, rid));
-                    }
+                for rid in want {
+                    scope.extend(fold_closure(t, &owner, *rid));
                 }
                 ids.retain(|i| scope.contains(i));
             }
-            // `_as_id(limit) or 100` / `or 200`: a `0` falls back too.
-            let limit = payload
-                .get("limit")
-                .and_then(as_id)
-                .filter(|l| *l != 0)
-                .unwrap_or(100);
-            let width = payload
-                .get("width")
-                .and_then(as_id)
-                .filter(|w| *w != 0)
-                .unwrap_or(200);
+            // a `0` falls back to the default too
+            let limit = a.limit.filter(|l| *l != 0).unwrap_or(100);
+            let width = a.width.filter(|w| *w != 0).unwrap_or(200);
             let limit = usize::try_from(limit).unwrap_or(usize::MAX);
             let width = usize::try_from(width).unwrap_or(usize::MAX);
             let mut matches: Vec<Value> = Vec::new();
@@ -767,33 +652,13 @@ impl RamStoreBundle {
         })
     }
 
-    /// `Err` is python's TypeError out of `kind in keep` — a raise.
-    fn prune(
-        &self,
-        id: &AgentId,
-        payload: &Value,
-        kernel: &Arc<Kernel>,
-    ) -> Result<Value, BundleError> {
+    fn prune(&self, id: &AgentId, a: &verbs::Prune, kernel: &Arc<Kernel>) -> Value {
         let (owner, _) = match caller(kernel) {
             Ok(o) => o,
-            Err(r) => return Ok(r),
+            Err(r) => return r,
         };
-        let before = payload.get("before_id").and_then(as_id);
-        let want = payload.get("ids").and_then(Value::as_array);
-        if before.is_none() && want.is_none() {
-            return Ok(missing("prune", "before_id"));
-        }
-        let wanted: HashSet<Option<i64>> = want
-            .map(|w| w.iter().map(as_id).collect())
-            .unwrap_or_default();
-        // `keep = payload.get("keep") or []`, then `row.get("kind") in keep` —
-        // python's `in` on WHATEVER arrived: a list is membership, a string a
-        // SUBSTRING test, a dict its keys, and anything else raises.
-        let keep: Value = payload
-            .get("keep")
-            .filter(|v| py_truthy(v))
-            .cloned()
-            .unwrap_or_else(|| json!([]));
+        let wanted: HashSet<i64> = a.ids.iter().flatten().copied().collect();
+        let keep: &[Value] = a.keep.as_deref().unwrap_or(&[]);
         self.with_tables(id, |t| {
             let mut doomed: HashSet<i64> = HashSet::new();
             for i in t.ids(&owner) {
@@ -802,34 +667,22 @@ impl RamStoreBundle {
                     .and_then(|r| r.get("kind"))
                     .cloned()
                     .unwrap_or(Value::Null);
-                if py_in(&kind, &keep)? {
+                if keep.contains(&kind) {
                     continue;
                 }
-                if before.is_some_and(|b| i < b) || (want.is_some() && wanted.contains(&Some(i))) {
+                if a.before_id.is_some_and(|b| i < b) || (a.ids.is_some() && wanted.contains(&i)) {
                     doomed.insert(i);
                 }
             }
             let n = t.delete(&owner, &doomed);
-            Ok(json!({"pruned": n}))
+            json!({"pruned": n})
         })
-    }
-
-    /// The `ref` of a bytes verb: a non-empty string.
-    fn blob_ref(verb: &str, payload: &Value) -> Result<String, Value> {
-        match payload.get("ref") {
-            Some(Value::String(r)) if !r.is_empty() => Ok(r.clone()),
-            None | Some(Value::Null) => Err(missing(verb, "ref")),
-            Some(_) => Err(refusal(
-                BAD_ARG,
-                format!("{verb}: `ref` must be a non-empty string"),
-            )),
-        }
     }
 
     fn put_bytes(
         &self,
         id: &AgentId,
-        payload: &Value,
+        a: &verbs::PutBytes,
         body: Option<&Blob>,
         kernel: &Arc<Kernel>,
     ) -> Value {
@@ -837,24 +690,12 @@ impl RamStoreBundle {
             Ok(o) => o,
             Err(r) => return r,
         };
-        let key = match Self::blob_ref("put_bytes", payload) {
-            Ok(r) => r,
-            Err(e) => return e,
-        };
-        let media = match payload.get("media_type") {
-            Some(Value::String(m)) if !m.is_empty() => m.clone(),
-            None | Some(Value::Null) => return missing("put_bytes", "media_type"),
-            Some(_) => {
-                return refusal(
-                    BAD_ARG,
-                    "put_bytes: `media_type` must be a non-empty string",
-                )
-            }
-        };
         let Some(bytes) = body_at(body, "data") else {
             return missing("put_bytes", "data (the raw bytes, as the request body)");
         };
         let n = bytes.len();
+        let key = a.ref_name.clone();
+        let media = a.media_type.clone();
         self.with_tables(id, |t| {
             t.blobs
                 .insert((owner, key.clone()), (media.clone(), bytes.to_vec()));
@@ -865,17 +706,14 @@ impl RamStoreBundle {
     fn get_bytes(
         &self,
         id: &AgentId,
-        payload: &Value,
+        a: &verbs::GetBytes,
         kernel: &Arc<Kernel>,
     ) -> (Value, Option<Blob>) {
         let (owner, _) = match caller(kernel) {
             Ok(o) => o,
             Err(r) => return (r, None),
         };
-        let key = match Self::blob_ref("get_bytes", payload) {
-            Ok(r) => r,
-            Err(e) => return (e, None),
-        };
+        let key = a.ref_name.clone();
         let found = self.with_tables(id, |t| t.blobs.get(&(owner, key.clone())).cloned());
         match found {
             Some((media, bytes)) => (
@@ -890,8 +728,8 @@ impl RamStoreBundle {
         }
     }
 
-    fn inject(&self, id: &AgentId, payload: &Value) -> Value {
-        let t = match load_tables(payload.get("tables").unwrap_or(&Value::Null)) {
+    fn inject(&self, id: &AgentId, a: &verbs::Inject) -> Value {
+        let t = match load_tables(&a.tables) {
             Ok(t) => t,
             Err(e) => return e,
         };
@@ -912,38 +750,42 @@ impl RamStoreBundle {
 }
 
 #[async_trait]
-impl Bundle for RamStoreBundle {
+impl Handler for RamStoreBundle {
+    type Call = verbs::Call;
+
     /// The CATALOG name — python's entry-point name, not the handler module
     /// (`ram_store.tools` leaked into every `bundles=` line of a system prompt).
     fn name(&self) -> &str {
         "ram_store"
     }
 
-    fn verb_docs(&self) -> Value {
-        let mut verbs = Map::new();
-        for (n, d) in VERB_DOCS {
-            verbs.insert(n.to_string(), Value::from(d));
-        }
-        Value::Object(verbs)
+    fn man(&self) -> &'static str {
+        MAN
     }
 
-    fn readme(&self) -> Option<&'static str> {
-        Some(README)
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        verbs::VERBS
+    }
+
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        verbs::dynamic_verbs(agent)
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &record::RECORD
     }
 
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        let out = match verb {
-            "reflect" => self.reflect(agent_id),
-            // No-op — the tables start empty (RAM) or are filled by `inject`.
-            "boot" => return Ok(None),
-            "append" => {
-                let out = self.append(agent_id, payload, kernel);
+        use verbs::Call;
+        let out = match call {
+            Call::Reflect(_) => self.reflect(agent_id),
+            Call::Append(a) => {
+                let out = self.append(agent_id, &a, kernel);
                 // one `appended` event per new row; a refusal has no `ids`
                 for id in out
                     .get("ids")
@@ -960,25 +802,20 @@ impl Bundle for RamStoreBundle {
                 }
                 out
             }
-            "read" => self.read(agent_id, payload, kernel),
-            "search" => self.search(agent_id, payload, kernel),
-            "prune" => self.prune(agent_id, payload, kernel)?,
-            "inject" => self.inject(agent_id, payload),
-            "dump" => self.dump(agent_id),
+            Call::Read(a) => self.read(agent_id, &a, kernel),
+            Call::Search(a) => self.search(agent_id, &a, kernel),
+            Call::Prune(a) => self.prune(agent_id, &a, kernel),
+            Call::Inject(a) => self.inject(agent_id, &a),
+            Call::Dump(_) => self.dump(agent_id),
             // the bytes verbs ride the binary path only (`handle_binary`)
-            "put_bytes" | "get_bytes" => refusal(
+            Call::PutBytes(_) => refusal(
                 BAD_ARG,
-                format!("ram_store: {verb} carries its bytes as a binary body, at `data`"),
+                "ram_store: put_bytes carries its bytes as a binary body, at `data`",
             ),
-            _ => {
-                let t = payload.get("type").cloned().unwrap_or(Value::Null);
-                let mut r = refusal(
-                    UNHANDLED,
-                    format!("ram_store: unknown type {}", py_repr_value(&t)),
-                );
-                with(&mut r, "verb", t);
-                r
-            }
+            Call::GetBytes(_) => refusal(
+                BAD_ARG,
+                "ram_store: get_bytes carries its bytes as a binary body, at `data`",
+            ),
         };
         Ok(Some(out))
     }
@@ -988,20 +825,20 @@ impl Bundle for RamStoreBundle {
     async fn handle_binary(
         &self,
         agent_id: &AgentId,
-        header: Value,
+        call: Self::Call,
         body: Option<Blob>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<Blob>), BundleError> {
-        match header.get("type").and_then(Value::as_str) {
-            Some("put_bytes") => {
-                let out = self.put_bytes(agent_id, &header, body.as_ref(), kernel);
+        match call {
+            verbs::Call::PutBytes(a) => {
+                let out = self.put_bytes(agent_id, &a, body.as_ref(), kernel);
                 Ok((Some(out), None))
             }
-            Some("get_bytes") => {
-                let (out, blob) = self.get_bytes(agent_id, &header, kernel);
+            verbs::Call::GetBytes(a) => {
+                let (out, blob) = self.get_bytes(agent_id, &a, kernel);
                 Ok((Some(out), blob))
             }
-            _ => Ok((self.handle(agent_id, &header, kernel).await?, None)),
+            other => Ok((self.handle(agent_id, other, kernel).await?, None)),
         }
     }
 

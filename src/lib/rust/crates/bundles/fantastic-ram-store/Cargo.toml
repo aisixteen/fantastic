@@ -14,6 +14,8 @@ description = "In-RAM memory store agent: per-owner rows, fold refs, grants, sea
 fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 serde_json = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 
