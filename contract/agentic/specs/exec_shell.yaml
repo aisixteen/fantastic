@@ -41,7 +41,7 @@ expect:
     # ── EXS-3 · autodiscovery is PTY-only ────────────────────────────────
     - name: a pipe job still names its command
       operator: {to: shell_term, send: {type: start}}
-      expect: {reason: missing_arg, contains: {arg: command}}
+      expect: {reason: missing_arg, contains: {arg: "command | pty"}}
       because: EXS-3
 
     # ── EXS-4 · `shell` permits ONE exact line ───────────────────────────

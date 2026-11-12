@@ -950,13 +950,13 @@ fn a_non_finite_kv_argument_round_trips_instead_of_panicking() {
         out.status.code()
     );
     assert!(!stderr.contains("panicked"), "{stderr}");
-    // python `json.dumps(record, indent=2, default=str)` — the bare tokens, and
-    // the wide integer's exact digits.
+    // a field the record does not type is the text as written: the wide integer's
+    // exact digits and the non-finite words come back unchanged, never coerced.
     for want in [
-        "\"big2\": 123456789012345678901234567890",
-        "\"inf\": Infinity",
-        "\"nan\": NaN",
-        "\"neg_inf\": -Infinity",
+        "\"big2\": \"123456789012345678901234567890\"",
+        "\"inf\": \"inf\"",
+        "\"nan\": \"nan\"",
+        "\"neg_inf\": \"-Infinity\"",
         "\"id\": \"coerced\"",
     ] {
         assert!(stdout.contains(want), "missing {want} in:\n{stdout}");
