@@ -6,7 +6,7 @@
 //! exposes its state on demand via [`Kernel::save`] / [`Kernel::load`].
 
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
-use fantastic_kernel::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+use fantastic_kernel::bundle::{BundleError, BundleRegistry, Handler, Reply};
 use fantastic_kernel::Item;
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
@@ -16,14 +16,27 @@ use tempfile::TempDir;
 struct Noop;
 
 #[async_trait::async_trait]
-impl Bundle for Noop {
+impl Handler for Noop {
+    type Call = fantastic_kernel::test_support::NoCall;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "noop"
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::test_support::no_verbs()
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        fantastic_kernel::test_support::no_dynamic(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         Ok(Some(Value::Null))

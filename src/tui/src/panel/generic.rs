@@ -226,21 +226,6 @@ impl GenericPanel {
             }
         }
 
-        if let Some(readme) = r.get("readme").and_then(Value::as_str) {
-            out.push(Line::from(""));
-            out.push(Line::from(Span::styled(
-                "  README",
-                Style::default()
-                    .fg(theme::LABEL)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            for l in readme.lines() {
-                out.push(Line::from(Span::styled(
-                    format!("  {l}"),
-                    Style::default().fg(theme::DIM),
-                )));
-            }
-        }
         out
     }
 }

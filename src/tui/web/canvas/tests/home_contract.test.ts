@@ -1,20 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { ACTIONS, PROTOCOL, STATUSES, VERSION, decodeState, label } from "../src/bundles/home_view/home_model.ts";
+import { ACTIONS, PROTOCOL, STATUSES, decodeState, label } from "../src/bundles/home_view/home_model.ts";
 import type { Status } from "../src/bundles/home_view/home_model.ts";
 import { HOME_VERBS } from "../src/bundles/home_view/home_view.ts";
 import { SCHEMA_BY_PATH, cssName } from "../src/bundles/skin/schema.ts";
 import { stockSkin } from "../src/bundles/skin/stock.ts";
 import { compileSkin } from "../src/bundles/skin/tokens.ts";
 
-// THE CONTRACT REPLAY, client side: `contract/home/v1/cases.json` (the `home`
-// protocol v1, as data) against what the Home reads. The Rust agent replays the
+// THE CONTRACT REPLAY, client side: `contract/home/cases.json` (the `home`
+// protocol, as data) against what the Home reads. The Rust agent replays the
 // same file (`fantastic-home-kernel/src/home/contract_tests.rs`).
 
 interface Corpus {
   protocol: string;
-  version: number;
   verbs: string[];
   events: string[];
   statuses: string[];
@@ -22,7 +21,7 @@ interface Corpus {
   states: { valid: unknown[]; invalid: Array<{ state: unknown; why: string }> };
 }
 
-const corpus = JSON.parse(readFileSync(new URL("../../../../../contract/home/v1/cases.json", import.meta.url), "utf8")) as Corpus;
+const corpus = JSON.parse(readFileSync(new URL("../../../../../contract/home/cases.json", import.meta.url), "utf8")) as Corpus;
 
 /** The verbs only a host shell sends (`focus` raises its window, `menu` builds
  *  its native menus) and `reflect`, which the page does not send: the Home's
@@ -31,7 +30,6 @@ const NOT_THE_PAGES = ["reflect", "focus", "menu"];
 
 test("the corpus is the protocol the model reads", () => {
   assert.equal(corpus.protocol, PROTOCOL);
-  assert.equal(corpus.version, VERSION);
   assert.deepEqual(corpus.statuses, [...STATUSES]);
   assert.deepEqual(corpus.actions, [...ACTIONS]);
   assert.ok(corpus.events.includes("state"), "the state is an event");
@@ -88,10 +86,9 @@ test("list.html takes its look from one :root block of the dark skin's custom pr
   for (const [, used] of rest.matchAll(/var\((--[\w-]+)\)/g)) assert.ok(defined.has(used!), `${used} is not in the :root block`);
 });
 
-test("list.html checks the protocol first and sends version 1 with a fresh id", () => {
+test("list.html checks the protocol first and sends a fresh id", () => {
   assert.match(LIST, /type: "reflect"/);
-  assert.match(LIST, /me\.protocol !== PROTOCOL \|\| me\.version !== VERSION/);
-  assert.match(LIST, /version: VERSION/);
+  assert.match(LIST, /me\.protocol !== PROTOCOL/);
   assert.match(LIST, /crypto\.randomUUID\(\)/);
   assert.match(LIST, /\/home\/ws/);
   assert.match(LIST, /frame\.payload\.type !== "state"/);

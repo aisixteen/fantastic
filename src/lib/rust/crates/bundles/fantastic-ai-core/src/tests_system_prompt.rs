@@ -215,25 +215,17 @@ async fn pre_and_post_wrap_whichever_block_is_in_force() {
 
 #[test]
 fn an_unusable_wrap_value_is_refused_at_the_write() {
-    let sch = crate::schema::schema(Vec::new());
-    let rec = json!({"memory_store_id": "m"})
-        .as_object()
-        .cloned()
-        .unwrap();
     for name in ["pre_system_prompt", "post_system_prompt"] {
         for bad in [json!(""), json!("   "), json!(42), json!(["x"])] {
             let mut meta = serde_json::Map::new();
             meta.insert(name.to_string(), bad.clone());
-            assert_eq!(
-                crate::schema::validate(&sch, "b", &meta, &rec),
-                Some(crate::schema::wrap_prompt_refusal(name)),
-                "{name}={bad}"
-            );
+            let refused = crate::tests_decl::refused_at_the_write(&meta);
+            assert!(refused.is_some_and(|e| e.contains(name)), "{name}={bad}");
         }
         for ok in [json!("FINE"), Value::Null] {
             let mut meta = serde_json::Map::new();
             meta.insert(name.to_string(), ok);
-            assert_eq!(crate::schema::validate(&sch, "b", &meta, &rec), None);
+            assert_eq!(crate::tests_decl::refused_at_the_write(&meta), None);
         }
     }
 }

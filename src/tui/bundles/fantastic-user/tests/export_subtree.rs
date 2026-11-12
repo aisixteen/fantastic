@@ -6,27 +6,42 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use fantastic_kernel::{
     bootstrap::{bootstrap, BootstrapOptions},
-    bundle::BundleError,
-    AgentId, Bundle, BundleRegistry, Item, Kernel, Reply,
+    bundle::{BundleError, Handler},
+    AgentId, BundleRegistry, Item, Kernel, Reply,
 };
-use fantastic_user::{UserBundle, HANDLER_MODULE, VERBS};
+use fantastic_user::{verbs::VERBS, UserBundle, HANDLER_MODULE};
 use serde_json::{json, Value};
+
+fantastic_kernel::stand_in_verbs!(echo_verbs { Ping "ping" {}, Run "run" {} });
 
 /// Answers with what it was given.
 struct Echo;
 
 #[async_trait]
-impl Bundle for Echo {
+impl Handler for Echo {
+    type Call = echo_verbs::Call;
     fn name(&self) -> &str {
         "echo"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in that answers with what it was given."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        echo_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        echo_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         _id: &AgentId,
-        p: &Value,
+        call: Self::Call,
         _k: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        Ok(Some(json!({"echo": p})))
+        Ok(Some(json!({"echo": call.payload()})))
     }
 }
 
@@ -236,20 +251,22 @@ async fn export_subtree_refuses_existing_dir_and_dotdot() {
 #[tokio::test(flavor = "multi_thread")]
 async fn export_subtree_requires_agent_id_and_path() {
     let k = setup().await;
-    for p in [
-        json!({"type": "export_subtree", "path": "x"}),
-        json!({"type": "export_subtree", "agent_id": "a"}),
-        json!({"type": "export_subtree", "agent_id": 3, "path": "x"}),
-        json!({"type": "export_subtree", "agent_id": "a", "path": ""}),
+    for (p, reason, arg) in [
+        (json!({"type": "export_subtree", "path": "x"}), "missing_arg", "agent_id"),
+        (json!({"type": "export_subtree", "agent_id": "a"}), "missing_arg", "path"),
+        (json!({"type": "export_subtree", "agent_id": 3, "path": "x"}), "bad_arg", "agent_id"),
     ] {
         let r = op(&k, "user", p.clone()).await;
-        assert_eq!(r["reason"], "bad_arg", "{p}: {r}");
+        assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some(reason), Some(arg)), "{p}: {r}");
     }
+    // an empty path is the engine's too: the root's own export refuses it
+    let r = op(&k, "user", json!({"type": "export_subtree", "agent_id": "a", "path": ""})).await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn export_subtree_is_in_verbs_and_docs() {
-    assert!(VERBS.contains(&"export_subtree"));
+    assert!(VERBS.iter().any(|v| v.name == "export_subtree"));
     let k = setup().await;
     let d = op(&k, "kernel", json!({"type": "docs", "of": "user"})).await;
     assert!(d["verbs"].get("export_subtree").is_some(), "{d}");
@@ -370,7 +387,7 @@ async fn export_subtree_refuses_with_secret_found_when_agent_py_holds_a_key() {
         json!({"type": "export_subtree", "agent_id": "a", "path": "out_keyed"}),
     )
     .await;
-    assert_eq!(r["reason"], "secret_found", "{r}");
+    assert_eq!(r["reason"], "store_refused", "{r}");
     assert!(
         r["error"]
             .as_str()

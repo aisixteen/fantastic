@@ -12,7 +12,8 @@ use std::time::Duration;
 use crate::agent_loop::BackendConfig;
 use crate::provider::{Provider, ProviderError, ProviderEvent, ProviderStream};
 use async_trait::async_trait;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
+use crate::tests_decl::chat_decls;
 use fantastic_kernel::{Agent, AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 use tempfile::TempDir;
@@ -67,24 +68,31 @@ impl Provider for Mock {
 struct PauseBundle;
 
 #[async_trait]
-impl Bundle for PauseBundle {
+impl Handler for PauseBundle {
+    chat_decls!();
     fn name(&self) -> &str {
         CFG.name
     }
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         let served = served_for(agent_id);
-        let reply = crate::verbs::handle_common(agent_id, payload, kernel, CFG, move |_client| {
-            Arc::new(Mock {
-                served: Arc::clone(&served),
-            }) as Arc<dyn Provider>
-        })
-        .await?
-        .unwrap_or_else(|| json!({"error": "pause_mock: unknown type"}));
+        let reply = crate::verbs::handle(
+            agent_id,
+            call,
+            kernel,
+            CFG,
+            move |_client| {
+                Arc::new(Mock {
+                    served: Arc::clone(&served),
+                }) as Arc<dyn Provider>
+            },
+            || json!({"id": "pause_mock"}),
+        )
+        .await?;
         Ok(Some(reply))
     }
 }
@@ -101,22 +109,47 @@ static ASKED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 /// is asked.
 struct LimitRegistry;
 
+/// The registry's one verb, `get_count`: it takes no arguments.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GetCount {}
+
+mod registry_verbs {
+    use super::GetCount;
+    fantastic_kernel::verbs! { "get_count" => GetCount }
+}
+
 #[async_trait]
-impl Bundle for LimitRegistry {
+impl Handler for LimitRegistry {
+    type Call = registry_verbs::Call;
     fn name(&self) -> &str {
         "limit_registry"
+    }
+    fn man(&self) -> &'static str {
+        "A registry stub that refuses every count with `limit`."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        registry_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, a: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        registry_verbs::dynamic_verbs(a)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &crate::tests_decl::any::RECORD
     }
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb = payload["type"].as_str().unwrap_or("").to_string();
+        let registry_verbs::Call::GetCount(_) = call else {
+            return Ok(None);
+        };
         ASKED
             .lock()
             .unwrap()
-            .push((agent_id.as_str().to_string(), verb));
+            .push((agent_id.as_str().to_string(), "get_count".to_string()));
         Ok(Some(json!({"error": "limit", "running": 9, "max": 1})))
     }
 }
@@ -278,23 +311,19 @@ async fn pause_twice_and_resume_twice_are_noops() {
 }
 
 #[test]
-fn pause_and_resume_are_documented_like_every_other_verb() {
-    let docs = crate::verbs::verb_docs();
-    for verb in ["pause", "resume"] {
-        let d = docs[verb].as_str().unwrap_or_default();
-        assert!(
-            d.starts_with("args: "),
-            "`docs` carries no signature for {verb}: {d:?}"
-        );
+fn pause_and_resume_are_declared_like_every_other_verb() {
+    use crate::declared::chat::VERBS;
+    for (verb, reply) in [
+        ("pause", "{paused, held}"),
+        ("resume", "{resumed, released}"),
+    ] {
+        let v = VERBS
+            .iter()
+            .find(|v| v.name == verb)
+            .unwrap_or_else(|| panic!("{verb} is not declared"));
+        assert!(v.doc().contains(reply), "{verb}: {}", v.doc());
+        assert!(v.schema()["properties"].is_object(), "{verb} declares its arguments");
     }
-    assert!(docs["pause"]
-        .as_str()
-        .unwrap()
-        .contains("{paused:bool, held:int}"));
-    assert!(docs["resume"]
-        .as_str()
-        .unwrap()
-        .contains("{resumed:bool, released:int}"));
 }
 
 #[tokio::test]

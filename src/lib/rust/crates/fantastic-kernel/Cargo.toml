@@ -14,6 +14,7 @@ fantastic-bundle = { path = "../fantastic-bundle" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
+schemars = { workspace = true }
 serde_json = { workspace = true }
 # THE YAML READER (`yaml_io::load`) is PyYAML's `CSafeLoader`: libyaml gives
 # the EVENTS (each scalar's tag and `plain_implicit`) and `yaml_io/read.rs`
@@ -37,6 +38,12 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Threading",
 ] }
 
+[features]
+# The stand-ins tests build on (`test_support`): a dev-dependency turns it on, nothing ships it.
+test-support = []
+
 [dev-dependencies]
+# this crate's own integration tests and examples use its `test-support`
+fantastic-kernel = { path = ".", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = "3"

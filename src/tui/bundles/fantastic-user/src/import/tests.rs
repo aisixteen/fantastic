@@ -34,7 +34,14 @@ fn run(
         .iter()
         .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
         .collect();
-    let bind = bind.as_object().cloned().unwrap_or_default();
+    let bind: BTreeMap<String, String> = bind
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().expect("a bind value is text").to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
     let agent = |id: &str| existing(id, taken);
     let w = World {
         parent_id: "home",
@@ -406,4 +413,19 @@ fn plan_refuses_undeclared_port_and_unknown_outside_id() {
         "{}",
         e.message
     );
+}
+
+#[test]
+fn import_subtree_refuses_an_empty_bind_target_by_the_declared_schema() {
+    let verb = fantastic_kernel::Verb::of::<crate::verbs::ImportSubtree>("import_subtree");
+    let call = |bind: Value| {
+        fantastic_kernel::verbs::validate(
+            "import_subtree",
+            verb.schema(),
+            &json!({"path": "p", "parent_id": "a", "bind": bind}),
+        )
+    };
+    let refused = call(json!({"port": ""})).expect_err("an empty bind target is refused");
+    assert!(refused["error"].as_str().unwrap_or("").contains("bind"), "{refused}");
+    assert!(call(json!({"port": "agent_1"})).is_ok());
 }

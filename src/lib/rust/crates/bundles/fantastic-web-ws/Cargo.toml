@@ -7,12 +7,14 @@ license.workspace = true
 description = "WebSocket verb channel — mounts ws://host/<agent_id>/ws on a parent web agent."
 
 [dependencies]
-# python-format helpers: `{x!r}` in the unhandled refusal.
+# python-format helpers: `{x!r}` in the route refusal.
 fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 # the shared leg posture (`describe`) this surface reflects.
 fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
 async-trait = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]

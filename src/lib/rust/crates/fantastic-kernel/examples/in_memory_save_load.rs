@@ -8,7 +8,7 @@
 
 use async_trait::async_trait;
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
-use fantastic_kernel::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+use fantastic_kernel::bundle::{BundleError, BundleRegistry, Handler, Reply};
 use fantastic_kernel::Item;
 use fantastic_kernel::{AgentId, Kernel, StorageMode};
 use serde_json::{json, Value};
@@ -18,14 +18,27 @@ use std::sync::Arc;
 struct Demo;
 
 #[async_trait]
-impl Bundle for Demo {
+impl Handler for Demo {
+    type Call = fantastic_kernel::test_support::NoCall;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "demo"
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::test_support::no_verbs()
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        fantastic_kernel::test_support::no_dynamic(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         Ok(Some(Value::Null))
@@ -106,7 +119,6 @@ async fn main() {
         println!("    {line}");
     }
     assert_or_die(snapshot.contains("alpha"), "snapshot mentions alpha");
-    assert_or_die(snapshot.contains("\"version\":1"), "version field present");
 
     banner("Step 4: spin a FRESH in-memory kernel + kernel.load_json(snapshot)");
     let booted2 = bootstrap(registry(), BootstrapOptions::in_memory()).expect("boot 2");
@@ -165,16 +177,7 @@ async fn main() {
     );
 
     banner("Step 7: load_json validation — bad snapshots fail loud");
-    let bad = json!({"version": 9999, "agents": []}).to_string();
-    let err = kernel2.load_json(&bad).unwrap_err();
-    println!("  future-version snapshot → {err}");
-    assert_or_die(
-        format!("{err}").contains("exceeds"),
-        "future version rejected",
-    );
-
     let bad2 = json!({
-        "version": 1,
         "agents": [
             {"id": "x", "parent_id": "no-such-parent", "handler_module": "demo.tools"}
         ]

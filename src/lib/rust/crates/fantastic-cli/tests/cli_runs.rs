@@ -243,19 +243,13 @@ fn one_shot_dispatch_returns_json_reply() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("\"id\""));
     assert!(stdout.contains("\"sentence\""));
-    assert!(stdout.contains("Filesystem edge of the io family"));
+    assert!(stdout.contains("\"verbs\""));
 }
 
-/// The vendored `help.md` — the same bytes the binary prints, read from the
-/// crate source so a test can compare without shelling out twice.
-const HELP_MD: &str = include_str!("../../bundles/fantastic-cli-bundle/src/help.md");
-
-/// `help` / `-h` / `--help` as the FIRST word prints python's
-/// `cli/help.md` rstripped plus one `\n`, exits 0, and seeds the workdir like
-/// every other mode. Later words are ignored.
+/// `help` / `-h` / `--help` as the FIRST word prints the kernel's docs, rendered from
+/// its declarations, exits 0 and writes nothing. Later words are ignored.
 #[test]
-fn help_prints_cli_help_md_verbatim() {
-    let expected = format!("{}\n", HELP_MD.trim_end());
+fn help_prints_the_kernels_docs() {
     for spelling in [
         vec!["help"],
         vec!["-h"],
@@ -274,12 +268,11 @@ fn help_prints_cli_help_md_verbatim() {
             "{spelling:?} exited non-zero: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout),
-            expected,
-            "{spelling:?} did not print help.md verbatim"
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("create_agent"),
+            "{spelling:?} did not print the kernel's verbs: {stdout}"
         );
-        assert_eq!(out.stdout.len(), 1545, "python's help.md is 1545 bytes");
         assert!(
             !tmp.path().join(".fantastic").exists(),
             "{spelling:?} takes no lock, so it writes nothing"
@@ -683,10 +676,10 @@ fn ledger_cap_flag_is_stripped_and_applied() {
         .env("FANTASTIC_LEDGER_CAP", "abc")
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1), "python dies on int('abc')");
+    assert_eq!(out.status.code(), Some(1), "a cap that is not a count is refused");
     assert!(
         String::from_utf8_lossy(&out.stderr)
-            .contains("ValueError: invalid literal for int() with base 10: 'abc'"),
+            .contains("--ledger-cap \"abc\": invalid digit found in string"),
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -933,7 +926,7 @@ fn a_non_finite_kv_argument_round_trips_instead_of_panicking() {
             "kernel",
             "create_agent",
             "parent_id=kernel",
-            "handler_module=file_bridge.tools",
+            "handler_module=kernel_state.tools",
             "id=coerced",
             "big2=123456789012345678901234567890",
             "inf=inf",
@@ -951,13 +944,13 @@ fn a_non_finite_kv_argument_round_trips_instead_of_panicking() {
         out.status.code()
     );
     assert!(!stderr.contains("panicked"), "{stderr}");
-    // python `json.dumps(record, indent=2, default=str)` — the bare tokens, and
-    // the wide integer's exact digits.
+    // a field the record does not type is the text as written: the wide integer's
+    // exact digits and the non-finite words come back unchanged, never coerced.
     for want in [
-        "\"big2\": 123456789012345678901234567890",
-        "\"inf\": Infinity",
-        "\"nan\": NaN",
-        "\"neg_inf\": -Infinity",
+        "\"big2\": \"123456789012345678901234567890\"",
+        "\"inf\": \"inf\"",
+        "\"nan\": \"nan\"",
+        "\"neg_inf\": \"-Infinity\"",
         "\"id\": \"coerced\"",
     ] {
         assert!(stdout.contains(want), "missing {want} in:\n{stdout}");
@@ -1269,7 +1262,7 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
     // a required field has no default; the counts a record leaves out are read
     // from the server before a turn — no default either
     assert!(required.iter().all(|n| fields[n].get("default").is_none()));
-    for n in ["model", "max_tokens", "context_window", "kv_slots"] {
+    for n in ["model", "max_tokens", "kv_slots"] {
         assert!(fields[n].get("default").is_none(), "{n}");
         assert!(
             fields[n]["hint"]
@@ -1278,25 +1271,21 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
             "{n}"
         );
     }
-    // the defaulted fields carry THE BACKEND'S OWN values
-    assert_eq!(fields["temperature"]["default"], serde_json::json!(0.2));
+    // the backend declares a value for each sampling knob it leaves out, and none for the window
+    for n in ["temperature", "thinking_token_budget"] {
+        assert!(fields[n].get("default").is_some(), "{n}");
+    }
+    assert!(fields["context_window"].get("default").is_none());
     assert_eq!(
-        fields["thinking_token_budget"]["default"],
-        serde_json::json!(16000)
+        fields["kv_overflow"]["type"],
+        serde_json::json!("'evict'|'reject'")
     );
     assert_eq!(
-        fields["kv_overflow"]["enum"],
-        serde_json::json!(["evict", "reject"])
-    );
-    assert_eq!(
-        fields["reasoning_effort"]["enum"],
-        serde_json::json!(["low", "medium", "xhigh"])
+        fields["reasoning_effort"]["type"],
+        serde_json::json!("'low'|'medium'|'xhigh'")
     );
     // the key: optional where a server may be keyless, required where it never is
-    assert_eq!(
-        fields["credentials"]["type"],
-        serde_json::json!("credentials")
-    );
+    assert_eq!(fields["credentials"]["type"], serde_json::json!("object"));
     assert_eq!(fields["credentials"]["required"], serde_json::json!(false));
     let sch = &by["responses_backend"]["schema"];
     assert!(sch.get("key_var").is_none());
@@ -1307,14 +1296,23 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
         .find(|f| f["name"] == "credentials")
         .expect("responses_backend: no credentials field");
     assert_eq!(cred["required"], serde_json::json!(true));
-    // the credential store is an installed bundle, and publishes no schema
+    // every installed bundle publishes the record it declares
     assert_eq!(
         by["credential_store"]["handler_module"],
         serde_json::json!("credential_store.tools")
     );
-    assert!(by["credential_store"].get("schema").is_none());
-    // a bundle that is not a backend publishes none
-    assert!(by["file_bridge"].get("schema").is_none());
+    let store_fields: Vec<&str> = by["credential_store"]["schema"]["fields"]
+        .as_array()
+        .expect("credential_store declares a record")
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(store_fields, ["backend", "file", "keychain_namespace", "refs"]);
+    let bridge_fields = by["file_bridge"]["schema"]["fields"]
+        .as_array()
+        .expect("file_bridge declares a record");
+    assert!(bridge_fields.iter().any(|f| f["name"] == "root"));
+    assert_eq!(by["file_bridge"]["schema"]["open"], serde_json::json!(false));
 }
 
 /// The on-device backend is in the REAL catalog of this binary, in every tier,
@@ -1340,13 +1338,20 @@ fn the_catalog_carries_the_on_device_backend() {
         names,
         [
             "temperature",
+
             "max_tokens",
-            "memory_store_id",
-            "context_window",
-            "output_reserve",
-            "context_strategy",
-            "recent_n",
+
             "caching",
+
+            "memory_store_id",
+
+            "context_window",
+
+            "output_reserve",
+
+            "context_strategy",
+
+            "recent_n",
             "cache_primer_until",
             "transport_retries",
             "misfire_limit",
@@ -1354,12 +1359,14 @@ fn the_catalog_carries_the_on_device_backend() {
             "file_bridge_id",
             "system_prompt_file",
             "pre_system_prompt",
-            "post_system_prompt"
+            "post_system_prompt",
+            "image_max_bytes",
+            "image_max_pixels",
+            "provider_capabilities"
         ]
     );
-    // the on-device model's own window — 0 on a Mac with no model (a CI VM)
-    let window = fields[3]["default"].as_i64().expect("an int window");
-    assert!(window >= 0, "{window}");
+    // the window is the model's own, read at use: the record declares no default
+    assert!(fields[3].get("default").is_none(), "{}", fields[3]);
 }
 
 /// Python `test_the_schema_is_what_the_write_enforces`: ONE
@@ -1380,12 +1387,9 @@ fn the_schema_is_what_the_write_enforces() {
         one_shot_json(tmp.path(), &args)
     };
     let r = create(&["id=a1"]);
-    assert_eq!(r["reason"], "invalid_meta", "{r}");
+    assert_eq!(r["reason"], "missing_arg", "{r}");
     assert!(
-        r["error"]
-            .as_str()
-            .unwrap()
-            .contains("missing: endpoint, credentials, memory_store_id"),
+        r["error"].as_str().unwrap().contains("'credentials'"),
         "{r}"
     );
     let r = create(&[
@@ -1396,7 +1400,7 @@ fn the_schema_is_what_the_write_enforces() {
         r#"credentials={"store": "creds", "ref": "claude"}"#,
         "context_strategy=bogus",
     ]);
-    assert_eq!(r["reason"], "invalid_meta", "{r}");
+    assert_eq!(r["reason"], "bad_arg", "{r}");
     assert!(
         r["error"].as_str().unwrap().contains("context_strategy"),
         "{r}"
@@ -1408,12 +1412,9 @@ fn the_schema_is_what_the_write_enforces() {
         "memory_store_id=memory",
         r#"credentials={"store": "creds"}"#,
     ]);
-    assert_eq!(r["reason"], "invalid_meta", "{r}");
+    assert_eq!(r["reason"], "missing_arg", "{r}");
     assert!(
-        r["error"]
-            .as_str()
-            .unwrap()
-            .contains("credentials must be {store"),
+        r["error"].as_str().unwrap().contains("credentials.ref"),
         "{r}"
     );
     let r = create(&[

@@ -14,19 +14,42 @@ const PROBE: &str = "boot_probe.tools";
 
 struct Probe;
 
+fantastic_kernel::stand_in_verbs!(probe_verbs { Ping "ping" {} });
+
 #[async_trait::async_trait]
-impl fantastic_kernel::bundle::Bundle for Probe {
+impl fantastic_kernel::bundle::Handler for Probe {
+    type Call = probe_verbs::Call;
+
     fn name(&self) -> &str {
         "boot_probe"
+    }
+
+    fn man(&self) -> &'static str {
+        "A test stand-in an embedder registers."
+    }
+
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        probe_verbs::VERBS
+    }
+
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        probe_verbs::dynamic_verbs(agent)
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
 
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Option<Value>, fantastic_kernel::bundle::BundleError> {
-        Ok(Some(json!({"probe": "pong"})))
+        Ok(match call {
+            probe_verbs::Call::Ping(_) => Some(json!({"probe": "pong"})),
+            probe_verbs::Call::Reflect(_) => None,
+        })
     }
 }
 

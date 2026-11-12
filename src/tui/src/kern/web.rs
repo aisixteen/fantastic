@@ -102,10 +102,8 @@ async fn merge_verbs(
 
 async fn create(h: &Host, spec: Value) -> Result<(), String> {
     let id = spec["id"].as_str().unwrap_or("?").to_string();
-    let mut spec = spec;
-    spec["type"] = json!("create_agent");
-    let r = h.operator("kernel", spec).await;
-    err_of(&r).map_or(Ok(()), |e| Err(format!("could not create `{id}`: {e}")))
+    let r = fantastic_kernel::verbs::create_agent(&h.kernel, spec).await;
+    fantastic_kernel::refusal::error_text(&r).map_or(Ok(()), |e| Err(format!("could not create `{id}`: {e}")))
 }
 
 /// A CANVAS (phase 4): a `canvas.tools` node under `parent` (`canvas_page`, or the
@@ -196,22 +194,6 @@ pub fn canvases(h: &Host) -> Vec<(String, String)> {
     out
 }
 
-/// The node id a canvas named `name` takes: `canvas_<slug>`, the slug its letters
-/// and digits (other characters `_`, the ends trimmed). A name with none is refused.
-pub fn canvas_node_id(name: &str) -> Result<String, String> {
-    let slug: String = name
-        .trim()
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    let slug = slug.trim_matches('_');
-    if slug.is_empty() {
-        return Err("new_canvas needs a name (letters or digits)".into());
-    }
-    Ok(format!("canvas_{slug}"))
-}
-
 /// The page records dir of a canvas `node` spawned by a canvas whose own records
 /// dir is `parent_root`: nested under it, `<parent_root>/<node>`.
 pub fn child_records_root(parent_root: &str, node: &str) -> String {
@@ -233,7 +215,7 @@ pub async fn new_canvas(h: &Host, parent: &str, name: &str) -> Result<String, St
     if !canvas_parent {
         return Err(format!("new_canvas: `{parent}` is not a canvas"));
     }
-    let node = canvas_node_id(name)?;
+    let node = format!("canvas_{name}");
     if h.kernel.exists(&node) {
         return Err(format!("a canvas `{node}` already exists"));
     }
@@ -361,7 +343,7 @@ pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<U
     // THE CANVAS.
     if !h.kernel.exists(CANVAS_PAGE_ID) {
         create(h, json!({"parent_id": WEB_ID, "id": CANVAS_PAGE_ID, "handler_module": fantastic_canvas_page::HANDLER_MODULE,
-            "verbs": {"read_stream": fantastic_canvas_page::READ_STREAM_DOC}})).await?;
+            "verbs": fantastic_canvas_page::read_stream_declared()})).await?;
     }
     let fresh_canvas_ws = !h.kernel.exists(CANVAS_WS_ID);
     if fresh_canvas_ws {
@@ -403,7 +385,7 @@ pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<U
         merge_verbs(h, WEB_ID, "can_call", served, json!(["read_stream"])).await?;
     }
     // `user`: the leg's one reach (its verbs), and the page loader it reads.
-    let gw_verbs = json!(fantastic_user::VERBS);
+    let gw_verbs = json!(fantastic_user::page_verbs());
     let r = h
         .operator(
             "kernel",
@@ -490,18 +472,6 @@ fn web_record(user: &str, port: u16, bind: Option<&str>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_canvas_takes_its_node_id_from_its_name_or_is_refused_without_one() {
-        assert_eq!(canvas_node_id("research").unwrap(), "canvas_research");
-        assert_eq!(
-            canvas_node_id("  Research Team! ").unwrap(),
-            "canvas_research_team"
-        );
-        assert_eq!(canvas_node_id("a-b").unwrap(), "canvas_a_b");
-        assert!(canvas_node_id("").unwrap_err().contains("needs a name"));
-        assert!(canvas_node_id(" -- ").unwrap_err().contains("needs a name"));
-    }
 
     #[test]
     fn a_child_canvas_records_nest_under_its_parents_records_dir() {
@@ -608,6 +578,15 @@ pub(crate) mod canvas_tree_tests {
         kernel.bundles.register(
             crate::kern::backend::HANDLER_MODULE,
             crate::kern::backend::BackendBundle,
+        );
+        // the agents the canvas world creates (`create_agent` refuses a handler that is not installed)
+        kernel.bundles.register(
+            fantastic_user::HANDLER_MODULE,
+            fantastic_user::UserBundle::default(),
+        );
+        kernel.bundles.register(
+            fantastic_canvas_page::HANDLER_MODULE,
+            fantastic_canvas_page::CanvasPageBundle,
         );
         let kernel = Arc::new(kernel);
         let root = Agent::new(
@@ -825,8 +804,6 @@ pub(crate) mod canvas_tree_tests {
         let h = canvas_world(&dir).await;
         let err = new_canvas(&h, CANVAS_PAGE_ID, "x").await.unwrap_err();
         assert!(err.contains("is not a canvas"), "{err}");
-        let err = new_canvas(&h, CANVAS_NODE_ID, "  -- ").await.unwrap_err();
-        assert!(err.contains("needs a name"), "{err}");
         assert!(!h.kernel.agents.contains_key(&KernelId::from("canvas_x")));
         let _ = std::fs::remove_dir_all(&dir);
     }

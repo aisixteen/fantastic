@@ -86,8 +86,7 @@ pub enum KernelError {
 
     /// A [`crate::Kernel::load`] or [`crate::Kernel::load_json`] call
     /// received a snapshot that couldn't be parsed, was missing a
-    /// root, had a duplicate id, or had a schema version this kernel
-    /// doesn't understand.
+    /// root, or had a duplicate id.
     #[error("invalid kernel snapshot: {0}")]
     InvalidSnapshot(String),
 }

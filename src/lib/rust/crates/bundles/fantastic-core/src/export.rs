@@ -33,13 +33,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use fantastic_kernel::refusal::{refusal, BAD_ARG, EXISTS, NOT_FOUND, STORE_REFUSED};
 use fantastic_kernel::{AgentId, AgentRecord, Kernel};
 use serde_json::{json, Map, Value};
-
-/// A refusal in the kernel's shape.
-fn refuse(reason: &str, msg: impl Into<String>) -> Value {
-    json!({"error": msg.into(), "reason": reason})
-}
 
 /// The blueprint's file name in the export folder.
 pub const BLUEPRINT_FILE: &str = "blueprint.yaml";
@@ -857,27 +853,16 @@ fn read_bundle_dir(state: &Path, hm: &str) -> Vec<BundleFile> {
 /// `export_subtree {agent_id, path}` — write the agent and everything under it
 /// as a blueprint folder at `path` (relative to the running dir), which must be
 /// new or empty.
-pub async fn export_subtree(kernel: &Arc<Kernel>, p: &Value, who: &str) -> Value {
-    let (Some(agent_id), Some(path)) = (
-        p.get("agent_id")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty()),
-        p.get("path")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty()),
-    ) else {
-        return refuse(
-            "bad_arg",
-            format!("{who}: agent_id (str) + path (str) required"),
-        );
-    };
+pub async fn export_subtree(
+    kernel: &Arc<Kernel>,
+    agent_id: &str,
+    path: &str,
+    who: &str,
+) -> Value {
     let rel = Path::new(path);
-    if rel.components().any(|c| c == Component::ParentDir) {
-        return refuse("bad_arg", format!("{who}: path may not hold `..`"));
-    }
     let base = match kernel.work_dir() {
         Ok(b) => b,
-        Err(e) => return refuse("failed", format!("{who}: {e}")),
+        Err(e) => return refusal(STORE_REFUSED, format!("{who}: {e}")),
     };
     let out = absolute(&base, rel);
     if out.exists() {
@@ -886,15 +871,15 @@ pub async fn export_subtree(kernel: &Arc<Kernel>, p: &Value, who: &str) -> Value
                 .map(|mut d| d.next().is_none())
                 .unwrap_or(false);
         if !empty {
-            return refuse(
-                "exists",
+            return refusal(
+                EXISTS,
                 format!("{who}: {path} exists and is not an empty folder"),
             );
         }
     }
     let Some(parent) = out.parent().filter(|p| p.is_dir()) else {
-        return refuse(
-            "not_found",
+        return refusal(
+            NOT_FOUND,
             format!("{who}: the folder that holds {path} does not exist"),
         );
     };
@@ -924,7 +909,7 @@ pub async fn export_subtree(kernel: &Arc<Kernel>, p: &Value, who: &str) -> Value
     // a folder bundle's plain top-level files: `<state>/bundles/<hm>/`
     let state = match kernel.state_dir() {
         Ok(s) => s,
-        Err(e) => return refuse("failed", format!("{who}: {e}")),
+        Err(e) => return refusal(STORE_REFUSED, format!("{who}: {e}")),
     };
     let read_bundle = |hm: &str| -> Vec<BundleFile> { read_bundle_dir(&state, hm) };
     let ex = match build(
@@ -936,7 +921,7 @@ pub async fn export_subtree(kernel: &Arc<Kernel>, p: &Value, who: &str) -> Value
         &read_bundle,
     ) {
         Ok(x) => x,
-        Err(e) => return refuse("bad_arg", format!("{who}: {e}")),
+        Err(e) => return refusal(BAD_ARG, format!("{who}: {e}")),
     };
 
     let name = out
@@ -950,13 +935,13 @@ pub async fn export_subtree(kernel: &Arc<Kernel>, p: &Value, who: &str) -> Value
     let tmp = parent.join(format!(".{name}.export-{}-{nanos}", std::process::id()));
     if let Err(e) = write_folder(&tmp, &ex) {
         let _ = std::fs::remove_dir_all(&tmp);
-        return refuse("failed", format!("{who}: {e}"));
+        return refusal(STORE_REFUSED, format!("{who}: {e}"));
     }
     let hits = scan_secrets(&tmp);
     if !hits.is_empty() {
         let _ = std::fs::remove_dir_all(&tmp);
-        return refuse(
-            "secret_found",
+        return refusal(
+            STORE_REFUSED,
             format!("{who}: the output was not written — {}", hits.join("; ")),
         );
     }
@@ -965,7 +950,7 @@ pub async fn export_subtree(kernel: &Arc<Kernel>, p: &Value, who: &str) -> Value
     }
     if let Err(e) = std::fs::rename(&tmp, &out) {
         let _ = std::fs::remove_dir_all(&tmp);
-        return refuse("failed", format!("{who}: {e}"));
+        return refusal(STORE_REFUSED, format!("{who}: {e}"));
     }
     let mut files = vec![BLUEPRINT_FILE.to_string()];
     files.extend(ex.files.iter().map(|(f, _)| f.clone()));

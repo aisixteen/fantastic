@@ -367,7 +367,7 @@ mod tests {
             vec![
                 row(json!({"id":1,"agent":"ai","content":"a"})),
                 row(json!({"id":2,"agent":"ai","content":"b"})),
-                row(json!({"id":3,"agent":"ai","kind":"view","v":1,"budget":100,"why":"projection: fold",
+                row(json!({"id":3,"agent":"ai","kind":"view","budget":100,"why":"projection: fold",
                            "ids":[{"id":1,"res":"stub"},{"id":2,"res":"full"}]})),
                 row(json!({"id":4,"agent":"ai","content":"appended since"})),
             ],
@@ -389,8 +389,8 @@ mod tests {
         s.apply_full(
             &a(),
             vec![
-                row(json!({"id":1,"agent":"ai","kind":"view","v":1,"why":"old","ids":[]})),
-                row(json!({"id":2,"agent":"ai","kind":"view","v":1,"why":"new","ids":[]})),
+                row(json!({"id":1,"agent":"ai","kind":"view","why":"old","ids":[]})),
+                row(json!({"id":2,"agent":"ai","kind":"view","why":"new","ids":[]})),
             ],
         );
         assert_eq!(s.views[&a()].why, "new");

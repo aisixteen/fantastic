@@ -23,7 +23,7 @@
 //! | `boot` | none | `{booted, transport}` or `{error, already}` |
 //! | `shutdown` | none | `{stopped:true}` (runs the `on_delete` cascade) |
 //! | `reconnect` | none | shutdown + boot (the manual redial; a dropped `ws` link redials by itself) |
-//! | `forward` | `{target, payload, forward_timeout?}` | the unwrapped reply from the remote |
+//! | `forward` | `{target, payload, forward_timeout}` | the unwrapped reply from the remote |
 //! | `watch_remote` | `{target}` | `{ok, watching}` — stream a remote agent's emits onto this bridge's inbox |
 //! | `unwatch_remote` | `{target}` | `{ok, unwatched}` |
 //!
@@ -75,12 +75,11 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_bundle::{
-    py_float, py_float_repr, py_int, py_repr, py_repr_value, py_str, py_truthy,
-};
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_bundle::{py_float_repr, py_repr};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::refusal::{refusal_hint, NOT_CONNECTED};
 use fantastic_kernel::{AgentId, Blob, Item, Kernel};
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -90,10 +89,14 @@ use tokio::sync::{oneshot, Mutex as AsyncMutex};
 // The authorization rule registries live in the shared `fantastic-io-bridge` base
 // (every io derivation imports them).
 use fantastic_io_bridge::authorizer;
+pub mod record;
 pub mod transport;
+pub mod verbs;
 
 use authorizer::{Action, Decision};
+#[cfg(any(test, feature = "test-support"))]
 use transport::memory::MemoryTransport;
+use verbs::{CallFrame, FrameId, WatchFrame};
 use transport::relay::{RelaySpawn, RelayTransport};
 use transport::ws::WsTransport;
 use transport::{BridgeTransport, TransportError};
@@ -115,70 +118,14 @@ pub enum Family {
 }
 
 impl Family {
-    /// python's `SENTENCE` for this derivation.
+    /// What this derivation is for — its one man text.
     fn sentence(self) -> &'static str {
         match self {
-            Family::Ws => "Cross-kernel comms bridge — WS-only, asymmetric (no peer bridge needed); weak proxy.",
-            Family::Relay => "Cross-kernel comms through a relay-kernel router — dial-out WS, group-password auth (X-Fantastic-Auth), GUID-routed; symmetric RPC tunneled over the relay; auto-reconnecting.",
+            Family::Ws => WS_MAN,
+            Family::Relay => RELAY_MAN,
         }
-    }
-
-    /// python's `make_verbs(default_kind=…)` — the reflect fallback only; `boot`
-    /// defaults to `ws` for BOTH derivations (the shared engine).
-    fn default_kind(self) -> &'static str {
-        match self {
-            Family::Ws => "ws",
-            Family::Relay => "relay",
-        }
-    }
-
-    /// python's reflect `verbs` — the first doc line of each verb in the table,
-    /// verbatim, in `make_verbs` order (plus the relay's four directory verbs).
-    fn verbs(self) -> Value {
-        let mut v = json!({
-            "reflect": "Identity + transport + connectivity. No args.",
-            "boot": "No args. Reads `transport` (kind) + transport-specific fields off the agent record, builds the transport, spawns the read loop, emits `bridge_up`. Idempotent: re-booting a connected bridge is a no-op.",
-            "reconnect": "No args. Teardown + boot — the manual redial. A `ws` leg whose link dropped redials its known address by itself, with a backoff, and keeps its watches; `bridge_down` then `bridge_up` mark the drop and the return.",
-            "forward": "args: target:str (req — an id on the REMOTE kernel), payload:dict (req — the call to run there, a verb frame with its own `type`), forward_timeout:float? (default 30s — not `timeout`, which is a call's own routing field). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. The far kernel judges the call as the leg that serves it there. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given.",
-            "watch_remote": "args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport and subscribes this leg to `target`. Subsequent `{type:'event', src, payload}` frames whose `src` is subscribed are re-emitted on THIS bridge agent's inbox as the payload plus `src`; an event for anything not subscribed is dropped. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)`. Idempotent (web_ws de-dups via its own `watching` set).",
-            "unwatch_remote": "args: target:str (req — id previously passed to watch_remote). Unsubscribes this leg from `target` (events for it are dropped from now on) and sends `{type:'unwatch', src:<target>}` so the remote stops emitting them.",
-        });
-        if self == Family::Relay {
-            if let Some(o) = v.as_object_mut() {
-                o.insert(
-                    "list_peers".into(),
-                    json!("args: list_timeout:float? (default 30s — not `timeout`, which is a call's own routing field). One-shot snapshot of the relay directory:"),
-                );
-                o.insert("watch_directory".into(), json!("No args. Subscribe to the relay directory; live `peer_joined`/`peer_left`/"));
-                o.insert(
-                    "unwatch_directory".into(),
-                    json!("No args. Stop the directory subscription started by `watch_directory`."),
-                );
-                o.insert("set_identity".into(), json!("Advertise/update this peer's DIRECTORY identity — the typed attrs the relay"));
-            }
-        }
-        v
     }
 }
-
-/// `ws_bridge`'s readme.md, auto-seeded into the agent's dir on creation.
-pub const WS_README: &str = include_str!("readme_ws.md");
-
-/// `relay_connector`'s readme.md, auto-seeded into the agent's dir on creation.
-pub const RELAY_README: &str = include_str!("readme_relay.md");
-
-/// Default forward timeout in seconds. Caller can override per call
-/// via `payload.timeout`.
-pub const DEFAULT_FORWARD_TIMEOUT_SECS: f64 = 30.0;
-
-/// python `relay_connector._relay.DEFAULT_HEARTBEAT` (0 or less = off).
-pub const DEFAULT_HEARTBEAT_SECS: f64 = 30.0;
-
-/// python `relay_connector._relay.DEFAULT_RECONNECT`.
-pub const DEFAULT_RECONNECT_SECS: f64 = 10.0;
-
-/// python `relay_connector._relay.ROLES`, as its `repr` prints in a refusal.
-pub const ROLES: &str = "('manager', 'kernel')";
 
 /// python `relay_connector` fixes the directory watch timeout at 10 s.
 const DIRECTORY_WATCH_TIMEOUT_SECS: f64 = 10.0;
@@ -265,83 +212,45 @@ pub struct WsBridgeBundle;
 /// Registered under `relay_connector.tools`. Shares the engine with `WsBridgeBundle`.
 pub struct RelayConnectorBundle;
 
-/// Every verb but `forward` — the JSON half of [`dispatch`], the one bridge
-/// engine both derivations run. `family` is the only difference: it bounds
-/// which transport a `boot` may open.
-async fn verb_reply(
-    family: Family,
-    agent_id: &AgentId,
-    payload: &Value,
-    kernel: &Arc<Kernel>,
-) -> Result<Reply, BundleError> {
-    let verb_value = payload.get("type").unwrap_or(&Value::Null);
-    let verb = verb_value.as_str().unwrap_or("");
-    // The directory verbs belong to the RELAY derivation only — on a ws leg they
-    // are not in the verb table at all, so they take the unknown-type reply.
-    let directory = matches!(
-        verb,
-        "list_peers" | "watch_directory" | "unwatch_directory" | "set_identity"
-    ) && family == Family::Relay;
-    let reply = match verb {
-        "reflect" => reflect_reply(family, agent_id, kernel),
-        "boot" => boot_reply(family, agent_id, kernel).await,
-        "reconnect" => reconnect_reply(family, agent_id, kernel).await,
-        "watch_remote" => watch_remote_reply(agent_id, payload, "watch").await,
-        "unwatch_remote" => watch_remote_reply(agent_id, payload, "unwatch").await,
-        "list_peers" | "watch_directory" | "unwatch_directory" if directory => {
-            directory_reply(agent_id, payload, verb).await?
-        }
-        "set_identity" if directory => set_identity_reply(agent_id, payload, kernel).await,
-        // python's `dispatch`: a verb the table does not carry (`shutdown`
-        // included — the teardown lives in `on_delete`) teaches the envelope.
-        _ => unknown_type(verb_value),
-    };
-    Ok(Some(reply))
-}
-
-/// python `dispatch`'s miss branch — the commonest slip is a frame with no
-/// `type`, or a `forward` whose inner `payload` dropped its own.
-fn unknown_type(verb: &Value) -> Value {
-    let mut r = fantastic_kernel::refusal::refusal_hint(
-        fantastic_kernel::refusal::UNHANDLED,
-        format!("bridge: unknown type {}", py_repr_value(verb)),
-        "every bridge frame needs a \"type\"; to reach a remote agent use \
-    {\"type\":\"forward\",\"target\":\"<remote_id>\",\"payload\":{\"type\":\"<verb>\",...}} \
-    — the inner payload is itself a verb frame and needs its own \"type\".",
-    );
-    fantastic_kernel::refusal::with(&mut r, "verb", verb.clone());
-    r
-}
-
 /// The relay directory verbs (`relay_connector` only) — addressed to the relay's
 /// own `relay` agent (`target:"relay"`), not the partner. `list_peers` is a
 /// one-shot snapshot; `watch_directory` subscribes so `peer_*` events re-emit on
 /// this connector's inbox; `unwatch_directory` stops it.
-async fn directory_reply(
-    agent_id: &AgentId,
-    payload: &Value,
-    op: &str,
-) -> Result<Value, BundleError> {
+enum DirectoryOp {
+    /// `list_peers`, with the seconds to wait for the relay's answer.
+    ListPeers(f64),
+    Watch,
+    Unwatch,
+}
+
+impl DirectoryOp {
+    fn name(&self) -> &'static str {
+        match self {
+            DirectoryOp::ListPeers(_) => "list_peers",
+            DirectoryOp::Watch => "watch_directory",
+            DirectoryOp::Unwatch => "unwatch_directory",
+        }
+    }
+}
+
+async fn directory_reply(agent_id: &AgentId, op: DirectoryOp) -> Result<Value, BundleError> {
     let state = BRIDGES.lock().get(agent_id).cloned();
     let live = state.as_ref().filter(|s| !s.transport.closed());
     let Some(state) = live else {
         // python: `unwatch_directory` on a leg with no transport is simply `ok`.
-        if op == "unwatch_directory" {
+        if let DirectoryOp::Unwatch = op {
             return Ok(json!({"ok": true}));
         }
         return Ok(refusal_hint(
             NOT_CONNECTED,
-            format!("relay_connector.{op}: not connected"),
+            format!("relay_connector.{}: not connected", op.name()),
             "call boot first",
         ));
     };
     Ok(match op {
-        "list_peers" => {
-            let timeout = py_timeout(payload, "list_timeout")?;
-            state.transport.list_peers(timeout).await
-        }
+        DirectoryOp::ListPeers(timeout) => state.transport.list_peers(timeout).await,
         // python passes NO timeout here — the transport's own 10 s stands.
-        "watch_directory" => {
+        DirectoryOp::Watch => {
             // The leg SUBSCRIBES to the directory as `watch_remote` does to a
             // remote agent — before asking: the read loop may hand the engine an
             // event that follows the relay's ack before this verb resumes. A
@@ -356,7 +265,7 @@ async fn directory_reply(
                 .transport
                 .watch_directory(DIRECTORY_WATCH_TIMEOUT_SECS)
                 .await;
-            if out.get("error").is_some_and(py_truthy) {
+            if fantastic_kernel::refusal::error_text(&out).is_some() {
                 state
                     .watching
                     .lock()
@@ -365,7 +274,7 @@ async fn directory_reply(
             }
             out
         }
-        _ => {
+        DirectoryOp::Unwatch => {
             state
                 .watching
                 .lock()
@@ -376,23 +285,15 @@ async fn directory_reply(
     })
 }
 
-/// python `float(payload.get(<key>, 30))` — `forward_timeout` on `forward`,
-/// `list_timeout` on `list_peers` (never `timeout`, a call's own routing field): a
-/// number or a numeric string is the timeout, a bool is 0/1, and `null` or a
-/// non-numeric string RAISES — the handler dies with python's
-/// `TypeError`/`ValueError`, settled `failed`.
-fn py_timeout(payload: &Value, key: &str) -> Result<f64, BundleError> {
-    match payload.get(key) {
-        None => Ok(DEFAULT_FORWARD_TIMEOUT_SECS),
-        Some(v) => py_float(v).map_err(|e| format!("{}: {}", e.class_name(), e.message()).into()),
-    }
-}
-
 /// `set_identity` (`relay_connector` only): advertise/update this peer's directory
 /// typing — `role`/`owner_guid`/`exposes` (all optional, merged over the record).
 /// Persists the change so it re-announces on the next boot, then pushes it to the
 /// relay live (→ `peer_updated`). Mirrors py `_set_identity`.
-async fn set_identity_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+async fn set_identity_reply(
+    agent_id: &AgentId,
+    a: verbs::SetIdentity,
+    kernel: &Arc<Kernel>,
+) -> Value {
     let Some(state) = BRIDGES
         .lock()
         .get(agent_id)
@@ -405,26 +306,19 @@ async fn set_identity_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Ke
             "call boot first",
         );
     };
-    if let Some(role) = payload.get("role") {
-        if !role.is_null() && role.as_str() != Some("manager") && role.as_str() != Some("kernel") {
-            // python `bad("set_identity", "role", f"one of {ROLES}")`.
-            let mut out = fantastic_kernel::refusal::refusal(
-                fantastic_kernel::refusal::BAD_ARG,
-                format!("set_identity: role must be one of {ROLES}"),
-            );
-            fantastic_kernel::refusal::with(&mut out, "arg", json!("role"));
-            return out;
-        }
-    }
     // Merge only the provided well-known keys into the record + persist (explicit
     // null retracts a field, e.g. owner_guid:null = become standalone).
     // python `kernel.update(id, **patch)` — the `updated` state event is what
     // the root loader's writer persists.
     let mut patch = serde_json::Map::new();
-    for k in ["role", "owner_guid", "exposes"] {
-        if let Some(v) = payload.get(k) {
-            patch.insert(k.to_string(), v.clone());
-        }
+    if let Some(role) = a.role {
+        patch.insert("role".into(), json!(role));
+    }
+    if let Some(owner) = a.owner_guid {
+        patch.insert("owner_guid".into(), json!(owner));
+    }
+    if let Some(exposes) = a.exposes {
+        patch.insert("exposes".into(), json!(exposes));
     }
     if !patch.is_empty() {
         kernel.update(agent_id, patch);
@@ -433,214 +327,172 @@ async fn set_identity_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Ke
     state.transport.set_identity(attrs).await
 }
 
-/// The bridge's dispatch, every verb — the one bridge engine both derivations
-/// run. `forward` is the one verb that carries bytes either way: the local
-/// caller sends `{type:forward, target, payload, forward_timeout?}`, a request body (if
-/// any) inside the INNER payload (`Item::with_binary(["payload", …], …)` —
-/// python's forward payload holds the bytes there); the bridge ships a `call`
-/// frame (binary when it carries that body, text otherwise) and returns
-/// `(reply, reply_body)` — the reply body at its slot of the reply (`["bytes"]`
-/// for a `read_stream` forward, the peer's own key otherwise), whenever the
-/// peer answered one, whatever verb it was. A body anywhere else is not part of
-/// the forwarded call, exactly as python's inner payload would not hold it.
-/// Every other verb is [`verb_reply`] (a request body is unused).
-async fn dispatch(
-    family: Family,
+/// `forward` — the one verb that carries bytes either way: the local caller sends
+/// `{type:forward, target, payload, forward_timeout}`, a request body (if any)
+/// inside the INNER payload (`Item::with_binary(["payload", …], …)` — python's
+/// forward payload holds the bytes there); the bridge ships a `call` frame (binary
+/// when it carries that body, text otherwise) and returns `(reply, reply_body)` —
+/// the reply body at its slot of the reply (`["bytes"]` for a `read_stream`
+/// forward, the peer's own key otherwise), whenever the peer answered one,
+/// whatever verb it was. A body anywhere else is not part of the forwarded call,
+/// exactly as python's inner payload would not hold it.
+async fn forward_call(
     agent_id: &AgentId,
-    header: Value,
+    a: verbs::Forward,
     body: Option<Blob>,
     kernel: &Arc<Kernel>,
-) -> Result<(Reply, Option<Blob>), BundleError> {
-    let verb = header.get("type").and_then(Value::as_str).unwrap_or("");
-    if verb != "forward" {
-        let reply = verb_reply(family, agent_id, &header, kernel).await?;
-        return Ok((reply, None));
-    }
-    let target = header
-        .get("target")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let inner = header.get("payload").cloned().unwrap_or(Value::Null);
-    if target.is_empty() || !inner.is_object() {
-        return Ok((
-            Some(json!({"error": "bridge.forward: target (str) + payload (dict) required"})),
-            None,
-        ));
-    }
-    let timeout_secs = py_timeout(&header, "forward_timeout")?;
+) -> (Value, Option<Blob>) {
     // A body INSIDE the forwarded `payload` — its path below the step `payload`.
     // One bound to the literal top-level key `payload.x` (the REST octet leg) is
     // a different key, never inside it: python's `payload[field] = body` puts it
     // beside `payload`, not in it.
     let carried = body.and_then(|b| b.under("payload"));
-    let (v, body) = forward_core(kernel, agent_id, &target, inner, carried, timeout_secs).await;
-    Ok((Some(v), body))
+    forward_core(
+        kernel,
+        agent_id,
+        &a.target,
+        Value::Object(a.payload),
+        carried,
+        a.forward_timeout,
+    )
+    .await
 }
 
-/// The secret paths of a FORWARDED call: a `forward` of a `set` marks each
-/// `payload.fields.<name>` (a name that is empty or holds a dot marks the whole
-/// `payload.fields`, as the credential store's own `field_marks` does). The
-/// caller cannot know the far bundle before sending, so this is deliberate
-/// over-redaction in the CALLER's records for every forwarded `set`: the far
+/// The secret paths of a FORWARDED call: the forwarded payload is read through
+/// the credential store's declared `set` (the only call that carries secret
+/// fields), and each mark is placed under `payload.`. The caller cannot know the
+/// far bundle before sending, so this is deliberate over-redaction in the
+/// CALLER's records for every forwarded call that reads as a store `set`: the far
 /// kernel's own record is exact. A `get`'s reply marks come back on the reply
-/// frame instead. The page-peer `<guid>|agent` route (web `ws_peer`) is not
-/// covered; it only reaches browser kernels, which hold no credential store.
-fn forward_payload_secret(payload: &Value) -> Vec<String> {
-    if payload.get("type").and_then(Value::as_str) != Some("forward") {
-        return Vec::new();
-    }
-    let Some(inner) = payload
-        .get("payload")
-        .filter(|p| p.get("type") == Some(&json!("set")))
-    else {
-        return Vec::new();
+/// frame instead. The call itself is read through the bridge's own declared
+/// `forward`.
+fn forward_marks(f: &verbs::Forward) -> Vec<String> {
+    fantastic_credential_store::set_marks(&Value::Object(f.payload.clone()))
+        .into_iter()
+        .map(|m| format!("payload.{m}"))
+        .collect()
+}
+
+/// What the bundle is for — its one short man text (ws_bridge).
+const WS_MAN: &str = "A cross-kernel bridge: it dials a far kernel's web_ws leg and forwards calls to it, watches its agents and serves the far side's calls and watches as this leg, gated as the leg. Emits bridge_up and bridge_down on its inbox.";
+
+/// What the bundle is for — its one short man text (relay_connector).
+const RELAY_MAN: &str = "A cross-kernel bridge through a relay kernel: it dials the relay with a group password from a credential store, forwards calls to a partner kernel by guid, serves the partner's calls as this leg, keeps a directory of peers, and redials by itself. Emits bridge_up and bridge_down on its inbox.";
+
+/// The ONE handler both derivations share: the verbs every leg answers are written
+/// once here; a derivation adds only its own arms (`|agent, kernel| { arms }`), and
+/// names its verb module (`ws` / `relay`), its bundle name and man text, and its family.
+macro_rules! bridge_handler {
+    ($ty:ident, $m:ident, $name:literal, $man:expr, $family:expr, |$agent:ident, $kern:ident| { $($extra:tt)* }) => {
+        #[async_trait]
+        impl Handler for $ty {
+            type Call = verbs::$m::Call;
+
+            fn name(&self) -> &str {
+                $name
+            }
+
+            fn man(&self) -> &'static str {
+                $man
+            }
+
+            fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+                verbs::$m::VERBS
+            }
+
+            fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+                verbs::$m::dynamic_verbs(agent)
+            }
+
+            fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+                &record::$m::RECORD
+            }
+
+            /// [`forward_marks`] of a `forward` call; every other verb carries none.
+            fn payload_secret(&self, payload: &Value) -> Vec<String> {
+                use fantastic_kernel::verbs::Parse;
+                match verbs::$m::Call::parse($name, payload, &[]) {
+                    Ok(verbs::$m::Call::Forward(f)) => forward_marks(&f),
+                    _ => Vec::new(),
+                }
+            }
+
+            /// The JSON half of [`Self::handle_binary`] — a `forward` reply body is not carried.
+            async fn handle(
+                &self,
+                agent_id: &AgentId,
+                call: Self::Call,
+                kernel: &Arc<Kernel>,
+            ) -> Result<Reply, BundleError> {
+                Ok(self.handle_binary(agent_id, call, None, kernel).await?.0)
+            }
+
+            async fn handle_binary(
+                &self,
+                $agent: &AgentId,
+                call: Self::Call,
+                body: Option<Blob>,
+                $kern: &Arc<Kernel>,
+            ) -> Result<(Reply, Option<Blob>), BundleError> {
+                let family = $family;
+                let reply = match call {
+                    verbs::$m::Call::Reflect(_) => reflect_reply(family, $agent, $kern),
+                    verbs::$m::Call::Boot(_) => boot_reply(family, $agent, $kern).await,
+                    verbs::$m::Call::Shutdown(_) => Value::Null,
+                    verbs::$m::Call::Reconnect(_) => reconnect_reply(family, $agent, $kern).await,
+                    verbs::$m::Call::Forward(a) => {
+                        let (v, b) = forward_call($agent, a, body, $kern).await;
+                        return Ok((Some(v), b));
+                    }
+                    verbs::$m::Call::WatchRemote(a) => {
+                        watch_remote_reply($agent, &a.target, "watch").await
+                    }
+                    verbs::$m::Call::UnwatchRemote(a) => {
+                        watch_remote_reply($agent, &a.target, "unwatch").await
+                    }
+                    $($extra)*
+                };
+                Ok((Some(reply), None))
+            }
+
+            async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
+                let _ = shutdown_reply(agent_id, kernel).await;
+                Ok(())
+            }
+
+            /// Shutdown frees what delete frees — declared, never a fallback.
+            async fn on_shutdown(
+                &self,
+                agent_id: &AgentId,
+                kernel: &Arc<Kernel>,
+            ) -> Result<(), BundleError> {
+                self.on_delete(agent_id, kernel).await
+            }
+        }
     };
-    match inner.get("fields") {
-        Some(Value::Object(m)) if m.keys().all(|k| !k.is_empty() && !k.contains('.')) => {
-            m.keys().map(|k| format!("payload.fields.{k}")).collect()
+}
+
+bridge_handler!(WsBridgeBundle, ws, "ws_bridge", WS_MAN, Family::Ws, |agent_id, kernel| {});
+
+bridge_handler!(
+    RelayConnectorBundle,
+    relay,
+    "relay_connector",
+    RELAY_MAN,
+    Family::Relay,
+    |agent_id, kernel| {
+        verbs::relay::Call::ListPeers(a) => {
+            directory_reply(agent_id, DirectoryOp::ListPeers(a.list_timeout)).await?
         }
-        Some(Value::Object(_)) => vec!["payload.fields".to_string()],
-        _ => Vec::new(),
-    }
-}
-
-#[async_trait]
-impl Bundle for WsBridgeBundle {
-    fn name(&self) -> &str {
-        "ws_bridge"
-    }
-
-    fn payload_secret(&self, payload: &Value) -> Vec<String> {
-        forward_payload_secret(payload)
-    }
-
-    fn verb_docs(&self) -> Value {
-        Family::Ws.verbs()
-    }
-
-    fn emits_doc(&self) -> Option<Value> {
-        Some(emits_json())
-    }
-    fn readme(&self) -> Option<&'static str> {
-        Some(WS_README)
-    }
-    /// The JSON half of [`dispatch`] — a `forward` reply body is not carried.
-    async fn handle(
-        &self,
-        agent_id: &AgentId,
-        payload: &Value,
-        kernel: &Arc<Kernel>,
-    ) -> Result<Reply, BundleError> {
-        Ok(
-            dispatch(Family::Ws, agent_id, payload.clone(), None, kernel)
-                .await?
-                .0,
-        )
-    }
-    async fn handle_binary(
-        &self,
-        agent_id: &AgentId,
-        header: Value,
-        body: Option<Blob>,
-        kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<Blob>), BundleError> {
-        dispatch(Family::Ws, agent_id, header, body, kernel).await
-    }
-    async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
-        let _ = shutdown_reply(agent_id, kernel).await;
-        Ok(())
-    }
-    /// Shutdown frees what delete frees — declared, never a fallback.
-    async fn on_shutdown(
-        &self,
-        agent_id: &AgentId,
-        kernel: &Arc<Kernel>,
-    ) -> Result<(), BundleError> {
-        self.on_delete(agent_id, kernel).await
-    }
-    fn validate_meta(
-        &self,
-        meta: &Map<String, Value>,
-        _record: &Map<String, Value>,
-    ) -> Option<String> {
-        validate_bridge_meta(meta)
-    }
-}
-
-#[async_trait]
-impl Bundle for RelayConnectorBundle {
-    fn name(&self) -> &str {
-        "relay_connector"
-    }
-
-    fn payload_secret(&self, payload: &Value) -> Vec<String> {
-        forward_payload_secret(payload)
-    }
-
-    fn verb_docs(&self) -> Value {
-        Family::Relay.verbs()
-    }
-
-    fn emits_doc(&self) -> Option<Value> {
-        Some(emits_json())
-    }
-    fn readme(&self) -> Option<&'static str> {
-        Some(RELAY_README)
-    }
-    /// The JSON half of [`dispatch`] — a `forward` reply body is not carried.
-    async fn handle(
-        &self,
-        agent_id: &AgentId,
-        payload: &Value,
-        kernel: &Arc<Kernel>,
-    ) -> Result<Reply, BundleError> {
-        Ok(
-            dispatch(Family::Relay, agent_id, payload.clone(), None, kernel)
-                .await?
-                .0,
-        )
-    }
-    async fn handle_binary(
-        &self,
-        agent_id: &AgentId,
-        header: Value,
-        body: Option<Blob>,
-        kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<Blob>), BundleError> {
-        dispatch(Family::Relay, agent_id, header, body, kernel).await
-    }
-    async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
-        let _ = shutdown_reply(agent_id, kernel).await;
-        Ok(())
-    }
-    /// Shutdown frees what delete frees — declared, never a fallback.
-    async fn on_shutdown(
-        &self,
-        agent_id: &AgentId,
-        kernel: &Arc<Kernel>,
-    ) -> Result<(), BundleError> {
-        self.on_delete(agent_id, kernel).await
-    }
-    /// The record's own fields, refused at the write: `credentials` ({store,
-    /// ref}) — the relay password lives in a credential_store — then the leg's
-    /// `ingress_rule`.
-    /// Python `relay_connector.tools.validate_meta`.
-    fn validate_meta(
-        &self,
-        meta: &Map<String, Value>,
-        _record: &Map<String, Value>,
-    ) -> Option<String> {
-        if let Some(bad) = meta
-            .get("credentials")
-            .filter(|v| !v.is_null())
-            .and_then(fantastic_ai_core::credentials::shape_error)
-        {
-            return Some(bad);
+        verbs::relay::Call::WatchDirectory(_) => {
+            directory_reply(agent_id, DirectoryOp::Watch).await?
         }
-        validate_bridge_meta(meta)
+        verbs::relay::Call::UnwatchDirectory(_) => {
+            directory_reply(agent_id, DirectoryOp::Unwatch).await?
+        }
+        verbs::relay::Call::SetIdentity(a) => set_identity_reply(agent_id, a, kernel).await,
     }
-}
+);
 
 // ── the relay password (a credential_store ref, never a record field) ──
 
@@ -733,50 +585,35 @@ fn identity_from_meta(agent_id: &AgentId, kernel: &Kernel) -> Value {
     Value::Object(attrs)
 }
 
+fn meta_f64(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<f64> {
+    meta_value(agent_id, kernel, key).and_then(|v| v.as_f64())
+}
+
 fn meta_value(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<Value> {
     let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
     let meta = agent.meta.read().expect("meta poisoned");
     meta.get(key).cloned()
 }
 
-/// The rule spec for one direction: the per-direction field if present, else the
-/// `auth` shorthand — which carries a bare STEM that each manifold scopes with its own
-/// suffix (`auth:"password"` ⇒ `password_ingress` + `password_egress`). See
-/// `authorizer::manifold_spec`.
-fn rule_spec(agent_id: &AgentId, kernel: &Kernel, primary: &str) -> Option<Value> {
-    let suffix = if primary == "egress_rule" {
-        "_egress"
-    } else {
-        "_ingress"
+/// The leg's rules, read off the LIVE record. A record that holds what no rule is
+/// (edited past its schema) seals the leg.
+fn rules_of(agent_id: &AgentId, kernel: &Kernel) -> authorizer::Rules {
+    let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
+        return authorizer::Rules::default();
     };
-    authorizer::manifold_spec(
-        meta_value(agent_id, kernel, primary).as_ref(),
-        meta_value(agent_id, kernel, "auth").as_ref(),
-        suffix,
-    )
+    let meta = agent.meta.read().expect("meta poisoned");
+    authorizer::Rules::of(&meta).unwrap_or_default()
 }
 
 // ── verb implementations ────────────────────────────────────────────
 
-/// What a bridge leg emits on its own inbox — python `io_bridge.EMITS`, served by
-/// `docs` (tier detailed).
-fn emits_json() -> Value {
-    json!({
-        "bridge_up": "{type:'bridge_up'} — emitted on this agent's inbox after a successful boot",
-        "bridge_down": "{type:'bridge_down'} — emitted when the transport drops (peer closed, tunnel died)",
-        "<remote event>": "events from `watch_remote` subscriptions are re-emitted on this agent's inbox as their original `{type, ...}` shape plus `src` (the watched remote id); unsubscribed events are dropped",
-    })
-}
-
 fn reflect_reply(family: Family, agent_id: &AgentId, kernel: &Kernel) -> Value {
     let bridge = BRIDGES.lock().get(agent_id).cloned();
-    // python: `st.transport_kind or rec.get("transport") or default_kind`.
-    let transport_kind = bridge
-        .as_ref()
-        .map(|b| b.transport_kind.clone())
-        .filter(|k| !k.is_empty())
-        .or_else(|| meta_string(agent_id, kernel, "transport"))
-        .unwrap_or_else(|| family.default_kind().to_string());
+    // the live transport's kind, else the record's `transport` as stored
+    let transport_kind = match bridge.as_ref() {
+        Some(b) => json!(b.transport_kind),
+        None => meta_value(agent_id, kernel, "transport").unwrap_or(Value::Null),
+    };
     // python's engine: the transport EXISTS and is not closed. The relay leg
     // overrides it in `reflect_fields` with the LIVE socket state.
     let connected = match bridge.as_ref() {
@@ -795,16 +632,11 @@ fn reflect_reply(family: Family, agent_id: &AgentId, kernel: &Kernel) -> Value {
     out.insert("pending_count".into(), json!(pending));
     // Read-key == write-key (py parity): `ingress_rule`/`egress_rule`, so a
     // `reflect` → `update_agent` edit is a direct mirror. No `auth` in the
-    // reflect (it's a WRITE shorthand only). `sealed` = the leg still
+    // reflect. `sealed` = the leg still
     // denies inbound (the conscious-open signal). The SAME `describe` every leg
     // reflects with (python `**describe(rec)`) — the gate's own scoping, so a
     // bridge never reports a rule its gate resolves differently.
-    let rec = kernel
-        .agents
-        .get(agent_id)
-        .map(|e| e.meta.read().expect("meta poisoned").clone())
-        .unwrap_or_default();
-    if let Some(posture) = authorizer::describe(&rec).as_object() {
+    if let Some(posture) = rules_of(agent_id, kernel).describe().as_object() {
         for (k, v) in posture {
             out.insert(k.clone(), v.clone());
         }
@@ -821,41 +653,18 @@ fn reflect_reply(family: Family, agent_id: &AgentId, kernel: &Kernel) -> Value {
             }
         }
         Family::Relay => {
-            for key in ["relay_url", "guid", "partner_guid"] {
+            for key in ["relay_url", "guid", "partner_guid", "reconnect", "role"] {
                 out.insert(
                     key.into(),
                     meta_value(agent_id, kernel, key).unwrap_or(Value::Null),
                 );
             }
-            out.insert(
-                "reconnect".into(),
-                json!(meta_value(agent_id, kernel, "reconnect")
-                    .as_ref()
-                    .map_or(Ok(DEFAULT_RECONNECT_SECS), py_float)
-                    .unwrap_or(DEFAULT_RECONNECT_SECS)),
-            );
-            let role = meta_value(agent_id, kernel, "role").unwrap_or(Value::Null);
-            out.insert(
-                "role".into(),
-                if py_truthy(&role) {
-                    role
-                } else {
-                    json!("kernel")
-                },
-            );
-            out.insert(
-                "owner_guid".into(),
-                meta_value(agent_id, kernel, "owner_guid").unwrap_or(Value::Null),
-            );
-            let exposes = meta_value(agent_id, kernel, "exposes").unwrap_or(Value::Null);
-            out.insert(
-                "exposes".into(),
-                if py_truthy(&exposes) {
-                    exposes
-                } else {
-                    json!([])
-                },
-            );
+            for key in ["owner_guid", "exposes"] {
+                out.insert(
+                    key.into(),
+                    meta_value(agent_id, kernel, key).unwrap_or(Value::Null),
+                );
+            }
         }
     }
     Value::Object(out)
@@ -894,29 +703,20 @@ async fn boot_carrying_inner(
         }
     }
     // The leg's rules are NOT cached here: the gate and `forward` read them off
-    // the live record per frame. Boot only refuses an egress rule the registry
-    // does not know, before dialing.
-    if let Err(e) = authorizer::egress::resolve(rule_spec(agent_id, kernel, "egress_rule").as_ref())
-    {
-        return json!({"error": format!("bridge: bad auth rule: {e}")});
-    }
+    // the live record per frame.
 
-    // python's shared engine: `kind = rec.get("transport") or "ws"` for BOTH
-    // derivations; the builder is chosen by the derivation, not by the kind.
-    let kind = match meta_value(agent_id, kernel, "transport") {
-        Some(v) if py_truthy(&v) => py_str(&v),
-        _ => "ws".to_string(),
+    // The record declares its `transport` (required); the builder is chosen by
+    // the derivation, not by the kind.
+    let Some(kind) = meta_string(agent_id, kernel, "transport") else {
+        return json!({"error": "bridge: the record has no `transport`"});
     };
-    let transport: Arc<dyn BridgeTransport> = if kind == "memory" {
-        match take_injected(agent_id) {
-            Some(t) => t,
-            None => return json!({"error": "bridge: memory transport requires test injection"}),
-        }
-    } else {
-        match build_transport(family, &kind, agent_id, kernel).await {
+    let transport: Arc<dyn BridgeTransport> = match injected_for(&kind, agent_id) {
+        Some(Ok(t)) => t,
+        Some(Err(refusal)) => return refusal,
+        None => match build_transport(family, agent_id, kernel).await {
             Ok(t) => t,
             Err(e) => return json!({"error": format!("bridge: {kind} boot failed: {e}")}),
-        }
+        },
     };
 
     let state = Arc::new(BridgeState {
@@ -982,42 +782,32 @@ async fn boot_carrying_inner(
 /// text; the caller wraps it as `bridge: <kind> boot failed: <text>`.
 async fn build_transport(
     family: Family,
-    kind: &str,
     agent_id: &AgentId,
     kernel: &Arc<Kernel>,
 ) -> Result<Arc<dyn BridgeTransport>, String> {
     match family {
-        Family::Ws => build_ws_transport(kind, agent_id, kernel).await,
+        Family::Ws => build_ws_transport(agent_id, kernel).await,
         Family::Relay => build_relay_transport(agent_id, kernel).await,
     }
 }
 
 /// python `ws_bridge._ws.build_transport` — `host` explicit, nothing guessed.
 async fn build_ws_transport(
-    kind: &str,
     agent_id: &AgentId,
     kernel: &Arc<Kernel>,
 ) -> Result<Arc<dyn BridgeTransport>, String> {
-    let peer_id = match meta_value(agent_id, kernel, "peer_id") {
-        Some(v) if py_truthy(&v) => py_str(&v),
-        _ => return Err("peer_id required for the ws transport".to_string()),
-    };
-    if kind == "ws" {
-        let port = meta_value(agent_id, kernel, "port")
-            .filter(py_truthy)
-            .ok_or_else(|| "ws transport requires port".to_string())?;
-        let port = py_int(&port).map_err(|e| e.message().to_string())?;
-        let host = match meta_value(agent_id, kernel, "host") {
-            Some(v) if py_truthy(&v) => py_str(&v),
-            _ => return Err("ws transport requires host (nothing is guessed)".to_string()),
-        };
-        let url = format!("ws://{host}:{port}/{peer_id}/ws");
-        return WsTransport::connect(&url)
-            .await
-            .map(|t| t as Arc<dyn BridgeTransport>)
-            .map_err(|e| transport_error_text(&e));
-    }
-    Err(format!("unknown transport {}", py_repr(kind)))
+    let peer_id = meta_string(agent_id, kernel, "peer_id")
+        .ok_or_else(|| "peer_id required for the ws transport".to_string())?;
+    let port = meta_value(agent_id, kernel, "port")
+        .and_then(|p| p.as_u64())
+        .ok_or_else(|| "ws transport requires port".to_string())?;
+    let host = meta_string(agent_id, kernel, "host")
+        .ok_or_else(|| "ws transport requires host (nothing is guessed)".to_string())?;
+    let url = format!("ws://{host}:{port}/{peer_id}/ws");
+    WsTransport::connect(&url)
+        .await
+        .map(|t| t as Arc<dyn BridgeTransport>)
+        .map_err(|e| transport_error_text(&e))
 }
 
 /// python `relay_connector._relay.build_transport` — validates BEFORE minting
@@ -1026,30 +816,31 @@ async fn build_relay_transport(
     agent_id: &AgentId,
     kernel: &Arc<Kernel>,
 ) -> Result<Arc<dyn BridgeTransport>, String> {
-    let relay_url = meta_value(agent_id, kernel, "relay_url").filter(py_truthy);
-    let partner = meta_value(agent_id, kernel, "partner_guid").filter(py_truthy);
+    let relay_url = meta_string(agent_id, kernel, "relay_url");
+    let partner = meta_string(agent_id, kernel, "partner_guid");
     let (Some(relay_url), Some(partner)) = (relay_url, partner) else {
         return Err("relay_connector requires relay_url, partner_guid".to_string());
     };
+    let heartbeat = meta_f64(agent_id, kernel, "heartbeat")
+        .unwrap_or(crate::record::DEFAULT_HEARTBEAT_SECS);
+    let reconnect = meta_f64(agent_id, kernel, "reconnect")
+        .unwrap_or(crate::record::DEFAULT_RECONNECT_SECS);
     // The relay password lives in a credential_store, named by `credentials`:
     // no field ⇒ the boot fails loud, before any identity is minted or anything
     // dialed.
-    let Some(cred) = meta_value(agent_id, kernel, "credentials").filter(|v| !v.is_null()) else {
+    if meta_value(agent_id, kernel, "credentials").is_none_or(|v| v.is_null()) {
         return Err(format!(
             "relay_connector: no `credentials` on {agent_id} — name the relay password's \
              credential store and ref (update_agent {agent_id} credentials={{store: <id>, \
              ref: <ref>}}; the ref's field `password`, bound to the relay's host)"
         ));
-    };
-    if let Some(bad) = fantastic_ai_core::credentials::shape_error(&cred) {
-        return Err(format!("relay_connector: {bad}"));
     }
     // `guid` (our WS path) is auto-minted ONCE on first boot if absent and
     // persisted into the record, so every later hydration re-dials the SAME path;
     // an explicit guid always wins, and a minted one is never regenerated.
-    let guid = match meta_value(agent_id, kernel, "guid") {
-        Some(v) if py_truthy(&v) => py_str(&v),
-        _ => {
+    let guid = match meta_string(agent_id, kernel, "guid") {
+        Some(guid) => guid,
+        None => {
             let g = mint_guid();
             // python `kernel.update(rec["id"], guid=guid)` — persisted by the
             // root loader's writer off the `updated` event.
@@ -1059,28 +850,12 @@ async fn build_relay_transport(
             g
         }
     };
-    if let Some(role) = meta_value(agent_id, kernel, "role") {
-        if !role.is_null() && role.as_str() != Some("manager") && role.as_str() != Some("kernel") {
-            return Err(format!(
-                "relay_connector role must be one of {ROLES}, got {}",
-                py_repr_value(&role)
-            ));
-        }
-    }
-    let heartbeat = meta_value(agent_id, kernel, "heartbeat")
-        .as_ref()
-        .map_or(Ok(DEFAULT_HEARTBEAT_SECS), py_float)
-        .map_err(|e| e.message().to_string())?;
-    let reconnect = meta_value(agent_id, kernel, "reconnect")
-        .as_ref()
-        .map_or(Ok(DEFAULT_RECONNECT_SECS), py_float)
-        .map_err(|e| e.message().to_string())?;
     let identity = identity_from_meta(agent_id, kernel);
     RelayTransport::connect(
-        &py_str(&relay_url),
+        &relay_url,
         &guid,
-        password_reader(agent_id, kernel, &py_str(&relay_url)),
-        &py_str(&partner),
+        password_reader(agent_id, kernel, &relay_url),
+        &partner,
         reconnect,
         heartbeat,
         identity,
@@ -1190,16 +965,7 @@ async fn forward_core(
     };
     // The leg's EGRESS rule, off the live record per forward (never a boot-time
     // copy): an operator's `update_agent egress_rule=…` stamps the next frame.
-    let egress =
-        match authorizer::egress::resolve(rule_spec(agent_id, kernel, "egress_rule").as_ref()) {
-            Ok(rule) => rule,
-            Err(e) => {
-                return (
-                    json!({"error": format!("bridge: bad auth rule: {e}")}),
-                    None,
-                )
-            }
-        };
+    let egress = authorizer::egress::resolve(&rules_of(agent_id, kernel));
     let n = state.corr_counter.fetch_add(1, Ordering::SeqCst) + 1;
     // DASH, not colon: `<agent>:<hex>` is the kernel's minted-pid namespace, and
     // a bridge correlator that borrowed it would read as a REFERENCE to an
@@ -1288,11 +1054,7 @@ async fn forward_core(
 /// `watch_remote` / `unwatch_remote`: send `{type:"watch"|"unwatch",
 /// src:target}` over the transport. Inbound `event` frames arrive via
 /// the read loop and are re-emitted on this bridge agent's inbox.
-async fn watch_remote_reply(agent_id: &AgentId, payload: &Value, kind: &str) -> Value {
-    let target = payload.get("target").and_then(Value::as_str).unwrap_or("");
-    if target.is_empty() {
-        return json!({"error": format!("bridge.{kind}_remote: target (str) required")});
-    }
+async fn watch_remote_reply(agent_id: &AgentId, target: &str, kind: &str) -> Value {
     let state = match BRIDGES
         .lock()
         .get(agent_id)
@@ -1377,30 +1139,42 @@ async fn serve_inbound_call(
     frame: Value,
     body: Option<Blob>,
 ) {
-    let corr_id = frame.get("id").cloned().unwrap_or(Value::Null);
-    let target = frame
-        .get("target")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    // python `frame.get("payload") or {}` — a missing or falsy payload is an
-    // empty call, not a null one.
-    let inner = match frame.get("payload") {
-        Some(v) if py_truthy(v) => v.clone(),
-        _ => json!({}),
+    // The frame is typed once: its id, target and the call's verb come from the
+    // declaration, not from reads of the raw value. A frame that is not a call of
+    // that shape is answered with the refusal.
+    let CallFrame {
+        id: corr_id,
+        target,
+        payload,
+        auth_token,
+    } = match serde_json::from_value::<CallFrame>(frame.clone()) {
+        Ok(f) => f,
+        Err(e) => {
+            let id = FrameId::deserialize(&frame).unwrap_or_default().id.unwrap_or(Value::Null);
+            let _ = state
+                .transport
+                .send_frame(json!({
+                    "type": "reply",
+                    "id": id,
+                    "data": fantastic_kernel::verbs::unparsed("call", &e.to_string()),
+                }))
+                .await;
+            return;
+        }
     };
+    let verb = payload.verb.clone();
+    let inner = payload.into_value();
     // AUTH GATE — the single choke point. The leg's INGRESS rule — read off the
     // LIVE record, per frame, as every web/file/exec leg does — decides whether
     // this inbound call dispatches locally; on deny we reply {error,
     // reason:"unauthorized"} (fail-fast, not a silent drop).
-    let verb = inner.get("type").and_then(Value::as_str).unwrap_or("");
-    let decision = authorizer::ingress::resolve(rule_spec(&leg, &kernel, "ingress_rule").as_ref())
+    let decision = authorizer::ingress::resolve(&rules_of(&leg, &kernel))
         .authorize(&Action {
             kind: "call",
             target: &target,
-            verb,
+            verb: &verb,
             // the `auth_token` rides the frame envelope, not the payload
-            token: frame.get("auth_token").and_then(Value::as_str),
+            token: auth_token.as_deref(),
         });
     if let Decision::Deny(denial) = decision {
         let _ = state
@@ -1416,7 +1190,7 @@ async fn serve_inbound_call(
         // batch item — pid, call/settle rows, `ps` row, dedup — on the binary
         // channel, at that path of the payload. A body the frame put anywhere else
         // is not in the payload python's decoder hands the kernel.
-        let mut item = Item::from_frame(AgentId::from(target.as_str()), inner, corr_id.as_str());
+        let mut item = Item::from_frame(AgentId::from(target.as_str()), inner, Some(corr_id.as_str()));
         // Whatever frame asked — text or binary — the reply carries a body
         // whenever the verb answered one: python's reply dict holds bytes at a
         // key, and the frame kind follows from that alone.
@@ -1500,12 +1274,12 @@ async fn send_event(
 
 /// `{type:"error", id, src, …refusal}` — the answer to an inbound `watch` that
 /// did not register (its keys flattened, as `web_ws` answers a refused watch).
-async fn refuse_watch(state: &Arc<BridgeState>, frame: &Value, src: &str, r: &Value) {
+async fn refuse_watch(state: &Arc<BridgeState>, id: Option<Value>, src: &str, r: &Value) {
     let mut out = Map::new();
     out.insert("type".into(), json!("error"));
     out.insert(
         "id".into(),
-        frame.get("id").cloned().unwrap_or_else(|| json!("")),
+        id.unwrap_or_else(|| json!("")),
     );
     out.insert("src".into(), json!(src));
     if let Value::Object(m) = r {
@@ -1526,7 +1300,12 @@ async fn refuse_watch(state: &Arc<BridgeState>, frame: &Value, src: &str, r: &Va
 /// `error` frame and nothing is registered. Inline in the read loop, so a call
 /// frame that follows it is served after the watch is in place.
 async fn serve_watch(leg: &AgentId, state: &Arc<BridgeState>, kernel: &Arc<Kernel>, frame: &Value) {
-    let src = frame.get("src").and_then(Value::as_str).unwrap_or("");
+    let WatchFrame {
+        id,
+        src,
+        auth_token,
+    } = WatchFrame::deserialize(frame).unwrap_or_default();
+    let src = src.as_deref().unwrap_or("");
     if src.is_empty()
         || state
             .served
@@ -1536,15 +1315,15 @@ async fn serve_watch(leg: &AgentId, state: &Arc<BridgeState>, kernel: &Arc<Kerne
     {
         return;
     }
-    let decision = authorizer::ingress::resolve(rule_spec(leg, kernel, "ingress_rule").as_ref())
+    let decision = authorizer::ingress::resolve(&rules_of(leg, kernel))
         .authorize(&Action {
             kind: "watch",
             target: src,
             verb: "watch",
-            token: frame.get("auth_token").and_then(Value::as_str),
+            token: auth_token.as_deref(),
         });
     if let Decision::Deny(denial) = decision {
-        refuse_watch(state, frame, src, &deny_reply(&denial)).await;
+        refuse_watch(state, id, src, &deny_reply(&denial)).await;
         return;
     }
     let Some(target) = kernel.resolve_target(src) else {
@@ -1552,7 +1331,7 @@ async fn serve_watch(leg: &AgentId, state: &Arc<BridgeState>, kernel: &Arc<Kerne
             fantastic_kernel::refusal::UNKNOWN_AGENT,
             format!("watch: no agent {} (an id, or `kernel`)", py_repr(src)),
         );
-        refuse_watch(state, frame, src, &r).await;
+        refuse_watch(state, id.clone(), src, &r).await;
         return;
     };
     // THIS WATCH'S OWN READER — registered before the watch asks for one.
@@ -1561,7 +1340,7 @@ async fn serve_watch(leg: &AgentId, state: &Arc<BridgeState>, kernel: &Arc<Kerne
     let ready = kernel.ensure_inbox(&reader);
     if let Some(denial) = kernel.watch(&target.id, reader.clone()).await {
         kernel.remove_inbox(&reader);
-        refuse_watch(state, frame, src, &denial).await;
+        refuse_watch(state, id.clone(), src, &denial).await;
         return;
     }
     let task = kernel.spawn_task(leg, "watch_drain", {
@@ -1618,10 +1397,24 @@ async fn drop_served(state: &Arc<BridgeState>, kernel: &Arc<Kernel>) {
     }
 }
 
-/// Write-time check of the leg's `ingress_rule` (`ingress::unknown_refusal`, the
-/// one write-time check every leg makes). Python `io_bridge._engine.validate_meta`.
-fn validate_bridge_meta(meta: &Map<String, Value>) -> Option<String> {
-    authorizer::ingress::unknown_refusal(meta, &authorizer::ingress::REGISTRY)
+/// The kinds of frame a bridge's read loop serves, decoded from the frame's `type`.
+/// A frame of any other kind, or one that lacks a field its kind needs, does not
+/// decode and is dropped, so the loop stays robust.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Wire {
+    /// A call for this leg to serve; `id` names its execution.
+    Call { id: Option<String> },
+    /// An event for an agent this leg watches on the far side.
+    Event { src: String, payload: Map<String, Value> },
+    /// The reply to a call this leg forwarded.
+    Reply { id: String, data: Option<Value>, secret: Option<Value> },
+    /// The far side's refusal of a call this leg forwarded.
+    Error { id: String, error: Option<Value> },
+    /// The far side asks to watch one of this leg's agents.
+    Watch,
+    /// The far side gives a watch back.
+    Unwatch { src: String },
 }
 
 async fn read_loop(
@@ -1647,9 +1440,13 @@ async fn read_loop(
             transport::Frame::Text(v) => (v, None),
             transport::Frame::Binary(h, b) => (h, Some(b)),
         };
-        let ftype = frame.get("type").and_then(Value::as_str).unwrap_or("");
-        match ftype {
-            "call" => {
+        // The frame's kind is its typed decode; a frame that is not one of the
+        // known kinds, or lacks a field its kind needs, is dropped.
+        let Ok(kind) = Wire::deserialize(&frame) else {
+            continue;
+        };
+        match kind {
+            Wire::Call { id: frame_id } => {
                 // TRACKED TASK, not an inline await. Serving the call here parked
                 // the loop inside `kernel.send`, so a handler that forwarded back
                 // over THIS bridge could never have its reply read — the round
@@ -1660,13 +1457,8 @@ async fn read_loop(
                 let call_state = Arc::clone(&state);
                 let call_kernel = Arc::clone(&kernel);
                 calls.retain(|(_, h)| !h.is_finished());
-                let frame_id = frame
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
                 calls.push((
-                    frame_id,
+                    frame_id.unwrap_or_default(),
                     fantastic_kernel::spawn_inherit(serve_inbound_call(
                         agent_id.clone(),
                         call_state,
@@ -1676,25 +1468,19 @@ async fn read_loop(
                     )),
                 ));
             }
-            "event" => {
+            Wire::Event { src, payload } => {
                 // The `watch_remote` RETURN half: re-emitted on the bridge's OWN
                 // inbox for local watchers ONLY when its `src` is a remote agent
                 // this leg subscribed to. An event nobody asked for is dropped.
-                let Some(src) = frame.get("src").and_then(Value::as_str) else {
-                    continue;
-                };
                 if !state
                     .watching
                     .lock()
                     .expect("watching poisoned")
-                    .contains(src)
+                    .contains(&src)
                 {
                     continue;
                 }
-                let mut payload = match frame.get("payload") {
-                    Some(v) if v.is_object() => v.clone(),
-                    _ => continue,
-                };
+                let mut payload = Value::Object(payload);
                 payload["src"] = json!(src);
                 // A BINARY event re-emits WHOLE. The envelope's `_binary_path` is
                 // `["payload", …p]`; the inbox carrier wants `p`, the steps inside
@@ -1706,16 +1492,15 @@ async fn read_loop(
                 };
                 kernel.emit_item(&agent_id, item).await;
             }
-            "reply" => {
-                let Some(id) = frame.get("id").and_then(Value::as_str) else {
-                    continue;
-                };
-                let data = frame.get("data").cloned().unwrap_or(Value::Null);
+            Wire::Reply { id, data, secret } => {
+                let data = data.unwrap_or(Value::Null);
                 // optional `secret`: dotted paths into `data` the far reply's
                 // bundle marked. Malformed ⇒ none (the reply is still delivered).
-                let marks =
-                    fantastic_kernel::secret::check(frame.get("secret")).unwrap_or_default();
-                let tx = state.pending.lock().expect("pending poisoned").remove(id);
+                let marks = secret
+                    .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+                    .and_then(|m| fantastic_kernel::secret::check(&m).ok())
+                    .unwrap_or_default();
+                let tx = state.pending.lock().expect("pending poisoned").remove(&id);
                 if let Some(tx) = tx {
                     // Carry the reply body alongside, at its slot of the reply
                     // (`["data", …p]` on the frame is `p` in `data`). A TEXT reply
@@ -1725,14 +1510,11 @@ async fn read_loop(
                     let _ = tx.send(Ok((data, body.and_then(|b| b.under("data")), marks)));
                 }
             }
-            "error" => {
-                let Some(id) = frame.get("id").and_then(Value::as_str) else {
-                    continue;
-                };
+            Wire::Error { id, error } => {
                 // python RESOLVES the pending future with this value — the
                 // forward returns it verbatim, with no `bridge.forward:` prefix.
-                let err = py_str(frame.get("error").unwrap_or(&Value::Null));
-                let tx = state.pending.lock().expect("pending poisoned").remove(id);
+                let err = fantastic_kernel::refusal::error_text(&json!({ "error": error })).unwrap_or_default();
+                let tx = state.pending.lock().expect("pending poisoned").remove(&id);
                 if let Some(tx) = tx {
                     let _ = tx.send(Ok((
                         json!({ "error": format!("remote error: {err}") }),
@@ -1741,18 +1523,13 @@ async fn read_loop(
                     )));
                 }
             }
-            "watch" => serve_watch(&agent_id, &state, &kernel, &frame).await,
-            "unwatch" => {
+            Wire::Watch => serve_watch(&agent_id, &state, &kernel, &frame).await,
+            Wire::Unwatch { src } => {
                 // NO GATE — giving a watch back (as `web_ws` leaves it ungated).
-                let src = frame.get("src").and_then(Value::as_str).unwrap_or("");
-                let served = state.served.lock().expect("served poisoned").remove(src);
+                let served = state.served.lock().expect("served poisoned").remove(&src);
                 if let Some(s) = served {
                     drop_watch(&kernel, s).await;
                 }
-            }
-            _ => {
-                // Unknown frame type — ignore so the loop stays robust.
-                // (call/reply/error/event/watch/unwatch are handled above.)
             }
         }
     }
@@ -1848,8 +1625,10 @@ async fn redial(
 /// will pick them up at `boot` time. The memory transport carries
 /// no record-level config (a Queue can't be serialized), so tests
 /// stash a paired half here and the bridge's `boot` consumes it.
+#[cfg(any(test, feature = "test-support"))]
 static INJECTED: OnceLock<Mutex<HashMap<AgentId, Arc<dyn BridgeTransport>>>> = OnceLock::new();
 
+#[cfg(any(test, feature = "test-support"))]
 fn injected_map() -> std::sync::MutexGuard<'static, HashMap<AgentId, Arc<dyn BridgeTransport>>> {
     INJECTED
         .get_or_init(|| Mutex::new(HashMap::new()))
@@ -1857,6 +1636,7 @@ fn injected_map() -> std::sync::MutexGuard<'static, HashMap<AgentId, Arc<dyn Bri
         .expect("INJECTED poisoned")
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn take_injected(agent_id: &AgentId) -> Option<Arc<dyn BridgeTransport>> {
     injected_map().remove(agent_id)
 }
@@ -1867,6 +1647,7 @@ fn take_injected(agent_id: &AgentId) -> Option<Arc<dyn BridgeTransport>> {
 ///
 /// Test-only helper; real WS / HTTP bridges build their transport
 /// from agent.yaml fields at boot time.
+#[cfg(any(test, feature = "test-support"))]
 pub fn inject_pair(a_id: &AgentId, b_id: &AgentId) {
     let (a, b) = MemoryTransport::pair();
     let mut map = injected_map();
@@ -1878,10 +1659,24 @@ pub fn inject_pair(a_id: &AgentId, b_id: &AgentId) {
 /// so a test can drive the wire directly — read what the bridge sends
 /// (`recv_frame`) and push synthetic inbound frames (`send_frame`).
 /// Mirrors Python's `MemoryTransport.pair()` + single-side injection.
+#[cfg(any(test, feature = "test-support"))]
 pub fn inject_one(agent_id: &AgentId) -> Arc<dyn BridgeTransport> {
     let (a, b) = MemoryTransport::pair();
     injected_map().insert(agent_id.clone(), a);
     b
+}
+
+/// The test-injected transport a `memory` record boots on; `None` for every real kind
+/// (and always in a production build, where no such kind exists).
+fn injected_for(kind: &str, agent_id: &AgentId) -> Option<Result<Arc<dyn BridgeTransport>, Value>> {
+    #[cfg(any(test, feature = "test-support"))]
+    if kind == "memory" {
+        return Some(take_injected(agent_id).ok_or_else(|| {
+            json!({"error": "bridge: memory transport requires test injection"})
+        }));
+    }
+    let _ = (kind, agent_id);
+    None
 }
 
 #[cfg(test)]

@@ -475,35 +475,18 @@ async fn if_match_guards_write_and_edit() {
     assert_eq!(r["path"], "v.txt");
 }
 
-/// An all-digit version given as a JSON number still matches.
+/// A version like `12e45` is text: it never parses as a number.
 #[tokio::test]
-async fn an_all_digit_version_matches_as_a_number() {
-    use crate::text::same_version;
-    assert!(same_version(
-        &json!(1234567890123456u64),
-        "1234567890123456"
-    ));
-    assert!(same_version(&json!("1234567890123456"), "1234567890123456"));
-    assert!(!same_version(
-        &json!(1234567890123457u64),
-        "1234567890123456"
-    ));
-}
-
-/// A version like `12e45` matches whether given as a number or a string.
-#[tokio::test]
-async fn an_exponent_like_version_matches() {
-    use crate::text::same_version;
-    assert!(same_version(&json!("12e45"), "12e45"));
+async fn an_exponent_like_version_never_parses_as_a_number() {
     for i in 0..5000u32 {
         let v = crate::text::version_of(i.to_string().as_bytes());
         assert!(v.parse::<f64>().is_err(), "{v}");
     }
 }
 
-/// A numeric if_match that differs is still refused.
+/// A numeric if_match is refused by name: a version is text.
 #[tokio::test]
-async fn a_numeric_if_match_that_differs_is_refused() {
+async fn a_numeric_if_match_is_refused_by_name() {
     let tmp = tempfile::TempDir::new().unwrap();
     let k = mk(&tmp, json!({})).await;
     seed(&k, "n.txt", "one\n").await;
@@ -512,7 +495,8 @@ async fn a_numeric_if_match_that_differs_is_refused() {
         json!({"type": "write", "path": "n.txt", "bytes": "x", "if_match": 1234567890123456u64}),
     )
     .await;
-    assert_eq!(r["reason"], "version_mismatch", "{r}");
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "if_match", "{r}");
     assert_eq!(text_of(&tmp, "n.txt"), "one\n");
 }
 
@@ -524,12 +508,12 @@ async fn version_mismatch_key_order_is_pythons() {
     seed(&k, "v.txt", "one\n").await;
     let r = call(
         &k,
-        json!({"type": "write", "path": "v.txt", "bytes": "x", "if_match": 12345}),
+        json!({"type": "write", "path": "v.txt", "bytes": "x", "if_match": "12345"}),
     )
     .await;
     let keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(keys, ["error", "reason", "path", "expected", "actual"]);
-    assert_eq!(r["expected"], 12345);
+    assert_eq!(r["expected"], "12345");
 }
 
 #[tokio::test]
@@ -786,8 +770,9 @@ async fn edit_hunk_count_must_be_an_int() {
             json!({"type": "edit", "edits": [{"path": "m.py", "hunks": bad}], "bytes": blob}),
         )
         .await;
+        // the entry judges the list; the call's own typed decode names the item field
         assert_eq!(r["reason"], "bad_arg", "{bad}: {r}");
-        assert_eq!(r["arg"], "edits");
+        assert!(r["error"].as_str().unwrap().starts_with("edit: "), "{bad}: {r}");
     }
     assert_eq!(text_of(&tmp, "m.py"), "a = 1\n");
 }
@@ -884,7 +869,11 @@ async fn text_verbs_see_only_exposed_paths() {
     std::fs::create_dir_all(sd(&tmp).join("pub")).unwrap();
     put(&tmp, ".env", "SECRET=1\n");
     for verb in ["read", "write", "append", "undo"] {
-        let r = call(&k, json!({"type": verb, "path": ".env", "bytes": "x"})).await;
+        let mut payload = json!({"type": verb, "path": ".env"});
+        if matches!(verb, "write" | "append") {
+            payload["bytes"] = json!("x");
+        }
+        let r = call(&k, payload).await;
         assert_eq!(r["reason"], "not_found", "{verb}: {r}");
     }
     assert_eq!(text_of(&tmp, ".env"), "SECRET=1\n");
@@ -905,11 +894,9 @@ async fn reflect_carries_edit_grammar_and_compose() {
     let keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
     let at = |k: &str| keys.iter().position(|x| *x == k).unwrap();
     assert!(at("allow_count") < at("edit_grammar") && at("edit_grammar") < at("compose"));
-    assert!(r.get("verbs").is_none(), "{r}");
     assert!(r.get("hidden_count").is_none(), "{r}");
-    let docs = FileBundle::default().verb_docs();
     for v in ["read", "write", "edit", "append", "undo"] {
-        assert!(docs.get(v).is_some(), "{v}");
+        assert!(r["verbs"].get(v).is_some(), "{v}");
     }
 }
 

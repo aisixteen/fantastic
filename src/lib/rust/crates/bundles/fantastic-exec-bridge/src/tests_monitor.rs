@@ -6,7 +6,7 @@
 
 use super::*;
 use async_trait::async_trait;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::{Agent, Item};
 use serde_json::Map;
 use std::path::PathBuf;
@@ -18,29 +18,43 @@ use tempfile::TempDir;
 #[derive(Default, Clone)]
 struct Ear(Arc<Mutex<Vec<(Instant, String)>>>);
 
+fantastic_kernel::stand_in_verbs!(ear_verbs {
+    SendV "send" { text: Option<String> },
+});
+
 #[async_trait]
-impl Bundle for Ear {
+impl Handler for Ear {
+    type Call = ear_verbs::Call;
     fn name(&self) -> &str {
         "monitor_listener_probe"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        ear_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        ear_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         id: &AgentId,
-        p: &Value,
+        call: Self::Call,
         _k: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        match p.get("type").and_then(Value::as_str) {
-            Some("send") => {
-                self.0.lock().unwrap().push((
-                    Instant::now(),
-                    p.get("text")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                ));
+        match call {
+            ear_verbs::Call::SendV(a) => {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((Instant::now(), a.text.unwrap_or_default()));
                 Ok(Some(json!({"ok": true})))
             }
-            _ => Ok(Some(
+            ear_verbs::Call::Reflect(_) => Ok(Some(
                 json!({"id": id.as_str(), "sentence": "records what it is sent"}),
             )),
         }
@@ -275,7 +289,7 @@ async fn without_match_every_is_required_and_args_are_checked() {
     let (rn, en) = ids(&tmp);
     let jid = printer(&k, &rn, 1, 0.01, "", 3.0).await;
     let cases = [
-        (json!({"notify": en}), "missing_arg", "every"),
+        (json!({"notify": en}), "missing_arg", "match | every"),
         (
             json!({"notify": en, "match": "(", "every": 1}),
             "bad_arg",

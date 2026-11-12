@@ -9,18 +9,32 @@
 //! verb `read_stream` and declares it on its record (`verbs`). Read-only: there
 //! is nothing to write.
 //!
-//! Its verbs: `reflect`, `boot` (no-op), `read_stream {path, offset?, length?}`
-//! (a BINARY reply: the bytes as the body, `{path, offset, next_offset, eof,
-//! size}` as the head), `list` (the served paths).
+//! Its verbs are declared in [`verbs`] (`reflect` and `docs` render them); its record
+//! in [`record`].
 
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
+
+pub mod record;
+pub mod verbs;
+
+/// What the bundle is for: its one short man text; how to call it is rendered from
+/// its declared verbs (`docs`, `reflect`).
+const MAN: &str = "The canvas page's files, served read-only: the canvas app's pack embedded in the binary, streamed to the web host's file route.";
+
+/// What a `canvas_page` record's `verbs` field carries so the web host serves it:
+/// the `read_stream` verb as it is declared (its argument schema).
+#[must_use]
+pub fn read_stream_declared() -> Value {
+    let verb = verbs::VERBS.iter().find(|v| v.name == "read_stream").expect("read_stream is declared");
+    json!({"read_stream": verb.schema()})
+}
 
 /// The `handler_module` this bundle registers under.
 pub const HANDLER_MODULE: &str = "canvas_page.tools";
@@ -40,9 +54,6 @@ pub const HOME_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\">
 /// The example client of the `home` protocol (`src/tui/web/home/list.html`),
 /// served as `list.html`.
 pub const LIST_HTML: &str = include_str!("../../../web/home/list.html");
-
-/// What `read_stream` declares on the record, so the host serves it.
-pub const READ_STREAM_DOC: &str = "args: path:str (req), offset:int?, length:int?. A file of the embedded canvas page as a BINARY reply — the bytes as the body, {path, offset, next_offset, eof, size} as the head.";
 
 /// Every served file, inflated once: the zip's entries plus `index.html`,
 /// `home.html` and `list.html`.
@@ -72,8 +83,8 @@ fn files() -> &'static BTreeMap<String, Vec<u8>> {
 #[derive(Default)]
 pub struct CanvasPageBundle;
 
-fn read_stream(payload: &Value) -> (Value, Option<Vec<u8>>) {
-    let path = payload.get("path").and_then(Value::as_str).unwrap_or("").trim_start_matches('/');
+fn read_stream(a: &verbs::ReadStream) -> (Value, Option<Vec<u8>>) {
+    let path = a.path.as_str();
     let Some(bytes) = files().get(path) else {
         return (
             json!({
@@ -84,8 +95,8 @@ fn read_stream(payload: &Value) -> (Value, Option<Vec<u8>>) {
         );
     };
     let size = bytes.len() as u64;
-    let offset = payload.get("offset").and_then(Value::as_u64).unwrap_or(0).min(size);
-    let length = payload.get("length").and_then(Value::as_u64).unwrap_or(size - offset);
+    let offset = a.offset.min(size);
+    let length = a.length.unwrap_or(size - offset);
     let end = offset.saturating_add(length).min(size);
     let body = bytes[offset as usize..end as usize].to_vec();
     (
@@ -97,52 +108,61 @@ fn read_stream(payload: &Value) -> (Value, Option<Vec<u8>>) {
 fn reflect(agent_id: &AgentId) -> Value {
     json!({
         "id": agent_id.as_str(),
-        "sentence": "The canvas page's files, served read-only (transport only). To build on the canvas, use the page's view: `docs of=<page guid>|view_root`.",
+        "sentence": MAN,
         "files": files().keys().collect::<Vec<_>>(),
     })
 }
 
 #[async_trait]
-impl Bundle for CanvasPageBundle {
-    /// HOW TO CALL it — served by the kernel's `docs` verb, never on a reflect.
-    fn verb_docs(&self) -> Value {
-        json!({
-            "reflect": "No args.",
-            "boot": "No-op; the parent `web` host serves the route.",
-            "read_stream": READ_STREAM_DOC,
-            "list": "No args. The served paths.",
-        })
-    }
+impl Handler for CanvasPageBundle {
+    type Call = verbs::Call;
 
     fn name(&self) -> &str {
         "canvas_page"
     }
 
-    async fn handle(&self, agent_id: &AgentId, payload: &Value, _kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        Ok(Some(match verb {
-            "reflect" => reflect(agent_id),
-            "boot" => json!({"booted": true}),
-            "list" => json!({"files": files().keys().collect::<Vec<_>>()}),
+    fn man(&self) -> &'static str {
+        MAN
+    }
+
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        verbs::VERBS
+    }
+
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        verbs::dynamic_verbs(agent)
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &record::RECORD
+    }
+
+    async fn handle(
+        &self,
+        agent_id: &AgentId,
+        call: Self::Call,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<Reply, BundleError> {
+        Ok(Some(match call {
+            verbs::Call::Reflect(_) => reflect(agent_id),
             // Text-only callers get the head; the bytes ride a binary reply.
-            "read_stream" => read_stream(payload).0,
-            other => json!({"error": format!("canvas_page: unknown type {other:?}"), "reason": "unhandled", "verb": other}),
+            verbs::Call::ReadStream(a) => read_stream(&a).0,
         }))
     }
 
     async fn handle_binary(
         &self,
         agent_id: &AgentId,
-        header: Value,
+        call: Self::Call,
         _body: Option<fantastic_kernel::Blob>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<fantastic_kernel::Blob>), BundleError> {
-        if header.get("type").and_then(Value::as_str) == Some("read_stream") {
+        if let verbs::Call::ReadStream(a) = &call {
             // the chunk rides at the reply's `bytes` key, as the file bridge's does
-            let (head, body) = read_stream(&header);
+            let (head, body) = read_stream(a);
             return Ok((Some(head), body.map(|b| fantastic_kernel::Blob::key("bytes", b))));
         }
-        Ok((self.handle(agent_id, &header, kernel).await?, None))
+        Ok((self.handle(agent_id, call, kernel).await?, None))
     }
 }
 
@@ -150,14 +170,15 @@ impl Bundle for CanvasPageBundle {
 mod tests {
     use super::*;
 
+    fn rs(path: &str, offset: Option<u64>, length: Option<u64>) -> verbs::ReadStream {
+        verbs::ReadStream { path: path.into(), offset: offset.unwrap_or(0), length }
+    }
+
     #[test]
     fn the_embedded_page_is_the_pack_and_its_index() {
         let f = files();
-        assert!(f.contains_key("bundle.min.js") && f.contains_key("readme.md") && f.contains_key("index.html"));
+        assert!(f.contains_key("bundle.min.js") && f.contains_key("index.html"));
         assert!(f["bundle.min.js"].len() > 500_000, "vendors are inlined");
-        // the readme stamps the sha256 of the bundle it ships (verify-before-serve)
-        let readme = String::from_utf8_lossy(&f["readme.md"]);
-        assert!(readme.contains("expected: "), "the pack stamped the readme");
     }
 
     #[test]
@@ -169,24 +190,93 @@ mod tests {
         let list = String::from_utf8_lossy(&f["list.html"]);
         assert_eq!(list, LIST_HTML);
         assert!(list.contains("/home/ws"), "the list page watches home");
-        let (head, body) = read_stream(&json!({"path": "home.html"}));
+        let (head, body) = read_stream(&rs("home.html", None, None));
         assert_eq!(head["eof"], json!(true));
         assert_eq!(body.unwrap(), HOME_HTML.as_bytes());
-        let (head, body) = read_stream(&json!({"path": "list.html"}));
+        let (head, body) = read_stream(&rs("list.html", None, None));
         assert_eq!(head["size"], json!(LIST_HTML.len()));
         assert_eq!(body.unwrap(), LIST_HTML.as_bytes());
     }
 
+
+    /// A kernel holding the agent `id` (its bundle is the one under test).
+    fn kernel_with(id: &str) -> std::sync::Arc<Kernel> {
+        let kernel = Arc::new(Kernel::new());
+        kernel.register(fantastic_kernel::Agent::new(
+            AgentId::from(id),
+            None,
+            None,
+            Default::default(),
+            std::path::PathBuf::new(),
+            false,
+        ));
+        kernel
+    }
+
+    /// One call through the agent's entry: parsed and checked against the declared verbs
+    /// first, then handled. The reply and its body.
+    async fn ask(
+        kernel: &Arc<Kernel>,
+        id: &str,
+        payload: Value,
+    ) -> (Value, Option<fantastic_kernel::Blob>) {
+        let (reply, body) =
+            fantastic_kernel::Bundle::handle_binary(&CanvasPageBundle, &AgentId::from(id), payload, None, kernel)
+                .await
+                .expect("handled");
+        (reply.unwrap_or(Value::Null), body)
+    }
+
+    /// Every declared verb is checked by the agent's own entry: an unknown verb is
+    /// refused naming what the agent answers, an unknown argument and a missing
+    /// required one by name.
+    #[tokio::test]
+    async fn the_canvas_page_checks_every_call_against_its_declared_verbs() {
+        let kernel = kernel_with("canvas_page");
+        let r = ask(&kernel, "canvas_page", json!({"type": "zzz_nope"})).await.0;
+        assert_eq!(r["reason"], "unhandled", "{r}");
+        for n in ["read_stream", "reflect"] {
+            assert!(r["error"].as_str().unwrap().contains(n), "{n} in {r}");
+        }
+        for v in verbs::VERBS {
+            let r = ask(&kernel, "canvas_page", json!({"type": v.name, "zzz_unknown": 1})).await.0;
+            assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("zzz_unknown")), "{}: {r}", v.name);
+        }
+        let r = ask(&kernel, "canvas_page", json!({"type": "read_stream"})).await.0;
+        assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("missing_arg"), Some("path")), "{r}");
+        let r = ask(&kernel, "canvas_page", json!({"type": "read_stream", "path": 3})).await.0;
+        assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("path")), "{r}");
+        let r = ask(&kernel, "canvas_page", json!({"type": "read_stream", "path": "index.html", "offset": "0"})).await.0;
+        assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("offset")), "{r}");
+        let r = ask(&kernel, "canvas_page", json!({"type": "read_stream", "path": "/index.html"})).await.0;
+        assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("path")), "{r}");
+    }
+
+    #[tokio::test]
+    async fn reflect_and_read_stream_answer() {
+        let kernel = kernel_with("canvas_page");
+        let r = ask(&kernel, "canvas_page", json!({"type": "reflect"})).await.0;
+        assert_eq!(r["id"], "canvas_page", "{r}");
+        assert!(r["files"].as_array().unwrap().iter().any(|f| f == "index.html"), "{r}");
+        let (head, body) = ask(&kernel, "canvas_page", json!({"type": "read_stream", "path": "index.html", "length": 6})).await;
+        assert_eq!(head["next_offset"], json!(6), "{head}");
+        assert_eq!(body.unwrap().bytes, INDEX_HTML.as_bytes()[..6]);
+        // the declaration the web host reads off the record names `read_stream`
+        let declared = read_stream_declared();
+        assert!(declared["read_stream"]["properties"].get("path").is_some(), "{declared}");
+        assert_eq!(declared["read_stream"]["required"], json!(["path"]), "{declared}");
+    }
+
     #[test]
     fn read_stream_pages_through_a_file_and_refuses_an_unknown_one() {
-        let (head, body) = read_stream(&json!({"path": "index.html", "offset": 0, "length": 10}));
+        let (head, body) = read_stream(&rs("index.html", Some(0), Some(10)));
         assert_eq!(head["next_offset"], json!(10));
         assert_eq!(head["eof"], json!(false));
         assert_eq!(body.unwrap(), INDEX_HTML.as_bytes()[..10]);
-        let (head, body) = read_stream(&json!({"path": "index.html", "offset": 10}));
+        let (head, body) = read_stream(&rs("index.html", Some(10), None));
         assert_eq!(head["eof"], json!(true));
         assert_eq!(body.unwrap(), INDEX_HTML.as_bytes()[10..]);
-        let (head, body) = read_stream(&json!({"path": "../secret"}));
+        let (head, body) = read_stream(&rs("../secret", None, None));
         assert_eq!(head["reason"], json!("not_found"));
         assert!(body.is_none());
     }

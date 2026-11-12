@@ -347,27 +347,24 @@ fn a_write_the_server_read_cannot_honour_is_refused() {
     for (meta, fragment) in [
         (
             json!({"context_window": "big"}),
-            "context_window must be a positive int",
+            "context_window",
         ),
         (
             json!({"context_window": 0}),
-            "context_window must be a positive int",
+            "context_window",
         ),
         (
             json!({"metrics_url": "vllm.test/metrics"}),
-            "metrics_url must be an http(s) URL",
+            "metrics_url",
         ),
-        (
-            json!({"metrics_url": 9100}),
-            "metrics_url must be an http(s) URL",
-        ),
+        (json!({"metrics_url": 9100}), "metrics_url"),
         (
             json!({"endpoint": "http://h:10000/api"}),
             "kv_slots is left to the server, but the endpoint 'http://h:10000/api' does \
              not end in /v1",
         ),
     ] {
-        let err = validate(&obj(meta.clone()), &base).unwrap_or_default();
+        let err = crate::tests::at_the_write(&obj(meta.clone()), &base).unwrap_or_default();
         assert!(err.contains(fragment), "{meta}: {err}");
     }
 }
@@ -394,26 +391,14 @@ fn caching_none_and_cleanup_are_accepted_and_provider_cache_is_refused_here() {
         let meta = json!({"caching": mode});
         assert_eq!(validate(&obj(meta.clone()), &rec), None, "{mode}");
     }
+    // provider caching is no mode of this backend: the record declaration refuses it
     let meta = json!({"caching": "provider_cache"});
-    assert_eq!(
-        validate(&obj(meta.clone()), &rec).as_deref(),
-        Some(
-            "vllm_backend cannot do provider caching: caching=provider_cache is refused — use \
-             none or cleanup"
-        )
-    );
-    // a record already in provider_cache is refused on any write to it
-    let stored = json!({
-        "endpoint": "http://vllm.test/v1", "kv_overflow": "evict",
-        "memory_store_id": "memory", "caching": "provider_cache"
-    });
-    assert!(validate(&Map::new(), stored.as_object().unwrap()).is_some());
-    // an unknown mode is the schema's enum refusal
+    let refused = crate::tests::at_the_write(&obj(meta.clone()), &rec).unwrap_or_default();
+    assert!(refused.contains("caching"), "{refused}");
+    // an unknown mode is the record declaration's refusal, by field name
     let meta = json!({"caching": "always"});
-    assert_eq!(
-        validate(&obj(meta.clone()), &rec).as_deref(),
-        Some("caching='always' is not one of the legal values: none, cleanup, provider_cache")
-    );
+    let refused = crate::tests::at_the_write(&obj(meta.clone()), &rec).unwrap_or_default();
+    assert!(refused.contains("caching"), "{refused}");
 }
 
 // ─── through the kernel ─────────────────────────────────────────────────────
@@ -458,7 +443,7 @@ async fn create(kernel: &Arc<Kernel>, meta: Map<String, Value>) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_send_reads_the_server_first_and_reflect_shows_the_values() {
+async fn a_complete_reads_the_server_first_and_reflect_shows_the_values() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(&tmp).await;
     let (_srv, ep) = default_vllm().await;
@@ -471,7 +456,7 @@ async fn a_send_reads_the_server_first_and_reflect_shows_the_values() {
     call(
         &kernel,
         "v1",
-        json!({"type": "send", "text": "hi", "client_id": "t"}),
+        json!({"type": "complete", "rid": "r1", "messages": [{"role": "user", "content": "hi"}]}),
     )
     .await;
     let rec = helpers::agent_meta(&AgentId::from("v1"), &kernel);
@@ -491,7 +476,7 @@ async fn a_send_reads_the_server_first_and_reflect_shows_the_values() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_send_the_server_cannot_answer_is_refused_naming_the_field() {
+async fn a_complete_the_server_cannot_answer_is_refused_naming_the_field() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(&tmp).await;
     let (srv, ep) = vllm(models(&[(MODEL, 1)]), String::new(), 404).await;
@@ -504,7 +489,7 @@ async fn a_send_the_server_cannot_answer_is_refused_naming_the_field() {
     let r = call(
         &kernel,
         "v1",
-        json!({"type": "send", "text": "hi", "client_id": "t"}),
+        json!({"type": "complete", "rid": "r1", "messages": [{"role": "user", "content": "hi"}]}),
     )
     .await;
     assert_eq!(r["reason"], json!("bad_arg"), "{r}");

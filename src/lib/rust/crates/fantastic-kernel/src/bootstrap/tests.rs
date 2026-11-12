@@ -2,7 +2,7 @@
 use crate::outcome::Item;
 
 use super::*;
-use crate::Bundle;
+use crate::Handler;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -21,14 +21,27 @@ use crate::test_support::boot_root;
 
 struct Noop;
 #[async_trait]
-impl Bundle for Noop {
+impl Handler for Noop {
+    type Call = crate::test_support::NoCall;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "noop"
+    }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::test_support::no_verbs()
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        crate::test_support::no_dynamic(agent)
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
     }
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _k: &Arc<Kernel>,
     ) -> Result<crate::Reply, crate::bundle::BundleError> {
         Ok(None)
@@ -768,7 +781,7 @@ fn bootstrap_refuses_a_tree_that_fails_validation() {
             "id: rp\nroot_path: /elsewhere\n",
             "record 'rp' carries reserved key(s) ['root_path'] — these are Agent constructor parameters",
         ),
-        ("seven", "id: 7\n", "record 7: load: id must be a non-empty string"),
+        ("seven", "id: 7\n", "snapshot record missing id"),
     ] {
         let tmp = TempDir::new().unwrap();
         let at = tmp.path().join(".fantastic/agents").join(dir);

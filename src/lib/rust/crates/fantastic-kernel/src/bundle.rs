@@ -1,4 +1,4 @@
-//! Bundle trait + compile-time registry.
+//! Bundle traits + compile-time registry.
 //!
 //! Bundles aren't dynamically loaded — every Rust bundle is a crate
 //! linked into the binary at compile time. The CLI crate links the
@@ -9,11 +9,15 @@
 //!
 //! ## Contract
 //!
-//! Every bundle implements [`Bundle`]. The substrate calls
-//! [`Bundle::handle_binary`] — whose default is `handle` — for any verb the
-//! Agent's system-verb table doesn't claim; a bundle whose replies never hold
-//! raw bytes implements `handle` alone. Bundle authors return `None` to mean
-//! "no reply" (fire-and-forget — the Python equivalent is returning `None`
+//! A bundle implements [`Handler`]: it declares its verbs (`verbs!`) and its record
+//! (`record!`), names the `Call` those declarations generate, and answers a TYPED
+//! `Call` — `handle(agent_id, call, kernel)`. It never sees a payload: the kernel talks
+//! to a bundle only through [`Bundle`], which every `Handler` is by one blanket
+//! implementation, and that implementation runs the generated entry
+//! ([`Parse::parse`](crate::verbs::Parse)) first. A call the agent does not answer, or
+//! whose arguments are not the declared ones, is refused by that entry as the agent's own
+//! reply; the handler runs only on a checked, typed call. Bundle authors return `None`
+//! to mean "no reply" (fire-and-forget — the Python equivalent is returning `None`
 //! from the handler).
 //!
 //! Lifecycle hooks:
@@ -32,6 +36,7 @@
 use crate::agent::AgentId;
 use crate::kernel::Kernel;
 use crate::tasks::TaskId;
+use crate::verbs::Parse;
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -45,16 +50,278 @@ pub type Reply = Option<Value>;
 /// trait signature stays readable.
 pub type BundleError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Bundle trait. Every Rust bundle implements this.
+mod sealed {
+    /// Only [`super::Handler`]s are bundles: nothing else implements [`super::Bundle`].
+    pub trait Sealed {}
+}
+
+/// What the kernel talks to: a registered bundle, as an object. It is implemented
+/// ONCE, for every [`Handler`] — the entry that checks a call runs before the
+/// handler, so a bundle cannot answer a raw payload. Nothing else implements it.
+// async_trait's own `#[must_use]` on a bodiless `async fn` that returns a `Result`
+#[allow(clippy::double_must_use)]
 #[async_trait]
-pub trait Bundle: Send + Sync {
+pub trait Bundle: sealed::Sealed + Send + Sync {
+    /// Stable bundle name (see [`Handler::name`]).
+    fn name(&self) -> &str;
+
+    /// One short generic text saying what the bundle is for (see [`Handler::man`]).
+    fn man(&self) -> &'static str;
+
+    /// The verbs the bundle's agents answer, declared.
+    fn verbs(&self) -> &'static [crate::verbs::Verb];
+
+    /// The verbs this agent carries beside the builtin ones, built at runtime.
+    fn dynamic_verbs(&self, agent: &crate::agent::Agent) -> Vec<crate::verbs::DynVerb>;
+
+    /// The record the bundle's agents carry, declared.
+    fn record(&self) -> &'static crate::verbs::RecordDecl;
+
+    /// THE RECORD'S SHARED ENTRY: check the fields a `create_agent` / `update_agent`
+    /// would set on an agent of this bundle against the bundle's own record declaration
+    /// and the fields every record has ([`crate::declared::record`]). The kernel asks
+    /// the target's bundle; it judges no field itself. `Err` is the refusal.
+    fn check_record(&self, verb: &str, fields: &Map<String, Value>) -> Result<(), Value> {
+        crate::verbs::check_record(
+            verb,
+            self.name(),
+            fields,
+            &crate::declared::record::RECORD,
+            self.record(),
+        )
+    }
+
+    /// THE WRITE'S SHARED ENTRY: the record's fields ([`Bundle::check_record`]), then
+    /// the bundle's own [`Bundle::validate_meta`] over what changes against `current`
+    /// (empty at create). `id` names the agent in a `validate_meta` refusal (update).
+    /// `Err` is the refusal; the kernel only routes it.
+    fn check_write(
+        &self,
+        verb: &str,
+        fields: &Map<String, Value>,
+        current: &Map<String, Value>,
+        id: Option<&str>,
+    ) -> Result<(), Value> {
+        self.check_record(verb, fields)?;
+        match self.validate_meta(fields, current) {
+            None => Ok(()),
+            Some(why) => {
+                let mut r = crate::refusal::refusal(crate::refusal::INVALID_META, why);
+                if let Some(id) = id {
+                    crate::refusal::with(&mut r, "id", Value::from(id));
+                }
+                Err(r)
+            }
+        }
+    }
+
+    /// Refuse a record this bundle cannot honour (see [`Handler::validate_meta`]).
+    fn validate_meta(
+        &self,
+        meta: &Map<String, Value>,
+        record: &Map<String, Value>,
+    ) -> Option<String>;
+
+    /// Dotted paths into an incoming payload the kernel records only as `[secret]`.
+    fn payload_secret(&self, payload: &Value) -> Vec<String>;
+
+    /// Dotted paths into a reply the kernel records only as `[secret]`.
+    fn reply_secret(&self, payload: &Value, reply: &Value) -> Vec<String>;
+
+    /// THE DISPATCH — the kernel calls this for EVERY call, a request body or not;
+    /// python's one `handle`, whose reply dict may hold `bytes` at any key. Raw bytes
+    /// flow in BOTH directions, never base64. `header` is the payload with NOTHING at
+    /// the request body's path; `body` is the raw request body AT ITS PATH
+    /// ([`crate::outcome::Blob`]), `None` when the call carried none.
+    ///
+    /// The generated entry parses and checks `header` first; its refusal is the reply
+    /// and no handler runs. The reply body is an `Option<Blob>` — the chunk AND ITS SLOT
+    /// in the reply, as python's reply dict holds a `bytes` value at a key; every wire
+    /// leg answers binary exactly when it is `Some`.
+    async fn handle_binary(
+        &self,
+        agent_id: &AgentId,
+        header: Value,
+        body: Option<crate::outcome::Blob>,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError>;
+
+    /// Pre-detach hook (see [`Handler::on_delete`]).
+    async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError>;
+
+    /// Cancel hook (see [`Handler::on_cancel`]).
+    async fn on_cancel(
+        &self,
+        agent_id: &AgentId,
+        task_id: &TaskId,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError>;
+
+    /// Land the pending writes (see [`Handler::flush_pending`]).
+    async fn flush_pending(
+        &self,
+        agent_id: &AgentId,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError>;
+
+    /// Pre-shutdown hook (see [`Handler::on_shutdown`]).
+    async fn on_shutdown(
+        &self,
+        agent_id: &AgentId,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError>;
+
+    /// The root loader's cold pass (see [`Handler::cold_boot`]).
+    fn cold_boot(&self, kernel: &Kernel, fantastic_dir: &std::path::Path);
+
+    /// Can a folder bundle extend this bundle? (see [`Handler::folder_base`]).
+    fn folder_base(&self) -> bool;
+
+    /// Build the bundle a folder runs as (see [`Handler::folder_bundle`]).
+    fn folder_bundle(
+        &self,
+        name: &str,
+        folder: &std::path::Path,
+        spec: &Value,
+    ) -> Result<Arc<dyn Bundle>, String>;
+
+    /// The root-reflect contribution (see [`Handler::reflect_root_extra`]).
+    fn reflect_root_extra(
+        &self,
+        agent: &Arc<crate::agent::Agent>,
+        full: bool,
+        kernel: &Arc<Kernel>,
+    ) -> Result<Option<Map<String, Value>>, Value>;
+}
+
+impl<T: Handler> sealed::Sealed for T {}
+
+#[async_trait]
+impl<T: Handler> Bundle for T {
+    fn name(&self) -> &str {
+        Handler::name(self)
+    }
+    fn man(&self) -> &'static str {
+        Handler::man(self)
+    }
+    fn verbs(&self) -> &'static [crate::verbs::Verb] {
+        Handler::verbs(self)
+    }
+    fn dynamic_verbs(&self, agent: &crate::agent::Agent) -> Vec<crate::verbs::DynVerb> {
+        Handler::dynamic_verbs(self, agent)
+    }
+    fn record(&self) -> &'static crate::verbs::RecordDecl {
+        Handler::record(self)
+    }
+    fn validate_meta(
+        &self,
+        meta: &Map<String, Value>,
+        record: &Map<String, Value>,
+    ) -> Option<String> {
+        Handler::validate_meta(self, meta, record)
+    }
+    fn payload_secret(&self, payload: &Value) -> Vec<String> {
+        Handler::payload_secret(self, payload)
+    }
+    fn reply_secret(&self, payload: &Value, reply: &Value) -> Vec<String> {
+        Handler::reply_secret(self, payload, reply)
+    }
+    async fn handle_binary(
+        &self,
+        agent_id: &AgentId,
+        header: Value,
+        body: Option<crate::outcome::Blob>,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
+        // THE GENERATED ENTRY RUNS FIRST: the agent's verbs (builtin and the ones
+        // built at runtime for it) judge the call; the handler gets a typed `Call` or
+        // the call never reaches it.
+        let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
+            return Ok((
+                Some(crate::refusal::unknown_agent(
+                    agent_id.as_str(),
+                    kernel.agents.iter().map(|e| e.key().0.clone()).collect(),
+                )),
+                None,
+            ));
+        };
+        let dynamic = Handler::dynamic_verbs(self, &agent);
+        match <T::Call as Parse>::parse(&agent_id.0, &header, &dynamic) {
+            Err(refused) => Ok((Some(refused), None)),
+            Ok(call) => {
+                Handler::handle_binary(self, agent_id, call, body, kernel).await
+            }
+        }
+    }
+    async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
+        Handler::on_delete(self, agent_id, kernel).await
+    }
+    async fn on_cancel(
+        &self,
+        agent_id: &AgentId,
+        task_id: &TaskId,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        Handler::on_cancel(self, agent_id, task_id, kernel).await
+    }
+    async fn flush_pending(
+        &self,
+        agent_id: &AgentId,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        Handler::flush_pending(self, agent_id, kernel).await
+    }
+    async fn on_shutdown(
+        &self,
+        agent_id: &AgentId,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        Handler::on_shutdown(self, agent_id, kernel).await
+    }
+    fn cold_boot(&self, kernel: &Kernel, fantastic_dir: &std::path::Path) {
+        Handler::cold_boot(self, kernel, fantastic_dir);
+    }
+    fn folder_base(&self) -> bool {
+        Handler::folder_base(self)
+    }
+    fn folder_bundle(
+        &self,
+        name: &str,
+        folder: &std::path::Path,
+        spec: &Value,
+    ) -> Result<Arc<dyn Bundle>, String> {
+        Handler::folder_bundle(self, name, folder, spec)
+    }
+    fn reflect_root_extra(
+        &self,
+        agent: &Arc<crate::agent::Agent>,
+        full: bool,
+        kernel: &Arc<Kernel>,
+    ) -> Result<Option<Map<String, Value>>, Value> {
+        Handler::reflect_root_extra(self, agent, full, kernel)
+    }
+}
+
+/// What a bundle implements. Every Rust bundle does.
+#[allow(clippy::double_must_use)]
+#[async_trait]
+pub trait Handler: Send + Sync + 'static {
+    /// The `Call` the bundle's `verbs!` generates: the typed form of every call its
+    /// agents answer, and the entry that checks one.
+    type Call: Parse;
+
     /// Stable bundle name. Matches what's stored in agent.yaml's
     /// `handler_module` (e.g. `"file_bridge.tools"`, `"web.tools"`).
     fn name(&self) -> &str;
 
-    /// Dispatch a verb whose reply is JSON alone — the default
-    /// [`Self::handle_binary`] calls it. `payload["type"]` names the verb.
-    /// Substrate guarantees `payload` is an `Object` shape.
+    /// ONE SHORT GENERIC TEXT in code saying what the bundle is for. The only prose a
+    /// bundle carries: how to call it is rendered from its declared verbs
+    /// (`docs`, `reflect`), never written by hand.
+    fn man(&self) -> &'static str;
+
+    /// Answer one checked call. `call` is the typed form of the payload — its verb
+    /// known, its arguments present and of their declared types; the entry
+    /// ([`Parse::parse`]) ran before this and refused anything else.
     ///
     /// `kernel` is passed so the handler can `kernel.send(...)` to
     /// other agents or read shared state. Avoids storing back-refs
@@ -67,9 +334,31 @@ pub trait Bundle: Send + Sync {
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError>;
+
+    /// Answer one checked call that may carry or answer raw bytes. `body` is the raw
+    /// request body AT ITS PATH ([`crate::outcome::Blob`]) a handler reads ITS OWN key
+    /// of with [`crate::outcome::Blob::at`]; the reply body is the chunk AND ITS SLOT
+    /// (`Blob::key("bytes", …)`). `Some` means the verb RETURNED A CHUNK, so a 0-byte
+    /// chunk stays distinguishable from a bodiless status reply.
+    ///
+    /// Default impl: a bundle whose verbs never carry bytes answers through
+    /// [`Self::handle`] and a request body is DROPPED — never base64-encoded onto the
+    /// payload. A bundle that takes or answers raw bytes overrides this method and
+    /// answers EVERY verb here, routing the rest to its own `handle`. Returns NO reply
+    /// body.
+    async fn handle_binary(
+        &self,
+        agent_id: &AgentId,
+        call: Self::Call,
+        _body: Option<crate::outcome::Blob>,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
+        let reply = self.handle(agent_id, call, kernel).await?;
+        Ok((reply, None))
+    }
 
     /// Refuse an `update_agent` patch this bundle cannot honour. Called by the
     /// substrate BEFORE the record changes; `Some(reason)` REFUSES the patch.
@@ -87,8 +376,8 @@ pub trait Bundle: Send + Sync {
     /// py-canonical: a cross-field rule (exec_bridge's `interpreter` against
     /// `interpreters`) is unenforceable from the patch alone, and checking the
     /// patch would falsely refuse `update_agent id=x interpreter=<already allowed>`.
-    /// Called at BOTH create and update, so no record is born with meta its own
-    /// bundle refuses.
+    /// Called at BOTH create and update, so no record is born with meta only its
+    /// own bundle refuses.
     fn validate_meta(
         &self,
         _meta: &Map<String, Value>,
@@ -97,56 +386,29 @@ pub trait Bundle: Send + Sync {
         None
     }
 
-    /// What this bundle KIND's record takes — `{fields:[{name, type, required,
-    /// enum?, default?, hint}]}` — readable before any agent of it exists; a key
-    /// is a `credentials` field (`{store, ref}`),
-    /// never an environment variable. The substrate attaches it to this
-    /// bundle's entry in the `reflect bundles=all` catalog, and nowhere else.
-    /// Python's duck-typed module-level `RECORD_SCHEMA`.
-    ///
-    /// ONE TRUTH: a bundle that publishes a schema enforces the same one in
-    /// [`Self::validate_meta`] (the AI backends build both from
-    /// `fantastic_ai_core::schema`). Default: none — most bundles publish no
-    /// record contract.
-    fn record_schema(&self) -> Option<Value> {
-        None
-    }
+    /// THE VERBS this bundle's agents answer, DECLARED (`verbs!{}` in its `verbs.rs`): the
+    /// list the agent's own entry checks every call against — verb known, arguments
+    /// known, present and typed — and `reflect` and `docs` render. Required.
+    fn verbs(&self) -> &'static [crate::verbs::Verb];
 
-    /// HOW TO CALL this bundle's agents — `{verb: doc}` in the bundle's order,
-    /// python's module-level `VERBS` docstrings. Served by the kernel's `docs`
-    /// verb (oneliners: each doc's signature; detailed: the whole doc) and read
-    /// by [`crate::kernel::Kernel::advertises`]. Never on a reflect. Default: no
-    /// verbs.
-    fn verb_docs(&self) -> Value {
-        Value::Object(serde_json::Map::new())
-    }
+    /// THE VERBS THIS AGENT carries beside the builtin ones: built at runtime for the
+    /// agent instance (an MCP client's tools), the same schema shape as a builtin
+    /// verb's and checked by the same engine. `reflect` and `docs` render them with
+    /// the builtin ones. Required: a bundle with none returns the explicit empty
+    /// list its `verbs!` generates (`verbs::dynamic_verbs`).
+    fn dynamic_verbs(&self, agent: &crate::agent::Agent) -> Vec<crate::verbs::DynVerb>;
 
-    /// THIS AGENT'S verb docs, when its bundle serves different verbs per agent
-    /// (an MCP server's tools) — python's duck-typed `instance_verbs(agent)`.
-    /// `docs of=<agent id>` reads it before [`Self::verb_docs`]; `None` keeps the
-    /// bundle's. Default: none.
-    fn instance_verb_docs(&self, _agent: &crate::agent::Agent) -> Option<Value> {
-        None
-    }
-
-    /// The rest of the DETAILED docs — python's duck-typed module-level `EMITS`,
-    /// `CANCEL` and `NOTES`, served by `docs` (tier detailed, no `verb`).
-    fn emits_doc(&self) -> Option<Value> {
-        None
-    }
-    /// How a caller stops this bundle's work (python `CANCEL`). Default: none.
-    fn cancel_doc(&self) -> Option<Value> {
-        None
-    }
-    /// Bundle notes for the detailed tier (python `NOTES`). Default: none.
-    fn notes_doc(&self) -> Option<Value> {
-        None
-    }
+    /// THE RECORD this bundle's agents carry, DECLARED (`record!` in its `record.rs`):
+    /// the fields `create_agent` / `update_agent` may set on them, beside the fields
+    /// every record has ([`crate::declared::record`]); also what `reflect bundles=all`
+    /// lists for the kind. Required.
+    fn record(&self) -> &'static crate::verbs::RecordDecl;
 
     /// SECRET PATHS of an incoming call (`crate::secret`): dotted paths into
     /// `payload` whose values the kernel keeps and shows only as `[secret]` — the
     /// call row, the state stream, every watcher's mirror — added to the item's
-    /// own `secret` marks. The handler still gets the payload as sent. Default: none.
+    /// own `secret` marks. The call the handler gets is parsed from the payload as sent.
+    /// Default: none.
     fn payload_secret(&self, _payload: &Value) -> Vec<String> {
         Vec::new()
     }
@@ -162,49 +424,6 @@ pub trait Bundle: Send + Sync {
     /// and the reply in clear.
     fn reply_secret(&self, _payload: &Value, _reply: &Value) -> Vec<String> {
         Vec::new()
-    }
-
-    /// THE DISPATCH — the kernel calls this for EVERY call, a request body or
-    /// not; python's one `handle`, whose reply dict may hold `bytes` at any key.
-    /// Raw bytes flow in BOTH directions, never base64. `header` is the payload
-    /// with NOTHING at the request body's path (python holds the bytes there);
-    /// `body` is the raw request body AT ITS PATH ([`crate::outcome::Blob`]) — a
-    /// handler reads ITS OWN key with [`crate::outcome::Blob::at`], exactly as
-    /// python's reads `payload.get("data")` / `payload.get("bytes")`, so a body
-    /// placed under another key is not its body. `None` = the call carried no
-    /// request body (a plain text call: `read_stream`, `events`, …).
-    ///
-    /// The reply body is an `Option<Blob>` — the chunk AND ITS SLOT in the
-    /// reply, as python's reply dict holds a `bytes` value at a key: a
-    /// `read_stream` chunk is `Blob::key("bytes", …)`, a bundle's own verb puts
-    /// its chunk at its own key (`Blob::key("chunk", …)`), a bridge relaying a
-    /// peer's reply keeps the slot the peer's frame named (`["x.y"]` is the
-    /// reply key `"x.y"`, never `x` → `y`). ANY verb may return one — nothing is
-    /// declared, no verb list exists — and every wire leg answers binary exactly
-    /// when it is `Some` (the REST octet reply, the WS binary frame, a bridge's
-    /// binary reply frame). `Some` means the verb RETURNED A CHUNK and `None`
-    /// means it returned none, so a 0-byte chunk (an empty file read) stays
-    /// distinguishable from `write_stream`'s bodiless status reply. Python has
-    /// the distinction for free — `isinstance(reply["bytes"], bytes)` — which is
-    /// why an `is_empty()` test served an empty file as JSON and a denial as a
-    /// 200.
-    ///
-    /// Default impl: a bundle whose verbs never carry bytes gets its JSON
-    /// `header` dispatched through [`Self::handle`] and a request body is
-    /// DROPPED — never base64-encoded onto the payload. A bundle that takes or
-    /// answers raw bytes overrides this method and answers EVERY verb here
-    /// (`file_bridge.read_stream`/`write_stream`, `exec_bridge.paste_image`, a
-    /// bridge's `forward`), routing the rest to its own `handle`. Returns NO
-    /// reply body.
-    async fn handle_binary(
-        &self,
-        agent_id: &AgentId,
-        header: Value,
-        _body: Option<crate::outcome::Blob>,
-        kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
-        let reply = self.handle(agent_id, &header, kernel).await?;
-        Ok((reply, None))
     }
 
     /// Pre-detach hook. Default: noop.
@@ -283,20 +502,6 @@ pub trait Bundle: Send + Sync {
         _spec: &Value,
     ) -> Result<Arc<dyn Bundle>, String> {
         Err(format!("{} is not a base a folder can extend", self.name()))
-    }
-
-    /// Optional readme text seeded into the agent's dir on creation.
-    /// Default: empty (no readme). Bundles override with
-    /// `include_str!("readme.md")` to ship their description.
-    fn readme(&self) -> Option<&'static str> {
-        None
-    }
-
-    /// Optional keyed `docs/` topic tree seeded beside the readme (a `/` in a
-    /// key is a nested tier). Default: empty. Python reads the bundle package's
-    /// `docs/` dir via importlib; a rust bundle hands the table in.
-    fn docs(&self) -> &'static [(&'static str, &'static str)] {
-        &[]
     }
 
     /// Duck-typed ROOT-reflect contribution, merged by the substrate on the
@@ -404,7 +609,11 @@ impl BundleRegistry {
             // A bare bundle name (`ai_chat`) is accepted for its `.tools` module (owner).
             .or_else(|| {
                 (!handler_module.contains('.'))
-                    .then(|| self.by_handler.get(&format!("{handler_module}.tools")).cloned())
+                    .then(|| {
+                        self.by_handler
+                            .get(&format!("{handler_module}.tools"))
+                            .cloned()
+                    })
                     .flatten()
             })
     }
@@ -486,11 +695,22 @@ impl BundleRegistry {
     /// (a registered `handler_module`, a meta bundle, an installed bundle's name) that
     /// never leads back to `name`. `Ok` is the row to register, `base` resolved to its
     /// handler module; `Err` names the field.
-    pub fn meta_row(&self, name: &str, base: &str, sentence: &str, spec: &Value, row: Value) -> Result<Value, String> {
+    pub fn meta_row(
+        &self,
+        name: &str,
+        base: &str,
+        sentence: &str,
+        spec: &Value,
+        row: Value,
+    ) -> Result<Value, String> {
         let record = match spec.get("record") {
             None | Some(Value::Null) => Value::Object(serde_json::Map::new()),
             Some(r @ Value::Object(_)) => r.clone(),
-            Some(_) => return Err("record: must be a mapping of the fields every instance inherits".to_string()),
+            Some(_) => {
+                return Err(
+                    "record: must be a mapping of the fields every instance inherits".to_string(),
+                )
+            }
         };
         let Some(handler) = self.handler_of(base) else {
             let bases = self.folder_bases().join(", ");
@@ -542,8 +762,13 @@ impl BundleRegistry {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| format!("{name}: sentence: required — one line saying what it is"))?;
         let row = serde_json::json!({"name": name, "handler_module": name});
-        let row = self.meta_row(name, base, sentence, &spec, row).map_err(|e| format!("{name}: {e}"))?;
-        self.embedded.write().expect("embedded poisoned").insert(name.to_string(), row);
+        let row = self
+            .meta_row(name, base, sentence, &spec, row)
+            .map_err(|e| format!("{name}: {e}"))?;
+        self.embedded
+            .write()
+            .expect("embedded poisoned")
+            .insert(name.to_string(), row);
         Ok(())
     }
 
@@ -590,17 +815,30 @@ impl BundleRegistry {
     /// folder with no program — its row holds its `record`, and no built bundle
     /// stands for it), else its embedded one.
     fn meta_base(&self, name: &str) -> Option<String> {
-        self.meta_row_of(name)?.get("base").and_then(Value::as_str).map(str::to_string)
+        self.meta_row_of(name)?
+            .get("base")
+            .and_then(Value::as_str)
+            .map(str::to_string)
     }
 
     /// The live row of the meta bundle `name`: a loaded folder meta bundle wins over
     /// an embedded one. `None`: no meta bundle by that name (or a program folder).
     fn meta_row_of(&self, name: &str) -> Option<Value> {
-        if self.folders.read().expect("folders poisoned").contains_key(name) {
+        if self
+            .folders
+            .read()
+            .expect("folders poisoned")
+            .contains_key(name)
+        {
             return None;
         }
-        self.folder_meta(name)
-            .or_else(|| self.embedded.read().expect("embedded poisoned").get(name).cloned())
+        self.folder_meta(name).or_else(|| {
+            self.embedded
+                .read()
+                .expect("embedded poisoned")
+                .get(name)
+                .cloned()
+        })
     }
 
     /// A FOLDER meta bundle's row: loaded, no error, a `record`.
@@ -629,7 +867,11 @@ impl BundleRegistry {
         for name in chain.iter().rev() {
             // a meta bundle's live row (folder over embedded), or a program folder's own
             let row = self.meta_row_of(name).or_else(|| {
-                self.folder_rows.read().expect("folder rows poisoned").get(name).cloned()
+                self.folder_rows
+                    .read()
+                    .expect("folder rows poisoned")
+                    .get(name)
+                    .cloned()
             });
             if let Some(Value::Object(rec)) = row.as_ref().and_then(|r| r.get("record")) {
                 for (k, v) in rec {

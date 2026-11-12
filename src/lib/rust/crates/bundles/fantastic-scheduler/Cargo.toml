@@ -13,12 +13,15 @@ fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
 tokio = { workspace = true }
 # `getentropy` — the OS CSPRNG behind python's `secrets` module.
 libc = { workspace = true }
 futures-util = { workspace = true }
 
 [dev-dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 # The ROOT LOADER bundle — tests need it registered so the root answers the
 # verbs it serves (`persist_blob`/`load_blob`, `boot`), as it does in production.
 fantastic-core = { path = "../fantastic-core" }

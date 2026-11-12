@@ -205,34 +205,17 @@ fn flagged_contents(msgs: &[Value], key: &str) -> Vec<String> {
 
 #[test]
 fn caching_is_an_enum_that_defaults_to_cleanup_and_refuses_anything_else() {
-    let sch = crate::schema::schema(vec![]);
-    let field = sch["fields"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|f| f["name"] == "caching")
-        .expect("caching is a shared field")
-        .clone();
-    assert_eq!(field["type"], "enum");
-    assert_eq!(field["enum"], json!(["none", "cleanup", "provider_cache"]));
-    assert_eq!(field["default"], "cleanup");
-    let rec = json!({"endpoint": "e", "memory_store_id": "m"});
-    let rec = rec.as_object().unwrap();
-    let check = |meta: Value| crate::schema::validate(&sch, "x", meta.as_object().unwrap(), rec);
+    let check = |meta: Value| crate::tests_decl::refused_at_the_write(meta.as_object().unwrap());
     for legal in ["none", "cleanup", "provider_cache"] {
         assert_eq!(check(json!({"caching": legal})), None, "{legal}");
     }
-    assert_eq!(
-        check(json!({"caching": "always"})).as_deref(),
-        Some("caching='always' is not one of the legal values: none, cleanup, provider_cache")
+    assert!(
+        check(json!({"caching": "always"})).is_some_and(|e| e.contains("caching")),
+        "an unknown mode is refused by name"
     );
-    let primer = sch["fields"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|f| f["name"] == "cache_primer_until")
-        .expect("the primer is a shared field");
-    assert_eq!(primer["type"], "int");
+    // the primer is a row id: a number, never text
+    assert_eq!(check(json!({"cache_primer_until": 12})), None);
+    assert!(check(json!({"cache_primer_until": "12"})).is_some());
 }
 
 // ─── the three modes over one history ───────────────────────────────────────

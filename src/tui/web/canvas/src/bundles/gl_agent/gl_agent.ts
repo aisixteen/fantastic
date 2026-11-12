@@ -1,5 +1,8 @@
 import { str } from "../../lib.ts";
-import { panelRelay } from "../panel_relay.ts";
+import { bodyText } from "../body_text.ts";
+import { docsOf, entry } from "../declared.ts";
+import type { Declared } from "../declared.ts";
+import { PANEL_VERBS, panelRelay } from "../panel_relay.ts";
 import type { Handler, Json } from "../../lib.ts";
 
 // gl_agent — a JS view-agent holding a MUTABLE GL source (THREE/GLSL text).
@@ -11,7 +14,17 @@ import type { Handler, Json } from "../../lib.ts";
 
 export const GL_AGENT = "gl_agent.ts";
 
-export const glAgent: Handler = (id, payload, kernel): Json | Promise<Json> => {
+/** The verbs a GL cell answers. */
+export const GL_DECL: Declared = {
+  get_gl_view: { doc: "This GL cell's source, as the GL host reads it. Returns {id, source}.", args: {} },
+  set_gl_source: {
+    doc: "Replaces the scene. Returns {ok, bytes}.",
+    args: { bytes: { type: "bytes", required: true, doc: "The GL source, verbatim." } },
+  },
+  ...PANEL_VERBS,
+};
+
+const glHandler: Handler = (id, payload, kernel): Json | Promise<Json> => {
   // the GL source's own emits, as this agent (`panel_relay.ts`)
   const relayed = panelRelay(kernel, payload);
   if (relayed !== undefined) return relayed;
@@ -24,20 +37,22 @@ export const glAgent: Handler = (id, payload, kernel): Json | Promise<Json> => {
       return { id, source: typeof src === "string" ? src : "" };
     }
     case "set_gl_source": {
-      const source = str(payload, "source");
+      const source = bodyText(payload["bytes"]) as string;
       kernel.updateMeta(id, { gl_source: source }); // → updated event → persist
       kernel.emit(id, { type: "reload_html" }); // universal view reload
       return { ok: true, bytes: source.length };
     }
     default:
-      return { error: `gl_agent: unknown verb '${str(payload, "type")}'`, reason: "unhandled", verb: str(payload, "type") };
+      throw new Error(`gl_agent: ${str(payload, "type")} is declared and not handled`);
   }
 };
+
+export const glAgent: Handler = entry("gl_agent", GL_DECL, glHandler);
 
 /** Register the gl_agent bundle so `handler_module: "gl_agent.ts"` records
  *  run locally (and weak-load elsewhere). */
 export function registerGlAgent(kernel: {
-  registerBundle(hm: string, h: Handler): void;
+  registerBundle(hm: string, h: Handler, verbs?: Record<string, string>): void;
 }): void {
-  kernel.registerBundle(GL_AGENT, glAgent);
+  kernel.registerBundle(GL_AGENT, glAgent, docsOf(GL_DECL));
 }

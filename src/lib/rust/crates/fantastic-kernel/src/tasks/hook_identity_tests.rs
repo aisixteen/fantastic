@@ -8,7 +8,7 @@
 //!   root owns); `ps` still lists them, and a group kill leaves them out.
 use super::*;
 use crate::agent::Agent;
-use crate::bundle::{Bundle, BundleError, Reply};
+use crate::bundle::{BundleError, Handler, Reply};
 use crate::outcome::Item;
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -20,18 +20,33 @@ struct IdBundle {
     log: Log,
 }
 
+crate::stand_in_verbs!(idbundle_verbs { BootV "boot" {  }, ForkServiceV "fork_service" {  }, ShutdownV "shutdown" {  }, SlowV "slow" {  } });
 #[async_trait]
-impl Bundle for IdBundle {
+impl Handler for IdBundle {
+    type Call = idbundle_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "hook_identity_probe"
+    }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        idbundle_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        idbundle_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
     }
 
     async fn handle(
         &self,
         _agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
+        let payload = &call.payload();
         match payload.get("type").and_then(Value::as_str).unwrap_or("") {
             "boot" | "shutdown" => Ok(None),
             "slow" => {

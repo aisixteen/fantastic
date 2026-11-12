@@ -11,20 +11,22 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::{AgentId, Kernel};
+use schemars::JsonSchema;
 use serde_json::{json, Value};
 
 use crate::agent_loop::BackendConfig;
+use crate::declared::chat;
+use crate::record::AiRecord;
 use crate::remote_provider::{chat_provider, PROVIDER_FIELD};
 use crate::verbs;
 
 /// The handler module this bundle registers under.
 pub const HANDLER_MODULE: &str = "ai_chat.tools";
 const NAME: &str = "ai_chat";
-/// What `reflect` says the agent is.
-pub const SENTENCE: &str =
-    "An AI chat: holds its conversation and completes each turn through its provider agent (`provider_id`).";
+/// What the bundle is for — its one short man text.
+const MAN: &str = "An AI agent: it holds a conversation in its memory store, folds and recalls it to fit the model's window, reads the calls the model writes and routes each to the agent it names, and completes every turn through the provider agent its record names.";
 
 const CFG: BackendConfig = BackendConfig {
     name: NAME,
@@ -52,65 +54,58 @@ pub const VIEW_CALLS: [&str; 9] = [
 /// What the view reads and answers on `user`: the inquiries this chat asked the person.
 pub const VIEW_USER_CALLS: [&str; 2] = ["inquiries", "answer_inquiry"];
 
-const README: &str = "# ai_chat\n\nThe AI agent apart from any provider: it keeps the conversation \
-and completes each turn through the provider agent named by `provider_id` (`complete`). Grant it \
-`can_call {<provider>: [complete, watch]}`; the provider admits it in `callable_by`. Model, endpoint \
-and key are the provider's; the cache marks are this chat's (`caching`): the provider forwards them.\n";
+/// The fields a chat's record carries, beside the ones every record has.
+#[derive(Debug, JsonSchema)]
+pub struct ChatRecord {
+    /// The provider agent that completes this chat's turns (`<guid>|<id>` on a connected kernel).
+    pub provider_id: Option<String>,
+    /// The model this chat asks its provider for.
+    pub model: Option<String>,
+    /// How the conversation is kept in the model's view; `provider_cache` asks the provider for its cache markers.
+    pub caching: Option<crate::record::CachingMode>,
+    /// The fields every ai_core agent takes.
+    #[serde(flatten)]
+    pub ai: AiRecord,
+}
+
+fantastic_kernel::record!(ChatRecord);
 
 /// The `ai_chat.tools` bundle.
 pub struct AiChatBundle;
 
 #[async_trait]
-impl Bundle for AiChatBundle {
+impl Handler for AiChatBundle {
+    type Call = chat::Call;
+
     fn name(&self) -> &str {
         NAME
     }
 
-    fn verb_docs(&self) -> Value {
-        let mut docs = verbs::verb_docs();
-        if let Some(m) = docs.as_object_mut() {
-            for v in ["complete", "models", "set_default_model"] {
-                m.remove(v); // a provider's verbs, not a chat's
-            }
-        }
-        docs
+    fn man(&self) -> &'static str {
+        MAN
     }
 
-    fn emits_doc(&self) -> Option<Value> {
-        Some(verbs::emits())
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        chat::VERBS
     }
 
-    fn cancel_doc(&self) -> Option<Value> {
-        Some(Value::String(verbs::CANCEL_DOC.to_string()))
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        chat::dynamic_verbs(agent)
     }
 
-    fn notes_doc(&self) -> Option<Value> {
-        Some(verbs::notes())
-    }
-
-    fn readme(&self) -> Option<&'static str> {
-        Some(README)
-    }
-
-    /// The write-time check of the chat's own prompt-file fields (the provider's `validate_meta`
-    /// ran it before the split): a value the file could never be read through is refused at the write.
-    fn validate_meta(
-        &self,
-        meta: &serde_json::Map<String, Value>,
-        _record: &serde_json::Map<String, Value>,
-    ) -> Option<String> {
-        crate::prompt_file::shape_error(meta)
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &RECORD
     }
 
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        if verb == "reflect" {
-            let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, CFG.model_window);
+        let provider = |_client: &str| chat_provider(agent_id, kernel);
+        let reflect = || {
+            let mut out = verbs::reflect_base(agent_id, kernel, MAN, CFG.model_window);
             let meta = crate::helpers::agent_meta(agent_id, kernel);
             out.insert(
                 PROVIDER_FIELD.into(),
@@ -126,22 +121,11 @@ impl Bundle for AiChatBundle {
                     "calls": {id: VIEW_CALLS, "user": VIEW_USER_CALLS},
                 }),
             );
-            return Ok(Some(Value::Object(out)));
-        }
-        if matches!(verb, "complete" | "models" | "set_default_model") {
-            return Ok(Some(fantastic_kernel::refusal::refusal(
-                fantastic_kernel::refusal::UNHANDLED,
-                format!("{NAME}: `{verb}` is a provider's verb; this chat completes through its {PROVIDER_FIELD} (ask it there)"),
-            )));
-        }
-        let provider = |_client: &str| chat_provider(agent_id, kernel);
-        if let Some(reply) = verbs::handle_common(agent_id, payload, kernel, CFG, provider).await? {
-            return Ok(Some(reply));
-        }
-        Ok(Some(fantastic_kernel::refusal::refusal(
-            fantastic_kernel::refusal::UNHANDLED,
-            format!("{NAME}: unknown type {}", json!(verb)),
-        )))
+            Value::Object(out)
+        };
+        Ok(Some(
+            verbs::handle(agent_id, call, kernel, CFG, provider, reflect).await?,
+        ))
     }
 
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {

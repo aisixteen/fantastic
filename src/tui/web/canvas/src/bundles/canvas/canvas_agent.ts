@@ -6,6 +6,8 @@ import { RENDERER_CHOICES, resolveRenderer } from "../terminal_view/renderer.ts"
 import { readShell } from "../shell.ts";
 import { bodyText } from "../body_text.ts";
 import { htmlRefusal } from "../html_check.ts";
+import { docsOf, entry } from "../declared.ts";
+import type { Declared } from "../declared.ts";
 import { fileGrant, isRefusal, kernelBridge, openViewAgent, said } from "../files/file_bridge.ts";
 import { agentIndex } from "../files/files_deps.ts";
 import { isRefusalOf, resolveTarget } from "../files/drag.ts";
@@ -86,19 +88,16 @@ const geometryOf = (p: Record<string, unknown>): Partial<Rect> => {
 };
 
 /** A cell's BODY from a call: `bytes` (ai_core's verbatim convention), or the
- *  kind's own field (`html` / `gl_source`). undefined = none given; a refusal
- *  when it is not a string (the grammar parsed markup's tags as arguments). */
+ *  kind's own field (`html` / `gl_source`), both declared as text. undefined =
+ *  none given; a refusal when an html body is no html. */
 function bodyOf(kind: string, payload: Payload): string | undefined | Record<string, unknown> {
   const field = kind === "gl" ? "gl_source" : "html";
   const given = payload["bytes"] ?? payload[field];
   if (given === undefined) return undefined;
-  const raw = bodyText(given);
-  if (raw !== null) {
-    // an html body must BE html (a placeholder, a truncated script: refused)
-    if (field === "html") return htmlRefusal("view", raw) ?? raw;
-    return raw;
-  }
-  return { error: `view: the ${field} must be a string`, reason: "bad_arg", arg: "bytes", hint: "send the markup as <bytes>…</bytes> — verbatim, nothing escaped" };
+  const raw = bodyText(given) as string;
+  // an html body must BE html (a placeholder, a truncated script: refused)
+  if (field === "html") return htmlRefusal("view", raw) ?? raw;
+  return raw;
 }
 
 
@@ -127,13 +126,106 @@ async function fitCell(kernel: Kernel, view: string, cell: string, max: { width:
   return { fitted: cell, ...rect, content: { width: first.mw, height: at.h }, overflowed } as unknown as Json;
 }
 
-export const CANVAS_README =
-  
-  "The canvas: the page's root agent. It holds the one view, `view_root` — build there (`docs of=view_root`). It answers reflect only.";
+export const CANVAS_MAN = "The canvas: the page's root agent. It holds the one view, `view_root`; build there.";
 
-export const VIEW_README =
-  
-  "THE VIEW — the canvas's one view (frontend). Its cells are its children: you place and change them HERE. VERBS: place {kind: html|gl|terminal (or handler_module) — or only backend_id: a VIEW of that host agent, drawn as its `view` says, read from its `reflect` — x, y, id?, width?, height?, display_name?, bytes? (the body, verbatim), trusted?, can_call?, callable_by?, backend_id? (terminal/chat: the host agent shown)} · move {id, x?, y?, width?, height?} · fit {id, max_width?, max_height?} (an html cell sized to what it draws — {width, height, overflowed}; a cell keeps its size otherwise, 480×320 when place names none: after you place or update an html cell, call fit) · update {id, bytes? (a new body reloads it), fields?: {display_name|trusted|readme|x|y|width|height|can_call|callable_by}} (on the view itself: any field) · terminal_renderer {name?: auto | webgl | dom} (the terminals' renderer — auto: DOM in WebKitGTK, else the shared WebGL; no name: what it is and why) · wire {sender, receiver, verbs} (a grant, written on each side that is a cell; not from/to) · remove {id} (DELETES the cell from the view: its agent is untouched) · hide {id} (takes the cell OFF the view, its agent keeps running and its rect is kept; hiding a hidden cell changes nothing) · show {id, x?, y?} (puts a hidden cell back where it was — or at x, y in the layout in use — and it re-attaches live; a shown cell keeps its place). open {path | agent, x?, y?} (what a drop on the canvas does: a FILE opens as a preview pinned to it, a FOLDER as a file tree rooted at it, an agent — or an agent's folder — as its cell: a cell already on the view is moved to x, y when given (never a second one), and without x, y keeps its place; a hidden one is shown (where it was, or at x, y), else the agent is placed at x, y or 0, 0; refused: bad_arg, outside_root, not_found, or the file bridge's refusal). hide, show and remove stay distinct: hide and show never touch the agent. A PANEL'S JS (an html cell's body) has `fantastic`: `await fantastic.send(id, payload)` → the reply · `fantastic.watch(id, ev => …)` → events (returns off) · `fantastic.emit(id, payload)` · `fantastic.onMessage(p => …)`. Its calls are judged by the CELL's can_call — grant what it calls (`{<id>: [verbs…, watch]}`); a reply's `grants_missing` names any it lacks. On the host they arrive as `user`: a host agent you create for a panel needs `callable_by: {user: [<the verbs the panel calls>, watch]}` in its create_agent (a new agent admits no one); never drop `user` from an existing agent's callable_by. Example — a button that runs a command on a host exec agent `runner` and shows its output live: place {kind: html, x: 700, y: 60, can_call: {runner: [start, watch]}, bytes: <button onclick=\"fantastic.send('runner',{type:'start',command:'ls'}).then(r=>job=r.job_id)\">Run</button><pre id=o></pre><script>let job;fantastic.watch('runner',e=>{if(e.job_id===job&&e.type==='progress')o.textContent+=e.line+'\\n'})</script>} A LIVE HOST CELL — the agent pushes, its panel redraws (no polling): a bundle agent (start from `spawn {bundle: python_agent}` on the canvas's host node) whose record has `view: {kind: html, bytes_file: panel.html, calls: [get_html, watch]}` and `callable_by: {user: [get_html, watch]}`; its `agent.py` sends `fa.emit({'type': 'update', 'html': …})` on each change; its `panel.html` does `fantastic.send(id,{type:'get_html'})` once, then `fantastic.watch(id, e => { if (e.type==='update') root.innerHTML = e.html })`; show it with place {backend_id: id}. innerHTML runs no <script>: keep the panel's script in panel.html and send data (or script-free HTML) in the events. A live URL or a file: an html cell whose body is <iframe src=URL> (trusted: true for GET /static_files/file/<path>). The background is the child `background` (set_bg / default_bg / clear_bg / get_bg). ";
+export const VIEW_MAN =
+  "THE VIEW: the canvas's one view. Its cells are its children; you place and change them here. A cell's html body runs with `fantastic` (`send`, `watch`, `emit`, `onMessage`): its calls are judged by the cell's can_call, and on the host they arrive as `user`.";
+
+const GEOMETRY_ARGS = {
+  x: { type: "number", doc: "The cell's left edge in the view." },
+  y: { type: "number", doc: "The cell's top edge in the view." },
+  width: { type: "number", min: 1, doc: "The cell's width." },
+  height: { type: "number", min: 1, doc: "The cell's height." },
+} as const;
+
+/** The verbs the view answers, declared once: the call is checked against them before the handler
+ *  runs (`declared.ts`) and `docs` is rendered from them. */
+export const VIEW_DECL: Declared = {
+  place: {
+    doc: "A new cell of this view: a `kind` (or a `handler_module`), or only `backend_id` for a view of that host agent, drawn as its record says. Returns {placed, kind, grants_missing?, hint?}.",
+    args: {
+      kind: { type: "string", enum: Object.keys(PLACEABLE), doc: "What to make." },
+      handler_module: { type: "string", min: 1, doc: "The cell's own bundle (the `.ts` suffix optional), instead of a kind." },
+      backend_id: { type: "string", min: 1, doc: "The host agent the cell shows (a terminal's agent), or alone: a view of that agent." },
+      x: { ...GEOMETRY_ARGS.x, required: true },
+      y: { ...GEOMETRY_ARGS.y, required: true },
+      width: GEOMETRY_ARGS.width,
+      height: GEOMETRY_ARGS.height,
+      id: { type: "string", min: 1, doc: "The new cell's id; absent, one is made." },
+      bytes: { type: "bytes", doc: "The cell's body, verbatim: html for an html cell, the source for a gl cell." },
+      html: { type: "bytes", doc: "An html cell's body, as its record field (`bytes` is the same body)." },
+      gl_source: { type: "bytes", doc: "A gl cell's source, as its record field (`bytes` is the same body)." },
+      display_name: { type: "string", doc: "The cell's title." },
+      trusted: { type: "boolean", doc: "An html cell runs unsandboxed (a live URL or the host's own files)." },
+      readme: { type: "string", doc: "What the cell is for." },
+      can_call: { type: "object", doc: "What the cell may call: {<id>: [verbs…, watch]}; a reply's `grants_missing` names what its body calls and it lacks." },
+      callable_by: { type: "object", doc: "Who may call the cell." },
+    },
+    anyOf: [["kind"], ["handler_module"], ["backend_id"]],
+    when: [
+      { arg: "kind", is: "terminal", then: "backend_id" },
+      { arg: "handler_module", is: "terminal_view", then: "backend_id" },
+      { arg: "handler_module", is: "terminal_view.ts", then: "backend_id" },
+    ],
+  },
+  move: {
+    doc: "Moves or resizes a cell. Returns {moved, …}.",
+    args: { id: { type: "string", required: true, min: 1, doc: "The cell." }, ...GEOMETRY_ARGS },
+    anyOf: [["x"], ["y"], ["width"], ["height"]],
+  },
+  fit: {
+    doc: "Sizes an html cell to what it draws: the width its content wants, then its height at that width. Returns {fitted, x, y, width, height, content, overflowed}; call it after placing or updating an html cell.",
+    args: {
+      id: { type: "string", required: true, min: 1, doc: "The cell." },
+      max_width: { type: "number", min: 1, default: FIT_MAX.width, doc: "The widest it may get." },
+      max_height: { type: "number", min: 1, default: FIT_MAX.height, doc: "The tallest it may get." },
+    },
+  },
+  update: {
+    doc: "Changes a cell (or this view): a new body, and/or record fields. Returns {updated, fields, grants_missing?, hint?}.",
+    args: {
+      id: { type: "string", required: true, min: 1, doc: "A cell, or this view." },
+      bytes: { type: "bytes", doc: "A new body, verbatim." },
+      fields: { type: "object", doc: `The fields to set: ${[...SETTABLE, ...GEOMETRY].join(", ")} on a cell; any field on the view.` },
+    },
+    anyOf: [["bytes"], ["fields"]],
+  },
+  wire: {
+    doc: "A grant: `sender` may call `receiver` with `verbs`, written on each side that is a cell of this view (sender's can_call, receiver's callable_by).",
+    args: {
+      sender: { type: "string", required: true, min: 1, doc: "The agent that calls." },
+      receiver: { type: "string", required: true, min: 1, doc: "The agent called." },
+      verbs: { type: "string[]", required: true, min: 1, doc: "The verbs granted." },
+    },
+  },
+  remove: {
+    doc: "Removes a cell from the view; its agent is untouched; refused on a delete_lock (the background). Returns {deleted}.",
+    args: { id: { type: "string", required: true, min: 1, doc: "The cell." } },
+  },
+  hide: {
+    doc: "Takes the cell off the view: its agent keeps running, its rect is kept, a reload keeps it hidden; idempotent. Returns {hidden, hidden_cells}.",
+    args: { id: { type: "string", required: true, min: 1, doc: "The cell." } },
+  },
+  show: {
+    doc: "Puts a hidden cell back on the view, live: where it was, or at x, y (a shown cell keeps its place; `move` moves one). Returns {shown, x?, y?, width?, height?, hidden_cells}.",
+    args: { id: { type: "string", required: true, min: 1, doc: "The cell." }, x: GEOMETRY_ARGS.x, y: GEOMETRY_ARGS.y },
+  },
+  open: {
+    doc: "What a drop on the canvas does: a FILE opens as a preview pinned to it, a FOLDER as a file tree rooted at it, an agent (or an agent's folder) as its cell: one already on the view is moved to x, y when given (never a second), a hidden one is shown. Returns {opened, kind: agent|file|dir, cell, moved?, shown?, placed?}.",
+    args: {
+      path: { type: "string", doc: "A project path." },
+      agent: { type: "string", min: 1, doc: "An agent id." },
+      x: GEOMETRY_ARGS.x,
+      y: GEOMETRY_ARGS.y,
+    },
+    oneOf: ["path", "agent"],
+    together: [["x", "y"]],
+  },
+  terminal_renderer: {
+    doc: "The terminals' renderer: auto (DOM in WebKitGTK, else the shared WebGL), webgl or dom. No name: what it is and why.",
+    args: { name: { type: "string", enum: RENDERER_CHOICES, doc: "The renderer to use." } },
+  },
+};
 
 /** What the page does when its host stops (`main.ts` sets it): its last
  *  records flushed, nothing written after. */
@@ -142,9 +234,15 @@ export function onHostStopping(fn: () => Promise<void>): void {
   hostStopping = fn;
 }
 
-/** The root: `reflect` is the kernel's; besides it, only the host's
- *  `host_stopping` (its shutdown, before the drain). */
-export const canvasAgent: Handler = (_id, payload): Json | Promise<Json> => {
+/** The verbs the root answers, besides `reflect` (the kernel's). */
+export const CANVAS_DECL: Declared = {
+  host_stopping: {
+    doc: "The host is stopping (its shutdown, before the drain): the page flushes its last records and writes nothing after. Returns {stopped}.",
+    args: {},
+  },
+};
+
+const canvasHandler: Handler = (_id, payload): Json | Promise<Json> => {
   switch (str(payload, "type")) {
     case "boot":
     case "shutdown":
@@ -152,11 +250,13 @@ export const canvasAgent: Handler = (_id, payload): Json | Promise<Json> => {
     case "host_stopping":
       return hostStopping().then(() => ({ stopped: true }));
     default:
-      return { error: `canvas: unknown verb '${str(payload, "type")}' — the canvas holds the root view (${ROOT_VIEW}); talk to a view`, reason: "unhandled", verb: str(payload, "type") };
+      throw new Error(`canvas: ${str(payload, "type")} is declared and not handled`);
   }
 };
 
-export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> => {
+export const canvasAgent: Handler = entry("canvas", CANVAS_DECL, canvasHandler, ["boot", "shutdown"]);
+
+const viewHandler: Handler = (id, payload, kernel): Json | Promise<Json> => {
   switch (str(payload, "type")) {
     case "place": {
       // WHAT to make: a `kind` (html|gl|terminal), or the cell's own
@@ -165,7 +265,6 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       // record says (`view`, else its kind's default, else the stub)
       const given = str(payload, "handler_module");
       if (!given && !str(payload, "kind") && str(payload, "backend_id")) {
-        if (!num(payload["x"]) || !num(payload["y"])) return { error: "view: place needs x and y (numbers, view coordinates)", reason: "bad_arg", arg: "x" };
         const agent = str(payload, "backend_id");
         // an agent made a moment ago (spawn, then place) is read from the host
         // first — the page's copy of the host agents syncs only on its own events
@@ -182,13 +281,8 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       }
       const named = given ? (given.endsWith(".ts") ? given : `${given}.ts`) : undefined;
       const kind = named !== undefined ? (Object.entries(PLACEABLE).find(([, m]) => m === named)?.[0] ?? named.slice(0, -3)) : str(payload, "kind");
-      const hm = named ?? PLACEABLE[kind];
-      if (hm === undefined) return { error: `view: place — kind ${JSON.stringify(kind)} is one of ${Object.keys(PLACEABLE).join(", ")}, or name the cell's handler_module`, reason: "bad_arg", arg: "kind" };
-      if (!num(payload["x"]) || !num(payload["y"])) return { error: "view: place needs x and y (numbers, view coordinates)", reason: "bad_arg", arg: "x" };
+      const hm = named ?? PLACEABLE[kind]!;
       const backend = str(payload, "backend_id");
-      if (kind === "terminal" && !backend) {
-        return { error: `view: place ${kind} needs backend_id — the host agent it shows`, reason: "bad_arg", arg: "backend_id" };
-      }
       const want = str(payload, "id");
       const aid = want || `${kind}_${Math.random().toString(16).slice(2, 10)}`;
       if (kernel.get(aid) !== undefined) return { error: `view: place — ${aid} already exists`, reason: "exists", arg: "id", hint: `to change it: update {id: ${aid}, bytes?, fields?}; to replace it: remove {id: ${aid}} first` };
@@ -203,44 +297,31 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       if (backend) Object.assign(meta, { backend_id: backend, owns_backend: false });
       // the view's OWN declared grant onto the agent it shows
       if (kind === "terminal") meta["can_call"] = { ...terminalView.grants(backend) };
-      // the file tree and the previewer reach the project's file bridge (sidebar_view.ts is the cell's name before the file tree (#106): saved layouts still hold it, and it opens as the tree)
-      if (["files_view.ts", "preview_view.ts", "sidebar_view.ts"].includes(hm) && meta["can_call"] === undefined) meta["can_call"] = fileGrant();
+      // the file tree and the previewer reach the project's file bridge
+      if (["files_view.ts", "preview_view.ts"].includes(hm) && meta["can_call"] === undefined) meta["can_call"] = fileGrant();
       kernel.register(new Agent({ id: aid, parentId: id, handlerModule: hm, meta: meta as Payload }));
       // grants the body needs and the cell lacks are SAID (the panel's refused
       // call never reaches the AI)
       const grants = typeof meta["html"] === "string" ? grantHint(aid, meta["html"] as string, kernel.get(aid)?.meta["can_call"]) : {};
-      // fields `place` does not take are SAID, never dropped silently
-      const known = new Set<string>(["type", "kind", "handler_module", "id", "bytes", "backend_id", ...SETTABLE, ...GEOMETRY]);
-      const ignored = Object.keys(payload).filter((k) => !known.has(k));
-      if (ignored.length) {
-        return { placed: aid, kind, ignored, ...grants, hint: "place does not take those fields — a cell's content is its body (bytes); to show a live URL or a file, make the body an <iframe src=…> (trusted: true for the host's own files)" + (grants["hint"] ? `. Also: ${grants["hint"]}` : "") } as Json;
-      }
       return { placed: aid, kind, ...grants } as Json;
     }
     case "move": {
       const target = str(payload, "id");
       if (kernel.get(target)?.parentId !== id) return { error: `view: move — ${JSON.stringify(target)} is not a cell of this view`, reason: "not_found", arg: "id" };
-      const m = geometryOf(payload);
-      if (Object.keys(m).length === 0) return { error: "view: move needs x, y, width or height", reason: "bad_arg", arg: "x" };
       const layout = layoutFor(tabWidth());
-      return { moved: target, ...setRect(kernel, id, layout, target, m) } as unknown as Json;
+      return { moved: target, ...setRect(kernel, id, layout, target, geometryOf(payload)) } as unknown as Json;
     }
     case "fit": {
       const target = str(payload, "id");
       if (kernel.get(target)?.parentId !== id) return { error: `view: fit — ${JSON.stringify(target)} is not a cell of this view`, reason: "not_found", arg: "id" };
-      const max = {
-        width: num(payload["max_width"]) ? (payload["max_width"] as number) : FIT_MAX.width,
-        height: num(payload["max_height"]) ? (payload["max_height"] as number) : FIT_MAX.height,
-      };
+      const max = { width: payload["max_width"] as number, height: payload["max_height"] as number };
       return fitCell(kernel, id, target, max);
     }
     case "update": {
       const target = str(payload, "id");
       if (target === id) return updateSelf(id, payload, kernel);
       if (kernel.get(target)?.parentId !== id) return { error: `view: update — ${JSON.stringify(target)} is not a cell of this view`, reason: "not_found", arg: "id" };
-      const fields = payload["fields"] ?? {};
-      if (typeof fields !== "object" || Array.isArray(fields)) return { error: "view: update — fields must be {…}", reason: "bad_arg", arg: "fields" };
-      if (Object.keys(fields).length === 0 && payload["bytes"] === undefined) return { error: "view: update needs bytes (a new body) or fields", reason: "bad_arg", arg: "fields" };
+      const fields = (payload["fields"] ?? {}) as Record<string, unknown>;
       const settable: readonly string[] = [...SETTABLE, ...GEOMETRY];
       const bad = Object.keys(fields).filter((k) => !settable.includes(k));
       if (bad.length) return { error: `view: update — not settable: ${bad.join(", ")} (settable: ${settable.join(", ")})`, reason: "bad_arg", arg: "fields" };
@@ -253,9 +334,6 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       const body = bodyOf(kindOf, payload);
       if (typeof body === "object") return body as unknown as Json;
       if (body !== undefined) f[kindOf === "gl" ? "gl_source" : "html"] = body;
-      for (const k of ["html", "gl_source"]) {
-        if (f[k] !== undefined && typeof f[k] !== "string") return { error: `view: update — ${k} must be a string`, reason: "bad_arg", arg: "bytes", hint: "send the markup as <bytes>…</bytes> — verbatim, nothing escaped" };
-      }
       if (Object.keys(f).length > 0) kernel.updateMeta(target, f as Payload);
       // the cell's NEW BODY shows at once (owner 2026-10-13): its own inbox is told
       // directly — the view just rewrote the cell's record, its own child's; an
@@ -274,19 +352,13 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       // agent's record is not the view's to write). (Not from/to: `to` is
       // ai_core's routing tag.)
       const [from, to] = [str(payload, "sender"), str(payload, "receiver")];
-      const verbs = payload["verbs"];
-      for (const [k, v] of [["sender", from], ["receiver", to]] as const) {
-        if (!v) return { error: `view: wire needs ${k} (an agent id)`, reason: "bad_arg", arg: k };
-      }
+      const verbs = payload["verbs"] as string[];
       const mine = (aid: string): boolean => kernel.get(aid)?.parentId === id;
       if (!mine(from) && !mine(to)) return { error: `view: wire — neither ${JSON.stringify(from)} nor ${JSON.stringify(to)} is a cell of this view`, reason: "not_found", arg: "sender" };
-      if (!Array.isArray(verbs) || verbs.length === 0 || !verbs.every((x) => typeof x === "string")) {
-        return { error: "view: wire needs verbs: [\"emit\", …]", reason: "bad_arg", arg: "verbs" };
-      }
       const merge = (aid: string, field: string, key: string): void => {
         const cur = ((kernel.get(aid)?.meta[field] ?? {}) as Record<string, unknown>);
         const had = Array.isArray(cur[key]) ? (cur[key] as string[]) : [];
-        kernel.updateMeta(aid, { [field]: { ...cur, [key]: [...new Set([...had, ...(verbs as string[])])] } } as unknown as Payload);
+        kernel.updateMeta(aid, { [field]: { ...cur, [key]: [...new Set([...had, ...verbs])] } } as unknown as Payload);
       };
       if (mine(from)) merge(from, "can_call", to);
       if (mine(to)) merge(to, "callable_by", from);
@@ -332,10 +404,7 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       // shared WebGL), webgl or dom. Every terminal of the view switches live.
       // No name: what it is, what is in use here and why.
       const name = payload["name"];
-      if (name !== undefined) {
-        if (!(RENDERER_CHOICES as readonly unknown[]).includes(name)) return { error: "view: terminal_renderer — name is auto, webgl or dom", reason: "bad_arg", arg: "name" };
-        kernel.updateMeta(id, { terminal_renderer: name } as unknown as Payload);
-      }
+      if (name !== undefined) kernel.updateMeta(id, { terminal_renderer: name } as unknown as Payload);
       const choice = kernel.get(id)?.meta["terminal_renderer"] ?? "auto";
       let r: ReturnType<typeof resolveRenderer>;
       try {
@@ -348,11 +417,15 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
     }
     case "boot":
     case "shutdown":
-      return null;
+      return null; // the page kernel's lifecycle: nothing to open or release
     default:
-      return { error: `view: unknown verb '${str(payload, "type")}'`, reason: "unhandled", verb: str(payload, "type") };
+      throw new Error(`view: ${str(payload, "type")} is declared and not handled`);
   }
 };
+
+/** The view's entry: every call is checked against `VIEW_DECL` before `viewHandler` runs. The page
+ *  kernel's lifecycle verbs (`boot`, `shutdown`) are not declared and reach the handler as they are. */
+export const viewAgent: Handler = entry("view", VIEW_DECL, viewHandler, ["boot", "shutdown"]);
 
 // ─── `open`: WHAT A DROP ON THE CANVAS DOES (#134, #135) ─────────────────────
 // A file opens as a preview pinned to it, a folder as a file tree rooted at it,
@@ -409,23 +482,17 @@ function cellsOfAgent(kernel: Kernel, view: string, agent: string): string[] {
 async function openView(view: string, payload: Payload, kernel: Kernel): Promise<Json> {
   const agent = str(payload, "agent");
   const path = payload["path"];
-  if ((agent !== "") === (typeof path === "string")) {
-    return { error: "view: open needs path (a project path) or agent (an agent id): one of them", reason: "bad_arg", arg: "path" };
-  }
   const x = payload["x"];
   const y = payload["y"];
-  if (x !== undefined || y !== undefined) {
-    if (!num(x) || !num(y)) return { error: "view: open — x and y are numbers (the cell's corner in the view), given together", reason: "bad_arg", arg: "x" };
-  }
   // x, y: where the cell goes. Absent, a cell already on the view keeps its place (the same as `show`).
-  const at = num(x) && num(y) ? { x, y } : undefined;
+  const at = typeof x === "number" && typeof y === "number" ? { x, y } : undefined;
   const target: Target = agent !== "" ? { kind: "agent", id: agent } : { kind: "any", path: path as string };
   let r: Opened | Refusal;
   try {
     r = await resolveTarget(target, viewLook(kernel));
   } catch (err) {
     // the file bridge refused the listing: the path is not one it can look at
-    return { error: `view: open — ${(err as Error).message}`, reason: "refused", arg: "path", hint: "the file bridge would not list it" };
+    return { error: `view: open — ${(err as Error).message}`, reason: "bad_arg", arg: "path", hint: "the file bridge would not list it" };
   }
   if (isRefusalOf(r)) return r as unknown as Json;
   if (r.kind === "agent") return openAgent(view, r.agent, at, kernel);
@@ -489,22 +556,18 @@ async function openDir(view: string, path: string, at: { x: number; y: number },
 
 /** `update` on the view itself: any fields. */
 function updateSelf(id: string, payload: Payload, kernel: Parameters<Handler>[2]): Json {
-  const fields = payload["fields"];
-  if (typeof fields !== "object" || fields === null || Array.isArray(fields) || Object.keys(fields).length === 0) {
-    return { error: "view: update on the view itself needs fields: {…}", reason: "bad_arg", arg: "fields" };
-  }
-  const f = fields as Record<string, unknown>;
+  const f = (payload["fields"] ?? {}) as Record<string, unknown>;
   kernel.updateMeta(id, f as unknown as Payload);
   return { updated: id, fields: Object.keys(f) };
 }
 
 /** Register the canvas root's bundle and the view bundle. */
 export function registerCanvas(kernel: {
-  registerBundle(hm: string, h: Handler): void;
+  registerBundle(hm: string, h: Handler, verbs?: Record<string, string>): void;
   setBundleReadme(hm: string, readme: string): void;
 }): void {
-  kernel.registerBundle(CANVAS, canvasAgent);
-  kernel.setBundleReadme(CANVAS, CANVAS_README);
-  kernel.registerBundle(VIEW, viewAgent);
-  kernel.setBundleReadme(VIEW, VIEW_README);
+  kernel.registerBundle(CANVAS, canvasAgent, docsOf(CANVAS_DECL));
+  kernel.setBundleReadme(CANVAS, CANVAS_MAN);
+  kernel.registerBundle(VIEW, viewAgent, docsOf(VIEW_DECL));
+  kernel.setBundleReadme(VIEW, VIEW_MAN);
 }

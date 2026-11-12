@@ -524,11 +524,11 @@ async fn a_text_write_stream_keeps_the_clients_bytes_value() {
         .find(|f| f["id"] == "s1")
         .unwrap_or_else(|| panic!("no reply for s1: {text:?}"));
     assert_eq!(
-        reply["data"]["error"], "write_stream: bytes (one raw chunk) required",
+        reply["data"]["error"], "write_stream: unknown argument 'bytes'",
         "{reply}"
     );
-    assert_eq!(reply["data"]["reason"], "missing_arg", "{reply}");
-    assert_eq!(reply["data"]["arg"], "bytes (one raw chunk)", "{reply}");
+    assert_eq!(reply["data"]["reason"], "bad_arg", "{reply}");
+    assert_eq!(reply["data"]["arg"], "bytes", "{reply}");
     assert!(!files.join("t.txt").exists(), "the refusal still wrote");
 
     // NO key at all — python's `payload.get("bytes", b"")`: an empty chunk.
@@ -842,7 +842,12 @@ async fn call_frame_without_id_or_payload_replies_like_python() {
         .find(|f| f["type"] == "reply")
         .unwrap_or_else(|| panic!("no reply: {t:?}"));
     assert_eq!(reply["id"], "", "an absent id echoes as the empty string");
-    assert_eq!(reply["data"]["error"], "send: target required", "{reply}");
+    assert!(
+        reply["data"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("item.target")),
+        "{reply}"
+    );
 
     // A non-string id is echoed VERBATIM and names no execution.
     let frame =
@@ -1353,15 +1358,6 @@ async fn stage_host(
     kernel
 }
 
-/// The readme is python's file, byte for byte.
-#[test]
-fn readme_is_python_verbatim() {
-    assert_eq!(
-        README,
-        include_str!("../../../../../python/bundled_agents/web/host/src/web/readme.md")
-    );
-}
-
 /// The file proxy types through CPython's `mimetypes` table, with
 /// starlette's `; charset=utf-8` on `text/*` and octet-stream for a miss.
 #[test]
@@ -1642,8 +1638,8 @@ async fn stop(kernel: &Arc<Kernel>, web_id: &str) {
 
 /// The response header BLOCK, in python's order: uvicorn writes `date`
 /// then `server`, starlette then the handler's own headers, then
-/// `content-length`, then `content-type`; a `204` carries neither of the last
-/// two. Read off the raw socket, because that is where order lives.
+/// `content-length`, then `content-type`. Read off the raw socket, because that
+/// is where order lives.
 #[tokio::test]
 async fn rest_response_header_order_matches_python() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1701,17 +1697,6 @@ async fn rest_response_header_order_matches_python() {
         names,
         ["date", "server", "allow", "content-length", "content-type"]
     );
-
-    // 204: date, server only.
-    let (status, names) = header_names(
-        port,
-        &format!(
-            "POST /rest/fb_hdr HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\ncontent-type: application/json\r\ncontent-length: 15\r\n\r\n{{\"type\":\"boot\"}}"
-        ),
-    )
-    .await;
-    assert!(status.starts_with("HTTP/1.1 204"), "{status}");
-    assert_eq!(names, ["date", "server"]);
 
     // octet: date, server, x-fantastic-payload, x-fantastic-bytes-field,
     // content-length, content-type.
@@ -1866,61 +1851,42 @@ async fn octet_leg_header_contract_matches_python() {
         .await
         .expect("post");
     let body: Value = resp.json().await.expect("json");
-    assert_eq!(body["reason"], "missing_arg", "body: {body}");
+    assert_eq!(body["reason"], "bad_arg", "body: {body}");
     assert_eq!(
         body["error"],
-        "write_stream: bytes (one raw chunk) required"
+        "write_stream: unknown argument 'bytes'"
     );
     assert!(!tmp.path().join("served/bf3.bin").exists());
     stop(&kernel, "web_oct").await;
 }
 
-/// The GET `_reflect` shortcuts read their flags exactly as python's
-/// `_reflect_payload` does (`readme=1|true|yes` ⇒ `True`, any other non-falsy
-/// value is a DOC KEY, `tree`/`bundles` only from the three tiers), and a null
-/// reply is a bare 404.
+/// The GET `_reflect` shortcuts send their `tree` and `bundles` flags as given
+/// (the target's entry refuses a value it does not list), nothing else (a flag
+/// `reflect` does not take is never sent), and a null reply is a bare 404.
 #[tokio::test]
 async fn get_reflect_query_flags_match_python() {
     assert_eq!(routes::reflect_payload(""), json!({"type": "reflect"}));
     assert_eq!(
         routes::reflect_payload("readme=true"),
-        json!({"type": "reflect", "readme": true})
+        json!({"type": "reflect"}),
+        "`readme` is no flag of reflect"
     );
     assert_eq!(
-        routes::reflect_payload("readme=1"),
-        json!({"type": "reflect", "readme": true})
+        routes::reflect_payload("tree=ids&bundles=all"),
+        json!({"type": "reflect", "tree": "ids", "bundles": "all"})
     );
     assert_eq!(
-        routes::reflect_payload("readme=yes"),
-        json!({"type": "reflect", "readme": true})
-    );
-    assert_eq!(
-        routes::reflect_payload("readme=0"),
-        json!({"type": "reflect"})
-    );
-    assert_eq!(
-        routes::reflect_payload("readme=no"),
-        json!({"type": "reflect"})
-    );
-    assert_eq!(
-        routes::reflect_payload("readme="),
-        json!({"type": "reflect"})
-    );
-    assert_eq!(
-        routes::reflect_payload("readme=self-extension"),
-        json!({"type": "reflect", "readme": "self-extension"})
-    );
-    assert_eq!(
-        routes::reflect_payload("tree=ids&bundles=none"),
-        json!({"type": "reflect", "tree": "ids", "bundles": "none"})
+        routes::reflect_payload("tree=none&bundles=none"),
+        json!({"type": "reflect", "tree": "none", "bundles": "none"}),
+        "values are sent as given: the target's entry judges them"
     );
     assert_eq!(
         routes::reflect_payload("tree=deep"),
-        json!({"type": "reflect"})
+        json!({"type": "reflect", "tree": "deep"})
     );
 
-    // ...and over the wire: `?readme=true` is 200 (never 400 "invalid digit
-    // found in string"), and a null reply is a 404.
+    // ...and over the wire: a flag `reflect` does not take is dropped, not refused
+    // (never 400 "invalid digit found in string"), and a null reply is a 404.
     let tmp = TempDir::new().unwrap();
     let port = free_port();
     let kernel = stage_host(&tmp, port, "web_q", "rest", "fb_q").await;
@@ -1954,7 +1920,7 @@ async fn reflect_sentence_and_verbs_match_python() {
     // The bundle's own frame, in python's key order; the kernel then appends
     // its reflect decoration (can_call / callable_by / kernel_verbs / tree).
     assert_eq!(
-        obj.keys().map(String::as_str).take(10).collect::<Vec<_>>(),
+        obj.keys().map(String::as_str).take(9).collect::<Vec<_>>(),
         vec![
             "id",
             "sentence",
@@ -1964,13 +1930,12 @@ async fn reflect_sentence_and_verbs_match_python() {
             "running",
             "served_agent_count",
             "surfaces",
-            "routes",
             "browser_reachable",
         ]
     );
     assert_eq!(
         obj["sentence"],
-        json!("HTTP host — rendering routes baked in; call surfaces mounted from sub-agents.")
+        json!(crate::MAN)
     );
     assert_eq!(obj["port"], json!(port));
     assert_eq!(obj["running"], json!(true));
@@ -1982,25 +1947,75 @@ async fn reflect_sentence_and_verbs_match_python() {
     // The io leg is open AND both call gates name the host, so the file bridge
     // is the one agent a browser could actually fetch.
     assert_eq!(obj["browser_reachable"], json!(["fb_r"]));
-    assert!(obj["routes"]["GET /<agent_id>/file/<path>"]
-        .as_str()
-        .expect("route contract")
-        .starts_with("Streams a file by read_stream-ing through the named agent."));
+    // the route contract is the man text plus the declared `fetch_file`, not a reflect block
+    assert!(!obj.contains_key("routes"));
+    // the declared verbs, in declaration order, rendered in the reply's `verbs` block
     assert_eq!(
-        WebBundle
-            .verb_docs()
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
+        Handler::verbs(&WebBundle)
+            .iter()
+            .map(|v| v.name)
             .collect::<Vec<_>>(),
-        vec!["reflect", "boot", "stop", "mount", "unmount", "fetch_file"]
+        vec!["boot", "shutdown", "stop", "mount", "unmount", "fetch_file"]
     );
-    assert_eq!(
-        WebBundle.verb_docs()["reflect"],
-        json!("Identity + uvicorn port + running flag + currently mounted surfaces (process-local; reflect the live serve for truth).")
+    let verbs = reply["verbs"].as_object().expect("a verbs block");
+    // `reflect` is the common verb every agent answers: its rendered line
+    assert_eq!(verbs["reflect"], json!("args: detail:'distilled'|'full'?, tree:'all'|'ids'|'none'?, show_subtrees:list[string]?, ignore_subtrees:list[string]?, handler_modules:list[string]?, bundles:'all'|'ids'?, limit:int >= 1?, after:string? — What this agent IS: identity, sentence, state, grants — and, by flags, its subtree and the installable bundles"));
+    for name in ["boot", "stop", "mount", "unmount", "fetch_file"] {
+        assert!(verbs[name].is_string(), "{name}: {verbs:?}");
+    }
+    assert!(
+        verbs["mount"]
+            .as_str()
+            .unwrap()
+            .starts_with("args: child_id:string of at least 1 character(s) (req)"),
+        "{}",
+        verbs["mount"]
     );
     stop(&kernel, "web_r").await;
+}
+
+/// The record's `host`, `bind` and `port` are judged by the record declaration at
+/// the write: an empty text or a port that is not a number never reaches a read.
+#[test]
+fn the_record_declaration_refuses_an_empty_host_or_bind_and_a_text_port() {
+    for (field, bad) in [
+        ("host", json!("")),
+        ("bind", json!("")),
+        ("port", json!("8080")),
+        ("port", json!(0)),
+    ] {
+        let mut meta = Map::new();
+        meta.insert(field.into(), bad.clone());
+        let refused = <WebBundle as fantastic_kernel::Bundle>::check_record(
+            &WebBundle,
+            "create_agent",
+            &meta,
+        )
+        .expect_err(&format!("{field}={bad} must be refused"));
+        assert_eq!(refused["arg"], field, "{refused}");
+    }
+}
+
+/// A `?tree=` or `?bundles=` value `reflect` does not list is the target's refusal,
+/// never dropped on the way.
+#[tokio::test]
+async fn a_reflect_flag_value_that_is_not_listed_is_refused_by_the_target() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_qr", "rest", "fb_qr").await;
+    for q in ["tree=deep", "bundles=none"] {
+        let r = kernel
+            .send(vec![Item::new(
+                AgentId::from("web_qr"),
+                routes::reflect_payload(q),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["reason"], "bad_arg", "{q}: {r}");
+        assert_eq!(r["arg"], q.split('=').next().unwrap(), "{q}: {r}");
+    }
+    stop(&kernel, "web_qr").await;
 }
 
 /// `boot` answers `{running, surfaces}`, a missing port RAISES, and
@@ -2080,14 +2095,17 @@ async fn mount_unmount_and_unknown_verb_match_python() {
                 .result
         }
     };
-    assert_eq!(
-        call(json!({"type": "mount"})).await,
-        json!({"error": "web.mount: child_id required"})
-    );
-    assert_eq!(
-        call(json!({"type": "unmount"})).await,
-        json!({"error": "web.unmount: child_id required"})
-    );
+    let r = call(json!({"type": "mount"})).await;
+    assert_eq!(r["error"], json!("mount: missing argument 'child_id'"), "{r}");
+    assert_eq!(r["reason"], json!("missing_arg"), "{r}");
+    let r = call(json!({"type": "unmount"})).await;
+    assert_eq!(r["error"], json!("unmount: missing argument 'child_id'"), "{r}");
+    // an empty child is refused by the declaration too, a number by its type
+    let r = call(json!({"type": "mount", "child_id": ""})).await;
+    assert_eq!(r["arg"], json!("child_id"), "{r}");
+    let r = call(json!({"type": "unmount", "child_id": 7})).await;
+    assert_eq!(r["arg"], json!("child_id"), "{r}");
+    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
     assert_eq!(
         call(json!({"type": "mount", "child_id": "rest"})).await,
         json!({"mounted": ["/rest/{target_id}", "/rest/_reflect", "/rest/_reflect/{target_id}"]})
@@ -2096,13 +2114,17 @@ async fn mount_unmount_and_unknown_verb_match_python() {
         call(json!({"type": "unmount", "child_id": "rest"})).await,
         json!({"unmounted": "rest"})
     );
-    assert_eq!(
-        call(json!({"type": "shutdown"})).await,
-        json!({"error": "web: unknown type 'shutdown'", "reason": "unhandled", "verb": "shutdown"})
-    );
-    assert_eq!(
-        call(json!({"type": "render_html"})).await,
-        json!({"error": "web: unknown type 'render_html'", "reason": "unhandled", "verb": "render_html"})
+    // `shutdown` is a declared verb (null: nothing to release by call)
+    assert_eq!(call(json!({"type": "shutdown"})).await, Value::Null);
+    let r = call(json!({"type": "render_html"})).await;
+    assert_eq!(r["reason"], json!("unhandled"), "{r}");
+    assert_eq!(r["verb"], json!("render_html"), "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("unknown verb 'render_html'; web_m answers: boot, shutdown, stop, mount, unmount, fetch_file"),
+        "{r}"
     );
     stop(&kernel, "web_m").await;
     assert_eq!(
@@ -2393,25 +2415,36 @@ static SAID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 /// A stand-in `cli` that records `say` and answers `None`, as python's does.
 struct SayProbe;
 
+fantastic_kernel::stand_in_verbs!(say_verbs {
+    Say "say" { source: Option<String>, text: String }
+});
+
 #[async_trait::async_trait]
-impl fantastic_kernel::bundle::Bundle for SayProbe {
+impl fantastic_kernel::Handler for SayProbe {
+    type Call = say_verbs::Call;
     fn name(&self) -> &str {
         "cli_probe"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        say_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        say_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         _agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<fantastic_kernel::bundle::Reply, fantastic_kernel::bundle::BundleError> {
-        if payload.get("type").and_then(Value::as_str) == Some("say") {
-            SAID.lock().expect("said").push(
-                payload
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-            );
+        if let say_verbs::Call::Say(say) = call {
+            SAID.lock().expect("said").push(say.text);
         }
         Ok(None)
     }
@@ -2616,10 +2649,10 @@ async fn json_leg_read_stream_answers_octet_including_empty_chunk() {
 }
 
 /// A JSON `write_stream` naming `bytes` as a JSON string is
-/// `missing_arg`, and NOTHING is written: JSON has no bytes type, so the only
+/// `bad_arg` (unknown argument), and NOTHING is written: JSON has no bytes type, so the only
 /// raw chunk on this leg is the octet body.
 #[tokio::test]
-async fn json_leg_write_stream_string_bytes_is_missing_arg() {
+async fn json_leg_write_stream_string_bytes_is_bad_arg() {
     let tmp = TempDir::new().unwrap();
     let port = free_port();
     let kernel = stage_host(&tmp, port, "web_jsonwr", "rest", "fb_jsonwr").await;
@@ -2634,9 +2667,9 @@ async fn json_leg_write_stream_string_bytes_is_missing_arg() {
         .expect("post");
     assert_eq!(resp.status().as_u16(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["reason"], "missing_arg", "{body}");
+    assert_eq!(body["reason"], "bad_arg", "{body}");
     assert_eq!(
-        body["error"], "write_stream: bytes (one raw chunk) required",
+        body["error"], "write_stream: unknown argument 'bytes'",
         "{body}"
     );
     assert!(
@@ -3250,15 +3283,32 @@ mod any_verb_bytes;
 /// `eof` nor `next_offset`.
 struct OddSource;
 
+fantastic_kernel::stand_in_verbs!(odd_verbs {
+    ReadStream "read_stream" { path: String, offset: i64, length: i64 }
+});
+
 #[async_trait::async_trait]
-impl fantastic_kernel::bundle::Bundle for OddSource {
+impl fantastic_kernel::Handler for OddSource {
+    type Call = odd_verbs::Call;
     fn name(&self) -> &str {
         "odd_source"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        odd_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        odd_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<fantastic_kernel::bundle::Reply, fantastic_kernel::bundle::BundleError> {
         Ok(Some(json!({"error": "text channel"})))
@@ -3266,7 +3316,7 @@ impl fantastic_kernel::bundle::Bundle for OddSource {
     async fn handle_binary(
         &self,
         id: &AgentId,
-        header: Value,
+        call: Self::Call,
         _body: Option<fantastic_kernel::Blob>,
         _kernel: &Arc<Kernel>,
     ) -> Result<
@@ -3276,7 +3326,10 @@ impl fantastic_kernel::bundle::Bundle for OddSource {
         ),
         fantastic_kernel::bundle::BundleError,
     > {
-        let offset = header["offset"].as_u64().unwrap_or(0);
+        let odd_verbs::Call::ReadStream(read) = call else {
+            return Ok((Some(json!({"error": "text channel"})), None));
+        };
+        let offset = read.offset;
         let chunk = |b: &[u8]| Some(fantastic_kernel::Blob::key("bytes", b.to_vec()));
         Ok(match (id.as_str(), offset) {
             ("chunked", 0) => (
@@ -3372,45 +3425,51 @@ async fn the_file_proxy_reads_on_until_a_truthy_eof() {
 #[test]
 fn reflect_query_is_parsed_like_starlette() {
     assert_eq!(
-        crate::routes::reflect_payload("readme=1&readme=index"),
-        json!({"type": "reflect", "readme": "index"})
+        crate::routes::reflect_payload("tree=all&tree=ids"),
+        json!({"type": "reflect", "tree": "ids"})
     );
     assert_eq!(
-        crate::routes::reflect_payload("readme=1;tree=ids"),
-        json!({"type": "reflect", "readme": "1;tree=ids"})
+        crate::routes::reflect_payload("tree=ids;bundles=all"),
+        json!({"type": "reflect", "tree": "ids;bundles=all"})
     );
     assert_eq!(
-        crate::routes::reflect_payload("tree=none&tree=ids&readme=yes"),
-        json!({"type": "reflect", "readme": true, "tree": "ids"})
+        crate::routes::reflect_payload("tree=none&tree=ids&bundles=all"),
+        json!({"type": "reflect", "tree": "ids", "bundles": "all"})
     );
 }
 
-/// `web`'s unknown type is a BARE `{error}` (no code,
-/// no verb) — unlike its legs' coded refusal. Compared as text: key order is
-/// part of the wire and `Value` equality ignores it.
+/// An unknown verb is refused by the host's own entry: the refusal keeps the raw
+/// `type` (`null` when absent, a number as sent) in `verb`.
 #[tokio::test]
-async fn unknown_type_wire_shape_is_byte_exact() {
-    let kernel = Arc::new(Kernel::new());
-    for (payload, want) in [
-        (
-            json!({"type": "frob"}),
-            r#"{"error":"web: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#,
-        ),
-        (
-            json!({"type": "it's"}),
-            r#"{"error":"web: unknown type \"it's\"","reason":"unhandled","verb":"it's"}"#,
-        ),
-        (
-            json!({}),
-            r#"{"error":"web: unknown type None","reason":"unhandled","verb":null}"#,
-        ),
+async fn an_unknown_verb_echoes_the_raw_type() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp, false, false);
+    kernel.register(Agent::new(
+        AgentId::from("web_x"),
+        Some(HANDLER_MODULE.into()),
+        None,
+        Map::new(),
+        std::path::PathBuf::new(),
+        false,
+    ));
+    for (payload, verb) in [
+        (json!({"type": "frob"}), json!("frob")),
+        (json!({"type": "it's"}), json!("it's")),
+        (json!({"type": 5}), json!(5)),
     ] {
-        let reply = WebBundle
-            .handle(&AgentId::from("web_x"), &payload, &kernel)
-            .await
-            .expect("handled")
-            .expect("reply");
-        assert_eq!(serde_json::to_string(&reply).unwrap(), want, "{payload}");
+        let reply = <WebBundle as fantastic_kernel::Bundle>::handle_binary(
+            &WebBundle,
+            &AgentId::from("web_x"),
+            payload.clone(),
+            None,
+            &kernel,
+        )
+        .await
+        .expect("handled")
+        .0
+        .expect("reply");
+        assert_eq!(reply["reason"], json!("unhandled"), "{payload}");
+        assert_eq!(reply["verb"], verb, "{payload}");
     }
 }
 
@@ -3499,11 +3558,6 @@ fn the_listener_binds_the_bind_field_and_the_guard_keeps_the_host() {
     let both = rec(json!({"bind": "0.0.0.0", "host": "192.168.1.5"}));
     assert_eq!(listen_host(&both), "0.0.0.0");
     assert_eq!(origin::effective_host(&both), "192.168.1.5");
-    // an empty bind is no bind (python's `rec.get("bind") or ...`)
-    assert_eq!(
-        listen_host(&rec(json!({"bind": "", "host": "0.0.0.0"}))),
-        "0.0.0.0"
-    );
 }
 
 /// The container's listener (#158 decision 4): a `bind` of `0.0.0.0` keeps the
@@ -3525,4 +3579,81 @@ fn wildcard_bind_guard_admits_loopback_host() {
     assert!(origin::guard("web_x", &rec, &req("localhost:8088")).is_none());
     let refused = origin::guard("web_x", &rec, &req("192.168.1.5:8088")).expect("LAN host refused");
     assert_eq!(refused.status(), 403);
+}
+
+/// The host's record is declared: a field it does not carry, a port of the wrong
+/// type or an origin list that is not a list is refused at the write, by name.
+#[tokio::test]
+async fn the_hosts_record_is_checked_by_its_declaration() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp, false, false);
+    for (field, value) in [
+        ("colour", json!("red")),
+        ("port", json!("8080")),
+        ("port", json!(0)),
+        ("allowed_origins", json!("https://ui.example")),
+        ("host", json!("")),
+    ] {
+        let mut create = json!({"type": "create_agent", "parent_id": "kernel",
+                                "handler_module": HANDLER_MODULE, "id": "web_rec"});
+        create[field] = value.clone();
+        let r = kernel
+            .send(vec![Item::new(AgentId::from("kernel_state"), create)])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["arg"], json!(field), "{field}={value}: {r}");
+    }
+}
+
+/// `fetch_file` is checked by its declaration before it reads anything: every
+/// argument is required, an offset or length is a number, never a numeric string.
+#[tokio::test]
+async fn fetch_file_is_checked_by_its_declaration() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp, false, false);
+    let made = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "parent_id": "kernel",
+                   "handler_module": HANDLER_MODULE, "id": "web_ff"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(made["id"], json!("web_ff"), "{made}");
+    for (args, want) in [
+        (
+            json!({"path": "a", "offset": 0, "length": 1}),
+            "fetch_file: missing argument 'agent_id'",
+        ),
+        (
+            json!({"agent_id": "x", "offset": 0, "length": 1}),
+            "fetch_file: missing argument 'path'",
+        ),
+        (
+            json!({"agent_id": "x", "path": "a", "length": 1}),
+            "fetch_file: missing argument 'offset'",
+        ),
+        (
+            json!({"agent_id": "x", "path": "a", "offset": "0", "length": 1}),
+            "fetch_file: argument 'offset' must be int",
+        ),
+        (
+            json!({"agent_id": "x", "path": "a", "offset": 0, "length": 1, "extra": 1}),
+            "fetch_file: unknown argument 'extra'",
+        ),
+    ] {
+        let mut payload = args;
+        payload["type"] = json!("fetch_file");
+        let r = kernel
+            .send(vec![Item::new(AgentId::from("web_ff"), payload.clone())])
+            .await
+            .remove(0)
+            .result;
+        assert!(
+            r["error"].as_str().unwrap_or_default().starts_with(want),
+            "{payload} -> {r}"
+        );
+    }
 }

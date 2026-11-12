@@ -162,7 +162,6 @@ fn for_os_drops_items_marked_for_other_systems() {
     assert_eq!(mac.iter().filter(|r| **r == Role::Quit).count(), 1);
     // nested menus are filtered too
     let nested = Menu {
-        version: MENU_VERSION,
         bar: vec![menu_of(vec![Item::Submenu(Submenu {
             label: "Inner".into(),
             os: vec![],
@@ -202,24 +201,17 @@ fn open_action(id: &str, accel: Option<&str>) -> Item {
 #[test]
 fn validate_refuses() {
     let ok = Menu {
-        version: MENU_VERSION,
         bar: vec![menu_of(vec![open_action("a", Some("CmdOrCtrl+A"))])],
     };
     assert_eq!(ok.validate(), Ok(()));
 
-    let wrong_version = Menu {
-        version: 2,
-        ..ok.clone()
-    };
     let duplicate = Menu {
-        version: MENU_VERSION,
         bar: vec![menu_of(vec![
             open_action("a", None),
             open_action("a", None),
         ])],
     };
     let no_send = Menu {
-        version: MENU_VERSION,
         bar: vec![menu_of(vec![Item::Action {
             id: "a".into(),
             label: "L".into(),
@@ -231,7 +223,6 @@ fn validate_refuses() {
         }])],
     };
     let pick_other = Menu {
-        version: MENU_VERSION,
         bar: vec![menu_of(vec![Item::Action {
             id: "a".into(),
             label: "L".into(),
@@ -249,25 +240,21 @@ fn validate_refuses() {
         items: vec![],
     };
     let two_helps = Menu {
-        version: MENU_VERSION,
         bar: vec![help("Help"), help("More help")],
     };
     let doubled = Menu {
-        version: MENU_VERSION,
         bar: vec![menu_of(vec![
             open_action("a", Some("CmdOrCtrl+K")),
             open_action("b", Some("CmdOrCtrl+K")),
         ])],
     };
     let empty_label = Menu {
-        version: MENU_VERSION,
         bar: vec![Submenu {
             label: String::new(),
             ..menu_of(vec![])
         }],
     };
     for (menu, says) in [
-        (wrong_version, "version 2"),
         (duplicate, "used twice"),
         (no_send, "sends nothing"),
         (pick_other, "must send open"),
@@ -303,7 +290,6 @@ fn an_accelerator_on_disjoint_systems_is_not_doubled() {
         _ => unreachable!(),
     };
     let menu = Menu {
-        version: MENU_VERSION,
         bar: vec![menu_of(vec![
             on_os("a", Os::Macos),
             on_os("b", Os::Windows),
@@ -322,7 +308,6 @@ fn menu_spec_round_trips_through_json() {
     let back: MenuSpecMsg = serde_json::from_str(&text).expect("parses");
     assert_eq!(back, msg);
     let value: serde_json::Value = serde_json::from_str(&text).expect("json");
-    assert_eq!(value["spec"]["version"], 1);
     let file = &value["spec"]["bar"][1];
     assert_eq!(file["label"], "File");
     assert_eq!(
@@ -334,6 +319,6 @@ fn menu_spec_round_trips_through_json() {
     assert_eq!(file["items"][1]["kind"], "submenu");
     assert_eq!(value["spec"]["bar"][4]["system"], "window");
     // an unknown field in a menu is refused
-    let bad = r#"{"seq":1,"spec":{"version":1,"bar":[{"label":"M","items":[],"colour":"red"}]}}"#;
+    let bad = r#"{"seq":1,"spec":{"bar":[{"label":"M","items":[],"colour":"red"}]}}"#;
     assert!(serde_json::from_str::<MenuSpecMsg>(bad).is_err());
 }

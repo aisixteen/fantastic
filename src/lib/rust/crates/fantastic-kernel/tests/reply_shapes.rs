@@ -8,22 +8,36 @@
 //! the one refusal shape exists for.
 
 use async_trait::async_trait;
-use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Reply};
+use fantastic_kernel::{Agent, AgentId, BundleRegistry, Handler, Item, Kernel, Reply};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use tempfile::TempDir;
 
 struct Noop;
 
+fantastic_kernel::stand_in_verbs!(noop_verbs { GetV "get" { id: Option<String> }, NoSuchSystemVerbV "no_such_system_verb" {  }, PokeV "poke" {  } });
 #[async_trait]
-impl Bundle for Noop {
+impl Handler for Noop {
+    type Call = noop_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "noop"
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        noop_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        noop_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Some(json!({"ok": true})))
@@ -132,7 +146,7 @@ async fn delete_agent_without_an_id_is_missing_arg() {
     let r = call(&kernel, "kernel", json!({"type": "delete_agent"})).await;
     assert_eq!(r["reason"], "missing_arg", "{r}");
     assert_eq!(r["arg"], "id", "{r}");
-    assert_eq!(r["error"], "delete_agent: id required", "{r}");
+    assert_eq!(r["error"], "delete_agent: missing argument 'id'", "{r}");
 }
 
 /// Same for `cancel` — `{cancelled:false}` would claim the kernel looked; it
@@ -143,7 +157,7 @@ async fn cancel_without_a_task_id_is_missing_arg() {
     let r = call(&kernel, "kernel", json!({"type": "cancel"})).await;
     assert_eq!(r["reason"], "missing_arg", "{r}");
     assert_eq!(r["arg"], "task_id", "{r}");
-    assert_eq!(r["error"], "cancel: task_id required", "{r}");
+    assert_eq!(r["error"], "cancel: missing argument 'task_id'", "{r}");
 }
 
 /// A verb the ROOT cannot answer is `unhandled` + the `verb` that was asked —

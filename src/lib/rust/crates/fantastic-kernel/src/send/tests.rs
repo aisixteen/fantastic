@@ -222,17 +222,30 @@ async fn a_binary_item_to_a_missing_target_is_refused() {
 
 #[tokio::test]
 async fn a_binary_item_routes_through_bundle_handle_binary() {
-    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    use crate::bundle::{BundleError, BundleRegistry, Handler, Reply};
     struct EchoBytes;
     #[async_trait::async_trait]
-    impl Bundle for EchoBytes {
+    impl Handler for EchoBytes {
+        type Call = sent_verbs::Call;
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
         fn name(&self) -> &str {
             "echo_bytes"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         async fn handle(
             &self,
             _agent_id: &AgentId,
-            _payload: &Value,
+            _call: Self::Call,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
             Ok(Some(json!({"error": "text path not exercised here"})))
@@ -240,7 +253,7 @@ async fn a_binary_item_routes_through_bundle_handle_binary() {
         async fn handle_binary(
             &self,
             _agent_id: &AgentId,
-            _header: Value,
+            _call: Self::Call,
             body: Option<crate::outcome::Blob>,
             _kernel: &Arc<Kernel>,
         ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
@@ -335,17 +348,30 @@ async fn binary_dispatch_refusals_match_the_text_channel() {
 async fn a_binary_bundle_error_settles_raised() {
     // A bundle error on the binary channel settles `raised:true`,
     // exactly like the text channel's bundle-error path.
-    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    use crate::bundle::{BundleError, BundleRegistry, Handler, Reply};
     struct Boom;
     #[async_trait::async_trait]
-    impl Bundle for Boom {
+    impl Handler for Boom {
+        type Call = sent_verbs::Call;
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
         fn name(&self) -> &str {
             "boom"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         async fn handle(
             &self,
             _agent_id: &AgentId,
-            _payload: &Value,
+            _call: Self::Call,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
             Ok(None)
@@ -353,7 +379,7 @@ async fn a_binary_bundle_error_settles_raised() {
         async fn handle_binary(
             &self,
             _agent_id: &AgentId,
-            _header: Value,
+            _call: Self::Call,
             _body: Option<crate::outcome::Blob>,
             _kernel: &Arc<Kernel>,
         ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
@@ -476,7 +502,7 @@ async fn a_handler_reads_its_caller_not_itself() {
     // `current_sender()` inside a handler is that handler's OWN agent — the
     // callee. A bundle whose payload NAMES a resource needs the CALLER, which
     // is what `current_origin()` carries.
-    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    use crate::bundle::{BundleError, BundleRegistry, Handler, Reply};
     use crate::send::current_origin;
     use crate::test_support::as_agent;
     use std::sync::Mutex;
@@ -485,14 +511,27 @@ async fn a_handler_reads_its_caller_not_itself() {
 
     struct Spy;
     #[async_trait::async_trait]
-    impl Bundle for Spy {
+    impl Handler for Spy {
+        type Call = sent_verbs::Call;
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
         fn name(&self) -> &str {
             "origin_spy"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         async fn handle(
             &self,
             _agent_id: &AgentId,
-            _payload: &Value,
+            _call: Self::Call,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
             *SEEN.lock().unwrap() = Some((
@@ -720,23 +759,42 @@ async fn gate_denial_keys_are_error_reason_hint_side() {
     assert_eq!(d["side"], "ingress");
 }
 
+// The verbs these tests send to the stand-in bundles below, as the stand-ins declare
+// them: each with the arguments the tests give it.
+crate::stand_in_verbs!(sent_verbs { AfterUnwatchV "after_unwatch" {  }, EchoV "echo" {  }, EchoErrorV "echo_error" { error: Option<serde_json::Value> }, EmptyV "empty" {  }, FailV "fail" {  }, FrobV "frob" {  }, GetV "get" {  }, GoV "go" {  }, HelloV "hello" { k: Option<i64> }, HiV "hi" {  }, HopV "hop" { next: Option<serde_json::Value> }, IngestV "ingest" {  }, LoadTreeV "load_tree" {  }, NopeV "nope" {  }, PasteImageV "paste_image" { job_id: Option<i64>, data: Option<serde_json::Value>, mime: Option<String> }, PingV "ping" {  }, PokeV "poke" { n: Option<i64> }, PutV "put" { fields: Option<serde_json::Value> }, RaiseV "raise" {  }, SayV "say" { text: Option<String> }, SelfV "self" { n: Option<i64> }, SetV "set" { r#ref: Option<String>, fields: Option<serde_json::Value> }, TakeV "take" { meta: Option<serde_json::Value>, a: Option<serde_json::Value>, #[serde(rename = "a.b")] a_b: Option<serde_json::Value>, items: Option<Vec<serde_json::Value>> }, WorkV "work" { n: Option<i64> }, WriteStreamV "write_stream" { path: Option<String>, bytes: Option<serde_json::Value> } });
+
 // ── the call row and its settle ────────────────────────────────────────
 
 /// A bundle that answers whatever the payload asks for: `{"type":"work"}` is a
 /// plain reply, `{"type":"nope"}` a domain refusal with a `reason`.
 struct C36Bundle;
 
+crate::stand_in_verbs!(c36bundle_verbs { EchoErrorV "echo_error" { error: Option<serde_json::Value> }, NopeV "nope" {  }, WorkV "work" { n: Option<i64> } });
 #[async_trait::async_trait]
-impl crate::bundle::Bundle for C36Bundle {
+impl crate::bundle::Handler for C36Bundle {
+    type Call = c36bundle_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "c36"
+    }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        c36bundle_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        c36bundle_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
     }
     async fn handle(
         &self,
         _agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        let payload = &call.payload();
         match payload.get("type").and_then(Value::as_str).unwrap_or("") {
             "nope" => Ok(Some(
                 json!({"error": "х".repeat(300), "reason": "not_found", "extra": 1}),
@@ -897,46 +955,35 @@ async fn an_errored_call_row_stamps_the_python_error_and_reason() {
 }
 
 #[tokio::test]
-async fn a_falsy_non_string_error_settles_completed() {
-    // Python `ERRORED if isinstance(reply, dict) and reply.get("error")
-    // else COMPLETED` (`_agent.py:1051-1052`) — FULL truthiness, not "the key
-    // is present". `0`, `0.0`, `[]`, `{}` and `""` are all falsy.
+async fn only_a_null_or_empty_error_settles_completed() {
+    // An `error` that is null or empty text is no refusal; any other value is one.
     let (kernel, worker) = c36_kernel();
-    for falsy in [
-        json!(0),
-        json!(0.0),
-        json!([]),
-        json!({}),
-        json!(""),
-        json!(false),
-        Value::Null,
-    ] {
+    for none in [json!(""), Value::Null] {
         let out = kernel
             .send(vec![Item::new(
                 worker.id.clone(),
-                json!({"type": "echo_error", "error": falsy}),
+                json!({"type": "echo_error", "error": none}),
             )])
             .await
             .remove(0);
         assert_eq!(
             out.status,
             Status::Completed,
-            "a falsy error must settle completed: {falsy:?}"
+            "no error must settle completed: {none:?}"
         );
     }
-    // The contrast case: a TRUTHY non-string/non-bool error still errors.
-    for truthy in [json!(1), json!(-1), json!([1]), json!({"k": 1})] {
+    for some in [json!(0), json!(false), json!([]), json!({}), json!(1), json!([1]), json!({"k": 1})] {
         let out = kernel
             .send(vec![Item::new(
                 worker.id.clone(),
-                json!({"type": "echo_error", "error": truthy}),
+                json!({"type": "echo_error", "error": some}),
             )])
             .await
             .remove(0);
         assert_eq!(
             out.status,
             Status::Errored,
-            "a truthy error must still settle errored: {truthy:?}"
+            "an error must settle errored: {some:?}"
         );
     }
 }
@@ -1057,16 +1104,30 @@ async fn a_registered_agent_without_a_reader_cannot_be_a_watcher() {
 /// A bundle that reports what its own inbox already held when it ran.
 struct PeekInbox;
 #[async_trait::async_trait]
-impl crate::bundle::Bundle for PeekInbox {
+impl crate::bundle::Handler for PeekInbox {
+    type Call = sent_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "peek"
+    }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        sent_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        sent_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
     }
     async fn handle(
         &self,
         agent_id: &AgentId,
-        _payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        let _payload = &call.payload();
         let mut rx = kernel.ensure_inbox(agent_id);
         let mut seen = Vec::new();
         while let Some(item) = rx.try_recv() {
@@ -1188,21 +1249,34 @@ async fn a_fork_is_rowed_before_the_dispatch_settles_and_its_body_runs_under_it(
     // id order too; a single `yield_now()` at python's await point in `settle`
     // fixes one class (`deliver_reply` rows) and worsens another (`call send`
     // rows), and one worker thread is worse still.
-    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    use crate::bundle::{BundleError, BundleRegistry, Handler, Reply};
     use tokio::sync::Notify;
     struct Forker {
         // the body says it ran — the test waits on THAT, never on time
         done: Arc<Notify>,
     }
     #[async_trait::async_trait]
-    impl Bundle for Forker {
+    impl Handler for Forker {
+        type Call = sent_verbs::Call;
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
         fn name(&self) -> &str {
             "forker"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         async fn handle(
             &self,
             a: &AgentId,
-            _p: &Value,
+            _call: Self::Call,
             k: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
             let k2 = Arc::clone(k);
@@ -1273,17 +1347,30 @@ async fn a_watched_write_stream_reaches_the_watcher_with_its_body() {
     // The binary channel's payload rides the inbox WHOLE. The watcher gets
     // the head with `bytes` nulled AND the raw body — which is what the WS drain
     // re-encodes into the binary frame python sends.
-    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    use crate::bundle::{BundleError, BundleRegistry, Handler, Reply};
     struct Sink;
     #[async_trait::async_trait]
-    impl Bundle for Sink {
+    impl Handler for Sink {
+        type Call = sent_verbs::Call;
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
         fn name(&self) -> &str {
             "sink"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         async fn handle(
             &self,
             _a: &AgentId,
-            _p: &Value,
+            _call: Self::Call,
             _k: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
             Ok(Some(json!({"ok": true})))
@@ -1291,7 +1378,7 @@ async fn a_watched_write_stream_reaches_the_watcher_with_its_body() {
         async fn handle_binary(
             &self,
             _a: &AgentId,
-            _h: Value,
+            _call: Self::Call,
             body: Option<crate::outcome::Blob>,
             _k: &Arc<Kernel>,
         ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
@@ -1347,17 +1434,30 @@ async fn a_watched_write_stream_reaches_the_watcher_with_its_body() {
 /// A path that names no slot of the payload is refused before anything runs.
 #[tokio::test]
 async fn a_binary_body_rides_at_its_payload_path() {
-    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    use crate::bundle::{BundleError, BundleRegistry, Handler, Reply};
     struct Echo;
     #[async_trait::async_trait]
-    impl Bundle for Echo {
+    impl Handler for Echo {
+        type Call = sent_verbs::Call;
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
         fn name(&self) -> &str {
             "echo"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         async fn handle(
             &self,
             _a: &AgentId,
-            _p: &Value,
+            _call: Self::Call,
             _k: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
             Ok(Some(json!({"channel": "text"})))
@@ -1365,10 +1465,11 @@ async fn a_binary_body_rides_at_its_payload_path() {
         async fn handle_binary(
             &self,
             _a: &AgentId,
-            header: Value,
+            call: Self::Call,
             body: Option<crate::outcome::Blob>,
             _k: &Arc<Kernel>,
         ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
+            let header = call.payload();
             let data = crate::outcome::body_at(body.as_ref(), "data").map(<[u8]>::len);
             let bytes = crate::outcome::body_at(body.as_ref(), "bytes").map(<[u8]>::len);
             Ok((
@@ -1476,17 +1577,30 @@ async fn a_binary_body_rides_at_its_payload_path() {
 /// where python's dict does; an envelope with no `a` is no refusal.
 #[tokio::test]
 async fn a_literal_key_body_is_one_top_level_key() {
-    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    use crate::bundle::{BundleError, BundleRegistry, Handler, Reply};
     struct Echo;
     #[async_trait::async_trait]
-    impl Bundle for Echo {
+    impl Handler for Echo {
+        type Call = sent_verbs::Call;
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
         fn name(&self) -> &str {
             "echo"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         async fn handle(
             &self,
             _a: &AgentId,
-            _p: &Value,
+            _call: Self::Call,
             _k: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
             Ok(Some(json!({"channel": "text"})))
@@ -1494,10 +1608,11 @@ async fn a_literal_key_body_is_one_top_level_key() {
         async fn handle_binary(
             &self,
             _a: &AgentId,
-            header: Value,
+            call: Self::Call,
             body: Option<crate::outcome::Blob>,
             _k: &Arc<Kernel>,
         ) -> Result<(Reply, Option<crate::outcome::Blob>), BundleError> {
+            let header = call.payload();
             let at = crate::outcome::body_at(body.as_ref(), "a.b").map(<[u8]>::len);
             Ok((Some(json!({"header": header, "a.b": at})), None))
         }
@@ -1573,17 +1688,30 @@ async fn binary_dispatch_runs_the_same_pre_bundle_path_as_text() {
     // substrate identity whether the payload carried bytes or not. The binary
     // channel takes the same path, so an octet `reflect` on the ROOT describes
     // the kernel, never the loader.
-    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    use crate::bundle::{BundleError, BundleRegistry, Handler, Reply};
     struct Loader;
     #[async_trait::async_trait]
-    impl Bundle for Loader {
+    impl Handler for Loader {
+        type Call = sent_verbs::Call;
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
         fn name(&self) -> &str {
             "loader"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         async fn handle(
             &self,
             _a: &AgentId,
-            _p: &Value,
+            _call: Self::Call,
             _k: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
             Ok(Some(
@@ -1682,73 +1810,227 @@ async fn a_literal_dotted_key_summarizes_at_that_key() {
     );
 }
 
-// ─── The kernel_verbs map is python's `_SYSTEM_VERB_DOCS` ─────────
+// ─── The kernel's own verbs are DECLARED, and `docs of=kernel` renders them ─────
 
-/// python `_SYSTEM_VERB_DOCS`, in declaration order, verbatim
-/// (`P/kernel/_agent.py`).
-const PY_KERNEL_VERB_DOCS: [(&str, &str); 14] = [
-    ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent. A handler_module that is a meta bundle (`bundles/<name>/bundle.yaml` with a base and no program) runs its base, with the `record` of the bundle under your fields; `bundle:<name>` beside the base is the same."),
-    ("update_agent", "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT. Whoever holds update_agent on the root updates any agent, itself included."),
-    ("delete_agent", "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`. Whoever holds delete_agent on the root deletes any agent."),
-    ("list_agents", "No args. Every agent's record, flat. Paged."),
-    ("ps", "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}, one row per in-flight dispatch. Paged."),
-    ("ledger", "No args. EVERY execution and what it became — named under its id, unnamed under its minted pid — {executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}, paged, scoped to what YOU originated; read from the kernel's memory store plus what is not yet flushed. `outcome` keeps the RESULT only for a named call; a dead letter keeps its error; anything else is {status, bytes} — the reply itself went to its caller. Failed/timed_out/cancelled rows are the dead-letter queue (announced by the `on_deadletter` event): inspect, retry with a NEW id if you choose, then `ack_deadletter` it — nothing is retried silently."),
-    ("ack_deadletter", "args: id:int|str (req — an execution id, or its name). Acknowledges a DEAD LETTER (failed/timed_out/cancelled) you originated: recorded in the kernel's store, it may then be pruned. Returns {acked:true, id}."),
-    ("kernel_start", "No args. THE START SEQUENCE — the root must name `memory_store_id` (fail loud otherwise): boots the root, then that store, starts flushing the kernel's execution rows into it, then boots every other agent in registration order. Idempotent. Returns {started, store, booted:[ids]}."),
-    ("cancel", "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}."),
-    ("shutdown_agents", "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."),
-    ("kernel_stop", "No args. Stops the kernel PROCESS gracefully — drain, every call settles (done, or cancelled into the dead letters), the last rows flush, agents shut down, exit. Under env:'container', the container."),
-    ("docs", "args: of:str (req — an agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'), tier:'oneliners'|'detailed'?, verb:str?. HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one signature line per verb, `detailed` the full text (no `verb`: plus emits, cancel and notes). Pull once per bundle; `detailed` for a verb you are about to use. Gated like every kernel verb: a `can_call` grant of `docs` on the root. Returns {of, bundle, tier, verbs, emits?, cancel?, notes?}."),
-    ("await_set", "args: ids:list[str] (req — agent ids), timeout_s:number? (a positive number of seconds), label:str?. Waits for EVERY named agent to send YOU a message of type 'report' (its `state` and `result`); a report from a named agent is HELD for the one combined message, not delivered as its own turn. Returns at once {wait_id, label, ids, timeout_s}; later ONE message reaches you — {wait_id, label, done:[{id, state, result}], missing:[ids], timed_out} — when all have reported or `timeout_s` passes. Refuses a missing or empty `ids`, an id that names no agent (unknown_agent), yourself, a non-positive `timeout_s` and a non-string `label`. The wait is a row: it survives a restart."),
-    ("await_cancel", "args: wait_id:int (req). Drops YOUR wait; the reports it held are then delivered one by one, each as its own message. Returns {cancelled:bool, wait_id, released:int}. A wait that is unknown or not yours ⇒ {cancelled:false}."),
+/// The kernel's verbs in declaration order (python's `_SYSTEM_VERB_DOCS` order).
+const KERNEL_VERB_NAMES: [&str; 14] = [
+    "create_agent",
+    "update_agent",
+    "delete_agent",
+    "list_agents",
+    "ps",
+    "ledger",
+    "ack_deadletter",
+    "kernel_start",
+    "cancel",
+    "shutdown_agents",
+    "kernel_stop",
+    "docs",
+    "await_set",
+    "await_cancel",
 ];
 
-/// python `kernel/_docs.signature` of each `_SYSTEM_VERB_DOCS` entry.
-const PY_SIGNATURES: [(&str, &str); 14] = [
-    ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta"),
-    ("update_agent", "args: id:str, **meta"),
-    ("delete_agent", "args: id:str"),
-    ("list_agents", "No args"),
-    ("ps", "No args"),
-    ("ledger", "No args"),
-    ("ack_deadletter", "args: id:int|str (req — an execution id, or its name)"),
-    ("kernel_start", "No args"),
-    ("cancel", "args: task_id:str"),
-    ("shutdown_agents", "No args"),
-    ("kernel_stop", "No args"),
-    ("docs", "args: of:str (req — an agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'), tier:'oneliners'|'detailed'?, verb:str?"),
-    ("await_set", "args: ids:list[str] (req — agent ids), timeout_s:number? (a positive number of seconds), label:str?"),
-    ("await_cancel", "args: wait_id:int (req)"),
+/// What `docs of=kernel` renders for EVERY kernel verb: `(verb, one-line tier, detailed
+/// tier)`, in declaration order. The one-line tier is the argument list, then the first
+/// sentence of the verb's doc; the detailed tier the whole doc, then each argument with
+/// its type, whether it is required (or its default) and its description.
+const KERNEL_VERB_TEXT: [(&str, &str, &str); 14] = [
+    (
+        "create_agent",
+        r####"args: handler_module:string of at least 1 character(s) (req), parent_id:string of at least 1 character(s) (req), id:string matching /^[0-9]*[^/\\|.0-9](?:[^/\\|.]|\.[^/\\|.])*\.?$/?, bundle:string? — Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level"####,
+        r####"Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent. A handler_module that is a meta bundle (`bundles/<name>/bundle.yaml` with a base and no program) runs its base, with the `record` of the bundle under your fields; `bundle:<name>` beside another handler_module names the bundle the record inherits from. The handler must be installed. Every argument beyond these is a field of that bundle's record (`reflect bundles=all` lists them), and a field it does not have is refused.
+
+args:
+  handler_module:string of at least 1 character(s) (req) — The bundle the agent runs (`file_bridge.tools`, or a bare bundle name such as `file_bridge`).
+  parent_id:string of at least 1 character(s) (req) — The agent that will OWN the new one: your own id for a tool you keep, `kernel_state` for a top-level agent.
+  id:string matching /^[0-9]*[^/\\|.0-9](?:[^/\\|.]|\.[^/\\|.])*\.?$/? — Its id (one safe path segment: no separator, no `|`, not hidden, no `..`, not all digits). Absent: minted from the bundle's name.
+  bundle:string? — The bundle a record inherits from when it runs another base than the bundle's own."####,
+    ),
+    (
+        "update_agent",
+        r####"args: id:string of at least 1 character(s) (req) — EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE"####,
+        r####"EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT. Whoever holds update_agent on the root updates any agent, itself included. Every argument beyond `id` is a field of the agent's bundle's record, and a field it does not have is refused.
+
+args:
+  id:string of at least 1 character(s) (req) — The agent to update."####,
+    ),
+    (
+        "delete_agent",
+        r####"args: id:string of at least 1 character(s) (req), keep_memory:bool? — CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`"####,
+        r####"CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`. Whoever holds delete_agent on the root deletes any agent.
+
+args:
+  id:string of at least 1 character(s) (req) — The agent to delete.
+  keep_memory:bool? — `true` leaves the persisted memory of the whole subtree alone."####,
+    ),
+    (
+        "list_agents",
+        r####"args: limit:int >= 1?, after:string? — Every agent's record, flat"####,
+        r####"Every agent's record, flat. Paged.
+
+args:
+  limit:int >= 1? — A page size: absent, everything.
+  after:string? — The cursor `next` of the previous page."####,
+    ),
+    (
+        "ps",
+        r####"args: limit:int >= 1?, after:string? — The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}, one row per in-flight dispatch"####,
+        r####"The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}, one row per in-flight dispatch. Paged.
+
+args:
+  limit:int >= 1? — A page size: absent, everything.
+  after:string? — The cursor `next` of the previous page."####,
+    ),
+    (
+        "ledger",
+        r####"args: limit:int >= 1?, after:string? — EVERY execution and what it became — named under its id, unnamed under its minted pid — {executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}, paged, scoped to what YOU originated; read from the kernel's memory store plus what is not yet flushed"####,
+        r####"EVERY execution and what it became — named under its id, unnamed under its minted pid — {executions:[{id, target, status, attempts, retries, named, outcome?, acked?}]}, paged, scoped to what YOU originated; read from the kernel's memory store plus what is not yet flushed. `outcome` keeps the RESULT only for a named call; a dead letter keeps its error; anything else is {status, bytes} — the reply itself went to its caller. Failed/timed_out/cancelled rows are the dead-letter queue (announced by the `on_deadletter` event): inspect, retry with a NEW id if you choose, then `ack_deadletter` it — nothing is retried silently.
+
+args:
+  limit:int >= 1? — A page size: absent, everything.
+  after:string? — The cursor `next` of the previous page."####,
+    ),
+    (
+        "ack_deadletter",
+        r####"args: id:int|string (req) — Acknowledges a DEAD LETTER (failed/timed_out/cancelled) you originated: recorded in the kernel's store, it may then be pruned"####,
+        r####"Acknowledges a DEAD LETTER (failed/timed_out/cancelled) you originated: recorded in the kernel's store, it may then be pruned. Returns {acked:true, id}.
+
+args:
+  id:int|string (req) — An execution id, or its name."####,
+    ),
+    (
+        "kernel_start",
+        r####"No args — THE START SEQUENCE — the root must name `memory_store_id` (fail loud otherwise): boots the root, then that store, starts flushing the kernel's execution rows into it, then boots every other agent in registration order"####,
+        r####"THE START SEQUENCE — the root must name `memory_store_id` (fail loud otherwise): boots the root, then that store, starts flushing the kernel's execution rows into it, then boots every other agent in registration order. Idempotent. Returns {started, store, booted:[ids]}.
+
+No args."####,
+    ),
+    (
+        "cancel",
+        r####"args: task_id:int|string (req) — Kills that task AND ITS SUBTREE — the id names its own agent"####,
+        r####"Kills that task AND ITS SUBTREE — the id names its own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}.
+
+args:
+  task_id:int|string (req) — The task's id (`ps` lists them), or the name the caller gave its own execution."####,
+    ),
+    (
+        "shutdown_agents",
+        r####"No args — Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest"####,
+        r####"Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}.
+
+No args."####,
+    ),
+    (
+        "kernel_stop",
+        r####"No args — Stops the kernel PROCESS gracefully — drain, every call settles (done, or cancelled into the dead letters), the last rows flush, agents shut down, exit"####,
+        r####"Stops the kernel PROCESS gracefully — drain, every call settles (done, or cancelled into the dead letters), the last rows flush, agents shut down, exit. Under env:'container', the container.
+
+No args."####,
+    ),
+    (
+        "docs",
+        r####"args: of:string matching /^[^|]+(?:\|[^|]+)?$/ (req), tier:'oneliners'|'detailed'?, verb:string? — HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument"####,
+        r####"HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument. Without `verb` the reply also carries the bundle's short `man` text. Pull once per bundle; `detailed` for a verb you are about to use. Gated like every kernel verb: a `can_call` grant of `docs` on the root. Returns {of, bundle, tier, verbs, man?}.
+
+args:
+  of:string matching /^[^|]+(?:\|[^|]+)?$/ (req) — An agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'.
+  tier:'oneliners'|'detailed'? — How much of each verb: `oneliners` (default) or `detailed`.
+  verb:string? — One verb's entry only."####,
+    ),
+    (
+        "await_set",
+        r####"args: ids:list[string] with at least 1 item(s) (req), timeout_s:number > 0?, label:string? — Waits for EVERY named agent to send YOU a message of type 'report' (its `state` and `result`); a report from a named agent is HELD for the one combined message, not delivered as its own turn"####,
+        r####"Waits for EVERY named agent to send YOU a message of type 'report' (its `state` and `result`); a report from a named agent is HELD for the one combined message, not delivered as its own turn. Returns at once {wait_id, label, ids, timeout_s}; later ONE message reaches you — {wait_id, label, done:[{id, state, result}], missing:[ids], timed_out} — when all have reported or `timeout_s` passes. Refuses a missing or empty `ids`, an id that names no agent (unknown_agent), yourself, a non-positive `timeout_s` and a non-string `label`. The wait is a row: it survives a restart.
+
+args:
+  ids:list[string] with at least 1 item(s) (req) — The agent ids to wait for.
+  timeout_s:number > 0? — A positive number of seconds after which the wait ends as timed out.
+  label:string? — A name for the wait, echoed in the combined message."####,
+    ),
+    (
+        "await_cancel",
+        r####"args: wait_id:int (req) — Drops YOUR wait; the reports it held are then delivered one by one, each as its own message"####,
+        r####"Drops YOUR wait; the reports it held are then delivered one by one, each as its own message. Returns {cancelled:bool, wait_id, released:int}. A wait that is unknown or not yours ⇒ {cancelled:false}.
+
+args:
+  wait_id:int (req) — The `wait_id` `await_set` returned."####,
+    ),
 ];
 
 #[test]
-fn kernel_verb_docs_match_python_verbatim() {
-    let docs = kernel_verb_docs();
-    let obj = docs.as_object().expect("an object");
-    assert_eq!(obj.len(), PY_KERNEL_VERB_DOCS.len(), "{docs}");
-    for (verb, text) in PY_KERNEL_VERB_DOCS {
-        assert_eq!(obj[verb], json!(text), "{verb}");
+fn kernel_verbs_are_declared_in_order_and_rendered() {
+    let names: Vec<&str> = crate::declared::kernel::VERBS
+        .iter()
+        .map(|v| v.name)
+        .collect();
+    assert_eq!(names, KERNEL_VERB_NAMES);
+    let rows = crate::docs::entries_of_decls(&[crate::declared::kernel::VERBS], &[]);
+    assert_eq!(rows.len(), KERNEL_VERB_TEXT.len());
+    for ((verb, one, detail), (name, want_one, want_detail)) in rows.iter().zip(KERNEL_VERB_TEXT) {
+        assert_eq!(verb, name);
+        assert_eq!(one, want_one, "{name}: one line");
+        assert_eq!(detail, want_detail, "{name}: detailed");
     }
-    let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
-    let want: Vec<&str> = PY_KERNEL_VERB_DOCS.iter().map(|(v, _)| *v).collect();
-    assert_eq!(keys, want, "python declaration order");
 }
 
-#[test]
-fn docs_signatures_are_pythons() {
-    for ((verb, text), (sverb, sig)) in PY_KERNEL_VERB_DOCS.iter().zip(PY_SIGNATURES.iter()) {
-        assert_eq!(verb, sverb);
-        assert_eq!(crate::docs::signature(text), *sig, "{verb}");
+#[tokio::test]
+async fn docs_of_kernel_serves_the_rendered_text_of_all_fourteen_verbs() {
+    let kernel = Arc::new(Kernel::new());
+    let root = make_agent("kernel_state");
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(root);
+    for (tier, pick) in [("oneliners", 1usize), ("detailed", 2)] {
+        let out = send_text(
+            &kernel,
+            "kernel",
+            json!({"type": "docs", "of": "kernel", "tier": tier}),
+        )
+        .await
+        .result;
+        let verbs = out["verbs"].as_object().expect("verbs");
+        assert_eq!(verbs.len(), 14, "{tier}: {out}");
+        for entry in KERNEL_VERB_TEXT {
+            let want = if pick == 1 { entry.1 } else { entry.2 };
+            assert_eq!(verbs[entry.0], want, "{tier} {}", entry.0);
+        }
     }
+    // one verb, either tier
+    let one = send_text(
+        &kernel,
+        "kernel",
+        json!({"type": "docs", "of": "kernel", "verb": "cancel", "tier": "detailed"}),
+    )
+    .await
+    .result;
+    assert_eq!(one["verbs"].as_object().unwrap().len(), 1, "{one}");
+    assert_eq!(one["verbs"]["cancel"], KERNEL_VERB_TEXT[8].2, "{one}");
+}
+
+/// The one-line tier cuts a doc at its first top-level `. ` or the end of its first
+/// paragraph — never inside brackets — for builtin and dynamic verbs alike.
+#[test]
+fn the_one_line_tier_is_the_first_sentence_of_the_doc() {
+    let line = |doc: &str| {
+        let v = crate::DynVerb::new("v", doc, json!({"type": "object"}).as_object().expect("an object"));
+        crate::verbs::line(&crate::verbs::Row {
+            name: &v.name,
+            schema: &v.schema,
+        })
+    };
+    assert_eq!(line("Finds q. Then more."), "No args — Finds q");
     assert_eq!(
-        crate::docs::signature("args: q:str (req — e.g. a word), n:int? (default 5). Finds q."),
-        "args: q:str (req — e.g. a word), n:int? (default 5)"
+        line("Start the loop unless `watch=false`\n(a loader). More.\n\nX."),
+        "No args — Start the loop unless `watch=false` (a loader)"
     );
     assert_eq!(
-        crate::docs::signature("Start the loop unless `watch=false`\n(a loader). More.\n\nX."),
-        "Start the loop unless `watch=false` (a loader)"
+        line("A (note. inside) brackets. More."),
+        "No args — A (note. inside) brackets"
     );
-    assert_eq!(crate::docs::signature("No args."), "No args");
+    assert_eq!(
+        line("Whole paragraph only\n\nSecond."),
+        "No args — Whole paragraph only"
+    );
+    assert_eq!(line(""), "No args");
 }
 
 // ─── one dispatch per channel ───────────────────────────────────────────────
@@ -1852,7 +2134,7 @@ async fn a_binary_kernel_verb_on_the_root_is_answered_as_text() {
 }
 
 #[tokio::test]
-async fn a_binary_reflect_or_lifecycle_verb_on_a_bare_agent_answers_as_text() {
+async fn a_binary_reflect_on_a_bare_agent_answers_as_text_and_a_lifecycle_verb_is_refused() {
     let kernel = root_and_child();
     let bin = send_binary(&kernel, "kid", json!({"type": "reflect"}), vec![1]).await;
     let txt = send_text(&kernel, "kid", json!({"type": "reflect"})).await;
@@ -1863,9 +2145,8 @@ async fn a_binary_reflect_or_lifecycle_verb_on_a_bare_agent_answers_as_text() {
     for verb in ["boot", "shutdown"] {
         let bin = send_binary(&kernel, "kid", json!({"type": verb}), vec![1]).await;
         let txt = send_text(&kernel, "kid", json!({"type": verb})).await;
-        assert_eq!(bin.result, Value::Null, "{verb} on a bare agent is null");
-        assert_eq!(txt.result, Value::Null, "{verb}");
-        assert_eq!(bin.status, crate::outcome::Status::Completed, "{verb}");
+        assert_eq!(bin.result["reason"], "unhandled", "{verb}: a bare agent has no such verb");
+        assert_eq!(bin.result, txt.result, "{verb}");
         assert_eq!(bin.body, None, "{verb}");
     }
 }
@@ -1873,15 +2154,29 @@ async fn a_binary_reflect_or_lifecycle_verb_on_a_bare_agent_answers_as_text() {
 /// A bundle whose binary handler answers `Ok((None, body))` and whose text
 /// handler answers `Ok(None)` or raises, by verb.
 struct NoReply;
+crate::stand_in_verbs!(noreply_verbs { EchoV "echo" {  }, EmptyV "empty" {  }, RaiseV "raise" {  } });
 #[async_trait::async_trait]
-impl crate::bundle::Bundle for NoReply {
+impl crate::bundle::Handler for NoReply {
+    type Call = noreply_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "no_reply"
+    }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        noreply_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        noreply_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
     }
     async fn handle(
         &self,
         _agent_id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
         Ok(None)
@@ -1889,11 +2184,12 @@ impl crate::bundle::Bundle for NoReply {
     async fn handle_binary(
         &self,
         _agent_id: &AgentId,
-        header: Value,
+        call: Self::Call,
         body: Option<crate::outcome::Blob>,
         _kernel: &Arc<Kernel>,
     ) -> Result<(crate::bundle::Reply, Option<crate::outcome::Blob>), crate::bundle::BundleError>
     {
+        let header = call.payload();
         let blob: Vec<u8> = body.map(|b| b.bytes).unwrap_or_default();
         match verb_of(&header) {
             "raise" => Err(crate::bundle::BundleError::from("kaboom")),
@@ -2002,16 +2298,30 @@ async fn binary_refusals_for_bare_and_uninstalled_agents_are_byte_identical_to_t
 struct HopLog(std::sync::Mutex<Vec<Value>>);
 struct Hop(Arc<HopLog>);
 #[async_trait::async_trait]
-impl crate::bundle::Bundle for Hop {
+impl crate::bundle::Handler for Hop {
+    type Call = sent_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "hop"
+    }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        sent_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        sent_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
     }
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        let payload = &call.payload();
         if verb_of(payload) != "hop" {
             return Ok(None);
         }
@@ -2295,13 +2605,12 @@ async fn ack_deadletter_refusals_and_acks_are_byte_exact() {
         .remove(0);
     let did = done.pid.expect("an id").0;
 
-    assert_eq!(
-        ack(Value::Null).await,
-        r#"{"error":"ack_deadletter: id required","reason":"missing_arg","arg":"id"}"#
-    );
+    let missing = r#"{"error":"ack_deadletter: argument 'id' must be int|string, got NoneType","reason":"bad_arg","hint":"ack_deadletter takes — args: id:int|string (req). id: An execution id, or its name.","arg":"id","verb":"ack_deadletter"}"#;
+    assert_eq!(ack(Value::Null).await, missing);
+    // text is a NAME, never a number: an empty one names no execution
     assert_eq!(
         ack(json!("")).await,
-        r#"{"error":"ack_deadletter: id required","reason":"missing_arg","arg":"id"}"#
+        r#"{"error":"ack_deadletter: no execution '' of yours in the ledger","reason":"not_found","arg":"id"}"#
     );
     assert_eq!(
         ack(json!("nobody")).await,
@@ -2317,14 +2626,21 @@ async fn ack_deadletter_refusals_and_acks_are_byte_exact() {
             r#"{{"error":"ack_deadletter: execution {did} is 'completed', not a dead letter — only failed / timed_out / cancelled work is acknowledged","reason":"bad_arg","arg":"id"}}"#
         )
     );
-    // by NAME, then again by its decimal-string id: acked, then already acked
+    // by NAME, then again by its id: acked, then already acked; the id's decimal
+    // TEXT is a name, not the id
     assert_eq!(
         ack(json!("dl_job")).await,
         format!(r#"{{"acked":true,"id":{fid}}}"#)
     );
     assert_eq!(
-        ack(json!(fid.to_string())).await,
+        ack(json!(fid)).await,
         format!(r#"{{"acked":true,"id":{fid},"already":true}}"#)
+    );
+    assert_eq!(
+        ack(json!(fid.to_string())).await,
+        format!(
+            r#"{{"error":"ack_deadletter: no execution '{fid}' of yours in the ledger","reason":"not_found","arg":"id"}}"#
+        )
     );
 }
 
@@ -2332,19 +2648,33 @@ async fn ack_deadletter_refusals_and_acks_are_byte_exact() {
 /// the marks; the call row and every state event carry the value as `[secret]`.
 #[tokio::test]
 async fn a_marked_value_is_shown_never_kept() {
-    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    use crate::bundle::{BundleError, BundleRegistry, Handler, Reply};
     struct Probe;
     #[async_trait::async_trait]
-    impl Bundle for Probe {
+    impl Handler for Probe {
+        type Call = sent_verbs::Call;
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
         fn name(&self) -> &str {
             "secret_probe"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         async fn handle(
             &self,
             _agent_id: &AgentId,
-            payload: &Value,
+            call: Self::Call,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
+            let payload = &call.payload();
             Ok(Some(
                 json!({"got": payload["fields"]["api_key"], "marks": crate::secret::current_secret()}),
             ))
@@ -2396,20 +2726,14 @@ async fn a_marked_value_is_shown_never_kept() {
     );
     assert!(events.contains("[secret]"));
     // malformed marks are refused before anything runs
-    for bad in [
-        json!("fields.api_key"),
-        json!([""]),
-        json!(["a..b"]),
-        json!([1]),
-        json!(["type"]),
-    ] {
+    for bad in [vec![""], vec!["a..b"], vec!["type"]] {
         let out = kernel
             .send(vec![
-                Item::new("sp", json!({"type": "set"})).with_raw_secret(bad.clone())
+                Item::new("sp", json!({"type": "set"})).with_secret(bad.clone())
             ])
             .await
             .remove(0);
-        assert_eq!(out.result["arg"], json!("secret"), "{bad}");
+        assert_eq!(out.result["arg"], json!("secret"), "{bad:?}");
     }
 }
 
@@ -2419,12 +2743,25 @@ async fn a_marked_value_is_shown_never_kept() {
 /// stream carry only `[secret]`.
 #[tokio::test]
 async fn a_bundle_names_its_own_secret_paths() {
-    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    use crate::bundle::{BundleError, BundleRegistry, Handler, Reply};
     struct Vault;
     #[async_trait::async_trait]
-    impl Bundle for Vault {
+    impl Handler for Vault {
+        type Call = sent_verbs::Call;
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
         fn name(&self) -> &str {
             "vault_probe"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         fn payload_secret(&self, payload: &Value) -> Vec<String> {
             if payload.get("type") == Some(&json!("put")) {
@@ -2443,9 +2780,10 @@ async fn a_bundle_names_its_own_secret_paths() {
         async fn handle(
             &self,
             _agent_id: &AgentId,
-            payload: &Value,
+            call: Self::Call,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
+            let payload = &call.payload();
             Ok(Some(match payload.get("type").and_then(Value::as_str) {
                 Some("put") => json!({"seen": payload["fields"]["api_key"]}),
                 _ => json!({"token": "tk-REAL", "host": "h"}),
@@ -2512,12 +2850,25 @@ async fn a_bundle_names_its_own_secret_paths() {
 /// still gets the error whole.
 #[tokio::test]
 async fn a_call_error_echoing_a_secret_is_shown_in_the_row() {
-    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    use crate::bundle::{BundleError, BundleRegistry, Handler, Reply};
     struct Echo;
     #[async_trait::async_trait]
-    impl Bundle for Echo {
+    impl Handler for Echo {
+        type Call = sent_verbs::Call;
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
         fn name(&self) -> &str {
             "echo_probe"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         fn reply_secret(&self, payload: &Value, _reply: &Value) -> Vec<String> {
             if payload.get("type") == Some(&json!("fail")) {
@@ -2529,7 +2880,7 @@ async fn a_call_error_echoing_a_secret_is_shown_in_the_row() {
         async fn handle(
             &self,
             _agent_id: &AgentId,
-            _payload: &Value,
+            _call: Self::Call,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
             Ok(Some(json!({"error": "bad key sk-ERR-REAL"})))
@@ -2561,7 +2912,10 @@ async fn a_call_error_echoing_a_secret_is_shown_in_the_row() {
         out.result
     );
     let rows = serde_json::to_string(&kernel.rows.all()).unwrap();
-    assert!(!rows.contains("sk-ERR-REAL"), "a row kept the error text: {rows}");
+    assert!(
+        !rows.contains("sk-ERR-REAL"),
+        "a row kept the error text: {rows}"
+    );
     assert!(rows.contains("[secret]"), "{rows}");
 }
 
@@ -2570,20 +2924,37 @@ async fn a_call_error_echoing_a_secret_is_shown_in_the_row() {
 /// row, the ledger and the state stream carry `[secret]`.
 #[tokio::test]
 async fn a_handler_noting_reply_secret_marks_its_settle_row() {
-    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    use crate::bundle::{BundleError, BundleRegistry, Handler, Reply};
     struct Relay;
     #[async_trait::async_trait]
-    impl Bundle for Relay {
+    impl Handler for Relay {
+        type Call = sent_verbs::Call;
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
         fn name(&self) -> &str {
             "relay_probe"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            sent_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            sent_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         async fn handle(
             &self,
             _agent_id: &AgentId,
-            _payload: &Value,
+            _call: Self::Call,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
-            crate::note_reply_secret(["fields.k".to_string(), "type".to_string(), "a..b".to_string()]);
+            crate::note_reply_secret([
+                "fields.k".to_string(),
+                "type".to_string(),
+                "a..b".to_string(),
+            ]);
             Ok(Some(json!({"fields": {"k": "sk-RELAYED", "n": "keep"}})))
         }
     }
@@ -2609,13 +2980,21 @@ async fn a_handler_noting_reply_secret_marks_its_settle_row() {
         .send(vec![Item::new("rp", json!({"type": "get"})).with_id("r1")])
         .await
         .remove(0);
-    assert_eq!(out.result["fields"]["k"], json!("sk-RELAYED"), "{}", out.result);
+    assert_eq!(
+        out.result["fields"]["k"],
+        json!("sk-RELAYED"),
+        "{}",
+        out.result
+    );
     assert_eq!(out.secret, vec!["fields.k".to_string()]);
     let rows = serde_json::to_string(&kernel.rows.all()).unwrap();
     assert!(!rows.contains("sk-RELAYED"), "a row kept the value: {rows}");
     let ledger = serde_json::to_string(&kernel.ledger.entries()).unwrap();
     assert!(!ledger.contains("sk-RELAYED"), "{ledger}");
-    assert!(ledger.contains("[secret]") && ledger.contains("keep"), "{ledger}");
+    assert!(
+        ledger.contains("[secret]") && ledger.contains("keep"),
+        "{ledger}"
+    );
     let events = format!("{:?}", seen.lock().expect("sink poisoned"));
     assert!(!events.contains("sk-RELAYED"), "{events}");
 }

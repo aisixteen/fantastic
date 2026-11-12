@@ -22,7 +22,7 @@
 use super::binary_steps::{create, kernel_with, op, serve, tag, until};
 use super::*;
 use fantastic_bridge::transport::{BridgeTransport, Frame};
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Reply};
 use fantastic_kernel::{Blob, Step};
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Mutex;
@@ -36,57 +36,76 @@ type Calls = Arc<Mutex<Vec<String>>>;
 /// python `_probe`: a bundle's OWN verbs, nothing declared anywhere.
 struct Probe(Calls);
 
+fantastic_kernel::stand_in_verbs!(probe_verbs {
+    Events "events" {},
+    Idle "idle" {},
+    Nested "nested" {},
+    Listed "listed" {}
+});
+
 #[async_trait::async_trait]
-impl Bundle for Probe {
+impl fantastic_kernel::Handler for Probe {
+    type Call = probe_verbs::Call;
     fn name(&self) -> &str {
         "anyverb_bytes_probe.tools"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        probe_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        probe_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     /// The JSON half — a reply body is not carried.
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        Ok(self
-            .handle_binary(id, payload.clone(), None, kernel)
-            .await?
-            .0)
+        Ok(self.handle_binary(id, call, None, kernel).await?.0)
     }
     async fn handle_binary(
         &self,
         id: &AgentId,
-        header: Value,
+        call: Self::Call,
         _body: Option<Blob>,
         _kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<Blob>), BundleError> {
-        let verb = header["type"].as_str().unwrap_or("").to_string();
-        match verb.as_str() {
-            "boot" | "shutdown" => return Ok((None, None)),
-            "reflect" => {
+        use probe_verbs::Call;
+        let chunk = CHUNK.to_vec();
+        let verb = match &call {
+            Call::Reflect(_) => {
                 return Ok((
                     Some(json!({"id": id.0, "sentence": "bytes-reply probe", "verbs": {}})),
                     None,
                 ))
             }
-            _ => {}
-        }
-        self.0.lock().unwrap().push(verb.clone());
-        let chunk = CHUNK.to_vec();
-        Ok(match verb.as_str() {
-            "events" => (
+            Call::Events(_) => "events",
+            Call::Idle(_) => "idle",
+            Call::Nested(_) => "nested",
+            Call::Listed(_) => "listed",
+        };
+        self.0.lock().unwrap().push(verb.to_string());
+        Ok(match call {
+            Call::Events(_) => (
                 Some(json!({"seq": 3, "chunk": null})),
                 Some(Blob::key("chunk", chunk)),
             ),
-            "idle" => (Some(json!({"seq": 3})), None),
-            "nested" => (
+            Call::Idle(_) => (Some(json!({"seq": 3})), None),
+            Call::Nested(_) => (
                 Some(json!({"seq": 3, "out": {"chunk": null}})),
                 Some(Blob::new(
                     vec![Step::from("out"), Step::from("chunk")],
                     chunk,
                 )),
             ),
-            "listed" => (
+            Call::Listed(_) => (
                 Some(json!({"events": [{"n": 0}, {"n": 1, "bytes": null}]})),
                 Some(Blob::new(
                     vec![
@@ -97,12 +116,7 @@ impl Bundle for Probe {
                     chunk,
                 )),
             ),
-            other => (
-                Some(
-                    json!({"error": format!("probe: no verb {}", fantastic_bundle::py_repr(other))}),
-                ),
-                None,
-            ),
+            Call::Reflect(_) => unreachable!("answered above"),
         })
     }
 }
@@ -451,7 +465,7 @@ async fn c_a_ws_bridge_forward_text_call_binary_reply() {
     let out = op(
         &ka,
         &a_leg,
-        json!({"type": "forward", "target": "probe", "payload": {"type": "events"}}),
+        json!({"type": "forward", "target": "probe", "payload": {"type": "events"}, "forward_timeout": 30.0}),
     )
     .await;
     assert_eq!(

@@ -14,6 +14,8 @@ fantastic-kernel = { path = "../../fantastic-kernel" }
 # (python imports `file_bridge.fs` the same way).
 fantastic-file = { path = "../fantastic-file" }
 serde_json = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
 async-trait = { workspace = true }
 
 # `sys::unix` — getpwuid_r / getpwnam_r: `~` expansion.
@@ -28,7 +30,14 @@ libc = { workspace = true }
 [target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))'.dependencies]
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
 
+[features]
+# the test fixtures a dependent crate's tests build on; nothing ships them
+test-support = []
+
 [dev-dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
+# the private-file fixtures the file-backend tests set modes with
+fantastic-file = { path = "../fantastic-file", features = ["test-support"] }
 # The kernel flushes its execution rows into a memory store; the ledger the
 # tests read back is that store's.
 fantastic-ram-store = { path = "../fantastic-ram-store" }

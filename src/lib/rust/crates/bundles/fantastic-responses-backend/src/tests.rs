@@ -151,18 +151,6 @@ fn decode_all(body: &str, bounded: bool) -> (String, Option<String>, ReportCell)
     (out, verdict, report)
 }
 
-#[test]
-fn readme_is_python_verbatim() {
-    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(4)
-        .expect("repo's src/lib above the crate")
-        .join(
-            "python/bundled_agents/ai/responses/responses_backend/src/responses_backend/readme.md",
-        );
-    assert_eq!(README, std::fs::read_to_string(&py).expect("python readme"));
-}
-
 /// The error a `chat` call returns when the endpoint answers `code` before any stream.
 async fn status_refusal(code: u16) -> ProviderError {
     let server = MockServer::start().await;
@@ -496,7 +484,7 @@ async fn reflect_sentence_is_python_verbatim() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["sentence"], SENTENCE);
+    assert_eq!(r["sentence"], MAN);
     assert_eq!(r["model"], "test-model");
     assert_eq!(r["endpoint"], "http://127.0.0.1:1/v1/responses");
 }
@@ -577,14 +565,8 @@ async fn a_record_without_an_endpoint_is_refused_at_the_write_naming_it() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["reason"], json!("invalid_meta"), "{r}");
-    assert_eq!(
-        r["error"],
-        json!(
-            "responses_backend: required on the record and missing: endpoint — nothing is \
-             guessed. endpoint = the full Responses API URL (…/v1/responses)"
-        )
-    );
+    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    assert_eq!(r["arg"], json!("endpoint"), "{r}");
 }
 
 /// `store:false` keeps the conversation ours and `model` is the record's — a
@@ -739,7 +721,7 @@ async fn send_once(kernel: &Arc<Kernel>, id: &AgentId) -> Value {
     kernel
         .send(vec![Item::new(
             fantastic_ai_core::remote_provider::pair_chat(&kernel, &id).await,
-            json!({"type": "send", "text": "go", "client_id": "t", "reply_to": null}),
+            json!({"type": "send", "text": "go", "client_id": "t"}),
         )])
         .await
         .remove(0)
@@ -826,10 +808,11 @@ async fn unknown_type_wire_shape_is_byte_exact() {
         .await
         .remove(0)
         .result;
-    assert_eq!(
-        serde_json::to_string(&r).unwrap(),
-        r#"{"error":"responses_backend: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#
-    );
+    // the agent's own entry refuses: the verb it was asked, and what it answers
+    assert_eq!(r["reason"], json!("unhandled"));
+    assert_eq!(r["verb"], json!("frob"));
+    let answers = "boot, complete, models, set_default_model, reflect";
+    assert!(r["error"].as_str().is_some_and(|e| e.contains(answers)), "{r}");
 }
 
 /// A 200 whose body starts and then stops: the connection stays open and silent,
@@ -899,61 +882,42 @@ fn stream_idle_seconds_is_validated_at_the_write() {
         m.insert("stream_idle_seconds".to_string(), v);
         m
     };
+    let at_the_write = |v: Value| {
+        fantastic_kernel::verbs::check_record(
+            "update_agent",
+            "responses_backend",
+            &meta(v),
+            &fantastic_kernel::declared::record::RECORD,
+            &RECORD,
+        )
+    };
     for bad in [json!(0), json!(-1), json!("soon"), json!(true)] {
-        let msg = ResponsesBundle
-            .validate_meta(&meta(bad.clone()), &Map::new())
-            .unwrap_or_else(|| panic!("{bad} is refused"));
-        assert!(
-            msg.contains("stream_idle_seconds must be a positive number"),
-            "{msg}"
-        );
+        let refused = at_the_write(bad.clone()).expect_err("refused");
+        assert_eq!(refused["arg"], json!("stream_idle_seconds"), "{bad}: {refused}");
     }
-    let ok = ResponsesBundle
-        .validate_meta(&meta(json!(2.5)), &Map::new())
-        .unwrap_or_default();
-    assert!(!ok.contains("stream_idle_seconds"), "{ok}");
+    assert!(at_the_write(json!(2.5)).is_ok());
 }
 
 #[test]
 fn caching_none_and_cleanup_are_accepted_and_provider_cache_is_refused_here() {
-    // responses declares no provider caching: the mode is refused at the write, naming
-    // the backend; the two modes that send no marker are accepted.
-    let rec = json!({
-        "endpoint": "https://api.test/v1/responses", "model": "gpt-x",
-        "credentials": {"store": "credential_store", "ref": "openai"},
-        "memory_store_id": "memory"
-    });
-    let rec = rec.as_object().unwrap();
-    for mode in ["none", "cleanup"] {
+    // responses declares no provider caching: its record's `caching` has no such value,
+    // so the engine refuses it by field name; the two modes that send no marker are
+    // accepted.
+    let at_the_write = |mode: &str| {
         let meta = json!({"caching": mode});
-        assert_eq!(
-            ResponsesBundle.validate_meta(meta.as_object().unwrap(), rec),
-            None,
-            "{mode}"
-        );
+        fantastic_kernel::verbs::check_record(
+            "update_agent",
+            "responses_backend",
+            meta.as_object().unwrap(),
+            &fantastic_kernel::declared::record::RECORD,
+            &RECORD,
+        )
+    };
+    for mode in ["none", "cleanup"] {
+        assert!(at_the_write(mode).is_ok(), "{mode}");
     }
-    let meta = json!({"caching": "provider_cache"});
-    assert_eq!(
-        ResponsesBundle
-            .validate_meta(meta.as_object().unwrap(), rec)
-            .as_deref(),
-        Some("responses_backend cannot do provider caching: caching=provider_cache is refused — use \
-             none or cleanup")
-    );
-    // a record already in provider_cache is refused on any write to it
-    let stored = json!({
-        "endpoint": "https://api.test/v1/responses", "model": "gpt-x",
-        "caching": "provider_cache"
-    });
-    assert!(ResponsesBundle
-        .validate_meta(&Map::new(), stored.as_object().unwrap())
-        .is_some());
-    // an unknown mode is the schema's enum refusal
-    let meta = json!({"caching": "always"});
-    assert_eq!(
-        ResponsesBundle
-            .validate_meta(meta.as_object().unwrap(), rec)
-            .as_deref(),
-        Some("caching='always' is not one of the legal values: none, cleanup, provider_cache")
-    );
+    for mode in ["provider_cache", "always"] {
+        let refused = at_the_write(mode).expect_err("refused");
+        assert_eq!(refused["arg"], json!("caching"), "{refused}");
+    }
 }

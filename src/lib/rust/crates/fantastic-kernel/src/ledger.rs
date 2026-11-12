@@ -427,6 +427,9 @@ impl Ledger {
         let Some(target) = call.get("agent").and_then(Value::as_str) else {
             return false;
         };
+        let Some(retries) = call.get("retries").and_then(Value::as_u64) else {
+            return false;
+        };
         let mut g = self.inner.lock().expect("ledger poisoned");
         if g.rows.contains_key(&exec_id) {
             return false;
@@ -453,7 +456,7 @@ impl Ledger {
                 // The ORIGINAL call's payload: a joiner of a recalled execution
                 // is authorized against exactly that call.
                 payload: call.get("payload").cloned().unwrap_or(Value::Null),
-                retries: call.get("retries").and_then(Value::as_u64).unwrap_or(0) as u32,
+                retries: retries as u32,
                 attempts,
                 name,
                 caller: call

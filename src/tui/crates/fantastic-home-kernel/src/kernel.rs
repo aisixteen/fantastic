@@ -270,7 +270,7 @@ impl HomeKernel {
         // Every hydrated agent the start did not boot, in registration order.
         // Every agent here is the home's: a refusal is fatal.
         for id in kernel.agent_ids() {
-            if done.contains(&id.0) {
+            if done.contains(&id.0) || !kernel.advertises(&id, "boot").await {
                 continue;
             }
             let out = Arc::clone(kernel)
@@ -393,3 +393,4 @@ impl HomeKernel {
         }
     }
 }
+

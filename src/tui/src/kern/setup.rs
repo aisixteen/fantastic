@@ -2,8 +2,8 @@
 //!
 //! The page asks the human for the id, the handler (one of the backends this
 //! build links, from the kernel's own bundle catalog), and then THE BACKEND'S
-//! OWN FIELDS as its record schema declares them (`Bundle::record_schema`:
-//! name, type, required, enum, the backend's default, a hint) — generic, so a
+//! OWN FIELDS as its declared record names them (`Bundle::record`: name,
+//! type, required, enum, the backend's default, a hint) — generic, so a
 //! new backend needs no page change. Required fields start empty (nothing is
 //! guessed); a field with a default starts at the BACKEND's value. The backend
 //! validates at the create — one truth — and its refusal names every missing
@@ -29,11 +29,25 @@ pub const WRITE_OWNED: [&str; 2] = ["memory_store_id", "credentials"];
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     pub name: String,
+    /// The declared type as the kernel renders it (`string`, `int`, `number`, `bool`,
+    /// `list[string]`, `'a'|'b'`, `object`, ...).
     pub ty: String,
     pub required: bool,
     pub one_of: Vec<String>,
     pub default: Option<Value>,
     pub hint: String,
+}
+
+/// The enum set a property schema declares: its own `enum`, or the `enum` of each
+/// documented variant under `oneOf`.
+fn enum_set(prop: &Value) -> Vec<String> {
+    let names = |e: &Value| -> Vec<String> {
+        e["enum"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default()
+    };
+    match prop["oneOf"].as_array() {
+        Some(alts) => alts.iter().flat_map(names).collect(),
+        None => names(prop),
+    }
 }
 
 /// A linked AI backend and what its record takes.
@@ -48,34 +62,45 @@ pub struct Backend {
 }
 
 impl Backend {
-    /// A backend from its catalog schema.
+    /// A backend from its declared record schema (`Bundle::record().schema()`, a JSON
+    /// schema object): each property's rendered type, required flag, default and doc
+    /// come from the kernel's own reading of it, the enum set from the property's
+    /// `enum`.
     pub fn from_schema(module: &str, schema: &Value) -> Self {
-        let fields = schema["fields"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|f| {
-                        let name = f["name"].as_str()?.to_string();
-                        (!WRITE_OWNED.contains(&name.as_str())).then(|| Field {
-                            name,
-                            ty: f["type"].as_str().unwrap_or("str").to_string(),
-                            required: f["required"].as_bool().unwrap_or(false),
-                            one_of: f["enum"]
-                                .as_array()
-                                .map(|e| e.iter().filter_map(Value::as_str).map(str::to_string).collect())
-                                .unwrap_or_default(),
-                            default: f.get("default").cloned().filter(|v| !v.is_null()),
-                            hint: f["hint"].as_str().unwrap_or("").to_string(),
-                        })
-                    })
-                    .collect()
+        let fields = fantastic_kernel::verbs::args(schema)
+            .into_iter()
+            .filter(|a| !WRITE_OWNED.contains(&a.name.as_str()))
+            .map(|a| Field {
+                one_of: enum_set(&schema["properties"][a.name.as_str()]),
+                name: a.name,
+                ty: a.ty,
+                required: a.required,
+                default: a.default,
+                hint: a.doc,
             })
-            .unwrap_or_default();
-        let key = schema["fields"].as_array().and_then(|a| {
-            a.iter().find(|f| f["type"] == "credentials").map(|f| f["required"].as_bool().unwrap_or(false))
-        });
+            .collect();
+        let key = fantastic_kernel::verbs::args(schema)
+            .into_iter()
+            .find(|a| a.name == "credentials")
+            .map(|a| a.required);
         Self { module: module.to_string(), fields, key }
     }
+}
+
+/// The AI backend bundles a set-up can name.
+pub const BACKENDS: [&str; 5] =
+    ["anthropic_backend.tools", "ollama_backend.tools", "responses_backend.tools", "vllm_backend.tools", "foundation_models_backend.tools"];
+
+/// The schema of a set-up's backend: one of the five backend bundle names.
+pub fn handler_schema() -> Value {
+    json!({"type": "string", "minLength": 1, "enum": BACKENDS})
+}
+
+/// A set-up record's declared schema as the shared engine reads it: its
+/// `handler_module` is one of [`BACKENDS`].
+pub fn check_backend(handler: &str) -> Result<(), Value> {
+    let schema = json!({"type": "object", "required": ["handler_module"], "properties": {"handler_module": handler_schema()}});
+    fantastic_kernel::verbs::validate("set-up", &schema, &json!({"handler_module": handler})).map(|_| ())
 }
 
 /// The backends this build links — every registered module with a record
@@ -85,46 +110,35 @@ pub fn backends(host: &Host) -> Vec<Backend> {
         .kernel
         .bundles
         .catalog()
-        .filter(|(m, _)| {
-            matches!(
-                *m,
-                "anthropic_backend.tools" | "ollama_backend.tools" | "responses_backend.tools" | "vllm_backend.tools" | "foundation_models_backend.tools"
-            )
-        })
-        .filter_map(|(m, b)| b.record_schema().map(|s| Backend::from_schema(m, &s)))
+        .filter(|(m, _)| BACKENDS.contains(m))
+        .map(|(m, b)| Backend::from_schema(m, b.record().schema()))
         .collect();
     v.sort_by(|a, b| a.module.cmp(&b.module));
     v
 }
 
-/// A field's text as the page holds it → the record's value, typed by the
-/// schema. Empty text = not set.
-pub fn coerce(f: &Field, text: &str) -> Result<Option<Value>, String> {
+/// What the TUI form's text box holds for a field → the value the record is sent with.
+/// A `string` or an enum is the text itself; any other declared type is a JSON literal
+/// (a number, `true`, a list, an object) read as written — nothing is converted across
+/// types, and the record's own declaration refuses a value of the wrong type at the
+/// write. Empty text = not set.
+pub fn literal(f: &Field, text: &str) -> Result<Option<Value>, String> {
     let t = text.trim();
     if t.is_empty() {
         return Ok(None);
     }
-    let bad = |what: &str| format!("{}: `{t}` is not {what}", f.name);
-    Ok(Some(match f.ty.as_str() {
-        "int" => json!(t.parse::<i64>().map_err(|_| bad("an integer"))?),
-        "float" => json!(t.parse::<f64>().map_err(|_| bad("a number"))?),
-        "bool" => json!(match t {
-            "true" | "yes" | "1" => true,
-            "false" | "no" | "0" => false,
-            _ => return Err(bad("true or false")),
-        }),
-        "enum" if !f.one_of.iter().any(|o| o == t) => return Err(bad(&format!("one of {}", f.one_of.join("|")))),
-        "list" => json!(t.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()).collect::<Vec<_>>()),
-        "map" => serde_json::from_str::<Value>(t).ok().filter(Value::is_object).ok_or_else(|| bad("a JSON object"))?,
-        _ => json!(t),
-    }))
+    if f.ty == "string" || !f.one_of.is_empty() {
+        return Ok(Some(Value::String(t.to_string())));
+    }
+    serde_json::from_str::<Value>(t)
+        .map(Some)
+        .map_err(|_| format!("{}: `{t}` is not a JSON value ({})", f.name, f.ty))
 }
 
-/// A value as the page shows it (the inverse of [`coerce`]).
+/// A value as the page shows it (the inverse of [`literal`]).
 pub fn text_of(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
-        Value::Array(a) => a.iter().map(|x| x.as_str().map_or_else(|| x.to_string(), str::to_string)).collect::<Vec<_>>().join(", "),
         Value::Null => String::new(),
         other => other.to_string(),
     }
@@ -140,21 +154,6 @@ pub struct Record {
     pub may_call: Vec<String>,
 }
 
-impl Record {
-    /// What the PAGE must have before a write: the id and the handler. The
-    /// backend's own required fields are the backend's to refuse, by name.
-    pub fn missing(&self) -> Vec<&'static str> {
-        let mut m = Vec::new();
-        if self.id.trim().is_empty() {
-            m.push("id");
-        }
-        if self.handler.is_empty() {
-            m.push("handler");
-        }
-        m
-    }
-}
-
 fn err_of(r: &fantastic_kernel::Outcome) -> Option<String> {
     r.result.get("error").and_then(Value::as_str).map(|e| {
         match r.result.get("reason").and_then(Value::as_str) {
@@ -166,8 +165,9 @@ fn err_of(r: &fantastic_kernel::Outcome) -> Option<String> {
 
 
 
-/// Field TEXTS (`{name: text}`) typed by `handler`'s record schema — the one
-/// typing path for a write and a saved set-up (an empty text is left out).
+/// The TUI form's field TEXTS (`{name: text}`) read as values by `handler`'s declared
+/// field types (an empty text is left out). Only the form calls this: the verbs take
+/// typed values.
 pub fn typed(host: &Host, handler: &str, texts: &Map<String, Value>) -> Result<Map<String, Value>, String> {
     let backend = backends(host)
         .into_iter()
@@ -176,20 +176,42 @@ pub fn typed(host: &Host, handler: &str, texts: &Map<String, Value>) -> Result<M
     let mut fields = Map::new();
     for f in &backend.fields {
         let t = texts.get(&f.name).and_then(Value::as_str).unwrap_or("");
-        if let Some(v) = coerce(f, t)? {
+        if let Some(v) = literal(f, t)? {
             fields.insert(f.name.clone(), v);
         }
     }
     Ok(fields)
 }
 
+/// A backend's DECLARED fields as one schema for the shared engine: its record's
+/// properties (the write-owned ones left out), nothing else allowed, none required
+/// (a change names only what it sets).
+pub fn fields_schema(host: &Host, handler: &str) -> Result<Value, String> {
+    check_backend(handler).map_err(|r| r["error"].as_str().unwrap_or("not a backend").to_string())?;
+    let (_, bundle) = host
+        .kernel
+        .bundles
+        .catalog()
+        .find(|(m, _)| *m == handler)
+        .ok_or_else(|| format!("this build links no backend {handler:?}"))?;
+    let mut props = bundle.record().schema()["properties"].as_object().cloned().unwrap_or_default();
+    props.retain(|k, _| !WRITE_OWNED.contains(&k.as_str()));
+    Ok(json!({"type": "object", "properties": props, "additionalProperties": false}))
+}
+
+/// `fields` checked by the engine against the backend's declared fields: a name the
+/// backend does not declare, or a value of the wrong type, is refused.
+pub fn declared_fields(host: &Host, verb: &str, handler: &str, fields: Map<String, Value>) -> Result<Map<String, Value>, Value> {
+    let schema = fields_schema(host, handler).map_err(|e| fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e))?;
+    let Value::Object(checked) = fantastic_kernel::verbs::validate(verb, &schema, &Value::Object(fields))? else {
+        unreachable!("the engine answers the checked arguments as an object")
+    };
+    Ok(checked)
+}
+
 /// Create, grant and boot. Returns where the record was written.
 pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
-    let missing = rec.missing();
-    if !missing.is_empty() {
-        return Err(format!("missing: {}", missing.join(", ")));
-    }
-    let id = rec.id.trim();
+    let id = rec.id.as_str();
     if host.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(id)) {
         return Err(format!("`{id}` already exists"));
     }
@@ -206,6 +228,10 @@ pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
     spec.insert("handler_module".into(), json!(rec.handler));
     crate::kern::backend::BackendBundle::make_ai(host, &fantastic_kernel::AgentId::from(PARENT), id, spec, peer).await?;
     for agent in [crate::kern::backend::provider_id(id), id.to_string()] {
+        // only an agent whose bundle declares `boot` is sent it
+        if !host.kernel.advertises(&fantastic_kernel::AgentId::from(agent.as_str()), "boot").await {
+            continue;
+        }
         let r = host.act(&agent, json!({"type": "boot"})).await;
         if let Some(e) = err_of(&r) {
             return Err(format!("`{agent}` was written but did not boot: {e}"));
@@ -218,6 +244,45 @@ pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::kern::backend::create_tests::{host, record_of};
+
+    #[test]
+    fn a_fields_enum_set_comes_from_its_schema_plain_or_documented() {
+        let b = Backend::from_schema(
+            "x.tools",
+            &json!({"type": "object", "properties": {
+                "a": {"type": "string", "enum": ["p", "q"]},
+                "b": {"oneOf": [{"type": "string", "enum": ["r"]}, {"type": "string", "enum": ["s"]}]},
+                "c": {"type": "string"},
+            }}),
+        );
+        let sets: Vec<String> = b.fields.iter().map(|f| f.one_of.join(",")).collect();
+        assert_eq!(sets, ["p,q", "r,s", ""]);
+    }
+
+    #[tokio::test]
+    async fn fields_are_checked_against_the_backends_declared_fields() {
+        // the real backend: its record declares the fields (the shared test host's is a stand-in)
+        let mut kernel = fantastic_kernel::Kernel::new();
+        kernel.bundles.register(fantastic_vllm_backend::HANDLER_MODULE, fantastic_vllm_backend::VllmBundle);
+        let h = Host { kernel: std::sync::Arc::new(kernel), cfg: crate::env::ClientCfg::here(), root: "kernel".to_string() };
+        let vllm = "vllm_backend.tools";
+        let ok = |v: Value| declared_fields(&h, "configure_ai", vllm, v.as_object().cloned().unwrap());
+        assert_eq!(ok(json!({"model": "m1"})).unwrap()["model"], "m1");
+        // a name the backend does not declare — the verb and the target among them — is refused
+        for name in ["id", "handler_module", "parent_id", "zzz"] {
+            let r = ok(json!({ name: "x" })).expect_err(name);
+            assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some(name)), "{r}");
+        }
+        // `type` is the call's own verb key, never a field: it is dropped, the verb stays
+        assert!(!ok(json!({"type": "delete_agent"})).unwrap().contains_key("type"));
+        // the ones the write sets itself are not the caller's
+        for name in WRITE_OWNED {
+            assert!(ok(json!({ name: "x" })).is_err(), "{name}");
+        }
+        // a wrongly typed value is refused, never coerced
+        assert!(ok(json!({"model": 3})).is_err());
+        assert!(declared_fields(&h, "configure_ai", "nope.tools", Map::new()).is_err());
+    }
 
     #[tokio::test]
     async fn write_makes_the_provider_and_the_chat_naming_it_both_booted() {

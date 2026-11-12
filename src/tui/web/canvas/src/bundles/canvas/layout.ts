@@ -267,13 +267,8 @@ export function placeMissing(
   return rects;
 }
 
-export const LAYOUT_README =
-  "A view's LAYOUT: `rects: {<cell id>: {x, y, width, height}}` — where each cell sits. `layout_canvas` is the free canvas; `layout_mobile` is where the one-column phone layout (a tab under 768px wide) keeps its state. " +
-  "The view uses one by the tab's width; the cells are untouched by it. " +
-  "Move cells with the view's `move`; a cell with no rect is placed by its layout (free: free space near the centre; column: the column's bottom). " +
-  "`minimized: [<cell id>…]`: those cells show their head bar alone (a double click on the head toggles it). " +
-  "`pinned: <cell id>` (the column): that cell is held on the screen's bottom while the column scrolls (the 📌 on its head). " +
-  "The view's `hidden: [<cell id>…]` are the cells not shown: their agents run on and their rects are kept, so `show` puts them back where they were.";
+/** What the bundle is for. */
+export const LAYOUT_MAN = "A view's layout: where each cell sits, held as state and moved through its view.";
 
 /** A layout holds state only: it answers reflect (the kernel's) and nothing else. */
 export const layoutAgent: Handler = (_id, payload): Json => {
@@ -284,5 +279,5 @@ export const layoutAgent: Handler = (_id, payload): Json => {
 
 export function registerLayout(kernel: { registerBundle(hm: string, h: Handler): void; setBundleReadme(hm: string, readme: string): void }): void {
   kernel.registerBundle(LAYOUT, layoutAgent);
-  kernel.setBundleReadme(LAYOUT, LAYOUT_README);
+  kernel.setBundleReadme(LAYOUT, LAYOUT_MAN);
 }

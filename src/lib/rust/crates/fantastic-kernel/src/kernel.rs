@@ -10,7 +10,7 @@
 use crate::agent::{Agent, AgentId};
 use crate::bundle::BundleRegistry;
 use crate::errors::{KernelError, KernelResult};
-use crate::state::{KernelState, CURRENT_VERSION};
+use crate::state::KernelState;
 use crate::storage::StorageMode;
 use crate::tasks::TaskTable;
 use arc_swap::ArcSwapOption;
@@ -369,7 +369,7 @@ impl Kernel {
 
     /// BOTH grant maps as ONE step: `edit` gets `can_call` and `callable_by` as they are at
     /// the write and returns which of the two it changed. One record lock, one run of the
-    /// write-time checks (`bad_grant_shape`, the bundle's `validate_meta`) over what changed,
+    /// write-time checks (the grant keys, the common record's shape, the bundle's `validate_meta`) over what changed,
     /// one `updated` event: a shape refused in either map writes neither.
     pub fn edit_grants(
         &self,
@@ -398,8 +398,11 @@ impl Kernel {
             if cb_edited {
                 patch.insert("callable_by".to_string(), Value::Object(cb.clone()));
             }
-            if let Some(why) = crate::lifecycle::bad_grant_shape(&patch) {
+            if let Some(why) = crate::lifecycle::bad_grant_key(&patch) {
                 return Err(why.to_string());
+            }
+            if let Err(refused) = crate::declared::bare_record::check("edit_grants", &patch) {
+                return Err(crate::refusal::error_text(&refused).unwrap_or_default());
             }
             if let Some(hm) = handler.as_deref() {
                 if let Some(bundle) = self.bundles.get(hm) {
@@ -537,14 +540,14 @@ impl Kernel {
     /// `Agent.advertises(verb)` (`_agent.py:1160`), which reads the module's
     /// `VERBS` table and dispatches nothing.
     ///
-    /// Read STATICALLY from [`crate::bundle::Bundle::verb_docs`] — the same
-    /// table `docs` serves — never through `send`: a dispatch would mint a
+    /// Read STATICALLY from [`crate::bundle::Bundle::verbs`] — the same
+    /// declarations `docs` serves — never through `send`: a dispatch would mint a
     /// message id and write a call row, a task row, a ledger execution and a
     /// watcher echo for a question python answers with an attribute lookup.
     ///
     /// False for a bare agent and for a handler_module no registry holds
     /// (python's unimportable bundle advertises nothing).
-    pub(crate) async fn advertises(self: &Arc<Self>, id: &AgentId, verb: &str) -> bool {
+    pub async fn advertises(self: &Arc<Self>, id: &AgentId, verb: &str) -> bool {
         let Some(agent) = self.agents.get(id).map(|e| Arc::clone(&e)) else {
             return false;
         };
@@ -555,12 +558,22 @@ impl Kernel {
         else {
             return false;
         };
-        // PER-INSTANCE first, as `docs` reads it: an agent whose bundle names its own
-        // table answers that table (python `advertises` reads `instance_verbs`).
-        let table = bundle
-            .instance_verb_docs(&agent)
-            .unwrap_or_else(|| bundle.verb_docs());
-        table.as_object().is_some_and(|v| v.contains_key(verb))
+        bundle.verbs().iter().any(|v| v.name == verb)
+            || bundle.dynamic_verbs(&agent).iter().any(|v| v.name == verb)
+    }
+
+    /// Tell one agent a lifecycle verb (`boot`, `shutdown`) as kernel bookkeeping,
+    /// ONLY when its bundle declares it: `None` when it does not (nothing to tell).
+    pub async fn announce(
+        self: &Arc<Self>,
+        agent: &Arc<Agent>,
+        payload: Value,
+    ) -> Option<crate::outcome::Outcome> {
+        let verb = payload.get("type").and_then(Value::as_str).unwrap_or_default();
+        if !self.advertises(&agent.id, verb).await {
+            return None;
+        }
+        Some(self.bookkeeping(agent, payload, None).await)
     }
 
     /// DEPTH-FIRST `on_shutdown`, children before their parent. A hook that
@@ -953,10 +966,7 @@ impl Kernel {
             .collect();
         // python `records.sort(key=lambda r: r["id"])`.
         agents.sort_by(|a, b| a.id.cmp(&b.id));
-        KernelState {
-            version: CURRENT_VERSION,
-            agents,
-        }
+        KernelState { agents }
     }
 
     /// [`Self::save`] serialized to JSON. Used by [`Self::maybe_flush`]
@@ -985,17 +995,10 @@ impl Kernel {
     /// the loaded set; subsequent [`Self::save`] won't see it.
     ///
     /// Errors:
-    /// - [`KernelError::InvalidSnapshot`] if `state.version` exceeds
-    ///   [`CURRENT_VERSION`], if the snapshot has no root, or if any
+    /// - [`KernelError::InvalidSnapshot`] if the snapshot has no root, or if any
     ///   record's `parent_id` doesn't point at a record in the
     ///   snapshot.
     pub fn load(&self, state: KernelState) -> KernelResult<()> {
-        if state.version > CURRENT_VERSION {
-            return Err(KernelError::InvalidSnapshot(format!(
-                "snapshot version {} exceeds this kernel's max ({})",
-                state.version, CURRENT_VERSION
-            )));
-        }
         let records: Vec<Map<String, Value>> = state
             .agents
             .iter()
@@ -1021,10 +1024,7 @@ impl Kernel {
             }
             agents.push(rec);
         }
-        let state = KernelState {
-            version: CURRENT_VERSION,
-            agents,
-        };
+        let state = KernelState { agents };
         // The root record declares this tree's children-dir name (default
         // "agents") — set BEFORE the build, since every agent derives its
         // address from it.
@@ -1201,25 +1201,25 @@ mod tests;
 
 /// Validate a flat record list before anything is torn down; `Ok` names the one
 /// root. Python `kernel/_state.py` `validate_records`, check for check and text
-/// for text: a falsy id, the id rule a create applies (`guard_agent_id`), the
+/// for text: a falsy id, the id rule a create declares (`AGENT_ID_PATTERN`), the
 /// reserved keys (sorted), a duplicate, not exactly one root, a parent outside
 /// the set, and records unreachable from the root.
 ///
 /// # Errors
 /// [`KernelError::InvalidSnapshot`] carrying python's `SnapshotError` text.
 pub fn validate_records(records: &[Map<String, Value>]) -> KernelResult<String> {
-    use fantastic_bundle::{py_repr, py_repr_value, py_truthy};
+    use fantastic_bundle::{py_repr, py_repr_value};
     let bad = |m: String| Err(KernelError::InvalidSnapshot(m));
     let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut roots: Vec<String> = Vec::new();
     for r in records {
-        let Some(rid) = r.get("id").filter(|v| py_truthy(v)) else {
+        let Some(rid) = r.get("id").filter(|v| v.as_str().is_some_and(|s| !s.is_empty())) else {
             return bad("snapshot record missing id".to_string());
         };
         // THE SAME ID RULE AS A CREATE: a record edited on disk to carry the
         // reserved `kernel`, a foreign `guid|agent`, or a path-walking id is
         // refused here, before the live tree is torn down.
-        if let Some(refused) = crate::refusal::guard_agent_id("load", rid.as_str().unwrap_or("")) {
+        if let Err(refused) = crate::verbs::check_agent_id("load", "id", rid.as_str().unwrap_or("")) {
             return bad(format!(
                 "record {}: {}",
                 py_repr_value(rid),
@@ -1229,10 +1229,14 @@ pub fn validate_records(records: &[Map<String, Value>]) -> KernelResult<String> 
                     .unwrap_or_default()
             ));
         }
-        let rid = rid
-            .as_str()
-            .expect("guard_agent_id passed a str")
-            .to_string();
+        let rid = rid.as_str().expect("the id pattern passed a str").to_string();
+        if rid == crate::refusal::RESERVED_ID {
+            return bad(format!(
+                "record {}: load: id must be a name other than the reserved {}",
+                py_repr(&rid),
+                py_repr(&rid)
+            ));
+        }
         // RESERVED KEYS: constructor parameters, not meta.
         let mut reserved: Vec<&str> = crate::agent::RESERVED_RECORD_KEYS
             .iter()

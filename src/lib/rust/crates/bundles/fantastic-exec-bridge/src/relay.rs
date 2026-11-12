@@ -25,7 +25,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use fantastic_bundle::py_truthy;
 use fantastic_io_bridge::codec::{decode_binary_frame, encode_binary_frame};
 use fantastic_kernel::{AgentId, Blob, Item, Kernel, TaskId};
 use serde_json::{json, Value};
@@ -256,72 +255,34 @@ async fn drop_proxy(kernel: &Arc<Kernel>, src: &AgentId, sub: Sub) {
     kernel.cancel_task(&sub.drain).await;
 }
 
-/// The verbs that DRIVE one job — python `DRIVE_VERBS`. A running program's
-/// owner-inbox relay drops one of these whose `job_id` names ANOTHER job: the
-/// fanout mirrors every payload sent to the leg, so a program started by one
-/// caller would see another caller's keystrokes, paste bytes and drive calls
-/// aimed at that caller's job. One with no `job_id` (bulk) or naming this job is
-/// forwarded.
-const DRIVE_VERBS: [&str; 6] = [
-    "write",
-    "resize",
-    "paste_image",
-    "stop",
-    "interrupt",
-    "clear",
-];
-
-/// The job's own telemetry echoes back through the owner's watcher fanout; drop it so a
-/// tool does not receive its own `progress`/`job_started`/`job_done` as inbox mail —
-/// drop a drive verb addressed to ANOTHER job ([`DRIVE_VERBS`]) — and
-/// drop whatever the leg's gate refuses (python `_inbox_framer`). The
-/// substrate's fanout mirrors every payload to the owner's watchers BEFORE any
-/// handler runs, so a sealed leg whose handler refused the call would still have
-/// it delivered here.
-fn inbox_framer(p: &Value, owner: &AgentId, job_id: TaskId, kernel: &Kernel) -> Option<Value> {
-    let verb = match p.get("type").and_then(Value::as_str) {
-        Some("progress") | Some("output") | Some("job_started") | Some("job_done") => return None,
-        v => v.unwrap_or(""),
-    };
-    // Dropped only when an int `job_id` names ANOTHER job — no id (bulk) or this
-    // job's id is forwarded; a bool, a string or a float names no job.
-    if DRIVE_VERBS.contains(&verb)
-        && p.get("job_id")
-            .and_then(Value::as_i64)
-            .is_some_and(|j| j != job_id.get())
-    {
-        return None;
-    }
-    if crate::gate(&crate::snapshot_meta(owner, kernel), owner, verb).is_some() {
+/// The mail framer: what `owner`'s program gets of a queued payload. The job's own
+/// telemetry echoes back through the owner's watcher fanout, and the fanout mirrors
+/// every call made to the leg BEFORE any handler runs: only a call of a verb the
+/// program declared, which the agent's own entry accepts and the leg's gate admits,
+/// is mail (python `_inbox_framer`).
+fn inbox_framer(p: &Value, owner: &AgentId, kernel: &Kernel) -> Option<Value> {
+    let mail = crate::mail::of(owner, p)?;
+    if crate::gate(&crate::snapshot_meta(owner, kernel), owner, &mail.name).is_some() {
         return None;
     }
     Some(json!({"op": "inbox", "payload": p}))
-}
-
-fn gate_refuses(p: &Value, owner: &AgentId, kernel: &Kernel) -> bool {
-    let verb = p.get("type").and_then(Value::as_str).unwrap_or("");
-    !matches!(verb, "reflect" | "connector")
-        && crate::gate(&crate::snapshot_meta(owner, kernel), owner, verb).is_some()
 }
 
 /// The drain's verdict on ONE queued item: the frame to write, or `None` to drop it.
 /// Mail the handler refused at send time ([`note_refused`]) is dropped whatever the
 /// record says now; the live gate in [`inbox_framer`] still catches an item the
 /// drain dequeues before the handler has noted it.
-pub(crate) fn drain_verdict(
-    p: &Value,
-    owner: &AgentId,
-    job_id: TaskId,
-    kernel: &Kernel,
-) -> Option<Value> {
-    if take_refused(owner, p) {
+pub(crate) fn drain_verdict(p: &Value, owner: &AgentId, kernel: &Kernel) -> Option<Value> {
+    let mail = crate::mail::of(owner, p)?;
+    let key = crate::mail::payload_of(&mail);
+    if take_refused(owner, &key) {
         return None;
     }
-    let f = inbox_framer(p, owner, job_id, kernel);
-    if f.is_none() && gate_refuses(p, owner, kernel) {
+    let f = inbox_framer(p, owner, kernel);
+    if f.is_none() {
         // Dropped on the live gate before the handler noted it (the handler runs
         // after the fanout): let its late note cancel against this.
-        note_dropped_early(owner, p);
+        note_dropped_early(owner, &key);
     }
     f
 }
@@ -393,13 +354,12 @@ pub async fn serve(
         match m.get("op").and_then(Value::as_str) {
             Some("send") => {
                 let target = m.get("target").and_then(Value::as_str).unwrap_or("");
-                // py `m.get("payload") or {}` — TRUTHINESS, so an explicit null, `0`
-                // or `[]` is an empty payload rather than a value the kernel has to
-                // make sense of.
-                let payload = match m.get("payload").filter(|v| py_truthy(v)) {
-                    Some(p) => p.clone(),
-                    None => json!({}),
-                };
+                // an absent or null payload is an empty one
+                let payload = m
+                    .get("payload")
+                    .filter(|v| !v.is_null())
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
                 // RELAYED UNTOUCHED, as python's `_serve_ctrl` relays it: one
                 // `kernel.send([{target, payload}])`, no tag added, nothing refused
                 // here — the kernel's gate is the only judge. This loop is a task
@@ -433,10 +393,11 @@ pub async fn serve(
             }
             Some("emit") => {
                 // A program emits on its OWNER agent — the one it runs as.
-                let payload = match m.get("payload").filter(|v| py_truthy(v)) {
-                    Some(p) => p.clone(),
-                    None => json!({}),
-                };
+                let payload = m
+                    .get("payload")
+                    .filter(|v| !v.is_null())
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
                 // a payload holding bytes is emitted WHOLE: watchers get the body
                 // at its path, as python's `kernel.emit` hands them the dict
                 let item = match payload_body(framed) {
@@ -527,7 +488,7 @@ pub async fn serve(
                 let drain = kernel.spawn_task(&owner, "inbox_drain", async move {
                     while let Some(p) = rx.recv().await {
                         let Some(k) = weak.upgrade() else { break };
-                        if let Some(f) = drain_verdict(&p.payload, &o, job_id, &k) {
+                        if let Some(f) = drain_verdict(&p.payload, &o, &k) {
                             push_item(&w, f, &p).await;
                         }
                     }
@@ -565,6 +526,11 @@ pub async fn serve(
     }
     if self_sub.take().is_some() {
         release_owner_inbox(&kernel, &owner, job_id).await;
+    }
+    // The program is over: the verbs it declared go with it (unless another job of
+    // the agent still runs its own).
+    if !crate::jobs::has_other_running_job(&owner, job_id) {
+        crate::mail::forget(&owner);
     }
 }
 

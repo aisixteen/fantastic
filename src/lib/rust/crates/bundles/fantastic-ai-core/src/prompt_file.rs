@@ -23,13 +23,6 @@ use fantastic_bundle::{py_repr, py_strip};
 use fantastic_kernel::{AgentId, Item, Kernel, Status, TaskId};
 use serde_json::{json, Map, Value};
 
-/// The refusal for a `file_bridge_id` the record cannot use.
-pub const FILE_BRIDGE_ID_REFUSAL: &str =
-    "file_bridge_id must be a non-empty file_bridge agent id — null clears it";
-/// The refusal for a `system_prompt_file` the record cannot use.
-pub const SYSTEM_PROMPT_FILE_REFUSAL: &str =
-    "system_prompt_file must be a non-empty path on the agent's file_bridge_id — null clears it";
-
 /// `system_prompt_file` is set and cannot be the block — the turn fails, said so.
 /// Python `PromptFileError(RuntimeError)`.
 #[derive(Debug, Clone)]
@@ -59,33 +52,16 @@ fn files() -> &'static Mutex<HashMap<String, FileState>> {
     FILES.get_or_init(Mutex::default)
 }
 
-fn non_blank<'a>(meta: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
-    meta.get(key)?.as_str().filter(|s| !py_strip(s).is_empty())
+fn named<'a>(meta: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
+    meta.get(key)?.as_str()
 }
 
 /// `(file_bridge_id, system_prompt_file)` when the record names both, or `None`.
 #[must_use]
 pub fn ref_of(meta: &Map<String, Value>) -> Option<(String, String)> {
-    let bridge = non_blank(meta, "file_bridge_id")?;
-    let path = non_blank(meta, "system_prompt_file")?;
+    let bridge = named(meta, "file_bridge_id")?;
+    let path = named(meta, "system_prompt_file")?;
     Some((bridge.to_string(), path.to_string()))
-}
-
-/// Why a written `file_bridge_id` / `system_prompt_file` is unusable, or `None`
-/// (null clears either).
-#[must_use]
-pub fn shape_error(meta: &Map<String, Value>) -> Option<String> {
-    for (name, refusal) in [
-        ("file_bridge_id", FILE_BRIDGE_ID_REFUSAL),
-        ("system_prompt_file", SYSTEM_PROMPT_FILE_REFUSAL),
-    ] {
-        match meta.get(name) {
-            None | Some(Value::Null) => {}
-            Some(_) if non_blank(meta, name).is_some() => {}
-            Some(_) => return Some(refusal.to_string()),
-        }
-    }
-    None
 }
 
 /// Why the file is not this agent's block right now, or `None`.
@@ -137,7 +113,7 @@ pub async fn text(
         if held.is_some() {
             drop_file(self_id, kernel).await;
         }
-        if let Some(path) = non_blank(&meta, "system_prompt_file") {
+        if let Some(path) = named(&meta, "system_prompt_file") {
             return Err(PromptFileError(format!(
                 "{self_id}: system_prompt_file {} is set but the record has no file_bridge_id \
                  — name the file_bridge it is read through",
@@ -194,15 +170,13 @@ async fn send(kernel: &Arc<Kernel>, target: &str, payload: Value) -> (Status, Va
 }
 
 fn why(status: Status, res: &Value) -> String {
-    res.get("error")
-        .filter(|e| fantastic_bundle::py_truthy(e))
-        .map_or_else(|| status.as_str().to_string(), fantastic_bundle::py_str)
+    fantastic_kernel::refusal::error_text(res).unwrap_or_else(|| status.as_str().to_string())
 }
 
 fn failed(status: Status, res: &Value) -> bool {
     status != Status::Completed
         || !res.is_object()
-        || res.get("error").is_some_and(fantastic_bundle::py_truthy)
+        || res.get("error").is_some_and(|e| !e.is_null())
 }
 
 async fn arm(self_id: &AgentId, kernel: &Arc<Kernel>, file: (String, String)) {
@@ -242,10 +216,7 @@ async fn arm(self_id: &AgentId, kernel: &Arc<Kernel>, file: (String, String)) {
         kernel.remove_inbox(&inbox);
         set_error(format!(
             "{bridge} watch: {}",
-            denial
-                .get("error")
-                .map(fantastic_bundle::py_str)
-                .unwrap_or_default()
+            fantastic_kernel::refusal::error_text(&denial).unwrap_or_default()
         ));
         let _ = send(
             kernel,

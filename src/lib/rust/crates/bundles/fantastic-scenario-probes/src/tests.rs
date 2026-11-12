@@ -1,26 +1,59 @@
-//! Unit tests for the scenario fixtures. Every text pinned here is the python
-//! probe's (`e2e/probes/*/tools.py`) — a fixture that refuses differently from
-//! python makes a scenario measure the FIXTURE instead of the kernel.
+//! Unit tests for the scenario fixtures. Every call goes through the kernel, so each
+//! probe's own entry (`Call::parse`) judges it the way it does in a scenario: a
+//! fixture that refuses differently from python makes a scenario measure the
+//! FIXTURE instead of the kernel.
 
 use super::*;
-use fantastic_kernel::Agent;
+use fantastic_kernel::{Agent, Item};
 use serde_json::Map;
 
+/// A kernel with every probe registered under its module, and a root.
 fn kernel() -> Arc<Kernel> {
-    Arc::new(Kernel::new())
+    let mut k = Kernel::new();
+    k.bundles
+        .register(DISPENSER_MODULE, DispenserProbe::default());
+    k.bundles.register(PLANT_MODULE, PlantProbe::default());
+    k.bundles
+        .register(PURCHASE_MODULE, PurchaseProbe::default());
+    k.bundles.register(USER_MODULE, UserProbe::default());
+    k.bundles.register(ORACLE_MODULE, OracleProbe::default());
+    k.bundles.register(SLOW_MODULE, SlowProbe::default());
+    k.bundles.register(VAULT_MODULE, VaultProbe::default());
+    let k = Arc::new(k);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        json!({"callable_by": {"user_send": "*", "user_granting": "*"}})
+            .as_object()
+            .cloned()
+            .unwrap(),
+        std::env::temp_dir().join("fantastic-probe-tests"),
+        true,
+    );
+    k.register(Arc::clone(&root));
+    k.set_root(root);
+    k
 }
 
-/// A registered agent carrying `meta`, so a probe can read its own record.
-fn agent(kernel: &Arc<Kernel>, id: &str, meta: Value) -> AgentId {
+/// Every caller may reach the agent, and the agent may reach the root.
+fn wide_open(mut meta: Map<String, Value>) -> Map<String, Value> {
+    meta.insert("callable_by".to_string(), json!({"*": "*"}));
+    meta.insert("can_call".to_string(), json!({"kernel_state": "*"}));
+    meta
+}
+
+/// A registered agent of `module` carrying `meta`, so a probe can read its own record.
+fn agent(kernel: &Arc<Kernel>, id: &str, module: &str, meta: Value) -> AgentId {
     let map = match meta {
         Value::Object(m) => m,
         _ => Map::new(),
     };
     let a = Agent::new(
         AgentId::from(id),
-        None,
-        None,
-        map,
+        Some(module.to_string()),
+        Some(AgentId::from("kernel_state")),
+        wide_open(map),
         std::env::temp_dir().join("fantastic-probe-tests"),
         true,
     );
@@ -28,100 +61,141 @@ fn agent(kernel: &Arc<Kernel>, id: &str, meta: Value) -> AgentId {
     a.id.clone()
 }
 
-/// A root, so `user_probe`'s grants have somewhere to go.
-fn with_root(kernel: &Arc<Kernel>) {
-    let root = Agent::new(
-        AgentId::from("kernel_state"),
-        None,
-        None,
-        Map::new(),
-        std::env::temp_dir().join("fantastic-probe-tests"),
-        true,
-    );
-    kernel.register(Arc::clone(&root));
-    kernel.set_root(root);
-}
-
-async fn call<B: Bundle>(b: &B, kernel: &Arc<Kernel>, id: &AgentId, payload: Value) -> Value {
-    b.handle(id, &payload, kernel)
+async fn call(kernel: &Arc<Kernel>, id: &AgentId, payload: Value) -> Value {
+    kernel
+        .send(vec![Item::new(id.clone(), payload)])
         .await
-        .expect("no raise")
-        .expect("a reply")
+        .remove(0)
+        .result
 }
 
-// ── reflect bytes ───────────────────────────────────────────────────────────
+// ── reflect ─────────────────────────────────────────────────────────────────
 
-/// The plant's `count` doc is python's.
 #[tokio::test]
-async fn plant_reflect_is_pythons_bytes() {
+async fn plant_reflect_names_the_plant() {
     let k = kernel();
-    let id = AgentId::from("flaky_plant");
-    let r = call(&PlantProbe::default(), &k, &id, json!({"type": "reflect"})).await;
+    let id = agent(&k, "flaky_plant", PLANT_MODULE, json!({}));
+    let r = call(&k, &id, json!({"type": "reflect"})).await;
+    assert_eq!(r["id"], "flaky_plant", "{r}");
     assert_eq!(
-        r,
-        json!({
-            "id": "flaky_plant",
-            "sentence": "Industrial plant. Its pump is unreliable; its valve has seized.",
-        })
+        r["sentence"], "Industrial plant. Its pump is unreliable; its valve has seized.",
+        "{r}"
     );
 }
 
-/// The desk's `count` doc is python's, "ever" included.
 #[tokio::test]
-async fn purchase_reflect_is_pythons_bytes() {
+async fn purchase_reflect_names_the_desk() {
     let k = kernel();
-    let id = AgentId::from("purchase_desk");
-    let r = call(
-        &PurchaseProbe::default(),
+    let id = agent(&k, "purchase_desk", PURCHASE_MODULE, json!({}));
+    let r = call(&k, &id, json!({"type": "reflect"})).await;
+    assert_eq!(
+        r["sentence"], "Purchase desk. Spends real money — only a person may press the button.",
+        "{r}"
+    );
+}
+
+#[tokio::test]
+async fn slow_reflect_names_the_work() {
+    let k = kernel();
+    let id = agent(&k, "slow", SLOW_MODULE, json!({}));
+    let r = call(&k, &id, json!({"type": "reflect"})).await;
+    assert_eq!(
+        r["sentence"],
+        "Probe work: `slow` (never finishes by itself), `work` (counts), \
+         `fail` (raises), `sleep` (takes `seconds`).",
+        "{r}"
+    );
+}
+
+/// Every verb of every probe is rendered by `reflect` from its declaration.
+#[tokio::test]
+async fn reflect_renders_every_declared_verb() {
+    let k = kernel();
+    let rows: [(&str, &str, &[&str]); 7] = [
+        ("d", DISPENSER_MODULE, &["dispense", "count"]),
+        ("p", PLANT_MODULE, &["pump", "valve", "count"]),
+        ("b", PURCHASE_MODULE, &["buy", "count"]),
+        ("u", USER_MODULE, &["inquiry", "inquiries", "send"]),
+        ("o", ORACLE_MODULE, &["ask"]),
+        (
+            "s",
+            SLOW_MODULE,
+            &["slow", "work", "fail", "started", "sleep"],
+        ),
+        ("v", VAULT_MODULE, &["open", "count"]),
+    ];
+    for (id, module, verbs) in rows {
+        let id = agent(&k, id, module, json!({}));
+        let r = call(&k, &id, json!({"type": "reflect"})).await;
+        for verb in verbs {
+            assert!(r["verbs"].get(verb).is_some(), "{module} {verb}: {r}");
+        }
+    }
+}
+
+/// The vault's detailed docs teach the code; its one-liner does not.
+#[tokio::test]
+async fn vault_docs_teach_the_code_only_in_detail() {
+    let k = kernel();
+    let id = agent(
         &k,
-        &id,
-        json!({"type": "reflect"}),
+        "vault",
+        VAULT_MODULE,
+        json!({"serial": "1", "secret": "s"}),
+    );
+    let r = call(&k, &id, json!({"type": "reflect"})).await;
+    let line = r["verbs"]["open"].as_str().unwrap();
+    assert!(line.contains("code:string (req)"), "{line}");
+    let d = call(
+        &k,
+        &AgentId::from("kernel_state"),
+        json!({"type": "docs", "of": "vault", "verb": "open", "tier": "detailed"}),
     )
     .await;
-    assert_eq!(
-        r,
-        json!({
-            "id": "purchase_desk",
-            "sentence": "Purchase desk. Spends real money — only a person may press the button.",
-        })
-    );
+    assert!(d.to_string().contains("BACKWARDS"), "{d}");
 }
 
 // ── refusals and raises ─────────────────────────────────────────────────────
 
 /// The plant RAISES, and the kernel renders the exception class.
 #[tokio::test]
-async fn plant_failures_render_pythons_error() {
+async fn plant_failures_render_the_error() {
     let k = kernel();
-    let id = AgentId::from("flaky_plant");
-    let p = PlantProbe::default();
+    let id = agent(&k, "flaky_plant", PLANT_MODULE, json!({}));
     for _ in 0..2 {
-        let e = p
-            .handle(&id, &json!({"type": "pump"}), &k)
-            .await
-            .expect_err("the first two pumps raise");
-        assert_eq!(e.to_string(), "RuntimeError: pump stalled");
+        let r = call(&k, &id, json!({"type": "pump"})).await;
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("RuntimeError: pump stalled"),
+            "the first two pumps raise: {r}"
+        );
     }
     // FLAKY, not broken: the third attempt works.
-    let r = call(&p, &k, &id, json!({"type": "pump"})).await;
-    assert_eq!(r["pumped"], json!(true));
-    let e = p
-        .handle(&id, &json!({"type": "valve"}), &k)
-        .await
-        .expect_err("the valve never opens");
-    assert_eq!(e.to_string(), "RuntimeError: valve is rusted shut");
+    let r = call(&k, &id, json!({"type": "pump"})).await;
+    assert_eq!(r["pumped"], json!(true), "{r}");
+    let r = call(&k, &id, json!({"type": "valve"})).await;
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .contains("RuntimeError: valve is rusted shut"),
+        "{r}"
+    );
+    // pump x3 + valve
+    assert_eq!(call(&k, &id, json!({"type": "count"})).await["count"], 4);
 }
 
 /// `secrets.token_hex(3)`: six hex characters, not eight.
 #[tokio::test]
 async fn plant_serial_is_six_hex() {
     let k = kernel();
-    let id = AgentId::from("flaky_plant");
-    let p = PlantProbe::default();
+    let id = agent(&k, "flaky_plant", PLANT_MODULE, json!({}));
     for _ in 0..2 {
-        let _ = p.handle(&id, &json!({"type": "pump"}), &k).await;
+        let _ = call(&k, &id, json!({"type": "pump"})).await;
     }
-    let r = call(&p, &k, &id, json!({"type": "pump"})).await;
+    let r = call(&k, &id, json!({"type": "pump"})).await;
     let serial = r["serial"].as_str().expect("a serial").to_string();
     assert_eq!(serial.len(), 6, "{serial}");
     assert!(
@@ -132,187 +206,249 @@ async fn plant_serial_is_six_hex() {
     );
 }
 
-/// `unknown verb 'zap'`, python's repr: a quote inside the verb switches
-/// the quoting, which rust's `{:?}` never does.
+/// The dispenser and the desk count their side effects and echo their argument.
 #[tokio::test]
-async fn unknown_verb_is_python_repr() {
+async fn dispenser_and_desk_count_what_they_do() {
     let k = kernel();
-    let d = AgentId::from("dispenser");
-    let p = AgentId::from("flaky_plant");
-    let b = AgentId::from("purchase_desk");
-    assert_eq!(
-        call(&DispenserProbe::default(), &k, &d, json!({"type": "zap"})).await,
-        json!({"error": "dispenser_probe: unknown verb 'zap'"})
-    );
-    assert_eq!(
-        call(&PlantProbe::default(), &k, &p, json!({"type": "zap"})).await,
-        json!({"error": "plant_probe: unknown verb 'zap'"})
-    );
-    assert_eq!(
-        call(&PurchaseProbe::default(), &k, &b, json!({"type": "zap"})).await,
-        json!({"error": "purchase_probe: unknown verb 'zap'"})
-    );
-    assert_eq!(
-        call(&DispenserProbe::default(), &k, &d, json!({"type": "it's"})).await,
-        json!({"error": "dispenser_probe: unknown verb \"it's\""})
-    );
+    let d = agent(&k, "dispenser", DISPENSER_MODULE, json!({}));
+    let r = call(&k, &d, json!({"type": "dispense", "job": "j1"})).await;
+    assert_eq!(r["coin"], 1, "{r}");
+    assert_eq!(r["job"], "j1", "{r}");
+    assert_eq!(r["receipt"].as_str().unwrap().len(), 8, "{r}");
+    let _ = call(&k, &d, json!({"type": "dispense"})).await;
+    assert_eq!(call(&k, &d, json!({"type": "count"})).await["count"], 2);
+    let b = agent(&k, "purchase_desk", PURCHASE_MODULE, json!({}));
+    let r = call(&k, &b, json!({"type": "buy", "item": "tea"})).await;
+    assert_eq!(r["bought"], "tea", "{r}");
+    assert_eq!(r["n"], 1, "{r}");
+    assert_eq!(call(&k, &b, json!({"type": "count"})).await["count"], 1);
 }
 
-/// The human's unknown-verb refusal, python repr and all.
+/// An unknown verb is refused by each probe's own entry, naming what it answers; an
+/// argument it does not take, or one of the wrong type, is refused by name.
 #[tokio::test]
-async fn user_unknown_verb_is_python_repr() {
+async fn every_probe_refuses_by_its_own_entry() {
     let k = kernel();
-    let id = agent(&k, "user_unknown", json!({}));
-    assert_eq!(
-        call(&UserProbe::default(), &k, &id, json!({"type": "zap"})).await,
-        json!({"error": "user_probe: unknown verb 'zap'", "reason": "unhandled", "verb": "zap"})
-    );
-}
-
-/// The oracle names its verbs as python's `sorted(VERBS)` prints them.
-#[tokio::test]
-async fn oracle_unknown_verb_names_its_verbs_like_python() {
-    let k = kernel();
-    let id = agent(&k, "oracle_unknown", json!({}));
-    assert_eq!(
-        call(&OracleProbe::default(), &k, &id, json!({"type": "zap"})).await,
-        json!({
-            "error": "oracle_probe: unknown verb 'zap'; verbs: ['ask']",
-            "reason": "unhandled",
-        })
-    );
-}
-
-/// The `kind` refusal lists python's list, and a present
-/// non-string `kind` is refused rather than silently defaulted.
-#[tokio::test]
-async fn inquiry_kind_refusal_lists_python_list() {
-    let k = kernel();
-    let id = agent(&k, "user_kind", json!({"answer": "yes"}));
-    let p = UserProbe::default();
-    let refusal = json!({
-        "error": "user_probe: inquiry: `kind` must be one of ['text', 'single', 'multi', 'confirm']",
-        "reason": "bad_arg",
-        "arg": "kind",
-    });
-    assert_eq!(
-        call(
-            &p,
-            &k,
-            &id,
-            json!({"type": "inquiry", "text": "q", "kind": "essay"})
-        )
-        .await,
-        refusal
-    );
-    // A present non-string is not in KINDS either.
-    assert_eq!(
-        call(
-            &p,
-            &k,
-            &id,
-            json!({"type": "inquiry", "text": "q", "kind": 5})
-        )
-        .await,
-        refusal
-    );
-    assert_eq!(
-        call(
-            &p,
-            &k,
-            &id,
-            json!({"type": "inquiry", "text": "q", "kind": null})
-        )
-        .await,
-        refusal
-    );
-    // An ABSENT kind takes python's `"text"` default and passes.
-    let ok = call(&p, &k, &id, json!({"type": "inquiry", "text": "q"})).await;
-    assert_eq!(ok["accepted"], json!(true), "{ok}");
-}
-
-/// `send` refuses a payload whose `type` is falsy, not just absent.
-#[tokio::test]
-async fn user_send_refuses_a_falsy_type() {
-    let k = kernel();
-    let id = agent(&k, "user_send", json!({}));
-    let p = UserProbe::default();
-    let refusal = json!({
-        "error": "user_probe: send: `payload` must be a dict naming a `type`",
-        "reason": "bad_arg",
-        "arg": "payload",
-    });
-    for t in [json!(""), json!(0), json!(null), json!(false)] {
-        assert_eq!(
-            call(
-                &p,
-                &k,
-                &id,
-                json!({"type": "send", "target": "x", "payload": {"type": t}})
-            )
-            .await,
-            refusal,
-            "a falsy type must be refused: {t}"
+    let d = agent(&k, "dispenser", DISPENSER_MODULE, json!({}));
+    let r = call(&k, &d, json!({"type": "zap"})).await;
+    assert_eq!(r["reason"], "unhandled", "{r}");
+    assert_eq!(r["verb"], "zap", "{r}");
+    assert!(r["error"].as_str().unwrap().contains("dispense"), "{r}");
+    let r = call(&k, &d, json!({"type": "dispense", "jobs": "x"})).await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "jobs", "{r}");
+    let r = call(&k, &d, json!({"type": "dispense", "job": 5})).await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "job", "{r}");
+    for (id, module, listed) in [
+        ("p", PLANT_MODULE, "pump"),
+        ("b", PURCHASE_MODULE, "buy"),
+        ("u", USER_MODULE, "inquiry"),
+        ("o", ORACLE_MODULE, "ask"),
+        ("s", SLOW_MODULE, "sleep"),
+        ("v", VAULT_MODULE, "open"),
+    ] {
+        let id = agent(&k, id, module, json!({}));
+        let r = call(&k, &id, json!({"type": "zap"})).await;
+        assert_eq!(r["reason"], "unhandled", "{module}: {r}");
+        assert_eq!(r["verb"], "zap", "{module}: {r}");
+        assert!(
+            r["error"].as_str().unwrap().contains(listed),
+            "{module}: {r}"
         );
     }
 }
 
+/// `kind` is one of the four shapes, refused by name otherwise; an absent one passes.
+#[tokio::test]
+async fn inquiry_kind_is_one_of_the_four_shapes() {
+    let k = kernel();
+    let id = agent(&k, "user_kind", USER_MODULE, json!({"answer": "yes"}));
+    for kind in [json!("essay"), json!(5), json!("Text")] {
+        let r = call(
+            &k,
+            &id,
+            json!({"type": "inquiry", "text": "q", "reply_client_id": "cli", "kind": kind.clone()}),
+        )
+        .await;
+        assert_eq!(r["reason"], "bad_arg", "{kind}: {r}");
+        assert_eq!(r["arg"], "kind", "{kind}: {r}");
+    }
+    for kind in ["text", "single", "multi", "confirm"] {
+        let r = call(
+            &k,
+            &id,
+            json!({"type": "inquiry", "text": "q", "reply_client_id": "cli", "kind": kind}),
+        )
+        .await;
+        assert_eq!(r["accepted"], json!(true), "{kind}: {r}");
+    }
+    let ok = call(
+        &k,
+        &id,
+        json!({"type": "inquiry", "text": "q", "reply_client_id": "cli"}),
+    )
+    .await;
+    assert_eq!(ok["accepted"], json!(true), "{ok}");
+}
+
+/// An inquiry needs text; a blank one is refused naming `text`.
+#[tokio::test]
+async fn inquiry_text_is_required_and_not_blank() {
+    let k = kernel();
+    let id = agent(&k, "user_text", USER_MODULE, json!({"answer": "yes"}));
+    let r = call(
+        &k,
+        &id,
+        json!({"type": "inquiry", "reply_client_id": "cli"}),
+    )
+    .await;
+    assert_eq!(r["reason"], "missing_arg", "{r}");
+    assert_eq!(r["arg"], "text", "{r}");
+    // the reply client defaults to `cli`
+    let r = call(&k, &id, json!({"type": "inquiry", "text": "q"})).await;
+    assert_eq!(r["accepted"], true, "{r}");
+    // an empty reply client is refused by name, not turned into `cli`
+    let r = call(
+        &k,
+        &id,
+        json!({"type": "inquiry", "text": "q", "reply_client_id": ""}),
+    )
+    .await;
+    assert_eq!(r["arg"], "reply_client_id", "{r}");
+    for blank in ["", "  \n\t "] {
+        let r = call(
+            &k,
+            &id,
+            json!({"type": "inquiry", "text": blank, "reply_client_id": "cli"}),
+        )
+        .await;
+        assert_eq!(r["arg"], "text", "{blank:?}: {r}");
+    }
+    // an unwired human says so
+    let bare = agent(&k, "user_bare", USER_MODULE, json!({}));
+    let r = call(
+        &k,
+        &bare,
+        json!({"type": "inquiry", "text": "q", "reply_client_id": "cli"}),
+    )
+    .await;
+    assert_eq!(r["reason"], "not_connected", "{r}");
+}
+
+/// `send` needs a target and a payload that names a `type`.
+#[tokio::test]
+async fn user_send_needs_a_target_and_a_typed_payload() {
+    let k = kernel();
+    let id = agent(&k, "user_send", USER_MODULE, json!({}));
+    for payload in [
+        json!({}),
+        json!({"type": 0}),
+        json!({"type": null}),
+        json!({"type": false}),
+        json!({"type": ""}),
+    ] {
+        let r = call(
+            &k,
+            &id,
+            json!({"type": "send", "target": "x", "payload": payload.clone()}),
+        )
+        .await;
+        assert!(
+            r["reason"] == "bad_arg" || r["reason"] == "missing_arg",
+            "{payload}: {r}"
+        );
+        assert!(
+            r["arg"].as_str().unwrap().starts_with("payload"),
+            "{payload}: {r}"
+        );
+    }
+    let r = call(
+        &k,
+        &id,
+        json!({"type": "send", "target": "", "payload": {"type": "reflect"}}),
+    )
+    .await;
+    assert_eq!(r["arg"], "target", "{r}");
+    // a good one is dispatched as the human
+    let r = call(
+        &k,
+        &id,
+        json!({"type": "send", "target": "kernel_state", "payload": {"type": "reflect", "tree": "none"}}),
+    )
+    .await;
+    assert_eq!(r["sent"], "kernel_state", "{r}");
+    assert_eq!(r["result"]["id"], "kernel_state", "{r}");
+}
+
 // ── tallies ─────────────────────────────────────────────────────────────────
 
-/// The inquiry reply carries `granted`, the count of grants APPLIED. The
-/// reply is the ACCEPTANCE (fully async); the answer itself
-/// arrives later as the human's own message under the inquiry's pid.
+/// The inquiry reply carries `granted`, the count of grants APPLIED. The reply is
+/// the ACCEPTANCE (fully async); the answer itself arrives later as the human's own
+/// message under the inquiry's pid.
 #[tokio::test]
 async fn inquiry_reply_carries_granted() {
     let k = kernel();
-    with_root(&k);
-    let p = UserProbe::default();
-    let plain = agent(&k, "user_plain", json!({"answer": "yes"}));
-    assert_eq!(
-        call(&p, &k, &plain, json!({"type": "inquiry", "text": "ok?"})).await,
-        json!({"accepted": true, "re": null, "request_id": null, "inquiries": 1, "granted": 0})
-    );
+    let plain = agent(&k, "user_plain", USER_MODULE, json!({"answer": "yes"}));
+    let r = call(
+        &k,
+        &plain,
+        json!({"type": "inquiry", "text": "ok?", "reply_client_id": "cli"}),
+    )
+    .await;
+    assert_eq!(r["accepted"], json!(true), "{r}");
+    assert_eq!(r["inquiries"], json!(1), "{r}");
+    assert_eq!(r["granted"], json!(0), "{r}");
+    assert_eq!(r["request_id"], Value::Null, "{r}");
     // One grant on the record, applied before the answer.
     let granting = agent(
         &k,
         "user_granting",
+        USER_MODULE,
         json!({"answer": "yes", "grants": [{"type": "reflect", "tree": "none"}]}),
     );
-    let r = call(&p, &k, &granting, json!({"type": "inquiry", "text": "ok?"})).await;
-    assert_eq!(r["granted"], json!(1));
-    assert_eq!(r["accepted"], json!(true));
+    let r = call(
+        &k,
+        &granting,
+        json!({"type": "inquiry", "text": "ok?", "reply_client_id": "cli"}),
+    )
+    .await;
+    assert_eq!(r["granted"], json!(1), "{r}");
+    assert_eq!(r["accepted"], json!(true), "{r}");
 }
 
 /// Two humans keep two tallies, and their proposals stay apart.
 #[tokio::test]
 async fn user_tallies_are_per_agent() {
     let k = kernel();
-    with_root(&k);
-    let p = UserProbe::default();
-    let u1 = agent(&k, "u1", json!({"answer": "a1"}));
-    let u2 = agent(&k, "u2", json!({"answer": "a2"}));
+    let u1 = agent(&k, "u1", USER_MODULE, json!({"answer": "a1"}));
+    let u2 = agent(&k, "u2", USER_MODULE, json!({"answer": "a2"}));
     let act1 = json!({"target": "purchase_desk", "payload": {"type": "buy"}});
     let r1 = call(
-        &p,
         &k,
         &u1,
-        json!({"type": "inquiry", "text": "q", "action": act1}),
+        json!({"type": "inquiry", "text": "q", "reply_client_id": "cli", "action": act1}),
     )
     .await;
-    let r2 = call(&p, &k, &u2, json!({"type": "inquiry", "text": "q"})).await;
-    assert_eq!(r1["inquiries"], json!(1));
-    assert_eq!(r2["inquiries"], json!(1));
+    let r2 = call(
+        &k,
+        &u2,
+        json!({"type": "inquiry", "text": "q", "reply_client_id": "cli"}),
+    )
+    .await;
+    assert_eq!(r1["inquiries"], json!(1), "{r1}");
+    assert_eq!(r2["inquiries"], json!(1), "{r2}");
     assert_eq!(
-        call(&p, &k, &u1, json!({"type": "inquiries"})).await,
+        call(&k, &u1, json!({"type": "inquiries"})).await,
         json!({"inquiries": 1, "proposals": [act1]})
     );
     assert_eq!(
-        call(&p, &k, &u2, json!({"type": "inquiries"})).await,
+        call(&k, &u2, json!({"type": "inquiries"})).await,
         json!({"inquiries": 1, "proposals": []})
     );
     // …and the reflect tally is the same per-agent count.
     assert_eq!(
-        call(&p, &k, &u2, json!({"type": "reflect"})).await["inquiries"],
+        call(&k, &u2, json!({"type": "reflect"})).await["inquiries"],
         json!(1)
     );
 }
@@ -321,85 +457,53 @@ async fn user_tallies_are_per_agent() {
 #[tokio::test]
 async fn oracle_tallies_per_agent() {
     let k = kernel();
-    let p = OracleProbe::default();
-    let o1 = agent(&k, "o1", json!({"lines": ["Dana is in room 4"]}));
-    let o2 = agent(&k, "o2", json!({"lines": ["Dana is in room 4"]}));
+    let o1 = agent(
+        &k,
+        "o1",
+        ORACLE_MODULE,
+        json!({"lines": ["Dana is in room 4"]}),
+    );
+    let o2 = agent(
+        &k,
+        "o2",
+        ORACLE_MODULE,
+        json!({"lines": ["Dana is in room 4"]}),
+    );
     for _ in 0..2 {
         let _ = call(
-            &p,
             &k,
             &o1,
-            json!({"type": "ask", "question": "which room Dana"}),
+            json!({"type": "ask", "question": "which room Dana", "limit": 6}),
         )
         .await;
     }
     let _ = call(
-        &p,
         &k,
         &o2,
-        json!({"type": "ask", "question": "which room Dana"}),
+        json!({"type": "ask", "question": "which room Dana", "limit": 6}),
     )
     .await;
     assert_eq!(
-        call(&p, &k, &o1, json!({"type": "reflect"})).await["asked"],
+        call(&k, &o1, json!({"type": "reflect"})).await["asked"],
         json!(2)
     );
     assert_eq!(
-        call(&p, &k, &o2, json!({"type": "reflect"})).await["asked"],
+        call(&k, &o2, json!({"type": "reflect"})).await["asked"],
         json!(1)
     );
 }
 
-// ── oracle rendering and coercion ───────────────────────────────────────────
+// ── oracle ──────────────────────────────────────────────────────────────────
 
-/// A non-string ledger line is rendered with python's `str()`: a dict
-/// reads `{\'a\': \'alpha\'}`, not JSON's `{"a":"alpha"}`.
+/// `limit` is an integer of 1 to 20, six when absent; 0 or less and a value of another
+/// type is refused by name, never coerced.
 #[tokio::test]
-async fn oracle_renders_non_string_lines_with_python_str() {
-    let k = kernel();
-    let id = agent(
-        &k,
-        "oracle_str",
-        json!({"lines": [777, true, null, {"a": "alpha"}]}),
-    );
-    let r = call(
-        &OracleProbe::default(),
-        &k,
-        &id,
-        json!({"type": "ask", "question": "true none 777 alpha"}),
-    )
-    .await;
-    // One hit each, so python's `(-hits, line)` sort orders them by the RENDERED
-    // line — which is the rendering this test is about.
-    assert_eq!(
-        r,
-        json!({
-            "answers": ["777", "None", "True", "{\'a\': \'alpha\'}"],
-            "matched": 4,
-        })
-    );
-}
-
-/// `limit` is python's `int(x or 6)`, clamped to 1..=20, and an
-/// unparsable value falls back to 6 rather than raising.
-#[tokio::test]
-async fn oracle_limit_coerces_like_python() {
+async fn oracle_limit_is_bounded_and_typed() {
     let k = kernel();
     let lines: Vec<String> = (0..25).map(|i| format!("fact number {i} here")).collect();
-    let id = agent(&k, "oracle_limit", json!({"lines": lines}));
-    let p = OracleProbe::default();
-    for (limit, want) in [
-        (json!("3"), 3),
-        (json!(0), 6),
-        (json!("x"), 6),
-        (json!(99), 20),
-        (json!(2.9), 2),
-        (json!(true), 1),
-        (json!(-5), 1),
-        (json!(null), 6),
-    ] {
+    let id = agent(&k, "oracle_limit", ORACLE_MODULE, json!({"lines": lines}));
+    for (limit, want) in [(json!(3), 3), (json!(20), 20)] {
         let r = call(
-            &p,
             &k,
             &id,
             json!({"type": "ask", "question": "fact here", "limit": limit}),
@@ -408,79 +512,126 @@ async fn oracle_limit_coerces_like_python() {
         assert_eq!(
             r["answers"].as_array().expect("answers").len(),
             want,
-            "limit {limit} must page {want}"
+            "limit {limit} must page {want}: {r}"
         );
         assert_eq!(r["matched"], json!(25));
     }
-    // Absent is python's `or 6` too.
-    let r = call(&p, &k, &id, json!({"type": "ask", "question": "fact here"})).await;
+    for wrong in [
+        json!("3"),
+        json!(2.9),
+        json!(true),
+        json!("x"),
+        json!(0),
+        json!(-5),
+        json!(99),
+    ] {
+        let r = call(
+            &k,
+            &id,
+            json!({"type": "ask", "question": "fact here", "limit": wrong.clone()}),
+        )
+        .await;
+        assert_eq!(r["reason"], "bad_arg", "{wrong}: {r}");
+        assert_eq!(r["arg"], "limit", "{wrong}: {r}");
+    }
+    let r = call(&k, &id, json!({"type": "ask", "question": "fact here"})).await;
+    assert_eq!(r["answers"].as_array().expect("answers").len(), 6, "{r}");
+    let r = call(
+        &k,
+        &id,
+        json!({"type": "ask", "question": "fact here", "limit": 6}),
+    )
+    .await;
     assert_eq!(r["answers"].as_array().expect("answers").len(), 6);
+    // a question is text; a blank one is refused, an unwired oracle says so
+    for blank in ["", " \t\n"] {
+        let r = call(
+            &k,
+            &id,
+            json!({"type": "ask", "question": blank, "limit": 6}),
+        )
+        .await;
+        assert_eq!(r["arg"], "question", "{blank:?}: {r}");
+    }
+    let r = call(&k, &id, json!({"type": "ask", "question": 5, "limit": 6})).await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    let bare = agent(&k, "oracle_bare", ORACLE_MODULE, json!({}));
+    let r = call(
+        &k,
+        &bare,
+        json!({"type": "ask", "question": "q q q", "limit": 6}),
+    )
+    .await;
+    assert_eq!(r["reason"], "not_connected", "{r}");
+}
+
+// ── vault ───────────────────────────────────────────────────────────────────
+
+/// The vault opens with `V-` and its serial reversed, and counts its openings.
+#[tokio::test]
+async fn vault_opens_only_with_the_right_code() {
+    let k = kernel();
+    let id = agent(
+        &k,
+        "vault",
+        VAULT_MODULE,
+        json!({"serial": "123", "secret": "gold"}),
+    );
+    let r = call(&k, &id, json!({"type": "open", "code": "nope"})).await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "code", "{r}");
+    assert_eq!(call(&k, &id, json!({"type": "count"})).await["opened"], 0);
+    let r = call(&k, &id, json!({"type": "open", "code": " V-321 "})).await;
+    assert_eq!(r, json!({"secret": "gold"}));
+    assert_eq!(call(&k, &id, json!({"type": "count"})).await["opened"], 1);
+    let r = call(&k, &id, json!({"type": "reflect"})).await;
+    assert_eq!(r["serial"], "123", "{r}");
+    assert_eq!(r["opened"], 1, "{r}");
+    let r = call(&k, &id, json!({"type": "open"})).await;
+    assert_eq!(r["reason"], "missing_arg", "{r}");
 }
 
 // ── slow ────────────────────────────────────────────────────────────────────
 
-/// The slow probe's reflect is python's, verb order included.
-#[tokio::test]
-async fn slow_reflect_is_pythons_bytes() {
-    let k = kernel();
-    let id = AgentId::from("slow");
-    let r = call(&SlowProbe::default(), &k, &id, json!({"type": "reflect"})).await;
-    assert_eq!(
-        serde_json::to_string(&r).unwrap(),
-        serde_json::to_string(&json!({
-            "id": "slow",
-            "sentence": "Probe work: `slow` (never finishes by itself), `work` (counts), \
-                         `fail` (raises), `sleep` (takes `seconds`).",
-        }))
-        .unwrap()
-    );
-}
-
-/// `sleep` takes the stated time and echoes the value; a missing, boolean or
+/// `sleep` takes the stated time and echoes the value; a missing, boolean, text or
 /// negative `seconds` is refused naming the arg; `fail` raises python's class.
 #[tokio::test]
 async fn slow_sleep_work_and_fail_are_pythons() {
     let k = kernel();
-    let id = AgentId::from("slow");
-    let p = SlowProbe::default();
+    let id = agent(&k, "slow", SLOW_MODULE, json!({}));
     let t0 = std::time::Instant::now();
-    let r = call(&p, &k, &id, json!({"type": "sleep", "seconds": 0.2})).await;
+    let r = call(&k, &id, json!({"type": "sleep", "seconds": 0.2})).await;
     assert_eq!(r, json!({"slept": 0.2}));
     assert!(t0.elapsed() >= std::time::Duration::from_millis(200));
     assert_eq!(
-        call(&p, &k, &id, json!({"type": "sleep", "seconds": 0})).await,
+        call(&k, &id, json!({"type": "sleep", "seconds": 0})).await,
         json!({"slept": 0})
     );
-    for bad in [json!(null), json!(true), json!(-1), json!("2")] {
-        let r = call(&p, &k, &id, json!({"type": "sleep", "seconds": bad})).await;
-        assert_eq!(
-            r,
-            json!({
-                "error": "slow_probe: sleep needs seconds, a non-negative number",
-                "reason": "bad_arg",
-                "arg": "seconds",
-            }),
-            "{bad}"
+    for bad in [json!(null), json!(true), json!("2")] {
+        let r = call(&k, &id, json!({"type": "sleep", "seconds": bad.clone()})).await;
+        assert!(
+            r["reason"] == "bad_arg" || r["reason"] == "missing_arg",
+            "{bad}: {r}"
         );
+        assert_eq!(r["arg"], "seconds", "{bad}: {r}");
     }
+    let r = call(&k, &id, json!({"type": "sleep", "seconds": -1})).await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "seconds", "{r}");
     assert_eq!(
-        call(&p, &k, &id, json!({"type": "work"})).await,
+        call(&k, &id, json!({"type": "work"})).await,
         json!({"runs": 1})
     );
     assert_eq!(
-        call(&p, &k, &id, json!({"type": "started"})).await,
+        call(&k, &id, json!({"type": "started"})).await,
         json!({"started": 0})
     );
-    let err = p
-        .handle(&id, &json!({"type": "fail"}), &k)
-        .await
-        .unwrap_err();
-    assert_eq!(
-        err.to_string(),
-        "RuntimeError: slow_probe: failed on purpose"
-    );
-    assert_eq!(
-        call(&p, &k, &id, json!({"type": "zap"})).await,
-        json!({"error": "slow_probe: unknown verb 'zap'", "reason": "unhandled"})
+    let r = call(&k, &id, json!({"type": "fail"})).await;
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .contains("RuntimeError: slow_probe: failed on purpose"),
+        "{r}"
     );
 }

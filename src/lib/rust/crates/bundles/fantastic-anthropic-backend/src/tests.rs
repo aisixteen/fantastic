@@ -313,16 +313,15 @@ fn stream_idle_seconds_defaults_and_is_validated() {
         m.insert("stream_idle_seconds".to_string(), v);
         m
     };
-    let default = fantastic_ai_core::provider::stream_idle_of(&Map::new()).expect("default");
+    let default = fantastic_ai_core::provider::stream_idle_of(&Map::new());
     assert_eq!(default, Duration::from_secs(60));
-    let set = fantastic_ai_core::provider::stream_idle_of(&meta(json!(2.5))).expect("set");
+    let set = fantastic_ai_core::provider::stream_idle_of(&meta(json!(2.5)));
     assert_eq!(set, Duration::from_millis(2500));
     for bad in [json!(0), json!(-1), json!("soon"), json!(true)] {
         let m = meta(bad.clone());
-        assert!(validate(&m, &Map::new()).is_some(), "{bad} is refused");
         assert!(
-            fantastic_ai_core::provider::stream_idle_of(&m).is_err(),
-            "{bad} is refused at the read too"
+            at_the_write(&m, &Map::new()).is_some_and(|e| e.contains("stream_idle_seconds")),
+            "{bad} is refused at the write"
         );
     }
 }
@@ -386,7 +385,8 @@ fn rec(extra: Value) -> Map<String, Value> {
 
 #[test]
 fn an_endpoint_and_a_store_are_all_a_record_needs() {
-    let required: Vec<&str> = record_schema()["fields"]
+    let declared = fantastic_kernel::verbs::record_fields(&RECORD);
+    let required: Vec<&str> = declared["fields"]
         .as_array()
         .unwrap()
         .iter()
@@ -398,28 +398,44 @@ fn an_endpoint_and_a_store_are_all_a_record_needs() {
     assert_eq!(validate(&rec(json!({})), &Map::new()), None);
 }
 
+
+/// What a write of `meta` to this bundle's record answers: the engine's refusal of a
+/// field, else the bundle's own check. `None`: taken.
+fn at_the_write(meta: &Map<String, Value>, record: &Map<String, Value>) -> Option<String> {
+    match fantastic_kernel::verbs::check_record(
+        "update_agent",
+        NAME,
+        meta,
+        &fantastic_kernel::declared::record::RECORD,
+        &RECORD,
+    ) {
+        Err(r) => Some(fantastic_kernel::refusal::error_text(&r).unwrap_or_default()),
+        Ok(()) => validate(meta, record),
+    }
+}
+
 #[test]
 fn a_write_the_backend_cannot_honour_is_refused() {
     for (meta, fragment) in [
         (
             json!({"max_tokens": 0}),
-            "max_tokens must be a positive int",
+            "max_tokens",
         ),
-        (json!({"thinking_budget": 512}), "below the API's 1024"),
+        (json!({"thinking_budget": 512}), "must be int >= 1024"),
         (
             json!({"thinking_budget": 4000, "max_tokens": 4000}),
             "not below max_tokens=4000",
         ),
         (
             json!({"temperature": "hot"}),
-            "temperature must be a number",
+            "temperature",
         ),
         (
             json!({"endpoint": "https://api.test/v1/chat"}),
             "max_tokens is left to the API, but the endpoint",
         ),
     ] {
-        let err = validate(meta.as_object().unwrap(), &rec(json!({}))).unwrap_or_default();
+        let err = at_the_write(meta.as_object().unwrap(), &rec(json!({}))).unwrap_or_default();
         assert!(err.contains(fragment), "{meta}: {err}");
     }
 }
@@ -547,7 +563,9 @@ async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let to = if fantastic_ai_core::remote_provider::is_chat_verb(&verb) {
+    let to = if verb != "boot"
+        && fantastic_ai_core::declared::chat::VERBS.iter().any(|v| v.name == verb)
+    {
         fantastic_ai_core::remote_provider::pair_chat(kernel, &AgentId::from(target)).await
     } else {
         AgentId::from(target)
@@ -1261,27 +1279,16 @@ async fn the_usage_log_gets_one_line_per_request() {
 #[test]
 fn the_new_fields_are_validated() {
     let rec = serde_json::Map::new();
-    let check = |m: Value| validate(m.as_object().unwrap(), &rec);
-    assert_eq!(
-        check(json!({"long_context_tokens": 0})).as_deref(),
-        Some("long_context_tokens must be a positive int")
-    );
-    assert_eq!(
-        check(json!({"long_context_tokens": "x"})).as_deref(),
-        Some("long_context_tokens must be a positive int")
-    );
-    assert_eq!(
-        check(json!({"price_input_long_per_mtok": -1})).as_deref(),
-        Some("price_input_long_per_mtok must be a number, zero or more")
-    );
-    assert_eq!(
-        check(json!({"usage_log": ""})).as_deref(),
-        Some("usage_log must be a non-empty string")
-    );
-    assert_eq!(
-        check(json!({"price_cache_write_1h_per_mtok": -1})).as_deref(),
-        Some("price_cache_write_1h_per_mtok must be a number, zero or more")
-    );
+    let check = |m: Value| at_the_write(m.as_object().unwrap(), &rec);
+    for (bad, field) in [
+        (json!({"long_context_tokens": 0}), "long_context_tokens"),
+        (json!({"long_context_tokens": "x"}), "long_context_tokens"),
+        (json!({"price_input_long_per_mtok": -1}), "price_input_long_per_mtok"),
+        (json!({"usage_log": ""}), "usage_log"),
+        (json!({"price_cache_write_1h_per_mtok": -1}), "price_cache_write_1h_per_mtok"),
+    ] {
+        assert!(check(bad.clone()).is_some_and(|e| e.contains(field)), "{bad}");
+    }
 }
 
 #[tokio::test]
@@ -1639,7 +1646,7 @@ async fn deleting_an_agent_drops_its_counts() {
 
 #[test]
 fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
-    let check = |meta: Value| validate(meta.as_object().unwrap(), &rec(json!({})));
+    let check = |meta: Value| at_the_write(meta.as_object().unwrap(), &rec(json!({})));
     assert_eq!(check(json!({"caching": "provider_cache"})), None);
     assert_eq!(check(json!({"caching": "none"})), None);
     assert_eq!(check(json!({"cache_primer_until": 12})), None);
@@ -1647,34 +1654,25 @@ fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
         check(json!({"prices": {"m": {"input": 3, "output": 15}}})),
         None
     );
-    assert_eq!(
-        check(json!({"caching": "always"})).as_deref(),
-        Some("caching='always' is not one of the legal values: none, cleanup, provider_cache")
-    );
-    assert_eq!(
-        check(json!({"caching": true})).as_deref(),
-        Some("caching=True is not one of the legal values: none, cleanup, provider_cache")
-    );
-    assert_eq!(
-        check(json!({"cache_primer_until": 0})).as_deref(),
-        Some("cache_primer_until=0 must be a row id (a positive int)")
-    );
-    assert_eq!(
-        check(json!({"prompt_cache": true})),
-        None,
-        "retired: an unknown key is not this backend's to refuse"
-    );
+    for (bad, field) in [
+        (json!({"caching": "always"}), "caching"),
+        (json!({"caching": true}), "caching"),
+        // a retired key is no field of the record
+        (json!({"prompt_cache": true}), "prompt_cache"),
+    ] {
+        assert!(check(bad.clone()).is_some_and(|e| e.contains(field)), "{bad}");
+    }
     assert!(check(json!({"prices": {"m": {"input": 3, "output": "x"}}}))
         .unwrap()
-        .contains("must be a number"));
+        .contains("prices.m.output"));
     assert!(
         check(json!({"prices": {"m": {"input": true, "output": 1}}}))
             .unwrap()
-            .contains("must be a number")
+            .contains("prices.m.input")
     );
     assert!(check(json!({"prices": {"m": {"input": -1, "output": 1}}}))
         .unwrap()
-        .contains("zero or more"));
+        .contains("prices.m.input"));
     assert!(check(json!({"prices": {"m": {"input": 1}}}))
         .unwrap()
         .contains("prices.m.output"));
@@ -1683,10 +1681,9 @@ fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
             .unwrap()
             .contains("prices.m.cache_read")
     );
-    assert!(check(json!({"prices": [1]}))
-        .unwrap()
-        .contains("prices must be a map"));
-    let names: Vec<&str> = record_schema()["fields"]
+    assert!(check(json!({"prices": [1]})).unwrap().contains("prices"));
+    let declared = fantastic_kernel::verbs::record_fields(&RECORD);
+    let names: Vec<&str> = declared["fields"]
         .as_array()
         .unwrap()
         .iter()
@@ -1904,22 +1901,22 @@ fn a_bad_effort_or_display_or_both_modes_are_refused() {
     for (meta, fragment) in [
         (
             json!({"effort": "ultra"}),
-            "effort must be one of low, medium, high, xhigh, max",
+            "effort",
         ),
         (
             json!({"thinking_display": "verbose"}),
-            "thinking_display must be summarized or omitted",
+            "thinking_display",
         ),
         (
             json!({"thinking_display": "summarized", "thinking_budget": 2048}),
             "two thinking modes — set one",
         ),
     ] {
-        let err = validate(meta.as_object().unwrap(), &rec(json!({}))).unwrap_or_default();
+        let err = at_the_write(meta.as_object().unwrap(), &rec(json!({}))).unwrap_or_default();
         assert!(err.contains(fragment), "{meta}: {err}");
     }
     assert_eq!(
-        validate(
+        at_the_write(
             json!({"effort": "xhigh", "thinking_display": "omitted"})
                 .as_object()
                 .unwrap(),
@@ -2043,7 +2040,13 @@ fn turn_events(out: i64) -> String {
 
 /// One turn through the agent's own provider, as a send runs it, stream drained.
 async fn turn(kernel: &Arc<Kernel>, id: &str) {
-    let p = build_provider(&AgentId::from(id), kernel);
+    let p = build_provider_with(
+        &AgentId::from(id),
+        kernel,
+        helpers::agent_meta(&AgentId::from(id), kernel),
+        None,
+        Images::default(),
+    );
     let msgs = [json!({"role": "user", "content": "hi"})];
     let mut s = p
         .chat(&msgs, None)
@@ -2526,13 +2529,12 @@ async fn two_calling_chats_count_apart_in_by_agent() {
 #[test]
 fn the_caller_is_the_rid_prefix() {
     assert_eq!(
-        caller_of(&json!({"rid": "chat_ai~7"})).as_deref(),
+        caller_of("chat_ai~7").as_deref(),
         Some("chat_ai")
     );
-    assert_eq!(caller_of(&json!({"rid": "a~b~7"})).as_deref(), Some("a~b"));
-    assert_eq!(caller_of(&json!({"rid": "7"})), None);
-    assert_eq!(caller_of(&json!({"rid": "~7"})), None);
-    assert_eq!(caller_of(&json!({})), None);
+    assert_eq!(caller_of("a~b~7").as_deref(), Some("a~b"));
+    assert_eq!(caller_of("7"), None);
+    assert_eq!(caller_of("~7"), None);
 }
 
 async fn complete_as(kernel: &Arc<Kernel>, provider: &str, chat: &str) {
@@ -2805,7 +2807,7 @@ async fn image_bytes_on_the_binary_path_reach_the_wire_as_base64() {
     let rid = "chat~1";
     let item = Item::new(
         AgentId::from("img1"),
-        json!({"type": "complete", "rid": rid, "image": {"ref": 5, "media_type": "image/png"}}),
+        json!({"type": "complete", "rid": rid, "image": {"ref": "5", "media_type": "image/png"}}),
     )
     .with_binary_key("data", vec![0xff, 0x00, 0x10]);
     let r = kernel.send(vec![item]).await.remove(0).result;
@@ -2858,7 +2860,7 @@ fn stashed(agent: &str, rid: &str) -> bool {
 async fn send_image(kernel: &Arc<Kernel>, agent: &str, rid: &str) {
     let item = Item::new(
         AgentId::from(agent),
-        json!({"type": "complete", "rid": rid, "image": {"ref": 5, "media_type": "image/png"}}),
+        json!({"type": "complete", "rid": rid, "image": {"ref": "5", "media_type": "image/png"}}),
     )
     .with_binary_key("data", vec![1, 2, 3]);
     let r = kernel.send(vec![item]).await.remove(0).result;
@@ -2942,23 +2944,24 @@ async fn an_image_item_without_bytes_or_media_type_is_refused() {
     let r = kernel
         .send(vec![Item::new(
             AgentId::from("img2"),
-            json!({"type": "complete", "rid": "c~1", "image": {"ref": 1, "media_type": "image/png"}}),
+            json!({"type": "complete", "rid": "c~1", "image": {"ref": "1", "media_type": "image/png"}}),
         )
         .with_binary_key("other", vec![1])])
         .await
         .remove(0)
         .result;
-    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    assert_eq!(r["reason"], json!("missing_arg"), "{r}");
     let r = kernel
         .send(vec![Item::new(
             AgentId::from("img2"),
-            json!({"type": "complete", "rid": "c~1", "image": {"ref": 1}}),
+            json!({"type": "complete", "rid": "c~1", "image": {"ref": "1"}}),
         )
         .with_binary_key("data", vec![1])])
         .await
         .remove(0)
         .result;
-    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    assert_eq!(r["reason"], json!("missing_arg"), "{r}");
+    assert_eq!(r["arg"], json!("image.media_type"), "{r}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -582,7 +582,7 @@ async fn call_is_user_forward_and_a_refusal_is_err() {
         .call(json!({"type": "open", "paths": ["relative"]}))
         .await
         .unwrap_err();
-    assert_eq!(e, "home: open: \"relative\" is not an absolute path");
+    assert!(e.contains("argument 'paths' must be"), "{e}");
     hk.shutdown().await.expect("a clean stop");
 }
 

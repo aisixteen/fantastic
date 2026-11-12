@@ -27,7 +27,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use fantastic_bundle::{py_json_dumps, py_repr, py_str, py_truthy};
+use fantastic_bundle::{py_json_dumps, py_repr};
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 
@@ -123,7 +123,7 @@ pub(crate) async fn store_item(
     let sid = store_of(self_id, kernel)?;
     let verb = payload
         .get("type")
-        .map_or_else(|| "None".to_string(), py_str);
+        .map_or_else(|| "null".to_string(), crate::helpers::shown);
     let mut item = Item::new(sid.clone(), payload);
     if let Some(b) = body {
         item = item.with_binary_key("data", b);
@@ -131,16 +131,16 @@ pub(crate) async fn store_item(
     let out = kernel.send(vec![item]).await.remove(0);
     let reply_body = out.body.and_then(|b| b.into_at("data"));
     let res = out.result;
-    let refused = res.get("error").is_some_and(py_truthy);
+    let refused = res.get("error").is_some_and(|e| !e.is_null());
     if !out.status.is_completed_or(refused) {
         let err = match &res {
-            Value::Object(m) => m.get("error").map_or_else(|| "None".to_string(), py_str),
+            Value::Object(m) => m.get("error").map_or_else(|| "null".to_string(), crate::helpers::shown),
             _ => out.status.as_str().to_string(),
         };
         let hint = res
             .get("hint")
-            .filter(|h| py_truthy(h))
-            .map(|h| format!(" (hint: {})", py_str(h)))
+            .filter(|h| !h.is_null())
+            .map(|h| format!(" (hint: {})", crate::helpers::shown(h)))
             .unwrap_or_default();
         return Err(MemoryStoreError(format!(
             "{self_id}: memory store {} {verb} failed: {err}{hint}",
@@ -221,9 +221,9 @@ pub(crate) fn rows_of(res: &Map<String, Value>, self_id: &AgentId) -> Vec<Value>
 }
 
 /// The store holds this agent's conversation AND its view rows. The CONVERSATION
-/// a reader sees is everything but the view and the recorded fold anchors (an
+/// a reader sees is everything but the view and keep rows (an
 /// allow-list of kinds to HIDE: a kind forgotten here lands in the model's prompt).
-pub const BOOKKEEPING: [&str; 3] = ["view", "anchors", "keep"];
+pub const BOOKKEEPING: [&str; 2] = ["view", "keep"];
 
 /// The chat roles a TURN carries.
 pub const TURN_ROLES: [&str; 3] = ["user", "assistant", "system"];
@@ -401,7 +401,7 @@ pub async fn save_history(
                 .collect(),
             other => {
                 let mut m = Map::new();
-                m.insert("content".to_string(), Value::from(py_str(other)));
+                m.insert("content".to_string(), Value::from(crate::helpers::shown(other)));
                 m
             }
         };
@@ -546,7 +546,6 @@ pub async fn save_view(
         kernel,
         &[json!({
             "kind": "view",
-            "v": 1,
             "ts": crate::helpers::now_secs(),
             "budget": budget,
             "why": why,
@@ -589,7 +588,7 @@ pub fn row_digest(row: &Value) -> Value {
         None => "null".to_string(),
     };
     let kind = match row.get("kind") {
-        Some(k) if py_truthy(k) => k.clone(),
+        Some(k) if !k.is_null() => k.clone(),
         _ => row.get("role").cloned().unwrap_or(Value::Null),
     };
     let mut d = Map::new();

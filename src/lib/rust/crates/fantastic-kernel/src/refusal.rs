@@ -11,7 +11,6 @@
 //! {"error":  "<one line a person reads>",
 //!  "reason": "<code a machine branches on>",
 //!  "hint":   "<what to do instead>",    // optional but strongly encouraged
-//!  "see":    "<readme key>",            // optional doc pointer
 //!  ...extra}                            // facts specific to this refusal
 //! ```
 //!
@@ -166,7 +165,9 @@ pub fn refusal(code: &str, error: impl Into<String>) -> Value {
 /// a string `message` is appended as `: {message}`.
 #[must_use]
 pub fn error_text(reply: &Value) -> Option<String> {
-    let e = reply.get("error")?;
+    let e = reply
+        .get("error")
+        .filter(|e| !e.is_null() && e.as_str() != Some(""))?;
     let mut s = e
         .as_str()
         .map(str::to_string)
@@ -175,6 +176,12 @@ pub fn error_text(reply: &Value) -> Option<String> {
         s = format!("{s}: {m}");
     }
     Some(s)
+}
+
+/// Does the reply carry an `error` (present, not null, not empty text)?
+#[must_use]
+pub fn is_refused(reply: &Value) -> bool {
+    error_text(reply).is_some()
 }
 
 /// `refusal`, plus `hint` — what to do instead. Prefer this over the bare form
@@ -195,94 +202,6 @@ pub fn with(target: &mut Value, key: &str, value: Value) {
     }
 }
 
-/// Refuse an agent id that is not ONE SAFE PATH SEGMENT. `None` when it is fine.
-///
-/// An agent id is not just a name — it BECOMES A DIRECTORY. The loader builds a
-/// record's on-disk home by joining the id onto the store root, so an id
-/// carrying `..` or a separator walks out of the store and the write, or the
-/// recursive delete, lands wherever it pointed.
-///
-/// The call gate is not bypassed by such an id; only validating it stops a
-/// `forget_record` with `id: "../../x"` from recursively deleting a directory
-/// OUTSIDE the store.
-#[must_use]
-pub fn guard_agent_id(verb: &str, agent_id: &str) -> Option<Value> {
-    guard_agent_id_as(verb, "id", agent_id)
-}
-
-/// [`guard_agent_id`] for a field that is not an id but BECOMES A DIRECTORY too
-/// — python `guard_agent_id(verb, value, arg=…)`: a record's `children_dir`
-/// (`<agent>/<children_dir>/<child>`), which `create_agent` / `update_agent`
-/// hold to the same rule. `arg` names the field in the refusal.
-#[must_use]
-pub fn guard_agent_id_as(verb: &str, arg: &str, agent_id: &str) -> Option<Value> {
-    if agent_id.is_empty() {
-        return Some(bad(verb, arg, "a non-empty string"));
-    }
-    if agent_id.contains('/') || agent_id.contains('\\') {
-        return Some(bad(
-            verb,
-            arg,
-            &format!(
-                "a single path segment (no separators); got {}",
-                py_repr(agent_id)
-            ),
-        ));
-    }
-    if agent_id == "." || agent_id == ".." || agent_id.contains("..") {
-        return Some(bad(
-            verb,
-            arg,
-            &format!(
-                "a name that is not a path traversal; got {}",
-                py_repr(agent_id)
-            ),
-        ));
-    }
-    if agent_id.starts_with('.') {
-        return Some(bad(
-            verb,
-            arg,
-            &format!("a name that is not hidden; got {}", py_repr(agent_id)),
-        ));
-    }
-    if fantastic_bundle::py_isdigit(agent_id) {
-        // Message ids are plain integers; in prompt text an all-digit agent id
-        // would read as one. Names are words.
-        return Some(bad(
-            verb,
-            arg,
-            &format!(
-                "a name, not a number (message ids are ints); got {}",
-                py_repr(agent_id)
-            ),
-        ));
-    }
-    if agent_id.contains('|') {
-        // `|` qualifies a FOREIGN agent (`<guid>|<agent>`): a local id never
-        // carries one, so a gate can tell local from foreign by the id alone.
-        return Some(bad(
-            verb,
-            arg,
-            &format!(
-                "a local name without `|` (it marks a foreign `guid|agent`); got {}",
-                py_repr(agent_id)
-            ),
-        ));
-    }
-    if agent_id == RESERVED_ID {
-        // `kernel` names the operator: sends to it reach the root, and a memory
-        // store serves the operator under it. An agent holding that id would BE
-        // the operator to every store.
-        return Some(bad(
-            verb,
-            arg,
-            &format!("a name other than the reserved {}", py_repr(RESERVED_ID)),
-        ));
-    }
-    None
-}
-
 /// The one reserved agent id — the operator's name (send target, store identity).
 pub const RESERVED_ID: &str = "kernel";
 
@@ -290,24 +209,6 @@ pub const RESERVED_ID: &str = "kernel";
 #[must_use]
 pub fn missing(verb: &str, arg: &str) -> Value {
     let mut v = refusal(MISSING_ARG, format!("{verb}: {arg} required"));
-    with(&mut v, "arg", Value::String(arg.to_string()));
-    v
-}
-
-/// `missing` WITH a recipe. Use this rather than `refusal_hint(MISSING_ARG, …)`:
-/// the hand-rolled form drops the machine-readable `arg`, which is the whole
-/// point of the code: `create_agent: parent_id required` with a hint and no
-/// `arg` would disagree with python on a field a caller branches on.
-///
-/// KEY ORDER matches python's `refusal(code, error, hint=hint, arg=arg)`:
-/// `error, reason, hint, arg` — `hint` is a named parameter of `refusal()`
-/// itself and is inserted before `**extra` (which is where `arg` rides), so
-/// hint precedes arg. `missing()` alone has no hint and stays `error, reason,
-/// arg`.
-#[must_use]
-pub fn missing_hint(verb: &str, arg: &str, hint: impl Into<String>) -> Value {
-    let mut v = refusal(MISSING_ARG, format!("{verb}: {arg} required"));
-    with(&mut v, "hint", Value::String(hint.into()));
     with(&mut v, "arg", Value::String(arg.to_string()));
     v
 }

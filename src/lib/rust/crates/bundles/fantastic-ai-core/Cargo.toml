@@ -7,12 +7,13 @@ license.workspace = true
 description = "Shared reflect-driven LLM-agent machinery (state, verbs, agentic loop, prompt assembly, events, history) behind a Provider seam. Backends supply only their Provider + a thin Bundle."
 
 [dependencies]
-# python-format helpers: `py_truthy` decides the `target_id or target`
-# fall-through exactly as python does.
+# text helpers (`py_strip`, `py_repr`, ...)
 fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
 # `getentropy` — the OS CSPRNG behind python's `secrets` module.
@@ -25,11 +26,12 @@ regex = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [dev-dependencies]
+fantastic-credential-store = { path = "../fantastic-credential-store", features = ["test-support"] }
+fantastic-ram-store = { path = "../fantastic-ram-store", features = ["test-support"] }
+fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 fantastic-file = { path = "../fantastic-file" }
 # Every AI agent keeps its conversation in a memory store; the tests wire one.
-fantastic-ram-store = { path = "../fantastic-ram-store" }
 # A backend reads its key from a credential store; the reader's tests wire one.
-fantastic-credential-store = { path = "../fantastic-credential-store" }
 fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }
 # The author tests allowlist a REAL interpreter — the test acting as operator.
 which = "6"

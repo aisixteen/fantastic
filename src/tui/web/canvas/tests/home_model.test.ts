@@ -17,7 +17,7 @@ function row(status: Status, over: Partial<HomeRow> = {}): HomeRow {
 /** A state as the home sends it (`home/wire.rs`). */
 function wire(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    type: "state", protocol: "fantastic.home", version: 1, seq: 7, mode: "lock", listed: true,
+    type: "state", protocol: "fantastic.home", seq: 7, mode: "lock", listed: true,
     rows: [row("running", { actions: ["stop", "open", "remove"] }), { ...row("stopped"), id: "adding:/x", guid: null, last_seen: null, log: "/h/logs/x.log" }],
     pages: ["g-1"], selection: "g-1", problem: null, ...over,
   };
@@ -35,7 +35,6 @@ test("decodeState accepts the home's state and names what is wrong otherwise", (
     return r as string;
   };
   assert.match(why({ protocol: "fantastic.canvas" }), /protocol/);
-  assert.match(why({ version: 2 }), /version/);
   assert.equal(why({ rows: undefined }), "state: `rows` is not a list");
   assert.match(why({ rows: [row("sleeping" as Status)] }), /rows\[0\]\.status: "sleeping" is not a status/);
   assert.match(why({ type: "focus" }), /type/);

@@ -1,7 +1,7 @@
 //! A record that leaves `model` out has it READ FROM THE SERVER — python
 //! `ollama_backend/server.py`, text for text.
 //!
-//! Before a verb that runs a turn ([`TURN_VERBS`]), an absent `model` is read from
+//! Before `complete`, the verb that runs a turn, an absent `model` is read from
 //! the server the record's `endpoint` names — the ONE model `GET {endpoint}/api/tags`
 //! lists — and WRITTEN BACK to the record, so reflect shows it and it is not read
 //! again until the field is cleared (`null`). A server listing several names them and
@@ -19,8 +19,6 @@ use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The verbs that run a turn of the model — the ones the server is read for.
-pub const TURN_VERBS: [&str; 4] = ["send", "inquiry", "context_recall", "complete"];
 /// Seconds to reach the server.
 pub const CONNECT_TIMEOUT: f64 = 5.0;
 /// Seconds to wait on the model list.
@@ -45,7 +43,7 @@ pub fn served_model(body: &str, url: &str) -> Result<String, String> {
         _ => {
             let served = names
                 .iter()
-                .map(fantastic_bundle::py_str)
+                .map(fantastic_ai_core::helpers::shown)
                 .collect::<Vec<_>>()
                 .join(", ");
             let served = if served.is_empty() {

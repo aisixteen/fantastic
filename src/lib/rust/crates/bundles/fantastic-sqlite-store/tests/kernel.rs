@@ -14,10 +14,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use fantastic_ai_core::agent_loop::BackendConfig;
 use fantastic_ai_core::provider::{Provider, ProviderError, ProviderEvent, ProviderStream};
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
-use fantastic_kernel::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+use fantastic_kernel::bundle::{BundleError, BundleRegistry, Handler, Reply};
 use fantastic_kernel::test_support::{register_fake_store, register_root_loader, wire_fake_store};
 use fantastic_kernel::test_support::as_agent;
 use fantastic_kernel::{AgentId, Item, Kernel, Outcome};
@@ -28,31 +27,49 @@ use serde_json::{json, Map, Value};
 #[derive(Default)]
 struct Probe(Mutex<HashMap<String, i64>>);
 
+fantastic_kernel::stand_in_verbs!(probe_verbs {
+    WorkV "work" {},
+    CountV "count" {},
+    FailV "fail" {},
+});
+
 #[async_trait]
-impl Bundle for Probe {
+impl Handler for Probe {
+    type Call = probe_verbs::Call;
     fn name(&self) -> &str {
         "sql_probe.tools"
     }
-    async fn handle(&self, id: &AgentId, payload: &Value, _k: &Arc<Kernel>) -> Result<Reply, BundleError> {
-        match payload["type"].as_str().unwrap_or("") {
-            "boot" => Ok(None),
-            "reflect" => Ok(Some(json!({"id": id.0, "sentence": "probe", "verbs": {"work": "", "count": ""}}))),
-            "work" => Ok(Some(json!({"ok": true}))),
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        probe_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        probe_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
+    async fn handle(&self, id: &AgentId, call: Self::Call, _k: &Arc<Kernel>) -> Result<Reply, BundleError> {
+        use probe_verbs::Call;
+        match call {
+            Call::Reflect(_) => Ok(Some(json!({"id": id.0, "sentence": "probe"}))),
+            Call::WorkV(_) => Ok(Some(json!({"ok": true}))),
             // `pid`: which PROCESS ran it — a dedup that re-ran would answer n=1
             // from the new process too, so the count alone proves nothing.
-            "count" => {
+            Call::CountV(_) => {
                 let mut c = self.0.lock().unwrap();
                 let n = c.entry(id.0.clone()).or_insert(0);
                 *n += 1;
                 Ok(Some(json!({"n": *n, "pid": std::process::id()})))
             }
-            "fail" => Err("probe failed on purpose".into()),
-            other => Ok(Some(json!({"error": format!("unknown '{other}'"), "reason": "unhandled"}))),
+            Call::FailV(_) => Err("probe failed on purpose".into()),
         }
     }
 }
 
-// ── a scripted AI agent: the real ai_core verb table, a canned provider ─────────
+// ── a scripted AI agent: the real `ai_chat` bundle, a canned provider agent ─────
 
 struct Canned;
 
@@ -67,28 +84,37 @@ impl Provider for Canned {
     }
 }
 
-const CFG: BackendConfig = BackendConfig { name: "canned_ai", model_window: fantastic_ai_core::constants::DEFAULT_CONTEXT_WINDOW, provider_cache: false };
-
-struct CannedAi;
+/// The provider agent the chat completes through: it streams the canned words.
+struct CannedProvider;
 
 #[async_trait]
-impl Bundle for CannedAi {
+impl Handler for CannedProvider {
+    type Call = fantastic_ai_core::declared::provider::Call;
     fn name(&self) -> &str {
-        "canned_ai.tools"
+        "canned_provider.tools"
     }
-    async fn handle(&self, id: &AgentId, payload: &Value, k: &Arc<Kernel>) -> Result<Reply, BundleError> {
-        if payload["type"] == json!("reflect") {
-            return Ok(Some(json!({"id": id.0, "sentence": "canned AI", "verbs": {"send": ""}})));
-        }
-        let out = fantastic_ai_core::verbs::handle_common(id, payload, k, CFG, |_| {
-            Arc::new(Canned) as Arc<dyn Provider>
-        })
-        .await?;
-        Ok(Some(out.unwrap_or_else(|| json!({"reason": "unhandled"}))))
+    fn man(&self) -> &'static str {
+        "A test stand-in provider."
     }
-    async fn on_delete(&self, id: &AgentId, k: &Arc<Kernel>) -> Result<(), BundleError> {
-        fantastic_ai_core::verbs::on_delete(id, k).await;
-        Ok(())
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_ai_core::declared::provider::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        fantastic_ai_core::declared::provider::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
+    async fn handle(&self, id: &AgentId, call: Self::Call, k: &Arc<Kernel>) -> Result<Reply, BundleError> {
+        fantastic_ai_core::remote_provider::handle(
+            id,
+            call,
+            k,
+            |_| Arc::new(Canned) as Arc<dyn Provider>,
+            fantastic_ai_core::remote_provider::NO_LIVE,
+            || json!({"id": id.0, "sentence": "canned provider"}),
+        )
+        .await
     }
 }
 
@@ -102,7 +128,8 @@ fn registry(dir: &Path) -> BundleRegistry {
     register_fake_store(&mut reg, &dir.join(".fantastic"));
     reg.register(fantastic_sqlite_store::HANDLER_MODULE, fantastic_sqlite_store::SqliteStoreBundle::default());
     reg.register("sql_probe.tools", Probe::default());
-    reg.register("canned_ai.tools", CannedAi);
+    reg.register("ai_chat.tools", fantastic_ai_core::chat_bundle::AiChatBundle);
+    reg.register("canned_provider.tools", CannedProvider);
     reg
 }
 
@@ -174,9 +201,14 @@ async fn wire(k: &Arc<Kernel>, dir: &Path, probes: &[&str]) {
         .await;
     }
     create(k, json!({
-        "id": "ai", "handler_module": "canned_ai.tools", "model": "canned",
+        "id": "canned_p", "handler_module": "canned_provider.tools",
+        "callable_by": {"ai": "*"},
+    }))
+    .await;
+    create(k, json!({
+        "id": "ai", "handler_module": "ai_chat.tools", "provider_id": "canned_p", "model": "canned",
         "context_window": 32768, "memory_store_id": "memory",
-        "can_call": {"memory": "*", "cli": "*"},
+        "can_call": {"memory": "*", "cli": "*", "canned_p": ["complete", "watch"]},
     }))
     .await;
     let out = k.start(false).await;

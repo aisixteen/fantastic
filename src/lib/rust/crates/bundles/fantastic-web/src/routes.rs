@@ -556,23 +556,15 @@ pub(crate) fn split_target(req: &Request<Body>) -> (String, String) {
     )
 }
 
-/// The `_reflect` payload python composes from the query flags
-/// (`web_rest/tools.py::_reflect_payload`).
+/// The `reflect` call the query flags compose: `tree` and `bundles` are sent as
+/// given, and the target's own entry judges their values against `reflect`'s
+/// declaration (a value it does not list is its refusal, never a silent drop).
 pub(crate) fn reflect_payload(query: &str) -> serde_json::Value {
     let mut out = serde_json::Map::new();
     out.insert("type".into(), serde_json::json!("reflect"));
-    if let Some(rm) = query_get(query, "readme") {
-        if matches!(rm.as_str(), "1" | "true" | "yes") {
-            out.insert("readme".into(), serde_json::json!(true));
-        } else if !rm.is_empty() && !matches!(rm.as_str(), "0" | "false" | "no") {
-            out.insert("readme".into(), serde_json::json!(rm));
-        }
-    }
     for key in ["tree", "bundles"] {
         if let Some(v) = query_get(query, key) {
-            if matches!(v.as_str(), "all" | "ids" | "none") {
-                out.insert(key.into(), serde_json::json!(v));
-            }
+            out.insert(key.into(), serde_json::json!(v));
         }
     }
     serde_json::Value::Object(out)

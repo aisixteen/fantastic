@@ -31,20 +31,22 @@ test("select: opens the folders above, selects, publishes to the previews; repli
   assert.deepEqual(r.saved.at(-1)!["selected"], ".fantastic/agents/user/agents/files");
 });
 
-test("select, expand, collapse and reveal refuse: bad_arg, outside_root, not_found, not_a_dir", async () => {
+test("select, expand, collapse and reveal refuse: missing_arg, bad_arg, not_allowed, not_found", async () => {
   const r = rig();
   project(r.bridge);
   await r.mountTree("tree_1");
   for (const verb of ["select", "expand", "collapse", "reveal"]) {
-    assert.equal((await r.call("tree_1", { type: verb }))["reason"], "bad_arg", verb);
-    assert.equal((await r.call("tree_1", { type: verb, path: "/etc/passwd" }))["reason"], "outside_root", verb);
-    assert.equal((await r.call("tree_1", { type: verb, path: "a/../../b" }))["reason"], "outside_root", verb);
+    assert.equal((await r.call("tree_1", { type: verb }))["reason"], "missing_arg", verb);
+    assert.equal((await r.call("tree_1", { type: verb, path: 4 }))["reason"], "bad_arg", verb);
+    assert.equal((await r.call("tree_1", { type: verb, path: "a", agent: "b" }))["reason"], "bad_arg", verb);
+    assert.equal((await r.call("tree_1", { type: verb, path: "/etc/passwd" }))["reason"], "not_allowed", verb);
+    assert.equal((await r.call("tree_1", { type: verb, path: "a/../../b" }))["reason"], "not_allowed", verb);
   }
   assert.equal((await r.call("tree_1", { type: "select", path: "nope/x" }))["reason"], "not_found");
   assert.equal((await r.call("tree_1", { type: "expand", path: "nope" }))["reason"], "not_found");
   assert.equal((await r.call("tree_1", { type: "select", agent: "ghost" }))["reason"], "not_found");
   const f = await r.call("tree_1", { type: "expand", path: "top.txt" });
-  assert.equal(f["reason"], "not_a_dir");
+  assert.equal(f["reason"], "bad_arg");
   const u = await r.call("tree_1", { type: "frobnicate" });
   assert.equal(u["reason"], "unhandled");
   assert.equal(u["verb"], "frobnicate");
@@ -85,7 +87,7 @@ test("a verb to a cell that is not on screen is refused not_mounted", async () =
   const r = rig();
   r.k.register(new Agent({ id: "tree_ghost", parentId: "canvas", handlerModule: "files_view.ts" }));
   const x = await r.call("tree_ghost", { type: "select", path: "a" });
-  assert.equal(x["reason"], "not_mounted");
+  assert.equal(x["reason"], "not_here");
 });
 
 test("two trees on one folder share one hold; closing one keeps the other live; closing both leaves none", async () => {

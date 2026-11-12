@@ -58,7 +58,7 @@ pub async fn refresh_views(h: &Host, name: &str, dir: &Path) -> Result<(), Strin
     // the TUI part is checked BEFORE any instance is touched: a bad declaration
     // is refused with its sentence and every instance keeps the view it has
     if let Some(tui) = declared.get("tui") {
-        crate::panel::declared::parse_tui(tui).map_err(|r| r.error)?;
+        crate::panel::declared::parse_tui(tui).map_err(|r| fantastic_kernel::error_text(&r).unwrap_or_default())?;
     }
     // the panel's REVISION (only a view with a file has one): a view edit changes
     // no other field of the record, and an unchanged record redraws nothing
@@ -354,23 +354,47 @@ pub fn scaffold(store: &Path, kind: &str, name: &str) -> Result<PathBuf, String>
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use fantastic_kernel::bundle::{Bundle, BundleError};
+    use fantastic_kernel::bundle::{BundleError, Handler};
     use fantastic_kernel::{Agent, Kernel};
 
     struct Plain;
 
+    fantastic_kernel::stand_in_verbs!(plain_verbs { Ping "ping" {} });
+
     #[async_trait]
-    impl Bundle for Plain {
+    impl Handler for Plain {
+        type Call = plain_verbs::Call;
+
         fn name(&self) -> &str {
             "board"
         }
+
+        fn man(&self) -> &'static str {
+            "A test stand-in bundle."
+        }
+
+        fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+            plain_verbs::VERBS
+        }
+
+        fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+            plain_verbs::dynamic_verbs(agent)
+        }
+
+        fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+            fantastic_kernel::fixture_record!()
+        }
+
         async fn handle(
             &self,
             _id: &fantastic_kernel::AgentId,
-            _p: &Value,
+            call: Self::Call,
             _k: &Arc<Kernel>,
         ) -> Result<Option<Value>, BundleError> {
-            Ok(None)
+            Ok(match call {
+                plain_verbs::Call::Ping(_) => Some(json!({"pong": true})),
+                plain_verbs::Call::Reflect(_) => None,
+            })
         }
     }
 
@@ -509,7 +533,7 @@ mod tests {
         )
         .await;
         let e = refresh_views(&h, "board", &dir).await.expect_err("refused");
-        assert!(e.contains("view.tui[0].show") && e.contains("grid"), "{e}");
+        assert!(e.contains("view.tui[0]") && e.contains("show"), "{e}");
         assert_eq!(view_of(&h), own, "the instance keeps its view");
     }
 

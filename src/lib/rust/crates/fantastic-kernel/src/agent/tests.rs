@@ -78,29 +78,6 @@ fn delete_lock_flag() {
 }
 
 #[test]
-fn delete_lock_is_python_truthiness() {
-    // `if self._meta.get("delete_lock")`: CLI `k=v` gives an int, a hand
-    // record may say "yes" — both lock; falsy values do not.
-    for (v, locked) in [
-        (json!(1), true),
-        (json!("yes"), true),
-        (json!(["x"]), true),
-        (json!({"a": 1}), true),
-        (json!(0), false),
-        (json!(""), false),
-        (json!([]), false),
-        (json!(false), false),
-        (Value::Null, false),
-    ] {
-        let a = make();
-        let mut p = Map::new();
-        p.insert("delete_lock".to_string(), v.clone());
-        a.update_meta(p);
-        assert_eq!(a.is_delete_locked(), locked, "delete_lock={v}");
-    }
-}
-
-#[test]
 fn name_or_id_treats_an_empty_display_name_as_none() {
     // `self.display_name or self.id` — "" is falsy, a non-string is no name.
     let a = make();

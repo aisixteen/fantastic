@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use fantastic_kernel::{
-    Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Outcome, PeerRoute, Reply,
+    Agent, AgentId, BundleRegistry, Handler, Item, Kernel, Outcome, PeerRoute, Reply,
 };
 use serde_json::{json, Map, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,15 +23,29 @@ const PAGE: &str = "g1";
 /// A local agent that answers every verb with its own id.
 struct Echo;
 
+fantastic_kernel::stand_in_verbs!(echo_verbs { AroundV "around" { x: Option<i64>, y: Option<i64>, radius: Option<i64> }, ClearV "clear" {  } });
 #[async_trait]
-impl Bundle for Echo {
+impl Handler for Echo {
+    type Call = echo_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "echo"
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        echo_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        echo_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Some(json!({"id": id.0})))

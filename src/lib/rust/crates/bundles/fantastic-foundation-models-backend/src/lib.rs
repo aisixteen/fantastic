@@ -4,7 +4,7 @@
 //! The FoundationModels calls live in ONE implementation, the swift
 //! `FantasticFMCore` in this crate's `swift/` package; this crate links it as a
 //! static library through `FantasticFMBridge`'s C ABI (`build.rs`, [`system`]).
-//! Python has none (Apple-only native). The bundle's readme is `src/readme.md`.
+//! Python has none (Apple-only native).
 //!
 //! A thin shell over `fantastic-ai-core`, like every backend: this crate supplies
 //! the [`Provider`] (messages -> one FMCore request, raw text out) and the
@@ -38,10 +38,11 @@ use fantastic_ai_core::constants::default_max_tokens;
 use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
 };
-use fantastic_ai_core::schema::{self, Field};
-use fantastic_ai_core::{agent_loop::BackendConfig, caching, helpers, verbs};
-use fantastic_bundle::{py_repr_value, py_str};
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_ai_core::declared::provider;
+use fantastic_ai_core::record::AiRecord;
+use fantastic_ai_core::{agent_loop::BackendConfig, helpers, verbs};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
+use schemars::JsonSchema;
 use fantastic_kernel::{AgentId, Kernel, TaskId};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -51,16 +52,6 @@ pub const HANDLER_MODULE: &str = "foundation_models_backend.tools";
 
 /// The bundle's name — the prefix of every refusal it raises.
 pub const NAME: &str = "foundation_models_backend";
-
-/// readme.md seeded into the agent's dir — the bundle's one readme.
-pub const README: &str = include_str!("readme.md");
-
-/// What `reflect` says this agent IS — the sentence the kernels have always shown.
-pub const SENTENCE: &str = "Apple Foundation Models LLM agent — the on-device system model (raw prompt-and-parse tool-calling; no endpoint, no model choice, no key).";
-
-/// The fields an on-device record must NOT carry — there is nothing for them to
-/// mean here, and reflect shows `model`/`endpoint` straight off the record.
-pub const OFF_DEVICE_FIELDS: [&str; 3] = ["endpoint", "model", "credentials"];
 
 /// The model id the provider reports — swift's `FoundationModelsProvider.model`.
 pub const MODEL: &str = "SystemLanguageModel.default";
@@ -94,38 +85,11 @@ impl FoundationModelsBackendBundle {
         }
     }
 
-    /// THE RECORD SCHEMA — its own two knobs, then the shared AI fields, with
-    /// `context_window` defaulting to the model's real window. Neither knob has a
-    /// default here: unset, the model uses its own. Swift
-    /// `FoundationModelsBackendBundle.schema(contextWindow:)`.
-    #[must_use]
-    pub fn schema_for_window(context_window: i64) -> Value {
-        schema::schema_with_window(
-            vec![
-                Field::new(
-                    "temperature",
-                    "float",
-                    "sampling temperature (>= 0); unset, the on-device model's own",
-                ),
-                Field::new(
-                    "max_tokens",
-                    "int",
-                    "a turn's output budget (tokens); unset, the on-device model's own",
-                ),
-            ],
-            context_window,
-        )
-    }
-
     /// The provider for one pass. An UNAVAILABLE model makes a provider that
     /// refuses the turn up front ([`Provider::ready`]) — naming the reason,
     /// before the context is projected — so the caller reads why, not a window
     /// failure on a model that could never have answered.
-    fn build_provider(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider> {
-        self.build_provider_with(agent_id, kernel, helpers::agent_meta(agent_id, kernel))
-    }
-
-    /// [`Self::build_provider`] from a record (`complete` lays the pass's `model` over the agent's).
+    /// The record is passed in (`complete` lays the pass's `model` over the agent's).
     fn build_provider_with(&self, _agent_id: &AgentId, _kernel: &Arc<Kernel>, meta: Map<String, Value>) -> Arc<dyn Provider> {
         let refusal = self
             .engine
@@ -134,12 +98,12 @@ impl FoundationModelsBackendBundle {
             .map(|r| ProviderError::raised(format!("{NAME}: {}", unavailable_message(r))));
         Arc::new(FoundationModelsProvider {
             engine: Arc::clone(&self.engine),
-            temperature: meta.get("temperature").and_then(number),
+            temperature: meta.get("temperature").and_then(Value::as_f64),
             // a record that names none gets the bounded default, never above the
             // model's window (#495)
             max_tokens: Some(
                 meta.get("max_tokens")
-                    .and_then(int)
+                    .and_then(Value::as_i64)
                     .unwrap_or_else(|| default_max_tokens(None, self.engine.context_size())),
             ),
             refusal,
@@ -151,7 +115,7 @@ impl FoundationModelsBackendBundle {
     /// answer and why not, its real window, and the two knobs as the record sets
     /// them (null = the model's own). Swift `reflectExtra`.
     fn reflect_reply(&self, agent_id: &AgentId, kernel: &Kernel) -> Value {
-        let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, self.cfg().model_window);
+        let mut out = verbs::reflect_base(agent_id, kernel, MAN, self.cfg().model_window);
         let meta = helpers::agent_meta(agent_id, kernel);
         let a = self.engine.availability();
         out.insert("available".to_string(), json!(a.is_available()));
@@ -173,144 +137,88 @@ impl FoundationModelsBackendBundle {
     }
 }
 
-/// An int or a float as an `f64` — a bool is neither. Swift `number`.
-fn number(v: &Value) -> Option<f64> {
-    match v {
-        Value::Number(n) => n.as_f64(),
-        _ => None,
-    }
+/// What the bundle is for — its one short man text.
+const MAN: &str = "The on-device Apple Foundation Models provider: it streams one completion pass of the system model for a chat that names it, lists it and keeps a default model.";
+
+/// The fields an on-device record carries: no endpoint, no model choice, no key.
+#[derive(Debug, JsonSchema)]
+pub struct FoundationRecord {
+    /// Sampling temperature (>= 0); unset, the on-device model's own.
+    #[schemars(range(min = 0))]
+    pub temperature: Option<f64>,
+    /// A turn's output budget (tokens); unset, the on-device model's own.
+    #[schemars(range(min = 1))]
+    pub max_tokens: Option<i64>,
+    /// How the conversation is kept in the model's view.
+    pub caching: Option<fantastic_ai_core::record::UncachedMode>,
+    /// The memory store agent that keeps this agent's settings (e.g. a ram_store).
+    pub memory_store_id: String,
+    /// The fields every ai_core agent takes; `context_window` no larger than the model's.
+    #[serde(flatten)]
+    pub ai: AiRecord,
 }
 
-/// A JSON INT — never a float, even an integral one (`5.0`), never a bool.
-fn int(v: &Value) -> Option<i64> {
-    match v {
-        Value::Number(n) if !n.is_f64() => n.as_i64(),
-        _ => None,
-    }
-}
+fantastic_kernel::record!(FoundationRecord);
 
 #[async_trait]
-impl Bundle for FoundationModelsBackendBundle {
+impl Handler for FoundationModelsBackendBundle {
+    type Call = provider::Call;
+
     fn name(&self) -> &str {
         NAME
     }
 
-    fn verb_docs(&self) -> Value {
-        fantastic_ai_core::verbs::verb_docs()
+    fn man(&self) -> &'static str {
+        MAN
     }
 
-    fn emits_doc(&self) -> Option<Value> {
-        Some(fantastic_ai_core::verbs::emits())
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        provider::VERBS
     }
 
-    fn cancel_doc(&self) -> Option<Value> {
-        Some(Value::String(
-            fantastic_ai_core::verbs::CANCEL_DOC.to_string(),
-        ))
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        provider::dynamic_verbs(agent)
     }
 
-    fn notes_doc(&self) -> Option<Value> {
-        Some(fantastic_ai_core::verbs::notes())
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &RECORD
     }
 
-    fn readme(&self) -> Option<&'static str> {
-        Some(README)
-    }
-
-    /// Refuse, AT THE WRITE, a record this backend cannot honour — each check
-    /// names the field and the legal shape; the schema's own check runs last.
-    /// Swift `validateMeta`, check for check and word for word.
+    /// Refuse, AT THE WRITE, a window larger than the on-device model's: the engine's
+    /// window is known only at runtime, so no static declaration can state it.
     fn validate_meta(
         &self,
         meta: &Map<String, Value>,
-        record: &Map<String, Value>,
+        _record: &Map<String, Value>,
     ) -> Option<String> {
-        let set = |key: &str| meta.get(key).filter(|v| !v.is_null());
-        for key in OFF_DEVICE_FIELDS {
-            if set(key).is_some() {
-                return Some(format!(
-                    "{NAME}: `{key}` has no meaning here — the model is Apple's on-device \
-                     system model (no endpoint, no model choice, no credentials)"
-                ));
-            }
-        }
-        if let Some(v) = set("temperature") {
-            if !number(v).is_some_and(|t| t.is_finite() && t >= 0.0) {
-                return Some("temperature must be a number >= 0".to_string());
-            }
-        }
-        if let Some(v) = set("max_tokens") {
-            if !int(v).is_some_and(|n| n >= 1) {
-                return Some("max_tokens must be a positive int".to_string());
-            }
-        }
-        if let Some(v) = set("context_window") {
-            let size = self.engine.context_size();
-            if !int(v).is_some_and(|n| n >= 1 && n <= size) {
-                return Some(format!(
+        let size = self.engine.context_size();
+        meta.get("context_window")
+            .and_then(Value::as_i64)
+            .filter(|n| *n > size)
+            .map(|_| {
+                format!(
                     "context_window must be a positive int no larger than the on-device \
                      model's window ({size} tokens)"
-                ));
-            }
-        }
-        schema::validate(
-            &Self::schema_for_window(self.engine.context_size()),
-            NAME,
-            meta,
-            record,
-        )
-        .or_else(|| caching::refusal(meta, record, NAME, self.cfg().provider_cache))
-    }
-
-    fn record_schema(&self) -> Option<Value> {
-        Some(Self::schema_for_window(self.engine.context_size()))
+                )
+            })
     }
 
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        if verb == "reflect" {
-            return Ok(Some(self.reflect_reply(agent_id, kernel)));
-        }
-        // EVERY OTHER ai_core VERB, one table for every backend.
-        // THE PROVIDER VERBS (`complete`, `models`, `default_model`): an AI chat completes here
-        if let Some(r) = fantastic_ai_core::remote_provider::provider_verbs(
+        // THE PROVIDER VERBS (`complete`, `models`, `set_default_model`): an AI chat completes here
+        fantastic_ai_core::remote_provider::handle(
             agent_id,
-            payload,
+            call,
             kernel,
             |m| self.build_provider_with(agent_id, kernel, m),
             fantastic_ai_core::remote_provider::NO_LIVE,
+            || self.reflect_reply(agent_id, kernel),
         )
         .await
-        {
-            return Ok(Some(r));
-        }
-        // A PROVIDER ONLY: a chat verb belongs to an `ai_chat` agent that names this one
-        {
-            let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-            if fantastic_ai_core::remote_provider::is_chat_verb(verb) {
-                return Ok(Some(fantastic_ai_core::remote_provider::chat_refusal(NAME, verb)));
-            }
-        }
-        let provider = |_client: &str| self.build_provider(agent_id, kernel);
-        if let Some(reply) =
-            verbs::handle_common(agent_id, payload, kernel, self.cfg(), provider).await?
-        {
-            return Ok(Some(reply));
-        }
-        Ok(Some({
-            let raw = payload.get("type").cloned().unwrap_or(Value::Null);
-            let mut r = fantastic_kernel::refusal::refusal(
-                fantastic_kernel::refusal::UNHANDLED,
-                format!("{NAME}: unknown type {}", py_repr_value(&raw)),
-            );
-            fantastic_kernel::refusal::with(&mut r, "verb", raw);
-            r
-        }))
     }
 
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
@@ -362,7 +270,7 @@ impl FoundationModelsProvider {
         max_tokens: Option<i64>,
     ) -> Result<FmRequest, ProviderError> {
         let role = |m: &Value| m.get("role").cloned().unwrap_or(Value::Null);
-        let content = |m: &Value| m.get("content").map_or_else(String::new, py_str);
+        let content = |m: &Value| m.get("content").map_or_else(String::new, fantastic_ai_core::helpers::shown);
         let is_system = |m: &Value| m.get("role").and_then(Value::as_str) == Some("system");
         let instructions: Vec<String> = messages
             .iter()
@@ -376,7 +284,7 @@ impl FoundationModelsProvider {
         else {
             let r = rest
                 .last()
-                .map_or_else(|| "none".to_string(), |m| py_str(&role(m)));
+                .map_or_else(|| "none".to_string(), |m| fantastic_ai_core::helpers::shown(&role(m)));
             return Err(ProviderError::raised(format!(
                 "{NAME}: the last message is not a user turn (role {r}) — the on-device \
                  session answers a prompt"
@@ -387,7 +295,7 @@ impl FoundationModelsProvider {
             turns: earlier
                 .iter()
                 .map(|m| FmTurn {
-                    role: py_str(&role(m)),
+                    role: fantastic_ai_core::helpers::shown(&role(m)),
                     content: content(m),
                 })
                 .collect(),

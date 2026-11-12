@@ -4,11 +4,9 @@
 //! .fantastic/
 //! ├── lock.yaml                 pid: <u32>
 //! ├── agent.yaml                root record
-//! ├── readme.md                 seeded from the root bundle (if any)
 //! └── agents/
 //!     └── <child_id>/
 //!         ├── agent.yaml
-//!         ├── readme.md
 //!         └── agents/<grandchild>/...
 //! ```
 //!
@@ -59,8 +57,8 @@ pub fn record_map(rec: &AgentRecord) -> Value {
 
 /// ONE STORE IO, THROUGH THE BATCH.
 ///
-/// Every persistence byte — the record merge read, the record write, the readme
-/// probe and seed, the blob verbs — crosses [`store_read`] or [`store_write`],
+/// Every persistence byte — the record merge read, the record write, the blob
+/// verbs — crosses [`store_read`] or [`store_write`],
 /// each ONE call of the provider's handler as KERNEL BOOKKEEPING
 /// ([`Kernel::bookkeeping`]): no gate, no call row, the handler run as the
 /// provider with no origin.
@@ -273,9 +271,8 @@ fn persist_failed(kernel: &Kernel, loader: &AgentId, store: &AgentId, path: &str
         other => other.clone(),
     };
     eprintln!(
-        "  [{loader}] persist through {} failed: {path}: {}",
-        fantastic_bundle::py_repr(&store.0),
-        fantastic_bundle::py_str(&msg)
+        "  [{loader}] persist through {} failed: {path}: {msg}",
+        fantastic_bundle::py_repr(&store.0)
     );
     health(kernel)
         .0
@@ -298,7 +295,7 @@ fn persist_landed(kernel: &Kernel, loader: &AgentId) {
 /// A reply that failed: not an object, or an object with a truthy `error`.
 fn write_failed(r: &Value) -> bool {
     match r {
-        Value::Object(o) => o.get("error").is_some_and(fantastic_bundle::py_truthy),
+        Value::Object(_) => crate::refusal::is_refused(r),
         _ => true,
     }
 }
@@ -424,9 +421,10 @@ pub async fn read_via_store(kernel: &Arc<Kernel>, store_id: &AgentId, path: &str
             return Vec::new();
         }
         out.extend_from_slice(&body.unwrap_or_default());
-        // A provider that reports neither `eof` nor a moving cursor gets ONE
-        // pass — the loop must not spin on a surface that cannot answer.
-        let eof = meta.get("eof").and_then(Value::as_bool).unwrap_or(true);
+        // `eof` is part of a `read_stream` reply: a reply without it is no read.
+        let Some(eof) = meta.get("eof").and_then(Value::as_bool) else {
+            return Vec::new();
+        };
         let next = meta.get("next_offset").and_then(Value::as_u64);
         match next {
             Some(n) if !eof && n > offset => offset = n,
@@ -462,7 +460,7 @@ fn mint_tmp_suffix() -> String {
 ///
 /// `Ok(true)` only when the record LANDED (written and renamed) — python
 /// `_persist_via_store` returns after `_persist_failed`, so nothing that follows
-/// a landed write (the readme/docs seed) runs for a failed one.
+/// a landed write runs for a failed one.
 pub async fn persist(kernel: &Arc<Kernel>, loader: &Agent, agent: &Agent) -> KernelResult<bool> {
     if kernel.storage.is_in_memory() || agent.ephemeral {
         return Ok(false);
@@ -566,7 +564,8 @@ pub async fn forget_path(kernel: &Arc<Kernel>, loader: &Agent, agent_root: &Path
     .0;
     if out
         .as_object()
-        .is_some_and(|o| o.get("error").is_some_and(fantastic_bundle::py_truthy))
+        .is_some()
+        && crate::refusal::is_refused(&out)
     {
         persist_failed(kernel, &loader.id, &store_id, &reldir, &out);
     }
@@ -876,7 +875,7 @@ impl PersistWriter {
     ///
     /// When it returns, every write that was dirty when it was called has
     /// LANDED — also the ones the debounced loop took first, so the caller finds
-    /// the record and its readme on disk.
+    /// the record on disk.
     pub async fn flush(&self, kernel: &Arc<Kernel>) {
         flush_records(kernel, &self.loader, &self.dirty, &self.drain).await;
     }
@@ -1054,8 +1053,6 @@ async fn flush_records(
             continue;
         }
         dirty.lock().expect("dirty poisoned").unwritten.remove(&aid);
-        // The record only — a bundle's readme and docs are served from the
-        // bundle, never copied.
         let _ = persist(kernel, &loader, &agent).await;
     }
     for (_, path) in forget {

@@ -22,7 +22,7 @@
 //! Every mode autoloads `.env` first and honours `--ledger-cap` /
 //! `FANTASTIC_LEDGER_CAP`, as python's `main_dispatch` does.
 
-use fantastic_bundle::{is_space, py_int, py_json_dumps};
+use fantastic_bundle::{is_space, py_json_dumps};
 use fantastic_kernel::bootstrap::{self, BootedKernel, BootstrapOptions, DEFAULT_ROOT_ID};
 use fantastic_kernel::{lock, AgentId, BundleRegistry, Item, KernelError};
 use serde_json::{json, Map, Value};
@@ -341,11 +341,6 @@ fn py_strip(s: &str) -> &str {
     s.trim_matches(is_space)
 }
 
-/// python `str.rstrip()`.
-fn py_rstrip(s: &str) -> &str {
-    s.trim_end_matches(is_space)
-}
-
 /// python `_ledger_cap_from` (`P/main.py:66-85`). `--ledger-cap <v>` is removed
 /// from argv wherever it sits — but ONLY when a value follows, so a trailing bare
 /// flag stays an ordinary word. With no flag the value comes from
@@ -377,10 +372,10 @@ fn ledger_cap_from(argv: Vec<String>) -> Result<(Vec<String>, Option<Option<usiz
     if raw == "inf" {
         return Ok((out, Some(None)));
     }
-    match py_int(&Value::String(raw)) {
-        // A negative ring keeps nothing; `usize` cannot hold it, so it floors at 0.
-        Ok(n) => Ok((out, Some(Some(usize::try_from(n).unwrap_or(0))))),
-        Err(e) => Err(format!("{}: {e}", e.class_name())),
+    // the operator's flag, read as the count it is: `inf` or a non-negative integer
+    match raw.parse::<usize>() {
+        Ok(n) => Ok((out, Some(Some(n)))),
+        Err(e) => Err(format!("--ledger-cap {raw:?}: {e}")),
     }
 }
 
@@ -410,8 +405,17 @@ async fn dispatch(
         let opts = BootstrapOptions::one_shot(&state_dir, &work_dir);
         let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
         apply_ledger_cap(&booted, cap);
-        // python `print(src.read_text(...).rstrip())` — rstripped, one newline.
-        println!("{}", py_rstrip(fantastic_cli_bundle::HELP));
+        // The help is the kernel's own docs, rendered from its declarations.
+        let reply = booted
+            .kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel"),
+                json!({"type": "docs", "of": "kernel"}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        println!("{}", py_json_dumps(&reply, true, Some(2)));
         // Every non-daemon mode ends with an idempotent kernel
         // shutdown (python's atexit → `Kernel.shutdown`), even here where no
         // lock was ever taken.
@@ -422,7 +426,7 @@ async fn dispatch(
     // Mode 2: `reflect [<id>] [k=v ...]`. The first token after `reflect`
     // is the target unless it's a `k=v` pair (then target defaults to the
     // root); remaining `k=v` compose the reflect payload — `tree=ids`,
-    // `bundles=all`, `readme=true`, etc. (mirrors the Python CLI).
+    // `bundles=all`, etc. (mirrors the Python CLI).
     if args.first().map(String::as_str) == Some("reflect") {
         let opts = BootstrapOptions::one_shot(&state_dir, &work_dir);
         let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
@@ -432,13 +436,10 @@ async fn dispatch(
             Some(first) if !first.contains('=') => (first.clone(), &rest[1..]),
             _ => (DEFAULT_ROOT_ID.to_string(), rest),
         };
-        let mut payload = Map::new();
-        payload.insert("type".to_string(), json!("reflect"));
-        for kv in kvs {
-            if let Some((k, v)) = kv.split_once('=') {
-                payload.insert(k.to_string(), parse_kv(v));
-            }
-        }
+        let payload = match typed_payload(&booted.kernel, &target, "reflect", kvs) {
+            Ok(p) => p,
+            Err(refused) => return Ok(refuse_args(&refused)),
+        };
         let reply = booted
             .kernel
             .send(vec![Item::new(
@@ -525,13 +526,6 @@ async fn dispatch(
     if args.len() >= 2 {
         let id = args[0].clone();
         let verb = args[1].clone();
-        let mut payload = Map::new();
-        payload.insert("type".to_string(), json!(verb));
-        for kv in &args[2..] {
-            if let Some((k, v)) = kv.split_once('=') {
-                payload.insert(k.to_string(), parse_kv(v));
-            }
-        }
         // THE DAEMON'S OWN LOCK, the flock the bootstrap takes; a live
         // holder refuses with python's `[call]` line, not the kernel's LockHeld
         // text (see [`one_shot_bootstrap`]).
@@ -545,6 +539,12 @@ async fn dispatch(
             return Ok(ExitCode::from(1));
         };
         apply_ledger_cap(&booted, cap);
+        // THE VALUES take the type the verb's declaration asks for (the kernel is up, so
+        // its bundles' declared verbs are known).
+        let payload = match typed_payload(&booted.kernel, &id, &verb, &args[2..]) {
+            Ok(p) => p,
+            Err(refused) => return Ok(refuse_args(&refused)),
+        };
         // BOOT THE ROOT LOADER so this call's mutations (create/update/delete)
         // subscribe and persist. The debounce never ticks before we exit, so
         // the writer is drained synchronously after the call — python's `call`
@@ -625,16 +625,13 @@ async fn dispatch(
     // start: fail loud, exit non-zero — the lock released and the agents torn
     // down on the way out, as python's `with FantasticLock()` + atexit do.
     let started = kernel.start(true).await;
-    if let Some(err) = started
-        .get("error")
-        .filter(|e| fantastic_bundle::py_truthy(e))
-    {
-        let mut msg = fantastic_bundle::py_str(err);
+    if let Some(mut msg) = fantastic_kernel::refusal::error_text(&started) {
         if let Some(hint) = started
             .get("hint")
-            .filter(|h| fantastic_bundle::py_truthy(h))
+            .and_then(Value::as_str)
+            .filter(|h| !h.is_empty())
         {
-            msg.push_str(&format!("\n  hint: {}", fantastic_bundle::py_str(hint)));
+            msg.push_str(&format!("\n  hint: {hint}"));
         }
         stop_kernel(&kernel).await;
         bootstrap::shutdown(&state_dir)?;
@@ -697,58 +694,68 @@ async fn dispatch(
     Ok(ExitCode::SUCCESS)
 }
 
-/// k=v value coercion for one-shot `fantastic <id> <verb> k=v`. Mirrors the
-/// canonical python CLI's `_coerce` (kernel/modes/parse.py): the SHARED scalar
-/// rule, plus a JSON object/array literal for the OPERATOR.
-///
-/// The scalar half is [`fantastic_kernel::coerce_scalar`], the same function the
-/// model's `<k>v</k>` goes through — ONE rule for text a caller typed, as python
-/// has. The JSON branch is this side only: it lets an operator pass a nested
-/// payload (`payload={"type":"list_agents"}`, `tags=[1,2]`), and the
-/// model↔harness path carries no JSON at all.
-fn parse_kv(v: &str) -> Value {
-    let typed = fantastic_kernel::coerce_scalar(v);
-    if !typed.is_string() {
-        return typed;
+/// A `k=v` that is not the type its verb declares: the refusal, on stderr, exit 1.
+fn refuse_args(refused: &Value) -> ExitCode {
+    eprintln!("{}", serde_json::to_string_pretty(refused).unwrap_or_default());
+    ExitCode::from(1)
+}
+
+/// The payload of a one-shot `fantastic <id> <verb> k=v …` call: each value is read as
+/// the type the verb's OWN declaration asks for that argument (`limit=7` is the integer 7
+/// where the verb declares an integer, the text `7` where it declares text; a JSON
+/// literal is a list or an object only where the verb declares one). The reader is the
+/// kernel's ([`fantastic_kernel::typing`]), the same code the model's `<k>v</k>` goes
+/// through; a value that is not its declared type is refused by argument name, and an
+/// agent or verb this kernel does not declare is refused by the reader.
+fn typed_payload(
+    kernel: &std::sync::Arc<fantastic_kernel::Kernel>,
+    target: &str,
+    verb: &str,
+    kvs: &[String],
+) -> Result<Map<String, Value>, Value> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for kv in kvs {
+        let Some((k, v)) = kv.split_once('=') else {
+            return Err(fantastic_kernel::refusal::bad(
+                verb,
+                kv,
+                "written k=v (an argument without `=` is refused, never dropped)",
+            ));
+        };
+        pairs.push((k.to_string(), v.to_string()));
     }
-    // Only attempt JSON when it *looks* like an object/array, so a plain
-    // string with a stray brace doesn't get misparsed (matches Python).
-    let looks_json =
-        (v.starts_with('{') && v.ends_with('}')) || (v.starts_with('[') && v.ends_with(']'));
-    if looks_json {
-        if let Ok(parsed) = serde_json::from_str::<Value>(v) {
-            return parsed;
-        }
-    }
-    Value::String(v.to_string())
+    fantastic_kernel::typing::operator_payload(kernel, target, verb, &pairs)
 }
 
 #[cfg(test)]
-mod parse_kv_tests {
-    use super::parse_kv;
+mod typed_payload_tests {
+    use super::typed_payload;
     use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
-    fn coerces_like_python() {
-        // bool (case-insensitive, matching Python's `v.lower()`).
-        assert_eq!(parse_kv("true"), json!(true));
-        assert_eq!(parse_kv("True"), json!(true));
-        assert_eq!(parse_kv("FALSE"), json!(false));
-        // int then float.
-        assert_eq!(parse_kv("42"), json!(42));
-        assert_eq!(parse_kv("1.5"), json!(1.5));
-        // JSON object/array literal — regression: previously stayed a
-        // string, so `payload={...}` reached handlers as text and the
-        // scheduler errored "payload.type required".
+    fn a_value_for_an_undeclared_verb_stays_the_text_written() {
+        let kernel = Arc::new(fantastic_kernel::Kernel::new());
+        let p = typed_payload(
+            &kernel,
+            "nobody",
+            "ping",
+            &["n=42".into(), "flag=true".into(), "w=[1]".into()],
+        )
+        .unwrap();
         assert_eq!(
-            parse_kv("{\"type\":\"list_agents\"}"),
-            json!({"type": "list_agents"})
+            serde_json::Value::Object(p),
+            json!({"type": "ping", "n": "42", "flag": "true", "w": "[1]"})
         );
-        assert_eq!(parse_kv("[1,2,3]"), json!([1, 2, 3]));
-        // plain strings (incl. a stray brace) stay strings.
-        assert_eq!(parse_kv("hello"), json!("hello"));
-        assert_eq!(parse_kv("a{b"), json!("a{b"));
-        assert_eq!(parse_kv("web.tools"), json!("web.tools"));
+    }
+
+    #[test]
+    fn an_argument_without_an_equals_sign_is_refused_not_dropped() {
+        let kernel = Arc::new(fantastic_kernel::Kernel::new());
+        let e = typed_payload(&kernel, "nobody", "ping", &["n=42".into(), "no_equals".into()])
+            .unwrap_err();
+        assert_eq!(e["reason"], json!("bad_arg"));
+        assert_eq!(e["arg"], json!("no_equals"));
     }
 }
 
@@ -788,7 +795,7 @@ mod catalog_tests {
 /// writes to the PROCESS environment, which the whole test binary shares.
 #[cfg(test)]
 mod cli_shell_tests {
-    use super::{ledger_cap_from, load_dotenv, py_rstrip, py_splitlines, USAGE};
+    use super::{ledger_cap_from, load_dotenv, py_splitlines, USAGE};
 
     fn write_env(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -883,13 +890,6 @@ mod cli_shell_tests {
     }
 
     #[test]
-    fn rstrip_takes_the_ascii_separators_trim_end_leaves() {
-        assert_eq!(py_rstrip("help\n"), "help");
-        assert_eq!(py_rstrip("help\u{1f}\u{1c} \n"), "help");
-        assert_eq!(py_rstrip("  keep left"), "  keep left");
-    }
-
-    #[test]
     fn usage_is_pythons_four_lines() {
         let lines: Vec<&str> = USAGE.split('\n').collect();
         assert_eq!(lines.len(), 4);
@@ -921,16 +921,18 @@ mod cli_shell_tests {
             ledger_cap_from(argv(&["--ledger-cap", "inf"])).unwrap().1,
             Some(None)
         );
-        // python's `int()`, so `_` and a sign parse and a bad literal raises.
+        // a count is plain digits; anything else is refused.
         assert_eq!(
-            ledger_cap_from(argv(&["--ledger-cap", " +1_000 "]))
-                .unwrap()
-                .1,
+            ledger_cap_from(argv(&["--ledger-cap", "1000"])).unwrap().1,
             Some(Some(1000))
         );
         assert_eq!(
+            ledger_cap_from(argv(&["--ledger-cap", " +1_000 "])).unwrap_err(),
+            "--ledger-cap \" +1_000 \": invalid digit found in string"
+        );
+        assert_eq!(
             ledger_cap_from(argv(&["--ledger-cap", "abc"])).unwrap_err(),
-            "ValueError: invalid literal for int() with base 10: 'abc'"
+            "--ledger-cap \"abc\": invalid digit found in string"
         );
     }
 }

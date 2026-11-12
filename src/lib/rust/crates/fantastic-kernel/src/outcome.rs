@@ -200,9 +200,8 @@ pub struct Item {
     pub target: AgentId,
     /// The verb payload — `type` names the verb.
     pub payload: Value,
-    /// Optional caller-chosen execution id. May not contain `:` (the
-    /// minted-pid namespace).
-    pub id: Option<String>,
+    /// Optional execution handle: a name opens-or-joins, a number joins a known execution.
+    pub id: Option<crate::declared::IdOrName>,
     /// Optional per-item deadline in seconds. Absent = wait forever.
     pub timeout: Option<f64>,
     /// Optional retry budget for terminal failed/timed_out attempts.
@@ -221,29 +220,9 @@ pub struct Item {
     /// answer one ([`Outcome::body`]), as any python handler may return a dict
     /// holding bytes.
     pub binary: Option<Blob>,
-    /// The RAW (tag-typed) `exec_id`, when a caller is forwarding a value it
-    /// did not itself parse — a model's `<exec_id>` argument, or a wire
-    /// frame's `id` field. An untyped [`Value`] the KERNEL validates
-    /// and produces python's exact refusals for: `int(id)` NAMES an
-    /// execution to JOIN (refused if none exists under it), a non-empty
-    /// string NAMES one to open-or-join, anything else is `bad_arg`. Set,
-    /// this SUPERSEDES the typed `id` above — coercing with
-    /// `args.get("exec_id").and_then(Value::as_str)` would silently DROP an int
-    /// `exec_id` (never attempting the join python performs) instead of
-    /// forwarding it.
-    pub raw_id: Option<Value>,
-    /// The RAW `timeout`, forwarded untouched instead of
-    /// `args.get("timeout").and_then(Value::as_f64)`, which silently
-    /// DROPPED a malformed value (e.g. the string `"soon"`) — defaulting to
-    /// "wait forever" — instead of the kernel's `bad_arg` refusal. Set, this
-    /// SUPERSEDES the typed `timeout` above.
-    pub raw_timeout: Option<Value>,
-    /// The RAW `retries`, forwarded untouched for the same reason.
-    /// Set, this SUPERSEDES the typed `retries` above.
-    pub raw_retries: Option<Value>,
     /// SECRET MARKS (`crate::secret`): dotted paths into the payload whose values
-    /// the kernel keeps and shows only as `[secret]`. RAW — the kernel validates.
-    pub secret: Option<Value>,
+    /// the kernel keeps and shows only as `[secret]`.
+    pub secret: Vec<String>,
 }
 
 impl Item {
@@ -257,10 +236,7 @@ impl Item {
             timeout: None,
             retries: None,
             binary: None,
-            raw_id: None,
-            raw_timeout: None,
-            raw_retries: None,
-            secret: None,
+            secret: Vec::new(),
         }
     }
 
@@ -268,16 +244,7 @@ impl Item {
     /// sent; every row, event and mirror shows them as `[secret]`.
     #[must_use]
     pub fn with_secret<S: Into<String>>(mut self, marks: impl IntoIterator<Item = S>) -> Self {
-        self.secret = Some(Value::Array(
-            marks.into_iter().map(|m| Value::from(m.into())).collect(),
-        ));
-        self
-    }
-
-    /// Forward a RAW `secret` field (a wire frame's) for the kernel to validate.
-    #[must_use]
-    pub fn with_raw_secret(mut self, v: Value) -> Self {
-        self.secret = Some(v);
+        self.secret = marks.into_iter().map(Into::into).collect();
         self
     }
 
@@ -306,7 +273,7 @@ impl Item {
     /// NAME this execution — the dedup/join/retry handle, and the same id
     /// `ps`/`cancel`/reply tags carry.
     #[must_use]
-    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+    pub fn with_id(mut self, id: impl Into<crate::declared::IdOrName>) -> Self {
         self.id = Some(id.into());
         self
     }
@@ -325,31 +292,6 @@ impl Item {
         self
     }
 
-    /// Forward a RAW (tag-typed) `exec_id` for the KERNEL to validate —
-    /// use this instead of `.with_id(...)` whenever the value came from a
-    /// caller this code did not itself construct (model tag args, a wire
-    /// frame), so an int join or a malformed value reaches python's exact
-    /// refusal instead of being silently coerced/dropped at the call site.
-    #[must_use]
-    pub fn with_raw_id(mut self, v: Value) -> Self {
-        self.raw_id = Some(v);
-        self
-    }
-
-    /// Forward a RAW `timeout` for the kernel to validate.
-    #[must_use]
-    pub fn with_raw_timeout(mut self, v: Value) -> Self {
-        self.raw_timeout = Some(v);
-        self
-    }
-
-    /// Forward RAW `retries` for the kernel to validate.
-    #[must_use]
-    pub fn with_raw_retries(mut self, v: Value) -> Self {
-        self.raw_retries = Some(v);
-        self
-    }
-
     /// Read an item off a wire frame's fields. `id` here is the FRAME id — the
     /// execution id and the correlation id are ONE id space, deliberately: id
     /// reuse across sockets or reconnects is the same intent, so a double-click
@@ -359,7 +301,7 @@ impl Item {
         let mut it = Self::new(target, payload);
         if let Some(fid) = frame_id {
             if !fid.is_empty() {
-                it.id = Some(fid.to_string());
+                it.id = Some(fid.into());
             }
         }
         it

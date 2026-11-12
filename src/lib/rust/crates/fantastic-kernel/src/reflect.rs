@@ -8,21 +8,23 @@
 //!
 //! - `detail=distilled|full` (default distilled) — distilled carries the
 //!   gated ROSTER and the `more` hint; full carries the wiring tree.
-//! - `tree=all|ids` (default `all`; any other PRESENT value omits it) — the
-//!   nested subtree / the flat descendant-id index, paged with `next`.
+//! - `tree=all|ids|none` (default `all`) — the nested subtree / the flat
+//!   descendant-id index, paged with `next`; `none` omits it.
 //!   `handler_modules=[names]` keeps only the agents whose `handler_module` is
 //!   listed (an agent of a role, a meta bundle, is listed under its base as well
 //!   as under its own name); `tree` is then a flat array (ids, or nodes without
 //!   `children`).
 //! - `bundles=all|ids` (default none) — the INSTALLED `{name, handler_module}`
 //!   catalog / its names, paged with `bundles_next`.
-//! - `readme=true` — attach the agent's readme.md (string or null).
 //!
-//! Transport/wire docs live in the root readme (`reflect readme=true`).
+//! The flags are the typed arguments of the declared `reflect`
+//! ([`crate::declared::common::Reflect`]); how to call an agent is `docs`.
 
 use crate::agent::Agent;
 #[cfg(test)]
 use crate::agent::AgentId;
+use crate::declared::common::Reflect;
+use crate::declared::{BundlesKind, Detail, TreeKind};
 use crate::kernel::Kernel;
 use crate::outcome::Status;
 use serde_json::{json, Map, Value};
@@ -34,147 +36,9 @@ use std::sync::Arc;
 /// `sentence` (python `_PURPOSE_KEYS`).
 const PURPOSE_KEYS: [&str; 1] = ["mode"];
 
-// ─── keyed / tiered doc tree ───────────────────────────────────
-// The root manual is a SHORT `readme.md` orientation + a `docs/` tree of topic
-// files (nested dirs = tiers, `/` in the key). `reflect readme=index` lists the
-// tree token-annotated; `reflect readme=<key>` drills one topic. Served from the
-// bundle's compiled `readme()`/`docs()` — nothing is copied to disk.
-
-/// ~tokens for a doc: ceil(chars/4), matching ai_core's estimate (CHARS, not
-/// bytes — Unicode-safe so the advertised cost is stable across runtimes).
-fn est_tokens(text: &str) -> usize {
-    text.chars().count().div_ceil(4)
-}
-
-/// A topic's one-line descriptor: the leading `> ` line if present, else the
-/// first prose line (skipping headings). Python `_read_desc` splits like
-/// `str.splitlines()` (the `\x1c`-`\x1e`/`\x85`/U+2028/U+2029 boundaries
-/// included, not just `\n`) and strips like `str.strip()` (python's wider
-/// whitespace set).
-fn read_desc(text: &str) -> String {
-    let lines = fantastic_bundle::py_splitlines(text);
-    for line in &lines {
-        if let Some(rest) = line.strip_prefix("> ") {
-            return fantastic_bundle::py_strip(rest).to_string();
-        }
-    }
-    for line in &lines {
-        let s = fantastic_bundle::py_strip(line);
-        if !s.is_empty() && !s.starts_with('#') && !s.starts_with('>') {
-            return s.to_string();
-        }
-    }
-    String::new()
-}
-
-/// `\r\n` and a lone `\r` both become `\n` — python's universal-newlines text
-/// mode, applied to every doc/readme read, so `tokens`/`desc` match python's.
-fn translate_newlines(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\r' {
-            if chars.peek() == Some(&'\n') {
-                chars.next();
-            }
-            out.push('\n');
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Token-annotated topic index of a bundle's compiled `docs` table at the tier
-/// under `prefix` (recursive; nesting preserved). Each entry `{key, desc,
-/// tokens, children?}` — NO body. A tier is ordered as python orders the files
-/// of a `docs/` dir: by `<stem>.md`. The docs ship IN the bundle and are never
-/// copied to disk.
-pub fn readme_index(docs: &[(&str, &str)], prefix: &str) -> Vec<Value> {
-    let mut tier: Vec<(&str, &str)> = docs
-        .iter()
-        .filter_map(|(key, body)| {
-            let stem = key.strip_prefix(prefix)?;
-            (!stem.is_empty() && !stem.contains('/')).then_some((stem, *body))
-        })
-        .collect();
-    tier.sort_by_key(|(stem, _)| format!("{stem}.md"));
-    tier.into_iter()
-        .map(|(stem, body)| {
-            let body = translate_newlines(body);
-            let key = format!("{prefix}{stem}");
-            let mut entry = Map::new();
-            entry.insert("key".to_string(), json!(key));
-            entry.insert("desc".to_string(), json!(read_desc(&body)));
-            entry.insert("tokens".to_string(), json!(est_tokens(&body)));
-            let children = readme_index(docs, &format!("{key}/"));
-            if !children.is_empty() {
-                entry.insert("children".to_string(), Value::Array(children));
-            }
-            Value::Object(entry)
-        })
-        .collect()
-}
-
-/// Flatten every doc key the index lists (for an unknown-key error reply).
-fn readme_keys(docs: &[(&str, &str)]) -> Vec<String> {
-    fn walk(entries: &[Value], out: &mut Vec<String>) {
-        for e in entries {
-            if let Some(k) = e.get("key").and_then(Value::as_str) {
-                out.push(k.to_string());
-            }
-            if let Some(ch) = e.get("children").and_then(Value::as_array) {
-                walk(ch, out);
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(&readme_index(docs, ""), &mut out);
-    out
-}
-
-/// Polymorphic `readme=<str>`: `"index"` → the token-annotated tree; a `<key>` →
-/// that topic's body + its immediate sub-docs' index; unknown/escaping key →
-/// `{error, keys}` (the reply stays well-formed). Python's `_readme_view`: the
-/// key is checked LEXICALLY, then against the keys the index lists.
-fn readme_view(docs: &[(&str, &str)], sel: &str) -> Value {
-    if sel == "index" {
-        return json!({ "index": readme_index(docs, "") });
-    }
-    let safe = sel.trim_matches('/').replace('\\', "/");
-    if safe.is_empty() || safe.split('/').any(|p| matches!(p, "" | "." | "..")) {
-        return json!({
-            "error": format!("bad key {}", fantastic_bundle::py_repr(sel)),
-            "keys": readme_keys(docs),
-        });
-    }
-    let keys = readme_keys(docs);
-    let Some(body) = keys
-        .contains(&safe)
-        .then(|| docs.iter().find(|(k, _)| *k == safe).map(|(_, b)| *b))
-        .flatten()
-    else {
-        return json!({
-            "error": format!("no doc {}", fantastic_bundle::py_repr(sel)),
-            "keys": keys,
-        });
-    };
-    let body = translate_newlines(body);
-    let mut view = Map::new();
-    view.insert("key".to_string(), json!(safe));
-    view.insert("desc".to_string(), json!(read_desc(&body)));
-    view.insert("tokens".to_string(), json!(est_tokens(&body)));
-    view.insert("body".to_string(), json!(body));
-    let children = readme_index(docs, &format!("{safe}/"));
-    if !children.is_empty() {
-        view.insert("children".to_string(), Value::Array(children));
-    }
-    Value::Object(view)
-}
-
 /// Uniform reflect identity for a bare agent (the root, or any node with
 /// no handler_module). Bundle agents build their own identity in their
-/// handler; the substrate appends tree/bundles/readme to BOTH via
+/// handler; the substrate appends tree/bundles to BOTH via
 /// [`apply_reflect_flags`], so root is not special-cased.
 pub fn reflect_identity(target: &Arc<Agent>) -> Value {
     let mut obj = Map::new();
@@ -271,7 +135,7 @@ async fn roster_node(kernel: &Arc<Kernel>, a: &Arc<Agent>) -> Result<Map<String,
         node.insert("id".to_string(), json!(a.id.0));
         if let Some(sentence) = raw
             .get("sentence")
-            .filter(|v| fantastic_bundle::py_truthy(v))
+            .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
         {
             node.insert("sentence".to_string(), sentence.clone());
         }
@@ -309,9 +173,25 @@ impl Kernel {
             return json!({"error": "no root agent"});
         };
         let mut reply = reflect_identity(&root);
-        let payload = json!({"type": "reflect", "tree": "ids", "bundles": "ids"});
-        match apply_reflect_flags(self, &root, &payload, &mut reply).await {
-            Ok(()) => reply,
+        let args = Reflect {
+            detail: None,
+            tree: Some(TreeKind::Ids),
+            show_subtrees: None,
+            ignore_subtrees: None,
+            handler_modules: None,
+            bundles: Some(BundlesKind::Ids),
+            limit: None,
+            after: None,
+        };
+        match apply_reflect_flags(self, &root, &args, &mut reply).await {
+            Ok(()) => {
+                // LEAN: the primer is the tree and the bundle names; the verbs are
+                // what `docs` and a direct `reflect` serve.
+                if let Some(o) = reply.as_object_mut() {
+                    o.shift_remove("verbs");
+                }
+                reply
+            }
             Err(raised) => raised,
         }
     }
@@ -322,7 +202,7 @@ impl Kernel {
 /// `_apply_reflect_flags`). Non-object replies and refusals pass through.
 ///
 /// Key order is python's: identity, `description`, gate fields, `view`, the root
-/// frame, `tree`, `next`, `bundles`, `bundles_next`, `readme`. A reflect says
+/// frame, `tree`, `next`, `bundles`, `bundles_next`, `verbs`. A reflect says
 /// what an agent IS, never how to call it: verb docs are
 /// the `docs` kernel verb ([`crate::docs`]).
 ///
@@ -334,7 +214,7 @@ impl Kernel {
 pub async fn apply_reflect_flags(
     kernel: &Arc<Kernel>,
     target: &Arc<Agent>,
-    payload: &Value,
+    args: &Reflect,
     reply: &mut Value,
 ) -> Result<(), Value> {
     let Some(obj) = reply.as_object_mut() else {
@@ -346,7 +226,7 @@ pub async fn apply_reflect_flags(
     if obj.contains_key("error") {
         return Ok(());
     }
-    let full = payload.get("detail").and_then(Value::as_str) == Some("full");
+    let full = args.detail == Some(Detail::Full);
     // `description` is a substrate meta field — surface it on every
     // reflect (bundle handlers don't know about it) unless already set.
     if !obj.contains_key("description") {
@@ -413,20 +293,16 @@ pub async fn apply_reflect_flags(
             }
         }
     }
-    // DECIDED BY KEY PRESENCE (python `payload.get("tree", "all")`): absent is
-    // `all`; a present `all`/`ids` acts; any other present value — null, a bool,
-    // a number, `none` — omits the tree.
-    let tree_mode = match payload.get("tree") {
-        None => Some("all"),
-        Some(Value::String(t)) if t == "all" => Some("all"),
-        Some(Value::String(t)) if t == "ids" => Some("ids"),
-        _ => None,
+    let tree_mode = match args.tree.unwrap_or(TreeKind::All) {
+        TreeKind::All => Some("all"),
+        TreeKind::Ids => Some("ids"),
+        TreeKind::None => None,
     };
     if let Some(mode) = tree_mode {
         // SUBTREE FILTERS: `show_subtrees` answers with only
         // those branches, `ignore_subtrees` prunes each named branch to a stub
         // `{id, pruned: n}`; together, show first and ignore inside it.
-        let (show, ignore) = match crate::docs::subtree_filter(kernel, payload, target) {
+        let (show, ignore) = match crate::docs::subtree_filter(kernel, args, target) {
             Ok(f) => f,
             Err(refused) => {
                 *reply = refused;
@@ -435,25 +311,9 @@ pub async fn apply_reflect_flags(
         };
         // HANDLER FILTER: a list of handler names; `tree` then lists only the
         // agents whose record `handler_module`, or the base of its role (a meta
-        // bundle), is one of them. Absent or null = no filter. Checked here, on the record, before any node is asked.
-        let handlers: Option<Vec<String>> = match payload.get("handler_modules") {
-            None | Some(Value::Null) => None,
-            Some(Value::Array(items)) => {
-                let names: Vec<String> = items
-                    .iter()
-                    .filter_map(|v| v.as_str().filter(|s| !s.is_empty()).map(str::to_string))
-                    .collect();
-                if names.len() != items.len() {
-                    *reply = bad_handler_modules();
-                    return Ok(());
-                }
-                Some(names)
-            }
-            Some(_) => {
-                *reply = bad_handler_modules();
-                return Ok(());
-            }
-        };
+        // bundle), is one of them. Absent = no filter. Checked here, on the record,
+        // before any node is asked.
+        let handlers: Option<Vec<String>> = args.handler_modules.clone();
         let roots: Vec<Arc<Agent>> = if show.is_empty() {
             vec![Arc::clone(target)]
         } else {
@@ -507,14 +367,15 @@ pub async fn apply_reflect_flags(
                 .iter()
                 .flat_map(|r| descendant_entries(r, &ignore, handlers.as_deref(), &kernel.bundles))
                 .collect();
-            let (ids, next) = crate::paging::page(flat, payload, |v| match v {
-                Value::String(s) => s.clone(),
-                other => other
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-            });
+            let (ids, next) =
+                crate::paging::page(flat, args.limit, args.after.as_deref(), |v| match v {
+                    Value::String(s) => s.clone(),
+                    other => other
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                });
             obj.insert("tree".to_string(), Value::Array(ids));
             if let Some(next) = next {
                 obj.insert("next".to_string(), json!(next));
@@ -523,53 +384,56 @@ pub async fn apply_reflect_flags(
     }
     // The catalog pages with the SAME `limit`/`after` as `tree=ids`, and names
     // its cursor `bundles_next` only when a further page exists.
-    match payload.get("bundles") {
-        Some(Value::String(b)) if b == "all" => {
-            let (cat, next) = crate::paging::page(available_bundles(kernel, true), payload, |b| {
-                b.get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string()
-            });
+    match args.bundles {
+        Some(BundlesKind::All) => {
+            let (cat, next) = crate::paging::page(
+                available_bundles(kernel, true),
+                args.limit,
+                args.after.as_deref(),
+                |b| {
+                    b.get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string()
+                },
+            );
             obj.insert("bundles".to_string(), Value::Array(cat));
             if let Some(next) = next {
                 obj.insert("bundles_next".to_string(), json!(next));
             }
         }
-        Some(Value::String(b)) if b == "ids" => {
+        Some(BundlesKind::Ids) => {
             let names: Vec<String> = available_bundles(kernel, false)
                 .iter()
                 .filter_map(|b| b.get("name").and_then(Value::as_str).map(str::to_string))
                 .collect();
-            let (names, next) = crate::paging::page(names, payload, Clone::clone);
+            let (names, next) =
+                crate::paging::page(names, args.limit, args.after.as_deref(), Clone::clone);
             obj.insert("bundles".to_string(), json!(names));
             if let Some(next) = next {
                 obj.insert("bundles_next".to_string(), json!(next));
             }
         }
-        _ => {}
+        None => {}
     }
-    // Polymorphic `readme`: `true` → the SHORT orientation readme.md (string or
-    // null); `"index"` → the token-annotated topic tree; `"<key>"` → one topic's
-    // body + sub-docs' index. Served from the agent's BUNDLE (compiled in), never
-    // from a copy on disk.
     let bundle = target
         .handler_module
         .as_deref()
         .and_then(|hm| kernel.bundles.get(hm));
-    match payload.get("readme") {
-        Some(Value::Bool(true)) => {
-            let readme = bundle.and_then(|b| b.readme()).map(translate_newlines);
-            obj.insert(
-                "readme".to_string(),
-                readme.map_or(Value::Null, Value::String),
-            );
+    // THE VERBS, rendered from the declarations: the agent's own (its bundle's) and the
+    // ones every agent answers; the root answers the kernel's too. An agent without a
+    // bundle has none.
+    if let Some(b) = bundle.as_ref() {
+        let own = b.verbs();
+        let dynamic = b.dynamic_verbs(target);
+        let mut lists: Vec<&[crate::verbs::Verb]> = Vec::new();
+        if target.parent_id.is_none() {
+            lists.push(crate::declared::kernel::VERBS);
         }
-        Some(Value::String(sel)) if !sel.is_empty() => {
-            let docs = bundle.map_or(&[][..], |b| b.docs());
-            obj.insert("readme".to_string(), readme_view(docs, sel));
-        }
-        _ => {}
+        lists.push(own);
+        lists.push(crate::declared::common::VERBS);
+        let shown = crate::verbs::rows(&lists, &dynamic);
+        obj.insert("verbs".to_string(), crate::verbs::lines(&shown));
     }
     Ok(())
 }
@@ -696,16 +560,6 @@ fn handler_listed(
     })
 }
 
-/// The refusal of a `handler_modules` that is not a list of handler names.
-fn bad_handler_modules() -> Value {
-    let mut r = crate::refusal::refusal(
-        crate::refusal::BAD_ARG,
-        "reflect: handler_modules must be a list of handler names",
-    );
-    crate::refusal::with(&mut r, "arg", json!("handler_modules"));
-    r
-}
-
 /// Flat id index of an agent + all descendants (DFS, self first, children in
 /// CREATION ORDER — python's dict walk). The cheap `tree=ids` tier.
 pub fn descendant_ids(target: &Agent) -> Vec<String> {
@@ -721,7 +575,7 @@ pub fn descendant_ids(target: &Agent) -> Vec<String> {
 /// `bundles=all` tier (`bundles=ids` maps to just the names).
 ///
 /// With `schemas`, an entry also carries `schema` when its bundle publishes a
-/// [`crate::bundle::Bundle::record_schema`] — what that KIND's record takes,
+/// [`crate::bundle::Bundle::record`] — what that KIND's record takes,
 /// readable before any agent of it exists. Python
 /// `_available_bundles(schemas=True)`; the cheap `bundles=ids` listing never asks.
 fn available_bundles(kernel: &Arc<Kernel>, schemas: bool) -> Vec<Value> {
@@ -734,9 +588,7 @@ fn available_bundles(kernel: &Arc<Kernel>, schemas: bool) -> Vec<Value> {
                 "handler_module": handler_module,
             });
             if schemas {
-                if let Some(sch) = b.record_schema() {
-                    entry["schema"] = sch;
-                }
+                entry["schema"] = crate::verbs::record_fields(b.record());
             }
             entry
         })

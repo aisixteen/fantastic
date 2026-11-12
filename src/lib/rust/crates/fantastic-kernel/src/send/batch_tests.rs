@@ -302,35 +302,47 @@ struct Overlap {
     b_started: Arc<tokio::sync::Notify>,
 }
 
+crate::stand_in_verbs!(overlap_verbs { BV "b" {  }, BootV "boot" {  }, ShutdownV "shutdown" {  }, WaitForBV "wait_for_b" {  } });
 #[async_trait::async_trait]
-impl crate::bundle::Bundle for Overlap {
+impl crate::bundle::Handler for Overlap {
+    type Call = overlap_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "overlap"
+    }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        overlap_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        overlap_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
     }
 
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &serde_json::Value,
+        call: Self::Call,
         _kernel: &Arc<crate::kernel::Kernel>,
     ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
-        let verb = payload
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        Ok(Some(match verb {
-            "boot" | "shutdown" => serde_json::Value::Null,
-            "reflect" => json!({"id": agent_id.0, "sentence": "overlap probe", "verbs": {}}),
-            "wait_for_b" => {
+        use overlap_verbs::Call;
+        Ok(Some(match call {
+            Call::BootV(_) | Call::ShutdownV(_) => serde_json::Value::Null,
+            Call::Reflect(_) => {
+                json!({"id": agent_id.0, "sentence": "overlap probe", "verbs": {}})
+            }
+            Call::WaitForBV(_) => {
                 let saw =
                     tokio::time::timeout(Duration::from_secs(3), self.b_started.notified()).await;
                 json!({"overlapped": saw.is_ok()})
             }
-            "b" => {
+            Call::BV(_) => {
                 self.b_started.notify_one();
                 json!({"b": true})
             }
-            other => json!({"error": format!("unknown verb {other}")}),
         }))
     }
 }
@@ -486,22 +498,22 @@ async fn the_unnamed_kernel_reflect_honours_its_timeout() {
 
 #[tokio::test]
 async fn timeout_prose_and_row_keep_the_number_the_caller_gave() {
-    // `f"{d.timeout}s"` keeps python's number: an int prints `1s`, a float `0.1s`
-    // / `1e-07s`; the call row stores the value as given.
+    // The timeout is a typed float: it prints as `1.0s`, `0.1s`, `1e-07s`; the call
+    // row stores the value as given.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "b_prose").await;
     let out = kernel
         .send(vec![
-            Item::new(a.clone(), json!({"type": "slow"})).with_raw_timeout(json!(1)),
-            Item::new(a.clone(), json!({"type": "slow"})).with_raw_timeout(json!(1e-7)),
+            Item::new(a.clone(), json!({"type": "slow"})).with_timeout(1.0),
+            Item::new(a.clone(), json!({"type": "slow"})).with_timeout(1e-7),
             Item::new(a.clone(), json!({"type": "slow"})).with_timeout(0.1),
         ])
         .await;
     let text = |i: usize| out[i].result["error"].as_str().unwrap_or("").to_string();
     assert_eq!(
         text(0),
-        "send: b_prose 'slow' exceeded its 1s timeout; task cancelled"
+        "send: b_prose 'slow' exceeded its 1.0s timeout; task cancelled"
     );
     assert_eq!(
         text(1),
@@ -515,8 +527,8 @@ async fn timeout_prose_and_row_keep_the_number_the_caller_gave() {
     let row = kernel.rows.get_one(pid).expect("the call row");
     assert_eq!(
         row["timeout"].to_string(),
-        "1",
-        "the row keeps the int: {row:?}"
+        "1.0",
+        "the row keeps the number: {row:?}"
     );
 }
 

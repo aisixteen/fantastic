@@ -124,7 +124,7 @@ async fn embed_refuses_missing_view_missing_agent_and_missing_grants() {
         json!({"type": "embed", "id": bare}),
     )
     .await;
-    assert_eq!(nv["reason"], json!("no_view"), "{nv}");
+    assert_eq!(nv["reason"], json!("bad_arg"), "{nv}");
 
     // a view whose callable_by lacks get_html for the user
     let weak = id_for(&tmp, "weak");
@@ -135,7 +135,7 @@ async fn embed_refuses_missing_view_missing_agent_and_missing_grants() {
         json!({"type": "embed", "id": weak}),
     )
     .await;
-    assert_eq!(gm["reason"], json!("grants_missing"), "{gm}");
+    assert_eq!(gm["reason"], json!("not_allowed"), "{gm}");
     assert_eq!(
         gm["grants_missing"],
         json!({ weak.clone(): ["get_html"] }),

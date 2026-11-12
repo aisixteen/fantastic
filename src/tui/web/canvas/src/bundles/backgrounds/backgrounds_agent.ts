@@ -28,15 +28,8 @@ const BG_CALLS = ["set_bg", "clear_bg", "default_bg", "get_bg"] as const;
 /** The automatic pick's default period. */
 export const ROTATE_EVERY_S = 60;
 
-export const BACKGROUNDS_README =
-  "THE BACKGROUNDS — a view's background manager. STOCK backgrounds (built in; hide one with `delete`, bring all back with `restore_stock`) and the USER's own list. " +
-  "`list` → {stock: [{name, note, sets}], user: [{name, note}], hidden_stock, current, rotate}. " +
-  "`set {name, set?}` applies one (set: a colour-set name or index; stock only). `random` applies a random visible one. `none` clears the background, `default` restores the bundled one. " +
-  "`rotate {on, every_s?}` picks a random one every `every_s` seconds (default 60). " +
-  "`delete {name}` removes a user background, or HIDES a stock one. " +
-  "`add {name, note?, bytes}` adds a USER background: `bytes` is a GL source in the background's format (JavaScript run as new Function(THREE, scene, t, onFrame, cleanup, bytes) — see the `background` agent's readme). " +
-  "Or `add {name, note?, body, sets?}`: a BODY on the stock prelude — it already defines `SET` (4 hex: field, line, mid, accent), `uniforms` (uT time, uC0..uC3 the set's colours, uNoise), GLSL helpers fbm(p), fbm2(p), hair(v,w), hairAt(v,lvl,w), vignette(p), grain(t), hash(p), and backdrop(glsl, {decl?, uniforms?, z?}) — a full-screen plane whose fragment body writes gl_FragColor (vW = world position) — and headline(); read any stock entry (`list`, then `get {name}`) for an example. " +
-  "`sets` defaults to the stock colour sets. A source that does not compile is refused, with the error; the same name replaces the old one. `get {name}` → its source.";
+/** What the bundle is for. */
+export const BACKGROUNDS_MAN = "A view's background manager: the stock backgrounds, the user's own, and the one in use.";
 
 interface Entry {
   name: string;
@@ -249,5 +242,5 @@ export function registerBackgrounds(kernel: {
     restore_stock: "No args. Every hidden stock background back.",
     add: "args: name:str, note?:str, bytes?:str (a full GL source) | body?:str, sets?:[[name, [4 hex]]] (on the stock prelude). Adds a USER background; same name replaces.",
   });
-  kernel.setBundleReadme(BACKGROUNDS, BACKGROUNDS_README);
+  kernel.setBundleReadme(BACKGROUNDS, BACKGROUNDS_MAN);
 }

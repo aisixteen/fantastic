@@ -2,7 +2,7 @@
 //! `vllm_backend/server.py`, text for text.
 //!
 //! `model`, `max_tokens`, `context_window` and `kv_slots` may be left off the
-//! record. Before a verb that runs a turn ([`TURN_VERBS`]), every one still absent
+//! record. Before `complete`, the verb that runs a turn, every one still absent
 //! is read from the server the record's `endpoint` names and WRITTEN BACK to the
 //! record — it then holds a measured value like one the operator set: reflect
 //! shows it, a reboot keeps it, and the server is not asked again until the field
@@ -27,6 +27,7 @@
 
 use fantastic_ai_core::constants::default_max_tokens;
 use fantastic_ai_core::credentials::{key_reader, KeySource};
+use crate::seconds;
 use fantastic_ai_core::helpers;
 use fantastic_kernel::refusal::{refusal, with, BAD_ARG};
 use fantastic_kernel::{AgentId, Kernel};
@@ -37,7 +38,6 @@ use std::time::Duration;
 /// The fields a record may leave to the server, in the order they are read.
 pub const INFERRED: [&str; 4] = ["model", "max_tokens", "context_window", "kv_slots"];
 /// The verbs that run a turn of the model — the ones the server is read for.
-pub const TURN_VERBS: [&str; 4] = ["send", "inquiry", "context_recall", "complete"];
 
 const INFO: &str = "vllm:cache_config_info";
 
@@ -287,13 +287,6 @@ fn netloc(url: &str) -> &str {
     rest.split(['/', '?', '#']).next().unwrap_or("")
 }
 
-fn seconds(rec: &Map<String, Value>, key: &str, default: f64) -> f64 {
-    rec.get(key)
-        .and_then(Value::as_f64)
-        .filter(|s| *s > 0.0)
-        .unwrap_or(default)
-}
-
 /// The values for the record's absent fields, read from the server.
 ///
 /// # Errors
@@ -314,12 +307,8 @@ pub async fn read(
         .await
         .map_err(|e| fail(want.first().copied().unwrap_or("model"), e.to_string()))?;
     let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs_f64(seconds(
-            rec,
-            "connect_timeout",
-            5.0,
-        )))
-        .read_timeout(Duration::from_secs_f64(seconds(rec, "read_timeout", 900.0)))
+        .connect_timeout(Duration::from_secs_f64(seconds(rec, "connect_timeout")))
+        .read_timeout(Duration::from_secs_f64(seconds(rec, "read_timeout")))
         .build()
         .map_err(|e| fail(want.first().copied().unwrap_or("model"), e.to_string()))?;
     let mut out = Map::new();

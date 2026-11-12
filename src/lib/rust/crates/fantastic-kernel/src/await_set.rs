@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Map, Value};
 
 use crate::agent::AgentId;
+use crate::declared::kernel::{AwaitCancel, AwaitSet};
 use crate::kernel::Kernel;
 use crate::outcome::Item;
 use crate::rows::Row;
@@ -94,11 +95,13 @@ fn row(kind: &str, fields: Value) -> Row {
     r
 }
 
-/// `await_set` — open a wait for the CALLER. Python `_await.await_set`.
+/// `await_set` — open a wait for the CALLER. Python `_await.await_set`. `args` are
+/// the declared, typed arguments (a non-empty list of ids, a positive number of
+/// seconds, a text label); what is left to judge here is the TREE: who the ids name.
 pub(crate) async fn await_set(
     kernel: &Arc<Kernel>,
     caller: Option<AgentId>,
-    payload: &Value,
+    args: &AwaitSet,
 ) -> Value {
     const VERB: &str = "await_set";
     let Some(caller) = caller else {
@@ -108,20 +111,8 @@ pub(crate) async fn await_set(
             "an agent — an operator send has nobody to wake",
         );
     };
-    let Some(raw) = payload.get("ids").filter(|v| !v.is_null()) else {
-        return crate::refusal::missing(VERB, "ids");
-    };
-    let Some(items) = raw.as_array().filter(|a| !a.is_empty()) else {
-        return match raw.as_array() {
-            Some(_) => crate::refusal::missing(VERB, "ids"),
-            None => crate::refusal::bad(VERB, "ids", "a list of agent ids"),
-        };
-    };
     let mut ids: Vec<String> = Vec::new();
-    for it in items {
-        let Some(s) = it.as_str().filter(|s| !s.is_empty()) else {
-            return crate::refusal::bad(VERB, "ids", "a list of agent id strings");
-        };
+    for s in &args.ids {
         let Some(agent) = kernel.resolve_target(s) else {
             return crate::refusal::unknown_agent(
                 s,
@@ -135,22 +126,9 @@ pub(crate) async fn await_set(
             ids.push(agent.id.0.clone());
         }
     }
-    let timeout_raw = payload.get("timeout_s").filter(|v| !v.is_null()).cloned();
-    let timeout = match payload.get("timeout_s").filter(|v| !v.is_null()) {
-        None => None,
-        Some(v) => match v
-            .as_f64()
-            .filter(|t| v.is_number() && t.is_finite() && *t > 0.0)
-        {
-            Some(t) => Some(t),
-            None => return crate::refusal::bad(VERB, "timeout_s", "a positive number of seconds"),
-        },
-    };
-    let label = match payload.get("label").filter(|v| !v.is_null()) {
-        None => Value::Null,
-        Some(v) if v.is_string() => v.clone(),
-        Some(_) => return crate::refusal::bad(VERB, "label", "a string"),
-    };
+    let timeout = args.timeout_s;
+    let timeout_raw = json!(timeout);
+    let label = json!(args.label);
     let deadline = timeout.map(|t| now_secs() + t);
     let wait_id = kernel.mint_id();
     let open = row(
@@ -198,28 +176,19 @@ fn arm(kernel: &Arc<Kernel>, wait_id: i64, after: std::time::Duration) -> tokio:
 pub(crate) async fn await_cancel(
     kernel: &Arc<Kernel>,
     caller: Option<AgentId>,
-    payload: &Value,
+    args: &AwaitCancel,
 ) -> Value {
-    let raw = payload.get("wait_id").cloned().unwrap_or(Value::Null);
-    let wait_id = match &raw {
-        Value::Null | Value::Bool(_) => return crate::refusal::missing("await_cancel", "wait_id"),
-        Value::String(s) if s.is_empty() => {
-            return crate::refusal::missing("await_cancel", "wait_id")
-        }
-        Value::Number(n) => n.as_i64(),
-        Value::String(s) => s.trim().parse::<i64>().ok(),
-        _ => None,
-    };
+    let wait_id = args.wait_id;
     let tbl = table(kernel);
-    let taken = wait_id.and_then(|id| {
+    let taken = {
         let mut t = tbl.lock();
-        match t.get(&id) {
-            Some(w) if Some(&w.caller) == caller.as_ref() => t.remove(&id),
+        match t.get(&wait_id) {
+            Some(w) if Some(&w.caller) == caller.as_ref() => t.remove(&wait_id),
             _ => None,
         }
-    });
-    let (Some(wait_id), Some(w)) = (wait_id, taken) else {
-        return json!({"cancelled": false, "wait_id": raw, "released": 0});
+    };
+    let Some(w) = taken else {
+        return json!({"cancelled": false, "wait_id": wait_id, "released": 0});
     };
     if let Some(t) = &w.timer {
         t.abort();
@@ -248,23 +217,43 @@ async fn redeliver(kernel: Arc<Kernel>, caller: AgentId, held: Vec<(String, Held
     }
 }
 
+/// The `report` message a named agent sends the lead that awaits it (`dispatch` hands
+/// over only a call whose verb is `report`): its `state` and `result`, whatever else
+/// it carries riding along in the held payload.
+#[derive(serde::Deserialize)]
+struct Report {
+    #[serde(default)]
+    state: Value,
+    #[serde(default)]
+    result: Value,
+}
+
 /// THE HOOK in `dispatch`: is this `report` held for an open wait?
 ///
-/// `Some(reply)` = held (the reporter is answered at once, never blocked on the
-/// lead's turn); `None` = dispatch it normally.
+/// `Some(Ok(reply))` = held (the reporter is answered at once, never blocked on the
+/// lead's turn); `Some(Err(refusal))` = a wait holds for this reporter and the
+/// report is malformed; `None` = dispatch it normally.
 pub(crate) fn hold_report(
     kernel: &Arc<Kernel>,
     target: &AgentId,
     origin: Option<&AgentId>,
     payload: &Value,
-) -> Option<Value> {
-    if payload.get("type").and_then(Value::as_str) != Some("report") {
+) -> Option<Result<Value, Value>> {
+    let origin = origin?;
+    let awaited = table(kernel)
+        .lock()
+        .values()
+        .any(|w| &w.caller == target && w.ids.contains(&origin.0));
+    if !awaited {
         return None;
     }
-    let origin = origin?;
+    let report: Report = match crate::verbs::decode("report", payload) {
+        Ok(r) => r,
+        Err(refusal) => return Some(Err(refusal)),
+    };
     let held = Held {
-        state: payload.get("state").cloned().unwrap_or(Value::Null),
-        result: payload.get("result").cloned().unwrap_or(Value::Null),
+        state: report.state,
+        result: report.result,
         payload: payload.clone(),
     };
     let tbl = table(kernel);
@@ -297,7 +286,7 @@ pub(crate) fn hold_report(
             tokio::spawn(async move { finish(&k, wait_id, w, false).await });
         }
     }
-    Some(json!({"held": true, "wait_id": wait_id}))
+    Some(Ok(json!({"held": true, "wait_id": wait_id})))
 }
 
 /// Close a claimed wait and deliver its ONE combined message.

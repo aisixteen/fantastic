@@ -17,40 +17,42 @@
 //! one that moved. This is the kernel, not a database; that is stated rather
 //! than papered over with a snapshot nobody asked to pay for.
 //!
-//! Absent `limit` ⇒ everything, `next: null`. So a caller that never learned
-//! about paging gets exactly what it always got — the default is unchanged, and
-//! the field is inert until asked for.
+//! Absent `limit` ⇒ everything, `next: null`. `limit` and `after` are the verb's
+//! own declared, typed arguments (a positive integer, a text cursor): what the
+//! declaration refuses never reaches this function.
 
-use serde_json::Value;
+/// The text of a row's `id` — a name as itself, a number as its digits — the identity
+/// `page` compares a cursor against. An absent id is the empty text.
+#[must_use]
+pub(crate) fn id_text(id: Option<&serde_json::Value>) -> String {
+    match id {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
 
-/// Apply `limit`/`after` from `payload` to `items`, keyed by `ident`.
+/// Apply `limit`/`after` to `items`, keyed by `ident`.
 ///
 /// Returns `(page, next_cursor)`. `next_cursor` is `Some` only when a further
 /// page exists, so a caller loops until it is `None`.
 ///
-/// `ident` must already answer the item's identity AS PYTHON'S `str()` WOULD
-/// (`fantastic_bundle::py_str` on a numeric id) — `page` compares it against
-/// `after` verbatim, exactly as python's `str(ident(item)) == after`.
+/// `ident` must already answer the item's identity as text (`id_text`) — `page`
+/// compares it against `after` verbatim.
 #[must_use]
-pub fn page<T, F>(items: Vec<T>, payload: &Value, ident: F) -> (Vec<T>, Option<String>)
+pub fn page<T, F>(
+    items: Vec<T>,
+    limit: Option<i64>,
+    after: Option<&str>,
+    ident: F,
+) -> (Vec<T>, Option<String>)
 where
     F: Fn(&T) -> String,
 {
     let mut items = items;
 
-    // PYTHON: `after = payload.get("after")`; a bool is never a cursor
-    // (`isinstance(after, bool): after = None`); absent, `None` or `""` means
-    // "from the start"; any OTHER value compares as `str(after)` — an int id
-    // and its decimal string ARE the same cursor. A non-string `after` is never
-    // silently IGNORED (which would page the WHOLE list instead of resuming past
-    // it).
-    let after = match payload.get("after") {
-        None | Some(Value::Null) | Some(Value::Bool(_)) => None,
-        Some(Value::String(s)) if s.is_empty() => None,
-        Some(v) => Some(fantastic_bundle::py_str(v)),
-    };
-
-    if let Some(after) = after {
+    // absent or `""` means "from the start"
+    if let Some(after) = after.filter(|a| !a.is_empty()) {
         match items.iter().position(|it| ident(it) == after) {
             Some(i) => {
                 items.drain(..=i);
@@ -65,15 +67,9 @@ where
         }
     }
 
-    // `limit` must be a positive integer. Anything else (absent, 0, negative,
-    // a bool, a string) means "everything" — the kernel never guesses a page
-    // size on the caller's behalf.
-    let limit = match payload.get("limit") {
-        Some(Value::Number(n)) => match n.as_i64() {
-            Some(l) if l > 0 => l as usize,
-            _ => return (items, None),
-        },
-        _ => return (items, None),
+    // absent: everything — the kernel never guesses a page size on the caller's behalf
+    let Some(limit) = limit.and_then(|l| usize::try_from(l).ok()) else {
+        return (items, None);
     };
 
     if items.len() <= limit {

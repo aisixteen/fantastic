@@ -1,12 +1,12 @@
 #!/bin/sh
 # pack.sh — the canvas page as a sovereign artifact: dist/canvas.zip =
-# readme.md (the revive guide) + ONE bundle.min.js (the page, its views, the ts
+# ONE bundle.min.js (the page, its views, the ts
 # kernel library, three + xterm + xterm.css — all inlined, no chunks) +
 # bundle.min.js.map.
 #
 # The packing itself is the library's (`src/lib/ts/scripts/pack.sh`, with its
 # vendored, sha256-pinned esbuild — NO npm, NO node); this script names what the
-# CANVAS packs: its entry, its output, its readme, and the flags its vendors
+# CANVAS packs: its entry, its output, and the flags its vendors
 # need. Then it checks that the vendors really are inside.
 #
 #   sh scripts/pack.sh            # → dist/canvas.zip  (PACK_PROFILE=debug: unminified)
@@ -20,7 +20,7 @@ cd "$APP"
 # writes nothing into the tree); default dist/canvas.zip, relative to the app.
 # SOURCE_DATE_EPOCH passes through to the library: the zip is byte-reproducible.
 ZIP="${1:-dist/canvas.zip}"
-sh ../../../lib/ts/scripts/pack.sh src/bundle.ts "$ZIP" readme.md \
+sh ../../../lib/ts/scripts/pack.sh src/bundle.ts "$ZIP" \
   --alias:three=./src/vendor/three.module.js \
   --alias:@xterm/xterm=./src/vendor/xterm.js \
   --alias:@xterm/addon-fit=./src/vendor/addon-fit.js \

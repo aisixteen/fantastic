@@ -74,15 +74,14 @@ async fn a_field_the_create_names_overrides_the_inherited_one() {
 }
 
 #[tokio::test]
-async fn bundle_beside_the_base_is_the_same_create() {
+async fn bundle_beside_another_base_keeps_the_handler_and_names_the_bundle() {
     let tmp = TempDir::new().unwrap();
     let kernel = kernel_with_bundles(&tmp, &[("notes", NOTES)]).await;
     let r = create(&kernel, json!({"id": "n3", "handler_module": "file_bridge.tools", "bundle": "notes"})).await;
     assert_eq!(r["id"], json!("n3"), "{r}");
     let rec = kernel.agents.get(&AgentId::from("n3")).unwrap().record();
-    assert_eq!(rec.handler_module.as_deref(), Some("notes"));
-    assert!(!rec.meta.contains_key("bundle"), "the record carries the kind, not a `bundle` field");
-    assert_eq!(rec.meta["root"], json!("notes"));
+    assert_eq!(rec.handler_module.as_deref(), Some("file_bridge.tools"));
+    assert_eq!(rec.meta["bundle"], json!("notes"), "the record names the bundle it inherits from");
 }
 
 #[tokio::test]

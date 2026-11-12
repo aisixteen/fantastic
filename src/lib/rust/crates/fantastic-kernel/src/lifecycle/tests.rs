@@ -9,14 +9,27 @@ struct CountingBundle {
     deletes: Arc<AtomicUsize>,
 }
 #[async_trait]
-impl crate::Bundle for CountingBundle {
+impl crate::Handler for CountingBundle {
+    type Call = crate::test_support::NoCall;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "counting"
+    }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::test_support::no_verbs()
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        crate::test_support::no_dynamic(agent)
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
     }
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _k: &Arc<Kernel>,
     ) -> Result<crate::Reply, crate::bundle::BundleError> {
         Ok(None)
@@ -381,17 +394,32 @@ async fn agent_created_reaches_a_parent_at_any_depth() {
 #[tokio::test]
 async fn a_raised_child_boot_prints_python_line_and_an_errored_one_is_silent() {
     struct BootBundle;
+    crate::stand_in_verbs!(bootbundle_verbs { BootV "boot" {  } });
     #[async_trait::async_trait]
-    impl crate::Bundle for BootBundle {
+    impl crate::Handler for BootBundle {
+        type Call = bootbundle_verbs::Call;
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
         fn name(&self) -> &str {
             "booty.tools"
+        }
+        fn verbs(&self) -> &'static [crate::Verb] {
+            bootbundle_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+            bootbundle_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static crate::RecordDecl {
+            crate::fixture_record!()
         }
         async fn handle(
             &self,
             id: &AgentId,
-            payload: &Value,
+            call: Self::Call,
             _k: &Arc<Kernel>,
         ) -> Result<crate::Reply, crate::bundle::BundleError> {
+            let payload = &call.payload();
             if payload.get("type").and_then(Value::as_str) == Some("boot") {
                 if id.0.starts_with("raiser") {
                     return Err("boot blew up".into());
@@ -486,20 +514,25 @@ async fn missing_hint_orders_hint_before_arg() {
         .remove(0)
         .result;
     assert_eq!(r["reason"], "missing_arg");
-    assert_eq!(
-        r["hint"],
-        "name the agent that will OWN the new one — your own id for a tool \
-         you keep, or the root ('kernel_state') for a top-level agent"
+    // the hint is the verb's declared argument list and the missing argument's doc
+    let hint = r["hint"].as_str().unwrap();
+    assert!(
+        hint.starts_with(
+            "create_agent takes — args: handler_module:string of at least 1 character(s) (req), parent_id:string of at least 1 character(s) (req)"
+        ),
+        "{hint}"
     );
-    // python `missing(verb, arg, hint=hint)` → `refusal(code, error, hint=hint,
-    // arg=arg)`: `hint` is a named parameter of `refusal`, inserted BEFORE
-    // `arg`, which rides `**extra`.
+    assert!(
+        hint.contains("The agent that will OWN the new one"),
+        "{hint}"
+    );
+    // `hint` is inserted BEFORE `arg`, which rides beside `verb`
     let keys: Vec<&String> = r.as_object().unwrap().keys().collect();
-    assert_eq!(keys, vec!["error", "reason", "hint", "arg"]);
+    assert_eq!(keys, vec!["error", "reason", "hint", "arg", "verb"]);
 }
 
 #[tokio::test]
-async fn empty_required_args_are_missing() {
+async fn empty_required_args_are_refused_by_their_declaration() {
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
     let empty_hm = kernel
@@ -510,7 +543,7 @@ async fn empty_required_args_are_missing() {
         .await
         .remove(0)
         .result;
-    assert_eq!(empty_hm["reason"], "missing_arg");
+    assert_eq!(empty_hm["reason"], "bad_arg");
     assert_eq!(empty_hm["arg"], "handler_module");
     let empty_pid = kernel
         .send(vec![Item::new(
@@ -520,7 +553,7 @@ async fn empty_required_args_are_missing() {
         .await
         .remove(0)
         .result;
-    assert_eq!(empty_pid["reason"], "missing_arg");
+    assert_eq!(empty_pid["reason"], "bad_arg");
     assert_eq!(empty_pid["arg"], "parent_id");
 }
 
@@ -532,11 +565,22 @@ async fn create_refusal_precedence_matches_python() {
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
 
-    // Both handler_module AND parent_id absent -> handler_module wins (checked first).
+    // Both handler_module AND parent_id absent -> the first declared REQUIRED argument
+    // (handler_module) is refused first, by the shared entry's check of the declaration.
     let r = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["arg"], "handler_module");
+    // parent_id given, handler_module absent -> handler_module.
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","parent_id":"kernel"}),
         )])
         .await
         .remove(0)
@@ -570,43 +614,40 @@ async fn create_refusal_precedence_matches_python() {
         .result;
     assert_eq!(r["arg"], "parent");
 
-    // Reserved keys clear but the grant shape is bad -> invalid_meta before
-    // `guard_agent_id`/`exists` are ever reached (id is a number, not a str).
+    // Reserved keys clear but the grant shape is bad: the target's record entry
+    // refuses the field by name (the declared shape: a map of `*` or verb lists).
     let r = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","handler_module":"counting.tools",
-                   "parent_id":"kernel","can_call":"*","id":123}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r["reason"], "invalid_meta");
-    // python NAMES THE TYPE THAT ARRIVED: `— got str. To open wide, …`.
-    assert_eq!(
-        r["error"],
-        "can_call must be a grant MAP {\"<id|$token>\": \"*\" | [\"<verb>\", …]} \
-         — got str. To open wide, grant per key (e.g. {\"$self\": \"*\", \"ai\": \"*\"}), \
-         never a bare value"
-    );
-
-    // Grant shape fine, id invalid (a digit-only name) -> guard_agent_id fires
-    // before the (irrelevant here) exists check.
-    let r = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type":"create_agent","handler_module":"counting.tools",
-                   "parent_id":"kernel","id":"123"}),
+                   "parent_id":"kernel","can_call":"*","id":"granted"}),
         )])
         .await
         .remove(0)
         .result;
     assert_eq!(r["reason"], "bad_arg");
+    assert_eq!(r["arg"], "can_call");
+
+    // An id that is not one safe path segment (or is all digits) is refused by the
+    // declaration of `id`, before any agent exists.
+    for bad_id in ["..", "a/b", ".hidden", "a|b", "123"] {
+        let r = kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel"),
+                json!({"type":"create_agent","handler_module":"counting.tools",
+                       "parent_id":"kernel","id":bad_id}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["reason"], "bad_arg", "{bad_id}: {r}");
+        assert_eq!(r["arg"], "id", "{bad_id}: {r}");
+    }
 }
 
-/// An unknown grant key, and a value that is not `"*"` or a list of strings, are
-/// refused at WRITE time — python `_bad_grant_shape`, text for text, the legal
-/// keys named per field (a peer address is a `can_call` key only).
+/// An unknown grant key is refused at WRITE time — the legal keys named per field (a
+/// peer address is a `can_call` key only); a value that is not `"*"` or a list of
+/// strings is refused by the record's declared shape.
 #[tokio::test]
 async fn unknown_grant_keys_and_bad_values_are_refused_at_write_time() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -642,14 +683,6 @@ async fn unknown_grant_keys_and_bad_values_are_refused_at_write_time() {
             json!({"callable_by": {"g1|ai": "*"}}),
             key("callable_by", "g1|ai"),
         ),
-        (
-            json!({"can_call": {"served": {"verbs": ["list"]}}}),
-            "can_call['served'] must be \"*\" or a list of verb strings".to_string(),
-        ),
-        (
-            json!({"can_call": {"served": 7}}),
-            "can_call['served'] must be \"*\" or a list of verb strings".to_string(),
-        ),
     ];
     for (patch, want) in cases {
         let mut payload = json!({"type": "update_agent", "id": "hub"});
@@ -664,19 +697,46 @@ async fn unknown_grant_keys_and_bad_values_are_refused_at_write_time() {
         assert_eq!(r["reason"], "invalid_meta", "{patch}: {r}");
         assert_eq!(r["error"], want, "{patch}");
     }
+    for patch in [
+        json!({"can_call": {"served": {"verbs": ["list"]}}}),
+        json!({"can_call": {"served": 7}}),
+    ] {
+        let mut payload = json!({"type": "update_agent", "id": "hub"});
+        for (k, v) in patch.as_object().unwrap() {
+            payload[k] = v.clone();
+        }
+        let r = kernel
+            .send(vec![Item::new(AgentId::from("kernel"), payload)])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["reason"], "bad_arg", "{patch}: {r}");
+        assert_eq!(r["arg"], "can_call.served", "{patch}: {r}");
+    }
 }
 
 #[tokio::test]
-async fn update_agent_checks_reserved_keys_before_resolving_id() {
-    // python: `for k in ("handler_module", *sorted(RESERVED_RECORD_KEYS))` runs
-    // BEFORE `self.ctx.agents.get(target_id)` — an unknown target with a
-    // reserved key present still answers `bad_arg`, not `unknown_agent`.
+async fn update_agent_refuses_substrate_wiring_through_the_targets_bundle() {
+    // The record's fields are judged by the TARGET's bundle (its shared record
+    // entry): `handler_module` is fixed at create, and `root_path`/`ctx`/`parent`
+    // name substrate wiring — each refused by name, `parent` (alphabetically first of
+    // the sorted reserved keys) before `root_path`.
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
+    let made = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","parent_id":"kernel",
+                   "handler_module":"counting.tools","id":"wired"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(made["id"], "wired", "{made}");
     let r = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
-            json!({"type":"update_agent","id":"ghost","handler_module":"x.tools"}),
+            json!({"type":"update_agent","id":"wired","handler_module":"x.tools"}),
         )])
         .await
         .remove(0)
@@ -687,15 +747,36 @@ async fn update_agent_checks_reserved_keys_before_resolving_id() {
     let r = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
-            json!({"type":"update_agent","id":"ghost","root_path":"/evil","parent":"x"}),
+            json!({"type":"update_agent","id":"wired","root_path":"/evil","parent":"x"}),
         )])
         .await
         .remove(0)
         .result;
-    // `handler_module` absent here -> sorted(RESERVED_RECORD_KEYS) =
-    // ["ctx","parent","root_path"] -> `parent` is alphabetically first of the
-    // two present.
+    assert_eq!(r["reason"], "bad_arg");
     assert_eq!(r["arg"], "parent");
+
+    // where an agent sits is the tree's, never its record's
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"update_agent","id":"wired","parent_id":"kernel_state"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "bad_arg");
+    assert_eq!(r["arg"], "parent_id");
+
+    // an agent that is not there is the unknown agent
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"update_agent","id":"ghost","display_name":"x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "unknown_agent");
 
     let r = kernel
         .send(vec![Item::new(
@@ -705,7 +786,7 @@ async fn update_agent_checks_reserved_keys_before_resolving_id() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["reason"], "missing_arg");
+    assert_eq!(r["reason"], "bad_arg");
     assert_eq!(r["arg"], "id");
 }
 
@@ -733,7 +814,7 @@ async fn delete_agent_refuses_the_root_with_python_text() {
 }
 
 #[tokio::test]
-async fn delete_agent_empty_id_is_missing_arg() {
+async fn delete_agent_empty_id_is_refused_by_its_declaration() {
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
     let r = kernel
@@ -744,7 +825,7 @@ async fn delete_agent_empty_id_is_missing_arg() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["reason"], "missing_arg");
+    assert_eq!(r["reason"], "bad_arg");
     assert_eq!(r["arg"], "id");
 }
 
@@ -785,12 +866,23 @@ async fn delete_lock_refusal_is_python_text_and_key_order() {
 }
 
 #[tokio::test]
-async fn delete_lock_int_refuses_like_python() {
-    // python `_find_locked_descendant` reads truthiness: `delete_lock: 1` (the
-    // CLI's k=v coercion) locks a GRANDCHILD and the cascade is refused.
+async fn delete_lock_on_a_grandchild_refuses_the_cascade() {
+    // `delete_lock` is the record's declared bool: a lock on a GRANDCHILD refuses the
+    // cascade, and a number is no lock — it is refused as the wrong type.
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
-    for (id, parent, lock) in [("P", "kernel", json!(0)), ("C", "P", json!(1))] {
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"create_agent","parent_id":"kernel","handler_module":"counting.tools",
+                   "id":"N","delete_lock":1}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "delete_lock", "{r}");
+    for (id, parent, lock) in [("P", "kernel", json!(false)), ("C", "P", json!(true))] {
         let r = kernel
             .send(vec![Item::new(
                 AgentId::from("kernel"),
@@ -901,14 +993,27 @@ struct KeepProbe {
     seen: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
 }
 #[async_trait]
-impl crate::Bundle for KeepProbe {
+impl crate::Handler for KeepProbe {
+    type Call = crate::test_support::NoCall;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "keep_probe"
+    }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        crate::test_support::no_verbs()
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        crate::test_support::no_dynamic(agent)
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
     }
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _k: &Arc<Kernel>,
     ) -> Result<crate::Reply, crate::bundle::BundleError> {
         Ok(None)

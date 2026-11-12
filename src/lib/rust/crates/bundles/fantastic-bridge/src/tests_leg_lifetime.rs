@@ -106,7 +106,7 @@ async fn forward_frame(k: &Arc<Kernel>, bid: &str, peer: &Arc<dyn BridgeTranspor
         ask(
             &kk,
             &id,
-            json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}}),
+            json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}, "forward_timeout": 30.0}),
         )
         .await
     });
@@ -135,7 +135,7 @@ async fn a_live_egress_change_stamps_the_next_frame() {
     op(
         &k,
         json!({"type": "update_agent", "id": bid,
-               "egress_rule": {"type": "password_egress", "env": env}}),
+               "egress_rule": "password_egress", "token_env": env}),
     )
     .await;
     assert_eq!(forward_frame(&k, &bid, &peer).await["auth_token"], "grp-1");
@@ -150,27 +150,19 @@ async fn a_live_egress_change_stamps_the_next_frame() {
         .is_none());
 }
 
-/// An egress rule is resolved per forward now, so one the registry does not know
-/// refuses that forward, loud — nothing goes on the wire.
+/// An egress rule no list spells is refused at the write: the record keeps the
+/// rule it had, so no forward ever meets an unknown one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_unknown_egress_rule_written_live_refuses_the_forward() {
+async fn an_unknown_egress_rule_is_refused_at_the_write() {
     let tmp = TempDir::new().unwrap();
     let (k, bid, _peer) = leg(&tmp, "brg_badegress").await;
-    op(
+    let r = op(
         &k,
         json!({"type": "update_agent", "id": bid, "egress_rule": "nope_egress"}),
     )
     .await;
-    let out = ask(
-        &k,
-        &bid,
-        json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}}),
-    )
-    .await;
-    assert_eq!(
-        out,
-        json!({"error": "bridge: bad auth rule: unknown egress rule type 'nope_egress'"})
-    );
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "egress_rule", "{r}");
 }
 
 /// `<bridge id>-<boot nonce>-<n>`: the id keeps bridges apart, the nonce keeps
@@ -199,7 +191,8 @@ async fn write_doc(ka: &Arc<Kernel>, a_id: &str, doc: &str, text: &str) -> Value
         ka,
         a_id,
         json!({"type": "forward", "target": doc,
-               "payload": {"type": "write", "path": "doc.txt", "bytes": text}}),
+               "payload": {"type": "write", "path": "doc.txt", "bytes": text},
+               "forward_timeout": 30.0}),
     )
     .await
 }
@@ -254,33 +247,51 @@ struct TurnProbe {
     started: Arc<tokio::sync::Notify>,
 }
 
+fantastic_kernel::stand_in_verbs!(turn_verbs {
+    Turn "turn" { park: Option<bool> },
+    Status "status" {}
+});
+
 #[async_trait]
-impl Bundle for TurnProbe {
+impl Handler for TurnProbe {
+    type Call = turn_verbs::Call;
     fn name(&self) -> &str {
         "turn_probe.tools"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        turn_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &Agent) -> Vec<fantastic_kernel::DynVerb> {
+        turn_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        match payload["type"].as_str().unwrap_or("") {
-            "turn" => {
+        match call {
+            turn_verbs::Call::Turn(t) => {
                 if self.busy.swap(true, Ordering::SeqCst) {
                     return Ok(Some(json!({"error": "busy"})));
                 }
-                if payload["park"] == json!(true) {
+                if t.park == Some(true) {
                     self.started.notify_one();
                     std::future::pending::<()>().await;
                 }
                 self.busy.store(false, Ordering::SeqCst);
                 Ok(Some(json!({"answered": true})))
             }
-            "status" => Ok(Some(
+            turn_verbs::Call::Status(_) => Ok(Some(
                 json!({"generating": self.busy.load(Ordering::SeqCst)}),
             )),
-            _ => Ok(Some(
+            turn_verbs::Call::Reflect(_) => Ok(Some(
                 json!({"id": id.0, "sentence": "turn probe", "verbs": {}}),
             )),
         }

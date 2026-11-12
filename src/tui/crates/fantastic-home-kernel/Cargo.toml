@@ -25,6 +25,8 @@ fantastic-canvas-page = { path = "../../bundles/fantastic-canvas-page" }
 tokio = { version = "1.40", features = ["rt", "macros", "time", "sync", "process", "net", "io-util", "signal"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+schemars = { version = "0.8", features = ["preserve_order"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 async-trait = "0.1"

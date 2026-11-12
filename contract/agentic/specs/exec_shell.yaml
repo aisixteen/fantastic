@@ -41,7 +41,7 @@ expect:
     # ── EXS-3 · autodiscovery is PTY-only ────────────────────────────────
     - name: a pipe job still names its command
       operator: {to: shell_term, send: {type: start}}
-      expect: {reason: missing_arg, contains: {arg: command}}
+      expect: {reason: missing_arg, contains: {arg: "command | pty"}}
       because: EXS-3
 
     # ── EXS-4 · `shell` permits ONE exact line ───────────────────────────
@@ -73,5 +73,5 @@ expect:
     # ── EXS-5 · `shell` is refused at write time unless true/false/"login" ──
     - name: a shell NAME is not a shell permission
       operator: {to: kernel, send: {type: update_agent, id: shell_term, shell: bash}}
-      expect: {reason: invalid_meta}
+      expect: {reason: bad_arg, contains: {arg: shell}}
       because: EXS-5

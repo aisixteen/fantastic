@@ -12,6 +12,8 @@ fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
 serde_json = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
 async-trait = { workspace = true }
 # the on-demand document `version` (sha256[:16]).
 sha2 = "0.10"
@@ -37,5 +39,10 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Threading",
 ] }
 
+[features]
+# the private-file test fixtures (set a mode, read it back) for a dependent crate's tests
+test-support = []
+
 [dev-dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 tempfile = "3"

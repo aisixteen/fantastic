@@ -19,7 +19,7 @@ use crate::history_view::{dedupe_repeat_bodies, dedupe_stale_reads, drop_read_do
 use crate::memory::{load_history, MemoryStoreError};
 use crate::prompt_file::PromptFileError;
 use crate::state::BackendState;
-use fantastic_bundle::{py_split_whitespace, py_str, py_strip, py_truthy};
+use fantastic_bundle::{py_split_whitespace, py_strip};
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -39,7 +39,7 @@ fn reflect_field(v: &Value) -> String {
                 .iter()
                 .all(|x| !matches!(x, Value::Object(_) | Value::Array(_))) =>
         {
-            items.iter().map(py_str).collect::<Vec<_>>().join(",")
+            items.iter().map(crate::helpers::shown).collect::<Vec<_>>().join(",")
         }
         other => py_split_whitespace(&crate::tool_parse::render_reply(other)).join(" "),
     }
@@ -57,7 +57,7 @@ pub fn render_reflect(v: &Value) -> String {
     };
     let sentence = obj
         .shift_remove("sentence")
-        .map(|s| py_str(&s))
+        .map(|s| crate::helpers::shown(&s))
         .unwrap_or_default();
     let fields = obj
         .iter()
@@ -328,8 +328,8 @@ async fn parts(
     let meta = crate::helpers::agent_meta(self_id, kernel);
     let store = meta
         .get("memory_store_id")
-        .filter(|v| py_truthy(v))
-        .map_or_else(|| "(none)".to_string(), py_str);
+        .and_then(Value::as_str)
+        .map_or_else(|| "(none)".to_string(), str::to_string);
     if need.contains(&"store") {
         out.insert("store", store.clone());
     }
@@ -339,8 +339,7 @@ async fn parts(
         // stripped body, and the async/rows how-to only when replies arrive
         // as rows. Teaching either unconditionally spends window on an
         // affordance the agent does not have.
-        // PYTHON TRUTHINESS (`if rec_.get(...)`): `1`/`"on"` turn the block on.
-        let flag = |k: &str| meta.get(k).is_some_and(py_truthy);
+        let flag = |k: &str| meta.get(k).and_then(Value::as_bool) == Some(true);
         let mut blocks = vec![
             SEND_TO_HOWTO.to_string(),
             CONTEXT_HOWTO.to_string(),
@@ -458,7 +457,7 @@ pub(crate) async fn system_pieces(
     let meta = crate::helpers::agent_meta(self_id, kernel);
     let inner = inner_system_pieces(self_id, kernel, system_prompt).await?;
     let wrap = |key: &str| {
-        crate::schema::record_wrap_prompt(&meta, key).map(|s| vec![piece("system_text", s)])
+        crate::record::record_wrap_prompt(&meta, key).map(|s| vec![piece("system_text", s)])
     };
     let mut out: Vec<SystemPiece> = Vec::new();
     for group in [
@@ -490,7 +489,7 @@ async fn inner_system_pieces(
         return Ok(render_prompt(s, self_id, kernel, "system_text").await);
     }
     if let Some(s) =
-        crate::schema::record_system_prompt(&crate::helpers::agent_meta(self_id, kernel))
+        crate::record::record_system_prompt(&crate::helpers::agent_meta(self_id, kernel))
     {
         return Ok(render_prompt(&s, self_id, kernel, "system_text").await);
     }

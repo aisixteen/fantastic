@@ -1,62 +1,22 @@
 //! A fold carries its own place (`anchor`): it stays in the view when its members are
 //! not in the rows being rendered (a body rebuilt from the view array, a store
-//! compacted by `context_forget`), and a store written before the field existed
-//! renders as it did. The twin of python `ai_core/tests/test_fold_anchors.py`.
+//! compacted by `context_forget`). The twin of python `ai_core/tests/test_fold_anchors.py`.
 //!
 //! A child of `tests`, so the kernel half drives the same harness: a real `ram_store`
 //! named `memory` under the root, every backend wired to it both ways.
 
 use super::*;
 use crate::folds::{
-    anchors_of, covered, expand_ids, is_fold, make_fold, member_anchor, refs_of, render, row_id,
-    unanchored,
+    expand_ids, is_fold, make_fold, member_anchor, refs_of, render, row_id, unanchored,
 };
 use fantastic_kernel::test_support::as_agent;
 use std::collections::{HashMap, HashSet};
 
 const DONE: &str = "<call name=\"done\"></call>";
 const CALL: &str = "<call name=\"send\"><target_id>notes</target_id><type>read</type></call>";
-const DUMP: &str = include_str!("../../../../../../../contract/ai_core/dump_before_anchors.json");
-
-/// `render` as it was before anchors: each fold at the position of the first of its
-/// refs present in `rows`. The oracle the new render must match while every member
-/// is present.
-fn old_render(rows: &[Value]) -> Vec<Value> {
-    let cov = covered(rows);
-    let mut first_pos: HashMap<i64, usize> = HashMap::new();
-    for (i, r) in rows.iter().enumerate() {
-        if let Some(id) = row_id(r).filter(|id| cov.contains(id)) {
-            first_pos.entry(id).or_insert(i);
-        }
-    }
-    let mut place: HashMap<usize, Vec<&Value>> = HashMap::new();
-    for r in rows.iter().filter(|r| is_fold(r)) {
-        let at = refs_of(r)
-            .iter()
-            .filter_map(|x| first_pos.get(x))
-            .min()
-            .copied();
-        if let Some(at) = at {
-            if !row_id(r).is_some_and(|id| cov.contains(&id)) {
-                place.entry(at).or_default().push(r);
-            }
-        }
-    }
-    let mut out = Vec::new();
-    for (i, r) in rows.iter().enumerate() {
-        for f in place.get(&i).into_iter().flatten() {
-            out.push((*f).clone());
-        }
-        if row_id(r).is_some_and(|id| cov.contains(&id)) || is_fold(r) {
-            continue;
-        }
-        out.push(r.clone());
-    }
-    out
-}
 
 fn new_render(rows: &[Value]) -> Vec<Value> {
-    render(rows, &anchors_of(rows))
+    render(rows)
 }
 
 fn ids(rows: &[Value]) -> Vec<Option<i64>> {
@@ -158,117 +118,6 @@ fn without_anchor(mut f: Value) -> Value {
     f
 }
 
-// ── the fold fixtures, members present ──────────────────────────────
-
-fn fixtures() -> Vec<(&'static str, Vec<Value>)> {
-    let mut out = Vec::new();
-    let mut k = Ids::new();
-    let (mut rows, _) = k.chains(&["a", "b"]);
-    rows.push(k.row("user", "later", None));
-    let f = k.fold(&idv(&rows[..5]), "a");
-    rows.push(f);
-    out.push(("one fold", rows));
-
-    let mut k = Ids::new();
-    let (mut rows, _) = k.chains(&["a"]);
-    let inner = k.fold(&idv(&rows), "inner");
-    let outer = k.fold(&[row_id(&inner).unwrap()], "outer");
-    rows.extend([inner, outer]);
-    out.push(("fold of folds", rows));
-
-    let mut k = Ids::new();
-    let (mut rows, _) = k.chains(&["a", "b"]);
-    let part = k.fold(&idv(&rows[..3]), "part");
-    let whole = k.fold(&idv(&rows), "whole");
-    rows.extend([part, whole]);
-    out.push(("overlapping", rows));
-
-    let mut k = Ids::new();
-    let (mut rows, _) = k.chains(&["a"]);
-    let mut refs = idv(&rows);
-    refs.push(9999);
-    let f = k.fold(&refs, "done");
-    rows.push(f);
-    out.push(("a member gone", rows));
-
-    let mut k = Ids::new();
-    let (mut rows, _) = k.chains(&["a"]);
-    let f = k.fold(&idv(&rows), "done");
-    let first = row_id(&rows[0]);
-    rows.push(f);
-    let late = k.row("user", "[reply to 7 · notes read]\nlate", first);
-    rows.push(late);
-    out.push(("a late reply", rows));
-
-    let mut k = Ids::new();
-    let goal = k.row("user", "GOAL", None);
-    let (body, per) = k.chains(&["a", "b", "c", "d", "e", "f"]);
-    let mut rows = vec![goal];
-    rows.extend(body);
-    for c in &per {
-        let f = k.fold(&idv(c), "d");
-        rows.push(f);
-    }
-    rows.push(k.row("user", "now?", None));
-    out.push(("interleaved chains", rows));
-
-    let mut k = Ids::new();
-    let goal = k.row("user", "GOAL", None);
-    let (body, per) = k.chains(&["a", "b"]);
-    let mut rows = vec![goal];
-    rows.extend(body);
-    let fa = k.fold(&idv(&per[0]), "a");
-    let fb = k.fold(&idv(&per[1]), "b");
-    rows.extend([fa, fb]);
-    for i in 0..3 {
-        rows.push(k.row("user", &format!("t{i}"), None));
-    }
-    out.push(("two folds and a tail", rows));
-    out
-}
-
-#[test]
-fn render_is_unchanged_when_members_are_present() {
-    for (name, rows) in fixtures() {
-        assert_eq!(new_render(&rows), old_render(&rows), "{name}");
-    }
-}
-
-fn dump() -> Value {
-    serde_json::from_str(DUMP).expect("the dump is JSON")
-}
-
-#[test]
-fn render_is_unchanged_for_a_store_written_before_anchors() {
-    // The committed dump, made on the code before anchors: every member present.
-    let d = dump();
-    let refs: HashMap<i64, Value> = d["tables"]["fold_refs"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|f| (f["fold"].as_i64().unwrap(), f["members"].clone()))
-        .collect();
-    let rows: Vec<Value> = d["tables"]["rows"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|t| {
-            let mut r = t["row"].clone();
-            if let Some(m) = row_id(&r).and_then(|id| refs.get(&id)) {
-                r["refs"] = m.clone();
-            }
-            r
-        })
-        .collect();
-    let last = rows.iter().rposition(|r| r["kind"] == "clear").unwrap();
-    let head: Vec<Value> = rows[last..]
-        .iter()
-        .filter(|r| r["kind"] != "view" && r["kind"] != "anchors")
-        .cloned()
-        .collect();
-    assert_eq!(new_render(&head), old_render(&head));
-}
-
 // ── a fold without its members ──────────────────────────────────────
 
 #[test]
@@ -319,24 +168,14 @@ fn a_fold_without_members_keeps_its_place() {
 fn an_unanchored_fold_without_members_is_counted_not_placed() {
     let mut k = Ids::new();
     let (a, _) = k.chains(&["a"]);
-    let old = without_anchor(k.fold(&idv(&a), "done")); // written before the field
-    let oid = row_id(&old).unwrap();
+    let old = without_anchor(k.fold(&idv(&a), "done")); // a stored row without the field
     let tail = vec![k.row("user", "now", None)];
     let mut all = a.clone();
     all.push(old);
     all.extend(tail.iter().cloned());
     let rows = cascade(&all, &idv(&a).into_iter().collect());
-    let anchors = anchors_of(&rows);
-    assert!(!anchors.contains_key(&oid));
-    assert_eq!(ids(&render(&rows, &anchors)), ids(&tail));
-    assert_eq!(unanchored(&rows, &anchors), 1);
-    // an `anchors` row recorded for it places it again
-    let mut with = rows.clone();
-    with.push(json!({"kind": "anchors", "v": 1, "anchors": {oid.to_string(): row_id(&a[0])}}));
-    let anchors = anchors_of(&with);
-    let mut want = vec![Some(oid)];
-    want.extend(ids(&tail));
-    assert_eq!(ids(&render(&rows, &anchors)), want);
+    assert_eq!(ids(&render(&rows)), ids(&tail));
+    assert_eq!(unanchored(&rows), 1);
 }
 
 // ── through a real agent and its ram_store ──────────────────────────
@@ -598,10 +437,6 @@ async fn context_forget_prunes_covered_rows_and_old_views() {
     assert!(folds.iter().all(|f| left.contains(f)), "every fold is kept");
     let after_views: Vec<i64> = views(&after).iter().filter_map(|r| row_id(r)).collect();
     assert_eq!(after_views, vs[vs.len() - 1..].to_vec());
-    assert!(
-        !after.iter().any(|r| r["kind"] == "anchors"),
-        "folds that carry their anchor need no anchors row"
-    );
     assert_eq!(
         prompt(&kernel, &backend).await,
         before,
@@ -652,21 +487,9 @@ async fn context_forget_keeps_open_chains_and_unanchored_folds() {
     )
     .await;
     o.push(last);
-    // a fold written before the field, with its members: anchored by deriving
-    let legacy_m = closed(&kernel, &backend, "legacy", 10).await;
     let f_done = make_fold(&done, "d", "b", false, kernel.mint_id(), done[0], 1, None);
     let f_open = make_fold(&o[..2], "o", "b", false, kernel.mint_id(), o[0], 1, None);
-    let legacy = without_anchor(make_fold(
-        &legacy_m,
-        "l",
-        "b",
-        false,
-        kernel.mint_id(),
-        0,
-        1,
-        None,
-    ));
-    // and one with neither field nor members: its place cannot be known
+    // one without the field: its place cannot be known
     let lost = without_anchor(make_fold(
         &[],
         "lost",
@@ -677,17 +500,17 @@ async fn context_forget_keeps_open_chains_and_unanchored_folds() {
         1,
         None,
     ));
-    let kept: Vec<i64> = [&f_done, &f_open, &legacy, &lost]
+    let kept: Vec<i64> = [&f_done, &f_open, &lost]
         .iter()
         .filter_map(|f| row_id(f))
         .collect();
-    for f in [f_done, f_open, legacy.clone(), lost] {
+    for f in [f_done, f_open, lost] {
         put_row(&kernel, &backend, f).await;
     }
     let out = call(&kernel, &backend, json!({"type": "context_forget"})).await;
     assert_eq!(
         out,
-        json!({"pruned": done.len() + legacy_m.len(), "kept_folds": 4, "unanchored": 1})
+        json!({"pruned": done.len(), "kept_folds": 3, "unanchored": 1})
     );
     let left = store(&kernel, &backend).await;
     let ids_left: HashSet<i64> = left.iter().filter_map(row_id).collect();
@@ -697,149 +520,6 @@ async fn context_forget_keeps_open_chains_and_unanchored_folds() {
         "an open chain keeps every row"
     );
     assert!(kept.iter().all(|f| ids_left.contains(f)));
-    let recorded: Vec<Value> = left
-        .iter()
-        .filter(|r| r["kind"] == "anchors")
-        .map(|r| r["anchors"].clone())
-        .collect();
-    assert_eq!(
-        recorded,
-        vec![json!({row_id(&legacy).unwrap().to_string(): legacy_m[0]})],
-        "the legacy fold's place is recorded before its members go"
-    );
-}
-
-#[tokio::test]
-async fn a_dump_from_before_anchors_restores_with_the_same_view() {
-    let d = dump();
-    let tmp = TempDir::new().unwrap();
-    let kernel = base_kernel(&tmp, |_| {}).await;
-    assert_eq!(
-        kernel.root().unwrap().meta.read().unwrap()["guid"],
-        d["guid"],
-        "the dump was made under the test guid"
-    );
-    let aid = d["agent"].as_str().unwrap();
-    let top = d["tables"]["rows"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|t| row_id(&t["row"]))
-        .max()
-        .unwrap();
-    while kernel.mint_id() <= top {} // the kernel's counter is past every stored id
-    let file_id = format!("ff_{aid}");
-    add_file_bridge(&kernel, &file_id, &tmp.path().join(".fantastic"), aid).await;
-    let agent = add_backend(&kernel, aid, &file_id).await;
-    call(
-        &kernel,
-        &AgentId::from(MEMORY),
-        json!({"type": "inject", "tables": d["tables"]}),
-    )
-    .await;
-
-    async fn rendered(kernel: &Arc<Kernel>, agent: &AgentId) -> Value {
-        let head = as_agent(agent.clone(), crate::memory::head(agent, kernel))
-            .await
-            .unwrap();
-        let hist = as_agent(
-            agent.clone(),
-            crate::memory::load_history(agent, kernel, false),
-        )
-        .await
-        .unwrap();
-        json!(ids(&render(&hist, &anchors_of(&head))))
-    }
-
-    assert_eq!(
-        rendered(&kernel, &agent).await,
-        d["render_ids"],
-        "the view main rendered"
-    );
-    let state = crate::state::state_for(&agent);
-    let (msgs, _) = as_agent(
-        agent.clone(),
-        crate::assembly::assemble_messages(
-            &agent,
-            &state,
-            "next",
-            &kernel,
-            "c",
-            Some("sys"),
-            crate::caching::Caching::Cleanup,
-        ),
-    )
-    .await
-    .unwrap();
-    let prompt_ids: Vec<Value> = msgs[1..msgs.len() - 1]
-        .iter()
-        .map(|m| m.get("id").cloned().unwrap_or(Value::Null))
-        .collect();
-    assert_eq!(json!(prompt_ids), d["prompt_ids"]);
-    let before = prompt(&kernel, &agent).await;
-    let rows = store(&kernel, &agent).await;
-    let last_clear = rows
-        .iter()
-        .filter(|r| r["kind"] == "clear")
-        .filter_map(row_id)
-        .max()
-        .unwrap();
-    let head_folds: Vec<&Value> = rows
-        .iter()
-        .filter(|r| is_fold(r) && row_id(r).is_some_and(|i| i > last_clear))
-        .collect();
-    assert!(!head_folds.is_empty() && head_folds.iter().all(|f| f.get("anchor").is_none()));
-    let hf: Vec<i64> = head_folds.iter().filter_map(|f| row_id(f)).collect();
-    let members: HashSet<i64> = expand_ids(&rows, &hf).into_iter().collect();
-    let all_anchors = anchors_of(&rows);
-    let out = call(&kernel, &agent, json!({"type": "context_forget"})).await;
-    assert_eq!(out["unanchored"], 0, "{out}");
-    assert_eq!(out["kept_folds"], hf.len(), "{out}");
-    assert_eq!(
-        prompt(&kernel, &agent).await,
-        before,
-        "the next prompt is the same bytes"
-    );
-    let left = store(&kernel, &agent).await;
-    assert!(
-        members.is_disjoint(&left.iter().filter_map(row_id).collect()),
-        "the old folds' members are gone"
-    );
-    let recorded: Vec<&Value> = left.iter().filter(|r| r["kind"] == "anchors").collect();
-    assert_eq!(recorded.len(), 1);
-    let want: Map<String, Value> = hf
-        .iter()
-        .map(|f| (f.to_string(), json!(all_anchors[f])))
-        .collect();
-    assert_eq!(recorded[0]["anchors"], Value::Object(want));
-    assert_eq!(rendered(&kernel, &agent).await, d["render_ids"]);
-    // dump → inject into a fresh store under the same guid: still the same view
-    let tables = call(&kernel, &AgentId::from(MEMORY), json!({"type": "dump"})).await;
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "create_agent", "parent_id": "kernel_state",
-                   "handler_module": fantastic_ram_store::HANDLER_MODULE, "id": "memory2",
-                   "callable_by": {"$self": "*", aid: "*"}}),
-        )])
-        .await;
-    let mut can_call = kernel.agents.get(&agent).unwrap().meta.read().unwrap()["can_call"].clone();
-    can_call["memory2"] = json!("*");
-    set(
-        &kernel,
-        &agent,
-        json!({"memory_store_id": "memory2", "can_call": can_call}),
-    )
-    .await;
-    call(
-        &kernel,
-        &AgentId::from("memory2"),
-        json!({"type": "inject", "tables": tables["tables"]}),
-    )
-    .await;
-    crate::memory::forget_head(&agent, &kernel);
-    assert_eq!(rendered(&kernel, &agent).await, d["render_ids"]);
-    assert_eq!(prompt(&kernel, &agent).await, before);
 }
 
 #[tokio::test]
@@ -1068,24 +748,20 @@ fn a_new_folds_anchor_is_its_least_leaf() {
     let rows = vec![
         json!({"role": "user", "id": 7, "content": "a"}),
         json!({"role": "user", "id": 30, "kind": "fold", "refs": [3, 4], "anchor": 3, "content": "f"}),
-        json!({"role": "user", "id": 31, "kind": "fold", "refs": [1], "content": "legacy"}),
     ];
-    // a member fold places by its own anchor, a legacy one by the head's anchors
-    let anchors = HashMap::from([(31, 1)]);
-    assert_eq!(member_anchor(&rows, &[0], &anchors).unwrap(), 7);
-    assert_eq!(member_anchor(&rows, &[0, 1], &anchors).unwrap(), 3);
-    assert_eq!(member_anchor(&rows, &[0, 1, 2], &anchors).unwrap(), 1);
+    // a member fold places by its own anchor
+    assert_eq!(member_anchor(&rows, &[0]).unwrap(), 7);
+    assert_eq!(member_anchor(&rows, &[0, 1]).unwrap(), 3);
 }
 
 #[test]
 fn a_fold_that_cannot_be_placed_is_an_error_not_a_panic() {
     let rows = vec![
-        json!({"role": "user", "id": 31, "kind": "fold", "refs": [1], "content": "legacy"}),
+        json!({"role": "user", "id": 31, "kind": "fold", "refs": [1], "content": "no anchor"}),
         json!({"role": "user", "id": "x", "content": "a row with no int id"}),
         json!({"role": "user", "content": "a row with no id"}),
     ];
-    let none = HashMap::new();
-    let err = |idxs: &[usize]| member_anchor(&rows, idxs, &none).unwrap_err().to_string();
+    let err = |idxs: &[usize]| member_anchor(&rows, idxs).unwrap_err().to_string();
     assert_eq!(err(&[0]), "ValueError: fold: member fold 31 has no anchor");
     assert_eq!(err(&[1]), "ValueError: fold: member row 'x' has no int id");
     assert_eq!(err(&[2]), "ValueError: fold: member row None has no int id");
@@ -1106,10 +782,9 @@ async fn write_fold_reports_an_unplaceable_span_before_it_summarizes() {
         script: Arc::clone(&s),
     });
     let rows = vec![
-        json!({"role": "user", "id": 31, "kind": "fold", "refs": [1], "content": "legacy"}),
+        json!({"role": "user", "id": 31, "kind": "fold", "refs": [1], "content": "no anchor"}),
         json!({"role": "user", "id": 32, "content": "a"}),
     ];
-    let anchors = HashMap::new();
     let ctx = crate::strategies::ProjectionCtx {
         budget: 4000,
         recent_n: 6,
@@ -1117,11 +792,10 @@ async fn write_fold_reports_an_unplaceable_span_before_it_summarizes() {
         self_id: &backend,
         kernel: &kernel,
         client_id: "cli",
-        anchors: &anchors,
     };
     let out = as_agent(
         backend.clone(),
-        crate::strategies::fold::write_fold(&ctx, &rows, &[0, 1], &anchors),
+        crate::strategies::fold::write_fold(&ctx, &rows, &[0, 1]),
     )
     .await;
     match out {

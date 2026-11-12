@@ -238,9 +238,9 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   per open fantastic, kept across restarts; a nav pill and the shortcuts mod+0,
   mod+1–9 and mod+W; Open Folder through the shell or a path field. The Home page
   keeps its own records in `<home>/app/`.
-- The reskin contract: the `home` protocol v1, documented in
+- The reskin contract: the `home` protocol, documented in
   `fantastic-home-kernel/docs/home.md` and served by `docs of=home`;
-  `contract/home/v1/cases.json`, replayed by the Rust agent and the TS client;
+  `contract/home/cases.json`, replayed by the Rust agent and the TS client;
   READMEs for Rust shells of `fantastic-home` and `fantastic-home-kernel`; a
   one-file example client at `list.html`. A non-Rust shell talks to a running
   app's port.
@@ -270,7 +270,6 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 - CI runs only by hand: a push to a `fix/**` or `feat/**` branch no longer
   starts the units. Ready branches are batched into one temporary
   `ci/batch-<n>` branch and run once.
-- `home` refuses a client asking for a protocol version other than 1.
 - The home kernel serves the Home at `home.html` and the list page at
   `list.html`.
 - On Windows, canvases start in a hidden console of their own and stop through
@@ -288,9 +287,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   `%LOCALAPPDATA%\fantastic\logs`). The home kernel's folder is `<home>/app`,
   its workdir and its state dir (was `<home>/.fantastic/app`, with its state
   in `<home>/.fantastic/app/.fantastic`). The home was `~/.config/fantastic`.
-  Nothing moves by itself: `fantastic migrate-home` moves an older layout's
-  files (`--dry-run` prints the moves), and refuses while a fantastic or the app
-  runs or a target exists.
+  Nothing moves by itself.
 - Every runtime's disk bootstrap refuses a workdir whose `.fantastic` is the
   fantastic home: `<dir>: its .fantastic is the fantastic home (<home>) — run
   fantastic in a project folder`.

@@ -79,7 +79,7 @@ async fn hello_goes_first_at_every_boot_and_only_with_a_guid() {
         ask(
             &k,
             &id,
-            json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}}),
+            json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}, "forward_timeout": 30.0}),
         )
         .await
     });

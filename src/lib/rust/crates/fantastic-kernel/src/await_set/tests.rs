@@ -2,7 +2,7 @@
 //! memory store, in `fantastic-ram-store/tests/await_restart.rs`.)
 use super::*;
 use crate::agent::Agent;
-use crate::bundle::{Bundle, BundleError, Reply};
+use crate::bundle::{BundleError, Handler, Reply};
 use crate::test_support::wire;
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -28,17 +28,32 @@ impl Rec {
 
 struct RecBundle(Arc<Rec>);
 
+crate::stand_in_verbs!(recbundle_verbs { NoteV "note" {  }, ReportV "report" { state: Option<String>, result: Option<serde_json::Value> }, SendV "send" { wait_id: Option<i64>, label: Option<String>, done: Option<Vec<serde_json::Value>>, missing: Option<Vec<String>>, timed_out: Option<bool>, text: Option<String> } });
 #[async_trait]
-impl Bundle for RecBundle {
+impl Handler for RecBundle {
+    type Call = recbundle_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "rec"
+    }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        recbundle_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        recbundle_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
     }
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
+        let payload = &call.payload();
         if payload["type"] == json!("boot") {
             return Ok(None);
         }
@@ -291,7 +306,7 @@ async fn await_set_refuses_bad_args() {
         (json!({"type": "await_set"}), "missing_arg", "ids"),
         (
             json!({"type": "await_set", "ids": []}),
-            "missing_arg",
+            "bad_arg",
             "ids",
         ),
         (json!({"type": "await_set", "ids": "w1"}), "bad_arg", "ids"),
@@ -317,7 +332,7 @@ async fn await_set_refuses_bad_args() {
             "timeout_s",
         ),
         (
-            json!({"type": "await_set", "ids": ["w1"], "timeout_s": "5"}),
+            json!({"type": "await_set", "ids": ["w1"], "timeout_s": "soon"}),
             "bad_arg",
             "timeout_s",
         ),

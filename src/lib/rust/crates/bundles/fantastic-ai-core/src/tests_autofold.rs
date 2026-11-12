@@ -131,7 +131,7 @@ async fn recall_by_id_returns_the_row_whole_with_its_thinking() {
         json!({"role": "assistant", "content": "the answer", "thinking": "the deep thought"}),
     )
     .await;
-    for given in [json!(id), json!(id.to_string())] {
+    for given in [json!(id)] {
         let r = verb(&kernel, &agent, json!({"type": "recall", "id": given})).await;
         assert_eq!(
             r,

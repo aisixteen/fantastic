@@ -1,30 +1,10 @@
-//! THE ORIENTATION for a coding CLI opened in the project (owner 2026-10-08):
-//! `<state>/AGENTS.md` (the cross-tool name; no CLAUDE.md, owner 2026-10-13)
-//! — is a kernel running here, how to check it,
-//! how to connect (`.mcp.json`, `/mcp`), how to call it from a shell, what is
-//! safe to edit. SEEDED at boot when missing, never overwritten (the human's to
-//! edit); static text only — what changes (ids, the page guid) is `reflect`'s.
+//! The state folder's `readme.md`, rewritten from the live values at every boot.
 
 use std::path::{Path, PathBuf};
 
 use fantastic_kernel::AgentId;
 
 use crate::kern::host::Host;
-
-const FILES: &[(&str, &str)] = &[
-    ("AGENTS.md", include_str!("../../starters/orientation/AGENTS.md")),
-];
-
-/// Seed each file in the state folder that is missing.
-pub fn seed(state: &Path) -> Result<(), String> {
-    for (name, body) in FILES {
-        let f = state.join(name);
-        if !f.exists() {
-            std::fs::write(&f, body).map_err(|e| format!("{}: {e}", f.display()))?;
-        }
-    }
-    Ok(())
-}
 
 /// The folder of bridge `id` (where its file lives).
 fn folder_of(h: &Host, id: &str) -> Option<PathBuf> {

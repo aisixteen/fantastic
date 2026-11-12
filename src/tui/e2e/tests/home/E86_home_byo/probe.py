@@ -108,7 +108,7 @@ def main() -> bool:
         run = yaml_of(rig.home / "app" / "home.yaml")
         info["run_file"] = run
         r["run_file_names_the_host"] = run.get("pid") == rig.home_proc.pid and run.get("port") == rig.home_port
-        listed = await native_call(rig.home_port, "home", {"type": "list", "version": 1})
+        listed = await native_call(rig.home_port, "home", {"type": "list"})
         info["native_list"] = [(x.get("name"), x.get("status")) for x in listed.get("rows", [])]
         r["native_admitted"] = listed.get("type") == "state" and {ap, bp} <= {x.get("path") for x in listed.get("rows", [])}
         code = await upgrade_status(rig.home_port, FOREIGN)

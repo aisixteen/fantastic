@@ -1,0 +1,215 @@
+//! The verbs the canvas's host node (`canvas.tools`) declares (issue #642): one struct
+//! per verb, then `verbs!` — the list the agent's own entry checks every call against,
+//! and that `reflect` and `docs` render. `reflect` is declared once, in the kernel.
+
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::{Map, Value};
+
+/// One direct child of this agent; asking for an existing child of the same handler again answers it. An AI (its handler names a memory store) is made as every AI is: on the project's memory store, granted that store and the human's chat verbs. Returns {id, …}.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Create {
+    /// The child: `handler_module`, `id` (optional) and its own record fields; no parent or grants of the caller's.
+    #[schemars(schema_with = "child_record")]
+    pub record: ChildRecord,
+}
+
+/// A child's record as the declared schema decodes it: the two fields the create itself
+/// reads, typed, and the bundle's own fields beside them.
+#[derive(Debug, Deserialize)]
+pub struct ChildRecord {
+    /// The bundle the child runs.
+    pub handler_module: String,
+    /// The child's id, when asked for.
+    pub id: Option<String>,
+    /// The bundle's own fields.
+    #[serde(flatten)]
+    pub rest: Map<String, Value>,
+}
+
+impl ChildRecord {
+    /// The whole record, as the kernel's create takes it.
+    pub fn into_map(self) -> Map<String, Value> {
+        let mut m = self.rest;
+        m.insert("handler_module".into(), Value::String(self.handler_module));
+        if let Some(id) = self.id {
+            m.insert("id".into(), Value::String(id));
+        }
+        m
+    }
+}
+
+/// Fields that make a different agent: never the caller's to set on a child.
+const STRUCTURAL: [&str; 4] = ["type", "parent_id", "guid", "agents"];
+
+/// Properties that allow no value at all (the shared engine refuses a field declared so).
+fn never(keys: &[&str], props: &mut Map<String, Value>) {
+    for k in keys {
+        props.insert(
+            (*k).to_string(),
+            serde_json::json!({"enum": [], "description": "Structural: not the caller's to set."}),
+        );
+    }
+}
+
+/// The schema of a child's record: an object naming the bundle it runs, and carrying
+/// no structural field.
+fn child_record(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    let mut props = Map::new();
+    props.insert(
+        "handler_module".into(),
+        serde_json::json!({"type": "string", "minLength": 1, "description": "The bundle the child runs."}),
+    );
+    never(&STRUCTURAL, &mut props);
+    serde_json::from_value(serde_json::json!({
+        "type": "object",
+        "required": ["handler_module"],
+        "properties": props,
+    }))
+    .expect("a child record schema")
+}
+
+/// The schema of a stamp: an object of the caller's own fields, none structural.
+fn stamp(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    let mut props = Map::new();
+    never(&["type", "id", "parent_id", "guid", "handler_module", "agents"], &mut props);
+    serde_json::from_value(serde_json::json!({"type": "object", "properties": props, "default": {}})).expect("a stamp schema")
+}
+
+/// Delete an agent under this one, and its subtree.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Delete {
+    /// The agent to delete: one under this node.
+    #[schemars(length(min = 1))]
+    pub id: String,
+}
+
+/// The default AI set-up and the project's own bundles. Returns {preferred, bundles:[{name, sentence}]}.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Presets {}
+
+/// Make one AI cell's backend from a saved set-up (else the default; none and no name is refused, naming how to set one), or place a project bundle: `bundle` makes a NEW project bundle from that starter (only when the user asks for a bundle), `instance_of` one more instance of a project bundle. Returns {id, root, saved, handler_module, model}.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Spawn {
+    /// The saved set-up to make the AI from; absent, the owner's default.
+    #[schemars(length(min = 1))]
+    pub saved: Option<String>,
+    /// A starter to make a NEW project bundle from.
+    #[schemars(length(min = 1))]
+    pub bundle: Option<String>,
+    /// A project bundle to place one more instance of.
+    #[schemars(length(min = 1))]
+    pub instance_of: Option<String>,
+    /// The caller's own fields for the backend root, copied unread; the agent's own structure (parent, id, handler) is set after it.
+    #[serde(default)]
+    #[schemars(schema_with = "stamp")]
+    pub stamp: Map<String, Value>,
+    /// Any grant key: more egress for the AI.
+    #[serde(default)]
+    pub peer_grants: Map<String, Value>,
+}
+
+/// Record the dialog of a cell's AI (its rows are already in the project's memory store); it outlives the cell. Returns {kept, name}.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Keep {
+    /// The cell's AI.
+    #[schemars(length(min = 1))]
+    pub id: String,
+    /// The dialog's name; absent, the AI's id.
+    #[schemars(length(min = 1), regex(pattern = "\\S"))]
+    pub name: Option<String>,
+}
+
+/// Name a kept dialog. Returns {id, name}.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Rename {
+    /// The kept dialog's AI.
+    #[schemars(length(min = 1))]
+    pub id: String,
+    /// The new name.
+    #[schemars(length(min = 1), regex(pattern = "\\S"))]
+    pub name: String,
+}
+
+/// The kept dialogs. Returns {dialogs:[{id, name, saved, live}]}.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Dialogs {}
+
+/// Bind a new cell to a kept dialog: the live AI when another cell has it, else the same AI re-made here, its history intact. Returns {id, root, saved, name, shared}.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Reopen {
+    /// The kept dialog's AI.
+    #[schemars(length(min = 1))]
+    pub id: String,
+    /// As `spawn`'s.
+    #[serde(default)]
+    #[schemars(schema_with = "stamp")]
+    pub stamp: Map<String, Value>,
+    /// As `spawn`'s.
+    #[serde(default)]
+    pub peer_grants: Map<String, Value>,
+}
+
+/// A CHILD canvas `canvas_<name>` of this one: its page records nest under this canvas's records, and deleting this canvas deletes it. Its own page kernel and its own cells' backends. Open it at the page URL with `?canvas=<id>`. Returns {id}.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NewCanvas {
+    /// The canvas's name: lowercase letters, digits and `_`; the node is `canvas_<name>`.
+    #[schemars(length(min = 1), regex(pattern = "^[a-z0-9][a-z0-9_]{0,62}$"))]
+    pub name: String,
+}
+
+/// Every canvas, the main one first. Returns {canvases:[{id, loader, main, name}]}.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Canvases {}
+
+/// One remote MCP server as an agent under this canvas: its tools are its verbs. The key is stored in the credential store (choose where keys are kept first). Returns {id}.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AddMcp {
+    /// The server's MCP endpoint.
+    #[schemars(length(min = 1), regex(pattern = "\\S"))]
+    pub url: String,
+    /// A static API key, sent as Bearer to that host only.
+    #[schemars(length(min = 1), regex(pattern = "\\S"))]
+    pub key: Option<String>,
+}
+
+/// An MCP agent's settings changed (a new key stored for the url's host and named), then it connects and lists its tools again (`boot`). Neither given: a reset, it reconnects as it is. Returns {id, url}.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigureMcp {
+    /// An MCP agent of this canvas.
+    #[schemars(length(min = 1))]
+    pub id: String,
+    /// A new endpoint.
+    #[schemars(length(min = 1), regex(pattern = "\\S"))]
+    pub url: Option<String>,
+    /// A new key.
+    #[schemars(length(min = 1), regex(pattern = "\\S"))]
+    pub key: Option<String>,
+}
+
+fantastic_kernel::verbs! {
+    "create" => Create,
+    "delete" => Delete,
+    "presets" => Presets,
+    "spawn" => Spawn,
+    "keep" => Keep,
+    "rename" => Rename,
+    "dialogs" => Dialogs,
+    "reopen" => Reopen,
+    "new_canvas" => NewCanvas,
+    "canvases" => Canvases,
+    "add_mcp" => AddMcp,
+    "configure_mcp" => ConfigureMcp,
+}

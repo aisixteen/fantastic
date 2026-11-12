@@ -133,34 +133,6 @@ pub fn settings(meta: &Map<String, Value>) -> Result<(Caching, Option<i64>), Str
     Ok((mode_of(meta)?, primer_of(meta)?))
 }
 
-/// The write-time check of the caching fields, on the MERGED record: `provider_cache`
-/// only where the backend declares it, and `cache_primer_until` a row id. The mode's
-/// own legal values are the schema's enum check, which runs first.
-#[must_use]
-pub fn refusal(
-    meta: &Map<String, Value>,
-    record: &Map<String, Value>,
-    backend: &str,
-    provider_cache: bool,
-) -> Option<String> {
-    let mut merged = record.clone();
-    for (k, v) in meta {
-        merged.insert(k.clone(), v.clone());
-    }
-    if mode_of(&merged) == Ok(Caching::ProviderCache) && !provider_cache {
-        return Some(format!(
-            "{backend} cannot do provider caching: caching=provider_cache is refused — use \
-             none or cleanup"
-        ));
-    }
-    if meta.contains_key("cache_primer_until") {
-        if let Err(why) = primer_of(&merged) {
-            return Some(why);
-        }
-    }
-    None
-}
-
 /// The refusal a turn fails with when its record asks for a caching the backend
 /// cannot do. Raised before the turn opens, so nothing is stored.
 #[must_use]
@@ -286,30 +258,6 @@ mod tests {
             assert!(err.starts_with("cache_primer_until="), "{err}");
             assert!(err.ends_with("must be a row id (a positive int)"), "{err}");
         }
-    }
-
-    #[test]
-    fn provider_cache_is_refused_where_the_backend_cannot_cache() {
-        let rec = obj(json!({"memory_store_id": "s"}));
-        let asks = obj(json!({"caching": "provider_cache"}));
-        let why = refusal(&asks, &rec, "ollama_backend", false).expect("refused");
-        assert!(why.contains("ollama_backend"), "{why}");
-        assert!(why.contains("provider_cache"), "{why}");
-        assert_eq!(refusal(&asks, &rec, "anthropic_backend", true), None);
-        // none and cleanup go anywhere
-        for mode in ["none", "cleanup"] {
-            let m = obj(json!({"caching": mode}));
-            assert_eq!(refusal(&m, &rec, "ollama_backend", false), None);
-        }
-        // a record already in provider_cache, named again on a backend that cannot
-        assert!(refusal(&obj(json!({"recent_n": 4})), &asks, "ollama_backend", false).is_some());
-    }
-
-    #[test]
-    fn a_primer_named_on_the_write_must_be_a_row_id() {
-        let rec = obj(json!({}));
-        assert!(refusal(&obj(json!({"cache_primer_until": 3})), &rec, "b", true).is_none());
-        assert!(refusal(&obj(json!({"cache_primer_until": "x"})), &rec, "b", true).is_some());
     }
 
     #[test]

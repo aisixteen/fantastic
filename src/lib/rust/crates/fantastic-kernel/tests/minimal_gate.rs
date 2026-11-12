@@ -10,7 +10,7 @@
 //! - A grant key outside the legal set is refused `invalid_meta` at the write.
 
 use async_trait::async_trait;
-use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Outcome, Reply};
+use fantastic_kernel::{Agent, AgentId, BundleRegistry, Handler, Item, Kernel, Outcome, Reply};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -20,17 +20,32 @@ const MOD: &str = "minimal_gate_probe.tools";
 /// Answers `{ok: <id>, verb}` for any verb.
 struct Probe;
 
+fantastic_kernel::stand_in_verbs!(probe_verbs { BootV "boot" {  }, PingV "ping" {  }, ShutdownV "shutdown" {  } });
 #[async_trait]
-impl Bundle for Probe {
+impl Handler for Probe {
+    type Call = probe_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "minimal_gate_probe"
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        probe_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        probe_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
+        let payload = &call.payload();
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         Ok(match verb {
             "boot" | "shutdown" => None,
@@ -278,41 +293,48 @@ async fn a_missing_operand_or_an_unknown_id_gets_the_verbs_own_refusal() {
         json!({"can_call": {"kernel_state": "*"}}),
     )
     .await;
-    // a missing or non-string operand is the VERB's missing/shape refusal
-    for (payload, verb, arg) in [
+    // a missing operand is `missing_arg`, a non-string one `bad_arg`: the kernel's
+    // check of the verb's declaration, by argument name, before the verb runs
+    for (payload, verb, arg, reason) in [
         (
             json!({"type": "create_agent", "handler_module": MOD}),
             "create_agent",
             "parent_id",
+            "missing_arg",
         ),
         (
             json!({"type": "create_agent", "parent_id": 7, "handler_module": MOD}),
             "create_agent",
             "parent_id",
+            "bad_arg",
         ),
         (
             json!({"type": "update_agent", "description": "x"}),
             "update_agent",
             "id",
+            "missing_arg",
         ),
         (
             json!({"type": "update_agent", "id": 7}),
             "update_agent",
             "id",
+            "bad_arg",
         ),
-        (json!({"type": "delete_agent"}), "delete_agent", "id"),
+        (
+            json!({"type": "delete_agent"}),
+            "delete_agent",
+            "id",
+            "missing_arg",
+        ),
         (
             json!({"type": "delete_agent", "id": ""}),
             "delete_agent",
             "id",
+            "bad_arg",
         ),
     ] {
         let out = as_agent(&k, "a", "kernel", payload.clone()).await;
-        assert_eq!(
-            out.result["reason"], "missing_arg",
-            "{payload}: {}",
-            out.result
-        );
+        assert_eq!(out.result["reason"], reason, "{payload}: {}", out.result);
         assert_eq!(out.result["arg"], arg, "{payload}: {}", out.result);
         assert!(
             out.result["error"]
@@ -398,6 +420,6 @@ async fn an_unknown_grant_key_is_refused_at_the_write() {
     .await;
     assert_eq!(
         r["error"],
-        "callable_by['a'] must be \"*\" or a list of verb strings"
+        "create_agent: argument 'callable_by.a' must be '*'|list[string], got dict"
     );
 }

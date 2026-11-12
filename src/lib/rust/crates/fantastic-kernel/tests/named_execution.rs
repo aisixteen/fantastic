@@ -6,7 +6,7 @@
 //! named. Python registers named work under `exec_id`.
 
 use async_trait::async_trait;
-use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Reply, Status};
+use fantastic_kernel::{Agent, AgentId, BundleRegistry, Handler, Item, Kernel, Reply, Status};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,17 +15,32 @@ use tempfile::TempDir;
 /// Sleeps long enough that the test can act on it mid-flight.
 struct Slow;
 
+fantastic_kernel::stand_in_verbs!(slow_verbs { PingV "ping" {  }, WorkV "work" {  } });
 #[async_trait]
-impl Bundle for Slow {
+impl Handler for Slow {
+    type Call = slow_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "slow"
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        slow_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        slow_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         _id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
+        let payload = &call.payload();
         match payload.get("type").and_then(Value::as_str) {
             Some("work") => {
                 tokio::time::sleep(Duration::from_secs(30)).await;

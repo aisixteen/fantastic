@@ -34,10 +34,6 @@ const SETTING_PIXELS: &str = "image_max_pixels";
 /// A chat setting that lowers the byte limit of the model (a number).
 const SETTING_BYTES: &str = "image_max_bytes";
 
-/// The limits an image is held to when the capability entry names none.
-const FALLBACK_BYTES: i64 = 5_000_000;
-const FALLBACK_PIXELS: i64 = 1_150_000;
-
 /// The re-encodes a too large image gets before it is refused.
 const SHRINKS: u32 = 10;
 
@@ -67,26 +63,24 @@ pub(crate) fn can(meta: &Map<String, Value>, need: &str) -> bool {
 
 /// The limits of the chat's model ([`Limits`]).
 pub(crate) fn limits(meta: &Map<String, Value>) -> Limits {
-    let entry = entry_of(meta);
-    let num = |m: Option<&Map<String, Value>>, k: &str| {
-        m.and_then(|m| m.get(k))
-            .and_then(Value::as_i64)
-            .filter(|n| *n > 0)
+    let empty = Map::new();
+    let entry = entry_of(meta).unwrap_or(&empty);
+    let own = |k: &str| {
+        crate::record::image_caps::RECORD
+            .get(entry, k)
+            .and_then(|v| v.as_i64())
     };
-    let lowered = |own: Option<i64>, setting: &str| match num(Some(meta), setting) {
-        Some(s) => own.map_or(s, |o| o.min(s)),
-        None => own.unwrap_or(i64::MAX),
+    let lowered = |k: &str, setting: &str| {
+        let own = own(k).expect("the capability declares its default");
+        crate::record::ai::RECORD
+            .get(meta, setting)
+            .and_then(|v| v.as_i64())
+            .map_or(own, |s| own.min(s))
     };
     Limits {
-        max_images: num(entry, "max_images"),
-        max_bytes: lowered(
-            num(entry, "max_bytes").or(Some(FALLBACK_BYTES)),
-            SETTING_BYTES,
-        ),
-        max_pixels: lowered(
-            num(entry, "max_pixels").or(Some(FALLBACK_PIXELS)),
-            SETTING_PIXELS,
-        ),
+        max_images: own("max_images"),
+        max_bytes: lowered("max_bytes", SETTING_BYTES),
+        max_pixels: lowered("max_pixels", SETTING_PIXELS),
     }
 }
 
@@ -333,13 +327,11 @@ fn tokens(w: u32, h: u32) -> u64 {
 pub(crate) async fn attach(
     agent_id: &AgentId,
     kernel: &Arc<Kernel>,
-    specs: Option<&Value>,
+    specs: Option<&[crate::declared::Image]>,
 ) -> Result<Option<Attached>, String> {
     let list = match specs {
-        None | Some(Value::Null) => return Ok(None),
-        Some(Value::Array(a)) if a.is_empty() => return Ok(None),
-        Some(Value::Array(a)) => a,
-        Some(_) => return Err("send: `images` must be a list of {path | ref}".to_string()),
+        None | Some([]) => return Ok(None),
+        Some(a) => a,
     };
     let meta = crate::helpers::agent_meta(agent_id, kernel);
     let limits = limits(&meta);
@@ -354,14 +346,8 @@ pub(crate) async fn attach(
     let mut info = Vec::new();
     for (i, spec) in list.iter().enumerate() {
         let at = format!("send: images[{i}]");
-        let path = spec
-            .get("path")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty());
-        let named = spec
-            .get("ref")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty());
+        let path = spec.path.as_deref().filter(|s| !s.is_empty());
+        let named = spec.image_ref.as_deref().filter(|s| !s.is_empty());
         let (raw, name, from_ref) = match (path, named) {
             (Some(p), None) => {
                 let bridge = meta

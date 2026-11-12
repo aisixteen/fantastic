@@ -14,13 +14,14 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use fantastic_bundle::{py_repr, py_repr_value, py_str};
-use fantastic_kernel::refusal::{bad, missing, refusal, with, NOT_FOUND, TRANSPORT_ERROR};
+use fantastic_kernel::refusal::{bad, refusal, with, NOT_FOUND, TRANSPORT_ERROR};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
 
 use crate::jobs;
 use crate::sys;
+use crate::verbs;
+use crate::JobRef;
 
 /// The scrollback ring a re-attaching client replays (python `PTY_RING`).
 pub const PTY_RING: usize = 256 * 1024;
@@ -30,14 +31,6 @@ pub const HIGH_WATERMARK: usize = 100_000;
 pub const LOW_WATERMARK: usize = 5_000;
 /// A pasted image's size cap.
 pub const MAX_PASTE_IMAGE: usize = 5 * 1024 * 1024;
-/// The formats a CLI like Claude Code accepts, keyed by MIME.
-const IMAGE_EXT: [(&str, &str); 4] = [
-    ("image/png", "png"),
-    ("image/jpeg", "jpg"),
-    ("image/gif", "gif"),
-    ("image/webp", "webp"),
-];
-
 /// One PTY job's terminal: the master end and its mutable state.
 pub struct Pty {
     master: sys::PtyMaster,
@@ -228,11 +221,10 @@ async fn write_all(pty: &Pty, data: &[u8]) -> std::io::Result<usize> {
 
 /// `(pty, None)` for a live PTY job this agent owns, or the refusal (python
 /// `_pty_job`).
-fn pty_job(verb: &str, owner: &AgentId, payload: &Value) -> Result<Arc<Pty>, Value> {
-    let jid = crate::require_job(verb, payload)?;
+fn pty_job(verb: &str, owner: &AgentId, jid: &JobRef) -> Result<Arc<Pty>, Value> {
     let g = jobs::jobs();
     let Some(job) = jid.find(&g, owner) else {
-        return Err(crate::no_such_job(&jid));
+        return Err(crate::no_such_job(jid));
     };
     let Some(pty) = job.pty.clone() else {
         return Err(bad(verb, "job_id", "a PTY job (started with `pty`)"));
@@ -240,63 +232,35 @@ fn pty_job(verb: &str, owner: &AgentId, payload: &Value) -> Result<Arc<Pty>, Val
     if !jobs::alive(job) || pty.lock().eof {
         let mut v = refusal(
             NOT_FOUND,
-            format!("exec_bridge: job {} has ended", py_repr_value(&jid.raw)),
+            format!("exec_bridge: job {} has ended", jid.id.0),
         );
-        with(&mut v, "job_id", jid.raw);
+        with(&mut v, "job_id", json!(jid.id.0));
         return Err(v);
     }
     Ok(pty)
-}
-
-/// A positive `u16` (python `_dims`: an int >= 1, a bool is not one).
-fn dim(verb: &str, name: &str, v: Option<&Value>) -> Result<u16, Value> {
-    v.and_then(Value::as_u64)
-        .filter(|n| *n >= 1)
-        .and_then(|n| u16::try_from(n).ok())
-        .ok_or_else(|| bad(verb, name, "a positive integer"))
-}
-
-/// `(cols, rows)` of a `pty` / `resize` object — both required, positive.
-pub fn dims(verb: &str, raw: &Value) -> Result<(u16, u16), Value> {
-    if !raw.is_object() {
-        return Err(bad(verb, "pty", "an object {cols, rows}"));
-    }
-    Ok((
-        dim(verb, "cols", raw.get("cols"))?,
-        dim(verb, "rows", raw.get("rows"))?,
-    ))
 }
 
 /// `write {job_id, data | bytes}` — keystrokes / paste. `bytes` is written
 /// VERBATIM (a `<call>` strips a scalar like `data`, so a trailing Enter only
 /// survives as `bytes`); `raw` is the binary body when `bytes` rode the binary
 /// channel.
-pub async fn write_reply(owner: &AgentId, payload: &Value, raw: Option<&[u8]>) -> Value {
-    let pty = match pty_job("write", owner, payload) {
+pub async fn write_reply(owner: &AgentId, a: &verbs::Write, raw: Option<&[u8]>) -> Value {
+    let pty = match pty_job("write", owner, &JobRef::of(a.job_id)) {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let data = payload.get("data").filter(|v| !v.is_null());
-    let bytes_val = payload.get("bytes").filter(|v| !v.is_null());
-    if data.is_some() == (raw.is_some() || bytes_val.is_some()) {
+    if a.data.is_some() == (raw.is_some() || a.bytes.is_some()) {
         return bad(
             "write",
             "data",
             "exactly one of data (a string) or bytes (verbatim)",
         );
     }
-    let buf: Vec<u8> = if let Some(r) = raw {
-        r.to_vec()
-    } else if let Some(b) = bytes_val {
-        match b.as_str() {
-            Some(s) => s.as_bytes().to_vec(),
-            None => return bad("write", "bytes", "bytes, or a string written verbatim"),
-        }
-    } else {
-        match data.and_then(Value::as_str) {
-            Some(s) => s.as_bytes().to_vec(),
-            None => return bad("write", "data", "a string"),
-        }
+    let buf: Vec<u8> = match (raw, &a.bytes, &a.data) {
+        (Some(r), _, _) => r.to_vec(),
+        (None, Some(b), _) => b.as_bytes().to_vec(),
+        (None, None, Some(d)) => d.as_bytes().to_vec(),
+        (None, None, None) => Vec::new(),
     };
     let _guard = pty.write_lock.lock().await;
     match write_all(&pty, &buf).await {
@@ -306,15 +270,12 @@ pub async fn write_reply(owner: &AgentId, payload: &Value, raw: Option<&[u8]>) -
 }
 
 /// `resize {job_id, cols, rows}`.
-pub fn resize_reply(owner: &AgentId, payload: &Value) -> Value {
-    let pty = match pty_job("resize", owner, payload) {
+pub fn resize_reply(owner: &AgentId, a: &verbs::Resize) -> Value {
+    let pty = match pty_job("resize", owner, &JobRef::of(a.job_id)) {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let (cols, rows) = match dims("resize", payload) {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
+    let (cols, rows) = (a.cols, a.rows);
     {
         let mut g = pty.lock();
         g.cols = cols;
@@ -327,14 +288,12 @@ pub fn resize_reply(owner: &AgentId, payload: &Value) -> Value {
 }
 
 /// `ack {job_id, chars}` — flow control.
-pub fn ack_reply(owner: &AgentId, payload: &Value) -> Value {
-    let pty = match pty_job("ack", owner, payload) {
+pub fn ack_reply(owner: &AgentId, a: &verbs::Ack) -> Value {
+    let pty = match pty_job("ack", owner, &JobRef::of(a.job_id)) {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let Some(chars) = payload.get("chars").and_then(Value::as_u64) else {
-        return bad("ack", "chars", "a non-negative integer");
-    };
+    let chars = a.chars;
     let (unacked, paused) = {
         let mut g = pty.lock();
         // the re-attach grace ends at the viewer's first ack after its replay
@@ -353,11 +312,8 @@ pub fn ack_reply(owner: &AgentId, payload: &Value) -> Value {
 }
 
 /// `output {job_id, max_bytes?}` — the ring, for a client re-attaching.
-pub fn output_reply(owner: &AgentId, payload: &Value) -> Value {
-    let jid = match crate::require_job("output", payload) {
-        Ok(j) => j,
-        Err(e) => return e,
-    };
+pub fn output_reply(owner: &AgentId, a: &verbs::Output) -> Value {
+    let jid = JobRef::of(a.job_id);
     let g = jobs::jobs();
     let Some(job) = jid.find(&g, owner) else {
         return crate::no_such_job(&jid);
@@ -384,10 +340,8 @@ pub fn output_reply(owner: &AgentId, payload: &Value) -> Value {
         }
         g.ring.iter().map(String::as_str).collect()
     };
-    if let Some(mb) = payload.get("max_bytes").filter(|v| !v.is_null()) {
-        let Some(mb) = mb.as_u64().and_then(|n| usize::try_from(n).ok()) else {
-            return bad("output", "max_bytes", "a non-negative integer");
-        };
+    if let Some(mb) = a.max_bytes {
+        let mb = usize::try_from(mb).unwrap_or(usize::MAX);
         if mb < text.len() {
             // python slices the BYTES and decodes with errors="ignore": a char cut
             // at the front is dropped, never shown as litter.
@@ -398,9 +352,9 @@ pub fn output_reply(owner: &AgentId, payload: &Value) -> Value {
             text = text[start..].to_string();
         }
     }
-    let shown = py_str(&jid.raw);
+    let shown = jid.id.0;
     json!({
-        "job_id": jid.raw,
+        "job_id": jid.id.0,
         "output": text,
         "origin": format!("{owner} output {{job_id: {shown}}} — the ring NOW; re-send, it moves"),
     })
@@ -408,16 +362,16 @@ pub fn output_reply(owner: &AgentId, payload: &Value) -> Value {
 
 /// `paste_image` on the TEXT channel: there are no bytes to paste — the job is
 /// checked first, as python's handler does, then `data` refuses.
-pub fn paste_image_text(owner: &AgentId, payload: &Value) -> Value {
-    match pty_job("paste_image", owner, payload) {
+pub fn paste_image_text(owner: &AgentId, a: &verbs::PasteImage) -> Value {
+    match pty_job("paste_image", owner, &JobRef::of(a.job_id)) {
         Ok(_) => bad("paste_image", "data", "raw bytes"),
         Err(e) => e,
     }
 }
 
 /// `paste_image {job_id, data:bytes, mime}` — the BINARY channel: `data` IS the blob.
-pub async fn paste_image_reply(owner: &AgentId, header: &Value, data: &[u8]) -> Value {
-    let pty = match pty_job("paste_image", owner, header) {
+pub async fn paste_image_reply(owner: &AgentId, a: &verbs::PasteImage, data: &[u8]) -> Value {
+    let pty = match pty_job("paste_image", owner, &JobRef::of(a.job_id)) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -428,27 +382,7 @@ pub async fn paste_image_reply(owner: &AgentId, header: &Value, data: &[u8]) -> 
             &format!("at most {MAX_PASTE_IMAGE} bytes"),
         );
     }
-    // The mime is the caller's to state — never guessed.
-    let mime = match header.get("mime").and_then(Value::as_str) {
-        Some(m) if !m.is_empty() => m.to_lowercase(),
-        _ => return missing("paste_image", "mime"),
-    };
-    let Some((_, ext)) = IMAGE_EXT.iter().find(|(m, _)| *m == mime) else {
-        let mut legal: Vec<&str> = IMAGE_EXT.iter().map(|(m, _)| *m).collect();
-        legal.sort_unstable();
-        return bad(
-            "paste_image",
-            "mime",
-            &format!(
-                "one of [{}]",
-                legal
-                    .iter()
-                    .map(|m| py_repr(m))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        );
-    };
+    let ext = a.mime.ext();
     let dir = {
         let existing = pty.lock().paste_dir.clone();
         match existing {

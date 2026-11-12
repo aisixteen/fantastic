@@ -242,7 +242,7 @@ async fn a_pty_job_is_gated_like_any_start_and_its_verbs_want_a_pty_job() {
     let r = call(
         &k,
         "term_g",
-        json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", "0"], "pty": {"cols": 0}}),
+        json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", "0"], "pty": {"cols": 0, "rows": 24}}),
     )
     .await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
@@ -330,7 +330,8 @@ async fn the_kernel_env_reaches_a_child_only_by_name() {
         ("env_all", json!(["*"]), "s3cret/open"),
     ] {
         let tmp = TempDir::new().unwrap();
-        let k = kernel_with(&tmp, id, json!({"inherit_env": inherit})).await;
+        let extra = if inherit.is_null() { json!({}) } else { json!({"inherit_env": inherit}) };
+        let k = kernel_with(&tmp, id, extra).await;
         let mut rx = k.ensure_inbox(&AgentId::from(id));
         call(
             &k,

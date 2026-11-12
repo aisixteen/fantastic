@@ -16,7 +16,7 @@ use super::HomeBundle;
 /// An absolute path's prefix on this OS: `/w/ok` is absolute on Unix only.
 const D: &str = if cfg!(windows) { "C:" } else { "" };
 use crate::home::fake::{run, FakeOs, Folder};
-use crate::home::{HomeOs, ID, VERBS};
+use crate::home::{HomeOs, ID};
 
 struct T {
     kernel: Arc<Kernel>,
@@ -82,10 +82,12 @@ fn entry(guid: &str, path: &str, pid: Option<u32>, port: Option<u16>) -> (String
 
 impl T {
     async fn call(&self, payload: Value) -> Value {
+        // THE ENTRY: the call is parsed and checked against the declared verbs first
         self.bundle
-            .handle(&self.id, &payload, &self.kernel)
+            .handle_binary(&self.id, payload, None, &self.kernel)
             .await
             .expect("handled")
+            .0
             .expect("a reply")
     }
 
@@ -159,7 +161,7 @@ async fn list_answers_the_state_shape() {
     let mut got = t.call(json!({"type": "list"})).await;
     assert!(got["seq"].as_u64().is_some_and(|s| s >= 1), "{got}");
     got["seq"] = json!(7);
-    let golden = json!({"type":"state","protocol":"fantastic.home","version":1,"seq":7,"mode":"lock","listed":true,
+    let golden = json!({"type":"state","protocol":"fantastic.home","seq":7,"mode":"lock","listed":true,
         "rows":[{"id":"g-1","guid":"g-1","name":"notes","path":"/home/a/notes","last_seen":1760800000,
                  "status":"running","canvas":{"url":"http://127.0.0.1:8123/canvas_page/file/index.html","port":8123},
                  "pid":4242,"actions":["stop","open","remove"],"log":"/home/a/.fantastic/logs/notes-1a2b3c4d.log"}],
@@ -172,7 +174,6 @@ async fn list_answers_the_state_shape() {
         [
             "type",
             "protocol",
-            "version",
             "seq",
             "mode",
             "listed",
@@ -211,7 +212,8 @@ async fn an_unknown_id_is_not_found() {
         assert_eq!(r["arg"], json!("id"));
     }
     let r = t.call(json!({"type": "start"})).await;
-    refused(&r, "missing_arg", "home: start: id required");
+    refused(&r, "missing_arg", "start: missing argument 'id'");
+    assert_eq!(r["arg"], json!("id"));
     t.shutdown().await;
 }
 
@@ -221,12 +223,9 @@ async fn open_refuses_a_relative_path_or_a_file_and_opens_nothing() {
     t.boot().await;
     let before = t.call(json!({"type": "list"})).await;
     let r = t.call(json!({"type": "open", "paths": ["notes"]})).await;
-    refused(
-        &r,
-        "bad_arg",
-        "home: open: \"notes\" is not an absolute path",
-    );
-    assert_eq!(r["arg"], json!("paths"));
+    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    assert_eq!(r["arg"], json!("paths"), "{r}");
+    assert!(r["error"].as_str().is_some_and(|e| e.contains("/^(?:/")), "{r}");
     t.os.set_resolve(
         &format!("{D}/w/file.txt"),
         Err(format!("{D}/w/file.txt is not a directory")),
@@ -254,7 +253,7 @@ async fn open_refuses_a_relative_path_or_a_file_and_opens_nothing() {
     );
     for (payload, reason) in [
         (json!({"type": "open"}), "missing_arg"),
-        (json!({"type": "open", "paths": []}), "missing_arg"),
+        (json!({"type": "open", "paths": []}), "bad_arg"),
         (
             json!({"type": "open", "paths": &format!("{D}/w/ok")}),
             "bad_arg",
@@ -471,68 +470,61 @@ async fn boot_restores_pages_and_selection_from_the_record() {
 
 #[tokio::test]
 async fn boot_refuses_a_malformed_pages_record() {
-    let t = t_with(json!({"pages": "g1"}), HomeConfig::new(Mode::Lock));
-    let r = t.call(json!({"type": "boot"})).await;
-    refused(
-        &r,
-        "bad_arg",
-        "home: its record's `pages` must be a list of ids, got \"g1\"",
-    );
-    assert!(
-        !t.bundle.runner().polling(),
-        "a refused boot starts no poll"
-    );
-    let t = t_with(json!({"pages": ["g1", 2]}), HomeConfig::new(Mode::Lock));
-    let r = t.call(json!({"type": "boot"})).await;
-    refused(
-        &r,
-        "bad_arg",
-        "home: its record's `pages` must be a list of ids, got [\"g1\",2]",
-    );
-    let t = t_with(json!({"selection": 3}), HomeConfig::new(Mode::Lock));
-    let r = t.call(json!({"type": "boot"})).await;
-    refused(
-        &r,
-        "bad_arg",
-        "home: its record's `selection` must be an id or null, got 3",
-    );
+    for (meta, arg) in [
+        (json!({"pages": "g1"}), "pages"),
+        (json!({"pages": ["g1", 2]}), "pages"),
+        (json!({"selection": 3}), "pages"),
+    ] {
+        let t = t_with(meta.clone(), HomeConfig::new(Mode::Lock));
+        let r = t.call(json!({"type": "boot"})).await;
+        assert_eq!(r["reason"], json!("bad_arg"), "{meta}: {r}");
+        assert_eq!(r["arg"], json!(arg), "{meta}: {r}");
+        assert!(
+            r["error"].as_str().is_some_and(|e| e.starts_with("home: its record's `pages` or `selection` is malformed")),
+            "{meta}: {r}"
+        );
+        assert!(
+            !t.bundle.runner().polling(),
+            "a refused boot starts no poll"
+        );
+    }
 }
 
 #[tokio::test]
-async fn verb_docs_are_verbs_plus_boot_and_shutdown() {
-    let t = t();
-    let docs = t.bundle.verb_docs();
-    let keys: Vec<&str> = docs
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    let mut want: Vec<&str> = VERBS.to_vec();
+async fn the_declared_verbs_are_the_page_verbs_plus_boot_and_shutdown() {
+    let mut declared: Vec<&str> = crate::home::verbs::VERBS.iter().map(|v| v.name).collect();
+    declared.sort_unstable();
+    let mut want: Vec<&str> = crate::home::verbs::page_verbs();
+    want.retain(|v| *v != "reflect");
     want.extend(["boot", "shutdown"]);
-    assert_eq!(keys, want);
-    assert!(docs
-        .as_object()
-        .unwrap()
-        .values()
-        .all(|d| d.as_str().is_some_and(|s| !s.is_empty())));
+    want.sort_unstable();
+    assert_eq!(declared, want);
+    // every one renders a signature and a description from its declaration
+    let rendered = fantastic_kernel::docs::entries_of_decls(
+        &[crate::home::verbs::VERBS, fantastic_kernel::declared::common::VERBS],
+        &[],
+    );
+    assert!(rendered.iter().all(|(_, line, detail)| !line.is_empty() && !detail.is_empty()));
 }
 
 #[tokio::test]
 async fn an_unknown_verb_is_unhandled() {
     let t = t();
     let r = t.call(json!({"type": "nope"})).await;
-    refused(&r, "unhandled", "home: unknown type \"nope\"");
+    refused(
+        &r,
+        "unhandled",
+        "unknown verb 'nope'; home answers: boot, shutdown, list, open, register, start, stop, remove, select, select_page, close_page, dismiss, log, focus, menu, reflect",
+    );
     assert_eq!(r["verb"], json!("nope"));
 }
 
 #[tokio::test]
-async fn reflect_names_the_protocol_and_version() {
+async fn reflect_names_the_protocol() {
     let t = t();
     let r = t.call(json!({"type": "reflect"})).await;
     assert_eq!(r["id"], json!("home"));
     assert_eq!(r["protocol"], json!("fantastic.home"));
-    assert_eq!(r["version"], json!(1));
     assert_eq!(r["mode"], json!("lock"));
     assert_eq!(r["home"], json!(&format!("{D}/h")));
     assert_eq!(r["poll_ms"], json!(2000));
@@ -672,7 +664,7 @@ async fn every_intent_in_the_default_menu_is_a_verb_home_accepts() {
             send["paths"] = json!([format!("{D}/w/new")]);
         }
         assert!(
-            VERBS.contains(&send["type"].as_str().unwrap()),
+            crate::home::verbs::page_verbs().contains(&send["type"].as_str().unwrap()),
             "{id}: {send}"
         );
         let r = t.call(send.clone()).await;
@@ -683,30 +675,53 @@ async fn every_intent_in_the_default_menu_is_a_verb_home_accepts() {
 }
 
 #[tokio::test]
-async fn a_version_other_than_1_is_refused() {
+async fn every_verb_is_checked_by_its_declaration() {
     let t = t();
     t.boot().await;
     let before = t.call(json!({"type": "list"})).await;
-    for verb in ["list", "dismiss", "focus", "reflect", "start"] {
-        let r = t.call(json!({"type": verb, "version": 2, "id": "x"})).await;
-        refused(
-            &r,
-            "bad_arg",
-            "home speaks fantastic.home v1; this client asked for v2",
+    for v in crate::home::verbs::VERBS {
+        let r = t.call(json!({"type": v.name, "zzz_unknown": 1})).await;
+        assert_eq!(
+            (r["reason"].as_str(), r["arg"].as_str()),
+            (Some("bad_arg"), Some("zzz_unknown")),
+            "{}: {r}",
+            v.name
         );
-        assert_eq!(r["arg"], json!("version"), "{verb}: {r}");
+        let required: Vec<String> = fantastic_kernel::verbs::args(v.schema())
+            .into_iter()
+            .filter(|a| a.required)
+            .map(|a| a.name)
+            .collect();
+        if !required.is_empty() {
+            let r = t.call(json!({"type": v.name})).await;
+            assert_eq!(r["reason"], json!("missing_arg"), "{}: {r}", v.name);
+            assert!(required.iter().any(|n| r["arg"] == json!(n)), "{}: {r}", v.name);
+        }
     }
-    let r = t.call(json!({"type": "list", "version": "1"})).await;
-    refused(
-        &r,
-        "bad_arg",
-        "home speaks fantastic.home v1; this client asked for v\"1\"",
-    );
-    // 1, or none, is v1
-    assert_eq!(t.call(json!({"type": "list", "version": 1})).await, before);
-    let r = t.call(json!({"type": "reflect", "version": 1})).await;
-    assert_eq!(r["version"], json!(1));
+    // wrongly typed, never coerced
+    for (p, arg) in [
+        (json!({"type": "open", "paths": "/w/a"}), "paths"),
+        (json!({"type": "open", "paths": [3]}), "paths"),
+        (json!({"type": "select_page", "index": "0"}), "index"),
+        (json!({"type": "select_page", "index": -1}), "index"),
+        (json!({"type": "select", "id": 3}), "id"),
+        (json!({"type": "start", "id": 3}), "id"),
+    ] {
+        let r = t.call(p.clone()).await;
+        assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some(arg)), "{p}: {r}");
+    }
+    // an empty list or text is a wrong value
+    let r = t.call(json!({"type": "open", "paths": []})).await;
+    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("paths")), "{r}");
+    let r = t.call(json!({"type": "log", "id": ""})).await;
+    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("id")), "{r}");
     // a refused call changed nothing
     assert_eq!(t.call(json!({"type": "list"})).await, before);
+    // the record declares the kept pages and selection and no other field
+    let bundle = &t.bundle as &dyn fantastic_kernel::Bundle;
+    let fields = |v: Value| v.as_object().unwrap().clone();
+    assert!(bundle.check_record("update_agent", &fields(json!({"pages": ["g"], "selection": "g"}))).is_ok());
+    assert!(bundle.check_record("update_agent", &fields(json!({"pages": "g"}))).is_err());
+    assert!(bundle.check_record("update_agent", &fields(json!({"stray": 1}))).is_err());
     t.shutdown().await;
 }

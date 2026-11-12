@@ -31,7 +31,7 @@
 mod tests;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path};
+use std::path::Path;
 use std::sync::Arc;
 
 use fantastic_kernel::{AgentId, Kernel};
@@ -122,7 +122,7 @@ pub struct World<'a> {
     /// The root's id (what `@root` becomes).
     pub root_id: &'a str,
     /// `{port: agent id}`.
-    pub bind: &'a Map<String, Value>,
+    pub bind: &'a BTreeMap<String, String>,
     /// Whether code may come in.
     pub allow_code: bool,
     /// An existing agent's handler (`Some("")` when it has none); `None` = no such agent.
@@ -166,7 +166,7 @@ fn walk(v: &Value, parent: Option<&str>, out: &mut Vec<Entry>) -> Result<(), Imp
             format!("agent {id}: handler_module is required"),
         ));
     };
-    if fantastic_kernel::refusal::guard_agent_id("import_subtree", id).is_some() {
+    if fantastic_kernel::verbs::check_agent_id("import_subtree", "id", id).is_err() {
         return Err(err("bad_arg", format!("agent {id:?}: not a safe agent id")));
     }
     if out.iter().any(|e| e.id == id) {
@@ -393,12 +393,7 @@ pub fn plan(yaml: &str, files: &BTreeMap<String, String>, w: &World) -> Result<P
                 ),
             ));
         };
-        let Some(target) = v.as_str().filter(|s| !s.is_empty()) else {
-            return Err(err(
-                "bad_binding",
-                format!("bind {name}: an agent id (str)"),
-            ));
-        };
+        let target = v.as_str();
         let Some(hm) = (w.agent)(target) else {
             return Err(err(
                 "bad_binding",
@@ -425,7 +420,7 @@ pub fn plan(yaml: &str, files: &BTreeMap<String, String>, w: &World) -> Result<P
         if ids.values().all(|n| {
             (w.agent)(n).is_none()
                 && n != w.root_id
-                && fantastic_kernel::refusal::guard_agent_id("import_subtree", n).is_none()
+                && fantastic_kernel::verbs::check_agent_id("import_subtree", "id", n).is_ok()
         }) {
             break ids;
         }
@@ -597,11 +592,6 @@ fn read_folder(dir: &Path) -> Result<BTreeMap<String, String>, String> {
     Ok(out)
 }
 
-/// Only the literal `true` counts.
-fn literal_true(p: &Value, k: &str) -> bool {
-    p.get(k) == Some(&Value::Bool(true))
-}
-
 /// Delete what an import made (the top agent, cascading) and take back the
 /// edges it wrote.
 async fn roll_back(kernel: &Arc<Kernel>, top: Option<&str>, edges: &[Edge]) {
@@ -630,35 +620,11 @@ async fn roll_back(kernel: &Arc<Kernel>, top: Option<&str>, edges: &[Edge]) {
 /// import of the blueprint folder at `path` (relative to the running dir) under
 /// `parent_id`; without `approve: true` the reply is the preview and nothing is
 /// created.
-pub async fn import_subtree(kernel: &Arc<Kernel>, p: &Value) -> Value {
-    let (Some(path), Some(parent_id)) = (
-        p.get("path")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty()),
-        p.get("parent_id")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty()),
-    ) else {
-        return refuse(
-            "bad_arg",
-            "user.import_subtree: path (str) + parent_id (str) required",
-        );
-    };
-    let empty = Map::new();
-    let bind = match p.get("bind") {
-        None | Some(Value::Null) => &empty,
-        Some(Value::Object(m)) => m,
-        Some(_) => {
-            return refuse(
-                "bad_arg",
-                "user.import_subtree: bind is a map {\"@port\": \"<agent id>\"}",
-            )
-        }
-    };
+pub async fn import_subtree(kernel: &Arc<Kernel>, args: crate::verbs::ImportSubtree) -> Value {
+    let path = args.path.as_str();
+    let parent_id = args.parent_id.as_str();
+    let bind = args.bind;
     let rel = Path::new(path);
-    if rel.components().any(|c| c == Component::ParentDir) {
-        return refuse("bad_arg", "user.import_subtree: path may not hold `..`");
-    }
     let Some(root) = kernel.root() else {
         return refuse("failed", "user.import_subtree: the kernel has no root");
     };
@@ -672,11 +638,8 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, p: &Value) -> Value {
         Ok(b) => b,
         Err(e) => return refuse("failed", format!("user.import_subtree: {e}")),
     };
-    let dir = if rel.is_absolute() {
-        rel.to_path_buf()
-    } else {
-        base.join(rel)
-    };
+    // one path shape: `join` keeps an absolute path as it is and puts a relative one under the running dir
+    let dir = base.join(rel);
     if !dir.join(BLUEPRINT_FILE).is_file() {
         return refuse(
             "not_found",
@@ -700,8 +663,8 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, p: &Value) -> Value {
         let world = World {
             parent_id,
             root_id: &root.id.0,
-            bind,
-            allow_code: literal_true(p, "allow_code"),
+            bind: &bind,
+            allow_code: args.allow_code == Some(true),
             agent: &agent,
             known_bundle: &known,
         };
@@ -713,7 +676,7 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, p: &Value) -> Value {
     };
 
     // THE PREVIEW: what it will reach and what code it carries; nothing made
-    if !literal_true(p, "approve") {
+    if args.approve != Some(true) {
         return json!({
             "approval_required": true,
             "agents": plan.agents.len(),
@@ -728,15 +691,21 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, p: &Value) -> Value {
     // APPROVED: depth first, then the other end of every bound edge
     let top = plan.agents.first().map(|a| a.new_id.clone());
     for a in &plan.agents {
-        let mut payload = a.meta.clone();
-        payload.insert("type".into(), json!("create_agent"));
-        payload.insert("id".into(), json!(a.new_id));
-        payload.insert("handler_module".into(), json!(a.handler_module));
-        payload.insert("parent_id".into(), json!(a.parent));
-        let r = fantastic_kernel::lifecycle::create_from_payload(
+        // the declared arguments of `create_agent`; the rest of the record rides as its fields
+        let mut fields = a.meta.clone();
+        let bundle = fields
+            .remove("bundle")
+            .and_then(|b| b.as_str().map(str::to_string));
+        let r = fantastic_kernel::lifecycle::create_agent(
             kernel,
             &root,
-            &Value::Object(payload),
+            fantastic_kernel::declared::kernel::CreateAgent {
+                handler_module: a.handler_module.clone(),
+                parent_id: a.parent.clone(),
+                id: Some(a.new_id.clone()),
+                bundle,
+                fields,
+            },
         )
         .await;
         if let Some(e) = r.get("error") {

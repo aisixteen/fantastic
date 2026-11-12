@@ -14,9 +14,16 @@ description = "In-RAM memory store agent: per-owner rows, fold refs, grants, sea
 fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 serde_json = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 
+[features]
+# the test fixtures a dependent crate's tests build on; nothing ships them
+test-support = []
+
 [dev-dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = "3"

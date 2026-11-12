@@ -146,8 +146,6 @@ Then READ before running anything — **doc mode** starts nothing and writes not
 
 ```sh
 ./fantastic                  # stdout not a terminal (an agent's shell): the readme + every command
-./fantastic readme           # the docs index, one line per doc
-./fantastic readme mcp       # one doc: canvas, mcp, setup, bundles, and the kernel's own
 ```
 
 From there, run the mode the user asks for (see [Commands](#commands)): `fantastic mcp`
@@ -278,8 +276,6 @@ paste:
 
 Without a terminal, as an agent's shell runs it, `fantastic` is in **doc mode**:
 it prints its readme and the command list, and starts and writes nothing.
-`fantastic readme [key]` prints any doc: `canvas`, `mcp`, `setup`, `bundles`, and
-the kernel's own.
 
 ### Commands
 
@@ -291,8 +287,6 @@ fantastic [canvas] ai BACKEND     # the root AI `ai`: vllm -p PORT | ollama -p P
 fantastic [canvas] run CMD [ARGS] # your own program from $PATH in a terminal (with canvas: a terminal cell)
 fantastic mcp                     # MCP over stdio (tools `reflect`, `send`); attaches to a running kernel, or runs it
 fantastic send '<item json>'      # one call into the running kernel; `$env:NAME` values come from this shell, marked secret
-fantastic migrate-home [--dry-run] # move an older layout's files into ~/.fantastic
-fantastic readme [key]            # the docs
 ```
 
 These words are **recipes**: each adds its agents only if they are missing, then
@@ -324,9 +318,8 @@ content (`html`, `gl`).
   `▶`. A terminal re-attaches to its live job after a reload and redraws.
 - **html cells** run sandboxed (null origin) unless `trusted: true`. Their only
   way out is the connector: `fantastic.send`, `emit`, `onMessage`, `watch`. An AI
-  builds them with the view's verbs `place`, `update`, `fit`, `move`, `wire`
-  and `remove`.
-- **Canvases** are flat peers. `new_canvas {name}` makes one, and
+  builds them with the view's verbs (`docs of=<view id>`).
+- **Canvases** are flat peers. A canvas node makes another (read its `docs`), and
   `?canvas=<node id>` opens it. Each has its own page kernel and shows only its
   own subtree. A tab under 768px wide draws the cells as one column, any other
   as the free canvas; the layout moves cells, never the agents.
@@ -381,18 +374,6 @@ Each project keeps its own state in its own `.fantastic/`.
 No `.fantastic` is nested in the home, so a fantastic is never run in `~`
 itself: its `.fantastic` would be the home, and every runtime refuses that.
 
-**Moving from an older layout.** Earlier versions kept these files in
-`~/.config/fantastic/` (the registry, `agents/ai_agent/saved/` and
-`agents/ai_agent/keys/`) and `~/.fantastic/credentials/`. Nothing moves by
-itself; stop every fantastic and the app, then:
-
-```sh
-fantastic migrate-home --dry-run   # print every move
-fantastic migrate-home             # move them
-```
-
-It refuses, and moves nothing, when a target already exists, a fantastic is
-running, or the app is open. Each file keeps its permissions.
 
 ### How the CLI is tested
 

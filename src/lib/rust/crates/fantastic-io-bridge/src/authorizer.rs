@@ -8,14 +8,14 @@
 //!     consulted by `forward` to stamp this leg's token on the frame ENVELOPE (never
 //!     the dispatched payload — the target never sees it).
 //!
-//! Each rule is typed in the record (`{"type": <name>, "env": <var>}`) and resolved
-//! BY NAME from a registry — the [`ingress`] and [`egress`] modules, each a folder
-//! of one-rule-per-file plus a `mod.rs` importer that registers names. Add a rule =
-//! drop a file + one registry arm; the engine never changes. The record carries
-//! `ingress_rule`/`egress_rule` (symmetric), or the `auth` shorthand (sets
-//! both sides). Rules are TRANSITIONAL (inline plumbing), not invocational (agents).
+//! The record carries ONE declared shape, [`Rules`]: `ingress_rule` and `egress_rule`
+//! (a name from the closed [`IngressName`] / [`EgressName`] lists) and `token_env`.
+//! A name no list spells is refused by the record's schema. The [`ingress`] and
+//! [`egress`] modules each hold one rule per file and resolve a [`Rules`] to the rule.
+//! Rules are TRANSITIONAL (inline plumbing), not invocational (agents).
 
-use fantastic_bundle::{py_repr_value, py_truthy};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub mod egress;
@@ -117,147 +117,131 @@ pub trait EgressRule: Send + Sync {
     fn credential(&self) -> Option<String>;
 }
 
-/// Default env var for the `password` rule when the record names none.
-pub(crate) const DEFAULT_TOKEN_ENV: &str = "FANTASTIC_GROUP_TOKEN";
+/// Default env var for the `password` rules: the declared default of a leg's `token_env`.
+pub const DEFAULT_TOKEN_ENV: &str = "FANTASTIC_GROUP_TOKEN";
 
-/// Normalize a rule spec `Value` to `(type_name, secret_env_key)`. python
-/// `io_bridge._base.parse_spec`: a FALSY spec (absent, null, `""`, `0`, `[]`,
-/// `{}`) is `(None, None)`, a string is `(name, None)`, an object is
-/// `(type, env)`; a null `type`/`env` is an absent one.
-///
-/// `type` and `env` are the only spellings.
-///
-/// An object with no `type` is `(None, env)` — a plain SEAL, as python resolves
-/// it, rendered the same way by every caller.
-///
-/// MALFORMED ⇒ `(python repr of the spec, None)`: a spec that is neither a
-/// string nor an object, or an object whose `type` or `env` is not a string, is
-/// named by its own repr — a name no registry holds, so ingress SEALS on it
-/// (`DenyInbound::unknown`) and egress refuses it like any unknown name. A
-/// non-string `env` is never read as the DEFAULT variable, which would let a
-/// malformed password rule admit the default group token.
-pub(crate) fn parse_spec(spec: Option<&Value>) -> (Option<String>, Option<String>) {
-    let Some(spec) = spec else {
-        return (None, None);
-    };
-    if !py_truthy(spec) {
-        return (None, None);
-    }
-    let text = |key: &str, o: &serde_json::Map<String, Value>| match o.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(s)) => Ok(Some(s.clone())),
-        Some(_) => Err(()),
-    };
-    match spec {
-        Value::String(s) => (Some(s.clone()), None),
-        Value::Object(o) => match (text("type", o), text("env", o)) {
-            (Ok(name), Ok(env)) => (name, env),
-            _ => (Some(py_repr_value(spec)), None),
-        },
-        other => (Some(py_repr_value(other)), None),
-    }
-}
-
-/// The effective spec for ONE manifold, with the `auth` shorthand already SCOPED.
-///
-/// Rule names are manifold-scoped: a name binds to exactly one direction, so a name
-/// written into the wrong field is a loud error instead of a silent policy change.
-/// With bare names, `auth:"silent"` — a legitimate EGRESS policy — would resolve
-/// ingress to `DenyInbound(unknown="silent")`, SEALING the leg while saying
-/// nothing; and `auth:"allow_all"` would hand egress a `Silent` nobody asked for.
-/// One unscoped name against two registries with different membership is a
-/// fallback, and this kernel does not have fallbacks.
-///
-/// The per-direction field WINS and is taken as written (the author already scoped it).
-/// `auth` carries a bare STEM, and each manifold appends its own suffix — except that an
-/// inbound-only stem presents nothing outbound, which is a MEANING spelled out per stem,
-/// not a lookup miss. Doing the scoping HERE keeps `resolve` and `rule_name` unchanged:
-/// they only ever see an already-scoped spec.
-pub fn manifold_spec(primary: Option<&Value>, auth: Option<&Value>, suffix: &str) -> Option<Value> {
-    if let Some(v) = primary {
-        return Some(v.clone());
-    }
-    let spec = auth?;
-    let (name, env) = parse_spec(Some(spec));
-    let stem = name?;
-    if suffix == "_egress" && (stem == "allow_all" || stem == "deny") {
-        return Some(Value::String("silent_egress".to_string()));
-    }
-    let scoped = format!("{stem}{suffix}");
-    match env {
-        Some(e) => Some(json!({ "type": scoped, "env": e })),
-        None => Some(Value::String(scoped)),
-    }
-}
-
-/// The rule TYPE name for reflect — never surfaces the rule's config. Absent,
-/// falsy or type-less ⇒ `default`, which the CALLER supplies: `deny_ingress` for
-/// ingress (IO legs seal by default) and `silent_egress` for egress. python
-/// `rule_name`: `parse_spec(spec)[0] or default`.
-pub fn rule_name(spec: Option<&Value>, default: &str) -> String {
-    match parse_spec(spec) {
-        (Some(name), _) if !name.is_empty() => name,
-        _ => default.to_string(),
-    }
-}
-
-/// A leg's auth POSTURE for `reflect` — the rule NAMES (never their config) plus
-/// whether the leg is sealed: `{ingress_rule, egress_rule, sealed}`. python
-/// `io_bridge._base.describe`.
-///
-/// Keyed by the field you SET (read-key == write-key), so a readme-only LLM reads
-/// `ingress_rule: deny_ingress` and opens the leg with
-/// `ingress_rule: allow_all_ingress` — a direct mirror, no translation. The name
-/// is reported SCOPED whichever field it came from, the GATE's exact rule
-/// ([`manifold_spec`]): an `auth` stem always gets the suffix, so
-/// `auth: allow_all_ingress` reflects `allow_all_ingress_ingress` and `sealed`
-/// — the rule the gate resolves (unknown ⇒ deny). An ABSENT spec is the
-/// manifold's default, which already carries its suffix.
+/// The declared default of `token_env`, as a record field's default.
 #[must_use]
-pub fn describe(meta: &serde_json::Map<String, Value>) -> Value {
-    let ingress_scoped = meta.contains_key("ingress_rule");
-    let egress_scoped = meta.contains_key("egress_rule");
-    let ing_spec = if ingress_scoped {
-        meta.get("ingress_rule")
-    } else {
-        meta.get("auth")
-    };
-    let egr_spec = if egress_scoped {
-        meta.get("egress_rule")
-    } else {
-        meta.get("auth")
-    };
-    let ing_name = rule_name(ing_spec, "");
-    let egr_name = rule_name(egr_spec, "");
-    let ingress = if ing_name.is_empty() {
-        "deny_ingress".to_string()
-    } else {
-        scoped(&ing_name, "_ingress", ingress_scoped)
-    };
-    let egress = if egr_name.is_empty() {
-        "silent_egress".to_string()
-    } else {
-        scoped(&egr_name, "_egress", egress_scoped)
-    };
-    json!({
-        "ingress_rule": ingress,
-        "egress_rule": egress,
-        "sealed": ingress != "allow_all_ingress",
-    })
+pub fn default_token_env() -> String {
+    DEFAULT_TOKEN_ENV.to_string()
 }
 
-/// python `_base._scoped`: report the SCOPED rule name whichever field it came
-/// from — a per-direction field as written, an `auth` stem with this manifold's
-/// suffix (the gate's exact rule, so `reflect` never shows a name that resolves
-/// differently when written back into `ingress_rule`).
-fn scoped(name: &str, suffix: &str, was_scoped: bool) -> String {
-    if was_scoped {
-        return name.to_string();
+/// The inbound FILTER a leg's record names (`ingress_rule`). A name no variant spells
+/// is refused by the record's schema; the leg is SEALED until a rule opens it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub enum IngressName {
+    /// Permit every inbound action.
+    #[serde(rename = "allow_all_ingress")]
+    AllowAll,
+    /// Refuse every inbound action (the default).
+    #[default]
+    #[serde(rename = "deny_ingress")]
+    Deny,
+    /// Permit an inbound action carrying this leg's group token.
+    #[serde(rename = "password_ingress")]
+    Password,
+}
+
+impl IngressName {
+    /// The name as a record spells it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AllowAll => "allow_all_ingress",
+            Self::Deny => "deny_ingress",
+            Self::Password => "password_ingress",
+        }
     }
-    if suffix == "_egress" && (name == "allow_all" || name == "deny") {
-        return "silent_egress".to_string();
+}
+
+/// The inbound filters an edge with no wire envelope takes (the file and process
+/// edges): the password rule reads a token off an envelope, which such an edge never
+/// has, so it is not a name there. The names spell as [`IngressName`]'s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum EnvelopelessIngress {
+    /// Permit every inbound action.
+    #[serde(rename = "allow_all_ingress")]
+    AllowAll,
+    /// Refuse every inbound action.
+    #[serde(rename = "deny_ingress")]
+    Deny,
+}
+
+/// The outbound DECORATOR a leg's record names (`egress_rule`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub enum EgressName {
+    /// Present no credential (the default).
+    #[default]
+    #[serde(rename = "silent_egress")]
+    Silent,
+    /// Present this leg's group token on every outbound call.
+    #[serde(rename = "password_egress")]
+    Password,
+}
+
+impl EgressName {
+    /// The name as a record spells it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Silent => "silent_egress",
+            Self::Password => "password_egress",
+        }
     }
-    format!("{name}{suffix}")
+}
+
+/// The rule fields of a leg's record, declared once for every leg: the ingress rule,
+/// the egress rule and the env var the `password` rules read the group token from.
+/// One shape: a record that does not carry them takes the declared defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Rules {
+    /// The inbound filter. Sealed (`deny_ingress`) until set.
+    #[serde(default)]
+    pub ingress_rule: IngressName,
+    /// The outbound decorator.
+    #[serde(default)]
+    pub egress_rule: EgressName,
+    /// The env var the group token is read from (`password_ingress` / `password_egress`).
+    #[serde(default = "default_token_env")]
+    pub token_env: String,
+}
+
+impl Default for Rules {
+    fn default() -> Self {
+        Self {
+            ingress_rule: IngressName::default(),
+            egress_rule: EgressName::default(),
+            token_env: default_token_env(),
+        }
+    }
+}
+
+impl Rules {
+    /// Read the rule fields off a leg's record. `Err` names what the record holds that
+    /// no rule is (a record edited past its schema); the caller treats the leg as sealed.
+    ///
+    /// # Errors
+    /// The decode error text.
+    pub fn of(record: &serde_json::Map<String, Value>) -> Result<Rules, String> {
+        let mut own = serde_json::Map::new();
+        for k in ["ingress_rule", "egress_rule", "token_env"] {
+            if let Some(v) = record.get(k) {
+                own.insert(k.to_string(), v.clone());
+            }
+        }
+        serde_json::from_value(Value::Object(own)).map_err(|e| e.to_string())
+    }
+
+    /// A leg's auth POSTURE for `reflect` — the rule NAMES (never the env var) plus
+    /// whether the leg is sealed: `{ingress_rule, egress_rule, sealed}`.
+    #[must_use]
+    pub fn describe(&self) -> Value {
+        json!({
+            "ingress_rule": self.ingress_rule.as_str(),
+            "egress_rule": self.egress_rule.as_str(),
+            "sealed": self.ingress_rule != IngressName::AllowAll,
+        })
+    }
 }
 
 /// Content-blind constant-time compare given equal length (length is not secret —
@@ -275,107 +259,47 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 #[cfg(test)]
-mod describe_tests {
+mod rules_tests {
     use super::*;
 
-    fn posture(meta: Value) -> Value {
-        describe(meta.as_object().expect("a record"))
+    fn rules(meta: Value) -> Result<Rules, String> {
+        Rules::of(meta.as_object().expect("a record"))
     }
 
-    /// python `_base.describe`: an `auth` stem ALWAYS gets the manifold suffix —
-    /// the gate's exact rule — so `auth: allow_all_ingress` reflects the rule the
-    /// gate resolves (`allow_all_ingress_ingress`, unknown ⇒ sealed). Absent specs
-    /// are the manifold defaults, suffixed once.
+    /// An absent field takes its declared default; the posture reads the names.
     #[test]
-    fn describe_scopes_an_auth_stem_like_the_gate() {
+    fn a_record_without_rules_is_sealed_and_silent() {
         assert_eq!(
-            posture(json!({})),
+            rules(json!({})).unwrap().describe(),
             json!({"ingress_rule": "deny_ingress", "egress_rule": "silent_egress", "sealed": true})
         );
+        assert_eq!(rules(json!({})).unwrap().token_env, DEFAULT_TOKEN_ENV);
         assert_eq!(
-            posture(json!({"auth": "allow_all"})),
+            rules(json!({"ingress_rule": "allow_all_ingress"})).unwrap().describe(),
             json!({"ingress_rule": "allow_all_ingress", "egress_rule": "silent_egress", "sealed": false})
         );
         assert_eq!(
-            posture(json!({"auth": "allow_all_ingress"})),
-            json!({"ingress_rule": "allow_all_ingress_ingress",
-                   "egress_rule": "allow_all_ingress_egress", "sealed": true})
-        );
-        assert_eq!(
-            posture(json!({"ingress_rule": "allow_all_ingress"})),
-            json!({"ingress_rule": "allow_all_ingress", "egress_rule": "silent_egress", "sealed": false})
+            rules(json!({"ingress_rule": "password_ingress", "egress_rule": "password_egress", "token_env": "MY_TOKEN"}))
+                .unwrap()
+                .describe(),
+            json!({"ingress_rule": "password_ingress", "egress_rule": "password_egress", "sealed": true})
         );
     }
-}
 
-#[cfg(test)]
-mod malformed_spec_tests {
-    use super::*;
-    use fantastic_bundle::py_repr;
-
-    /// python `parse_spec`: a spec that is not a string or an object,
-    /// or whose `type`/`env` is not a string, is named by its python repr — a
-    /// name no registry holds — so ingress SEALS on it, egress refuses it, and
-    /// reflect reports it, in python's words.
+    /// One shape: a name no rule spells, a stem, an object or a wrong type is refused,
+    /// never read as a seal or as another rule.
     #[test]
-    fn a_malformed_spec_is_named_by_its_python_repr() {
-        for (spec, name) in [
-            (json!(7), "7"),
-            (json!(["allow_all_ingress"]), "['allow_all_ingress']"),
-            (json!({"type": ["x"]}), "{'type': ['x']}"),
-            (json!({"type": {"a": 1}}), "{'type': {'a': 1}}"),
-            (
-                json!({"type": "password_ingress", "env": 7}),
-                "{'type': 'password_ingress', 'env': 7}",
-            ),
+    fn only_a_declared_name_is_a_rule() {
+        for bad in [
+            json!({"ingress_rule": "allow_all"}),
+            json!({"ingress_rule": "silent_egress"}),
+            json!({"ingress_rule": {"type": "allow_all_ingress"}}),
+            json!({"ingress_rule": 7}),
+            json!({"egress_rule": "deny"}),
+            json!({"egress_rule": ["password_egress"]}),
+            json!({"token_env": 7}),
         ] {
-            assert_eq!(ingress::unknown(Some(&spec)).as_deref(), Some(name));
-            let Decision::Deny(d) = ingress::resolve(Some(&spec)).authorize(&Action {
-                kind: "call",
-                target: "t",
-                verb: "reflect",
-                token: Some("x"),
-            }) else {
-                panic!("a malformed rule must never allow: {spec}");
-            };
-            assert_eq!(
-                d.reason,
-                format!("edge sealed — unknown ingress rule {}", py_repr(name))
-            );
-            assert_eq!(
-                egress::resolve(Some(&spec)).err(),
-                Some(format!("unknown egress rule type {}", py_repr(name)))
-            );
-            let rec = json!({ "ingress_rule": spec });
-            assert_eq!(
-                describe(rec.as_object().expect("a record"))["ingress_rule"],
-                name
-            );
-            assert_eq!(
-                ingress::unknown_refusal(rec.as_object().expect("a record"), &ingress::REGISTRY),
-                Some(format!(
-                    "ingress_rule={} is not a rule this bundle implements — legal values: \
-                     allow_all_ingress, deny_ingress, password_ingress",
-                    py_repr_value(&spec)
-                ))
-            );
-        }
-        // null inside a spec is ABSENT, as it is for the whole spec.
-        assert!(ingress::unknown(Some(&json!({"type": null}))).is_none());
-        assert_eq!(
-            parse_spec(Some(&json!({"type": "password_ingress", "env": null}))),
-            (Some("password_ingress".to_string()), None)
-        );
-        // an implemented name, or no `ingress_rule`, is no refusal.
-        for rec in [
-            json!({"ingress_rule": "password_ingress"}),
-            json!({"auth": "nope"}),
-        ] {
-            assert!(ingress::unknown_refusal(
-                rec.as_object().expect("a record"),
-                &ingress::REGISTRY
-            )
-            .is_none());
+            assert!(rules(bad.clone()).is_err(), "{bad}");
         }
     }
 }

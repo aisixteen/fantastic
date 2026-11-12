@@ -6,28 +6,43 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use fantastic_kernel::{
     bootstrap::{bootstrap, BootstrapOptions},
-    bundle::BundleError,
-    AgentId, Bundle, BundleRegistry, Item, Kernel, Reply,
+    bundle::{BundleError, Handler},
+    AgentId, BundleRegistry, Item, Kernel, Reply,
 };
 use fantastic_user::export::strip_runtime;
-use fantastic_user::{UserBundle, HANDLER_MODULE, VERBS};
+use fantastic_user::{verbs::VERBS, UserBundle, HANDLER_MODULE};
 use serde_json::{json, Map, Value};
+
+fantastic_kernel::stand_in_verbs!(echo_verbs { Ping "ping" {}, Run "run" {} });
 
 /// Answers with what it was given.
 struct Echo;
 
 #[async_trait]
-impl Bundle for Echo {
+impl Handler for Echo {
+    type Call = echo_verbs::Call;
     fn name(&self) -> &str {
         "echo"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in that answers with what it was given."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        echo_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        echo_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         _id: &AgentId,
-        p: &Value,
+        call: Self::Call,
         _k: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        Ok(Some(json!({"echo": p})))
+        Ok(Some(json!({"echo": call.payload()})))
     }
 }
 
@@ -367,15 +382,37 @@ async fn import_refuses_missing_binding_secret_and_code_with_messages_that_name_
         "{msg}"
     );
     assert_eq!(k.agents.len(), n, "nothing created");
-    // allowed, the code comes in
+    // allowed, a handler this kernel does not run is still refused when the agent is
+    // made (`create_agent` needs an installed bundle), and nothing is kept
     let r = import(
         &k,
         &c,
         json!({"approve": true, "bind": {}, "allow_code": true}),
     )
     .await;
+    assert_eq!(r["reason"], "failed", "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .contains("handler_module 'py_ab12.tools' is not installed"),
+        "{r}"
+    );
+    assert_eq!(k.agents.len(), n, "nothing kept");
+    // allowed, with the handler installed, the code comes in
+    let ok = written(
+        "code-ok",
+        "agents:\n  - id: s\n    handler_module: echo.tools\n",
+        &[("s/bundle.yaml", "name: s\n"), ("s/tools.py", "print(1)\n")],
+    );
+    let r = import(
+        &k,
+        &ok,
+        json!({"approve": true, "bind": {}, "allow_code": true}),
+    )
+    .await;
     assert_eq!(r["imported"], 1, "{r}");
-    for x in [d, s, c] {
+    for x in [d, s, c, ok] {
         let _ = std::fs::remove_dir_all(x);
     }
 }
@@ -438,12 +475,12 @@ async fn import_failure_rolls_back() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn import_requires_literal_true_for_approve_and_allow_code() {
+async fn import_takes_only_a_boolean_for_approve_and_allow_code() {
     let k = setup().await;
     let n = k.agents.len();
     let d = exported(&k, "literal").await;
     let r = import(&k, &d, json!({"approve": "true"})).await;
-    assert_eq!(r["approval_required"], true, "{r}");
+    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("approve")), "{r}");
     assert_eq!(k.agents.len(), n);
     let c = written(
         "literal-code",
@@ -456,6 +493,8 @@ async fn import_requires_literal_true_for_approve_and_allow_code() {
         json!({"approve": true, "bind": {}, "allow_code": "true"}),
     )
     .await;
+    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("allow_code")), "{r}");
+    let r = import(&k, &c, json!({"approve": true, "bind": {}})).await;
     assert_eq!(r["reason"], "code_not_allowed", "{r}");
     assert_eq!(k.agents.len(), n);
     for x in [d, c] {
@@ -465,16 +504,16 @@ async fn import_requires_literal_true_for_approve_and_allow_code() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn import_subtree_args_and_docs() {
-    assert!(VERBS.contains(&"import_subtree"));
+    assert!(VERBS.iter().any(|v| v.name == "import_subtree"));
     let k = setup().await;
-    for p in [
-        json!({"type": "import_subtree", "parent_id": "other"}),
-        json!({"type": "import_subtree", "path": "x"}),
-        json!({"type": "import_subtree", "path": "x/../y", "parent_id": "other"}),
-        json!({"type": "import_subtree", "path": "x", "parent_id": "other", "bind": []}),
+    for (p, reason) in [
+        (json!({"type": "import_subtree", "parent_id": "other"}), "missing_arg"),
+        (json!({"type": "import_subtree", "path": "x"}), "missing_arg"),
+        (json!({"type": "import_subtree", "path": "x/../y", "parent_id": "other"}), "bad_arg"),
+        (json!({"type": "import_subtree", "path": "x", "parent_id": "other", "bind": []}), "bad_arg"),
     ] {
         let r = op(&k, "user", p.clone()).await;
-        assert_eq!(r["reason"], "bad_arg", "{p}: {r}");
+        assert_eq!(r["reason"], reason, "{p}: {r}");
     }
     let r = op(
         &k,
@@ -485,6 +524,19 @@ async fn import_subtree_args_and_docs() {
     assert_eq!(r["reason"], "not_found", "{r}");
     let d = op(&k, "kernel", json!({"type": "docs", "of": "user"})).await;
     assert!(d["verbs"].get("import_subtree").is_some(), "{d}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_bind_target_is_refused_by_the_shared_engine() {
+    let k = setup().await;
+    let n = k.agents.len();
+    for bind in [json!({"@memory": ""}), json!({"@memory": 3})] {
+        let p = json!({"type": "import_subtree", "path": "x", "parent_id": "other", "bind": bind});
+        let r = op(&k, "user", p.clone()).await;
+        assert_eq!(r["reason"], "bad_arg", "{p}: {r}");
+        assert!(r["error"].as_str().is_some_and(|e| e.contains("bind")), "{r}");
+    }
+    assert_eq!(k.agents.len(), n, "nothing created");
 }
 
 #[tokio::test(flavor = "multi_thread")]

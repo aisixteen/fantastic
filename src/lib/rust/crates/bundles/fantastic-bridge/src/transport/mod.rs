@@ -25,6 +25,7 @@ use fantastic_kernel::Blob;
 use serde_json::Value;
 use std::fmt;
 
+#[cfg(any(test, feature = "test-support"))]
 pub mod memory;
 pub mod relay;
 pub mod ws;

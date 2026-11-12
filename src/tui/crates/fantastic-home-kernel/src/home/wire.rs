@@ -1,7 +1,7 @@
-//! THE STATE, as every client reads it: protocol `fantastic.home`, version 1.
+//! THE STATE, as every client reads it: protocol `fantastic.home`.
 //!
 //! ```json
-//! {"type":"state","protocol":"fantastic.home","version":1,"seq":7,"mode":"lock","listed":true,
+//! {"type":"state","protocol":"fantastic.home","seq":7,"mode":"lock","listed":true,
 //!  "rows":[{"id","guid","name","path","last_seen","status","canvas","pid","actions","log"}],
 //!  "pages":["g-1"],"selection":"g-1","problem":null}
 //! ```
@@ -14,7 +14,6 @@ use fantastic_home::{Home, Mode, Row, Status};
 use serde_json::{json, Value};
 
 pub const PROTOCOL: &str = "fantastic.home";
-pub const VERSION: u32 = 1;
 
 /// A status's serde name.
 pub fn status_name(status: &Status) -> &'static str {
@@ -68,7 +67,6 @@ pub fn state(home: &Home, now_ms: u64, seq: u64, logs: &dyn Fn(&str) -> Option<S
     json!({
         "type": "state",
         "protocol": PROTOCOL,
-        "version": VERSION,
         "seq": seq,
         "mode": mode_name(mode),
         "listed": home.listed(),

@@ -26,39 +26,54 @@ type Got = Arc<Mutex<Vec<Value>>>;
 /// `x.y` beside a nested `x` → `y`, so the reply crosses the same way back.
 struct BinEcho(Got);
 
+// the one verb it takes: any `a`, and the literal key `a.b` its body rides at
+fantastic_kernel::stand_in_verbs!(echo_verbs {
+    Take "take" { a: Option<serde_json::Value>, #[serde(rename = "a.b")] a_b: Option<serde_json::Value> }
+});
+
 #[async_trait]
-impl Bundle for BinEcho {
+impl Handler for BinEcho {
+    type Call = echo_verbs::Call;
     fn name(&self) -> &str {
         "binpath_echo.tools"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        echo_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        echo_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb = payload["type"].as_str().unwrap_or("");
-        if matches!(verb, "boot" | "shutdown" | "reflect") {
-            return Ok(Some(
-                json!({"id": id.0, "sentence": "binary path probe", "verbs": {}}),
-            ));
-        }
-        Ok(Some(json!({"error": format!("text channel: {verb}")})))
+        Ok(Some(match call {
+            echo_verbs::Call::Reflect(_) => {
+                json!({"id": id.0, "sentence": "binary path probe", "verbs": {}})
+            }
+            echo_verbs::Call::Take(_) => json!({"error": "text channel: take"}),
+        }))
     }
     async fn handle_binary(
         &self,
         id: &AgentId,
-        header: Value,
+        call: Self::Call,
         body: Option<Blob>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<Blob>), BundleError> {
-        // the kernel dispatches EVERY call here — lifecycle verbs are not a take
-        if matches!(
-            header["type"].as_str(),
-            Some("boot" | "shutdown" | "reflect")
-        ) {
-            return Ok((self.handle(id, &header, kernel).await?, None));
+        // the kernel dispatches EVERY call here — reflect is not a take
+        if matches!(call, echo_verbs::Call::Reflect(_)) {
+            return Ok((self.handle(id, call, kernel).await?, None));
         }
+        let header = call.payload();
         // python `sorted(payload)` — the header's keys and the body's own key
         let mut keys: Vec<String> = header
             .as_object()
@@ -156,7 +171,8 @@ async fn forward_sent(k: &Arc<Kernel>, leg: &str) -> Outcome {
     k.send(vec![Item::new(
         AgentId::from(leg),
         json!({"type": "forward", "target": "echo",
-               "payload": {"type": "take", "a": {"b": "kept"}, "a.b": null}}),
+               "payload": {"type": "take", "a": {"b": "kept"}, "a.b": null},
+               "forward_timeout": 30.0}),
     )
     .with_binary(
         vec![Step::from("payload"), Step::from("a.b")],

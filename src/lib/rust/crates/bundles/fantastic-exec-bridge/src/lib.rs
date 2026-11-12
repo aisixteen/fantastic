@@ -23,8 +23,8 @@
 //! own source; the bridge prepends nothing. `start` spawns in the BACKGROUND and
 //! returns `{job_id, status:"running"}` at once, streaming `progress` / `job_done`;
 //! `boot` is a no-op (nothing auto-restarts — a command is started by a caller,
-//! not the record). Any verb this bundle does not own is MAIL for the running
-//! program (`{queued:true}`); jobs are kernel TASKS (`ps`/`cancel`, `on_cancel`
+//! not the record). A verb the running program declared is MAIL for it
+//! (`{queued:true}`); jobs are kernel TASKS (`ps`/`cancel`, `on_cancel`
 //! SIGKILLs the real process).
 //!
 //! **NOT a sandbox.** An allowlisted command is a NAMED command, with all of that
@@ -36,27 +36,19 @@
 //!
 //! ## Verbs
 //!
-//! | verb       | args                                                            | reply                                          |
-//! |------------|-----------------------------------------------------------------|------------------------------------------------|
-//! | `reflect`  | _none_ (UNGATED — discovery works on a sealed leg)              | identity + allowlist + posture                 |
-//! | `start`    | `command:str` (req; PTY: absent = child `$SHELL`), `args?`, `pty?` | `{job_id, status:"running", pty}` at once   |
-//! | `status`   | `job_id:int?`                                                   | one job with its output, or all of this agent's |
-//! | `clear`    | `job_id:int?`                                                   | drops finished rows of this agent              |
-//! | `interrupt`| `job_id:int?`                                                   | `{interrupted: int}` (SIGINT to in-flight)     |
-//! | `stop`     | `job_id:int?`                                                   | `{killed: int}` (SIGKILL to in-flight)         |
-//! | `boot`     | _none_                                                          | no-op → `null`                                 |
-//!
-//! Anything else is MAIL for the running program: `{queued:true}` when a job is
-//! live, a loud error naming the verb when none is.
+//! Declared in [`verbs`]; `reflect` and `docs` render them. The program a job runs may
+//! declare verbs of its own (`declare_verbs`): mail is a call of one of those, checked
+//! by the same entry against the schema the program declared, and acknowledged
+//! `{queued:true}` while a job is live. There is no other mail.
 
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_bundle::{io_error_str, py_repr, py_repr_value, py_str, py_truthy};
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_bundle::{io_error_str, py_repr, py_repr_value};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::refusal::{
-    bad, missing, refusal, refusal_hint, with, MISSING_ARG, NOT_FOUND, TRANSPORT_ERROR,
-    UNAUTHORIZED,
+    bad, refusal, refusal_hint, with, MISSING_ARG, NOT_FOUND, TRANSPORT_ERROR,
+    UNAUTHORIZED, UNHANDLED,
 };
 use fantastic_kernel::{body_at, AgentId, Blob, Kernel, TaskId};
 use serde_json::{json, Map, Value};
@@ -82,26 +74,15 @@ pub const CONNECTOR_SRC: &str = include_str!("connector.py");
 /// `handler_module` key under which this bundle registers.
 pub const HANDLER_MODULE: &str = "exec_bridge.tools";
 
-/// readme.md auto-seeded into the agent's dir on creation.
-pub const README: &str = include_str!("readme.md");
-
 // ── the command gate: a REGEX allowlist (py `_allowed_patterns` / `_command_permitted`) ──
 
-/// This leg's `allowed` — regexes a command line must fullmatch to run. A bare
-/// string is treated as a one-element list. Empty ⇒ the leg runs nothing (a legal
-/// state: wired but given nothing to run, refusing loudly).
+/// This leg's `allowed` — regexes a command line must fullmatch to run. Empty ⇒ the
+/// leg runs nothing (a legal state: wired but given nothing to run, refusing loudly).
 pub fn allowed_patterns(meta: &Map<String, Value>) -> Vec<String> {
-    match meta.get("allowed") {
-        Some(Value::String(s)) => vec![s.clone()],
-        Some(Value::Array(a)) => a.iter().map(value_to_pattern).collect(),
-        _ => vec![],
-    }
-}
-
-/// Mirror python's `str(x)` over each `allowed` element: a string as-is, anything
-/// else via CPython's `str()` (so `True`, not `true`).
-fn value_to_pattern(v: &Value) -> String {
-    py_str(v)
+    meta.get("allowed")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .unwrap_or_default()
 }
 
 /// Compile one `allowed` pattern in PYTHON's `re` dialect.
@@ -226,14 +207,10 @@ pub fn shell_tail(meta: &Map<String, Value>) -> Option<Vec<String>> {
     }
 }
 
-/// One var of the child's environment as the CHILD will see it. python's
-/// `_child_env` stringifies every `env` extra (`str(v)`), so a non-string value is
-/// read the way python prints it.
+/// One var of the child's environment as the CHILD will see it (the record
+/// declares every value a string).
 fn child_var(env: &Map<String, Value>, name: &str) -> Option<String> {
-    env.get(name).map(|v| match v {
-        Value::String(s) => s.clone(),
-        other => py_str(other),
-    })
+    env.get(name).and_then(Value::as_str).map(str::to_string)
 }
 
 /// True when `argv` is exactly the shell line the record's `shell` permits: a PTY
@@ -263,176 +240,77 @@ fn shell_permits(
 /// The exec_bridge bundle.
 pub struct ExecBridgeBundle;
 
-/// HOW TO CALL an exec_bridge agent — python's `VERBS` docstrings (first line
-/// each), served by the kernel's `docs` verb.
-fn verb_docs_json() -> Value {
-    json!({
-        "start": "args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL, and with no `args` the record's whole shell line: `$SHELL -l` under shell=\"login\"), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits.",
-        "run": "args: command:str (req), args?, cwd?, wait_s:float? (default 60, max 600), tail:int? (default 200) — start, wait, and return the output in ONE reply: {job_id, status, exit_code, lines}. Use run for short commands; a job still running at wait_s comes back running (continue with status wait_s / tail). Read files with files.read, not run.",
-        "status": "args: job_id:int? — one job (with its `cwd`; read its output with `tail`/`grep`), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. `wait_s`:float? (0–120) with job_id — returns as soon as the job is no longer running, or when the wait ends; use it instead of polling. Returns {jobs:[…]}.",
-        "stop": "args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL running jobs on this agent.",
-        "interrupt": "args: job_id:int? — SIGINT one job or ALL running jobs on this agent.",
-        "clear": "args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM",
-        "write": "args: job_id:int (req), data:str or bytes:bytes (exactly one). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). `bytes` is written VERBATIM — a trailing newline (Enter) survives; a `<call>` strips a scalar value like `data`, so send keys that end in Enter as `bytes`. Returns {written:int}.",
-        "resize": "args: job_id:int (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}.",
-        "ack": "args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. After an `output` replay the reader does not pause for the backlog until this viewer's first ack or its stream ends. Returns {unacked:int, paused:bool}.",
-        "output": "args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events; it clears the unacked backlog (flow control restarts at 0 for this viewer) and opens a re-attach grace: the reader does not pause for the backlog until this viewer's first `ack` or its stream ends. Returns {job_id, output:str}.",
-        "tail": "args: job_id:int (req), lines:int? (default 20, max 500), stream:str? (stdout|stderr|both, default both — a PTY job has one). The last lines a job has printed SO FAR — running or ended, pipe or PTY. Returns {job_id, status, lines:[{n, stream, line}], printed, dropped}.",
-        "grep": "args: job_id:int (req), match:str (req — a regex, searched in each line), lines:int? (most matches returned, default 50, max 500 — the LAST ones), stream:str? (stdout|stderr|both, default both). Searches what a job has printed SO FAR — running or ended, pipe or PTY; lines older than the 256 KiB ring are gone (`dropped` says how many). Returns {job_id, status, matches:[{n, stream, line}], total, scanned, dropped}.",
-        "paste_image": "args: job_id:int (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}.",
-        "connector": "no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}.",
-        "monitor": "args: job_id:int (req — a RUNNING job of this agent), notify:str (req — the agent told), match:str? (a regex; absent = every line), every:number? (seconds — at most one delivery per window; required without `match`), tail:int? (newest lines per delivery, default 100), label:str?. Watches the job's output AS IT ARRIVES and SENDS what matches to `notify` as a turn — it polls nothing. Returns {monitor_id, job_id, notify, match, every, tail, label}; kernel `cancel` (or `unmonitor`) ends it, and it ends with its job.",
-        "monitors": "no args — this agent's monitors: {monitors:[{monitor_id, job_id, notify, match, every, tail, label, delivered, pending, status, error}]}. `status` is running, or dead once `notify` REFUSED a delivery (`error` says why; nothing more is sent) — `unmonitor` clears it.",
-        "unmonitor": "args: monitor_id:int (req). End one of this agent's monitors (kernel `cancel` on its id does the same). Returns {unmonitored:true, monitor_id}.",
-        "reflect": "Identity + running job count + auth posture. No args.",
-        "boot": "No-op. Nothing auto-restarts: a command is started by a caller, not by the record.",
-    })
-}
+/// What the bundle is for — its one short man text.
+const MAN: &str = "A process edge: runs allowlisted commands as background jobs (pipe or terminal), sealed by default; a job's program may declare verbs of its own and receive them as mail.";
 
-/// What a job emits on this agent's inbox — python `EMITS`, served by `docs`.
-fn emits_json() -> Value {
-    json!({
-        "job_started": "{type:'job_started', job_id, command, args} — the RESOLVED invocation (a PTY start without `command` names the shell it ran)",
-        "progress": "{type:'progress', job_id, n, line, stream} — one per output line",
-        "job_done": "{type:'job_done', job_id, exit_code, ok, lines?, last_line?, error?} — a pipe job's output is read with `tail`/`grep`; a PTY job carries exit_code and ok only",
-        "output": "{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)",
-        "monitor_dead": "{type:'monitor_dead', monitor_id, job_id, notify, reason, error} — `notify` REFUSED a monitor's delivery (`reason` unauthorized|unknown_agent); the monitor ended, nothing more is sent",
-    })
-}
-
-/// How a running program talks back — python `NOTES`, served by `docs`.
-fn notes_json() -> Value {
-    json!({
-        "wire": "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket: frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs as steps from the frame root — a key as a string (taken literally: ['payload', 'a.b'] is the key 'a.b'), a list index as an int (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload}; the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data}. Read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first). ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs like any OS process. The `connector` verb returns a ready client.",
-        "inbox": "Any verb this bundle does not answer is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is refused — a script that only defines something exits before its first message arrives.",
-        "tasks": "Every running job IS a row in the kernel TASK TABLE: its `job_id` is that row's id, listed by `ps`. `cancel task_id=<job_id>` kills it — the OS process is SIGKILLed by this bundle's `on_cancel` hook first, so nothing is orphaned.",
-    })
+/// The name of a call's verb, for the gate.
+fn verb_name(call: &verbs::Call) -> &str {
+    use verbs::Call;
+    match call {
+        Call::Reflect(_) => "reflect",
+        Call::Shutdown(_) => "shutdown",
+        Call::Start(_) => "start",
+        Call::Run(_) => "run",
+        Call::Status(_) => "status",
+        Call::Stop(_) => "stop",
+        Call::Interrupt(_) => "interrupt",
+        Call::Clear(_) => "clear",
+        Call::Write(_) => "write",
+        Call::Resize(_) => "resize",
+        Call::Ack(_) => "ack",
+        Call::Output(_) => "output",
+        Call::Tail(_) => "tail",
+        Call::Grep(_) => "grep",
+        Call::PasteImage(_) => "paste_image",
+        Call::Connector(_) => "connector",
+        Call::Monitor(_) => "monitor",
+        Call::Monitors(_) => "monitors",
+        Call::Unmonitor(_) => "unmonitor",
+        Call::DeclareVerbs(_) => "declare_verbs",
+        Call::Dynamic(c) => &c.name,
+    }
 }
 
 #[async_trait]
-impl Bundle for ExecBridgeBundle {
+impl Handler for ExecBridgeBundle {
+    type Call = verbs::Call;
+
     fn name(&self) -> &str {
         "exec_bridge"
     }
 
-    fn verb_docs(&self) -> Value {
-        verb_docs_json()
+    fn man(&self) -> &'static str {
+        MAN
     }
 
-    fn emits_doc(&self) -> Option<Value> {
-        Some(emits_json())
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        verbs::VERBS
     }
 
-    fn notes_doc(&self) -> Option<Value> {
-        Some(notes_json())
+    /// The verbs the agent's running program declared (mail).
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        mail::declared(&agent.id)
     }
 
-    fn readme(&self) -> Option<&'static str> {
-        Some(README)
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &record::RECORD
     }
 
     /// Refuse a write this bundle cannot honour, at the WRITE, next to the typo
-    /// (py-canonical `validate_meta`): the ingress posture, the record's `cwd` /
-    /// `env` / `inherit_env` shapes, `shell` (true / false / "login"), and
-    /// `allowed` as a non-empty list of compilable regexes.
+    /// (py-canonical `validate_meta`): what the declared record cannot say, `allowed`
+    /// as compilable regexes.
     fn validate_meta(
         &self,
         meta: &Map<String, Value>,
         _record: &Map<String, Value>,
     ) -> Option<String> {
-        // ONLY an UNKNOWN RULE NAME is refused (py `resolve_ingress(...).unknown`):
-        // a falsy spec and a type-less object both seal silently, and
-        // `password_ingress` resolves fine here — it is the stem check below that
-        // refuses it on this edge.
-        if let Some(bad) = fantastic_io_bridge::authorizer::ingress::unknown_refusal(
-            meta,
-            &["allow_all_ingress", "deny_ingress"],
-        ) {
-            return Some(bad);
-        }
-        // `password_ingress` is meaningless on an in-process leg: the token is
-        // read off a WIRE ENVELOPE and the process edge has none — no frame ever
-        // presents one, so the rule could only refuse, or be satisfied by a
-        // secret persisted ON THE RECORD. Refused at the write. Same rule as
-        // `fantastic_file::password_refusal`.
-        for (field, stem) in [("ingress_rule", "password_ingress"), ("auth", "password")] {
-            let Some(spec) = meta.get(field) else {
-                continue;
-            };
-            if fantastic_io_bridge::authorizer::rule_name(Some(spec), "") == stem {
+        // `allowed` must hold compilable regexes: what a declaration cannot say.
+        for pat in allowed_patterns(meta) {
+            if let Err(e) = compile_pattern(&pat) {
                 return Some(format!(
-                    "{field}={} is not applicable to the process edge: a leg with \
-                     no wire envelope can never present a token — legal values: \
-                     allow_all_ingress, deny_ingress",
-                    py_repr_value(spec)
+                    "allowed contains a broken regex {}: {e}",
+                    py_repr(&pat)
                 ));
-            }
-        }
-        // WHERE and WITH WHAT a command runs is the record's — shaped at the write.
-        if let Some(c) = meta.get("cwd").filter(|v| !v.is_null()) {
-            if !c.as_str().is_some_and(|s| !s.is_empty()) {
-                return Some("cwd must be a non-empty directory path".to_string());
-            }
-        }
-        if let Some(e) = meta.get("env").filter(|v| !v.is_null()) {
-            let ok = e.as_object().is_some_and(|m| {
-                m.values()
-                    .all(|v| matches!(v, Value::String(_) | Value::Number(_) | Value::Bool(_)))
-            });
-            if !ok {
-                return Some("env must be a map of NAME -> value".to_string());
-            }
-        }
-        if let Some(n) = meta.get("inherit_env").filter(|v| !v.is_null()) {
-            let ok = n
-                .as_array()
-                .is_some_and(|a| a.iter().all(|x| x.as_str().is_some_and(|s| !s.is_empty())));
-            if !ok {
-                return Some(
-                    r#"inherit_env must be a list of env var names (["*"] = all)"#.to_string(),
-                );
-            }
-        }
-        // `shell` is a CLOSED set — each legal value names ONE exact line. A JSON
-        // `1` is refused: python checks `isinstance(v, bool)` first so a bare `1`
-        // (equal to True there) can never read as permission.
-        if let Some(v) = meta.get("shell").filter(|v| !v.is_null()) {
-            let ok = matches!(v, Value::Bool(_)) || v.as_str() == Some("login");
-            if !ok {
-                return Some(format!(
-                    "shell={} is not a shell permission — legal values: true \
-                     (the child's $SHELL, bare), \"login\" ($SHELL -l), false (none)",
-                    py_repr_value(v)
-                ));
-            }
-        }
-        // `allowed` must be a non-empty list of compilable regexes.
-        if let Some(raw) = meta.get("allowed").filter(|v| !v.is_null()) {
-            let pats: Vec<String> = match raw {
-                Value::String(s) => vec![s.clone()],
-                Value::Array(a) => a.iter().map(value_to_pattern).collect(),
-                _ => Vec::new(),
-            };
-            if pats.is_empty() {
-                return Some(
-                    "allowed must be a non-empty list of regexes, e.g. \
-                     <allowed><item>ls( .*)?</item></allowed>"
-                        .to_string(),
-                );
-            }
-            // py reprs the RAW element and compiles `str(pat)`; the engine's own
-            // message after `': '` is not matched.
-            let raw_items: Vec<Value> = match raw {
-                Value::Array(a) => a.clone(),
-                other => vec![other.clone()],
-            };
-            for (item, pat) in raw_items.iter().zip(&pats) {
-                if let Err(e) = compile_pattern(pat) {
-                    return Some(format!(
-                        "allowed contains a broken regex {}: {e}",
-                        py_repr_value(item)
-                    ));
-                }
             }
         }
         None
@@ -441,131 +319,94 @@ impl Bundle for ExecBridgeBundle {
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let raw_type = payload.get("type").unwrap_or(&Value::Null);
-        let verb = raw_type.as_str().unwrap_or("");
+        Ok(self.handle_binary(agent_id, call, None, kernel).await?.0)
+    }
+
+    /// The kernel's dispatch, every verb: `write` reads ITS key — the request body at
+    /// `bytes`, written verbatim — and `paste_image` the body at `data`. A body under
+    /// any other key, or none, is not the chunk.
+    async fn handle_binary(
+        &self,
+        agent_id: &AgentId,
+        call: Self::Call,
+        body: Option<Blob>,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(Reply, Option<Blob>), BundleError> {
+        use verbs::Call;
         // AUTH GATE — the process edge, gated like any io_bridge leg (SEALED by
         // default). `reflect` and `connector` are UNGATED: discovery must work on a
-        // sealed bridge. Every other type is gated, MAIL INCLUDED (python `handler`):
-        // a sealed leg delivers nothing to its program — the relay's
-        // inbox drain refuses the same payloads, since the substrate's fanout
-        // reaches it before this handler runs.
-        //
-        // `shutdown` is NOT a verb: python's VERBS has no such key, so it is
-        // MAIL like any other unowned type.
-        if !matches!(verb, "reflect" | "connector") {
+        // sealed bridge. Every other verb is gated, MAIL INCLUDED (python `handler`):
+        // a sealed leg delivers nothing to its program — the relay's inbox drain
+        // refuses the same mail, since the substrate's fanout reaches it before this
+        // handler runs.
+        if !matches!(call, Call::Reflect(_) | Call::Connector(_)) {
             let meta = snapshot_meta(agent_id, kernel);
-            if let Some(denied) = gate(&meta, agent_id, verb) {
-                // The fanout has queued a copy of this payload for the program already: note
-                // the refusal now so the drain drops it whatever the record says
-                // when it dequeues.
-                if relay::has_owner_inbox(agent_id) {
-                    relay::note_refused(agent_id, payload);
+            if let Some(denied) = gate(&meta, agent_id, verb_name(&call)) {
+                // The fanout has queued a copy of this mail for the program already:
+                // note the refusal now so the drain drops it whatever the record
+                // says when it dequeues.
+                if let Call::Dynamic(c) = &call {
+                    if relay::has_owner_inbox(agent_id) {
+                        relay::note_refused(agent_id, &mail::payload_of(c));
+                    }
                 }
-                return Ok(Some(denied));
+                return Ok((Some(denied), None));
             }
         }
-        let reply = match verb {
-            "reflect" => reflect_reply(agent_id, kernel),
-            "start" => start_reply(agent_id, payload, kernel).await,
-            "run" => run_reply(agent_id, payload, kernel).await,
-            "boot" => boot_reply(agent_id, kernel).await,
-            "status" => status_reply(agent_id, payload).await,
-            "clear" => clear_reply(agent_id, payload),
-            "interrupt" => interrupt_reply(agent_id, payload),
-            "stop" => stop_reply(agent_id, payload),
-            "write" => pty::write_reply(agent_id, payload, None).await,
-            "resize" => pty::resize_reply(agent_id, payload),
-            "ack" => pty::ack_reply(agent_id, payload),
-            "output" => pty::output_reply(agent_id, payload),
-            "tail" => tail::tail_reply(agent_id, payload),
-            "grep" => tail::grep_reply(agent_id, payload),
-            "monitor" => monitor::monitor_reply(agent_id, payload, kernel).await,
-            "monitors" => monitor::monitors_reply(agent_id),
-            "unmonitor" => monitor::unmonitor_reply(agent_id, payload, kernel).await,
-            // `data` is bytes: on the text channel there is none to paste.
-            "paste_image" => pty::paste_image_text(agent_id, payload),
+        let reply = match call {
+            Call::Reflect(_) => reflect_reply(agent_id, kernel),
+            Call::Shutdown(_) => Value::Null,
+            Call::Start(a) => {
+                start_reply(agent_id, a.command.as_deref(), a.args, a.pty, kernel).await
+            }
+            Call::Run(a) => run_reply(agent_id, a, kernel).await,
+            Call::Status(a) => status_reply(agent_id, &a).await,
+            Call::Clear(a) => clear_reply(agent_id, a.job_id.map(JobRef::of).as_ref()),
+            Call::Interrupt(a) => interrupt_reply(agent_id, a.job_id.map(JobRef::of).as_ref()),
+            Call::Stop(a) => stop_reply(agent_id, a.job_id.map(JobRef::of).as_ref()),
+            Call::Write(a) => pty::write_reply(agent_id, &a, body_at(body.as_ref(), "bytes")).await,
+            Call::Resize(a) => pty::resize_reply(agent_id, &a),
+            Call::Ack(a) => pty::ack_reply(agent_id, &a),
+            Call::Output(a) => pty::output_reply(agent_id, &a),
+            Call::Tail(a) => tail::tail_reply(agent_id, &JobRef::of(a.job_id), a.lines, a.stream),
+            Call::Grep(a) => tail::grep_reply(agent_id, &a),
+            Call::Monitor(a) => monitor::monitor_reply(agent_id, &a, kernel).await,
+            Call::Monitors(_) => monitor::monitors_reply(agent_id),
+            Call::Unmonitor(a) => monitor::unmonitor_reply(agent_id, a.monitor_id, kernel).await,
+            // `data` is the request body: on the text channel there is none to paste.
+            Call::PasteImage(a) => match body_at(body.as_ref(), "data") {
+                Some(data) => pty::paste_image_reply(agent_id, &a, data).await,
+                None => pty::paste_image_text(agent_id, &a),
+            },
             // The reference wire client SOURCE — a model pastes it at the top of
             // its program instead of re-deriving the socket framing (int(fd),
             // buffering, not-seekable). Ungated like reflect.
-            "connector" => json!({
-                "source": CONNECTOR_SRC,
-                "howto": "Write `source` verbatim as the first lines of your program file, then \
-                          your code below it. It opens FANTASTIC_CTRL_FD (a socket, length-prefixed \
-                          frames; a payload carrying a bytes value rides the binary channel raw: \
-                          `write_stream` puts its chunk in `bytes`, `read_stream` passes `bytes: b''` \
-                          and gets its chunk back raw in the reply's `bytes`) and \
-                          exposes `kernel.send(target, payload) -> reply` (raises if \
-                          the relay could not deliver), \
-                          `kernel.emit(payload)`, `kernel.watch(src, cb)`, `kernel.on_message(cb)`, \
-                          `kernel.self_id`. Arguments arrive as ARGV, like any command — there is \
-                          no `kernel.args`. One frame caps at 16 MiB; move more than that with \
-                          `write_stream` chunks. Your sends carry THIS runner's identity \
-                          and grants (its `can_call`; a target must list this runner in \
-                          `callable_by`). Do not rewrite the wire by hand.",
-            }),
-            // ADDRESSABLE INBOX. Any verb this bundle does not own is mail for the
-            // running program — the substrate's fanout has ALREADY delivered it to the
-            // job's `_xbself_` proxy, so this only ACKs. Re-emitting would double it.
-            _ => {
+            Call::Connector(_) => json!({"source": CONNECTOR_SRC}),
+            Call::DeclareVerbs(a) => mail::declare_reply(agent_id, &a),
+            // MAIL — a verb the running program declared, its arguments already
+            // checked against the declared schema. The substrate's fanout has ALREADY
+            // delivered it to the job's `_xbself_` proxy, so this only ACKs.
+            // Re-emitting would double it.
+            Call::Dynamic(c) => {
                 if jobs::has_running_job(agent_id) {
                     json!({"queued": true})
                 } else {
-                    // py `{t!r}` over the RAW value — an absent `type` is `None`.
-                    let mut r = fantastic_kernel::refusal::refusal(
-                        fantastic_kernel::refusal::UNHANDLED,
+                    let mut r = refusal(
+                        UNHANDLED,
                         format!(
-                            "exec_bridge: unknown type {} (no running job to receive it)",
-                            py_repr_value(raw_type)
+                            "exec_bridge: {} is mail and no job is running to receive it",
+                            py_repr(&c.name)
                         ),
                     );
-                    fantastic_kernel::refusal::with(&mut r, "verb", raw_type.clone());
+                    with(&mut r, "verb", json!(c.name));
                     r
                 }
             }
         };
-        Ok(Some(reply))
-    }
-
-    /// The kernel's dispatch, every verb: `paste_image` reads ITS key — the
-    /// request body at `data` (python's `payload.get("data")` is the bytes). A
-    /// body under any other key, or none, is not the image: python's `data` is
-    /// then absent, `bad_arg` "raw bytes". Every other verb takes `handle`.
-    async fn handle_binary(
-        &self,
-        agent_id: &AgentId,
-        header: Value,
-        body: Option<Blob>,
-        kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<Blob>), BundleError> {
-        if header.get("type").and_then(Value::as_str) == Some("paste_image") {
-            let meta = snapshot_meta(agent_id, kernel);
-            if let Some(denied) = gate(&meta, agent_id, "paste_image") {
-                if relay::has_owner_inbox(agent_id) {
-                    relay::note_refused(agent_id, &header);
-                }
-                return Ok((Some(denied), None));
-            }
-            let reply = match body_at(body.as_ref(), "data") {
-                Some(data) => pty::paste_image_reply(agent_id, &header, data).await,
-                None => pty::paste_image_text(agent_id, &header),
-            };
-            return Ok((Some(reply), None));
-        }
-        if header.get("type").and_then(Value::as_str) == Some("write") {
-            let meta = snapshot_meta(agent_id, kernel);
-            if let Some(denied) = gate(&meta, agent_id, "write") {
-                if relay::has_owner_inbox(agent_id) {
-                    relay::note_refused(agent_id, &header);
-                }
-                return Ok((Some(denied), None));
-            }
-            let reply = pty::write_reply(agent_id, &header, body_at(body.as_ref(), "bytes")).await;
-            return Ok((Some(reply), None));
-        }
-        Ok((self.handle(agent_id, &header, kernel).await?, None))
+        Ok((Some(reply), None))
     }
 
     async fn on_delete(
@@ -580,6 +421,7 @@ impl Bundle for ExecBridgeBundle {
                 jobs::teardown(j);
             }
         }
+        mail::forget(agent_id);
         Ok(())
     }
     /// Shutdown frees what delete frees — declared, never a fallback.
@@ -622,7 +464,7 @@ impl Bundle for ExecBridgeBundle {
 // ── the auth gate (io_bridge leg — SEALED by default) ───────────────
 
 /// Deny an owned verb on a sealed leg. Same shape as `fantastic-file`'s gate:
-/// absent `ingress_rule` (or `auth`) resolves to deny-inbound, and every denial
+/// absent `ingress_rule` resolves to deny-inbound, and every denial
 /// teaches the fix. `kind="spawn"` — that is what is being authorized; no rule
 /// inspects the kind, so a new one costs nothing and the audit trail is honest.
 ///
@@ -630,12 +472,8 @@ impl Bundle for ExecBridgeBundle {
 /// hand-rolled here would teach a different repair per bundle and per runtime;
 /// the rule that refused is the thing that knows the repair.
 fn gate(meta: &Map<String, Value>, agent_id: &AgentId, verb: &str) -> Option<Value> {
-    let spec = fantastic_io_bridge::authorizer::manifold_spec(
-        meta.get("ingress_rule"),
-        meta.get("auth"),
-        "_ingress",
-    );
-    let rule = fantastic_io_bridge::authorizer::ingress::resolve(spec.as_ref());
+    let rules = fantastic_io_bridge::authorizer::Rules::of(meta).unwrap_or_default();
+    let rule = fantastic_io_bridge::authorizer::ingress::resolve(&rules);
     let action = fantastic_io_bridge::authorizer::Action {
         kind: "spawn",
         target: agent_id.0.as_str(),
@@ -685,25 +523,25 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         .count();
     let mut out = json!({
         "id": agent_id.as_str(),
-        // Py-canonical sentence — the ALLOWLIST is advertised so an authoring
-        // model can see what it may run without guessing.
-        "sentence": "Process edge of the io family — a general-purpose COMMAND runner, sealed by default, gated by the `allowed` regexes. Spawns commands in the background; a child may speak the kernel over a private control fd.",
+        "sentence": MAN,
         "cwd": cwd_val,
         // THE GATE, advertised: a caller must see what it may run, where, and with
         // which of the kernel's env vars.
         "allowed": allowed_patterns(&meta),
         "inherit_env": meta.get("inherit_env").cloned().unwrap_or_else(|| json!([])),
         // The shell line the record permits without an `allowed` entry: false
-        // (none), true ($SHELL bare) or "login" ($SHELL -l). py `rec.get("shell")
-        // or False` — any falsy value reads as false.
-        "shell": meta.get("shell").filter(|v| py_truthy(v)).cloned().unwrap_or(json!(false)),
+        // (none), true ($SHELL bare) or "login" ($SHELL -l).
+        "shell": record::RECORD.get(&meta, "shell"),
         "running": running,
     });
     // The auth POSTURE, python's `describe(rec)` — `**_describe(rec)` is the last
     // thing python's reflect spreads, so these keys land last and in its order.
     if let (Some(o), Some(posture)) = (
         out.as_object_mut(),
-        fantastic_io_bridge::authorizer::describe(&meta).as_object(),
+        fantastic_io_bridge::authorizer::Rules::of(&meta)
+            .unwrap_or_default()
+            .describe()
+            .as_object(),
     ) {
         for (k, v) in posture {
             o.insert(k.clone(), v.clone());
@@ -713,12 +551,15 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
 }
 
 pub mod jobs;
+pub mod mail;
 mod monitor;
 pub mod pty;
+pub mod record;
 pub mod relay;
 pub mod spawn;
 mod sys;
 mod tail;
+pub mod verbs;
 
 #[cfg(test)]
 mod pty_tests;
@@ -746,7 +587,7 @@ fn signal_jobs(agent_id: &AgentId, want: Option<&JobRef>, sig: Signal) -> u64 {
     let mut g = jobs::jobs();
     let mut n = 0u64;
     for ((_, id), j) in g.iter_mut() {
-        if &j.owner != agent_id || want.is_some_and(|w| w.id != Some(*id)) {
+        if &j.owner != agent_id || want.is_some_and(|w| w.id != *id) {
             continue;
         }
         if !jobs::alive(j) {
@@ -780,18 +621,18 @@ fn no_job(agent_id: &AgentId, want: Option<&JobRef>) -> Option<Value> {
     }
 }
 
-/// A job named by a caller (python `_job_arg`'s result): the value AS SENT — every
-/// refusal echoes it — and the task id it names.
+/// A job named by a caller: the kernel task id it names.
 pub(crate) struct JobRef {
-    /// `payload["job_id"]`, verbatim.
-    pub(crate) raw: Value,
-    /// The kernel task id it names; `None` for an integer too wide to be one.
-    /// python's `int` is unbounded: such a value passes the type check and then
-    /// simply names no job — it is not a bad argument.
-    pub(crate) id: Option<TaskId>,
+    /// The kernel task id it names.
+    pub(crate) id: TaskId,
 }
 
 impl JobRef {
+    /// The job a call named by its task id.
+    pub(crate) fn of(id: i64) -> Self {
+        Self { id: TaskId(id) }
+    }
+
     /// This agent's row for the named job, when there is one. A job of ANOTHER
     /// agent is not found, exactly like a job that never existed.
     pub(crate) fn find<'a>(
@@ -799,7 +640,7 @@ impl JobRef {
         g: &'a indexmap::IndexMap<jobs::JobKey, jobs::Job>,
         owner: &AgentId,
     ) -> Option<&'a jobs::Job> {
-        self.id.and_then(|id| g.get(&(owner.clone(), id)))
+        g.get(&(owner.clone(), self.id))
     }
 }
 
@@ -808,85 +649,22 @@ impl JobRef {
 pub(crate) fn no_such_job(jid: &JobRef) -> Value {
     let mut v = refusal(
         NOT_FOUND,
-        format!("exec_bridge: no job {}", py_repr_value(&jid.raw)),
+        format!("exec_bridge: no job {}", jid.id.0),
     );
-    with(&mut v, "job_id", jid.raw.clone());
+    with(&mut v, "job_id", json!(jid.id.0));
     v
 }
 
-/// The `job_id` argument (python `_job_arg`): `Ok(None)` when absent (or `null`)
-/// and optional, `Ok(Some)` for an int, or the refusal.
-///
-/// A job's id IS its kernel TASK id — an int. Anything else is a bad argument
-/// naming that, never looked up: a string like `"42"` is not coerced, so a caller
-/// that stringified an id learns so here instead of reading `no job`. (The ids
-/// were random 8-hex strings; a model's `<job_id>04203581</job_id>` came back an
-/// int and `458e5912` an infinite float, so 3.7% of jobs were unaddressable.)
-pub(crate) fn job_arg(
-    verb: &str,
-    payload: &Value,
-    required: bool,
-) -> Result<Option<JobRef>, Value> {
-    match payload.get("job_id") {
-        None | Some(Value::Null) if required => Err(missing(verb, "job_id")),
-        None | Some(Value::Null) => Ok(None),
-        Some(v @ Value::Number(n)) if is_int(n) => Ok(Some(JobRef {
-            raw: v.clone(),
-            id: n.as_i64().map(TaskId),
-        })),
-        Some(_) => Err(bad(
-            verb,
-            "job_id",
-            "an int — the job's task id (from `start`, `status` or `ps`)",
-        )),
-    }
-}
-
-/// [`job_arg`] for a verb that needs one job.
-pub(crate) fn require_job(verb: &str, payload: &Value) -> Result<JobRef, Value> {
-    job_arg(verb, payload, true)?.ok_or_else(|| missing(verb, "job_id"))
-}
-
-/// python `isinstance(v, int)` for a JSON number: digits with an optional sign —
-/// no fraction, no exponent, and not the `Infinity`/`NaN` token the kernel keeps
-/// for a non-finite float (a model's `458e5912` is one).
-fn is_int(n: &serde_json::Number) -> bool {
-    let s = n.to_string();
-    let digits = s.strip_prefix('-').unwrap_or(&s);
-    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
-}
-
-fn interrupt_reply(agent_id: &AgentId, payload: &Value) -> Value {
-    let want = match job_arg("interrupt", payload, false) {
-        Ok(w) => w,
-        Err(e) => return e,
-    };
-    no_job(agent_id, want.as_ref()).unwrap_or_else(
-        || json!({"interrupted": signal_jobs(agent_id, want.as_ref(), Signal::Interrupt)}),
+fn interrupt_reply(agent_id: &AgentId, want: Option<&JobRef>) -> Value {
+    no_job(agent_id, want).unwrap_or_else(
+        || json!({"interrupted": signal_jobs(agent_id, want, Signal::Interrupt)}),
     )
 }
 
-fn stop_reply(agent_id: &AgentId, payload: &Value) -> Value {
-    let want = match job_arg("stop", payload, false) {
-        Ok(w) => w,
-        Err(e) => return e,
-    };
-    no_job(agent_id, want.as_ref())
-        .unwrap_or_else(|| json!({"killed": signal_jobs(agent_id, want.as_ref(), Signal::Kill)}))
+fn stop_reply(agent_id: &AgentId, want: Option<&JobRef>) -> Value {
+    no_job(agent_id, want)
+        .unwrap_or_else(|| json!({"killed": signal_jobs(agent_id, want, Signal::Kill)}))
 }
-
-/// `start` — spawn the COMMAND in the BACKGROUND and return at once.
-///
-/// args: `command:str` (req — on a PTY start, absent = the child's `$SHELL`),
-/// `args:list[str]?` (argv, default `[]`), `pty:{cols,rows}?` (run it on a
-/// terminal). The FULL line (command + args, shell-joined) must fullmatch one of
-/// the record's `allowed` regexes — or be the exact shell line the record's
-/// `shell` permits — or the start is refused naming the patterns. A pipe job
-/// always names its command. Everything else is the RECORD's, never the call's:
-/// `cwd` (required), `env` + `inherit_env` (the child's environment).
-/// `start` sends no one anything — the refusal of a `notify`/`match`/`every` on it.
-const START_WAKE_HINT: &str = "absent — `start` sends no one anything; to be told what the job \
-     prints (or when it ends), `monitor` it: job_id, notify, match, every";
 
 /// The agent's own folder (empty when it is gone).
 fn agent_own_root(kernel: &Kernel, id: &AgentId) -> std::path::PathBuf {
@@ -908,60 +686,42 @@ fn cwd_refusal(cwd: &str, why: &str) -> Value {
     v
 }
 
-async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+/// `start` as the answer a caller reads: the job started, or the refusal.
+async fn start_reply(
+    agent_id: &AgentId,
+    command: Option<&str>,
+    args: Option<Vec<String>>,
+    pty: Option<verbs::Terminal>,
+    kernel: &Arc<Kernel>,
+) -> Value {
+    match start_job(agent_id, command, args, pty, kernel).await {
+        Ok((job_id, is_pty)) => {
+            json!({"job_id": job_id.get(), "status": "running", "pty": is_pty})
+        }
+        Err(refused) => refused,
+    }
+}
+
+/// Start the job: its task id and whether it runs on a terminal, or the refusal.
+async fn start_job(
+    agent_id: &AgentId,
+    command: Option<&str>,
+    args: Option<Vec<String>>,
+    pty: Option<verbs::Terminal>,
+    kernel: &Arc<Kernel>,
+) -> Result<(TaskId, bool), Value> {
     let meta = snapshot_meta(agent_id, kernel);
     // EVERY refusal on this verb carries a CODE, so nothing has to tell a typo
     // from a policy refusal by matching prose.
-    // WHERE and WITH WHAT a command runs are the OPERATOR's: a per-call `env`
-    // (`LD_PRELOAD`, `PATH`, …) or `cwd` would change what an allowlisted line
-    // actually runs.
-    for gone in ["env", "cwd"] {
-        if payload.get(gone).is_some_and(|v| !v.is_null()) {
-            return bad(
-                "start",
-                gone,
-                &format!("absent — `{gone}` is the record's (update_agent {agent_id} {gone}=…)"),
-            );
-        }
-    }
-    // A WAKE-UP is a monitor's, never the start's: a `notify` here is refused,
-    // never dropped silently with the caller waiting for a message nothing sends.
-    for gone in ["notify", "match", "every"] {
-        if payload.get(gone).is_some_and(|v| !v.is_null()) {
-            return bad("start", gone, START_WAKE_HINT);
-        }
-    }
-    // `args` — a list of scalars, each stringified into argv. python's
-    // `isinstance(a, (str, int, float))` ACCEPTS a bool (a bool IS an int there), and
-    // `str(True)` is `True`; an explicit `null` is not a list and refuses.
-    let raw_args = payload.get("args").cloned().unwrap_or_else(|| json!([]));
-    let mut args: Vec<String> = match &raw_args {
-        Value::Array(a) => {
-            let mut out = Vec::with_capacity(a.len());
-            for v in a {
-                match v {
-                    Value::String(_) | Value::Number(_) | Value::Bool(_) => out.push(py_str(v)),
-                    _ => return bad("start", "args", "a list of strings"),
-                }
-            }
-            out
-        }
-        _ => return bad("start", "args", "a list of strings"),
-    };
-    let dims = match payload.get("pty").filter(|v| !v.is_null()) {
-        None => None,
-        Some(raw) => match pty::dims("start", raw) {
-            Ok(d) => Some(d),
-            Err(e) => return e,
-        },
-    };
+    // WHERE and WITH WHAT a command runs are the OPERATOR's: the call declares no
+    // `env` or `cwd` (they would change what an allowlisted line actually runs), nor
+    // a `notify`: a WAKE-UP is a monitor's, never the start's.
+    let mut args: Vec<String> = args.unwrap_or_default();
+    let dims = pty.map(|t| (t.cols, t.rows));
     // The child's WHOLE environment, from the record — built before the command
     // is resolved, because an absent `command` on a PTY start is read from it.
     let mut env = child_env(&meta);
-    // py `payload.get("command")`: an absent key and an explicit `null` are the
-    // same "no command".
-    let named = payload.get("command").filter(|v| !v.is_null());
-    let command = match named {
+    let command = match command {
         // AUTODISCOVERY, not a default: the shell is whatever the record passed
         // down to the child as SHELL. No chain (zsh → bash → sh) behind it — a
         // child env without one is refused, naming where it comes from.
@@ -975,7 +735,7 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
                 if args.is_empty() {
                     args = shell_tail(&meta).unwrap_or_default();
                 }
-                Value::String(shell)
+                shell
             }
             None => {
                 let mut v = refusal_hint(
@@ -991,21 +751,14 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
                     ),
                 );
                 with(&mut v, "arg", json!(SHELL_VAR));
-                return v;
+                return Err(v);
             }
         },
-        None => Value::Null,
-        Some(v) => v.clone(),
+        None => String::new(),
+        Some(v) => v.to_string(),
     };
-    // py `not isinstance(command, str) or not command.strip()`: a string of nothing
-    // but WHITESPACE is missing, and `str.strip()` strips every python space
-    // character, not just ASCII. A pipe job always names its command; so does a
-    // PTY start that passed one explicitly (an empty string is a typo, not "use
-    // the shell").
-    let command = match command.as_str() {
-        Some(c) if c.chars().any(|ch| !fantastic_bundle::is_space(ch)) => c.to_string(),
-        _ => return missing("start", "command"),
-    };
+    // A given `command` is never blank (the declared `pattern`) and a call naming
+    // neither `command` nor `pty` is refused by the engine (the declared `anyOf`).
     // The FULL argv, shell-joined, matched against the allowlist BEFORE spawning.
     let mut argv = Vec::with_capacity(args.len() + 1);
     argv.push(command.clone());
@@ -1047,11 +800,11 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             // `<program> <args>` can ever match it — say where the words go.
             why.push_str(COMMAND_ONE_PROGRAM);
         }
-        return refusal_hint(
+        return Err(refusal_hint(
             UNAUTHORIZED,
             why,
             "the leg's `allowed` policy decides; an operator may widen it",
-        );
+        ));
     }
     let Some(cwd) = meta
         .get("cwd")
@@ -1066,7 +819,7 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             format!("update_agent {agent_id} cwd=<dir>"),
         );
         with(&mut v, "arg", json!("cwd"));
-        return v;
+        return Err(v);
     };
     // The kernel's one record-path rule: `@state`/`@self` under their folders,
     // anything else (relative or absolute) under the work folder.
@@ -1078,9 +831,9 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
         match kernel.record_root(&cwd, &agent_own_root(kernel, agent_id)) {
             Ok((base, rel)) => match std::path::absolute(base.join(rel)) {
                 Ok(p) => p.to_string_lossy().into_owned(),
-                Err(e) => return cwd_refusal(&cwd, &e.to_string()),
+                Err(e) => return Err(cwd_refusal(&cwd, &e.to_string())),
             },
-            Err(e) => return cwd_refusal(&cwd, &e),
+            Err(e) => return Err(cwd_refusal(&cwd, &e)),
         }
     };
 
@@ -1108,7 +861,7 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
                 ),
             );
             with(&mut v, "arg", json!("PATH"));
-            return v;
+            return Err(v);
         }
         Err(e) => {
             // py `f"exec_bridge: spawn failed: {e}"` over the OSError
@@ -1122,21 +875,21 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             } else {
                 &command
             };
-            return refusal(
+            return Err(refusal(
                 TRANSPORT_ERROR,
                 format!(
                     "exec_bridge: spawn failed: {}",
                     io_error_str(&e, std::path::Path::new(culprit))
                 ),
-            );
+            ));
         }
     };
     let crate::spawn::Spawned { child, ctrl } = spawned;
     let Some(pid) = child.id() else {
-        return refusal(
+        return Err(refusal(
             TRANSPORT_ERROR,
             "exec_bridge: child exited before it could be tracked",
-        );
+        ));
     };
     let (rd, wr) = ctrl.into_split();
     // THE PROGRAM'S SENDS ARE THIS AGENT'S SENDS — `spawn_task` carries the
@@ -1225,7 +978,7 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             json!({"type": "job_started", "job_id": job_id.get(), "command": command, "args": args}),
         )
         .await;
-    json!({"job_id": job_id.get(), "status": "running", "pty": pty_state.is_some()})
+    Ok((job_id, pty_state.is_some()))
 }
 
 /// The child's WHOLE environment, from the record (python `_child_env`): the
@@ -1274,31 +1027,16 @@ pub fn child_env(meta: &Map<String, Value>) -> Map<String, Value> {
     env
 }
 
-/// `boot` — a NO-OP returning null. Nothing auto-restarts: a command is started by a
-/// caller, not by the record (py `_boot`).
-async fn boot_reply(_agent_id: &AgentId, _kernel: &Arc<Kernel>) -> Value {
-    Value::Null
-}
-
 /// `status` — one job (full output) or all of THIS agent's jobs.
 ///
 /// `wait_s` (0–120, with a `job_id`) waits for the job to stop RUNNING before
 /// answering, so a caller does not have to poll.
-async fn status_reply(agent_id: &AgentId, payload: &Value) -> Value {
-    let want = match job_arg("status", payload, false) {
-        Ok(w) => w,
-        Err(e) => return e,
-    };
-    if let Some(w) = payload.get("wait_s").filter(|v| !v.is_null()) {
+async fn status_reply(agent_id: &AgentId, a: &verbs::Status) -> Value {
+    let want = a.job_id.map(JobRef::of);
+    if let Some(secs) = a.wait_s {
         let Some(jid) = &want else {
             return bad("status", "wait_s", "a job_id to wait for");
         };
-        let Some(secs) = w.as_f64() else {
-            return bad("status", "wait_s", "a number of seconds, 0 to 120");
-        };
-        if !(0.0..=120.0).contains(&secs) {
-            return bad("status", "wait_s", "a number of seconds, 0 to 120");
-        }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs);
         loop {
             let live = {
@@ -1316,16 +1054,16 @@ async fn status_reply(agent_id: &AgentId, payload: &Value) -> Value {
     }
     let g = jobs::jobs();
     match want {
-        Some(jid) => match (jid.id, jid.find(&g, agent_id)) {
-            (Some(id), Some(j)) => json!({
-                "jobs": [jobs::snap(id, j, true)],
+        Some(jid) => match jid.find(&g, agent_id) {
+            Some(j) => json!({
+                "jobs": [jobs::snap(jid.id, j, true)],
                 "origin": format!(
                     "{agent_id} status {{job_id: {}}} — a live job; re-send for its \
                      output NOW, which may differ",
-                    id.get()
+                    jid.id.get()
                 ),
             }),
-            _ => no_such_job(&jid),
+            None => no_such_job(&jid),
         },
         None => json!({
             "jobs": g.iter()
@@ -1341,30 +1079,19 @@ async fn status_reply(agent_id: &AgentId, payload: &Value) -> Value {
 ///
 /// `wait_s` (default 60, 0–600) bounds the wait exactly like `status`'s: the job
 /// is polled every 200 ms and the reply comes as soon as it is no longer
-/// `running`/`stopping`. `tail` (default 200, 1–2000) is how many of its last
+/// `running`/`stopping`. `tail` (default 200, 1–500) is how many of its last
 /// lines come back. A job still running at the deadline is returned `running`
 /// with its `job_id`, so the caller continues with `status wait_s` / `tail`.
-async fn run_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let wait_s = match payload.get("wait_s").filter(|v| !v.is_null()) {
-        None => 60.0,
-        Some(v) => match v.as_f64() {
-            Some(s) if (0.0..=600.0).contains(&s) => s,
-            _ => return bad("run", "wait_s", "a number of seconds, 0 to 600"),
-        },
-    };
-    let tail = match payload.get("tail").filter(|v| !v.is_null()) {
-        None => 200,
-        Some(v) => match v.as_i64() {
-            Some(n) if (1..=2000).contains(&n) => n,
-            _ => return bad("run", "tail", "a line count, 1 to 2000"),
-        },
-    };
-    let started = start_reply(agent_id, payload, kernel).await;
-    // A refusal from `start` (no command, not allowed, no cwd) is the answer.
-    let jid = match require_job("run", &started) {
-        Ok(j) => j,
-        Err(_) => return started,
-    };
+async fn run_reply(agent_id: &AgentId, a: verbs::Run, kernel: &Arc<Kernel>) -> Value {
+    let (job_id, _) =
+        match start_job(agent_id, a.command.as_deref(), a.args, a.pty, kernel).await {
+            Ok(started) => started,
+            // A refusal from `start` (no command, not allowed, no cwd) is the answer.
+            Err(refused) => return refused,
+        };
+    let jid = JobRef::of(job_id.get());
+    let wait_s = a.wait_s;
+    let tail = a.tail;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(wait_s);
     loop {
         let live = {
@@ -1386,12 +1113,7 @@ async fn run_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) ->
             None => ("running".to_string(), None),
         }
     };
-    // `tail`'s reply carries at most its ring's 500 lines; `run`'s wider cap is
-    // clamped rather than refused, so a large `tail` never turns into a bad_arg.
-    let mut reply = tail::tail_reply(
-        agent_id,
-        &json!({"job_id": jid.raw, "lines": tail.min(tail::MAX_LINES)}),
-    );
+    let mut reply = tail::tail_reply(agent_id, &jid, tail, verbs::Stream::Both);
     with(&mut reply, "status", json!(status));
     with(&mut reply, "exit_code", json!(exit_code));
     reply
@@ -1404,13 +1126,9 @@ async fn run_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) ->
 /// `cancel`, `delete` and shutdown kill its process through — dropped, the process
 /// would outlive all four. `clear` is also the one caller that wants the label rather
 /// than process liveness — it is deciding what is finished enough to forget.
-fn clear_reply(agent_id: &AgentId, payload: &Value) -> Value {
-    let want = match job_arg("clear", payload, false) {
-        Ok(w) => w,
-        Err(e) => return e,
-    };
+fn clear_reply(agent_id: &AgentId, want: Option<&JobRef>) -> Value {
     let mut g = jobs::jobs();
-    if let Some(jid) = &want {
+    if let Some(jid) = want {
         if let Some(j) = jid.find(&g, agent_id) {
             if j.status == "running" || j.status == "stopping" {
                 return bad(
@@ -1418,7 +1136,7 @@ fn clear_reply(agent_id: &AgentId, payload: &Value) -> Value {
                     "job_id",
                     &format!(
                         "a finished job (job {} is {} — `stop` it, then clear)",
-                        py_str(&jid.raw),
+                        jid.id.0,
                         j.status
                     ),
                 );
@@ -1429,7 +1147,7 @@ fn clear_reply(agent_id: &AgentId, payload: &Value) -> Value {
         .iter()
         .filter(|((_, id), j)| {
             &j.owner == agent_id
-                && want.as_ref().is_none_or(|w| w.id == Some(*id))
+                && want.is_none_or(|w| w.id == *id)
                 && j.status != "running"
                 && j.status != "stopping"
         })

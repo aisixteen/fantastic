@@ -3,48 +3,10 @@
 //! CLI that runs `fantastic` in its shell reads what this is and how to drive
 //! it; nothing is written to the directory and no kernel starts. On a terminal
 //! the same command opens the terminal UI. An embedding launcher's readme
-//! sections (passed to `main_with`) are printed after this text, in order; the
-//! same for `fantastic readme`.
+//! sections (passed to `main_with`) are printed after this text, in order. What an agent is and how to call it is never written
+//! here: it is rendered from the agents' own declarations (`reflect`, `docs`).
 
-use fantastic_web_mcp::{INSTRUCTIONS, LEAD_IN, SHAPE};
-
-const COMMANDS: &str = "Aisixteen Fantastic — a kernel of agents with a state folder (default `.fantastic/` in the work folder), driven by one verb, send, and discovered by reflect.\n\
-\n\
-This is `fantastic` without a terminal, so it only prints this readme: it starts nothing and writes nothing. Commands:\n\
-\x20\x20fantastic                          the terminal UI (on a terminal); a fresh state folder is seeded on launch\n\
-\x20\x20fantastic --statedir DIR --workdir DIR  on the UI, `--headless`, `canvas` and `mcp`: the state folder (default `<workdir>/.fantastic`) and the work folder (default the current dir; the root record keeps it, and a running kernel refuses a change)\n\
-\x20\x20fantastic canvas [ai] --port N     the browser canvas, headless: the kernel's message stream on stdout (--port the first time only)\n\
-\x20\x20fantastic [canvas] ai vllm -p PORT  the root AI `ai` on a backend (also `ai ollama -p PORT`, `ai responses|anthropic --model M`)\n\
-\x20\x20fantastic [canvas] run CMD [ARGS]   your own program from $PATH, as is, in the terminal (or a canvas cell)\n\
-\x20\x20fantastic --headless               no screen: the kernel's message stream on stdout; a recorded `web` host still serves its routes\n\
-\x20\x20fantastic mcp [--statedir DIR] [--workdir DIR]  MCP over stdio for a coding CLI (attaches to a running kernel, or runs it)\n\
-\x20\x20fantastic send [--statedir DIR] '<item json>'  one call into the running kernel, as the `mcp` leg; `$env:NAME` values come from this shell, marked secret\n\
-\x20\x20fantastic import PATH --parent ID  import a blueprint folder as agents under ID: prints the preview, then asks (`--bind @port=ID`, `--allow-code`, `--approve` skips the question)\n\
-\x20\x20fantastic migrate-home [--dry-run]  move the files of an older layout (~/.config/fantastic, ~/.fantastic/credentials) into ~/.fantastic; --dry-run only prints the moves\n\
-\x20\x20fantastic readme [key]              the docs: the index, or one doc (`canvas`, `mcp`, `setup`, `bundles`, `subtrees`, and the kernel's own)\n\
-\n";
-
-/// The CLI's own docs, beside the kernel's embedded tree
-/// (`fantastic_core::DOCS`). Each opens with a `> ` one-line summary, as the
-/// kernel's do.
-const CLI_DOCS: &[(&str, &str)] = &[
-    ("canvas", include_str!("../docs/canvas.md")),
-    ("mcp", include_str!("../docs/mcp.md")),
-    ("setup", include_str!("../docs/setup.md")),
-    ("bundles", include_str!("../docs/bundles.md")),
-    ("skins", include_str!("../docs/skins.md")),
-    ("subtrees", include_str!("../docs/subtrees.md")),
-];
-
-/// Every doc, the CLI's first: `(key, text)`.
-fn docs() -> impl Iterator<Item = (&'static str, &'static str)> {
-    CLI_DOCS.iter().chain(fantastic_core::DOCS.iter()).copied()
-}
-
-/// A doc's one-line summary: its leading `> ` line.
-fn summary(text: &str) -> &str {
-    text.lines().next().and_then(|l| l.strip_prefix("> ")).unwrap_or("")
-}
+use fantastic_web_mcp::INSTRUCTIONS;
 
 /// `base`, then each section in order, set off by a blank line, each ended by a newline.
 fn with_sections(base: String, sections: &[&str]) -> String {
@@ -62,52 +24,11 @@ fn with_sections(base: String, sections: &[&str]) -> String {
     out
 }
 
-/// `fantastic readme` → the index; `fantastic readme <key>` → that doc. Reads
-/// only what is embedded: nothing starts, nothing is written.
-pub fn main(argv: &[String], sections: &[&str]) -> ! {
-    match argv {
-        [] => {
-            print!("{}", listing(sections));
-            std::process::exit(0);
-        }
-        [key] => match docs().find(|(k, _)| k == key) {
-            Some((_, text)) => {
-                print!("{text}");
-                std::process::exit(0);
-            }
-            None => {
-                eprintln!("fantastic readme: no doc `{key}`\n\n{}", index());
-                std::process::exit(2);
-            }
-        },
-        _ => {
-            eprintln!("fantastic readme: one key at most (got {})", argv.len());
-            std::process::exit(2);
-        }
-    }
-}
-
-/// The keys, each with its summary.
-pub fn index() -> String {
-    let w = docs().map(|(k, _)| k.len()).max().unwrap_or(0);
-    let mut out = String::from("fantastic readme <key>:\n");
-    for (k, t) in docs() {
-        out.push_str(&format!("  {k:<w$}  {}\n", summary(t)));
-    }
-    out
-}
-
-/// `fantastic readme` with no key: the index, then each embedder section.
-pub fn listing(sections: &[&str]) -> String {
-    with_sections(index(), sections)
-}
-
-/// The whole text: the commands, how to register the MCP face, what a
-/// connected MCP client is told, and where the docs are, then each embedder
-/// section the launcher passed (none for `fantastic`).
+/// The whole text: what a connected MCP client is told, then each embedder section the launcher passed
+/// (none for `fantastic`).
 pub fn text(sections: &[&str]) -> String {
     with_sections(
-        format!("{COMMANDS}{SHAPE}{LEAD_IN}{INSTRUCTIONS}\n\nDetails: `fantastic readme` lists the docs, `fantastic readme <key>` prints one.\n"),
+        format!("{INSTRUCTIONS}\n"),
         sections,
     )
 }
@@ -117,35 +38,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_doc_has_a_summary_and_a_unique_key() {
-        let mut keys = std::collections::HashSet::new();
-        for (k, t) in docs() {
-            assert!(!summary(t).is_empty(), "`{k}` opens with no `> ` summary");
-            assert!(keys.insert(k), "`{k}` twice");
-        }
-        assert!(keys.contains("canvas") && keys.contains("mcp") && keys.contains("setup") && keys.contains("agents"));
-    }
-
-    #[test]
-    fn the_index_lists_every_key() {
-        let i = index();
-        for (k, _) in docs() {
-            assert!(i.contains(&format!("  {k} ")), "{k} missing from\n{i}");
-        }
-    }
-
-    #[test]
     fn the_readme_with_no_sections_is_the_base_text() {
-        assert_eq!(listing(&[]), index());
         let t = text(&[]);
-        assert!(t.starts_with(COMMANDS));
-        assert!(t.ends_with("`fantastic readme <key>` prints one.\n"));
+        assert_eq!(t, format!("{INSTRUCTIONS}\n"));
     }
 
     #[test]
     fn one_section_follows_the_base_text() {
         const S: &str = "## extra\n\nan embedder's own section\n";
-        assert_eq!(listing(&[S]), format!("{}\n{S}", index()));
         assert_eq!(text(&[S]), format!("{}\n{S}", text(&[])));
     }
 

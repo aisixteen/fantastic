@@ -28,29 +28,6 @@ fn py_repr_matches_cpython() {
 }
 
 #[test]
-fn py_str_matches_cpython() {
-    for (input, want) in [
-        (json!(null), "None"),
-        (json!(true), "True"),
-        (json!(false), "False"),
-        (json!(1.0), "1.0"),
-        (json!(1e16), "1e+16"),
-        (json!(1e-05), "1e-05"),
-        (json!(7), "7"),
-        (json!("as is"), "as is"),
-        (json!([1, "a", null, true]), "[1, 'a', None, True]"),
-        (json!({"a": {"b": []}}), "{'a': {'b': []}}"),
-        (
-            json!([1, "a", null, true, 1.0, {"x": "it's"}]),
-            "[1, 'a', None, True, 1.0, {'x': \"it's\"}]",
-        ),
-    ] {
-        assert_eq!(py_str(&input), want, "str({input})");
-    }
-    assert_eq!(py_repr_value(&json!("s")), "'s'");
-}
-
-#[test]
 fn py_float_repr_matches_cpython() {
     for (f, want) in [
         (1.0, "1.0"),
@@ -72,35 +49,6 @@ fn py_float_repr_matches_cpython() {
         (123.456, "123.456"),
     ] {
         assert_eq!(py_float_repr(f), want, "repr({f})");
-    }
-}
-
-#[test]
-fn py_truthy_table() {
-    for falsy in [
-        json!(null),
-        json!(false),
-        json!(0),
-        json!(0.0),
-        json!(-0.0),
-        json!(""),
-        json!([]),
-        json!({}),
-    ] {
-        assert!(!py_truthy(&falsy), "{falsy} is falsy");
-    }
-    for truthy in [
-        json!(true),
-        json!(1),
-        json!(-1),
-        json!(0.5),
-        json!(u64::MAX),
-        json!(" "),
-        json!("0"),
-        json!([0]),
-        json!({"a": null}),
-    ] {
-        assert!(py_truthy(&truthy), "{truthy} is truthy");
     }
 }
 
@@ -165,60 +113,6 @@ fn os_error_str_matches_cpython() {
 }
 
 #[test]
-fn py_int_or_matches_cpython() {
-    let type_error = |t: &str| {
-        Err(PyError::TypeError(format!(
-            "int() argument must be a string, a bytes-like object or a real number, not '{t}'"
-        )))
-    };
-    let value_error = |shown: &str| {
-        Err(PyError::ValueError(format!(
-            "invalid literal for int() with base 10: {shown}"
-        )))
-    };
-    for (input, want) in [
-        (json!(null), Ok(6)),
-        (json!("7"), Ok(7)),
-        (json!(" 7 "), Ok(7)),
-        (json!("1_0"), Ok(10)),
-        (json!("+5"), Ok(5)),
-        (json!("7.0"), value_error("'7.0'")),
-        (json!(7.9), Ok(7)),
-        (json!(-7.9), Ok(-7)),
-        (json!(true), Ok(1)),
-        (json!(false), Ok(6)),
-        (json!(0), Ok(6)),
-        (json!([]), Ok(6)),
-        (json!({}), Ok(6)),
-        (json!(""), Ok(6)),
-        (json!([1]), type_error("list")),
-        (json!({"a": 1}), type_error("dict")),
-        (json!("\u{663}"), Ok(3)),
-        (json!("\u{2000}7"), Ok(7)),
-        (json!("\u{1c}7"), value_error("'\\x1c7'")),
-        (json!("_1"), value_error("'_1'")),
-        (json!("1_"), value_error("'1_'")),
-        (json!("1__0"), value_error("'1__0'")),
-        (json!("0_7"), Ok(7)),
-        (json!("007"), Ok(7)),
-        (json!("- 5"), value_error("'- 5'")),
-        (json!("-5"), Ok(-5)),
-        (json!("\u{b2}"), value_error("'²'")),
-    ] {
-        assert_eq!(py_int_or(&input, 6), want, "int({input} or 6)");
-    }
-    assert_eq!(py_int(&json!(null)), type_error("NoneType"));
-    assert_eq!(py_int(&json!(false)), Ok(0));
-    assert_eq!(py_int(&json!("")), value_error("''"));
-    // `%.200R`: the repr is cut at 200 characters, closing quote included.
-    let long = "a".repeat(300);
-    let shown = format!("'{}", "a".repeat(199));
-    assert_eq!(py_int(&json!(long)), value_error(&shown));
-    let e = py_int(&json!([1])).unwrap_err();
-    assert_eq!(e.class_name(), "TypeError");
-}
-
-#[test]
 fn utf8_decode_error_str_matches_cpython() {
     for (bytes, want) in [
         (
@@ -274,68 +168,6 @@ fn unicode_predicates_match_cpython() {
     assert_eq!(decimal_value('\u{663}'), Some(3));
     assert_eq!(decimal_value('9'), Some(9));
     assert_eq!(decimal_value('\u{b2}'), None);
-}
-
-/// `py_float` is CPython's `float(x)` — the coercion `shell.timeout` and the
-/// relay's `heartbeat`/`reconnect` run.
-#[test]
-fn py_float_is_cpython_float() {
-    assert_eq!(py_float(&json!(1)).unwrap(), 1.0);
-    assert_eq!(py_float(&json!(2.5)).unwrap(), 2.5);
-    assert_eq!(py_float(&json!(true)).unwrap(), 1.0);
-    assert_eq!(py_float(&json!(" 3.5 ")).unwrap(), 3.5);
-    assert_eq!(py_float(&json!("1_000.5")).unwrap(), 1000.5);
-    assert_eq!(py_float(&json!("-Infinity")).unwrap(), f64::NEG_INFINITY);
-    assert!(py_float(&json!("nan")).unwrap().is_nan());
-    assert_eq!(
-        py_float(&json!(null)).unwrap_err(),
-        PyError::TypeError(
-            "float() argument must be a string or a real number, not 'NoneType'".into()
-        )
-    );
-    assert_eq!(
-        py_float(&json!([])).unwrap_err(),
-        PyError::TypeError("float() argument must be a string or a real number, not 'list'".into())
-    );
-    assert_eq!(
-        py_float(&json!("abc")).unwrap_err(),
-        PyError::ValueError("could not convert string to float: 'abc'".into())
-    );
-    assert_eq!(
-        py_float(&json!("_1")).unwrap_err(),
-        PyError::ValueError("could not convert string to float: '_1'".into())
-    );
-    // CPython strips C `isspace` (` \t\n\v\f\r`) and the NON-ASCII spaces its
-    // transform turns into ` ` — never `\x1c`-`\x1f`, which `str.isspace()`
-    // counts but an ASCII char is never transformed. Measured python 3.11.
-    for ok in ["\u{0b}7", "\u{0c}7", "\t7\n", "\u{85}7", "\u{a0}7\u{3000}"] {
-        assert_eq!(py_float(&json!(ok)).unwrap(), 7.0, "{ok:?}");
-    }
-    for (bad, shown) in [
-        ("\u{1c}7", "'\\x1c7'"),
-        ("7\u{1f}", "'7\\x1f'"),
-        ("\u{1c}7\u{a0}", "'\\x1c7\\xa0'"),
-        ("7\u{1e}\u{2003}", "'7\\x1e\\u2003'"),
-    ] {
-        assert_eq!(
-            py_float(&json!(bad)).unwrap_err(),
-            PyError::ValueError(format!("could not convert string to float: {shown}")),
-            "{bad:?}"
-        );
-    }
-}
-
-/// `int()`/`float()` transform every Unicode `Nd` digit to its ASCII
-/// value BEFORE parsing — mixed scripts allowed in the one literal.
-#[test]
-fn unicode_decimal_digits_are_ascii_to_int_and_float() {
-    assert_eq!(py_int(&json!("١٢")).unwrap(), 12); // Arabic-Indic
-    assert_eq!(py_int(&json!("1١")).unwrap(), 11); // mixed ASCII + Arabic-Indic
-    assert_eq!(py_float(&json!("١.٥")).unwrap(), 1.5);
-    assert_eq!(py_float(&json!("１２")).unwrap(), 12.0); // fullwidth digits
-                                                         // A `Numeric_Type=Digit` (not `Nd`) form, e.g. superscript ², stays refused —
-                                                         // `decimal_value` is None for it, so it is not a valid int()/float() digit.
-    assert!(py_int(&json!("²")).is_err());
 }
 
 /// `os_error_class` names the `OSError` subclass CPython raises, which is what
@@ -441,9 +273,8 @@ fn a_non_finite_and_a_wide_int_keep_their_python_spelling() {
     ] {
         // `json.dumps(..., allow_nan=True)` — the kernel's default.
         assert_eq!(py_json_dumps(&v, true, None), dumps, "dumps {v}");
-        // `repr()` / `str()` spell a non-finite float differently.
+        // `repr()` spells a non-finite float differently.
         assert_eq!(py_repr_value(&v), repr, "repr {v}");
-        assert_eq!(py_str(&v), repr, "str {v}");
     }
     assert_eq!(
         py_json_dumps(&json!({"inf": f64::INFINITY}), true, None),

@@ -34,27 +34,27 @@ pub fn apply(bundles: &BundleRegistry, handler_module: &str, meta: &mut Map<Stri
     }
 }
 
-/// A `create_agent` payload with its bundle's fields under it, or `None` when nothing
-/// changes. `bundle: X` (beside the base's handler_module, or alone) is the same
-/// create as `handler_module: X`.
+/// What a `create_agent` makes of its arguments once the bundle's fields are under
+/// them: the handler module the agent runs and its record's fields. A `bundle` that
+/// is not the handler module names the bundle the record inherits from.
 #[must_use]
-pub fn create_payload(bundles: &BundleRegistry, payload: &Value) -> Option<Value> {
-    let obj = payload.as_object()?;
-    let mut out = obj.clone();
-    let named = obj.get("bundle").and_then(Value::as_str).filter(|s| !s.is_empty());
-    if let Some(b) = named {
-        // the bundle's own base (or none named): the kind IS the bundle. Another base:
-        // it keeps its handler and names the bundle it inherits from.
-        let hm = obj.get("handler_module").and_then(Value::as_str).unwrap_or("");
-        if hm.is_empty() || hm == b || hm == bundles.base_of(b) {
-            out.remove("bundle");
-            out.insert("handler_module".into(), Value::String(b.to_string()));
-        }
+pub fn create_args(
+    bundles: &BundleRegistry,
+    args: crate::declared::kernel::CreateAgent,
+) -> (String, Map<String, Value>) {
+    let crate::declared::kernel::CreateAgent {
+        handler_module,
+        bundle,
+        fields,
+        ..
+    } = args;
+    let mut meta = fields;
+    let hm = handler_module;
+    if let Some(b) = bundle.filter(|b| *b != hm) {
+        meta.insert("bundle".into(), Value::String(b));
     }
-    let hm = out.get("handler_module").and_then(Value::as_str)?.to_string();
-    let before = out.len();
-    apply(bundles, &hm, &mut out);
-    (named.is_some() || out.len() != before).then_some(Value::Object(out))
+    apply(bundles, &hm, &mut meta);
+    (hm, meta)
 }
 
 /// The instances that inherit from bundle `name` (its own and those of every bundle

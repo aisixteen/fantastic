@@ -13,6 +13,8 @@ fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
 # The one disk module — a PTY job's pasted-image scratch file goes through it.
 fantastic-file = { path = "../fantastic-file" }
 async-trait = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 # The command gate is a REGEX allowlist over the shell-joined line, in PYTHON's
@@ -45,6 +47,7 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 # The ROOT LOADER bundle — tests need it registered so the root answers the
 # verbs it serves (`persist_blob`/`load_blob`, `boot`), as it does in production.
 fantastic-core = { path = "../fantastic-core" }

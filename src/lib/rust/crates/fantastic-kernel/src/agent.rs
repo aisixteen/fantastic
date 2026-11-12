@@ -309,7 +309,8 @@ impl Agent {
             .read()
             .expect("meta lock poisoned")
             .get("delete_lock")
-            .is_some_and(fantastic_bundle::py_truthy)
+            .and_then(Value::as_bool)
+            == Some(true)
     }
 
     /// Path of `agent.yaml` under `root_path`.

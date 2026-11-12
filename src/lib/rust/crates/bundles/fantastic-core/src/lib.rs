@@ -11,7 +11,7 @@
 //!
 //! Contract (duck-typed; any agent answering these is a loader):
 //! ```text
-//!   load_tree                 -> {records, version}   read the subtree (direct)
+//!   load_tree                 -> {records}   read the subtree (direct)
 //!   persist_record {record}   -> {ok}                 write one agent.yaml
 //!   forget_record {id}        -> {ok}                 remove one agent's dir
 //!   persist_blob / load_blob                          the sidecar byte channel
@@ -31,88 +31,20 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use fantastic_kernel::agent::Agent;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::{persistence, AgentId, Kernel};
 
 pub mod export;
 pub mod folders;
+pub mod record;
+pub mod verbs;
 
 /// The `handler_module` this bundle answers to — python's package path.
 pub const HANDLER_MODULE: &str = "kernel_state.tools";
 
-/// The SHORT orientation readme — `reflect readme=true` serves it from here.
-/// The full manual is the keyed [`DOCS`] tree — `reflect readme=index` / `=<key>`.
-pub const README: &str = include_str!("readme.md");
-
-/// The manual, split into keyed topic docs (nested dirs = tiers via a `/` in the
-/// key), compiled in and never copied to disk; `reflect readme=index` lists them
-/// token-annotated and `reflect readme=<key>` drills one. Trimmed + reordered so a
-/// self-authoring model reaches `self-extension` first, not a system-manual dump.
-pub const DOCS: &[(&str, &str)] = &[
-    ("self-extension", include_str!("docs/self-extension.md")),
-    ("reflect", include_str!("docs/reflect.md")),
-    ("system-verbs", include_str!("docs/system-verbs.md")),
-    ("agents", include_str!("docs/agents.md")),
-    ("orchestration", include_str!("docs/orchestration.md")),
-    ("memory", include_str!("docs/memory.md")),
-    ("persistence", include_str!("docs/persistence.md")),
-    ("transports", include_str!("docs/transports.md")),
-    ("streams", include_str!("docs/streams.md")),
-    ("frontend", include_str!("docs/frontend.md")),
-    (
-        "frontend/html-agent",
-        include_str!("docs/frontend/html-agent.md"),
-    ),
-    ("frontend/routing", include_str!("docs/frontend/routing.md")),
-    ("terminal", include_str!("docs/terminal.md")),
-    ("daemon", include_str!("docs/daemon.md")),
-];
-
-/// The SHORT `self_extension` a DISTILLED root reflect carries — python
-/// `reflect_root_extra`'s non-full branch, verbatim.
-const SELF_EXTENSION_SHORT: &str = "A DURABLE PROGRAM is a FILE plus a command (no `code` field): write it with a file agent's <type>write_stream</type> (`bytes` verbatim), run it on an `exec_bridge.tools` agent — <type>start</type> <command>python3</command> <args><item>prog.py</item></args>, matched against its `allowed` — and re-run to update. Wiring an agent to another takes BOTH halves: its `can_call` and the other's `callable_by`. More: reflect kernel with <readme>self-extension</readme>.";
-
-/// The one-liner teaching `docs` and keyed doc fetch — python
-/// `reflect_root_extra`'s `docs`.
-const DOCS_LINE: &str = "How to CALL an agent: send 'kernel' <type>docs</type> <of>agent id, bundle or kernel</of> — one signature line per verb; add <verb>name</verb> <tier>detailed</tier> for one verb's full text. The manual is a keyed doc tree: send 'kernel' <type>reflect</type> with <readme>index</readme> (every topic, ~token cost), <readme>key</readme> (one topic) or <readme>true</readme> (the short orientation). Read only what a task needs.";
-
-/// The LONG `self_extension` a `detail:"full"` root reflect carries — python's
-/// full branch, verbatim (it has no fd-wire tail sentence).
-const SELF_EXTENSION_FULL: &str =
-    "A DURABLE PROGRAM is a FILE you write plus a command that runs it — not a \
-`code`-carrying agent (there is no `code` field). A program carried as a \
-JSON string is exactly how a call gets lost to escaping. Assemble these \
-THREE pieces and you have built something that persists and re-runs:\n1. \
-WRITE THE PROGRAM TO A FILE: never carry file contents in a JSON string. \
-Use the file leg's STREAM verbs — <type>write_stream</type> <path>…</path> \
-<truncate>true</truncate> <bytes>…</bytes> to write, \
-<type>read_stream</type> <path>…</path> <offset>0</offset> to read, one raw \
-chunk at a time. `bytes` is VERBATIM: the program between `<bytes>` and \
-`</bytes>` exactly as written, real newlines, nothing escaped. The text \
-verbs (`write`, `edit`, `append`) take `bytes` the same way.\n2. RUN IT: \
-the executor is a general-purpose COMMAND runner. Reflect it, read its \
-`allowed` regexes, then send <type>start</type> <command>path</command> \
-<args><item>…</item></args>; poll <type>status</type>. It runs commands, \
-not inline programs.\n3. RE-RUN: the file is durable on disk, so the SAME \
-`start` command run again later re-executes the SAME program against \
-whatever the inputs hold THEN — that is how a thing 'keeps itself up to \
-date'.\nA WORKER THAT COMPUTES is an `exec_bridge.tools` agent (the \
-EXISTING command runner) that owns a program file — you never author a new \
-handler_module (you cannot add modules to the catalog and do not need to). \
-'A specialist with child workers' = a parent agent whose children are \
-exec_bridge runners, each with its own program file.\nWIRING TO A SIBLING: \
-a record is edited with `update_agent` on the root — holding that grant (both \
-ends) you edit ANY record, `totals`/`readings` included; without it you cannot \
-raise your OWN authority. To let your worker call `totals`: grant the worker \
-`can_call:{totals}` AND `update_agent id='totals'` to add the worker to \
-`totals.callable_by` (send the WHOLE map — update replaces, not merges).\nA SPAWNED PROGRAM reaches agents over its \
-control fd — a TWO-WAY socket (FANTASTIC_CTRL_FD): write {op:'send', rid, \
-target, payload}; the reply comes back on the SAME fd as {op:'reply', rid, \
-data}. It is not inline — read frames until one carries your `rid`, \
-skipping event/inbox frames.\nCOMPOSE the agents you were given for \
-everything else (`list_agents`, reflect each, send). CREATE/DELETE plain \
-agents (create_agent with a handler_module and grants, delete_agent) work \
-as before.";
+/// What the bundle is for — its one short man text; how to call it is rendered from
+/// its declared verbs (`docs`, `reflect`).
+const MAN: &str = "The kernel's root agent: it owns the durable state of the tree. It reads and writes agent records and sidecar files through the store, reloads folder bundles, exports a subtree as a blueprint, and starts and stops the record writer.";
 
 /// Per-loader process state — what `boot` installed, so a second `boot` is a
 /// no-op and `on_shutdown` can tear it down. Python keeps it on the agent
@@ -354,44 +286,23 @@ impl KernelStateBundle {
         };
         Ok(json!({
             "records": read_tree(&root, live)?,
-            "version": fantastic_kernel::CURRENT_VERSION,
         }))
     }
 
     async fn persist_record(
         &self,
         agent: &Arc<Agent>,
-        payload: &Value,
+        args: verbs::PersistRecord,
         kernel: &Arc<Kernel>,
     ) -> Result<Value, BundleError> {
         if let Some(denied) = guard_own_tree("persist_record", agent) {
             return Ok(denied);
         }
-        let Some(record) = payload
-            .get("record")
-            .and_then(Value::as_object)
-            .filter(|r| r.get("id").is_some_and(fantastic_bundle::py_truthy))
-        else {
-            return Ok(fantastic_kernel::missing(
-                "persist_record",
-                "record (dict with id)",
-            ));
-        };
-        if let Some(bad) = guard_id("persist_record", record.get("id")) {
-            return Ok(bad);
-        }
+        let record = &args.record;
+        // the declaration made `id` an agent-id-shaped text and `parent_id` that or null
         let id = record.get("id").and_then(Value::as_str).unwrap_or("");
-        let parent_id = record.get("parent_id");
-        let parent = parent_id.and_then(Value::as_str);
+        let parent = record.get("parent_id").and_then(Value::as_str);
         let mut at = Places::new(agent, kernel);
-        // python `_guard_parent_chain`: a parent_id that is not None must be a
-        // valid id — a non-string included.
-        if let Some(bad) = parent_id
-            .filter(|p| !p.is_null())
-            .and_then(|p| guard_id("persist_record", Some(p)))
-        {
-            return Ok(bad);
-        }
         let path = match kernel.agents.get(&AgentId::from(id)) {
             Some(a) => a.root_path.clone(),
             None => at.resolve(id, parent)?,
@@ -403,30 +314,15 @@ impl KernelStateBundle {
     async fn forget_record(
         &self,
         agent: &Arc<Agent>,
-        payload: &Value,
+        args: verbs::ForgetRecord,
         kernel: &Arc<Kernel>,
     ) -> Result<Value, BundleError> {
         if let Some(denied) = guard_own_tree("forget_record", agent) {
             return Ok(denied);
         }
-        // `if not target: missing` — TRUTHINESS; a truthy non-string is then the
-        // id guard's `bad_arg`, not `missing_arg`.
-        let Some(raw) = payload.get("id").filter(|v| fantastic_bundle::py_truthy(v)) else {
-            return Ok(fantastic_kernel::missing("forget_record", "id"));
-        };
-        if let Some(bad) = guard_id("forget_record", Some(raw)) {
-            return Ok(bad);
-        }
-        let target = raw.as_str().unwrap_or("");
-        let parent_id = payload.get("parent_id");
-        let parent = parent_id.and_then(Value::as_str);
+        let target = args.id.as_str();
+        let parent = args.parent_id.as_deref();
         let mut at = Places::new(agent, kernel);
-        if let Some(bad) = parent_id
-            .filter(|p| !p.is_null())
-            .and_then(|p| guard_id("forget_record", Some(p)))
-        {
-            return Ok(bad);
-        }
         let path = match kernel.agents.get(&AgentId::from(target)) {
             Some(a) => a.root_path.clone(),
             None => at.resolve(target, parent)?,
@@ -441,16 +337,10 @@ impl KernelStateBundle {
     }
 }
 
-/// `guard_agent_id` on the RAW value: python refuses a non-string id with the
-/// same `bad_arg` an empty one gets.
-fn guard_id(verb: &str, v: Option<&Value>) -> Option<Value> {
-    fantastic_kernel::refusal::guard_agent_id(verb, v.and_then(Value::as_str).unwrap_or(""))
-}
-
 /// Merge-write one record's `agent.yaml` in `root` (the agent's own dir, already
 /// clamped) — python `write_record`: read any existing file, overlay the
 /// record's keys (unknown fields + sidecars survive), write atomically through
-/// `fs` — a failed write RAISES. A bundle's readme and docs are never copied.
+/// `fs` — a failed write RAISES.
 fn write_record(root: &Path, record: &Map<String, Value>) -> Result<(), BundleError> {
     let mut on_disk = read_record(root, persistence::RECORD_FILE)?.unwrap_or_default();
     for (k, v) in record {
@@ -558,23 +448,29 @@ fn guard_own_tree(verb: &str, agent: &Arc<Agent>) -> Option<Value> {
 }
 
 #[async_trait]
-impl Bundle for KernelStateBundle {
+impl Handler for KernelStateBundle {
+    type Call = verbs::Call;
+
     // The catalog NAME is python's entry-point name, not the module path: the
     // prompt and the `bundles_next` cursor both carry it.
     fn name(&self) -> &str {
         "kernel_state"
     }
 
-    fn verb_docs(&self) -> Value {
-        verbs_view()
+    fn man(&self) -> &'static str {
+        MAN
     }
 
-    fn readme(&self) -> Option<&'static str> {
-        Some(README)
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        verbs::VERBS
     }
 
-    fn docs(&self) -> &'static [(&'static str, &'static str)] {
-        DOCS
+    fn dynamic_verbs(&self, agent: &Agent) -> Vec<fantastic_kernel::DynVerb> {
+        verbs::dynamic_verbs(agent)
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &record::RECORD
     }
 
     /// FOLDER BUNDLES before the tree loads, read through the clamp from the
@@ -591,7 +487,7 @@ impl Bundle for KernelStateBundle {
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
@@ -600,40 +496,27 @@ impl Bundle for KernelStateBundle {
                 kernel.agents.iter().map(|e| e.key().0.clone()).collect(),
             )));
         };
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        let reply = match verb {
-            "reflect" => json!({
+        let reply = match call {
+            verbs::Call::Reflect(_) => json!({
                 "id": agent.id.0,
-                "sentence": "Disk persistence/hydration root — owns .fantastic; \
-                             answers load_tree / persist_record / forget_record.",
+                "sentence": MAN,
                 "root": reported_root(&agent, kernel)?,
             }),
-            "boot" => self.boot(&agent, kernel).await?,
-            "load_tree" => self.load_tree(&agent, kernel).await?,
-            "persist_record" => self.persist_record(&agent, payload, kernel).await?,
-            "forget_record" => self.forget_record(&agent, payload, kernel).await?,
-            "persist_blob" => persistence::persist_blob(kernel, &agent, payload).await?,
-            "load_blob" => persistence::load_blob(kernel, &agent, payload).await?,
-            "reload_bundle" => reload_bundle(&agent, payload, kernel).await?,
-            "read_bundles" => read_bundles(&agent, payload, kernel)?,
-            "export_subtree" => export_subtree_root(&agent, payload, kernel).await,
-            // CODED. A reason-less error on the ROOT — the most-addressed agent
-            // in the kernel — is decorated by `apply_reflect_flags` into
-            // something that reads like a healthy reflect (python).
-            // `verb` echoes the RAW `type` (python `verb=t`): null when absent, `5`
-            // for a number — never the empty string the dispatch matched on.
-            _ => {
-                let t = payload.get("type").cloned().unwrap_or(Value::Null);
-                let mut r = fantastic_kernel::refusal(
-                    fantastic_kernel::refusal::UNHANDLED,
-                    format!(
-                        "kernel_state: unknown type {}",
-                        fantastic_bundle::py_repr_value(&t)
-                    ),
-                );
-                fantastic_kernel::refusal::with(&mut r, "verb", t);
-                r
+            verbs::Call::Boot(_) => self.boot(&agent, kernel).await?,
+            verbs::Call::Shutdown(_) => Value::Null,
+            verbs::Call::LoadTree(_) => self.load_tree(&agent, kernel).await?,
+            verbs::Call::PersistRecord(args) => self.persist_record(&agent, args, kernel).await?,
+            verbs::Call::ForgetRecord(args) => self.forget_record(&agent, args, kernel).await?,
+            verbs::Call::PersistBlob(args) => {
+                persistence::persist_blob(kernel, &agent, &args.agent_id, &args.name, &args.content)
+                    .await?
             }
+            verbs::Call::LoadBlob(args) => {
+                persistence::load_blob(kernel, &agent, &args.agent_id, &args.name).await?
+            }
+            verbs::Call::ReloadBundle(args) => reload_bundle(&agent, args, kernel).await?,
+            verbs::Call::ReadBundles(args) => read_bundles(&agent, args, kernel)?,
+            verbs::Call::ExportSubtree(args) => export_subtree_root(&agent, args, kernel).await,
         };
         if reply.is_null() {
             return Ok(None);
@@ -644,7 +527,7 @@ impl Bundle for KernelStateBundle {
     fn reflect_root_extra(
         &self,
         agent: &Arc<Agent>,
-        full: bool,
+        _full: bool,
         kernel: &Arc<Kernel>,
     ) -> Result<Option<Map<String, Value>>, Value> {
         let mut out = Map::new();
@@ -663,18 +546,6 @@ impl Bundle for KernelStateBundle {
                 .and_then(|m| m.get("guid").cloned())
                 .unwrap_or(Value::Null),
         );
-        if !full {
-            out.insert("self_extension".to_string(), json!(SELF_EXTENSION_SHORT));
-            return Ok(Some(out));
-        }
-        // A DOC THAT WILL NOT DECODE FAILS THE REFLECT. python's `_readme_index`
-        // lets the UnicodeDecodeError out of `reflect_root_extra`, and the
-        // substrate's merge site does not swallow it — the full root reflect
-        // settles `failed` with that raise.
-        let readmes = fantastic_kernel::reflect::readme_index(DOCS, "");
-        out.insert("readmes".to_string(), Value::Array(readmes));
-        out.insert("docs".to_string(), json!(DOCS_LINE));
-        out.insert("self_extension".to_string(), json!(SELF_EXTENSION_FULL));
         Ok(Some(out))
     }
 
@@ -723,8 +594,6 @@ impl Bundle for KernelStateBundle {
     }
 }
 
-/// `verbs` as the loader's own reflect renders it — one line per verb, python's
-/// first-docstring-line rule.
 /// `reload_bundle {name}` — python `kernel_state._reload_bundle`: re-read
 /// `bundles/<name>/bundle.yaml` (a new folder loads) and restart every live
 /// instance, each AS ITSELF (kernel bookkeeping): `shutdown` with the reason, then
@@ -732,12 +601,10 @@ impl Bundle for KernelStateBundle {
 /// folder and field; its instances keep the previous load.
 async fn reload_bundle(
     agent: &Arc<Agent>,
-    payload: &Value,
+    args: verbs::ReloadBundle,
     kernel: &Arc<Kernel>,
 ) -> Result<Value, BundleError> {
-    use fantastic_kernel::refusal::{
-        missing_hint, refusal, refusal_hint, INVALID_META, NOT_FOUND, NOT_HERE,
-    };
+    use fantastic_kernel::refusal::{refusal, refusal_hint, INVALID_META, NOT_FOUND, NOT_HERE};
     if agent.parent_id.is_some() {
         return Ok(refusal_hint(
             NOT_HERE,
@@ -745,21 +612,11 @@ async fn reload_bundle(
             "send it to kernel",
         ));
     }
-    let Some(name) = payload
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    else {
-        return Ok(missing_hint(
-            "reload_bundle",
-            "name",
-            "a folder under .fantastic/bundles/",
-        ));
-    };
+    let name = args.name.as_str();
     let root = clamp(kernel, &loader_root(kernel, agent)?)?;
     let shown = fantastic_fs::file_name(&root);
     let rel = format!("{}/{name}", crate::folders::BUNDLES_DIR);
-    if !(crate::folders::is_folder_name(name) && root.join(&rel).exists()) {
+    if !root.join(&rel).exists() {
         return Ok(refusal_hint(
             NOT_FOUND,
             format!("reload_bundle: no folder {shown}/{rel}"),
@@ -786,9 +643,9 @@ async fn reload_bundle(
     live.sort_by(|a, b| a.id.0.cmp(&b.id.0));
     for a in &live {
         kernel
-            .bookkeeping(a, json!({"type": "shutdown", "reason": "reloaded"}), None)
+            .announce(a, json!({"type": "shutdown", "reason": "reloaded"}))
             .await;
-        kernel.bookkeeping(a, json!({"type": "boot"}), None).await;
+        kernel.announce(a, json!({"type": "boot"})).await;
     }
     let ids: Vec<&str> = live.iter().map(|a| a.id.0.as_str()).collect();
     Ok(json!({"reloaded": name, "instances": ids}))
@@ -800,15 +657,15 @@ async fn reload_bundle(
 /// through this loader (a page kernel's proxy_loader). Parses nothing.
 fn read_bundles(
     agent: &Arc<Agent>,
-    payload: &Value,
+    args: verbs::ReadBundles,
     kernel: &Arc<Kernel>,
 ) -> Result<Value, BundleError> {
-    use crate::folders::{is_folder_name, BUNDLES_DIR, BUNDLE_FILE};
-    use fantastic_kernel::refusal::{bad, refusal_hint, NOT_FOUND};
+    use crate::folders::{BUNDLES_DIR, BUNDLE_FILE};
+    use fantastic_kernel::refusal::{refusal_hint, NOT_FOUND};
     let root = clamp(kernel, &loader_root(kernel, agent)?)?;
     let shown = fantastic_fs::file_name(&root);
-    let names: Vec<String> = match payload.get("name") {
-        None | Some(Value::Null) => {
+    let names: Vec<String> = match args.name.as_deref() {
+        None => {
             if fantastic_fs::exists(&root, BUNDLES_DIR).map_err(raise_fs)?
                 && fantastic_fs::is_dir(&root, BUNDLES_DIR).map_err(raise_fs)?
             {
@@ -827,11 +684,10 @@ fn read_bundles(
                 Vec::new()
             }
         }
-        Some(Value::String(n)) if !n.is_empty() => {
+        Some(n) => {
             let rel = format!("{BUNDLES_DIR}/{n}");
-            // a name the folder rule refuses is never joined into a path
-            if !(is_folder_name(n)
-                && fantastic_fs::exists(&root, &rel).map_err(raise_fs)?
+            // the declaration made `n` a folder name: it never joins a path as anything else
+            if !(fantastic_fs::exists(&root, &rel).map_err(raise_fs)?
                 && fantastic_fs::is_dir(&root, &rel).map_err(raise_fs)?)
             {
                 return Ok(refusal_hint(
@@ -840,9 +696,8 @@ fn read_bundles(
                     format!("a bundle is a folder under {shown}/{BUNDLES_DIR}/ with a bundle.yaml"),
                 ));
             }
-            vec![n.clone()]
+            vec![n.to_string()]
         }
-        Some(_) => return Ok(bad("read_bundles", "name", "a folder name")),
     };
     let mut out = Vec::with_capacity(names.len());
     for n in names {
@@ -861,29 +716,24 @@ fn read_bundles(
 
 /// `export_subtree {agent_id, path}` — the ROOT writes an agent and everything
 /// under it as a blueprint folder (`export.rs`; `user` answers the same verb).
-async fn export_subtree_root(agent: &Arc<Agent>, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+async fn export_subtree_root(
+    agent: &Arc<Agent>,
+    args: verbs::ExportSubtree,
+    kernel: &Arc<Kernel>,
+) -> Value {
     if agent.parent_id.is_some() {
         return fantastic_kernel::refusal::refusal(
             fantastic_kernel::refusal::BAD_ARG,
             "kernel_state.export_subtree: the ROOT answers it",
         );
     }
-    export::export_subtree(kernel, payload, "kernel_state.export_subtree").await
-}
-
-fn verbs_view() -> Value {
-    json!({
-        "reflect": "Identity + the disk root it owns. No args.",
-        "boot": "Start the auto-flush loop unless `watch=false` (a loader serving a",
-        "load_tree": "args: none. Read this loader's subtree from disk → {records, version}.",
-        "persist_record": "args: record:dict (req). Merge-write one agent.yaml. Location is the",
-        "forget_record": "args: id:str (req), parent_id:str (opt). rmtree the agent's dir. For a",
-        "persist_blob": "args: agent_id:str (req), name:str (req), content:str (req). Persist an",
-        "load_blob": "args: agent_id:str (req), name:str (req). Read an agent's sidecar THROUGH the",
-        "reload_bundle": "args: name:str (req). Re-read `bundles/<name>/bundle.yaml` (a new folder loads) and restart every live instance of it, abruptly — an in-flight call is answered with an error naming the reload. Returns {reloaded, instances}. The root answers it.",
-        "export_subtree": "args: agent_id:str (req), path:str (req) — writes the agent and everything under it as a blueprint folder; outside references become ports; no keys, no absolute paths, no rows. path: a new or empty folder (relative to the running dir; no `..`). Reply {exported, path, ports, files}.",
-        "read_bundles": "args: name:str?. The folder bundles under this loader's root AS TEXT — {bundles:[{name, folder, text?, error?}]}, each `bundles/<name>/bundle.yaml` raw (`error` when it has none); `name` reads one. For a kernel that loads its own folders through this loader (a page kernel's proxy_loader); this loader parses nothing.",
-    })
+    export::export_subtree(
+        kernel,
+        &args.agent_id,
+        &args.path,
+        "kernel_state.export_subtree",
+    )
+    .await
 }
 
 #[cfg(test)]

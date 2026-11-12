@@ -11,16 +11,7 @@
 //! Both are written by `fantastic_kernel::yaml_io::dump` — the one emitter
 //! config the kernel's own files use (block style, indent 2, key order kept).
 //!
-//! Verbs (mirror Python verb-for-verb):
-//!
-//! - `reflect` → `{id, sentence, paused, running}`
-//! - `boot`    → idempotent. Starts the fire loop; answers `{running:true}`.
-//! - `schedule`     args `{target, payload, interval_seconds, timeout?}` → mint + persist
-//! - `unschedule`   args `{schedule_id}`                       → remove + persist
-//! - `list`                                                    → `{schedules}`
-//! - `pause` / `resume` args `{schedule_id?}`                  → flip one or all
-//! - `tick_now`     args `{schedule_id}`                       → fire immediately
-//! - `history`      args `{limit?, schedule_id?}`              → tail of schedule_events.yaml
+//! The verbs are declared in `verbs.rs`; `reflect` and `docs` render them.
 //!
 //! NO IDLE WAKEUPS: the fire loop sleeps until the EARLIEST
 //! due schedule, or — none due, or the scheduler paused — until something
@@ -48,10 +39,10 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_bundle::{py_repr_value, py_str, py_truthy};
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_bundle::py_repr_value;
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::yaml_io;
-use fantastic_kernel::{bad, AgentId, Item, Kernel, Status, SubscriberToken};
+use fantastic_kernel::{AgentId, Item, Kernel, Status, SubscriberToken};
 use futures_util::FutureExt;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -63,8 +54,12 @@ use tokio::sync::Notify;
 /// `handler_module` key under which this bundle registers.
 pub const HANDLER_MODULE: &str = "scheduler.tools";
 
-/// readme.md auto-seeded into the agent's dir on creation.
-pub const README: &str = include_str!("readme.md");
+pub mod record;
+pub mod verbs;
+
+/// What the bundle is for — its one short man text; how to call it is rendered from
+/// its declared verbs (`docs`, `reflect`).
+const MAN: &str = "A recurring-task scheduler: it keeps a list of schedules, each a call to a target agent every so many seconds, fires the due ones as itself, and records every fire in its history.";
 
 /// Maximum history entries kept per scheduler (ring-trim threshold).
 /// Matches Python's `HISTORY_MAX`.
@@ -183,76 +178,53 @@ impl OnceLockScheduleCache {
 /// The scheduler bundle.
 pub struct SchedulerBundle;
 
-/// HOW TO CALL a scheduler — python's `VERBS` docstrings (first line each),
-/// served by the kernel's `docs` verb.
-fn verb_docs_json() -> Value {
-    json!({
-        "reflect": "Identity + tick state. No args.",
-        "boot": "Idempotent. Starts the tick loop; persistence is THROUGH the loader.",
-        "schedule": "args: target:str (the agent each fire calls), payload:{type:<verb>, ...} (the call itself: any verb `target` answers, with its args; {type:'send', text:'...'} wakes an AI with that text), interval_seconds:int (default 60), fire_timeout:number? (seconds per fire; absent = wait forever — not `timeout`, which is a call's own routing field). Every fire runs AS THE SCHEDULER — it reaches what the scheduler's can_call grants. Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired.",
-        "unschedule": "args: schedule_id:str (req). Returns {removed:bool, schedule_id}.",
-        "list": "No args. Returns {schedules: [<schedule record>, ...]} — every schedule.",
-        "pause": "args: schedule_id:str?. With id pauses one schedule; without, pauses the whole scheduler.",
-        "resume": "args: schedule_id:str?. With id resumes one schedule; without, resumes the whole scheduler.",
-        "tick_now": "args: schedule_id:str (req). Bumps run_count, persists, then fires that schedule immediately, as the scheduler. Returns {fired:true, schedule_id, result, error} — the fire's outcome as `history` records it: the target's reply, or why the fire failed.",
-        "history": "args: limit:int? (1..500, default 100), schedule_id:str?. Returns {history:[event,...], count} — every schedule's fires.",
-    })
-}
-
-/// What a scheduler emits — python `EMITS`, served by `docs`.
-fn emits_json() -> Value {
-    json!({
-        "schedule_fired": "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)",
-    })
-}
-
 #[async_trait]
-impl Bundle for SchedulerBundle {
+impl Handler for SchedulerBundle {
+    type Call = verbs::Call;
+
     fn name(&self) -> &str {
         "scheduler"
     }
 
-    fn verb_docs(&self) -> Value {
-        verb_docs_json()
+    fn man(&self) -> &'static str {
+        MAN
     }
 
-    fn emits_doc(&self) -> Option<Value> {
-        Some(emits_json())
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        verbs::VERBS
     }
 
-    fn readme(&self) -> Option<&'static str> {
-        Some(README)
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        verbs::dynamic_verbs(agent)
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &record::RECORD
     }
 
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let raw_type = payload.get("type").unwrap_or(&Value::Null);
-        let verb = raw_type.as_str().unwrap_or("");
-        let reply = match verb {
-            "reflect" => reflect_reply(agent_id, kernel),
-            "boot" => boot_reply(agent_id, kernel).await,
-            "schedule" => schedule_reply(agent_id, payload, kernel).await,
-            "unschedule" => unschedule_reply(agent_id, payload, kernel).await,
-            "list" => list_reply(agent_id, kernel).await,
-            "pause" => pause_reply(agent_id, payload, kernel).await,
-            "resume" => resume_reply(agent_id, payload, kernel).await,
-            "tick_now" => tick_now_reply(agent_id, payload, kernel).await,
-            "history" => history_reply(agent_id, payload, kernel).await,
-            // `shutdown` is NOT a verb: python's `VERBS` has no such key, so
-            // it lands here like any other unknown type. The tick loop dies in
-            // `on_delete`, never behind a verb.
-            _ => {
-                let mut r = fantastic_kernel::refusal::refusal(
-                    fantastic_kernel::refusal::UNHANDLED,
-                    format!("scheduler: unknown type {}", py_repr_value(raw_type)),
-                );
-                fantastic_kernel::refusal::with(&mut r, "verb", raw_type.clone());
-                r
+        // `shutdown` is NOT a verb: the tick loop dies in `on_delete`, never behind
+        // a verb.
+        let reply = match call {
+            verbs::Call::Reflect(_) => reflect_reply(agent_id, kernel),
+            verbs::Call::Boot(_) => boot_reply(agent_id, kernel).await,
+            verbs::Call::Shutdown(_) => Value::Null,
+            verbs::Call::Schedule(a) => schedule_reply(agent_id, a, kernel).await,
+            verbs::Call::Unschedule(a) => unschedule_reply(agent_id, &a.schedule_id, kernel).await,
+            verbs::Call::List(_) => list_reply(agent_id, kernel).await,
+            verbs::Call::Pause(a) => {
+                set_paused(agent_id, a.schedule_id, kernel, "pause", "paused", true).await
             }
+            verbs::Call::Resume(a) => {
+                set_paused(agent_id, a.schedule_id, kernel, "resume", "resumed", false).await
+            }
+            verbs::Call::TickNow(a) => tick_now_reply(agent_id, &a.schedule_id, kernel).await,
+            verbs::Call::History(a) => history_reply(agent_id, a, kernel).await,
         };
         Ok(Some(reply))
     }
@@ -282,38 +254,6 @@ impl Bundle for SchedulerBundle {
     }
 }
 
-// ── argument typing ─────────────────────────────────────────────────
-
-// ABSENT ⇒ `default`. Present, an integer, ≥ `minimum` ⇒ that value. ANYTHING
-// ELSE (a bool, a string, a float, an explicit null, a value under the bound)
-// ⇒ a `bad_arg` refusal.
-//
-// A present-but-wrong number is a TYPO, and `as_u64().unwrap_or(default)` hid
-// it: `interval_seconds: "60"` silently became an hourly schedule the caller
-// believed was per-minute, and nothing said so.
-fn int_arg(
-    payload: &Value,
-    key: &str,
-    default: u64,
-    verb: &str,
-    minimum: u64,
-) -> Result<u64, Value> {
-    let Some(raw) = payload.get(key) else {
-        return Ok(default);
-    };
-    match raw.as_u64() {
-        Some(n) if n >= minimum => Ok(n),
-        _ => {
-            let want = if minimum == 0 {
-                "a non-negative int".to_string()
-            } else {
-                format!("an int >= {minimum}")
-            };
-            Err(bad(verb, key, &want))
-        }
-    }
-}
-
 // ── meta helpers ────────────────────────────────────────────────────
 
 fn meta_value(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<Value> {
@@ -322,10 +262,9 @@ fn meta_value(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<Value> {
     meta.get(key).cloned()
 }
 
-/// A meta flag under PYTHON TRUTHINESS — `paused: "no"` is a paused
-/// scheduler there, because a non-empty string is true.
+/// A record flag: `true` only when the record says `true`.
 fn meta_truthy(agent_id: &AgentId, kernel: &Kernel, key: &str) -> bool {
-    meta_value(agent_id, kernel, key).is_some_and(|v| py_truthy(&v))
+    meta_value(agent_id, kernel, key).and_then(|v| v.as_bool()) == Some(true)
 }
 
 /// python `kernel.update(id, **{key: value})`: the meta merges and the
@@ -354,26 +293,13 @@ fn loader(kernel: &Kernel) -> Option<Arc<fantastic_kernel::Agent>> {
         .filter(|r| r.handler_module.as_deref() == Some("kernel_state.tools"))
 }
 
-/// ONE blob call to the root loader — persistence through the loader is KERNEL
-/// BOOKKEEPING ([`Kernel::bookkeeping`]): the loader's handler runs directly, never
-/// a gated send.
-async fn loader_call(
-    kernel: &Arc<Kernel>,
-    root: &Arc<fantastic_kernel::Agent>,
-    payload: Value,
-) -> Value {
-    kernel.bookkeeping(root, payload, None).await.result
-}
-
 /// Read a sidecar THROUGH the loader. Missing / no-store ⇒ `None` (reads lenient).
 async fn file_read(agent_id: &AgentId, kernel: &Arc<Kernel>, name: &str) -> Option<String> {
     let root = loader(kernel)?;
-    let reply = loader_call(
-        kernel,
-        &root,
-        json!({"type": "load_blob", "agent_id": agent_id.0, "name": name}),
-    )
-    .await;
+    // the loader's own blob channel, called as persistence bookkeeping (no gated send)
+    let reply = fantastic_kernel::persistence::load_blob(kernel, &root, &agent_id.0, name)
+        .await
+        .unwrap_or(Value::Null);
     reply
         .get("content")
         .and_then(Value::as_str)
@@ -405,17 +331,9 @@ async fn file_write(
             json!({"error": "scheduler: the root is not a kernel_state loader — no store"}),
         );
     };
-    let reply = loader_call(
-        kernel,
-        &root,
-        json!({
-            "type": "persist_blob",
-            "agent_id": agent_id.0,
-            "name": name,
-            "content": content,
-        }),
-    )
-    .await;
+    let reply = fantastic_kernel::persistence::persist_blob(kernel, &root, &agent_id.0, name, content)
+        .await
+        .map_err(|e| json!({"error": e.to_string()}))?;
     if reply.get("error").and_then(Value::as_str).is_some() {
         let mut e = json!({"error": reply["error"]});
         if let Some(reason) = reply.get("reason") {
@@ -503,13 +421,7 @@ async fn read_history(agent_id: &AgentId, kernel: &Arc<Kernel>, limit: usize) ->
         return Vec::new();
     }
     let events = parse_events(&raw);
-    // python `_parse_events(raw)[-limit:]` — `[-0:]` is the whole list.
-    let from = if limit == 0 {
-        0
-    } else {
-        events.len().saturating_sub(limit)
-    };
-    events[from..].to_vec()
+    events[events.len().saturating_sub(limit)..].to_vec()
 }
 
 /// One event as one stream document (python `yaml_io.row_to_doc(event)`).
@@ -539,10 +451,14 @@ async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
             let mut schedules = load_schedules(&agent_id, &kernel).await;
             let mut due: Vec<Value> = Vec::new();
             for sch in schedules.iter_mut() {
-                if sch.get("paused").is_some_and(py_truthy) {
+                if sch.get("paused").and_then(Value::as_bool) == Some(true) {
                     continue;
                 }
-                let next_run = sch.get("next_run").and_then(Value::as_f64).unwrap_or(0.0);
+                if let Err(why) = check_stored(sch) {
+                    log_line(format!("scheduler {agent_id}: skipping a schedule: {why}"));
+                    continue;
+                }
+                let next_run = sch["next_run"].as_f64().unwrap_or_default();
                 if now < next_run {
                     delay = Some(delay.map_or(next_run - now, |d: f64| d.min(next_run - now)));
                     continue;
@@ -550,11 +466,8 @@ async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
                 // Persist BEFORE the fire: run_count/next_run are bumped and saved
                 // first, so a crash inside the fire window does not re-fire the same
                 // tick on reboot (at-most-once restart semantics).
-                let count = sch.get("run_count").and_then(Value::as_u64).unwrap_or(0);
-                let interval = sch
-                    .get("interval_seconds")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(60.0);
+                let count = sch["run_count"].as_u64().unwrap_or_default();
+                let interval = sch["interval_seconds"].as_f64().unwrap_or_default();
                 sch["run_count"] = json!(count + 1);
                 sch["next_run"] = json!(now + interval);
                 due.push(sch.clone());
@@ -565,7 +478,7 @@ async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
                     // err.get("error"))` — an ABSENT `error` key reads `None`.
                     log_line(format!(
                         "scheduler {agent_id}: persist failed: {}",
-                        py_str(e.get("error").unwrap_or(&Value::Null))
+                        fantastic_kernel::refusal::error_text(&e).unwrap_or_default()
                     ));
                 }
                 fire_many(&agent_id, &kernel, &due).await;
@@ -585,23 +498,22 @@ async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
     }
 }
 
-/// A schedule's `target`, python's way: whatever was stored, as text. `schedule`
-/// only checks the field for TRUTHINESS, so a non-string target is stored verbatim
-/// and fired verbatim.
-fn sched_target(sch: &Value) -> String {
-    match sch.get("target") {
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => py_str(other),
-        None => String::new(),
-    }
+/// Refuse a stored schedule that is not the declared stored shape
+/// (`verbs::Stored`) — decoded strictly, no coercion, no defaults for stored data.
+fn check_stored(sch: &Value) -> Result<(), String> {
+    serde_json::from_value::<verbs::Stored>(sch.clone())
+        .map(|_| ())
+        .map_err(|e| format!("stored schedule is wrongly shaped: {e}"))
 }
 
-/// A schedule's `payload` under py `sch.get("payload") or {}`.
+/// A schedule's `target`; `check_stored` has already required a string.
+fn sched_target(sch: &Value) -> String {
+    sch["target"].as_str().unwrap_or_default().to_string()
+}
+
+/// A schedule's `payload`; `check_stored` has already required an object.
 fn sched_payload(sch: &Value) -> Value {
-    match sch.get("payload").filter(|v| py_truthy(v)) {
-        Some(p) => p.clone(),
-        None => json!({}),
-    }
+    sch["payload"].clone()
 }
 
 fn fire_item(sch: &Value) -> Item {
@@ -609,31 +521,32 @@ fn fire_item(sch: &Value) -> Item {
         AgentId::from(sched_target(sch).as_str()),
         sched_payload(sch),
     );
-    // python `if sch.get("fire_timeout") is not None: item["timeout"] = sch["fire_timeout"]`
-    // — the value AS STORED, so the kernel validates it and its prose prints the
-    // number the schedule holds (`5` → `5s`, not `5.0s`).
-    if let Some(t) = sch.get("fire_timeout").filter(|v| !v.is_null()) {
-        item = item.with_raw_timeout(t.clone());
+    // the stored `fire_timeout` (a number, declared by the record) bounds the fire
+    if let Some(t) = sch.get("fire_timeout").and_then(Value::as_f64) {
+        item = item.with_timeout(t);
     }
     item
 }
 
 /// One fire's `(result, error)` pair for the `schedule_fired` event.
 ///
-/// `completed` ⇒ result is the reply and error stays NULL — even when that reply
-/// carries an `error` key, because the status is the verdict. Anything else ⇒
-/// `f"{status}: {detail}"`, where `detail` is `res["error"]` for a dict (ABSENT
-/// reads `None`) and the whole result otherwise, both through python's `str()`. A
-/// cancelled fire therefore reads `cancelled: None`.
+/// `completed` => result is the reply and error stays NULL, even when that reply
+/// carries an `error` key, because the status is the verdict. Anything else =>
+/// `"{status}: {detail}"`, where `detail` is the reply's error (an object) or the
+/// result's text, and just `"{status}"` when there is none.
 fn fire_outcome(status: Status, result: Value) -> (Value, Value) {
     if status == Status::Completed {
         return (result, Value::Null);
     }
     let detail = match &result {
-        Value::Object(m) => m.get("error").cloned().unwrap_or(Value::Null),
-        other => other.clone(),
+        Value::Object(_) => fantastic_kernel::refusal::error_text(&result).unwrap_or_default(),
+        Value::Null => String::new(),
+        other => other.as_str().map_or_else(|| other.to_string(), str::to_string),
     };
-    (Value::Null, json!(format!("{status}: {}", py_str(&detail))))
+    if detail.is_empty() {
+        return (Value::Null, json!(status.to_string()));
+    }
+    (Value::Null, json!(format!("{status}: {detail}")))
 }
 
 /// Fire every due schedule AS THE SCHEDULER — one batch send, its items
@@ -667,7 +580,7 @@ async fn fire_many(agent_id: &AgentId, kernel: &Arc<Kernel>, due: &[Value]) -> V
             // sid, err.get("error"))`.
             log_line(format!(
                 "scheduler {agent_id}: history persist failed: {}",
-                py_str(e.get("error").unwrap_or(&Value::Null))
+                fantastic_kernel::refusal::error_text(&e).unwrap_or_default()
             ));
         }
         // ONE delivery per tick (py-canonical): the payload send IS the tick; a
@@ -708,7 +621,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         .unwrap_or(false);
     json!({
         "id": agent_id.as_str(),
-        "sentence": "Recurring-task scheduler.",
+        "sentence": MAN,
         "paused": meta_truthy(agent_id, kernel, "paused"),
         "running": running,
     })
@@ -780,37 +693,14 @@ async fn shutdown_tick(agent_id: &AgentId, kernel: &Arc<Kernel>) {
     }
 }
 
-/// `schedule` — VALIDATION ORDER IS PART OF THE CONTRACT: the payload's
-/// shape, then `interval_seconds`, then the target, then `payload.type`, then
-/// `timeout`. A call with two faults is told about the FIRST one python names.
-async fn schedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let sched_payload = match payload.get("payload") {
-        None | Some(Value::Null) => json!({}),
-        Some(v) if v.is_object() => v.clone(),
-        // A list/string here can never carry a `type`; say so as an ARG error
-        // rather than as the downstream "payload.type required".
-        Some(_) => return bad("schedule", "payload", "an object with type"),
-    };
-    let interval = match int_arg(payload, "interval_seconds", 60, "schedule", 1) {
-        Ok(v) => v,
-        Err(refusal) => return refusal,
-    };
-    // TRUTHINESS, and a truthy non-string target is stored verbatim.
-    let Some(target) = payload.get("target").filter(|v| py_truthy(v)).cloned() else {
-        return json!({"error": "schedule: target required"});
-    };
-    if !sched_payload.get("type").is_some_and(py_truthy) {
-        return json!({"error": "schedule: payload.type required"});
-    }
+/// `schedule` — the declaration checked the shape; what a type cannot say stays here.
+async fn schedule_reply(agent_id: &AgentId, a: verbs::Schedule, kernel: &Arc<Kernel>) -> Value {
+    let sched_payload = Value::Object(a.payload);
+    let interval = a.interval_seconds;
+    let target = json!(a.target);
     // Per-fire bound, seconds. Optional: absent = wait forever (never defaulted).
     // It is STORED AS SENT — an int `5` stays `5`, it does not become `5.0`.
-    let timeout = match payload.get("fire_timeout") {
-        None | Some(Value::Null) => None,
-        Some(Value::Number(n)) if n.as_f64().is_some_and(|t| t > 0.0) => {
-            Some(Value::Number(n.clone()))
-        }
-        Some(_) => return bad("schedule", "fire_timeout", "a positive number of seconds"),
-    };
+    let timeout = a.fire_timeout.map(Value::Number);
     let now = now_secs();
     let mut sch = json!({
         "id": mint_id(),
@@ -848,22 +738,14 @@ async fn schedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel
     json!({"schedule_id": sch["id"], "schedule": sch})
 }
 
-/// `payload["schedule_id"]` under PYTHON TRUTHINESS — every verb that takes
-/// one writes `if not sid:`, and the raw value is echoed back in the reply.
-fn schedule_id(payload: &Value) -> Option<&Value> {
-    payload.get("schedule_id").filter(|v| py_truthy(v))
-}
-
 /// Does this stored schedule carry `sid`? python compares with `==` against the RAW
 /// value, so only a string can ever match a stored string id.
 fn is_sched(s: &Value, sid: &Value) -> bool {
     s.get("id") == Some(sid)
 }
 
-async fn unschedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let Some(sid) = schedule_id(payload).cloned() else {
-        return json!({"error": "unschedule: schedule_id required"});
-    };
+async fn unschedule_reply(agent_id: &AgentId, sid: &str, kernel: &Arc<Kernel>) -> Value {
+    let sid = json!(sid);
     let mut schedules = load_schedules(agent_id, kernel).await;
     let before = schedules.len();
     schedules.retain(|s| !is_sched(s, &sid));
@@ -890,13 +772,13 @@ async fn list_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
 /// The per-schedule reply leads with the FLAG, then the id (python's key order).
 async fn set_paused(
     agent_id: &AgentId,
-    payload: &Value,
+    schedule_id: Option<String>,
     kernel: &Arc<Kernel>,
     verb: &str,
     flag_key: &str,
     paused: bool,
 ) -> Value {
-    if let Some(sid) = schedule_id(payload).cloned() {
+    if let Some(sid) = schedule_id.map(Value::from) {
         let mut schedules = load_schedules(agent_id, kernel).await;
         let mut touched = 0;
         for s in schedules.iter_mut() {
@@ -917,27 +799,17 @@ async fn set_paused(
     json!({flag_key: true, "scheduler_id": agent_id.as_str()})
 }
 
-async fn pause_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    set_paused(agent_id, payload, kernel, "pause", "paused", true).await
-}
-
-async fn resume_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    set_paused(agent_id, payload, kernel, "resume", "resumed", false).await
-}
-
-async fn tick_now_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let Some(sid) = schedule_id(payload).cloned() else {
-        return json!({"error": "tick_now: schedule_id required"});
-    };
+async fn tick_now_reply(agent_id: &AgentId, sid: &str, kernel: &Arc<Kernel>) -> Value {
+    let sid = json!(sid);
     let mut schedules = load_schedules(agent_id, kernel).await;
     let Some(idx) = schedules.iter().position(|s| is_sched(s, &sid)) else {
         return json!({"error": format!("schedule {} not found", py_repr_value(&sid))});
     };
+    if let Err(why) = check_stored(&schedules[idx]) {
+        return json!({"error": format!("tick_now: {why}")});
+    }
     // Same order as the tick: bump → persist → fire.
-    let count = schedules[idx]
-        .get("run_count")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
+    let count = schedules[idx]["run_count"].as_u64().unwrap_or_default();
     schedules[idx]["run_count"] = json!(count + 1);
     if let Err(e) = save_schedules(agent_id, kernel, &schedules).await {
         // ROLL THE BUMP BACK (py `s["run_count"] -= 1`): `save_schedules` already
@@ -963,17 +835,14 @@ async fn tick_now_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel
     })
 }
 
-async fn history_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let limit = match int_arg(payload, "limit", 100, "history", 1) {
-        Ok(v) => v.min(500) as usize,
-        Err(refusal) => return refusal,
-    };
+async fn history_reply(agent_id: &AgentId, a: verbs::History, kernel: &Arc<Kernel>) -> Value {
+    let limit = a.limit as usize;
     // every fire, then the newest `limit` of them.
     let fires: Vec<Value> = read_history(agent_id, kernel, 2 * HISTORY_MAX).await;
     let from = fires.len().saturating_sub(limit);
     let mut entries = fires[from..].to_vec();
-    if let Some(sid) = schedule_id(payload) {
-        entries.retain(|e| e.get("schedule_id") == Some(sid));
+    if let Some(sid) = a.schedule_id.map(Value::from) {
+        entries.retain(|e| e.get("schedule_id") == Some(&sid));
     }
     let n = entries.len();
     json!({

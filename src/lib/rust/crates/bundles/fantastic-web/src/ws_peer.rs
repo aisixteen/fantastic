@@ -23,7 +23,7 @@
 //! watches of that guid are asked for again on the new one. Kernel legs join no
 //! tabs and get no reply mirror.
 
-use super::{error_frame, gate_leg, send_envelope, Out, INBOUND_PAYLOAD_KEY, REPLY_KEY};
+use super::{error_frame, gate_leg, Envelope, send_envelope, Out, INBOUND_PAYLOAD_KEY, REPLY_KEY};
 use fantastic_io_bridge::authorizer::Decision;
 use fantastic_kernel::refusal::{bad, refusal, TRANSPORT_ERROR};
 use fantastic_kernel::{AgentId, Kernel, PeerReply, PeerRoute};
@@ -339,6 +339,7 @@ impl PeerLink {
         leg: &AgentId,
         out: &tokio::sync::mpsc::Sender<Out>,
         frame: &Value,
+        env: &Envelope,
         fid: &Value,
     ) {
         let guid = frame
@@ -367,7 +368,7 @@ impl PeerLink {
                 return;
             }
         };
-        if !matches!(gate_leg(kernel, leg, "hello", frame), Decision::Allow) {
+        if !matches!(gate_leg(kernel, leg, "hello", env), Decision::Allow) {
             return;
         }
         if let Some((pinned, _)) = &self.pinned {
@@ -543,7 +544,11 @@ impl PeerLink {
             .remove(fid);
         let Some(tx) = waiting else { return };
         // the reply's own secret paths (malformed ⇒ none; the reply still lands)
-        let marks = fantastic_kernel::secret::check(frame.get("secret")).unwrap_or_default();
+        let marks = frame
+            .get("secret")
+            .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+            .and_then(|m| fantastic_kernel::secret::check(&m).ok())
+            .unwrap_or_default();
         let (data, wrapped) = match frame.get("data") {
             Some(d @ Value::Object(_)) => (d.clone(), false),
             other => (

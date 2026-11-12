@@ -1,6 +1,8 @@
 import { str } from "../../lib.ts";
 import { bodyText } from "../body_text.ts";
-import { panelRelay } from "../panel_relay.ts";
+import { docsOf, entry } from "../declared.ts";
+import type { Declared } from "../declared.ts";
+import { PANEL_VERBS, panelRelay } from "../panel_relay.ts";
 import { DEFAULT_BG_SOURCE } from "./default_bg.ts";
 import type { Handler, Json } from "../../lib.ts";
 
@@ -36,18 +38,30 @@ export function viewToBg(cc: Record<string, unknown> | undefined): Record<string
 /** How a GL source runs (the GL host's contract, `gl_host.ts`). */
 export const GL_SIGNATURE = ["THREE", "scene", "t", "onFrame", "cleanup"] as const;
 
-export const BACKGROUND_README =
-  "A view's BACKGROUND — a singleton: one per view (the root view's is delete-locked: it can only be updated). " +
-  "`set_bg {bytes}` replaces it: `bytes` is JAVASCRIPT, verbatim, run as " +
-  "`new Function(\"THREE\", \"scene\", \"t\", \"onFrame\", \"cleanup\", bytes)` in the page's shared three.js scene, " +
-  "behind every cell — NOT CSS, NOT GLSL alone. `THREE` is three.js, `scene` the scene to add meshes to, `t` the " +
-  "time, `onFrame(fn)` registers a per-frame callback `fn(t)`, `cleanup(fn)` runs on replace. Example — a slow blue " +
-  "gradient: `const m = new THREE.ShaderMaterial({uniforms:{u:{value:0}}, vertexShader:'void main(){gl_Position=vec4(position.xy,0.,1.);}', " +
-  "fragmentShader:'uniform float u; void main(){vec2 p=gl_FragCoord.xy/vec2(1600.,900.); gl_FragColor=vec4(0.05,0.1+0.1*p.y,0.3+0.2*sin(u*0.2+p.x),1.);}'}); " +
-  "scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), m)); onFrame(t => m.uniforms.u.value = t);`. " +
-  "A source that does not compile is refused, with the error. `default_bg` restores the bundled one (`default_bg.ts`), `clear_bg` removes it, `get_bg` returns it; it persists with its record.";
+/** What the bundle is for (its one short text; how to call it is rendered from the declarations). */
+export const BACKGROUND_MAN =
+  "A view's BACKGROUND: a singleton, one per view (the root view's is delete-locked: it can only be updated). Its GL source is drawn behind every cell and persists with its record.";
 
-export const backgroundAgent: Handler = (id, payload, kernel): Json | Promise<Json> => {
+/** The verbs the background answers. */
+export const BACKGROUND_DECL: Declared = {
+  set_bg: {
+    doc: "Replaces the background scene; refused when the source does not compile. Returns {ok, bytes}.",
+    args: {
+      bytes: {
+        type: "bytes",
+        required: true,
+        doc: `JavaScript, verbatim, run as new Function(${GL_SIGNATURE.map((x) => JSON.stringify(x)).join(", ")}, bytes) in the page's shared three.js scene, behind every cell: THREE is three.js, scene the scene to add to, t the time, onFrame(fn) a per-frame callback fn(t), cleanup(fn) runs on replace. Not CSS.`,
+      },
+    },
+  },
+  default_bg: { doc: "Restores the bundled background scene. Returns {ok, bytes}.", args: {} },
+  clear_bg: { doc: "Clears the background. Returns {ok}.", args: {} },
+  get_bg: { doc: "The background's source. Returns {source}.", args: {} },
+  get_gl_view: { doc: "The background's GL view, as the GL host reads it. Returns {id, source}.", args: {} },
+  ...PANEL_VERBS,
+};
+
+const backgroundHandler: Handler = (id, payload, kernel): Json | Promise<Json> => {
   // its GL source's own emits, as this agent (`panel_relay.ts`)
   const relayed = panelRelay(kernel, payload);
   if (relayed !== undefined) return relayed;
@@ -58,11 +72,8 @@ export const backgroundAgent: Handler = (id, payload, kernel): Json | Promise<Js
   };
   switch (str(payload, "type")) {
     case "set_bg": {
-      // the body is `bytes` (verbatim); `source` names it too
-      const source = bodyText(payload["bytes"] ?? payload["source"]);
-      if (source === null || source.trim() === "") {
-        return { error: "background: set_bg needs the GL source as a non-empty string (`bytes`, verbatim)", reason: "bad_arg", arg: "bytes" };
-      }
+      // the body is `bytes` (verbatim)
+      const source = bodyText(payload["bytes"]) as string;
       // it must COMPILE as the GL host will run it — refused here, with the
       // error, rather than failing later where nobody sees it
       try {
@@ -89,19 +100,18 @@ export const backgroundAgent: Handler = (id, payload, kernel): Json | Promise<Js
     // The GL host's contract (`GlView`), so the background mounts like any GL view.
     case "get_gl_view":
       return { id, source: bg() };
-    case "boot":
-    case "shutdown":
-      return null;
     default:
-      return { error: `background: unknown verb '${str(payload, "type")}'`, reason: "unhandled", verb: str(payload, "type") };
+      throw new Error(`background: ${str(payload, "type")} is declared and not handled`);
   }
 };
 
+export const backgroundAgent: Handler = entry("background", BACKGROUND_DECL, backgroundHandler, ["boot", "shutdown"]);
+
 /** Register the background's bundle. */
 export function registerBackground(kernel: {
-  registerBundle(hm: string, h: Handler): void;
+  registerBundle(hm: string, h: Handler, verbs?: Record<string, string>): void;
   setBundleReadme(hm: string, readme: string): void;
 }): void {
-  kernel.registerBundle(BACKGROUND, backgroundAgent);
-  kernel.setBundleReadme(BACKGROUND, BACKGROUND_README);
+  kernel.registerBundle(BACKGROUND, backgroundAgent, docsOf(BACKGROUND_DECL));
+  kernel.setBundleReadme(BACKGROUND, BACKGROUND_MAN);
 }

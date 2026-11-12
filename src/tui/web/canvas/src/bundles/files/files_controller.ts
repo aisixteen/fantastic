@@ -1,5 +1,7 @@
 import type { Handler, Json, Payload } from "../../lib.ts";
 import { str } from "../../lib.ts";
+import { docsOf, entry, refuse } from "../declared.ts";
+import type { Declared } from "../declared.ts";
 import { isRefusal, said } from "./file_bridge.ts";
 import type { Change, FileBridge, Refusal, WatchHub } from "./file_bridge.ts";
 import type { AgentIndex } from "./agent_index.ts";
@@ -216,47 +218,59 @@ export class FilesController {
 /** The live controllers, by cell id. */
 export const controllers = new Map<string, FilesController>();
 
-export const FILES_VERBS = ["select", "expand", "collapse", "reveal"] as const;
+const WHERE = {
+  path: { type: "string", min: 1, doc: "A project path, root-relative." },
+  agent: { type: "string", min: 1, doc: "An agent's id: its folder." },
+} as const;
 
-export const FILES_VERB_DOCS: Record<string, string> = {
-  select: "args: path:str | agent:str (req — a project path, root-relative; or an agent's id). Opens the folders above it, selects it and scrolls to it; every preview that follows the tree shows it. {selected, kind: file|dir, agent?}. Refused: bad_arg, outside_root, not_found.",
-  expand: "args: path:str | agent:str (req). Opens a folder (listed and watched live). {expanded, entries}. Refused: bad_arg, outside_root, not_found, not_a_dir, or the bridge's refusal.",
-  collapse: "args: path:str | agent:str (req). Closes a folder and every open folder below it (their watches end). {collapsed, was_open}.",
-  reveal: "args: path:str | agent:str (req). Opens the folders above it and scrolls to it; the selection stays. {revealed}. Refused: bad_arg, outside_root, not_found.",
-  reflect: "No args. This cell and its verbs.",
+/** The verbs a file tree cell answers. */
+export const FILES_DECL: Declared = {
+  select: {
+    doc: "Opens the folders above the target, selects it and scrolls to it; every preview that follows the tree shows it. Returns {selected, kind: file|dir, agent?}.",
+    args: WHERE,
+    oneOf: ["path", "agent"],
+  },
+  expand: {
+    doc: "Opens a folder (listed and watched live). Returns {expanded, entries}.",
+    args: WHERE,
+    oneOf: ["path", "agent"],
+  },
+  collapse: {
+    doc: "Closes a folder and every open folder below it (their watches end). Returns {collapsed, was_open}.",
+    args: WHERE,
+    oneOf: ["path", "agent"],
+  },
+  reveal: {
+    doc: "Opens the folders above the target and scrolls to it; the selection stays. Returns {revealed}.",
+    args: WHERE,
+    oneOf: ["path", "agent"],
+  },
 };
 
-export const FILES_README =
-  "A FILE TREE cell: the project's folder, live (or, dropped from the tree, a folder as its own tree: its root is that folder). `.fantastic` is highlighted, and every agent is a folder in it (marked with a badge, its status and its name). Folders list when opened and are watched while open, so a file made, changed or removed on disk shows without a reload. Click selects (the previews that follow the tree show it); Shift-click selects a range, ⌘/Ctrl-click toggles one, and the selected rows drag onto the canvas (agents show their cells, files open as previews, folders as trees). Double-click, Shift+Enter or ↗ opens an agent's cell. VERBS: select {path | agent}, expand, collapse, reveal. Page content: it calls the project's file bridge `files` as its cell grant allows.";
-
-const refusal = (error: string, reason: string, extra: Record<string, unknown> = {}): Json => ({ error, reason, ...extra }) as Json;
+/** What the bundle is for. */
+export const FILES_MAN = "A file tree cell: the project's folder, live, whose selection the previews follow.";
 
 /** `path` or `agent` → a project path; or the refusal. */
 function target(p: Payload, ctl: FilesController): { path: string } | { refused: Json } {
-  const agent = str(p, "agent");
+  const agent = typeof p["agent"] === "string" ? p["agent"] : "";
   let path: string;
   if (agent !== "") {
     const folder = ctl.o.index.folderOf(agent);
-    if (folder === undefined) return { refused: refusal(`files: no folder on disk for agent '${agent}'`, "not_found", { arg: "agent", hint: "the agent folders are read from .fantastic; an agent with no folder is not on disk" }) };
+    if (folder === undefined) return { refused: refuse("not_found", `files: no folder on disk for agent '${agent}'`, { arg: "agent", hint: "the agent folders are read from .fantastic; an agent with no folder is not on disk" }) };
     path = folder;
   } else {
-    if (typeof p["path"] !== "string") return { refused: refusal("files: path (a root-relative project path) or agent (an agent id) is required", "bad_arg", { arg: "path" }) };
-    if (!inRoot(p["path"])) return { refused: refusal(`files: '${p["path"]}' is outside the project`, "outside_root", { arg: "path", hint: "paths are relative to the project folder, with no leading / and no .." }) };
-    path = norm(p["path"]);
+    if (!inRoot(p["path"] as string)) return { refused: refuse("not_allowed", `files: '${p["path"]}' is outside the project`, { arg: "path", hint: "paths are relative to the project folder, with no leading / and no .." }) };
+    path = norm(p["path"] as string);
   }
   // a tree rooted at a folder (#135) shows nothing above it
-  if (!under(path, ctl.root)) return { refused: refusal(`files: '${path}' is outside this tree (its root is ${ctl.root === "" ? "the project" : ctl.root})`, "outside_root", { arg: agent !== "" ? "agent" : "path" }) };
+  if (!under(path, ctl.root)) return { refused: refuse("not_allowed", `files: '${path}' is outside this tree (its root is ${ctl.root === "" ? "the project" : ctl.root})`, { arg: agent !== "" ? "agent" : "path" }) };
   return { path };
 }
 
-export const filesAgent: Handler = async (id, payload): Promise<Json> => {
+const filesHandler: Handler = async (id, payload): Promise<Json> => {
   const verb = str(payload, "type");
-  if (verb === "") return refusal("files: no verb", "bad_arg", { arg: "type" });
-  if (!(FILES_VERBS as readonly string[]).includes(verb)) {
-    return refusal(`files: unknown verb '${verb}'`, "unhandled", { verb, hint: `it answers ${FILES_VERBS.join(", ")}` });
-  }
   const ctl = controllers.get(id);
-  if (ctl === undefined) return refusal("files: the cell is not on screen", "not_mounted", { hint: "the cell is not on screen" });
+  if (ctl === undefined) return refuse("not_here", "files: the cell is not on screen", { hint: "the cell is not on screen" });
   const t = target(payload, ctl);
   if ("refused" in t) return t.refused;
   const p = t.path;
@@ -270,7 +284,7 @@ export const filesAgent: Handler = async (id, payload): Promise<Json> => {
       if (!(await ctl.reveal(p))) return notFound(p, ctl);
       const n = ctl.model.nodes.get(p);
       if (n === undefined) return notFound(p, ctl);
-      if (n.type !== "dir") return refusal(`files: '${p}' is a file, not a folder`, "not_a_dir", { arg: "path" });
+      if (n.type !== "dir") return refuse("bad_arg", `files: '${p}' is a file, not a folder`, { arg: "path" });
       await ctl.expand(p);
       const e = ctl.errors.get(p);
       if (e !== undefined) return e as Json;
@@ -289,22 +303,21 @@ export const filesAgent: Handler = async (id, payload): Promise<Json> => {
       return { selected: p, kind: n.type, ...(agent !== undefined ? { agent } : {}) };
     }
   }
-  return refusal(`files: unknown verb '${verb}'`, "unhandled", { verb });
+  throw new Error(`files: ${verb} is declared and not handled`);
 };
+
+export const filesAgent: Handler = entry("files", FILES_DECL, filesHandler);
 
 function notFound(p: string, ctl: FilesController): Json {
   const e = ctl.errors.get(parentOf(p));
   if (e !== undefined) return e as Json;
-  return refusal(`files: '${p}' is not in the project`, "not_found", { arg: "path" });
+  return refuse("not_found", `files: '${p}' is not in the project`, { arg: "path" });
 }
 
 export function registerFilesView(kernel: {
   registerBundle(hm: string, h: Handler, verbs?: Record<string, string>): void;
   setBundleReadme(hm: string, readme: string): void;
 }): void {
-  // sidebar_view.ts is the cell's name before the file tree (#106): saved layouts still hold it, and it opens as the tree
-  for (const hm of ["files_view.ts", "sidebar_view.ts"]) {
-    kernel.registerBundle(hm, filesAgent, FILES_VERB_DOCS);
-    kernel.setBundleReadme(hm, hm === "files_view.ts" ? FILES_README : "legacy name of files_view.ts: it opens as the file tree. " + FILES_README);
-  }
+  kernel.registerBundle("files_view.ts", filesAgent, docsOf(FILES_DECL));
+  kernel.setBundleReadme("files_view.ts", FILES_MAN);
 }

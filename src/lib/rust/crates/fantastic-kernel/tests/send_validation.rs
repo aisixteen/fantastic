@@ -5,22 +5,36 @@
 //! `send`; nothing is minted for a caller-supplied `""` id.
 
 use async_trait::async_trait;
-use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Reply};
+use fantastic_kernel::{Agent, AgentId, BundleRegistry, Handler, Item, Kernel, Reply};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use tempfile::TempDir;
 
 struct Noop;
 
+fantastic_kernel::stand_in_verbs!(noop_verbs { PokeV "poke" {  } });
 #[async_trait]
-impl Bundle for Noop {
+impl Handler for Noop {
+    type Call = noop_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "noop"
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        noop_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        noop_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Some(json!({"ok": true})))

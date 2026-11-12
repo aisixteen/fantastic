@@ -18,14 +18,14 @@ expect:
   reboot: true
   closed_roster_sender: asker
   steps:
-    # ── DOC-1 · a reflect carries no verb docs ──
+    # ── DOC-1 · a reflect lists the agent's verbs as one line each, never the kernel's ──
     - name: the root's reflect advertises no kernel verbs
       operator: {to: kernel, send: {type: reflect}}
       expect: {absent: kernel_verbs}
       because: DOC-1
-    - name: an agent's reflect carries no verb signature
+    - name: an agent's reflect lists its verbs, one signature line each
       operator: {to: shelf, send: {type: reflect}}
-      expect: {absent: "args:"}
+      expect: {mentions: "args:"}
       because: DOC-1
 
     # ── DOC-2 · `docs` is gated like any kernel verb ──
@@ -38,7 +38,7 @@ expect:
       because: DOC-2
     - name: an agent granted docs on the root reads them
       reach: {from: reader, to: $root, send: {type: docs, of: kernel, verb: cancel}}
-      expect: {allow: true, contains: {verbs.cancel: "args: task_id:str"}}
+      expect: {allow: true, contains: {bundle: kernel}}
       because: DOC-2
     - name: and the grant covers docs alone — reflect stays gated
       reach: {from: reader, to: $root, send: {type: reflect}}

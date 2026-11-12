@@ -45,7 +45,7 @@ pub const LOADER_VERBS: [&str; 3] = ["load_tree", "persist_record", "forget_reco
 /// Every grant of the tree: `(agent, can_call, callable_by)`, the `$self`
 /// baseline left to the kernel.
 pub fn grants() -> Vec<(&'static str, Value, Value)> {
-    let verbs = json!(home::VERBS);
+    let verbs = json!(home::verbs::page_verbs());
     let kernel_verbs = json!(["reflect", "docs"]);
     let loader = json!(LOADER_VERBS);
     vec![
@@ -102,13 +102,13 @@ pub async fn operator(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Res
     }
 }
 
-async fn create(kernel: &Arc<Kernel>, mut spec: Value) -> Result<(), String> {
+async fn create(kernel: &Arc<Kernel>, spec: Value) -> Result<(), String> {
     let id = spec["id"].as_str().unwrap_or_default().to_string();
-    spec["type"] = json!("create_agent");
-    operator(kernel, "kernel", spec)
-        .await
-        .map(|_| ())
-        .map_err(|e| format!("could not create `{id}`: {e}"))
+    let r = fantastic_kernel::verbs::create_agent(kernel, spec).await;
+    match r.get("error").and_then(Value::as_str) {
+        Some(e) => Err(format!("could not create `{id}`: {}", sys::with_hint(e, &r))),
+        None => Ok(()),
+    }
 }
 
 /// Create what is missing, write every grant whole, boot, mount. `port` is the
@@ -149,7 +149,7 @@ pub async fn ensure(kernel: &Arc<Kernel>, port: Option<u16>) -> Result<u16, Stri
         (
             CANVAS_PAGE,
             json!({"parent_id": WEB, "handler_module": fantastic_canvas_page::HANDLER_MODULE,
-                   "verbs": {"read_stream": fantastic_canvas_page::READ_STREAM_DOC}}),
+                   "verbs": fantastic_canvas_page::read_stream_declared()}),
         ),
         (
             WEB_LOADER,
@@ -170,11 +170,15 @@ pub async fn ensure(kernel: &Arc<Kernel>, port: Option<u16>) -> Result<u16, Stri
     }
     // `web`'s boot mounts its children and then listens: last, and only when it
     // was made here (a hydrated host is listening already).
-    let mut boots = vec![CANVAS_PAGE, HOME_WS, WEB_LOADER, HOME];
+    let mut boots = vec![HOME_WS, WEB_LOADER, HOME];
     if fresh_web {
         boots.push(WEB);
     }
     for id in boots {
+        // only an agent whose bundle declares `boot` is sent it
+        if !kernel.advertises(&AgentId::from(id), "boot").await {
+            continue;
+        }
         operator(kernel, id, json!({"type": "boot"}))
             .await
             .map_err(|e| format!("`{id}` did not boot: {e}"))?;

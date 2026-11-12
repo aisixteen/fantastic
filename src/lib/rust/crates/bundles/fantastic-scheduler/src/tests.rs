@@ -5,6 +5,7 @@
 //! wire path the scheduler uses in production, not a stub.
 
 use super::*;
+use fantastic_kernel::bundle::Handler;
 use fantastic_kernel::Agent;
 use fantastic_kernel::Item;
 use serde_json::Map;
@@ -57,23 +58,37 @@ struct ProbeBundle {
     capture: Option<PathBuf>,
 }
 
+fantastic_kernel::stand_in_verbs!(probe_verbs { HitV "hit" { block: Option<f64> } });
+
 #[async_trait]
-impl Bundle for ProbeBundle {
+impl Handler for ProbeBundle {
+    type Call = probe_verbs::Call;
     fn name(&self) -> &str {
         "sched_probe"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        probe_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        probe_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        match payload.get("type").and_then(Value::as_str).unwrap_or("") {
-            "boot" | "shutdown" => Ok(None),
-            "reflect" => Ok(Some(
+        match call {
+            probe_verbs::Call::Reflect(_) => Ok(Some(
                 json!({"id": agent_id.as_str(), "sentence": "scheduler probe", "verbs": {}}),
             )),
-            "hit" => {
+            probe_verbs::Call::HitV(hit) => {
                 let doc = self
                     .capture
                     .as_ref()
@@ -84,12 +99,11 @@ impl Bundle for ProbeBundle {
                     .lock()
                     .unwrap()
                     .insert(agent_id.as_str().to_string(), (now(), doc));
-                if let Some(b) = payload.get("block").and_then(Value::as_f64) {
+                if let Some(b) = hit.block {
                     tokio::time::sleep(Duration::from_secs_f64(b)).await;
                 }
                 Ok(Some(json!({"hit": agent_id.as_str()})))
             }
-            other => Ok(Some(json!({"error": format!("unknown verb '{other}'")}))),
         }
     }
 }
@@ -262,12 +276,6 @@ async fn stop_tick(kernel: &Arc<Kernel>, sch: &AgentId) {
     }
 }
 
-#[test]
-fn readme_present_and_titled() {
-    assert!(!README.is_empty());
-    assert!(README.contains("scheduler"));
-}
-
 #[tokio::test]
 async fn reflect_reports_state() {
     let tmp = TempDir::new().unwrap();
@@ -338,7 +346,10 @@ async fn schedule_persists_and_lists() {
         .await
         .remove(0)
         .result;
-    let sid = r["schedule_id"].as_str().unwrap().to_string();
+    let sid = r["schedule_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{r}"))
+        .to_string();
     assert!(sid.starts_with("sch_"));
     let listed = kernel
         .send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
@@ -361,12 +372,13 @@ async fn schedule_requires_target_and_payload_type() {
     let r = kernel
         .send(vec![Item::new(
             sch.clone(),
-            json!({"type": "schedule", "interval_seconds": 5}),
+            json!({"type": "schedule", "interval_seconds": 5, "payload": {"type": "ping"}}),
         )])
         .await
         .remove(0)
         .result;
-    assert!(r["error"].as_str().unwrap().contains("target"));
+    assert_eq!(r["reason"], "missing_arg", "{r}");
+    assert!(r["error"].as_str().unwrap().contains("target"), "{r}");
     let r2 = kernel
         .send(vec![Item::new(
             sch.clone(),
@@ -375,7 +387,32 @@ async fn schedule_requires_target_and_payload_type() {
         .await
         .remove(0)
         .result;
-    assert!(r2["error"].as_str().unwrap().contains("payload.type"));
+    assert_eq!(r2["reason"], "missing_arg", "{r2}");
+    assert!(r2["error"].as_str().unwrap().contains("payload"), "{r2}");
+    // a call without a `type` is refused by name, by the declaration
+    let r3 = kernel
+        .send(vec![Item::new(
+            sch.clone(),
+            json!({"type": "schedule", "target": "kernel_state", "payload": {}}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(
+        r3["error"].as_str().unwrap().contains("payload.type"),
+        "{r3}"
+    );
+    // an empty `type` is no verb: a rule the type cannot say
+    let r4 = kernel
+        .send(vec![Item::new(
+            sch.clone(),
+            json!({"type": "schedule", "target": "kernel_state", "payload": {"type": ""}}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r4["reason"], "bad_arg", "{r4}");
+    assert_eq!(r4["arg"], "payload.type", "{r4}");
 }
 
 #[tokio::test]
@@ -777,7 +814,7 @@ async fn non_int_args_are_bad_arg_refusals() {
         .result;
     assert_eq!(ok["schedule"]["interval_seconds"], json!(60), "{ok}");
 
-    for bad_value in [json!("100"), json!(2.0), json!(true), json!(null), json!(0)] {
+    for bad_value in [json!("100"), json!(2.0), json!(true), json!(null), json!(0), json!(100000)] {
         let h = kernel
             .send(vec![Item::new(
                 sch.clone(),
@@ -789,6 +826,7 @@ async fn non_int_args_are_bad_arg_refusals() {
         assert_eq!(h["reason"], json!("bad_arg"), "{bad_value}: {h}");
         assert_eq!(h["arg"], json!("limit"), "{bad_value}: {h}");
     }
+    // a `limit` above 500 is refused by the declared maximum (in the loop above).
     // ABSENT `limit` is the default page, not a refusal.
     let h = kernel
         .send(vec![Item::new(sch.clone(), json!({"type": "history"}))])
@@ -868,76 +906,47 @@ async fn an_idle_scheduler_never_wakes_and_a_change_wakes_it() {
 
 // ─── python parity (plan §2 A5) ──────────────────────────────────
 
-/// The vendored readme is python's, byte for byte (two lines + `\n`).
-#[test]
-fn scheduler_readme_is_python_verbatim() {
-    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(4) // src/lib above crates/bundles/<crate>
-        .expect("src/lib above the crate")
-        .join("python/bundled_agents/scheduler/src/scheduler/readme.md");
-    let Ok(src) = std::fs::read_to_string(&py) else {
-        eprintln!("skipping: python tree not present at {}", py.display());
-        return;
-    };
-    assert_eq!(src, README, "readme has drifted from {}", py.display());
-}
-
-/// The `schedule_fired` emit doc is python's, two em-dashes and all.
+/// `reflect` renders every declared verb, in declaration order, with its arguments.
 #[tokio::test]
-async fn docs_emits_is_python_verbatim() {
-    assert_eq!(
-        SchedulerBundle.emits_doc().unwrap()["schedule_fired"],
-        "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)"
-    );
-}
-
-/// `verbs` is python's `VERBS` order, each entry the FIRST LINE of that
-/// verb's docstring. `boot`'s is truncated mid-sentence; that is the python text.
-#[tokio::test]
-async fn verb_docs_are_python_verbatim() {
-    let docs = SchedulerBundle.verb_docs();
-    let verbs = docs.as_object().expect("verbs object");
-    assert_eq!(
-        verbs.keys().map(String::as_str).collect::<Vec<_>>(),
-        [
-            "reflect",
-            "boot",
-            "schedule",
-            "unschedule",
-            "list",
-            "pause",
-            "resume",
-            "tick_now",
-            "history"
-        ]
-    );
-    assert_eq!(
-        verbs["boot"],
-        "Idempotent. Starts the tick loop; persistence is THROUGH the loader."
-    );
-    assert_eq!(
-        verbs["unschedule"],
-        "args: schedule_id:str (req). Returns {removed:bool, schedule_id}."
-    );
-    assert_eq!(
-        verbs["list"],
-        "No args. Returns {schedules: [<schedule record>, ...]} — every schedule."
-    );
-}
-
-/// `shutdown` is not a verb: python's `VERBS` has no such key, so it is an
-/// unknown type — never a `null` that reads as a successful stop.
-#[tokio::test]
-async fn shutdown_is_an_unknown_type() {
+async fn reflect_renders_every_declared_verb() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
     let r = kernel
-        .send(vec![Item::new(sch.clone(), json!({"type": "shutdown"}))])
+        .send(vec![Item::new(sch.clone(), json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
-    assert_eq!(r["error"], "scheduler: unknown type 'shutdown'");
+    let verbs = r["verbs"].as_object().expect("verbs block");
+    for name in [
+        "boot",
+        "schedule",
+        "unschedule",
+        "list",
+        "pause",
+        "resume",
+        "tick_now",
+        "history",
+    ] {
+        assert!(verbs.contains_key(name), "{name} missing: {r}");
+    }
+    // the nine declared (`boot` and `shutdown` among them), and the `reflect` every agent answers
+    assert_eq!(verbs.len(), 10, "{r}");
+    let unschedule = verbs["unschedule"].as_str().unwrap();
+    assert!(
+        unschedule.starts_with("args: schedule_id:string of at least 1 character(s) (req)"),
+        "{unschedule}"
+    );
+    let schedule = verbs["schedule"].as_str().unwrap();
+    assert!(
+        schedule.contains("interval_seconds:int >= 1 (default 60)"),
+        "{schedule}"
+    );
+    assert!(schedule.contains("fire_timeout:number"), "{schedule}");
+    let history = verbs["history"].as_str().unwrap();
+    assert!(
+        history.contains("limit:int >= 1 (default 100)"),
+        "{history}"
+    );
 }
 
 /// Refusals quote with python's `repr`.
@@ -954,7 +963,7 @@ async fn refusal_text_uses_python_repr() {
         .remove(0)
         .result;
     assert_eq!(r["error"], "schedule 'nope' not found");
-    // A truthy NON-string id is echoed through repr too.
+    // A non-string id is refused by name, never coerced.
     let r = kernel
         .send(vec![Item::new(
             sch.clone(),
@@ -963,7 +972,8 @@ async fn refusal_text_uses_python_repr() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["error"], "schedule 7 not found");
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "schedule_id", "{r}");
 }
 
 /// `boot` is idempotent and says only `{running:true}`; a caller cannot
@@ -983,11 +993,9 @@ async fn boot_twice_replies_running_only() {
     stop_tick(&kernel, &sch).await;
 }
 
-/// The validation ORDER is python's: payload shape → `interval_seconds` →
-/// target → `payload.type` → `timeout`. A call with two faults is told about the
-/// first one python names.
+/// A call with a fault is refused by the declaration, naming the argument.
 #[tokio::test]
-async fn schedule_validation_order_is_pythons() {
+async fn schedule_faults_are_named_by_the_declaration() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
     let call = |p: Value| {
@@ -995,20 +1003,25 @@ async fn schedule_validation_order_is_pythons() {
         let sch = sch.clone();
         async move { kernel.send(vec![Item::new(sch, p)]).await.remove(0).result }
     };
-    // No target AND a bad interval ⇒ the INTERVAL is named (it is checked first).
     let r = call(json!({"type": "schedule", "interval_seconds": "60",
-                        "payload": {"type": "ping"}}))
+                        "target": "kernel_state", "payload": {"type": "ping"}}))
     .await;
     assert_eq!(r["arg"], "interval_seconds", "{r}");
-    // A non-object payload beats the interval.
-    let r = call(json!({"type": "schedule", "payload": [1], "interval_seconds": "60"})).await;
+    let r = call(json!({"type": "schedule", "target": "kernel_state", "payload": [1]})).await;
     assert_eq!(r["arg"], "payload", "{r}");
-    // No target AND no payload.type ⇒ the TARGET is named.
-    let r = call(json!({"type": "schedule", "payload": {}})).await;
-    assert_eq!(r["error"], "schedule: target required", "{r}");
-    // A truthy NON-STRING target is stored verbatim.
+    let r = call(json!({"type": "schedule", "payload": {"type": "ping"}})).await;
+    assert_eq!(r["reason"], "missing_arg", "{r}");
+    assert!(r["error"].as_str().unwrap().contains("target"), "{r}");
+    // a target is text: a number is refused, not stored
     let r = call(json!({"type": "schedule", "target": 7, "payload": {"type": "ping"}})).await;
-    assert_eq!(r["schedule"]["target"], json!(7), "{r}");
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "target", "{r}");
+    // an argument the verb does not take is refused by name
+    let r = call(json!({"type": "schedule", "target": "kernel_state",
+                        "payload": {"type": "ping"}, "in": 20}))
+    .await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "in", "{r}");
 }
 
 /// `timeout` is stored AS SENT: an int `5` stays `5`, it does not become
@@ -1030,10 +1043,9 @@ async fn an_int_timeout_stays_an_int() {
     assert!(r["schedule"]["fire_timeout"].is_i64(), "{r}");
 }
 
-/// `schedule_id` is read under python TRUTHINESS, and the raw value is
-/// echoed back.
+/// `schedule_id` is text with at least one character; anything else is refused by name.
 #[tokio::test]
-async fn empty_schedule_id_is_absent_like_python() {
+async fn schedule_id_must_be_text() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
     let call = |p: Value| {
@@ -1041,28 +1053,36 @@ async fn empty_schedule_id_is_absent_like_python() {
         let sch = sch.clone();
         async move { kernel.send(vec![Item::new(sch, p)]).await.remove(0).result }
     };
-    for falsy in [json!(""), json!(null), json!(0)] {
-        let r = call(json!({"type": "unschedule", "schedule_id": falsy})).await;
-        assert_eq!(r["error"], "unschedule: schedule_id required", "{r}");
-        let r = call(json!({"type": "tick_now", "schedule_id": falsy})).await;
-        assert_eq!(r["error"], "tick_now: schedule_id required", "{r}");
-        // A falsy id on pause/resume is the WHOLE-SCHEDULER form.
-        let r = call(json!({"type": "pause", "schedule_id": falsy})).await;
-        assert_eq!(r["scheduler_id"], sch.as_str(), "{r}");
+    for verb in ["unschedule", "tick_now", "pause", "resume", "history"] {
+        // an explicit `null` is an argument left out: only the required verbs refuse it
+        let nulls = matches!(verb, "unschedule" | "tick_now");
+        for wrong in [json!(""), json!(null), json!(0), json!(7)] {
+            if wrong.is_null() && !nulls {
+                continue;
+            }
+            let r = call(json!({"type": verb, "schedule_id": wrong.clone()})).await;
+            assert!(
+                ["bad_arg", "missing_arg"].contains(&r["reason"].as_str().unwrap_or("")),
+                "{verb} {wrong}: {r}"
+            );
+            assert_eq!(r["arg"], "schedule_id", "{verb} {wrong}: {r}");
+        }
     }
-    // A truthy non-string id is echoed raw.
-    let r = call(json!({"type": "unschedule", "schedule_id": 7})).await;
-    assert_eq!(r["removed"], false, "{r}");
-    assert_eq!(r["schedule_id"], json!(7), "{r}");
+    for verb in ["unschedule", "tick_now"] {
+        let r = call(json!({"type": verb})).await;
+        assert_eq!(r["reason"], "missing_arg", "{verb}: {r}");
+    }
+    // absent on pause is the WHOLE-SCHEDULER form
+    let r = call(json!({"type": "pause"})).await;
+    assert_eq!(r["scheduler_id"], sch.as_str(), "{r}");
 }
 
-/// `paused` is python TRUTHINESS on both the agent meta and each schedule;
-/// reflect still answers a bool.
+/// `paused` on the record is a bool; any other value is refused at the write.
 #[tokio::test]
-async fn paused_meta_uses_python_truthiness() {
+async fn paused_record_field_is_a_bool() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
-    let _ = kernel
+    let r = kernel
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": sch.as_str(), "paused": "no"}),
@@ -1070,10 +1090,17 @@ async fn paused_meta_uses_python_truthiness() {
         .await
         .remove(0)
         .result;
-    // A non-empty string is TRUE in python — `paused: "no"` is a paused scheduler.
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    let r = reflect_reply(&sch, &kernel);
+    assert_eq!(r["paused"], false, "{r}");
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": sch.as_str(), "paused": true}),
+        )])
+        .await;
     let r = reflect_reply(&sch, &kernel);
     assert_eq!(r["paused"], true, "{r}");
-    assert!(r["paused"].is_boolean(), "{r}");
 }
 
 /// The sidecar bytes are python's `yaml_io.dump`: a block YAML sequence,
@@ -1137,27 +1164,27 @@ async fn recreated_scheduler_drops_the_process_cache() {
     );
 }
 
-/// A non-`completed` fire reads `'<status>: ' + str(detail)`, and a detail
-/// python never had reads `None`. `completed` keeps `error` null even when the
-/// reply itself carries an `error` key: the STATUS is the verdict.
+/// A non-`completed` fire reads `<status>: <detail>`, and no detail reads the status
+/// alone. `completed` keeps `error` null even when the reply itself carries an
+/// `error` key: the STATUS is the verdict.
 #[test]
-fn cancelled_fire_error_reads_none() {
+fn cancelled_fire_error_reads_the_status() {
     assert_eq!(
         fire_outcome(Status::Cancelled, Value::Null),
-        (Value::Null, json!("cancelled: None"))
+        (Value::Null, json!("cancelled"))
     );
     assert_eq!(
         fire_outcome(Status::Cancelled, json!({})),
-        (Value::Null, json!("cancelled: None"))
+        (Value::Null, json!("cancelled"))
     );
     assert_eq!(
         fire_outcome(Status::TimedOut, json!({"error": "gone"})),
         (Value::Null, json!("timed_out: gone"))
     );
-    // A non-dict result is `str()`'d whole.
+    // A non-object result is its JSON text.
     assert_eq!(
         fire_outcome(Status::Failed, json!([1, "x"])),
-        (Value::Null, json!("failed: [1, 'x']"))
+        (Value::Null, json!("failed: [1,\"x\"]"))
     );
     // `completed` carries the reply through and leaves `error` null.
     assert_eq!(
@@ -1348,22 +1375,19 @@ async fn a_failed_persist_prints_python_line() {
     assert!(history.contains("no store"), "{history}");
 }
 
-/// python `item["timeout"] = sch["fire_timeout"]`: a fire carries the timeout AS
-/// STORED (an int stays an int), so the kernel's prose and call row print the
-/// schedule's own number.
+/// A fire carries the stored `fire_timeout` as the item's timeout; none stored, none set.
 #[test]
-fn a_fire_carries_the_stored_timeout_raw() {
+fn a_fire_carries_the_stored_timeout() {
     let item = fire_item(&json!({"target": "t", "payload": {"type": "x"}, "fire_timeout": 5}));
-    assert_eq!(item.raw_timeout, Some(json!(5)));
-    assert!(item.timeout.is_none());
+    assert_eq!(item.timeout, Some(5.0));
     let item = fire_item(&json!({"target": "t", "payload": {"type": "x"}, "fire_timeout": null}));
-    assert!(item.raw_timeout.is_none());
+    assert!(item.timeout.is_none());
 }
 
-/// The scheduler's unknown type is a BARE `{error}`
-/// over python's repr of the RAW value. Compared as text (key order is wire).
+/// An unknown verb is refused by the agent's own entry, naming what it answers; the
+/// raw `type` is echoed.
 #[tokio::test]
-async fn unknown_type_wire_shape_is_byte_exact() {
+async fn unknown_type_is_refused_by_the_entry() {
     let tmp = TempDir::new().unwrap();
     let (kernel, sch) = mk_kernel(&tmp).await;
     let r = kernel
@@ -1371,19 +1395,28 @@ async fn unknown_type_wire_shape_is_byte_exact() {
         .await
         .remove(0)
         .result;
-    assert_eq!(
-        serde_json::to_string(&r).unwrap(),
-        r#"{"error":"scheduler: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#
-    );
-    let r = SchedulerBundle
-        .handle(&sch, &json!({}), &kernel)
+    assert_eq!(r["reason"], "unhandled", "{r}");
+    assert_eq!(r["verb"], "frob", "{r}");
+    let text = r["error"].as_str().unwrap();
+    for verb in [
+        "schedule",
+        "unschedule",
+        "list",
+        "pause",
+        "resume",
+        "tick_now",
+        "history",
+    ] {
+        assert!(text.contains(verb), "{text}");
+    }
+    let r = kernel
+        .send(vec![Item::new(sch.clone(), json!({}))])
         .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        serde_json::to_string(&r).unwrap(),
-        r#"{"error":"scheduler: unknown type None","reason":"unhandled","verb":null}"#
-    );
+        .remove(0)
+        .result;
+    // no `type` at all is refused before any agent is asked
+    assert_eq!(r["reason"], "missing_arg", "{r}");
+    assert_eq!(r["arg"], "payload.type", "{r}");
 }
 
 /// A schedule id is python's
@@ -1503,4 +1536,27 @@ async fn two_schedulers_share_nothing_and_delete_frees_only_its_own() {
         "the deleted one's cache is gone"
     );
     stop_tick(&kernel, &b).await;
+}
+
+#[test]
+fn stored_schedule_fields_are_read_strictly() {
+    let good = json!({"target": "t", "payload": {"type": "x"}, "next_run": 1.5, "interval_seconds": 60, "run_count": 0});
+    assert!(check_stored(&good).is_ok());
+    for (key, bad) in [
+        ("target", json!(7)),
+        ("next_run", json!("soon")),
+        ("interval_seconds", Value::Null),
+        ("run_count", json!(-1)),
+        ("payload", json!("x")),
+    ] {
+        let mut s = good.clone();
+        s[key] = bad;
+        assert!(
+            check_stored(&s).is_err(),
+            "{key} wrongly typed must be refused"
+        );
+    }
+    let mut missing = good.clone();
+    missing.as_object_mut().unwrap().remove("run_count");
+    assert!(check_stored(&missing).is_err());
 }

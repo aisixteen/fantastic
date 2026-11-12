@@ -74,46 +74,21 @@ pub fn mint_guid() -> String {
     hex(&b)
 }
 
-/// Implementation of the `create_agent` system verb.
-///
-/// `payload` shape (matches the workdir wire format):
-/// ```json
-/// {"type":"create_agent","handler_module":"file_bridge.tools","id":"opt"}
-/// ```
-/// Any extra fields become the new agent's meta.
-/// A grant map's SHAPE, judged at WRITE time — the gate only judges edges.
-///
-/// `{key: "*" | [verbs]}`, a key being one of [`crate::authz::legal_keys`] —
-/// anything else is refused here, so a record can never carry a grant the gate
-/// would have to guess on. Ported from python: a silently-dead grant is the
-/// wrong answer — refuse loud.
-pub fn bad_grant_shape(meta: &Map<String, Value>) -> Option<String> {
+/// The KEYS of a grant map, judged at WRITE time — the gate only judges edges. The
+/// shape (`{key: "*" | [verbs]}`) is the record declaration's; a key is one of
+/// [`crate::authz::legal_keys`], which depends on the field, so a record can never
+/// carry a grant the gate would have to guess on.
+pub fn bad_grant_key(meta: &Map<String, Value>) -> Option<String> {
     for field in ["can_call", "callable_by"] {
-        let Some(g) = meta.get(field) else { continue };
-        let Some(map) = g.as_object() else {
-            // NAME WHAT ARRIVED — python's `got {type(g).__name__}.`; without it
-            // the refusal says a map is wanted but never what was sent.
-            return Some(format!(
-                "{field} must be a grant MAP {{\"<id|$token>\": \"*\" | \
-                 [\"<verb>\", …]}} — got {}. To open wide, grant per key \
-                 (e.g. {{\"$self\": \"*\", \"ai\": \"*\"}}), never a bare value",
-                fantastic_bundle::py_type_name(g)
-            ));
+        let Some(map) = meta.get(field).and_then(Value::as_object) else {
+            continue;
         };
-        for (k, v) in map {
-            let kr = fantastic_bundle::py_repr(k);
+        for k in map.keys() {
             if !crate::authz::is_grant_key(field, k) {
                 return Some(format!(
-                    "{field}[{kr}] is not a grant key — legal keys: {}",
+                    "{field}[{}] is not a grant key — legal keys: {}",
+                    fantastic_bundle::py_repr(k),
                     crate::authz::legal_keys(field)
-                ));
-            }
-            let ok = v.as_str() == Some("*")
-                || v.as_array()
-                    .is_some_and(|a| a.iter().all(|x| x.is_string()));
-            if !ok {
-                return Some(format!(
-                    "{field}[{kr}] must be \"*\" or a list of verb strings"
                 ));
             }
         }
@@ -123,43 +98,23 @@ pub fn bad_grant_shape(meta: &Map<String, Value>) -> Option<String> {
 
 /// The `create_agent` body, for a bundle that makes a child as bookkeeping — python's
 /// `Agent.create` (a view of a file bridge is made this way). NOT a gated send: the
-/// caller already holds the verb that asked for it.
-pub async fn create_from_payload(
+/// caller already holds the verb that asked for it. `args` are the declared, typed
+/// arguments of `create_agent`; any field beyond them is a field of the new agent's
+/// record, which its bundle's shared entry checks.
+pub async fn create_agent(
     kernel: &Arc<Kernel>,
     root: &Arc<Agent>,
-    payload: &Value,
+    args: crate::declared::kernel::CreateAgent,
 ) -> Value {
-    // THE BUNDLE'S FIELDS go under the payload's (`crate::inherit`).
-    let inherited = crate::inherit::create_payload(&kernel.bundles, payload);
-    let payload = inherited.as_ref().unwrap_or(payload);
-    // python: `if not isinstance(handler_module, str) or not handler_module:
-    // return missing(...)` — an EMPTY string is falsy and refused the same as
-    // an absent one, not just a missing/non-string value.
-    let Some(hm) = payload
-        .get("handler_module")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    else {
-        return crate::refusal::missing("create_agent", "handler_module");
-    };
+    let pid = args.parent_id.clone();
+    let supplied_id = args.id.clone();
+    // THE BUNDLE'S FIELDS go under the arguments' (`crate::inherit`).
+    let (hm, meta) = crate::inherit::create_args(&kernel.bundles, args);
+    let hm = hm.as_str();
+    let pid = pid.as_str();
 
     // `parent_id` NAMES THE OWNER. It is a real, REQUIRED argument — resolved
     // like a send target (the reserved `kernel` address included), never defaulted.
-    //
-    // Same falsy-string rule as `handler_module` — an empty `parent_id` is
-    // refused as absent, not resolved as an (unknown) empty-string agent id.
-    let Some(pid) = payload
-        .get("parent_id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    else {
-        return crate::refusal::missing_hint(
-            "create_agent",
-            "parent_id",
-            "name the agent that will OWN the new one — your own id for a \
-             tool you keep, or the root ('kernel_state') for a top-level agent",
-        );
-    };
     // Resolved the same way `send` does: `kernel` special-cased to the root,
     // then a literal id.
     let parent: Arc<Agent> = if pid == "kernel" {
@@ -176,52 +131,21 @@ pub async fn create_from_payload(
         }
     };
     let parent = &parent;
-    // We allow creation of agents whose bundle isn't yet registered —
-    // record persists, agent is registered but won't dispatch domain
-    // verbs until the bundle lands. Matches Python's behaviour. Only
-    // the LOAD path skips unknown bundles (weak-load semantics).
-
-    // RESERVED KEYS FIRST, in SORTED order — python walks `sorted(RESERVED_RECORD_KEYS)`
-    // and checks each against the payload, so the refusal names the
-    // alphabetically-first reserved key present, never whichever the payload
-    // happened to list first.
-    let mut reserved: Vec<&str> = crate::agent::RESERVED_RECORD_KEYS.to_vec();
-    reserved.sort_unstable();
-    for k in reserved {
-        if payload.get(k).is_some() {
-            return crate::refusal::bad(
-                "create_agent",
-                k,
-                "absent — root_path/ctx/parent name substrate wiring the \
-                 record may not carry",
-            );
-        }
-    }
-    // `children_dir` BECOMES A DIRECTORY (`<agent>/<children_dir>/<child>`), so
-    // it is one safe segment, exactly as an id is. A non-string is judged as ""
-    // — python refuses it as "a non-empty string" too.
-    if let Some(cd) = payload.get("children_dir") {
-        if let Some(r) = crate::refusal::guard_agent_id_as(
-            "create_agent",
-            "children_dir",
-            cd.as_str().unwrap_or(""),
-        ) {
-            return r;
-        }
-    }
-
-    // Compose meta from the remaining payload fields. No per-field check here:
-    // an unknown handler_module is not refused (see above), and reserved keys
-    // were already ruled out.
-    let mut meta: Map<String, Value> = Map::new();
-    if let Some(obj) = payload.as_object() {
-        for (k, v) in obj {
-            if matches!(k.as_str(), "type" | "id" | "handler_module" | "parent_id") {
-                continue;
-            }
-            meta.insert(k.clone(), v.clone());
-        }
-    }
+    // THE HANDLER MUST BE INSTALLED (issue #642): an agent of a bundle this kernel
+    // does not run would be created, and fail only when called. The LOAD path still
+    // skips a record whose bundle is another runtime's (weak-load semantics).
+    let Some(bundle) = kernel.bundles.get(hm) else {
+        let mut r = crate::refusal::refusal_hint(
+            crate::refusal::BAD_ARG,
+            format!(
+                "create_agent: handler_module {} is not installed in this kernel",
+                fantastic_bundle::py_repr(hm)
+            ),
+            "`reflect` with bundles=ids lists the installed bundles",
+        );
+        crate::refusal::with(&mut r, "arg", json!("handler_module"));
+        return r;
+    };
 
     // The structural authority baseline ({$self:*} on both
     // `can_call` and `callable_by`) is stamped + merged uniformly in `Agent::new`
@@ -231,27 +155,35 @@ pub async fn create_from_payload(
     // WRITE-TIME VALIDATION, same gate as `update_agent` (py-canonical), so a
     // field has one answer at create and at update. Record is empty
     // at create: the merged view IS the patch.
-    if let Some(why) = bad_grant_shape(&meta) {
+    if let Some(why) = bad_grant_key(&meta) {
         return crate::refusal::refusal(crate::refusal::INVALID_META, &why);
     }
-    if let Some(bundle) = kernel.bundles.get(hm) {
-        if let Some(why) = bundle.validate_meta(&meta, &Map::new()) {
-            return crate::refusal::refusal(crate::refusal::INVALID_META, why);
-        }
+    // THE RECORD'S FIELDS and the bundle's own check: the target's bundle judges them
+    // through its shared entry; the kernel only routes the refusal.
+    if let Err(refused) = bundle.check_write("create_agent", &meta, &Map::new(), None) {
+        return refused;
     }
 
     // A supplied id — even "" — is the caller's choice and is validated as one
-    // by `guard_agent_id`; only an ABSENT id is minted (python parity). Minted
+    // by the declaration; only an ABSENT id is minted (python parity). Minted
     // AFTER every refusal above (python's `parent.create()` runs last, inside
     // `rec = parent.create(...)`).
-    let id = match payload.get("id") {
-        None | Some(Value::Null) => mint_id(hm),
-        Some(v) => v.as_str().unwrap_or("").to_string(),
+    let id = match supplied_id {
+        None => mint_id(hm),
+        Some(v) => v,
     };
     // An id BECOMES A DIRECTORY, so it must be one safe segment. Enforced at
     // the mint, so every consumer inherits it rather than each remembering.
-    if let Some(r) = crate::refusal::guard_agent_id("create_agent", &id) {
-        return r;
+    // The id's shape is the declaration's (`CreateAgent.id`); `kernel` is the operator's.
+    if id == crate::refusal::RESERVED_ID {
+        return crate::refusal::bad(
+            "create_agent",
+            "id",
+            &format!(
+                "a name other than the reserved {}",
+                fantastic_bundle::py_repr(crate::refusal::RESERVED_ID)
+            ),
+        );
     }
     if kernel.agents.contains_key(&AgentId::from(id.as_str())) {
         let mut r = crate::refusal::refusal(
@@ -291,8 +223,7 @@ pub async fn create_from_payload(
 
     // NO INLINE PERSIST. The record reaches disk through the ROOT LOADER's
     // `persist_writer`, which consumes the `added` event published below and
-    // debounces it — python's `_FlushLoop`, and the only path that also seeds
-    // the bundle's readme/docs. A kernel with no loader booted (or no store
+    // debounces it — python's `_FlushLoop`. A kernel with no loader booted (or no store
     // wired) keeps the record in RAM, which is the auto-flush law.
 
     // LIFECYCLE SHAPE, python's: `{agent_id, kind, …}` like every other state
@@ -316,17 +247,17 @@ pub async fn create_from_payload(
     // Wrap in Box::pin because boot may call create_agent recursively (a boot
     // hook may create a child agent); the resulting async future is recursive
     // and Rust requires explicit indirection.
-    let boot = Box::pin(kernel.bookkeeping(&new_agent, json!({"type": "boot"}), None)).await;
+    let boot = Box::pin(kernel.announce(&new_agent, json!({"type": "boot"}))).await;
     let new_id = new_agent.id.clone();
     // BRANCH ON THE OUTCOME STATUS, not on the reply shape. A handler that
     // RAISED settles `failed` and is the one case python prints — on stdout,
     // with the result's `str()`. A boot that merely answered `{error:…}`
     // (`errored`) or completed prints nothing — no WARN for every refusal.
-    if boot.status == crate::outcome::Status::Failed {
+    if let Some(boot) = boot.filter(|b| b.status == crate::outcome::Status::Failed) {
         println!(
             "  [create_agent] {} boot failed: {}",
             new_id.0,
-            fantastic_bundle::py_str(&boot.result)
+            boot.result
         );
     }
     // Lifecycle event on the PARENT's inbox, not the root's: whoever watches an
@@ -386,18 +317,12 @@ pub fn keep_memory(kernel: &Kernel, id: &AgentId) -> bool {
 }
 
 /// Implementation of the `delete_agent` system verb.
-pub(crate) async fn delete_from_payload(
+pub(crate) async fn delete_agent(
     kernel: &Arc<Kernel>,
     caller: &Arc<Agent>,
-    payload: &Value,
+    args: &crate::declared::kernel::DeleteAgent,
 ) -> Value {
-    let Some(id_str) = payload
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    else {
-        return crate::refusal::missing("delete_agent", "id");
-    };
+    let id_str = args.id.as_str();
     let id = AgentId::from(id_str);
     let Some(target) = kernel.agents.get(&id).map(|e| Arc::clone(&e)) else {
         // THE ONE REFUSAL SHAPE, py-canonical: a code to branch on, the LIVE id
@@ -459,7 +384,7 @@ pub(crate) async fn delete_from_payload(
     // `keep_memory:true` (only the literal) tells every `on_delete` hook of this
     // subtree to leave the agent's persisted memory alone. The hook has no
     // payload, so the flag rides kernel state, set for this one delete.
-    let keep = payload.get("keep_memory") == Some(&Value::Bool(true));
+    let keep = args.keep_memory == Some(true);
     let kept = kernel.extension::<KeepMemory>(KEEP_MEMORY_KEY);
     if keep {
         kept.0

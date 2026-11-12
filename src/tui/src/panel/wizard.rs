@@ -80,7 +80,7 @@ pub struct Details {
 
 /// The backend's own fields: not [`MAIN`], not the key.
 pub fn own(b: &Backend) -> Vec<&Field> {
-    b.fields.iter().filter(|f| !MAIN.contains(&f.name.as_str()) && f.ty != "credentials").collect()
+    b.fields.iter().filter(|f| !MAIN.contains(&f.name.as_str()) && f.name != "credentials").collect()
 }
 
 impl Details {
@@ -218,26 +218,26 @@ mod tests {
     fn vllm() -> Backend {
         Backend::from_schema(
             "vllm_backend.tools",
-            &json!({"fields": [
-                {"name": "endpoint", "type": "str", "required": true},
-                {"name": "model", "type": "str", "required": true},
-                {"name": "max_tokens", "type": "int", "required": true},
-                {"name": "kv_overflow", "type": "enum", "required": false, "enum": ["evict", "reject"]},
-                {"name": "temperature", "type": "float", "required": false, "default": 0.2},
-                {"name": "credentials", "type": "credentials", "required": false},
-                {"name": "memory_store_id", "type": "str", "required": true},
-            ]}),
+            &json!({"type": "object", "required": ["endpoint", "model", "max_tokens", "memory_store_id"], "properties": {
+                "endpoint": {"type": "string"},
+                "model": {"type": "string"},
+                "max_tokens": {"type": "integer"},
+                "kv_overflow": {"type": "string", "enum": ["evict", "reject"]},
+                "temperature": {"type": "number", "default": 0.2},
+                "credentials": {"type": "object"},
+                "memory_store_id": {"type": "string"},
+            }}),
         )
     }
 
     fn keyed() -> Backend {
         Backend::from_schema(
             "responses_backend.tools",
-            &json!({"fields": [
-                {"name": "endpoint", "type": "str", "required": true},
-                {"name": "model", "type": "str", "required": true},
-                {"name": "credentials", "type": "credentials", "required": true},
-            ]}),
+            &json!({"type": "object", "required": ["endpoint", "model", "credentials"], "properties": {
+                "endpoint": {"type": "string"},
+                "model": {"type": "string"},
+                "credentials": {"type": "object"},
+            }}),
         )
     }
 

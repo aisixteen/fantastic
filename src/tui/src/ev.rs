@@ -168,6 +168,13 @@ pub enum Cmd {
         target: AgentId,
         payload: Value,
     },
+    /// Keystrokes typed into a terminal job: a `write` act, kept in order per agent by
+    /// the runner.
+    Typed {
+        target: AgentId,
+        job_id: i64,
+        data: String,
+    },
     Cancel {
         task_id: RowId,
     },
@@ -248,7 +255,7 @@ impl Cmd {
             Cmd::Ps => What::Ps,
             Cmd::Rows { .. } => What::Rows,
             Cmd::Reflect { .. } => What::Reflect,
-            Cmd::Send { .. } => What::Send,
+            Cmd::Send { .. } | Cmd::Typed { .. } => What::Send,
             Cmd::OpenView { .. } => What::Send,
             Cmd::Cancel { .. } => What::Cancel,
             Cmd::Watch(_) | Cmd::Unwatch(_) | Cmd::Jump { .. } | Cmd::Quit => What::Ps,
@@ -265,7 +272,7 @@ impl Cmd {
     pub fn is_act(&self) -> bool {
         matches!(
             self,
-            Cmd::Send { .. } | Cmd::Cancel { .. }
+            Cmd::Send { .. } | Cmd::Typed { .. } | Cmd::Cancel { .. }
         )
     }
 }

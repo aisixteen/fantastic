@@ -143,10 +143,7 @@ impl TerminalPanel {
     fn write(&self, data: String, out: &mut Vec<Cmd>) {
         // Keys before a job exists, or after it exited, have nowhere to go.
         let Some(job) = self.job.as_ref().filter(|_| !self.closed) else { return };
-        out.push(Cmd::Send {
-            target: self.agent.clone(),
-            payload: json!({"type":"write","job_id":job,"data":data}),
-        });
+        out.push(Cmd::Typed { target: self.agent.clone(), job_id: *job, data });
     }
 
     /// Is `payload` a frame of the job drawn here?
@@ -445,7 +442,7 @@ mod tests {
         let data: Vec<&str> = out
             .iter()
             .map(|c| match c {
-                Cmd::Send { payload, .. } => payload["data"].as_str().unwrap(),
+                Cmd::Typed { data, .. } => data.as_str(),
                 other => panic!("{other:?}"),
             })
             .collect();

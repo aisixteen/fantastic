@@ -31,7 +31,6 @@ ALLOWED_PATHS = (
     "docs/io_bridge_blueprint.md",
     "src/lib/rust/crates/bundles/fantastic-foundation-models-backend/",
     "src/lib/rust/README.md",
-    "src/lib/rust/selftest/foundation_models_backend.md",
     "src/lib/rust/.cargo/config.toml",
     "src/.cargo/config.toml",
     "src/tui/Cargo.toml",

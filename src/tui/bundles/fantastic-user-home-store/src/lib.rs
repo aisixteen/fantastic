@@ -40,19 +40,23 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::refusal::{
-    missing, refusal, refusal_hint, with, BAD_ARG, INVALID_META, NOT_FOUND, UNAUTHORIZED, UNHANDLED,
+    refusal, refusal_hint, with, BAD_ARG, INVALID_META, NOT_FOUND, UNAUTHORIZED,
 };
 use fantastic_kernel::{AgentId, Kernel};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 /// The `handler_module` this bundle answers to.
 pub const HANDLER_MODULE: &str = "user_home_store.tools";
 
-/// The short orientation readme.
-pub const README: &str = include_str!("readme.md");
+/// What the bundle is for: its one short man text; how to call it is rendered from its
+/// declared verbs (`docs`, `reflect`).
+const MAN: &str = "The user's saved set-ups: named agent-record blueprints kept in the user's home dir, applied by the CLI when it creates an agent. A saved set-up carries no identity, wiring or authority; the creator adds those.";
+
+pub mod record;
+pub mod verbs;
 
 /// The environment variable that names the home dir; unset → `~/.fantastic`.
 pub const HOME_VAR: &str = "FANTASTIC_HOME";
@@ -192,26 +196,11 @@ fn version(bytes: &[u8]) -> String {
     d.iter().map(|b| format!("{b:02x}")).collect::<String>()[..16].to_string()
 }
 
+/// Is `n` a name `forget_record` would take: its declared `name` (one pattern, in the
+/// verb's declaration) read by the shared engine, for a name found on disk.
 pub(crate) fn valid_name(n: &str) -> bool {
-    let mut cs = n.chars();
-    matches!(cs.next(), Some(c) if c.is_ascii_alphanumeric())
-        && n.len() <= 64
-        && cs.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
-fn name_arg(verb: &str, payload: &Value) -> Result<String, Value> {
-    match payload.get("name").and_then(Value::as_str) {
-        None | Some("") => Err(missing(verb, "name")),
-        Some(n) if valid_name(n) => Ok(n.to_string()),
-        Some(n) => {
-            let mut r = refusal(
-                BAD_ARG,
-                format!("{verb}: name {n:?} — letters, digits, '-' and '_', starting with a letter or digit, at most 64"),
-            );
-            with(&mut r, "arg", json!("name"));
-            Err(r)
-        }
-    }
+    let verb = verbs::VERBS.iter().find(|v| v.name == "forget_record").expect("forget_record is declared");
+    fantastic_kernel::verbs::validate("forget_record", verb.schema(), &json!({"name": n})).is_ok()
 }
 
 /// Write `bytes` to `path` atomically, created `0600`.
@@ -245,77 +234,33 @@ fn stale(verb: &str, name: &str, want: &str, have: Option<&str>) -> Value {
 }
 
 impl UserHomeStore {
-    fn persist(&self, payload: &Value, kernel: &Arc<Kernel>) -> Result<Value, Value> {
-        let name = name_arg("persist_record", payload)?;
-        let rec = match payload.get("record").and_then(Value::as_object) {
-            Some(r) => r.clone(),
-            None => return Err(missing("persist_record", "record")),
-        };
-        let Some(hm) = rec.get("handler_module").and_then(Value::as_str) else {
-            return Err(missing("persist_record", "record.handler_module"));
-        };
-        let bad: Vec<&str> = NOT_SAVED.iter().copied().filter(|k| rec.contains_key(*k)).collect();
-        if !bad.is_empty() {
-            return Err(refusal_hint(
-                INVALID_META,
-                format!("persist_record: a saved set-up carries no identity, wiring or authority — drop {}", bad.join(", ")),
-                "the creator adds id, parent, memory store and grants when it makes an agent from a saved set-up",
-            ));
-        }
+    fn persist(&self, a: verbs::PersistRecord, kernel: &Arc<Kernel>) -> Result<Value, Value> {
+        let name = a.name;
+        let hm = a.record.handler_module.as_str();
         let Some(bundle) = kernel.bundles.get(hm) else {
             return Err(refusal(INVALID_META, format!("persist_record: no bundle {hm:?} is linked into this build")));
         };
-        // A saved set-up is checked against the backend's RECORD SCHEMA (the same
-        // constants its create validates with) — minus what the CREATOR adds
-        // (`NOT_SAVED`: the memory store, id, grants…). A full
-        // `validate_meta` would demand exactly those, which a saved set-up must never
-        // carry. A bundle with no schema is checked by its own `validate_meta`.
-        let schema = bundle.record_schema();
-        if schema.is_none() {
-            let mut meta = rec.clone();
-            meta.remove("handler_module");
-            let mut target = Map::new();
-            target.insert("handler_module".into(), json!(hm));
-            if let Some(why) = bundle.validate_meta(&meta, &target) {
-                return Err(refusal(INVALID_META, format!("persist_record: {hm} refuses this saved set-up: {why}")));
-            }
-        }
-        if let Some(schema) = schema {
-            let fields = schema["fields"].as_array().cloned().unwrap_or_default();
-            let mut missing_f: Vec<String> = Vec::new();
-            for f in &fields {
-                let name = f["name"].as_str().unwrap_or("");
-                if NOT_SAVED.contains(&name) {
-                    continue;
-                }
-                let given = rec.get(name).filter(|v| !v.is_null());
-                if f["required"].as_bool() == Some(true) && given.is_none() {
-                    missing_f.push(format!("{name} = {}", f["hint"].as_str().unwrap_or("")));
-                }
-                if let (Some(v), Some(choices)) = (given, f["enum"].as_array()) {
-                    if !choices.contains(v) {
-                        return Err(refusal(INVALID_META, format!("persist_record: {hm} — {name} must be one of {}", Value::Array(choices.clone()))));
-                    }
-                }
-            }
-            if !missing_f.is_empty() {
-                return Err(refusal(INVALID_META, format!("persist_record: {hm} refuses this saved set-up — required and missing: {}", missing_f.join("; "))));
-            }
-        }
+        // A saved set-up is checked against the bundle's DECLARED RECORD (the same
+        // declaration its create is checked with, by the bundle's own shared entry):
+        // every field known and of its type, and the required ones present (a saved
+        // set-up is a record to be born: the create's check).
+        bundle.check_record("create_agent", &a.record.rest)?;
         let path = self.saved_for_write()?.join(format!("{name}.yaml"));
         let now = read_private(&path)?.map(|b| version(&b));
-        if let Some(want) = payload.get("if_match").and_then(Value::as_str) {
+        if let Some(want) = a.if_match.as_deref() {
             if now.as_deref() != Some(want) {
                 return Err(stale("persist_record", &name, want, now.as_deref()));
             }
         }
+        let mut rec = a.record.rest;
+        rec.insert("handler_module".into(), Value::String(a.record.handler_module));
         let text = fantastic_kernel::yaml_io::dump(&Value::Object(rec));
         write_private(&path, text.as_bytes())?;
         Ok(json!({"name": name, "version": version(text.as_bytes()), "path": path.display().to_string()}))
     }
 
-    fn forget(&self, payload: &Value) -> Result<Value, Value> {
-        let name = name_arg("forget_record", payload)?;
+    fn forget(&self, a: verbs::ForgetRecord) -> Result<Value, Value> {
+        let name = a.name;
         let Some(dir) = self.saved_if_any()? else {
             return Err(refusal(NOT_FOUND, format!("forget_record: no saved set-up {name}")));
         };
@@ -323,7 +268,7 @@ impl UserHomeStore {
         let Some(bytes) = read_private(&path)? else {
             return Err(refusal(NOT_FOUND, format!("forget_record: no saved set-up {name}")));
         };
-        if let Some(want) = payload.get("if_match").and_then(Value::as_str) {
+        if let Some(want) = a.if_match.as_deref() {
             let have = version(&bytes);
             if have != want {
                 return Err(stale("forget_record", &name, want, Some(&have)));
@@ -365,23 +310,22 @@ impl UserHomeStore {
         Ok(json!({"saved": out, "preferred": self.preferred(&dir)?, "dir": dir.display().to_string()}))
     }
 
-    fn prefer(&self, payload: &Value) -> Result<Value, Value> {
+    fn prefer(&self, a: verbs::Prefer) -> Result<Value, Value> {
         let Some(dir) = self.saved_if_any()? else {
-            return match payload.get("name") {
-                Some(Value::Null) => Ok(json!({"preferred": null})),
-                _ => Err(refusal(NOT_FOUND, format!("prefer: no saved set-up {}", payload.get("name").and_then(Value::as_str).unwrap_or("")))),
+            return match a.name {
+                None => Ok(json!({"preferred": null})),
+                Some(n) => Err(refusal(NOT_FOUND, format!("prefer: no saved set-up {n}"))),
             };
         };
         let p = dir.join(PREFERRED);
-        match payload.get("name") {
-            Some(Value::Null) => {
+        match a.name {
+            None => {
                 if p.exists() {
                     fs::remove_file(&p).map_err(|e| refusal(BAD_ARG, format!("user_home_store: {}: {e}", p.display())))?;
                 }
                 Ok(json!({"preferred": null}))
             }
-            _ => {
-                let name = name_arg("prefer", payload)?;
+            Some(name) => {
                 if !dir.join(format!("{name}.yaml")).exists() {
                     return Err(refusal(NOT_FOUND, format!("prefer: no saved set-up {name}")));
                 }
@@ -394,50 +338,43 @@ impl UserHomeStore {
     fn reflect(&self) -> Value {
         json!({
             "handler_module": HANDLER_MODULE,
-            "sentence": "The user's saved set-ups: named agent-record blueprints in the home dir (~/.fantastic), applied by the CLI when it creates an agent.",
+            "sentence": MAN,
             "dir": self.home.as_ref().map(|h| saved_dir(h).display().to_string()).ok(),
         })
     }
 }
 
 #[async_trait]
-impl Bundle for UserHomeStore {
+impl Handler for UserHomeStore {
+    type Call = verbs::Call;
+
     fn name(&self) -> &str {
         HANDLER_MODULE
     }
 
-    fn readme(&self) -> Option<&'static str> {
-        Some(README)
+    fn man(&self) -> &'static str {
+        MAN
     }
 
-    /// HOW TO CALL it — served by the kernel's `docs` verb, never on a reflect.
-    fn verb_docs(&self) -> Value {
-        json!({
-                "persist_record": "args: name:str (req), record:dict (req — handler_module + that bundle's config; no identity, wiring or grants), if_match:str?. Returns {name, version, path}.",
-                "forget_record": "args: name:str (req), if_match:str?. Returns {name, forgotten}.",
-                "load_tree": "No args. Returns {saved: [{name, version, record}], preferred, dir}.",
-                "prefer": "args: name:str|null (req). The owner's default for new AI agents; null clears it. Returns {preferred}.",
-            })
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        verbs::VERBS
     }
 
-    async fn handle(&self, _agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        if verb == "boot" {
-            return Ok(None);
-        }
-        if verb == "reflect" {
-            return Ok(Some(self.reflect()));
-        }
-        let out = match verb {
-            "persist_record" => self.persist(payload, kernel),
-            "forget_record" => self.forget(payload),
-            "load_tree" => self.load_tree(),
-            "prefer" => self.prefer(payload),
-            _ => {
-                let mut r = refusal(UNHANDLED, format!("user_home_store: unknown type {verb:?}"));
-                with(&mut r, "verb", json!(verb));
-                Err(r)
-            }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        verbs::dynamic_verbs(agent)
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &record::RECORD
+    }
+
+    async fn handle(&self, _agent_id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
+        let out = match call {
+            verbs::Call::Reflect(_) => return Ok(Some(self.reflect())),
+            verbs::Call::PersistRecord(a) => self.persist(a, kernel),
+            verbs::Call::ForgetRecord(a) => self.forget(a),
+            verbs::Call::LoadTree(_) => self.load_tree(),
+            verbs::Call::Prefer(a) => self.prefer(a),
         };
         Ok(Some(out.unwrap_or_else(|r| r)))
     }

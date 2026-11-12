@@ -21,35 +21,12 @@ use std::sync::Arc;
 /// Files the KERNEL manages. A sidecar may not overwrite them.
 const RESERVED_BLOB_NAMES: [&str; 1] = [crate::persistence::RECORD_FILE];
 
-/// Validate a blob filename: one bare segment, not kernel-managed, no escape or
-/// hidden name.
-///
-/// Defence in depth over the provider's own clamp, so a bad `name` fails AT the
-/// loader with a loader-scoped message instead of surfacing as a deep fs error
-/// the caller cannot act on.
-fn guard_name(name: Option<&str>) -> Result<&str, String> {
-    let Some(name) = name.filter(|n| !n.is_empty()) else {
-        return Err("name (non-empty str) required".to_string());
-    };
-    if name.contains('/') || name.contains('\\') {
-        return Err(format!(
-            "name {} must be a single filename (no path segments)",
-            fantastic_bundle::py_repr(name)
-        ));
-    }
-    if name.starts_with('.') || name.contains("..") {
-        return Err(format!(
-            "name {} must not be hidden or contain '..'",
-            fantastic_bundle::py_repr(name)
-        ));
-    }
-    if RESERVED_BLOB_NAMES.contains(&name.to_lowercase().as_str()) {
-        return Err(format!(
-            "name {} is reserved (kernel-managed)",
-            fantastic_bundle::py_repr(name)
-        ));
-    }
-    Ok(name)
+/// Is `name` a file the kernel manages? A sidecar may not overwrite it (a sidecar
+/// that could rewrite `agent.yaml` would let a consumer edit its own record, grants
+/// included, through a byte channel). The name's shape (one bare filename) is the
+/// verb declaration's pattern; this is the one rule that needs the reserved list.
+fn reserved_name(name: &str) -> bool {
+    RESERVED_BLOB_NAMES.contains(&name.to_lowercase().as_str())
 }
 
 /// Store-relative dir for an agent's sidecars — `agents/<id>`, or `""` for the
@@ -87,19 +64,7 @@ fn blob_reldir(kernel: &Arc<Kernel>, loader: &Agent, aid: &str) -> Result<String
     Ok(super::loader_reldir(kernel, loader, &abs))
 }
 
-/// A BARE `{error}`, python's shape. The blob verbs are the loader BUNDLE's, not
-/// the kernel's, and python's bundle returns plain dicts with no refusal code:
-/// `{"error": "<verb>: <why>"}`, plus `reason` only where python sets one.
-fn err(verb: &str, why: impl std::fmt::Display) -> Value {
-    json!({ "error": format!("{verb}: {why}") })
-}
-
-/// Shared preamble: validate, authorize, resolve the path.
-///
-/// PYTHON'S ORDER. `persist_blob` checks `content` BETWEEN the owner guard and
-/// the store lookup, so a bad payload is named before "no store wired" — the
-/// caller is told what IT got wrong first. `content` is the caller's to pass, so
-/// the check rides in `persist_blob` and this returns before the store lookup.
+/// Shared preamble: the path rules, then the store, then the path.
 ///
 /// `Ok(Err(reply))` = the bare `{error}` the verb answers with; `Err` = the walk
 /// RAISED ([`blob_reldir`]).
@@ -107,15 +72,22 @@ fn resolve(
     kernel: &Arc<Kernel>,
     loader: &Agent,
     verb: &str,
-    payload: &Value,
+    aid: &str,
+    name: &str,
 ) -> Result<Result<(AgentId, String), Value>, BundleError> {
-    let (aid, name) = match guard_args(verb, payload) {
-        Ok(v) => v,
-        Err(e) => return Ok(Err(e)),
-    };
+    if reserved_name(name) {
+        return Ok(Err(crate::refusal::bad(
+            verb,
+            "name",
+            "a name other than a kernel-managed file",
+        )));
+    }
     // THE ADDRESSED LOADER's store (python `_find_store(agent)`), never another's.
     let Some(store) = super::find_store_for(kernel, loader) else {
-        return Ok(Err(err(verb, "no store wired — persistence not available")));
+        return Ok(Err(crate::refusal::refusal(
+            crate::refusal::NOT_FOUND,
+            format!("{verb}: no store wired — persistence not available"),
+        )));
     };
     let reldir = blob_reldir(kernel, loader, aid)?;
     let path = if reldir.is_empty() {
@@ -126,23 +98,6 @@ fn resolve(
     Ok(Ok((store, path)))
 }
 
-/// agent_id → name → owner, python's order, shared by both verbs. Answers the
-/// validated `(agent_id, name)`.
-fn guard_args<'a>(verb: &str, payload: &'a Value) -> Result<(&'a str, &'a str), Value> {
-    let aid = payload
-        .get("agent_id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| err(verb, "agent_id (str) required"))?;
-    // The id BECOMES A DIRECTORY (`agents/<agent_id>/`): one safe segment, or
-    // `../bundles/x` would write a folder bundle's `bundle.yaml`.
-    if let Some(r) = crate::refusal::guard_agent_id_as(verb, "agent_id", aid) {
-        return Err(r);
-    }
-    let name = guard_name(payload.get("name").and_then(Value::as_str)).map_err(|e| err(verb, e))?;
-    Ok((aid, name))
-}
-
 /// `persist_blob` — whole-file write of one sidecar, through `loader`'s store.
 ///
 /// # Errors
@@ -150,17 +105,11 @@ fn guard_args<'a>(verb: &str, payload: &'a Value) -> Result<(&'a str, &'a str), 
 pub async fn persist_blob(
     kernel: &Arc<Kernel>,
     loader: &Agent,
-    payload: &Value,
+    agent_id: &str,
+    name: &str,
+    content: &str,
 ) -> Result<Value, BundleError> {
-    if let Err(e) = guard_args("persist_blob", payload) {
-        return Ok(e);
-    }
-    // CONTENT BEFORE THE STORE (python's order): what the caller got wrong is
-    // named before what the kernel does not have.
-    let Some(content) = payload.get("content").and_then(Value::as_str) else {
-        return Ok(err("persist_blob", "content (str) required"));
-    };
-    let (store, path) = match resolve(kernel, loader, "persist_blob", payload)? {
+    let (store, path) = match resolve(kernel, loader, "persist_blob", agent_id, name)? {
         Ok(v) => v,
         Err(e) => return Ok(e),
     };
@@ -174,17 +123,14 @@ pub async fn persist_blob(
         content.as_bytes().to_vec(),
     )
     .await;
-    if let Some(e) = reply
-        .get("error")
-        .filter(|v| fantastic_bundle::py_truthy(v))
-    {
+    if let Some(e) = crate::refusal::error_text(&reply) {
         let mut out = json!({
-            "error": format!("persist_blob: {}", fantastic_bundle::py_str(e)),
+            "error": format!("persist_blob: {e}"),
         });
         // Carry the provider's own machine fields through — a gate denial on the
         // store must not be relabelled, and python copies each only when truthy.
         for k in ["reason", "hint"] {
-            if let Some(v) = reply.get(k).filter(|v| fantastic_bundle::py_truthy(v)) {
+            if let Some(v) = reply.get(k).filter(|v| !v.is_null() && v.as_str() != Some("")) {
                 out[k] = v.clone();
             }
         }
@@ -192,7 +138,7 @@ pub async fn persist_blob(
     }
     Ok(json!({
         "ok": true,
-        "name": payload.get("name").cloned().unwrap_or(Value::Null),
+        "name": name,
         "size": reply.get("size").cloned().unwrap_or(Value::Null),
     }))
 }
@@ -206,8 +152,7 @@ fn decoded_blob(name: &Value, raw: Vec<u8>) -> Value {
         Ok(text) => json!({ "name": name, "content": text }),
         Err(e) => json!({
             "error": format!(
-                "load_blob: {} is not utf-8 at byte {}",
-                fantastic_bundle::py_str(name),
+                "load_blob: {name} is not utf-8 at byte {}",
                 e.utf8_error().valid_up_to()
             ),
             "reason": "bad_encoding",
@@ -231,13 +176,14 @@ fn decoded_blob(name: &Value, raw: Vec<u8>) -> Value {
 pub async fn load_blob(
     kernel: &Arc<Kernel>,
     loader: &Agent,
-    payload: &Value,
+    agent_id: &str,
+    name: &str,
 ) -> Result<Value, BundleError> {
-    let (store, path) = match resolve(kernel, loader, "load_blob", payload)? {
+    let (store, path) = match resolve(kernel, loader, "load_blob", agent_id, name)? {
         Ok(v) => v,
         Err(e) => return Ok(e),
     };
-    let name = payload.get("name").cloned().unwrap_or(Value::Null);
+    let name = Value::String(name.to_string());
     let mut chunks: Vec<u8> = Vec::new();
     let mut offset: u64 = 0;
     let mut last;
@@ -263,7 +209,7 @@ pub async fn load_blob(
                     "error": format!(
                         "load_blob: {} stalled at offset {offset} — the store \
                          returned no forward progress",
-                        fantastic_bundle::py_str(&name)
+                        name = name
                     ),
                     "name": name,
                     "content": Value::Null,
@@ -278,12 +224,12 @@ pub async fn load_blob(
         let mut out = json!({
             "error": format!(
                 "load_blob: {}",
-                last.get("error")
-                    .map_or_else(|| "unauthorized".to_string(), fantastic_bundle::py_str)
+                crate::refusal::error_text(&last)
+                    .unwrap_or_else(|| "unauthorized".to_string())
             ),
             "reason": "unauthorized",
         });
-        if let Some(h) = last.get("hint").filter(|v| fantastic_bundle::py_truthy(v)) {
+        if let Some(h) = last.get("hint").filter(|v| !v.is_null() && v.as_str() != Some("")) {
             out["hint"] = h.clone();
         }
         return Ok(out);

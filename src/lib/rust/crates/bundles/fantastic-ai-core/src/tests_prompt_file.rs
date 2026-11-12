@@ -59,7 +59,7 @@ async fn failed_turn(kernel: &Arc<Kernel>, backend: &AgentId, s: &Arc<MockScript
         .await
         .remove(0)
         .result;
-    assert_eq!(r["reason"], "system_prompt_file", "{r}");
+    assert_eq!(r["reason"], "invalid_meta", "{r}");
     assert_eq!(
         s.passes_served(),
         before,
@@ -271,82 +271,29 @@ async fn an_empty_file_fails_the_turn() {
 
 #[test]
 fn a_bad_value_is_refused_at_the_write() {
-    // every real backend's `validate_meta` runs the shared schema check
-    let sch = crate::schema::schema(vec![]);
-    let rec = json!({"memory_store_id": "m"})
-        .as_object()
-        .cloned()
-        .unwrap();
-    for (field, bad, refusal) in [
-        (
-            "system_prompt_file",
-            json!(""),
-            crate::prompt_file::SYSTEM_PROMPT_FILE_REFUSAL,
-        ),
-        (
-            "system_prompt_file",
-            json!("  "),
-            crate::prompt_file::SYSTEM_PROMPT_FILE_REFUSAL,
-        ),
-        (
-            "system_prompt_file",
-            json!(5),
-            crate::prompt_file::SYSTEM_PROMPT_FILE_REFUSAL,
-        ),
-        (
-            "system_prompt_file",
-            json!({"bridge": "x", "path": "p.md"}),
-            crate::prompt_file::SYSTEM_PROMPT_FILE_REFUSAL,
-        ),
-        (
-            "file_bridge_id",
-            json!(""),
-            crate::prompt_file::FILE_BRIDGE_ID_REFUSAL,
-        ),
-        (
-            "file_bridge_id",
-            json!(5),
-            crate::prompt_file::FILE_BRIDGE_ID_REFUSAL,
-        ),
-        (
-            "file_bridge_id",
-            json!(["x"]),
-            crate::prompt_file::FILE_BRIDGE_ID_REFUSAL,
-        ),
+    // the engine refuses a value that is not text, or text with no non-space character
+    for (field, bad) in [
+        ("system_prompt_file", json!("")),
+        ("system_prompt_file", json!("  ")),
+        ("system_prompt_file", json!(5)),
+        ("system_prompt_file", json!({"bridge": "x", "path": "p.md"})),
+        ("file_bridge_id", json!("")),
+        ("file_bridge_id", json!(5)),
+        ("file_bridge_id", json!(["x"])),
     ] {
         let mut meta = serde_json::Map::new();
         meta.insert(field.to_string(), bad.clone());
-        let e = crate::schema::validate(&sch, "b", &meta, &rec);
-        assert_eq!(e.as_deref(), Some(refusal), "{field}={bad}");
+        let e = crate::tests_decl::refused_at_the_write(&meta);
+        assert!(e.is_some_and(|t| t.contains(field)), "{field}={bad}");
     }
     let ok = json!({"file_bridge_id": "x", "system_prompt_file": "p.md"})
         .as_object()
         .cloned()
         .unwrap();
-    assert_eq!(crate::schema::validate(&sch, "b", &ok, &rec), None);
+    assert_eq!(crate::tests_decl::refused_at_the_write(&ok), None);
     let null = json!({"file_bridge_id": null, "system_prompt_file": null})
         .as_object()
         .cloned()
         .unwrap();
-    assert_eq!(
-        crate::schema::validate(&sch, "b", &null, &rec),
-        None,
-        "null clears"
-    );
-    let names: Vec<String> = sch["fields"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|f| f["name"].as_str().unwrap().to_string())
-        .collect();
-    assert!(
-        names.ends_with(&[
-            "system_prompt".to_string(),
-            "file_bridge_id".to_string(),
-            "system_prompt_file".to_string(),
-            "pre_system_prompt".to_string(),
-            "post_system_prompt".to_string()
-        ]),
-        "{names:?}"
-    );
+    assert_eq!(crate::tests_decl::refused_at_the_write(&null), None, "null clears");
 }

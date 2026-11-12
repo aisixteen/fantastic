@@ -12,6 +12,8 @@ description = "The user's SAVED SET-UP store (`user_home_store.tools`): named ag
 fantastic-kernel = { path = "../../../lib/rust/crates/fantastic-kernel" }
 async-trait = "0.1"
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+schemars = { version = "0.8", features = ["preserve_order"] }
 sha2 = "0.10"
 
 # `sys::windows` — the private-file contract as DACLs: the token's SIDs, a
@@ -27,5 +29,6 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+fantastic-kernel = { path = "../../../lib/rust/crates/fantastic-kernel", features = ["test-support"] }
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tempfile = "3"

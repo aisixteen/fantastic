@@ -10,13 +10,11 @@ import { inRoot, norm } from "./paths.ts";
 // cell's part: the folder it is a view of, and its saved state.
 
 export const FILES_VIEW = "files_view.ts";
-/** The cell's old name: a saved `sidebar_view.ts` cell opens as this tree. */
-export const LEGACY_SIDEBAR_VIEW = "sidebar_view.ts";
 
 const str = (r: Record<string, unknown> | undefined, k: string): string | undefined => (typeof r?.[k] === "string" && r[k] !== "" ? (r[k] as string) : undefined);
 
 export const filesView: ViewBundle = {
-  handles: [FILES_VIEW, LEGACY_SIDEBAR_VIEW],
+  handles: [FILES_VIEW],
   grants: () => fileGrant(),
   mount(ctx: ViewContext): ViewHandle {
     // the folder this tree starts at (#135: a folder dropped on the canvas); the project when none

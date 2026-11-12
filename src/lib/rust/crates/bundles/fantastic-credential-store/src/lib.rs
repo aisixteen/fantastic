@@ -69,17 +69,21 @@
 #![deny(missing_docs)]
 
 pub mod keychain;
+pub mod record;
 mod sys;
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+pub mod verbs;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use fantastic_bundle::{py_json_dumps, py_repr, py_repr_value, py_str, py_strip, py_truthy};
+use fantastic_bundle::{py_json_dumps, py_repr, py_repr_value, py_strip};
 use fantastic_file::fs;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::refusal::{missing, refusal, with, BAD_ARG, NOT_FOUND, UNHANDLED};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
+use serde::Deserialize;
+use fantastic_kernel::refusal::{refusal, with, BAD_ARG, NOT_FOUND};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
 
@@ -88,52 +92,12 @@ use crate::keychain::{Keychain, OsKeychain};
 /// The `handler_module` this bundle answers to — python's package path.
 pub const HANDLER_MODULE: &str = "credential_store.tools";
 
-/// The short orientation readme — python's, verbatim.
-pub const README: &str = include_str!("readme.md");
-
 const NAME: &str = "credential_store";
-const BACKENDS: [&str; 3] = ["file", "keychain", "env"];
 const CREDENTIALS_DIR: &str = "user/credentials";
 const KEYCHAIN_NAMESPACE: &str = "fantastic";
 
-/// What `reflect` says this agent IS — python's `sentence`, verbatim.
-pub const SENTENCE: &str = "Credential store — secrets by ref, each bound to one host.";
-
-/// Each verb's doc line — the FIRST line of python's docstring, in `VERBS` order.
-const VERBS: [(&str, &str); 6] = [
-    (
-        "reflect",
-        "Identity + posture: the backend, where the file lives, how many refs; never a \
-         value or a ref name. No args.",
-    ),
-    (
-        "boot",
-        "No-op: values are read from the backend when asked for.",
-    ),
-    (
-        "set",
-        "args: ref:str, fields:{name: value} (req). Store or rotate the value of a DECLARED \
-         ref — its host is the declaration's (refs are declared by update_agent on this \
-         store's record; set never creates one and takes no host). Returns {ref, host, \
-         fields:[names], stored}.",
-    ),
-    (
-        "get",
-        "args: ref:str (req), host:str? (where you will send it — refused unless the ref is \
-         bound to it). The credential: {ref, host, fields:{name: value}}. Send the value \
-         ONLY to `host`.",
-    ),
-    (
-        "list",
-        "No args. The declared refs — metadata only: {refs:[{ref, host, fields:[names]}]}. \
-         Never a value.",
-    ),
-    (
-        "forget",
-        "args: ref:str (req). Drop a ref's VALUE from the backend; its declaration (host) \
-         stays — update_agent alone undeclares a ref. Returns {forgotten, ref}.",
-    ),
-];
+/// What the bundle is for — its one short man text.
+const MAN: &str = "A store of secrets by ref, each bound to one host: a value is stored under a declared ref, read back only for the host it is bound to, and never shown by reflect or list.";
 
 // ─── python raises ─────────────────────────────────────────────────
 
@@ -231,12 +195,11 @@ fn host(h: Option<&Value>) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-/// The record's `backend`, python `agent.record.get("backend") or "file"`.
-fn backend_kind(rec: &Map<String, Value>) -> String {
-    match rec.get("backend") {
-        Some(v) if py_truthy(v) => py_str(v),
-        _ => "file".to_string(),
-    }
+/// The record's `backend` — the declared enum, `file` when the record names none.
+fn backend_kind(rec: &Map<String, Value>) -> Result<record::BackendKind, BundleError> {
+    serde_json::from_value::<record::Kind>(Value::Object(rec.clone()))
+        .map(|k| k.backend.unwrap_or_default())
+        .map_err(|e| raise("ValueError", format!("{NAME}: the record's backend: {e}")))
 }
 
 // ─── where the values live ───────────────────────────────────────
@@ -307,19 +270,6 @@ fn host_at_rest(r: &str, stored: Option<&Value>, declared: Option<String>) -> Op
     Some(host_mismatch(r, &bound, at_rest.as_deref()))
 }
 
-/// The refusal for a `file` that is not absolute (`/…` — on Windows also a
-/// drive or UNC path, [`fantastic_bundle::is_absolute`] — or `~…`), or `None`.
-/// Python `_relative_file`.
-fn relative_file(p: &str) -> Option<String> {
-    if fantastic_bundle::is_absolute(p) || p.starts_with('~') {
-        return None;
-    }
-    Some(format!(
-        "file={} must be an absolute path (starting with / or ~) — a relative path is refused",
-        py_repr(p)
-    ))
-}
-
 /// The default backend: one YAML document of
 /// `{refs: {ref: {host, fields: {field: value}}}}`, at an absolute path.
 struct FileBackend {
@@ -331,14 +281,10 @@ struct FileBackend {
 
 impl FileBackend {
     fn new(id: &AgentId, rec: &Map<String, Value>) -> Result<Self, BundleError> {
-        let p = match rec.get("file") {
-            Some(v) if py_truthy(v) => py_str(v),
-            _ => default_file(&id.0)?,
+        let p = match rec.get("file").and_then(Value::as_str) {
+            Some(f) => f.to_string(),
+            None => default_file(&id.0)?,
         };
-        if let Some(why) = relative_file(&p) {
-            // a record written past `validate_meta`
-            return Err(raise("ValueError", format!("{NAME}: {why}")));
-        }
         let (parent, name) = sys::split_path(&expanduser(&p)?);
         Ok(Self {
             base: PathBuf::from(parent),
@@ -432,10 +378,10 @@ fn raise_keychain(e: String) -> BundleError {
 
 impl KeychainBackend {
     fn new(kc: Arc<dyn Keychain>, id: &AgentId, rec: &Map<String, Value>) -> Self {
-        let namespace = match rec.get("keychain_namespace") {
-            Some(v) if py_truthy(v) => py_str(v),
-            _ => KEYCHAIN_NAMESPACE.to_string(),
-        };
+        let namespace = rec
+            .get("keychain_namespace")
+            .and_then(Value::as_str)
+            .map_or_else(|| KEYCHAIN_NAMESPACE.to_string(), str::to_string);
         Self {
             kc,
             namespace,
@@ -498,8 +444,8 @@ fn env_get(rec: &Map<String, Value>, r: &str) -> Result<Option<Map<String, Value
     };
     let mut out = Map::new();
     for (field, var) in names {
-        let var = py_str(var);
-        match std::env::var(&var) {
+        let var = var.as_str().unwrap_or_default();
+        match std::env::var(var) {
             Ok(val) if !val.is_empty() => {
                 out.insert(field.clone(), Value::String(val));
             }
@@ -598,74 +544,58 @@ impl CredentialStoreBundle {
     }
 
     fn backend(&self, id: &AgentId, rec: &Map<String, Value>) -> Result<Backend, BundleError> {
-        match backend_kind(rec).as_str() {
-            "file" => Ok(Backend::File(FileBackend::new(id, rec)?)),
-            "keychain" => Ok(Backend::Keychain(KeychainBackend::new(
+        use record::BackendKind;
+        match backend_kind(rec)? {
+            BackendKind::File => Ok(Backend::File(FileBackend::new(id, rec)?)),
+            BackendKind::Keychain => Ok(Backend::Keychain(KeychainBackend::new(
                 Arc::clone(&self.keychain),
                 id,
                 rec,
             ))),
-            "env" => Ok(Backend::Env(rec.clone())),
-            other => Err(raise("KeyError", py_repr(other))),
+            BackendKind::Env => Ok(Backend::Env(rec.clone())),
         }
     }
 
     fn reflect(id: &AgentId, rec: &Map<String, Value>) -> Value {
-        let backend = backend_kind(rec);
+        let backend = match backend_kind(rec) {
+            Ok(b) => b,
+            Err(e) => return json!({"error": e.to_string()}),
+        };
         let mut out = Map::new();
         out.insert("id".into(), json!(id.0));
-        out.insert("sentence".into(), json!(SENTENCE));
-        out.insert("backend".into(), json!(backend));
+        out.insert("sentence".into(), json!(MAN));
+        out.insert(
+            "backend".into(),
+            json!(match backend {
+                record::BackendKind::File => "file",
+                record::BackendKind::Keychain => "keychain",
+                record::BackendKind::Env => "env",
+            }),
+        );
         out.insert("refs".into(), json!(refs_of(rec).len()));
-        if backend == "file" {
-            let file = match rec.get("file") {
-                Some(v) if py_truthy(v) => v.clone(),
+        if matches!(backend, record::BackendKind::File) {
+            let file = match rec.get("file").filter(|v| !v.is_null()) {
+                Some(v) => v.clone(),
                 // python's `default_file`, which raises where this cannot be read
-                _ => json!(default_file(&id.0).unwrap_or_else(|e| e.to_string())),
+                None => json!(default_file(&id.0).unwrap_or_else(|e| e.to_string())),
             };
             out.insert("file".into(), file);
         }
         Value::Object(out)
     }
 
-    fn set(&self, id: &AgentId, payload: &Value, kernel: &Kernel) -> Result<Value, BundleError> {
-        let Some(r) = payload
-            .get("ref")
-            .and_then(Value::as_str)
-            .filter(|s| !py_strip(s).is_empty())
-        else {
-            return Ok(missing(&format!("{NAME} set"), "ref"));
-        };
-        if payload.get("host").is_some() {
-            // the binding is the declaration's alone
-            let mut out = refusal(
-                BAD_ARG,
-                format!(
-                    "{NAME} set: takes no host — a ref's host is its declaration, written by \
-                     update_agent on this store's refs"
-                ),
-            );
-            with(&mut out, "arg", json!("host"));
-            return Ok(out);
-        }
-        let fields = payload
-            .get("fields")
-            .and_then(Value::as_object)
-            .filter(|f| {
-                !f.is_empty()
-                    && f.iter()
-                        .all(|(k, v)| !k.is_empty() && v.as_str().is_some_and(|s| !s.is_empty()))
-            });
-        let Some(fields) = fields.cloned() else {
-            let mut out = refusal(
-                BAD_ARG,
-                format!("{NAME} set: fields must be a non-empty map of field name to string value"),
-            );
-            with(&mut out, "arg", json!("fields"));
-            return Ok(out);
-        };
+    fn set(&self, id: &AgentId, args: &verbs::Set, kernel: &Kernel) -> Result<Value, BundleError> {
+        // the binding is the declaration's alone: `set` declares no host argument, so
+        // the entry refuses one by name
+        let r = args.ref_name.as_str();
+        // the entry checked the map (at least one entry) and every name and value
+        let fields: Map<String, Value> = args
+            .fields
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
         let rec = record(kernel, id);
-        if backend_kind(&rec) == "env" {
+        if matches!(backend_kind(&rec)?, record::BackendKind::Env) {
             let mut out = refusal(
                 BAD_ARG,
                 format!(
@@ -695,21 +625,15 @@ impl CredentialStoreBundle {
         Ok(json!({"ref": r, "host": h, "fields": sorted_names, "stored": true}))
     }
 
-    fn get(&self, id: &AgentId, payload: &Value, kernel: &Kernel) -> Result<Value, BundleError> {
-        let Some(r) = payload
-            .get("ref")
-            .and_then(Value::as_str)
-            .filter(|s| !py_strip(s).is_empty())
-        else {
-            return Ok(missing(&format!("{NAME} get"), "ref"));
-        };
+    fn get(&self, id: &AgentId, args: &verbs::Get, kernel: &Kernel) -> Result<Value, BundleError> {
+        let r = args.ref_name.as_str();
         let rec = record(kernel, id);
         let refs = refs_of(&rec);
         let Some(entry) = refs.get(r).filter(|v| !v.is_null()).map(entry_map) else {
             return Ok(no_such_ref(r));
         };
-        if payload.get("host").is_some_and(|v| !v.is_null()) {
-            let want = host(payload.get("host"));
+        if let Some(asked) = &args.host {
+            let want = host(Some(&json!(asked)));
             if want.is_none() || want != host(entry.get("host")) {
                 return Ok(host_mismatch(
                     r,
@@ -748,9 +672,9 @@ impl CredentialStoreBundle {
         let mut out = Vec::new();
         for (r, entry) in refs {
             let entry = entry_map(&entry);
-            let fields = match entry.get("fields") {
-                Some(v) if py_truthy(v) => v.clone(),
-                _ => {
+            let fields = match entry.get("fields").filter(|v| !v.is_null()) {
+                Some(v) => v.clone(),
+                None => {
                     let mut names: Vec<String> = entry
                         .get("env")
                         .and_then(Value::as_object)
@@ -769,16 +693,10 @@ impl CredentialStoreBundle {
         json!({"refs": out})
     }
 
-    fn forget(&self, id: &AgentId, payload: &Value, kernel: &Kernel) -> Result<Value, BundleError> {
-        let Some(r) = payload
-            .get("ref")
-            .and_then(Value::as_str)
-            .filter(|s| !py_strip(s).is_empty())
-        else {
-            return Ok(missing(&format!("{NAME} forget"), "ref"));
-        };
+    fn forget(&self, id: &AgentId, args: &verbs::Forget, kernel: &Kernel) -> Result<Value, BundleError> {
+        let r = args.ref_name.as_str();
         let rec = record(kernel, id);
-        if backend_kind(&rec) == "env" {
+        if matches!(backend_kind(&rec)?, record::BackendKind::Env) {
             let mut out = refusal(
                 BAD_ARG,
                 format!(
@@ -805,14 +723,10 @@ impl CredentialStoreBundle {
     }
 }
 
-/// `refs[...]` as python's `{ref!r}` renders it in a refusal.
-fn ref_label(r: &str) -> String {
-    format!("refs[{}]", py_repr(r))
-}
-
-fn is_str_list(v: &Value) -> bool {
-    v.as_array()
-        .is_some_and(|a| a.iter().all(|x| x.as_str().is_some_and(|s| !s.is_empty())))
+/// A reply that may carry a value in `fields`.
+#[derive(Deserialize)]
+struct Answer {
+    fields: Option<Value>,
 }
 
 /// The secret marks of a `fields` value: `fields.<name>` for each name of a
@@ -828,142 +742,82 @@ fn field_marks(fields: Option<&Value>) -> Vec<String> {
     }
 }
 
+/// The secret paths of a call to a credential store: a `set`'s field values. The
+/// call is read through the declared entry; a `set` the entry refuses (a bad
+/// `fields`) is marked whole, since its values were never checked. Shared with
+/// every bundle that forwards calls to a store.
+pub fn set_marks(payload: &Value) -> Vec<String> {
+    use fantastic_kernel::verbs::Parse;
+    match verbs::Call::parse(NAME, payload, &[]) {
+        Ok(verbs::Call::Set(a)) => field_marks(Some(&json!(a.fields))),
+        Err(refusal) if refusal.get("verb") == Some(&json!("set")) => vec!["fields".to_string()],
+        _ => Vec::new(),
+    }
+}
+
 #[async_trait]
-impl Bundle for CredentialStoreBundle {
+impl Handler for CredentialStoreBundle {
+    type Call = verbs::Call;
+
     /// The CATALOG name — python's entry-point name.
     fn name(&self) -> &str {
         NAME
     }
 
-    fn verb_docs(&self) -> Value {
-        let mut verbs = Map::new();
-        for (n, doc) in VERBS {
-            verbs.insert(n.to_string(), json!(doc));
-        }
-        Value::Object(verbs)
+    fn man(&self) -> &'static str {
+        MAN
     }
 
-    fn readme(&self) -> Option<&'static str> {
-        Some(README)
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        verbs::VERBS
     }
 
-    /// A `set`'s field values are secret: recorded as `[secret]`.
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        verbs::dynamic_verbs(agent)
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &record::RECORD
+    }
+
+    /// A `set`'s field values are secret: recorded as `[secret]`. The call is read
+    /// through the declared entry; a `set` the entry refuses (a bad `fields`) is
+    /// recorded whole as secret, since its values were never checked.
     fn payload_secret(&self, payload: &Value) -> Vec<String> {
-        if payload.get("type").and_then(Value::as_str) != Some("set") {
-            return Vec::new();
-        }
-        field_marks(payload.get("fields"))
+        set_marks(payload)
     }
 
     /// A `get` reply's field values are secret: recorded as `[secret]`; the
     /// caller gets them whole.
     fn reply_secret(&self, payload: &Value, reply: &Value) -> Vec<String> {
-        if payload.get("type").and_then(Value::as_str) != Some("get") {
-            return Vec::new();
+        use fantastic_kernel::verbs::Parse;
+        match verbs::Call::parse(NAME, payload, &[]) {
+            Ok(verbs::Call::Get(_)) => match serde_json::from_value::<Answer>(reply.clone()) {
+                Ok(a) => field_marks(a.fields.as_ref()),
+                Err(_) => Vec::new(),
+            },
+            _ => Vec::new(),
         }
-        field_marks(reply.get("fields"))
-    }
-
-    /// The record's own fields, refused at the write when malformed — python
-    /// `validate_meta`, check for check and text for text.
-    fn validate_meta(
-        &self,
-        meta: &Map<String, Value>,
-        _record: &Map<String, Value>,
-    ) -> Option<String> {
-        if let Some(b) = meta.get("backend").filter(|v| !v.is_null()) {
-            if !b.as_str().is_some_and(|s| BACKENDS.contains(&s)) {
-                return Some(format!(
-                    "backend={} is not one of {}",
-                    py_repr_value(b),
-                    BACKENDS.join(", ")
-                ));
-            }
-        }
-        for k in ["file", "keychain_namespace"] {
-            if let Some(v) = meta.get(k).filter(|v| !v.is_null()) {
-                if !v.as_str().is_some_and(|s| !py_strip(s).is_empty()) {
-                    return Some(format!("{k} must be a non-empty string"));
-                }
-            }
-        }
-        if let Some(why) = meta
-            .get("file")
-            .and_then(Value::as_str)
-            .and_then(relative_file)
-        {
-            return Some(why);
-        }
-        let refs = meta.get("refs").filter(|v| !v.is_null())?;
-        let Some(refs) = refs.as_object() else {
-            return Some("refs must be a map of ref to {host, fields, env}".into());
-        };
-        for (r, e) in refs {
-            if py_strip(r).is_empty() {
-                return Some("a ref must be a non-empty string".to_string());
-            }
-            let Some(e) = e.as_object() else {
-                return Some(format!("{} must be a map", ref_label(r)));
-            };
-            if let Some(v) = e.get("fields").filter(|v| !v.is_null()) {
-                if !is_str_list(v) {
-                    return Some(format!("{}.fields must be a list of strings", ref_label(r)));
-                }
-            }
-            if !e.get("host").is_some_and(|v| !v.is_null()) {
-                return Some(format!(
-                    "{}.host is required — the one host this ref's value may be sent to",
-                    ref_label(r)
-                ));
-            }
-            if host(e.get("host")).is_none() {
-                return Some(format!("{}.host must be a non-empty host", ref_label(r)));
-            }
-            if let Some(env) = e.get("env").filter(|v| !v.is_null()) {
-                let ok = env.as_object().is_some_and(|m| {
-                    m.values()
-                        .all(|v| v.as_str().is_some_and(|s| !s.is_empty()))
-                });
-                if !ok {
-                    return Some(format!(
-                        "{}.env must map field names to variable names",
-                        ref_label(r)
-                    ));
-                }
-            }
-        }
-        None
     }
 
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        let out = match verb {
-            "reflect" => Self::reflect(agent_id, &record(kernel, agent_id)),
-            // No-op: values are read from the backend when asked for.
-            "boot" => return Ok(None),
-            "set" => {
+        use verbs::Call;
+        let out = match call {
+            Call::Reflect(_) => Self::reflect(agent_id, &record(kernel, agent_id)),
+            Call::Set(a) => {
                 let _one = self.writes.lock().unwrap_or_else(|p| p.into_inner());
-                self.set(agent_id, payload, kernel)?
+                self.set(agent_id, &a, kernel)?
             }
-            "get" => self.get(agent_id, payload, kernel)?,
-            "list" => Self::list(agent_id, kernel),
-            "forget" => {
+            Call::Get(a) => self.get(agent_id, &a, kernel)?,
+            Call::List(_) => Self::list(agent_id, kernel),
+            Call::Forget(a) => {
                 let _one = self.writes.lock().unwrap_or_else(|p| p.into_inner());
-                self.forget(agent_id, payload, kernel)?
-            }
-            _ => {
-                let t = payload.get("type").cloned().unwrap_or(Value::Null);
-                let mut r = refusal(
-                    UNHANDLED,
-                    format!("{NAME}: unknown type {}", py_repr_value(&t)),
-                );
-                with(&mut r, "verb", t);
-                r
+                self.forget(agent_id, &a, kernel)?
             }
         };
         Ok(Some(out))

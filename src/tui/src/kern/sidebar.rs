@@ -7,14 +7,19 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
 
 /// The `handler_module` this bundle answers to.
 pub const HANDLER_MODULE: &str = "sidebar.tools";
 
-const SENTENCE: &str = "The canvas's left column: kernels, the agent tree with each chat's state, what waits for the person, and the project's files. One html view; reflect only.";
+pub mod record;
+pub mod verbs;
+
+/// What the bundle is for: its one short man text; how to call it is rendered from its
+/// declared verbs (`docs`, `reflect`).
+const MAN: &str = "The canvas's left column as one html view its `reflect` returns: the kernels, the agent tree with each chat's state, what waits for the person, and the project's files.";
 
 const VIEW: &str = include_str!("sidebar_view.html");
 
@@ -35,36 +40,45 @@ fn calls(id: &str) -> Value {
 pub struct SidebarBundle;
 
 #[async_trait]
-impl Bundle for SidebarBundle {
+impl Handler for SidebarBundle {
+    type Call = verbs::Call;
+
     fn name(&self) -> &str {
         HANDLER_MODULE
     }
 
-    fn verb_docs(&self) -> Value {
-        json!({"reflect": ""})
+    fn man(&self) -> &'static str {
+        MAN
+    }
+
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        verbs::VERBS
+    }
+
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        verbs::dynamic_verbs(agent)
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &record::RECORD
     }
 
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        match payload.get("type").and_then(Value::as_str).unwrap_or("") {
-            "boot" => Ok(None),
-            "reflect" => {
+        match call {
+            verbs::Call::Reflect(_) => {
                 let id = agent_id.as_str();
                 Ok(Some(json!({
                     "id": id,
                     "handler_module": HANDLER_MODULE,
-                    "sentence": SENTENCE,
+                    "sentence": MAN,
                     "view": {"kind": "html", "bytes": VIEW.replace("{{agent}}", id), "calls": calls(id)},
                 })))
             }
-            other => Ok(Some(json!({
-                "error": format!("sidebar: unknown verb {other:?} — it answers `reflect` only"),
-                "reason": "unhandled",
-            }))),
         }
     }
 }
@@ -74,12 +88,52 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn the_sidebar_answers_reflect_and_refuses_the_rest_by_declaration() {
+        let kernel = Arc::new(Kernel::new());
+        kernel.register(fantastic_kernel::Agent::new(
+            AgentId::from("sidebar"),
+            None,
+            None,
+            Default::default(),
+            std::path::PathBuf::new(),
+            false,
+        ));
+        let ask = |payload: Value| {
+            let kernel = Arc::clone(&kernel);
+            async move {
+                fantastic_kernel::Bundle::handle_binary(&SidebarBundle, &AgentId::from("sidebar"), payload, None, &kernel)
+                    .await
+                    .unwrap()
+                    .0
+            }
+        };
+        let r = ask(json!({"type": "launch"})).await.unwrap();
+        assert_eq!(r["reason"], "unhandled", "{r}");
+        assert!(r["error"].as_str().unwrap().contains("reflect"), "{r}");
+        for v in ["reflect"] {
+            let r = ask(json!({"type": v, "zzz_unknown": 1})).await.unwrap();
+            assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("zzz_unknown")), "{v}: {r}");
+        }
+        let r = ask(json!({"type": "reflect"})).await.unwrap();
+        assert_eq!(r["view"]["kind"], "html", "{r}");
+    }
+
+    #[tokio::test]
     async fn reflect_carries_the_html_view_and_exactly_its_calls() {
         let kernel = Arc::new(Kernel::new());
         let r = SidebarBundle
             .handle(
                 &AgentId::from("sidebar"),
-                &json!({"type": "reflect"}),
+                verbs::Call::Reflect(fantastic_kernel::declared::common::Reflect {
+                    detail: None,
+                    tree: None,
+                    show_subtrees: None,
+                    ignore_subtrees: None,
+                    handler_modules: None,
+                    bundles: None,
+                    limit: None,
+                    after: None,
+                }),
                 &kernel,
             )
             .await

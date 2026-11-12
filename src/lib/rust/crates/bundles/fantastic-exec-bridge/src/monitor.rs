@@ -31,15 +31,15 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use fancy_regex::Regex;
-use fantastic_bundle::{py_repr_value, py_str};
-use fantastic_kernel::refusal::{bad, missing, refusal, with, MISSING_ARG, NOT_FOUND};
+use fantastic_bundle::py_repr_value;
+use fantastic_kernel::refusal::{bad, refusal, with, NOT_FOUND};
 use fantastic_kernel::{AgentId, Item, Kernel, TaskId};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
-/// Lines in one delivery when the caller names no `tail`.
-pub const DEFAULT_TAIL: i64 = 100;
+use crate::verbs;
+use crate::JobRef;
 
 enum Msg {
     Line(String),
@@ -59,7 +59,7 @@ struct Mon {
     matcher: Option<Regex>,
     /// As the caller wrote it (an int stays an int), echoed by `monitor`/`monitors`.
     every: Value,
-    tail: i64,
+    tail: u64,
     label: Option<String>,
     tx: mpsc::UnboundedSender<Msg>,
     carry: String,
@@ -365,11 +365,12 @@ fn log_line(msg: String) {
 }
 
 /// `monitor {job_id, notify, match?, every?, tail?, label?}` — python `_monitor_verb`.
-pub(crate) async fn monitor_reply(owner: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let jid = match crate::require_job("monitor", payload) {
-        Ok(j) => j,
-        Err(e) => return e,
-    };
+pub(crate) async fn monitor_reply(
+    owner: &AgentId,
+    a: &verbs::Monitor,
+    kernel: &Arc<Kernel>,
+) -> Value {
+    let jid = JobRef::of(a.job_id);
     {
         let g = crate::jobs::jobs();
         match jid.find(&g, owner) {
@@ -380,12 +381,8 @@ pub(crate) async fn monitor_reply(owner: &AgentId, payload: &Value, kernel: &Arc
             Some(_) => {}
         }
     }
-    let job_id = jid.id.expect("found above");
-    let notify = match payload.get("notify") {
-        None | Some(Value::Null) => return missing("monitor", "notify"),
-        Some(Value::String(s)) if !s.is_empty() => s.clone(),
-        Some(_) => return bad("monitor", "notify", "an agent id"),
-    };
+    let job_id = jid.id;
+    let notify = a.notify.clone();
     if kernel.agents.get(&AgentId::from(notify.as_str())).is_none() {
         let mut r = refusal(
             NOT_FOUND,
@@ -397,40 +394,16 @@ pub(crate) async fn monitor_reply(owner: &AgentId, payload: &Value, kernel: &Arc
         with(&mut r, "arg", json!("notify"));
         return r;
     }
-    let (pattern, matcher) = match payload.get("match") {
-        None | Some(Value::Null) => (None, None),
-        Some(Value::String(s)) if !s.is_empty() => match Regex::new(s) {
+    let (pattern, matcher) = match &a.pattern {
+        None => (None, None),
+        Some(s) => match Regex::new(s) {
             Ok(r) => (Some(s.clone()), Some(r)),
             Err(e) => return bad("monitor", "match", &format!("a valid regex ({e})")),
         },
-        Some(_) => return bad("monitor", "match", "a regex string"),
     };
-    let every = match payload.get("every") {
-        None | Some(Value::Null) => None,
-        Some(v @ Value::Number(_)) if v.as_f64().is_some_and(|x| x > 0.0) => v.as_f64(),
-        Some(_) => return bad("monitor", "every", "a positive number of seconds"),
-    };
-    if matcher.is_none() && every.is_none() {
-        let mut r = refusal(
-            MISSING_ARG,
-            "monitor: every required — without `match` every line counts, so name the \
-             window (`every`, seconds) its deliveries are gathered in",
-        );
-        with(&mut r, "arg", json!("every"));
-        return r;
-    }
-    let tail = match payload.get("tail") {
-        None => DEFAULT_TAIL,
-        Some(Value::Number(n)) if n.as_i64().is_some_and(|t| t >= 1) && !n.is_f64() => {
-            n.as_i64().unwrap_or(DEFAULT_TAIL)
-        }
-        Some(_) => return bad("monitor", "tail", "an int >= 1 (lines per delivery)"),
-    };
-    let label = match payload.get("label") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) => (!s.is_empty()).then(|| s.clone()),
-        Some(_) => return bad("monitor", "label", "a string"),
-    };
+    let every = a.every.as_ref().and_then(serde_json::Number::as_f64);
+    let tail = a.tail;
+    let label = a.label.clone();
     let (tx, rx) = mpsc::unbounded_channel();
     let (id_tx, id_rx) = oneshot::channel();
     let cfg = Cfg {
@@ -438,7 +411,7 @@ pub(crate) async fn monitor_reply(owner: &AgentId, payload: &Value, kernel: &Arc
         job_id,
         notify: notify.clone(),
         every,
-        tail: usize::try_from(tail).unwrap_or(usize::MAX),
+        tail: tail as usize,
         label: label.clone(),
         caller: fantastic_kernel::send::current_origin().map(|a| a.0),
         call: fantastic_kernel::current_task().map(|t| t.get()),
@@ -463,7 +436,7 @@ pub(crate) async fn monitor_reply(owner: &AgentId, payload: &Value, kernel: &Arc
             notify: notify.clone(),
             pattern: pattern.clone(),
             matcher,
-            every: payload.get("every").cloned().unwrap_or(Value::Null),
+            every: a.every.clone().map_or(Value::Null, Value::Number),
             tail,
             label: label.clone(),
             tx,
@@ -480,7 +453,7 @@ pub(crate) async fn monitor_reply(owner: &AgentId, payload: &Value, kernel: &Arc
         "job_id": job_id.get(),
         "notify": notify,
         "match": pattern,
-        "every": payload.get("every").cloned().unwrap_or(Value::Null),
+        "every": a.every.clone().map_or(Value::Null, Value::Number),
         "tail": tail,
         "label": label,
     })
@@ -513,20 +486,9 @@ pub(crate) fn monitors_reply(owner: &AgentId) -> Value {
 /// `unmonitor {monitor_id}` — end one of this agent's monitors.
 pub(crate) async fn unmonitor_reply(
     owner: &AgentId,
-    payload: &Value,
+    mid: i64,
     kernel: &Arc<Kernel>,
 ) -> Value {
-    let raw = match payload.get("monitor_id") {
-        None | Some(Value::Null) => return missing("unmonitor", "monitor_id"),
-        Some(v) => v.clone(),
-    };
-    let Some(mid) = raw.as_i64().filter(|_| raw.is_i64()) else {
-        return bad(
-            "unmonitor",
-            "monitor_id",
-            "an int — the id `monitor` returned",
-        );
-    };
     let key = (owner.0.clone(), mid);
     let dead = monitors().get(&key).map(|m| m.error.is_some());
     if dead == Some(true) {
@@ -537,9 +499,9 @@ pub(crate) async fn unmonitor_reply(
     if dead.is_none() {
         let mut r = refusal(
             NOT_FOUND,
-            format!("exec_bridge: no monitor {}", py_str(&raw)),
+            format!("exec_bridge: no monitor {mid}"),
         );
-        with(&mut r, "monitor_id", raw);
+        with(&mut r, "monitor_id", json!(mid));
         return r;
     }
     kernel.cancel_task(&TaskId(mid)).await;

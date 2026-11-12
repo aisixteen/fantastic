@@ -911,6 +911,8 @@ dependencies = [
  "fantastic-bundle",
  "fantastic-file",
  "fantastic-kernel",
+ "schemars 0.8.22",
+ "serde",
  "serde_json",
  "serde_yaml",
 ]
@@ -925,6 +927,8 @@ dependencies = [
  "fantastic-kernel",
  "libc",
  "notify",
+ "schemars 0.8.22",
+ "serde",
  "serde_json",
  "sha2",
  "tokio",
@@ -988,6 +992,7 @@ dependencies = [
  "futures-util",
  "libc",
  "regex",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -998,6 +1003,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-ram-store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-bundle",
+ "fantastic-kernel",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "fantastic-scenario-probes"
 version = "0.1.0"
 dependencies = [
@@ -1005,6 +1023,8 @@ dependencies = [
  "fantastic-bundle",
  "fantastic-kernel",
  "libc",
+ "schemars 0.8.22",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -1016,7 +1036,10 @@ dependencies = [
  "async-trait",
  "fantastic-bundle",
  "fantastic-kernel",
+ "fantastic-ram-store",
  "rusqlite",
+ "schemars 0.8.22",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -1058,6 +1081,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "tokio",
@@ -1073,6 +1097,8 @@ dependencies = [
  "fantastic-bundle",
  "fantastic-io-bridge",
  "fantastic-kernel",
+ "schemars 0.8.22",
+ "serde",
  "serde_json",
 ]
 

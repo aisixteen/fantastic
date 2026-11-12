@@ -46,7 +46,7 @@ fn an_item_defaults_nothing() {
         .with_id("job-1")
         .with_timeout(2.5)
         .with_retries(3);
-    assert_eq!(named.id.as_deref(), Some("job-1"));
+    assert_eq!(named.id, Some("job-1".into()));
     assert_eq!(named.timeout, Some(2.5));
     assert_eq!(named.retries, Some(3));
 }
@@ -56,7 +56,7 @@ fn a_frame_id_becomes_the_execution_id() {
     // ONE id space: the correlation id and the execution id are the same thing,
     // so the same id arriving twice (two tabs, a reconnect) is ONE intent.
     let it = Item::from_frame("desk", serde_json::json!({"type": "buy"}), Some("click-7"));
-    assert_eq!(it.id.as_deref(), Some("click-7"));
+    assert_eq!(it.id, Some("click-7".into()));
 
     // An absent or empty frame id names nothing — the execution is unnamed and
     // gets a minted pid instead.

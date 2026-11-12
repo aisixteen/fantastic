@@ -12,10 +12,13 @@ description = "The MCP leg as an ordinary bundle, built OUTSIDE the kernel tree:
 [dependencies]
 fantastic-kernel = { path = "../../../lib/rust/crates/fantastic-kernel" }
 async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+schemars = { version = "0.8", features = ["preserve_order"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1.40", features = ["sync", "time"] }
 
 [dev-dependencies]
+fantastic-kernel = { path = "../../../lib/rust/crates/fantastic-kernel", features = ["test-support"] }
 fantastic-core = { path = "../../../lib/rust/crates/bundles/fantastic-core" }
 fantastic-file = { path = "../../../lib/rust/crates/bundles/fantastic-file" }
 tempfile = "3"

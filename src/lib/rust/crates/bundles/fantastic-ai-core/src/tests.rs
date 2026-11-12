@@ -7,7 +7,8 @@ use super::*;
 use crate::agent_loop::BackendConfig;
 use crate::provider::{within, Provider, ProviderError, ProviderEvent, ProviderStream};
 use async_trait::async_trait;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
+use crate::tests_decl::chat_decls;
 use fantastic_kernel::{Agent, AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -275,37 +276,43 @@ const CFG: BackendConfig = BackendConfig {
 };
 
 #[async_trait]
-impl Bundle for MockBundle {
+impl Handler for MockBundle {
+    chat_decls!();
     fn name(&self) -> &str {
         self.cfg.name
     }
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        if verb == "reflect" {
-            return Ok(Some(json!({
+        // EVERY VERB through the one shared table, exactly as a real chat
+        // dispatches it — boot is a new incarnation there too.
+        let script = script_for(agent_id);
+        let reflect = || {
+            json!({
                 "id": agent_id.as_str(),
                 "sentence": "Mock LLM agent.",
                 "model": helpers::meta_string(agent_id, kernel, "model"),
                 "generating": crate::state::is_generating(agent_id),
                 "verbs": {"send": "send", "history": "history"},
                 "emits": {"token": "t"},
-            })));
-        }
-        // EVERY OTHER VERB through the one shared table, exactly as a real
-        // backend dispatches it — boot is a new incarnation there too.
-        let script = script_for(agent_id);
-        let reply = verbs::handle_common(agent_id, payload, kernel, self.cfg, move |_client| {
-            Arc::new(MockProvider {
-                script: Arc::clone(&script),
-            }) as Arc<dyn Provider>
-        })
-        .await?
-        .unwrap_or_else(|| json!({"error": format!("mock_backend: unknown type {verb:?}")}));
+            })
+        };
+        let reply = verbs::handle(
+            agent_id,
+            call,
+            kernel,
+            self.cfg,
+            move |_client| {
+                Arc::new(MockProvider {
+                    script: Arc::clone(&script),
+                }) as Arc<dyn Provider>
+            },
+            reflect,
+        )
+        .await?;
         Ok(Some(reply))
     }
 
@@ -696,7 +703,7 @@ async fn thinking_is_streamed_raw_but_neither_dispatched_nor_persisted() {
     let r = kernel
         .send(vec![Item::new(
             backend.clone(),
-            json!({"type": "recall", "client_id": client_id}),
+            json!({"type": "recall"}),
         )])
         .await
         .remove(0)
@@ -760,7 +767,7 @@ async fn a_thinking_only_turn_is_discarded_and_rerolled() {
     let h = kernel
         .send(vec![Item::new(
             backend.clone(),
-            json!({"type": "history", "client_id": "c_thonly"}),
+            json!({"type": "history"}),
         )])
         .await
         .remove(0)
@@ -1175,7 +1182,7 @@ async fn recall_pages_durable_store_and_context_status_shape() {
     let r = kernel
         .send(vec![Item::new(
             backend.clone(),
-            json!({"type": "recall", "query": "codename", "client_id": "chat"}),
+            json!({"type": "recall", "query": "codename"}),
         )])
         .await
         .remove(0)
@@ -1244,7 +1251,7 @@ async fn history_persists_and_round_trips() {
     let h = kernel
         .send(vec![Item::new(
             backend.clone(),
-            json!({"type": "history", "client_id": client_id}),
+            json!({"type": "history"}),
         )])
         .await
         .remove(0)
@@ -1332,7 +1339,7 @@ async fn chat_persists_with_no_loader_provider_wired() {
     let h = kernel
         .send(vec![Item::new(
             backend.clone(),
-            json!({"type": "history", "client_id": "cli"}),
+            json!({"type": "history"}),
         )])
         .await
         .remove(0)
@@ -2118,21 +2125,38 @@ async fn a_projection_refusal_is_returned_verbatim_and_does_not_raise() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
     struct Raiser;
+    /// The one verb the raiser declares beside `reflect`: it dies outright.
+    #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    struct Panic {}
+    fantastic_kernel::verbs! { "panic" => Panic }
     #[async_trait]
-    impl Bundle for Raiser {
+    impl Handler for Raiser {
+        type Call = Call;
         fn name(&self) -> &str {
             "raiser"
+        }
+        fn man(&self) -> &'static str {
+            "A handler that dies."
+        }
+        fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+            VERBS
+        }
+        fn dynamic_verbs(&self, a: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+            dynamic_verbs(a)
+        }
+        fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+            &crate::tests_decl::any::RECORD
         }
         async fn handle(
             &self,
             _agent_id: &AgentId,
-            payload: &Value,
+            call: Call,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
-            match payload.get("type").and_then(Value::as_str) {
-                Some("boot") | Some("shutdown") => Ok(None),
-                Some("panic") => panic!("the handler died outright"),
-                _ => Err("unknown ingress rule type 'password:whatever'".into()),
+            match call {
+                Call::Panic(_) => panic!("the handler died outright"),
+                Call::Reflect(_) => Err("unknown ingress rule type 'password:whatever'".into()),
             }
         }
     }
@@ -2559,17 +2583,13 @@ async fn a_chain_gives_up_after_its_misfire_limit() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn misfire_limit_is_validated() {
-    let sch = crate::schema::schema(vec![]);
-    let rec = json!({"endpoint": "e", "memory_store_id": "m"});
-    let rec = rec.as_object().unwrap();
     let check = |v| {
         let meta = json!({"misfire_limit": v});
-        crate::schema::validate(&sch, "ai", meta.as_object().unwrap(), rec)
+        crate::tests_decl::refused_at_the_write(meta.as_object().unwrap())
     };
     for bad in [json!(1), json!(51), json!("x")] {
-        assert_eq!(
-            check(bad.clone()),
-            Some("misfire_limit must be an int from 2 to 50".to_string()),
+        assert!(
+            check(bad.clone()).is_some_and(|e| e.contains("misfire_limit")),
             "{bad} should be refused"
         );
     }
@@ -2698,12 +2718,11 @@ async fn every_model_call_carries_the_layer_default_timeout() {
     assert!(turn.contains("<task_id>"), "must carry task_id: {turn}");
 }
 
-/// Routing forwards `timeout` RAW (not `.and_then(Value::as_f64)`), so a
-/// non-numeric value reaches the kernel's own `bad_arg` refusal instead of
-/// being silently DROPPED at the route.rs coercion site and defaulting the call
-/// to the layer's `send_timeout` as if the model had never written the arg.
+/// A `timeout` that is not a number is REFUSED by name where the call is read —
+/// never dropped (defaulting the call to the layer's `send_timeout` as if the
+/// model had never written the arg), never coerced.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_malformed_timeout_arg_settles_the_kernels_refusal() {
+async fn a_malformed_timeout_arg_is_refused_by_name() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "rt_badtimeout").await;
     let b = add_peer(&kernel, &tmp, &a).await;
@@ -2744,10 +2763,10 @@ async fn a_malformed_timeout_arg_settles_the_kernels_refusal() {
     );
     let turn = sa.request(0);
     assert!(
-        turn.contains("timeout must be a positive number of seconds"),
-        "must carry the kernel's refusal verbatim: {turn}"
+        turn.contains("timeout must be number"),
+        "must carry the refusal naming the argument: {turn}"
     );
-    assert!(turn.contains("'soon'"), "must echo the raw value: {turn}");
+    assert!(turn.contains("<arg>timeout</arg>"), "must name the argument: {turn}");
 }
 
 /// A `reply_to` naming NO AGENT dispatches nothing and tells the model (a chat
@@ -3119,7 +3138,7 @@ async fn a_failed_handoff_is_a_status_event_with_detail() {
         .as_str()
         .unwrap_or_else(|| panic!("the announcement must say WHY: {status:#?}"));
     assert!(!why.starts_with("delivery "), "{status:#?}");
-    assert!(why.contains("unknown type"), "{status:#?}");
+    assert!(why.contains("unknown verb"), "{status:#?}");
     assert_eq!(status["source"], leg.as_str(), "{status:#?}");
     assert!(status.get("ts").is_some(), "{status:#?}");
     assert_eq!(status["client_id"], "probe", "{status:#?}");
@@ -3325,7 +3344,7 @@ async fn recall_returns_the_turn_whole() {
     let r = kernel
         .send(vec![Item::new(
             backend.clone(),
-            json!({"type": "recall", "query": "HEAD", "client_id": "chat"}),
+            json!({"type": "recall", "query": "HEAD"}),
         )])
         .await
         .remove(0)
@@ -4383,7 +4402,7 @@ async fn history_answers_the_digest_and_the_full_turns() {
 /// A NEGATIVE `limit` is already satisfied by the empty page — python
 /// `_fit_reply(digest, cap, limit or None)` returns `([], True)`.
 #[tokio::test]
-async fn history_negative_limit_is_an_empty_page() {
+async fn history_limit_below_one_is_refused_by_name() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "hneg").await;
     script(
@@ -4408,9 +4427,8 @@ async fn history_negative_limit_is_an_empty_page() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["rows"], json!([]), "{r:#?}");
-    assert_eq!(r["next"], Value::Null);
-    assert!(r["total"].as_u64().unwrap() >= 2, "{r:#?}");
+    assert_eq!(r["reason"], json!("bad_arg"), "{r:#?}");
+    assert_eq!(r["arg"], json!("limit"), "{r:#?}");
 }
 
 /// Paging: `limit` cuts the page, `next` names where to resume, and an `after`
@@ -4512,18 +4530,43 @@ async fn per_client_events_are_emitted_on_the_agent_not_a_client_named_inbox() {
 async fn the_cli_caller_round_trips_through_the_cli_agent() {
     /// Stands in for the real `cli` bundle: records what it was handed.
     struct CliSink(Arc<std::sync::Mutex<Vec<Value>>>);
+    /// The one verb the cli sink answers: a streamed token, with where it came from.
+    #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+    struct Token {
+        client_id: String,
+        source: String,
+    }
+    fantastic_kernel::verbs! { "token" => Token }
     #[async_trait]
-    impl Bundle for CliSink {
+    impl Handler for CliSink {
+        type Call = Call;
         fn name(&self) -> &str {
             "cli"
+        }
+        fn man(&self) -> &'static str {
+            "A stand-in for the cli bundle: it records the tokens it is handed."
+        }
+        fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+            VERBS
+        }
+        fn dynamic_verbs(&self, a: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+            dynamic_verbs(a)
+        }
+        fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+            &crate::tests_decl::any::RECORD
         }
         async fn handle(
             &self,
             _agent_id: &AgentId,
-            payload: &Value,
+            call: Call,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
-            self.0.lock().expect("sink poisoned").push(payload.clone());
+            if let Call::Token(t) = call {
+                self.0
+                    .lock()
+                    .expect("sink poisoned")
+                    .push(serde_json::to_value(&t).expect("a token"));
+            }
             Ok(None)
         }
     }
@@ -4912,7 +4955,7 @@ async fn recall_long_head(
         backend.clone(),
         crate::retrieval::context_recall(
             backend,
-            &payload,
+            payload["dry"] == json!(true),
             kernel,
             Some(&provider),
             crate::constants::DEFAULT_CONTEXT_WINDOW,
@@ -5302,7 +5345,7 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
             .collect();
         levels.sort_unstable();
         levels.dedup();
-        let view = crate::folds::render(&rows, &crate::folds::anchors_of(&rows));
+        let view = crate::folds::render(&rows);
         let shape: String = view
             .iter()
             .map(|r| {
@@ -5324,106 +5367,26 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
 // ─── B1 / B3 / B5 python-parity twins ───────────────────────────────────────
 
 #[test]
-fn cancel_doc_is_python_verbatim() {
-    // Every AI reflect carries this, so a model reads it on every turn. Rust
-    // taught `{type:'ps'}` / `{type:'cancel', task_id:'<agent>:<n>'}` — JSON, and
-    // a task_id shape the kernel no longer mints.
+fn the_chat_declares_its_verbs_each_with_what_it_does() {
+    // what `docs` and `reflect` render: one declaration per verb, in order
+    let names: Vec<&str> = crate::declared::chat::VERBS.iter().map(|v| v.name).collect();
     assert_eq!(
-        crate::CANCEL_DOC,
-        "No `interrupt` verb — an in-flight `send` IS a kernel task. Kill it with \
-         the substrate's universal system verbs: send 'kernel' <type>ps</type> for \
-         the live task table, find the row {agent:'<this agent>', verb:'send'}, then \
-         send 'kernel' <type>cancel</type> <task_id>n</task_id>. The turn closes \
-         with status(phase='done', reason='cancelled') + done, its HTTP stream and \
-         FIFO lock are released, and the blocked caller's `send` resolves to \
-         {cancelled:true}. Cancel kills the task's whole SUBTREE, so any work the \
-         turn spawned dies with it."
-    );
-}
-
-#[test]
-fn verb_docs_match_python_docstrings() {
-    // python's `_build` order, each verb's WHOLE docstring (served by `docs`).
-    let v = crate::verbs::verb_docs();
-    let o = v.as_object().expect("an object");
-    assert_eq!(
-        o.keys().cloned().collect::<Vec<_>>(),
-        vec![
-            "reflect",
-            // the provider half of the ai_chat split: Rust first, the python port is its own ticket
-            "complete",
-            "models",
-            "set_default_model",
-            "send",
-            "stop",
-            "pause",
-            "resume",
-            "rows",
-            "inquiry",
-            "history",
-            "embed",
-            "unembed",
-            "status",
-            "context_status",
-            "recall",
-            "grep",
-            "context_recall",
-            "context_clear",
-            "context_fold",
-            "context_forget",
-            "fork",
-            "mark",
-            "fork_points",
-            "watch",
-            "unwatch",
-            "boot",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        o["reflect"],
-        "Identity + model + endpoint + generating flag + context posture. No args."
-    );
-    assert!(o["context_status"].as_str().unwrap().starts_with(
-        "No args. The context-budget posture + the last overflow projection + the model's\n"
-    ));
-    assert!(o["send"].as_str().unwrap().starts_with(
-        "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str?, send_to:str?."
-    ));
-    assert!(o["boot"]
-        .as_str()
-        .unwrap()
-        .starts_with("LAZY: never touches the memory store."));
-}
-
-#[test]
-fn emits_and_notes_are_python_verbatim() {
-    let e = crate::verbs::emits();
-    let o = e.as_object().expect("an object");
-    // THREE, in this order — `done` and `say` and `queued` are not python's.
-    assert_eq!(
-        o.keys().cloned().collect::<Vec<_>>(),
-        vec![
-            "token".to_string(),
-            "status".to_string(),
-            "context".to_string()
+        names,
+        [
+            "boot", "send", "stop", "pause", "resume", "rows", "inquiry", "history", "embed",
+            "unembed", "status", "context_status", "recall", "grep", "context_recall",
+            "context_clear", "context_fold", "context_forget", "fork", "mark", "fork_points",
+            "watch", "unwatch",
         ]
     );
-    assert!(o["token"]
-        .as_str()
-        .unwrap()
-        .starts_with("{type:'token', text:str, source, client_id} — streaming chunk, routed ONLY"));
-    assert!(o["context"]
-        .as_str()
-        .unwrap()
-        .ends_with("Pull counterpart: `context_status`."));
-    assert_eq!(
-        crate::verbs::notes()["concurrency"],
-        "A FIFO lock around `send`: one generation at a time; other callers wait and get a \
-         `queued` status. `reflect`/`history`/`status` skip the lock."
-    );
+    for v in crate::declared::chat::VERBS {
+        assert!(!v.doc().is_empty(), "{} says what it does", v.name);
+    }
+    // an argument is declared with its type: `send` takes the text, `rows` a row id
+    let send = crate::declared::chat::VERBS.iter().find(|v| v.name == "send").unwrap();
+    assert_eq!(send.schema()["required"], json!(["text"]));
+    let rows = crate::declared::chat::VERBS.iter().find(|v| v.name == "rows").unwrap();
+    assert!(rows.schema()["properties"]["after"]["type"].to_string().contains("integer"));
 }
 
 #[test]
@@ -5446,10 +5409,10 @@ fn render_reflect_matches_python_one() {
         })),
         "S  one=1  two=2  three=3"
     );
-    // A list of scalars uses python `str()`, so a bool is `True`.
+    // A list of scalars is joined by their text, a bool as `true`.
     assert_eq!(
         crate::assembly::render_reflect(&json!({"sentence": "", "t": [true, 2]})),
-        "t=True,2"
+        "t=true,2"
     );
 }
 
@@ -5464,83 +5427,60 @@ fn estimate_one_counts_python_json_dumps_code_points() {
 }
 
 #[test]
-fn budget_meta_parses_like_python() {
+fn budget_meta_reads_integers_only() {
     let meta = |v: Value| v.as_object().unwrap().clone();
-    // `context_window` 0.5 is a POSITIVE float, so `_as_pos_int` truncates it to
-    // 0 and that 0 is the window; `output_reserve` "-5" is not a digit string, so
-    // 1024; the budget then floors at 256. Python: {0, 1024, 256}.
-    let m = meta(json!({"context_window": 0.5, "output_reserve": "-5", "recent_n": 1000.0}));
-    assert_eq!(
-        crate::context::resolve_context_window(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
-        0
-    );
-    assert_eq!(crate::context::output_reserve(&m), 1024);
-    assert_eq!(
-        crate::context::budget(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
-        256
-    );
-    assert_eq!(crate::context::recent_n(&m), 50);
-    // `+12` is not `isdigit()`, `1000.0` is not an int, `true` is `int(True)` = 1.
-    let m = meta(json!({"context_window": "+12", "output_reserve": 1000.0, "recent_n": true}));
+    // a record's numbers are integers (the engine refuses anything else at the
+    // write); what is not one is not read: the window falls to the backend's, the
+    // reserve to 1024
+    let m = meta(json!({"context_window": 0.5, "output_reserve": "-5", "recent_n": "x"}));
     assert_eq!(
         crate::context::resolve_context_window(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
         131_072
     );
     assert_eq!(crate::context::output_reserve(&m), 1024);
-    assert_eq!(crate::context::recent_n(&m), 1);
-    // A positive float window truncates; the budget then floors.
-    let m = meta(json!({"context_window": 12.9}));
+    assert_eq!(crate::context::recent_n(&m), 6);
+    let m = meta(json!({"context_window": 12, "output_reserve": 1000}));
     assert_eq!(
         crate::context::resolve_context_window(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
         12
     );
+    assert_eq!(crate::context::output_reserve(&m), 1000);
+    // the budget floors at 256
     assert_eq!(
         crate::context::budget(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
         256
     );
-    // A bool is never a window; `" 7 "` is `int()`-able.
-    let m = meta(json!({"context_window": true, "recent_n": " 7 "}));
+    // a bool is never a window nor a count
+    let m = meta(json!({"context_window": true, "recent_n": true}));
     assert_eq!(
         crate::context::resolve_context_window(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
         131_072
     );
-    assert_eq!(crate::context::recent_n(&m), 7);
+    assert_eq!(crate::context::recent_n(&m), 6);
 }
 
-/// python `_as_id` / `_as_pos_int` / `output_reserve` take ASCII digits only
-/// (`isascii() and isdigit()`): a Unicode decimal (`'٣'`) or a compatibility
-/// digit (`'²'`) is not a number. Vectors measured with python's own functions.
 #[test]
-fn id_and_window_digit_strings_are_ascii_only() {
+fn ids_are_numbers() {
     use crate::retrieval::as_id;
+    // a JSON id is a positive integer, nothing else
     for (v, want) in [
-        (json!("٣"), None),
-        (json!("²"), None),
-        (json!("12٣"), None),
-        (json!(" 3 "), Some(3)),
-        (json!("\u{2003}3\u{2003}"), Some(3)),
-        (json!("\u{1c}3"), Some(3)),
-        (json!("0"), Some(0)),
-        (json!("+5"), None),
-        (json!(""), None),
         (json!(7), Some(7)),
         (json!(0), None),
         (json!(true), None),
         (json!(2.0), None),
+        (json!("3"), None),
     ] {
-        assert_eq!(as_id(&v), want, "_as_id({v})");
+        assert_eq!(as_id(&v), want, "as_id({v})");
     }
+    // a record's numbers are numbers: text there is not read
     let meta = |v: Value| v.as_object().unwrap().clone();
-    for v in ["٣", "²"] {
-        let m = meta(json!({"context_window": v, "output_reserve": v}));
-        assert_eq!(
-            crate::context::resolve_context_window(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
-            131_072,
-            "{v}"
-        );
-        assert_eq!(crate::context::output_reserve(&m), 1024, "{v}");
-    }
-    let m = meta(json!({"context_window": "\u{2003} 12 ", "output_reserve": "\u{2003} 12 "}));
+    let m = meta(json!({"context_window": "12", "output_reserve": "12"}));
+    assert_eq!(
+        crate::context::resolve_context_window(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
+        131_072
+    );
+    assert_eq!(crate::context::output_reserve(&m), 1024);
+    let m = meta(json!({"context_window": 12, "output_reserve": 12}));
     assert_eq!(
         crate::context::resolve_context_window(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
         12
@@ -5549,23 +5489,23 @@ fn id_and_window_digit_strings_are_ascii_only() {
 }
 
 #[test]
-fn recent_n_bool_is_one() {
-    let m = json!({"recent_n": 7.9}).as_object().unwrap().clone();
+fn recent_n_is_an_integer_and_its_range_is_the_records() {
+    let m = json!({"recent_n": 7}).as_object().unwrap().clone();
     assert_eq!(crate::context::recent_n(&m), 7);
     let m = json!({"recent_n": "nope"}).as_object().unwrap().clone();
-    assert_eq!(crate::context::recent_n(&m), 6, "int() raises → python's 6");
+    assert_eq!(crate::context::recent_n(&m), 6, "text is not read: the default");
 }
 
 #[test]
-fn inquiry_turn_text_uses_python_str_and_json_dumps() {
-    let out = crate::verbs::inquiry_open(&json!({
+fn inquiry_turn_text_renders_options_and_the_action() {
+    let inquiry: crate::declared::Inquiry = serde_json::from_value(json!({
         "text": "pick",
-        "options": [true, "b"],
+        "options": ["a", "b"],
         "action": {"a": 1, "b": "—"},
     }))
     .expect("a valid inquiry");
-    let text = out["text"].as_str().unwrap();
-    assert!(text.contains("\n\nOptions: True, b"), "{text:?}");
+    let text = crate::verbs::inquiry_text(&inquiry);
+    assert!(text.contains("\n\nOptions: a, b"), "{text:?}");
     assert!(
         text.contains("\n\nProposed action: {\"a\": 1, \"b\": \"\\u2014\"}"),
         "{text:?}"
@@ -5914,39 +5854,6 @@ fn a_null_context_strategy_is_refused_with_pythons_text() {
 // ─── the self-verb replies a MODEL reads (python-canonical bytes) ───────────
 
 #[tokio::test]
-async fn history_digest_of_caller_rows_follows_python() {
-    // `kind or role`, `str(content)[:120]` and `len(str(content))` — rust's
-    // `as_str` gave head '' / bytes 0 for a dict content and kept an EMPTY kind.
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "hdigpy").await;
-    put_row(
-        &kernel,
-        &backend,
-        json!({"role": "user", "kind": "", "content": {"a": 1}}),
-    )
-    .await;
-    put_row(&kernel, &backend, json!({"role": "user", "content": null})).await;
-    put_row(
-        &kernel,
-        &backend,
-        json!({"role": "user", "kind": 5, "content": "x"}),
-    )
-    .await;
-    let h = kernel
-        .send(vec![Item::new(backend, json!({"type": "history"}))])
-        .await
-        .remove(0)
-        .result;
-    let rows = h["rows"].as_array().expect("rows");
-    assert_eq!(rows[0]["kind"], "user", "a falsy kind falls back to role");
-    assert_eq!(rows[0]["head"], "{'a': 1}");
-    assert_eq!(rows[0]["bytes"], 8);
-    assert_eq!(rows[1]["head"], "None", "str(None) is the head");
-    assert_eq!(rows[1]["bytes"], 4);
-    assert_eq!(rows[2]["kind"], 5, "a non-string kind is kept RAW");
-}
-
-#[tokio::test]
 async fn recall_renders_non_string_content_like_python_json_dumps() {
     // `json.dumps(content, default=str)` with ensure_ascii — `{"k":"é"}` renders
     // `{"k": "\u00e9"}`, and an EMPTY string content renders as itself, never as
@@ -5997,9 +5904,8 @@ async fn recall_empty_page_says_why() {
 }
 
 #[tokio::test]
-async fn grep_numeric_query_and_empty_ids_follow_python() {
-    // `str(query or "")` — a NUMERIC query is its digits; an EMPTY `ids` list is
-    // falsy, so it means NO SCOPE (rust scoped every row out).
+async fn grep_digits_query() {
+    // a digits query is text.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "grepnum").await;
     put_row(
@@ -6011,7 +5917,7 @@ async fn grep_numeric_query_and_empty_ids_follow_python() {
     let r = kernel
         .send(vec![Item::new(
             backend.clone(),
-            json!({"type": "grep", "query": 586, "ids": []}),
+            json!({"type": "grep", "query": "586"}),
         )])
         .await
         .remove(0)
@@ -6135,23 +6041,6 @@ async fn a_null_context_strategy_is_reported_raw_and_refused() {
     assert!(st.get("last_projection").is_some());
 }
 
-#[tokio::test]
-async fn context_titles_flag_is_python_truthy() {
-    // `if rec.get("context_titles")` — `1` turns the block on; `as_bool` did not.
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "ctxtitles").await;
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "update_agent", "id": backend.as_str(), "context_titles": 1}),
-        )])
-        .await;
-    let sys = crate::assembly::default_system_content(&backend, &kernel).await;
-    assert!(
-        sys.contains("## Titling your calls"),
-        "the titles block is on"
-    );
-}
 #[tokio::test]
 async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
     // A rebooted agent woken by answers to calls its PREVIOUS incarnation made
@@ -6315,7 +6204,7 @@ async fn grep_scope_scans_bodies_in_arrival_order() {
 }
 
 #[tokio::test]
-async fn context_recall_dry_is_python_truthy() {
+async fn context_recall_dry_makes_no_model_call() {
     // `if payload.get("dry")` — `1` is dry, and a dry recall makes NO model call.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "dry1").await;
@@ -6333,7 +6222,7 @@ async fn context_recall_dry_is_python_truthy() {
     let r = kernel
         .send(vec![Item::new(
             backend,
-            json!({"type": "context_recall", "dry": 1}),
+            json!({"type": "context_recall", "dry": true}),
         )])
         .await
         .remove(0)
@@ -6341,7 +6230,7 @@ async fn context_recall_dry_is_python_truthy() {
     assert_eq!(
         s.passes_served(),
         0,
-        "dry:1 must make no model call: {r:#?}"
+        "dry:true must make no model call: {r:#?}"
     );
     assert_eq!(r["why"], "mechanical fit");
     assert_eq!(r["degraded"], true);
@@ -6370,17 +6259,20 @@ async fn an_empty_json_recall_answer_stays_degraded() {
 }
 
 #[tokio::test]
-async fn a_numeric_why_is_its_python_str() {
-    // `str(ans.get("why") or "")[:300] or "chosen"`: 42 reads `42`, `["a"]` reads
-    // `['a']`, and only a FALSY why is `chosen`.
-    for (answer, want) in [
-        ("{\"why\": 42}", "42"),
-        ("{\"why\": [\"a\"]}", "['a']"),
+async fn only_a_text_why_is_kept() {
+    // the answer's `why` is its text; a number, a list or an empty text is `chosen`.
+    for (i, (answer, want)) in [
+        ("{\"why\": 42}", "chosen"),
+        ("{\"why\": [\"a\"]}", "chosen"),
         ("{\"why\": 0}", "chosen"),
         ("{\"why\": \"\"}", "chosen"),
-    ] {
+        ("{\"why\": \"fits\"}", "fits"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let tmp = TempDir::new().unwrap();
-        let (kernel, backend) = mk_kernel(&tmp, &format!("why_{want}")).await;
+        let (kernel, backend) = mk_kernel(&tmp, &format!("why_{i}")).await;
         script(&backend, vec![pass(answer)], Duration::ZERO);
         put_row(
             &kernel,
@@ -7034,7 +6926,7 @@ async fn delete_drops_every_row_but_the_incarnation() {
 /// `as_id`: an int, or a STRIPPED decimal string; never a float, a bool or a
 /// word), the head's key order, and the two refusals, byte for byte.
 #[tokio::test]
-async fn history_by_fold_parses_the_id_and_refuses_in_pythons_words() {
+async fn history_by_fold_takes_an_integer_id_and_refuses_the_rest() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "s4fold").await;
     let r1 = put_row(
@@ -7069,7 +6961,7 @@ async fn history_by_fold_parses_the_id_and_refuses_in_pythons_words() {
                 .result
         }
     };
-    for fold in [json!(f), json!(format!(" {f} ")), json!(f.to_string())] {
+    for fold in [json!(f)] {
         let h = hist(fold.clone()).await;
         assert_eq!(
             serde_json::to_string(&h["fold"]).unwrap(),
@@ -7084,19 +6976,24 @@ async fn history_by_fold_parses_the_id_and_refuses_in_pythons_words() {
             .collect();
         assert_eq!(ids, vec![r1, r2], "{fold}");
     }
+    // a `fold` that is not an integer is refused by name, never read as one
     for fold in [
         json!("abc"),
         json!(f as f64 + 0.0),
         json!(true),
         json!("+1"),
-        json!(-1),
+        json!(format!(" {f} ")),
+        json!(f.to_string()),
     ] {
-        assert_eq!(
-            serde_json::to_string(&hist(fold.clone()).await).unwrap(),
-            r#"{"error":"history: `fold` must be a fold id (int)","reason":"bad_arg","arg":"fold"}"#,
-            "{fold}"
-        );
+        let h = hist(fold.clone()).await;
+        assert_eq!(h["reason"], json!("bad_arg"), "{fold}: {h}");
+        assert_eq!(h["arg"], json!("fold"), "{fold}: {h}");
     }
+    assert_eq!(
+        hist(json!(-1)).await["reason"],
+        json!("not_found"),
+        "an integer that names no fold"
+    );
     assert_eq!(
         serde_json::to_string(&hist(json!(r1)).await).unwrap(),
         format!(
@@ -7627,27 +7524,40 @@ async fn a_peer_cannot_mark_its_message_a_notice() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_routing_name_the_verb_documents_is_refused_loud() {
     struct Store(Arc<std::sync::Mutex<Vec<String>>>);
+    // `create` takes a `title`: a name the call's routing also carries
+    fantastic_kernel::stand_in_verbs!(clash_verbs {
+        CreateV "create" { title: String, body: String },
+        PingV "ping" {}
+    });
     #[async_trait]
-    impl Bundle for Store {
+    impl fantastic_kernel::Handler for Store {
+        type Call = clash_verbs::Call;
         fn name(&self) -> &str {
             "clash_store"
         }
-        fn verb_docs(&self) -> Value {
-            json!({
-                "create": "args: title:str (req), body:str (req). A page → {created}.",
-                "ping": "No args. → {pong}.",
-            })
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
+        fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+            clash_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &Agent) -> Vec<fantastic_kernel::DynVerb> {
+            clash_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+            fantastic_kernel::fixture_record!()
         }
         async fn handle(
             &self,
             _agent_id: &AgentId,
-            payload: &Value,
+            call: Self::Call,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
-            let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-            if matches!(verb, "boot" | "shutdown") {
-                return Ok(None);
-            }
+            let verb = match &call {
+                clash_verbs::Call::CreateV(_) => "create",
+                clash_verbs::Call::PingV(_) => "ping",
+                clash_verbs::Call::Reflect(_) => "reflect",
+            };
             self.0.lock().unwrap().push(verb.to_string());
             Ok(Some(json!({"ok": verb})))
         }
@@ -7725,25 +7635,34 @@ async fn a_routing_name_the_verb_documents_is_refused_loud() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_routing_name_in_the_payload_of_a_routed_call_is_delivered() {
     struct Store(Arc<std::sync::Mutex<Vec<Value>>>);
+    fantastic_kernel::stand_in_verbs!(clash2_verbs {
+        CreateV "create" { title: String, body: String }
+    });
     #[async_trait]
-    impl Bundle for Store {
+    impl fantastic_kernel::Handler for Store {
+        type Call = clash2_verbs::Call;
         fn name(&self) -> &str {
             "clash_store2"
         }
-        fn verb_docs(&self) -> Value {
-            json!({"create": "args: title:str (req), body:str (req). A page → {created}."})
+        fn man(&self) -> &'static str {
+            "A test stand-in."
+        }
+        fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+            clash2_verbs::VERBS
+        }
+        fn dynamic_verbs(&self, agent: &Agent) -> Vec<fantastic_kernel::DynVerb> {
+            clash2_verbs::dynamic_verbs(agent)
+        }
+        fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+            fantastic_kernel::fixture_record!()
         }
         async fn handle(
             &self,
             _agent_id: &AgentId,
-            payload: &Value,
+            call: Self::Call,
             _kernel: &Arc<Kernel>,
         ) -> Result<Reply, BundleError> {
-            let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-            if matches!(verb, "boot" | "shutdown") {
-                return Ok(None);
-            }
-            self.0.lock().unwrap().push(payload.clone());
+            self.0.lock().unwrap().push(call.payload());
             Ok(Some(json!({"created": true})))
         }
     }
@@ -7918,7 +7837,7 @@ async fn driver_store(
         .await;
         fantastic_kernel::test_support::as_agent(
             backend.clone(),
-            crate::retrieval::context_clear(backend, &json!({"why":"new job"}), kernel, 32768),
+            crate::retrieval::context_clear(backend, Some("new job"), kernel, 32768),
         )
         .await
         .expect("clear");
@@ -8290,17 +8209,45 @@ impl Provider for EchoWords {
     }
 }
 
+mod provider_verbs {
+    use crate::declared::{Complete, Models, SetDefaultModel};
+    fantastic_kernel::verbs! {
+        "complete" => Complete,
+        "models" => Models,
+        "set_default_model" => SetDefaultModel,
+    }
+}
+
 #[async_trait]
-impl Bundle for EchoProvider {
+impl Handler for EchoProvider {
+    type Call = provider_verbs::Call;
     fn name(&self) -> &str {
         "echo_provider"
     }
-    async fn handle(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
+    fn man(&self) -> &'static str {
+        "A provider stand-in that streams a fixed answer."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        provider_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, a: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        provider_verbs::dynamic_verbs(a)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &crate::tests_decl::any::RECORD
+    }
+    async fn handle(&self, id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
         // no model on the pass: the "server" names its own, `srv-1`
         let build = |m: Map<String, Value>| -> Arc<dyn Provider> {
             Arc::new(EchoWords(m.get("model").and_then(Value::as_str).unwrap_or("srv-1").to_string()))
         };
-        Ok(crate::remote_provider::provider_verbs(id, payload, kernel, build, crate::remote_provider::NO_LIVE).await)
+        use provider_verbs::Call;
+        Ok(Some(match call {
+            Call::Reflect(_) => json!({"id": id.as_str()}),
+            Call::Complete(a) => crate::remote_provider::complete_verb(id, &a, kernel, build).await,
+            Call::Models(_) => crate::remote_provider::models_verb(id, kernel, crate::remote_provider::NO_LIVE).await,
+            Call::SetDefaultModel(a) => crate::remote_provider::set_default_verb(id, &a, kernel).await,
+        }))
     }
 }
 
@@ -8371,7 +8318,7 @@ async fn an_ai_chat_holds_the_conversation_and_completes_through_its_provider() 
             .await
             .remove(0)
             .result;
-        assert!(r["error"].as_str().unwrap_or_default().contains(&format!("{field} must be a non-empty")), "{field}: {r}");
+        assert!(r["error"].as_str().unwrap_or_default().contains(field), "{field}: {r}");
     }
 
     // the chat names its own model: the next pass runs on it, the conversation stays
@@ -8434,7 +8381,7 @@ async fn a_provider_completes_on_its_default_model_field_and_lists_and_sets_it()
     assert_eq!(call("prov", json!({"type": "set_default_model", "model": "m-big"})).await, json!({"default": "m-big"}));
     assert_eq!(call("prov", json!({"type": "models"})).await["default"], "m-big");
     let no = call("prov", json!({"type": "set_default_model", "model": "m-huge"})).await;
-    assert_eq!(no["reason"], "bad_arg", "not one of its models: {no}");
+    assert_eq!(no["reason"], "not_found", "not one of its models: {no}");
     let r = call("prov", json!({"type": "complete", "messages": msg, "rid": "r4"})).await;
     assert_eq!(r["model"], "m-big", "the new default: {r}");
 }

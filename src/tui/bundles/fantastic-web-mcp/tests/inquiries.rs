@@ -10,11 +10,17 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use fantastic_kernel::{
     bootstrap::{bootstrap, BootstrapOptions},
-    bundle::BundleError,
-    AgentId, Bundle, BundleRegistry, Item, Kernel, Reply,
+    bundle::{BundleError, Handler},
+    AgentId, BundleRegistry, Item, Kernel, Reply,
 };
 use fantastic_web_mcp::{WebMcpBundle, HANDLER_MODULE};
 use serde_json::{json, Value};
+
+fantastic_kernel::stand_in_verbs!(asker_verbs {
+    Ask "ask" { text: String },
+    Send "send" { text: String, client_id: String },
+    Got "got" {},
+});
 
 /// Asks the leg an inquiry on request, and records every message it is sent.
 #[derive(Default)]
@@ -23,36 +29,44 @@ struct Asker {
 }
 
 #[async_trait]
-impl Bundle for Asker {
+impl Handler for Asker {
+    type Call = asker_verbs::Call;
     fn name(&self) -> &str {
         "asker"
     }
+    fn man(&self) -> &'static str {
+        "A test stand-in that asks the leg and records what it is sent."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        asker_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        asker_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
     async fn handle(
         &self,
-        _id: &AgentId,
-        p: &Value,
+        id: &AgentId,
+        call: Self::Call,
         k: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        match p.get("type").and_then(Value::as_str) {
-            Some("ask") => {
-                let ask = json!({"type": "inquiry", "text": p["text"], "request_id": "r1"});
+        match call {
+            asker_verbs::Call::Ask(a) => {
+                let ask = json!({"type": "inquiry", "text": a.text, "request_id": "r1"});
                 let out = Arc::clone(k)
                     .send(vec![Item::new(AgentId::from("mcp"), ask)])
                     .await
                     .remove(0);
                 Ok(Some(out.result))
             }
-            Some("send") => {
-                self.got
-                    .lock()
-                    .unwrap()
-                    .push(p["text"].as_str().unwrap_or("").to_string());
+            asker_verbs::Call::Send(m) => {
+                self.got.lock().unwrap().push(m.text);
                 Ok(Some(json!({"ok": true})))
             }
-            Some("got") => Ok(Some(json!({"got": self.got.lock().unwrap().clone()}))),
-            _ => Ok(Some(
-                json!({"verbs": {"ask": "args: text", "got": "no args"}}),
-            )),
+            asker_verbs::Call::Got(_) => Ok(Some(json!({"got": self.got.lock().unwrap().clone()}))),
+            asker_verbs::Call::Reflect(_) => Ok(Some(json!({"id": id.as_str(), "sentence": "an asker"}))),
         }
     }
 }

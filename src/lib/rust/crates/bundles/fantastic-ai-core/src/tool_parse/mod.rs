@@ -35,6 +35,7 @@
 pub mod grammar;
 pub mod render;
 pub mod shape;
+pub mod typed;
 
 #[cfg(test)]
 mod tests_grammar;
@@ -187,7 +188,7 @@ pub fn malformed_calls(text: &str) -> Vec<MalformedCall> {
             // BOTH ENDS, never just the head — the fault in a long block is
             // almost never in the first 400 chars. Shown WHOLE, DEFANGED so
             // quoting it cannot arm the scanner again.
-            your_block: defang(fantastic_kernel::py_strip(f.block)),
+            your_block: defang(fantastic_bundle::py_strip(f.block)),
         })
         .collect()
 }

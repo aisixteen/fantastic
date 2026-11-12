@@ -1,17 +1,16 @@
 #!/bin/sh
 # pack.sh — roll an APP's page into a sovereign, self-describing artifact with
-# the library's vendored esbuild: <out.zip> = readme.md + ONE bundle.min.js (the
+# the library's vendored esbuild: <out.zip> = ONE bundle.min.js (the
 # entry and everything it imports — the library included — inlined, no chunks)
 # + bundle.min.js.map.
 #
-# The library has no page of its own: the APP names its entry, its output and
-# its readme (the revive guide that travels inside the zip), and passes any
-# esbuild flags its page needs (vendor aliases, loaders) after them:
+# The library has no page of its own: the APP names its entry and its output,
+# and passes any esbuild flags its page needs (vendor aliases, loaders) after them:
 #
-#   sh pack.sh <entry.ts> <out.zip> <readme.md> [esbuild flags …]
+#   sh pack.sh <entry.ts> <out.zip> [esbuild flags …]
 #
 # e.g. the canvas app (src/tui/web/canvas/scripts/pack.sh):
-#   sh ../../../lib/ts/scripts/pack.sh src/bundle.ts dist/canvas.zip readme.md \
+#   sh ../../../lib/ts/scripts/pack.sh src/bundle.ts dist/canvas.zip \
 #     --alias:three=./src/vendor/three.module.js --loader:.css=text …
 #
 # The zip is reproducible: SOURCE_DATE_EPOCH stamps its entries (zip.sh).
@@ -24,8 +23,8 @@
 # Windows' sh and tools, plus Info-ZIP `zip`).
 set -eu
 
-if [ "$#" -lt 3 ]; then
-  echo "usage: sh pack.sh <entry.ts> <out.zip> <readme.md> [esbuild flags …]" >&2
+if [ "$#" -lt 2 ]; then
+  echo "usage: sh pack.sh <entry.ts> <out.zip> [esbuild flags …]" >&2
   echo "  the library has no default page — the app names what it packs" >&2
   exit 2
 fi
@@ -37,12 +36,9 @@ CALLER=$(pwd)
 abs() { case "$1" in /*) printf '%s\n' "$1" ;; [A-Za-z]:[/\\]*) printf '%s\n' "$1" | tr '\\' '/' ;; *) printf '%s\n' "$CALLER/$1" ;; esac; }
 ENTRY=$(abs "$1")
 ZIP=$(abs "$2")
-README=$(abs "$3")
-shift 3
+shift 2
 [ -f "$ENTRY" ] || { echo "pack.sh: no entry at $ENTRY" >&2; exit 1; }
-[ -f "$README" ] || { echo "pack.sh: no readme at $README" >&2; exit 1; }
 OUT="$(dirname "$ZIP")/pack"   # isolated staging dir beside the zip
-PLACEHOLDER="__BUNDLE_SHA256__"
 
 # ── locate the library (this script lives in <lib>/scripts/) ────────────────
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -130,16 +126,14 @@ if [ "$JS_COUNT" != "1" ]; then
 fi
 [ -f "$OUT/bundle.min.js.map" ] || { echo "pack.sh: missing sourcemap" >&2; exit 1; }
 
-# ── stamp the bundle's sha256 into the readme (zip copy only) ───────────────
 BUNDLE_SHA=$(sha256 "$OUT/bundle.min.js")
-sed "s/$PLACEHOLDER/$BUNDLE_SHA/g" "$README" > "$OUT/readme.md"
 
-# ── zip (flat: readme.md + bundle.min.js + bundle.min.js.map) ───────────────
+# ── zip (flat: bundle.min.js + bundle.min.js.map) ───────────────────────────
 # Deterministic (zip.sh): fixed order, mode 644, no extra fields, entry times from
 # SOURCE_DATE_EPOCH (default 1980-01-01 UTC).
 mkdir -p "$(dirname "$ZIP")"
 rm -f "$ZIP"
-sh "$SCRIPT_DIR/zip.sh" "$ZIP" "$OUT" readme.md bundle.min.js bundle.min.js.map
+sh "$SCRIPT_DIR/zip.sh" "$ZIP" "$OUT" bundle.min.js bundle.min.js.map
 
 BYTES=$(wc -c < "$OUT/bundle.min.js" | tr -d ' ')
 echo "pack.sh: wrote $ZIP"

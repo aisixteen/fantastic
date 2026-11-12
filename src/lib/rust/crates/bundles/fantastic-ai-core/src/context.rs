@@ -4,10 +4,8 @@
 //! WRONG tokenizer for gemma/nemotron). Plus window/budget resolution off
 //! the agent record meta. Mirrors the Python `ai_core/context.py`.
 
-use crate::constants::{
-    BUDGET_FLOOR, CHARS_PER_TOKEN, DEFAULT_OUTPUT_RESERVE, RECENT_N, RECENT_N_RANGE,
-};
-use fantastic_bundle::{py_int, py_json_dumps, py_strip};
+use crate::constants::{BUDGET_FLOOR, CHARS_PER_TOKEN};
+use fantastic_bundle::py_json_dumps;
 use serde_json::{json, Map, Value};
 
 /// Rough token estimate for ONE message — counts the SERIALIZED form, because
@@ -39,36 +37,6 @@ pub fn estimate_tokens(messages: &[Value]) -> i64 {
     messages.iter().map(estimate_one).sum()
 }
 
-/// Python `_as_pos_int`: a bool is never one; an int must be > 0; a float must
-/// be > 0 and then TRUNCATES (`0.5` → 0, which is why the budget can floor); a
-/// string counts only when `strip().isascii() and strip().isdigit()` (so `+12`,
-/// `-3` and `'٣'` are not).
-fn as_pos_int(v: Option<&Value>) -> Option<i64> {
-    match v {
-        Some(Value::Bool(_)) => None,
-        Some(Value::Number(n)) => {
-            if let Some(i) = n.as_i64() {
-                (i > 0).then_some(i)
-            } else if let Some(f) = n.as_f64() {
-                (f > 0.0).then_some(f as i64)
-            } else {
-                None
-            }
-        }
-        Some(Value::String(s)) => {
-            let t = py_strip(s);
-            if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
-                py_int(&Value::String(t.to_string()))
-                    .ok()
-                    .filter(|&i| i > 0)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
 /// The model's usable window, by STATIC precedence (no fallback-chain):
 /// `context_window` (the explicit per-agent override — works on any
 /// backend incl. vllm/responses which have no `num_ctx`) → `num_ctx`
@@ -80,34 +48,20 @@ fn as_pos_int(v: Option<&Value>) -> Option<i64> {
 /// `contextSize`). Named at every call — a backend's window is never assumed.
 pub fn resolve_context_window(meta: &Map<String, Value>, model_window: i64) -> i64 {
     for key in ["context_window", "num_ctx"] {
-        if let Some(v) = as_pos_int(meta.get(key)) {
+        if let Some(v) = meta.get(key).and_then(Value::as_i64) {
             return v;
         }
     }
     model_window
 }
 
-/// Output headroom reserved out of the window — python `output_reserve`: a
-/// NON-BOOL int ≥ 0, or a `strip().isascii() and strip().isdigit()` string,
-/// else 1024. A float (even
-/// `1000.0`), a negative, and `+5` all take the default.
+/// Output headroom reserved out of the window: the record's `output_reserve` (its
+/// declared range and default are the record's, see [`crate::record::AiRecord`]).
 pub fn output_reserve(meta: &Map<String, Value>) -> i64 {
-    match meta.get("output_reserve") {
-        Some(Value::Bool(_)) => DEFAULT_OUTPUT_RESERVE,
-        Some(Value::Number(n)) => n
-            .as_i64()
-            .filter(|&i| i >= 0)
-            .unwrap_or(DEFAULT_OUTPUT_RESERVE),
-        Some(Value::String(s)) => {
-            let t = py_strip(s);
-            if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
-                py_int(&Value::String(t.to_string())).unwrap_or(DEFAULT_OUTPUT_RESERVE)
-            } else {
-                DEFAULT_OUTPUT_RESERVE
-            }
-        }
-        _ => DEFAULT_OUTPUT_RESERVE,
-    }
+    crate::record::ai::RECORD
+        .get(meta, "output_reserve")
+        .and_then(|v| v.as_i64())
+        .expect("output_reserve declares its default")
 }
 
 /// Token budget for the INPUT (window minus output headroom), floored.
@@ -116,15 +70,12 @@ pub fn budget(meta: &Map<String, Value>, model_window: i64) -> i64 {
 }
 
 /// The agent's configured `recent_n` (verbatim recent turns kept by
-/// compact/truncate) — python `int(v)` clamped to [1, 50], and 6 on the
-/// TypeError/ValueError `int()` raises. `True` is 1, `7.9` is 7, `" 7 "` is 7.
+/// compact/truncate); its range and default are the record's declared ones.
 pub fn recent_n(meta: &Map<String, Value>) -> usize {
-    let n = match meta.get("recent_n") {
-        Some(v) => py_int(v).unwrap_or(RECENT_N),
-        None => RECENT_N,
-    };
-    let (lo, hi) = RECENT_N_RANGE;
-    n.clamp(lo, hi) as usize
+    crate::record::ai::RECORD
+        .get(meta, "recent_n")
+        .and_then(|v| v.as_i64())
+        .expect("recent_n declares its default") as usize
 }
 
 /// Tokens a reply may occupy INLINE in the model's next turn. Above this it is

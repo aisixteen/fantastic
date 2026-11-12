@@ -1,26 +1,25 @@
 <!doctype html>
 <!--
-  THE EXAMPLE CLIENT of the `home` protocol v1 (fantastic-home-kernel/docs/home.md).
+  THE EXAMPLE CLIENT of the `home` protocol (the `home` agent's declared verbs).
   This one file is the whole protocol: read it to write a client. No framework,
   no build step, no import.
 
   The home serves it at http://127.0.0.1:<port>/canvas_page/file/list.html (the
   Home itself is home.html). A native client speaks the same frames over the
   same two sockets, sending no Origin header. A copy opened in a browser from
-  file:// or another origin is refused by the host's Origin rule (home.md,
-  section 6, "Bring your own UI").
+  file:// or another origin is refused by the host's Origin rule.
 
     ws://<host>/user/ws   the calls: {type:"call", target:"user", id,
-                          payload:{type:"forward", target:"home", payload:{type, version:1, …}}}
+                          payload:{type:"forward", target:"home", payload:{type, …}}}
     ws://<host>/home/ws   the events: {type:"event", payload}; this page keeps `state` only
 
-  1. `reflect` first: run only against protocol "fantastic.home", version 1.
+  1. `reflect` first: run only against protocol "fantastic.home".
   2. Watch /home/ws, then call `list`; draw a state only when its seq is above
      the last one drawn.
-  3. Every call carries version 1 and a fresh id (crypto.randomUUID()).
+  3. Every call carries a fresh id (crypto.randomUUID()).
 
   The look is ONE `:root` block of the skin schema's custom properties
-  (src/tui/docs/skins.md), its values the dark skin's
+  (skin/schema.ts), its values the dark skin's
   (skin/stock/dark.tokens.json); everything below paints with var(--fc-…) only.
   Swapping that block is the whole reskin of this page.
 -->
@@ -101,7 +100,6 @@
 "use strict";
 (() => {
   const PROTOCOL = "fantastic.home";
-  const VERSION = 1;
   const host = location.host;
   let drawnSeq = 0;
   const pending = new Map();
@@ -110,7 +108,7 @@
   function say(text) { $("status").textContent = text; }
   function refused(text) { $("refused").textContent = text || ""; }
 
-  // ── the calls: user.forward to home, a fresh id each, version 1 ───────────
+  // ── the calls: user.forward to home, a fresh id each ───────────
   const calls = new WebSocket(`ws://${host}/user/ws`);
   const callsOpen = new Promise((resolve, reject) => {
     calls.addEventListener("open", resolve, { once: true });
@@ -133,7 +131,7 @@
     const id = crypto.randomUUID();
     const reply = new Promise((resolve) => pending.set(id, resolve));
     calls.send(JSON.stringify({ type: "call", target: "user", id,
-      payload: { type: "forward", target: "home", payload: { ...payload, version: VERSION } } }));
+      payload: { type: "forward", target: "home", payload } }));
     const data = await reply;
     if (data && typeof data.error === "string") {
       refused(data.hint ? `${data.error} — ${data.hint}` : data.error);
@@ -214,9 +212,9 @@
   // ── start: the protocol checked, then watched first and listed second ─────
   async function start() {
     const me = await call({ type: "reflect" });
-    if (!me || me.protocol !== PROTOCOL || me.version !== VERSION) {
-      const spoke = me ? `${me.protocol} v${me.version}` : "nothing";
-      say(`this page speaks ${PROTOCOL} v${VERSION}; the host speaks ${spoke} — not started`);
+    if (!me || me.protocol !== PROTOCOL) {
+      const spoke = me ? String(me.protocol) : "nothing";
+      say(`this page speaks ${PROTOCOL}; the host speaks ${spoke} — not started`);
       return;
     }
     const events = new WebSocket(`ws://${host}/home/ws`);

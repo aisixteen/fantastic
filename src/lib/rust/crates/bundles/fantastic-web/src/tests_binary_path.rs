@@ -15,23 +15,48 @@ use tokio_tungstenite::tungstenite::Message as TMessage;
 /// handler was given (python's payload minus the bytes).
 struct Capture;
 
+// the one verb it takes, and every slot a body rides at in these tests
+fantastic_kernel::stand_in_verbs!(capture_verbs {
+    Take "take" {
+        meta: Option<serde_json::Value>,
+        a: Option<serde_json::Value>,
+        k: Option<i64>,
+        data: Option<serde_json::Value>,
+        bytes: Option<serde_json::Value>,
+        #[serde(rename = "a.b")] a_b: Option<serde_json::Value>
+    }
+});
+
 #[async_trait::async_trait]
-impl fantastic_kernel::bundle::Bundle for Capture {
+impl fantastic_kernel::Handler for Capture {
+    type Call = capture_verbs::Call;
     fn name(&self) -> &str {
         "capture"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        capture_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        capture_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         _id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<fantastic_kernel::bundle::Reply, fantastic_kernel::bundle::BundleError> {
-        Ok(Some(json!({"channel": "text", "header": payload})))
+        Ok(Some(json!({"channel": "text", "header": call.payload()})))
     }
     async fn handle_binary(
         &self,
         _id: &AgentId,
-        header: Value,
+        call: Self::Call,
         body: Option<fantastic_kernel::Blob>,
         _kernel: &Arc<Kernel>,
     ) -> Result<
@@ -46,7 +71,7 @@ impl fantastic_kernel::bundle::Bundle for Capture {
                 "channel": "binary",
                 "path": body.as_ref().map(|b| fantastic_bundle::path::steps_value(&b.path)),
                 "len": body.as_ref().map(|b| b.bytes.len()),
-                "header": header,
+                "header": call.payload(),
             })),
             None,
         ))

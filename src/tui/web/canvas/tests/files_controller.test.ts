@@ -153,7 +153,7 @@ test("the verbs: an agent with no folder, a path that is not a string, and a mis
   project(r.bridge);
   await r.mountTree("t_verbs3");
   assert.equal((await r.call("t_verbs3", { type: "select", agent: "nobody" }))["reason"], "not_found");
-  assert.equal((await r.call("t_verbs3", { type: "select" }))["reason"], "bad_arg");
+  assert.equal((await r.call("t_verbs3", { type: "select" }))["reason"], "missing_arg");
   assert.equal((await r.call("t_verbs3", { type: "select", path: 4 }))["reason"], "bad_arg");
   assert.equal((await r.call("t_verbs3", { type: "" }))["reason"], "bad_arg", "a call with no verb");
   const ok = await r.call("t_verbs3", { type: "select", path: "src/one.txt" });
@@ -172,21 +172,16 @@ test("the verbs: collapse says what was open; select of an agent's folder carrie
 });
 
 test("filesAgent is the handler the kernel calls: it needs a cell on screen (registered by the file tree view)", async () => {
-  assert.deepEqual(await filesAgent("nobody", { type: "select", path: "a" }), { error: "files: the cell is not on screen", reason: "not_mounted", hint: "the cell is not on screen" });
+  assert.deepEqual(await filesAgent("nobody", { type: "select", path: "a" }), { error: "files: the cell is not on screen", reason: "not_here", hint: "the cell is not on screen" });
 });
 
-test("registerFilesView: the tree's name and the old sidebar's name both register the handler, with the readme", () => {
+test("registerFilesView: the tree's name registers the handler, its verbs rendered from the declaration, with its man text", () => {
   const calls: string[] = [];
   registerFilesView({
     registerBundle: (hm, _h, verbs) => calls.push(`bundle ${hm} ${Object.keys(verbs ?? {}).join(",")}`),
     setBundleReadme: (hm, readme) => calls.push(`readme ${hm} ${readme.slice(0, 11)}`),
   });
-  assert.deepEqual(calls, [
-    "bundle files_view.ts select,expand,collapse,reveal,reflect",
-    "readme files_view.ts A FILE TREE",
-    "bundle sidebar_view.ts select,expand,collapse,reveal,reflect",
-    "readme sidebar_view.ts legacy name",
-  ]);
+  assert.deepEqual(calls, ["bundle files_view.ts select,expand,collapse,reveal", "readme files_view.ts A file tree"]);
   controllers.clear();
 });
 
@@ -283,7 +278,7 @@ test("the verbs: a reveal through a folder that refused says so from that folder
   const x = await r.call("t_reveal_refused", { type: "reveal", path: "src/nothing" });
   assert.equal(x["reason"], "denied", "the parent's refusal, as its row shows it");
   r.bridge.call = was;
-  assert.equal((await filesAgent("t_reveal_refused", {}))["reason"], "bad_arg");
+  assert.equal((await filesAgent("t_reveal_refused", {}))["reason"], "unhandled");
 });
 
 test("a change under an open folder of .fantastic asks the agent folders to be read again; a change of content does not", async () => {

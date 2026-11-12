@@ -20,18 +20,23 @@
 
 #![deny(missing_docs)]
 
+// the macros below name this crate by its own name, in it as in a dependent one
+extern crate self as fantastic_kernel;
+
 pub mod agent;
 pub mod authz;
 pub mod await_set;
 pub mod bootstrap;
 pub mod bundle;
 pub mod call_guard;
+pub mod declared;
 pub mod docs;
 pub mod errors;
 pub mod executions;
 pub mod grants;
 pub mod inbox;
 pub mod inherit;
+pub mod inquiry;
 pub mod jsonsafe;
 pub mod kernel;
 pub mod ledger;
@@ -44,21 +49,23 @@ pub mod persistence;
 pub mod reflect;
 pub mod refusal;
 pub mod rows;
-pub mod scalar;
 pub mod secret;
 pub mod send;
 pub mod state;
 pub mod storage;
 mod sys;
 pub mod tasks;
+pub mod typing;
+pub mod verbs;
 pub mod yaml_io;
 
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_support;
 
 pub use agent::{Agent, AgentId, AgentRecord, RESERVED_RECORD_KEYS};
 pub use authz::{authorize_call, default_callable_by, default_can_call, Decision, FROM_ABOVE};
-pub use bundle::{Bundle, BundleRegistry, Reply};
+pub use bundle::{Bundle, BundleError, BundleRegistry, Handler, Reply};
 pub use errors::{KernelError, KernelResult};
 pub use kernel::{
     Kernel, StateSubscriber, SubscriberToken, DEFAULT_INBOX_BOUND, SELF_PLACEHOLDER,
@@ -67,11 +74,11 @@ pub use kernel::{
 pub use outcome::{body_at, Blob, Item, Outcome, Status, Step};
 pub use paging::page;
 pub use peers::{PeerCallFuture, PeerEmitFuture, PeerReply, PeerRoute};
-pub use refusal::{bad, error_text, missing, not_here, refusal, refusal_hint, unknown_agent};
+pub use refusal::{error_text, is_refused, not_here, refusal, refusal_hint, unknown_agent};
 pub use rows::{Row, RowStore, RowTail};
-pub use scalar::{coerce_scalar, py_strip};
 pub use secret::{current_secret, note_reply_secret};
 pub use send::{current_origin, current_sender, Signal, ON_BATCH_LAUNCHED};
-pub use state::{KernelState, CURRENT_VERSION};
+pub use state::KernelState;
 pub use storage::StorageMode;
 pub use tasks::{current_killed, current_task, spawn_inherit, TaskId, TaskTable, CURRENT_TASK};
+pub use verbs::{DynRegistry, DynVerb, Parse, RecordDecl, Verb};

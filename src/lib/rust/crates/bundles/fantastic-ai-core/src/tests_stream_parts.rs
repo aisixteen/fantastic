@@ -204,14 +204,15 @@ impl Provider for SlowProvider {
 struct SlowBundle;
 
 #[async_trait]
-impl Bundle for SlowBundle {
+impl Handler for SlowBundle {
+    crate::tests_decl::chat_decls!();
     fn name(&self) -> &str {
         "slow_backend"
     }
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         // An unscripted agent (its `boot` at create) serves DONE passes.
@@ -226,11 +227,15 @@ impl Bundle for SlowBundle {
                     })
                 }),
         );
-        let reply = verbs::handle_common(agent_id, payload, kernel, CFG, move |_client| {
-            Arc::new(SlowProvider(Arc::clone(&script))) as Arc<dyn Provider>
-        })
-        .await?
-        .unwrap_or_else(|| json!({"error": "slow_backend: unknown type"}));
+        let reply = verbs::handle(
+            agent_id,
+            call,
+            kernel,
+            CFG,
+            move |_client| Arc::new(SlowProvider(Arc::clone(&script))) as Arc<dyn Provider>,
+            || json!({"id": "slow_backend"}),
+        )
+        .await?;
         Ok(Some(reply))
     }
     async fn on_cancel(
@@ -500,17 +505,18 @@ const SLOW_DEAF: &str = "slow_backend_deaf.tools";
 struct DeafBundle;
 
 #[async_trait]
-impl Bundle for DeafBundle {
+impl Handler for DeafBundle {
+    crate::tests_decl::chat_decls!();
     fn name(&self) -> &str {
         "slow_backend_deaf"
     }
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        SlowBundle.handle(agent_id, payload, kernel).await
+        Handler::handle(&SlowBundle, agent_id, call, kernel).await
     }
 }
 

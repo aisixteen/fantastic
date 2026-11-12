@@ -18,7 +18,7 @@
 //!
 //! ### Verbs
 //!
-//! - `reflect` → identity, port, host, allowed_origins, running, served_agent_count, surfaces, routes,
+//! - `reflect` → identity, port, host, allowed_origins, running, served_agent_count, surfaces,
 //!   browser_reachable
 //! - `boot`    → `{running, surfaces}`. Idempotent; a missing `port` RAISES.
 //! - `stop`    → `{stopped}`
@@ -38,15 +38,16 @@ mod handlers;
 pub(crate) mod mimetypes;
 mod mimetypes_table;
 pub(crate) mod origin;
+pub mod record;
 pub(crate) mod routes;
+pub mod verbs;
 pub(crate) mod ws;
 
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::Request;
 use axum::response::Response;
-use fantastic_bundle::{py_int, py_repr_value, py_str, py_truthy};
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -69,15 +70,11 @@ pub use origin::DEFAULT_HOST;
 /// judges by `host` alone (`origin.rs`), so a wildcard `bind` leaves the guard's
 /// identity where it was. Python `tools.py` agrees.
 pub fn listen_host(rec: &Map<String, Value>) -> String {
-    match rec.get("bind") {
-        Some(v) if py_truthy(v) => py_str(v),
-        _ => origin::effective_host(rec),
+    match rec.get("bind").and_then(Value::as_str) {
+        Some(bind) => bind.to_string(),
+        None => origin::effective_host(rec),
     }
 }
-
-/// readme.md auto-seeded into the agent's dir on creation. Python's file, byte
-/// for byte (`PB/web/host/src/web/readme.md`).
-pub const README: &str = include_str!("readme.md");
 
 /// Bundled favicon — python's `web/favicon.png`, byte for byte.
 pub const FAVICON_PNG: &[u8] = include_bytes!("favicon.png");
@@ -131,73 +128,72 @@ pub(crate) struct AppState {
 /// The HTTP host bundle.
 pub struct WebBundle;
 
-/// HOW TO CALL a web host — python's `VERBS` docstrings (first line each),
-/// served by the kernel's `docs` verb.
-fn verb_docs_json() -> Value {
-    json!({
-        "reflect": "Identity + uvicorn port + running flag + currently mounted surfaces (process-local; reflect the live serve for truth).",
-        "boot": "Idempotent. Builds the host on rec.port (required, no default), mounts each",
-        "stop": "No args. Asks uvicorn to shut down; cancels its task. Returns {stopped:bool}.",
-        "mount": "args: child_id:str (req). Pulls `get_routes` from the named child and (re)mounts its routes onto the live app. Idempotent — unmounts any prior routes for the child first.",
-        "unmount": "args: child_id:str (req). Removes every route belonging to the named child from the live app.",
-        "fetch_file": "args: agent_id:str (req), path:str (req), offset:int (req), length:int (req). One `read_stream` chunk of `path` on `agent_id`, read AS THIS HOST — the file route hands every browser fetch here, so the served agent's gates judge `web`. Returns that agent's reply.",
-    })
+/// What the bundle is for — its one short man text.
+const MAN: &str = "An HTTP host: it serves the favicon and GET /<agent_id>/file/<path> (a file streamed from an agent's read_stream, read as this host) and mounts the call surfaces (web_ws, web_rest) its child agents declare.";
+
+/// Serve one checked call; `fetch_file` answers a raw chunk beside its JSON.
+async fn serve(
+    agent_id: &AgentId,
+    call: verbs::Call,
+    kernel: &Arc<Kernel>,
+) -> Result<(Reply, Option<fantastic_kernel::Blob>), BundleError> {
+    let reply = match call {
+        verbs::Call::Reflect(_) => reflect_reply(agent_id, kernel).await,
+        verbs::Call::Boot(_) => boot_reply(agent_id, kernel).await?,
+        verbs::Call::Shutdown(_) => Value::Null,
+        verbs::Call::Stop(_) => stop_reply(agent_id).await,
+        verbs::Call::Mount(a) => mount_reply(agent_id, &a.child_id, kernel).await,
+        verbs::Call::Unmount(a) => unmount_reply(agent_id, &a.child_id).await,
+        verbs::Call::FetchFile(a) => {
+            let (v, body) = fetch_file_reply(a, kernel).await;
+            return Ok((Some(v), body));
+        }
+    };
+    Ok((Some(reply), None))
 }
 
 #[async_trait]
-impl Bundle for WebBundle {
+impl Handler for WebBundle {
+    type Call = verbs::Call;
+
     fn name(&self) -> &str {
         "web"
     }
 
-    fn verb_docs(&self) -> Value {
-        verb_docs_json()
+    fn man(&self) -> &'static str {
+        MAN
     }
 
-    fn readme(&self) -> Option<&'static str> {
-        Some(README)
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        verbs::VERBS
     }
 
-    /// `fetch_file` answers a raw chunk beside its JSON; every other verb is
-    /// [`Bundle::handle`]'s.
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        verbs::dynamic_verbs(agent)
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &record::RECORD
+    }
+
+    /// `fetch_file` answers a raw chunk beside its JSON; every other verb has no body.
     async fn handle_binary(
         &self,
         agent_id: &AgentId,
-        header: Value,
+        call: Self::Call,
         _body: Option<fantastic_kernel::Blob>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<fantastic_kernel::Blob>), BundleError> {
-        if header.get("type").and_then(Value::as_str) == Some("fetch_file") {
-            let (v, body) = fetch_file_reply(&header, kernel).await;
-            return Ok((Some(v), body));
-        }
-        Ok((self.handle(agent_id, &header, kernel).await?, None))
+        serve(agent_id, call, kernel).await
     }
 
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        let reply = match verb {
-            "reflect" => reflect_reply(agent_id, kernel).await,
-            "boot" => boot_reply(agent_id, kernel).await?,
-            "stop" => stop_reply(agent_id).await,
-            "mount" => mount_reply(agent_id, payload, kernel).await,
-            "unmount" => unmount_reply(agent_id, payload).await,
-            _ => {
-                let raw = payload.get("type").cloned().unwrap_or(Value::Null);
-                let mut r = fantastic_kernel::refusal::refusal(
-                    fantastic_kernel::refusal::UNHANDLED,
-                    format!("web: unknown type {}", py_repr_value(&raw)),
-                );
-                fantastic_kernel::refusal::with(&mut r, "verb", raw);
-                r
-            }
-        };
-        Ok(Some(reply))
+        Ok(serve(agent_id, call, kernel).await?.0)
     }
 
     async fn on_delete(
@@ -243,7 +239,7 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     out.insert("id".into(), json!(agent_id.as_str()));
     out.insert(
         "sentence".into(),
-        json!("HTTP host — rendering routes baked in; call surfaces mounted from sub-agents."),
+        json!(MAN),
     );
     out.insert("port".into(), port.map_or(Value::Null, |p| json!(p)));
     let rec = read_rec(agent_id, kernel);
@@ -255,21 +251,6 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     out.insert("running".into(), json!(running));
     out.insert("served_agent_count".into(), json!(kernel.agents.len()));
     out.insert("surfaces".into(), Value::Object(surface_map));
-    // THE BROWSER-FACING CONTRACT. `/file/` is the only route a browser hits,
-    // and without a description a model that reflects this agent finds no
-    // route contract and HALLUCINATES one. This field is that contract.
-    out.insert(
-        "routes".into(),
-        json!({
-            "GET /<agent_id>/file/<path>":
-                "Streams a file by read_stream-ing through the named agent. The \
-        read is dispatched AS THIS WEB AGENT, so it needs BOTH sides of \
-        the call gate — this host's can_call[<agent_id>] (egress) AND that \
-        agent's callable_by[<this web id>] (ingress) — plus that agent's \
-        own io leg open (ingress_rule). Any one missing → 404. See \
-        browser_reachable for who actually passes all three."
-        }),
-    );
     // The PROPERTY, computed — not a description of it. `ingress_rule=allow_all_ingress`
     // reads like "open" while the call gate still refuses, so config never
     // carried the answer to "what can a browser actually get?".
@@ -350,10 +331,10 @@ fn browser_reachable(web_id: &AgentId, kernel: &Kernel) -> Vec<String> {
 
 /// The io leg's own resolved ingress rule (python `gate_inbound(resolve_ingress(rec), …)`).
 fn leg_admits(meta: &Map<String, Value>, target: &str, verb: &str) -> bool {
-    use fantastic_io_bridge::authorizer::{ingress, manifold_spec, Action, Decision};
-    let spec = manifold_spec(meta.get("ingress_rule"), meta.get("auth"), "_ingress");
+    use fantastic_io_bridge::authorizer::{ingress, Action, Decision, Rules};
+    let rules = Rules::of(meta).unwrap_or_default();
     matches!(
-        ingress::resolve(spec.as_ref()).authorize(&Action {
+        ingress::resolve(&rules).authorize(&Action {
             kind: "call",
             target,
             verb,
@@ -498,25 +479,17 @@ async fn stop_reply(agent_id: &AgentId) -> Value {
 /// `callable_by` and its io leg judge `web`. The reply comes back whole, its raw
 /// chunk at its slot.
 async fn fetch_file_reply(
-    payload: &Value,
+    a: verbs::FetchFile,
     kernel: &Arc<Kernel>,
 ) -> (Value, Option<fantastic_kernel::Blob>) {
-    let Some(agent_id) = payload
-        .get("agent_id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    else {
-        return (json!({"error": "web.fetch_file: agent_id required"}), None);
-    };
-    let field = |k: &str| payload.get(k).cloned().unwrap_or(Value::Null);
     let out = kernel
         .send(vec![Item::new(
-            AgentId::from(agent_id),
+            AgentId::from(a.agent_id.as_str()),
             json!({
                 "type": "read_stream",
-                "path": field("path"),
-                "offset": field("offset"),
-                "length": field("length"),
+                "path": a.path,
+                "offset": a.offset,
+                "length": a.length,
             }),
         )])
         .await
@@ -524,10 +497,8 @@ async fn fetch_file_reply(
     (out.result, out.body)
 }
 
-async fn mount_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let Some(child) = child_arg(payload) else {
-        return json!({"error": "web.mount: child_id required"});
-    };
+async fn mount_reply(agent_id: &AgentId, child_id: &str, kernel: &Arc<Kernel>) -> Value {
+    let child = AgentId::from(child_id);
     let Some(table) = SERVERS.lock().get(agent_id).map(|h| Arc::clone(&h.table)) else {
         return json!({"error": "web.mount: not running"});
     };
@@ -539,24 +510,13 @@ async fn mount_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
 }
 
 /// python `_unmount` — remove every route belonging to the named child.
-async fn unmount_reply(agent_id: &AgentId, payload: &Value) -> Value {
-    let Some(child) = child_arg(payload) else {
-        return json!({"error": "web.unmount: child_id required"});
-    };
+async fn unmount_reply(agent_id: &AgentId, child_id: &str) -> Value {
+    let child = AgentId::from(child_id);
     let Some(table) = SERVERS.lock().get(agent_id).map(|h| Arc::clone(&h.table)) else {
         return json!({"error": "web.unmount: not running"});
     };
     table.write().await.unmount(&child);
     json!({"unmounted": child.0})
-}
-
-/// python `payload.get("child_id")` guarded by its own truthiness.
-fn child_arg(payload: &Value) -> Option<AgentId> {
-    let v = payload.get("child_id")?;
-    if !py_truthy(v) {
-        return None;
-    }
-    v.as_str().map(AgentId::from)
 }
 
 /// python `_mount_surface` — ask one child for its routes and mount them. A
@@ -586,16 +546,11 @@ async fn mount_surface(
     Ok(())
 }
 
-/// python `int(rec.get("port"))` with its falsy check — `None`, `0` and `""`
-/// all mean "not set".
+/// The record's `port` (declared `u16`, at least 1); absent means not set.
 fn read_port(agent_id: &AgentId, kernel: &Kernel) -> Option<u16> {
     let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
-    let meta = agent.meta.read().expect("meta poisoned").clone();
-    let raw = meta.get("port")?;
-    if !py_truthy(raw) {
-        return None;
-    }
-    py_int(raw).ok().and_then(|n| u16::try_from(n).ok())
+    let meta = agent.meta.read().expect("meta poisoned");
+    meta.get("port")?.as_u64().and_then(|n| u16::try_from(n).ok())
 }
 
 /// The agent's record meta (python `kernel.get(id) or {}`).

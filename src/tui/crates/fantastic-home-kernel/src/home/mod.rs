@@ -4,16 +4,18 @@
 //! ```text
 //!   agent    HomeBundle (`home.tools`): the verbs → Events, validation, replies
 //!   runner   owns the Home: Event → reduce → Effects → HomeOs → Events; the poll; the sinks
-//!   wire     the state JSON (protocol "fantastic.home", version 1)
+//!   wire     the state JSON (protocol "fantastic.home")
 //!   os       trait HomeOs, and SysOs (delegates every call to sys)
 //!   sys      every OS call of the crate
 //! ```
 
 pub mod agent;
 pub mod os;
+pub mod record;
 pub mod runner;
 #[doc(hidden)]
 pub mod sys;
+pub mod verbs;
 pub mod wire;
 
 #[cfg(test)]
@@ -29,22 +31,3 @@ pub const ID: &str = "home";
 
 /// Its `handler_module`.
 pub const HANDLER_MODULE: &str = "home.tools";
-
-/// Every verb of the agent except the lifecycle (`boot`, `shutdown`): what a
-/// page reaches through `user` (the grant follows this list).
-pub const VERBS: &[&str] = &[
-    "list",
-    "open",
-    "register",
-    "start",
-    "stop",
-    "remove",
-    "select",
-    "select_page",
-    "close_page",
-    "dismiss",
-    "log",
-    "focus",
-    "menu",
-    "reflect",
-];

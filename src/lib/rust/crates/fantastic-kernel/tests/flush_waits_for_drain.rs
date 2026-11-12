@@ -12,7 +12,7 @@
 use async_trait::async_trait;
 use fantastic_kernel::test_support::{boot_root, register_root_loader, wire_fake_store, FakeStore};
 use fantastic_kernel::StorageMode;
-use fantastic_kernel::{Agent, AgentId, Blob, Bundle, BundleRegistry, Item, Kernel, Reply};
+use fantastic_kernel::{Agent, AgentId, Blob, BundleRegistry, Handler, Item, Kernel, Reply};
 use serde_json::{json, Map, Value};
 use std::path::Path;
 use std::sync::Arc;
@@ -22,24 +22,34 @@ use tokio::sync::{Notify, Semaphore};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// A bundle that ships a readme — none is copied beside its record.
+/// A bundle with nothing to answer beside the verbs every agent does.
 struct ReadmeBundle;
 
 #[async_trait]
-impl Bundle for ReadmeBundle {
+impl Handler for ReadmeBundle {
+    type Call = fantastic_kernel::test_support::NoCall;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "readme_bundle"
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::test_support::no_verbs()
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        fantastic_kernel::test_support::no_dynamic(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         _id: &AgentId,
-        _payload: &Value,
+        _call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BoxError> {
         Ok(None)
-    }
-    fn readme(&self) -> Option<&'static str> {
-        Some("shipped readme text\n")
     }
 }
 
@@ -52,25 +62,39 @@ struct GatedStore {
 }
 
 #[async_trait]
-impl Bundle for GatedStore {
+impl Handler for GatedStore {
+    type Call = fantastic_kernel::test_support::declared_fixtures::store_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
     fn name(&self) -> &str {
         "file_bridge"
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_kernel::test_support::declared_fixtures::store_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        fantastic_kernel::test_support::declared_fixtures::store_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BoxError> {
-        self.inner.handle(id, payload, kernel).await
+        self.inner.handle(id, call, kernel).await
     }
     async fn handle_binary(
         &self,
         id: &AgentId,
-        header: Value,
+        call: Self::Call,
         body: Option<Blob>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<Blob>), BoxError> {
+        let header = call.payload();
         let probe_write = header.get("type").and_then(Value::as_str) == Some("write_stream")
             && header
                 .get("path")
@@ -81,7 +105,7 @@ impl Bundle for GatedStore {
             // closed ⇒ `Err` at once: the gate is open
             let _ = self.gate.acquire().await;
         }
-        self.inner.handle_binary(id, header, body, kernel).await
+        self.inner.handle_binary(id, call, body, kernel).await
     }
 }
 
@@ -148,15 +172,12 @@ async fn a_flush_waits_for_the_drain_the_writer_already_took() {
     let dir = agent_dir.clone();
     let flush = tokio::spawn(async move {
         k.flush_records().await;
-        (
-            dir.join("agent.yaml").exists(),
-            dir.join("readme.md").exists(),
-        )
+        dir.join("agent.yaml").exists()
     });
     tokio::time::sleep(Duration::from_millis(200)).await;
     let returned_early = flush.is_finished();
     gate.close();
-    let (record, readme) = tokio::time::timeout(Duration::from_secs(10), flush)
+    let record = tokio::time::timeout(Duration::from_secs(10), flush)
         .await
         .expect("the flush never returned")
         .expect("the flush task panicked");
@@ -165,6 +186,5 @@ async fn a_flush_waits_for_the_drain_the_writer_already_took() {
         "flush_records returned while the writer's drain still held the record write"
     );
     assert!(record, "flush_records returned before agent.yaml landed");
-    assert!(!readme, "a record write copies no readme.md");
     kernel.shutdown().await;
 }

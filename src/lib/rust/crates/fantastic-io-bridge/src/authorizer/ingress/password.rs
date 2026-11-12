@@ -1,9 +1,9 @@
 //! `password` — kernel-GROUP membership by a shared secret (ingress side: CHECK).
 
-use super::super::{constant_time_eq, Action, Decision, Denial, IngressRule, DEFAULT_TOKEN_ENV};
+use super::super::{constant_time_eq, Action, Decision, Denial, IngressRule};
 
 /// Authorize an inbound `call` only if its envelope `auth_token` matches this leg's
-/// group token, read from an env var (`token_env`, default `FANTASTIC_GROUP_TOKEN`)
+/// group token, read from an env var (the leg's `token_env`)
 /// so the secret never touches the portable `.fantastic` workdir. Fail-closed: an
 /// unset/empty env var refuses every inbound `call`. Constant-time compare. The
 /// egress mirror (`egress::password`) PRESENTS the same token.
@@ -12,11 +12,9 @@ pub struct Password {
 }
 
 impl Password {
-    /// Build from an optional `token_env` (default `FANTASTIC_GROUP_TOKEN`).
-    pub fn new(token_env: Option<String>) -> Self {
-        Self {
-            token_env: token_env.unwrap_or_else(|| DEFAULT_TOKEN_ENV.to_string()),
-        }
+    /// Build from the leg's `token_env`.
+    pub fn new(token_env: String) -> Self {
+        Self { token_env }
     }
 
     fn token(&self) -> Option<String> {
@@ -65,7 +63,7 @@ mod tests {
         // A private env var so parallel tests cannot race on the default one.
         let env = "FANTASTIC_GROUP_TOKEN_PW_UNIT_EVERY_KIND";
         std::env::set_var(env, "s3cret");
-        let rule = Password::new(Some(env.to_string()));
+        let rule = Password::new(env.to_string());
         for kind in [
             "call",
             "spawn",
@@ -103,7 +101,7 @@ mod tests {
     fn password_compares_utf8_bytes_so_any_token_is_a_plain_answer() {
         let env = "FANTASTIC_GROUP_TOKEN_PW_UNIT_UTF8";
         std::env::set_var(env, "s3cret");
-        let rule = Password::new(Some(env.to_string()));
+        let rule = Password::new(env.to_string());
         for odd in ["é", "s3cr€t", "été"] {
             match rule.authorize(&act("call", Some(odd))) {
                 Decision::Deny(d) => {

@@ -130,50 +130,24 @@ fn unknown_agent_error_is_python_repr() {
 }
 
 #[test]
-fn guard_refuses_all_digit_ids_and_accepts_colons() {
+fn the_declared_id_pattern_refuses_the_unsafe_and_accepts_colons() {
+    use crate::verbs::check_agent_id;
+    let refused = |id: &str| check_agent_id("create_agent", "id", id).is_err();
     // An all-digit id reads as a MESSAGE ID in prompt text; names are words.
-    let v = guard_agent_id("create_agent", "123").expect("all-digit id is refused");
-    assert_eq!(
-        v["error"],
-        "create_agent: id must be a name, not a number (message ids are ints); got '123'"
-    );
+    assert!(refused("123"));
+    // …but a digit-LED name is not all digits.
+    assert!(!refused("1a"));
+    // `:` is legal.
+    assert!(!refused("ai:7f"));
+    // separators, traversal, hidden, foreign `guid|agent`, empty
+    for bad in ["../x", "a/b", "a\\b", "a..b", ".hidden", "a|b", ""] {
+        assert!(refused(bad), "{bad:?}");
+    }
+    assert!(!refused("kernel_notes"));
+    // the refusal names the verb and the argument
+    let v = check_agent_id("create_agent", "id", "../x").unwrap_err();
     assert_eq!(v["reason"], "bad_arg");
     assert_eq!(v["arg"], "id");
-    // Python's `str.isdigit()`, not ASCII: `٣` (ARABIC-INDIC THREE) and `²`
-    // (SUPERSCRIPT TWO) are digits to python.
-    assert!(guard_agent_id("create_agent", "٣").is_some());
-    assert!(guard_agent_id("create_agent", "²").is_some());
-    // …but a digit-LED name is not all digits.
-    assert!(guard_agent_id("create_agent", "1a").is_none());
-    // `:` is legal — python never refused it, and the minted-pid check the port
-    // invented refused ids python mints.
-    assert!(guard_agent_id("create_agent", "ai:7f").is_none());
-    // The refusals python DOES make keep python's repr in `got`. Order is
-    // python's too: `../x` carries a separator, so it is refused as one.
-    assert_eq!(
-        guard_agent_id("create_agent", "../x").unwrap()["error"],
-        "create_agent: id must be a single path segment (no separators); got '../x'"
-    );
-    assert_eq!(
-        guard_agent_id("create_agent", "a..b").unwrap()["error"],
-        "create_agent: id must be a name that is not a path traversal; got 'a..b'"
-    );
-    assert_eq!(
-        guard_agent_id("create_agent", ".hidden").unwrap()["error"],
-        "create_agent: id must be a name that is not hidden; got '.hidden'"
-    );
-    // `kernel` names the operator; `|` marks a FOREIGN `guid|agent`
-    // (`create_agent id=kernel` would make an agent the operator to every
-    // memory store).
-    assert_eq!(
-        guard_agent_id("create_agent", "kernel").unwrap()["error"],
-        "create_agent: id must be a name other than the reserved 'kernel'"
-    );
-    assert_eq!(
-        guard_agent_id("create_agent", "a|b").unwrap()["error"],
-        "create_agent: id must be a local name without `|` (it marks a foreign `guid|agent`); got 'a|b'"
-    );
-    assert!(guard_agent_id("create_agent", "kernel_notes").is_none());
 }
 
 /// Every builder's KEY ORDER, as text —
@@ -194,10 +168,6 @@ fn every_builder_serializes_in_pythons_key_order() {
         r#"{"error":"create_agent: parent_id required","reason":"missing_arg","arg":"parent_id"}"#
     );
     assert_eq!(
-        s(missing_hint("create_agent", "parent_id", "name it")),
-        r#"{"error":"create_agent: parent_id required","reason":"missing_arg","hint":"name it","arg":"parent_id"}"#
-    );
-    assert_eq!(
         s(bad("send", "timeout", "a positive number")),
         r#"{"error":"send: timeout must be a positive number","reason":"bad_arg","arg":"timeout"}"#
     );
@@ -214,10 +184,6 @@ fn every_builder_serializes_in_pythons_key_order() {
     assert_eq!(
         s(unknown_agent("<id>", vec![])),
         r#"{"error":"no agent '<id>'","reason":"unknown_agent","agent_count":0,"agents":[],"hint":"'<id>' is a PLACEHOLDER from an example, not an id — substitute one of `agents`."}"#
-    );
-    assert_eq!(
-        s(guard_agent_id("create_agent", "a/b").unwrap()),
-        r#"{"error":"create_agent: id must be a single path segment (no separators); got 'a/b'","reason":"bad_arg","arg":"id"}"#
     );
 }
 

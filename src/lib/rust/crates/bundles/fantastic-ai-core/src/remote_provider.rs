@@ -19,10 +19,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use fantastic_kernel::refusal::{
+    refusal, with, MISSING_ARG, NOT_FOUND, STORE_REFUSED, TRANSPORT_ERROR,
+};
 use fantastic_kernel::{AgentId, Item, Kernel, Status};
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 
+use crate::declared::{Complete, SetDefaultModel};
 use crate::provider::{Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, Unconfigured};
 
 /// The event type a provider's tokens carry on its stream.
@@ -30,15 +34,6 @@ pub const TOKEN_EVENT: &str = "provider_token";
 
 /// The record field naming a chat's provider.
 pub const PROVIDER_FIELD: &str = "provider_id";
-
-/// The `complete` verb's doc.
-pub const COMPLETE_DOC: &str = "args: messages:list (req — role + text content, as ai_core assembles them), \
-model:str? (the model of this pass — the calling chat's own; absent: this provider's default_model), \
-max_tokens:int? (this call's output bound; absent: the record's), rid:str (req — tags every token event). \
-ONE stateless pass: no memory, no calls, no conversation kept. Each content token is emitted on this agent's \
-stream as {type:'provider_token', rid, text} (a watcher reads them); the reply is {rid, model, prompt_tokens, \
-completion_tokens, stop_reason} or {rid, error, transport}. An AI chat (`ai_chat.tools`) calls it through its \
-`provider_id`.";
 
 /// The name of a provider's default-model setting (in its memory store).
 pub const DEFAULT_FIELD: &str = "default_model";
@@ -117,152 +112,123 @@ pub async fn set_usage(agent_id: &AgentId, kernel: &Arc<Kernel>, usage: &Value) 
     set_setting(agent_id, kernel, USAGE_FIELD, usage.clone()).await
 }
 
-/// The `models` verb's doc.
-pub const MODELS_DOC: &str = "No args. The models this provider serves and its default: {models:[name, …], default}. \
-The list is the record's `models`; a provider that can ask its API lists those when the record names none.";
-
-/// The `set_default_model` verb's doc.
-pub const SET_DEFAULT_DOC: &str = "args: model:str (req). Sets this provider's default model (one of `models` when the list \
-is known, else refused); a chat that names no `model` completes on it. Returns {default}.";
-
 /// For a provider that cannot ask its API for its models: `provider_verbs(…, NO_LIVE)`.
 pub const NO_LIVE: Option<fn() -> std::future::Ready<Result<Vec<String>, String>>> = None;
 
-/// The names a provider's record lists in `models` (strings, or `{id|name}` objects).
+/// The names a provider's record lists in `models`.
 #[must_use]
 pub fn listed_models(meta: &Map<String, Value>) -> Vec<String> {
     meta.get("models")
         .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|m| {
-                    m.as_str()
-                        .map(String::from)
-                        .or_else(|| m.get("id").or_else(|| m.get("name")).and_then(Value::as_str).map(String::from))
-                })
-                .collect()
-        })
+        .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
         .unwrap_or_default()
 }
 
-/// THE PROVIDER VERBS every backend serves the same way: `complete` (on the call's
-/// `model`, else the record's `default_model`), `models` (the record's list, or the
-/// API's through `live` when the record names none, and the default) and
-/// `set_default_model`. `build` makes the backend's provider from a record (the pass's
-/// `model` laid over the agent's). `None`: not a provider verb.
-pub async fn provider_verbs<B, L, Fut>(
+/// `complete`: one pass on the call's `model`, else the record's `default_model`.
+/// `build` makes the backend's provider from a record (the pass's `model` laid over
+/// the agent's).
+pub async fn complete_verb<B>(
     agent_id: &AgentId,
-    payload: &Value,
+    args: &Complete,
     kernel: &Arc<Kernel>,
     build: B,
-    live: Option<L>,
-) -> Option<Value>
+) -> Value
 where
     B: Fn(Map<String, Value>) -> Arc<dyn Provider>,
-    L: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<Vec<String>, String>>,
 {
-    let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
     let meta = crate::helpers::agent_meta(agent_id, kernel);
-    match verb {
-        "complete" => {
-            // THE MODEL OF A PASS: the user's (the chat's `model`, sent with the call), else the
-            // provider's `default_model`; neither, the server's own (a vLLM or ollama server reads
-            // the one it serves), which becomes the default. Nothing anywhere: refused by name.
-            let chosen = payload
-                .get("model")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .or(default_of(agent_id, kernel).await);
-            let mut over = meta.clone();
-            over.remove("model");
-            if let Some(m) = &chosen {
-                over.insert("model".into(), json!(m));
-            }
-            let mut r = complete(agent_id, payload, kernel, build(over)).await;
-            if chosen.is_none() {
-                match r.get("model").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-                    // the server named it: it is the default from now on
-                    Some(m) => {
-                        let m = m.to_string();
-                        let _ = set_default(agent_id, kernel, &m).await;
-                    }
-                    None if r.get("kind").and_then(Value::as_str) == Some("ValueError") => {
-                        r["error"] = json!(format!(
-                            "complete: no model — the chat names none, this provider has no {DEFAULT_FIELD}, \
-                             and its server names none ({})",
-                            r["error"].as_str().unwrap_or("")
-                        ));
-                    }
-                    None => {}
-                }
-            }
-            Some(r)
-        }
-        "models" => {
-            let mut names = listed_models(&meta);
-            if names.is_empty() {
-                if let Some(l) = live {
-                    match l().await {
-                        Ok(n) => names = n,
-                        Err(e) => return Some(json!({"error": e, "reason": "unhandled", "default": default_of(agent_id, kernel).await})),
-                    }
-                }
-            }
-            Some(json!({"models": names, "default": default_of(agent_id, kernel).await}))
-        }
-        "set_default_model" => match payload.get("model").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-            None => Some(json!({"error": "set_default_model: model required — a model name", "reason": "bad_arg"})),
-            Some(m) => {
-                let names = listed_models(&meta);
-                if !names.is_empty() && !names.iter().any(|n| n == m) {
-                    return Some(json!({"error": format!("set_default_model: `{m}` is not one of this provider's models {names:?}"),
-                                       "reason": "bad_arg"}));
-                }
-                match set_default(agent_id, kernel, m).await {
-                    Ok(()) => Some(json!({"default": m})),
-                    Err(e) => Some(json!({"error": format!("set_default_model: {e}"), "reason": "unhandled"})),
-                }
-            }
-        },
-        _ => None,
+    // THE MODEL OF A PASS: the user's (the chat's `model`, sent with the call), else the
+    // provider's `default_model`; neither, the server's own (a vLLM or ollama server reads
+    // the one it serves), which becomes the default. Nothing anywhere: refused by name.
+    let chosen = args
+        .model
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or(default_of(agent_id, kernel).await);
+    let mut over = meta.clone();
+    over.remove("model");
+    if let Some(m) = &chosen {
+        over.insert("model".into(), json!(m));
     }
-}
-
-/// A provider answers no chat: `send`, `history`, `fork` … belong to an AI chat
-/// (`ai_chat.tools`) that names it (`provider_id`). `reflect` and `boot` are its own.
-#[must_use]
-pub fn is_chat_verb(verb: &str) -> bool {
-    !matches!(verb, "reflect" | "boot" | "complete" | "models" | "set_default_model")
-        && crate::verbs::verb_docs().get(verb).is_some()
-}
-
-/// The refusal a provider answers a chat verb with.
-#[must_use]
-pub fn chat_refusal(name: &str, verb: &str) -> Value {
-    let mut r = fantastic_kernel::refusal::refusal(
-        fantastic_kernel::refusal::UNHANDLED,
-        format!(
-            "{name}: `{verb}` is a chat's verb, and this agent is a provider — it holds no conversation. \
-             Chat with an `ai_chat.tools` agent whose {PROVIDER_FIELD} names this one; it completes here (`complete`)."
-        ),
-    );
-    fantastic_kernel::refusal::with(&mut r, "verb", json!(verb));
+    let mut r = complete(agent_id, args, kernel, build(over)).await;
+    if chosen.is_none() {
+        match r.get("model").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            // the server named it: it is the default from now on
+            Some(m) => {
+                let m = m.to_string();
+                let _ = set_default(agent_id, kernel, &m).await;
+            }
+            None if r.get("kind").and_then(Value::as_str) == Some("ValueError") => {
+                r["error"] = json!(format!(
+                    "complete: no model — the chat names none, this provider has no {DEFAULT_FIELD}, \
+                     and its server names none ({})",
+                    r["error"].as_str().unwrap_or("")
+                ));
+            }
+            None => {}
+        }
+    }
     r
 }
 
-/// THE PROVIDER SIDE: run one pass of `provider` for `payload` and stream its
-/// tokens on `agent_id`'s own stream, tagged with the caller's `rid`.
-pub async fn complete(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>, provider: Arc<dyn Provider>) -> Value {
-    let rid = payload.get("rid").and_then(Value::as_str).unwrap_or("").to_string();
-    if rid.is_empty() {
-        return json!({"error": "complete: rid required", "reason": "bad_arg"});
+/// `models`: the record's list, or the API's through `live` when the record names
+/// none, and the default.
+pub async fn models_verb<L, Fut>(agent_id: &AgentId, kernel: &Arc<Kernel>, live: Option<L>) -> Value
+where
+    L: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<String>, String>>,
+{
+    let meta = crate::helpers::agent_meta(agent_id, kernel);
+    let mut names = listed_models(&meta);
+    if names.is_empty() {
+        if let Some(l) = live {
+            match l().await {
+                Ok(n) => names = n,
+                Err(e) => {
+                    let mut r = refusal(TRANSPORT_ERROR, e);
+                    with(&mut r, "default", json!(default_of(agent_id, kernel).await));
+                    return r;
+                }
+            }
+        }
     }
-    let Some(messages) = payload.get("messages").and_then(Value::as_array).cloned() else {
-        return json!({"rid": rid, "error": "complete: messages must be a list", "reason": "bad_arg"});
+    json!({"models": names, "default": default_of(agent_id, kernel).await})
+}
+
+/// `set_default_model`: keep `model` as the default, one of the record's `models`
+/// when that list is known.
+pub async fn set_default_verb(agent_id: &AgentId, args: &SetDefaultModel, kernel: &Arc<Kernel>) -> Value {
+    let meta = crate::helpers::agent_meta(agent_id, kernel);
+    let m = args.model.as_str();
+    let names = listed_models(&meta);
+    if !names.is_empty() && !names.iter().any(|n| n == m) {
+        let mut r = refusal(
+            NOT_FOUND,
+            format!("set_default_model: `{m}` is not one of this provider's models {names:?}"),
+        );
+        with(&mut r, "arg", json!("model"));
+        return r;
+    }
+    match set_default(agent_id, kernel, m).await {
+        Ok(()) => json!({"default": m}),
+        Err(e) => refusal(STORE_REFUSED, format!("set_default_model: {e}")),
+    }
+}
+
+/// THE PROVIDER SIDE: run one pass of `provider` for `args` and stream its
+/// tokens on `agent_id`'s own stream, tagged with the caller's `rid`.
+pub async fn complete(agent_id: &AgentId, args: &Complete, kernel: &Arc<Kernel>, provider: Arc<dyn Provider>) -> Value {
+    let rid = args.rid.clone();
+    // the schema lets a call carry `image` instead of `messages`; such a call's bytes are
+    // taken at the binary entry, so a pass is never asked for without them
+    let Some(messages) = args.messages.as_ref() else {
+        let mut r = refusal(MISSING_ARG, "complete: messages required");
+        with(&mut r, "arg", json!("messages"));
+        with(&mut r, "rid", json!(rid));
+        return r;
     };
-    let max_tokens = payload.get("max_tokens").and_then(Value::as_i64);
+    let messages: Vec<Value> = messages.iter().cloned().map(Value::Object).collect();
+    let max_tokens = args.max_tokens;
     if let Err(e) = provider.ready() {
         return failed(&rid, &e);
     }
@@ -414,7 +380,7 @@ impl Provider for RemoteProvider {
         self.send_images(messages, &rid).await?;
         // the reader: an inbox of this pass only, watching the provider's stream
         let reader = AgentId::from(format!("_provider_reader_{}_{n}", self.chat.as_str()));
-        let mut inbox = self.kernel.ensure_inbox(&reader);
+        let inbox = self.kernel.ensure_inbox(&reader);
         if let Some(refused) = self.kernel.watch(&self.provider, reader.clone()).await {
             self.kernel.remove_inbox(&reader);
             return Err(ProviderError::raised(format!(
@@ -628,4 +594,33 @@ pub async fn pair_chat(kernel: &Arc<Kernel>, provider: &AgentId) -> AgentId {
         }
     }
     chat
+}
+
+/// EVERY VERB OF A PROVIDER BACKEND, answered from its typed call: `boot` is the
+/// shared incarnation reset, `reflect` is the backend's own (handed in), and the
+/// rest are the provider verbs above. `build` makes the backend's provider from a
+/// record; `live` lists the models the API serves when the record names none.
+pub async fn handle<B, L, Fut, R>(
+    agent_id: &AgentId,
+    call: crate::declared::provider::Call,
+    kernel: &Arc<Kernel>,
+    build: B,
+    live: Option<L>,
+    reflect: R,
+) -> Result<Option<Value>, fantastic_kernel::bundle::BundleError>
+where
+    B: Fn(Map<String, Value>) -> Arc<dyn Provider>,
+    L: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<String>, String>>,
+    R: FnOnce() -> Value,
+{
+    use crate::declared::provider::Call;
+    let reply = match call {
+        Call::Reflect(_) => reflect(),
+        Call::Boot(_) => crate::verbs::boot(agent_id, kernel),
+        Call::Complete(a) => complete_verb(agent_id, &a, kernel, build).await,
+        Call::Models(_) => models_verb(agent_id, kernel, live).await,
+        Call::SetDefaultModel(a) => set_default_verb(agent_id, &a, kernel).await,
+    };
+    Ok((!reply.is_null()).then_some(reply))
 }
