@@ -147,6 +147,10 @@ pub async fn ensure_canvas(
 
 async fn boot_canvas(h: &Host, node: &str, loader: &str) -> Result<(), String> {
     for id in [node, loader] {
+        // only an agent whose bundle declares `boot` is sent it
+        if !h.kernel.advertises(&fantastic_kernel::AgentId::from(id), "boot").await {
+            continue;
+        }
         let r = h.operator(id, json!({"type":"boot"})).await;
         if let Some(e) = err_of(&r) {
             return Err(format!("`{id}` did not boot: {e}"));
