@@ -725,21 +725,6 @@ impl CredentialStoreBundle {
     }
 }
 
-/// The calls whose secret marks the kernel asks for, read by their verb tag.
-#[derive(Deserialize)]
-#[serde(tag = "type")]
-enum Sent {
-    /// A `set`: the value rides `fields`.
-    #[serde(rename = "set")]
-    Set { fields: Option<Value> },
-    /// A `get`: the value rides the reply's `fields`.
-    #[serde(rename = "get")]
-    Get,
-    /// Any other verb carries no secret.
-    #[serde(other)]
-    Other,
-}
-
 /// A reply that may carry a value in `fields`.
 #[derive(Deserialize)]
 struct Answer {
@@ -784,10 +769,14 @@ impl Handler for CredentialStoreBundle {
         &record::RECORD
     }
 
-    /// A `set`'s field values are secret: recorded as `[secret]`.
+    /// A `set`'s field values are secret: recorded as `[secret]`. The call is read
+    /// through the declared entry; a `set` the entry refuses (a bad `fields`) is
+    /// recorded whole as secret, since its values were never checked.
     fn payload_secret(&self, payload: &Value) -> Vec<String> {
-        match serde_json::from_value::<Sent>(payload.clone()) {
-            Ok(Sent::Set { fields }) => field_marks(fields.as_ref()),
+        use fantastic_kernel::verbs::{Parse, Routed};
+        match verbs::Call::parse(NAME, payload, &[]) {
+            Ok(Routed::Call(verbs::Call::Set(a))) => field_marks(Some(&json!(a.fields))),
+            Err(refusal) if refusal.get("verb") == Some(&json!("set")) => vec!["fields".to_string()],
             _ => Vec::new(),
         }
     }
@@ -795,8 +784,9 @@ impl Handler for CredentialStoreBundle {
     /// A `get` reply's field values are secret: recorded as `[secret]`; the
     /// caller gets them whole.
     fn reply_secret(&self, payload: &Value, reply: &Value) -> Vec<String> {
-        match serde_json::from_value::<Sent>(payload.clone()) {
-            Ok(Sent::Get) => match serde_json::from_value::<Answer>(reply.clone()) {
+        use fantastic_kernel::verbs::{Parse, Routed};
+        match verbs::Call::parse(NAME, payload, &[]) {
+            Ok(Routed::Call(verbs::Call::Get(_))) => match serde_json::from_value::<Answer>(reply.clone()) {
                 Ok(a) => field_marks(a.fields.as_ref()),
                 Err(_) => Vec::new(),
             },
