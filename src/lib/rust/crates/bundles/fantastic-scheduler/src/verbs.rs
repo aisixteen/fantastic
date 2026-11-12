@@ -117,9 +117,9 @@ pub struct TickNow {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct History {
-    /// How many of the newest fires, at most 500.
+    /// How many of the newest fires, at most 500 (above 500 is clamped to 500).
     #[serde(default = "hundred")]
-    #[schemars(range(min = 1, max = 500))]
+    #[schemars(range(min = 1))]
     pub limit: u64,
     /// Keep only this schedule's fires.
     #[schemars(length(min = 1))]

@@ -346,7 +346,10 @@ async fn schedule_persists_and_lists() {
         .await
         .remove(0)
         .result;
-    let sid = r["schedule_id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+    let sid = r["schedule_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{r}"))
+        .to_string();
     assert!(sid.starts_with("sch_"));
     let listed = kernel
         .send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
@@ -823,6 +826,19 @@ async fn non_int_args_are_bad_arg_refusals() {
         assert_eq!(h["reason"], json!("bad_arg"), "{bad_value}: {h}");
         assert_eq!(h["arg"], json!("limit"), "{bad_value}: {h}");
     }
+    // a `limit` above 500 is clamped to 500, not refused.
+    let big = kernel
+        .send(vec![Item::new(
+            sch.clone(),
+            json!({"type": "history", "limit": 100000}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(
+        big.get("history").is_some() && big.get("reason").is_none(),
+        "{big}"
+    );
     // ABSENT `limit` is the default page, not a refusal.
     let h = kernel
         .send(vec![Item::new(sch.clone(), json!({"type": "history"}))])
@@ -1567,7 +1583,10 @@ fn stored_schedule_fields_are_read_strictly() {
     ] {
         let mut s = good.clone();
         s[key] = bad;
-        assert!(check_stored(&s).is_err(), "{key} wrongly typed must be refused");
+        assert!(
+            check_stored(&s).is_err(),
+            "{key} wrongly typed must be refused"
+        );
     }
     let mut missing = good.clone();
     missing.as_object_mut().unwrap().remove("run_count");

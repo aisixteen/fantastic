@@ -22,12 +22,12 @@ use fantastic_bundle::py_str;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
-
-pub mod record;
-pub mod verbs;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+pub mod record;
+pub mod verbs;
 
 /// python's raised reply: the kernel renders `f"{type(e).__name__}: {e}"`, so a
 /// probe that raises must carry the exception class the python probe raises.
@@ -572,7 +572,7 @@ impl Handler for OracleProbe {
                         })
                     } else {
                         self.asked.with(agent_id, |n| *n += 1);
-                        let limit = if a.limit == 0 { 6 } else { a.limit.clamp(1, 20) } as usize;
+                        let limit = a.limit.min(20) as usize;
                         let words = keywords(&q);
                         let mut scored: Vec<(usize, String)> = lines
                             .into_iter()

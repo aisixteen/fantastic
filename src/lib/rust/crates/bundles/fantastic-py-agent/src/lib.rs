@@ -132,6 +132,13 @@ impl Handler for PyAgentBundle {
 
 // ─── a folder bundle that extends it ────────────────────────────────
 
+/// A verb as `bundle.yaml` declares it: `{doc: <text>, schema: <object>}`.
+fn verb_decl(v: &Value) -> bool {
+    v.get("doc").is_some_and(Value::is_string)
+        && v.get("schema").is_some_and(Value::is_object)
+        && v.as_object().is_some_and(|m| m.len() == 2)
+}
+
 /// One folder bundle (`bundles/<name>/`): its program and its verbs.
 pub struct FolderBundle {
     name: String,
@@ -161,11 +168,11 @@ impl FolderBundle {
         let verbs = spec
             .get("verbs")
             .and_then(Value::as_object)
-            .filter(|m| !m.is_empty() && m.iter().all(|(k, v)| !k.is_empty() && v.is_string()));
+            .filter(|m| !m.is_empty() && m.iter().all(|(k, v)| !k.is_empty() && verb_decl(v)));
         let Some(verbs) = verbs.cloned() else {
             return Err(
-                "verbs: required — a map of verb → its doc (the first sentence is the \
-                        signature), e.g. {search: 'args: q:str (req). Returns {hits}.'}"
+                "verbs: required — a map of verb → {doc: <text>, schema: <JSON schema \
+                        of the call's arguments, an object>}"
                     .to_string(),
             );
         };
@@ -562,12 +569,18 @@ impl Handler for FolderBundle {
         verbs::VERBS
     }
 
-    /// The program's verbs, as `bundle.yaml` names them: each with its doc and no
-    /// declared arguments (the program judges them).
+    /// The program's verbs, as `bundle.yaml` names them: each with its doc and its
+    /// declared argument schema.
     fn dynamic_verbs(&self, _agent: &fantastic_kernel::Agent) -> Vec<DynVerb> {
         self.verbs
             .iter()
-            .map(|(name, doc)| DynVerb::new(name, doc.as_str().expect("bundle.yaml verb doc is a string"), &json!({})))
+            .map(|(name, decl)| {
+                DynVerb::new(
+                    name,
+                    decl["doc"].as_str().expect("verb_decl checked the doc"),
+                    &decl["schema"],
+                )
+            })
             .collect()
     }
 

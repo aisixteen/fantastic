@@ -861,7 +861,7 @@ async fn tick_now_reply(agent_id: &AgentId, sid: &str, kernel: &Arc<Kernel>) -> 
 }
 
 async fn history_reply(agent_id: &AgentId, a: verbs::History, kernel: &Arc<Kernel>) -> Value {
-    let limit = a.limit as usize;
+    let limit = a.limit.min(500) as usize;
     // every fire, then the newest `limit` of them.
     let fires: Vec<Value> = read_history(agent_id, kernel, 2 * HISTORY_MAX).await;
     let from = fires.len().saturating_sub(limit);

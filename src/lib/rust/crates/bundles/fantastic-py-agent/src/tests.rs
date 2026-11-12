@@ -36,7 +36,9 @@ def slow(p):
 fa.serve({"echo": echo, "die": die, "slow": slow, "chatty": chatty})
 "#;
 
-const VERBS: &str = "  echo: 'args: text:str. Returns {echo, pid}.'\n  die: 'No args. The program exits.'\n  slow: 'No args. Sleeps 30 s.'\n  chatty: 'No args. Writes 300 kB to stdout.'\n";
+const NONE: &str = "{type: object, properties: {}, additionalProperties: false}";
+
+const VERBS: &str = "  echo: {doc: 'Echoes the text. Returns {echo, pid}.', schema: {type: object, properties: {text: {type: string}}, required: [text], additionalProperties: false}}\n  die: {doc: 'The program exits.', schema: {type: object, properties: {}, additionalProperties: false}}\n  slow: {doc: 'Sleeps 30 s.', schema: {type: object, properties: {}, additionalProperties: false}}\n  chatty: {doc: 'Writes 300 kB to stdout.', schema: {type: object, properties: {}, additionalProperties: false}}\n";
 
 /// Write `bundles/<name>/` with the helper, `program` and a bundle.yaml.
 fn bundle(tmp: &TempDir, name: &str, program: &str, verbs: &str) -> PathBuf {
@@ -170,7 +172,8 @@ async fn docs_and_the_catalog_read_bundle_yaml() {
     create(&kernel, "rs_documented", "rs_d1").await;
     let d = call(&kernel, "kernel", json!({"type": "docs", "of": "rs_d1"})).await;
     let echo = d["verbs"]["echo"].as_str().unwrap_or_default();
-    assert!(echo.contains("args: text:str"), "{d}");
+    assert!(echo.contains("Echoes the text"), "{d}");
+    assert!(echo.contains("text"), "{d}");
     for verb in ["boot", "shutdown", "reflect", "die", "slow", "chatty"] {
         assert!(d["verbs"].get(verb).is_some(), "{verb}: {d}");
     }
@@ -211,7 +214,7 @@ async fn a_program_that_serves_other_verbs_than_declared_stops_saying_so() {
         &tmp,
         "rs_liar",
         ECHO,
-        &format!("{VERBS}  extra: 'No args.'\n"),
+        &format!("{VERBS}  extra: {{doc: 'Extra.', schema: {NONE}}}\n"),
     );
     let kernel = kernel_for(&tmp);
     load(&kernel, &tmp);
@@ -273,7 +276,9 @@ async fn shutdown_without_a_reason_stops_the_program() {
         .get(&AgentId::from("rs_n1"))
         .map(|e| Arc::clone(e.value()))
         .unwrap();
-    kernel.bookkeeping(&a, json!({"type": "shutdown"}), None).await;
+    kernel
+        .bookkeeping(&a, json!({"type": "shutdown"}), None)
+        .await;
     let after = call(&kernel, "rs_n1", json!({"type": "echo", "text": "b"})).await;
     assert_eq!(after["reason"], "transport_closed", "{after}");
     delete(&kernel, "rs_n1").await;
