@@ -247,7 +247,9 @@ impl Kernel {
         };
         let mut booted: Vec<String> = Vec::new();
         for a in [&root, &store] {
-            let out = self.bookkeeping(a, json!({"type": "boot"}), None).await;
+            let Some(out) = self.announce(a, json!({"type": "boot"})).await else {
+                continue;
+            };
             if out.status != Status::Completed {
                 return crate::refusal::refusal(
                     crate::refusal::UNHANDLED,
@@ -313,7 +315,9 @@ impl Kernel {
                     continue;
                 }
                 let Some(a) = self.live(&id) else { continue };
-                let out = self.bookkeeping(&a, json!({"type": "boot"}), None).await;
+                let Some(out) = self.announce(&a, json!({"type": "boot"})).await else {
+                    continue;
+                };
                 if out.status == Status::Completed {
                     booted.push(id.0.clone());
                 } else {

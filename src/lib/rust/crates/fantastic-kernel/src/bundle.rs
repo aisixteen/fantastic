@@ -36,7 +36,7 @@
 use crate::agent::AgentId;
 use crate::kernel::Kernel;
 use crate::tasks::TaskId;
-use crate::verbs::{Parse, Routed};
+use crate::verbs::Parse;
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -248,8 +248,7 @@ impl<T: Handler> Bundle for T {
         let dynamic = Handler::dynamic_verbs(self, &agent);
         match <T::Call as Parse>::parse(&agent_id.0, &header, &dynamic) {
             Err(refused) => Ok((Some(refused), None)),
-            Ok(Routed::Answered(reply)) => Ok((Some(reply), None)),
-            Ok(Routed::Call(call)) => {
+            Ok(call) => {
                 Handler::handle_binary(self, agent_id, call, body, kernel).await
             }
         }

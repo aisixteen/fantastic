@@ -243,17 +243,6 @@ pub enum Resolved {
     Dynamic(DynCall),
 }
 
-/// What an agent's entry made of a call: the typed call for its handler, or the
-/// reply the shared code gives itself (`boot` and `shutdown` of an agent that
-/// declares neither: nothing to open or release).
-#[derive(Debug)]
-pub enum Routed<C> {
-    /// The call, its arguments checked and typed: the handler's.
-    Call(C),
-    /// The entry answered; no handler runs.
-    Answered(Value),
-}
-
 /// THE ENTRY of every call to a bundle's agents, implemented by the `Call` that
 /// [`verbs!`] generates: the verb is looked up (builtin, common, dynamic), its
 /// arguments are checked against the declaration and typed. `Err` is the agent's
@@ -262,7 +251,7 @@ pub enum Routed<C> {
 pub trait Parse: Sized + Send + 'static {
     /// Parse `payload` as a call to the agent `agent`, whose verbs built at runtime
     /// are `dynamic`.
-    fn parse(agent: &str, payload: &Value, dynamic: &[DynVerb]) -> Result<Routed<Self>, Value>;
+    fn parse(agent: &str, payload: &Value, dynamic: &[DynVerb]) -> Result<Self, Value>;
 }
 
 /// Declare a bundle's verbs: `verbs! { "name" => Struct, … }` generates
@@ -320,7 +309,7 @@ macro_rules! verbs {
                 agent: &str,
                 payload: &$crate::verbs::serde_json::Value,
                 dynamic: &[$crate::verbs::DynVerb],
-            ) -> Result<$crate::verbs::Routed<Call>, $crate::verbs::serde_json::Value> {
+            ) -> Result<Call, $crate::verbs::serde_json::Value> {
                 match $crate::verbs::resolve(
                     agent,
                     payload,
@@ -328,10 +317,10 @@ macro_rules! verbs {
                     dynamic,
                 )? {
                     $crate::verbs::Resolved::Dynamic(call) => {
-                        Ok($crate::verbs::Routed::Call(Call::Dynamic(call)))
+                        Ok(Call::Dynamic(call))
                     }
                     $crate::verbs::Resolved::Builtin(vname, args) => {
-                        Self::route(agent, payload, vname, args)
+                        Self::arm(agent, payload, vname, args)
                     }
                 }
             }
@@ -355,13 +344,13 @@ macro_rules! verbs {
                 agent: &str,
                 payload: &$crate::verbs::serde_json::Value,
                 _dynamic: &[$crate::verbs::DynVerb],
-            ) -> Result<$crate::verbs::Routed<Call>, $crate::verbs::serde_json::Value> {
+            ) -> Result<Call, $crate::verbs::serde_json::Value> {
                 let (vname, args) = $crate::verbs::resolve_builtin(
                     agent,
                     payload,
                     &[VERBS, $crate::declared::common::VERBS],
                 )?;
-                Self::route(agent, payload, vname, args)
+                Self::arm(agent, payload, vname, args)
             }
         }
         /// This bundle's agents carry no verbs built at runtime: an explicit empty list
@@ -404,21 +393,7 @@ macro_rules! verbs {
                     .map_err(|e| $crate::verbs::unparsed(verb, &e.to_string()))
             }
 
-            // The call of a resolved builtin verb, typed. `boot` and `shutdown` an
-            // agent does not declare are answered by the shared entry itself.
-            #[allow(dead_code)]
-            fn route(
-                agent: &str,
-                payload: &$crate::verbs::serde_json::Value,
-                vname: &str,
-                $args: $crate::verbs::serde_json::Value,
-            ) -> Result<$crate::verbs::Routed<Call>, $crate::verbs::serde_json::Value> {
-                if matches!(vname, "boot" | "shutdown") && !VERBS.iter().any(|v| v.name == vname) {
-                    return Ok($crate::verbs::Routed::Answered($crate::verbs::serde_json::Value::Null));
-                }
-                Self::arm(agent, payload, vname, $args).map($crate::verbs::Routed::Call)
-            }
-
+            // The call of a resolved builtin verb, typed.
             fn arm(
                 agent: &str,
                 payload: &$crate::verbs::serde_json::Value,

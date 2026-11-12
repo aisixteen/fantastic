@@ -259,13 +259,13 @@ pub async fn create_agent(
     // Wrap in Box::pin because boot may call create_agent recursively (a boot
     // hook may create a child agent); the resulting async future is recursive
     // and Rust requires explicit indirection.
-    let boot = Box::pin(kernel.bookkeeping(&new_agent, json!({"type": "boot"}), None)).await;
+    let boot = Box::pin(kernel.announce(&new_agent, json!({"type": "boot"}))).await;
     let new_id = new_agent.id.clone();
     // BRANCH ON THE OUTCOME STATUS, not on the reply shape. A handler that
     // RAISED settles `failed` and is the one case python prints — on stdout,
     // with the result's `str()`. A boot that merely answered `{error:…}`
     // (`errored`) or completed prints nothing — no WARN for every refusal.
-    if boot.status == crate::outcome::Status::Failed {
+    if let Some(boot) = boot.filter(|b| b.status == crate::outcome::Status::Failed) {
         println!(
             "  [create_agent] {} boot failed: {}",
             new_id.0,

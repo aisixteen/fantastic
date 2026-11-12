@@ -2121,14 +2121,13 @@ fn dispatch(
         let Some(hm) = target.handler_module.as_deref() else {
             // Universal answers for bare agents, through the shared entry of the
             // common verbs: their arguments are checked like any agent's.
-            if matches!(verb, "boot" | "shutdown" | "reflect") {
+            if verb == "reflect" {
                 if let Err(refused) = crate::declared::common::Call::parse(&target.id.0, &payload) {
                     return Ok((refused, None));
                 }
             }
             return Ok((
                 match verb {
-                    "boot" | "shutdown" => Value::Null,
                     "reflect" => crate::reflect::reflect_identity(&target),
                     // CODED, not a bare error. A reason-less `{error}` is
                     // decorated by `apply_reflect_flags` into something that

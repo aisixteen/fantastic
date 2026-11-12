@@ -374,18 +374,18 @@ fn forward_marks(f: &verbs::Forward) -> Vec<String> {
 
 /// [`forward_marks`] of a `ws_bridge` call.
 fn ws_payload_secret(payload: &Value) -> Vec<String> {
-    use fantastic_kernel::verbs::{Parse, Routed};
+    use fantastic_kernel::verbs::Parse;
     match verbs::ws::Call::parse("ws_bridge", payload, &[]) {
-        Ok(Routed::Call(verbs::ws::Call::Forward(f))) => forward_marks(&f),
+        Ok(verbs::ws::Call::Forward(f)) => forward_marks(&f),
         _ => Vec::new(),
     }
 }
 
 /// [`forward_marks`] of a `relay_connector` call.
 fn relay_payload_secret(payload: &Value) -> Vec<String> {
-    use fantastic_kernel::verbs::{Parse, Routed};
+    use fantastic_kernel::verbs::Parse;
     match verbs::relay::Call::parse("relay_connector", payload, &[]) {
-        Ok(Routed::Call(verbs::relay::Call::Forward(f))) => forward_marks(&f),
+        Ok(verbs::relay::Call::Forward(f)) => forward_marks(&f),
         _ => Vec::new(),
     }
 }

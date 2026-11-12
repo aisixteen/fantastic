@@ -1715,16 +1715,12 @@ async fn a_leg_that_is_not_registered_says_no_agent_on_both_channels() {
     let b = FileBundle::default();
     for verb in ["read_stream", "write", "list"] {
         let call = || {
-            let routed = <verbs::Call as fantastic_kernel::verbs::Parse>::parse(
+            <verbs::Call as fantastic_kernel::verbs::Parse>::parse(
                 "ghost_fb",
                 &json!({"type": verb, "path": "a"}),
                 &[],
             )
-            .expect("a call");
-            match routed {
-                fantastic_kernel::verbs::Routed::Call(c) => c,
-                other => panic!("{other:?}"),
-            }
+            .expect("a call")
         };
         let (bin, body) = b
             .handle_binary(

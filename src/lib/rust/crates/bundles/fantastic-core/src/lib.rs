@@ -715,9 +715,9 @@ async fn reload_bundle(
     live.sort_by(|a, b| a.id.0.cmp(&b.id.0));
     for a in &live {
         kernel
-            .bookkeeping(a, json!({"type": "shutdown", "reason": "reloaded"}), None)
+            .announce(a, json!({"type": "shutdown", "reason": "reloaded"}))
             .await;
-        kernel.bookkeeping(a, json!({"type": "boot"}), None).await;
+        kernel.announce(a, json!({"type": "boot"})).await;
     }
     let ids: Vec<&str> = live.iter().map(|a| a.id.0.as_str()).collect();
     Ok(json!({"reloaded": name, "instances": ids}))

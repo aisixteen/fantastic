@@ -86,8 +86,7 @@ pub fn no_verbs() -> &'static [crate::Verb] {
     &[]
 }
 
-/// The call to a stand-in that answers no verb of its own: `reflect` alone (`boot` and
-/// `shutdown` the shared entry answers itself).
+/// The call to a stand-in that answers no verb of its own: `reflect` alone.
 #[derive(Debug)]
 pub enum NoCall {
     /// The `reflect` every agent answers.
@@ -95,18 +94,9 @@ pub enum NoCall {
 }
 
 impl crate::verbs::Parse for NoCall {
-    fn parse(
-        agent: &str,
-        payload: &Value,
-        _dynamic: &[crate::DynVerb],
-    ) -> Result<crate::verbs::Routed<NoCall>, Value> {
-        let (verb, _args) =
-            crate::verbs::resolve_builtin(agent, payload, &[crate::declared::common::VERBS])?;
-        match verb {
-            "reflect" => crate::verbs::decode("reflect", payload)
-                .map(|r| crate::verbs::Routed::Call(NoCall::Reflect(r))),
-            _ => Ok(crate::verbs::Routed::Answered(Value::Null)),
-        }
+    fn parse(agent: &str, payload: &Value, _dynamic: &[crate::DynVerb]) -> Result<NoCall, Value> {
+        crate::verbs::resolve_builtin(agent, payload, &[crate::declared::common::VERBS])?;
+        crate::verbs::decode("reflect", payload).map(NoCall::Reflect)
     }
 }
 

@@ -559,6 +559,20 @@ impl Kernel {
             || bundle.dynamic_verbs(&agent).iter().any(|v| v.name == verb)
     }
 
+    /// Tell one agent a lifecycle verb (`boot`, `shutdown`) as kernel bookkeeping,
+    /// ONLY when its bundle declares it: `None` when it does not (nothing to tell).
+    pub async fn announce(
+        self: &Arc<Self>,
+        agent: &Arc<Agent>,
+        payload: Value,
+    ) -> Option<crate::outcome::Outcome> {
+        let verb = payload.get("type").and_then(Value::as_str).unwrap_or_default();
+        if !self.advertises(&agent.id, verb).await {
+            return None;
+        }
+        Some(self.bookkeeping(agent, payload, None).await)
+    }
+
     /// DEPTH-FIRST `on_shutdown`, children before their parent. A hook that
     /// errors is printed and the walk continues — teardown is not refusable.
     fn shutdown_walk<'a>(

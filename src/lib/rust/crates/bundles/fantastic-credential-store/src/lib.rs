@@ -749,9 +749,9 @@ fn field_marks(fields: Option<&Value>) -> Vec<String> {
 /// `fields`) is marked whole, since its values were never checked. Shared with
 /// every bundle that forwards calls to a store.
 pub fn set_marks(payload: &Value) -> Vec<String> {
-    use fantastic_kernel::verbs::{Parse, Routed};
+    use fantastic_kernel::verbs::Parse;
     match verbs::Call::parse(NAME, payload, &[]) {
-        Ok(Routed::Call(verbs::Call::Set(a))) => field_marks(Some(&json!(a.fields))),
+        Ok(verbs::Call::Set(a)) => field_marks(Some(&json!(a.fields))),
         Err(refusal) if refusal.get("verb") == Some(&json!("set")) => vec!["fields".to_string()],
         _ => Vec::new(),
     }
@@ -792,9 +792,9 @@ impl Handler for CredentialStoreBundle {
     /// A `get` reply's field values are secret: recorded as `[secret]`; the
     /// caller gets them whole.
     fn reply_secret(&self, payload: &Value, reply: &Value) -> Vec<String> {
-        use fantastic_kernel::verbs::{Parse, Routed};
+        use fantastic_kernel::verbs::Parse;
         match verbs::Call::parse(NAME, payload, &[]) {
-            Ok(Routed::Call(verbs::Call::Get(_))) => match serde_json::from_value::<Answer>(reply.clone()) {
+            Ok(verbs::Call::Get(_)) => match serde_json::from_value::<Answer>(reply.clone()) {
                 Ok(a) => field_marks(a.fields.as_ref()),
                 Err(_) => Vec::new(),
             },

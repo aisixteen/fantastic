@@ -279,24 +279,9 @@ pub mod common {
         pub after: Option<String>,
     }
 
-    /// The kernel starts the agent: open what it holds (files, tasks). Sent by the kernel, no arguments.
-    #[derive(Debug, Deserialize, JsonSchema)]
-    #[serde(deny_unknown_fields)]
-    pub struct Boot {}
-
-    /// The kernel stops the agent: release what it holds. Sent by the kernel.
-    #[derive(Debug, Deserialize, JsonSchema)]
-    #[serde(deny_unknown_fields)]
-    pub struct Shutdown {
-        /// Why it stops (`reloaded` when its bundle was reloaded).
-        pub reason: Option<String>,
-    }
-
     crate::verbs! {
         @own
         "reflect" => Reflect,
-        "boot" => Boot,
-        "shutdown" => Shutdown,
     }
 }
 

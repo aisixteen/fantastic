@@ -8,46 +8,9 @@
 use super::*;
 use crate::declared::IdOrName;
 
-/// excludes `reflect`. Reflect is per-bundle (each handler customizes
-/// its `sentence` + state shape); the substrate's reflect path only
-/// fires for bare agents (no `handler_module`), which is handled
-/// inside `dispatch`.
+/// Is `verb` one the kernel answers itself (the declared kernel verbs).
 pub(super) fn is_kernel_verb(verb: &str) -> bool {
-    matches!(
-        verb,
-        "create_agent"
-            | "delete_agent"
-            | "update_agent"
-            | "list_agents"
-            // The TASK TABLE — work in flight, universal. Baked into the
-            // substrate, in no bundle's verb map: cancellation is a property of
-            // the one primitive (`send`), so EVERY agent is cancelable and a
-            // caller never needs to know which bundle it faces. Plain verbs — an
-            // AGENT can call them on another agent's work.
-            | "ps"
-            | "cancel"
-            // The EXECUTION LEDGER's read surface — every execution, live and
-            // settled. Terminal non-completed rows ARE the dead-letter queue:
-            // parked, inspectable, never silently retried; `ack_deadletter`
-            // retires one. (NOT `ack`: kernel verbs shadow bundle verbs, and
-            // exec_bridge owns `ack` for a PTY job's flow control.)
-            | "ledger"
-            | "ack_deadletter"
-            // The kernel's LIFECYCLE. `kernel_start` is the one start sequence
-            // (the root's memory store first, then everyone); `kernel_stop` the
-            // graceful stop of the process. `shutdown_agents` stops the agents,
-            // not the process. Root-only — gated inside `handle_kernel_verb`.
-            | "kernel_start"
-            | "shutdown_agents"
-            | "kernel_stop"
-            // WAITING for a set of agents — one wake for N reports (a message of
-            // `type: "report"` from each named agent). Caller-scoped.
-            | "await_set"
-            | "await_cancel"
-            // HOW TO CALL an agent — its bundle's verb docs. Answered by the
-            // root and gated like every kernel verb (`gate`).
-            | "docs"
-    )
+    crate::declared::kernel::VERBS.iter().any(|v| v.name == verb)
 }
 
 /// `Err` is a python RAISE the verb emulates (a store read that failed, an
