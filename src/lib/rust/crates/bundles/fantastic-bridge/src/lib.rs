@@ -79,6 +79,7 @@ use fantastic_bundle::{py_float_repr, py_repr, py_str, py_truthy};
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::refusal::{refusal_hint, NOT_CONNECTED};
 use fantastic_kernel::{AgentId, Blob, Item, Kernel};
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -356,33 +357,6 @@ async fn forward_call(
     .await
 }
 
-/// The secret paths of a FORWARDED call: a `forward` of a `set` marks each
-/// `payload.fields.<name>` (a name that is empty or holds a dot marks the whole
-/// `payload.fields`, as the credential store's own `field_marks` does). The
-/// caller cannot know the far bundle before sending, so this is deliberate
-/// over-redaction in the CALLER's records for every forwarded `set`: the far
-/// kernel's own record is exact. A `get`'s reply marks come back on the reply
-/// frame instead. The page-peer `<guid>|agent` route (web `ws_peer`) is not
-/// covered; it only reaches browser kernels, which hold no credential store.
-fn forward_payload_secret(payload: &Value) -> Vec<String> {
-    if payload.get("type").and_then(Value::as_str) != Some("forward") {
-        return Vec::new();
-    }
-    let Some(inner) = payload
-        .get("payload")
-        .filter(|p| p.get("type") == Some(&json!("set")))
-    else {
-        return Vec::new();
-    };
-    match inner.get("fields") {
-        Some(Value::Object(m)) if m.keys().all(|k| !k.is_empty() && !k.contains('.')) => {
-            m.keys().map(|k| format!("payload.fields.{k}")).collect()
-        }
-        Some(Value::Object(_)) => vec!["payload.fields".to_string()],
-        _ => Vec::new(),
-    }
-}
-
 /// What the bundle is for — its one short man text (ws_bridge).
 const WS_MAN: &str = "A cross-kernel bridge: it dials a far kernel's web_ws leg and forwards calls to it, watches its agents and serves the far side's calls and watches as this leg, gated as the leg. Emits bridge_up and bridge_down on its inbox.";
 
@@ -411,10 +385,6 @@ impl Handler for WsBridgeBundle {
 
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         &record::ws::RECORD
-    }
-
-    fn payload_secret(&self, payload: &Value) -> Vec<String> {
-        forward_payload_secret(payload)
     }
 
     /// The JSON half of [`Self::handle_binary`] — a `forward` reply body is not carried.
@@ -496,10 +466,6 @@ impl Handler for RelayConnectorBundle {
 
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         &record::relay::RECORD
-    }
-
-    fn payload_secret(&self, payload: &Value) -> Vec<String> {
-        forward_payload_secret(payload)
     }
 
     /// The JSON half of [`Self::handle_binary`] — a `forward` reply body is not carried.
@@ -1505,6 +1471,26 @@ fn validate_bridge_meta(meta: &Map<String, Value>) -> Option<String> {
     authorizer::ingress::unknown_refusal(meta, &authorizer::ingress::REGISTRY)
 }
 
+/// The kinds of frame a bridge's read loop serves, decoded from the frame's `type`.
+/// A frame of any other kind, or one that lacks a field its kind needs, does not
+/// decode and is dropped, so the loop stays robust.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Wire {
+    /// A call for this leg to serve; `id` names its execution.
+    Call { id: Option<String> },
+    /// An event for an agent this leg watches on the far side.
+    Event { src: String, payload: Map<String, Value> },
+    /// The reply to a call this leg forwarded.
+    Reply { id: String, data: Option<Value>, secret: Option<Value> },
+    /// The far side's refusal of a call this leg forwarded.
+    Error { id: String, error: Option<Value> },
+    /// The far side asks to watch one of this leg's agents.
+    Watch,
+    /// The far side gives a watch back.
+    Unwatch { src: String },
+}
+
 async fn read_loop(
     agent_id: AgentId,
     state: Arc<BridgeState>,
@@ -1528,9 +1514,13 @@ async fn read_loop(
             transport::Frame::Text(v) => (v, None),
             transport::Frame::Binary(h, b) => (h, Some(b)),
         };
-        let ftype = frame.get("type").and_then(Value::as_str).unwrap_or("");
-        match ftype {
-            "call" => {
+        // The frame's kind is its typed decode; a frame that is not one of the
+        // known kinds, or lacks a field its kind needs, is dropped.
+        let Ok(kind) = Wire::deserialize(&frame) else {
+            continue;
+        };
+        match kind {
+            Wire::Call { id: frame_id } => {
                 // TRACKED TASK, not an inline await. Serving the call here parked
                 // the loop inside `kernel.send`, so a handler that forwarded back
                 // over THIS bridge could never have its reply read — the round
@@ -1541,13 +1531,8 @@ async fn read_loop(
                 let call_state = Arc::clone(&state);
                 let call_kernel = Arc::clone(&kernel);
                 calls.retain(|(_, h)| !h.is_finished());
-                let frame_id = frame
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
                 calls.push((
-                    frame_id,
+                    frame_id.unwrap_or_default(),
                     fantastic_kernel::spawn_inherit(serve_inbound_call(
                         agent_id.clone(),
                         call_state,
@@ -1557,25 +1542,19 @@ async fn read_loop(
                     )),
                 ));
             }
-            "event" => {
+            Wire::Event { src, payload } => {
                 // The `watch_remote` RETURN half: re-emitted on the bridge's OWN
                 // inbox for local watchers ONLY when its `src` is a remote agent
                 // this leg subscribed to. An event nobody asked for is dropped.
-                let Some(src) = frame.get("src").and_then(Value::as_str) else {
-                    continue;
-                };
                 if !state
                     .watching
                     .lock()
                     .expect("watching poisoned")
-                    .contains(src)
+                    .contains(&src)
                 {
                     continue;
                 }
-                let mut payload = match frame.get("payload") {
-                    Some(v) if v.is_object() => v.clone(),
-                    _ => continue,
-                };
+                let mut payload = Value::Object(payload);
                 payload["src"] = json!(src);
                 // A BINARY event re-emits WHOLE. The envelope's `_binary_path` is
                 // `["payload", …p]`; the inbox carrier wants `p`, the steps inside
@@ -1587,16 +1566,12 @@ async fn read_loop(
                 };
                 kernel.emit_item(&agent_id, item).await;
             }
-            "reply" => {
-                let Some(id) = frame.get("id").and_then(Value::as_str) else {
-                    continue;
-                };
-                let data = frame.get("data").cloned().unwrap_or(Value::Null);
+            Wire::Reply { id, data, secret } => {
+                let data = data.unwrap_or(Value::Null);
                 // optional `secret`: dotted paths into `data` the far reply's
                 // bundle marked. Malformed ⇒ none (the reply is still delivered).
-                let marks =
-                    fantastic_kernel::secret::check(frame.get("secret")).unwrap_or_default();
-                let tx = state.pending.lock().expect("pending poisoned").remove(id);
+                let marks = fantastic_kernel::secret::check(secret.as_ref()).unwrap_or_default();
+                let tx = state.pending.lock().expect("pending poisoned").remove(&id);
                 if let Some(tx) = tx {
                     // Carry the reply body alongside, at its slot of the reply
                     // (`["data", …p]` on the frame is `p` in `data`). A TEXT reply
@@ -1606,14 +1581,11 @@ async fn read_loop(
                     let _ = tx.send(Ok((data, body.and_then(|b| b.under("data")), marks)));
                 }
             }
-            "error" => {
-                let Some(id) = frame.get("id").and_then(Value::as_str) else {
-                    continue;
-                };
+            Wire::Error { id, error } => {
                 // python RESOLVES the pending future with this value — the
                 // forward returns it verbatim, with no `bridge.forward:` prefix.
-                let err = py_str(frame.get("error").unwrap_or(&Value::Null));
-                let tx = state.pending.lock().expect("pending poisoned").remove(id);
+                let err = py_str(error.as_ref().unwrap_or(&Value::Null));
+                let tx = state.pending.lock().expect("pending poisoned").remove(&id);
                 if let Some(tx) = tx {
                     let _ = tx.send(Ok((
                         json!({ "error": format!("remote error: {err}") }),
@@ -1622,18 +1594,13 @@ async fn read_loop(
                     )));
                 }
             }
-            "watch" => serve_watch(&agent_id, &state, &kernel, &frame).await,
-            "unwatch" => {
+            Wire::Watch => serve_watch(&agent_id, &state, &kernel, &frame).await,
+            Wire::Unwatch { src } => {
                 // NO GATE — giving a watch back (as `web_ws` leaves it ungated).
-                let src = frame.get("src").and_then(Value::as_str).unwrap_or("");
-                let served = state.served.lock().expect("served poisoned").remove(src);
+                let served = state.served.lock().expect("served poisoned").remove(&src);
                 if let Some(s) = served {
                     drop_watch(&kernel, s).await;
                 }
-            }
-            _ => {
-                // Unknown frame type — ignore so the loop stays robust.
-                // (call/reply/error/event/watch/unwatch are handled above.)
             }
         }
     }

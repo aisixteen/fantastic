@@ -213,22 +213,3 @@ fn the_record_declaration_refuses_a_route_of_the_wrong_type() {
     }
 }
 
-/// A `route` that is not a literal path is refused at the write.
-#[test]
-fn validate_meta_refuses_a_route_that_is_not_a_literal_path() {
-    for bad in [json!("/{x}/ws"), json!("page/ws"), json!("")] {
-        let mut meta = Map::new();
-        meta.insert("route".into(), bad.clone());
-        let text = WebWsBundle
-            .validate_meta(&meta, &Map::new())
-            .unwrap_or_else(|| panic!("{bad} must be refused"));
-        assert!(text.starts_with("route="), "{text}");
-        assert!(text.contains("is not a literal mount path"), "{text}");
-    }
-    for ok in [json!("/page_ws/ws"), Value::Null] {
-        let mut meta = Map::new();
-        meta.insert("ingress_rule".into(), json!("allow_all_ingress"));
-        meta.insert("route".into(), ok);
-        assert_eq!(WebWsBundle.validate_meta(&meta, &Map::new()), None);
-    }
-}

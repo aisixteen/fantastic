@@ -70,6 +70,7 @@ use fantastic_io_bridge::codec::{decode_binary_frame, encode_frame};
 use fantastic_io_bridge::ws_deflate::DeflateStream;
 use fantastic_kernel::{AgentId, Kernel};
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -136,13 +137,49 @@ pub(crate) fn track_call(
     p.push(id);
 }
 
+/// The fields of a frame's envelope the gate and the frame arms read, decoded
+/// once; a frame whose envelope does not decode is a frame error.
+#[derive(Deserialize)]
+pub(crate) struct Envelope {
+    #[serde(rename = "type")]
+    ty: String,
+    target: Option<String>,
+    src: Option<String>,
+    id: Option<Value>,
+    secret: Option<Value>,
+    auth_token: Option<String>,
+    payload: Option<Value>,
+}
+
+impl Envelope {
+    /// The envelope of a watch of `src`, as the connect-time auto-watch judges it.
+    fn watch_of(src: &str) -> Envelope {
+        Envelope {
+            ty: "watch".to_string(),
+            target: None,
+            src: Some(src.to_string()),
+            id: None,
+            secret: None,
+            auth_token: None,
+            payload: None,
+        }
+    }
+}
+
+/// The verb of a call's payload: its `type`.
+#[derive(Deserialize)]
+struct Verbed {
+    #[serde(rename = "type")]
+    verb: Option<String>,
+}
+
 /// python `_gate` — the leg's INGRESS rule, resolved off the LEG's record on
 /// every frame. A missing record, or a record with no rule, is SEALED.
 ///
 /// `kind` ∈ call|emit|watch|state_subscribe; for `call` the verb is the
 /// payload's `type`, otherwise the verb IS the kind (python `gate_inbound`).
 /// The credential rides the frame ENVELOPE (`auth_token`), never the payload.
-fn gate_leg(kernel: &Arc<Kernel>, leg: &AgentId, kind: &str, frame: &Value) -> Decision {
+fn gate_leg(kernel: &Arc<Kernel>, leg: &AgentId, kind: &str, env: &Envelope) -> Decision {
     let (primary, auth) = match kernel.agents.get(leg).map(|e| Arc::clone(&e)) {
         Some(a) => {
             let meta = a.meta.read().expect("meta poisoned");
@@ -150,29 +187,29 @@ fn gate_leg(kernel: &Arc<Kernel>, leg: &AgentId, kind: &str, frame: &Value) -> D
         }
         None => (None, None),
     };
-    let inner = frame.get("payload").filter(|v| v.is_object());
     let verb = if kind == "call" {
-        inner
-            .and_then(|p| p.get("type"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
+        env.payload
+            .as_ref()
+            .and_then(|p| Verbed::deserialize(p).ok())
+            .and_then(|v| v.verb)
+            .unwrap_or_default()
     } else {
-        kind
+        kind.to_string()
     };
     // python `frame.get("target") or frame.get("src") or ""` — a falsy target
     // falls through to `src`, which is what a watch frame carries.
-    let addr = frame
-        .get("target")
-        .filter(|v| fantastic_bundle::py_truthy(v))
-        .or_else(|| frame.get("src"))
-        .and_then(Value::as_str)
+    let addr = env
+        .target
+        .as_deref()
+        .filter(|t| !t.is_empty())
+        .or(env.src.as_deref())
         .unwrap_or("");
     let spec = manifold_spec(primary.as_ref(), auth.as_ref(), "_ingress");
     ingress::resolve(spec.as_ref()).authorize(&Action {
         kind,
         target: addr,
-        verb,
-        token: frame.get("auth_token").and_then(Value::as_str),
+        verb: &verb,
+        token: env.auth_token.as_deref(),
     })
 }
 
@@ -378,7 +415,7 @@ pub(crate) async fn ws_loop(
             &state.kernel,
             &leg_agent_id,
             "watch",
-            &json!({"src": host_agent_id.0}),
+            &Envelope::watch_of(&host_agent_id.0),
         ),
         Decision::Allow
     );
@@ -523,29 +560,22 @@ pub(crate) async fn ws_loop(
             continue;
         };
         let frame = inbound.envelope;
-        let ty = frame.get("type").and_then(Value::as_str).unwrap_or("");
-        // python `frame.get("target", "")` — the URL host is NEVER the default.
-        let target = AgentId::from(
-            frame
-                .get("target")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        );
-        // python `frame.get("payload", {})`.
-        let payload = match frame.get("payload") {
-            Some(v) => v.clone(),
-            None => json!({}),
+        let Ok(mut env) = Envelope::deserialize(&frame) else {
+            let _ = out_tx.send(Out::Text(encode_frame(&frame_error()))).await;
+            continue;
         };
+        // python `frame.get("target", "")` — the URL host is NEVER the default.
+        let target = AgentId::from(env.target.as_deref().unwrap_or_default());
         // python `frame.get("id", "")` — kept RAW (any JSON type) and always
         // echoed; only a non-empty STRING names the execution.
-        let fid = frame.get("id").cloned().unwrap_or_else(|| json!(""));
-        let secret = frame.get("secret").cloned();
+        let fid = env.id.take().unwrap_or_else(|| json!(""));
+        let secret = env.secret.take();
         let kernel = Arc::clone(&state.kernel);
         let leg = leg_agent_id.clone();
         let out = out_tx.clone();
-        match ty {
+        match env.ty.as_str() {
             "call" => {
-                let denial = match gate_leg(&kernel, &leg, "call", &frame) {
+                let denial = match gate_leg(&kernel, &leg, "call", &env) {
                     Decision::Allow => None,
                     // TEACHING DENIAL: the caller's promise resolves with the
                     // reason plus the pointer that says how to
@@ -558,6 +588,8 @@ pub(crate) async fn ws_loop(
                     peer::mirror_reply(peer.mirror().siblings(), &fid, &data, None).await;
                     continue;
                 }
+                // python `frame.get("payload", {})`.
+                let payload = env.payload.take().unwrap_or_else(|| json!({}));
                 let body = inbound.body;
                 // REGISTERED UNDER THE HOST: a frame handler DISPATCHES, so it
                 // is real work — a `ps` row, reachable by `cancel`, and its send
@@ -647,7 +679,7 @@ pub(crate) async fn ws_loop(
                 });
                 track_call(&state.kernel, &pending_calls, handle);
             }
-            "hello" => peer.hello(&kernel, &leg, &out, &frame, &fid).await,
+            "hello" => peer.hello(&kernel, &leg, &out, &frame, &env, &fid).await,
             // An answer to one of the host's calls INTO the page — never gated:
             // it only settles a call this leg itself sent.
             "reply" | "error" => peer.answer(&kernel, &frame, inbound.answer_body),
@@ -655,9 +687,11 @@ pub(crate) async fn ws_loop(
             // never gated: it only answers a watch this leg itself sent.
             "event" => peer.event(&kernel, &frame, inbound.body),
             "emit" => {
-                if !matches!(gate_leg(&kernel, &leg, "emit", &frame), Decision::Allow) {
+                if !matches!(gate_leg(&kernel, &leg, "emit", &env), Decision::Allow) {
                     continue;
                 }
+                // python `frame.get("payload", {})`.
+                let payload = env.payload.take().unwrap_or_else(|| json!({}));
                 // HANDED TO THE LEG (`inbound_emit`), which emits AS ITSELF. The
                 // body rides at ITS path below `payload`; the decode already left
                 // `null` in that slot, in python's position.
@@ -673,10 +707,10 @@ pub(crate) async fn ws_loop(
                 .await;
             }
             "watch" => {
-                if !matches!(gate_leg(&kernel, &leg, "watch", &frame), Decision::Allow) {
+                if !matches!(gate_leg(&kernel, &leg, "watch", &env), Decision::Allow) {
                     continue;
                 }
-                let src = frame.get("src").and_then(Value::as_str).unwrap_or("");
+                let src = env.src.as_deref().unwrap_or("");
                 watch_path(
                     &kernel,
                     &leg,
@@ -693,7 +727,7 @@ pub(crate) async fn ws_loop(
             "unwatch" => {
                 // NO GATE — python gates the four inbound actions and leaves
                 // `unwatch` (a client giving something up) ungated.
-                let src = frame.get("src").and_then(Value::as_str).unwrap_or("");
+                let src = env.src.as_deref().unwrap_or("");
                 if let Some(entry) = watching.remove(src) {
                     drop_watch(&kernel, src, entry, &readers).await;
                 }
@@ -701,7 +735,7 @@ pub(crate) async fn ws_loop(
             "state_subscribe" => {
                 // A SEALED LEG LEAKS NO TELEMETRY, not merely no dispatch.
                 if !matches!(
-                    gate_leg(&kernel, &leg, "state_subscribe", &frame),
+                    gate_leg(&kernel, &leg, "state_subscribe", &env),
                     Decision::Allow
                 ) {
                     continue;

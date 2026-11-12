@@ -23,7 +23,7 @@
 //! watches of that guid are asked for again on the new one. Kernel legs join no
 //! tabs and get no reply mirror.
 
-use super::{error_frame, gate_leg, send_envelope, Out, INBOUND_PAYLOAD_KEY, REPLY_KEY};
+use super::{error_frame, gate_leg, Envelope, send_envelope, Out, INBOUND_PAYLOAD_KEY, REPLY_KEY};
 use fantastic_io_bridge::authorizer::Decision;
 use fantastic_kernel::refusal::{bad, refusal, TRANSPORT_ERROR};
 use fantastic_kernel::{AgentId, Kernel, PeerReply, PeerRoute};
@@ -339,6 +339,7 @@ impl PeerLink {
         leg: &AgentId,
         out: &tokio::sync::mpsc::Sender<Out>,
         frame: &Value,
+        env: &Envelope,
         fid: &Value,
     ) {
         let guid = frame
@@ -367,7 +368,7 @@ impl PeerLink {
                 return;
             }
         };
-        if !matches!(gate_leg(kernel, leg, "hello", frame), Decision::Allow) {
+        if !matches!(gate_leg(kernel, leg, "hello", env), Decision::Allow) {
             return;
         }
         if let Some((pinned, _)) = &self.pinned {

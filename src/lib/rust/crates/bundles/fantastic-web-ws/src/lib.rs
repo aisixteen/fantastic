@@ -19,7 +19,6 @@ pub mod record;
 pub mod verbs;
 
 use async_trait::async_trait;
-use fantastic_bundle::py_repr_value;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::{AgentId, Blob, Kernel};
 use serde_json::{json, Map, Value};
@@ -96,18 +95,16 @@ impl Handler for WebWsBundle {
 
     /// The leg's `ingress_rule`, refused at the WRITE when no rule implements it
     /// — the one check every leg makes (python `validate_meta` →
-    /// `io_bridge.unknown_ingress_refusal`) — and a `route` that is not a literal path.
+    /// `io_bridge.unknown_ingress_refusal`).
     fn validate_meta(
         &self,
         meta: &Map<String, Value>,
         _record: &Map<String, Value>,
     ) -> Option<String> {
-        route_refusal(meta).or_else(|| {
-            fantastic_io_bridge::authorizer::ingress::unknown_refusal(
-                meta,
-                &fantastic_io_bridge::authorizer::ingress::REGISTRY,
-            )
-        })
+        fantastic_io_bridge::authorizer::ingress::unknown_refusal(
+            meta,
+            &fantastic_io_bridge::authorizer::ingress::REGISTRY,
+        )
     }
 
     /// The INBOUND verbs carry a raw body: an admitted frame the transport hands in,
@@ -145,21 +142,6 @@ fn route_of(agent_id: &AgentId, kernel: &Kernel) -> Option<String> {
 /// The path this leg mounts: its `route` literal, else the catch-all.
 fn mount_path(agent_id: &AgentId, kernel: &Kernel) -> String {
     route_of(agent_id, kernel).unwrap_or_else(|| PATH_PATTERN.to_string())
-}
-
-/// `route` must be a literal path: a pattern sent as `route` would be a
-/// disguised second catch-all. A `route` of the wrong type is already refused by the
-/// record declaration (`record::Record`), which runs first; only the text's shape
-/// is judged here.
-fn route_refusal(meta: &Map<String, Value>) -> Option<String> {
-    let s = meta.get("route")?.as_str()?;
-    if s.starts_with('/') && !s.contains('{') && !s.contains('}') {
-        return None;
-    }
-    Some(format!(
-        "route={} is not a literal mount path — a string starting with \"/\", with no \"{{\" or \"}}\"",
-        py_repr_value(&json!(s))
-    ))
 }
 
 /// python `web_ws/tools.py::_reflect` — identity, the mounted URL pattern and

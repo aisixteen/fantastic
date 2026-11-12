@@ -5,7 +5,7 @@
 
 REST verb channel. `POST /<self_id>/<target_id>` body=payload →
 kernel.send → JSON reply. Browser-pastable shortcuts:
-`GET /<self_id>/_reflect[/<target>][?readme=1]`.
+`GET /<self_id>/_reflect[/<target>]`.
 
 ## Pre-flight
 
@@ -50,14 +50,7 @@ curl -sf http://localhost:$PORT/wr/_reflect | jq -e '.tree.id == "kernel_state"'
 curl -sf http://localhost:$PORT/wr/_reflect/core | jq -e '.id == "kernel_state"'
 ```
 
-### Test 4: GET _reflect?readme=1 includes readme
-
-```bash
-curl -sf "http://localhost:$PORT/wr/_reflect/core?readme=1" \
-  | jq -e '.readme | type == "string" and contains("Fantastic kernel")'
-```
-
-### Test 5: multiple instances coexist
+### Test 4: multiple instances coexist
 
 ```bash
 $FANTASTIC w create_agent handler_module=web_rest.tools id=wr2
@@ -76,5 +69,4 @@ curl -sf http://localhost:$PORT/wr2/_reflect | jq -e '.tree.id == "kernel_state"
 | 1. POST → kernel.send |  |  |
 | 2. error on bad target |  |  |
 | 3. GET _reflect |  |  |
-| 4. readme flag |  |  |
-| 5. multiple instances |  |  |
+| 4. multiple instances |  |  |

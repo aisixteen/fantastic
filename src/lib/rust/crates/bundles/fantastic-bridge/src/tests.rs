@@ -2795,34 +2795,6 @@ async fn a_malformed_rule_on_the_record_denies_in_python_s_words() {
         .await;
 }
 
-/// A forwarded `set` names its fields as secret in the CALLER's records (the far
-/// bundle is unknown before sending); nothing else a bridge is sent does.
-#[test]
-fn bridge_payload_secret_marks_only_a_forwarded_set_fields() {
-    let set = json!({"type": "forward", "target": "creds",
-                     "payload": {"type": "set", "ref": "r", "fields": {"a": "1", "b": "2"}}});
-    let dotted = json!({"type": "forward", "target": "creds",
-                        "payload": {"type": "set", "ref": "r", "fields": {"a.b": "1"}}});
-    let get = json!({"type": "forward", "target": "creds",
-                     "payload": {"type": "get", "ref": "r", "fields": {"a": "1"}}});
-    let reflect = json!({"type": "forward", "target": "creds", "payload": {"type": "reflect"}});
-    let plain = json!({"type": "set", "fields": {"a": "1"}});
-    let nofields = json!({"type": "forward", "target": "creds", "payload": {"type": "set"}});
-    for b in [
-        &WsBridgeBundle as &dyn fantastic_kernel::Bundle,
-        &RelayConnectorBundle as &dyn fantastic_kernel::Bundle,
-    ] {
-        assert_eq!(
-            b.payload_secret(&set),
-            vec!["payload.fields.a".to_string(), "payload.fields.b".to_string()]
-        );
-        assert_eq!(b.payload_secret(&dotted), vec!["payload.fields".to_string()]);
-        for none in [&get, &reflect, &plain, &nofields] {
-            assert!(b.payload_secret(none).is_empty(), "{none}");
-        }
-    }
-}
-
 /// Every bridge verb is checked by its declaration before it runs: an unknown
 /// argument, a missing one, a wrongly typed one is refused by name, on both families.
 #[tokio::test]

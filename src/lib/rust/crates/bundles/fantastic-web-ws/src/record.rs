@@ -7,7 +7,7 @@ use serde_json::Value;
 /// The fields a web_ws leg's record carries.
 #[derive(Debug, JsonSchema)]
 pub struct Record {
-    /// A literal mount path such as `/page_ws/ws` (a string starting with `/`, with no `{` or `}`): the leg then mounts only that path; absent, the host's catch-all.
+    /// A literal mount path such as `/page_ws/ws`: the leg then mounts only that path; absent, the host's catch-all.
     #[schemars(length(min = 1))]
     pub route: Option<String>,
     /// Who may reach this leg: a rule name (`allow_all_ingress`, `deny_ingress`, `password_ingress`) or `{type, env}`; absent, the leg is sealed.
