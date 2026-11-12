@@ -108,7 +108,7 @@ def run(ctx) -> None:  # noqa: C901
         for n, parent in ((1, k.root_id), (2, "files")):
             before = len(k.http)
             r = k.send(k.root_id, {"type": "create_agent", "id": "joiner", "parent_id": parent,
-                                   "handler_module": "cli.tools"}, exec_id="kv-joined-1")
+                                   "handler_module": "cli.tools"}, execution_id="kv-joined-1")
             rec.json(f"C22/joiner_{n}", {"parent": parent, "reply": r, "http": k.http[before:]})
         # ── C25/C26/C27 — id shapes, duplicate/missing, update and delete ──
         for ident, tag in (("123", "digits"), ("a:b", "colon"), ("", "empty"),

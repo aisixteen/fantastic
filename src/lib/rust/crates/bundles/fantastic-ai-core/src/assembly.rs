@@ -39,7 +39,11 @@ fn reflect_field(v: &Value) -> String {
                 .iter()
                 .all(|x| !matches!(x, Value::Object(_) | Value::Array(_))) =>
         {
-            items.iter().map(crate::helpers::shown).collect::<Vec<_>>().join(",")
+            items
+                .iter()
+                .map(crate::helpers::shown)
+                .collect::<Vec<_>>()
+                .join(",")
         }
         other => py_split_whitespace(&crate::tool_parse::render_reply(other)).join(" "),
     }
@@ -221,7 +225,7 @@ Your view is finite: when it overflows, older turns are compacted and a
 `[context-notice]` says so; the transcript stays whole. Send your OWN id
 `<type>recall</type>` (`<query>`, `<limit>`) to page dropped turns back, `<type>context_status</type>`
 for your budget.
-A [folded …], [thought …] or [cut …] anchor stands for a body you already saw in full; `recall` with its id to read it again — it folds back after your next answer. A folded `docs` reply has no id: use what you restated; call it again only when the state may have changed. {reflect_fold}
+A [folded …], [thought …] or [cut …] anchor stands for a body you already saw in full; `recall` with its id to read it again — it folds back after your next answer. A folded `docs` reply has no id: use what you restated; call it again only when the state may have changed. A `reflect` reply stays whole.
 A reply that will fold after your answer ends with a `keep` call holding its id: write what you will still need of it in `summary`, short, and the folded block shows that in place of the body; leave it out and the block folds to its anchor.
 Your thinking lasts one turn: after you answer it folds to a [thought …] anchor and is not kept. Use it to choose the next step, not to gather again what you already know. Do not repeat a call whose result you still have or noted; fetch again only what was folded and you need.
 "#;
@@ -351,14 +355,7 @@ async fn parts(
         let mut blocks = vec![
             SEND_TO_HOWTO.to_string(),
             reflect_howto(),
-            CONTEXT_HOWTO.replace(
-                "{reflect_fold}",
-                if flag("reflect_fold") {
-                    "A `reflect` reply folds the same way."
-                } else {
-                    "A `reflect` reply stays whole."
-                },
-            ),
+            CONTEXT_HOWTO.to_string(),
             MEMORY_HOWTO.replace("{store}", &store),
         ];
         if flag("context_titles") {
@@ -627,11 +624,10 @@ pub async fn assemble_messages(
     };
     *state.view_source.lock().expect("view_source poisoned") = Some(source.to_string());
     let rendered = render_history(&store, listed.as_deref(), caching.cleans());
-    let reflect_fold = crate::record::reflect_fold(&crate::helpers::agent_meta(self_id, kernel));
     let pics = Pictures::of(self_id, state, kernel, &store, &rendered);
     for r in rendered {
         let (msg, form) = if caching.folds() && r.res == "full" {
-            crate::history_view::autofold(&store, r.idx, &r.msg, Some(user_text), reflect_fold)
+            crate::history_view::autofold(&store, r.idx, &r.msg, Some(user_text))
         } else {
             (r.msg, if r.res == "full" { "whole" } else { "anchor" })
         };
@@ -963,9 +959,14 @@ mod tests_worknote {
 
     #[test]
     fn the_working_section_asks_to_keep_the_task_state_in_the_reply() {
-        let h = super::WORKING_HOWTO.split_whitespace().collect::<Vec<_>>().join(" ");
+        let h = super::WORKING_HOWTO
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         let h = h.as_str();
-        assert!(h.starts_with("## Working Your thinking lasts one turn; your reply's own text stays."));
+        assert!(
+            h.starts_with("## Working Your thinking lasts one turn; your reply's own text stays.")
+        );
         assert!(h.contains("Keep the task's state there, in a few plain lines before your calls (plain text, not a call or an agent)"));
         assert!(h.contains("what was asked and how you will know it is done; the steps and which one you are on; what you found, with where you found it; what you tried that failed; and your next step."));
         assert!(h.contains("A step counts as done only once its result is among what you found"));
@@ -973,7 +974,14 @@ mod tests_worknote {
         // the sections run in the agreed order
         let s = super::SEND_TO_HOWTO;
         assert!(!s.contains("## Working"));
-        let order = ["## Reaching", "## Grants", "## Turns", "## Replies", "## How to call", "## Inquiries"];
+        let order = [
+            "## Reaching",
+            "## Grants",
+            "## Turns",
+            "## Replies",
+            "## How to call",
+            "## Inquiries",
+        ];
         let at: Vec<usize> = order.iter().map(|k| s.find(k).unwrap()).collect();
         assert!(at.windows(2).all(|p| p[0] < p[1]), "{at:?}");
     }
@@ -981,15 +989,23 @@ mod tests_worknote {
     #[test]
     fn the_send_howto_says_act_early_batch_and_verify_before_done() {
         // (the text wraps lines; compare on single spaces)
-        let h = format!("{} {}", super::SEND_TO_HOWTO, super::WORKING_HOWTO).split_whitespace().collect::<Vec<_>>().join(" ");
+        let h = format!("{} {}", super::SEND_TO_HOWTO, super::WORKING_HOWTO)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         let h = h.as_str();
         assert!(h.contains("Read only what the request names; no docs or reflect sweep before your first real call."));
         assert!(h.contains("an error reply names the missing argument"));
         assert!(h.contains("One answer may hold many <call> elements; they run at once."));
         assert!(h.contains("a call waits for a later turn only when it does"));
-        assert!(h.contains("Before `done`: for each check that shows the task is done, the reply that proves it."));
+        assert!(h.contains(
+            "Before `done`: for each check that shows the task is done, the reply that proves it."
+        ));
         assert!(h.contains("Checks are run, not re-read"));
-        assert!(h.contains("`done` (the work is done, checked as under Working)") || h.contains("checked as under Working"));
+        assert!(
+            h.contains("`done` (the work is done, checked as under Working)")
+                || h.contains("checked as under Working")
+        );
         assert!(h.contains("three times: stop"));
         assert!(h.contains("send whoever asked you an `inquiry`"));
         assert!(h.contains("Other text outside calls: only your last message."));

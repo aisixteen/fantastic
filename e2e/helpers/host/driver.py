@@ -352,10 +352,10 @@ class HostKernel:
             print(tail if len(raw) <= 4000 else "…\n" + tail, flush=True)
 
     def send(self, target: str, payload: dict, timeout: float = 300,
-             exec_id: str | None = None) -> dict:
+             execution_id: str | None = None) -> dict:
         """One POST per call.
 
-        `exec_id` NAMES the execution, so ensure-semantics are reachable from
+        `execution_id` NAMES the execution, so ensure-semantics are reachable from
         the wire: an unknown id dispatches, an in-flight id joins, and a settled
         id returns the recorded outcome instead of running the verb twice. A
         scenario whose subject is a safe repeat is measurable through HTTP
@@ -375,8 +375,8 @@ class HostKernel:
         else:
             headers = {"content-type": "application/json"}
             data = json.dumps(payload).encode()
-        if exec_id is not None:
-            headers[EXEC_ID_HEADER] = exec_id
+        if execution_id is not None:
+            headers[EXEC_ID_HEADER] = execution_id
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.port}/rest/{target}", data=data, headers=headers)
         try:

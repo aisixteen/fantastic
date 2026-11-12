@@ -424,7 +424,7 @@ class CaptureKernel(HostKernel):
         return port
 
     # ── transport ────────────────────────────────────────────────────────────
-    def send(self, target: str, payload: dict, timeout: float = 120, exec_id=None):
+    def send(self, target: str, payload: dict, timeout: float = 120, execution_id=None):
         """One POST, recorded WHOLE.
 
         The reply this returns is the parsed one families assert on; the raw
@@ -445,8 +445,8 @@ class CaptureKernel(HostKernel):
         else:
             headers = {"content-type": "application/json"}
             data = json.dumps(payload).encode()
-        if exec_id is not None:
-            headers[EXEC_ID_HEADER] = exec_id
+        if execution_id is not None:
+            headers[EXEC_ID_HEADER] = execution_id
         url = f"http://127.0.0.1:{self.port}/rest/{target}"
         rec = {
             "target": target,

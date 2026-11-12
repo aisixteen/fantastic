@@ -225,21 +225,35 @@ async fn a_reflect_reply_never_folds() {
     say(&kernel, &agent, "next").await;
     assert!(until_passes(&s, 2).await);
     let seen = s.request(1);
-    assert!(seen.contains(&"x".repeat(1000)), "still whole after it is answered");
-    assert!(!seen.contains("[folded · reflect reply"), "a reflect never folds");
+    assert!(
+        seen.contains(&"x".repeat(1000)),
+        "still whole after it is answered"
+    );
+    assert!(
+        !seen.contains("[folded · reflect reply"),
+        "a reflect never folds"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reflect_reply_carrying_an_html_view_reaches_the_model_without_the_body() {
     let tmp = TempDir::new().unwrap();
     let kernel = base_kernel(&tmp, |k| {
-        k.bundles
-            .register(crate::chat_bundle::HANDLER_MODULE, crate::chat_bundle::AiChatBundle);
+        k.bundles.register(
+            crate::chat_bundle::HANDLER_MODULE,
+            crate::chat_bundle::AiChatBundle,
+        );
     })
     .await;
     let backend_id = id_for(&tmp, "af_viewhide");
     let file_id = format!("ff_{backend_id}");
-    add_file_bridge(&kernel, &file_id, &tmp.path().join(".fantastic"), &backend_id).await;
+    add_file_bridge(
+        &kernel,
+        &file_id,
+        &tmp.path().join(".fantastic"),
+        &backend_id,
+    )
+    .await;
     let agent = add_backend(&kernel, &backend_id, &file_id).await;
     let made = verb(
         &kernel,
@@ -257,8 +271,17 @@ async fn a_reflect_reply_carrying_an_html_view_reaches_the_model_without_the_bod
     )
     .await;
     assert!(r.get("error").is_none(), "{r}");
-    let whole = verb(&kernel, &AgentId::from("viewchat"), json!({"type": "reflect"})).await;
-    let size = whole["view"]["bytes"].as_str().expect("the view body").chars().count();
+    let whole = verb(
+        &kernel,
+        &AgentId::from("viewchat"),
+        json!({"type": "reflect"}),
+    )
+    .await;
+    let size = whole["view"]["bytes"]
+        .as_str()
+        .expect("the view body")
+        .chars()
+        .count();
     let call = call_envelope("viewchat", json!({"type": "reflect"}), Some("self"));
     let s = script(&agent, vec![pass(call), pass(DONE)], Duration::ZERO);
     say(&kernel, &agent, "go").await;
@@ -268,5 +291,8 @@ async fn a_reflect_reply_carrying_an_html_view_reaches_the_model_without_the_bod
         seen.contains(&format!("<view>html, {size} chars, not shown</view>")),
         "{seen}"
     );
-    assert!(!seen.contains("<!DOCTYPE") && !seen.contains("<html"), "{seen}");
+    assert!(
+        !seen.contains("<!DOCTYPE") && !seen.contains("<html"),
+        "{seen}"
+    );
 }

@@ -51,10 +51,10 @@ pub const TOOLS: [&str; 5] = ["send", "done", "await", "inquiry_answer", "keep"]
 
 /// Call-level fields of a `send`: where it goes, where the answer goes, what it
 /// is for, and the kernel's per-item bounds. Everything else in the call is the
-/// payload. The kernel item's caller-chosen execution name is `exec_id` HERE
-/// (the router maps it onto the item's `id`): a bare `<id>` would collide with
-/// the many verbs whose payload has an `id` (`delete_agent`, `update_agent`, …)
-/// now that arguments are inline.
+/// payload. `id` is the kernel item's caller-chosen execution name. A verb whose
+/// own payload has an `id` (`delete_agent`, `update_agent`, …) clashes with it in
+/// the inline form; the router refuses that call and names the routing form,
+/// where the payload is taken whole.
 pub const ROUTING: [&str; 8] = [
     "target_id",
     "to",
@@ -63,7 +63,7 @@ pub const ROUTING: [&str; 8] = [
     "title",
     "timeout",
     "retries",
-    "exec_id",
+    "id",
 ];
 
 /// The block is a call the model MEANT and it does not parse; the string is the

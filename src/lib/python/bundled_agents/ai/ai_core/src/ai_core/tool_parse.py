@@ -34,7 +34,7 @@ blocks, OpenHands/cline per-parameter tags, codex freeform grammar).
 Rules (all of them):
 - Envelope `<call name="<tool>">…</call>`. Tools: `send`, `done`, `await`, `inquiry_answer`.
 - `send`: `target_id` (or `to`, a list of recipients — one copy each), `re`,
-  `reply_to`, `title`, `timeout`, `retries`, `exec_id` are CALL-level and stay there; every other child IS the payload (`type` names the verb). Other tools: the children
+  `reply_to`, `title`, `timeout`, `retries`, `id` are CALL-level and stay there; every other child IS the payload (`type` names the verb). Other tools: the children
   are the arguments.
 - THE ROUTING FORM: a `send` with a `<routing>` child reads its routing ONLY from it
   (the names above, nothing else) and takes `<payload>` WHOLE — nothing inside it is
@@ -73,9 +73,9 @@ _HEAD = re.compile(r'^\s*name\s*=\s*"([A-Za-z_][\w]*)"\s*>', re.DOTALL)
 _TAG = re.compile(r"<([A-Za-z_$][\w$.\-]*)>")
 # Call-level fields of a `send`: where it goes, where the answer goes, what it is for,
 # and the kernel's per-item bounds. Everything else in the call is the payload. The
-# kernel item's caller-chosen execution name is `exec_id` HERE (core maps it onto the
-# item's `id`): a bare `<id>` would collide with the many verbs whose payload has an
-# `id` (`delete_agent`, `update_agent`, …) now that arguments are inline.
+# kernel item's caller-chosen execution name is `id`. A verb whose own payload has an
+# `id` (`delete_agent`, `update_agent`, …) clashes with it in the inline form; core
+# refuses that call and names the routing form, where the payload is taken whole.
 _ROUTING_TAG = "routing"
 _PAYLOAD_TAG = "payload"
 _ROUTING = (
@@ -86,7 +86,7 @@ _ROUTING = (
     "title",
     "timeout",
     "retries",
-    "exec_id",
+    "id",
 )
 # The tools. Any other `name` is refused with the shape — a verb is `<type>`, never
 # the tool name (a compression small models made under the JSON grammar).

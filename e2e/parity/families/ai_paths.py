@@ -2,7 +2,7 @@
 
 Covered: inquiry, stateless `messages`,
 `send_to`, a reply that arrives late, a cancel mid-stream, a send timeout, a
-cycle, a depth-9 chain, and every tag argument (`<timeout>`, `<exec_id>`,
+cycle, a depth-9 chain, and every tag argument (`<timeout>`, `<id>`,
 `<retries>`, `<to>`, `<type>`).
 
 The stub keys on a `CASE=<name>#<n>` marker the harness plants in the send
@@ -32,7 +32,7 @@ DONE = '<call name="done"></call>'
 FILL = ("The pump log is unremarkable and the valve is closed. " * 2000)[:AI_FILL_CHARS]
 
 
-ROUTING = ("to", "re", "reply_to", "title", "timeout", "retries", "exec_id")
+ROUTING = ("to", "re", "reply_to", "title", "timeout", "retries", "id")
 
 
 def tag(target: str, verb: str, **args) -> str:
@@ -100,13 +100,13 @@ CASES = {
     "tag_payloadless": ['<call name="send"><target_id>readings</target_id></call>', DONE],
     # C31 — a real timeout on a slow verb, then the SAME exec id with a smaller one.
     "tag_timeout_short": [tag("slow", "sleep", seconds=2, timeout="0.2"), DONE],
-    "tag_exec_id_reuse": [
-        tag("slow", "sleep", seconds=2, exec_id="reuse-1", timeout="5"),
-        tag("slow", "sleep", seconds=2, exec_id="reuse-1", timeout="0.2"),
+    "tag_execution_id_reuse": [
+        tag("slow", "sleep", seconds=2, id="reuse-1", timeout="5"),
+        tag("slow", "sleep", seconds=2, id="reuse-1", timeout="0.2"),
         DONE,
     ],
     # C38 — an exec id that is a number, and retries that are not.
-    "tag_exec_id_int": [tag("readings", "reflect", exec_id=7), DONE],
+    "tag_execution_id_int": [tag("readings", "reflect", id=7), DONE],
     "tag_retries_word": [tag("readings", "reflect", retries="x"), DONE],
     # B5.12 / B5.13 — `<to>` with a number, and with mixed item types.
     "to_number": ['<call name="send"><to>42</to><type>reflect</type></call>', DONE],
@@ -239,7 +239,7 @@ def run(ctx) -> None:  # noqa: C901
         for case in ("call_less_turns", "inquiry_shapes", "empty_text", "stateless_messages",
                      "send_to_number", "send_to_blank", "text_number", "probe_raise",
                      "tag_timeout_word", "tag_empty_id", "tag_payloadless",
-                     "tag_timeout_short", "tag_exec_id_reuse", "tag_exec_id_int",
+                     "tag_timeout_short", "tag_execution_id_reuse", "tag_execution_id_int",
                      "tag_retries_word", "to_number", "to_mixed_items", "type_number",
                      "crlf_reply", "depth9", "ai_to_ai", "cycle", "context_fill"):
             run_case(case)

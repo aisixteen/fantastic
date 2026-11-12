@@ -150,7 +150,7 @@ pub fn unsupported(name: &str) -> ProviderError {
 /// last message; the tail is never the system message. A message hit by several
 /// reasons carries one flag. The flag is on the message's own text, so a backend can
 /// cut its block there.
-pub fn mark(messages: &mut [Value], primer: Option<i64>, reflect_fold: bool) {
+pub fn mark(messages: &mut [Value], primer: Option<i64>) {
     let system_at = (messages
         .first()
         .and_then(|m| m.get("role").and_then(Value::as_str))
@@ -179,7 +179,6 @@ pub fn mark(messages: &mut [Value], primer: Option<i64>, reflect_fold: bool) {
             m.get("role").and_then(Value::as_str) == Some("user")
                 && crate::history_view::will_fold(
                     m.get("content").and_then(Value::as_str).unwrap_or(""),
-                    reflect_fold,
                 )
         })
         .map(|(i, _)| i);
@@ -271,7 +270,7 @@ mod tests {
             json!({"role": "user", "content": "[fold 9", "id": 9, "kind": "fold"}),
             json!({"role": "user", "content": "c", "id": 10}),
         ];
-        mark(&mut msgs, Some(6), false);
+        mark(&mut msgs, Some(6));
         assert_eq!(
             marked(&msgs),
             vec![0, 3, 4, 5],
@@ -289,11 +288,11 @@ mod tests {
             ]
         };
         let mut none = rows();
-        mark(&mut none, None, false);
+        mark(&mut none, None);
         assert_eq!(marked(&none), vec![0, 2]);
         // a primer that is not in the view flags nothing
         let mut gone = rows();
-        mark(&mut gone, Some(99), false);
+        mark(&mut gone, Some(99));
         assert_eq!(marked(&gone), vec![0, 2]);
     }
 
@@ -303,7 +302,7 @@ mod tests {
             json!({"role": "user", "content": "[cleared 4", "id": 4, "kind": "clear"}),
             json!({"role": "user", "content": "x", "id": 5}),
         ];
-        mark(&mut msgs, None, false);
+        mark(&mut msgs, None);
         assert_eq!(marked(&msgs), vec![0, 1]);
     }
 
@@ -335,7 +334,7 @@ mod tests {
             json!({"role": "assistant", "content": "b", "id": 2}),
             json!({"role": "user", "content": "[reply to 3 · notes read]\nsmall"}),
         ];
-        mark(&mut msgs, None, false);
+        mark(&mut msgs, None);
         assert_eq!(marked(&msgs), vec![0, 3]);
     }
 
@@ -347,7 +346,7 @@ mod tests {
             json!({"role": "assistant", "content": "b"}),
             json!({"role": "user", "content": big_reply()}),
         ];
-        mark(&mut msgs, None, false);
+        mark(&mut msgs, None);
         assert_eq!(marked(&msgs), vec![0, 2]);
         assert!(msgs[3].get(CACHE_MARK).is_none());
         // a recall reply does the same
@@ -355,7 +354,7 @@ mod tests {
         for m in msgs.iter_mut() {
             m.as_object_mut().unwrap().remove(CACHE_MARK);
         }
-        mark(&mut msgs, None, false);
+        mark(&mut msgs, None);
         assert_eq!(marked(&msgs), vec![0, 2]);
         // a will-fold row BEFORE the last assistant row is already answered: ignored
         let mut older = vec![
@@ -364,7 +363,7 @@ mod tests {
             json!({"role": "assistant", "content": "b"}),
             json!({"role": "user", "content": "live"}),
         ];
-        mark(&mut older, None, false);
+        mark(&mut older, None);
         assert_eq!(marked(&older), vec![0, 3]);
     }
 
@@ -374,7 +373,7 @@ mod tests {
             json!({"role": "system", "content": "s"}),
             json!({"role": "user", "content": big_reply()}),
         ];
-        mark(&mut msgs, None, false);
+        mark(&mut msgs, None);
         assert_eq!(marked(&msgs), vec![0]);
     }
 
@@ -384,7 +383,7 @@ mod tests {
             json!({"role": "user", "content": "a", "id": 1}),
             json!({"role": "assistant", "content": "b", "id": 2}),
         ];
-        mark(&mut msgs, None, false);
+        mark(&mut msgs, None);
         assert_eq!(marked(&msgs), vec![1]);
     }
 

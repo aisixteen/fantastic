@@ -734,12 +734,12 @@ pub(crate) fn watch_job(
             job: job.clone(),
             exec: exec_s.clone(),
         };
-        let exec_id = AgentId::from(exec_s.as_str());
+        let execution_id = AgentId::from(exec_s.as_str());
         let mut last;
         loop {
             let out = work
                 .send(vec![Item::new(
-                    exec_id.clone(),
+                    execution_id.clone(),
                     json!({"type": "status", "job_id": job.clone(), "wait_s": 100}),
                 )])
                 .await;
@@ -754,7 +754,7 @@ pub(crate) fn watch_job(
         }
         let t = work
             .send(vec![Item::new(
-                exec_id,
+                execution_id,
                 json!({"type": "tail", "job_id": job.clone(), "lines": 20}),
             )])
             .await;
@@ -1703,14 +1703,14 @@ async fn route_reply_gated(
         // as a refusal the model can read.
         item = item.with_timeout(send_timeout);
         // The model may NAME the execution (dedup/join across retries) and may
-        // bound its own call; each is carried in its declared type. `exec_id`, not
-        // `id`: arguments are INLINE, so a bare `<id>` would collide with the many
-        // verbs whose payload has one (`delete_agent`, `update_agent`, ...).
-        if let Some(id) = args.get("exec_id") {
+        // bound its own call; each is carried in its declared type. A verb whose
+        // payload has its own `id` (`delete_agent`, ...) clashes with it in the inline
+        // form; the routing-clash check above refuses that call.
+        if let Some(id) = args.get("id") {
             match serde_json::from_value::<fantastic_kernel::declared::IdOrName>(id.clone()) {
                 Ok(id) => item = item.with_id(id),
                 Err(_) => {
-                    let refused = fantastic_kernel::refusal::bad("send", "exec_id", "text or an integer");
+                    let refused = fantastic_kernel::refusal::bad("send", "id", "text or an integer");
                     if let Some(rt) = reply_to {
                         units.push(Unit {
                             dest: rt,

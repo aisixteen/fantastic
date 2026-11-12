@@ -82,7 +82,7 @@ def main() -> int:
 
         local = threading.local()
 
-        def post(target: str, payload: dict, exec_id: str | None = None) -> dict:
+        def post(target: str, payload: dict, execution_id: str | None = None) -> dict:
             """`HostKernel.send`'s JSON path on a per-thread KEEP-ALIVE connection.
             The server closes an idle one, so a phase that follows idle time starts
             on a fresh connection (`fresh()`)."""
@@ -90,8 +90,8 @@ def main() -> int:
             if conn is None:
                 conn = local.conn = http.client.HTTPConnection("127.0.0.1", hk.port, timeout=600)
             headers = {"content-type": "application/json"}
-            if exec_id is not None:
-                headers[EXEC_ID_HEADER] = exec_id
+            if execution_id is not None:
+                headers[EXEC_ID_HEADER] = execution_id
             conn.request("POST", f"/rest/{target}", body=json.dumps(payload).encode(),
                          headers=headers)
             r = conn.getresponse()
@@ -106,12 +106,12 @@ def main() -> int:
                 conn.close()
             local.conn = None
 
-        def call(exec_id: str | None = None) -> float:
+        def call(execution_id: str | None = None) -> float:
             t = time.monotonic()
-            r = post(PAD, {"type": "reflect", "tree": "none"}, exec_id)
+            r = post(PAD, {"type": "reflect", "tree": "none"}, execution_id)
             dt = time.monotonic() - t
             if not isinstance(r, dict) or r.get("id") != PAD:
-                raise RuntimeError(f"reflect {PAD} (exec_id={exec_id!r}): {str(r)[:200]}")
+                raise RuntimeError(f"reflect {PAD} (execution_id={execution_id!r}): {str(r)[:200]}")
             return dt
 
         def stored_calls() -> tuple[int, float]:

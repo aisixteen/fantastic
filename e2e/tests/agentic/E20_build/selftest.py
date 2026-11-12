@@ -186,7 +186,7 @@ async def scenario(name: str, own: bool) -> bool:
         # THE MODEL'S HALF, as a live model actually builds it: its own exec worker,
         # its own ingress, its own command gate. The probe's picker must find THIS one
         # even though the operator's leg exists and is perfectly usable.
-        exec_id = (await root.send([{"target": root.id, "payload": {
+        execution_id = (await root.send([{"target": root.id, "payload": {
                 "type": "create_agent",
                 "parent_id": home(root),
                 "handler_module": "exec_bridge.tools",
@@ -200,11 +200,11 @@ async def scenario(name: str, own: bool) -> bool:
                 "can_call": {"totals": "*"},
             }}]))[0]["result"]["id"]
     else:
-        exec_id = EXECUTOR_LEG
+        execution_id = EXECUTOR_LEG
 
     total = sum(readings.values())
     new_total = total + canary_value
-    print(f"\n  --- scenario {name!r}: the program runs on {exec_id!r} ---")
+    print(f"\n  --- scenario {name!r}: the program runs on {execution_id!r} ---")
     print(f"  true total = {total}   after canary = {new_total}")
 
     # DISCOVERED, not hardcoded — the same path the probe's scoring and a model use.
@@ -216,7 +216,7 @@ async def scenario(name: str, own: bool) -> bool:
     # now that nothing is auto-prepended (the shim mechanism is gone).
     with open("main.py", "w") as fh:
         fh.write(CONNECTOR_SRC + REFERENCE)
-    started = (await root.send([{"target": exec_id, "payload": {
+    started = (await root.send([{"target": execution_id, "payload": {
             "type": "start",
             "command": sys.executable,
             "args": ["main.py"],
@@ -227,9 +227,9 @@ async def scenario(name: str, own: bool) -> bool:
     #    That older check passed on a job the probe itself would have scored `jobs=0`,
     #    which is precisely the defect this selftest now has to be able to catch.
     ran_on, jobs, job = await wait_for_scored_job(root, 60)
-    c1 = job is not None and ran_on == exec_id
+    c1 = job is not None and ran_on == execution_id
     print(f"  1. artifact exists   {'OK' if c1 else 'NO'}  "
-          f"runner={ran_on!r} (want {exec_id!r}) jobs={len(jobs)} "
+          f"runner={ran_on!r} (want {execution_id!r}) jobs={len(jobs)} "
           f"ran={None if job is None else [job.get('command'), job.get('args')]}")
 
     # 2. correct total (the program computes once at startup)

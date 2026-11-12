@@ -640,11 +640,11 @@ class Kernel:
         """The message id a caller's name stands for, while its execution is held."""
         return self.names.get(name)
 
-    def ledger_put(self, exec_id: int, row: dict) -> None:
+    def ledger_put(self, execution_id: int, row: dict) -> None:
         """Insert one execution's PROCESS state, then enforce the ring."""
-        self.executions[exec_id] = row
+        self.executions[execution_id] = row
         if row.get("name"):
-            self.names[row["name"]] = exec_id
+            self.names[row["name"]] = execution_id
         cap = self.ledger_cap
         if cap is None or len(self.executions) <= cap:
             return

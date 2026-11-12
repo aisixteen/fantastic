@@ -347,8 +347,8 @@ struct Dispatch {
     verb: String,
     timeout: Option<Deadline>,
     /// The execution's id — the kernel counter's number, and the ledger key.
-    exec_id: i64,
-    /// The task-table handle. It IS `exec_id`: one number names the execution in
+    execution_id: i64,
+    /// The task-table handle. It IS `execution_id`: one number names the execution in
     /// `ps`, in `cancel`, in the ledger and in the reply. A retry re-registers
     /// under the same handle.
     task_id: TaskId,
@@ -378,7 +378,7 @@ struct Joiner {
     /// The id of the execution being JOINED (python `d.pid`) — not this
     /// joiner's own dispatch, which never gets one. Needed only to render
     /// the joiner-timeout refusal's `task_id` + pid-in-prose.
-    exec_id: i64,
+    execution_id: i64,
 }
 
 impl Kernel {
@@ -521,7 +521,7 @@ impl Kernel {
     /// (what a FRESH open binds); `caller_id` is the id as JSON
     /// (`Value::Null` when the item carried none), kept for the ledger's
     /// rebind text.
-    fn resolve_exec_id(&self, item: &Item) -> Result<(Option<i64>, Option<String>, Value), Value> {
+    fn resolve_execution_id(&self, item: &Item) -> Result<(Option<i64>, Option<String>, Value), Value> {
         use crate::declared::IdOrName;
         let Some(id) = &item.id else {
             return Ok((None, None, Value::Null));
@@ -665,7 +665,7 @@ impl Kernel {
         };
         // 5. id — a NAME (non-empty string) opens-or-joins by name; an int
         // JOINS an existing execution or refuses; anything else is `bad_arg`.
-        let (join_id, name, caller_id) = match self.resolve_exec_id(&item) {
+        let (join_id, name, caller_id) = match self.resolve_execution_id(&item) {
             Ok(v) => v,
             Err(r) => return Launched::Settled(Outcome::refused(r)),
         };
@@ -770,11 +770,11 @@ impl Kernel {
         // never mints into the kernel's space. The mint stays SYNCHRONOUS:
         // the pid exists before the first await, which is what makes a whole
         // batch visible in `ps` at once.
-        let exec_id = join_id.unwrap_or_else(|| self.mint_id());
-        let task_id = TaskId(exec_id);
+        let execution_id = join_id.unwrap_or_else(|| self.mint_id());
+        let task_id = TaskId(execution_id);
 
         match self.ledger.open(
-            exec_id,
+            execution_id,
             &caller_id,
             &target.id,
             &item.payload,
@@ -812,7 +812,7 @@ impl Kernel {
                 return Launched::Joining(Box::new(Joiner {
                     rx,
                     timeout,
-                    exec_id,
+                    execution_id,
                 }));
             }
             crate::ledger::Opened::Fresh => {
@@ -831,7 +831,7 @@ impl Kernel {
                 // retry while it is still in RAM. `caller` scopes who may see it
                 // through `ledger` (it was `origin`; replies own `origin` now).
                 let mut row = Map::new();
-                row.insert("id".to_string(), Value::from(exec_id));
+                row.insert("id".to_string(), Value::from(execution_id));
                 row.insert("kind".to_string(), Value::from("call"));
                 row.insert(
                     "verb".to_string(),
@@ -875,7 +875,7 @@ impl Kernel {
             payload: item.payload,
             verb,
             timeout,
-            exec_id,
+            execution_id,
             task_id,
             binary: item.binary,
             caller,
@@ -944,7 +944,7 @@ impl Kernel {
             payload,
             verb,
             timeout,
-            exec_id,
+            execution_id,
             task_id,
             binary,
             caller,
@@ -959,7 +959,7 @@ impl Kernel {
         // its way out through `_settle`.
         let _settle_on_drop = SettleOnDrop {
             kernel: Arc::clone(self),
-            exec_id,
+            execution_id,
             target: target.id.clone(),
         };
         let mut next_pid = task_id;
@@ -968,14 +968,14 @@ impl Kernel {
         // under a fresh row, so the last one is what the outcome names.
         let mut noted_marks: Vec<String> = Vec::new();
         let (pid, reply, status, body) = loop {
-            let attempts = self.ledger.attempt(exec_id);
+            let attempts = self.ledger.attempt(execution_id);
             if attempts > 1 {
                 // THE ROW COUNTS REAL RUNS. The call row went down with
                 // `attempts: 1`; every re-dispatch updates it in place while it
                 // is in RAM, and the settle row carries the final count.
                 let mut bump = Map::new();
                 bump.insert("attempts".to_string(), Value::from(attempts));
-                self.rows.stamp(exec_id, &bump);
+                self.rows.stamp(execution_id, &bump);
             }
             if std::mem::take(&mut fast_first) {
                 // The caller-NAMED `kernel` reflect's first attempt: a bare
@@ -995,10 +995,10 @@ impl Kernel {
                         }
                     }
                 };
-                if !self.ledger.should_retry(exec_id, status) {
+                if !self.ledger.should_retry(execution_id, status) {
                     break (Some(task_id), reply, status, None);
                 }
-                next_pid = TaskId(exec_id);
+                next_pid = TaskId(execution_id);
                 continue;
             }
             let mut this_pid: Option<TaskId> = None;
@@ -1053,14 +1053,14 @@ impl Kernel {
                     }
                 }
             }
-            if !self.ledger.should_retry(exec_id, status) {
+            if !self.ledger.should_retry(execution_id, status) {
                 break (this_pid, reply, status, body);
             }
             // A RETRY IS THE SAME EXECUTION, so it re-registers under the SAME
             // id — named or not — so `cancel <pid>` on attempt two reaches the
             // work it is aimed at. Cancelling the id kills the current attempt
             // AND this loop: a cancel is absorbing.
-            next_pid = TaskId(exec_id);
+            next_pid = TaskId(execution_id);
         };
 
         // NO FANOUT HERE. It ran in `run_dispatch`, BEFORE the handler — which is
@@ -1078,7 +1078,7 @@ impl Kernel {
         // kernel's store.
         let reply_marks = crate::secret::well_formed(reply_marks, &noted_marks);
         let out = self.ledger.settle(
-            exec_id,
+            execution_id,
             Outcome::new(pid, status, reply)
                 .with_body(body)
                 .with_secret(reply_marks),
@@ -1310,11 +1310,11 @@ impl Kernel {
                                 "send: joined execution {} did not settle \
                                  within this caller's {}s wait; the \
                                  execution itself keeps running",
-                                j.exec_id,
+                                j.execution_id,
                                 d.shown(),
                             ),
                         );
-                        crate::refusal::with(&mut r, "task_id", json!(j.exec_id));
+                        crate::refusal::with(&mut r, "task_id", json!(j.execution_id));
                         Outcome::new(None, Status::TimedOut, r)
                     }
                 }
@@ -1913,18 +1913,18 @@ impl Drop for DispatchGuard {
 /// call end; the dead-letter announcement is a fanout and runs as its own task.
 struct SettleOnDrop {
     kernel: Arc<Kernel>,
-    exec_id: i64,
+    execution_id: i64,
     target: AgentId,
 }
 
 impl Drop for SettleOnDrop {
     fn drop(&mut self) {
-        if self.kernel.ledger.is_done(self.exec_id) {
+        if self.kernel.ledger.is_done(self.execution_id) {
             return;
         }
-        let pid = Some(TaskId(self.exec_id));
+        let pid = Some(TaskId(self.execution_id));
         let out = self.kernel.ledger.settle(
-            self.exec_id,
+            self.execution_id,
             Outcome::new(pid, Status::Cancelled, json!({ "cancelled": true })),
         );
         if let Some(pid) = self.kernel.stamp_call_rows(pid, &out, &self.target) {

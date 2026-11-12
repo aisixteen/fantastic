@@ -88,7 +88,7 @@ PROVIDER_CALLS = ["complete", "watch", "reflect"]
 #: record fields the CHAT takes too (it sizes its own context; output is the provider's max_tokens)
 CHAT_SHARED = ("model", "context_window", "caching")
 #: record fields that are the PROVIDER's only, wherever a probe puts them
-PROVIDER_ONLY = ("handler_module", "endpoint", "credentials", "num_ctx", "kv_slots",
+PROVIDER_ONLY = ("handler_module", "endpoint", "credentials", "num_ctx", "max_tokens", "kv_slots",
                  "kv_overflow", "no_repeat_ngram_size", "repetition_penalty",
                  "thinking_token_budget", "temperature", "top_p", "top_k")
 
@@ -100,6 +100,8 @@ def split_record(backend_record: dict, extra: dict | None = None) -> tuple[dict,
         if k in prov:
             chat[k] = prov[k]
     for k, v in (extra or {}).items():
+        if k == "num_ctx" and not str(prov.get("handler_module", "")).startswith("ollama"):
+            continue  # the window ollama LOADS the model with; no other provider has the field
         if k in PROVIDER_ONLY:
             prov[k] = v
         else:
@@ -135,9 +137,6 @@ def chat_pair(backend, chat: dict, *, role: str | None = None,
     # the KEY is the provider's: the chat names no credentials and reads no `creds`
     chat_fields.pop("credentials", None)
     chat_fields["can_call"].pop(creds.CREDS, None)
-    # `REFLECT_FOLD=1`: the chat folds answered reflect replies (its record's `reflect_fold`)
-    if os.environ.get("REFLECT_FOLD") == "1":
-        chat_fields["reflect_fold"] = True
     return prov, {"type": "create_agent", **chat_fields, "handler_module": CHAT_MODULE,
                   "provider_id": pid}
 

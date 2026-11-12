@@ -202,7 +202,8 @@ def main() -> int:
         planted = asyncio.run(plant(hk))
         before = asyncio.run(ghost_rows(hk))
         need(len(before) == N, f"{len(before)}/{N} rows planted under ghost")
-        r = hk.send(hk.root_id, {"type": "delete_agent", "id": "ghost"})
+        r = hk.send(hk.root_id, {"type": "delete_agent", "id": "ghost",
+                                   "keep_memory": True})
         need(not r.get("error"), f"delete_agent ghost: {str(r)[:200]}")
         kept = asyncio.run(ghost_rows(hk))
         need([x.get("id") for x in kept] == planted,

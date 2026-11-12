@@ -977,7 +977,7 @@ fn run_cli(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
 /// carries no HTTP client in its dev-deps, and the wire form is the point.
 /// `x-fantastic-execution-id` names the execution, so the ledger row this call
 /// settles is identifiable on disk by a string only this test knows.
-fn post_rest(port: u16, path: &str, exec_id: &str, body: &str) -> String {
+fn post_rest(port: u16, path: &str, execution_id: &str, body: &str) -> String {
     use std::io::{Read, Write};
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut sock = loop {
@@ -996,7 +996,7 @@ fn post_rest(port: u16, path: &str, exec_id: &str, body: &str) -> String {
         .unwrap();
     let req = format!(
         "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nconnection: close\r\n\
-         content-type: application/json\r\nx-fantastic-execution-id: {exec_id}\r\n\
+         content-type: application/json\r\nx-fantastic-execution-id: {execution_id}\r\n\
          content-length: {}\r\n\r\n{body}",
         body.len()
     );
@@ -1187,11 +1187,11 @@ fn a_daemon_with_a_store_stops_cleanly_and_releases_its_lock() {
         .expect("the daemon must print [kernel] up within 10s");
     assert_eq!(up, "[kernel] up");
 
-    let exec_id = "probe_last_exec";
+    let execution_id = "probe_last_exec";
     let reply = post_rest(
         port,
         "/rest/kernel_state",
-        exec_id,
+        execution_id,
         "{\"type\":\"list_agents\"}",
     );
     assert!(
@@ -1355,7 +1355,6 @@ fn the_catalog_carries_the_on_device_backend() {
             "cache_primer_until",
             "transport_retries",
             "misfire_limit",
-            "reflect_fold",
             "system_prompt",
             "file_bridge_id",
             "system_prompt_file",

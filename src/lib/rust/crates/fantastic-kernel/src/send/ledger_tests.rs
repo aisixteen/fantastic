@@ -257,13 +257,13 @@ async fn a_joiner_timeout_bounds_only_its_own_wait() {
     assert_eq!(joined.status, Status::TimedOut);
     // Python's prose, verbatim — the JOINED execution's id (bare
     // digits, not this joiner's own pid-less dispatch), plus `task_id`.
-    let exec_id = joined.result["task_id"]
+    let execution_id = joined.result["task_id"]
         .as_i64()
         .expect("a joiner timeout must carry task_id");
     assert_eq!(
         joined.result["error"],
         json!(format!(
-            "send: joined execution {exec_id} did not settle within this \
+            "send: joined execution {execution_id} did not settle within this \
              caller's 0.2s wait; the execution itself keeps running"
         ))
     );
