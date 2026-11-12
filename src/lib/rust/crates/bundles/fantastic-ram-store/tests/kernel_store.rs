@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
-use fantastic_kernel::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+use fantastic_kernel::bundle::{BundleError, BundleRegistry, Handler, Reply};
 use fantastic_kernel::test_support::as_agent;
 use fantastic_kernel::test_support::register_root_loader;
 use fantastic_kernel::{AgentId, Item, Kernel, Outcome};
@@ -32,24 +32,42 @@ struct ProbeState {
 
 struct Probe(Arc<ProbeState>);
 
+fantastic_kernel::stand_in_verbs!(probe_verbs {
+    ShutdownV "shutdown" {},
+    SlowV "slow" {},
+    WorkV "work" {},
+    CountV "count" {},
+    FailV "fail" {},
+});
+
 #[async_trait]
-impl Bundle for Probe {
+impl Handler for Probe {
+    type Call = probe_verbs::Call;
     fn name(&self) -> &str {
         "mem_probe.tools"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        probe_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        probe_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        match payload["type"].as_str().unwrap_or("") {
-            "boot" => Ok(None),
-            "reflect" => Ok(Some(json!({
-                "id": id.0, "sentence": "probe",
-                "verbs": {"shutdown": "wraps up", "slow": "", "work": ""},
-            }))),
-            "shutdown" => {
+        use probe_verbs::Call;
+        match call {
+            Call::Reflect(_) => Ok(Some(json!({"id": id.0, "sentence": "probe"}))),
+            Call::ShutdownV(_) => {
                 self.0.shut.lock().unwrap().push(id.0.clone());
                 // the shutdown dispatch may still use its tools: a nested send
                 // passes the drain
@@ -62,22 +80,19 @@ impl Bundle for Probe {
                     .remove(0);
                 Ok(Some(json!({"wrapped": true, "tools_ok": r.is_completed()})))
             }
-            "slow" => {
+            Call::SlowV(_) => {
                 self.0.slow_started.notify_one();
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 Ok(Some(json!({"finished": true})))
             }
-            "work" => Ok(Some(json!({"ok": true}))),
-            "count" => {
+            Call::WorkV(_) => Ok(Some(json!({"ok": true}))),
+            Call::CountV(_) => {
                 let mut c = self.0.counts.lock().unwrap();
                 let n = c.entry(id.0.clone()).or_insert(0);
                 *n += 1;
                 Ok(Some(json!({"n": *n})))
             }
-            "fail" => Err("probe failed on purpose".into()),
-            other => Ok(Some(
-                json!({"error": format!("unknown '{other}'"), "reason": "unhandled"}),
-            )),
+            Call::FailV(_) => Err("probe failed on purpose".into()),
         }
     }
 }
@@ -680,22 +695,37 @@ struct FlakyStore {
 }
 
 #[async_trait]
-impl Bundle for FlakyStore {
+impl Handler for FlakyStore {
+    type Call = fantastic_ram_store::verbs::Call;
     fn name(&self) -> &str {
         "flaky_store"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        self.inner.verbs()
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        self.inner.dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        self.inner.record()
     }
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         use std::sync::atomic::Ordering;
-        if payload["type"] == json!("read") && self.fail_read.load(Ordering::SeqCst) {
+        if matches!(call, fantastic_ram_store::verbs::Call::Read(_))
+            && self.fail_read.load(Ordering::SeqCst)
+        {
             self.refused.fetch_add(1, Ordering::SeqCst);
             return Ok(Some(json!({"error": "gone"})));
         }
-        self.inner.handle(id, payload, kernel).await
+        self.inner.handle(id, call, kernel).await
     }
 }
 

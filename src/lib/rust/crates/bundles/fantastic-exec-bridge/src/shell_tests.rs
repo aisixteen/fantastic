@@ -238,7 +238,7 @@ async fn a_pipe_job_always_names_its_command() {
     let r = call(&k, "sh_pipe", json!({"type": "start"})).await;
     assert_eq!(
         (&r["reason"], &r["arg"]),
-        (&json!("missing_arg"), &json!("command")),
+        (&json!("missing_arg"), &json!("command | pty")),
         "{r}"
     );
     // …and an explicit empty command on a PTY is a typo, not "use the shell".
@@ -250,7 +250,7 @@ async fn a_pipe_job_always_names_its_command() {
     .await;
     assert_eq!(
         (&r["reason"], &r["arg"]),
-        (&json!("missing_arg"), &json!("command")),
+        (&json!("bad_arg"), &json!("command")),
         "{r}"
     );
 }
@@ -433,13 +433,8 @@ async fn shell_is_refused_at_write_unless_true_false_or_login() {
         .enumerate()
     {
         let r = mk(&k, &tmp, &format!("bad_{i}"), json!({"shell": bad})).await;
-        assert_eq!(r["reason"], "invalid_meta", "{bad}: {r}");
-        assert!(
-            r["error"]
-                .as_str()
-                .is_some_and(|e| e.contains("legal values")),
-            "{r}"
-        );
+        assert_eq!(r["reason"], "bad_arg", "{bad}: {r}");
+        assert_eq!(r["arg"], "shell", "{bad}: {r}");
     }
     for (i, ok) in [json!(true), json!(false), json!("login")]
         .into_iter()
@@ -448,14 +443,11 @@ async fn shell_is_refused_at_write_unless_true_false_or_login() {
         let r = mk(&k, &tmp, &format!("ok_{i}"), json!({"shell": ok})).await;
         assert!(r["id"].is_string(), "{ok}: {r}");
     }
-    // the exact python text, `repr` of the refused value included
+    // the refusal names the field and what it may be
     let r = mk(&k, &tmp, "bad_text", json!({"shell": "bash"})).await;
     assert_eq!(
         r["error"],
-        json!(
-            "shell='bash' is not a shell permission — legal values: true (the child's \
-             $SHELL, bare), \"login\" ($SHELL -l), false (none)"
-        ),
+        json!("create_agent: record field 'shell' must be bool|'login', got str"),
         "{r}"
     );
 }

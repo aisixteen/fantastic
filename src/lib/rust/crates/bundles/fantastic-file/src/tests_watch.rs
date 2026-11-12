@@ -158,14 +158,12 @@ async fn what_is_not_exposed_or_not_there_is_refused() {
     let tmp = tempfile::TempDir::new().unwrap();
     let k = kernel(&tmp, json!(["docs"])).await;
     std::fs::write(served(&tmp).join("secret.md"), "no").unwrap();
-    for p in [json!({"path": "secret.md"}), json!({})] {
-        let mut payload = json!({"type": "watch_path"});
-        for (key, v) in p.as_object().unwrap() {
-            payload[key] = v.clone();
-        }
-        let r = call(&k, payload.clone()).await;
-        assert_eq!(r["reason"], "not_found", "{payload}: {r}");
-    }
+    let r = call(&k, json!({"type": "watch_path", "path": "secret.md"})).await;
+    assert_eq!(r["reason"], "not_found", "{r}");
+    // no `path` is the declaration's refusal
+    let r = call(&k, json!({"type": "watch_path"})).await;
+    assert_eq!(r["reason"], "missing_arg", "{r}");
+    assert_eq!(r["arg"], "path", "{r}");
 }
 
 /// `allow` is read live: narrowed after the watch was armed, the path's changes

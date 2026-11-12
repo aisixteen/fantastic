@@ -118,6 +118,13 @@ pub fn has_running_job(owner: &AgentId) -> bool {
     jobs().values().any(|j| &j.owner == owner && alive(j))
 }
 
+/// Any live process of this owner beside job `except`.
+pub fn has_other_running_job(owner: &AgentId, except: TaskId) -> bool {
+    jobs()
+        .iter()
+        .any(|((o, id), j)| o == owner && *id != except && alive(j))
+}
+
 /// A `status` snapshot. `full` adds the collected output.
 ///
 /// `job_id` is the job's kernel TASK id, an INT — `cancel task_id=<job_id>` takes

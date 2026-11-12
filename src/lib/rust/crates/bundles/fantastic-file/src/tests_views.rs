@@ -476,7 +476,7 @@ fn a_file_view_relays_only_its_own_path() {
 }
 
 #[tokio::test]
-async fn a_view_documents_only_its_own_verbs() {
+async fn a_view_declares_its_own_verbs() {
     let tmp = tempfile::TempDir::new().unwrap();
     let k = kernel(&tmp).await;
     std::fs::write(served(&tmp).join("a.txt"), "one\n").unwrap();
@@ -489,17 +489,19 @@ async fn a_view_documents_only_its_own_verbs() {
         .as_str()
         .unwrap()
         .to_string();
-    assert_eq!(
-        docs_verbs(&k, &f).await,
-        ["read", "reflect", "watch", "write"]
-    );
-    assert_eq!(
-        docs_verbs(&k, &d).await,
-        ["list", "reflect", "reveal", "watch"]
-    );
+    // a view's own verbs (`watch`, a folder's `reveal`) are declared on the view alone
+    let file_verbs = docs_verbs(&k, &f).await;
+    assert!(file_verbs.contains(&"watch".to_string()), "{file_verbs:?}");
+    assert!(!file_verbs.contains(&"reveal".to_string()), "{file_verbs:?}");
+    let folder_verbs = docs_verbs(&k, &d).await;
+    assert!(folder_verbs.contains(&"watch".to_string()), "{folder_verbs:?}");
+    assert!(folder_verbs.contains(&"reveal".to_string()), "{folder_verbs:?}");
+    let bridge_verbs = docs_verbs(&k, "fb").await;
+    assert!(!bridge_verbs.contains(&"watch".to_string()), "{bridge_verbs:?}");
+    assert!(!bridge_verbs.contains(&"reveal".to_string()), "{bridge_verbs:?}");
     // the bridge still answers its whole table
     assert!(docs_verbs(&k, "fb").await.contains(&"delete".to_string()));
-    // and a verb a view does not answer is not in its docs, nor its advertisement
+    // and a verb a view does not answer is refused by the view
     let r = call(&k, &f, json!({"type": "delete", "path": "a.txt"})).await;
     assert_eq!(r["reason"], "unhandled", "{r}");
 }
@@ -566,7 +568,7 @@ async fn a_view_caller_is_held_to_its_path_at_the_bridge() {
     let fv = AgentId::from(open(&k, "file", "a.txt").await["id"].as_str().unwrap());
     let dv = AgentId::from(open(&k, "folder", "dir").await["id"].as_str().unwrap());
     let fb = AgentId::from("fb");
-    let read = |p: &str| json!({"type": "read", "path": p});
+    let read = |p: &str| p.to_string();
     let refused = view_scope(&k, &fb, Some(&fv), "read", &read("b.txt")).expect("refused");
     assert_eq!(refused["reason"], "unauthorized", "{refused}");
     assert!(refused["error"]
@@ -574,7 +576,7 @@ async fn a_view_caller_is_held_to_its_path_at_the_bridge() {
         .unwrap()
         .contains("outside this file view"));
     assert!(view_scope(&k, &fb, Some(&fv), "read", &read("a.txt")).is_none());
-    let watch = json!({"path": "dir"});
+    let watch = "dir";
     assert_eq!(
         view_scope(&k, &fb, Some(&fv), "watch_path", &watch).unwrap()["reason"],
         "unauthorized"
@@ -589,10 +591,6 @@ async fn a_view_caller_is_held_to_its_path_at_the_bridge() {
     assert!(view_scope(&k, &fb, Some(&dv), "read", &read("dir/x.txt")).is_none());
     // an operator, or a plain agent, is not path-scoped here
     assert!(view_scope(&k, &fb, None, "read", &read("b.txt")).is_none());
-    assert_eq!(
-        view_scope(&k, &fb, Some(&fv), "read", &json!({"path": 7})).unwrap()["reason"],
-        "bad_arg"
-    );
 }
 
 /// The bridge's binary channel, called AS `caller` (the kernel's dispatch identity).
@@ -685,7 +683,7 @@ async fn the_bridge_holds_a_view_to_the_scope_in_its_callable_by() {
         .unwrap()
         .to_string();
     let fb = AgentId::from("fb");
-    let read = |p: &str| json!({"type": "read", "path": p});
+    let read = |p: &str| p.to_string();
     assert!(view_scope(
         &k,
         &fb,
@@ -705,11 +703,11 @@ async fn the_bridge_holds_a_view_to_the_scope_in_its_callable_by() {
     let dv_id = AgentId::from(dv.as_str());
     let refused = view_scope(&k, &fb, Some(&dv_id), "read", &read("dir/x.txt")).expect("refused");
     assert_eq!(refused["reason"], "unauthorized", "{refused}");
-    assert!(view_scope(&k, &fb, Some(&dv_id), "list", &json!({"path": "dir/sub"})).is_none());
+    assert!(view_scope(&k, &fb, Some(&dv_id), "list", "dir/sub").is_none());
     // an entry with no single scope token is a view refused in full
     set_callable_by(&k, "fb", &dv, json!(["list", "watch_path", "unwatch_path"]));
     let refused =
-        view_scope(&k, &fb, Some(&dv_id), "list", &json!({"path": "dir/sub"})).expect("refused");
+        view_scope(&k, &fb, Some(&dv_id), "list", "dir/sub").expect("refused");
     assert_eq!(refused["reason"], "unauthorized", "{refused}");
 }
 
@@ -955,7 +953,7 @@ fn refused_read(k: &Arc<Kernel>, dv: &str, path: &str) -> bool {
         &AgentId::from("fb"),
         Some(&AgentId::from(dv)),
         "read",
-        &json!({"type": "read", "path": path}),
+        path,
     )
     .is_some()
 }

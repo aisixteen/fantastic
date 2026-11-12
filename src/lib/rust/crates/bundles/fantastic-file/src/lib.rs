@@ -14,22 +14,9 @@
 //!
 //! ## Verbs
 //!
-//! | verb     | args                       | reply                                 |
-//! |----------|----------------------------|---------------------------------------|
-//! | `reflect`| _none_                     | `{id, sentence, root, readonly, allow_count, edit_grammar, compose, verbs, ingress_rule, egress_rule, sealed}` |
-//! | `boot`   | _none_                     | `null`                                |
-//! | `list`   | `path?`                    | `{path, files: [{name, path, type, size?}]}` |
-//! | `read`   | `path`, `offset?`, `limit?` | `{path, lines:[{n,text}], total, eof, version, origin}` |
-//! | `write`  | `path`, `bytes`, `if_match?` | `{path, size, version}` (atomic)     |
-//! | `edit`   | `edits`, `bytes`, `dry_run?` | `{edited, edits:[{path,hunks,size,version}]}` |
-//! | `append` | `path`, `bytes`            | `{path, size, version}`               |
-//! | `undo`   | `path`                     | `{undone, path, version|deleted}`     |
-//! | `read_stream` | `path`, `offset?`, `length?` | `{path, offset, bytes, next_offset, eof, size}` |
-//! | `write_stream`| `path`, `bytes`, `offset?`, `truncate?` | `{path, written, offset, size}` |
-//! | `pump`   | `source?`, `source_path`, `sink?`, `sink_path?` | server-side SOURCE→SINK copy |
-//! | `delete` | `path`, `recursive?`       | `{path, deleted: true}`               |
-//! | `rename` | `old_path`, `new_path`     | `{old_path, new_path}`                |
-//! | `mkdir`  | `path`                     | `{path, created: true}`               |
+//! Declared in [`verbs`] (`reflect`, `docs` render them): `list`, `read`, `write`,
+//! `edit`, `append`, `undo`, `read_stream`, `write_stream`, `pump`, `delete`,
+//! `rename`, `mkdir`, `watch_path`, `unwatch_path`, `open_view`.
 //!
 //! The `allow` list is a RECORD field: set at create, changed by `update_agent`.
 //!
@@ -41,16 +28,18 @@
 #![deny(missing_docs)]
 
 pub mod fs;
+pub mod record;
 mod sys;
 #[doc(hidden)]
 pub mod test_support;
 mod text;
+pub mod verbs;
 mod views;
 mod watch;
 
 use async_trait::async_trait;
 use fantastic_bundle::{is_absolute, py_repr, py_repr_value, py_str, py_truthy};
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::refusal as rf;
 use fantastic_kernel::{body_at, current_origin, AgentId, Blob, Item, Kernel};
 use serde_json::{json, Map, Value};
@@ -60,81 +49,8 @@ use std::sync::Arc;
 /// `handler_module` key under which this bundle registers.
 pub const HANDLER_MODULE: &str = "file_bridge.tools";
 
-/// readme.md auto-seeded into the agent's dir on creation.
-pub const README: &str = include_str!("readme.md");
-
-/// The verb table, in python's `VERBS` order — reflect's `verbs` map, the
-/// unknown-verb refusal and the gate all read it.
-const VERBS: [(&str, &str); 17] = [
-    (
-        "reflect",
-        "Identity + filesystem root + readonly flag + auth posture (ingress/egress/sealed/see). No args.",
-    ),
-    ("boot", "No-op. Returns None."),
-    (
-        "list",
-        "args: path:str (default ''). Returns {path, files:[{name, path, type, size?}, ...]} — the exposed entries and the directories on the way to one.",
-    ),
-    (
-        "read",
-        "args: path:str (req), offset:int=0 (line), limit:int=200 — a text page {path, lines:[{n,text}], total, eof, version, origin}; refuses binary.",
-    ),
-    (
-        "write",
-        "args: path:str (req), bytes (req — the whole document; str is utf-8-encoded), if_match:str? — atomic whole-document write; {path, size, version}.",
-    ),
-    (
-        "edit",
-        "args: edits:[{path:str, hunks:int, if_match:str?}] (req — even for ONE file), bytes (req — ALL hunks concatenated; str is utf-8-encoded), dry_run:bool? — a TRANSACTION: every hunk of every edit verified before any write, any failure writes nothing (or restores what was written); {edited:true, edits:[{path,hunks,size,version}]}.",
-    ),
-    (
-        "append",
-        "args: path:str (req), bytes (req — one chunk; str is utf-8-encoded) — appends (creates if absent); {path, size, version}.",
-    ),
-    (
-        "undo",
-        "args: path:str (req) — swap the document with the bytes the last write/edit/append replaced (a second undo is redo); ONE slot per path, in RAM, lost on restart; {undone:true, path, version|deleted}.",
-    ),
-    (
-        "read_stream",
-        "args: path:str (req), offset:int=0, length:int=65536. The SOURCE half — returns ONE chunk {path, offset, bytes, next_offset, eof, size}.",
-    ),
-    (
-        "write_stream",
-        "args: path:str (req), bytes:bytes (req — ONE raw chunk; a model writes it VERBATIM between `<bytes>` and `</bytes>`, nothing escaped), offset:int? (default = append at end), truncate:bool=False. The SINK half — a producer pushes RAW chunks by offset.",
-    ),
-    (
-        "pump",
-        "The PUMP — a server-side stream copy SOURCE→SINK, chunk by chunk, in ONE call.",
-    ),
-    (
-        "delete",
-        "args: path:str (req), recursive:bool=False. Returns {path, deleted:true}.",
-    ),
-    (
-        "rename",
-        "args: old_path:str, new_path:str (both req). Returns {old_path, new_path}. Creates new parent dirs. Refused if readonly.",
-    ),
-    (
-        "mkdir",
-        "args: path:str (req). Returns {path, created:true}. Recursive (parents ok). Refused if readonly.",
-    ),
-    (
-        "watch_path",
-        "args: path:str (req — an exposed file or directory). Emit `{type: changed, path, kind}` on this bridge's inbox whenever it changes on disk, by any writer; WATCH this bridge to receive them. Returns {watching, paths}.\n\n`kind` is `added`, `modified` or `deleted` as the disk reported it — treat any\n`changed` as \"read it again\". A directory reports its entries (not recursive).\nHeld per caller until `unwatch_path`; RAM only.",
-    ),
-    (
-        "unwatch_path",
-        "args: path:str (req). Stop YOUR watch of a path; the disk watch ends when no caller holds a path. Returns {watching:false, paths}.",
-    ),
-    (
-        "open_view",
-        "args: kind:str (req — `file` or `folder`), path:str (req — root-relative, exposed by `allow`; `.` = the whole root, folders only). Reuses the view of that path or makes it: {id, kind, path, created}. The new view's grant on THIS bridge is its own verbs only (views.GRANTS).",
-    ),
-];
-
-/// Discovery must work on a sealed bridge — python's `UNGATED`.
-const UNGATED: [&str; 1] = ["reflect"];
+/// What the bundle is for — its one short man text.
+const MAN: &str = "The filesystem edge: it serves one directory (`root`) to the agents that are granted it, only the paths its `allow` list exposes, sealed until opened. Text documents are read and edited in place, raw bytes move over streams, and every file or folder can be opened as a view agent.";
 
 /// The filesystem bundle. Holds the text verbs' RAM state (undo slots, document
 /// locks) for the kernel it is registered in.
@@ -159,8 +75,49 @@ pub(crate) fn readonly_refusal() -> Value {
     )
 }
 
+/// The name of the verb a call carries — what the gate and the clamp judge.
+fn verb_name(call: &verbs::Call) -> &str {
+    use verbs::Call;
+    match call {
+        Call::Reflect(_) => "reflect",
+        Call::Boot(_) => "boot",
+        Call::List(_) => "list",
+        Call::Read(_) => "read",
+        Call::Write(_) => "write",
+        Call::Edit(_) => "edit",
+        Call::Append(_) => "append",
+        Call::Undo(_) => "undo",
+        Call::ReadStream(_) => "read_stream",
+        Call::WriteStream(_) => "write_stream",
+        Call::Pump(_) => "pump",
+        Call::Delete(_) => "delete",
+        Call::Rename(_) => "rename",
+        Call::Mkdir(_) => "mkdir",
+        Call::WatchPath(_) => "watch_path",
+        Call::UnwatchPath(_) => "unwatch_path",
+        Call::OpenView(_) => "open_view",
+        Call::Dynamic(c) => &c.name,
+    }
+}
+
+/// The path a view-scoped verb names (`""` when it names none): `Some` for the verbs a
+/// view may send its bridge, `None` for every other.
+fn scoped_path(call: &verbs::Call) -> Option<&str> {
+    use verbs::Call;
+    match call {
+        Call::Read(a) => Some(a.path.as_deref().unwrap_or("")),
+        Call::Write(a) => Some(a.path.as_deref().unwrap_or("")),
+        Call::List(a) => Some(a.path.as_deref().unwrap_or("")),
+        Call::WatchPath(a) => Some(&a.path),
+        Call::UnwatchPath(a) => Some(&a.path),
+        _ => None,
+    }
+}
+
 #[async_trait]
-impl Bundle for FileBundle {
+impl Handler for FileBundle {
+    type Call = verbs::Call;
+
     /// Refuse an `ingress_rule` no resolver implements. Mirrors py
     /// `file_bridge.validate_meta`: an unknown rule now SEALS rather than erroring,
     /// so the edge is safe either way — but reporting `{"updated": true}` for a
@@ -178,21 +135,6 @@ impl Bundle for FileBundle {
         if let Some(bad) = views::view_refusal(meta) {
             return Some(bad);
         }
-        if let Some(a) = meta.get("allow") {
-            let ok = a.as_array().is_some_and(|items| {
-                items.iter().all(|x| {
-                    x.as_str()
-                        .is_some_and(|s| !s.is_empty() && !is_absolute(s) && norm(s).is_some())
-                })
-            });
-            if !ok {
-                return Some(
-                    "allow must be a list of paths relative to the root (a file, or a \
-                     directory exposing everything under it; `.` = the whole root)"
-                        .to_string(),
-                );
-            }
-        }
         fantastic_io_bridge::authorizer::ingress::unknown_refusal(
             meta,
             &["allow_all_ingress", "deny_ingress"],
@@ -204,276 +146,162 @@ impl Bundle for FileBundle {
         "file_bridge"
     }
 
-    fn verb_docs(&self) -> Value {
-        let mut verbs = Map::new();
-        for (name, doc) in VERBS {
-            verbs.insert(name.to_string(), json!(doc));
-        }
-        Value::Object(verbs)
+    fn man(&self) -> &'static str {
+        MAN
     }
 
-    /// A VIEW answers its own verbs, so `docs of=<view>` serves its table (python
-    /// `instance_verbs`); every other record keeps the bridge's.
-    fn instance_verb_docs(&self, agent: &fantastic_kernel::Agent) -> Option<Value> {
-        views::verb_docs_of(&agent.record().meta)
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        verbs::VERBS
     }
 
-    fn readme(&self) -> Option<&'static str> {
-        Some(README)
+    /// A VIEW answers verbs of its own beside the bridge's (`watch`, and for a
+    /// folder `reveal`); every other record has none.
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        views::dynamic_verbs(&agent.record().meta)
     }
 
-    fn emits_doc(&self) -> Option<Value> {
-        Some(json!({
-            "changed": "{path, kind: added|modified|deleted} — a path under `watch_path` changed on disk, by any writer; watch this bridge to receive it",
-        }))
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &record::RECORD
     }
 
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb_value = payload.get("type").cloned().unwrap_or(Value::Null);
-        let verb = verb_value.as_str().unwrap_or("");
-        // Snapshot meta so concurrent updates don't race.
-        let agent = match kernel.agents.get(agent_id) {
-            Some(e) => Arc::clone(&e),
-            None => return Ok(Some(json!({"error": format!("no agent {agent_id}")}))),
-        };
-        let meta = agent.meta.read().expect("meta poisoned").clone();
-        // UNKNOWN VERB FIRST — before the gate and before any clamp, as python's
-        // `handler` looks the verb up before reaching the gate. `shutdown` is not
-        // a verb of this bundle, so it is unhandled like any other.
-        if !VERBS.iter().any(|(n, _)| *n == verb) {
-            let mut v = rf::refusal(
-                rf::UNHANDLED,
-                format!("file_bridge: unknown type {}", py_repr_value(&verb_value)),
-            );
-            rf::with(&mut v, "verb", verb_value);
-            return Ok(Some(v));
-        }
-        // GATE — the fs edge is an io_bridge leg: SEALED by default. Discovery
-        // (`reflect`) is the only exemption; `boot` is gated like the rest.
-        if !UNGATED.contains(&verb) {
-            if let Some(denied) = gate(&meta, agent_id, verb) {
-                return Ok(Some(denied));
-            }
-        }
-        // THE PATH GATE FOR A VIEW CALLER — python `tools._view_scope`, after the gate.
-        if SCOPED_VERBS.contains(&verb) {
-            if let Some(refused) =
-                view_scope(kernel, agent_id, current_origin().as_ref(), verb, payload)
-            {
-                return Ok(Some(refused));
-            }
-        }
-        let root = clamp_root(&meta, kernel, &agent.root_path);
-        let readonly = py_truthy(meta.get("readonly").unwrap_or(&Value::Null));
-        let reply = match verb {
-            "reflect" => reflect_reply(agent_id, &meta, &root),
-            "boot" => Value::Null,
-            "open_view" => views::open_view_verb(kernel, &meta, agent_id, payload).await,
-            v if text::TEXT_VERBS.contains(&v) => {
-                text::dispatch(
-                    &self.text,
-                    v,
-                    &agent_id.0,
-                    &meta,
-                    &root,
-                    payload,
-                    None,
-                    readonly,
-                )
-                .await
-            }
-            // The PUMP coordinates a SOURCE→SINK copy by id; it never touches
-            // bytes/root itself, so it rides without a clamp.
-            "pump" => pump_reply(agent_id, payload, kernel).await,
-            other => {
-                // THE RUNNING-DIR LAW. The clamp is resolved here but applied
-                // AFTER each verb's argument checks — python reaches `fs` only
-                // once the arguments are good, so a bad argument on a bridge with
-                // an escaping root answers `bad_arg`, not `transport_error`.
-                // DENY-ALL AT THE PATH LEVEL — after each verb's own argument
-                // checks (python's order), before any disk access.
-                if let Some(refused) = exposure(other, &root, &meta, payload, readonly) {
-                    return Ok(Some(refused));
-                }
-                match other {
-                    "list" => {
-                        let mut out = list_reply(agent_id, &root, payload);
-                        keep_exposed(&mut out, &allow_list(&meta), &root);
-                        out
-                    }
-                    // THE JSON HALF of a read: the chunk is the reply body
-                    // `handle_binary` returns beside it (the kernel's dispatch);
-                    // a JSON-only reply holds `bytes: null` in its slot.
-                    "read_stream" => read_stream_reply(agent_id, &root, payload).0,
-                    // `bytes` IN THE JSON IS NEVER A CHUNK. python types the
-                    // argument (`isinstance(data, (bytes, bytearray))`), and
-                    // JSON has no bytes, so ANY present value here — a string, a
-                    // number — is `missing_arg`, and nothing is written.
-                    // A raw chunk reaches this bundle as a request body only;
-                    // that is the carrier a model's `<bytes>` document rides too.
-                    // Absent ⇒ python's `payload.get("bytes", b"")`: an empty
-                    // chunk, which is a legal write.
-                    "write_stream" => {
-                        let chunk = match payload.get("bytes") {
-                            None => Some(&b""[..]),
-                            Some(_) => None,
-                        };
-                        write_stream_reply(&root, payload, chunk, readonly)
-                    }
-                    "delete" => delete_reply(&root, payload, readonly),
-                    "rename" => rename_reply(&root, payload, readonly),
-                    "mkdir" => mkdir_reply(&root, payload, readonly),
-                    "watch_path" | "unwatch_path" => {
-                        let p = match path_arg(other, payload, "path") {
-                            Ok(p) => p,
-                            Err(e) => return Ok(Some(e)),
-                        };
-                        let r = match clamped(&root) {
-                            Ok(r) => r.to_path_buf(),
-                            Err(e) => return Ok(Some(e)),
-                        };
-                        if other == "watch_path" {
-                            self.watch.watch_path(agent_id, &r, p, kernel)
-                        } else {
-                            self.watch.unwatch_path(agent_id, &r, p, kernel)
-                        }
-                    }
-                    _ => unreachable!("every VERBS entry is dispatched"),
-                }
-            }
-        };
-        Ok(Some(reply))
+        Ok(self.handle_binary(agent_id, call, None, kernel).await?.0)
     }
 
     /// The kernel's dispatch for every verb: `read_stream` (reply BODY = the raw
     /// chunk, whatever the call carried) and `write_stream` (the body at `bytes`
     /// = the raw chunk → status reply, no body). Symmetric with Python's
-    /// `bytes`-in-the-dict; never base64. Every verb reads the body at ITS key,
-    /// `bytes` — python's `payload.get("bytes")` — so a body placed under
-    /// another key is not a chunk. Any other verb takes `handle`.
+    /// `bytes`-in-the-dict; never base64. A text verb takes its document from the
+    /// body at `bytes`, or from `bytes` as text. A body placed under another key is
+    /// not a chunk.
     async fn handle_binary(
         &self,
         agent_id: &AgentId,
-        header: Value,
+        call: Self::Call,
         body: Option<Blob>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<Blob>), BundleError> {
-        let verb = header.get("type").and_then(Value::as_str).unwrap_or("");
+        use verbs::Call;
+        let verb = verb_name(&call);
         let chunk = body_at(body.as_ref(), "bytes");
-        // A VIEW is answered by its own verbs, before the bridge's table and gate (python
-        // `file_bridge.tools.handler`): a view is not sealed, its gate is its grant.
-        let view = kernel.agents.get(agent_id).and_then(|a| {
-            a.record()
-                .meta
-                .get("view")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
-        if let Some(kind) = view {
-            let reply = views::dispatch(kernel, &self.views, agent_id, &kind, verb, &header).await;
-            return Ok((Some(reply), None));
-        }
-        if text::TEXT_VERBS.contains(&verb) {
-            // THE BODY AT `bytes` IS THE `bytes` ARGUMENT, present even when
-            // empty — the bytes-typed carrier a model's `<bytes>` document rides.
-            // A text verb answers a document, never a raw chunk: no reply body.
-            let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
-                return Ok((Some(json!({"error": format!("no agent {agent_id}")})), None));
-            };
-            let meta = agent.meta.read().expect("meta poisoned").clone();
-            if let Some(denied) = gate(&meta, agent_id, verb) {
-                return Ok((Some(denied), None));
-            }
-            // THE PATH GATE FOR A VIEW CALLER, as `handle` runs it after the gate: the
-            // binary channel is no way round it (python's single `handler` gates every entry).
-            if SCOPED_VERBS.contains(&verb) {
-                if let Some(refused) =
-                    view_scope(kernel, agent_id, current_origin().as_ref(), verb, &header)
-                {
-                    return Ok((Some(refused), None));
-                }
-            }
-            let readonly = py_truthy(meta.get("readonly").unwrap_or(&Value::Null));
-            let root = clamp_root(&meta, kernel, &agent.root_path);
-            let reply = text::dispatch(
-                &self.text,
-                verb,
-                &agent_id.0,
-                &meta,
-                &root,
-                &header,
-                chunk,
-                readonly,
-            )
-            .await;
-            return Ok((Some(reply), None));
-        }
-        if !matches!(verb, "read_stream" | "write_stream") {
-            // file_bridge has no other verb that takes or answers bytes — route
-            // the header through `handle` (which gates + dispatches); a request
-            // body is unused.
-            let reply = self.handle(agent_id, &header, kernel).await?;
-            return Ok((reply, None));
-        }
+        // Snapshot meta so concurrent updates don't race.
         let agent = match kernel.agents.get(agent_id) {
             Some(e) => Arc::clone(&e),
             None => return Ok((Some(json!({"error": format!("no agent {agent_id}")})), None)),
         };
         let meta = agent.meta.read().expect("meta poisoned").clone();
-        // GATE — same sealed-by-default choke point as `handle`.
-        if let Some(denied) = gate(&meta, agent_id, verb) {
-            return Ok((Some(denied), None));
+        // A VIEW is answered by its own verbs, before the bridge's gate (python
+        // `file_bridge.tools.handler`): a view is not sealed, its gate is its grant.
+        if let Some(kind) = agent
+            .record()
+            .meta
+            .get("view")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            let reply = views::dispatch(kernel, &self.views, agent_id, &kind, call).await;
+            return Ok((Some(reply), None));
+        }
+        // GATE — the fs edge is an io_bridge leg: SEALED by default. Discovery
+        // (`reflect`) is the only exemption; `boot` is gated like the rest.
+        if verb != "reflect" {
+            if let Some(denied) = gate(&meta, agent_id, verb) {
+                return Ok((Some(denied), None));
+            }
+        }
+        // THE PATH GATE FOR A VIEW CALLER — python `tools._view_scope`, after the gate.
+        if let Some(rel) = scoped_path(&call) {
+            if let Some(refused) =
+                view_scope(kernel, agent_id, current_origin().as_ref(), verb, rel)
+            {
+                return Ok((Some(refused), None));
+            }
         }
         let root = clamp_root(&meta, kernel, &agent.root_path);
         let readonly = py_truthy(meta.get("readonly").unwrap_or(&Value::Null));
-        if let Some(refused) = exposure(verb, &root, &meta, &header, readonly) {
-            return Ok((Some(refused), None));
-        }
-        match verb {
-            "read_stream" => {
-                // the chunk is the reply's `bytes`, as python's dict holds it
-                let (reply, body) = read_stream_reply(agent_id, &root, &header);
-                Ok((Some(reply), body.map(|b| Blob::key("bytes", b))))
+        let reply = match &call {
+            Call::Reflect(_) => reflect_reply(agent_id, &meta, &root),
+            Call::Boot(_) => Value::Null,
+            Call::OpenView(a) => views::open_view_verb(kernel, &meta, agent_id, a).await,
+            Call::Read(_) | Call::Write(_) | Call::Edit(_) | Call::Append(_) | Call::Undo(_) => {
+                text::dispatch(&self.text, &agent_id.0, &meta, &root, &call, chunk, readonly)
+                    .await
             }
-            "write_stream" => {
-                // THE REQUEST BODY AT `bytes` IS THE CHUNK — python's
-                // `payload.get("bytes", b"")`. A header that carries a `bytes`
-                // key is a JSON value where raw bytes belong —
-                // `missing("write_stream", "bytes (one raw chunk)")`, whatever it
-                // holds. Nothing at `bytes` (no body, or a body under another
-                // key) is python's default `b""`: `written: 0`.
-                //
-                // PYTHON'S ORDER: readonly FIRST (`_readonly_or_none` precedes the
-                // chunk check), so a readonly leg answers `readonly` whatever the
-                // header holds — `handle` already does this.
-                if readonly {
-                    return Ok((Some(readonly_refusal()), None));
+            // The PUMP coordinates a SOURCE→SINK copy by id; it never touches
+            // bytes/root itself, so it rides without a clamp.
+            Call::Pump(a) => pump_reply(agent_id, a, kernel).await,
+            // THE RUNNING-DIR LAW. The clamp is resolved here but applied
+            // AFTER each verb's argument checks — python reaches `fs` only
+            // once the arguments are good, so a bad argument on a bridge with
+            // an escaping root answers `bad_arg`, not `transport_error`.
+            // DENY-ALL AT THE PATH LEVEL — after each verb's own argument
+            // checks (python's order), before any disk access.
+            other => {
+                if let Some(refused) = exposure(other, &root, &meta, readonly) {
+                    return Ok((Some(refused), None));
                 }
-                if header.get("bytes").is_some() {
-                    return Ok((
-                        Some(rf::missing("write_stream", "bytes (one raw chunk)")),
-                        None,
-                    ));
+                match other {
+                    Call::List(a) => {
+                        let mut out = list_reply(agent_id, &root, a);
+                        keep_exposed(&mut out, &allow_list(&meta), &root);
+                        out
+                    }
+                    // THE JSON HALF of a read: the chunk is the reply body beside it.
+                    Call::ReadStream(a) => {
+                        let (reply, bytes) = read_stream_reply(agent_id, &root, a);
+                        return Ok((Some(reply), bytes.map(|b| Blob::key("bytes", b))));
+                    }
+                    // THE REQUEST BODY AT `bytes` IS THE CHUNK. Nothing at `bytes`
+                    // (no body, or a body under another key) is an empty chunk, which
+                    // is a legal write. NO CHUNK COMES BACK from a write — `None`, not
+                    // an empty body, so a leg can tell this reply from a 0-byte read.
+                    Call::WriteStream(a) => {
+                        write_stream_reply(&root, a, Some(chunk.unwrap_or_default()), readonly)
+                    }
+                    Call::Delete(a) => delete_reply(&root, a, readonly),
+                    Call::Rename(a) => rename_reply(&root, a, readonly),
+                    Call::Mkdir(a) => mkdir_reply(&root, a, readonly),
+                    Call::WatchPath(a) => {
+                        let p = match rel_path("watch_path", "path", &a.path) {
+                            Ok(p) => p,
+                            Err(e) => return Ok((Some(e), None)),
+                        };
+                        let r = match clamped(&root) {
+                            Ok(r) => r.to_path_buf(),
+                            Err(e) => return Ok((Some(e), None)),
+                        };
+                        self.watch.watch_path(agent_id, &r, p, kernel)
+                    }
+                    Call::UnwatchPath(a) => {
+                        let p = match rel_path("unwatch_path", "path", &a.path) {
+                            Ok(p) => p,
+                            Err(e) => return Ok((Some(e), None)),
+                        };
+                        let r = match clamped(&root) {
+                            Ok(r) => r.to_path_buf(),
+                            Err(e) => return Ok((Some(e), None)),
+                        };
+                        self.watch.unwatch_path(agent_id, &r, p, kernel)
+                    }
+                    // `watch` and `reveal` are a VIEW's verbs; a bridge has none
+                    Call::Dynamic(c) => {
+                        let mut v = rf::refusal(
+                            rf::UNHANDLED,
+                            format!("file_bridge: unknown type {}", py_repr(&c.name)),
+                        );
+                        rf::with(&mut v, "verb", json!(c.name));
+                        v
+                    }
+                    _ => unreachable!("every other verb is answered above"),
                 }
-                // NO CHUNK COMES BACK from a write — `None`, not an empty body,
-                // so a leg can tell this reply from a 0-byte read.
-                Ok((
-                    Some(write_stream_reply(
-                        &root,
-                        &header,
-                        Some(chunk.unwrap_or_default()),
-                        readonly,
-                    )),
-                    None,
-                ))
             }
-            _ => unreachable!("only the two stream verbs reach here"),
-        }
+        };
+        Ok((Some(reply), None))
     }
 
     /// The bridge is going away — its undo slots and its disk watch go with it. A
@@ -493,10 +321,6 @@ impl Bundle for FileBundle {
     }
 }
 
-/// The verbs a view may send its bridge that name one path of the disk (python
-/// `tools.SCOPED_VERBS`).
-const SCOPED_VERBS: [&str; 5] = ["read", "write", "list", "watch_path", "unwatch_path"];
-
 /// python `tools._view_scope`: a VIEW caller reaches only inside its own path, whatever
 /// its grant names. None admits; a refusal is returned. An operator or a plain agent is
 /// not path-scoped here.
@@ -505,14 +329,9 @@ fn view_scope(
     agent_id: &AgentId,
     origin: Option<&AgentId>,
     verb: &str,
-    payload: &Value,
+    rel: &str,
 ) -> Option<Value> {
     let (kind, own) = views::caller_scope(kernel, &agent_id.0, origin)?;
-    let rel = match payload.get("path") {
-        None | Some(Value::Null) => "",
-        Some(Value::String(s)) => s.as_str(),
-        Some(_) => return Some(rf::bad(verb, "path", "a string")),
-    };
     let inside = norm(rel).is_some_and(|p| !own.is_empty() && views::inside(&kind, &own, &p));
     if inside {
         return None;
@@ -607,20 +426,14 @@ fn clamp_root(meta: &Map<String, Value>, kernel: &Kernel, own: &Path) -> Result<
 fn read_stream_reply(
     agent_id: &AgentId,
     root: &Result<PathBuf, String>,
-    payload: &Value,
+    a: &verbs::ReadStream,
 ) -> (Value, Option<Vec<u8>>) {
-    let path_str = match path_arg("read_stream", payload, "path") {
+    let path_str = match rel_path("read_stream", "path", &a.path) {
         Ok(p) => p,
         Err(e) => return (e, None),
     };
-    let offset = match int_arg("read_stream", payload, "offset", 0, 0) {
-        Ok(n) => n,
-        Err(e) => return (e, None),
-    };
-    let length = match int_arg("read_stream", payload, "length", 65536, 1) {
-        Ok(n) => n,
-        Err(e) => return (e, None),
-    };
+    let offset = a.offset.unwrap_or(0);
+    let length = a.length.unwrap_or(65536);
     let root = match clamped(root) {
         Ok(r) => r,
         Err(e) => return (e, None),
@@ -667,58 +480,26 @@ fn read_stream_reply(
     (Value::Object(out), Some(chunk))
 }
 
-/// python's `missing("write_stream", "bytes (one raw chunk)")`.
-fn missing_bytes() -> Value {
-    rf::missing("write_stream", "bytes (one raw chunk)")
-}
-
-/// A string argument that is a ROOT-RELATIVE path: absent/null ⇒ `""`; a
-/// non-string or an absolute path is `bad_arg` (the absolute form is refused,
-/// never silently re-rooted).
-pub(crate) fn path_arg<'a>(verb: &str, payload: &'a Value, name: &str) -> Result<&'a str, Value> {
-    let p = match payload.get(name) {
-        None | Some(Value::Null) => "",
-        Some(Value::String(s)) => s.as_str(),
-        Some(_) => return Err(rf::bad(verb, name, "a string")),
-    };
+/// A ROOT-RELATIVE path argument: an absolute one is `bad_arg` (the absolute form
+/// is refused, never silently re-rooted). The declaration judged its type.
+pub(crate) fn rel_path<'a>(verb: &str, name: &str, p: &'a str) -> Result<&'a str, Value> {
     if is_absolute(p) {
         return Err(rf::bad(verb, name, "a root-relative path (no leading '/')"));
     }
     Ok(p)
 }
 
-/// An integer argument with a floor: absent/null ⇒ `default`; anything that is
-/// not a JSON integer (a bool, a float, a string) or is below `minimum` is
-/// `bad_arg` naming the arg. Mirrors py `_int_arg` — a huge `length` used to
-/// abort rust; now every runtime refuses.
-pub(crate) fn int_arg(
-    verb: &str,
-    payload: &Value,
-    name: &str,
-    default: u64,
-    minimum: u64,
-) -> Result<u64, Value> {
-    match payload.get(name) {
-        None | Some(Value::Null) => Ok(default),
-        Some(Value::Bool(_)) => Err(rf::bad(verb, name, &format!("an integer >= {minimum}"))),
-        Some(v) => match v.as_u64() {
-            Some(n) if n >= minimum => Ok(n),
-            _ => Err(rf::bad(verb, name, &format!("an integer >= {minimum}"))),
-        },
-    }
-}
-
-/// `path_arg` for a MUTATING verb: the path must name something INSIDE the
+/// `rel_path` for a MUTATING verb: the path must name something INSIDE the
 /// root — empty/`.` is `missing_arg`, anything resolving to the root itself is
 /// `bad_arg`, so `delete {path:"", recursive:true}` can never remove the whole
 /// served store: the root is the boundary, not an operand.
 fn target_arg<'a>(
     verb: &str,
     root: &Result<PathBuf, String>,
-    payload: &'a Value,
     name: &str,
+    p: &'a str,
 ) -> Result<&'a str, Value> {
-    let p = path_arg(verb, payload, name)?;
+    let p = rel_path(verb, name, p)?;
     if p.is_empty() || p == "." {
         return Err(rf::missing(verb, name));
     }
@@ -739,36 +520,27 @@ fn target_arg<'a>(
 /// `{path, written, offset, size}`. Mirrors py `_write_stream`.
 fn write_stream_reply(
     root: &Result<PathBuf, String>,
-    payload: &Value,
+    a: &verbs::WriteStream,
     blob: Option<&[u8]>,
     readonly: bool,
 ) -> Value {
     if readonly {
         return readonly_refusal();
     }
-    let path_str = match path_arg("write_stream", payload, "path") {
+    let path_str = match rel_path("write_stream", "path", &a.path) {
         Ok(p) => p,
         Err(e) => return e,
     };
-    // PYTHON'S ORDER: readonly, path, then the chunk's TYPE, then `offset`. A
-    // caller that passed a JSON value where raw bytes belong learns that before
-    // its offset is graded.
     let Some(blob) = blob else {
-        return missing_bytes();
+        return rf::missing("write_stream", "bytes (one raw chunk)");
     };
-    // python's `_int_arg(..., "offset", -1, 0)`: absent ⇒ append at the end.
-    let off_in = match payload.get("offset") {
-        None | Some(Value::Null) => None,
-        Some(_) => match int_arg("write_stream", payload, "offset", 0, 0) {
-            Ok(n) => Some(n),
-            Err(e) => return e,
-        },
-    };
+    // `offset` absent ⇒ append at the end.
+    let off_in = a.offset;
     let root = match clamped(root) {
         Ok(r) => r,
         Err(e) => return e,
     };
-    let truncate = py_truthy(payload.get("truncate").unwrap_or(&Value::Null));
+    let truncate = a.truncate.unwrap_or(false);
     match fs::write_chunk(root, path_str, blob, off_in, truncate) {
         Ok((offset, size)) => json!({
             "path": path_str,
@@ -789,22 +561,19 @@ fn write_stream_reply(
 /// baseline covers a pump within itself). Each end SELF-gates + SELF-clamps — the pump only coordinates, never touching bytes, so
 /// a sealed end refuses it. A pump ONTO ITS OWN SOURCE (the sink is the source and
 /// `sink_path` names the same file) is refused. Mirrors py `_pump`.
-async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    let self_id = json!(agent_id.0.as_str());
-    let truthy_or = |key: &str, fallback: Value| -> Value {
-        match payload.get(key) {
-            Some(v) if py_truthy(v) => v.clone(),
-            _ => fallback,
-        }
+async fn pump_reply(agent_id: &AgentId, a: &verbs::Pump, kernel: &Arc<Kernel>) -> Value {
+    // an empty text is no end: the ends default to this bridge
+    let or = |v: &Option<String>, fallback: &str| -> String {
+        v.as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(fallback)
+            .to_string()
     };
-    let src = truthy_or("source", self_id.clone());
-    let sink = truthy_or("sink", self_id);
-    let spath = truthy_or("source_path", json!(""));
-    let dpath = truthy_or("sink_path", spath.clone());
-    let chunk = match int_arg("pump", payload, "chunk", 65536, 1) {
-        Ok(n) => n,
-        Err(e) => return e,
-    };
+    let src = or(&a.source, agent_id.0.as_str());
+    let sink = or(&a.sink, agent_id.0.as_str());
+    let spath = or(&a.source_path, "");
+    let dpath = or(&a.sink_path, &spath);
+    let chunk = a.chunk.unwrap_or(65536);
     if src == sink && one_file(&spath, &dpath) {
         // The first write's `truncate` empties the file the next read comes from:
         // everything past the first chunk would be lost under a success reply —
@@ -817,8 +586,8 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
              onto its own source truncates it after the first chunk",
         );
     }
-    let src_id = AgentId::from(target_id(&src));
-    let sink_id = AgentId::from(target_id(&sink));
+    let src_id = AgentId::from(src.as_str());
+    let sink_id = AgentId::from(sink.as_str());
     let (mut offset, mut first, mut chunks) = (0u64, true, 0u64);
     loop {
         // TWO ORDINARY SENDS, python's: each end is a batch item (pid, rows,
@@ -845,7 +614,7 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
                 rf::TRANSPORT_ERROR,
                 format!(
                     "pump: read from {} failed: {}",
-                    py_repr_value(&src),
+                    py_repr(&src),
                     py_str(&rmeta)
                 ),
             );
@@ -853,7 +622,7 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
         let wmeta = kernel
             .send(vec![Item::new(
                 sink_id.clone(),
-                json!({"type": "write_stream", "path": dpath, "bytes": null, "offset": offset, "truncate": first}),
+                json!({"type": "write_stream", "path": dpath, "offset": offset, "truncate": first}),
             )
             .with_binary_key("bytes", body)])
             .await
@@ -864,7 +633,7 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
                 rf::TRANSPORT_ERROR,
                 format!(
                     "pump: write to {} failed: {}",
-                    py_repr_value(&sink),
+                    py_repr(&sink),
                     py_str(&wmeta)
                 ),
             );
@@ -884,7 +653,7 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
                     rf::TRANSPORT_ERROR,
                     format!(
                         "pump: source {} made no progress at offset {offset}",
-                        py_repr_value(&src)
+                        py_repr(&src)
                     ),
                 )
             }
@@ -895,22 +664,10 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
 
 /// Do two pump paths name ONE file — equal once normalised (`./x` is `x`)?
 /// python `_one_file`: only a root-relative path to something inside the root is
-/// judged; anything else (absent, not a string, absolute, climbing out, the root
-/// itself) is its end's to refuse.
-fn one_file(a: &Value, b: &Value) -> bool {
-    match (a.as_str(), b.as_str()) {
-        (Some(a), Some(b)) => norm(a).is_some_and(|n| n != "." && Some(&n) == norm(b).as_ref()),
-        _ => false,
-    }
-}
-
-/// The id a pump end addresses: a string as written, anything else as python
-/// would print it into the `send` target.
-fn target_id(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        other => py_str(other),
-    }
+/// judged; anything else (absent, absolute, climbing out, the root itself) is its
+/// end's to refuse.
+fn one_file(a: &str, b: &str) -> bool {
+    norm(a).is_some_and(|n| n != "." && Some(&n) == norm(b).as_ref())
 }
 
 /// `password_ingress` is meaningless on an in-process leg: the token is read
@@ -1037,51 +794,56 @@ pub(crate) fn gate_path(
 /// that verb's own argument checks (an argument fault answers first — `None`
 /// here lets the verb report it), before any disk access.
 fn exposure(
-    verb: &str,
+    call: &verbs::Call,
     root: &Result<PathBuf, String>,
     meta: &Map<String, Value>,
-    payload: &Value,
     readonly: bool,
 ) -> Option<Value> {
+    use verbs::Call;
     let allow = allow_list(meta);
-    match verb {
-        "list" => {
-            let p = path_arg("list", payload, "path").ok()?;
+    match call {
+        Call::List(a) => {
+            let p = rel_path("list", "path", a.path.as_deref().unwrap_or("")).ok()?;
             if leads_to(&allow, p) {
                 return None;
             }
             gate_path("list", root, &allow, p)
         }
-        "read_stream" => {
-            let p = path_arg("read_stream", payload, "path").ok()?;
-            int_arg("read_stream", payload, "offset", 0, 0).ok()?;
-            int_arg("read_stream", payload, "length", 65536, 1).ok()?;
+        Call::ReadStream(a) => {
+            let p = rel_path("read_stream", "path", &a.path).ok()?;
             gate_path("read_stream", root, &allow, p)
         }
-        "watch_path" => {
-            let p = path_arg("watch_path", payload, "path").ok()?;
+        Call::WatchPath(a) => {
+            let p = rel_path("watch_path", "path", &a.path).ok()?;
             gate_path("watch_path", root, &allow, p)
         }
-        "write_stream" => {
+        Call::WriteStream(a) => {
             if readonly {
                 return None;
             }
-            let p = path_arg("write_stream", payload, "path").ok()?;
+            let p = rel_path("write_stream", "path", &a.path).ok()?;
             gate_path("write_stream", root, &allow, p)
         }
-        "delete" | "mkdir" => {
+        Call::Delete(a) => {
             if readonly {
                 return None;
             }
-            let p = target_arg(verb, root, payload, "path").ok()?;
-            gate_path(verb, root, &allow, p)
+            let p = target_arg("delete", root, "path", &a.path).ok()?;
+            gate_path("delete", root, &allow, p)
         }
-        "rename" => {
+        Call::Mkdir(a) => {
             if readonly {
                 return None;
             }
-            let old = target_arg("rename", root, payload, "old_path").ok()?;
-            let new = target_arg("rename", root, payload, "new_path").ok()?;
+            let p = target_arg("mkdir", root, "path", &a.path).ok()?;
+            gate_path("mkdir", root, &allow, p)
+        }
+        Call::Rename(a) => {
+            if readonly {
+                return None;
+            }
+            let old = target_arg("rename", root, "old_path", &a.old_path).ok()?;
+            let new = target_arg("rename", root, "new_path", &a.new_path).ok()?;
             gate_path("rename", root, &allow, old)
                 .or_else(|| gate_path("rename", root, &allow, new))
         }
@@ -1160,8 +922,8 @@ fn reflect_reply(
     Value::Object(out)
 }
 
-fn list_reply(agent_id: &AgentId, root: &Result<PathBuf, String>, payload: &Value) -> Value {
-    let path_str = match path_arg("list", payload, "path") {
+fn list_reply(agent_id: &AgentId, root: &Result<PathBuf, String>, a: &verbs::List) -> Value {
+    let path_str = match rel_path("list", "path", a.path.as_deref().unwrap_or("")) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -1244,11 +1006,11 @@ fn list_entries(root: &Path, path: &str) -> Result<Listing, String> {
 /// dir tree. A symlink is UNLINKED, never followed (so a dangling one is still
 /// a deletable name). A bare delete on a populated dir refuses like python's
 /// `rmdir`.
-fn delete_reply(root: &Result<PathBuf, String>, payload: &Value, readonly: bool) -> Value {
+fn delete_reply(root: &Result<PathBuf, String>, a: &verbs::Delete, readonly: bool) -> Value {
     if readonly {
         return readonly_refusal();
     }
-    let path_str = match target_arg("delete", root, payload, "path") {
+    let path_str = match target_arg("delete", root, "path", &a.path) {
         Ok(t) => t,
         Err(e) => return e,
     };
@@ -1269,22 +1031,22 @@ fn delete_reply(root: &Result<PathBuf, String>, payload: &Value, readonly: bool)
         (Err(e), _) | (_, Err(e)) => return rf::refusal(rf::TRANSPORT_ERROR, e),
         _ => {}
     }
-    let recursive = py_truthy(payload.get("recursive").unwrap_or(&Value::Null));
+    let recursive = a.recursive.unwrap_or(false);
     match fs::remove(root, path_str, recursive) {
         Ok(()) => json!({"path": path_str, "deleted": true}),
         Err(e) => rf::refusal(rf::TRANSPORT_ERROR, e),
     }
 }
 
-fn rename_reply(root: &Result<PathBuf, String>, payload: &Value, readonly: bool) -> Value {
+fn rename_reply(root: &Result<PathBuf, String>, a: &verbs::Rename, readonly: bool) -> Value {
     if readonly {
         return readonly_refusal();
     }
-    let old = match target_arg("rename", root, payload, "old_path") {
+    let old = match target_arg("rename", root, "old_path", &a.old_path) {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let new = match target_arg("rename", root, payload, "new_path") {
+    let new = match target_arg("rename", root, "new_path", &a.new_path) {
         Ok(t) => t,
         Err(e) => return e,
     };
@@ -1310,11 +1072,11 @@ fn rename_reply(root: &Result<PathBuf, String>, payload: &Value, readonly: bool)
     }
 }
 
-fn mkdir_reply(root: &Result<PathBuf, String>, payload: &Value, readonly: bool) -> Value {
+fn mkdir_reply(root: &Result<PathBuf, String>, a: &verbs::Mkdir, readonly: bool) -> Value {
     if readonly {
         return readonly_refusal();
     }
-    let path_str = match target_arg("mkdir", root, payload, "path") {
+    let path_str = match target_arg("mkdir", root, "path", &a.path) {
         Ok(t) => t,
         Err(e) => return e,
     };
@@ -1326,6 +1088,12 @@ fn mkdir_reply(root: &Result<PathBuf, String>, payload: &Value, readonly: bool) 
         Ok(()) => json!({"path": path_str, "created": true}),
         Err(e) => rf::refusal(rf::TRANSPORT_ERROR, e),
     }
+}
+
+/// The typed arguments of a verb, from the JSON a test writes.
+#[cfg(test)]
+fn args<T: serde::de::DeserializeOwned>(v: Value) -> T {
+    serde_json::from_value(v).expect("typed arguments")
 }
 
 #[cfg(test)]
