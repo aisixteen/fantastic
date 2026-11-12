@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::inquiries::Held;
+use fantastic_kernel::inquiry::Held;
 
 /// An MCP leg's own record fields.
 #[derive(Debug, Deserialize, JsonSchema)]

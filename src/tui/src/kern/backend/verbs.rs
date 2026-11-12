@@ -20,16 +20,41 @@ pub struct Create {
     pub record: Map<String, Value>,
 }
 
-/// The schema of a child's record: an object naming the bundle it runs.
+/// Fields that make a different agent: never the caller's to set on a child.
+const STRUCTURAL: [&str; 4] = ["type", "parent_id", "guid", "agents"];
+
+/// Properties that allow no value at all (the shared engine refuses a field declared so).
+fn never(keys: &[&str], props: &mut Map<String, Value>) {
+    for k in keys {
+        props.insert(
+            (*k).to_string(),
+            serde_json::json!({"enum": [], "description": "Structural: not the caller's to set."}),
+        );
+    }
+}
+
+/// The schema of a child's record: an object naming the bundle it runs, and carrying
+/// no structural field.
 fn child_record(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    let mut props = Map::new();
+    props.insert(
+        "handler_module".into(),
+        serde_json::json!({"type": "string", "minLength": 1, "description": "The bundle the child runs."}),
+    );
+    never(&STRUCTURAL, &mut props);
     serde_json::from_value(serde_json::json!({
         "type": "object",
         "required": ["handler_module"],
-        "properties": {
-            "handler_module": {"type": "string", "minLength": 1, "description": "The bundle the child runs."}
-        }
+        "properties": props,
     }))
     .expect("a child record schema")
+}
+
+/// The schema of a stamp: an object of the caller's own fields, none structural.
+fn stamp(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    let mut props = Map::new();
+    never(&["type", "id", "parent_id", "guid", "handler_module", "agents"], &mut props);
+    serde_json::from_value(serde_json::json!({"type": "object", "properties": props})).expect("a stamp schema")
 }
 
 /// Delete an agent under this one, and its subtree.
@@ -60,6 +85,8 @@ pub struct Spawn {
     #[schemars(length(min = 1))]
     pub instance_of: Option<String>,
     /// The caller's own fields for the backend root, copied unread; the agent's own structure (parent, id, handler) is set after it.
+    #[serde(default)]
+    #[schemars(schema_with = "stamp")]
     pub stamp: Option<Map<String, Value>>,
     /// Any grant key: more egress for the AI.
     pub peer_grants: Option<Map<String, Value>>,
@@ -100,6 +127,8 @@ pub struct Reopen {
     #[schemars(length(min = 1))]
     pub id: String,
     /// As `spawn`'s.
+    #[serde(default)]
+    #[schemars(schema_with = "stamp")]
     pub stamp: Option<Map<String, Value>>,
     /// As `spawn`'s.
     pub peer_grants: Option<Map<String, Value>>,

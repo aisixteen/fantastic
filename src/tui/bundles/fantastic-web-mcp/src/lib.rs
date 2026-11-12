@@ -303,7 +303,7 @@ fn row(o: &Outcome) -> Value {
 // ── the protocol ────────────────────────────────────────────────────────────
 
 /// The one short generic text of what this bundle is for: told to a client in
-/// `initialize`, and printed by `fantastic readme`. Everything else a client
+/// `initialize`. Everything else a client
 /// learns is rendered from the agents' own declarations (`reflect`).
 pub const INSTRUCTIONS: &str = "A live Aisixteen Fantastic kernel: a tree of agents that all answer one verb, send. Start with `reflect` and no arguments for the agent tree and the bundles; reflect an agent before you send to it. A refusal is an ordinary result.";
 

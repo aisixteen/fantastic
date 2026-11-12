@@ -25,14 +25,25 @@ pub struct PersistRecord {
     pub if_match: Option<String>,
 }
 
-/// The schema of a saved set-up: an object naming the bundle it is for.
+/// The schema of a saved set-up: an object naming the bundle it is for, and never
+/// carrying an identity, wiring or authority field (each such field is declared with
+/// no allowed value, so the shared engine refuses it).
 fn set_up(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    let mut props = serde_json::Map::new();
+    props.insert(
+        "handler_module".into(),
+        serde_json::json!({"type": "string", "minLength": 1, "description": "The bundle the set-up is for."}),
+    );
+    for k in crate::NOT_SAVED {
+        props.insert(
+            k.into(),
+            serde_json::json!({"enum": [], "description": "Never saved: the creator adds identity, wiring and authority."}),
+        );
+    }
     serde_json::from_value(serde_json::json!({
         "type": "object",
         "required": ["handler_module"],
-        "properties": {
-            "handler_module": {"type": "string", "minLength": 1, "description": "The bundle the set-up is for."}
-        }
+        "properties": props,
     }))
     .expect("a set-up schema")
 }

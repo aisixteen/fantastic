@@ -36,6 +36,7 @@ pub mod executions;
 pub mod grants;
 pub mod inbox;
 pub mod inherit;
+pub mod inquiry;
 pub mod jsonsafe;
 pub mod kernel;
 pub mod ledger;

@@ -1265,6 +1265,20 @@ pub(crate) mod create_tests {
         assert_eq!(why(&r), (Some("missing_arg".into()), Some("name".into())), "{r}");
         let r = ask(json!({"type": "create", "record": {}})).await;
         assert_eq!(why(&r), (Some("missing_arg".into()), Some("record.handler_module".into())), "{r}");
+        // a structural field makes a different agent: refused by the declared schema
+        for f in ["type", "parent_id", "guid", "agents"] {
+            let r = ask(json!({"type": "create", "record": {"handler_module": "file_bridge.tools", f: "x"}})).await;
+            assert_eq!(why(&r), (Some("bad_arg".into()), Some(format!("record.{f}"))), "{f}: {r}");
+        }
+        for f in ["type", "id", "parent_id", "guid", "handler_module", "agents"] {
+            for (verb, extra) in [("spawn", json!({})), ("reopen", json!({"id": "a"}))] {
+                let mut call = extra;
+                call["type"] = json!(verb);
+                call["stamp"] = json!({f: "x"});
+                let r = ask(call).await;
+                assert_eq!(why(&r), (Some("bad_arg".into()), Some(format!("stamp.{f}"))), "{verb} {f}: {r}");
+            }
+        }
         // the record declares `main` and no other field
         let bundle = &BackendBundle as &dyn fantastic_kernel::Bundle;
         let fields = |v: Value| v.as_object().unwrap().clone();

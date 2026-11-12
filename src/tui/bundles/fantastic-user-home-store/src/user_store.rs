@@ -665,6 +665,11 @@ mod tests {
         assert_eq!(r["stored"]["canvas"], Value::Null, "{r}");
         assert_eq!(info(&h, "g-1").unwrap()["canvas"], Value::Null);
         assert!(!meta(&k, &id).contains_key("canvas"), "never on the record");
+        // `url` is optional: absent means none, the same as null
+        assert_eq!(call(&s, &k, &id, json!({"type": "set_canvas", "url": url})).await["canvas"], url);
+        let r = call(&s, &k, &id, json!({"type": "set_canvas"})).await;
+        assert_eq!(r["stored"]["canvas"], Value::Null, "{r}");
+        assert_eq!(info(&h, "g-1").unwrap()["canvas"], Value::Null);
         for bad in [json!({"type": "set_canvas", "url": ""}), json!({"type": "set_canvas", "url": 1})] {
             assert_eq!(call(&s, &k, &id, bad.clone()).await["arg"], "url", "{bad}");
         }

@@ -40,40 +40,39 @@ fn readme_launcher_child() {
 
 #[test]
 fn a_launcher_with_one_section_prints_the_base_then_the_section() {
-    for mode in ["bare"] {
-        let cwd = fresh(&format!("cwd-{mode}"));
-        let h = home(mode);
-        let mut base_cmd = Command::new(env!("CARGO_BIN_EXE_fantastic"));
-        let base_out = base_cmd
-            .current_dir(&cwd)
-            .env("FANTASTIC_HOME", &h)
-            .output()
-            .unwrap();
-        assert!(base_out.status.success(), "{mode}: base");
-        let base = String::from_utf8(base_out.stdout).unwrap();
+    let mode = "bare";
+    let cwd = fresh(&format!("cwd-{mode}"));
+    let h = home(mode);
+    let mut base_cmd = Command::new(env!("CARGO_BIN_EXE_fantastic"));
+    let base_out = base_cmd
+        .current_dir(&cwd)
+        .env("FANTASTIC_HOME", &h)
+        .output()
+        .unwrap();
+    assert!(base_out.status.success(), "{mode}: base");
+    let base = String::from_utf8(base_out.stdout).unwrap();
 
-        let child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "readme_launcher_child",
-                "--exact",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env("FC_README_LAUNCHER", mode)
-            .current_dir(&cwd)
-            .env("FANTASTIC_HOME", &h)
-            .output()
-            .unwrap();
-        assert!(
-            child.status.success(),
-            "{mode}: child: {}",
-            String::from_utf8_lossy(&child.stderr)
-        );
-        let out = String::from_utf8(child.stdout).unwrap();
-        let (_, got) = out.split_once(MARK).expect("the launcher's mark");
-        assert_eq!(got, format!("{base}\n{SECTION}"), "{mode}");
-        assert!(!base.contains("printed after the base readme"));
-        let _ = std::fs::remove_dir_all(&cwd);
-        let _ = std::fs::remove_dir_all(&h);
-    }
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "readme_launcher_child",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("FC_README_LAUNCHER", mode)
+        .current_dir(&cwd)
+        .env("FANTASTIC_HOME", &h)
+        .output()
+        .unwrap();
+    assert!(
+        child.status.success(),
+        "{mode}: child: {}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+    let out = String::from_utf8(child.stdout).unwrap();
+    let (_, got) = out.split_once(MARK).expect("the launcher's mark");
+    assert_eq!(got, format!("{base}\n{SECTION}"), "{mode}");
+    assert!(!base.contains("printed after the base readme"));
+    let _ = std::fs::remove_dir_all(&cwd);
+    let _ = std::fs::remove_dir_all(&h);
 }

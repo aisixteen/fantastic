@@ -364,7 +364,7 @@ async fn around_answers_from_the_page_records_by_the_callers_page_grants() {
         json!({"type": "around", "theme": "mobile", "x": 50, "y": 25, "radius": 10}),
     )
     .await;
-    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("theme")), "no theme argument: {r}");
+    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("theme")), "an unknown argument is refused: {r}");
     let r = tab(&k, json!({"type": "around", "x": "a", "y": 0, "radius": 5})).await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
     // a cell's AI: judged by its own page grants (cv2 only)

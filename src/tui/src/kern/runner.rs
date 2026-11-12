@@ -334,8 +334,6 @@ impl Runner {
         self.host.kernel.remove_inbox(&w);
     }
 
-    /// A refusal is filed under the command that earned it, so the pane that asked
-    /// is the pane that shows the answer.
     /// One act: the call goes out as the person, and the agent's log is re-read after it.
     async fn act_send(&self, cmd: &Cmd, target: &crate::kern::model::AgentId, payload: Value) {
         let out = self.host.act(target, payload).await;
@@ -360,6 +358,8 @@ impl Runner {
         }
     }
 
+    /// A refusal is filed under the command that earned it, so the pane that asked
+    /// is the pane that shows the answer.
     async fn refused(&self, cmd: &Cmd, err: KernelErr) {
         self.got(Got::Refused {
             what: cmd.what(),

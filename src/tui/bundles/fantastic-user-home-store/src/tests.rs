@@ -200,6 +200,8 @@ async fn every_verb_is_checked_by_its_declaration() {
     assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("missing_arg"), Some("record")), "{r}");
     let r = call(&k, "user", json!({"type": "persist_record", "name": "x", "record": {}})).await;
     assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("missing_arg"), Some("record.handler_module")), "{r}");
+    let r = call(&k, "user", json!({"type": "persist_record", "name": "x", "record": {"handler_module": ""}})).await;
+    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("missing_arg"), Some("record.handler_module")), "{r}");
     for (p, arg) in [
         (json!({"type": "persist_record", "name": "../x", "record": {"handler_module": "demo_backend.tools"}}), "name"),
         (json!({"type": "persist_record", "name": "x", "record": [], "if_match": 1}), "record"),

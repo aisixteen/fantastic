@@ -42,7 +42,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::refusal::{
-    missing, refusal, refusal_hint, with, BAD_ARG, INVALID_META, NOT_FOUND, UNAUTHORIZED,
+    refusal, refusal_hint, with, BAD_ARG, INVALID_META, NOT_FOUND, UNAUTHORIZED,
 };
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
@@ -237,17 +237,8 @@ impl UserHomeStore {
     fn persist(&self, a: verbs::PersistRecord, kernel: &Arc<Kernel>) -> Result<Value, Value> {
         let name = a.name;
         let rec = a.record;
-        let Some(hm) = rec.get("handler_module").and_then(Value::as_str) else {
-            return Err(missing("persist_record", "record.handler_module"));
-        };
-        let bad: Vec<&str> = NOT_SAVED.iter().copied().filter(|k| rec.contains_key(*k)).collect();
-        if !bad.is_empty() {
-            return Err(refusal_hint(
-                INVALID_META,
-                format!("persist_record: a saved set-up carries no identity, wiring or authority — drop {}", bad.join(", ")),
-                "the creator adds id, parent, memory store and grants when it makes an agent from a saved set-up",
-            ));
-        }
+        // the declared `set_up` schema guarantees a non-empty string handler_module
+        let hm = rec.get("handler_module").and_then(Value::as_str).unwrap_or_default();
         let Some(bundle) = kernel.bundles.get(hm) else {
             return Err(refusal(INVALID_META, format!("persist_record: no bundle {hm:?} is linked into this build")));
         };

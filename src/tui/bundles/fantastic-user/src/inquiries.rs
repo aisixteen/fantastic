@@ -12,45 +12,16 @@
 use std::sync::{Arc, Mutex};
 
 use fantastic_kernel::{AgentId, Item, Kernel};
-use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::verbs::{Answer, AnswerInquiry, Inquiries as ListArgs, Inquiry, Kind};
+use fantastic_kernel::inquiry::{Held, Inquiries as ListArgs, Inquiry};
 
-/// One open question, as `inquiries` lists it.
-#[derive(Debug, Clone, Serialize)]
-pub struct Held {
-    /// The pid the inquiry runs under: the handle the answer goes back under.
-    pub re: i64,
-    /// Who asked.
-    pub asker: Option<String>,
-    /// The question.
-    pub text: String,
-    /// The shape of the question.
-    pub kind: Kind,
-    /// The choices.
-    pub options: Option<Vec<String>>,
-    /// Names the inquiry in the answer.
-    pub request_id: Option<String>,
-    /// The client the answer is addressed to.
-    pub reply_client_id: String,
-    /// Epoch seconds the question was held.
-    pub ts: f64,
-}
+use crate::verbs::AnswerInquiry;
 
 /// The open questions.
 #[derive(Default)]
 pub struct Inquiries {
     open: Mutex<Vec<Held>>,
-}
-
-/// An answer as the asker reads it: words, a list joined, a yes / no.
-fn answer_text(v: &Answer) -> String {
-    match v {
-        Answer::Words(s) => s.trim().to_string(),
-        Answer::Picks(a) => a.join(", "),
-        Answer::Flag(b) => if *b { "yes" } else { "no" }.to_string(),
-    }
 }
 
 impl Inquiries {
@@ -97,7 +68,7 @@ impl Inquiries {
     /// `answer_inquiry`: the answer to the asker under the inquiry's pid; closed.
     pub async fn answer(&self, me: &AgentId, a: AnswerInquiry, kernel: &Arc<Kernel>) -> Value {
         let re = a.re;
-        let text = answer_text(&a.answer);
+        let text = a.answer.text();
         let q = {
             let mut open = self.open.lock().expect("inquiries poisoned");
             let Some(at) = open.iter().position(|q| q.re == re) else {

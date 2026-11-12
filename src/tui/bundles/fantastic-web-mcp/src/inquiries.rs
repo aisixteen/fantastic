@@ -10,12 +10,11 @@
 
 use std::sync::{Arc, Mutex};
 
+use fantastic_kernel::inquiry::{Held, Inquiries, Inquiry};
 use fantastic_kernel::{AgentId, Item, Kernel};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use crate::verbs::{Answer, AnswerInquiry, Inquiries, Inquiry, Kind};
+use crate::verbs::AnswerInquiry;
 
 /// The record field holding the open inquiries.
 pub const OPEN_FIELD: &str = "open_inquiries";
@@ -23,45 +22,18 @@ pub const OPEN_FIELD: &str = "open_inquiries";
 /// Serialises read-modify-write of the open list (never held across an await).
 static HELD: Mutex<()> = Mutex::new(());
 
-/// One open question, as it sits on the leg's record and as `inquiries` lists it.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Held {
-    /// The pid the inquiry runs under: the handle the answer goes back under.
-    pub re: i64,
-    /// Who asked.
-    pub asker: Option<String>,
-    /// The question.
-    pub text: String,
-    /// The shape of the question.
-    pub kind: Kind,
-    /// The choices.
-    pub options: Option<Vec<String>>,
-    /// Names the inquiry in the answer.
-    pub request_id: Option<String>,
-    /// The client the answer is addressed to.
-    pub reply_client_id: String,
-    /// Epoch seconds the question was held.
-    pub ts: f64,
-}
-
-/// An answer as the asker reads it: words, a list joined, a yes / no.
-fn answer_text(v: &Answer) -> String {
-    match v {
-        Answer::Words(s) => s.trim().to_string(),
-        Answer::Picks(a) => a.join(", "),
-        Answer::Flag(b) => if *b { "yes" } else { "no" }.to_string(),
-    }
-}
-
 /// The open inquiries on the leg's record.
-fn open(kernel: &Arc<Kernel>, leg: &AgentId) -> Vec<Held> {
-    kernel
+/// A stored list that is not a list of questions is refused, never dropped.
+fn open(kernel: &Arc<Kernel>, leg: &AgentId) -> Result<Vec<Held>, Value> {
+    let stored = kernel
         .agents
         .get(leg)
         .map(|e| e.meta.read().expect("meta poisoned").clone())
-        .and_then(|m| m.get(OPEN_FIELD).cloned())
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default()
+        .and_then(|m| m.get(OPEN_FIELD).cloned());
+    let Some(v) = stored else { return Ok(Vec::new()) };
+    serde_json::from_value(v).map_err(|e| {
+        json!({"error": format!("web_mcp: the record's {OPEN_FIELD} is malformed: {e}"), "reason": "bad_arg", "arg": OPEN_FIELD})
+    })
 }
 
 /// Write the list back through the kernel's meta update (which the record writer persists).
@@ -73,8 +45,8 @@ fn store(kernel: &Arc<Kernel>, leg: &AgentId, list: &[Held]) {
 
 /// How many are open — for the leg's reflect.
 #[must_use]
-pub fn open_count(kernel: &Arc<Kernel>, leg: &AgentId) -> usize {
-    open(kernel, leg).len()
+pub fn open_count(kernel: &Arc<Kernel>, leg: &AgentId) -> Value {
+    open(kernel, leg).map_or_else(|e| e, |l| json!(l.len()))
 }
 
 /// `inquiry`: held as open; the pid it runs under is its `re`.
@@ -97,7 +69,10 @@ pub fn ask(leg: &AgentId, a: Inquiry, kernel: &Arc<Kernel>) -> Value {
         ts,
     };
     let _g = HELD.lock().expect("inquiries poisoned");
-    let mut list = open(kernel, leg);
+    let mut list = match open(kernel, leg) {
+        Ok(l) => l,
+        Err(e) => return e,
+    };
     list.push(held);
     let n = list.len();
     store(kernel, leg, &list);
@@ -107,7 +82,11 @@ pub fn ask(leg: &AgentId, a: Inquiry, kernel: &Arc<Kernel>) -> Value {
 /// `inquiries`: the open ones, oldest first.
 pub fn list(leg: &AgentId, a: &Inquiries, kernel: &Arc<Kernel>) -> Value {
     let _g = HELD.lock().expect("inquiries poisoned");
-    let mine: Vec<Held> = open(kernel, leg)
+    let held = match open(kernel, leg) {
+        Ok(l) => l,
+        Err(e) => return e,
+    };
+    let mine: Vec<Held> = held
         .into_iter()
         .filter(|q| a.asker.as_deref().is_none_or(|w| q.asker.as_deref() == Some(w)))
         .collect();
@@ -117,10 +96,13 @@ pub fn list(leg: &AgentId, a: &Inquiries, kernel: &Arc<Kernel>) -> Value {
 /// `answer`: the answer to the asker under the inquiry's pid; closed.
 pub async fn answer(leg: &AgentId, a: AnswerInquiry, kernel: &Arc<Kernel>) -> Value {
     let re = a.re;
-    let text = answer_text(&a.text);
+    let text = a.text.text();
     let (at, q) = {
         let _g = HELD.lock().expect("inquiries poisoned");
-        let mut list = open(kernel, leg);
+        let mut list = match open(kernel, leg) {
+            Ok(l) => l,
+            Err(e) => return e,
+        };
         let Some(at) = list.iter().position(|q| q.re == re) else {
             return json!({"error": format!("web_mcp: answer: no open inquiry {re}"), "reason": "not_found", "arg": "re"});
         };
@@ -147,7 +129,10 @@ pub async fn answer(leg: &AgentId, a: AnswerInquiry, kernel: &Arc<Kernel>) -> Va
         // the answer did not reach the asker: the question stays open
         Some(e) => {
             let _g = HELD.lock().expect("inquiries poisoned");
-            let mut list = open(kernel, leg);
+            let mut list = match open(kernel, leg) {
+                Ok(l) => l,
+                Err(e) => return e,
+            };
             list.insert(at.min(list.len()), q.clone());
             store(kernel, leg, &list);
             json!({"error": format!("web_mcp: answer: the answer did not reach {asker}: {e}"), "reason": "refused"})

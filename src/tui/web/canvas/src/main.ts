@@ -63,7 +63,7 @@ function register(kernel: Kernel): void {
   // the read-only views of the agents that had only the stub
   for (const v of ["resources", "tasks", "store", "scheduler", "credentials"]) kernel.registerBundle(`${v}_view.ts`, () => null);
 
-  // Each frontend bundle declares its role via reflect (readme=true): the view
+  // Each frontend bundle declares its role via reflect: the view
   // CLIENTS name the host CAPABILITY + verb surface they front (an LLM weaves the
   // pairing from this + the host's capability readme — no hardcoded pairing);
   // content agents say what they hold. Direction is frontend→host: the JS knows
