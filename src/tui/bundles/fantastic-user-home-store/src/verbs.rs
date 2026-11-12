@@ -20,9 +20,20 @@ pub struct PersistRecord {
     pub name: String,
     /// The set-up: `handler_module` plus that bundle's own record fields.
     #[schemars(schema_with = "set_up")]
-    pub record: Map<String, Value>,
+    pub record: SetUp,
     /// The version you read; the save is refused when the file changed since.
     pub if_match: Option<String>,
+}
+
+/// A set-up as the declared schema decodes it: the bundle it is for, typed, and that
+/// bundle's own fields beside it.
+#[derive(Debug, Deserialize)]
+pub struct SetUp {
+    /// The bundle the set-up is for.
+    pub handler_module: String,
+    /// That bundle's own fields.
+    #[serde(flatten)]
+    pub rest: Map<String, Value>,
 }
 
 /// The schema of a saved set-up: an object naming the bundle it is for, and never

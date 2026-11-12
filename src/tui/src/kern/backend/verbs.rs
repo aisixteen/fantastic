@@ -17,7 +17,32 @@ pub struct Boot {}
 pub struct Create {
     /// The child: `handler_module`, `id` (optional) and its own record fields; no parent or grants of the caller's.
     #[schemars(schema_with = "child_record")]
-    pub record: Map<String, Value>,
+    pub record: ChildRecord,
+}
+
+/// A child's record as the declared schema decodes it: the two fields the create itself
+/// reads, typed, and the bundle's own fields beside them.
+#[derive(Debug, Deserialize)]
+pub struct ChildRecord {
+    /// The bundle the child runs.
+    pub handler_module: String,
+    /// The child's id, when asked for.
+    pub id: Option<String>,
+    /// The bundle's own fields.
+    #[serde(flatten)]
+    pub rest: Map<String, Value>,
+}
+
+impl ChildRecord {
+    /// The whole record, as the kernel's create takes it.
+    pub fn into_map(self) -> Map<String, Value> {
+        let mut m = self.rest;
+        m.insert("handler_module".into(), Value::String(self.handler_module));
+        if let Some(id) = self.id {
+            m.insert("id".into(), Value::String(id));
+        }
+        m
+    }
 }
 
 /// Fields that make a different agent: never the caller's to set on a child.

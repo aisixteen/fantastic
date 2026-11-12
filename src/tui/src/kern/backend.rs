@@ -481,13 +481,16 @@ impl BackendBundle {
     }
 
     /// `create {record}` — one direct child of this backend agent.
-    async fn create(host: &Host, me: &AgentId, rec: &Map<String, Value>) -> Value {
-        let handler = rec.get("handler_module").and_then(Value::as_str).unwrap_or("");
+    async fn create(host: &Host, me: &AgentId, child: verbs::ChildRecord) -> Value {
+        let handler = child.handler_module.clone();
+        let handler = handler.as_str();
+        let want_id = child.id.clone();
+        let rec = child.into_map();
         // an AI is a chat on its provider: asked as either, the chat is the child
         let is_ai = crate::kern::setup::BACKENDS.contains(&handler) || handler == CHAT_HANDLER;
         let made = if is_ai { CHAT_HANDLER } else { handler };
         // a child asked again is the same child
-        if let Some(id) = rec.get("id").and_then(Value::as_str) {
+        if let Some(id) = want_id.as_deref() {
             if let Some(a) = host.kernel.agents.get(&AgentId::from(id)) {
                 let r = a.value().record();
                 if r.parent_id.as_deref() == Some(me.0.as_str()) && r.handler_module.as_deref() == Some(made) {
@@ -500,16 +503,16 @@ impl BackendBundle {
         // memory store from its first turn, the chat granted its store, its provider and the
         // human's chat verbs. Equipment that is an AI reaches its memory store through this.
         if is_ai {
-            let ai = match rec.get("id").and_then(Value::as_str) {
-                Some(id) => id.to_string(),
+            let ai = match want_id {
+                Some(id) => id,
                 None => format!("ai_{}", hex8()),
             };
-            return match Self::make_ai(host, me, &ai, rec.clone(), Map::new()).await {
+            return match Self::make_ai(host, me, &ai, rec, Map::new()).await {
                 Ok(()) => json!({"id": ai}),
                 Err(e) => refuse("bad_arg", format!("create: {e}"), ""),
             };
         }
-        let mut spec = rec.clone();
+        let mut spec = rec;
         spec.insert("type".into(), json!("create_agent"));
         spec.insert("parent_id".into(), json!(me.0));
         let r = host.operator("kernel", Value::Object(spec)).await.result;
@@ -815,7 +818,7 @@ impl Handler for BackendBundle {
         };
         Ok(Some(match call {
             verbs::Call::Boot(_) | verbs::Call::Reflect(_) => unreachable!("answered above"),
-            verbs::Call::Create(a) => Self::create(&host, agent_id, &a.record).await,
+            verbs::Call::Create(a) => Self::create(&host, agent_id, a.record).await,
             verbs::Call::Delete(a) => Self::delete(&host, agent_id, &a.id).await,
             verbs::Call::Presets(_) => Self::presets(&host).await,
             verbs::Call::Spawn(a) => Self::spawn(&host, agent_id, a).await,
@@ -977,7 +980,7 @@ pub(crate) mod create_tests {
 
     /// `create` of a `{record}` payload.
     async fn create_rec(h: &Host, me: &AgentId, p: &Value) -> Value {
-        BackendBundle::create(h, me, p["record"].as_object().expect("a record")).await
+        BackendBundle::create(h, me, serde_json::from_value(p["record"].clone()).expect("a child record")).await
     }
 
     /// A host on a kernel whose root is `kernel`, the human `user` (its can_call names

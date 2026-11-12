@@ -236,9 +236,7 @@ fn stale(verb: &str, name: &str, want: &str, have: Option<&str>) -> Value {
 impl UserHomeStore {
     fn persist(&self, a: verbs::PersistRecord, kernel: &Arc<Kernel>) -> Result<Value, Value> {
         let name = a.name;
-        let rec = a.record;
-        // the declared `set_up` schema guarantees a non-empty string handler_module
-        let hm = rec.get("handler_module").and_then(Value::as_str).unwrap_or_default();
+        let hm = a.record.handler_module.as_str();
         let Some(bundle) = kernel.bundles.get(hm) else {
             return Err(refusal(INVALID_META, format!("persist_record: no bundle {hm:?} is linked into this build")));
         };
@@ -246,9 +244,7 @@ impl UserHomeStore {
         // declaration its create is checked with, by the bundle's own shared entry):
         // every field known and of its type, and the required ones present (a saved
         // set-up is a record to be born: the create's check).
-        let mut fields = rec.clone();
-        fields.remove("handler_module");
-        bundle.check_record("create_agent", &fields)?;
+        bundle.check_record("create_agent", &a.record.rest)?;
         let path = self.saved_for_write()?.join(format!("{name}.yaml"));
         let now = read_private(&path)?.map(|b| version(&b));
         if let Some(want) = a.if_match.as_deref() {
@@ -256,6 +252,8 @@ impl UserHomeStore {
                 return Err(stale("persist_record", &name, want, now.as_deref()));
             }
         }
+        let mut rec = a.record.rest;
+        rec.insert("handler_module".into(), Value::String(a.record.handler_module));
         let text = fantastic_kernel::yaml_io::dump(&Value::Object(rec));
         write_private(&path, text.as_bytes())?;
         Ok(json!({"name": name, "version": version(text.as_bytes()), "path": path.display().to_string()}))
