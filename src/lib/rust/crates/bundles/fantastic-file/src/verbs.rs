@@ -10,16 +10,12 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-/// Open nothing and answer nothing: the kernel's start call, gated like any verb.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Boot {}
-
 /// List the exposed entries of a directory and the directories on the way to one. Returns {path, files:[{name, path, type, size?}]}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct List {
-    /// A directory, relative to the root; absent, the root.
+    /// A directory, relative to the root, no leading `/`; absent, the root.
+    #[schemars(regex(pattern = r"^(?:[^/][\s\S]*)?$"))]
     pub path: Option<String>,
 }
 
@@ -28,13 +24,15 @@ pub struct List {
 #[serde(deny_unknown_fields)]
 pub struct Read {
     /// The file, relative to the root (a bridge needs it; a file view reads its own file).
-    #[schemars(length(min = 1))]
+    #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
     pub path: Option<String>,
     /// The first line of the page, counted from 0.
-    pub offset: Option<u64>,
-    /// How many lines; 200 by default.
+    #[serde(default)]
+    pub offset: u64,
+    /// How many lines.
+    #[serde(default = "page_lines")]
     #[schemars(range(min = 1))]
-    pub limit: Option<u64>,
+    pub limit: u64,
 }
 
 /// Write a whole document atomically; the document is `bytes`, verbatim. Returns {path, size, version}.
@@ -42,7 +40,7 @@ pub struct Read {
 #[serde(deny_unknown_fields)]
 pub struct Write {
     /// The file, relative to the root (a bridge needs it; a file view writes its own file).
-    #[schemars(length(min = 1))]
+    #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
     pub path: Option<String>,
     /// The whole document (text; a binary channel carries it as the request body at `bytes`).
     pub bytes: Option<String>,
@@ -52,9 +50,10 @@ pub struct Write {
 
 /// One file of an `edit` transaction.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EditFile {
     /// The file, relative to the root.
-    #[schemars(length(min = 1))]
+    #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
     pub path: String,
     /// How many hunks of the patch belong to this file; left out, with one file every block applies to it, and with named blocks no count is needed.
     pub hunks: Option<std::num::NonZeroU64>,
@@ -73,7 +72,8 @@ pub struct Edit {
     #[schemars(length(min = 1))]
     pub bytes: Option<String>,
     /// Verify every hunk and write nothing.
-    pub dry_run: Option<bool>,
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 /// Append one chunk to a file (created when absent); the chunk is `bytes`. Returns {path, size, version}.
@@ -81,7 +81,7 @@ pub struct Edit {
 #[serde(deny_unknown_fields)]
 pub struct Append {
     /// The file, relative to the root.
-    #[schemars(length(min = 1))]
+    #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
     pub path: String,
     /// The chunk (text; a binary channel carries it as the request body at `bytes`).
     pub bytes: Option<String>,
@@ -92,7 +92,7 @@ pub struct Append {
 #[serde(deny_unknown_fields)]
 pub struct Undo {
     /// The file, relative to the root.
-    #[schemars(length(min = 1))]
+    #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
     pub path: String,
 }
 
@@ -101,13 +101,15 @@ pub struct Undo {
 #[serde(deny_unknown_fields)]
 pub struct ReadStream {
     /// The file, relative to the root.
-    #[schemars(length(min = 1))]
+    #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
     pub path: String,
     /// Where the chunk starts, in bytes.
-    pub offset: Option<u64>,
-    /// The chunk size in bytes; 65536 by default.
+    #[serde(default)]
+    pub offset: u64,
+    /// The chunk size in bytes.
+    #[serde(default = "chunk_bytes")]
     #[schemars(range(min = 1))]
-    pub length: Option<u64>,
+    pub length: u64,
 }
 
 /// The SINK half of a stream: write ONE raw chunk, carried as the request body at `bytes`. Returns {path, written, offset, size}.
@@ -115,12 +117,13 @@ pub struct ReadStream {
 #[serde(deny_unknown_fields)]
 pub struct WriteStream {
     /// The file, relative to the root.
-    #[schemars(length(min = 1))]
+    #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
     pub path: String,
     /// Where the chunk lands, in bytes; absent, at the end of the file.
     pub offset: Option<u64>,
     /// Start the file over with this chunk.
-    pub truncate: Option<bool>,
+    #[serde(default)]
+    pub truncate: bool,
 }
 
 /// A server-side stream copy SOURCE to SINK, chunk by chunk, in ONE call; both ends run AS THIS BRIDGE and each gates and clamps itself. Returns {source, sink, bytes, chunks}.
@@ -128,16 +131,21 @@ pub struct WriteStream {
 #[serde(deny_unknown_fields)]
 pub struct Pump {
     /// The agent that answers `read_stream`; absent, this bridge.
+    #[schemars(length(min = 1))]
     pub source: Option<String>,
     /// The file to read from the source.
-    pub source_path: Option<String>,
+    #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
+    pub source_path: String,
     /// The agent that answers `write_stream`; absent, this bridge.
+    #[schemars(length(min = 1))]
     pub sink: Option<String>,
     /// The file to write on the sink; absent, `source_path`.
+    #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
     pub sink_path: Option<String>,
-    /// The chunk size in bytes; 65536 by default.
+    /// The chunk size in bytes.
+    #[serde(default = "chunk_bytes")]
     #[schemars(range(min = 1))]
-    pub chunk: Option<u64>,
+    pub chunk: u64,
 }
 
 /// Delete a file, an empty directory or (`recursive`) a directory tree; a symlink is unlinked, never followed. Returns {path, deleted:true}.
@@ -145,9 +153,11 @@ pub struct Pump {
 #[serde(deny_unknown_fields)]
 pub struct Delete {
     /// What goes, relative to the root (never the root itself).
+    #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
     pub path: String,
     /// Remove a directory with what is in it.
-    pub recursive: Option<bool>,
+    #[serde(default)]
+    pub recursive: bool,
 }
 
 /// Rename a file or directory, creating the new parent directories. Returns {old_path, new_path}.
@@ -155,8 +165,10 @@ pub struct Delete {
 #[serde(deny_unknown_fields)]
 pub struct Rename {
     /// What moves, relative to the root.
+    #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
     pub old_path: String,
     /// Where it goes, relative to the root.
+    #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
     pub new_path: String,
 }
 
@@ -165,6 +177,7 @@ pub struct Rename {
 #[serde(deny_unknown_fields)]
 pub struct Mkdir {
     /// The directory, relative to the root.
+    #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
     pub path: String,
 }
 
@@ -173,6 +186,7 @@ pub struct Mkdir {
 #[serde(deny_unknown_fields)]
 pub struct WatchPath {
     /// An exposed file or directory, relative to the root.
+    #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
     pub path: String,
 }
 
@@ -181,7 +195,16 @@ pub struct WatchPath {
 #[serde(deny_unknown_fields)]
 pub struct UnwatchPath {
     /// The path you watched.
+    #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
     pub path: String,
+}
+
+fn page_lines() -> u64 {
+    crate::text::READ_LIMIT
+}
+
+fn chunk_bytes() -> u64 {
+    65536
 }
 
 /// Which kind of path a view shows.
@@ -201,6 +224,7 @@ pub struct OpenView {
     /// `file` or `folder`.
     pub kind: ViewKind,
     /// Root-relative, exposed by `allow`; `.` is the whole root, folders only.
+    #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
     pub path: String,
     /// The new view's agent id, taken only when it is free.
     pub id: Option<String>,
@@ -216,13 +240,12 @@ pub struct Watch {}
 #[serde(deny_unknown_fields)]
 pub struct Reveal {
     /// A file or folder inside this one, relative to it.
-    #[schemars(length(min = 1))]
+    #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
     pub path: String,
 }
 
 fantastic_kernel::verbs! {
     dynamic;
-    "boot" => Boot,
     "list" => List,
     "read" => Read,
     "write" => Write,

@@ -1721,9 +1721,7 @@ async fn reflect_key_order_per_family() {
     );
     assert_eq!(
         r["sentence"],
-        json!(
-            "Cross-kernel comms bridge — WS-only, asymmetric (no peer bridge needed); weak proxy."
-        )
+        json!(crate::WS_MAN)
     );
     assert_eq!(r["transport"], json!("ws"), "the record's transport");
     assert_eq!(r["connected"], json!(false));
@@ -1765,7 +1763,7 @@ async fn reflect_key_order_per_family() {
     );
     assert_eq!(
         r["sentence"],
-        json!("Cross-kernel comms through a relay-kernel router — dial-out WS, group-password auth (X-Fantastic-Auth), GUID-routed; symmetric RPC tunneled over the relay; auto-reconnecting.")
+        json!(crate::RELAY_MAN)
     );
     assert_eq!(r["transport"], json!("relay"), "the record's transport");
     assert_eq!(r["reconnect"], json!(0));

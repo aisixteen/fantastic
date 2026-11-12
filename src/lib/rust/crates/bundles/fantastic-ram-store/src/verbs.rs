@@ -47,17 +47,21 @@ pub struct Read {
     pub after: Option<i64>,
     /// Only rows before this id.
     pub before: Option<i64>,
-    /// Page size; absent or 0 reads every row.
+    /// Page size; absent, every row.
+    #[schemars(range(min = 1))]
     pub limit: Option<u64>,
     /// `desc` reads newest first.
     pub order: Option<Order>,
     /// Only rows whose `kind` is one of these.
+    #[schemars(length(min = 1))]
     pub kinds: Option<Vec<Value>>,
     /// Only rows whose fields equal these (exact equality).
     pub r#match: Option<Map<String, Value>>,
     /// Only these row ids.
+    #[schemars(length(min = 1))]
     pub ids: Option<Vec<i64>>,
     /// Start at the newest row of this kind.
+    #[schemars(length(min = 1))]
     pub from_last_kind: Option<String>,
 }
 
@@ -69,11 +73,24 @@ pub struct Search {
     #[schemars(length(min = 1), regex(pattern = "\\S"))]
     pub query: String,
     /// The rows to search; a fold id includes its members. Absent, every row.
+    #[schemars(length(min = 1))]
     pub ids: Option<Vec<i64>>,
-    /// How many matches to return; 100 when absent or 0.
-    pub limit: Option<u64>,
-    /// Characters kept per matching line; 200 when absent or 0.
-    pub width: Option<u64>,
+    /// How many matches to return.
+    #[serde(default = "hundred")]
+    #[schemars(range(min = 1))]
+    pub limit: u64,
+    /// Characters kept per matching line.
+    #[serde(default = "two_hundred")]
+    #[schemars(range(min = 1))]
+    pub width: u64,
+}
+
+fn hundred() -> u64 {
+    100
+}
+
+fn two_hundred() -> u64 {
+    200
 }
 
 /// Delete the caller's rows below `before_id`, or exactly `ids`, except kinds in `keep`; every fold ref naming a deleted row goes with it (FK cascade). One of `before_id` and `ids` is required. Returns {pruned}.

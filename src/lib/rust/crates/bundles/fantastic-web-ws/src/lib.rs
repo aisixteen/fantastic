@@ -144,16 +144,12 @@ fn mount_path(agent_id: &AgentId, kernel: &Kernel) -> String {
     route_of(agent_id, kernel).unwrap_or_else(|| PATH_PATTERN.to_string())
 }
 
-/// python `web_ws/tools.py::_reflect` — identity, the mounted URL pattern and
-/// this leg's auth posture, in python's key order.
+/// `reflect` — identity, what the leg is for and its auth posture; the path it
+/// mounts is `get_routes`' alone.
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
     let mut out = Map::new();
     out.insert("id".into(), json!(agent_id.as_str()));
-    out.insert(
-        "sentence".into(),
-        json!("WS verb-invocation surface; mounts /<host_id>/ws on the parent web."),
-    );
-    out.insert("path_pattern".into(), json!(mount_path(agent_id, kernel)));
+    out.insert("sentence".into(), json!(MAN));
     // The leg is a CHANNEL — surface its auth posture so discovery-through-denial
     // has something to discover (the door + the pointer to how to open it).
     let meta = kernel

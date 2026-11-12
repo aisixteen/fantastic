@@ -250,8 +250,7 @@ async fn reflect_advertises_the_allowlist_not_interpreters() {
         .result;
     assert_eq!(r["id"], a.as_str());
     assert_eq!(
-        r["sentence"],
-        "Process edge of the io family — a general-purpose COMMAND runner, sealed by default, gated by the `allowed` regexes. Spawns commands in the background; a child may speak the kernel over a private control fd."
+        r["sentence"], crate::MAN
     );
     assert_eq!(r["running"], 0);
     // THE GATE is advertised.
@@ -261,7 +260,7 @@ async fn reflect_advertises_the_allowlist_not_interpreters() {
     assert_eq!(
         names,
         [
-            "boot", "start", "run", "status", "stop", "interrupt", "clear", "write", "resize",
+            "shutdown", "start", "run", "status", "stop", "interrupt", "clear", "write", "resize",
             "ack", "output", "tail", "grep", "paste_image", "connector", "monitor", "monitors",
             "unmonitor", "declare_verbs", "reflect", "shutdown"
         ],
@@ -1036,7 +1035,7 @@ async fn an_undeclared_verb_is_refused_by_name() {
     assert_eq!(r["reason"], "unhandled", "{r}");
     assert_eq!(r["verb"], "ping", "{r}");
     assert!(
-        r["error"].as_str().unwrap_or("").contains("answers: boot, start"),
+        r["error"].as_str().unwrap_or("").contains("answers: start"),
         "{r}"
     );
 }
@@ -1131,7 +1130,6 @@ async fn the_connector_verb_hands_over_the_reference_client() {
         src.contains("FANTASTIC_CTRL_FD") && src.contains("def send("),
         "{r}"
     );
-    assert!(r["howto"].as_str().unwrap().contains("can_call"));
 }
 
 /// A stream-speaking stand-in for `file_bridge`: `write_stream` keeps the blob,
@@ -1980,25 +1978,11 @@ async fn a_cancelled_job_finalises_to_stopped_and_clear_removes_it() {
     assert_eq!(st["jobs"].as_array().map(Vec::len), Some(0), "{st}");
 }
 
-/// `kernel.args` / FANTASTIC_ARGS was advertised by every runtime's howto and set
-/// by no spawner — a program written from the docs read `{}` and KeyError'd. A
-/// command runner takes its arguments as ARGV.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_connector_has_no_args() {
+/// `kernel.args` / FANTASTIC_ARGS was set by no spawner: a command runner takes its
+/// arguments as ARGV, and the connector source names no such thing.
+#[test]
+fn the_connector_has_no_args() {
     assert!(!CONNECTOR_SRC.contains("FANTASTIC_ARGS"));
-    let tmp = TempDir::new().unwrap();
-    let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel
-        .send(vec![Item::new(a, json!({"type": "connector"}))])
-        .await
-        .remove(0)
-        .result;
-    let howto = r["howto"].as_str().expect("howto");
-    assert!(
-        !howto.contains("`kernel.self_id`, `kernel.args`"),
-        "{howto}"
-    );
-    assert!(howto.contains("ARGV"), "{howto}");
 }
 
 /// The other half of the same guarantee, through the REAL path: `stop` →

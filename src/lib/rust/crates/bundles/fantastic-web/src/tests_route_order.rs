@@ -247,7 +247,6 @@ async fn a_web_ws_route_leg_beside_a_catch_all_leg_gets_its_own_url() {
     let (text, _) = round_trip(&mut ws, TMessage::Text(reflect("z_page_ws", "r1"))).await;
     let reply = text.iter().find(|v| v["id"] == "r1").expect("a reply");
     assert_eq!(reply["data"]["id"], "z_page_ws", "{reply}");
-    assert_eq!(reply["data"]["path_pattern"], "/z_page_ws/ws", "{reply}");
     // the host label is the URL's first segment, as the catch-all would capture
     kernel
         .emit(
@@ -268,6 +267,5 @@ async fn a_web_ws_route_leg_beside_a_catch_all_leg_gets_its_own_url() {
     let (text, _) = round_trip(&mut ws2, TMessage::Text(reflect("a_ws", "r2"))).await;
     let reply = text.iter().find(|v| v["id"] == "r2").expect("a reply");
     assert_eq!(reply["data"]["id"], "a_ws", "{reply}");
-    assert_eq!(reply["data"]["path_pattern"], "/{host_id}/ws", "{reply}");
     stop(&kernel, web_id).await;
 }

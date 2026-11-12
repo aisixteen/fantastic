@@ -46,22 +46,14 @@ fn status(payload: Value) -> Option<String> {
     render_status(&serde_json::from_value(payload).expect("a status call"))
 }
 
-fn context(payload: Value) -> Option<String> {
+fn context(payload: Value) -> String {
     render_context(&serde_json::from_value(payload).expect("a context call"))
 }
 
 #[tokio::test]
-async fn reflect_advertises_exactly_what_it_accepts() {
+async fn reflect_says_what_the_bundle_is_for() {
     let reply = dispatch(json!({"type": "reflect"})).await;
-    assert_eq!(reply["accepts"], json!(ACCEPTS), "{reply}");
-    // The list and the declarations must not drift: a verb advertised but not
-    // declared is a promise this sink does not keep.
-    for verb in ACCEPTS {
-        assert!(
-            declared::VERBS.iter().any(|v| v.name == verb),
-            "{verb} accepted but not declared"
-        );
-    }
+    assert_eq!(reply["sentence"], json!(MAN), "{reply}");
 }
 
 #[test]
@@ -117,7 +109,7 @@ async fn every_declared_verb_answers_null_rather_than_an_error() {
 async fn intro_booting_prints_the_control_plane_map() {
     let k = Arc::new(Kernel::new());
     let lines = intro_booting_lines(&k);
-    assert_eq!(lines.len(), 5);
+    assert_eq!(lines.len(), 2);
     // No root yet in a bare kernel — python falls back to its own root id, so
     // rust falls back to rust's.
     assert_eq!(
@@ -127,22 +119,7 @@ async fn intro_booting_prints_the_control_plane_map() {
             std::process::id()
         )
     );
-    assert_eq!(
-        lines[1],
-        "  one envelope: send(<id>, {\"type\":\"<verb>\", …})   ·   kernel = root   ·   full map: reflect · verbs: docs of=<id>"
-    );
-    assert_eq!(
-        lines[2],
-        "  PULL  ask → reply        REST POST /<rest>/<id>        ·  this REPL: @<id> <verb> k=v"
-    );
-    assert_eq!(
-        lines[3],
-        "  PUSH  async stream/emit  WS /<id>/ws : watch{src} · emit{target,payload} · state_subscribe"
-    );
-    assert_eq!(
-        lines[4],
-        "  REACH one call by id, any unit: compute(exec_bridge) · infer(ai) · memory(file_bridge) · shell(exec_bridge pty)"
-    );
+    assert_eq!(lines[1], "  full map: reflect · verbs: docs of=<id>");
 }
 
 /// `booted` is a DUMB SINK: one fixed line, no tree inspection.
@@ -191,7 +168,7 @@ fn status_handler_renders_phase_markers() {
         "  [ai] queued (0 ahead)"
     );
     assert_eq!(status(json!({"phase": "thinking"})).unwrap(), "  thinking…");
-    // `streaming` and `done` are silent; so is an unknown phase.
+    // `streaming` and `done` are silent.
     assert!(status(json!({"phase": "streaming"})).is_none());
     assert!(status(json!({"phase": "done"})).is_none());
 }
@@ -222,23 +199,34 @@ fn status_values_render_as_text() {
         "  ← 1({'a': 1})  True"
     );
     assert_eq!(
-        context(json!({"phase": "compacted", "detail": {}})).unwrap(),
+        context(json!({"phase": "compacted", "detail": {}})),
         "  ⟲ context compacted (?, 0 dropped; recall to page back)"
     );
     assert_eq!(
-        context(json!({"phase": "compacted", "source": "ai", "detail": {"strategy": null, "dropped_messages": 2}}))
-            .unwrap(),
+        context(json!({"phase": "compacted", "source": "ai", "detail": {"strategy": null, "dropped_messages": 2}})),
         "  [ai] ⟲ context compacted (None, 2 dropped; recall to page back)"
     );
     assert_eq!(
-        context(json!({"phase": "too_small", "detail": {"hint": 5}})).unwrap(),
+        context(json!({"phase": "too_small", "detail": {"hint": 5}})),
         "  ✗ context too small — 5"
     );
     assert_eq!(
-        context(json!({"phase": "too_small"})).unwrap(),
+        context(json!({"phase": "too_small"})),
         "  ✗ context too small — "
     );
-    assert!(context(json!({"phase": "nonsense"})).is_none());
+}
+
+/// A phase the declaration does not list is refused by the entry, by name.
+#[tokio::test]
+async fn an_unknown_phase_is_refused_by_name() {
+    for call in [
+        json!({"type": "status", "phase": "nonsense"}),
+        json!({"type": "context", "phase": "nonsense"}),
+        json!({"type": "context", "phase": "thinking"}),
+    ] {
+        let reply = dispatch(call.clone()).await;
+        assert_eq!(reply["arg"], json!("phase"), "{call}: {reply}");
+    }
 }
 
 /// A `detail` that is not an object is refused by the entry, by name.

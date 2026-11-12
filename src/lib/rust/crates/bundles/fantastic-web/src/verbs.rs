@@ -8,6 +8,11 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 pub struct Boot {}
 
+/// Release the listener before the kernel stops; sent by the kernel at shutdown.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Shutdown {}
+
 /// Stop listening and cancel the serve task. Returns {stopped}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +53,7 @@ pub struct FetchFile {
 
 fantastic_kernel::verbs! {
     "boot" => Boot,
+    "shutdown" => Shutdown,
     "stop" => Stop,
     "mount" => Mount,
     "unmount" => Unmount,

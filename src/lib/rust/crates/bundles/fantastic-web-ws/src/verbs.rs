@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-/// Declare this surface's route mounts for the parent `web` agent: the catch-all `/{host_id}/ws`, or the record's `route` literal.
+/// Declare this surface's route mounts for the parent `web` agent. Returns {routes:[{kind, path}]}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetRoutes {}
@@ -16,6 +16,7 @@ pub struct GetRoutes {}
 #[serde(deny_unknown_fields)]
 pub struct OnwardCall {
     /// The agent the call goes to.
+    #[schemars(length(min = 1))]
     pub target: String,
     /// The call: a verb frame with its own `type`.
     pub payload: Value,

@@ -30,7 +30,7 @@
 pub mod fs;
 pub mod record;
 mod sys;
-#[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 mod text;
 pub mod verbs;
@@ -38,7 +38,7 @@ mod views;
 mod watch;
 
 use async_trait::async_trait;
-use fantastic_bundle::{is_absolute, py_repr, py_repr_value, py_str, py_truthy};
+use fantastic_bundle::{is_absolute, py_repr, py_repr_value};
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::refusal as rf;
 use fantastic_kernel::{body_at, current_origin, AgentId, Blob, Item, Kernel};
@@ -80,7 +80,6 @@ fn verb_name(call: &verbs::Call) -> &str {
     use verbs::Call;
     match call {
         Call::Reflect(_) => "reflect",
-        Call::Boot(_) => "boot",
         Call::List(_) => "list",
         Call::Read(_) => "read",
         Call::Write(_) => "write",
@@ -100,14 +99,14 @@ fn verb_name(call: &verbs::Call) -> &str {
     }
 }
 
-/// The path a view-scoped verb names (`""` when it names none): `Some` for the verbs a
-/// view may send its bridge, `None` for every other.
+/// The path a view-scoped verb names: `Some` for the verbs a view may send its
+/// bridge, `None` for every other.
 fn scoped_path(call: &verbs::Call) -> Option<&str> {
     use verbs::Call;
     match call {
-        Call::Read(a) => Some(a.path.as_deref().unwrap_or("")),
-        Call::Write(a) => Some(a.path.as_deref().unwrap_or("")),
-        Call::List(a) => Some(a.path.as_deref().unwrap_or("")),
+        Call::Read(a) => a.path.as_deref(),
+        Call::Write(a) => a.path.as_deref(),
+        Call::List(a) => Some(a.path.as_deref().unwrap_or_default()),
         Call::WatchPath(a) => Some(&a.path),
         Call::UnwatchPath(a) => Some(&a.path),
         _ => None,
@@ -208,11 +207,18 @@ impl Handler for FileBundle {
             return Ok((Some(reply), None));
         }
         // GATE — the fs edge is an io_bridge leg: SEALED by default. Discovery
-        // (`reflect`) is the only exemption; `boot` is gated like the rest.
+        // (`reflect`) is the only exemption.
         if verb != "reflect" {
             if let Some(denied) = gate(&meta, agent_id, verb) {
                 return Ok((Some(denied), None));
             }
+        }
+        // A bridge reads and writes the file a call NAMES (only a view has a file of its own).
+        if matches!(
+            &call,
+            Call::Read(verbs::Read { path: None, .. }) | Call::Write(verbs::Write { path: None, .. })
+        ) {
+            return Ok((Some(rf::missing(verb, "path")), None));
         }
         // THE PATH GATE FOR A VIEW CALLER — python `tools._view_scope`, after the gate.
         if let Some(rel) = scoped_path(&call) {
@@ -223,10 +229,9 @@ impl Handler for FileBundle {
             }
         }
         let root = clamp_root(&meta, kernel, &agent.root_path);
-        let readonly = py_truthy(meta.get("readonly").unwrap_or(&Value::Null));
+        let readonly = readonly_flag(&meta);
         let reply = match &call {
             Call::Reflect(_) => reflect_reply(agent_id, &meta, &root),
-            Call::Boot(_) => Value::Null,
             Call::OpenView(a) => views::open_view_verb(kernel, &meta, agent_id, a).await,
             Call::Read(_) | Call::Write(_) | Call::Edit(_) | Call::Append(_) | Call::Undo(_) => {
                 text::dispatch(&self.text, &agent_id.0, &meta, &root, &call, chunk, readonly)
@@ -267,10 +272,7 @@ impl Handler for FileBundle {
                     Call::Rename(a) => rename_reply(&root, a, readonly),
                     Call::Mkdir(a) => mkdir_reply(&root, a, readonly),
                     Call::WatchPath(a) => {
-                        let p = match rel_path("watch_path", "path", &a.path) {
-                            Ok(p) => p,
-                            Err(e) => return Ok((Some(e), None)),
-                        };
+                        let p = a.path.as_str();
                         let r = match clamped(&root) {
                             Ok(r) => r.to_path_buf(),
                             Err(e) => return Ok((Some(e), None)),
@@ -278,25 +280,15 @@ impl Handler for FileBundle {
                         self.watch.watch_path(agent_id, &r, p, kernel)
                     }
                     Call::UnwatchPath(a) => {
-                        let p = match rel_path("unwatch_path", "path", &a.path) {
-                            Ok(p) => p,
-                            Err(e) => return Ok((Some(e), None)),
-                        };
+                        let p = a.path.as_str();
                         let r = match clamped(&root) {
                             Ok(r) => r.to_path_buf(),
                             Err(e) => return Ok((Some(e), None)),
                         };
                         self.watch.unwatch_path(agent_id, &r, p, kernel)
                     }
-                    // `watch` and `reveal` are a VIEW's verbs; a bridge has none
-                    Call::Dynamic(c) => {
-                        let mut v = rf::refusal(
-                            rf::UNHANDLED,
-                            format!("file_bridge: unknown type {}", py_repr(&c.name)),
-                        );
-                        rf::with(&mut v, "verb", json!(c.name));
-                        v
-                    }
+                    // `watch` and `reveal` are a VIEW's verbs (answered above, by the
+                    // view); a bridge declares none, so its entry refused them already.
                     _ => unreachable!("every other verb is answered above"),
                 }
             }
@@ -397,12 +389,17 @@ pub(crate) fn clamped(root: &Result<PathBuf, String>) -> Result<&Path, Value> {
     }
 }
 
+/// The record's `readonly` flag (declared a boolean; absent, off).
+pub(crate) fn readonly_flag(meta: &Map<String, Value>) -> bool {
+    meta.get("readonly").and_then(Value::as_bool).unwrap_or(false)
+}
+
 /// python's `_root_str`: the configured root string (`rec.get("root", "") or ""`).
 fn root_str(meta: &Map<String, Value>) -> String {
-    match meta.get("root") {
-        Some(v) if py_truthy(v) => py_str(v),
-        _ => String::new(),
-    }
+    meta.get("root")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// The clamped root: the configured root under the base the kernel's one rule
@@ -428,12 +425,9 @@ fn read_stream_reply(
     root: &Result<PathBuf, String>,
     a: &verbs::ReadStream,
 ) -> (Value, Option<Vec<u8>>) {
-    let path_str = match rel_path("read_stream", "path", &a.path) {
-        Ok(p) => p,
-        Err(e) => return (e, None),
-    };
-    let offset = a.offset.unwrap_or(0);
-    let length = a.length.unwrap_or(65536);
+    let path_str = a.path.as_str();
+    let offset = a.offset;
+    let length = a.length;
     let root = match clamped(root) {
         Ok(r) => r,
         Err(e) => return (e, None),
@@ -480,29 +474,16 @@ fn read_stream_reply(
     (Value::Object(out), Some(chunk))
 }
 
-/// A ROOT-RELATIVE path argument: an absolute one is `bad_arg` (the absolute form
-/// is refused, never silently re-rooted). The declaration judged its type.
-pub(crate) fn rel_path<'a>(verb: &str, name: &str, p: &'a str) -> Result<&'a str, Value> {
-    if is_absolute(p) {
-        return Err(rf::bad(verb, name, "a root-relative path (no leading '/')"));
-    }
-    Ok(p)
-}
-
-/// `rel_path` for a MUTATING verb: the path must name something INSIDE the
-/// root — empty/`.` is `missing_arg`, anything resolving to the root itself is
-/// `bad_arg`, so `delete {path:"", recursive:true}` can never remove the whole
-/// served store: the root is the boundary, not an operand.
+/// A path a MUTATING verb names must be INSIDE the root: one that resolves to the
+/// root itself (`.`) is `bad_arg`, so `delete {path:".", recursive:true}` can never
+/// remove the whole served store — the root is the boundary, not an operand. The
+/// shape of the argument (non-empty, root-relative) is the declaration's.
 fn target_arg<'a>(
     verb: &str,
     root: &Result<PathBuf, String>,
     name: &str,
     p: &'a str,
 ) -> Result<&'a str, Value> {
-    let p = rel_path(verb, name, p)?;
-    if p.is_empty() || p == "." {
-        return Err(rf::missing(verb, name));
-    }
     let root = clamped(root)?;
     match fs::resolve(root, p) {
         Ok(target) if target == root => Err(rf::bad(
@@ -527,10 +508,7 @@ fn write_stream_reply(
     if readonly {
         return readonly_refusal();
     }
-    let path_str = match rel_path("write_stream", "path", &a.path) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
+    let path_str = a.path.as_str();
     let Some(blob) = blob else {
         return rf::missing("write_stream", "bytes (one raw chunk)");
     };
@@ -540,8 +518,7 @@ fn write_stream_reply(
         Ok(r) => r,
         Err(e) => return e,
     };
-    let truncate = a.truncate.unwrap_or(false);
-    match fs::write_chunk(root, path_str, blob, off_in, truncate) {
+    match fs::write_chunk(root, path_str, blob, off_in, a.truncate) {
         Ok((offset, size)) => json!({
             "path": path_str,
             "written": blob.len(),
@@ -562,18 +539,12 @@ fn write_stream_reply(
 /// a sealed end refuses it. A pump ONTO ITS OWN SOURCE (the sink is the source and
 /// `sink_path` names the same file) is refused. Mirrors py `_pump`.
 async fn pump_reply(agent_id: &AgentId, a: &verbs::Pump, kernel: &Arc<Kernel>) -> Value {
-    // an empty text is no end: the ends default to this bridge
-    let or = |v: &Option<String>, fallback: &str| -> String {
-        v.as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(fallback)
-            .to_string()
-    };
-    let src = or(&a.source, agent_id.0.as_str());
-    let sink = or(&a.sink, agent_id.0.as_str());
-    let spath = or(&a.source_path, "");
-    let dpath = or(&a.sink_path, &spath);
-    let chunk = a.chunk.unwrap_or(65536);
+    // an end the call leaves out is this bridge; the sink file is the source's by default
+    let src = a.source.clone().unwrap_or_else(|| agent_id.0.to_string());
+    let sink = a.sink.clone().unwrap_or_else(|| agent_id.0.to_string());
+    let spath = a.source_path.clone();
+    let dpath = a.sink_path.clone().unwrap_or_else(|| spath.clone());
+    let chunk = a.chunk;
     if src == sink && one_file(&spath, &dpath) {
         // The first write's `truncate` empties the file the next read comes from:
         // everything past the first chunk would be lost under a success reply —
@@ -615,7 +586,7 @@ async fn pump_reply(agent_id: &AgentId, a: &verbs::Pump, kernel: &Arc<Kernel>) -
                 format!(
                     "pump: read from {} failed: {}",
                     py_repr(&src),
-                    py_str(&rmeta)
+                    rmeta
                 ),
             );
         };
@@ -628,20 +599,20 @@ async fn pump_reply(agent_id: &AgentId, a: &verbs::Pump, kernel: &Arc<Kernel>) -
             .await
             .remove(0)
             .result;
-        if !wmeta.is_object() || py_truthy(wmeta.get("error").unwrap_or(&Value::Null)) {
+        if !wmeta.is_object() || wmeta.get("error").is_some_and(|e| !e.is_null()) {
             return rf::refusal(
                 rf::TRANSPORT_ERROR,
                 format!(
                     "pump: write to {} failed: {}",
                     py_repr(&sink),
-                    py_str(&wmeta)
+                    wmeta
                 ),
             );
         }
         first = false;
         chunks += 1;
         let next = rmeta.get("next_offset").and_then(Value::as_u64);
-        if py_truthy(rmeta.get("eof").unwrap_or(&Value::Null)) {
+        if rmeta.get("eof").and_then(Value::as_bool) == Some(true) {
             offset = next.unwrap_or(offset);
             break;
         }
@@ -803,25 +774,25 @@ fn exposure(
     let allow = allow_list(meta);
     match call {
         Call::List(a) => {
-            let p = rel_path("list", "path", a.path.as_deref().unwrap_or("")).ok()?;
+            let p = a.path.as_deref().unwrap_or_default();
             if leads_to(&allow, p) {
                 return None;
             }
             gate_path("list", root, &allow, p)
         }
         Call::ReadStream(a) => {
-            let p = rel_path("read_stream", "path", &a.path).ok()?;
+            let p = a.path.as_str();
             gate_path("read_stream", root, &allow, p)
         }
         Call::WatchPath(a) => {
-            let p = rel_path("watch_path", "path", &a.path).ok()?;
+            let p = a.path.as_str();
             gate_path("watch_path", root, &allow, p)
         }
         Call::WriteStream(a) => {
             if readonly {
                 return None;
             }
-            let p = rel_path("write_stream", "path", &a.path).ok()?;
+            let p = a.path.as_str();
             gate_path("write_stream", root, &allow, p)
         }
         Call::Delete(a) => {
@@ -899,12 +870,12 @@ fn reflect_reply(
     out.insert("id".to_string(), json!(agent_id.as_str()));
     out.insert(
         "sentence".to_string(),
-        json!("Filesystem edge of the io family — sealed by default, running-dir only."),
+        json!(MAN),
     );
     out.insert("root".to_string(), json!(root_display));
     out.insert(
         "readonly".to_string(),
-        json!(py_truthy(meta.get("readonly").unwrap_or(&Value::Null))),
+        json!(readonly_flag(meta)),
     );
     out.insert("allow_count".to_string(), json!(allow_list(meta).len()));
     out.insert("edit_grammar".to_string(), json!(EDIT_GRAMMAR));
@@ -923,10 +894,7 @@ fn reflect_reply(
 }
 
 fn list_reply(agent_id: &AgentId, root: &Result<PathBuf, String>, a: &verbs::List) -> Value {
-    let path_str = match rel_path("list", "path", a.path.as_deref().unwrap_or("")) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
+    let path_str = a.path.as_deref().unwrap_or_default();
     let root = match clamped(root) {
         Ok(r) => r,
         Err(e) => return e,
@@ -1031,8 +999,7 @@ fn delete_reply(root: &Result<PathBuf, String>, a: &verbs::Delete, readonly: boo
         (Err(e), _) | (_, Err(e)) => return rf::refusal(rf::TRANSPORT_ERROR, e),
         _ => {}
     }
-    let recursive = a.recursive.unwrap_or(false);
-    match fs::remove(root, path_str, recursive) {
+    match fs::remove(root, path_str, a.recursive) {
         Ok(()) => json!({"path": path_str, "deleted": true}),
         Err(e) => rf::refusal(rf::TRANSPORT_ERROR, e),
     }

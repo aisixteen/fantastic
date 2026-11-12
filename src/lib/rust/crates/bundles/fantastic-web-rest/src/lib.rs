@@ -124,24 +124,12 @@ impl Handler for WebRestBundle {
     }
 }
 
-/// python `web_rest/tools.py::_reflect` — identity + URL patterns
-/// + this leg's auth posture, in python's key order.
+/// `reflect` — identity, what the leg is for and its auth posture; the routes it
+/// mounts are `get_routes`' alone.
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
-    let id = agent_id.as_str();
     let mut out = Map::new();
-    out.insert("id".into(), json!(id));
-    out.insert(
-        "sentence".into(),
-        json!("REST verb-invocation surface; POST /<self>/<target_id> body=payload."),
-    );
-    out.insert("path_pattern".into(), json!(format!("/{id}/{{target_id}}")));
-    out.insert("method".into(), json!("POST"));
-    out.insert("reflect_url".into(), json!(format!("/{id}/_reflect")));
-    out.insert(
-        "reflect_pattern".into(),
-        json!(format!("/{id}/_reflect/{{target_id}}")),
-    );
-    out.insert("auth_header".into(), json!("X-Fantastic-Auth"));
+    out.insert("id".into(), json!(agent_id.as_str()));
+    out.insert("sentence".into(), json!(MAN));
     // The REST face is a CHANNEL — surface its auth posture so a denied client
     // can find the door (discovery-through-denial).
     let meta = kernel

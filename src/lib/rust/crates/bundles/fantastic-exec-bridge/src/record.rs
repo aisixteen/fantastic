@@ -13,7 +13,7 @@ use serde_json::Value;
 /// A non-empty list of non-empty names.
 fn names(_gen: &mut SchemaGenerator) -> Schema {
     serde_json::from_value(serde_json::json!({
-        "type": ["array", "null"],
+        "type": "array",
         "items": {"type": "string", "minLength": 1},
     }))
     .expect("a list schema")
@@ -22,18 +22,18 @@ fn names(_gen: &mut SchemaGenerator) -> Schema {
 /// A non-empty list of regexes.
 fn patterns(_gen: &mut SchemaGenerator) -> Schema {
     serde_json::from_value(serde_json::json!({
-        "type": ["array", "null"],
+        "type": "array",
         "minItems": 1,
         "items": {"type": "string"},
     }))
     .expect("a list schema")
 }
 
-/// A map of NAME to a scalar value.
+/// A map of NAME to its value text.
 fn variables(_gen: &mut SchemaGenerator) -> Schema {
     serde_json::from_value(serde_json::json!({
-        "type": ["object", "null"],
-        "additionalProperties": {"type": ["string", "number", "boolean"]},
+        "type": "object",
+        "additionalProperties": {"type": "string"},
     }))
     .expect("a map schema")
 }
@@ -41,7 +41,7 @@ fn variables(_gen: &mut SchemaGenerator) -> Schema {
 /// `true` (the child's `$SHELL`, bare), `"login"` (`$SHELL -l`) or `false` (none).
 fn shell(_gen: &mut SchemaGenerator) -> Schema {
     serde_json::from_value(serde_json::json!({
-        "anyOf": [{"type": "boolean"}, {"type": "string", "enum": ["login"]}, {"type": "null"}],
+        "anyOf": [{"type": "boolean"}, {"type": "string", "enum": ["login"]}],
     }))
     .expect("a shell schema")
 }
@@ -63,7 +63,7 @@ pub struct Record {
     /// Extra environment of the child: NAME to value.
     #[serde(default)]
     #[schemars(schema_with = "variables")]
-    pub env: Option<BTreeMap<String, Value>>,
+    pub env: Option<BTreeMap<String, String>>,
     /// The kernel's environment variables the child inherits (`["*"]` = all).
     #[serde(default)]
     #[schemars(schema_with = "names")]

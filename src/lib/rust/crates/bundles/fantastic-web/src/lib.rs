@@ -140,6 +140,7 @@ async fn serve(
     let reply = match call {
         verbs::Call::Reflect(_) => reflect_reply(agent_id, kernel).await,
         verbs::Call::Boot(_) => boot_reply(agent_id, kernel).await?,
+        verbs::Call::Shutdown(_) => Value::Null,
         verbs::Call::Stop(_) => stop_reply(agent_id).await,
         verbs::Call::Mount(a) => mount_reply(agent_id, &a.child_id, kernel).await,
         verbs::Call::Unmount(a) => unmount_reply(agent_id, &a.child_id).await,
@@ -238,7 +239,7 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     out.insert("id".into(), json!(agent_id.as_str()));
     out.insert(
         "sentence".into(),
-        json!("HTTP host — rendering routes baked in; call surfaces mounted from sub-agents."),
+        json!(MAN),
     );
     out.insert("port".into(), port.map_or(Value::Null, |p| json!(p)));
     let rec = read_rec(agent_id, kernel);

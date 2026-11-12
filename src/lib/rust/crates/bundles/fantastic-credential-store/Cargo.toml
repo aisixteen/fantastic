@@ -31,6 +31,8 @@ libc = { workspace = true }
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
 
 [dev-dependencies]
+# the private-file fixtures the file-backend tests set modes with
+fantastic-file = { path = "../fantastic-file", features = ["test-support"] }
 # The kernel flushes its execution rows into a memory store; the ledger the
 # tests read back is that store's.
 fantastic-ram-store = { path = "../fantastic-ram-store" }

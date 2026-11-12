@@ -455,10 +455,7 @@ impl RamStoreBundle {
         out.insert("id".to_string(), Value::from(id.0.clone()));
         out.insert(
             "sentence".to_string(),
-            Value::from(
-                "Memory store in RAM — rows per owner (the caller), folds, search; \
-                 ephemeral: everything is lost when the process exits.",
-            ),
+            Value::from(MAN),
         );
         out.insert("durable".to_string(), Value::Bool(false));
         out.insert("owners".to_string(), Value::from(owners));
@@ -541,7 +538,7 @@ impl RamStoreBundle {
             };
             // Borrowed, never cloned: a filter reads one field of each row.
             let field = |i: &i64, k: &str| t.row(&owner, *i).and_then(|r| r.get(k));
-            if let Some(flk) = a.from_last_kind.as_deref().filter(|s| !s.is_empty()) {
+            if let Some(flk) = a.from_last_kind.as_deref() {
                 let last = t
                     .ids(&owner)
                     .iter()
@@ -552,10 +549,10 @@ impl RamStoreBundle {
                     ids.retain(|i| *i >= last);
                 }
             }
-            if let Some(kinds) = a.kinds.as_ref().filter(|k| !k.is_empty()) {
+            if let Some(kinds) = a.kinds.as_ref() {
                 ids.retain(|i| kinds.contains(field(i, "kind").unwrap_or(&Value::Null)));
             }
-            if let Some(m) = a.r#match.as_ref().filter(|m| !m.is_empty()) {
+            if let Some(m) = a.r#match.as_ref() {
                 ids.retain(|i| {
                     m.iter()
                         .all(|(k, v)| field(i, k).unwrap_or(&Value::Null) == v)
@@ -577,8 +574,7 @@ impl RamStoreBundle {
                 ids.retain(|i| *i < b);
             }
             let total = ids.len();
-            // `limit` 0 is no limit.
-            let limit = a.limit.filter(|l| *l != 0);
+            let limit = a.limit;
             let page: Vec<i64> = match limit {
                 Some(l) => ids
                     .iter()
@@ -611,18 +607,15 @@ impl RamStoreBundle {
                 Err(e) => return e,
             };
             let mut ids = t.ids(&owner);
-            if let Some(want) = a.ids.as_ref().filter(|w| !w.is_empty()) {
+            if let Some(want) = a.ids.as_ref() {
                 let mut scope: HashSet<i64> = HashSet::new();
                 for rid in want {
                     scope.extend(fold_closure(t, &owner, *rid));
                 }
                 ids.retain(|i| scope.contains(i));
             }
-            // a `0` falls back to the default too
-            let limit = a.limit.filter(|l| *l != 0).unwrap_or(100);
-            let width = a.width.filter(|w| *w != 0).unwrap_or(200);
-            let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-            let width = usize::try_from(width).unwrap_or(usize::MAX);
+            let limit = usize::try_from(a.limit).unwrap_or(usize::MAX);
+            let width = usize::try_from(a.width).unwrap_or(usize::MAX);
             let mut matches: Vec<Value> = Vec::new();
             let mut total = 0usize;
             for i in &ids {

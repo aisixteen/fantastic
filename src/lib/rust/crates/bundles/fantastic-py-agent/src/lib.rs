@@ -48,8 +48,13 @@ pub const SECURITY: &str = "a py_agent program runs with the user's OS rights �
                             subprocesses, files and network never pass a gate";
 /// Chars of the program's stderr kept for its instance's reflect.
 pub const STDERR_TAIL: usize = 2000;
-/// Verbs the kernel and this base answer; a bundle cannot declare them.
-const RESERVED: [&str; 3] = ["reflect", "boot", "shutdown"];
+/// Is `verb` one the kernel or this base answers (a bundle cannot declare it)? The
+/// declared lists say, not a second copy.
+fn reserved(verb: &str) -> bool {
+    [verbs::VERBS, fantastic_kernel::declared::common::VERBS]
+        .iter()
+        .any(|list| list.iter().any(|v| v.name == verb))
+}
 
 // ─── the base itself ────────────────────────────────────────────────
 
@@ -117,8 +122,7 @@ impl Handler for PyAgentBundle {
         match call {
             verbs::Call::Reflect(_) => Ok(Some(json!({
                 "id": agent_id.as_str(),
-                "sentence": "The base a folder bundle with a program extends — create an \
-                             agent of the bundle, not of py_agent.",
+                "sentence": MAN,
             }))),
             verbs::Call::Boot(_) | verbs::Call::Shutdown(_) | verbs::Call::Dynamic(_) => {
                 Ok(Some(refusal(
@@ -179,7 +183,7 @@ impl FolderBundle {
         let taken: Vec<&str> = verbs
             .keys()
             .map(String::as_str)
-            .filter(|v| RESERVED.contains(v))
+            .filter(|v| reserved(v))
             .collect();
         if !taken.is_empty() {
             return Err(format!(

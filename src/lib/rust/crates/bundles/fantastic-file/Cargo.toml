@@ -39,5 +39,9 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Threading",
 ] }
 
+[features]
+# the private-file test fixtures (set a mode, read it back) for a dependent crate's tests
+test-support = []
+
 [dev-dependencies]
 tempfile = "3"

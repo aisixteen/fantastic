@@ -44,7 +44,7 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use fantastic_bundle::{io_error_str, py_repr, py_repr_value, py_str, py_truthy};
+use fantastic_bundle::{io_error_str, py_repr, py_repr_value};
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::refusal::{
     bad, refusal, refusal_hint, with, MISSING_ARG, NOT_FOUND, TRANSPORT_ERROR,
@@ -207,14 +207,10 @@ pub fn shell_tail(meta: &Map<String, Value>) -> Option<Vec<String>> {
     }
 }
 
-/// One var of the child's environment as the CHILD will see it. python's
-/// `_child_env` stringifies every `env` extra (`str(v)`), so a non-string value is
-/// read the way python prints it.
+/// One var of the child's environment as the CHILD will see it (the record
+/// declares every value a string).
 fn child_var(env: &Map<String, Value>, name: &str) -> Option<String> {
-    env.get(name).map(|v| match v {
-        Value::String(s) => s.clone(),
-        other => py_str(other),
-    })
+    env.get(name).and_then(Value::as_str).map(str::to_string)
 }
 
 /// True when `argv` is exactly the shell line the record's `shell` permits: a PTY
@@ -252,7 +248,7 @@ fn verb_name(call: &verbs::Call) -> &str {
     use verbs::Call;
     match call {
         Call::Reflect(_) => "reflect",
-        Call::Boot(_) => "boot",
+        Call::Shutdown(_) => "shutdown",
         Call::Start(_) => "start",
         Call::Run(_) => "run",
         Call::Status(_) => "status",
@@ -390,7 +386,7 @@ impl Handler for ExecBridgeBundle {
         }
         let reply = match call {
             Call::Reflect(_) => reflect_reply(agent_id, kernel),
-            Call::Boot(_) => Value::Null,
+            Call::Shutdown(_) => Value::Null,
             Call::Start(a) => {
                 start_reply(agent_id, a.command.as_deref(), a.args, a.pty, kernel).await
             }
@@ -416,22 +412,7 @@ impl Handler for ExecBridgeBundle {
             // The reference wire client SOURCE — a model pastes it at the top of
             // its program instead of re-deriving the socket framing (int(fd),
             // buffering, not-seekable). Ungated like reflect.
-            Call::Connector(_) => json!({
-                "source": CONNECTOR_SRC,
-                "howto": "Write `source` verbatim as the first lines of your program file, then \
-                          your code below it. It opens FANTASTIC_CTRL_FD (a socket, length-prefixed \
-                          frames; a payload carrying a bytes value rides the binary channel raw: \
-                          `write_stream` puts its chunk in `bytes`, `read_stream` passes `bytes: b''` \
-                          and gets its chunk back raw in the reply's `bytes`) and \
-                          exposes `kernel.send(target, payload) -> reply` (raises if \
-                          the relay could not deliver), \
-                          `kernel.emit(payload)`, `kernel.watch(src, cb)`, `kernel.on_message(cb)`, \
-                          `kernel.self_id`. Arguments arrive as ARGV, like any command — there is \
-                          no `kernel.args`. One frame caps at 16 MiB; move more than that with \
-                          `write_stream` chunks. Your sends carry THIS runner's identity \
-                          and grants (its `can_call`; a target must list this runner in \
-                          `callable_by`). Do not rewrite the wire by hand.",
-            }),
+            Call::Connector(_) => json!({"source": CONNECTOR_SRC}),
             Call::DeclareVerbs(a) => mail::declare_reply(agent_id, &a),
             // MAIL — a verb the running program declared, its arguments already
             // checked against the declared schema. The substrate's fanout has ALREADY
@@ -574,18 +555,15 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         .count();
     let mut out = json!({
         "id": agent_id.as_str(),
-        // Py-canonical sentence — the ALLOWLIST is advertised so an authoring
-        // model can see what it may run without guessing.
-        "sentence": "Process edge of the io family — a general-purpose COMMAND runner, sealed by default, gated by the `allowed` regexes. Spawns commands in the background; a child may speak the kernel over a private control fd.",
+        "sentence": MAN,
         "cwd": cwd_val,
         // THE GATE, advertised: a caller must see what it may run, where, and with
         // which of the kernel's env vars.
         "allowed": allowed_patterns(&meta),
         "inherit_env": meta.get("inherit_env").cloned().unwrap_or_else(|| json!([])),
         // The shell line the record permits without an `allowed` entry: false
-        // (none), true ($SHELL bare) or "login" ($SHELL -l). py `rec.get("shell")
-        // or False` — any falsy value reads as false.
-        "shell": meta.get("shell").filter(|v| py_truthy(v)).cloned().unwrap_or(json!(false)),
+        // (none), true ($SHELL bare) or "login" ($SHELL -l).
+        "shell": meta.get("shell").cloned().unwrap_or(json!(false)),
         "running": running,
     });
     // The auth POSTURE, python's `describe(rec)` — `**_describe(rec)` is the last
@@ -672,11 +650,8 @@ fn no_job(agent_id: &AgentId, want: Option<&JobRef>) -> Option<Value> {
     }
 }
 
-/// A job named by a caller: the value AS SENT — every refusal echoes it — and the
-/// task id it names.
+/// A job named by a caller: the kernel task id it names.
 pub(crate) struct JobRef {
-    /// The `job_id`, as sent.
-    pub(crate) raw: Value,
     /// The kernel task id it names.
     pub(crate) id: TaskId,
 }
@@ -684,10 +659,7 @@ pub(crate) struct JobRef {
 impl JobRef {
     /// The job a call named by its task id.
     pub(crate) fn of(id: i64) -> Self {
-        Self {
-            raw: json!(id),
-            id: TaskId(id),
-        }
+        Self { id: TaskId(id) }
     }
 
     /// This agent's row for the named job, when there is one. A job of ANOTHER
@@ -706,9 +678,9 @@ impl JobRef {
 pub(crate) fn no_such_job(jid: &JobRef) -> Value {
     let mut v = refusal(
         NOT_FOUND,
-        format!("exec_bridge: no job {}", py_repr_value(&jid.raw)),
+        format!("exec_bridge: no job {}", jid.id.0),
     );
-    with(&mut v, "job_id", jid.raw.clone());
+    with(&mut v, "job_id", json!(jid.id.0));
     v
 }
 
@@ -1136,7 +1108,7 @@ async fn status_reply(agent_id: &AgentId, a: &verbs::Status) -> Value {
 ///
 /// `wait_s` (default 60, 0–600) bounds the wait exactly like `status`'s: the job
 /// is polled every 200 ms and the reply comes as soon as it is no longer
-/// `running`/`stopping`. `tail` (default 200, 1–2000) is how many of its last
+/// `running`/`stopping`. `tail` (default 200, 1–500) is how many of its last
 /// lines come back. A job still running at the deadline is returned `running`
 /// with its `job_id`, so the caller continues with `status wait_s` / `tail`.
 async fn run_reply(agent_id: &AgentId, a: verbs::Run, kernel: &Arc<Kernel>) -> Value {
@@ -1170,14 +1142,7 @@ async fn run_reply(agent_id: &AgentId, a: verbs::Run, kernel: &Arc<Kernel>) -> V
             None => ("running".to_string(), None),
         }
     };
-    // `tail`'s reply carries at most its ring's 500 lines; `run`'s wider cap is
-    // clamped rather than refused, so a large `tail` never turns into a bad_arg.
-    let mut reply = tail::tail_reply(
-        agent_id,
-        &jid,
-        tail.min(tail::MAX_LINES),
-        verbs::Stream::Both,
-    );
+    let mut reply = tail::tail_reply(agent_id, &jid, tail, verbs::Stream::Both);
     with(&mut reply, "status", json!(status));
     with(&mut reply, "exit_code", json!(exit_code));
     reply
@@ -1200,7 +1165,7 @@ fn clear_reply(agent_id: &AgentId, want: Option<&JobRef>) -> Value {
                     "job_id",
                     &format!(
                         "a finished job (job {} is {} — `stop` it, then clear)",
-                        py_str(&jid.raw),
+                        jid.id.0,
                         j.status
                     ),
                 );

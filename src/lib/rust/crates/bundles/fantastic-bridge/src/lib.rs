@@ -117,11 +117,11 @@ pub enum Family {
 }
 
 impl Family {
-    /// python's `SENTENCE` for this derivation.
+    /// What this derivation is for — its one man text.
     fn sentence(self) -> &'static str {
         match self {
-            Family::Ws => "Cross-kernel comms bridge — WS-only, asymmetric (no peer bridge needed); weak proxy.",
-            Family::Relay => "Cross-kernel comms through a relay-kernel router — dial-out WS, group-password auth (X-Fantastic-Auth), GUID-routed; symmetric RPC tunneled over the relay; auto-reconnecting.",
+            Family::Ws => WS_MAN,
+            Family::Relay => RELAY_MAN,
         }
     }
 }
@@ -445,6 +445,7 @@ impl Handler for WsBridgeBundle {
         let reply = match call {
             verbs::ws::Call::Reflect(_) => reflect_reply(family, agent_id, kernel),
             verbs::ws::Call::Boot(_) => boot_reply(family, agent_id, kernel).await,
+            verbs::ws::Call::Shutdown(_) => Value::Null,
             verbs::ws::Call::Reconnect(_) => reconnect_reply(family, agent_id, kernel).await,
             verbs::ws::Call::Forward(a) => {
                 let (v, b) = forward_call(agent_id, a, body, kernel).await;
@@ -530,6 +531,7 @@ impl Handler for RelayConnectorBundle {
         let reply = match call {
             verbs::relay::Call::Reflect(_) => reflect_reply(family, agent_id, kernel),
             verbs::relay::Call::Boot(_) => boot_reply(family, agent_id, kernel).await,
+            verbs::relay::Call::Shutdown(_) => Value::Null,
             verbs::relay::Call::Reconnect(_) => reconnect_reply(family, agent_id, kernel).await,
             verbs::relay::Call::Forward(a) => {
                 let (v, b) = forward_call(agent_id, a, body, kernel).await;

@@ -33,15 +33,6 @@ use std::sync::Arc;
 /// The handler module id a record names to select this bundle.
 pub const HANDLER_MODULE: &str = "cli.tools";
 
-/// The CLI cheatsheet `fantastic --help` prints — python's `cli/help.md`, byte
-/// for byte. It lives in THIS bundle because the CLI is what renders it:
-/// file-backed, editable markdown, not a hardcoded string. The binary prints it
-/// `rstrip`ped plus one `\n`, exactly as python's `print(src.read_text().rstrip())`.
-pub const HELP: &str = include_str!("help.md");
-
-/// The events this sink renders. Anything else is dropped.
-pub const ACCEPTS: [&str; 6] = ["token", "done", "say", "error", "status", "context"];
-
 // ─── the verbs ───────────────────────────────────────────────────────
 
 /// Writes `text` to stdout (no newline).
@@ -86,11 +77,37 @@ pub struct ErrorLine {
     pub client_id: Option<String>,
 }
 
+/// The phases of a turn a status marks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusPhase {
+    /// Waiting behind other turns.
+    Queued,
+    /// The model is thinking.
+    Thinking,
+    /// A tool call is made or answered.
+    ToolCalling,
+    /// The reply is streaming (no output: `token` covers it).
+    Streaming,
+    /// The turn ended (no output: `done` covers it).
+    Done,
+}
+
+/// The phases of a context notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextPhase {
+    /// Older messages were folded away.
+    Compacted,
+    /// The context window is too small for the turn.
+    TooSmall,
+}
+
 /// Renders one-line phase markers for queued / thinking / tool_calling (entry and exit); `streaming` and `done` produce no output (token and done cover them).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct Status {
     /// The phase.
-    pub phase: String,
+    pub phase: StatusPhase,
     /// Who is in the phase.
     pub source: Option<String>,
     /// Whose conversation it belongs to.
@@ -104,8 +121,8 @@ pub struct Status {
 /// Renders a one-line context-protocol notice for the phase `compacted` or `too_small`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct Context {
-    /// `compacted` or `too_small`.
-    pub phase: String,
+    /// The notice.
+    pub phase: ContextPhase,
     /// Who it concerns.
     pub source: Option<String>,
     /// Whose conversation it belongs to.
@@ -192,13 +209,13 @@ fn write(text: &str) {
 fn render_status(args: &Status) -> Option<String> {
     let detail = args.detail.clone().unwrap_or_default();
     let prefix = line_prefix(args.source.as_deref());
-    let line = match args.phase.as_str() {
-        "queued" => {
+    let line = match args.phase {
+        StatusPhase::Queued => {
             let ahead = text_or(&detail, "ahead", "0");
             format!("{prefix} queued ({ahead} ahead)")
         }
-        "thinking" => format!("{prefix} thinking…"),
-        "tool_calling" => {
+        StatusPhase::Thinking => format!("{prefix} thinking…"),
+        StatusPhase::ToolCalling => {
             let tool = detail
                 .get("tool")
                 .and_then(Value::as_object)
@@ -224,30 +241,28 @@ fn render_status(args: &Status) -> Option<String> {
         }
         // `streaming` and `done` are SILENT here: the token + done verbs
         // already cover them, and printing twice would double the stream.
-        _ => return None,
+        StatusPhase::Streaming | StatusPhase::Done => return None,
     };
     Some(line)
 }
 
-/// `_context` — one line, or `None` for an unknown phase.
-fn render_context(args: &Context) -> Option<String> {
+/// `_context` — one line.
+fn render_context(args: &Context) -> String {
     let detail = args.detail.clone().unwrap_or_default();
     let prefix = line_prefix(args.source.as_deref());
-    let line = match args.phase.as_str() {
-        "compacted" => {
+    match args.phase {
+        ContextPhase::Compacted => {
             let strat = text_or(&detail, "strategy", "?");
             let dropped = text_or(&detail, "dropped_messages", "0");
             format!(
                 "{prefix} ⟲ context compacted ({strat}, {dropped} dropped; recall to page back)"
             )
         }
-        "too_small" => {
+        ContextPhase::TooSmall => {
             let hint = text_or(&detail, "hint", "");
             format!("{prefix} ✗ context too small — {hint}")
         }
-        _ => return None,
-    };
-    Some(line)
+    }
 }
 
 // ─── two-phase PTY intro (first contact) ────────────────────────
@@ -272,24 +287,12 @@ fn identity(kernel: &Kernel) -> String {
     parts.join(" · ")
 }
 
-/// The five lines python's `_intro_booting` prints.
+/// The lines the first PTY push prints: the identity, and where the map is (the
+/// verbs themselves are rendered by `reflect` and `docs`, never listed here).
 pub fn intro_booting_lines(kernel: &Kernel) -> Vec<String> {
     vec![
         format!("[fantastic] {} — booting…", identity(kernel)),
-        concat!(
-            "  one envelope: send(<id>, {\"type\":\"<verb>\", …})",
-            "   ·   kernel = root   ·   full map: reflect · verbs: docs of=<id>"
-        )
-        .to_string(),
-        "  PULL  ask → reply        REST POST /<rest>/<id>        ·  this REPL: @<id> <verb> k=v"
-            .to_string(),
-        "  PUSH  async stream/emit  WS /<id>/ws : watch{src} · emit{target,payload} · state_subscribe"
-            .to_string(),
-        concat!(
-            "  REACH one call by id, any unit: ",
-            "compute(exec_bridge) · infer(ai) · memory(file_bridge) · shell(exec_bridge pty)"
-        )
-        .to_string(),
+        "  full map: reflect · verbs: docs of=<id>".to_string(),
     ]
 }
 
@@ -335,8 +338,7 @@ impl Handler for CliBundle {
             Call::Reflect(_) => {
                 return Ok(Some(json!({
                     "id": agent_id.as_str(),
-                    "sentence": "Terminal renderer. Prints incoming events to stdout.",
-                    "accepts": ACCEPTS,
+                    "sentence": MAN,
                 })));
             }
             Call::Token(a) => {
@@ -352,9 +354,7 @@ impl Handler for CliBundle {
                 }
             }
             Call::Context(a) => {
-                if let Some(line) = render_context(&a) {
-                    write(&format!("{line}\n"));
-                }
+                write(&format!("{}\n", render_context(&a)));
             }
             Call::IntroBooting(_) => {
                 for line in intro_booting_lines(kernel) {

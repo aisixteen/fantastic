@@ -305,16 +305,21 @@ async fn s_prune_keep_is_a_list_of_kinds(t: &mut T) {
 }
 conform!(prune_keep_is_a_list_of_kinds, s_prune_keep_is_a_list_of_kinds);
 
-async fn s_a_zero_limit_is_no_limit(t: &mut T) {
+async fn s_a_zero_limit_is_refused(t: &mut T) {
     t.append("alice", json!([{"id": 1, "kind": "msg", "content": "x one"}, {"id": 2, "kind": "msg", "content": "x two"}])).await;
-    let r = t.call(json!({"type": "read", "limit": 0}), Some("alice")).await;
+    for (payload, arg) in [
+        (json!({"type": "read", "limit": 0}), "limit"),
+        (json!({"type": "search", "query": "x", "limit": 0}), "limit"),
+        (json!({"type": "search", "query": "x", "width": 0}), "width"),
+    ] {
+        let r = t.call(payload.clone(), Some("alice")).await;
+        assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some(arg)), "{payload}: {r}");
+    }
+    let r = t.call(json!({"type": "read"}), Some("alice")).await;
     assert_eq!(ids(&r).len(), 2, "{r}");
     assert_eq!(r["next"], Value::Null);
-    let r = t.call(json!({"type": "search", "query": "x", "limit": 0, "width": 0}), Some("alice")).await;
-    assert_eq!(r["matches"].as_array().unwrap().len(), 2, "{r}");
-    assert_eq!(r["matches"][0]["text"], "x one", "width 0 falls back to 200");
 }
-conform!(a_zero_limit_is_no_limit, s_a_zero_limit_is_no_limit);
+conform!(a_zero_limit_is_refused, s_a_zero_limit_is_refused);
 
 async fn s_digit_string_refs_are_refused_as_not_row_ids(t: &mut T) {
     let first = t.append("alice", json!([{"id": 4, "kind": "msg", "content": "a"}])).await;

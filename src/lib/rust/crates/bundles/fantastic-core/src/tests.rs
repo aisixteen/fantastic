@@ -124,7 +124,7 @@ async fn full_root_frame_key_order_is_pythons() {
         .filter(|k| {
             matches!(
                 *k,
-                "runtime" | "env" | "version" | "persistence" | "guid" | "self_extension"
+                "runtime" | "env" | "version" | "persistence" | "guid"
             )
         })
         .collect();
@@ -135,49 +135,10 @@ async fn full_root_frame_key_order_is_pythons() {
             "env",
             "version",
             "persistence",
-            "guid",
-            "self_extension"
+            "guid"
         ],
         "{keys:?}"
     );
-}
-
-/// The FULL `self_extension` is python's text VERBATIM — and it ends at
-/// `work as before.`, with no rust-only fd-wire tail sentence.
-#[tokio::test]
-async fn full_self_extension_is_python_verbatim() {
-    let tmp = TempDir::new().unwrap();
-    let kernel = booted(&tmp);
-    let v = root_reflect(
-        &kernel,
-        json!({"type": "reflect", "detail": "full", "tree": "none"}),
-    )
-    .await;
-    let se = v["self_extension"].as_str().unwrap();
-    assert_eq!(se, SELF_EXTENSION_FULL);
-    assert!(
-        se.ends_with("work as before."),
-        "the rust-only fd-wire tail must be gone: {}",
-        &se[se.len() - 120..]
-    );
-    assert!(!se.contains("for the fd wire + detail."));
-}
-
-/// The SHORT pointer still states the FILE + command model — a model that lacks
-/// it writes something that cannot work, and the weak models never follow the
-/// pointer to go read the manual.
-#[tokio::test]
-async fn distilled_self_extension_states_the_file_and_command_model() {
-    let tmp = TempDir::new().unwrap();
-    let kernel = booted(&tmp);
-    let v = root_reflect(&kernel, json!({"type": "reflect", "tree": "none"})).await;
-    let se = v["self_extension"].as_str().unwrap();
-    assert_eq!(se, SELF_EXTENSION_SHORT);
-    assert!(se.contains("no `code` field"));
-    assert!(se.contains("write_stream"));
-    assert!(se.contains("`bytes` verbatim"));
-    assert!(se.contains("exec_bridge.tools"));
-    assert!(se.contains("can_call") && se.contains("callable_by"));
 }
 
 /// An unknown verb on the loader is python's CODED refusal, verbatim.
@@ -189,11 +150,11 @@ async fn unknown_type_refusal_is_verbatim() {
     // the KERNEL refuses a verb the bundle does not declare, naming what it answers
     let error = v["error"].as_str().unwrap();
     assert!(
-        error.starts_with("unknown verb 'wat'; kernel_state answers: boot, load_tree, "),
+        error.starts_with("unknown verb 'wat'; kernel_state answers: boot, shutdown, load_tree, "),
         "{error}"
     );
     assert!(
-        error.contains("export_subtree, reflect, shutdown"),
+        error.contains("export_subtree, reflect"),
         "{error}"
     );
     assert_eq!(v["reason"], json!("unhandled"));
@@ -1009,8 +970,8 @@ async fn a_loader_without_a_root_in_a_kernel_with_no_running_dir_raises() {
 async fn unknown_type_wire_shape_is_byte_exact() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);
-    let answers = "boot, load_tree, persist_record, forget_record, persist_blob, load_blob, \
-                   reload_bundle, read_bundles, export_subtree, reflect, shutdown";
+    let answers = "boot, shutdown, load_tree, persist_record, forget_record, persist_blob, \
+                   load_blob, reload_bundle, read_bundles, export_subtree, reflect";
     for verb in ["wat", "it's"] {
         let v = root_reflect(&kernel, json!({"type": verb})).await;
         let want = json!({
@@ -1026,7 +987,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
             "{verb}"
         );
     }
-    // `shutdown` is answered by every agent: this bundle has nothing to release
+    // `shutdown` is a verb this bundle declares; the record writer lands in its hook
     let v = root_reflect(&kernel, json!({"type": "shutdown"})).await;
     assert!(v.is_null(), "{v}");
 }
@@ -1088,7 +1049,7 @@ async fn read_bundles_refuses_what_is_no_folder() {
     let root = kernel.root().expect("root").id.0.clone();
     for (name, reason) in [
         ("nope", "not_found"),
-        ("../x", "not_found"),
+        ("../x", "bad_arg"),
         ("", "bad_arg"),
     ] {
         let r = ask(
@@ -1221,7 +1182,7 @@ async fn root_export_subtree_refuses_the_root_id_and_unknown_id_and_bad_args() {
         (
             json!({"type": "export_subtree", "agent_id": "a", "path": "../o4"}),
             "bad_arg",
-            "kernel_state.export_subtree:",
+            "export_subtree:",
         ),
     ] {
         let r = root_reflect(&kernel, p.clone()).await;

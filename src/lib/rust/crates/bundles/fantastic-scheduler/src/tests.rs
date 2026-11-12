@@ -814,7 +814,7 @@ async fn non_int_args_are_bad_arg_refusals() {
         .result;
     assert_eq!(ok["schedule"]["interval_seconds"], json!(60), "{ok}");
 
-    for bad_value in [json!("100"), json!(2.0), json!(true), json!(null), json!(0)] {
+    for bad_value in [json!("100"), json!(2.0), json!(true), json!(null), json!(0), json!(100000)] {
         let h = kernel
             .send(vec![Item::new(
                 sch.clone(),
@@ -826,19 +826,7 @@ async fn non_int_args_are_bad_arg_refusals() {
         assert_eq!(h["reason"], json!("bad_arg"), "{bad_value}: {h}");
         assert_eq!(h["arg"], json!("limit"), "{bad_value}: {h}");
     }
-    // a `limit` above 500 is clamped to 500, not refused.
-    let big = kernel
-        .send(vec![Item::new(
-            sch.clone(),
-            json!({"type": "history", "limit": 100000}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert!(
-        big.get("history").is_some() && big.get("reason").is_none(),
-        "{big}"
-    );
+    // a `limit` above 500 is refused by the declared maximum (in the loop above).
     // ABSENT `limit` is the default page, not a refusal.
     let h = kernel
         .send(vec![Item::new(sch.clone(), json!({"type": "history"}))])

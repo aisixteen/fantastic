@@ -863,16 +863,7 @@ pub async fn export_subtree(
     path: &str,
     who: &str,
 ) -> Value {
-    if agent_id.is_empty() || path.is_empty() {
-        return refuse(
-            "bad_arg",
-            format!("{who}: agent_id and path must not be empty"),
-        );
-    }
     let rel = Path::new(path);
-    if rel.components().any(|c| c == Component::ParentDir) {
-        return refuse("bad_arg", format!("{who}: path may not hold `..`"));
-    }
     let base = match kernel.work_dir() {
         Ok(b) => b,
         Err(e) => return refuse("failed", format!("{who}: {e}")),

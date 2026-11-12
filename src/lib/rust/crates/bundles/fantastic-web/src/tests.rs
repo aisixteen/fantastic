@@ -1941,7 +1941,7 @@ async fn reflect_sentence_and_verbs_match_python() {
     );
     assert_eq!(
         obj["sentence"],
-        json!("HTTP host — rendering routes baked in; call surfaces mounted from sub-agents.")
+        json!(crate::MAN)
     );
     assert_eq!(obj["port"], json!(port));
     assert_eq!(obj["running"], json!(true));

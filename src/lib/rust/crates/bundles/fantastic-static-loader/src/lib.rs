@@ -300,7 +300,7 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
 fn reflect_reply(agent: &Agent) -> Value {
     json!({
         "id": agent.id.0,
-        "sentence": "declarative YAML roster loader",
+        "sentence": MAN,
         // python `agent.display_name or id`: an EMPTY name is no name.
         "display_name": agent
             .display_name()

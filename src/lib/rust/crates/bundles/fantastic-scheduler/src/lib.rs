@@ -213,6 +213,7 @@ impl Handler for SchedulerBundle {
         let reply = match call {
             verbs::Call::Reflect(_) => reflect_reply(agent_id, kernel),
             verbs::Call::Boot(_) => boot_reply(agent_id, kernel).await,
+            verbs::Call::Shutdown(_) => Value::Null,
             verbs::Call::Schedule(a) => schedule_reply(agent_id, a, kernel).await,
             verbs::Call::Unschedule(a) => unschedule_reply(agent_id, &a.schedule_id, kernel).await,
             verbs::Call::List(_) => list_reply(agent_id, kernel).await,
@@ -441,13 +442,7 @@ async fn read_history(agent_id: &AgentId, kernel: &Arc<Kernel>, limit: usize) ->
         return Vec::new();
     }
     let events = parse_events(&raw);
-    // python `_parse_events(raw)[-limit:]` — `[-0:]` is the whole list.
-    let from = if limit == 0 {
-        0
-    } else {
-        events.len().saturating_sub(limit)
-    };
-    events[from..].to_vec()
+    events[events.len().saturating_sub(limit)..].to_vec()
 }
 
 /// One event as one stream document (python `yaml_io.row_to_doc(event)`).
@@ -646,7 +641,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         .unwrap_or(false);
     json!({
         "id": agent_id.as_str(),
-        "sentence": "Recurring-task scheduler.",
+        "sentence": MAN,
         "paused": meta_truthy(agent_id, kernel, "paused"),
         "running": running,
     })
@@ -861,7 +856,7 @@ async fn tick_now_reply(agent_id: &AgentId, sid: &str, kernel: &Arc<Kernel>) -> 
 }
 
 async fn history_reply(agent_id: &AgentId, a: verbs::History, kernel: &Arc<Kernel>) -> Value {
-    let limit = a.limit.min(500) as usize;
+    let limit = a.limit as usize;
     // every fire, then the newest `limit` of them.
     let fires: Vec<Value> = read_history(agent_id, kernel, 2 * HISTORY_MAX).await;
     let from = fires.len().saturating_sub(limit);

@@ -654,10 +654,7 @@ impl SqliteStoreBundle {
         out.insert("id".to_string(), Value::from(id.0.clone()));
         out.insert(
             "sentence".to_string(),
-            Value::from(
-                "Memory store in SQLite — rows per owner (the caller), folds, search; \
-                 durable: one database file, the tables survive the process.",
-            ),
+            Value::from(MAN),
         );
         out.insert("durable".to_string(), Value::Bool(true));
         out.insert(
@@ -723,7 +720,7 @@ impl SqliteStoreBundle {
     fn read(&self, id: &AgentId, a: &verbs::Read, kernel: &Arc<Kernel>) -> Value {
         self.tx(id, kernel, |db| {
             let (owner, _) = caller(kernel)?;
-            let flk = a.from_last_kind.as_deref().filter(|s| !s.is_empty());
+            let flk = a.from_last_kind.as_deref();
             let after = a.after;
             let before = a.before;
             let desc = a.order == Some(verbs::Order::Desc);
@@ -744,7 +741,7 @@ impl SqliteStoreBundle {
             // Rows are decoded only when a filter reads them, and only the ids
             // still in play.
             let needs_rows = flk.is_some()
-                || a.kinds.as_ref().is_some_and(|k| !k.is_empty())
+                || a.kinds.is_some()
                 || a.r#match.as_ref().is_some_and(|m| !m.is_empty());
             let (mut ids, rows) = if !needs_rows {
                 (db.ids_between(&owner, lo, hi).map_err(db_err)?, HashMap::new())
@@ -783,10 +780,10 @@ impl SqliteStoreBundle {
                     ids.retain(|i| *i >= last);
                 }
             }
-            if let Some(kinds) = a.kinds.as_ref().filter(|k| !k.is_empty()) {
+            if let Some(kinds) = a.kinds.as_ref() {
                 ids.retain(|i| kinds.contains(&row_of(i).get("kind").cloned().unwrap_or(Value::Null)));
             }
-            if let Some(m) = a.r#match.as_ref().filter(|m| !m.is_empty()) {
+            if let Some(m) = a.r#match.as_ref() {
                 ids.retain(|i| {
                     let r = row_of(i);
                     m.iter().all(|(k, v)| r.get(k).unwrap_or(&Value::Null) == v)
@@ -808,8 +805,7 @@ impl SqliteStoreBundle {
                 ids.retain(|i| *i < b);
             }
             let total = ids.len();
-            // `limit` 0 is no limit.
-            let limit = a.limit.filter(|l| *l != 0);
+            let limit = a.limit;
             let page: Vec<i64> = match limit {
                 Some(l) => ids.iter().take(usize::try_from(l).unwrap_or(usize::MAX)).copied().collect(),
                 None => ids.clone(),
@@ -833,7 +829,7 @@ impl SqliteStoreBundle {
         self.tx(id, kernel, |db| {
             let (owner, _) = caller(kernel)?;
             let mut ids = db.ids(&owner).map_err(db_err)?;
-            if let Some(want) = a.ids.as_ref().filter(|w| !w.is_empty()) {
+            if let Some(want) = a.ids.as_ref() {
                 let mut scope: HashSet<i64> = HashSet::new();
                 for rid in want {
                     scope.extend(fold_closure(db, &owner, *rid).map_err(db_err)?);
@@ -853,9 +849,8 @@ impl SqliteStoreBundle {
                     .map_err(db_err)?;
                 found
             };
-            // a `0` falls back to the default too
-            let limit = usize::try_from(a.limit.filter(|l| *l != 0).unwrap_or(100)).unwrap_or(usize::MAX);
-            let width = usize::try_from(a.width.filter(|w| *w != 0).unwrap_or(200)).unwrap_or(usize::MAX);
+            let limit = usize::try_from(a.limit).unwrap_or(usize::MAX);
+            let width = usize::try_from(a.width).unwrap_or(usize::MAX);
             let mut matches: Vec<Value> = Vec::new();
             let mut total = 0usize;
             for i in &ids {
