@@ -332,6 +332,9 @@ pub mod common {
         /// The installable bundles: `all` with their record schemas, `ids` the names.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub bundles: Option<BundlesKind>,
+        /// With `bundles=all`, only these bundles (names as `bundles=ids` lists them).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub bundle_names: Option<Vec<String>>,
         /// A page size for `tree=ids` and `bundles`.
         #[schemars(range(min = 1))]
         #[serde(skip_serializing_if = "Option::is_none")]

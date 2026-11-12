@@ -638,10 +638,10 @@ async fn folds_at_a_small_window_and_every_turn_answers() {
     set(
         &kernel,
         &backend,
-        // 13200, not S8's 12000: the window is a band around the system prompt's size
-        // (the routing-form how-to grew it); outside the band no fold batch makes a
+        // 13600, not S8's 12000: the window is a band around the system prompt's size
+        // (the routing-form and reflect how-tos grew it); outside the band no fold batch makes a
         // recall due inside these eight turns.
-        json!({"context_strategy": "fold", "context_window": 13200, "max_tokens": 12000,
+        json!({"context_strategy": "fold", "context_window": 13600, "max_tokens": 12000,
                "context_async": true, "context_titles": true}),
     )
     .await;

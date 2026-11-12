@@ -1003,6 +1003,18 @@ async fn bundles_page_like_python() {
         "no further page ⇒ no key: {all}"
     );
 
+    // `bundle_names` narrows `bundles=all` to the named bundles.
+    let one = kernel_reflect(
+        &kernel,
+        json!({"type": "reflect", "tree": "none", "bundles": "all", "bundle_names": ["bravo"]}),
+    )
+    .await
+    .result;
+    assert_eq!(
+        one["bundles"],
+        json!([{"name": "bravo", "handler_module": "bravo.tools", "schema": {"fields": [], "open": true}}])
+    );
+
     // `bundles=ids` pages by name with the SAME `limit`/`after` the flat tree
     // index uses in the same reflect.
     let p1 = kernel_reflect(

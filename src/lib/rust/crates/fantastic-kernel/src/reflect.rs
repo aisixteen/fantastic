@@ -180,6 +180,7 @@ impl Kernel {
             ignore_subtrees: None,
             handler_modules: None,
             bundles: Some(BundlesKind::Ids),
+            bundle_names: None,
             limit: None,
             after: None,
         };
@@ -386,8 +387,20 @@ pub async fn apply_reflect_flags(
     // its cursor `bundles_next` only when a further page exists.
     match args.bundles {
         Some(BundlesKind::All) => {
+            let all = available_bundles(kernel, true);
+            let listed: Vec<Value> = match args.bundle_names.as_deref() {
+                Some(names) => all
+                    .into_iter()
+                    .filter(|b| {
+                        b.get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|n| names.iter().any(|w| w == n))
+                    })
+                    .collect(),
+                None => all,
+            };
             let (cat, next) = crate::paging::page(
-                available_bundles(kernel, true),
+                listed,
                 args.limit,
                 args.after.as_deref(),
                 |b| {
