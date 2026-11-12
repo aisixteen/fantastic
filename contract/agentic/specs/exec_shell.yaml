@@ -73,5 +73,5 @@ expect:
     # ── EXS-5 · `shell` is refused at write time unless true/false/"login" ──
     - name: a shell NAME is not a shell permission
       operator: {to: kernel, send: {type: update_agent, id: shell_term, shell: bash}}
-      expect: {reason: invalid_meta}
+      expect: {reason: bad_arg, contains: {arg: shell}}
       because: EXS-5
