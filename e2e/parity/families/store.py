@@ -78,8 +78,8 @@ CASES = {
         '<call name="send"><target_id>readings</target_id> stray words <type>list</type><path></path></call>',
     ],
     # ── the tag-argument faults ──
-    "f12_exec_id_tag": [
-        '<call name="send"><target_id>readings</target_id><type>list</type><path></path><exec_id>7</exec_id></call>',
+    "f12_execution_id_tag": [
+        '<call name="send"><target_id>readings</target_id><type>list</type><path></path><id>7</id></call>',
     ],
     "f13_timeout_word": [
         '<call name="send"><target_id>readings</target_id><type>list</type><path></path><timeout>soon</timeout></call>',

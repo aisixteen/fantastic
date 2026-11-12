@@ -1201,7 +1201,7 @@ you do not know was routed to you — use it. Per call: `<timeout>seconds</timeo
 bounds it (a message to an agent has a deadline: 600 s unless the system sets
 another, and its reply states the deadline used; past it the message is withdrawn
 into a dead letter and you are told its id — resend it, or drop it with `kernel`
-`<type>ack_deadletter</type>`); `<exec_id>name</exec_id>` makes it idempotent (the same exec_id never runs
+`<type>ack_deadletter</type>`); `<id>name</id>` makes it idempotent (the same id never runs
 twice — you get the first outcome back; a new attempt needs a new name);
 `<retries>N</retries>` lets the kernel re-run a failing call; `kernel`
 `<type>ledger</type>` lists your executions and what became of them.
@@ -1269,18 +1269,18 @@ def _deliver_soon(
     _ctx(kernel).spawn_task(target, "deliver_reply", coro)
 
 
-def _watch_job(kernel, owner, exec_id, job_id, client_id, system_prompt) -> None:
+def _watch_job(kernel, owner, execution_id, job_id, client_id, system_prompt) -> None:
     """Record an exec job `owner`'s own batch started (`exec start` answered running),
     and spawn ONE watcher on the owner for it (#306). The watcher waits on the exec
     agent's `status` until the job is no longer `running`/`stopping`, forgets the job,
     then wakes the owner once with `job_done {job_id, exit_code, tail}`. Rust:
     `watch_job` in route.rs. Only this batch's own replies are watched, so another
     agent's job never counts against this one."""
-    _running_jobs.setdefault(owner, []).append((job_id, exec_id))
+    _running_jobs.setdefault(owner, []).append((job_id, execution_id))
     _ctx(kernel).spawn_task(
         owner,
         "job_watch",
-        _job_watch(kernel, owner, exec_id, job_id, client_id, system_prompt),
+        _job_watch(kernel, owner, execution_id, job_id, client_id, system_prompt),
     )
 
 
@@ -1296,25 +1296,25 @@ def _job_field(result, key):
     return result.get(key)
 
 
-def _drop_job(owner, job_id, exec_id) -> None:
+def _drop_job(owner, job_id, execution_id) -> None:
     """Forget one job; the owner's key goes with its last one."""
     jobs = _running_jobs.get(owner)
     if jobs is None:
         return
-    if (job_id, exec_id) in jobs:
-        jobs.remove((job_id, exec_id))
+    if (job_id, execution_id) in jobs:
+        jobs.remove((job_id, execution_id))
     if not jobs:
         _running_jobs.pop(owner, None)
 
 
-async def _job_watch(kernel, owner, exec_id, job_id, client_id, system_prompt) -> None:
+async def _job_watch(kernel, owner, execution_id, job_id, client_id, system_prompt) -> None:
     last = None
     try:
         while True:
             out = await kernel.send(
                 [
                     {
-                        "target": exec_id,
+                        "target": execution_id,
                         "payload": {"type": "status", "job_id": job_id, "wait_s": 100},
                     }
                 ]
@@ -1326,7 +1326,7 @@ async def _job_watch(kernel, owner, exec_id, job_id, client_id, system_prompt) -
         t = await kernel.send(
             [
                 {
-                    "target": exec_id,
+                    "target": execution_id,
                     "payload": {"type": "tail", "job_id": job_id, "lines": 20},
                 }
             ]
@@ -1346,7 +1346,7 @@ async def _job_watch(kernel, owner, exec_id, job_id, client_id, system_prompt) -
     finally:
         # Forget the job BEFORE the wake (and on cancellation), so the woken turn's
         # `pending` no longer counts it.
-        _drop_job(owner, job_id, exec_id)
+        _drop_job(owner, job_id, execution_id)
     text = "job_done " + json.dumps(
         {"job_id": job_id, "exit_code": exit_code, "tail": tail}
     )
@@ -2511,8 +2511,8 @@ async def _route_reply(
         # The model's execution NAME rides through untouched as the item's `id` —
         # the kernel owns the ledger semantics AND the validation (a bad name
         # settles as a refusal the model can read).
-        if "exec_id" in args:
-            item["id"] = args.get("exec_id")
+        if "id" in args:
+            item["id"] = args.get("id")
         if "retries" in args:
             item["retries"] = args.get("retries")
         items.append(item)

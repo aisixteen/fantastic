@@ -71,16 +71,6 @@ fn default_transport_retries() -> Option<i64> {
     Some(0)
 }
 
-fn default_reflect_fold() -> Option<bool> {
-    Some(false)
-}
-
-/// The record's `reflect_fold`: whether answered `reflect` replies fold.
-#[must_use]
-pub fn reflect_fold(meta: &serde_json::Map<String, serde_json::Value>) -> bool {
-    meta.get("reflect_fold").and_then(serde_json::Value::as_bool) == Some(true)
-}
-
 fn default_misfire_limit() -> Option<i64> {
     Some(crate::constants::MAX_SILENT_TURNS as i64)
 }
@@ -108,9 +98,6 @@ pub struct AiRecord {
     /// Answers in a row that ran nothing before the chain gives up.
     #[schemars(range(min = 2, max = 50), default = "default_misfire_limit")]
     pub misfire_limit: Option<i64>,
-    /// `true` folds an answered `reflect` reply like a `docs` reply; absent or `false`, a reflect stays whole.
-    #[schemars(default = "default_reflect_fold")]
-    pub reflect_fold: Option<bool>,
     /// A system block that REPLACES the default one on every turn; null = the default.
     #[schemars(length(min = 1), regex(pattern = r"\S"))]
     pub system_prompt: Option<String>,
@@ -270,4 +257,3 @@ pub mod clock {
     fantastic_kernel::record!(StreamClock);
     use super::StreamClock;
 }
-

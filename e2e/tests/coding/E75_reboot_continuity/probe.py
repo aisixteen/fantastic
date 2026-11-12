@@ -1,7 +1,7 @@
 """coding/reboot_continuity — kill the process state, keep the store, continue.
 
 Sixteen reads. After the eighth the agent is deleted and re-created on the same id: its
-rows and view stay in its memory store (delete_agent keeps store data), while reply
+rows and view stay in its memory store (delete_agent keep_memory:true keeps store data), while reply
 bodies — held in RAM only — are gone. The boot is lazy; the first turn after it reads
 the head and runs `context_recall`. Scored: the report lists all sixteen, reads after
 the reboot do not repeat the first eight, and the post-reboot view is a subset of the

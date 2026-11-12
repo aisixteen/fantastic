@@ -63,9 +63,19 @@ pub struct ChatRecord {
     pub model: Option<String>,
     /// How the conversation is kept in the model's view; `provider_cache` asks the provider for its cache markers.
     pub caching: Option<crate::record::CachingMode>,
+    /// `true` teaches the titles how-to: a stripped body keeps its title.
+    #[schemars(default = "default_off")]
+    pub context_titles: Option<bool>,
+    /// `true` teaches the full-async how-to: replies arrive as rows.
+    #[schemars(default = "default_off")]
+    pub context_async: Option<bool>,
     /// The fields every ai_core agent takes.
     #[serde(flatten)]
     pub ai: AiRecord,
+}
+
+fn default_off() -> Option<bool> {
+    Some(false)
 }
 
 fantastic_kernel::record!(ChatRecord);

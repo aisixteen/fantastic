@@ -84,7 +84,7 @@ async def _wire(kernel):
         assert out["status"] == "completed", out
 
 
-async def _fire(kernel, exec_id=None, verb="buy"):
+async def _fire(kernel, execution_id=None, verb="buy"):
     return (
         await kernel.send(
             [
@@ -94,7 +94,7 @@ async def _fire(kernel, exec_id=None, verb="buy"):
                         "type": "fire",
                         "t": "adv2_desk",
                         "p": {"type": verb, "item": "rocket"},
-                        "id": exec_id,
+                        "id": execution_id,
                     },
                 }
             ]
