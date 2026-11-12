@@ -417,7 +417,7 @@ async fn the_forks_prompt_equals_the_parents_for_the_same_prefix() {
         json!({"role": "user", "content": "question two"}),
     )
     .await;
-    let view = json!({"kind": "view", "v": 1, "budget": 1000, "why": "t",
+    let view = json!({"kind": "view", "budget": 1000, "why": "t",
         "ids": [{"id": fid, "res": "fold"}, {"id": u2, "res": "full"}]});
     let view_id = put_row(&kernel, &parent, view).await;
     let at = put_row(

@@ -121,7 +121,7 @@ Expect: both test files pass. Together they assert:
 - Round-trip Disk-mode kernel → `save_json()` → InMemory kernel →
   `load_json()` preserves the agent tree
 - Weak-load drops unknown handler_modules during `load`
-- Snapshot validation rejects: future schema version, missing root,
+- Snapshot validation rejects: missing root,
   duplicate ids, dangling parent references
 - The persistence merge-only contract: existing agent.yaml fields
   the kernel doesn't manage survive a subsequent update_agent call

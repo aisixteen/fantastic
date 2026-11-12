@@ -76,7 +76,6 @@
     "owner": "test-guid|fa",
     "row": {
      "kind": "view",
-     "v": 1,
      "ts": 1792358495.1879435,
      "budget": 9000,
      "why": "projection: fold",
@@ -104,7 +103,6 @@
     "owner": "test-guid|fa",
     "row": {
      "kind": "view",
-     "v": 1,
      "ts": 1792358495.1884556,
      "budget": 31744,
      "why": "cleared",
@@ -352,7 +350,6 @@
     "owner": "test-guid|fa",
     "row": {
      "kind": "view",
-     "v": 1,
      "ts": 1792358495.1901817,
      "budget": 9000,
      "why": "projection: fold",

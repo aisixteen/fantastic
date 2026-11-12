@@ -289,7 +289,6 @@ impl UserBundle {
         json!({
             "id": agent_id.as_str(),
             "handler_module": HANDLER_MODULE,
-            "sentence": "The human. Send me an inquiry when you cannot proceed without a decision that is mine to make; I read it and reply later, under its pid.",
             "inquiries": self.inquiries.count(),
         })
     }

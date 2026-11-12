@@ -102,11 +102,8 @@ impl Handler for WebMcpBundle {
             verbs::Call::Reflect(_) => {
                 let mut r = json!({
                     "id": agent_id.as_str(),
-                    "sentence": "An MCP leg: an external client (Claude Code, any MCP host) drives this kernel through me, with exactly my grants — never as the operator. My carrier speaks MCP; the verbs I dispatch are the kernel's own.",
                     "protocol": PROTOCOL_VERSION,
-                    "tools": ["reflect", "send"],
                     "inquiries_open": inquiries::open_count(kernel, agent_id),
-                    "human": "An agent may send me `inquiry` when a decision is the person's: I hold it; the person lists it with `inquiries` and answers with `answer {re, text}`.",
                 });
                 if let Some(e) = config_error(kernel, agent_id) {
                     r["mcp_config_error"] = json!(e);

@@ -32,7 +32,7 @@ fn mk() -> (TempDir, Arc<Kernel>) {
 }
 
 fn state(records: serde_json::Value) -> KernelState {
-    serde_json::from_value(json!({"version": 1, "agents": records})).unwrap()
+    serde_json::from_value(json!({"agents": records})).unwrap()
 }
 
 #[test]

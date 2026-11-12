@@ -10,7 +10,7 @@
 use crate::agent::{Agent, AgentId};
 use crate::bundle::BundleRegistry;
 use crate::errors::{KernelError, KernelResult};
-use crate::state::{KernelState, CURRENT_VERSION};
+use crate::state::KernelState;
 use crate::storage::StorageMode;
 use crate::tasks::TaskTable;
 use arc_swap::ArcSwapOption;
@@ -949,10 +949,7 @@ impl Kernel {
             .collect();
         // python `records.sort(key=lambda r: r["id"])`.
         agents.sort_by(|a, b| a.id.cmp(&b.id));
-        KernelState {
-            version: CURRENT_VERSION,
-            agents,
-        }
+        KernelState { agents }
     }
 
     /// [`Self::save`] serialized to JSON. Used by [`Self::maybe_flush`]
@@ -981,17 +978,10 @@ impl Kernel {
     /// the loaded set; subsequent [`Self::save`] won't see it.
     ///
     /// Errors:
-    /// - [`KernelError::InvalidSnapshot`] if `state.version` exceeds
-    ///   [`CURRENT_VERSION`], if the snapshot has no root, or if any
+    /// - [`KernelError::InvalidSnapshot`] if the snapshot has no root, or if any
     ///   record's `parent_id` doesn't point at a record in the
     ///   snapshot.
     pub fn load(&self, state: KernelState) -> KernelResult<()> {
-        if state.version > CURRENT_VERSION {
-            return Err(KernelError::InvalidSnapshot(format!(
-                "snapshot version {} exceeds this kernel's max ({})",
-                state.version, CURRENT_VERSION
-            )));
-        }
         let records: Vec<Map<String, Value>> = state
             .agents
             .iter()
@@ -1017,10 +1007,7 @@ impl Kernel {
             }
             agents.push(rec);
         }
-        let state = KernelState {
-            version: CURRENT_VERSION,
-            agents,
-        };
+        let state = KernelState { agents };
         // The root record declares this tree's children-dir name (default
         // "agents") — set BEFORE the build, since every agent derives its
         // address from it.

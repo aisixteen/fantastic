@@ -332,7 +332,7 @@ fn an_unanchored_fold_without_members_is_counted_not_placed() {
     assert_eq!(unanchored(&rows, &anchors), 1);
     // an `anchors` row recorded for it places it again
     let mut with = rows.clone();
-    with.push(json!({"kind": "anchors", "v": 1, "anchors": {oid.to_string(): row_id(&a[0])}}));
+    with.push(json!({"kind": "anchors", "anchors": {oid.to_string(): row_id(&a[0])}}));
     let anchors = anchors_of(&with);
     let mut want = vec![Some(oid)];
     want.extend(ids(&tail));

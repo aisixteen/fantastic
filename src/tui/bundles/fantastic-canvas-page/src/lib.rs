@@ -108,7 +108,6 @@ fn read_stream(a: &verbs::ReadStream) -> (Value, Option<Vec<u8>>) {
 fn reflect(agent_id: &AgentId) -> Value {
     json!({
         "id": agent_id.as_str(),
-        "sentence": "The canvas page's files, served read-only (transport only). To build on the canvas, use the page's view: `docs of=<page guid>|view_root`.",
         "files": files().keys().collect::<Vec<_>>(),
     })
 }

@@ -693,7 +693,7 @@ mod tests {
                              "parent":first_root,"refs":l1,"title":"the whole search","ts":f2,
                              "content":format!("[fold {f2} · 4 refs · L2]")}));
             let v = next();
-            rows.push(json!({"id":v,"agent":"ai_b","kind":"view","v":1,"budget":14976,"why":"projection: fold",
+            rows.push(json!({"id":v,"agent":"ai_b","kind":"view","budget":14976,"why":"projection: fold",
                              "ids":[{"id":first_root,"res":"full"},{"id":f2,"res":"full"}],"ts":v}));
             let r = next();
             rows.push(json!({"id":r,"agent":"ai_b","role":"user","kind":"recall","ts":r,
@@ -981,7 +981,7 @@ mod tests {
         let s = store_of(vec![
             json!({"id":1,"agent":"ai","content":"a"}),
             json!({"id":2,"agent":"ai","content":"b"}),
-            json!({"id":3,"agent":"ai","kind":"view","v":1,"budget":100,"why":"projection: fold",
+            json!({"id":3,"agent":"ai","kind":"view","budget":100,"why":"projection: fold",
                    "ids":[{"id":1,"res":"stub"},{"id":2,"res":"full"}]}),
         ]);
         let o = plain(&s);
@@ -1001,7 +1001,7 @@ mod tests {
         // the biggest lie the gutter could tell.
         let s = store_of(vec![
             json!({"id":1,"agent":"ai","content":"a"}),
-            json!({"id":2,"agent":"ai","kind":"view","v":1,"ids":[{"id":1,"res":"full"}]}),
+            json!({"id":2,"agent":"ai","kind":"view","ids":[{"id":1,"res":"full"}]}),
             json!({"id":3,"agent":"ai","content":"appended after the projection"}),
         ]);
         let o = plain(&s);
@@ -1013,7 +1013,7 @@ mod tests {
         let s = store_of(vec![
             json!({"id":1,"agent":"ai","content":"dropped from the prompt"}),
             json!({"id":2,"agent":"ai","content":"kept"}),
-            json!({"id":3,"agent":"ai","kind":"view","v":1,"ids":[{"id":2,"res":"full"}]}),
+            json!({"id":3,"agent":"ai","kind":"view","ids":[{"id":2,"res":"full"}]}),
         ]);
         let o = plain(&s);
         assert_eq!(o.lines[0].mark, Mark::NotInView);
@@ -1023,7 +1023,7 @@ mod tests {
     fn an_unknown_res_is_shown_not_guessed() {
         let s = store_of(vec![
             json!({"id":1,"agent":"ai","content":"a"}),
-            json!({"id":2,"agent":"ai","kind":"view","v":1,"ids":[{"id":1,"res":"hologram"}]}),
+            json!({"id":2,"agent":"ai","kind":"view","ids":[{"id":1,"res":"hologram"}]}),
         ]);
         assert_eq!(plain(&s).lines[0].mark, Mark::Unknown);
     }
@@ -1033,7 +1033,7 @@ mod tests {
         let s = store_of(vec![
             json!({"id":1,"agent":"ai","content":"dropped"}),
             json!({"id":2,"agent":"ai","content":"kept"}),
-            json!({"id":3,"agent":"ai","kind":"view","v":1,"ids":[{"id":2,"res":"full"}]}),
+            json!({"id":3,"agent":"ai","kind":"view","ids":[{"id":2,"res":"full"}]}),
             json!({"id":4,"agent":"ai","content":"tail"}),
         ]);
         let st = OutlineState {

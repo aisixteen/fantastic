@@ -598,7 +598,7 @@ impl BackendBundle {
         if host.kernel.agents.get(&AgentId::from(id.as_str())).and_then(|a| a.value().record().handler_module.clone()).as_deref() != Some(MCP) {
             return refuse("bad_arg", format!("configure_mcp: {id:?} is not an MCP agent"), "");
         }
-        let url = a.url.as_deref().map(str::trim).filter(|u| !u.is_empty())
+        let url = a.url.as_deref().map(str::trim)
             .map(str::to_string)
             .unwrap_or_else(|| meta.get("url").and_then(Value::as_str).unwrap_or("").to_string());
         let key = a.key.as_deref().unwrap_or("").trim().to_string();
@@ -1256,6 +1256,8 @@ pub(crate) mod create_tests {
             (json!({"type": "reopen", "id": "a", "stamp": 1}), "stamp"),
             (json!({"type": "add_mcp", "url": "  "}), "url"),
             (json!({"type": "configure_mcp", "id": "a", "key": 3}), "key"),
+            (json!({"type": "configure_mcp", "id": "a", "url": ""}), "url"),
+            (json!({"type": "configure_mcp", "id": "a", "url": "  "}), "url"),
         ] {
             let r = ask(p.clone()).await;
             assert_eq!(why(&r), (Some("bad_arg".into()), Some(arg.into())), "{p}: {r}");

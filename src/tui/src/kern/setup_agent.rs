@@ -91,7 +91,10 @@ impl SetupBundle {
                     Ok(r) => r,
                     Err(e) => return fail(format!("configure_ai: {e}")),
                 };
-                let mut upd = a.fields.unwrap_or_default();
+                let mut upd = match crate::kern::setup::declared_fields(host, "configure_ai", &handler, a.fields.unwrap_or_default()) {
+                    Ok(m) => m,
+                    Err(refusal) => return refusal,
+                };
                 let endpoint = upd.get("endpoint").or_else(|| meta.get("endpoint")).and_then(Value::as_str).unwrap_or("").to_string();
                 if crate::kern::keys::keyed(host, &handler).is_some() {
                     if let Ok(r) = crate::kern::keys::ref_for(&handler, &endpoint) {
@@ -106,8 +109,10 @@ impl SetupBundle {
                         }
                     }
                 }
-                let mut payload = json!({"type": "update_agent", "id": id});
-                payload.as_object_mut().expect("an object").extend(upd);
+                // declared names only, then the verb and the target — a field can never replace either
+                upd.insert("type".into(), json!("update_agent"));
+                upd.insert("id".into(), json!(id));
+                let payload = Value::Object(upd);
                 let r = host.act("kernel", payload).await.result;
                 match r.get("error").and_then(Value::as_str) {
                     Some(e) => fail(format!("configure_ai: {e}")),
@@ -115,7 +120,10 @@ impl SetupBundle {
                 }
             }
             Call::WriteAi(a) => {
-                let fields = a.fields.unwrap_or_default();
+                let fields = match crate::kern::setup::declared_fields(host, "write_ai", &a.handler, a.fields.unwrap_or_default()) {
+                    Ok(m) => m,
+                    Err(refusal) => return refusal,
+                };
                 let rec = crate::kern::setup::Record {
                     id: a.id,
                     handler: a.handler,
@@ -156,7 +164,10 @@ impl SetupBundle {
                 Err(e) => fail(e),
             },
             Call::Save(a) => {
-                let mut record = a.fields.unwrap_or_default();
+                let mut record = match crate::kern::setup::declared_fields(host, "save", &a.handler, a.fields.unwrap_or_default()) {
+                    Ok(m) => m,
+                    Err(refusal) => return refusal,
+                };
                 // the backend + every field set — never an id, a key or grants;
                 // the stored key for its endpoint is NAMED (a ref, never the value):
                 // a backend that requires one refuses a saved set-up without it
@@ -307,6 +318,7 @@ mod tests {
             (json!({"type": "ai_settings", "id": 3}), "id"),
             (json!({"type": "configure_ai", "id": "a", "fields": ["x"]}), "fields"),
             (json!({"type": "write_ai", "id": "a", "handler": "vllm_backend.tools", "may_call": "x"}), "may_call"),
+            (json!({"type": "write_ai", "id": "  ", "handler": "vllm_backend.tools"}), "id"),
             (json!({"type": "set_key_mode", "mode": "plaintext"}), "mode"),
             (json!({"type": "forget", "name": 3}), "name"),
             (json!({"type": "prefer", "name": ""}), "name"),

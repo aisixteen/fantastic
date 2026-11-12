@@ -546,7 +546,6 @@ pub async fn save_view(
         kernel,
         &[json!({
             "kind": "view",
-            "v": 1,
             "ts": crate::helpers::now_secs(),
             "budget": budget,
             "why": why,

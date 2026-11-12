@@ -12,7 +12,7 @@ contract/
   memory_store/
     cases.json             one answer from every memory store (ram, sqlite) in every runtime
   home/
-    v1/cases.json          the `home` protocol v1: the Rust agent and the TS client replay it
+    cases.json             the `home` protocol: the Rust agent and the TS client replay it
   agentic/
     configs/*.yaml         DEPLOYABLE kernel shapes — no test metadata, ever
     specs/*.yaml           what each config must prove, as ordered steps

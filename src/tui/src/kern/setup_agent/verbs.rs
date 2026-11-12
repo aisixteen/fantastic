@@ -46,7 +46,7 @@ pub struct ConfigureAi {
 #[serde(deny_unknown_fields)]
 pub struct WriteAi {
     /// The chat's id.
-    #[schemars(length(min = 1))]
+    #[schemars(length(min = 1), regex(pattern = "\\S"))]
     pub id: String,
     /// The backend: one of `backends`' modules.
     #[schemars(length(min = 1))]

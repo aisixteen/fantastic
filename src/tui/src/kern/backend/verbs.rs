@@ -167,6 +167,7 @@ pub struct ConfigureMcp {
     #[schemars(length(min = 1))]
     pub id: String,
     /// A new endpoint.
+    #[schemars(length(min = 1), regex(pattern = "\\S"))]
     pub url: Option<String>,
     /// A new key.
     pub key: Option<String>,

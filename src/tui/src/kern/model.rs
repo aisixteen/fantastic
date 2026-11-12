@@ -304,7 +304,7 @@ mod tests {
         );
 
         let view: Row = serde_json::from_str(
-            r#"{"v":1,"ts":1.0,"budget":14976,"kind":"view","id":8568,"agent":"ai_b",
+            r#"{"ts":1.0,"budget":14976,"kind":"view","id":8568,"agent":"ai_b",
                 "why":"projection: fold","ids":[{"id":4660,"res":"full"},{"id":7065,"res":"stub"}]}"#,
         )
         .unwrap();

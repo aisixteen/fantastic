@@ -90,7 +90,6 @@ async fn save_is_pure_in_ram_no_state_json_on_disk() {
         .exists());
 
     let snap = kernel.save();
-    assert_eq!(snap.version, fantastic_kernel::CURRENT_VERSION);
     assert!(snap.agents.iter().any(|a| a.id == "alpha"));
     assert!(snap.agents.iter().any(|a| a.id == "kernel_state"));
 
@@ -157,7 +156,6 @@ async fn save_and_load_round_trips_disk_to_memory() {
 #[tokio::test]
 async fn load_weak_loads_unknown_handler_modules() {
     let snapshot = json!({
-        "version": 1,
         "agents": [
             {"id": "kernel_state", "parent_id": null},
             {"id": "ghost", "parent_id": "kernel_state", "handler_module": "nonexistent.tools"},
@@ -182,7 +180,6 @@ async fn load_weak_loads_unknown_handler_modules() {
 #[tokio::test]
 async fn load_rejects_missing_root() {
     let snapshot = json!({
-        "version": 1,
         "agents": [
             {"id": "orphan", "parent_id": "missing", "handler_module": "noop.tools"},
         ],
@@ -198,7 +195,6 @@ async fn load_rejects_missing_root() {
 #[tokio::test]
 async fn load_rejects_duplicate_ids() {
     let snapshot = json!({
-        "version": 1,
         "agents": [
             {"id": "kernel_state", "parent_id": null},
             {"id": "dup", "parent_id": "kernel_state", "handler_module": "noop.tools"},
@@ -211,18 +207,6 @@ async fn load_rejects_duplicate_ids() {
     let kernel = Arc::new(kernel);
     let err = kernel.load_json(&snapshot).unwrap_err();
     assert!(format!("{err}").contains("duplicate"));
-}
-
-#[tokio::test]
-async fn load_rejects_future_version() {
-    let snapshot = json!({
-        "version": 9999,
-        "agents": [{"id": "kernel_state", "parent_id": null}],
-    })
-    .to_string();
-    let kernel = Arc::new(Kernel::with_storage(StorageMode::InMemory));
-    let err = kernel.load_json(&snapshot).unwrap_err();
-    assert!(format!("{err}").contains("exceeds"));
 }
 
 #[tokio::test]

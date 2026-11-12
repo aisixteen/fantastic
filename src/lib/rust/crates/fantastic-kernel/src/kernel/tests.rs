@@ -315,7 +315,6 @@ fn a_reserved_key_is_refused_before_anything_is_torn_down() {
         let mut meta = Map::new();
         meta.insert(key.to_string(), json!("anything"));
         let state = KernelState {
-            version: CURRENT_VERSION,
             agents: vec![AgentRecord {
                 id: "kernel_state".into(),
                 handler_module: None,

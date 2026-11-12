@@ -629,7 +629,7 @@ pub async fn context_forget(
         save_history(
             agent_id,
             kernel,
-            &[json!({"kind": "anchors", "v": 1, "anchors": map})],
+            &[json!({"kind": "anchors", "anchors": map})],
         )
         .await?;
         doomed.extend(rows_of_anchors.iter().filter_map(|r| row_id(r)));

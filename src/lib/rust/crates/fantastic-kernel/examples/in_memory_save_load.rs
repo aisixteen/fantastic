@@ -119,7 +119,6 @@ async fn main() {
         println!("    {line}");
     }
     assert_or_die(snapshot.contains("alpha"), "snapshot mentions alpha");
-    assert_or_die(snapshot.contains("\"version\":1"), "version field present");
 
     banner("Step 4: spin a FRESH in-memory kernel + kernel.load_json(snapshot)");
     let booted2 = bootstrap(registry(), BootstrapOptions::in_memory()).expect("boot 2");
@@ -178,16 +177,7 @@ async fn main() {
     );
 
     banner("Step 7: load_json validation — bad snapshots fail loud");
-    let bad = json!({"version": 9999, "agents": []}).to_string();
-    let err = kernel2.load_json(&bad).unwrap_err();
-    println!("  future-version snapshot → {err}");
-    assert_or_die(
-        format!("{err}").contains("exceeds"),
-        "future version rejected",
-    );
-
     let bad2 = json!({
-        "version": 1,
         "agents": [
             {"id": "x", "parent_id": "no-such-parent", "handler_module": "demo.tools"}
         ]

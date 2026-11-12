@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 #[serde(deny_unknown_fields)]
 pub struct Boot {}
 
-/// Read this loader's subtree from disk → {records, version}.
+/// Read this loader's subtree from disk → {records}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LoadTree {}

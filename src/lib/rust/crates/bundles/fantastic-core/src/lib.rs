@@ -11,7 +11,7 @@
 //!
 //! Contract (duck-typed; any agent answering these is a loader):
 //! ```text
-//!   load_tree                 -> {records, version}   read the subtree (direct)
+//!   load_tree                 -> {records}   read the subtree (direct)
 //!   persist_record {record}   -> {ok}                 write one agent.yaml
 //!   forget_record {id}        -> {ok}                 remove one agent's dir
 //!   persist_blob / load_blob                          the sidecar byte channel
@@ -328,7 +328,6 @@ impl KernelStateBundle {
         };
         Ok(json!({
             "records": read_tree(&root, live)?,
-            "version": fantastic_kernel::CURRENT_VERSION,
         }))
     }
 

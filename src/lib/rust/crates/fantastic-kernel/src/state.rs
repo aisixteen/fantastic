@@ -17,11 +17,6 @@
 use crate::agent::AgentRecord;
 use serde::{Deserialize, Serialize};
 
-/// Current snapshot schema version. Bump when [`KernelState`]'s
-/// on-the-wire shape breaks; old callers can still read snapshots
-/// with `version <= CURRENT` and refuse `version > CURRENT`.
-pub const CURRENT_VERSION: u32 = 1;
-
 /// Canonical kernel state — every agent in a kernel, in serializable
 /// form. Round-trips through [`crate::Kernel::save`] /
 /// [`crate::Kernel::load`].
@@ -30,7 +25,6 @@ pub const CURRENT_VERSION: u32 = 1;
 ///
 /// ```json
 /// {
-///   "version": 1,
 ///   "agents": [
 ///     { "id": "kernel_state", "parent_id": null, "handler_module": null, "meta": {} },
 ///     { "id": "web_8888", "parent_id": "kernel_state", "handler_module": "web.tools",
@@ -41,8 +35,6 @@ pub const CURRENT_VERSION: u32 = 1;
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KernelState {
-    /// Schema version. See [`CURRENT_VERSION`].
-    pub version: u32,
     /// Every agent in the kernel, flat. The root is the entry whose
     /// `parent_id` is `None`. Sorted by id (ASCII) for deterministic
     /// snapshots — byte-identical [`crate::Kernel::save_json`] output
@@ -51,11 +43,10 @@ pub struct KernelState {
 }
 
 impl KernelState {
-    /// Empty snapshot at the current schema version. Mostly useful for
+    /// Empty snapshot. Mostly useful for
     /// tests and for constructing a kernel from no prior state.
     pub fn empty() -> Self {
         Self {
-            version: CURRENT_VERSION,
             agents: Vec::new(),
         }
     }
@@ -83,16 +74,14 @@ mod tests {
     }
 
     #[test]
-    fn empty_uses_current_version() {
+    fn empty_has_no_agents() {
         let s = KernelState::empty();
-        assert_eq!(s.version, CURRENT_VERSION);
         assert!(s.agents.is_empty());
     }
 
     #[test]
     fn root_finds_orphan_entry() {
         let s = KernelState {
-            version: 1,
             agents: vec![rec("kernel_state", None), rec("web", Some("kernel_state"))],
         };
         assert_eq!(s.root().map(|r| r.id.as_str()), Some("kernel_state"));
@@ -101,7 +90,6 @@ mod tests {
     #[test]
     fn round_trips_through_json() {
         let s = KernelState {
-            version: 1,
             agents: vec![rec("kernel_state", None), rec("a", Some("kernel_state"))],
         };
         let json = serde_json::to_string(&s).unwrap();

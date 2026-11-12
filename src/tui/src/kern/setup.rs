@@ -142,21 +142,6 @@ pub struct Record {
     pub may_call: Vec<String>,
 }
 
-impl Record {
-    /// What the PAGE must have before a write: the id and the handler. The
-    /// backend's own required fields are the backend's to refuse, by name.
-    pub fn missing(&self) -> Vec<&'static str> {
-        let mut m = Vec::new();
-        if self.id.trim().is_empty() {
-            m.push("id");
-        }
-        if self.handler.is_empty() {
-            m.push("handler");
-        }
-        m
-    }
-}
-
 fn err_of(r: &fantastic_kernel::Outcome) -> Option<String> {
     r.result.get("error").and_then(Value::as_str).map(|e| {
         match r.result.get("reason").and_then(Value::as_str) {
@@ -186,13 +171,34 @@ pub fn typed(host: &Host, handler: &str, texts: &Map<String, Value>) -> Result<M
     Ok(fields)
 }
 
+/// A backend's DECLARED fields as one schema for the shared engine: its record's
+/// properties (the write-owned ones left out), nothing else allowed, none required
+/// (a change names only what it sets).
+pub fn fields_schema(host: &Host, handler: &str) -> Result<Value, String> {
+    let (_, bundle) = host
+        .kernel
+        .bundles
+        .catalog()
+        .find(|(m, _)| *m == handler && BACKENDS.contains(m))
+        .ok_or_else(|| format!("this build links no backend {handler:?}"))?;
+    let mut props = bundle.record().schema()["properties"].as_object().cloned().unwrap_or_default();
+    props.retain(|k, _| !WRITE_OWNED.contains(&k.as_str()));
+    Ok(json!({"type": "object", "properties": props, "additionalProperties": false}))
+}
+
+/// `fields` checked by the engine against the backend's declared fields: a name the
+/// backend does not declare, or a value of the wrong type, is refused.
+pub fn declared_fields(host: &Host, verb: &str, handler: &str, fields: Map<String, Value>) -> Result<Map<String, Value>, Value> {
+    let schema = fields_schema(host, handler).map_err(|e| json!({"error": e, "reason": "bad_arg"}))?;
+    match fantastic_kernel::verbs::validate(verb, &schema, &Value::Object(fields))? {
+        Value::Object(m) => Ok(m),
+        _ => Ok(Map::new()),
+    }
+}
+
 /// Create, grant and boot. Returns where the record was written.
 pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
-    let missing = rec.missing();
-    if !missing.is_empty() {
-        return Err(format!("missing: {}", missing.join(", ")));
-    }
-    let id = rec.id.trim();
+    let id = rec.id.as_str();
     if host.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(id)) {
         return Err(format!("`{id}` already exists"));
     }
@@ -234,6 +240,31 @@ mod tests {
         );
         let sets: Vec<String> = b.fields.iter().map(|f| f.one_of.join(",")).collect();
         assert_eq!(sets, ["p,q", "r,s", ""]);
+    }
+
+    #[tokio::test]
+    async fn fields_are_checked_against_the_backends_declared_fields() {
+        // the real backend: its record declares the fields (the shared test host's is a stand-in)
+        let mut kernel = fantastic_kernel::Kernel::new();
+        kernel.bundles.register(fantastic_vllm_backend::HANDLER_MODULE, fantastic_vllm_backend::VllmBundle);
+        let h = Host { kernel: std::sync::Arc::new(kernel), cfg: crate::env::ClientCfg::here(), root: "kernel".to_string() };
+        let vllm = "vllm_backend.tools";
+        let ok = |v: Value| declared_fields(&h, "configure_ai", vllm, v.as_object().cloned().unwrap());
+        assert_eq!(ok(json!({"model": "m1"})).unwrap()["model"], "m1");
+        // a name the backend does not declare — the verb and the target among them — is refused
+        for name in ["id", "handler_module", "parent_id", "zzz"] {
+            let r = ok(json!({ name: "x" })).expect_err(name);
+            assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some(name)), "{r}");
+        }
+        // `type` is the call's own verb key, never a field: it is dropped, the verb stays
+        assert!(ok(json!({"type": "delete_agent"})).unwrap().is_empty());
+        // the ones the write sets itself are not the caller's
+        for name in WRITE_OWNED {
+            assert!(ok(json!({ name: "x" })).is_err(), "{name}");
+        }
+        // a wrongly typed value is refused, never coerced
+        assert!(ok(json!({"model": 3})).is_err());
+        assert!(declared_fields(&h, "configure_ai", "nope.tools", Map::new()).is_err());
     }
 
     #[tokio::test]
