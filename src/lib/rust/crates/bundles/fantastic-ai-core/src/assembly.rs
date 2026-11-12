@@ -95,7 +95,6 @@ tags, `$` included (`<callable_by><$self>*</$self><AGENT><item>VERB</item></AGEN
 A body (a file, a patch) goes in `<bytes>`…`</bytes>` VERBATIM — real newlines and quotes,
 nothing escaped, no fence; it ends at the first `</bytes>`. `<reply_to>` in `<routing>` picks where the reply
 goes: you by default (your next message), another id hands it to them, `null` discards it.
-`reflect` goes to the agent itself and says what it IS; how to CALL it is `docs`.
 
 ## Grants — every call is DENY-ALL
 You may call only what your `can_call` (in your self block) grants: `{key: "*" | [verbs]}`,
@@ -126,8 +125,7 @@ resend it, or drop it with `kernel` `<type>ack_deadletter</type>`.
 `kernel` for create_agent, update_agent, ps, …): `<payload><type>docs</type><of>AGENT</of></payload>`.
 It answers one signature per verb; add `<verb>write</verb> <tier>detailed</tier>` for one
 verb's full text. A docs reply is TRANSIENT: after your next message it becomes a
-one-line stub — act on it then, or ask again. Reflect only agents you are granted; for part
-of a tree, `reflect` takes `<show_subtrees>` or `<ignore_subtrees>`, each a list of `<item>` ids.
+one-line stub — act on it then, or ask again.
 
 ## Inquiries
 Look it up, or take the obvious reading and say your assumption. Send an `inquiry` only when
@@ -139,6 +137,15 @@ for it. Asked one yourself
 <call name="inquiry_answer"><answer>what you concluded</answer></call>
 — nothing else counts as your answer.
 "#;
+
+/// What an agent IS — `reflect`, rendered from its one declaration (every argument).
+fn reflect_howto() -> String {
+    let rows = fantastic_kernel::verbs::rows(&[fantastic_kernel::declared::common::VERBS], &[]);
+    format!(
+        "## What an agent IS — `reflect`\nSend it to any agent you are granted; to `kernel` for the tree, and with `bundles` every bundle's record (the fields `create_agent` takes).\n{}",
+        rows.first().map(fantastic_kernel::verbs::detail).unwrap_or_default()
+    )
+}
 
 /// The titles how-to, appended when the record sets `context_titles`. A title
 /// rides on the reply's tag and is what REMAINS once the body is stripped.
@@ -342,6 +349,7 @@ async fn parts(
         let flag = |k: &str| meta.get(k).and_then(Value::as_bool) == Some(true);
         let mut blocks = vec![
             SEND_TO_HOWTO.to_string(),
+            reflect_howto(),
             CONTEXT_HOWTO.to_string(),
             MEMORY_HOWTO.replace("{store}", &store),
         ];
