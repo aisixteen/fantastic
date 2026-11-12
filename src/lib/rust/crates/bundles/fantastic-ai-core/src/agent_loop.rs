@@ -255,7 +255,10 @@ pub async fn run_generation(
     if caching.folds() {
         if let Some(last) = messages.last_mut() {
             let marked =
-                crate::history_view::mark_keep(last.get("content").and_then(Value::as_str).unwrap_or(""));
+                crate::history_view::mark_keep(
+                    last.get("content").and_then(Value::as_str).unwrap_or(""),
+                    crate::record::reflect_fold(&crate::helpers::agent_meta(self_id, kernel)),
+                );
             last["content"] = Value::String(marked);
         }
     }
@@ -311,7 +314,11 @@ pub async fn run_generation(
     // THE AGENT'S CACHE MARKS (`cache_mark`): its system message, the primer's end, the
     // last fold's, the tail. Only `provider_cache` places them; the backend forwards.
     if caching.marks() {
-        crate::caching::mark(&mut model_messages, primer);
+        crate::caching::mark(
+            &mut model_messages,
+            primer,
+            crate::record::reflect_fold(&crate::helpers::agent_meta(self_id, kernel)),
+        );
     }
     // ONE provider pass. Every chunk is a content token — the provider knows
     // nothing of the tool protocol; the envelope is text this crate parses after.

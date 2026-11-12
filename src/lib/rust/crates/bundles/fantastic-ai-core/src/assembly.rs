@@ -620,10 +620,11 @@ pub async fn assemble_messages(
     };
     *state.view_source.lock().expect("view_source poisoned") = Some(source.to_string());
     let rendered = render_history(&store, listed.as_deref(), caching.cleans());
+    let reflect_fold = crate::record::reflect_fold(&crate::helpers::agent_meta(self_id, kernel));
     let pics = Pictures::of(self_id, state, kernel, &store, &rendered);
     for r in rendered {
         let (msg, form) = if caching.folds() && r.res == "full" {
-            crate::history_view::autofold(&store, r.idx, &r.msg, Some(user_text))
+            crate::history_view::autofold(&store, r.idx, &r.msg, Some(user_text), reflect_fold)
         } else {
             (r.msg, if r.res == "full" { "whole" } else { "anchor" })
         };
