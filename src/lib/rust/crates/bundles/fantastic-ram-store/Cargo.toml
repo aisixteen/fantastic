@@ -19,6 +19,10 @@ schemars = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 
+[features]
+# the test fixtures a dependent crate's tests build on; nothing ships them
+test-support = []
+
 [dev-dependencies]
 fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }

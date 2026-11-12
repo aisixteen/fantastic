@@ -69,6 +69,7 @@ fn obj<const N: usize>(pairs: [(&str, Value); N]) -> Value {
     Value::Object(out)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
 pub mod record;
@@ -77,7 +78,8 @@ pub mod verbs;
 const OPERATOR: &str = "kernel";
 
 /// One stored row (without `refs` — those live in `fold_refs`).
-type Row = Map<String, Value>;
+/// One stored row.
+pub type Row = Map<String, Value>;
 
 /// A row id inside a stored row or a dump: a positive JSON integer.
 pub fn as_id(x: &Value) -> Option<i64> {
@@ -302,10 +304,21 @@ fn bad_tables(msg: &str) -> Value {
     r
 }
 
-/// Build a `Tables` from a `dump` — every key and FK checked; a refusal on the
-/// first violation (nothing half-loaded).
-fn load_tables(tables: &verbs::StoreTables) -> Result<Tables, Value> {
-    let mut t = Tables::default();
+/// A validated `dump`, ready to write — every key and FK checked; a refusal on the
+/// first violation (nothing half-loaded). The ONE check `inject` runs in every
+/// memory store (this one and the durable one).
+pub struct Staged {
+    /// The rows, by owner.
+    pub rows: Vec<(String, Vec<Row>)>,
+    /// The folds: owner, fold id, member ids.
+    pub fold_refs: Vec<(String, i64, Vec<i64>)>,
+}
+
+/// Check a `dump` and stage it.
+///
+/// # Errors
+/// The refusal for the first row or fold that breaks a key or foreign key.
+pub fn stage_tables(tables: &verbs::StoreTables) -> Result<Staged, Value> {
     let mut by_owner: Vec<(String, Vec<Row>)> = Vec::new();
     for item in tables.rows.iter().flatten() {
         let owner = item.get("owner").and_then(Value::as_str);
@@ -328,45 +341,47 @@ fn load_tables(tables: &verbs::StoreTables) -> Result<Tables, Value> {
             None => by_owner.push((owner.to_string(), vec![r])),
         }
     }
-    for (owner, rs) in by_owner {
+    let mut have: HashSet<(String, i64)> = HashSet::new();
+    for (owner, rs) in &by_owner {
         let mut seen: HashSet<i64> = HashSet::new();
-        for r in &rs {
+        for r in rs {
             let id = r.get("id").and_then(Value::as_i64).unwrap_or(0);
             if !seen.insert(id) {
                 let mut e = refusal(EXISTS, format!("inject: duplicate row ({owner}, {id})"));
                 with(&mut e, "id", json!(id));
                 return Err(e);
             }
+            have.insert((owner.clone(), id));
         }
-        t.insert(&owner, rs);
     }
+    let has = |owner: &str, id: i64| have.contains(&(owner.to_string(), id));
+    let mut fold_refs = Vec::new();
     for fr in tables.fold_refs.iter().flatten() {
-        let owner = fr
-            .get("owner")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        let owner = fr.get("owner").and_then(Value::as_str).unwrap_or("").to_string();
         let fold = fr.get("fold").and_then(as_id);
-        let members: Vec<Value> = fr
-            .get("members")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let Some(fold) = fold.filter(|f| t.has(&owner, *f)) else {
+        let members: Vec<Value> = fr.get("members").and_then(Value::as_array).cloned().unwrap_or_default();
+        let Some(fold) = fold.filter(|f| has(&owner, *f)) else {
             return Err(bad_tables(&format!(
                 "inject: fold_refs names no row {}",
                 fold.map_or_else(|| "None".to_string(), |f| f.to_string())
             )));
         };
-        if !members
-            .iter()
-            .all(|m| t.has(&owner, as_id(m).unwrap_or(-1)))
-        {
-            return Err(bad_tables(&format!(
-                "inject: fold {fold} refs a missing row"
-            )));
+        if !members.iter().all(|m| has(&owner, as_id(m).unwrap_or(-1))) {
+            return Err(bad_tables(&format!("inject: fold {fold} refs a missing row")));
         }
-        let ms: Vec<i64> = members.iter().filter_map(as_id).collect();
+        fold_refs.push((owner, fold, members.iter().filter_map(as_id).collect()));
+    }
+    Ok(Staged { rows: by_owner, fold_refs })
+}
+
+/// Build a `Tables` from a `dump`: [`stage_tables`] checks it, this loads it.
+fn load_tables(tables: &verbs::StoreTables) -> Result<Tables, Value> {
+    let staged = stage_tables(tables)?;
+    let mut t = Tables::default();
+    for (owner, rs) in staged.rows {
+        t.insert(&owner, rs);
+    }
+    for (owner, fold, ms) in staged.fold_refs {
         for m in &ms {
             t.ref_by_member
                 .entry((owner.clone(), *m))

@@ -549,7 +549,7 @@ async fn pump_reply(agent_id: &AgentId, a: &verbs::Pump, kernel: &Arc<Kernel>) -
         let read = kernel
             .send(vec![Item::new(
                 src_id.clone(),
-                json!({"type": "read_stream", "path": spath, "offset": offset, "length": chunk}),
+                fantastic_kernel::verbs::call("read_stream", json!({"path": spath, "offset": offset, "length": chunk})),
             )])
             .await
             .remove(0);
@@ -574,7 +574,7 @@ async fn pump_reply(agent_id: &AgentId, a: &verbs::Pump, kernel: &Arc<Kernel>) -
         let wmeta = kernel
             .send(vec![Item::new(
                 sink_id.clone(),
-                json!({"type": "write_stream", "path": dpath, "offset": offset, "truncate": first}),
+                fantastic_kernel::verbs::call("write_stream", json!({"path": dpath, "offset": offset, "truncate": first})),
             )
             .with_binary_key("bytes", body)])
             .await

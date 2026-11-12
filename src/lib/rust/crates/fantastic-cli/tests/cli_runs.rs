@@ -1271,10 +1271,11 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
             "{n}"
         );
     }
-    // the backend declares no value for a sampling knob it leaves out
-    for n in ["temperature", "thinking_token_budget", "context_window"] {
-        assert!(fields[n].get("default").is_none(), "{n}");
+    // the backend declares a value for each sampling knob it leaves out, and none for the window
+    for n in ["temperature", "thinking_token_budget"] {
+        assert!(fields[n].get("default").is_some(), "{n}");
     }
+    assert!(fields["context_window"].get("default").is_none());
     assert_eq!(
         fields["kv_overflow"]["type"],
         serde_json::json!("'evict'|'reject'")

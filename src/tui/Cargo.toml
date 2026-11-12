@@ -136,6 +136,7 @@ foundation-models = ["dep:fantastic-foundation-models-backend"]
 # ── headful e2e: the PTY + vt100 screenshot rig (dev only; the shell itself
 # never links a PTY — the terminal PANEL renders a remote stream in step 10).
 [dev-dependencies]
+fantastic-bridge = { path = "../lib/rust/crates/bundles/fantastic-bridge", features = ["test-support"] }
 fantastic-kernel = { path = "../lib/rust/crates/fantastic-kernel", features = ["test-support"] }
 portable-pty = "0.8"
 

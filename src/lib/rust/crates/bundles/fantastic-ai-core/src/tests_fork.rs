@@ -147,7 +147,7 @@ async fn fork_refuses_an_at_that_cuts_a_fold() {
         json!({"type": "fork", "at": all[1], "id": "fk_cutfold_new"}),
     )
     .await;
-    assert_eq!(out["reason"], "cuts_fold", "{out}");
+    assert_eq!(out["reason"], "bad_arg", "{out}");
     assert_eq!(out["at"], all[1], "{out}");
     assert!(!kernel.exists("fk_cutfold_new"), "no agent is created");
 }
@@ -184,7 +184,7 @@ async fn fork_refuses_an_at_that_cuts_a_turn() {
             json!({"type": "fork", "at": at, "id": "fk_cutturn_new"}),
         )
         .await;
-        assert_eq!(out["reason"], "cuts_turn", "at {at}: {out}");
+        assert_eq!(out["reason"], "bad_arg", "at {at}: {out}");
         assert!(!kernel.exists("fk_cutturn_new"));
     }
     // the end of the finished turn is a boundary
@@ -206,7 +206,7 @@ async fn fork_refuses_an_open_chain() {
     )
     .await;
     let out = verb(&kernel, &parent, json!({"type": "fork", "at": a})).await;
-    assert_eq!(out["reason"], "cuts_turn", "{out}");
+    assert_eq!(out["reason"], "bad_arg", "{out}");
 }
 
 #[tokio::test]
@@ -215,12 +215,12 @@ async fn fork_refuses_an_at_that_names_no_row() {
     let (kernel, parent) = mk_kernel(&tmp, "fk_norow").await;
     three_turns(&kernel, &parent).await;
     let out = verb(&kernel, &parent, json!({"type": "fork", "at": 999_999})).await;
-    assert_eq!(out["reason"], "no_such_row", "{out}");
+    assert_eq!(out["reason"], "not_found", "{out}");
     assert_eq!(out["at"], 999_999, "{out}");
     // a view row is no conversation row either
     let view = put_row(&kernel, &parent, json!({"kind": "view", "ids": []})).await;
     let out = verb(&kernel, &parent, json!({"type": "fork", "at": view})).await;
-    assert_eq!(out["reason"], "no_such_row", "{out}");
+    assert_eq!(out["reason"], "not_found", "{out}");
     // an `at` that is not a row id (an integer) is refused by name; none at all is missing
     for bad in [json!("x"), json!(1.5)] {
         let out = verb(&kernel, &parent, json!({"type": "fork", "at": bad})).await;
@@ -231,7 +231,7 @@ async fn fork_refuses_an_at_that_names_no_row() {
     assert_eq!(out["reason"], "missing_arg", "{out}");
     assert_eq!(out["arg"], "at", "{out}");
     let out = verb(&kernel, &parent, json!({"type": "fork", "at": -1})).await;
-    assert_eq!(out["reason"], "no_such_row", "{out}");
+    assert_eq!(out["reason"], "not_found", "{out}");
 }
 
 #[tokio::test]
@@ -247,7 +247,7 @@ async fn fork_refuses_while_the_parent_is_mid_turn() {
         json!({"type": "fork", "at": all[1], "id": "fk_busy_new"}),
     )
     .await;
-    assert_eq!(out["reason"], "parent_mid_turn", "{out}");
+    assert_eq!(out["reason"], "locked", "{out}");
     assert!(!kernel.exists("fk_busy_new"));
 }
 
@@ -475,7 +475,7 @@ async fn mark_lands_on_a_turn_boundary_outside_a_fold() {
         let lock = Arc::clone(&crate::state::state_for(&parent).lock);
         let _turn = lock.lock().await;
         let out = verb(&kernel, &parent, json!({"type": "mark", "label": "busy"})).await;
-        assert_eq!(out["reason"], "mid_turn", "{out}");
+        assert_eq!(out["reason"], "locked", "{out}");
     }
     // a label is required
     for (bad, reason) in [
@@ -498,7 +498,7 @@ async fn mark_lands_on_a_turn_boundary_outside_a_fold() {
     )
     .await;
     let out = verb(&kernel, &parent, json!({"type": "mark", "label": "open"})).await;
-    assert_eq!(out["reason"], "open_chain", "{out}");
+    assert_eq!(out["reason"], "bad_arg", "{out}");
 
     // a head that ends in a fold is a valid place, and `fork` accepts its `at`
     let (kernel, parent) = mk_kernel(&tmp, "mk_edge_fold").await;
@@ -727,7 +727,7 @@ async fn fork_and_mark_refusals_put_sentence_in_error_code_in_reason() {
     )
     .await;
     let out = verb(&kernel, &parent, json!({"type": "fork", "at": a})).await;
-    assert_eq!(out["reason"], "cuts_turn", "{out}");
+    assert_eq!(out["reason"], "bad_arg", "{out}");
     assert_ne!(out["error"], out["reason"], "{out}");
     assert!(out["error"].as_str().unwrap().contains(' '), "{out}");
     assert!(out["hint"].is_string(), "{out}");
@@ -735,6 +735,6 @@ async fn fork_and_mark_refusals_put_sentence_in_error_code_in_reason() {
     let lock = Arc::clone(&crate::state::state_for(&parent).lock);
     let _turn = lock.lock().await;
     let out = verb(&kernel, &parent, json!({"type": "mark", "label": "busy"})).await;
-    assert_eq!(out["reason"], "mid_turn", "{out}");
+    assert_eq!(out["reason"], "locked", "{out}");
     assert_ne!(out["error"], out["reason"], "{out}");
 }

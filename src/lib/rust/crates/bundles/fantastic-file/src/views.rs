@@ -529,7 +529,7 @@ async fn watch(
     }
     let inbox = relay_inbox(&view.0);
     let rx = kernel.ensure_inbox(&inbox);
-    let r = send_bridge(kernel, bridge, "watch_path", json!({"type": "watch_path", "path": own})).await;
+    let r = send_bridge(kernel, bridge, "watch_path", fantastic_kernel::verbs::call("watch_path", json!({"path": own}))).await;
     if r.get("error").is_some() {
         kernel.remove_inbox(&inbox);
         return r;
@@ -566,7 +566,7 @@ pub(crate) async fn stop(kernel: &Arc<Kernel>, relays: &Relays, view: &AgentId) 
         kernel,
         &st.bridge,
         "unwatch_path",
-        json!({"type": "unwatch_path", "path": st.path}),
+        fantastic_kernel::verbs::call("unwatch_path", json!({"path": st.path})),
     )
     .await;
 }
@@ -605,18 +605,16 @@ pub(crate) async fn dispatch(
             Err(e) => e,
             Ok(target) => {
                 let mut body = Map::new();
-                body.insert("type".into(), json!("read"));
                 body.insert("path".into(), json!(target));
                 body.insert("offset".into(), json!(a.offset));
                 body.insert("limit".into(), json!(a.limit));
-                send_bridge(kernel, &bridge, "read", Value::Object(body)).await
+                send_bridge(kernel, &bridge, "read", fantastic_kernel::verbs::call("read", Value::Object(body))).await
             }
         },
         (FILE, Call::Write(a)) => match scope("write", FILE, &own, a.path.as_deref()) {
             Err(e) => e,
             Ok(target) => {
                 let mut body = Map::new();
-                body.insert("type".into(), json!("write"));
                 body.insert("path".into(), json!(target));
                 if let Some(b) = &a.bytes {
                     body.insert("bytes".into(), json!(b));
@@ -624,7 +622,7 @@ pub(crate) async fn dispatch(
                 if let Some(m) = &a.if_match {
                     body.insert("if_match".into(), json!(m));
                 }
-                send_bridge(kernel, &bridge, "write", Value::Object(body)).await
+                send_bridge(kernel, &bridge, "write", fantastic_kernel::verbs::call("write", Value::Object(body))).await
             }
         },
         (FILE | FOLDER, Call::Dynamic(c)) if c.name == "watch" => {
@@ -633,7 +631,7 @@ pub(crate) async fn dispatch(
         (FOLDER, Call::List(a)) => match scope("list", FOLDER, &own, a.path.as_deref()) {
             Err(e) => e,
             Ok(target) => {
-                send_bridge(kernel, &bridge, "list", json!({"type": "list", "path": target})).await
+                send_bridge(kernel, &bridge, "list", fantastic_kernel::verbs::call("list", json!({"path": target}))).await
             }
         },
         (FOLDER, Call::Dynamic(c)) if c.name == "reveal" => {
@@ -684,7 +682,7 @@ async fn reveal(kernel: &Arc<Kernel>, own: &str, bridge: &str, a: &verbs::Reveal
         Some((d, _)) => d.to_string(),
         None => ".".to_string(),
     };
-    let listed = send_bridge(kernel, bridge, "list", json!({"type": "list", "path": parent})).await;
+    let listed = send_bridge(kernel, bridge, "list", fantastic_kernel::verbs::call("list", json!({"path": parent}))).await;
     if listed.get("error").is_some() {
         return listed;
     }
@@ -752,15 +750,7 @@ pub(crate) async fn open_view_verb(
     if let Some(err) = gate_path("open_view", &root, &allow, &norm_path) {
         return err;
     }
-    let chosen = match a.id.as_deref() {
-        None => None,
-        Some(s) => {
-            if let Some(err) = rf::guard_agent_id("open_view", s) {
-                return err;
-            }
-            Some(s)
-        }
-    };
+    let chosen = a.id.as_deref();
     open_view(kernel, &bridge, kind, &norm_path, chosen).await
 }
 

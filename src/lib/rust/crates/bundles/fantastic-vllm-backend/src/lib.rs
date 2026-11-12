@@ -72,22 +72,19 @@ const CFG: BackendConfig = BackendConfig {
 
 // ─── sampling ───────────────────────────────────────────────────────────────
 
-/// Applied ONLY where the record sets nothing (a production deployment's
-/// agentic defaults), in python's key order — the order
-/// reflect's `sampling` and the request body list them in.
-///
-/// `reasoning_effort` is a CHAT-TEMPLATE input (a soft steer on how much the
-/// model wants to think); `thinking_token_budget` is the HARD limit, which a
-/// medium-effort agent turn (~900 thinking tokens) only reaches on a runaway.
-fn sampling_defaults() -> [(&'static str, Value); 5] {
-    [
-        ("temperature", json!(0.2)),
-        ("top_p", json!(0.8)),
-        ("top_k", json!(20)),
-        ("reasoning_effort", json!("medium")),
-        ("thinking_token_budget", json!(16000)),
-    ]
-}
+/// The keys the effective sampling lists, in python's key order — the order reflect's
+/// `sampling` and the request body list them in. Each one's default is the record
+/// declaration's ([`VllmRecord`]). `reasoning_effort` is a CHAT-TEMPLATE input (a soft
+/// steer on how much the model wants to think); `thinking_token_budget` is the HARD
+/// limit, which a medium-effort agent turn (~900 thinking tokens) only reaches on a
+/// runaway.
+const SAMPLING_KEYS: [&str; 5] = [
+    "temperature",
+    "top_p",
+    "top_k",
+    "reasoning_effort",
+    "thinking_token_budget",
+];
 
 /// vLLM accepts exactly these; "high" answers 400, so it is refused at write.
 pub const REASONING_EFFORTS: [&str; 3] = ["low", "medium", "xhigh"];
@@ -1038,12 +1035,10 @@ fn required_int(meta: &Map<String, Value>, key: &str) -> Result<i64, ProviderErr
 /// set on the RECORD (explicit: sent as is) or defaulted (ours to adapt).
 fn sampling(meta: &Map<String, Value>) -> (Map<String, Value>, bool) {
     let mut eff = Map::new();
-    for (k, default) in sampling_defaults() {
-        let v = meta
-            .get(k)
-            .filter(|v| !v.is_null())
-            .cloned()
-            .unwrap_or(default);
+    for k in SAMPLING_KEYS {
+        let v = RECORD
+            .get(meta, k)
+            .expect("a sampling key declares its default");
         eff.insert(k.to_string(), v);
     }
     for k in PASSTHROUGH {
@@ -1057,10 +1052,12 @@ fn sampling(meta: &Map<String, Value>) -> (Map<String, Value>, bool) {
     (eff, explicit)
 }
 
-/// A seconds field of the record (declared positive, with its default, in
-/// [`VllmRecord`]); `default` is that declared default.
-pub(crate) fn seconds(meta: &Map<String, Value>, key: &str, default: f64) -> f64 {
-    meta.get(key).and_then(Value::as_f64).unwrap_or(default)
+/// A seconds field of the record (declared positive, with its default, in [`VllmRecord`]).
+pub(crate) fn seconds(meta: &Map<String, Value>, key: &str) -> f64 {
+    RECORD
+        .get(meta, key)
+        .and_then(|v| v.as_f64())
+        .expect("a seconds field declares its default")
 }
 
 /// The read clock (#177): the record's `stream_idle_seconds` when it names one,
@@ -1068,7 +1065,9 @@ pub(crate) fn seconds(meta: &Map<String, Value>, key: &str, default: f64) -> f64
 /// under the name every stream backend shares. Its default stays `read_timeout`:
 /// a vLLM server may take well over a minute to prefill before its first byte.
 fn read_clock_of(meta: &Map<String, Value>, read_timeout: f64) -> f64 {
-    seconds(meta, "stream_idle_seconds", read_timeout)
+    meta.get("stream_idle_seconds")
+        .and_then(Value::as_f64)
+        .unwrap_or(read_timeout)
 }
 
 /// [`build_provider`] from a record (`complete` lays the pass's `model` over the agent's).
@@ -1107,11 +1106,11 @@ fn configure(
             .and_then(Value::as_str)
             .unwrap_or("vllm")
             .to_string(),
-        kv_ttl: seconds(meta, "kv_ttl", KV_TTL),
+        kv_ttl: seconds(meta, "kv_ttl"),
         sampling,
         explicit_budget,
-        connect_timeout: seconds(meta, "connect_timeout", CONNECT_TIMEOUT),
-        read_clock: read_clock_of(meta, seconds(meta, "read_timeout", READ_TIMEOUT)),
+        connect_timeout: seconds(meta, "connect_timeout"),
+        read_clock: read_clock_of(meta, seconds(meta, "read_timeout")),
         report: ReportCell::default(),
     })
 }
@@ -1124,7 +1123,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
     let mut out = verbs::reflect_base(agent_id, kernel, MAN, CFG.model_window);
     let meta = helpers::agent_meta(agent_id, kernel);
     let (sampling, explicit) = sampling(&meta);
-    let secs = |key: &str, default: f64| seconds(&meta, key, default);
+    let secs = |key: &str| seconds(&meta, key);
     out.insert("sampling".into(), Value::Object(sampling));
     out.insert("usage".into(), usage_now(agent_id.as_str()));
     out.insert(
@@ -1146,8 +1145,8 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
     out.insert(
         "timeouts".into(),
         json!({
-            "connect": secs("connect_timeout", CONNECT_TIMEOUT),
-            "read": secs("read_timeout", READ_TIMEOUT),
+            "connect": secs("connect_timeout"),
+            "read": secs("read_timeout"),
         }),
     );
     let mut kv = Map::new();
@@ -1159,7 +1158,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "overflow".into(),
         meta.get("kv_overflow").cloned().unwrap_or(Value::Null),
     );
-    kv.insert("ttl".into(), json!(secs("kv_ttl", KV_TTL)));
+    kv.insert("ttl".into(), json!(secs("kv_ttl")));
     // shared by every vllm_backend agent on the same endpoint
     if let Some(endpoint) = meta.get("endpoint").and_then(Value::as_str) {
         kv.extend(with_table(endpoint, |t| t.view()));
@@ -1278,15 +1277,19 @@ pub struct VllmRecord {
     /// How this server names things — set explicitly, never guessed.
     pub server_dialect: Option<ServerDialect>,
     /// Sampling temperature.
+    #[schemars(default = "default_temperature")]
     pub temperature: Option<f64>,
     /// Nucleus sampling.
+    #[schemars(default = "default_top_p")]
     pub top_p: Option<f64>,
     /// Top-k sampling.
+    #[schemars(default = "default_top_k")]
     pub top_k: Option<i64>,
     /// How much the model wants to think (xhigh needs a thinking_token_budget).
+    #[schemars(default = "default_reasoning_effort")]
     pub reasoning_effort: Option<ReasoningEffort>,
     /// The hard cap on thinking tokens, below max_tokens; unset, a turn sends min(default, max_tokens/2).
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 1), default = "default_thinking_token_budget")]
     pub thinking_token_budget: Option<i64>,
     /// Min-p sampling; sent only when set.
     pub min_p: Option<f64>,
@@ -1303,16 +1306,13 @@ pub struct VllmRecord {
     /// Stop sequences; sent only when set.
     pub stop: Option<Vec<String>>,
     /// Seconds an idle conversation keeps its slot.
-    #[schemars(schema_with = "kv_ttl_seconds")]
-    #[serde(default)]
+    #[schemars(schema_with = "kv_ttl_seconds", default = "default_kv_ttl")]
     pub kv_ttl: Option<f64>,
     /// Seconds to reach the server.
-    #[schemars(schema_with = "connect_timeout_seconds")]
-    #[serde(default)]
+    #[schemars(schema_with = "connect_timeout_seconds", default = "default_connect_timeout")]
     pub connect_timeout: Option<f64>,
     /// Seconds to wait on a generation.
-    #[schemars(schema_with = "read_timeout_seconds")]
-    #[serde(default)]
+    #[schemars(schema_with = "read_timeout_seconds", default = "default_read_timeout")]
     pub read_timeout: Option<f64>,
     /// The read clock on the answer stream: seconds with no byte from the server (headers included) before the turn is judged stalled; default read_timeout.
     #[schemars(schema_with = "fantastic_ai_core::record::positive_seconds")]
@@ -1331,12 +1331,44 @@ pub struct VllmRecord {
     pub ai: AiRecord,
 }
 
+fn default_temperature() -> Option<f64> {
+    Some(0.2)
+}
+
+fn default_top_p() -> Option<f64> {
+    Some(0.8)
+}
+
+fn default_top_k() -> Option<i64> {
+    Some(20)
+}
+
+fn default_reasoning_effort() -> Option<&'static str> {
+    Some("medium")
+}
+
+fn default_thinking_token_budget() -> Option<i64> {
+    Some(16000)
+}
+
+fn default_kv_ttl() -> Option<f64> {
+    Some(KV_TTL)
+}
+
 fn kv_ttl_seconds(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
     fantastic_ai_core::record::positive_seconds_of(KV_TTL)
 }
 
+fn default_connect_timeout() -> Option<f64> {
+    Some(CONNECT_TIMEOUT)
+}
+
 fn connect_timeout_seconds(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
     fantastic_ai_core::record::positive_seconds_of(CONNECT_TIMEOUT)
+}
+
+fn default_read_timeout() -> Option<f64> {
+    Some(READ_TIMEOUT)
 }
 
 fn read_timeout_seconds(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {

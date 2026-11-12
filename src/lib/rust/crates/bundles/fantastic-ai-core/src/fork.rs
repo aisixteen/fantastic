@@ -9,14 +9,14 @@
 //! store only serves a caller its own key, so the copy is written AS the fork.
 //!
 //! A FORK POINT IS ALWAYS A TURN BOUNDARY OUTSIDE A FOLD. `fork {at}` refuses an
-//! `at` that names no row (`no_such_row`), cuts a turn (`cuts_turn`) or cuts a fold
-//! (`cuts_fold`), and a parent that is mid-turn (`parent_mid_turn`). `mark` writes a
+//! `at` that names no row (`not_found`), cuts a turn or a fold (`bad_arg`), and a parent
+//! that is mid-turn (`locked`). `mark` writes a
 //! `mark` row only where `fork` would accept it, so a marked point always forks.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use fantastic_kernel::refusal::bad;
+use fantastic_kernel::refusal::{bad, BAD_ARG, LOCKED, NOT_FOUND, UNKNOWN_AGENT};
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 
@@ -37,10 +37,10 @@ fn kind_of(r: &Value) -> Option<&str> {
 }
 
 /// A refusal with its named `reason`, the `at` it judged and what to do instead.
-fn refuse(verb: &str, reason: &str, why: &str, hint: &str, at: Option<i64>) -> Value {
-    let mut v = json!({"error": format!("{verb}: {why}"), "reason": reason, "hint": hint});
+fn refuse(verb: &str, code: &str, why: &str, hint: &str, at: Option<i64>) -> Value {
+    let mut v = fantastic_kernel::refusal::refusal_hint(code, format!("{verb}: {why}"), hint);
     if let Some(at) = at {
-        v["at"] = Value::from(at);
+        fantastic_kernel::refusal::with(&mut v, "at", Value::from(at));
     }
     v
 }
@@ -200,19 +200,19 @@ pub async fn fork(
     let copy = match plan(&rows, at) {
         Ok(c) => c,
         Err((reason, why)) => {
-            let hint = match reason {
-                "no_such_row" => "name a row of this conversation (see `history`)",
-                "cuts_fold" => "fork at a row before the fold or after all of it",
-                _ => "fork at the end of a finished turn, or at a `mark`",
+            let (code, hint) = match reason {
+                "no_such_row" => (NOT_FOUND, "name a row of this conversation (see `history`)"),
+                "cuts_fold" => (BAD_ARG, "fork at a row before the fold or after all of it"),
+                _ => (BAD_ARG, "fork at the end of a finished turn, or at a `mark`"),
             };
-            return Ok(refuse(verb, reason, &why, hint, Some(at)));
+            return Ok(refuse(verb, code, &why, hint, Some(at)));
         }
     };
     let store = store_of(agent_id, kernel)?;
     let Some(parent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
         return Ok(refuse(
             verb,
-            "no_such_agent",
+            UNKNOWN_AGENT,
             "the agent is gone",
             "",
             Some(at),
@@ -235,7 +235,7 @@ pub async fn fork(
     let Some(handler_module) = parent.handler_module.clone() else {
         return Ok(refuse(
             verb,
-            "no_such_agent",
+            UNKNOWN_AGENT,
             "the agent runs no bundle",
             "",
             Some(at),
@@ -306,7 +306,7 @@ pub async fn fork(
 fn parent_mid_turn(agent_id: &AgentId, at: i64) -> Value {
     refuse(
         "fork",
-        "parent_mid_turn",
+        LOCKED,
         &format!("a turn is running for {agent_id}"),
         "fork once the running turn has answered, or at a `mark`",
         Some(at),
@@ -356,7 +356,7 @@ pub async fn mark(
     let busy = || {
         refuse(
             verb,
-            "mid_turn",
+            LOCKED,
             &format!("a turn is running for {agent_id}"),
             "mark once the running turn has answered",
             None,
@@ -377,21 +377,16 @@ pub async fn mark(
     else {
         return Ok(refuse(
             verb,
-            "no_rows",
+            NOT_FOUND,
             "there is nothing in the conversation to mark",
             "mark after the first turn",
             None,
         ));
     };
-    if let Err((why, text)) = plan(&rows, at) {
-        let reason = if why == "cuts_fold" {
-            "in_fold"
-        } else {
-            "open_chain"
-        };
+    if let Err((_, text)) = plan(&rows, at) {
         return Ok(refuse(
             verb,
-            reason,
+            BAD_ARG,
             &text,
             "mark once the turn has ended",
             Some(at),

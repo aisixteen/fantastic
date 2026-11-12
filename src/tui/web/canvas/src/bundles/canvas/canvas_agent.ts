@@ -297,8 +297,8 @@ const viewHandler: Handler = (id, payload, kernel): Json | Promise<Json> => {
       if (backend) Object.assign(meta, { backend_id: backend, owns_backend: false });
       // the view's OWN declared grant onto the agent it shows
       if (kind === "terminal") meta["can_call"] = { ...terminalView.grants(backend) };
-      // the file tree and the previewer reach the project's file bridge (sidebar_view.ts is the cell's name before the file tree (#106): saved layouts still hold it, and it opens as the tree)
-      if (["files_view.ts", "preview_view.ts", "sidebar_view.ts"].includes(hm) && meta["can_call"] === undefined) meta["can_call"] = fileGrant();
+      // the file tree and the previewer reach the project's file bridge
+      if (["files_view.ts", "preview_view.ts"].includes(hm) && meta["can_call"] === undefined) meta["can_call"] = fileGrant();
       kernel.register(new Agent({ id: aid, parentId: id, handlerModule: hm, meta: meta as Payload }));
       // grants the body needs and the cell lacks are SAID (the panel's refused
       // call never reaches the AI)

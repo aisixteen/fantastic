@@ -20,8 +20,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 base64 = "0.22"
 
 [dev-dependencies]
+fantastic-credential-store = { path = "../fantastic-credential-store", features = ["test-support"] }
 fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
-fantastic-credential-store = { path = "../fantastic-credential-store" }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }
 wiremock = "0.6"

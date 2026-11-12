@@ -261,7 +261,6 @@ rust/
 │   ├── bench-coldstart.sh                 3-metric boot benchmark
 │   ├── quality.sh                         canonical pre-push gate
 │   └── compat-python.sh                   black-box wire-protocol probes
-├── selftest.md                            index + Rust-overlay specs
 └── selftest/                              Rust-specific selftest overlays
 ```
 
@@ -404,8 +403,6 @@ Rust-specific behaviour lives in [`selftest/`](selftest/):
 - `foundation_models_backend.md` — the on-device backend: hermetic suite, the
   opt-in live run, the linked binary
 - `cross_runtime_workdir.md` — round-trip workdir loading
-
-See [`selftest.md`](selftest.md) for the index + driving workflow.
 
 ## Pre-push checks
 

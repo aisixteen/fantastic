@@ -49,7 +49,7 @@ use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::outcome::{body_at, Blob};
 use fantastic_kernel::refusal::{missing, refusal, refusal_hint, with, BAD_ARG, EXISTS, NOT_FOUND, UNHANDLED};
 use fantastic_kernel::{AgentId, Kernel};
-use fantastic_ram_store::{as_id, row_refs, stage_rows};
+use fantastic_ram_store::{as_id, row_refs, stage_rows, stage_tables};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 
@@ -367,75 +367,6 @@ impl Db<'_> {
         out.insert("fold_refs".to_string(), Value::Array(fold_refs));
         Ok(Value::Object(out))
     }
-}
-
-fn bad_tables(msg: &str) -> Value {
-    let mut r = refusal(BAD_ARG, msg);
-    with(&mut r, "arg", json!("tables"));
-    r
-}
-
-/// A validated `dump`, ready to write — ram_store `load_tables`, every key and FK
-/// checked in the same order with the same refusals.
-struct Staged {
-    rows: Vec<(String, Vec<Row>)>,
-    fold_refs: Vec<(String, i64, Vec<i64>)>,
-}
-
-fn stage_tables(tables: &verbs::StoreTables) -> Result<Staged, Value> {
-    let mut by_owner: Vec<(String, Vec<Row>)> = Vec::new();
-    for item in tables.rows.iter().flatten() {
-        let owner = item.get("owner").and_then(Value::as_str);
-        let (Some(_), Some(owner)) = (item.as_object(), owner) else {
-            return Err(bad_tables("inject: every row needs {owner, row}"));
-        };
-        let row = item.get("row").and_then(Value::as_object);
-        let Some(id) = row.and_then(|r| r.get("id")).and_then(as_id) else {
-            return Err(bad_tables("inject: every row needs an int id"));
-        };
-        let mut r: Row = row
-            .expect("checked")
-            .iter()
-            .filter(|(k, _)| k.as_str() != "refs")
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        r.insert("id".to_string(), Value::from(id));
-        match by_owner.iter_mut().find(|(o, _)| o == owner) {
-            Some((_, v)) => v.push(r),
-            None => by_owner.push((owner.to_string(), vec![r])),
-        }
-    }
-    let mut have: HashSet<(String, i64)> = HashSet::new();
-    for (owner, rs) in &by_owner {
-        let mut seen: HashSet<i64> = HashSet::new();
-        for r in rs {
-            let id = r.get("id").and_then(Value::as_i64).unwrap_or(0);
-            if !seen.insert(id) {
-                let mut e = refusal(EXISTS, format!("inject: duplicate row ({owner}, {id})"));
-                with(&mut e, "id", json!(id));
-                return Err(e);
-            }
-            have.insert((owner.clone(), id));
-        }
-    }
-    let has = |owner: &str, id: i64| have.contains(&(owner.to_string(), id));
-    let mut fold_refs = Vec::new();
-    for fr in tables.fold_refs.iter().flatten() {
-        let owner = fr.get("owner").and_then(Value::as_str).unwrap_or("").to_string();
-        let fold = fr.get("fold").and_then(as_id);
-        let members: Vec<Value> = fr.get("members").and_then(Value::as_array).cloned().unwrap_or_default();
-        let Some(fold) = fold.filter(|f| has(&owner, *f)) else {
-            return Err(bad_tables(&format!(
-                "inject: fold_refs names no row {}",
-                fold.map_or_else(|| "None".to_string(), |f| f.to_string())
-            )));
-        };
-        if !members.iter().all(|m| has(&owner, as_id(m).unwrap_or(-1))) {
-            return Err(bad_tables(&format!("inject: fold {fold} refs a missing row")));
-        }
-        fold_refs.push((owner, fold, members.iter().filter_map(as_id).collect()));
-    }
-    Ok(Staged { rows: by_owner, fold_refs })
 }
 
 // ─── who is calling (ram_store, rule for rule) ───────────────────────────────

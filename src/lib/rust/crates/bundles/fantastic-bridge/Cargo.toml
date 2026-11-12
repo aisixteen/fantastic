@@ -22,7 +22,12 @@ libc = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 
+[features]
+# the in-process `memory` transport and its injection seam, for tests; nothing ships them
+test-support = []
+
 [dev-dependencies]
+fantastic-credential-store = { path = "../fantastic-credential-store", features = ["test-support"] }
 fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 fantastic-file = { path = "../fantastic-file" }
 # The memory store each test kernel flushes into — the secret tests read every

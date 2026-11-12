@@ -551,16 +551,18 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
 
 /// The sampling temperature: the record's, else the declared default.
 fn temperature_of(meta: &Map<String, Value>) -> f64 {
-    meta.get("temperature")
-        .and_then(Value::as_f64)
-        .unwrap_or(DEFAULT_TEMPERATURE)
+    RECORD
+        .get(meta, "temperature")
+        .and_then(|v| v.as_f64())
+        .expect("temperature declares its default")
 }
 
 /// A turn's output bound: the record's `num_predict`, else the declared default.
 fn num_predict_of(meta: &Map<String, Value>) -> u64 {
-    meta.get("num_predict")
-        .and_then(Value::as_u64)
-        .unwrap_or(u64::try_from(DEFAULT_TURN_TOKENS).unwrap_or(u64::MAX))
+    RECORD
+        .get(meta, "num_predict")
+        .and_then(|v| v.as_u64())
+        .expect("num_predict declares its default")
 }
 
 #[cfg(test)]

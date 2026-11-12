@@ -52,7 +52,7 @@ test("the verbs refuse: bad_arg, outside_root, not_found, nothing_shown, not_an_
   const r = rig();
   project(r.bridge);
   await r.mountPreview("pv");
-  assert.equal((await r.call("pv", { type: "open" }))["reason"], "bad_arg");
+  assert.equal((await r.call("pv", { type: "open" }))["reason"], "missing_arg");
   assert.equal((await r.call("pv", { type: "open", path: "/etc/passwd" }))["reason"], "outside_root");
   assert.equal((await r.call("pv", { type: "open", path: "../x" }))["reason"], "outside_root");
   assert.equal((await r.call("pv", { type: "open", path: "nope.txt" }))["reason"], "not_found");

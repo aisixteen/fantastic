@@ -1,5 +1,7 @@
 import type { Handler, Json } from "../../lib.ts";
 import { str } from "../../lib.ts";
+import { docsOf, entry, refuse } from "../declared.ts";
+import type { Declared } from "../declared.ts";
 import { bytesOf, isRefusal, readAll, readBytes, said } from "../files/file_bridge.ts";
 import type { Change, FileBridge, Refusal, WatchHub } from "../files/file_bridge.ts";
 import type { AgentIndex } from "../files/agent_index.ts";
@@ -495,44 +497,51 @@ export class PreviewController {
 /** The live controllers, by cell id. */
 export const previews = new Map<string, PreviewController>();
 
-export const PREVIEW_VERBS = ["open", "pin", "unpin", "mode", "edit", "save", "revert"] as const;
-
-export const PREVIEW_VERB_DOCS: Record<string, string> = {
-  open: "args: path:str (req — a project path). Pins this preview to the file and shows it (an AI's open means 'show this'). {opened, mode}. Refused: bad_arg, outside_root, not_found, unsaved_edits.",
-  pin: "args: path:str? (default: what is shown). Binds this preview to one path; the tree's selection no longer moves it. {pinned}. Refused: nothing_shown.",
-  unpin: "No args. Follows the tree's selection again. {following: true}.",
-  mode: "args: mode:file|agent (req). For an agent's folder: its files (agent.yaml) or the live agent. {mode}. Refused: bad_arg, not_an_agent.",
-  edit: "args: path:str? (open it first). Starts editing the text file shown. {editing, version}. Refused: nothing_shown, not_editable (with why).",
-  save: "No args. Writes the edits, against the version they are based on. {saved, version}. Refused: not_editing; conflict ({expected, actual}) when the file changed on disk under the edits — the person resolves it (reload, keep mine, compare); the bridge's refusal otherwise.",
-  revert: "No args. Drops the unsaved edits ({reverted: edits}), or undoes the last save through the bridge's undo ({reverted: save}); the undo slot is RAM-only on the host. {reverted, version}. Refused: nothing_to_revert, or the bridge's refusal.",
-  reflect: "No args. This cell and its verbs.",
+/** The verbs a preview cell answers. */
+export const PREVIEW_DECL: Declared = {
+  open: {
+    doc: "Pins this preview to the file and shows it (an AI's open means 'show this'). Returns {opened, mode}.",
+    args: { path: { type: "string", min: 1, required: true, doc: "A project path, root-relative." } },
+  },
+  pin: {
+    doc: "Binds this preview to one path; the tree's selection no longer moves it. Returns {pinned}.",
+    args: { path: { type: "string", min: 1, doc: "The path to bind; absent, what is shown." } },
+  },
+  unpin: { doc: "Follows the tree's selection again. Returns {following: true}.", args: {} },
+  mode: {
+    doc: "For an agent's folder: its files (agent.yaml) or the live agent. Returns {mode}.",
+    args: { mode: { type: "string", enum: ["file", "agent"], required: true, doc: "What to show." } },
+  },
+  edit: {
+    doc: "Starts editing the text file shown. Returns {editing, version}.",
+    args: { path: { type: "string", min: 1, doc: "The file to open first; absent, what is shown." } },
+  },
+  save: { doc: "Writes the edits, against the version they are based on. Returns {saved, version}.", args: {} },
+  revert: {
+    doc: "Drops the unsaved edits ({reverted: edits}), or undoes the last save through the bridge's undo ({reverted: save}); the undo slot is RAM-only on the host. Returns {reverted, version}.",
+    args: {},
+  },
 };
 
-export const PREVIEW_README =
-  "A PREVIEW cell: shows a file or the live agent. It follows the file tree's selection (`follow`) or is pinned to one path; several can coexist. Text is shown highlighted and followed live from disk; Markdown is rendered; images and PDF are drawn; a binary or large file shows its size (large ones page). An agent's folder shows its agent.yaml, or — in agent mode — the agent itself. Text files can be edited and saved (⌘S / Ctrl-S) against the version read; a change on disk under unsaved edits is a loud conflict (reload, keep mine, compare), never merged. VERBS: open {path}, pin, unpin, mode {file|agent}, edit, save, revert. Page content: it calls the project's file bridge `files` as its cell grant allows.";
+/** What the bundle is for. */
+export const PREVIEW_MAN = "A preview cell: shows a file or the live agent, following the file tree's selection or pinned to one path; text files can be edited and saved.";
 
-const refusal = (error: string, reason: string, extra: Record<string, unknown> = {}): Json => ({ error, reason, ...extra }) as Json;
-
-export const previewAgent: Handler = async (id, payload): Promise<Json> => {
+const previewHandler: Handler = async (id, payload): Promise<Json> => {
   const verb = str(payload, "type");
-  if (!(PREVIEW_VERBS as readonly string[]).includes(verb)) {
-    return refusal(`preview: unknown verb '${verb}'`, "unhandled", { verb, hint: `it answers ${PREVIEW_VERBS.join(", ")}` });
-  }
   const ctl = previews.get(id);
-  if (ctl === undefined) return refusal("preview: the cell is not on screen", "not_mounted", { hint: "the cell is not on screen" });
-  const nothing = (): Json => refusal("preview: nothing is shown", "nothing_shown", { hint: "open {path} or select something in the tree" });
-  const asRefusal = (r: Refusal | null, fallback: string): Json => (r !== null ? (r as Json) : refusal(fallback, "refused"));
+  if (ctl === undefined) return refuse("not_mounted", "preview: the cell is not on screen", { hint: "the cell is not on screen" });
+  const nothing = (): Json => refuse("nothing_shown", "preview: nothing is shown", { hint: "open {path} or select something in the tree" });
+  const asRefusal = (r: Refusal | null, fallback: string): Json => (r !== null ? (r as Json) : refuse("refused", fallback));
   const pathArg = (): { path: string } | { refused: Json } => {
-    const p = payload["path"];
-    if (typeof p !== "string" || p === "") return { refused: refusal("preview: path (a root-relative project path) is required", "bad_arg", { arg: "path" }) };
-    if (!inRoot(p)) return { refused: refusal(`preview: '${p}' is outside the project`, "outside_root", { arg: "path", hint: "paths are relative to the project folder, with no leading / and no .." }) };
+    const p = payload["path"] as string;
+    if (!inRoot(p)) return { refused: refuse("outside_root", `preview: '${p}' is outside the project`, { arg: "path", hint: "paths are relative to the project folder, with no leading / and no .." }) };
     return { path: norm(p) };
   };
   switch (verb) {
     case "open": {
       const a = pathArg();
       if ("refused" in a) return a.refused;
-      if (ctl.dirty && a.path !== ctl.path) return refusal(`preview: unsaved edits in ${ctl.path}`, "unsaved_edits", { hint: "save or revert first" });
+      if (ctl.dirty && a.path !== ctl.path) return refuse("unsaved_edits", `preview: unsaved edits in ${ctl.path}`, { hint: "save or revert first" });
       await ctl.pin(a.path);
       if (ctl.mode === "error" && ctl.gone) return asRefusal(ctl.lastRefusal, `preview: '${a.path}' is not in the project`);
       return { opened: a.path, mode: ctl.mode };
@@ -552,11 +561,10 @@ export const previewAgent: Handler = async (id, payload): Promise<Json> => {
       await ctl.unpin();
       return { following: true };
     case "mode": {
-      const m = str(payload, "mode");
-      if (m !== "file" && m !== "agent") return refusal("preview: mode must be file or agent", "bad_arg", { arg: "mode" });
-      if (!ctl.isAgent) return refusal("preview: what is shown is not an agent's folder", "not_an_agent", { hint: "select an agent folder first" });
+      const m = payload["mode"] as "file" | "agent";
+      if (!ctl.isAgent) return refuse("not_an_agent", "preview: what is shown is not an agent's folder", { hint: "select an agent folder first" });
       const unsaved = await ctl.setFileMode(m);
-      if (unsaved !== null) return refusal(`preview: unsaved edits in ${ctl.path}`, "unsaved_edits", { hint: "save or revert first" });
+      if (unsaved !== null) return refuse("unsaved_edits", `preview: unsaved edits in ${ctl.path}`, { hint: "save or revert first" });
       return { mode: m };
     }
     case "edit": {
@@ -564,42 +572,44 @@ export const previewAgent: Handler = async (id, payload): Promise<Json> => {
         const a = pathArg();
         if ("refused" in a) return a.refused;
         if (a.path !== ctl.path) {
-          if (ctl.dirty) return refusal(`preview: unsaved edits in ${ctl.path}`, "unsaved_edits", { hint: "save or revert first" });
+          if (ctl.dirty) return refuse("unsaved_edits", `preview: unsaved edits in ${ctl.path}`, { hint: "save or revert first" });
           await ctl.pin(a.path);
         }
       }
       if (ctl.path === null && ctl.content.k !== "agent") return nothing();
       const why = ctl.setEditing(true);
-      if (why !== null) return refusal(`preview: not editable — ${why}`, "not_editable", { why });
+      if (why !== null) return refuse("not_editable", `preview: not editable — ${why}`, { why });
       return { editing: ctl.path, version: ctl.editor.version() };
     }
     case "save": {
-      if (!ctl.editing) return refusal("preview: not editing", "not_editing", { hint: "edit first" });
-      if (ctl.gone) return refusal("preview: the file was deleted on disk", "file_deleted", { hint: "saving waits until the file is back; revert drops the edits" });
+      if (!ctl.editing) return refuse("not_editing", "preview: not editing", { hint: "edit first" });
+      if (ctl.gone) return refuse("file_deleted", "preview: the file was deleted on disk", { hint: "saving waits until the file is back; revert drops the edits" });
       const s = ctl.editor.state;
-      if (s.k === "conflict" || s.k === "comparing") return refusal("preview: the file changed on disk under your edits", "conflict", { expected: s.baseVersion, actual: s.theirsVersion, hint: "reload, keep mine or compare in the cell" });
+      if (s.k === "conflict" || s.k === "comparing") return refuse("conflict", "preview: the file changed on disk under your edits", { expected: s.baseVersion, actual: s.theirsVersion, hint: "reload, keep mine or compare in the cell" });
       await ctl.save();
       const after = ctl.editor.state;
-      if (after.k === "conflict" || after.k === "comparing") return refusal("preview: the file changed on disk under your edits", "conflict", { expected: after.baseVersion, actual: after.theirsVersion, hint: "reload, keep mine or compare in the cell" });
+      if (after.k === "conflict" || after.k === "comparing") return refuse("conflict", "preview: the file changed on disk under your edits", { expected: after.baseVersion, actual: after.theirsVersion, hint: "reload, keep mine or compare in the cell" });
       if (ctl.editor.error !== null) return asRefusal(ctl.lastRefusal, ctl.editor.error);
       return { saved: ctl.path, version: ctl.editor.version() };
     }
     case "revert": {
       const r = ctl.editor.revert();
-      if (!r.ok) return refusal("preview: nothing to revert", "nothing_to_revert", { hint: "revert drops unsaved edits, or undoes the last save" });
+      if (!r.ok) return refuse("nothing_to_revert", "preview: nothing to revert", { hint: "revert drops unsaved edits, or undoes the last save" });
       ctl.lastRefusal = null;
       await ctl.exec(r.effects);
       if (ctl.lastRefusal !== null) return ctl.lastRefusal as Json;
       return { reverted: r.what, version: ctl.editor.version() };
     }
   }
-  return refusal(`preview: unknown verb '${verb}'`, "unhandled", { verb });
+  throw new Error(`preview: ${verb} is declared and not handled`);
 };
+
+export const previewAgent: Handler = entry("preview", PREVIEW_DECL, previewHandler);
 
 export function registerPreviewView(kernel: {
   registerBundle(hm: string, h: Handler, verbs?: Record<string, string>): void;
   setBundleReadme(hm: string, readme: string): void;
 }): void {
-  kernel.registerBundle("preview_view.ts", previewAgent, PREVIEW_VERB_DOCS);
-  kernel.setBundleReadme("preview_view.ts", PREVIEW_README);
+  kernel.registerBundle("preview_view.ts", previewAgent, docsOf(PREVIEW_DECL));
+  kernel.setBundleReadme("preview_view.ts", PREVIEW_MAN);
 }

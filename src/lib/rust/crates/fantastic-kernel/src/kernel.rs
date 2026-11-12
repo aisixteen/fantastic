@@ -1201,7 +1201,7 @@ mod tests;
 
 /// Validate a flat record list before anything is torn down; `Ok` names the one
 /// root. Python `kernel/_state.py` `validate_records`, check for check and text
-/// for text: a falsy id, the id rule a create applies (`guard_agent_id`), the
+/// for text: a falsy id, the id rule a create declares (`AGENT_ID_PATTERN`), the
 /// reserved keys (sorted), a duplicate, not exactly one root, a parent outside
 /// the set, and records unreachable from the root.
 ///
@@ -1219,7 +1219,7 @@ pub fn validate_records(records: &[Map<String, Value>]) -> KernelResult<String> 
         // THE SAME ID RULE AS A CREATE: a record edited on disk to carry the
         // reserved `kernel`, a foreign `guid|agent`, or a path-walking id is
         // refused here, before the live tree is torn down.
-        if let Some(refused) = crate::refusal::guard_agent_id("load", rid.as_str().unwrap_or("")) {
+        if let Err(refused) = crate::verbs::check_agent_id("load", "id", rid.as_str().unwrap_or("")) {
             return bad(format!(
                 "record {}: {}",
                 py_repr_value(rid),
@@ -1229,10 +1229,14 @@ pub fn validate_records(records: &[Map<String, Value>]) -> KernelResult<String> 
                     .unwrap_or_default()
             ));
         }
-        let rid = rid
-            .as_str()
-            .expect("guard_agent_id passed a str")
-            .to_string();
+        let rid = rid.as_str().expect("the id pattern passed a str").to_string();
+        if rid == crate::refusal::RESERVED_ID {
+            return bad(format!(
+                "record {}: load: id must be a name other than the reserved {}",
+                py_repr(&rid),
+                py_repr(&rid)
+            ));
+        }
         // RESERVED KEYS: constructor parameters, not meta.
         let mut reserved: Vec<&str> = crate::agent::RESERVED_RECORD_KEYS
             .iter()

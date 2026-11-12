@@ -55,7 +55,7 @@ function register(kernel: Kernel): void {
   kernel.registerBundle("terminal_view.ts", () => null);
   kernel.registerBundle("reflect_view.ts", () => null);
   kernel.registerBundle("stream_view.ts", () => null);
-  registerFilesView(kernel); // the file tree cell, a page agent with verbs (sidebar_view.ts is the cell's name before the file tree (#106): saved layouts still hold it, and it opens as the tree)
+  registerFilesView(kernel); // the file tree cell, a page agent with verbs
   registerPreviewView(kernel); // the previewer / editor cell: a page agent with verbs
   kernel.registerBundle("canvases_view.ts", () => null); // the canvas-list cell
   kernel.registerBundle("mcp_view.ts", () => null); // an MCP server agent's view
@@ -68,26 +68,11 @@ function register(kernel: Kernel): void {
   // pairing from this + the host's capability readme — no hardcoded pairing);
   // content agents say what they hold. Direction is frontend→host: the JS knows
   // it fronts a host capability; the host stays ignorant of the frontend.
-  kernel.setBundleReadme(
-    "html_agent.ts",
-    "An html cell: its record's `html` body, rendered in a sandboxed frame (unsandboxed when trusted). A PANEL'S JS (an html cell's body) has `fantastic`: `await fantastic.send(id, payload)` → the reply · `fantastic.watch(id, ev => …)` → events (returns off) · `fantastic.emit(id, payload)` · `fantastic.onMessage(p => …)`. Its calls are judged by the CELL's can_call — grant what it calls (`{<id>: [verbs…, watch]}`); a reply's `grants_missing` names any it lacks. On the host they arrive as `user`: a host agent you create for a panel needs `callable_by: {user: [<the verbs the panel calls>, watch]}` in its create_agent (a new agent admits no one); never drop `user` from an existing agent's callable_by. The view (`view_root`) places, moves, grants and removes cells.",
-  );
-  kernel.setBundleReadme(
-    "agent_view.ts",
-    "A HOST agent's own view: the cell shows `backend_id`, drawn as that agent's record declares (`view: {kind: html, bytes | bytes_file, calls}`). The cell holds no content — the body is the host agent's; its grant onto the agent is the record's `calls`. Show a host agent: place {backend_id, x, y} on the view (no kind).",
-  );
-  kernel.setBundleReadme(
-    "canvases_view.ts",
-    "A canvas-list cell: every canvas on the host (flat peers, ★ the main one); a click opens one, `+ new canvas` makes a peer. Page content, no backend.",
-  );
-  kernel.setBundleReadme(
-    "gl_agent.ts",
-    "Frontend WebGL content agent. Renders its record's `gl_source` shader and reacts to events it watches by id. Content, not a host client.",
-  );
-  kernel.setBundleReadme(
-    "terminal_view.ts",
-    "A terminal cell: an xterm onto a host exec agent's PTY job (`backend_id`) — it starts the job, writes keystrokes (write), resizes, and draws its output.",
-  );
+  kernel.setBundleReadme("html_agent.ts", "An html cell: its record's `html` body, rendered in a sandboxed frame (unsandboxed when trusted).");
+  kernel.setBundleReadme("agent_view.ts", "A host agent's own view: the cell shows `backend_id`, drawn as that agent's record declares.");
+  kernel.setBundleReadme("canvases_view.ts", "A canvas-list cell: every canvas on the host; a click opens one.");
+  kernel.setBundleReadme("gl_agent.ts", "A WebGL content agent: it renders its record's `gl_source` shader.");
+  kernel.setBundleReadme("terminal_view.ts", "A terminal cell: an xterm onto a host exec agent's PTY job (`backend_id`).");
 }
 
 /** Fresh (the host namespace holds no records): seed the canvas root — the

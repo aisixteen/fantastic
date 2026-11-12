@@ -29,6 +29,8 @@ tower = "0.5"
 futures-util = "0.3"
 
 [dev-dependencies]
+fantastic-bridge = { path = "../fantastic-bridge", features = ["test-support"] }
+fantastic-credential-store = { path = "../fantastic-credential-store", features = ["test-support"] }
 fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 # The ROOT LOADER bundle — tests need it registered so the root answers the
 # verbs it serves (`persist_blob`/`load_blob`, `boot`), as it does in production.
@@ -43,9 +45,7 @@ fantastic-file = { path = "../fantastic-file" }
 fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }
 # Calls across the legs: a ws_bridge dialing web_ws (and a page kernel's bridge
 # end), the memory store every record lands in, and a credential store.
-fantastic-bridge = { path = "../fantastic-bridge" }
 fantastic-ram-store = { path = "../fantastic-ram-store" }
-fantastic-credential-store = { path = "../fantastic-credential-store" }
 # The two-way bridge (#476): a scripted AI agent — the real ai_core verb table, a
 # canned provider — whose stream a connected kernel watches.
 fantastic-ai-core = { path = "../fantastic-ai-core" }

@@ -128,18 +128,28 @@ static SECTION: fantastic_kernel::RecordDecl = fantastic_kernel::RecordDecl::of:
 /// The sections `view.tui` declares, or the refusal: the shared engine checks
 /// the declaration against the schemas above, then the checked value is typed.
 pub fn parse(view: &Value) -> Result<Vec<Section>, Value> {
-    let tui = view.get("tui").cloned().unwrap_or(Value::Null);
-    parse_tui(&tui)
+    // the declaration is checked as it stands: a view with no `tui` is refused by the
+    // engine as missing it, not read as an empty value
+    let mut whole = serde_json::Map::new();
+    if let Some(tui) = view.get("tui") {
+        whole.insert("tui".to_string(), tui.clone());
+    }
+    parse_whole(&Value::Object(whole))
 }
 
 /// Does `view` declare a TUI view that parses?
 pub fn declared(view: &Value) -> bool {
-    view.get("tui").is_some() && parse(view).is_ok()
+    parse(view).is_ok()
 }
 
 pub fn parse_tui(tui: &Value) -> Result<Vec<Section>, Value> {
-    let whole = json!({"tui": tui});
-    fantastic_kernel::verbs::validate("view", TUI.schema(), &whole)?;
+    parse_whole(&json!({"tui": tui}))
+}
+
+/// The checked declaration `{tui: [...]}`, typed.
+fn parse_whole(whole: &Value) -> Result<Vec<Section>, Value> {
+    fantastic_kernel::verbs::validate("view", TUI.schema(), whole)?;
+    let tui = &whole["tui"];
     let list = tui.as_array().expect("the declaration's schema made it a list");
     list.iter().enumerate().map(|(i, s)| section(i, s)).collect()
 }

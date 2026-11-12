@@ -21,35 +21,12 @@ use std::sync::Arc;
 /// Files the KERNEL manages. A sidecar may not overwrite them.
 const RESERVED_BLOB_NAMES: [&str; 1] = [crate::persistence::RECORD_FILE];
 
-/// Validate a blob filename: one bare segment, not kernel-managed, no escape or
-/// hidden name. The argument's presence and type are the verb declaration's.
-///
-/// Defence in depth over the provider's own clamp, so a bad `name` fails AT the
-/// loader with a loader-scoped message instead of surfacing as a deep fs error
-/// the caller cannot act on.
-fn guard_name(name: &str) -> Result<&str, String> {
-    if name.is_empty() {
-        return Err("name must be a non-empty filename".to_string());
-    }
-    if name.contains('/') || name.contains('\\') {
-        return Err(format!(
-            "name {} must be a single filename (no path segments)",
-            fantastic_bundle::py_repr(name)
-        ));
-    }
-    if name.starts_with('.') || name.contains("..") {
-        return Err(format!(
-            "name {} must not be hidden or contain '..'",
-            fantastic_bundle::py_repr(name)
-        ));
-    }
-    if RESERVED_BLOB_NAMES.contains(&name.to_lowercase().as_str()) {
-        return Err(format!(
-            "name {} is reserved (kernel-managed)",
-            fantastic_bundle::py_repr(name)
-        ));
-    }
-    Ok(name)
+/// Is `name` a file the kernel manages? A sidecar may not overwrite it (a sidecar
+/// that could rewrite `agent.yaml` would let a consumer edit its own record, grants
+/// included, through a byte channel). The name's shape (one bare filename) is the
+/// verb declaration's pattern; this is the one rule that needs the reserved list.
+fn reserved_name(name: &str) -> bool {
+    RESERVED_BLOB_NAMES.contains(&name.to_lowercase().as_str())
 }
 
 /// Store-relative dir for an agent's sidecars — `agents/<id>`, or `""` for the
@@ -87,13 +64,6 @@ fn blob_reldir(kernel: &Arc<Kernel>, loader: &Agent, aid: &str) -> Result<String
     Ok(super::loader_reldir(kernel, loader, &abs))
 }
 
-/// A BARE `{error}`, python's shape. The blob verbs are the loader BUNDLE's, not
-/// the kernel's, and python's bundle returns plain dicts with no refusal code:
-/// `{"error": "<verb>: <why>"}`, plus `reason` only where python sets one.
-fn err(verb: &str, why: impl std::fmt::Display) -> Value {
-    json!({ "error": format!("{verb}: {why}") })
-}
-
 /// Shared preamble: the path rules, then the store, then the path.
 ///
 /// `Ok(Err(reply))` = the bare `{error}` the verb answers with; `Err` = the walk
@@ -105,12 +75,19 @@ fn resolve(
     aid: &str,
     name: &str,
 ) -> Result<Result<(AgentId, String), Value>, BundleError> {
-    if let Err(e) = guard_args(verb, aid, name) {
-        return Ok(Err(e));
+    if reserved_name(name) {
+        return Ok(Err(crate::refusal::bad(
+            verb,
+            "name",
+            "a name other than a kernel-managed file",
+        )));
     }
     // THE ADDRESSED LOADER's store (python `_find_store(agent)`), never another's.
     let Some(store) = super::find_store_for(kernel, loader) else {
-        return Ok(Err(err(verb, "no store wired — persistence not available")));
+        return Ok(Err(crate::refusal::refusal(
+            crate::refusal::NOT_FOUND,
+            format!("{verb}: no store wired — persistence not available"),
+        )));
     };
     let reldir = blob_reldir(kernel, loader, aid)?;
     let path = if reldir.is_empty() {
@@ -119,17 +96,6 @@ fn resolve(
         format!("{reldir}/{name}")
     };
     Ok(Ok((store, path)))
-}
-
-/// The path rules of both verbs: the id BECOMES A DIRECTORY (`agents/<agent_id>/`),
-/// one safe segment, or `../bundles/x` would write a folder bundle's `bundle.yaml`;
-/// the name is one bare filename.
-fn guard_args(verb: &str, aid: &str, name: &str) -> Result<(), Value> {
-    if let Some(r) = crate::refusal::guard_agent_id_as(verb, "agent_id", aid) {
-        return Err(r);
-    }
-    guard_name(name).map_err(|e| err(verb, e))?;
-    Ok(())
 }
 
 /// `persist_blob` — whole-file write of one sidecar, through `loader`'s store.

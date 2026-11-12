@@ -19,9 +19,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 futures-util = { workspace = true }
 
 [dev-dependencies]
+fantastic-ram-store = { path = "../fantastic-ram-store", features = ["test-support"] }
 fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 # Every AI agent keeps its conversation in a memory store; the tests wire one.
-fantastic-ram-store = { path = "../fantastic-ram-store" }
 fantastic-file = { path = "../fantastic-file" }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }

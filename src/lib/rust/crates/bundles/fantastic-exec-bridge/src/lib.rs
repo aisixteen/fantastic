@@ -531,7 +531,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "inherit_env": meta.get("inherit_env").cloned().unwrap_or_else(|| json!([])),
         // The shell line the record permits without an `allowed` entry: false
         // (none), true ($SHELL bare) or "login" ($SHELL -l).
-        "shell": meta.get("shell").cloned().unwrap_or(json!(false)),
+        "shell": record::RECORD.get(&meta, "shell"),
         "running": running,
     });
     // The auth POSTURE, python's `describe(rec)` — `**_describe(rec)` is the last

@@ -226,7 +226,8 @@ pub struct OpenView {
     /// Root-relative, exposed by `allow`; `.` is the whole root, folders only.
     #[schemars(length(min = 1), regex(pattern = r"^[^/][\s\S]*$"))]
     pub path: String,
-    /// The new view's agent id, taken only when it is free.
+    /// The new view's agent id (one safe path segment: no separator, no `|`, not hidden, no `..`, not all digits), taken only when it is free.
+    #[schemars(regex(pattern = r"^[0-9]*[^/\\|.0-9](?:[^/\\|.]|\.[^/\\|.])*\.?$"))]
     pub id: Option<String>,
 }
 

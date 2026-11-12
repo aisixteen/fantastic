@@ -19,6 +19,7 @@ schemars = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
+fantastic-credential-store = { path = "../fantastic-credential-store", features = ["test-support"] }
 fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 # The shared agentic corpus is TEST data (`contract/`), read by the agentic
 # runner — not a manifest, so it needs no PyYAML semantics.
@@ -30,4 +31,3 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }
 # `credential_store.yaml` declares a credential store (CRED-1..5); its keychain is
 # the in-memory double, so the runner never reaches the real one.
-fantastic-credential-store = { path = "../fantastic-credential-store" }

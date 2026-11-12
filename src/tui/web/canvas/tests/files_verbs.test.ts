@@ -31,12 +31,14 @@ test("select: opens the folders above, selects, publishes to the previews; repli
   assert.deepEqual(r.saved.at(-1)!["selected"], ".fantastic/agents/user/agents/files");
 });
 
-test("select, expand, collapse and reveal refuse: bad_arg, outside_root, not_found, not_a_dir", async () => {
+test("select, expand, collapse and reveal refuse: missing_arg, bad_arg, outside_root, not_found, not_a_dir", async () => {
   const r = rig();
   project(r.bridge);
   await r.mountTree("tree_1");
   for (const verb of ["select", "expand", "collapse", "reveal"]) {
-    assert.equal((await r.call("tree_1", { type: verb }))["reason"], "bad_arg", verb);
+    assert.equal((await r.call("tree_1", { type: verb }))["reason"], "missing_arg", verb);
+    assert.equal((await r.call("tree_1", { type: verb, path: 4 }))["reason"], "bad_arg", verb);
+    assert.equal((await r.call("tree_1", { type: verb, path: "a", agent: "b" }))["reason"], "bad_arg", verb);
     assert.equal((await r.call("tree_1", { type: verb, path: "/etc/passwd" }))["reason"], "outside_root", verb);
     assert.equal((await r.call("tree_1", { type: verb, path: "a/../../b" }))["reason"], "outside_root", verb);
   }

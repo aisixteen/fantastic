@@ -307,16 +307,8 @@ pub async fn read(
         .await
         .map_err(|e| fail(want.first().copied().unwrap_or("model"), e.to_string()))?;
     let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs_f64(seconds(
-            rec,
-            "connect_timeout",
-            crate::CONNECT_TIMEOUT,
-        )))
-        .read_timeout(Duration::from_secs_f64(seconds(
-            rec,
-            "read_timeout",
-            crate::READ_TIMEOUT,
-        )))
+        .connect_timeout(Duration::from_secs_f64(seconds(rec, "connect_timeout")))
+        .read_timeout(Duration::from_secs_f64(seconds(rec, "read_timeout")))
         .build()
         .map_err(|e| fail(want.first().copied().unwrap_or("model"), e.to_string()))?;
     let mut out = Map::new();

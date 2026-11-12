@@ -94,6 +94,7 @@ pub mod transport;
 pub mod verbs;
 
 use authorizer::{Action, Decision};
+#[cfg(any(test, feature = "test-support"))]
 use transport::memory::MemoryTransport;
 use verbs::{CallFrame, FrameId, WatchFrame};
 use transport::relay::{RelaySpawn, RelayTransport};
@@ -372,197 +373,126 @@ fn forward_marks(f: &verbs::Forward) -> Vec<String> {
         .collect()
 }
 
-/// [`forward_marks`] of a `ws_bridge` call.
-fn ws_payload_secret(payload: &Value) -> Vec<String> {
-    use fantastic_kernel::verbs::Parse;
-    match verbs::ws::Call::parse("ws_bridge", payload, &[]) {
-        Ok(verbs::ws::Call::Forward(f)) => forward_marks(&f),
-        _ => Vec::new(),
-    }
-}
-
-/// [`forward_marks`] of a `relay_connector` call.
-fn relay_payload_secret(payload: &Value) -> Vec<String> {
-    use fantastic_kernel::verbs::Parse;
-    match verbs::relay::Call::parse("relay_connector", payload, &[]) {
-        Ok(verbs::relay::Call::Forward(f)) => forward_marks(&f),
-        _ => Vec::new(),
-    }
-}
-
 /// What the bundle is for — its one short man text (ws_bridge).
 const WS_MAN: &str = "A cross-kernel bridge: it dials a far kernel's web_ws leg and forwards calls to it, watches its agents and serves the far side's calls and watches as this leg, gated as the leg. Emits bridge_up and bridge_down on its inbox.";
 
 /// What the bundle is for — its one short man text (relay_connector).
 const RELAY_MAN: &str = "A cross-kernel bridge through a relay kernel: it dials the relay with a group password from a credential store, forwards calls to a partner kernel by guid, serves the partner's calls as this leg, keeps a directory of peers, and redials by itself. Emits bridge_up and bridge_down on its inbox.";
 
-#[async_trait]
-impl Handler for WsBridgeBundle {
-    type Call = verbs::ws::Call;
+/// The ONE handler both derivations share: the verbs every leg answers are written
+/// once here; a derivation adds only its own arms (`|agent, kernel| { arms }`), and
+/// names its verb module (`ws` / `relay`), its bundle name and man text, and its family.
+macro_rules! bridge_handler {
+    ($ty:ident, $m:ident, $name:literal, $man:expr, $family:expr, |$agent:ident, $kern:ident| { $($extra:tt)* }) => {
+        #[async_trait]
+        impl Handler for $ty {
+            type Call = verbs::$m::Call;
 
-    fn name(&self) -> &str {
-        "ws_bridge"
-    }
-
-    fn man(&self) -> &'static str {
-        WS_MAN
-    }
-
-    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        verbs::ws::VERBS
-    }
-
-    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
-        verbs::ws::dynamic_verbs(agent)
-    }
-
-    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
-        &record::ws::RECORD
-    }
-
-    fn payload_secret(&self, payload: &Value) -> Vec<String> {
-        ws_payload_secret(payload)
-    }
-
-    /// The JSON half of [`Self::handle_binary`] — a `forward` reply body is not carried.
-    async fn handle(
-        &self,
-        agent_id: &AgentId,
-        call: Self::Call,
-        kernel: &Arc<Kernel>,
-    ) -> Result<Reply, BundleError> {
-        Ok(self.handle_binary(agent_id, call, None, kernel).await?.0)
-    }
-
-    async fn handle_binary(
-        &self,
-        agent_id: &AgentId,
-        call: Self::Call,
-        body: Option<Blob>,
-        kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<Blob>), BundleError> {
-        let family = Family::Ws;
-        let reply = match call {
-            verbs::ws::Call::Reflect(_) => reflect_reply(family, agent_id, kernel),
-            verbs::ws::Call::Boot(_) => boot_reply(family, agent_id, kernel).await,
-            verbs::ws::Call::Shutdown(_) => Value::Null,
-            verbs::ws::Call::Reconnect(_) => reconnect_reply(family, agent_id, kernel).await,
-            verbs::ws::Call::Forward(a) => {
-                let (v, b) = forward_call(agent_id, a, body, kernel).await;
-                return Ok((Some(v), b));
+            fn name(&self) -> &str {
+                $name
             }
-            verbs::ws::Call::WatchRemote(a) => {
-                watch_remote_reply(agent_id, &a.target, "watch").await
-            }
-            verbs::ws::Call::UnwatchRemote(a) => {
-                watch_remote_reply(agent_id, &a.target, "unwatch").await
-            }
-        };
-        Ok((Some(reply), None))
-    }
 
-    async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
-        let _ = shutdown_reply(agent_id, kernel).await;
-        Ok(())
-    }
-    /// Shutdown frees what delete frees — declared, never a fallback.
-    async fn on_shutdown(
-        &self,
-        agent_id: &AgentId,
-        kernel: &Arc<Kernel>,
-    ) -> Result<(), BundleError> {
-        self.on_delete(agent_id, kernel).await
-    }
+            fn man(&self) -> &'static str {
+                $man
+            }
+
+            fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+                verbs::$m::VERBS
+            }
+
+            fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+                verbs::$m::dynamic_verbs(agent)
+            }
+
+            fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+                &record::$m::RECORD
+            }
+
+            /// [`forward_marks`] of a `forward` call; every other verb carries none.
+            fn payload_secret(&self, payload: &Value) -> Vec<String> {
+                use fantastic_kernel::verbs::Parse;
+                match verbs::$m::Call::parse($name, payload, &[]) {
+                    Ok(verbs::$m::Call::Forward(f)) => forward_marks(&f),
+                    _ => Vec::new(),
+                }
+            }
+
+            /// The JSON half of [`Self::handle_binary`] — a `forward` reply body is not carried.
+            async fn handle(
+                &self,
+                agent_id: &AgentId,
+                call: Self::Call,
+                kernel: &Arc<Kernel>,
+            ) -> Result<Reply, BundleError> {
+                Ok(self.handle_binary(agent_id, call, None, kernel).await?.0)
+            }
+
+            async fn handle_binary(
+                &self,
+                $agent: &AgentId,
+                call: Self::Call,
+                body: Option<Blob>,
+                $kern: &Arc<Kernel>,
+            ) -> Result<(Reply, Option<Blob>), BundleError> {
+                let family = $family;
+                let reply = match call {
+                    verbs::$m::Call::Reflect(_) => reflect_reply(family, $agent, $kern),
+                    verbs::$m::Call::Boot(_) => boot_reply(family, $agent, $kern).await,
+                    verbs::$m::Call::Shutdown(_) => Value::Null,
+                    verbs::$m::Call::Reconnect(_) => reconnect_reply(family, $agent, $kern).await,
+                    verbs::$m::Call::Forward(a) => {
+                        let (v, b) = forward_call($agent, a, body, $kern).await;
+                        return Ok((Some(v), b));
+                    }
+                    verbs::$m::Call::WatchRemote(a) => {
+                        watch_remote_reply($agent, &a.target, "watch").await
+                    }
+                    verbs::$m::Call::UnwatchRemote(a) => {
+                        watch_remote_reply($agent, &a.target, "unwatch").await
+                    }
+                    $($extra)*
+                };
+                Ok((Some(reply), None))
+            }
+
+            async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
+                let _ = shutdown_reply(agent_id, kernel).await;
+                Ok(())
+            }
+
+            /// Shutdown frees what delete frees — declared, never a fallback.
+            async fn on_shutdown(
+                &self,
+                agent_id: &AgentId,
+                kernel: &Arc<Kernel>,
+            ) -> Result<(), BundleError> {
+                self.on_delete(agent_id, kernel).await
+            }
+        }
+    };
 }
 
-#[async_trait]
-impl Handler for RelayConnectorBundle {
-    type Call = verbs::relay::Call;
+bridge_handler!(WsBridgeBundle, ws, "ws_bridge", WS_MAN, Family::Ws, |agent_id, kernel| {});
 
-    fn name(&self) -> &str {
-        "relay_connector"
+bridge_handler!(
+    RelayConnectorBundle,
+    relay,
+    "relay_connector",
+    RELAY_MAN,
+    Family::Relay,
+    |agent_id, kernel| {
+        verbs::relay::Call::ListPeers(a) => {
+            directory_reply(agent_id, DirectoryOp::ListPeers(a.list_timeout)).await?
+        }
+        verbs::relay::Call::WatchDirectory(_) => {
+            directory_reply(agent_id, DirectoryOp::Watch).await?
+        }
+        verbs::relay::Call::UnwatchDirectory(_) => {
+            directory_reply(agent_id, DirectoryOp::Unwatch).await?
+        }
+        verbs::relay::Call::SetIdentity(a) => set_identity_reply(agent_id, a, kernel).await,
     }
-
-    fn man(&self) -> &'static str {
-        RELAY_MAN
-    }
-
-    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        verbs::relay::VERBS
-    }
-
-    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
-        verbs::relay::dynamic_verbs(agent)
-    }
-
-    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
-        &record::relay::RECORD
-    }
-
-    fn payload_secret(&self, payload: &Value) -> Vec<String> {
-        relay_payload_secret(payload)
-    }
-
-    /// The JSON half of [`Self::handle_binary`] — a `forward` reply body is not carried.
-    async fn handle(
-        &self,
-        agent_id: &AgentId,
-        call: Self::Call,
-        kernel: &Arc<Kernel>,
-    ) -> Result<Reply, BundleError> {
-        Ok(self.handle_binary(agent_id, call, None, kernel).await?.0)
-    }
-
-    async fn handle_binary(
-        &self,
-        agent_id: &AgentId,
-        call: Self::Call,
-        body: Option<Blob>,
-        kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<Blob>), BundleError> {
-        let family = Family::Relay;
-        let reply = match call {
-            verbs::relay::Call::Reflect(_) => reflect_reply(family, agent_id, kernel),
-            verbs::relay::Call::Boot(_) => boot_reply(family, agent_id, kernel).await,
-            verbs::relay::Call::Shutdown(_) => Value::Null,
-            verbs::relay::Call::Reconnect(_) => reconnect_reply(family, agent_id, kernel).await,
-            verbs::relay::Call::Forward(a) => {
-                let (v, b) = forward_call(agent_id, a, body, kernel).await;
-                return Ok((Some(v), b));
-            }
-            verbs::relay::Call::WatchRemote(a) => {
-                watch_remote_reply(agent_id, &a.target, "watch").await
-            }
-            verbs::relay::Call::UnwatchRemote(a) => {
-                watch_remote_reply(agent_id, &a.target, "unwatch").await
-            }
-            verbs::relay::Call::ListPeers(a) => {
-                directory_reply(agent_id, DirectoryOp::ListPeers(a.list_timeout)).await?
-            }
-            verbs::relay::Call::WatchDirectory(_) => {
-                directory_reply(agent_id, DirectoryOp::Watch).await?
-            }
-            verbs::relay::Call::UnwatchDirectory(_) => {
-                directory_reply(agent_id, DirectoryOp::Unwatch).await?
-            }
-            verbs::relay::Call::SetIdentity(a) => set_identity_reply(agent_id, a, kernel).await,
-        };
-        Ok((Some(reply), None))
-    }
-
-    async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
-        let _ = shutdown_reply(agent_id, kernel).await;
-        Ok(())
-    }
-    /// Shutdown frees what delete frees — declared, never a fallback.
-    async fn on_shutdown(
-        &self,
-        agent_id: &AgentId,
-        kernel: &Arc<Kernel>,
-    ) -> Result<(), BundleError> {
-        self.on_delete(agent_id, kernel).await
-    }
-}
+);
 
 // ── the relay password (a credential_store ref, never a record field) ──
 
@@ -780,16 +710,13 @@ async fn boot_carrying_inner(
     let Some(kind) = meta_string(agent_id, kernel, "transport") else {
         return json!({"error": "bridge: the record has no `transport`"});
     };
-    let transport: Arc<dyn BridgeTransport> = if kind == "memory" {
-        match take_injected(agent_id) {
-            Some(t) => t,
-            None => return json!({"error": "bridge: memory transport requires test injection"}),
-        }
-    } else {
-        match build_transport(family, agent_id, kernel).await {
+    let transport: Arc<dyn BridgeTransport> = match injected_for(&kind, agent_id) {
+        Some(Ok(t)) => t,
+        Some(Err(refusal)) => return refusal,
+        None => match build_transport(family, agent_id, kernel).await {
             Ok(t) => t,
             Err(e) => return json!({"error": format!("bridge: {kind} boot failed: {e}")}),
-        }
+        },
     };
 
     let state = Arc::new(BridgeState {
@@ -1698,8 +1625,10 @@ async fn redial(
 /// will pick them up at `boot` time. The memory transport carries
 /// no record-level config (a Queue can't be serialized), so tests
 /// stash a paired half here and the bridge's `boot` consumes it.
+#[cfg(any(test, feature = "test-support"))]
 static INJECTED: OnceLock<Mutex<HashMap<AgentId, Arc<dyn BridgeTransport>>>> = OnceLock::new();
 
+#[cfg(any(test, feature = "test-support"))]
 fn injected_map() -> std::sync::MutexGuard<'static, HashMap<AgentId, Arc<dyn BridgeTransport>>> {
     INJECTED
         .get_or_init(|| Mutex::new(HashMap::new()))
@@ -1707,6 +1636,7 @@ fn injected_map() -> std::sync::MutexGuard<'static, HashMap<AgentId, Arc<dyn Bri
         .expect("INJECTED poisoned")
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn take_injected(agent_id: &AgentId) -> Option<Arc<dyn BridgeTransport>> {
     injected_map().remove(agent_id)
 }
@@ -1717,6 +1647,7 @@ fn take_injected(agent_id: &AgentId) -> Option<Arc<dyn BridgeTransport>> {
 ///
 /// Test-only helper; real WS / HTTP bridges build their transport
 /// from agent.yaml fields at boot time.
+#[cfg(any(test, feature = "test-support"))]
 pub fn inject_pair(a_id: &AgentId, b_id: &AgentId) {
     let (a, b) = MemoryTransport::pair();
     let mut map = injected_map();
@@ -1728,10 +1659,24 @@ pub fn inject_pair(a_id: &AgentId, b_id: &AgentId) {
 /// so a test can drive the wire directly — read what the bridge sends
 /// (`recv_frame`) and push synthetic inbound frames (`send_frame`).
 /// Mirrors Python's `MemoryTransport.pair()` + single-side injection.
+#[cfg(any(test, feature = "test-support"))]
 pub fn inject_one(agent_id: &AgentId) -> Arc<dyn BridgeTransport> {
     let (a, b) = MemoryTransport::pair();
     injected_map().insert(agent_id.clone(), a);
     b
+}
+
+/// The test-injected transport a `memory` record boots on; `None` for every real kind
+/// (and always in a production build, where no such kind exists).
+fn injected_for(kind: &str, agent_id: &AgentId) -> Option<Result<Arc<dyn BridgeTransport>, Value>> {
+    #[cfg(any(test, feature = "test-support"))]
+    if kind == "memory" {
+        return Some(take_injected(agent_id).ok_or_else(|| {
+            json!({"error": "bridge: memory transport requires test injection"})
+        }));
+    }
+    let _ = (kind, agent_id);
+    None
 }
 
 #[cfg(test)]

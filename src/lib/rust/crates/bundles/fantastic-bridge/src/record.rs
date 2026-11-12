@@ -22,6 +22,7 @@ pub enum WsKind {
     /// A WebSocket to the far kernel's `web_ws` leg.
     Ws,
     /// An in-process pair, for tests.
+    #[cfg(any(test, feature = "test-support"))]
     Memory,
 }
 
@@ -32,6 +33,7 @@ pub enum RelayKind {
     /// A WebSocket to the relay kernel.
     Relay,
     /// An in-process pair, for tests.
+    #[cfg(any(test, feature = "test-support"))]
     Memory,
 }
 

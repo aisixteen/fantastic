@@ -294,7 +294,7 @@ async fn blob_verbs_are_the_loaders_and_refuse_like_python() {
         .result;
     assert_eq!(
         v["error"],
-        json!("persist_blob: name 'agent.yaml' is reserved (kernel-managed)")
+        json!("persist_blob: name must be a name other than a kernel-managed file")
     );
 
     let v = kernel

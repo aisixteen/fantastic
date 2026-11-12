@@ -399,13 +399,12 @@ async fn store_failed_turn(
         .map_err(|e| e.0)
 }
 
-/// The reply of a send that outlived its ceiling (#496): the kernel's refusal shape
-/// with the existing `timeout` code, so a sender branching on `reason` settles on
-/// it — the same text the error row carries, and the `client_id` the send came in on.
-fn timeout_reply(message: String, client_id: &str) -> Value {
-    let mut v = fantastic_kernel::refusal::refusal(fantastic_kernel::refusal::TIMEOUT, message);
-    fantastic_kernel::refusal::with(&mut v, "client_id", json!(client_id));
-    v
+/// A turn that failed before any pass ran, as the kernel's one refusal shape plus the
+/// `client_id` of the send it belonged to.
+fn turn_refusal(code: &str, error: String, client_id: &str) -> Value {
+    let mut r = fantastic_kernel::refusal::refusal(code, error);
+    fantastic_kernel::refusal::with(&mut r, "client_id", json!(client_id));
+    r
 }
 
 /// The failure a turn reports, with the store's outcome: when its error row could
@@ -1114,7 +1113,7 @@ pub async fn send(
             match tokio::time::timeout(Duration::from_secs_f64(ceiling), reply_rx).await {
                 Ok(Ok(v)) => v,
                 Ok(Err(_)) => json!({"held": true, "cancelled": true, "client_id": client_id}),
-                Err(_) => timeout_reply(
+                Err(_) => turn_refusal(fantastic_kernel::refusal::TIMEOUT, 
                     format!("send: timeout after {}s", py_float_repr(ceiling)),
                     &client_id,
                 ),
@@ -1244,10 +1243,10 @@ pub async fn send(
     let timeout_secs = send_timeout_secs();
     // TRANSPORT RETRIES (#198 part 2): a pass that failed on the link is re-run,
     // visibly, up to the agent's `transport_retries` (0 = off).
-    let retries = agent_meta(agent_id, kernel)
-        .get("transport_retries")
-        .and_then(Value::as_i64)
-        .unwrap_or(crate::constants::TRANSPORT_RETRIES) as u32;
+    let retries = crate::record::ai::RECORD
+        .get(&agent_meta(agent_id, kernel), "transport_retries")
+        .and_then(|v| v.as_i64())
+        .expect("transport_retries declares its default") as u32;
     let mut attempt: u32 = 0;
     let outcome = loop {
         let r = tokio::select! {
@@ -1384,7 +1383,7 @@ pub async fn send(
                 m
             })
             .await;
-            json!({"error": e.0, "reason": "memory_store", "client_id": client_id})
+            turn_refusal(fantastic_kernel::refusal::STORE_REFUSED, e.0, &client_id)
         }
         // FAIL LOUD: a system_prompt_file is set and unusable — no turn on another
         // block, said so.
@@ -1396,7 +1395,7 @@ pub async fn send(
                 m
             })
             .await;
-            json!({"error": e.0, "reason": "system_prompt_file", "client_id": client_id})
+            turn_refusal(fantastic_kernel::refusal::INVALID_META, e.0, &client_id)
         }
         // FAIL LOUD: a fold's summary would not fit its budget
         // after every re-summarise — no turn on an unfolded view, said so.
@@ -1408,7 +1407,7 @@ pub async fn send(
                 m
             })
             .await;
-            json!({"error": e.0, "reason": "fold_summary", "client_id": client_id})
+            turn_refusal(fantastic_kernel::refusal::LIMIT, e.0, &client_id)
         }
         // A FOLD THAT CANNOT BE PLACED (python `member_anchor`'s `ValueError`,
         // through `_send`'s `except Exception`): the turn fails, reported on
@@ -1483,7 +1482,7 @@ pub async fn send(
                 attached.as_ref(),
             )
             .await;
-            timeout_reply(with_store_outcome(message, stored), &client_id)
+            turn_refusal(fantastic_kernel::refusal::TIMEOUT, with_store_outcome(message, stored), &client_id)
         }
     };
 

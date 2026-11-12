@@ -765,10 +765,10 @@ fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<Strin
         (Ok(e), Ok(m)) => (e, m),
         (Err(e), _) | (_, Err(e)) => return Arc::new(Unconfigured(e)),
     };
-    let max_tokens = meta
-        .get("max_tokens")
-        .and_then(Value::as_i64)
-        .unwrap_or(DEFAULT_MAX_TOKENS);
+    let max_tokens = RECORD
+        .get(&meta, "max_tokens")
+        .and_then(|v| v.as_i64())
+        .expect("max_tokens declares its default");
     let raw_sampling = meta.get("sampling").and_then(Value::as_object);
     let mut owned: Vec<&str> = raw_sampling
         .map(|m| {

@@ -18,10 +18,8 @@ export const SKIN_ID = "skin";
 /** What an AI cell (or a panel) calls on it. */
 export const SKIN_VERBS = ["get", "schema"] as const;
 
-export const SKIN_README =
-  "THE SKIN — how this canvas looks: the design tokens (W3C Design Tokens 2025.10, a subset) every view is drawn with — colours, corner radii, font families, shadows, motion — plus a BACKDROP: `web` (the page paints its own background) or `native` (the app's window draws a material behind a transparent page). " +
-  "The skin is fixed by the backdrop: `day` on the web (black and white glass), `glass` in the app's window (translucent). It is read only here. " +
-  "`get {name: \"day\"}` → the skin's tokens as authored and its backdrop; `schema` names every token (path, type, CSS name, what it paints) and the token format.";
+/** What the bundle is for. */
+export const SKIN_MAN = "The skin of this canvas: the design tokens every view is drawn with, and its backdrop; read only.";
 
 type Dict = Record<string, unknown>;
 
@@ -101,5 +99,5 @@ export function registerSkin(kernel: {
     get: "args: name:str. {name, note, backdrop, tokens (as authored)}.",
     schema: "No args. The token format and every token the canvas reads: {format, supported_types, refused, extension, tokens: [{path, type, opaque, note, css}], palette}.",
   });
-  kernel.setBundleReadme(SKIN, SKIN_README);
+  kernel.setBundleReadme(SKIN, SKIN_MAN);
 }

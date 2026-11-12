@@ -115,6 +115,13 @@ pub struct AiRecord {
     pub post_system_prompt: Option<String>,
 }
 
+/// The declaration of the fields every ai_core agent takes, for a reader of one of them
+/// ([`fantastic_kernel::RecordDecl::get`]: the record's value, else the declared default).
+pub mod ai {
+    fantastic_kernel::record!(AiRecord);
+    use super::AiRecord;
+}
+
 /// The record's `pre_system_prompt` / `post_system_prompt`, as declared (text with a
 /// non-space character, or absent).
 #[must_use]
@@ -187,3 +194,4 @@ pub fn positive_seconds(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::
 pub fn stream_idle_seconds(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
     positive_seconds_of(crate::constants::STREAM_IDLE_SECONDS)
 }
+

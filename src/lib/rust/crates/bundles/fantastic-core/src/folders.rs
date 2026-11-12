@@ -17,15 +17,21 @@ pub const BUNDLES_DIR: &str = "bundles";
 /// A folder bundle's manifest.
 pub const BUNDLE_FILE: &str = "bundle.yaml";
 
-/// A folder name is the handler_module of its instances: letters, digits, `_`, `-`,
-/// starting with a letter or `_`. Python `_FOLDER_NAME`.
-#[must_use]
-pub fn is_folder_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+/// The declared shape of a folder name (the handler_module of its instances): letters,
+/// digits, `_`, `-`, starting with a letter or `_`. The same pattern the loader's
+/// `reload_bundle` and `read_bundles` declare for their `name`.
+const FOLDER_NAME: &str = "^[A-Za-z_][A-Za-z0-9_-]*$";
+
+/// Check a name read from disk (not from a call) against the declared folder-name
+/// pattern, through the one validation engine.
+pub(crate) fn is_folder_name(name: &str) -> bool {
+    fantastic_kernel::verbs::validate(
+        "load_bundle",
+        &json!({"type": "object", "required": ["name"],
+                "properties": {"name": {"type": "string", "pattern": FOLDER_NAME}}}),
+        &json!({"name": name}),
+    )
+    .is_ok()
 }
 
 /// Load ONE folder bundle `<root>/bundles/<name>/` into `kernel`'s registry —

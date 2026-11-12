@@ -293,26 +293,13 @@ fn loader(kernel: &Kernel) -> Option<Arc<fantastic_kernel::Agent>> {
         .filter(|r| r.handler_module.as_deref() == Some("kernel_state.tools"))
 }
 
-/// ONE blob call to the root loader — persistence through the loader is KERNEL
-/// BOOKKEEPING ([`Kernel::bookkeeping`]): the loader's handler runs directly, never
-/// a gated send.
-async fn loader_call(
-    kernel: &Arc<Kernel>,
-    root: &Arc<fantastic_kernel::Agent>,
-    payload: Value,
-) -> Value {
-    kernel.bookkeeping(root, payload, None).await.result
-}
-
 /// Read a sidecar THROUGH the loader. Missing / no-store ⇒ `None` (reads lenient).
 async fn file_read(agent_id: &AgentId, kernel: &Arc<Kernel>, name: &str) -> Option<String> {
     let root = loader(kernel)?;
-    let reply = loader_call(
-        kernel,
-        &root,
-        json!({"type": "load_blob", "agent_id": agent_id.0, "name": name}),
-    )
-    .await;
+    // the loader's own blob channel, called as persistence bookkeeping (no gated send)
+    let reply = fantastic_kernel::persistence::load_blob(kernel, &root, &agent_id.0, name)
+        .await
+        .unwrap_or(Value::Null);
     reply
         .get("content")
         .and_then(Value::as_str)
@@ -344,17 +331,9 @@ async fn file_write(
             json!({"error": "scheduler: the root is not a kernel_state loader — no store"}),
         );
     };
-    let reply = loader_call(
-        kernel,
-        &root,
-        json!({
-            "type": "persist_blob",
-            "agent_id": agent_id.0,
-            "name": name,
-            "content": content,
-        }),
-    )
-    .await;
+    let reply = fantastic_kernel::persistence::persist_blob(kernel, &root, &agent_id.0, name, content)
+        .await
+        .map_err(|e| json!({"error": e.to_string()}))?;
     if reply.get("error").and_then(Value::as_str).is_some() {
         let mut e = json!({"error": reply["error"]});
         if let Some(reason) = reply.get("reason") {

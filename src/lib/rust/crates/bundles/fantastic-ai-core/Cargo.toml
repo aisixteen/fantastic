@@ -26,12 +26,12 @@ regex = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [dev-dependencies]
+fantastic-credential-store = { path = "../fantastic-credential-store", features = ["test-support"] }
+fantastic-ram-store = { path = "../fantastic-ram-store", features = ["test-support"] }
 fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 fantastic-file = { path = "../fantastic-file" }
 # Every AI agent keeps its conversation in a memory store; the tests wire one.
-fantastic-ram-store = { path = "../fantastic-ram-store" }
 # A backend reads its key from a credential store; the reader's tests wire one.
-fantastic-credential-store = { path = "../fantastic-credential-store" }
 fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }
 # The author tests allowlist a REAL interpreter — the test acting as operator.
 which = "6"

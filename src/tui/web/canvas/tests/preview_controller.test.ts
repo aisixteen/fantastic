@@ -341,7 +341,7 @@ test("the verbs: open, pin, unpin, mode, edit, save and revert each refuse what 
   assert.equal((await r.call("pv_v", { type: "frobnicate" }))["reason"], "unhandled");
   assert.equal((await r.call("pv_v", { type: "" }))["reason"], "bad_arg", "a call with no verb is refused by the kernel");
   assert.equal((await r.call("pv_v", { type: "open", path: "/abs" }))["reason"], "outside_root");
-  assert.equal((await r.call("pv_v", { type: "open" }))["reason"], "bad_arg");
+  assert.equal((await r.call("pv_v", { type: "open" }))["reason"], "missing_arg");
   assert.equal((await r.call("pv_v", { type: "open", path: "nope.txt" }))["reason"], "not_found");
   assert.deepEqual(await r.call("pv_v", { type: "open", path: "top.txt" }), { opened: "top.txt", mode: "text" }, "open pins: back to the file");
   assert.equal((await r.call("pv_v", { type: "mode", mode: "agent" }))["reason"], "not_an_agent");
@@ -363,7 +363,7 @@ test("the verbs: open, pin, unpin, mode, edit, save and revert each refuse what 
   await settle();
   assert.equal((await r.call("pv_v", { type: "save" }))["reason"], "conflict");
   assert.equal((await r.call("pv_v", { type: "pin" }))["reason"], undefined, "pin with no path re-pins what is shown");
-  assert.equal((await r.call("pv_v", { type: "pin", path: 9 }))["pinned"], "top.txt", "a path that is not a string is not a path");
+  assert.equal((await r.call("pv_v", { type: "pin", path: 9 }))["reason"], "bad_arg", "a path that is not a string is refused, not read as none");
   assert.equal((await r.call("pv_v", { type: "pin", path: "../x" }))["reason"], "outside_root");
   await p.revert();
   assert.deepEqual(await r.call("pv_v", { type: "unpin" }), { following: true });

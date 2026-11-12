@@ -17,11 +17,8 @@ export const SELECTOR_PREFIX = "selector_";
 /** The title it shows unless its record names another. */
 export const SELECTOR_TITLE = "Fantastic Canvas";
 
-export const SELECTOR_README =
-  "THE SELECTOR — the canvas's double-click popup, as an agent: added at the spot by a double click, it deletes itself once the human picks. " +
-  "`open` (its boot) shows it on top — what the human then picks is made at its spot. " +
-  "`tiles {typed?}` answers what it offers for that text: `{tiles: [{label, kind, section, hint}]}` — every kind a cell can be made of here. " +
-  "Its `title` field is the popup's title.";
+/** What the bundle is for. */
+export const SELECTOR_MAN = "The canvas's double-click popup as an agent: it offers what a cell can be made of at the spot, and deletes itself once the human picks.";
 
 /** What the canvas lends the selector: the popup itself, and its tiles. */
 export interface SelectorHost {
@@ -75,5 +72,5 @@ export function registerSelector(kernel: {
     open: "No args (its boot runs it). Shows its popup on top, at its spot; it deletes itself once the human picks, escapes or clicks away. {opened, title}.",
     tiles: "args: typed:str? (what the human typed). {tiles: [{label, kind, section, hint}]}: what the popup offers for it.",
   });
-  kernel.setBundleReadme(SELECTOR, SELECTOR_README);
+  kernel.setBundleReadme(SELECTOR, SELECTOR_MAN);
 }

@@ -59,7 +59,7 @@ async fn failed_turn(kernel: &Arc<Kernel>, backend: &AgentId, s: &Arc<MockScript
         .await
         .remove(0)
         .result;
-    assert_eq!(r["reason"], "system_prompt_file", "{r}");
+    assert_eq!(r["reason"], "invalid_meta", "{r}");
     assert_eq!(
         s.passes_served(),
         before,

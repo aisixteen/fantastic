@@ -86,6 +86,23 @@ impl RecordDecl {
     pub fn schema(&self) -> &Value {
         self.schema.get_or_init(self.make)
     }
+
+    /// One field of a record as an agent reads it: the record's own value when it is
+    /// of the type the declaration states for the field, else the `default` the
+    /// declaration states. The default lives ONLY in the declaration; a reader names no
+    /// constant of its own.
+    #[must_use]
+    pub fn get(&self, meta: &Map<String, Value>, field: &str) -> Option<Value> {
+        let decl = self.schema().get("properties").and_then(|p| p.get(field));
+        meta.get(field)
+            .filter(|v| !v.is_null() && decl.is_none_or(|d| matches_type(d, v)))
+            .cloned()
+            .or_else(|| {
+                decl.and_then(|f| f.get("default"))
+                    .filter(|d| !d.is_null())
+                    .cloned()
+            })
+    }
 }
 
 fn schema_of<T: schemars::JsonSchema>() -> Value {
@@ -447,6 +464,24 @@ macro_rules! record {
         /// The fields an agent of this bundle's record may carry (freeform).
         pub static RECORD: $crate::verbs::RecordDecl = $crate::verbs::RecordDecl::of::<$ty>(true);
     };
+}
+
+/// The ONE builder of an outgoing call: the verb named first, then its arguments. The
+/// arguments never carry a `type` (a spec key cannot override the verb): one that does
+/// is a programming error.
+///
+/// # Panics
+/// When `args` is not an object or names a `type` of its own.
+#[must_use]
+pub fn call(verb: &str, args: Value) -> Value {
+    let Value::Object(args) = args else {
+        panic!("call {verb}: the arguments are an object");
+    };
+    assert!(!args.contains_key("type"), "call {verb}: an argument named `type` would override the verb");
+    let mut out = Map::new();
+    out.insert("type".to_string(), Value::String(verb.to_string()));
+    out.extend(args);
+    Value::Object(out)
 }
 
 /// The payload without its `type`: the arguments alone.
@@ -907,6 +942,23 @@ fn refuse_arg(verb: &str, code: &str, arg: &str, why: String, schema: &Value) ->
     with(&mut r, "arg", json!(arg));
     with(&mut r, "verb", json!(verb));
     r
+}
+
+/// The shape of an agent id: one safe path segment (no separator, no `|`, not hidden,
+/// no `..`, not all digits). Every verb that takes an id declares this same pattern on
+/// the field; data read from a file (a record, a blueprint) is checked against it by
+/// [`check_agent_id`], the one engine.
+pub const AGENT_ID_PATTERN: &str = r"^[0-9]*[^/\\|.0-9](?:[^/\\|.]|\.[^/\\|.])*\.?$";
+
+/// Check an agent id that came from data, not a call, against [`AGENT_ID_PATTERN`]
+/// through the validation engine. `arg` names the field in the refusal.
+///
+/// # Errors
+/// The engine's refusal, naming `verb` and `arg`.
+pub fn check_agent_id(verb: &str, arg: &str, id: &str) -> Result<(), Value> {
+    let schema = json!({"type": "object", "required": [arg],
+        "properties": {arg: {"type": "string", "pattern": AGENT_ID_PATTERN}}});
+    validate(verb, &schema, &json!({ arg: id })).map(|_| ())
 }
 
 /// Check the ARGUMENTS of one call against a schema — the ONE validation engine,

@@ -21,9 +21,9 @@ sha2 = "0.10"
 tracing = { workspace = true }
 
 [dev-dependencies]
+fantastic-ram-store = { path = "../fantastic-ram-store", features = ["test-support"] }
 fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 # Every AI agent keeps its conversation in a memory store; the tests wire one.
-fantastic-ram-store = { path = "../fantastic-ram-store" }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }
 wiremock = "0.6"

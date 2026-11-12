@@ -38,10 +38,15 @@ fn variables(_gen: &mut SchemaGenerator) -> Schema {
     .expect("a map schema")
 }
 
+fn default_shell() -> Option<Value> {
+    Some(serde_json::json!(false))
+}
+
 /// `true` (the child's `$SHELL`, bare), `"login"` (`$SHELL -l`) or `false` (none).
 fn shell(_gen: &mut SchemaGenerator) -> Schema {
     serde_json::from_value(serde_json::json!({
         "anyOf": [{"type": "boolean"}, {"type": "string", "enum": ["login"]}],
+        "default": false,
     }))
     .expect("a shell schema")
 }
@@ -67,8 +72,7 @@ pub struct Record {
     #[schemars(schema_with = "names")]
     pub inherit_env: Option<Vec<String>>,
     /// The shell line permitted without an `allowed` entry: `true` (the child's `$SHELL`), `"login"` (`$SHELL -l`) or `false`.
-    #[serde(default)]
-    #[schemars(schema_with = "shell")]
+    #[schemars(schema_with = "shell", default = "default_shell")]
     pub shell: Option<Value>,
 }
 

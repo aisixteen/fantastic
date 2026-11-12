@@ -4,7 +4,7 @@
 //! WRONG tokenizer for gemma/nemotron). Plus window/budget resolution off
 //! the agent record meta. Mirrors the Python `ai_core/context.py`.
 
-use crate::constants::{BUDGET_FLOOR, CHARS_PER_TOKEN, DEFAULT_OUTPUT_RESERVE, RECENT_N};
+use crate::constants::{BUDGET_FLOOR, CHARS_PER_TOKEN};
 use fantastic_bundle::py_json_dumps;
 use serde_json::{json, Map, Value};
 
@@ -58,9 +58,10 @@ pub fn resolve_context_window(meta: &Map<String, Value>, model_window: i64) -> i
 /// Output headroom reserved out of the window: the record's `output_reserve` (its
 /// declared range and default are the record's, see [`crate::record::AiRecord`]).
 pub fn output_reserve(meta: &Map<String, Value>) -> i64 {
-    meta.get("output_reserve")
-        .and_then(Value::as_i64)
-        .unwrap_or(DEFAULT_OUTPUT_RESERVE)
+    crate::record::ai::RECORD
+        .get(meta, "output_reserve")
+        .and_then(|v| v.as_i64())
+        .expect("output_reserve declares its default")
 }
 
 /// Token budget for the INPUT (window minus output headroom), floored.
@@ -71,9 +72,10 @@ pub fn budget(meta: &Map<String, Value>, model_window: i64) -> i64 {
 /// The agent's configured `recent_n` (verbatim recent turns kept by
 /// compact/truncate); its range and default are the record's declared ones.
 pub fn recent_n(meta: &Map<String, Value>) -> usize {
-    meta.get("recent_n")
-        .and_then(Value::as_i64)
-        .unwrap_or(RECENT_N) as usize
+    crate::record::ai::RECORD
+        .get(meta, "recent_n")
+        .and_then(|v| v.as_i64())
+        .expect("recent_n declares its default") as usize
 }
 
 /// Tokens a reply may occupy INLINE in the model's next turn. Above this it is

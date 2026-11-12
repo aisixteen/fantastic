@@ -38,8 +38,8 @@ fn record_with_id(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema
         "type": "object",
         "required": ["id"],
         "properties": {
-            "id": {"type": "string", "description": "The agent's id."},
-            "parent_id": {"type": ["string", "null"], "description": "Where a new agent sits in the tree."}
+            "id": {"type": "string", "pattern": fantastic_kernel::verbs::AGENT_ID_PATTERN, "description": "The agent's id (one safe path segment)."},
+            "parent_id": {"type": ["string", "null"], "pattern": fantastic_kernel::verbs::AGENT_ID_PATTERN, "description": "Where a new agent sits in the tree."}
         }
     }))
     .expect("a record schema")
@@ -49,9 +49,11 @@ fn record_with_id(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ForgetRecord {
-    /// The agent whose folder goes.
+    /// The agent whose folder goes (one safe path segment: no separator, no `|`, not hidden, no `..`, not all digits).
+    #[schemars(regex(pattern = r"^[0-9]*[^/\\|.0-9](?:[^/\\|.]|\.[^/\\|.])*\.?$"))]
     pub id: String,
-    /// Where an agent that is no longer live sat in the tree.
+    /// Where an agent that is no longer live sat in the tree (an agent id).
+    #[schemars(regex(pattern = r"^[0-9]*[^/\\|.0-9](?:[^/\\|.]|\.[^/\\|.])*\.?$"))]
     pub parent_id: Option<String>,
 }
 
@@ -60,8 +62,10 @@ pub struct ForgetRecord {
 #[serde(deny_unknown_fields)]
 pub struct PersistBlob {
     /// The agent the file belongs to (one safe path segment).
+    #[schemars(regex(pattern = r"^[0-9]*[^/\\|.0-9](?:[^/\\|.]|\.[^/\\|.])*\.?$"))]
     pub agent_id: String,
-    /// One bare filename.
+    /// One bare filename: no separator, not hidden, no `..`.
+    #[schemars(regex(pattern = r"^[^/\\.](?:[^/\\.]|\.[^/\\.])*\.?$"))]
     pub name: String,
     /// The file's text.
     pub content: String,
@@ -71,9 +75,11 @@ pub struct PersistBlob {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LoadBlob {
-    /// The agent the file belongs to.
+    /// The agent the file belongs to (one safe path segment).
+    #[schemars(regex(pattern = r"^[0-9]*[^/\\|.0-9](?:[^/\\|.]|\.[^/\\|.])*\.?$"))]
     pub agent_id: String,
-    /// One bare filename.
+    /// One bare filename: no separator, not hidden, no `..`.
+    #[schemars(regex(pattern = r"^[^/\\.](?:[^/\\.]|\.[^/\\.])*\.?$"))]
     pub name: String,
 }
 

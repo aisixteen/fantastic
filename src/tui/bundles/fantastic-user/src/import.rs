@@ -166,7 +166,7 @@ fn walk(v: &Value, parent: Option<&str>, out: &mut Vec<Entry>) -> Result<(), Imp
             format!("agent {id}: handler_module is required"),
         ));
     };
-    if fantastic_kernel::refusal::guard_agent_id("import_subtree", id).is_some() {
+    if fantastic_kernel::verbs::check_agent_id("import_subtree", "id", id).is_err() {
         return Err(err("bad_arg", format!("agent {id:?}: not a safe agent id")));
     }
     if out.iter().any(|e| e.id == id) {
@@ -420,7 +420,7 @@ pub fn plan(yaml: &str, files: &BTreeMap<String, String>, w: &World) -> Result<P
         if ids.values().all(|n| {
             (w.agent)(n).is_none()
                 && n != w.root_id
-                && fantastic_kernel::refusal::guard_agent_id("import_subtree", n).is_none()
+                && fantastic_kernel::verbs::check_agent_id("import_subtree", "id", n).is_ok()
         }) {
             break ids;
         }

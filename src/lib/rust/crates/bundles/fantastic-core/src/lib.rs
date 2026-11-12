@@ -299,19 +299,10 @@ impl KernelStateBundle {
             return Ok(denied);
         }
         let record = &args.record;
-        // the declaration made `id` text and `parent_id` text or null; what is left is
-        // the kernel's one agent-id rule (an id becomes a directory)
+        // the declaration made `id` an agent-id-shaped text and `parent_id` that or null
         let id = record.get("id").and_then(Value::as_str).unwrap_or("");
-        if let Some(bad) = fantastic_kernel::refusal::guard_agent_id("persist_record", id) {
-            return Ok(bad);
-        }
         let parent = record.get("parent_id").and_then(Value::as_str);
         let mut at = Places::new(agent, kernel);
-        if let Some(bad) =
-            parent.and_then(|p| fantastic_kernel::refusal::guard_agent_id("persist_record", p))
-        {
-            return Ok(bad);
-        }
         let path = match kernel.agents.get(&AgentId::from(id)) {
             Some(a) => a.root_path.clone(),
             None => at.resolve(id, parent)?,
@@ -330,16 +321,8 @@ impl KernelStateBundle {
             return Ok(denied);
         }
         let target = args.id.as_str();
-        if let Some(bad) = fantastic_kernel::refusal::guard_agent_id("forget_record", target) {
-            return Ok(bad);
-        }
         let parent = args.parent_id.as_deref();
         let mut at = Places::new(agent, kernel);
-        if let Some(bad) =
-            parent.and_then(|p| fantastic_kernel::refusal::guard_agent_id("forget_record", p))
-        {
-            return Ok(bad);
-        }
         let path = match kernel.agents.get(&AgentId::from(target)) {
             Some(a) => a.root_path.clone(),
             None => at.resolve(target, parent)?,
@@ -660,9 +643,9 @@ async fn reload_bundle(
     live.sort_by(|a, b| a.id.0.cmp(&b.id.0));
     for a in &live {
         kernel
-            .bookkeeping(a, json!({"type": "shutdown", "reason": "reloaded"}), None)
+            .announce(a, json!({"type": "shutdown", "reason": "reloaded"}))
             .await;
-        kernel.bookkeeping(a, json!({"type": "boot"}), None).await;
+        kernel.announce(a, json!({"type": "boot"})).await;
     }
     let ids: Vec<&str> = live.iter().map(|a| a.id.0.as_str()).collect();
     Ok(json!({"reloaded": name, "instances": ids}))
