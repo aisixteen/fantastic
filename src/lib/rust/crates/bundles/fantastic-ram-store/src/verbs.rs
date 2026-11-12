@@ -63,8 +63,8 @@ pub struct Search {
     pub width: Option<u64>,
 }
 
-/// Delete the caller's rows below `before_id`, or exactly `ids`, except kinds in `keep`; every fold ref naming a deleted row goes with it (FK cascade). With neither `before_id` nor `ids`, nothing is deleted. Returns {pruned}.
-#[derive(Debug, Deserialize, JsonSchema)]
+/// Delete the caller's rows below `before_id`, or exactly `ids`, except kinds in `keep`; every fold ref naming a deleted row goes with it (FK cascade). One of `before_id` and `ids` is required. Returns {pruned}.
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Prune {
     /// Delete rows with an id below this.
@@ -73,6 +73,29 @@ pub struct Prune {
     pub ids: Option<Vec<i64>>,
     /// Kinds that are kept.
     pub keep: Option<Vec<Value>>,
+}
+
+/// `prune`'s declaration: its three fields and the rule that one of `before_id` and
+/// `ids` is given (the engine's `anyOf` of `required` lists).
+impl JsonSchema for Prune {
+    fn schema_name() -> String {
+        "Prune".to_string()
+    }
+
+    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        serde_json::from_value(serde_json::json!({
+        "type": "object",
+        "description": "Delete the caller's rows below `before_id`, or exactly `ids`, except kinds in `keep`; every fold ref naming a deleted row goes with it (FK cascade). One of `before_id` and `ids` is required. Returns {pruned}.",
+        "properties": {
+            "before_id": {"type": "integer", "description": "Delete rows with an id below this."},
+            "ids": {"type": "array", "items": {"type": "integer"}, "description": "Delete exactly these rows."},
+            "keep": {"type": "array", "items": {}, "description": "Kinds that are kept."}
+        },
+        "anyOf": [{"required": ["before_id"]}, {"required": ["ids"]}],
+        "additionalProperties": false
+        }))
+        .expect("the prune schema")
+    }
 }
 
 /// The tables of a store: what `dump` answers and `inject` takes.

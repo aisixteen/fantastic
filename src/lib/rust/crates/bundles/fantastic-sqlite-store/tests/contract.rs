@@ -127,9 +127,13 @@ fn alpha(cases: &mut Value) {
                 (_, "search") if send["query"].as_str().is_some_and(|q| q.trim().is_empty()) => {
                     st["expect"] = refused("query");
                 }
-                // neither selector: the declaration cannot state "one of", nothing is deleted
+                // neither selector: the engine names both alternatives
                 ("refusals", "prune") if send.get("before_id").is_none() && send.get("ids").is_none() => {
-                    st["expect"] = json!({"pruned": 0});
+                    st["expect"] = json!({
+                        "reason": "missing_arg",
+                        "arg": "before_id | ids",
+                        "error": "prune: one of before_id | ids is required"
+                    });
                 }
                 ("refusals", "append") if send["rows"] == json!([]) => {
                     // an empty list is below the declared `minItems`: the engine's missing_arg
