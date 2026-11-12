@@ -46,7 +46,6 @@ fn starts_kernel_is_public_and_bound_to_the_mode() {
     for a in [
         &["send", "x"][..],
         &["import", "p", "--parent", "user"],
-        &["migrate-home", "--dry-run"],
         &["__ctrl_break", "1"],
         &["mcp", "--can-call", "files"],
         &["bogus"],

@@ -38,10 +38,6 @@ const MAN: &str = "The canvas's AI set-up cell, host side: what the terminal's s
 #[derive(Default)]
 pub struct SetupBundle;
 
-fn fail(e: impl Into<String>) -> Value {
-    json!({"error": e.into(), "reason": "bad_arg"})
-}
-
 impl SetupBundle {
     fn host(kernel: &Arc<Kernel>) -> Option<Host> {
         let root = kernel.root()?.id.0.clone();
@@ -51,7 +47,7 @@ impl SetupBundle {
     async fn run(host: &Host, call: verbs::Call) -> Value {
         use verbs::Call;
         match call {
-            Call::Boot(_) | Call::Reflect(_) => unreachable!("answered before the host is built"),
+            Call::Reflect(_) => unreachable!("answered before the host is built"),
             Call::Backends(_) => json!({"backends": crate::kern::setup::backends(host).iter().map(|b| json!({
                 "module": b.module,
                 "key": b.key,
@@ -67,20 +63,20 @@ impl SetupBundle {
                     "mode": m.map(|m| m.name()),
                     "where": w,
                 }),
-                (Err(e), _) | (_, Err(e)) => fail(e),
+                (Err(e), _) | (_, Err(e)) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
             },
             // an AI agent's settings, as the wizard shows them: its handler and
             // every schema field's current value
             Call::AiSettings(a) => match ai_record(host, &a.id) {
                 Ok((handler, meta)) => {
-                    let fields: serde_json::Map<String, Value> = crate::kern::setup::backends(host)
-                        .into_iter()
-                        .find(|b| b.module == handler)
-                        .map(|b| b.fields.iter().filter_map(|f| meta.get(&f.name).map(|v| (f.name.clone(), v.clone()))).collect())
-                        .unwrap_or_default();
+                    let Some(backend) = crate::kern::setup::backends(host).into_iter().find(|b| b.module == handler) else {
+                        return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("ai_settings: this build links no backend {handler:?}"));
+                    };
+                    let fields: serde_json::Map<String, Value> =
+                        backend.fields.iter().filter_map(|f| meta.get(&f.name).map(|v| (f.name.clone(), v.clone()))).collect();
                     json!({"id": a.id, "handler": handler, "fields": fields, "saved": meta.get("saved")})
                 }
-                Err(e) => fail(format!("ai_settings: {e}")),
+                Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("ai_settings: {e}")),
             },
             // change a live AI agent's fields (same backend): live on its next
             // turn — the backend reads its record per call. The key for its
@@ -89,9 +85,9 @@ impl SetupBundle {
                 let id = a.id;
                 let (handler, meta) = match ai_record(host, &id) {
                     Ok(r) => r,
-                    Err(e) => return fail(format!("configure_ai: {e}")),
+                    Err(e) => return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("configure_ai: {e}")),
                 };
-                let mut upd = match crate::kern::setup::declared_fields(host, "configure_ai", &handler, a.fields.unwrap_or_default()) {
+                let mut upd = match crate::kern::setup::declared_fields(host, "configure_ai", &handler, a.fields) {
                     Ok(m) => m,
                     Err(refusal) => return refusal,
                 };
@@ -104,7 +100,7 @@ impl SetupBundle {
                             cc.insert(crate::kern::keys::STORE.into(), json!(["get"]));
                             upd.insert("can_call".into(), Value::Object(cc));
                             if let Err(e) = crate::kern::keys::wire(host, &id).await {
-                                return fail(format!("configure_ai: {e}"));
+                                return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("configure_ai: {e}"));
                             }
                         }
                     }
@@ -115,12 +111,12 @@ impl SetupBundle {
                 let payload = Value::Object(upd);
                 let r = host.act("kernel", payload).await.result;
                 match r.get("error").and_then(Value::as_str) {
-                    Some(e) => fail(format!("configure_ai: {e}")),
+                    Some(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("configure_ai: {e}")),
                     None => json!({"configured": id, "note": "live on its next turn"}),
                 }
             }
             Call::WriteAi(a) => {
-                let fields = match crate::kern::setup::declared_fields(host, "write_ai", &a.handler, a.fields.unwrap_or_default()) {
+                let fields = match crate::kern::setup::declared_fields(host, "write_ai", &a.handler, a.fields) {
                     Ok(m) => m,
                     Err(refusal) => return refusal,
                 };
@@ -128,16 +124,16 @@ impl SetupBundle {
                     id: a.id,
                     handler: a.handler,
                     fields,
-                    may_call: a.may_call.unwrap_or_default(),
+                    may_call: a.may_call,
                 };
                 match crate::kern::setup::write(host, &rec).await {
                     Ok(path) => json!({"written": path, "id": rec.id}),
-                    Err(e) => fail(e),
+                    Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
                 }
             }
             Call::KeyMode(_) => match crate::kern::keys::mode() {
                 Ok((m, w)) => json!({"mode": m.map(|m| m.name()), "where": w}),
-                Err(e) => fail(e),
+                Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
             },
             Call::SetKeyMode(a) => {
                 let m = match a.mode {
@@ -146,14 +142,14 @@ impl SetupBundle {
                 };
                 match crate::kern::keys::set_mode(host, m).await {
                     Ok(w) => json!({"mode": m.name(), "where": w}),
-                    Err(e) => fail(e),
+                    Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
                 }
             }
             // The page's call carries the value unmarked (the page kernel has no
             // secret marks yet): its rows hold it. The onward `set` is marked.
             Call::StoreKey(a) => match crate::kern::keys::store(host, &a.module, &a.endpoint, &a.secret).await {
                 Ok(r) => json!({"stored": r, "note": "live on the next call — no restart"}),
-                Err(e) => fail(e),
+                Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
             },
             Call::Saved(_) => match crate::kern::saved::shelf(host).await {
                 Ok(sh) => json!({
@@ -161,10 +157,10 @@ impl SetupBundle {
                     "preferred": sh.preferred,
                     "dir": sh.dir,
                 }),
-                Err(e) => fail(e),
+                Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
             },
             Call::Save(a) => {
-                let mut record = match crate::kern::setup::declared_fields(host, "save", &a.handler, a.fields.unwrap_or_default()) {
+                let mut record = match crate::kern::setup::declared_fields(host, "save", &a.handler, a.fields) {
                     Ok(m) => m,
                     Err(refusal) => return refusal,
                 };
@@ -172,13 +168,13 @@ impl SetupBundle {
                 // the stored key for its endpoint is NAMED (a ref, never the value):
                 // a backend that requires one refuses a saved set-up without it
                 if let Err(e) = crate::kern::keys::attach(host, &a.handler, &mut record) {
-                    return fail(format!("save: {e}"));
+                    return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("save: {e}"));
                 }
                 record.insert("handler_module".into(), json!(a.handler));
                 let record = Value::Object(record);
                 match crate::kern::saved::save(host, &a.name, record).await {
                     Ok(path) => json!({"saved": a.name, "path": path}),
-                    Err(e) => fail(e),
+                    Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
                 }
             }
             Call::Forget(a) => {
@@ -194,7 +190,7 @@ impl SetupBundle {
             }
             Call::Prefer(a) => match crate::kern::saved::prefer(host, a.name.as_deref()).await {
                 Ok(pr) => json!({"preferred": pr}),
-                Err(e) => fail(e),
+                Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
             },
         }
     }
@@ -226,17 +222,16 @@ impl Handler for SetupBundle {
 
     async fn handle(&self, _agent_id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
         match call {
-            verbs::Call::Boot(_) => return Ok(None),
             verbs::Call::Reflect(_) => {
                 return Ok(Some(json!({
                     "handler_module": HANDLER_MODULE,
-                    "sentence": "The canvas's AI set-up cell, host side: what the terminal's set-up page does, as the human. Exists only while the cell is open.",
+                    "sentence": MAN,
                 })))
             }
             _ => {}
         }
         let Some(host) = Self::host(kernel) else {
-            return Ok(Some(fail("setup: the kernel has no root")));
+            return Ok(Some(fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, "setup: the kernel has no root")));
         };
         Ok(Some(Self::run(&host, call).await))
     }
@@ -246,7 +241,7 @@ impl Handler for SetupBundle {
 fn ai_record(host: &Host, id: &str) -> Result<(String, serde_json::Map<String, Value>), String> {
     let a = host.kernel.agents.get(&AgentId::from(id)).ok_or_else(|| format!("no agent {id:?}"))?;
     let rec = a.value().record();
-    let handler = rec.handler_module.clone().unwrap_or_default();
+    let handler = rec.handler_module.clone().ok_or_else(|| format!("{id:?} has no handler"))?;
     if !crate::kern::setup::backends(host).iter().any(|b| b.module == handler) {
         return Err(format!("{id:?} is not an AI agent ({handler})"));
     }

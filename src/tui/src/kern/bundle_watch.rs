@@ -58,7 +58,7 @@ pub async fn refresh_views(h: &Host, name: &str, dir: &Path) -> Result<(), Strin
     // the TUI part is checked BEFORE any instance is touched: a bad declaration
     // is refused with its sentence and every instance keeps the view it has
     if let Some(tui) = declared.get("tui") {
-        crate::panel::declared::parse_tui(tui).map_err(|r| r.error)?;
+        crate::panel::declared::parse_tui(tui).map_err(|r| fantastic_kernel::error_text(&r).unwrap_or_default())?;
     }
     // the panel's REVISION (only a view with a file has one): a view edit changes
     // no other field of the record, and an unchanged record redraws nothing

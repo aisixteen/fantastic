@@ -202,11 +202,11 @@ pub fn fields_schema(host: &Host, handler: &str) -> Result<Value, String> {
 /// `fields` checked by the engine against the backend's declared fields: a name the
 /// backend does not declare, or a value of the wrong type, is refused.
 pub fn declared_fields(host: &Host, verb: &str, handler: &str, fields: Map<String, Value>) -> Result<Map<String, Value>, Value> {
-    let schema = fields_schema(host, handler).map_err(|e| json!({"error": e, "reason": "bad_arg"}))?;
-    match fantastic_kernel::verbs::validate(verb, &schema, &Value::Object(fields))? {
-        Value::Object(m) => Ok(m),
-        _ => Ok(Map::new()),
-    }
+    let schema = fields_schema(host, handler).map_err(|e| fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e))?;
+    let Value::Object(checked) = fantastic_kernel::verbs::validate(verb, &schema, &Value::Object(fields))? else {
+        unreachable!("the engine answers the checked arguments as an object")
+    };
+    Ok(checked)
 }
 
 /// Create, grant and boot. Returns where the record was written.

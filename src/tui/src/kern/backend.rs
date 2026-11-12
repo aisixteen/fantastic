@@ -118,10 +118,6 @@ const NOT_SNAPSHOT: [&str; 7] = ["id", "parent_id", "guid", "agents", "memory_st
 #[derive(Default)]
 pub struct BackendBundle;
 
-fn refuse(reason: &str, error: impl Into<String>, hint: &str) -> Value {
-    json!({"error": error.into(), "reason": reason, "hint": hint})
-}
-
 pub(crate) fn hex8() -> String {
     let mut b = [0u8; 4];
     let _ = getrandom::getrandom(&mut b);
@@ -140,7 +136,7 @@ impl BackendBundle {
                 "preferred": sh.preferred,
                 "bundles": Self::project_bundles(host),
             }),
-            Err(e) => refuse("not_found", e, "the user's saved set-ups are not readable"),
+            Err(e) => fantastic_kernel::refusal_hint(fantastic_kernel::refusal::NOT_FOUND, e, "the user's saved set-ups are not readable"),
         }
     }
 
@@ -159,7 +155,7 @@ impl BackendBundle {
             .filter(|e| e.path().join("bundle.yaml").is_file())
             .filter_map(|e| e.file_name().to_str().map(str::to_string))
             .filter(|n| host.kernel.bundles.is_folder(n))
-            .map(|n| {
+            .filter_map(|n| {
                 let sentence =
                     std::fs::read_to_string(state.join("bundles").join(&n).join("bundle.yaml"))
                         .ok()
@@ -168,9 +164,8 @@ impl BackendBundle {
                             d.get("sentence")
                                 .and_then(Value::as_str)
                                 .map(str::to_string)
-                        })
-                        .unwrap_or_default();
-                (n, sentence)
+                        })?;
+                Some((n, sentence))
             })
             .collect();
         out.sort();
@@ -178,11 +173,11 @@ impl BackendBundle {
     }
 
     async fn spawn(host: &Host, me: &AgentId, a: verbs::Spawn) -> Value {
-        let stamp = a.stamp.unwrap_or_default();
-        let peer = a.peer_grants.unwrap_or_default();
+        let stamp = a.stamp;
+        let peer = a.peer_grants;
         let shelf = match crate::kern::saved::shelf(host).await {
             Ok(s) => s,
-            Err(e) => return refuse("not_found", e, "the user's saved set-ups are not readable"),
+            Err(e) => return fantastic_kernel::refusal_hint(fantastic_kernel::refusal::NOT_FOUND, e, "the user's saved set-ups are not readable"),
         };
         // a STARTER BUNDLE (the double-click's "python agent"): a new project
         // bundle folder from the CLI's starter, loaded, and one instance of it
@@ -199,19 +194,15 @@ impl BackendBundle {
             None => match &shelf.preferred {
                 Some(n) => n.clone(),
                 None => {
-                    return refuse(
-                        "not_found",
-                        "no default AI set-up",
-                        "open ⚙ AI set-up: save one and make it your default",
-                    )
+                    return fantastic_kernel::refusal_hint(fantastic_kernel::refusal::NOT_FOUND, "no default AI set-up", "open ⚙ AI set-up: save one and make it your default")
                 }
             },
         };
         let Some(t) = shelf.saved.iter().find(|t| t.name == name) else {
-            return refuse("not_found", format!("no saved set-up `{name}`"), "open ⚙ AI set-up to see your saved set-ups");
+            return fantastic_kernel::refusal_hint(fantastic_kernel::refusal::NOT_FOUND, format!("no saved set-up `{name}`"), "open ⚙ AI set-up to see your saved set-ups");
         };
         if let Err(r) = crate::kern::setup::check_backend(&t.handler()) {
-            return refuse("bad_arg", format!("saved set-up `{name}` is not an AI set-up: {}", r["error"].as_str().unwrap_or("")), "open ⚙ AI set-up to see your saved set-ups");
+            return fantastic_kernel::refusal_hint(fantastic_kernel::refusal::BAD_ARG, format!("saved set-up `{name}` is not an AI set-up: {}", r["error"].as_str().unwrap_or("")), "open ⚙ AI set-up to see your saved set-ups");
         }
         let ai = format!("ai_{}", hex8());
         let mut spec: Map<String, Value> = t.record.clone();
@@ -224,10 +215,13 @@ impl BackendBundle {
             // chats — the canvas and the terminal keep them alike): listed for reopening
             Ok(()) => {
                 let kept = Self::keep(host, verbs::Keep { id: ai.clone(), name: None }).await;
+                if kept.get("error").is_some() {
+                    return kept;
+                }
                 json!({"id": ai, "root": ai, "saved": name, "handler_module": t.handler(), "model": t.model(),
-                       "dialog_name": kept.get("name").cloned().unwrap_or(json!(ai))})
+                       "dialog_name": kept["name"]})
             }
-            Err(e) => refuse("bad_arg", format!("spawn: the AI from saved set-up `{name}`: {e}"), ""),
+            Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("spawn: the AI from saved set-up `{name}`: {e}")),
         }
     }
 
@@ -244,19 +238,19 @@ impl BackendBundle {
     ) -> Value {
         let state = match host.kernel.state_dir() {
             Ok(p) => p,
-            Err(e) => return refuse("not_found", format!("spawn: the state folder: {e}"), ""),
+            Err(e) => return fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, format!("spawn: the state folder: {e}")),
         };
         let name = format!("py_{}", &hex8()[..6]);
         let dir = match crate::kern::bundle_watch::scaffold(&state, kind, &name) {
             Ok(d) => d,
-            Err(e) => return refuse("bad_arg", format!("spawn: {e}"), ""),
+            Err(e) => return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("spawn: {e}")),
         };
         // its files watched BEFORE it loads: an edit from now on reloads it, and
         // the folder's own (late) event does not restart the instance made below
         crate::kern::bundle_watch::arm(host, &name).await;
         let r = host.operator("kernel", json!({"type": "reload_bundle", "name": name})).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
-            return refuse("bad_arg", format!("spawn: loading the bundle `{name}`: {e}"), "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("spawn: loading the bundle `{name}`: {e}"));
         }
         let id = format!("{name}_1");
         let mut spec = stamp;
@@ -265,13 +259,13 @@ impl BackendBundle {
         }
         let r = host.operator("kernel", Value::Object(spec)).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
-            return refuse("bad_arg", format!("spawn: an instance of `{name}`: {e}"), "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("spawn: an instance of `{name}`: {e}"));
         }
         if let Err(e) = crate::kern::reach::granted(host, &id).await {
-            return refuse("bad_arg", e, "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e);
         }
         if let Err(e) = crate::kern::bundle_watch::refresh_views(host, &name, &dir).await {
-            return refuse("bad_arg", format!("spawn: `{id}`'s view: {e}"), "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("spawn: `{id}`'s view: {e}"));
         }
         json!({"id": id, "root": id, "bundle": name, "folder": dir.display().to_string(), "kind": "bundle"})
     }
@@ -287,7 +281,7 @@ impl BackendBundle {
     ) -> Value {
         match host.kernel.state_dir() {
             Ok(state) => Self::spawn_instance_in(host, me, name, stamp, &state).await,
-            Err(e) => refuse("not_found", format!("spawn: the state folder: {e}"), ""),
+            Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, format!("spawn: the state folder: {e}")),
         }
     }
 
@@ -302,7 +296,7 @@ impl BackendBundle {
         let dir = state.join("bundles").join(name);
         if !dir.join("bundle.yaml").is_file() || !host.kernel.bundles.is_folder(name) {
             let have: Vec<String> = Self::project_bundles(host).iter().filter_map(|b| b["name"].as_str().map(str::to_string)).collect();
-            return refuse("not_found", format!("spawn: no project bundle `{name}`"), &format!("the project's bundles: {}", have.join(", ")));
+            return fantastic_kernel::refusal_hint(fantastic_kernel::refusal::NOT_FOUND, format!("spawn: no project bundle `{name}`"), &format!("the project's bundles: {}", have.join(", ")));
         }
         let id = (1..)
             .map(|n| format!("{name}_{n}"))
@@ -314,13 +308,13 @@ impl BackendBundle {
         }
         let r = host.operator("kernel", Value::Object(spec)).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
-            return refuse("bad_arg", format!("spawn: an instance of `{name}`: {e}"), "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("spawn: an instance of `{name}`: {e}"));
         }
         if let Err(e) = crate::kern::reach::granted(host, &id).await {
-            return refuse("bad_arg", e, "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e);
         }
         if let Err(e) = crate::kern::bundle_watch::refresh_views(host, name, &dir).await {
-            return refuse("bad_arg", format!("spawn: `{id}`'s view: {e}"), "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("spawn: `{id}`'s view: {e}"));
         }
         json!({"id": id, "root": id, "bundle": name, "kind": "bundle"})
     }
@@ -496,7 +490,7 @@ impl BackendBundle {
                 if r.parent_id.as_deref() == Some(me.0.as_str()) && r.handler_module.as_deref() == Some(made) {
                     return json!({"id": id, "existed": true});
                 }
-                return refuse("exists", format!("create: `{id}` already exists elsewhere"), "");
+                return fantastic_kernel::refusal(fantastic_kernel::refusal::EXISTS, format!("create: `{id}` already exists elsewhere"));
             }
         }
         // an AI is made the way every AI is (`make_ai`): a provider and its chat, on the project's
@@ -509,7 +503,7 @@ impl BackendBundle {
             };
             return match Self::make_ai(host, me, &ai, rec, Map::new()).await {
                 Ok(()) => json!({"id": ai}),
-                Err(e) => refuse("bad_arg", format!("create: {e}"), ""),
+                Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("create: {e}")),
             };
         }
         let mut spec = rec;
@@ -517,13 +511,13 @@ impl BackendBundle {
         spec.insert("parent_id".into(), json!(me.0));
         let r = host.operator("kernel", Value::Object(spec)).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
-            return refuse("bad_arg", format!("create: {e}"), "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("create: {e}"));
         }
         // the page calls it through `user` and watches it through the leg the
         // moment this answers: both grants first
         let id = r.get("id").and_then(Value::as_str).unwrap_or("").to_string();
         if let Err(e) = crate::kern::reach::granted(host, &id).await {
-            return refuse("not_found", format!("create: {e}"), "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, format!("create: {e}"));
         }
         r
     }
@@ -531,7 +525,7 @@ impl BackendBundle {
     /// `delete {id}` — an agent of this node's subtree, and its own subtree.
     async fn delete(host: &Host, me: &AgentId, id: &str) -> Value {
         if !Self::below(host, me, id) {
-            return refuse("not_found", format!("delete: no {id:?} under `{}`", me.0), "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, format!("delete: no {id:?} under `{}`", me.0));
         }
         // the provider `make_ai` made for a chat goes with it
         let provider = Some(provider_id(id)).filter(|p| provider_of(host, id).as_deref() == Some(p.as_str()));
@@ -550,11 +544,10 @@ impl BackendBundle {
     /// host; the agent made under this node naming it, and granted its `get`.
     async fn add_mcp(host: &Host, me: &AgentId, a: verbs::AddMcp) -> Value {
         const MCP: &str = fantastic_mcp_client::HANDLER_MODULE;
-        let url = a.url.trim().to_string();
-        let key = a.key.as_deref().unwrap_or("").trim().to_string();
-        if !key.is_empty() {
-            if let Err(e) = crate::kern::keys::store(host, MCP, &url, &key).await {
-                return refuse("bad_arg", format!("add_mcp: the key: {e}"), "");
+        let url = a.url;
+        if let Some(key) = a.key.as_deref() {
+            if let Err(e) = crate::kern::keys::store(host, MCP, &url, key).await {
+                return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("add_mcp: the key: {e}"));
             }
         }
         let host_part = crate::kern::keys::host_of(&url).unwrap_or_default();
@@ -576,14 +569,14 @@ impl BackendBundle {
         // the store admits it BEFORE it exists: `create_agent` boots it, and its
         // boot already lists the server's tools with the key
         if let Err(e) = crate::kern::keys::wire_record(host, &id, &spec).await {
-            return refuse("not_found", format!("add_mcp: {e}"), "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, format!("add_mcp: {e}"));
         }
         let r = host.operator("kernel", Value::Object(spec)).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
-            return refuse("bad_arg", format!("add_mcp: {e}"), "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("add_mcp: {e}"));
         }
         if let Err(e) = crate::kern::reach::granted(host, &id).await {
-            return refuse("not_found", format!("add_mcp: {e}"), "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, format!("add_mcp: {e}"));
         }
         json!({"id": id})
     }
@@ -594,20 +587,23 @@ impl BackendBundle {
     /// lists the server's tools. Neither given: a reset (reconnect as it is).
     async fn configure_mcp(host: &Host, a: verbs::ConfigureMcp) -> Value {
         const MCP: &str = fantastic_mcp_client::HANDLER_MODULE;
-        let id = a.id.trim().to_string();
+        let id = a.id;
         let Some(meta) = Self::meta_of(host, &id) else {
-            return refuse("not_found", format!("configure_mcp: no agent {id:?}"), "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, format!("configure_mcp: no agent {id:?}"));
         };
         if host.kernel.agents.get(&AgentId::from(id.as_str())).and_then(|a| a.value().record().handler_module.clone()).as_deref() != Some(MCP) {
-            return refuse("bad_arg", format!("configure_mcp: {id:?} is not an MCP agent"), "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("configure_mcp: {id:?} is not an MCP agent"));
         }
-        let url = a.url.as_deref().map(str::trim)
-            .map(str::to_string)
-            .unwrap_or_else(|| meta.get("url").and_then(Value::as_str).unwrap_or("").to_string());
-        let key = a.key.as_deref().unwrap_or("").trim().to_string();
-        if !key.is_empty() {
-            if let Err(e) = crate::kern::keys::store(host, MCP, &url, &key).await {
-                return refuse("bad_arg", format!("configure_mcp: the key: {e}"), "");
+        let url = match a.url {
+            Some(u) => u,
+            None => match meta.get("url").and_then(Value::as_str) {
+                Some(u) => u.to_string(),
+                None => return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("configure_mcp: {id:?} records no url")),
+            },
+        };
+        if let Some(key) = a.key.as_deref() {
+            if let Err(e) = crate::kern::keys::store(host, MCP, &url, key).await {
+                return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("configure_mcp: the key: {e}"));
             }
         }
         let mut upd = json!({"type": "update_agent", "id": id, "url": url});
@@ -619,17 +615,17 @@ impl BackendBundle {
                 cc.insert(crate::kern::keys::STORE.into(), json!(["get"]));
                 upd["can_call"] = Value::Object(cc);
                 if let Err(e) = crate::kern::keys::wire(host, &id).await {
-                    return refuse("not_found", format!("configure_mcp: {e}"), "");
+                    return fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, format!("configure_mcp: {e}"));
                 }
             }
         }
         let r = host.operator("kernel", upd).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
-            return refuse("bad_arg", format!("configure_mcp: {e}"), "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("configure_mcp: {e}"));
         }
         let b = host.operator(&id, json!({"type": "boot"})).await.result;
         if let Some(e) = b.get("error").and_then(Value::as_str) {
-            return refuse("bad_arg", format!("configure_mcp: reconnecting: {e}"), "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("configure_mcp: reconnecting: {e}"));
         }
         json!({"id": id, "url": url})
     }
@@ -686,11 +682,11 @@ impl BackendBundle {
     async fn keep(host: &Host, a: verbs::Keep) -> Value {
         let ai = a.id;
         let Some(meta) = Self::meta_of(host, &ai) else {
-            return refuse("not_found", format!("keep: no AI {ai:?}"), "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, format!("keep: no AI {ai:?}"));
         };
         let dialogs = match Self::dialogs_map(host).await {
             Ok(d) => d,
-            Err(e) => return refuse("not_found", e, ""),
+            Err(e) => return fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, e),
         };
         if let Some(d) = dialogs.get(&ai) {
             return json!({"kept": ai, "name": d["name"]});
@@ -712,28 +708,28 @@ impl BackendBundle {
             None => (snapshot(&meta), handler_of(&ai)),
         };
         record.insert("handler_module".into(), json!(handler));
-        let name = a.name.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or(&ai).trim().to_string();
+        let name = a.name.unwrap_or_else(|| ai.clone());
         let d = json!({"name": name, "saved": meta.get("saved"), "record": record});
         match Self::save_dialog(host, &ai, &d).await {
             Ok(()) => json!({"kept": ai, "name": name}),
-            Err(e) => refuse("bad_arg", e, ""),
+            Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
         }
     }
 
     async fn rename(host: &Host, a: verbs::Rename) -> Value {
         let ai = a.id.as_str();
-        let name = a.name.trim().to_string();
+        let name = a.name;
         let dialogs = match Self::dialogs_map(host).await {
             Ok(d) => d,
-            Err(e) => return refuse("not_found", e, ""),
+            Err(e) => return fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, e),
         };
         let Some(mut d) = dialogs.get(ai).cloned() else {
-            return refuse("not_found", format!("rename: no kept dialog {ai:?}"), "keep it first");
+            return fantastic_kernel::refusal_hint(fantastic_kernel::refusal::NOT_FOUND, format!("rename: no kept dialog {ai:?}"), "keep it first");
         };
-        d["name"] = json!(if name.is_empty() { ai.to_string() } else { name });
+        d["name"] = json!(name);
         match Self::save_dialog(host, ai, &d).await {
             Ok(()) => json!({"id": ai, "name": d["name"]}),
-            Err(e) => refuse("bad_arg", e, ""),
+            Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
         }
     }
 
@@ -743,7 +739,7 @@ impl BackendBundle {
                 "id": id, "name": v.get("name"), "saved": v.get("saved"),
                 "live": host.kernel.agents.contains_key(&AgentId::from(id.as_str())),
             })).collect::<Vec<_>>()}),
-            Err(e) => refuse("not_found", e, ""),
+            Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, e),
         }
     }
 
@@ -754,13 +750,13 @@ impl BackendBundle {
         let ai = a.id;
         let dialogs = match Self::dialogs_map(host).await {
             Ok(d) => d,
-            Err(e) => return refuse("not_found", e, ""),
+            Err(e) => return fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, e),
         };
         let Some(d) = dialogs.get(&ai) else {
-            return refuse("not_found", format!("reopen: no kept dialog {ai:?}"), "");
+            return fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, format!("reopen: no kept dialog {ai:?}"));
         };
-        let stamp = a.stamp.unwrap_or_default();
-        let peer = a.peer_grants.unwrap_or_default();
+        let stamp = a.stamp;
+        let peer = a.peer_grants;
         if host.kernel.agents.contains_key(&AgentId::from(ai.as_str())) {
             return json!({"id": ai, "root": ai, "saved": d.get("saved"), "name": d.get("name"), "shared": true});
         }
@@ -773,7 +769,7 @@ impl BackendBundle {
         }
         match Self::make_ai(host, me, &ai, spec, peer).await {
             Ok(()) => json!({"id": ai, "root": ai, "saved": d.get("saved"), "name": d.get("name"), "shared": false}),
-            Err(e) => refuse("bad_arg", format!("reopen: re-making the AI: {e}"), ""),
+            Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("reopen: re-making the AI: {e}")),
         }
     }
 }
@@ -804,20 +800,19 @@ impl Handler for BackendBundle {
 
     async fn handle(&self, agent_id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
         match call {
-            verbs::Call::Boot(_) => return Ok(None),
             verbs::Call::Reflect(_) => {
                 return Ok(Some(json!({
                     "handler_module": HANDLER_MODULE,
-                    "sentence": "The canvas's host node: the cells' HOST backends (exec agents, AIs) are its children — create / delete them, spawn an AI. Cells themselves are placed on the page's view (`<page guid>|view_root`), not here.",
+                    "sentence": MAN,
                 })))
             }
             _ => {}
         }
         let Some(host) = Self::host(kernel) else {
-            return Ok(Some(refuse("not_found", "canvas: the kernel has no root", "")));
+            return Ok(Some(fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, "canvas: the kernel has no root")));
         };
         Ok(Some(match call {
-            verbs::Call::Boot(_) | verbs::Call::Reflect(_) => unreachable!("answered above"),
+            verbs::Call::Reflect(_) => unreachable!("answered above"),
             verbs::Call::Create(a) => Self::create(&host, agent_id, a.record).await,
             verbs::Call::Delete(a) => Self::delete(&host, agent_id, &a.id).await,
             verbs::Call::Presets(_) => Self::presets(&host).await,
@@ -828,7 +823,7 @@ impl Handler for BackendBundle {
             verbs::Call::Reopen(a) => Self::reopen(&host, agent_id, a).await,
             verbs::Call::NewCanvas(a) => match crate::kern::web::new_canvas(&host, &agent_id.0, &a.name).await {
                 Ok(id) => json!({"id": id}),
-                Err(e) => refuse("bad_arg", e, "name it: new_canvas {name: <name>}"),
+                Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
             },
             verbs::Call::Canvases(_) => Self::canvases(&host),
             verbs::Call::AddMcp(a) => Self::add_mcp(&host, agent_id, a).await,

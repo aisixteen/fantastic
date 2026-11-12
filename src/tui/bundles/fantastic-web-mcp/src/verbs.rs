@@ -7,7 +7,7 @@ use fantastic_kernel::inquiry::{Answer, Inquiries, Inquiry};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-/// Make the project's MCP config right (when the record names `file_bridge_id`): `mcpServers.fantastic` is this process's binary with `mcp`, written only when it changed. Answers nothing, or {error, reason: "mcp_config"} when the config could not be made right.
+/// Make the project's MCP config right (when the record names `file_bridge_id`): `mcpServers.fantastic` is this process's binary with `mcp`, written only when it changed. Answers nothing, or {error, reason: "invalid_meta"} when the config could not be made right.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Boot {}

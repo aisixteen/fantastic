@@ -3,7 +3,7 @@
 //! No `file_bridge_id` → nothing happens. Set → the config is read through the
 //! bridge, `mcpServers.fantastic` made `{command: <this binary>, args: ["mcp"]}`,
 //! written back only when it changed, every other key kept; anything that fails is
-//! loud (the boot's `{error, reason: "mcp_config"}`, reflect `mcp_config_error`).
+//! loud (the boot's `{error, reason: "invalid_meta"}`, reflect `mcp_config_error`).
 
 use std::sync::Arc;
 
@@ -106,7 +106,7 @@ async fn set_and_unusable_is_loud() {
     // no path on the bridge
     let tmp = tempfile::TempDir::new().unwrap();
     let (k, boot) = setup(tmp.path(), true, json!({"file_bridge_id": "cfg"})).await;
-    assert_eq!(boot["reason"], "mcp_config", "{boot}");
+    assert_eq!(boot["reason"], "invalid_meta", "{boot}");
     assert!(boot["error"].as_str().unwrap().contains("mcp_config_file"), "{boot}");
     let r = op(&k, "mcp", json!({"type": "reflect"})).await;
     assert!(r["mcp_config_error"].as_str().unwrap().contains("mcp_config_file"), "{r}");
@@ -114,7 +114,7 @@ async fn set_and_unusable_is_loud() {
     // the bridge does not admit the leg
     let tmp = tempfile::TempDir::new().unwrap();
     let (_k, boot) = setup(tmp.path(), false, wired()).await;
-    assert_eq!(boot["reason"], "mcp_config", "{boot}");
+    assert_eq!(boot["reason"], "invalid_meta", "{boot}");
     assert!(boot["error"].as_str().unwrap_or_default().contains("read_stream"), "{boot}");
     assert!(!tmp.path().join(".mcp.json").exists());
 

@@ -92,7 +92,7 @@ impl Handler for WebMcpBundle {
         Ok(Some(match call {
             verbs::Call::Boot(_) => match sync_config(agent_id, kernel).await {
                 Ok(()) => Value::Null,
-                Err(e) => json!({"error": e, "reason": "mcp_config"}),
+                Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::INVALID_META, e),
             },
             verbs::Call::InboundSend(a) => inbound_send(a, kernel).await,
             // THE PERSON'S INQUIRIES (#307): held on the record, listed, answered.
@@ -138,7 +138,7 @@ impl Handler for WebMcpBundle {
 // nothing happens. A missing file is `{}` (the leg creates it). Set and anything
 // goes wrong — no `mcp_config_file`, the bridge refuses, the file is not a JSON
 // object, `mcpServers` is not an object, the write is refused — is LOUD: the boot
-// answers `{error, reason: "mcp_config"}` and the leg's reflect carries it as
+// answers `{error, reason: "invalid_meta"}` and the leg's reflect carries it as
 // `mcp_config_error` until a boot succeeds. Nothing is overwritten on an error.
 
 /// The record field naming the file_bridge the leg reads and writes the config
@@ -201,12 +201,10 @@ pub fn with_entry(doc: &str, entry: &Value) -> Result<Option<String>, String> {
 
 /// Make the config right, as the leg. Records the outcome for reflect.
 async fn sync_config(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), String> {
-    let meta = kernel
-        .agents
-        .get(agent_id)
-        .map(|e| e.meta.read().expect("meta poisoned").clone())
-        .unwrap_or_default();
-    let name = |k: &str| meta.get(k).and_then(Value::as_str).filter(|s| !s.trim().is_empty()).map(str::to_string);
+    let Some(meta) = kernel.agents.get(agent_id).map(|e| e.meta.read().expect("meta poisoned").clone()) else {
+        return Err(format!("{agent_id}: no such agent"));
+    };
+    let name = |k: &str| meta.get(k).and_then(Value::as_str).map(str::to_string);
     let result = match (name(CONFIG_BRIDGE_FIELD), name(CONFIG_FILE_FIELD)) {
         (None, _) => Ok(()),
         (Some(bridge), None) => Err(format!(
@@ -263,7 +261,11 @@ async fn read_all(kernel: &Arc<Kernel>, bridge: &str, path: &str) -> Result<Stri
         if out.result.get("eof").and_then(Value::as_bool) == Some(true) {
             break;
         }
-        offset = out.result.get("next_offset").and_then(Value::as_u64).unwrap_or(offset);
+        offset = out
+            .result
+            .get("next_offset")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("{bridge} read_stream {path}: the reply names no next_offset"))?;
     }
     String::from_utf8(bytes).map_err(|e| format!("{bridge} {path}: not utf-8 ({e})"))
 }

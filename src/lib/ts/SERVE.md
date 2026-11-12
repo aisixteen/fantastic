@@ -22,15 +22,14 @@ This library has no page. An app packs its own — the canvas is
 
 ```bash
 sh src/tui/web/canvas/scripts/pack.sh   # → src/tui/web/canvas/dist/canvas.zip
-# any app:  sh src/lib/ts/scripts/pack.sh <entry.ts> <out.zip> <readme.md> [esbuild flags …]
+# any app:  sh src/lib/ts/scripts/pack.sh <entry.ts> <out.zip> [esbuild flags …]
 ```
 
-The zip is `readme.md` (the app's revive guide) + ONE inlined `bundle.min.js`
+The zip is ONE inlined `bundle.min.js`
 (the app, this library, the app's vendors) + its map. There is **no npm step**
 and no import map: esbuild inlines everything, so the mount page is a single
 `<script type="module">` tag served by a generic `file_bridge` agent. The canvas
-app's `readme.md` is the full revive recipe (inspect the zip without unpacking,
-pull `bundle.min.js`, open a `file_bridge` leg on it, provide the one-tag page).
+app is served as that bundle (open a `file_bridge` leg on it, provide the one-tag page).
 
 An app's page boots this library with `boot` (`src/index.ts`): it dials the
 host's loader by id (e.g. `web_loader` — a `kernel_state` the operator created at

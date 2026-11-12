@@ -19,7 +19,7 @@ class MockLoaderBridge implements Bridge {
   forward(target: string, payload: Payload): Promise<Json> {
     this.calls.push({ target, payload });
     if (payload["type"] === "load_tree") {
-      return Promise.resolve({ version: 1, records: [] });
+      return Promise.resolve({ records: [] });
     }
     return Promise.resolve({ ok: true });
   }
@@ -82,9 +82,9 @@ test("html_agent: agentic CRUD persists the LATEST content, coalesced", async ()
       new Agent({ id: "panel", parentId: "canvas", handlerModule: "html_agent.ts" }),
     );
     // UPDATE twice via the agent's own verb (agentic CRUD over send)
-    const r1 = (await k.send([{ target: "panel", payload: { type: "set_html", html: "<h1>v1</h1>" } }]))[0]!.result;
+    const r1 = (await k.send([{ target: "panel", payload: { type: "set_html", bytes: "<h1>v1</h1>" } }]))[0]!.result;
     assert.deepEqual(r1, { ok: true, bytes: "<h1>v1</h1>".length });
-    (await k.send([{ target: "panel", payload: { type: "set_html", html: "<h1>v2</h1>" } }]))[0]!.result;
+    (await k.send([{ target: "panel", payload: { type: "set_html", bytes: "<h1>v2</h1>" } }]))[0]!.result;
     await loader.flush();
 
     // one coalesced persist carrying the latest content + structure
@@ -119,7 +119,7 @@ test("gl_agent: source mutation persists; get_gl_view reflects it", async () => 
       new Agent({ id: "vfx", parentId: "canvas", handlerModule: "gl_agent.ts" }),
     );
     const src = "void main(){ gl_FragColor = vec4(1.0); }";
-    (await k.send([{ target: "vfx", payload: { type: "set_gl_source", source: src } }]))[0]!.result;
+    (await k.send([{ target: "vfx", payload: { type: "set_gl_source", bytes: src } }]))[0]!.result;
     await loader.flush();
 
     const persists = bridge.persistsOf("vfx");

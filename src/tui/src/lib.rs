@@ -41,7 +41,6 @@ mod kern;
 mod keys;
 mod local;
 mod mcp;
-mod migrate;
 mod panel;
 mod presence;
 mod readme;
@@ -151,7 +150,7 @@ pub fn state_dir_of(args: &[String]) -> Result<std::path::PathBuf, String> {
 /// THE LAUNCHER'S PREDICATE. True when `main_with(args, …)` would boot a kernel
 /// in the current directory: the UI (on a terminal), `--headless`, `canvas`, and
 /// an `mcp` with no flag but `--statedir` and `--workdir`. False for the one-shot commands (`send`, `import`,
-/// `migrate-home`, `__ctrl_break`), for the readme printed when there is no
+/// `__ctrl_break`), for the readme printed when there is no
 /// terminal and no argument, and for a refused command line (a parse error,
 /// `mcp` with another argument, the UI with no terminal). A launcher calls it before
 /// `main_with` and, when it is true, seeds with `seed_dir_with(&state_dir_of(argv)?, its
@@ -169,7 +168,7 @@ fn kernel_mode(args: &[String], stdout_is_terminal: bool, has_tty: &dyn Fn() -> 
     }
     match args.first().map(String::as_str) {
         Some("mcp") => return mcp::flags(&args[1..]).is_ok(),
-        Some("send" | "import" | "migrate-home" | "__ctrl_break") => return false,
+        Some("send" | "import" | "__ctrl_break") => return false,
         _ => {}
     }
     match recipe::parse(args) {
@@ -203,9 +202,6 @@ pub fn main_with(args: Vec<String>, extras: &[Extra], readme_sections: &[&str]) 
     }
     if args.first().map(String::as_str) == Some("import") {
         import::main(&args[1..])
-    }
-    if args.first().map(String::as_str) == Some("migrate-home") {
-        migrate::main(&args[1..])
     }
     // THE STOP HELPER (Windows): a hidden mode the home kernel runs to stop a
     // canvas in another console.
@@ -268,7 +264,7 @@ mod tests {
     #[test]
     fn starts_kernel_is_false_for_one_shots_and_refusals() {
         for s in [
-            "send x", "import p --parent user", "migrate-home", "migrate-home --dry-run",
+            "send x", "import p --parent user",
             "__ctrl_break 1", "mcp --can-call files", "mcp --bogus", "bogus", "--headless canvas",
         ] {
             assert!(!kernel_mode(&a(s), true, &|| true), "{s:?}");

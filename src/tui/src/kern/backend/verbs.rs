@@ -6,11 +6,6 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-/// The kernel starts the node: nothing to open. Answers nothing.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Boot {}
-
 /// One direct child of this agent; asking for an existing child of the same handler again answers it. An AI (its handler names a memory store) is made as every AI is: on the project's memory store, granted that store and the human's chat verbs. Returns {id, …}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -79,7 +74,7 @@ fn child_record(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::
 fn stamp(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
     let mut props = Map::new();
     never(&["type", "id", "parent_id", "guid", "handler_module", "agents"], &mut props);
-    serde_json::from_value(serde_json::json!({"type": "object", "properties": props})).expect("a stamp schema")
+    serde_json::from_value(serde_json::json!({"type": "object", "properties": props, "default": {}})).expect("a stamp schema")
 }
 
 /// Delete an agent under this one, and its subtree.
@@ -112,9 +107,10 @@ pub struct Spawn {
     /// The caller's own fields for the backend root, copied unread; the agent's own structure (parent, id, handler) is set after it.
     #[serde(default)]
     #[schemars(schema_with = "stamp")]
-    pub stamp: Option<Map<String, Value>>,
+    pub stamp: Map<String, Value>,
     /// Any grant key: more egress for the AI.
-    pub peer_grants: Option<Map<String, Value>>,
+    #[serde(default)]
+    pub peer_grants: Map<String, Value>,
 }
 
 /// Record the dialog of a cell's AI (its rows are already in the project's memory store); it outlives the cell. Returns {kept, name}.
@@ -125,10 +121,11 @@ pub struct Keep {
     #[schemars(length(min = 1))]
     pub id: String,
     /// The dialog's name; absent, the AI's id.
+    #[schemars(length(min = 1), regex(pattern = "\\S"))]
     pub name: Option<String>,
 }
 
-/// Name a kept dialog; an empty name is the AI's id. Returns {id, name}.
+/// Name a kept dialog. Returns {id, name}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Rename {
@@ -136,6 +133,7 @@ pub struct Rename {
     #[schemars(length(min = 1))]
     pub id: String,
     /// The new name.
+    #[schemars(length(min = 1), regex(pattern = "\\S"))]
     pub name: String,
 }
 
@@ -154,17 +152,18 @@ pub struct Reopen {
     /// As `spawn`'s.
     #[serde(default)]
     #[schemars(schema_with = "stamp")]
-    pub stamp: Option<Map<String, Value>>,
+    pub stamp: Map<String, Value>,
     /// As `spawn`'s.
-    pub peer_grants: Option<Map<String, Value>>,
+    #[serde(default)]
+    pub peer_grants: Map<String, Value>,
 }
 
 /// A CHILD canvas `canvas_<name>` of this one: its page records nest under this canvas's records, and deleting this canvas deletes it. Its own page kernel and its own cells' backends. Open it at the page URL with `?canvas=<id>`. Returns {id}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewCanvas {
-    /// The canvas's name.
-    #[schemars(length(min = 1))]
+    /// The canvas's name: lowercase letters, digits and `_`; the node is `canvas_<name>`.
+    #[schemars(length(min = 1), regex(pattern = "^[a-z0-9][a-z0-9_]{0,62}$"))]
     pub name: String,
 }
 
@@ -181,6 +180,7 @@ pub struct AddMcp {
     #[schemars(length(min = 1), regex(pattern = "\\S"))]
     pub url: String,
     /// A static API key, sent as Bearer to that host only.
+    #[schemars(length(min = 1), regex(pattern = "\\S"))]
     pub key: Option<String>,
 }
 
@@ -195,11 +195,11 @@ pub struct ConfigureMcp {
     #[schemars(length(min = 1), regex(pattern = "\\S"))]
     pub url: Option<String>,
     /// A new key.
+    #[schemars(length(min = 1), regex(pattern = "\\S"))]
     pub key: Option<String>,
 }
 
 fantastic_kernel::verbs! {
-    "boot" => Boot,
     "create" => Create,
     "delete" => Delete,
     "presets" => Presets,

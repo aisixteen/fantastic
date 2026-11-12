@@ -11,11 +11,6 @@ fn backend_handler(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schem
     serde_json::from_value(crate::kern::setup::handler_schema()).expect("a handler schema")
 }
 
-/// The kernel starts the agent: nothing to open. Answers nothing.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Boot {}
-
 /// The AI backends this build links and the fields each one's record declares. Returns {backends:[{module, key, fields:[{name, type, required, enum, default, hint}]}]}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -43,7 +38,8 @@ pub struct ConfigureAi {
     #[schemars(length(min = 1))]
     pub id: String,
     /// The fields to change: `{name: value}`, each of the type the backend's record declares.
-    pub fields: Option<Map<String, Value>>,
+    #[serde(default)]
+    pub fields: Map<String, Value>,
 }
 
 /// Write an AI agent: a provider and the chat naming it, created, granted and booted as the human. Returns {written, id}.
@@ -57,9 +53,11 @@ pub struct WriteAi {
     #[schemars(schema_with = "backend_handler")]
     pub handler: String,
     /// The backend's own fields: `{name: value}`, each of the type its record declares.
-    pub fields: Option<Map<String, Value>>,
+    #[serde(default)]
+    pub fields: Map<String, Value>,
     /// The agents the chat may call.
-    pub may_call: Option<Vec<String>>,
+    #[serde(default)]
+    pub may_call: Vec<String>,
 }
 
 /// Where keys are kept, and whether one was chosen. Returns {mode, where}.
@@ -116,7 +114,8 @@ pub struct Save {
     #[schemars(schema_with = "backend_handler")]
     pub handler: String,
     /// The backend's own fields: `{name: value}`, each of the type its record declares.
-    pub fields: Option<Map<String, Value>>,
+    #[serde(default)]
+    pub fields: Map<String, Value>,
 }
 
 /// Forget a saved set-up. Returns {forgotten}.
@@ -138,7 +137,6 @@ pub struct Prefer {
 }
 
 fantastic_kernel::verbs! {
-    "boot" => Boot,
     "backends" => Backends,
     "keys" => Keys,
     "ai_settings" => AiSettings,

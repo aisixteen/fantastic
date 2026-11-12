@@ -5,31 +5,20 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-/// No-op; the parent `web` host serves the route. Answers {booted:true}.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Boot {}
-
-/// The served paths. Returns {files:[path, ...]}.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct List {}
-
 /// A file of the embedded canvas page as a BINARY reply: the bytes as the body, {path, offset, next_offset, eof, size} as the head.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadStream {
-    /// The served file's path.
-    #[schemars(length(min = 1))]
+    /// The served file's path, as the page names it (no leading slash).
+    #[schemars(length(min = 1), regex(pattern = "^[^/]"))]
     pub path: String,
     /// Where the chunk starts, in bytes.
-    pub offset: Option<u64>,
+    #[serde(default)]
+    pub offset: u64,
     /// The chunk size in bytes; absent, the rest of the file.
     pub length: Option<u64>,
 }
 
 fantastic_kernel::verbs! {
-    "boot" => Boot,
-    "list" => List,
     "read_stream" => ReadStream,
 }
