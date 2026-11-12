@@ -137,9 +137,6 @@ def chat_pair(backend, chat: dict, *, role: str | None = None,
     # the KEY is the provider's: the chat names no credentials and reads no `creds`
     chat_fields.pop("credentials", None)
     chat_fields["can_call"].pop(creds.CREDS, None)
-    # `REFLECT_FOLD=1`: the chat folds answered reflect replies (its record's `reflect_fold`)
-    if os.environ.get("REFLECT_FOLD") == "1":
-        chat_fields["reflect_fold"] = True
     return prov, {"type": "create_agent", **chat_fields, "handler_module": CHAT_MODULE,
                   "provider_id": pid}
 

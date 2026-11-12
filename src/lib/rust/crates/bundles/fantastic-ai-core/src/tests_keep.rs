@@ -38,7 +38,10 @@ fn large_reply() -> String {
 /// The content of the last message of pass `n`.
 fn last_message(s: &Arc<MockScript>, n: usize) -> String {
     let msgs = s.request_messages(n);
-    msgs.last().unwrap()["content"].as_str().unwrap().to_string()
+    msgs.last().unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 /// The id of the stored reply row.
@@ -155,7 +158,10 @@ async fn after_the_answer_the_summary_replaces_the_body_and_recall_returns_it_wh
     assert!(!seen.contains("head line"));
     assert!(!seen.contains(&"x".repeat(1000)));
     let r = kernel
-        .send(vec![Item::new(agent.clone(), json!({"type": "recall", "id": id}))])
+        .send(vec![Item::new(
+            agent.clone(),
+            json!({"type": "recall", "id": id}),
+        )])
         .await
         .remove(0)
         .result;
@@ -196,7 +202,10 @@ async fn a_keep_for_an_unknown_id_is_refused_with_an_error() {
     let (kernel, agent) = mk_kernel(&tmp, "kp_unknown").await;
     let s = script(
         &agent,
-        vec![pass(format!("{}\n{DONE}", keep_call(424_242, "note"))), pass(DONE)],
+        vec![
+            pass(format!("{}\n{DONE}", keep_call(424_242, "note"))),
+            pass(DONE),
+        ],
         Duration::ZERO,
     );
     say(&kernel, &agent, "go").await;

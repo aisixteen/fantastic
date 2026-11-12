@@ -1355,7 +1355,6 @@ fn the_catalog_carries_the_on_device_backend() {
             "cache_primer_until",
             "transport_retries",
             "misfire_limit",
-            "reflect_fold",
             "system_prompt",
             "file_bridge_id",
             "system_prompt_file",
