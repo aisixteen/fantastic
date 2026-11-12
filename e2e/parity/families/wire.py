@@ -717,10 +717,10 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
             ("rest_self_shutdown", "POST", "/rest/rest", json.dumps({"type": "shutdown"}).encode(), J),
             ("rest_self_get_routes", "POST", "/rest/rest", json.dumps({"type": "get_routes"}).encode(), J),
             ("rest_self_handle_route", "POST", "/rest/rest", json.dumps({"type": "handle_route", "path": "/x"}).encode(), J),
-            ("exec_id_first", "POST", "/rest/files", json.dumps({"type": "reflect"}).encode(), {**J, "X-Fantastic-Execution-Id": "wirecap-exec-1"}),
-            ("exec_id_repeat_same_target", "POST", "/rest/files", json.dumps({"type": "reflect"}).encode(), {**J, "X-Fantastic-Execution-Id": "wirecap-exec-1"}),
-            ("exec_id_repeat_other_target", "POST", "/rest/cli", json.dumps({"type": "reflect"}).encode(), {**J, "X-Fantastic-Execution-Id": "wirecap-exec-1"}),
-            ("exec_id_with_colon", "POST", "/rest/files", json.dumps({"type": "reflect"}).encode(), {**J, "X-Fantastic-Execution-Id": "a:b"}),
+            ("execution_id_first", "POST", "/rest/files", json.dumps({"type": "reflect"}).encode(), {**J, "X-Fantastic-Execution-Id": "wirecap-exec-1"}),
+            ("execution_id_repeat_same_target", "POST", "/rest/files", json.dumps({"type": "reflect"}).encode(), {**J, "X-Fantastic-Execution-Id": "wirecap-exec-1"}),
+            ("execution_id_repeat_other_target", "POST", "/rest/cli", json.dumps({"type": "reflect"}).encode(), {**J, "X-Fantastic-Execution-Id": "wirecap-exec-1"}),
+            ("execution_id_with_colon", "POST", "/rest/files", json.dumps({"type": "reflect"}).encode(), {**J, "X-Fantastic-Execution-Id": "a:b"}),
             ("auth_header_on_open_leg", "POST", "/rest/files", json.dumps({"type": "reflect"}).encode(), {**J, "X-Fantastic-Auth": "whatever"}),
             ("fileproxy_ok", "GET", "/files/file/hello.txt", None, {}),
             ("fileproxy_missing", "GET", "/files/file/missing.txt", None, {}),
@@ -760,7 +760,7 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
             rec.jsonl("rest", {"case": "keepalive_two_requests", "__transport_error__": repr(e)})
         # C22 — the SAME execution id on create_agent with two different parents.
         for n, parent in ((1, k.root_id), (2, "files")):
-            http_case(f"exec_id_create_parent_{n}", P, "POST", f"/rest/{k.root_id}",
+            http_case(f"execution_id_create_parent_{n}", P, "POST", f"/rest/{k.root_id}",
                       json.dumps({"type": "create_agent", "id": f"joiner{n}",
                                   "parent_id": parent, "handler_module": "cli.tools"}).encode(),
                       {"content-type": "application/json",

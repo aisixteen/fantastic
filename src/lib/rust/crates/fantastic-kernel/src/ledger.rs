@@ -119,9 +119,9 @@ impl Ledger {
         }
     }
 
-    /// Claim `exec_id` for an execution, or discover it is already taken.
+    /// Claim `execution_id` for an execution, or discover it is already taken.
     ///
-    /// `exec_id` is the KERNEL's id. `caller_id` is the CALLER's raw id as
+    /// `execution_id` is the KERNEL's id. `caller_id` is the CALLER's raw id as
     /// given — a string name or an int — used ONLY to render the rebind
     /// refusal in python's exact words; `name` is `Some` only for the
     /// string-name case (only a named row is a dedup contract, and the ring
@@ -129,7 +129,7 @@ impl Ledger {
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         &self,
-        exec_id: i64,
+        execution_id: i64,
         caller_id: &Value,
         target: &AgentId,
         payload: &Value,
@@ -139,13 +139,13 @@ impl Ledger {
     ) -> Opened {
         let mut g = self.inner.lock().expect("ledger poisoned");
 
-        if let Some(row) = g.rows.get(&exec_id) {
+        if let Some(row) = g.rows.get(&execution_id) {
             // AN ID IS BOUND TO ITS FIRST TARGET. The same id aimed elsewhere is
             // a different intent wearing the same name — returning the other
             // execution's outcome would be silently wrong, so it refuses.
             //
             // PYTHON'S PROSE, verbatim (BOTH ledgers render the
-            // CALLER's raw id, never the minted exec_id — `py_repr` for a
+            // CALLER's raw id, never the minted execution_id — `py_repr` for a
             // string, bare digits for an int; the target names via `py_repr`
             // too; no `bound_to`).
             if &row.target != target {
@@ -176,10 +176,10 @@ impl Ledger {
         // starting a second one.
         let (tx, _rx) = watch::channel(None);
         if let Some(n) = name {
-            g.names.insert(n.to_string(), exec_id);
+            g.names.insert(n.to_string(), execution_id);
         }
         g.rows.insert(
-            exec_id,
+            execution_id,
             Row {
                 target: target.clone(),
                 payload: payload.clone(),
@@ -192,7 +192,7 @@ impl Ledger {
                 tx,
             },
         );
-        g.order.push(exec_id);
+        g.order.push(execution_id);
         Self::evict(&mut g);
         Opened::Fresh
     }
@@ -208,20 +208,20 @@ impl Ledger {
             .copied()
     }
 
-    /// Whether a row exists under `exec_id` (named or not, settled or not).
+    /// Whether a row exists under `execution_id` (named or not, settled or not).
     #[must_use]
-    pub fn has(&self, exec_id: i64) -> bool {
+    pub fn has(&self, execution_id: i64) -> bool {
         self.inner
             .lock()
             .expect("ledger poisoned")
             .rows
-            .contains_key(&exec_id)
+            .contains_key(&execution_id)
     }
 
-    /// Count one dispatch attempt against `exec_id`; returns the new count.
-    pub fn attempt(&self, exec_id: i64) -> u32 {
+    /// Count one dispatch attempt against `execution_id`; returns the new count.
+    pub fn attempt(&self, execution_id: i64) -> u32 {
         let mut g = self.inner.lock().expect("ledger poisoned");
-        match g.rows.get_mut(&exec_id) {
+        match g.rows.get_mut(&execution_id) {
             Some(r) => {
                 r.attempts += 1;
                 r.attempts
@@ -233,21 +233,21 @@ impl Ledger {
     /// May this execution be dispatched again? Only a terminal `failed` or
     /// `timed_out` with budget left. `cancelled` is ABSORBING — an operator kill
     /// is a decision, not a transient — and `completed` never retries.
-    pub fn should_retry(&self, exec_id: i64, status: Status) -> bool {
+    pub fn should_retry(&self, execution_id: i64, status: Status) -> bool {
         if !status.is_retryable() {
             return false;
         }
         let g = self.inner.lock().expect("ledger poisoned");
         g.rows
-            .get(&exec_id)
+            .get(&execution_id)
             .is_some_and(|r| r.attempts <= r.retries)
     }
 
     /// Record the FINAL outcome and wake every joiner. Stamps `attempts`, so a
     /// caller can see what its work actually cost.
-    pub fn settle(&self, exec_id: i64, mut outcome: Outcome) -> Outcome {
+    pub fn settle(&self, execution_id: i64, mut outcome: Outcome) -> Outcome {
         let mut g = self.inner.lock().expect("ledger poisoned");
-        if let Some(row) = g.rows.get_mut(&exec_id) {
+        if let Some(row) = g.rows.get_mut(&execution_id) {
             outcome.attempts = row.attempts.max(1);
             row.outcome = Some(outcome.clone());
             // Ignore the send error: no subscribers is the normal case.
@@ -269,14 +269,14 @@ impl Ledger {
         self.inner.lock().expect("ledger poisoned").cap
     }
 
-    /// Is `exec_id` held AND settled?
+    /// Is `execution_id` held AND settled?
     #[must_use]
-    pub fn is_done(&self, exec_id: i64) -> bool {
+    pub fn is_done(&self, execution_id: i64) -> bool {
         self.inner
             .lock()
             .expect("ledger poisoned")
             .rows
-            .get(&exec_id)
+            .get(&execution_id)
             .is_some_and(|r| r.outcome.is_some())
     }
 
@@ -294,21 +294,21 @@ impl Ledger {
 
     /// `(target, caller, name, named)` of one held execution.
     #[must_use]
-    pub fn info(&self, exec_id: i64) -> Option<(AgentId, Option<AgentId>, Option<String>)> {
+    pub fn info(&self, execution_id: i64) -> Option<(AgentId, Option<AgentId>, Option<String>)> {
         let g = self.inner.lock().expect("ledger poisoned");
         g.rows
-            .get(&exec_id)
+            .get(&execution_id)
             .map(|r| (r.target.clone(), r.caller.clone(), r.name.clone()))
     }
 
     /// Mark a held dead letter acknowledged (`ack_deadletter`).
-    pub fn mark_acked(&self, exec_id: i64) {
+    pub fn mark_acked(&self, execution_id: i64) {
         if let Some(r) = self
             .inner
             .lock()
             .expect("ledger poisoned")
             .rows
-            .get_mut(&exec_id)
+            .get_mut(&execution_id)
         {
             r.acked = true;
         }
@@ -316,14 +316,14 @@ impl Ledger {
 
     /// FORGET one execution — its rows landed in the store, which is its record
     /// now. The name binding goes with it, but only if it still points HERE.
-    pub fn forget(&self, exec_id: i64) {
+    pub fn forget(&self, execution_id: i64) {
         let mut g = self.inner.lock().expect("ledger poisoned");
-        if let Some(name) = g.rows.remove(&exec_id).and_then(|r| r.name) {
-            if g.names.get(&name) == Some(&exec_id) {
+        if let Some(name) = g.rows.remove(&execution_id).and_then(|r| r.name) {
+            if g.names.get(&name) == Some(&execution_id) {
                 g.names.remove(&name);
             }
         }
-        g.order.retain(|i| *i != exec_id);
+        g.order.retain(|i| *i != execution_id);
     }
 
     /// The RAM half of the `ledger` PROJECTION, oldest first — python
@@ -388,7 +388,7 @@ impl Ledger {
     /// status is not guessed at — nothing is put and `false` comes back.
     pub fn put_settled(
         &self,
-        exec_id: i64,
+        execution_id: i64,
         call: &crate::rows::Row,
         outcome: &Map<String, Value>,
         attempts: u32,
@@ -412,13 +412,13 @@ impl Ledger {
                     .collect(),
             ),
         };
-        self.put_done(exec_id, call, status, result, attempts)
+        self.put_done(execution_id, call, status, result, attempts)
     }
 
     /// The one DONE insert both recalls share: `call` is the flushed `call` row.
     fn put_done(
         &self,
-        exec_id: i64,
+        execution_id: i64,
         call: &crate::rows::Row,
         status: Status,
         result: Value,
@@ -431,11 +431,11 @@ impl Ledger {
             return false;
         };
         let mut g = self.inner.lock().expect("ledger poisoned");
-        if g.rows.contains_key(&exec_id) {
+        if g.rows.contains_key(&execution_id) {
             return false;
         }
         let out = Outcome {
-            pid: Some(crate::tasks::TaskId(exec_id)),
+            pid: Some(crate::tasks::TaskId(execution_id)),
             status,
             result,
             attempts,
@@ -447,10 +447,10 @@ impl Ledger {
         let (tx, _rx) = watch::channel(Some(out.clone()));
         let name = call.get("name").and_then(Value::as_str).map(str::to_string);
         if let Some(n) = &name {
-            g.names.insert(n.clone(), exec_id);
+            g.names.insert(n.clone(), execution_id);
         }
         g.rows.insert(
-            exec_id,
+            execution_id,
             Row {
                 target: AgentId::from(target),
                 // The ORIGINAL call's payload: a joiner of a recalled execution
@@ -468,7 +468,7 @@ impl Ledger {
                 tx,
             },
         );
-        g.order.push(exec_id);
+        g.order.push(execution_id);
         Self::evict(&mut g);
         true
     }

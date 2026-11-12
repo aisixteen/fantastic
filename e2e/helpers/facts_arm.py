@@ -312,13 +312,13 @@ async def connect_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: d
 
 async def reboot_agent(root, core, bk, fb: str, aid: str, strategy: str, extra: dict, *, watch_conn=None):
     """Kill the agent's PROCESS state and bring it back on the same store: close the
-    connection, `delete_agent` (the record goes — rows, bodies and the view stay in the
-    kernel under the same id by construction), forget the provider, then
+    connection, `delete_agent` with `keep_memory:true` (the record goes — `keep_memory:true`
+    keeps the store data, so rows, bodies and the view stay in the kernel under the same id), forget the provider, then
     `connect` again with the same record. `create_agent` fires `boot`, and a booted
     agent with a store runs `context_recall`. Returns the new connection."""
     if watch_conn is not None:
         await watch_conn.close()
-    r = await call(root, root.id, {"type": "delete_agent", "id": aid})
+    r = await call(root, root.id, {"type": "delete_agent", "id": aid, "keep_memory": True})
     assert not (isinstance(r, dict) and r.get("error")), f"delete_agent({aid}): {r}"
     if core is not None:
         WRAPS.pop(aid, None)

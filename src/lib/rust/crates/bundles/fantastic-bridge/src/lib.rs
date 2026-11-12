@@ -1184,7 +1184,7 @@ async fn serve_inbound_call(
     } else {
         // THE FRAME ID IS THE EXECUTION ID. The correlator a peer already sends
         // NAMES the execution, so a reconnect that replays its queue joins the
-        // original instead of running the side effect twice. No second `exec_id`
+        // original instead of running the side effect twice. No second `execution_id`
         // field exists. A BINARY frame is the same call: its body sits at
         // `["payload", …path]` (the frame's `_binary_path`) and rides the SAME
         // batch item — pid, call/settle rows, `ps` row, dedup — on the binary

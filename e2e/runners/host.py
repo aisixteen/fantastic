@@ -242,7 +242,7 @@ def main(scenario_id: str) -> int:
                     pressed = k.send(
                         action["target"],
                         action.get("payload") or {},
-                        exec_id=action["id"],
+                        execution_id=action["id"],
                     )
                 print(
                     f"  pressed twice with id {action['id']!r} -> {str(pressed)[:200]}"

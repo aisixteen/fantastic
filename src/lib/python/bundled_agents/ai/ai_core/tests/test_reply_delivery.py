@@ -209,9 +209,9 @@ async def test_a_failed_outcome_is_rendered_not_hidden():
     assert blocks[1].startswith("[reply to kernel:pid · kernel reflect · 2 of 2")
 
 
-async def test_the_models_exec_id_rides_the_item_as_its_id():
-    """`<exec_id>` is the call-level execution NAME; core hands it to the kernel as
-    the batch item's `id` (a bare `<id>` would collide with payload ids)."""
+async def test_the_models_id_rides_the_item_as_its_id():
+    """`<id>` is the call-level execution NAME; core hands it to the kernel as
+    the batch item's `id`."""
 
     class _K(_Kernel):
         def __init__(self):
@@ -229,7 +229,7 @@ async def test_the_models_exec_id_rides_the_item_as_its_id():
             "target_id": "vault",
             "payload": {"type": "withdraw"},
             "reply_to": "self",
-            "exec_id": "job-alpha",
+            "id": "job-alpha",
             "retries": 2,
         },
     )

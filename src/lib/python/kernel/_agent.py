@@ -784,47 +784,47 @@ class Agent:
         # The item's OWN fields are validated before anything is resolved, gated
         # or spawned: a bad `id`/`retries` caught only after an unnamed dispatch
         # had started would orphan a running task.
-        exec_id = item.get("id")
+        execution_id = item.get("id")
         join_id: int | None = None  # an int item id: JOIN by message id
         name: str | None = None  # a string item id: the caller's NAME
-        if exec_id is not None:
+        if execution_id is not None:
             # A caller-NAMED execution — "ensure it exists", the same semantics a
             # supplied `create_agent` id has. The name is the caller's; the
             # execution's id is the kernel's counter. An int names an execution
             # by its id and can only join it — the kernel is the only allocator.
-            if isinstance(exec_id, bool) or not isinstance(exec_id, (str, int)):
+            if isinstance(execution_id, bool) or not isinstance(execution_id, (str, int)):
                 return outcome(
                     None,
                     FAILED,
                     refusal(
                         BAD_ARG,
                         f"send: id must be a name (non-empty string) or a message "
-                        f"id (int), got {exec_id!r}",
+                        f"id (int), got {execution_id!r}",
                         arg="id",
                     ),
                 )
-            if isinstance(exec_id, int):
-                if exec_id not in self.ctx.executions:
+            if isinstance(execution_id, int):
+                if execution_id not in self.ctx.executions:
                     return outcome(
                         None,
                         FAILED,
                         refusal(
                             BAD_ARG,
-                            f"send: id {exec_id} names no known execution — "
+                            f"send: id {execution_id} names no known execution — "
                             "ids are minted by the kernel and can be joined, "
                             "never created",
                             arg="id",
                         ),
                     )
-                join_id = exec_id
+                join_id = execution_id
             else:
-                if not exec_id:
+                if not execution_id:
                     return outcome(
                         None,
                         FAILED,
                         refusal(BAD_ARG, "send: id must be a non-empty name", arg="id"),
                     )
-                name = exec_id
+                name = execution_id
                 join_id = self.ctx.resolve_name(name)
         bad_retries = self._check_retries(item)
         if bad_retries is not None:
@@ -892,7 +892,7 @@ class Agent:
         # telemetry, no table row), applied AFTER the gate so it is authorized
         # like any other reflect. Async (reflect flags nest dispatches), so it
         # rides the settle phase as a pid-less task.
-        if exec_id is not None:
+        if execution_id is not None:
             entry = self.ctx.executions.get(join_id) if join_id is not None else None
             if entry is not None:
                 # The id is BOUND to its first execution's target — returning an
@@ -903,7 +903,7 @@ class Agent:
                         FAILED,
                         refusal(
                             BAD_ARG,
-                            f"send: id {exec_id!r} already names an execution on "
+                            f"send: id {execution_id!r} already names an execution on "
                             f"{entry['target']!r}, not {target.id!r} — an id is "
                             "bound to its first execution; a retry aimed "
                             "elsewhere needs a new id",
@@ -950,9 +950,9 @@ class Agent:
                 return None
             # NAMED and new: the message id is minted like any other; the name
             # is a field on it.
-            exec_id = self.ctx.mint_id()
+            execution_id = self.ctx.mint_id()
             fut, bad = self._ledger_open(
-                exec_id, target, payload, timeout, item, name=name, marks=marks
+                execution_id, target, payload, timeout, item, name=name, marks=marks
             )
             if bad is not None:
                 return bad
@@ -968,7 +968,7 @@ class Agent:
                 dispatched.append(
                     _Dispatched(
                         index,
-                        exec_id,
+                        execution_id,
                         task,
                         timeout,
                         target,
@@ -981,7 +981,7 @@ class Agent:
                 return None
             sink: list = []
             pid, task = self._spawn_dispatch(
-                target, payload, task_id=exec_id, marks=marks, sink=sink
+                target, payload, task_id=execution_id, marks=marks, sink=sink
             )
             dispatched.append(
                 _Dispatched(
@@ -1095,7 +1095,7 @@ class Agent:
         )
 
     def _ledger_open(
-        self, exec_id: int, target, payload, timeout, item, *, name, marks=()
+        self, execution_id: int, target, payload, timeout, item, *, name, marks=()
     ):
         """Open one execution under a pre-minted id: the CALL ROW in the message
         store (what outlives the process) and the process side (`executions`).
@@ -1116,7 +1116,7 @@ class Agent:
         # thing that outlives the process, and `attempts` is updated on this dict
         # at every retry (the kernel owns the row in RAM).
         row = {
-            "id": exec_id,
+            "id": execution_id,
             "kind": "call",
             "verb": payload.get("type"),
             "parent": _current_task.get(),
@@ -1136,7 +1136,7 @@ class Agent:
         # re-issues against it, dead-letter is reading it. `attempts` counts real
         # runs; `caller` scopes who may see the row through the `ledger` verb.
         self.ctx.ledger_put(
-            exec_id,
+            execution_id,
             {
                 "target": target.id,
                 "fut": fut,

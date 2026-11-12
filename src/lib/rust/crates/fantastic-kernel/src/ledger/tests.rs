@@ -122,7 +122,7 @@ fn an_id_is_bound_to_its_first_target() {
     // Returning the other execution's outcome would be silently wrong.
     //
     // PYTHON'S PROSE, verbatim: the CALLER's raw id
-    // (`py_repr`-quoted for a string name), never the minted exec_id; both
+    // (`py_repr`-quoted for a string name), never the minted execution_id; both
     // target names via `py_repr`; no `bound_to` key.
     let l = Ledger::default();
     let _ = open(&l, "job-3", "desk", 0).1;
@@ -145,9 +145,9 @@ fn an_id_is_bound_to_its_first_target() {
 #[test]
 fn an_int_id_rebind_renders_bare_digits() {
     // The other half: an INT caller id renders as bare
-    // digits (python `{exec_id!r}` on an int has no quotes), not as a
+    // digits (python `{execution_id!r}` on an int has no quotes), not as a
     // string. Exercises the `caller_id` parameter directly, since the int
-    // JOIN path itself is wired at `send::Kernel::resolve_exec_id`.
+    // JOIN path itself is wired at `send::Kernel::resolve_execution_id`.
     let l = Ledger::default();
     let _ = l.open(
         301,

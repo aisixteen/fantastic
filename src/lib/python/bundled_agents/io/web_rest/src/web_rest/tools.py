@@ -237,9 +237,9 @@ def _make_post_endpoint(self_id: str, kernel):
         # returns the recorded outcome rather than running the verb twice.
         # Without it an HTTP caller cannot express a safe repeat at all.
         item = {"target": target_id, "payload": payload}
-        exec_id = request.headers.get("X-Fantastic-Execution-Id")
-        if exec_id:
-            item["id"] = exec_id
+        execution_id = request.headers.get("X-Fantastic-Execution-Id")
+        if execution_id:
+            item["id"] = execution_id
         # `secret` marks (comma-separated paths into the body) ride their own
         # header, like the id: the body's values at them are shown as `[secret]`.
         secret = request.headers.get("X-Fantastic-Secret")

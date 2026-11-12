@@ -3,7 +3,7 @@
 //! `send([{target, payload, id: "job-1"}])` registers the dispatch under
 //! `job-1`, never a freshly minted pid the caller has never seen — so `ps` shows
 //! the caller's id and `cancel task_id="job-1"` stops the execution it just
-//! named. Python registers named work under `exec_id`.
+//! named. Python registers named work under `execution_id`.
 
 use async_trait::async_trait;
 use fantastic_kernel::{Agent, AgentId, BundleRegistry, Handler, Item, Kernel, Reply, Status};

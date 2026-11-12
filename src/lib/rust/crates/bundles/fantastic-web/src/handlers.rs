@@ -310,7 +310,7 @@ async fn rest_post(
     let target = AgentId::from(target_id.as_str());
     let header_str =
         |name: &str| -> Option<String> { headers.get(name).map(|v| routes::latin1(v.as_bytes())) };
-    let exec_id = header_str(EXEC_ID_HEADER).filter(|v| !v.is_empty());
+    let execution_id = header_str(EXEC_ID_HEADER).filter(|v| !v.is_empty());
     let secret: Option<Vec<String>> = header_str(SECRET_HEADER)
         .filter(|v| !v.is_empty())
         .map(|v| v.split(',').map(|m| m.trim().to_string()).collect());
@@ -387,7 +387,7 @@ async fn rest_post(
         let out = fantastic_io_bridge::inbound::hand_in(
             &state.kernel,
             &owner,
-            inbound_call(&target, payload, exec_id, secret),
+            inbound_call(&target, payload, execution_id, secret),
             Some(body),
         )
         .await;
@@ -431,7 +431,7 @@ async fn rest_post(
     let out = fantastic_io_bridge::inbound::hand_in(
         &state.kernel,
         &owner,
-        inbound_call(&target, payload, exec_id, secret),
+        inbound_call(&target, payload, execution_id, secret),
         None,
     )
     .await;
@@ -443,13 +443,13 @@ async fn rest_post(
 fn inbound_call(
     target: &AgentId,
     payload: Value,
-    exec_id: Option<String>,
+    execution_id: Option<String>,
     secret: Option<Vec<String>>,
 ) -> Value {
     let mut item = serde_json::Map::new();
     item.insert("target".into(), json!(target.as_str()));
     item.insert("payload".into(), payload);
-    if let Some(id) = exec_id {
+    if let Some(id) = execution_id {
         item.insert("id".into(), json!(id));
     }
     if let Some(m) = secret {
