@@ -423,6 +423,10 @@ pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<U
         boots.push(WEB_ID); // its boot mounts every child, then listens
     }
     for id in boots {
+        // only an agent whose bundle declares `boot` is sent it
+        if !h.kernel.advertises(&fantastic_kernel::AgentId::from(id), "boot").await {
+            continue;
+        }
         let r = h.operator(id, json!({"type":"boot"})).await;
         if let Some(e) = err_of(&r) {
             return Err(format!("`{id}` did not boot: {e}"));

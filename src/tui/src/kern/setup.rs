@@ -57,15 +57,18 @@ fn takes_text(prop: &Value) -> bool {
 }
 
 /// The enum set a property schema declares: its own `enum`, or the `enum` of each
-/// documented variant under `oneOf`.
+/// variant under `oneOf`/`anyOf` (a nullable enum is an `anyOf` with `null`).
 fn enum_set(prop: &Value) -> Vec<String> {
-    let names = |e: &Value| -> Vec<String> {
-        e["enum"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default()
-    };
-    match prop["oneOf"].as_array() {
-        Some(alts) => alts.iter().flat_map(names).collect(),
-        None => names(prop),
+    let mut out: Vec<String> = prop["enum"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .unwrap_or_default();
+    for k in ["oneOf", "anyOf"] {
+        for alt in prop[k].as_array().into_iter().flatten() {
+            out.extend(enum_set(alt));
+        }
     }
+    out
 }
 
 /// A linked AI backend and what its record takes.
@@ -262,6 +265,17 @@ pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_nullable_enum_field_takes_one_of_its_names_as_text() {
+        let schema = serde_json::json!({"type": "object", "properties": {
+            "effort": {"anyOf": [{"type": "string", "enum": ["low", "high"]}, {"type": "null"}]},
+        }});
+        let b = super::Backend::from_schema("x.tools", &schema);
+        let f = b.fields.iter().find(|f| f.name == "effort").expect("effort");
+        assert_eq!(f.one_of, vec!["low".to_string(), "high".to_string()]);
+        assert_eq!(super::literal(f, "low").unwrap(), Some(serde_json::json!("low")));
+    }
+
     #[test]
     fn a_constrained_string_field_takes_its_text_as_written() {
         let schema = serde_json::json!({"type": "object", "properties": {
