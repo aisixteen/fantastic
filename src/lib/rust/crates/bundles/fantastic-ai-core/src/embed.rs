@@ -15,12 +15,13 @@
 //! the canvas's `place {backend_id}` makes: the agent exists, it has a `view`
 //! record, and the page may call what the panel calls (`view.calls` plus `watch`,
 //! all granted to `user` in the agent's `callable_by`); it names what is missing as
-//! `grants_missing`. The Rust side cannot measure pixels: it answers with the
+//! `not_allowed`. The Rust side cannot measure pixels: it answers with the
 //! card's box (`width:"100%"`, `max_height`), and the chat page, which draws the
 //! panel, measures it and tells the model when it overflowed.
 
 use crate::constants::CHAT_CARD_MAX_HEIGHT;
 use crate::memory::{refresh_head, save_history, MemResult};
+use fantastic_kernel::refusal::{refusal_hint, with, BAD_ARG, NOT_ALLOWED, NOT_FOUND};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -74,8 +75,11 @@ pub async fn card_rows(self_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<Vec
         .collect())
 }
 
-fn refusal(msg: String, reason: &str, hint: &str) -> Value {
-    json!({"error": msg, "reason": reason, "arg": "id", "hint": hint})
+/// The kernel's refusal for the `id` argument, with what to do instead.
+fn refused(code: &str, msg: String, hint: &str) -> Value {
+    let mut r = refusal_hint(code, msg, hint);
+    with(&mut r, "arg", json!("id"));
+    r
 }
 
 const MAKE_HINT: &str = "create_agent a host agent with view {kind:html, bytes_file:<panel file>, \
@@ -92,11 +96,11 @@ fn allows(grant: &Value, verb: &str) -> bool {
 
 /// `embed` verb: store a card row for host agent `id`. See the module doc.
 pub async fn embed(agent_id: &AgentId, id: &str, kernel: &Arc<Kernel>) -> MemResult<Value> {
-    let id = id.trim().to_string();
+    let id = id.to_string();
     if id == agent_id.0 {
-        return Ok(refusal(
+        return Ok(refused(
+            BAD_ARG,
             "embed: a chat cannot embed itself".to_string(),
-            "bad_arg",
             "embed another agent's id",
         ));
     }
@@ -106,16 +110,16 @@ pub async fn embed(agent_id: &AgentId, id: &str, kernel: &Arc<Kernel>) -> MemRes
         .map(|e| Arc::clone(&e))
         .map(|a| a.record())
     else {
-        return Ok(refusal(
+        return Ok(refused(
+            NOT_FOUND,
             format!("embed: no agent {id:?}"),
-            "not_found",
             "reflect the kernel for the agents there",
         ));
     };
     let Some(view) = rec.meta.get("view").filter(|v| v.is_object()) else {
-        return Ok(refusal(
+        return Ok(refused(
+            BAD_ARG,
             format!("embed: {id} has no `view` record — a default chat/terminal/stub view is not an embeddable panel"),
-            "no_view",
             MAKE_HINT,
         ));
     };
@@ -141,9 +145,9 @@ pub async fn embed(agent_id: &AgentId, id: &str, kernel: &Arc<Kernel>) -> MemRes
     let missing: Vec<&String> = calls.iter().filter(|c| !allows(&user, c)).collect();
     if !missing.is_empty() {
         let want: Vec<&String> = calls.iter().collect();
-        let mut r = refusal(
+        let mut r = refused(
+            NOT_ALLOWED,
             format!("embed: {id}'s callable_by does not let the user call {missing:?}"),
-            "grants_missing",
             &format!(
                 "the panel's calls will be refused. Grant them: update_agent {{id: {id}, callable_by: {{\"$self\":\"*\", \"user\": {}}}}}",
                 json!(want)

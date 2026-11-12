@@ -44,11 +44,11 @@ pub fn thinking_fields(text: &str) -> serde_json::Map<String, serde_json::Value>
         let a = i + rel + THINK_OPEN.len();
         match text[a..].find(THINK_CLOSE) {
             Some(relb) => {
-                spans.push(fantastic_bundle::py_strip(&text[a..a + relb]));
+                spans.push(crate::helpers::shownip(&text[a..a + relb]));
                 i = a + relb + THINK_CLOSE.len();
             }
             None => {
-                spans.push(fantastic_bundle::py_strip(&text[a..]));
+                spans.push(crate::helpers::shownip(&text[a..]));
                 break;
             }
         }
@@ -185,7 +185,6 @@ pub fn note_openai_usage(chunk: &serde_json::Value, report: &crate::provider::Re
     if let Some(n) = chunk
         .get("usage")
         .and_then(|u| u.get("prompt_tokens"))
-        .filter(|v| fantastic_bundle::py_truthy(v))
         .and_then(serde_json::Value::as_i64)
     {
         r.prompt_tokens = Some(n);
@@ -193,7 +192,6 @@ pub fn note_openai_usage(chunk: &serde_json::Value, report: &crate::provider::Re
     if let Some(n) = chunk
         .get("usage")
         .and_then(|u| u.get("completion_tokens"))
-        .filter(|v| fantastic_bundle::py_truthy(v))
         .and_then(serde_json::Value::as_i64)
     {
         r.completion_tokens = Some(n);
@@ -203,12 +201,12 @@ pub fn note_openai_usage(chunk: &serde_json::Value, report: &crate::provider::Re
         .and_then(serde_json::Value::as_array)
         .and_then(|c| c.first())
         .and_then(|c| c.get("finish_reason"))
-        .filter(|v| fantastic_bundle::py_truthy(v));
+        .and_then(serde_json::Value::as_str);
     if let Some(fr) = fr {
-        r.stop_reason = Some(if fr.as_str() == Some("length") {
+        r.stop_reason = Some(if fr == "length" {
             "max_tokens".to_string()
         } else {
-            fantastic_bundle::py_str(fr)
+            fr.to_string()
         });
     }
 }

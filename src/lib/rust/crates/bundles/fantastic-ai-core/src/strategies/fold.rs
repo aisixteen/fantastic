@@ -29,7 +29,7 @@ use crate::folds::{
 };
 use crate::memory::{save_history, MemoryStoreError};
 use crate::provider::Provider;
-use fantastic_bundle::{py_split_whitespace, py_splitlines, py_str, py_strip, py_truthy};
+use fantastic_bundle::{py_split_whitespace, py_splitlines, py_strip};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
@@ -124,7 +124,7 @@ fn ident_re() -> &'static regex::Regex {
 /// Python `mechanical_index`.
 #[must_use]
 pub fn mechanical_index(rows: &[Value], chain: &[usize]) -> String {
-    let content = |r: &Value| r.get("content").map_or_else(String::new, py_str);
+    let content = |r: &Value| r.get("content").map_or_else(String::new, crate::helpers::shown);
     let text = chain
         .iter()
         .map(|&i| content(&rows[i]))
@@ -151,7 +151,7 @@ pub fn mechanical_index(rows: &[Value], chain: &[usize]) -> String {
         let c = content(r);
         let c = py_strip(&c);
         let user = r.get("role").and_then(Value::as_str) == Some("user");
-        let kinded = r.get("kind").is_some_and(py_truthy);
+        let kinded = r.get("kind").is_some_and(|k| !k.is_null());
         if !user || kinded || c.is_empty() || RUNTIME.iter().any(|p| c.starts_with(p)) {
             continue;
         }

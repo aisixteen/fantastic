@@ -9,9 +9,6 @@
 //! so every existing path keeps working. Nothing here may depend on another
 //! ai-core module.
 
-use fantastic_bundle::py_float;
-use serde_json::json;
-
 // ─── the context window (python context.py) ─────────────────────────────────
 
 /// ~chars per token for the estimate.
@@ -34,12 +31,11 @@ pub const DEFAULT_CONTEXT_WINDOW: i64 = 131_072;
 pub const DEFAULT_OUTPUT_RESERVE: i64 = 1024;
 /// Never project to a budget below this.
 pub const BUDGET_FLOOR: i64 = 256;
-/// How many of the most recent turns a compaction keeps verbatim when the
-/// record names no `recent_n` (clamped to [`RECENT_N_RANGE`] either way).
-/// Python `RECENT_N`.
+/// How many of the most recent turns a compaction keeps verbatim: the declared
+/// default of the record's `recent_n`. Python `RECENT_N`.
 pub const RECENT_N: i64 = 6;
-/// The clamp on `recent_n`. Python `RECENT_N_RANGE`.
-pub const RECENT_N_RANGE: (i64, i64) = (1, 50);
+/// The declared default of the record's `transport_retries`: off.
+pub const TRANSPORT_RETRIES: i64 = 0;
 
 // ─── the turn loop (python core.py) ─────────────────────────────────────────
 
@@ -100,7 +96,7 @@ pub fn send_timeout_secs() -> f64 {
     let Ok(raw) = std::env::var("FANTASTIC_AI_SEND_TIMEOUT") else {
         return SEND_TIMEOUT_SECS;
     };
-    match py_float(&json!(raw)) {
+    match raw.trim().parse::<f64>() {
         Ok(v) => v,
         Err(e) => panic!("FANTASTIC_AI_SEND_TIMEOUT is not a number: {e}"),
     }

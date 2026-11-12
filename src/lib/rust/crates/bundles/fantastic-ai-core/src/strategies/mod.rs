@@ -15,7 +15,7 @@ pub mod strip;
 use crate::constants::NOTICE_ENVELOPE_RESERVE;
 use crate::context::estimate_one;
 use crate::provider::{Provider, ProviderEvent};
-use fantastic_bundle::{py_str, py_strip};
+use fantastic_bundle::py_strip;
 use fantastic_kernel::{AgentId, Kernel};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -120,10 +120,10 @@ pub async fn summarize(
         .iter()
         .map(|m| {
             let role = match m.get("role") {
-                Some(r) => py_str(r),
+                Some(r) => crate::helpers::shown(r),
                 None => "?".to_string(),
             };
-            let content = m.get("content").map_or_else(String::new, py_str);
+            let content = m.get("content").map_or_else(String::new, crate::helpers::shown);
             format!("{role}: {content}")
         })
         .collect::<Vec<_>>()

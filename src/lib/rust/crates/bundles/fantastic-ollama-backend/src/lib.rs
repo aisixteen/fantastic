@@ -32,7 +32,7 @@ use fantastic_ai_core::provider::{
 use fantastic_ai_core::declared::provider;
 use fantastic_ai_core::record::{Credentials, ProviderRecord};
 use fantastic_ai_core::think::ThinkWrap;
-use fantastic_ai_core::{agent_loop::BackendConfig, caching, helpers, verbs};
+use fantastic_ai_core::{agent_loop::BackendConfig, helpers, verbs};
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use schemars::JsonSchema;
 use fantastic_kernel::{AgentId, Kernel, TaskId};
@@ -55,10 +55,6 @@ pub const DEFAULT_CLIENT_ID: &str = fantastic_ai_core::DEFAULT_CLIENT_ID;
 const BACKEND: &str = "ollama_backend";
 
 pub mod server;
-
-/// What `reflect` says this agent IS — python `ollama_backend/tools.py`'s
-/// `sentence`, verbatim.
-pub const SENTENCE: &str = "Ollama-backed LLM agent (raw prompt-and-parse tool-calling).";
 
 /// Default sampling temperature sent to ollama (overridable via the record's
 /// `temperature` field). ollama's own default is 0.8 (creative) — wrong for an
@@ -327,28 +323,17 @@ impl NdjsonState {
 /// the output stopped at its bound). Python `OllamaProvider.chat`.
 fn note_usage(chunk: &Value, report: &ReportCell) {
     let mut r = report.lock().expect("report poisoned");
-    if let Some(n) = chunk
-        .get("prompt_eval_count")
-        .filter(|v| fantastic_bundle::py_truthy(v))
-        .and_then(Value::as_i64)
-    {
+    if let Some(n) = chunk.get("prompt_eval_count").and_then(Value::as_i64) {
         r.prompt_tokens = Some(n);
     }
-    if let Some(n) = chunk
-        .get("eval_count")
-        .filter(|v| fantastic_bundle::py_truthy(v))
-        .and_then(Value::as_i64)
-    {
+    if let Some(n) = chunk.get("eval_count").and_then(Value::as_i64) {
         r.completion_tokens = Some(n);
     }
-    if let Some(dr) = chunk
-        .get("done_reason")
-        .filter(|v| fantastic_bundle::py_truthy(v))
-    {
-        r.stop_reason = Some(if dr.as_str() == Some("length") {
+    if let Some(dr) = chunk.get("done_reason").and_then(Value::as_str) {
+        r.stop_reason = Some(if dr == "length" {
             "max_tokens".to_string()
         } else {
-            fantastic_bundle::py_str(dr)
+            dr.to_string()
         });
     }
 }
@@ -410,15 +395,21 @@ pub struct OllamaRecord {
     /// The model name; left out, read from the server before a turn and written here (the one model `GET /api/tags` lists).
     pub model: Option<String>,
     /// The context window ollama loads the model with.
+    #[schemars(range(min = 1))]
     pub num_ctx: Option<i64>,
     /// Sampling temperature.
+    #[schemars(default = "default_temperature")]
     pub temperature: Option<f64>,
     /// A turn's output budget (tokens).
+    #[schemars(range(min = 1), default = "default_num_predict")]
     pub num_predict: Option<i64>,
     /// Turn the model's thinking channel on or off.
     pub think: Option<bool>,
     /// The read clock on the answer stream: seconds with no byte from the server (headers included) before the turn is judged stalled and ends with an error row.
+    #[schemars(schema_with = "fantastic_ai_core::record::stream_idle_seconds")]
     pub stream_idle_seconds: Option<f64>,
+    /// How the conversation is kept in the model's view.
+    pub caching: Option<fantastic_ai_core::record::UncachedMode>,
     /// A door's key, when the server sits behind one — absent = no header.
     pub credentials: Option<Credentials>,
     /// The memory store agent that keeps this agent's settings (e.g. a ram_store).
@@ -426,6 +417,14 @@ pub struct OllamaRecord {
     /// The fields every provider takes.
     #[serde(flatten)]
     pub provider: ProviderRecord,
+}
+
+fn default_temperature() -> Option<f64> {
+    Some(DEFAULT_TEMPERATURE)
+}
+
+fn default_num_predict() -> Option<i64> {
+    Some(DEFAULT_TURN_TOKENS)
 }
 
 fantastic_kernel::record!(OllamaRecord);
@@ -455,20 +454,6 @@ impl Handler for OllamaBackendBundle {
 
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         &RECORD
-    }
-
-    /// Refuse, AT THE WRITE, what a type cannot say: a stall clock out of range, a
-    /// blank text, a caching mode this backend cannot do.
-    fn validate_meta(
-        &self,
-        meta: &Map<String, Value>,
-        record: &Map<String, Value>,
-    ) -> Option<String> {
-        if let Err(e) = stream_idle_of(meta) {
-            return Some(e.message);
-        }
-        fantastic_ai_core::record::validate_meta(meta)
-            .or_else(|| caching::refusal(meta, record, "ollama_backend", CFG.provider_cache))
     }
 
     async fn handle(
@@ -531,26 +516,15 @@ fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<Strin
         (Ok(e), Ok(m)) => (e, m),
         (Err(e), _) | (_, Err(e)) => return Arc::new(Unconfigured(e)),
     };
-    let stream_idle = match stream_idle_of(&meta) {
-        Ok(idle) => idle,
-        Err(e) => return Arc::new(Unconfigured(e)),
-    };
+    let stream_idle = stream_idle_of(&meta);
     Arc::new(OllamaProvider {
         endpoint,
         model,
-        temperature: meta
-            .get("temperature")
-            .and_then(Value::as_f64)
-            .unwrap_or(DEFAULT_TEMPERATURE),
+        temperature: temperature_of(&meta),
         num_ctx: meta.get("num_ctx").and_then(Value::as_u64),
         // a record that names none is bounded (#495): ollama's own default is no
         // cap at all
-        num_predict: Some(
-            meta.get("num_predict")
-                .and_then(Value::as_u64)
-                .filter(|n| *n > 0)
-                .unwrap_or(u64::try_from(DEFAULT_TURN_TOKENS).unwrap_or(u64::MAX)),
-        ),
+        num_predict: Some(num_predict_of(&meta)),
         think: meta.get("think").and_then(Value::as_bool),
         key: Arc::new(key_reader(agent_id, kernel, BACKEND, false)),
         report: ReportCell::default(),
@@ -560,23 +534,32 @@ fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<Strin
 
 /// `reflect` — python `_make_reflect` + `ollama_backend/tools.py`'s
 /// `_reflect_extra`: the shared base body, then the sampling knobs.
-fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleError> {
-    let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, CFG.model_window);
+fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
+    let mut out = verbs::reflect_base(agent_id, kernel, MAN, CFG.model_window);
     let meta = helpers::agent_meta(agent_id, kernel);
     // the record's values are typed by its declaration: what is named is shown as it is
-    out.insert(
-        "temperature".to_string(),
-        meta.get("temperature")
-            .and_then(Value::as_f64)
-            .map_or_else(|| json!(DEFAULT_TEMPERATURE), |t| json!(t)),
-    );
+    out.insert("temperature".to_string(), json!(temperature_of(&meta)));
     for key in ["num_ctx", "num_predict", "think"] {
         out.insert(
             key.to_string(),
             meta.get(key).cloned().unwrap_or(Value::Null),
         );
     }
-    Ok(Value::Object(out))
+    Value::Object(out)
+}
+
+/// The sampling temperature: the record's, else the declared default.
+fn temperature_of(meta: &Map<String, Value>) -> f64 {
+    meta.get("temperature")
+        .and_then(Value::as_f64)
+        .unwrap_or(DEFAULT_TEMPERATURE)
+}
+
+/// A turn's output bound: the record's `num_predict`, else the declared default.
+fn num_predict_of(meta: &Map<String, Value>) -> u64 {
+    meta.get("num_predict")
+        .and_then(Value::as_u64)
+        .unwrap_or(u64::try_from(DEFAULT_TURN_TOKENS).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]

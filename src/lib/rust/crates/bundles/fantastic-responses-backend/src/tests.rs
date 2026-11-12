@@ -484,7 +484,7 @@ async fn reflect_sentence_is_python_verbatim() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["sentence"], SENTENCE);
+    assert_eq!(r["sentence"], MAN);
     assert_eq!(r["model"], "test-model");
     assert_eq!(r["endpoint"], "http://127.0.0.1:1/v1/responses");
 }
@@ -882,64 +882,42 @@ fn stream_idle_seconds_is_validated_at_the_write() {
         m.insert("stream_idle_seconds".to_string(), v);
         m
     };
+    let at_the_write = |v: Value| {
+        fantastic_kernel::verbs::check_record(
+            "update_agent",
+            "responses_backend",
+            &meta(v),
+            &fantastic_kernel::declared::record::RECORD,
+            &RECORD,
+        )
+    };
     for bad in [json!(0), json!(-1), json!("soon"), json!(true)] {
-        let msg = ResponsesBundle
-            .validate_meta(&meta(bad.clone()), &Map::new())
-            .unwrap_or_else(|| panic!("{bad} is refused"));
-        assert!(
-            msg.contains("stream_idle_seconds must be a positive number"),
-            "{msg}"
-        );
+        let refused = at_the_write(bad.clone()).expect_err("refused");
+        assert_eq!(refused["arg"], json!("stream_idle_seconds"), "{bad}: {refused}");
     }
-    let ok = ResponsesBundle
-        .validate_meta(&meta(json!(2.5)), &Map::new())
-        .unwrap_or_default();
-    assert!(!ok.contains("stream_idle_seconds"), "{ok}");
+    assert!(at_the_write(json!(2.5)).is_ok());
 }
 
 #[test]
 fn caching_none_and_cleanup_are_accepted_and_provider_cache_is_refused_here() {
-    // responses declares no provider caching: the mode is refused at the write, naming
-    // the backend; the two modes that send no marker are accepted.
-    let rec = json!({
-        "endpoint": "https://api.test/v1/responses", "model": "gpt-x",
-        "credentials": {"store": "credential_store", "ref": "openai"},
-        "memory_store_id": "memory"
-    });
-    let rec = rec.as_object().unwrap();
-    for mode in ["none", "cleanup"] {
+    // responses declares no provider caching: its record's `caching` has no such value,
+    // so the engine refuses it by field name; the two modes that send no marker are
+    // accepted.
+    let at_the_write = |mode: &str| {
         let meta = json!({"caching": mode});
-        assert_eq!(
-            ResponsesBundle.validate_meta(meta.as_object().unwrap(), rec),
-            None,
-            "{mode}"
-        );
+        fantastic_kernel::verbs::check_record(
+            "update_agent",
+            "responses_backend",
+            meta.as_object().unwrap(),
+            &fantastic_kernel::declared::record::RECORD,
+            &RECORD,
+        )
+    };
+    for mode in ["none", "cleanup"] {
+        assert!(at_the_write(mode).is_ok(), "{mode}");
     }
-    let meta = json!({"caching": "provider_cache"});
-    assert_eq!(
-        ResponsesBundle
-            .validate_meta(meta.as_object().unwrap(), rec)
-            .as_deref(),
-        Some("responses_backend cannot do provider caching: caching=provider_cache is refused — use \
-             none or cleanup")
-    );
-    // a record already in provider_cache is refused on any write to it
-    let stored = json!({
-        "endpoint": "https://api.test/v1/responses", "model": "gpt-x",
-        "caching": "provider_cache"
-    });
-    assert!(ResponsesBundle
-        .validate_meta(&Map::new(), stored.as_object().unwrap())
-        .is_some());
-    // an unknown mode is the record declaration's refusal, by field name
-    let meta = json!({"caching": "always"});
-    let refused = fantastic_kernel::verbs::check_record(
-        "update_agent",
-        "responses_backend",
-        meta.as_object().unwrap(),
-        &fantastic_kernel::declared::record::RECORD,
-        &RECORD,
-    )
-    .expect_err("an unknown mode");
-    assert_eq!(refused["arg"], json!("caching"), "{refused}");
+    for mode in ["provider_cache", "always"] {
+        let refused = at_the_write(mode).expect_err("refused");
+        assert_eq!(refused["arg"], json!("caching"), "{refused}");
+    }
 }

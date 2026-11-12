@@ -30,7 +30,6 @@ use crate::tool_parse::grammar::{
     OpenTag, ROUTING,
 };
 use crate::tool_parse::{defang, CLOSE, TOOLS};
-use fantastic_bundle::py_str;
 use regex::Regex;
 use serde_json::{Map, Value};
 use std::sync::OnceLock;
@@ -142,8 +141,8 @@ fn rm_rf(line: &str) -> bool {
 
 fn flat(v: &Value) -> String {
     match v {
-        Value::Array(xs) => xs.iter().map(|x| py_str(x)).collect::<Vec<_>>().join(" "),
-        other => py_str(other),
+        Value::Array(xs) => xs.iter().map(|x| crate::helpers::shown(x)).collect::<Vec<_>>().join(" "),
+        other => crate::helpers::shown(other),
     }
 }
 
@@ -461,9 +460,9 @@ fn expected(name: &str, args: &[(String, Value)]) -> String {
         let inner: String = match v {
             Value::Array(xs) => xs
                 .iter()
-                .map(|x| format!("<item>{}</item>", py_str(x)))
+                .map(|x| format!("<item>{}</item>", crate::helpers::shown(x)))
                 .collect(),
-            other => py_str(other),
+            other => crate::helpers::shown(other),
         };
         format!("<{k}>{inner}</{k}>")
     };

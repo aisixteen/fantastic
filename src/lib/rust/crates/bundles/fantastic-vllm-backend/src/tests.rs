@@ -1027,7 +1027,7 @@ async fn reflect_shows_the_effective_posture_and_the_shared_table() {
         .await
         .remove(0)
         .result;
-    assert_eq!(out["sentence"], json!(SENTENCE));
+    assert_eq!(out["sentence"], json!(MAN));
     // WHERE its key is read: absent here, shown as null (a pointer, never a secret).
     assert_eq!(out.get("credentials"), Some(&Value::Null), "{out}");
     assert_eq!(out["sampling"]["temperature"], json!(0.2));
@@ -1318,9 +1318,8 @@ fn stream_idle_seconds_is_validated_and_read_clock_defaults_to_read_timeout() {
             .unwrap_or_else(|| panic!("{bad} is refused"));
         assert!(msg.contains("stream_idle_seconds"), "{msg}");
     }
-    assert_eq!(read_clock_of(&Map::new(), 900.0).ok(), Some(900.0));
-    assert_eq!(read_clock_of(&meta(json!(2.5)), 900.0).ok(), Some(2.5));
-    assert!(read_clock_of(&meta(json!(0)), 900.0).is_err());
+    assert_eq!(read_clock_of(&Map::new(), 900.0), 900.0);
+    assert_eq!(read_clock_of(&meta(json!(2.5)), 900.0), 2.5);
 }
 
 // ─── usage (#192) ───────────────────────────────────────────────────────────

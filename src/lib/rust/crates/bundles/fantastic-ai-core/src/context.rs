@@ -4,9 +4,7 @@
 //! WRONG tokenizer for gemma/nemotron). Plus window/budget resolution off
 //! the agent record meta. Mirrors the Python `ai_core/context.py`.
 
-use crate::constants::{
-    BUDGET_FLOOR, CHARS_PER_TOKEN, DEFAULT_OUTPUT_RESERVE, RECENT_N, RECENT_N_RANGE,
-};
+use crate::constants::{BUDGET_FLOOR, CHARS_PER_TOKEN, DEFAULT_OUTPUT_RESERVE, RECENT_N};
 use fantastic_bundle::py_json_dumps;
 use serde_json::{json, Map, Value};
 
@@ -39,13 +37,6 @@ pub fn estimate_tokens(messages: &[Value]) -> i64 {
     messages.iter().map(estimate_one).sum()
 }
 
-/// A positive integer the record names: the record's types are the engine's
-/// (`create_agent` / `update_agent` refuse a value that is not the declared type),
-/// so a field is an integer or it is not there.
-fn as_pos_int(v: Option<&Value>) -> Option<i64> {
-    v.and_then(Value::as_i64).filter(|&i| i > 0)
-}
-
 /// The model's usable window, by STATIC precedence (no fallback-chain):
 /// `context_window` (the explicit per-agent override — works on any
 /// backend incl. vllm/responses which have no `num_ctx`) → `num_ctx`
@@ -57,19 +48,18 @@ fn as_pos_int(v: Option<&Value>) -> Option<i64> {
 /// `contextSize`). Named at every call — a backend's window is never assumed.
 pub fn resolve_context_window(meta: &Map<String, Value>, model_window: i64) -> i64 {
     for key in ["context_window", "num_ctx"] {
-        if let Some(v) = as_pos_int(meta.get(key)) {
+        if let Some(v) = meta.get(key).and_then(Value::as_i64) {
             return v;
         }
     }
     model_window
 }
 
-/// Output headroom reserved out of the window: the record's `output_reserve`, an
-/// integer ≥ 0, else 1024.
+/// Output headroom reserved out of the window: the record's `output_reserve` (its
+/// declared range and default are the record's, see [`crate::record::AiRecord`]).
 pub fn output_reserve(meta: &Map<String, Value>) -> i64 {
     meta.get("output_reserve")
         .and_then(Value::as_i64)
-        .filter(|&i| i >= 0)
         .unwrap_or(DEFAULT_OUTPUT_RESERVE)
 }
 
@@ -79,14 +69,11 @@ pub fn budget(meta: &Map<String, Value>, model_window: i64) -> i64 {
 }
 
 /// The agent's configured `recent_n` (verbatim recent turns kept by
-/// compact/truncate), an integer clamped to [1, 50]; 6 when the record names none.
+/// compact/truncate); its range and default are the record's declared ones.
 pub fn recent_n(meta: &Map<String, Value>) -> usize {
-    let n = meta
-        .get("recent_n")
+    meta.get("recent_n")
         .and_then(Value::as_i64)
-        .unwrap_or(RECENT_N);
-    let (lo, hi) = RECENT_N_RANGE;
-    n.clamp(lo, hi) as usize
+        .unwrap_or(RECENT_N) as usize
 }
 
 /// Tokens a reply may occupy INLINE in the model's next turn. Above this it is

@@ -13,7 +13,6 @@
 //! newline after an open tag, `render_reply` does; `render_reply` renders a
 //! top-level list as `<items>` and spans a multiline scalar across lines.
 
-use fantastic_bundle::py_str;
 use serde_json::{Map, Value};
 
 use super::grammar::{PAYLOAD_TAG, ROUTING, ROUTING_TAG};
@@ -135,6 +134,6 @@ fn flat_text(v: &Value) -> String {
     match v {
         Value::Null => String::new(),
         Value::Bool(b) => (if *b { "true" } else { "false" }).to_string(),
-        other => py_str(other),
+        other => crate::helpers::shown(other),
     }
 }

@@ -39,8 +39,8 @@ use fantastic_ai_core::record::{AiRecord, Credentials};
 use fantastic_ai_core::think::ThinkWrap;
 use fantastic_ai_core::USAGE_KEYS;
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, verbs};
-use fantastic_bundle::py_float;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
+use fantastic_kernel::refusal::{refusal_hint, with, MISSING_ARG};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use fantastic_kernel::{AgentId, Kernel, TaskId};
@@ -60,9 +60,6 @@ const NAME: &str = "anthropic_backend";
 
 /// The agent's sidecar of persisted counts, in its own dir beside `agent.yaml`.
 const USAGE_FILE: &str = "usage.json";
-
-/// What `reflect` says this agent IS — python `tools.py`'s `sentence`.
-pub const SENTENCE: &str = "Anthropic Messages-API LLM agent (raw prompt-and-parse tool-calling).";
 
 /// The API version every request names.
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -111,7 +108,7 @@ fn to_wire(messages: &[Value], marks: bool, images: &Images) -> (String, bool, V
         let content = match m.get("content") {
             Some(Value::String(s)) => s.clone(),
             Some(Value::Null) | None => String::new(),
-            Some(v) => fantastic_bundle::py_str(v),
+            Some(v) => fantastic_ai_core::helpers::shown(v),
         };
         let marked = marks && m.get(caching::CACHE_MARK).and_then(Value::as_bool) == Some(true);
         let blocks = if role == "system" {
@@ -1413,8 +1410,8 @@ impl SseState {
                 return Err(ProviderError::raised(format!(
                     "{NAME}: {} stream error: {}: {}",
                     self.endpoint,
-                    fantastic_bundle::py_str(err.get("type").unwrap_or(&Value::Null)),
-                    fantastic_bundle::py_str(err.get("message").unwrap_or(&Value::Null)),
+                    fantastic_ai_core::helpers::shown(err.get("type").unwrap_or(&Value::Null)),
+                    fantastic_ai_core::helpers::shown(err.get("message").unwrap_or(&Value::Null)),
                 )));
             }
             _ => {}
@@ -1527,12 +1524,13 @@ impl SseState {
 
 // ─── the record ─────────────────────────────────────────────────────────────
 
-fn positive_int(v: Option<&Value>) -> Option<i64> {
-    v.and_then(Value::as_i64).filter(|n| *n >= 1)
+/// A positive integer field of the record, as its declaration types it (`range(min = 1)`).
+fn int_of(v: Option<&Value>) -> Option<i64> {
+    v.and_then(Value::as_i64)
 }
 
 fn required_int(meta: &Map<String, Value>, key: &str) -> Result<i64, ProviderError> {
-    positive_int(meta.get(key)).ok_or_else(|| {
+    int_of(meta.get(key)).ok_or_else(|| {
         ProviderError::value_error(format!(
             "{NAME}: `{key}` is not on the agent record, a positive int, and was not read \
              from the API (update_agent <id> {key}=…)"
@@ -1564,7 +1562,7 @@ fn build_provider_with(
             key: Arc::new(key_reader(agent_id, kernel, NAME, false)),
             max_tokens: required_int(&meta, "max_tokens")?,
             temperature: meta.get("temperature").and_then(Value::as_f64),
-            thinking_budget: positive_int(meta.get("thinking_budget")),
+            thinking_budget: int_of(meta.get("thinking_budget")),
             effort: meta.get("effort").and_then(Value::as_str).map(String::from),
             thinking_display: meta
                 .get("thinking_display")
@@ -1575,8 +1573,8 @@ fn build_provider_with(
             usage_file: usage_file_of(agent_id, kernel),
             kernel: Arc::clone(kernel),
             report: ReportCell::default(),
-            stream_idle: stream_idle_of(&meta)?,
-            long_context_tokens: positive_int(meta.get("long_context_tokens")),
+            stream_idle: stream_idle_of(&meta),
+            long_context_tokens: int_of(meta.get("long_context_tokens")),
             usage_log: meta
                 .get("usage_log")
                 .and_then(Value::as_str)
@@ -1659,21 +1657,11 @@ fn usage_reset_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
 
 /// `reflect` — the shared base body, then what the next request will send, and the
 /// usage so far.
-fn reflect_reply(
-    agent_id: &AgentId,
-    kernel: &Kernel,
-    capabilities: Value,
-) -> Result<Value, BundleError> {
-    let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, CFG.model_window);
+fn reflect_reply(agent_id: &AgentId, kernel: &Kernel, capabilities: Value) -> Value {
+    let mut out = verbs::reflect_base(agent_id, kernel, MAN, CFG.model_window);
     let meta = helpers::agent_meta(agent_id, kernel);
     for k in ["max_tokens", "temperature", "thinking_budget"] {
-        let v = meta.get(k).cloned().unwrap_or(Value::Null);
-        let v = if k == "temperature" && !v.is_null() {
-            json!(py_float(&v)?)
-        } else {
-            v
-        };
-        out.insert(k.to_string(), v);
+        out.insert(k.to_string(), meta.get(k).cloned().unwrap_or(Value::Null));
     }
     out.insert(
         "caching".into(),
@@ -1690,7 +1678,7 @@ fn reflect_reply(
         "usage_since_boot".into(),
         usage_since_boot_now(agent_id, kernel),
     );
-    Ok(Value::Object(out))
+    Value::Object(out)
 }
 
 /// The params-store setting that overrides the static capability entries: a map of
@@ -1788,44 +1776,6 @@ pub fn budget_thinking_refused(model: &str) -> bool {
     major == 4 && minor.is_some_and(|m| m >= 7)
 }
 
-/// Why `prices` is not `{<model>: {input, output, cache_read?, cache_write_5m?}}` with
-/// numbers of zero or more, or `None`.
-fn prices_refusal(prices: &Value) -> Option<String> {
-    let Some(map) = prices.as_object() else {
-        return Some(
-            "prices must be a map of model to {input, output, cache_read?, cache_write_5m?}"
-                .to_string(),
-        );
-    };
-    for (model, entry) in map {
-        let Some(e) = entry.as_object() else {
-            return Some(format!(
-                "prices.{model} must be {{input, output, cache_read?, cache_write_5m?}}"
-            ));
-        };
-        for key in ["input", "output"] {
-            if !e
-                .get(key)
-                .is_some_and(|v| v.as_f64().is_some_and(|n| n >= 0.0))
-            {
-                return Some(format!(
-                    "prices.{model}.{key} must be a number, zero or more"
-                ));
-            }
-        }
-        for key in ["cache_read", "cache_write_5m"] {
-            if let Some(v) = e.get(key).filter(|v| !v.is_null()) {
-                if !v.as_f64().is_some_and(|n| n >= 0.0) {
-                    return Some(format!(
-                        "prices.{model}.{key} must be a number, zero or more"
-                    ));
-                }
-            }
-        }
-    }
-    None
-}
-
 /// Refuse a write this backend cannot honour, AT THE WRITE, on the MERGED record —
 /// then every required field, named at once. Python `validate_meta`, text for text.
 #[must_use]
@@ -1833,14 +1783,6 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
     let mut merged = record.clone();
     for (k, v) in meta {
         merged.insert(k.clone(), v.clone());
-    }
-    if let Some(p) = meta.get("prices").filter(|v| !v.is_null()) {
-        if let Some(bad) = prices_refusal(p) {
-            return Some(bad);
-        }
-    }
-    if let Err(e) = stream_idle_of(meta) {
-        return Some(e.message);
     }
     let has_display = merged
         .get("thinking_display")
@@ -1855,13 +1797,8 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
             "thinking_display and thinking_budget are two thinking modes — set one".to_string(),
         );
     }
-    if let Some(budget) = positive_int(merged.get("thinking_budget")) {
-        if budget < THINKING_FLOOR {
-            return Some(format!(
-                "thinking_budget={budget} is below the API's {THINKING_FLOOR}"
-            ));
-        }
-        if let Some(mx) = positive_int(merged.get("max_tokens")) {
+    if let Some(budget) = int_of(merged.get("thinking_budget")) {
+        if let Some(mx) = int_of(merged.get("max_tokens")) {
             if budget >= mx {
                 return Some(format!(
                     "thinking_budget={budget} is not below max_tokens={mx} — the API refuses \
@@ -1892,8 +1829,7 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
             left.join(", ")
         ));
     }
-    fantastic_ai_core::record::validate_meta(meta)
-        .or_else(|| caching::refusal(meta, record, NAME, CFG.provider_cache))
+    None
 }
 
 /// The model's effort per turn.
@@ -1939,14 +1875,14 @@ pub struct AnthropicRecord {
     /// Sampling temperature; sent only when set.
     pub temperature: Option<f64>,
     /// Extended thinking per turn (tokens, at least the API's floor, below max_tokens); not for 4.7+ or 5.x models: use thinking_display and effort.
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 1024))]
     pub thinking_budget: Option<i64>,
     /// The model's effort per turn, sent as output_config.effort.
     pub effort: Option<Effort>,
     /// Adaptive thinking with its text shown (summarized) or hidden (omitted).
     pub thinking_display: Option<ThinkingDisplay>,
     /// USD per million tokens by model: {<model>: {input, output, cache_read?, cache_write_5m?}}; a model with no entry is unpriced (never $0).
-    pub prices: Option<Value>,
+    pub prices: Option<std::collections::BTreeMap<String, fantastic_ai_core::record::ModelPrice>>,
     /// USD per million input tokens for a long-context request, for every model in prices.
     #[schemars(range(min = 0))]
     pub price_input_long_per_mtok: Option<f64>,
@@ -1963,13 +1899,16 @@ pub struct AnthropicRecord {
     #[schemars(length(min = 1))]
     pub usage_log: Option<String>,
     /// The read clock on the answer stream: seconds with no byte from the API (headers included) before the turn is judged stalled.
+    #[schemars(schema_with = "fantastic_ai_core::record::stream_idle_seconds")]
     pub stream_idle_seconds: Option<f64>,
     /// The API key's credential store and ref; absent, no key header goes out.
     pub credentials: Option<Credentials>,
     /// The memory store agent that keeps this agent's settings (e.g. a ram_store).
     pub memory_store_id: String,
     /// The models this provider lists.
-    pub models: Option<Vec<Value>>,
+    pub models: Option<Vec<String>>,
+    /// How the conversation is kept in the model's view.
+    pub caching: Option<fantastic_ai_core::record::CachingMode>,
     /// The fields every ai_core agent takes.
     #[serde(flatten)]
     pub ai: AiRecord,
@@ -2054,7 +1993,7 @@ impl Handler for AnthropicBundle {
         let reply = match call {
             Call::Reflect(_) => {
                 let capabilities = capabilities_of(agent_id, kernel).await;
-                reflect_reply(agent_id, kernel, capabilities)?
+                reflect_reply(agent_id, kernel, capabilities)
             }
             Call::Boot(_) => verbs::boot(agent_id, kernel),
             Call::UsageVerb(a) => usage_reply(agent_id, a.reset == Some(true), kernel),
@@ -2139,13 +2078,13 @@ impl Handler for AnthropicBundle {
             return Ok((reply, None));
         };
         let Some(bytes) = body.and_then(|b| b.into_at("data")) else {
-            return Ok((
-                Some(json!({
-                    "error": format!("{NAME}: complete image: the image bytes are required as the body at `data`"),
-                    "reason": "bad_arg",
-                })),
-                None,
-            ));
+            let mut r = refusal_hint(
+                MISSING_ARG,
+                format!("{NAME}: complete image: the image bytes are required as the body at `data`"),
+                "send the image's bytes as the call's binary body at `data`",
+            );
+            with(&mut r, "arg", json!("data"));
+            return Ok((Some(r), None));
         };
         let n = bytes.len();
         stash_image(agent_id.as_str(), &a.rid, &json!(image.image_ref), &image.media_type, bytes);

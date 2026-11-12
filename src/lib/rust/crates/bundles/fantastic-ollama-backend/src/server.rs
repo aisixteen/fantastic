@@ -43,7 +43,7 @@ pub fn served_model(body: &str, url: &str) -> Result<String, String> {
         _ => {
             let served = names
                 .iter()
-                .map(fantastic_bundle::py_str)
+                .map(fantastic_ai_core::helpers::shown)
                 .collect::<Vec<_>>()
                 .join(", ");
             let served = if served.is_empty() {

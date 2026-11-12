@@ -29,7 +29,7 @@ use crate::strategies::ProjectionCtx;
 use crate::think::without_thinking;
 use crate::view::{apply_res, res_of};
 use fantastic_bundle::{
-    py_split_whitespace, py_splitlines, py_str, py_strip, py_truthy,
+    py_split_whitespace, py_splitlines, py_strip,
 };
 use fantastic_kernel::{AgentId, Kernel};
 use futures_util::StreamExt;
@@ -44,10 +44,6 @@ pub fn as_id(x: &Value) -> Option<i64> {
         Value::Number(n) if !n.is_f64() => n.as_i64().filter(|&i| i > 0),
         _ => None,
     }
-}
-
-fn bad_arg(msg: &str, arg: &str) -> Value {
-    json!({"error": msg, "reason": "bad_arg", "arg": arg})
 }
 
 /// `grep`: find the LINE that mentions something ANYWHERE in memory — every row
@@ -68,12 +64,9 @@ pub async fn grep(
     kernel: &Arc<Kernel>,
     model_window: i64,
 ) -> MemResult<Value> {
-    let q = py_strip(&args.query).to_lowercase();
-    if q.is_empty() {
-        return Ok(bad_arg("grep: `query` is required", "query"));
-    }
-    let limit = args.limit.unwrap_or(100).clamp(1, 100) as usize;
-    let width = args.width.unwrap_or(200).clamp(20, 20_000) as usize;
+    let q = args.query.to_lowercase();
+    let limit = args.limit as usize;
+    let width = args.width as usize;
     let ids: Option<Vec<i64>> = args.ids.clone();
 
     let mut matches: Vec<Value> = Vec::new();
@@ -665,8 +658,7 @@ const PIN_SHARE: f64 = 0.5;
 /// that is not a reply. A person or a peer sent it, and it sets or changes the task.
 fn is_task_root(r: &Value) -> bool {
     r.get("role").and_then(Value::as_str) == Some("user")
-        // python `not r.get("parent")`: a 0 parent is falsy too.
-        && !r.get("parent").is_some_and(py_truthy)
+        && r.get("parent").is_none_or(Value::is_null)
         // python `r.get("kind") in (None, "", "user")` — EXACTLY those three.
         && match r.get("kind") {
             None | Some(Value::Null) => true,
@@ -829,12 +821,10 @@ pub async fn context_recall(
             .map(|&i| {
                 let r = &view[i];
                 let content = row_content(r);
-                // python `r.get("title") or (<quoted title> or content[:80])` —
-                // TRUTHINESS, so an empty title falls through, and a non-string
-                // one is printed by `str()`.
-                let title = match r.get("title") {
-                    Some(t) if py_truthy(t) => py_str(t),
-                    _ => match quoted_title(content) {
+                // the row's own title, else the quoted title, else the content's head
+                let title = match r.get("title").and_then(Value::as_str) {
+                    Some(t) => t.to_string(),
+                    None => match quoted_title(content) {
                         Some(t) => t.to_string(),
                         None => content
                             .chars()
@@ -843,15 +833,14 @@ pub async fn context_recall(
                             .replace('\n', " "),
                     },
                 };
-                // `kind or role`, printed RAW through `str()`.
-                let kind = match r.get("kind") {
-                    Some(k) if py_truthy(k) => py_str(k),
-                    _ => r.get("role").map_or_else(String::new, py_str),
+                // the row's kind, else its role
+                let kind = match r.get("kind").filter(|k| !k.is_null()) {
+                    Some(k) => crate::helpers::shown(k),
+                    None => r.get("role").map_or_else(String::new, crate::helpers::shown),
                 };
-                // `parent or '-'`: truthiness, so a 0/null parent is `-`.
-                let parent = match r.get("parent") {
-                    Some(p) if py_truthy(p) => py_str(p),
-                    _ => "-".to_string(),
+                let parent = match r.get("parent").filter(|p| !p.is_null()) {
+                    Some(p) => crate::helpers::shown(p),
+                    None => "-".to_string(),
                 };
                 format!(
                     "{} · {kind} · \"{title}\" · {}B · ↑{parent}",
@@ -895,23 +884,20 @@ pub async fn context_recall(
             // python `_as_list(ans.get("expand"))`: a list as is, a scalar
             // wrapped, falsy empty.
             let raw_expand = ans.get("expand").unwrap_or(&Value::Null);
-            let items: Vec<Value> = if !py_truthy(raw_expand) {
-                Vec::new()
-            } else if let Value::Array(a) = raw_expand {
-                a.clone()
-            } else {
-                vec![raw_expand.clone()]
+            let items: Vec<Value> = match raw_expand {
+                Value::Null => Vec::new(),
+                Value::Array(a) => a.clone(),
+                other => vec![other.clone()],
             };
             let want: Vec<i64> = items
                 .iter()
                 .filter_map(as_id)
                 .filter(|x| head_ids.contains(x))
                 .collect();
-            // python `str(ans.get("why") or "")[:300] or "chosen"` — `42` reads
-            // `42` and `["a"]` reads `['a']`; only a FALSY why is `chosen`.
-            why = match ans.get("why") {
-                Some(w) if py_truthy(w) => py_str(w).chars().take(300).collect::<String>(),
-                _ => String::new(),
+            // the model's own words, at most 300 characters; none is `chosen`
+            why = match ans.get("why").and_then(Value::as_str) {
+                Some(w) => w.chars().take(300).collect::<String>(),
+                None => String::new(),
             };
             if why.is_empty() {
                 why = "chosen".to_string();

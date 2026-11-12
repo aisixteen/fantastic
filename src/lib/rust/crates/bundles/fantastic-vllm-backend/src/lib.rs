@@ -42,8 +42,7 @@ use fantastic_ai_core::provider::{
 };
 use fantastic_ai_core::record::{AiRecord, Credentials};
 use fantastic_ai_core::think::{decode_openai_delta, ThinkWrap};
-use fantastic_ai_core::{agent_loop::BackendConfig, caching, helpers, verbs};
-use fantastic_bundle::{py_str, py_truthy};
+use fantastic_ai_core::{agent_loop::BackendConfig, helpers, verbs};
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -62,10 +61,6 @@ pub const HANDLER_MODULE: &str = "vllm_backend.tools";
 const NAME: &str = "vllm_backend";
 
 pub mod server;
-
-/// What `reflect` says this agent IS — python `tools.py`'s `sentence`.
-pub const SENTENCE: &str = "vLLM-backed LLM agent, talking to the vLLM server directly \
-(raw prompt-and-parse tool-calling; a KV-cache session table per endpoint).";
 
 const CFG: BackendConfig = BackendConfig {
     name: NAME,
@@ -242,7 +237,7 @@ fn monotonic() -> f64 {
 
 /// python `str(m.get("content", ""))`.
 fn content_text(m: &Value) -> String {
-    m.get("content").map(py_str).unwrap_or_default()
+    m.get("content").map(fantastic_ai_core::helpers::shown).unwrap_or_default()
 }
 
 fn role(m: &Value) -> Option<&str> {
@@ -291,7 +286,7 @@ pub fn prompt_bound(messages: &[Value]) -> i64 {
         .map(|m| {
             let role = m
                 .get("role")
-                .map(fantastic_bundle::py_str)
+                .map(fantastic_ai_core::helpers::shown)
                 .unwrap_or_default();
             let content = match m.get("content") {
                 Some(Value::String(s)) => s.len(),
@@ -459,9 +454,7 @@ impl VllmProvider {
         else {
             return Ok(None);
         };
-        let budget = v.as_i64().ok_or_else(|| {
-            ProviderError::value_error("thinking_token_budget must be an integer".to_string())
-        })?;
+        let budget = v.as_i64().unwrap_or_default();
         if self.explicit_budget && !side_call {
             return Ok(Some(budget));
         }
@@ -910,12 +903,12 @@ impl SseState {
         else {
             return Ok(false); // the usage-only final chunk
         };
-        if choice.get("finish_reason").is_some_and(py_truthy) {
+        if choice.get("finish_reason").is_some_and(|f| !f.is_null()) {
             self.saw_finish = true;
         }
         let mut delta = choice
             .get("delta")
-            .filter(|d| py_truthy(d))
+            .filter(|d| d.is_object())
             .cloned()
             .unwrap_or_else(|| json!({}));
         // `reasoning_content` or, in some vLLM versions, `reasoning` — the
@@ -1031,9 +1024,9 @@ impl SseState {
 /// A count the turn runs on — set on the record, or read from the server before
 /// the turn ([`server::resolve`]); fails the turn loud otherwise.
 fn required_int(meta: &Map<String, Value>, key: &str) -> Result<i64, ProviderError> {
-    match meta.get(key) {
-        Some(Value::Number(n)) if n.as_i64().is_some_and(|v| v >= 1) => Ok(n.as_i64().unwrap_or(1)),
-        _ => Err(ProviderError::value_error(format!(
+    match meta.get(key).and_then(Value::as_i64) {
+        Some(n) => Ok(n),
+        None => Err(ProviderError::value_error(format!(
             "{NAME}: `{key}` is not on the agent record, a positive int, and was not read \
              from the server (update_agent <id> {key}=…)"
         ))),
@@ -1064,32 +1057,18 @@ fn sampling(meta: &Map<String, Value>) -> (Map<String, Value>, bool) {
     (eff, explicit)
 }
 
-/// python `float(rec.get(key) or default)`.
-fn seconds(meta: &Map<String, Value>, key: &str, default: f64) -> Result<f64, ProviderError> {
-    match meta.get(key).filter(|v| py_truthy(v)) {
-        Some(v) => v
-            .as_f64()
-            .ok_or_else(|| ProviderError::value_error(format!("{key} must be a number"))),
-        None => Ok(default),
-    }
+/// A seconds field of the record (declared positive, with its default, in
+/// [`VllmRecord`]); `default` is that declared default.
+pub(crate) fn seconds(meta: &Map<String, Value>, key: &str, default: f64) -> f64 {
+    meta.get(key).and_then(Value::as_f64).unwrap_or(default)
 }
 
 /// The read clock (#177): the record's `stream_idle_seconds` when it names one,
 /// else the `read_timeout` the backend has always read — the same per-read bound
 /// under the name every stream backend shares. Its default stays `read_timeout`:
 /// a vLLM server may take well over a minute to prefill before its first byte.
-fn read_clock_of(meta: &Map<String, Value>, read_timeout: f64) -> Result<f64, ProviderError> {
-    match meta.get("stream_idle_seconds").filter(|v| !v.is_null()) {
-        None => Ok(read_timeout),
-        Some(v) => v
-            .as_f64()
-            .filter(|s| *s > 0.0 && s.is_finite())
-            .ok_or_else(|| {
-                ProviderError::value_error(format!(
-                    "stream_idle_seconds must be a positive number of seconds, not {v}"
-                ))
-            }),
-    }
+fn read_clock_of(meta: &Map<String, Value>, read_timeout: f64) -> f64 {
+    seconds(meta, "stream_idle_seconds", read_timeout)
 }
 
 /// [`build_provider`] from a record (`complete` lays the pass's `model` over the agent's).
@@ -1107,12 +1086,9 @@ fn configure(
     key: Arc<dyn KeySource>,
 ) -> Result<VllmProvider, ProviderError> {
     let (sampling, explicit_budget) = sampling(meta);
-    let overflow = meta.get("kv_overflow").and_then(Value::as_str);
-    let Some(kv_overflow) = overflow.filter(|o| KV_OVERFLOWS.contains(o)) else {
+    let Some(kv_overflow) = meta.get("kv_overflow").and_then(Value::as_str) else {
         return Err(ProviderError::value_error(format!(
-            "{NAME}: `kv_overflow` is required on the agent record — evict (the \
-             least-recently-used conversation rotates out) or reject (refuse the \
-             newcomer) (update_agent <id> kv_overflow=…)"
+            "{NAME}: `kv_overflow` is not on the agent record (update_agent <id> kv_overflow=…)"
         )));
     };
     Ok(VllmProvider {
@@ -1131,11 +1107,11 @@ fn configure(
             .and_then(Value::as_str)
             .unwrap_or("vllm")
             .to_string(),
-        kv_ttl: seconds(meta, "kv_ttl", KV_TTL)?,
+        kv_ttl: seconds(meta, "kv_ttl", KV_TTL),
         sampling,
         explicit_budget,
-        connect_timeout: seconds(meta, "connect_timeout", CONNECT_TIMEOUT)?,
-        read_clock: read_clock_of(meta, seconds(meta, "read_timeout", READ_TIMEOUT)?)?,
+        connect_timeout: seconds(meta, "connect_timeout", CONNECT_TIMEOUT),
+        read_clock: read_clock_of(meta, seconds(meta, "read_timeout", READ_TIMEOUT)),
         report: ReportCell::default(),
     })
 }
@@ -1144,18 +1120,11 @@ fn configure(
 /// EFFECTIVE sampling (defaults filled in), the timeouts and the endpoint's
 /// shared KV session table, so one reflect shows what the next request will
 /// send and how many conversations are live.
-fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleError> {
-    let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, CFG.model_window);
+fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
+    let mut out = verbs::reflect_base(agent_id, kernel, MAN, CFG.model_window);
     let meta = helpers::agent_meta(agent_id, kernel);
     let (sampling, explicit) = sampling(&meta);
-    let secs = |key: &str, default: f64| -> Result<f64, BundleError> {
-        match meta.get(key).filter(|v| py_truthy(v)) {
-            Some(v) => v.as_f64().ok_or_else(|| -> BundleError {
-                format!("{key} must be a number").into()
-            }),
-            None => Ok(default),
-        }
-    };
+    let secs = |key: &str, default: f64| seconds(&meta, key, default);
     out.insert("sampling".into(), Value::Object(sampling));
     out.insert("usage".into(), usage_now(agent_id.as_str()));
     out.insert(
@@ -1177,8 +1146,8 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleErr
     out.insert(
         "timeouts".into(),
         json!({
-            "connect": secs("connect_timeout", CONNECT_TIMEOUT)?,
-            "read": secs("read_timeout", READ_TIMEOUT)?,
+            "connect": secs("connect_timeout", CONNECT_TIMEOUT),
+            "read": secs("read_timeout", READ_TIMEOUT),
         }),
     );
     let mut kv = Map::new();
@@ -1190,7 +1159,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleErr
         "overflow".into(),
         meta.get("kv_overflow").cloned().unwrap_or(Value::Null),
     );
-    kv.insert("ttl".into(), json!(secs("kv_ttl", KV_TTL)?));
+    kv.insert("ttl".into(), json!(secs("kv_ttl", KV_TTL)));
     // shared by every vllm_backend agent on the same endpoint
     if let Some(endpoint) = meta.get("endpoint").and_then(Value::as_str) {
         kv.extend(with_table(endpoint, |t| t.view()));
@@ -1203,23 +1172,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleErr
             .and_then(Value::as_str)
             .unwrap_or("vllm")),
     );
-    Ok(Value::Object(out))
-}
-
-/// python `_positive`: a bool is never a number; an int ≥ 1, or any number > 0.
-fn positive(v: &Value, integer: bool) -> bool {
-    let Value::Number(n) = v else {
-        return false;
-    };
-    if integer {
-        // an int wider than i64 is still a positive int (python ints are unbounded)
-        match n.as_i64() {
-            Some(i) => i >= 1,
-            None => n.as_u64().is_some(),
-        }
-    } else {
-        n.as_f64().is_some_and(|f| f > 0.0)
-    }
+    Value::Object(out)
 }
 
 /// Refuse a write this backend cannot honour, AT THE WRITE, naming the legal
@@ -1230,17 +1183,6 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
     let mut merged = record.clone();
     for (k, v) in meta {
         merged.insert(k.clone(), v.clone());
-    }
-    let set = |k: &str| meta.get(k).filter(|v| !v.is_null());
-    if let Some(url) = set("metrics_url") {
-        let ok = url
-            .as_str()
-            .is_some_and(|u| u.trim().starts_with("http://") || u.trim().starts_with("https://"));
-        if !ok {
-            return Some(
-                "metrics_url must be an http(s) URL — the server's /metrics page".to_string(),
-            );
-        }
     }
     let endpoint = merged.get("endpoint").and_then(Value::as_str).unwrap_or("");
     if merged.get("kv_slots").is_none_or(Value::is_null)
@@ -1254,20 +1196,16 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
         ));
     }
     let budget = merged.get("thinking_token_budget").filter(|v| !v.is_null());
-    let mx = merged.get("max_tokens");
-    if let (Some(b), Some(m)) = (budget, mx) {
-        if positive(b, true) && positive(m, true) {
-            let (b, m) = (
-                b.as_i64().unwrap_or(i64::MAX),
-                m.as_i64().unwrap_or(i64::MAX),
-            );
-            if b >= m {
-                return Some(format!(
-                    "thinking_token_budget={b} is not below max_tokens={m} — it could \
-                     never fire, and a turn would end mid-thought with no answer; keep it \
-                     below max_tokens (half is a good start)"
-                ));
-            }
+    if let (Some(b), Some(m)) = (
+        budget.and_then(Value::as_i64),
+        merged.get("max_tokens").and_then(Value::as_i64),
+    ) {
+        if b >= m {
+            return Some(format!(
+                "thinking_token_budget={b} is not below max_tokens={m} — it could \
+                 never fire, and a turn would end mid-thought with no answer; keep it \
+                 below max_tokens (half is a good start)"
+            ));
         }
     }
     let dialect = merged.get("server_dialect").and_then(Value::as_str);
@@ -1278,13 +1216,7 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
                 .to_string(),
         );
     }
-    // EVERY required field, checked at the WRITE: a model spawning a sub-AI
-    // copies the fields it can see, and a record the write accepted but no turn
-    // could use would fail only later, on every turn, far from the create that
-    // caused it. Named ALL at once, from the schema, so one retry fixes the
-    // record.
-    fantastic_ai_core::record::validate_meta(meta)
-        .or_else(|| caching::refusal(meta, record, NAME, CFG.provider_cache))
+    None
 }
 
 /// How much the model wants to think.
@@ -1339,6 +1271,7 @@ pub struct VllmRecord {
     #[schemars(range(min = 1))]
     pub kv_slots: Option<i64>,
     /// The server's Prometheus page, read for kv_slots; left out, the endpoint with /v1 replaced by /metrics.
+    #[schemars(regex(pattern = r"^\s*https?://"))]
     pub metrics_url: Option<String>,
     /// All slots live: evict (the least-recently-used rotates out) or reject (the newcomer is refused).
     pub kv_overflow: KvOverflow,
@@ -1370,15 +1303,15 @@ pub struct VllmRecord {
     /// Stop sequences; sent only when set.
     pub stop: Option<Vec<String>>,
     /// Seconds an idle conversation keeps its slot.
-    #[schemars(schema_with = "fantastic_ai_core::record::positive_seconds")]
+    #[schemars(schema_with = "kv_ttl_seconds")]
     #[serde(default)]
     pub kv_ttl: Option<f64>,
     /// Seconds to reach the server.
-    #[schemars(schema_with = "fantastic_ai_core::record::positive_seconds")]
+    #[schemars(schema_with = "connect_timeout_seconds")]
     #[serde(default)]
     pub connect_timeout: Option<f64>,
     /// Seconds to wait on a generation.
-    #[schemars(schema_with = "fantastic_ai_core::record::positive_seconds")]
+    #[schemars(schema_with = "read_timeout_seconds")]
     #[serde(default)]
     pub read_timeout: Option<f64>,
     /// The read clock on the answer stream: seconds with no byte from the server (headers included) before the turn is judged stalled; default read_timeout.
@@ -1390,10 +1323,24 @@ pub struct VllmRecord {
     /// The memory store agent that keeps this agent's settings (e.g. a ram_store).
     pub memory_store_id: String,
     /// The models this provider lists.
-    pub models: Option<Vec<Value>>,
+    pub models: Option<Vec<String>>,
+    /// How the conversation is kept in the model's view.
+    pub caching: Option<fantastic_ai_core::record::UncachedMode>,
     /// The fields every ai_core agent takes.
     #[serde(flatten)]
     pub ai: AiRecord,
+}
+
+fn kv_ttl_seconds(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    fantastic_ai_core::record::positive_seconds_of(KV_TTL)
+}
+
+fn connect_timeout_seconds(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    fantastic_ai_core::record::positive_seconds_of(CONNECT_TIMEOUT)
+}
+
+fn read_timeout_seconds(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    fantastic_ai_core::record::positive_seconds_of(READ_TIMEOUT)
 }
 
 fantastic_kernel::record!(VllmRecord);
@@ -1465,7 +1412,7 @@ impl Handler for VllmBundle {
     ) -> Result<Reply, BundleError> {
         use declared::Call;
         let reply = match call {
-            Call::Reflect(_) => reflect_reply(agent_id, kernel)?,
+            Call::Reflect(_) => reflect_reply(agent_id, kernel),
             Call::Boot(_) => verbs::boot(agent_id, kernel),
             Call::UsageVerb(a) => usage_reply(agent_id.as_str(), a.reset == Some(true)),
             Call::Complete(a) => {
