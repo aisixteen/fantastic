@@ -42,11 +42,6 @@ fn fail(e: impl Into<String>) -> Value {
     json!({"error": e.into(), "reason": "bad_arg"})
 }
 
-/// The page's field TEXTS as the setup form helpers take them.
-fn texts(fields: Option<std::collections::BTreeMap<String, String>>) -> serde_json::Map<String, Value> {
-    fields.unwrap_or_default().into_iter().map(|(k, v)| (k, Value::String(v))).collect()
-}
-
 impl SetupBundle {
     fn host(kernel: &Arc<Kernel>) -> Option<Host> {
         let root = kernel.root()?.id.0.clone();
@@ -96,10 +91,7 @@ impl SetupBundle {
                     Ok(r) => r,
                     Err(e) => return fail(format!("configure_ai: {e}")),
                 };
-                let mut upd = match typed_fields(host, &handler, texts(a.fields)) {
-                    Ok(f) => f,
-                    Err(e) => return fail(format!("configure_ai: {e}")),
-                };
+                let mut upd = a.fields.unwrap_or_default();
                 let endpoint = upd.get("endpoint").or_else(|| meta.get("endpoint")).and_then(Value::as_str).unwrap_or("").to_string();
                 if crate::kern::keys::keyed(host, &handler).is_some() {
                     if let Ok(r) = crate::kern::keys::ref_for(&handler, &endpoint) {
@@ -123,10 +115,7 @@ impl SetupBundle {
                 }
             }
             Call::WriteAi(a) => {
-                let fields = match typed_fields(host, &a.handler, texts(a.fields)) {
-                    Ok(f) => f,
-                    Err(e) => return fail(format!("write_ai: {e}")),
-                };
+                let fields = a.fields.unwrap_or_default();
                 let rec = crate::kern::setup::Record {
                     id: a.id,
                     handler: a.handler,
@@ -167,10 +156,7 @@ impl SetupBundle {
                 Err(e) => fail(e),
             },
             Call::Save(a) => {
-                let mut record = match typed_fields(host, &a.handler, texts(a.fields)) {
-                    Ok(f) => f,
-                    Err(e) => return fail(format!("save: {e}")),
-                };
+                let mut record = a.fields.unwrap_or_default();
                 // the backend + every field set — never an id, a key or grants;
                 // the stored key for its endpoint is NAMED (a ref, never the value):
                 // a backend that requires one refuses a saved set-up without it
@@ -243,11 +229,6 @@ impl Handler for SetupBundle {
         };
         Ok(Some(Self::run(&host, call).await))
     }
-}
-
-/// The page's field TEXTS (`fields: {name: text}`), typed by `handler`'s schema.
-fn typed_fields(host: &Host, handler: &str, texts: serde_json::Map<String, Value>) -> Result<serde_json::Map<String, Value>, String> {
-    crate::kern::setup::typed(host, handler, &texts)
 }
 
 /// An AI agent's handler and record fields — refused for any other agent.
@@ -325,7 +306,6 @@ mod tests {
         for (p, arg) in [
             (json!({"type": "ai_settings", "id": 3}), "id"),
             (json!({"type": "configure_ai", "id": "a", "fields": ["x"]}), "fields"),
-            (json!({"type": "configure_ai", "id": "a", "fields": {"model": 7}}), "fields.model"),
             (json!({"type": "write_ai", "id": "a", "handler": "vllm_backend.tools", "may_call": "x"}), "may_call"),
             (json!({"type": "set_key_mode", "mode": "plaintext"}), "mode"),
             (json!({"type": "forget", "name": 3}), "name"),

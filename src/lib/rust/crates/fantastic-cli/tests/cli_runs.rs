@@ -1283,6 +1283,7 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
     // a required field has no default; the counts a record leaves out are read
     // from the server before a turn — no default either
     assert!(required.iter().all(|n| fields[n].get("default").is_none()));
+    // context_window: the record declares no default (the server's window is read at run time)
     assert!(fields["context_window"].get("default").is_none(), "context_window");
     for n in ["model", "max_tokens", "kv_slots"] {
         assert!(fields[n].get("default").is_none(), "{n}");
@@ -1293,13 +1294,19 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
             "{n}"
         );
     }
-    // the declared types: an enum is its set, a number is a number
-    assert_eq!(fields["kv_overflow"]["type"], serde_json::json!("'evict'|'reject'"));
+    // the sampling values (temperature 0.2, thinking_token_budget 16000) are the
+    // provider's own defaults, shown in its reflect: the record declares their types only
+    assert_eq!(fields["temperature"]["type"], serde_json::json!("number"));
+    assert!(fields["temperature"].get("default").is_none());
+    // an enum is its declared set
+    assert_eq!(
+        fields["kv_overflow"]["type"],
+        serde_json::json!("'evict'|'reject'")
+    );
     assert_eq!(
         fields["reasoning_effort"]["type"],
         serde_json::json!("'low'|'medium'|'xhigh'")
     );
-    assert_eq!(fields["temperature"]["type"], serde_json::json!("number"));
     // the key: a `credentials` object (a store ref), optional where a server may
     // be keyless, required where it never is
     assert_eq!(fields["credentials"]["type"], serde_json::json!("object"));
@@ -1369,8 +1376,9 @@ fn the_catalog_carries_the_on_device_backend() {
             "post_system_prompt"
         ]
     );
-    // the window is a positive integer the model's own default fills in; the record names no default
+    // the window: a positive integer; the record declares no static default (the model's own window is read at run time)
     assert_eq!(fields[3]["type"], serde_json::json!("int >= 1"));
+    assert!(fields[3].get("default").is_none());
 }
 
 /// Python `test_the_schema_is_what_the_write_enforces`: ONE

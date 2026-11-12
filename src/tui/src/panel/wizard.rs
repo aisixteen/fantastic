@@ -80,7 +80,7 @@ pub struct Details {
 
 /// The backend's own fields: not [`MAIN`], not the key.
 pub fn own(b: &Backend) -> Vec<&Field> {
-    b.fields.iter().filter(|f| !MAIN.contains(&f.name.as_str()) && f.ty != "credentials").collect()
+    b.fields.iter().filter(|f| !MAIN.contains(&f.name.as_str()) && f.name != "credentials").collect()
 }
 
 impl Details {
@@ -219,13 +219,13 @@ mod tests {
         Backend::from_schema(
             "vllm_backend.tools",
             &json!({"fields": [
-                {"name": "endpoint", "type": "str", "required": true},
-                {"name": "model", "type": "str", "required": true},
+                {"name": "endpoint", "type": "string", "required": true},
+                {"name": "model", "type": "string", "required": true},
                 {"name": "max_tokens", "type": "int", "required": true},
-                {"name": "kv_overflow", "type": "enum", "required": false, "enum": ["evict", "reject"]},
-                {"name": "temperature", "type": "float", "required": false, "default": 0.2},
-                {"name": "credentials", "type": "credentials", "required": false},
-                {"name": "memory_store_id", "type": "str", "required": true},
+                {"name": "kv_overflow", "type": "'evict'|'reject'", "required": false},
+                {"name": "temperature", "type": "number", "required": false, "default": 0.2},
+                {"name": "credentials", "type": "object", "required": false},
+                {"name": "memory_store_id", "type": "string", "required": true},
             ]}),
         )
     }
@@ -234,9 +234,9 @@ mod tests {
         Backend::from_schema(
             "responses_backend.tools",
             &json!({"fields": [
-                {"name": "endpoint", "type": "str", "required": true},
-                {"name": "model", "type": "str", "required": true},
-                {"name": "credentials", "type": "credentials", "required": true},
+                {"name": "endpoint", "type": "string", "required": true},
+                {"name": "model", "type": "string", "required": true},
+                {"name": "credentials", "type": "object", "required": true},
             ]}),
         )
     }

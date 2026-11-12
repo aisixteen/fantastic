@@ -608,11 +608,11 @@ mod tests {
         Backend::from_schema(
             "vllm_backend.tools",
             &json!({"fields": [
-                {"name": "endpoint", "type": "str", "required": true},
-                {"name": "model", "type": "str", "required": true},
+                {"name": "endpoint", "type": "string", "required": true},
+                {"name": "model", "type": "string", "required": true},
                 {"name": "max_tokens", "type": "int", "required": true},
-                {"name": "temperature", "type": "float", "required": false, "default": 0.2},
-                {"name": "credentials", "type": "credentials", "required": false},
+                {"name": "temperature", "type": "number", "required": false, "default": 0.2},
+                {"name": "credentials", "type": "object", "required": false},
             ]}),
         )
     }

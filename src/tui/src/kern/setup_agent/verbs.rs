@@ -2,10 +2,9 @@
 //! `verbs!` — the list the agent's own entry checks every call against, and that
 //! `reflect` and `docs` render. `reflect` is declared once, in the kernel.
 
-use std::collections::BTreeMap;
-
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::{Map, Value};
 
 /// The kernel starts the agent: nothing to open. Answers nothing.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -38,8 +37,8 @@ pub struct ConfigureAi {
     /// The AI agent.
     #[schemars(length(min = 1))]
     pub id: String,
-    /// The fields to change, as the page holds them: `{name: text}`, typed by the backend's declared record; empty text leaves a field out.
-    pub fields: Option<BTreeMap<String, String>>,
+    /// The fields to change: `{name: value}`, each of the type the backend's record declares.
+    pub fields: Option<Map<String, Value>>,
 }
 
 /// Write an AI agent: a provider and the chat naming it, created, granted and booted as the human. Returns {written, id}.
@@ -52,8 +51,8 @@ pub struct WriteAi {
     /// The backend: one of `backends`' modules.
     #[schemars(length(min = 1))]
     pub handler: String,
-    /// The backend's own fields, as the page holds them: `{name: text}`.
-    pub fields: Option<BTreeMap<String, String>>,
+    /// The backend's own fields: `{name: value}`, each of the type its record declares.
+    pub fields: Option<Map<String, Value>>,
     /// The agents the chat may call.
     pub may_call: Option<Vec<String>>,
 }
@@ -111,8 +110,8 @@ pub struct Save {
     /// The backend: one of `backends`' modules.
     #[schemars(length(min = 1))]
     pub handler: String,
-    /// The backend's own fields, as the page holds them: `{name: text}`.
-    pub fields: Option<BTreeMap<String, String>>,
+    /// The backend's own fields: `{name: value}`, each of the type its record declares.
+    pub fields: Option<Map<String, Value>>,
 }
 
 /// Forget a saved set-up. Returns {forgotten}.

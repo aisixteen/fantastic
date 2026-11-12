@@ -114,21 +114,6 @@ const DIALOG: &str = "dialog";
 /// authority — added again when the AI is re-made).
 const NOT_SNAPSHOT: [&str; 7] = ["id", "parent_id", "guid", "agents", "memory_store_id", "can_call", "callable_by"];
 
-/// Fields a caller's `stamp` may never set: the structural ones (they make a
-/// different agent).
-const NOT_STAMPABLE: [&str; 6] = ["type", "id", "parent_id", "guid", "handler_module", "agents"];
-
-/// The caller's `stamp`: an object of fields, none of them structural (a
-/// structural field makes a different agent). Grants pass: the kernel judges
-/// them at the write. Absent = none.
-fn stamp_of(stamp: Option<Map<String, Value>>) -> Result<Map<String, Value>, Value> {
-    let stamp = stamp.unwrap_or_default();
-    match stamp.keys().find(|k| NOT_STAMPABLE.contains(&k.as_str())) {
-        Some(k) => Err(refuse("bad_arg", format!("stamp: `{k}` is not the caller's to set"), "stamp only fields of your own")),
-        None => Ok(stamp),
-    }
-}
-
 /// The bundle.
 #[derive(Default)]
 pub struct BackendBundle;
@@ -193,10 +178,7 @@ impl BackendBundle {
     }
 
     async fn spawn(host: &Host, me: &AgentId, a: verbs::Spawn) -> Value {
-        let stamp = match stamp_of(a.stamp) {
-            Ok(s) => s,
-            Err(e) => return e,
-        };
+        let stamp = a.stamp.unwrap_or_default();
         let peer = a.peer_grants.unwrap_or_default();
         let shelf = match crate::kern::saved::shelf(host).await {
             Ok(s) => s,
@@ -228,15 +210,14 @@ impl BackendBundle {
         let Some(t) = shelf.saved.iter().find(|t| t.name == name) else {
             return refuse("not_found", format!("no saved set-up `{name}`"), "open ⚙ AI set-up to see your saved set-ups");
         };
-        if !matches!(
-            t.handler().as_str(),
-            "anthropic_backend.tools" | "ollama_backend.tools" | "responses_backend.tools" | "vllm_backend.tools" | "foundation_models_backend.tools"
-        ) {
+        if !crate::kern::setup::BACKENDS.contains(&t.handler().as_str()) {
             return refuse("bad_arg", format!("saved set-up `{name}` is not an AI set-up ({})", t.handler()), "open ⚙ AI set-up to see your saved set-ups");
         }
         let ai = format!("ai_{}", hex8());
         let mut spec: Map<String, Value> = t.record.clone();
         spec.extend(stamp);
+        // what the set-up is stays what it is, whatever the stamp says
+        spec.insert("handler_module".into(), json!(t.handler()));
         spec.insert("saved".into(), json!(name));
         match Self::make_ai(host, me, &ai, spec, peer).await {
             // EVERY dialog is KEPT from its start (owner 2026-10-12: no ephemeral
@@ -501,15 +482,9 @@ impl BackendBundle {
 
     /// `create {record}` — one direct child of this backend agent.
     async fn create(host: &Host, me: &AgentId, rec: &Map<String, Value>) -> Value {
-        if let Some(k) = rec.keys().find(|k| *k != "handler_module" && NOT_STAMPABLE.contains(&k.as_str()) && *k != "id") {
-            return refuse("bad_arg", format!("create: `{k}` is structural — not the caller's to set"), "the child's parent is this agent");
-        }
         let handler = rec.get("handler_module").and_then(Value::as_str).unwrap_or("");
         // an AI is a chat on its provider: asked as either, the chat is the child
-        let is_ai = matches!(
-            handler,
-            "anthropic_backend.tools" | "ollama_backend.tools" | "responses_backend.tools" | "vllm_backend.tools" | "foundation_models_backend.tools" | "ai_chat.tools"
-        );
+        let is_ai = crate::kern::setup::BACKENDS.contains(&handler) || handler == CHAT_HANDLER;
         let made = if is_ai { CHAT_HANDLER } else { handler };
         // a child asked again is the same child
         if let Some(id) = rec.get("id").and_then(Value::as_str) {
@@ -781,16 +756,18 @@ impl BackendBundle {
         let Some(d) = dialogs.get(&ai) else {
             return refuse("not_found", format!("reopen: no kept dialog {ai:?}"), "");
         };
-        let stamp = match stamp_of(a.stamp) {
-            Ok(s) => s,
-            Err(e) => return e,
-        };
+        let stamp = a.stamp.unwrap_or_default();
         let peer = a.peer_grants.unwrap_or_default();
         if host.kernel.agents.contains_key(&AgentId::from(ai.as_str())) {
             return json!({"id": ai, "root": ai, "saved": d.get("saved"), "name": d.get("name"), "shared": true});
         }
         let mut spec: Map<String, Value> = d.get("record").and_then(Value::as_object).cloned().unwrap_or_default();
+        let handler = spec.get("handler_module").cloned();
         spec.extend(stamp);
+        // what the dialog's AI is stays what it is, whatever the stamp says
+        if let Some(h) = handler {
+            spec.insert("handler_module".into(), h);
+        }
         match Self::make_ai(host, me, &ai, spec, peer).await {
             Ok(()) => json!({"id": ai, "root": ai, "saved": d.get("saved"), "name": d.get("name"), "shared": false}),
             Err(e) => refuse("bad_arg", format!("reopen: re-making the AI: {e}"), ""),
@@ -1278,10 +1255,6 @@ pub(crate) mod create_tests {
         assert_eq!(why(&r), (Some("missing_arg".into()), Some("name".into())), "{r}");
         let r = ask(json!({"type": "create", "record": {}})).await;
         assert_eq!(why(&r), (Some("missing_arg".into()), Some("record.handler_module".into())), "{r}");
-        // what the declaration cannot state stays a rule of the verb: a stamp may not set a structural field
-        let r = ask(json!({"type": "spawn", "stamp": {"parent_id": "x"}})).await;
-        assert_eq!(r["reason"], "bad_arg", "{r}");
-        assert!(r["error"].as_str().unwrap().contains("parent_id"), "{r}");
         // the record declares `main` and no other field
         let bundle = &BackendBundle as &dyn fantastic_kernel::Bundle;
         let fields = |v: Value| v.as_object().unwrap().clone();

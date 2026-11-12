@@ -59,7 +59,7 @@ pub struct Spawn {
     /// A project bundle to place one more instance of.
     #[schemars(length(min = 1))]
     pub instance_of: Option<String>,
-    /// The caller's own fields for the backend root, copied unread (none of the structural ones).
+    /// The caller's own fields for the backend root, copied unread; the agent's own structure (parent, id, handler) is set after it.
     pub stamp: Option<Map<String, Value>>,
     /// Any grant key: more egress for the AI.
     pub peer_grants: Option<Map<String, Value>>,

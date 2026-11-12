@@ -189,10 +189,10 @@ pub fn keyed(h: &Host, module: &str) -> Option<bool> {
         .bundles
         .catalog()
         .find(|(m, _)| *m == module)
-        .map(|(_, b)| crate::kern::setup::schema_of(b.record()))
+        .map(|(_, b)| fantastic_kernel::verbs::record_fields(b.record()))
         .and_then(|s| {
             s["fields"].as_array().and_then(|a| {
-                a.iter().find(|f| f["type"] == "credentials").map(|f| f["required"].as_bool().unwrap_or(false))
+                a.iter().find(|f| f["name"] == "credentials").map(|f| f["required"].as_bool().unwrap_or(false))
             })
         })
 }

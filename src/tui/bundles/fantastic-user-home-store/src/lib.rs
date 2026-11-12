@@ -253,10 +253,11 @@ impl UserHomeStore {
         };
         // A saved set-up is checked against the bundle's DECLARED RECORD (the same
         // declaration its create is checked with, by the bundle's own shared entry):
-        // every field known and of its type, and the required ones present.
+        // every field known and of its type, and the required ones present (a saved
+        // set-up is a record to be born: the create's check).
         let mut fields = rec.clone();
         fields.remove("handler_module");
-        bundle.check_record("persist_record", &fields)?;
+        bundle.check_record("create_agent", &fields)?;
         let path = self.saved_for_write()?.join(format!("{name}.yaml"));
         let now = read_private(&path)?.map(|b| version(&b));
         if let Some(want) = a.if_match.as_deref() {
