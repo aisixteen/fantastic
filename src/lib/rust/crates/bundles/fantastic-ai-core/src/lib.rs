@@ -114,7 +114,6 @@ pub mod view;
 
 pub use agent_loop::{run_generation, BackendConfig};
 pub use constants::{CHAT_CARD_MAX_HEIGHT, USAGE_KEYS};
-pub use helpers::DEFAULT_CLIENT_ID;
 pub use provider::{Provider, ProviderEvent, ProviderStream};
 pub use route::route_reply;
 pub use think::{without_thinking, ThinkWrap, THINK_CLOSE, THINK_OPEN};

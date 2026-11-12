@@ -8,6 +8,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+/// The caller a message belongs to when it names none: the headless / REPL one.
+pub fn default_client_id() -> String {
+    "cli".to_string()
+}
+
 fn default_recall_limit() -> i64 {
     20
 }
@@ -43,7 +48,9 @@ pub struct Send {
     /// The message.
     pub text: String,
     /// Whose turn it is: `cli`, or the tab whose socket filters by it.
-    pub client_id: Option<String>,
+    #[serde(default = "default_client_id")]
+    #[schemars(regex(pattern = r"[^\s\x1c-\x1f]"))]
+    pub client_id: String,
     /// REPLACES the built system block for this delivery.
     pub system_prompt: Option<String>,
     /// Hand this pass's text to that agent id as a fresh turn, once.
@@ -120,7 +127,9 @@ pub struct Inquiry {
     /// The asker's own tag, echoed in the reply.
     pub request_id: Option<String>,
     /// Whose conversation the answer returns to.
-    pub reply_client_id: Option<String>,
+    #[serde(default = "default_client_id")]
+    #[schemars(regex(pattern = r"[^\s\x1c-\x1f]"))]
+    pub reply_client_id: String,
     /// REPLACES the built system block for this delivery.
     pub system_prompt: Option<String>,
 }

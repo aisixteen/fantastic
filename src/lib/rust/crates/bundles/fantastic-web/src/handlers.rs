@@ -653,7 +653,7 @@ fn decode_utf32(b: &[u8], big_endian: bool) -> Option<String> {
 /// A dispatched reply is 200 even when it carries `{error}` (python parity);
 /// only the INGRESS gate and a malformed request are 4xx, and a `None` reply
 /// is `204`.
-fn json_reply(reply: Value) -> Response {
+pub(crate) fn json_reply(reply: Value) -> Response {
     if reply.is_null() {
         return routes::respond(StatusCode::NO_CONTENT, &[], None, Vec::new());
     }

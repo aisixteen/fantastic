@@ -145,7 +145,7 @@ pub enum BundlesKind {
 pub mod kernel {
     use super::*;
 
-    /// Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent. A handler_module that is a meta bundle (`bundles/<name>/bundle.yaml` with a base and no program) runs its base, with the `record` of the bundle under your fields; `bundle:<name>` beside another handler_module names the bundle the record inherits from. The handler must be installed. Every argument beyond these is a field of that bundle's record (`reflect bundles=all` lists them), and a field it does not have is refused.
+    /// Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent. A handler_module that is a meta bundle (`bundles/<name>/bundle.yaml` with a base and no program) runs its base, with the `record` of the bundle under your fields; The handler must be installed. Every argument beyond these is a field of that bundle's record (`reflect bundles=all` lists them), and a field it does not have is refused.
     #[derive(Debug, Deserialize, JsonSchema)]
     pub struct CreateAgent {
         /// The bundle the agent runs (`file_bridge.tools`, or a bare bundle name such as `file_bridge`).
@@ -157,8 +157,6 @@ pub mod kernel {
         /// Its id (one safe path segment: no separator, no `|`, not hidden, no `..`, not all digits). Absent: minted from the bundle's name.
         #[schemars(regex(pattern = "^[0-9]*[^/\\\\|.0-9](?:[^/\\\\|.]|\\.[^/\\\\|.])*\\.?$"))]
         pub id: Option<String>,
-        /// The bundle a record inherits from when it runs another base than the bundle's own.
-        pub bundle: Option<String>,
         /// The fields of the new agent's record — whatever its bundle's record declares.
         #[serde(flatten)]
         pub fields: Map<String, Value>,
@@ -377,8 +375,6 @@ pub mod record {
         pub view: Option<Value>,
         /// The agent that stores the kernel's execution rows (the root's).
         pub memory_store_id: Option<String>,
-        /// The bundle the record inherits its fields from.
-        pub bundle: Option<String>,
     }
 
     /// The schema of a grant map: each key `"*"` (every verb) or a list of verbs.

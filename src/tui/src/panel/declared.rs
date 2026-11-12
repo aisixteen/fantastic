@@ -722,6 +722,16 @@ mod tests {
     }
 
     #[test]
+    fn the_declared_cap_is_sixteen_sections() {
+        let one = json!({"title": "T", "call": {"verb": "v"}, "show": "kv"});
+        assert!(parse_tui(&json!(vec![one.clone(); 16])).is_ok());
+        let r = refusal_of(json!(vec![one; 17]));
+        assert!(r["reason"].is_string(), "{r}");
+        assert!(err(&r).contains("tui"), "17 sections are refused by the declaration, naming `tui`: {r}");
+        assert!(!declared(&json!({"tui": vec![json!({"title": "T", "call": {"verb": "v"}, "show": "kv"}); 17]})));
+    }
+
+    #[test]
     fn an_unknown_show_kind_is_refused_naming_the_valid_ones() {
         let r = refusal_of(json!([{"title": "T", "call": {"verb": "v"}, "show": "grid"}]));
         assert!(err(&r).contains("view.tui[0]") && err(&r).contains("show"), "{r}");

@@ -35,15 +35,11 @@ fn the_idle_window_defaults_and_takes_a_positive_number() {
 
 #[test]
 fn a_window_that_is_not_a_positive_number_is_refused_at_the_write() {
-    let schema = {
-        let mut gen = schemars::gen::SchemaGenerator::default();
-        serde_json::to_value(crate::record::stream_idle_seconds(&mut gen)).unwrap()
-    };
+    let decl = crate::record::clock::RECORD.schema();
     for bad in [json!(0), json!(-1.5), json!("soon"), json!(true), json!([1])] {
-        let decl = json!({"properties": {"stream_idle_seconds": schema}});
         let call = json!({"type": "update", "stream_idle_seconds": bad});
         assert!(
-            fantastic_kernel::verbs::validate("update", &decl, &call).is_err(),
+            fantastic_kernel::verbs::validate("update", decl, &call).is_err(),
             "{bad}"
         );
     }

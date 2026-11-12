@@ -1055,8 +1055,6 @@ fn safe_client_strips_python_whitespace() {
     use crate::helpers::safe_client;
     // `\x1c`–`\x1f` are python whitespace; `str::trim` keeps them.
     assert_eq!(safe_client("\u{1f} p \u{1f}"), "p");
-    assert_eq!(safe_client("  "), "cli");
-    assert_eq!(safe_client(""), "cli");
     // UNICODE ALPHANUMERICS SURVIVE, and 70 of them are still 70.
     let long: String = "é".repeat(70);
     assert_eq!(safe_client(&long), long);

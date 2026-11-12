@@ -1722,6 +1722,18 @@ async fn rest_response_header_order_matches_python() {
     stop(&kernel, "web_hdr").await;
 }
 
+/// A reply that is null (a handler with no answer) is `204`: the header block is
+/// `date`, `server` only, with no `content-length` and no `content-type`.
+#[test]
+fn a_null_reply_is_204_with_date_and_server_only() {
+    let resp = crate::handlers::json_reply(Value::Null);
+    assert_eq!(resp.status(), axum::http::StatusCode::NO_CONTENT);
+    let names: Vec<&str> = resp.headers().keys().map(|k| k.as_str()).collect();
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert!(resp.headers().contains_key("date") && resp.headers().contains_key("server"), "{names:?}");
+    assert!(resp.headers().get("content-length").is_none() && resp.headers().get("content-type").is_none(), "{names:?}");
+}
+
 /// The octet leg's header contract.
 #[tokio::test]
 async fn octet_leg_header_contract_matches_python() {

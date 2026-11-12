@@ -30,7 +30,7 @@
 //! would trip [`fantastic_kernel::call_guard`] as a false cycle on turn 2. The
 //! INBOUND check lives in [`crate::verbs::send`], before the lock.
 
-use crate::constants::{MAX_CUT_TURNS, MAX_SILENT_TURNS};
+use crate::constants::MAX_CUT_TURNS;
 use crate::events::emit_status;
 use crate::helpers::mint_batch_token;
 use crate::history_view::{docs_head, example_verb, point_to_docs};
@@ -2192,10 +2192,10 @@ async fn count_silent_turn(
         *e += 1;
         *e
     };
-    let limit = crate::helpers::agent_meta(self_id, kernel)
-        .get("misfire_limit")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(MAX_SILENT_TURNS, |n| n as usize);
+    let limit = crate::record::ai::RECORD
+        .get(&crate::helpers::agent_meta(self_id, kernel), "misfire_limit")
+        .and_then(|v| v.as_u64())
+        .expect("misfire_limit declares a default") as usize;
     if streak < limit {
         return false;
     }

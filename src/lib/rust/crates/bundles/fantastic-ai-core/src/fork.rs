@@ -229,10 +229,6 @@ pub async fn fork(
         "display_name".to_string(),
         Value::from(name.unwrap_or_else(|| format!("{shown} fork"))),
     );
-    // the card's `bundle` (the kind it inherits from) is the argument of that name
-    let bundle = meta
-        .remove("bundle")
-        .and_then(|b| b.as_str().map(str::to_string));
     let Some(handler_module) = parent.handler_module.clone() else {
         return Ok(refuse(
             verb,
@@ -250,7 +246,6 @@ pub async fn fork(
             .map_or("kernel", |p| p.as_str())
             .to_string(),
         id: want_id,
-        bundle,
         fields: meta,
     };
     let Some(root) = kernel.root() else {

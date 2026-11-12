@@ -7,7 +7,7 @@ use crate::constants::MAX_CALL_DEPTH;
 use crate::context::{budget as agent_budget, output_reserve, resolve_context_window};
 use crate::declared::{History, Inquiry, Recall, Rows, Status, Unwatch, Watch};
 use crate::events::emit_status;
-use crate::helpers::{agent_meta, mint_send_id, now_secs, safe_client, DEFAULT_CLIENT_ID};
+use crate::helpers::{agent_meta, mint_send_id, now_secs, safe_client};
 use crate::memory::{load_history, MemResult};
 use crate::projection::{derive_reaction, round3, TRIGGER};
 use crate::provider::Provider;
@@ -996,7 +996,7 @@ pub async fn send(
         .send_to
         .clone()
         .filter(|s| !py_strip(s).is_empty());
-    let client_id = safe_client(args.client_id.as_deref().unwrap_or(DEFAULT_CLIENT_ID));
+    let client_id = safe_client(&args.client_id);
     // The sender's id, kept in RAM for `status`: the calling agent, else the client.
     let origin_id = fantastic_kernel::current_origin()
         .map_or_else(|| client_id.clone(), |o| o.as_str().to_string());
@@ -1681,12 +1681,7 @@ pub fn inquiry_accept(
     let task = fantastic_kernel::current_task();
     let pid = task.map_or_else(|| "-".to_string(), |t| t.0.to_string());
     let client = safe_client(&format!("inquiry-{pid}"));
-    let reply_client = safe_client(
-        args.reply_client_id
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(DEFAULT_CLIENT_ID),
-    );
+    let reply_client = safe_client(&args.reply_client_id);
     let request_id = args.request_id.clone().map_or(Value::Null, Value::String);
     crate::route::open_inquiries()
         .lock()
@@ -1831,7 +1826,7 @@ where
         Call::Reflect(_) => reflect(),
         Call::Boot(_) => boot(agent_id, kernel),
         Call::Send(a) => {
-            let client = safe_client(a.client_id.as_deref().unwrap_or(""));
+            let client = safe_client(&a.client_id);
             send(provider_for(&client), agent_id, &a, kernel, cfg).await?
         }
         // A receiver of this agent's streaming parts stops the generation.
@@ -1856,7 +1851,7 @@ where
         Call::Grep(a) => crate::retrieval::grep(agent_id, &a, kernel, cfg.model_window).await?,
         // Rebuild the view from the store: on boot, after folds, on request.
         Call::ContextRecall(a) => {
-            let p = provider_for(DEFAULT_CLIENT_ID);
+            let p = provider_for(&crate::declared::default_client_id());
             crate::retrieval::context_recall(
                 agent_id,
                 a.dry == Some(true),
@@ -1875,7 +1870,7 @@ where
         }
         // Fold a chosen stretch of the view into one fold row — the operator's mark.
         Call::ContextFold(a) => {
-            let p = provider_for(DEFAULT_CLIENT_ID);
+            let p = provider_for(&crate::declared::default_client_id());
             crate::retrieval::context_fold(agent_id, &a, kernel, &p, cfg.model_window).await?
         }
         // Compact the store: drop the rows the folds already summarise.

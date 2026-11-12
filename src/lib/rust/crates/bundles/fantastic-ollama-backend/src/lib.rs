@@ -48,9 +48,6 @@ pub const HANDLER_MODULE: &str = "ollama_backend.tools";
 /// Hard ceiling per `send` (mirrors Python's `SEND_TIMEOUT`).
 pub const SEND_TIMEOUT_SECS: f64 = fantastic_ai_core::SEND_TIMEOUT_SECS;
 
-/// Default `client_id` for callers that don't supply one.
-pub const DEFAULT_CLIENT_ID: &str = fantastic_ai_core::DEFAULT_CLIENT_ID;
-
 /// The name a required-field refusal carries.
 const BACKEND: &str = "ollama_backend";
 
@@ -405,10 +402,9 @@ pub struct OllamaRecord {
     pub num_predict: Option<i64>,
     /// Turn the model's thinking channel on or off.
     pub think: Option<bool>,
-    /// The read clock on the answer stream: seconds with no byte from the server (headers included) before the turn is judged stalled and ends with an error row.
-    #[serde(default)]
-    #[schemars(schema_with = "fantastic_ai_core::record::stream_idle_seconds")]
-    pub stream_idle_seconds: Option<f64>,
+    /// The read clock of the answer stream.
+    #[serde(flatten)]
+    pub clock: fantastic_ai_core::record::StreamClock,
     /// How the conversation is kept in the model's view.
     pub caching: Option<fantastic_ai_core::record::UncachedMode>,
     /// A door's key, when the server sits behind one — absent = no header.
