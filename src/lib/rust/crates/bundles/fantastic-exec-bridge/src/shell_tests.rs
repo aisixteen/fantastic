@@ -238,7 +238,7 @@ async fn a_pipe_job_always_names_its_command() {
     let r = call(&k, "sh_pipe", json!({"type": "start"})).await;
     assert_eq!(
         (&r["reason"], &r["arg"]),
-        (&json!("missing_arg"), &json!("command")),
+        (&json!("missing_arg"), &json!("command | pty")),
         "{r}"
     );
     // …and an explicit empty command on a PTY is a typo, not "use the shell".

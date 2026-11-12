@@ -399,8 +399,11 @@ async fn digit_string_refs_are_refused_as_not_row_ids() {
     )
     .await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
-    assert_eq!(r["arg"], "rows", "{r}");
-    assert!(r["error"].as_str().unwrap().starts_with("append: argument 'rows' must be"), "{r}");
+    assert_eq!(
+        r["error"],
+        format!("append: the arguments do not parse (invalid type: string \"{rid}\", expected i64)"),
+        "{r}"
+    );
     // The int ref is found.
     let r = append(
         &k,
@@ -517,15 +520,14 @@ async fn arg_refusals_carry_error_reason_arg_in_that_order() {
     let k = store();
     append(&k, "alice", json!([{"id": 1, "content": "a"}])).await;
     // a row id that is not a kernel int and refs that are not row ids are the engine's refusals
-    for payload in [
-        json!({"type": "append", "rows": [{"id": "5"}]}),
-        json!({"type": "append", "rows": [{"id": 0}]}),
-        json!({"type": "append", "rows": [{"id": 7, "refs": ["x"]}]}),
+    for (payload, why) in [
+        (json!({"type": "append", "rows": [{"id": "5"}]}), "invalid type: string \"5\", expected a nonzero u64"),
+        (json!({"type": "append", "rows": [{"id": 0}]}), "invalid value: integer `0`, expected a nonzero u64"),
+        (json!({"type": "append", "rows": [{"id": 7, "refs": ["x"]}]}), "invalid type: string \"x\", expected i64"),
     ] {
         let got = call(&k, payload.clone(), Some("alice")).await;
         assert_eq!(got["reason"], "bad_arg", "{payload}: {got}");
-        assert_eq!(got["arg"], "rows", "{payload}: {got}");
-        assert!(got["error"].as_str().unwrap().starts_with("append: argument 'rows' must be"), "{got}");
+        assert_eq!(got["error"], format!("append: the arguments do not parse ({why})"), "{payload}: {got}");
     }
     // an empty list, a missing list and a wrongly typed one are the entry's refusals
     for (payload, reason) in [

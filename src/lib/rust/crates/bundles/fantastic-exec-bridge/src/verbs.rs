@@ -26,6 +26,26 @@ fn positive(_gen: &mut SchemaGenerator) -> Schema {
     .expect("a number schema")
 }
 
+/// The object schema of `Start` and `Run`: the fields of `props` plus `pty`, and
+/// the rule that a `command` is given unless the job runs on a terminal (the
+/// engine's `anyOf` of `required` lists), so a call naming neither is refused by
+/// the engine.
+fn command_or_pty(gen: &mut SchemaGenerator, description: &str, mut props: Map<String, Value>) -> Schema {
+    let mut pty = serde_json::to_value(gen.subschema_for::<Terminal>()).expect("a terminal schema");
+    if let Some(o) = pty.as_object_mut() {
+        o.insert("description".into(), Value::from("Run it on a terminal of this size."));
+    }
+    props.insert("pty".into(), pty);
+    serde_json::from_value(serde_json::json!({
+        "type": "object",
+        "description": description,
+        "properties": props,
+        "anyOf": [{"required": ["command"]}, {"required": ["pty"]}],
+        "additionalProperties": false,
+    }))
+    .expect("a start schema")
+}
+
 /// A terminal to run a job on.
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -117,11 +137,10 @@ fn both() -> Stream {
 pub struct Boot {}
 
 /// Spawn a command in the BACKGROUND and return at once with {job_id, status, pty}. The FULL line (command + args) must fullmatch one of the record's `allowed` regexes, or be the shell line the record's `shell` permits. Where it runs and with what environment are the record's, never the call's.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Start {
     /// The executable ALONE (e.g. `grep`). On a PTY start, absent = the child's $SHELL, and with no `args` the record's whole shell line (`$SHELL -l` under shell="login").
-    #[schemars(regex(pattern = "\\S"))]
     pub command: Option<String>,
     /// Its arguments, one item each.
     pub args: Option<Vec<String>>,
@@ -129,12 +148,31 @@ pub struct Start {
     pub pty: Option<Terminal>,
 }
 
+/// `start`'s declaration: its three fields and the rule that a `command` is given
+/// unless the job runs on a terminal (the engine's `anyOf` of `required` lists).
+impl JsonSchema for Start {
+    fn schema_name() -> String {
+        "Start".to_string()
+    }
+
+    fn json_schema(gen: &mut SchemaGenerator) -> Schema {
+        let mut props = Map::new();
+        props.insert("command".into(), serde_json::json!({
+            "type": "string", "pattern": "\\S",
+            "description": "The executable ALONE (e.g. `grep`). On a PTY start, absent = the child's $SHELL, and with no `args` the record's whole shell line (`$SHELL -l` under shell=\"login\").",
+        }));
+        props.insert("args".into(), serde_json::json!({
+            "type": "array", "items": {"type": "string"}, "description": "Its arguments, one item each.",
+        }));
+        command_or_pty(gen, "Spawn a command in the BACKGROUND and return at once with {job_id, status, pty}. The FULL line (command + args) must fullmatch one of the record's `allowed` regexes, or be the shell line the record's `shell` permits. Where it runs and with what environment are the record's, never the call's.", props)
+    }
+}
+
 /// Start, wait, and return the output in ONE reply: {job_id, status, exit_code, lines}. For short commands; a job still running at `wait_s` comes back running (continue with status wait_s / tail). Read files with files.read, not run.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Run {
     /// The executable ALONE.
-    #[schemars(regex(pattern = "\\S"))]
     pub command: Option<String>,
     /// Its arguments, one item each.
     pub args: Option<Vec<String>>,
@@ -142,12 +180,37 @@ pub struct Run {
     pub pty: Option<Terminal>,
     /// How many seconds to wait for it to finish.
     #[serde(default = "sixty")]
-    #[schemars(range(min = 0, max = 600))]
     pub wait_s: f64,
     /// How many of its last lines come back.
     #[serde(default = "two_hundred")]
-    #[schemars(range(min = 1, max = 2000))]
     pub tail: i64,
+}
+
+/// `run`'s declaration: `start`'s fields, the two waits, and the same rule that a
+/// `command` is given unless the job runs on a terminal.
+impl JsonSchema for Run {
+    fn schema_name() -> String {
+        "Run".to_string()
+    }
+
+    fn json_schema(gen: &mut SchemaGenerator) -> Schema {
+        let mut props = Map::new();
+        props.insert("command".into(), serde_json::json!({
+            "type": "string", "pattern": "\\S", "description": "The executable ALONE.",
+        }));
+        props.insert("args".into(), serde_json::json!({
+            "type": "array", "items": {"type": "string"}, "description": "Its arguments, one item each.",
+        }));
+        props.insert("wait_s".into(), serde_json::json!({
+            "type": "number", "minimum": 0, "maximum": 600, "default": 60,
+            "description": "How many seconds to wait for it to finish.",
+        }));
+        props.insert("tail".into(), serde_json::json!({
+            "type": "integer", "minimum": 1, "maximum": 2000, "default": 200,
+            "description": "How many of its last lines come back.",
+        }));
+        command_or_pty(gen, "Start, wait, and return the output in ONE reply: {job_id, status, exit_code, lines}. For short commands; a job still running at `wait_s` comes back running (continue with status wait_s / tail). Read files with files.read, not run.", props)
+    }
 }
 
 /// One job (with its `cwd`; read its output with `tail`/`grep`), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}.

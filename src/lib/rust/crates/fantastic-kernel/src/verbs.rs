@@ -871,13 +871,7 @@ fn matches_type(schema: &Value, v: &Value) -> bool {
                 }
                 _ => false,
             },
-            "object" => v.as_object().is_some_and(|m| {
-                // an object met inside a list or a map: its declared fields are
-                // typed the same way a top-level argument's are
-                o.get("properties").and_then(Value::as_object).is_none_or(|p| {
-                    m.iter().all(|(k, x)| p.get(k).is_none_or(|ps| matches_type(ps, x)))
-                })
-            }),
+            "object" => v.is_object(),
             _ => true,
         }
     };

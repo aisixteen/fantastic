@@ -103,7 +103,7 @@ pub fn stage_rows(
     let mut staged: Vec<Map<String, Value>> = Vec::new();
     let mut batch: HashSet<i64> = HashSet::new();
     for r in rows {
-        let rid = r.id.unwrap_or_else(&mut mint);
+        let rid = r.id.map_or_else(&mut mint, |n| i64::try_from(n.get()).unwrap_or(i64::MAX));
         if !batch.insert(rid) {
             let mut e = refusal(EXISTS, format!("append: row {rid} already exists for this owner"));
             with(&mut e, "id", json!(rid));

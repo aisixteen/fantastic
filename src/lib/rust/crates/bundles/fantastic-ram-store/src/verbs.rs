@@ -31,7 +31,7 @@ pub struct Append {
 pub struct AppendRow {
     /// The kernel id the row was minted with; absent, the next id is taken from the kernel's counter.
     #[schemars(range(min = 1))]
-    pub id: Option<i64>,
+    pub id: Option<std::num::NonZeroU64>,
     /// Row ids this row folds (rows of the same owner, this batch included).
     pub refs: Option<Vec<i64>>,
     /// The row's own fields.

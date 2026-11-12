@@ -292,7 +292,7 @@ async fn every_start_refusal_carries_a_code() {
     let r = ask(json!({"type": "start"})).await;
     assert_eq!(
         (&r["reason"], &r["arg"]),
-        (&json!("missing_arg"), &json!("command")),
+        (&json!("missing_arg"), &json!("command | pty")),
         "{r}"
     );
     let r = ask(json!({"type": "start", "command": "echo", "args": [{"no": 1}]})).await;

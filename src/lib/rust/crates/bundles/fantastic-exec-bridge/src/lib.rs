@@ -47,7 +47,7 @@ use async_trait::async_trait;
 use fantastic_bundle::{io_error_str, py_repr, py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::refusal::{
-    bad, missing, refusal, refusal_hint, with, MISSING_ARG, NOT_FOUND, TRANSPORT_ERROR,
+    bad, refusal, refusal_hint, with, MISSING_ARG, NOT_FOUND, TRANSPORT_ERROR,
     UNAUTHORIZED, UNHANDLED,
 };
 use fantastic_kernel::{body_at, AgentId, Blob, Kernel, TaskId};
@@ -814,12 +814,8 @@ async fn start_job(
         None => String::new(),
         Some(v) => v.to_string(),
     };
-    // A given `command` is never blank (the declared `pattern`); a pipe job always
-    // names one, so what is left is the absent one (a PTY start without it took the
-    // shell above).
-    if command.is_empty() {
-        return Err(missing("start", "command"));
-    }
+    // A given `command` is never blank (the declared `pattern`) and a call naming
+    // neither `command` nor `pty` is refused by the engine (the declared `anyOf`).
     // The FULL argv, shell-joined, matched against the allowlist BEFORE spawning.
     let mut argv = Vec::with_capacity(args.len() + 1);
     argv.push(command.clone());
