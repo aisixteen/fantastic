@@ -1189,7 +1189,7 @@ async fn docs_of_an_agent_render_its_dynamic_verbs_beside_the_bundles_own() {
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("kernel_state"),
-        None,
+        Some("per_instance_probe".into()),
         None,
         Map::new(),
         PathBuf::new(),
@@ -1241,6 +1241,9 @@ async fn docs_of_an_agent_render_its_dynamic_verbs_beside_the_bundles_own() {
         a1["verbs"]["own_a1"], "args: x:int (req) — Only mine",
         "{a1}"
     );
+    // the ROOT answers the kernel's verbs too, as its reflect lists them
+    let root_docs = docs("kernel_state", json!({"verb": "create_agent"})).await;
+    assert!(root_docs["verbs"]["create_agent"].is_string(), "{root_docs}");
     // the detailed tier of one dynamic verb: the whole doc, then each argument
     let a2 = docs("a2", json!({"tier": "detailed", "verb": "own_a2"})).await;
     assert_eq!(

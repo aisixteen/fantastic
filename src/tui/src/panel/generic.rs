@@ -84,7 +84,10 @@ impl GenericPanel {
         };
 
         // HEADER: who, and whether it answers at all.
-        let sealed = r.get("sealed").and_then(Value::as_bool).unwrap_or(false);
+        let sealed = r
+            .get("ingress_rule")
+            .and_then(Value::as_str)
+            .is_some_and(|i| i != "allow_all_ingress");
         out.push(Line::from(vec![
             Span::styled(
                 format!("  {}  ", self.agent),
@@ -371,7 +374,6 @@ mod tests {
     fn the_default_view_shows_who_it_is_and_who_it_talks_to() {
         let r = json!({
             "sentence": "reads and writes files under a root",
-            "sealed": false,
             "can_call": {"$self": "*", "$parent": "*", "user": "*"},
             "callable_by": {"$self": "*", "$subtree": "*", "user": "*", "exec": ["read_stream"]},
             "ingress_rule": "allow_all_ingress",
@@ -394,7 +396,7 @@ mod tests {
 
     #[test]
     fn a_sealed_agent_says_so_from_its_own_reflect() {
-        let r = json!({"sealed": true, "callable_by": {}, "can_call": {}});
+        let r = json!({"ingress_rule": "deny_ingress", "callable_by": {}, "can_call": {}});
         let p = GenericPanel::new("leg".into());
         let store = crate::store::Store::default();
         let seen = std::collections::HashSet::new();

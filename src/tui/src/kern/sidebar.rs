@@ -131,6 +131,7 @@ mod tests {
                     ignore_subtrees: None,
                     handler_modules: None,
                     bundles: None,
+                    bundle_names: None,
                     limit: None,
                     after: None,
                 }),

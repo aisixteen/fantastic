@@ -337,7 +337,7 @@ async fn provider_cache_flags_the_primer_end_and_the_last_fold_and_the_fold_move
 
     // [u1, a1*primer, F1, F2*last fold], then the live turn
     let mut msgs = view_with(&kernel, &agent, Caching::ProviderCache).await;
-    crate::caching::mark(&mut msgs, Some(a1));
+    crate::caching::mark(&mut msgs, Some(a1), false);
     let flagged = |msgs: &[Value], key: &str| -> Vec<i64> {
         msgs.iter()
             .filter(|m| m.get(key) == Some(&json!(true)))
@@ -363,7 +363,7 @@ async fn provider_cache_flags_the_primer_end_and_the_last_fold_and_the_fold_move
     let a4 = put(&kernel, &agent, "assistant", "a4").await;
     let f3 = fold(&kernel, &agent, u4, a4, "fold three").await;
     let mut msgs = view_with(&kernel, &agent, Caching::ProviderCache).await;
-    crate::caching::mark(&mut msgs, Some(a1));
+    crate::caching::mark(&mut msgs, Some(a1), false);
     assert_eq!(
         flagged(&msgs, "cache_mark"),
         vec![a1, f3],
@@ -380,7 +380,7 @@ async fn no_primer_field_flags_no_primer_and_no_fold_flags_no_fold() {
     put(&kernel, &agent, "assistant", "a1").await;
 
     let mut msgs = view_with(&kernel, &agent, Caching::ProviderCache).await;
-    crate::caching::mark(&mut msgs, None);
+    crate::caching::mark(&mut msgs, None, false);
     let at = |msgs: &[Value]| -> Vec<usize> {
         (0..msgs.len())
             .filter(|i| msgs[*i].get("cache_mark") == Some(&json!(true)))
@@ -394,7 +394,7 @@ async fn no_primer_field_flags_no_primer_and_no_fold_flags_no_fold() {
 
     // the primer is named, but no fold exists: the primer's mark and the tail
     let mut msgs = view_with(&kernel, &agent, Caching::ProviderCache).await;
-    crate::caching::mark(&mut msgs, Some(a1));
+    crate::caching::mark(&mut msgs, Some(a1), false);
     assert_eq!(at(&msgs), vec![0, 1, msgs.len() - 1], "{msgs:?}");
 }
 
@@ -416,7 +416,7 @@ async fn a_primer_outside_the_view_flags_nothing_and_pins_nothing() {
     let u2 = put(&kernel, &agent, "user", "u2").await;
     let a2 = put(&kernel, &agent, "assistant", "a2").await;
     let mut msgs = view_with(&kernel, &agent, Caching::ProviderCache).await;
-    crate::caching::mark(&mut msgs, Some(a1));
+    crate::caching::mark(&mut msgs, Some(a1), false);
     assert!(
         msgs.iter()
             .all(|m| m["id"] != json!(a1) || m.get("cache_mark").is_none()),

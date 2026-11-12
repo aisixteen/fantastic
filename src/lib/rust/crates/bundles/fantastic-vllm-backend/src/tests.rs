@@ -1030,11 +1030,12 @@ async fn reflect_shows_the_effective_posture_and_the_shared_table() {
     assert_eq!(out["sentence"], json!(MAN));
     // WHERE its key is read: absent here, shown as null (a pointer, never a secret).
     assert_eq!(out.get("credentials"), Some(&Value::Null), "{out}");
-    assert_eq!(out["sampling"]["temperature"], json!(0.2));
-    assert_eq!(out["sampling"]["seed"], json!(3));
+    assert_eq!(out["temperature"], json!(0.2));
+    assert_eq!(out["seed"], json!(3));
     assert_eq!(out["thinking_token_budget_source"], json!("default"));
     assert_eq!(out["last_thinking_budget"], Value::Null);
-    assert_eq!(out["timeouts"], json!({"connect": 5.0, "read": 900.0}));
+    assert_eq!(out["connect_timeout"], json!(5.0));
+    assert_eq!(out["read_timeout"], json!(900.0));
     assert_eq!(
         out["kv"],
         json!({

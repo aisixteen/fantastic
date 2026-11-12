@@ -827,7 +827,7 @@ async fn reflect_key_order_matches_python() {
         .unwrap()
         .keys()
         .map(String::as_str)
-        .take(10)
+        .take(9)
         .collect();
     assert_eq!(
         keys,
@@ -841,7 +841,6 @@ async fn reflect_key_order_matches_python() {
             "compose",
             "ingress_rule",
             "egress_rule",
-            "sealed",
         ]
     );
     assert_eq!(
@@ -853,7 +852,6 @@ async fn reflect_key_order_matches_python() {
     );
     assert_eq!(r["ingress_rule"], "allow_all_ingress");
     assert_eq!(r["egress_rule"], "silent_egress");
-    assert_eq!(r["sealed"], false);
     assert_eq!(
         r["sentence"], crate::MAN
     );
@@ -941,12 +939,10 @@ fn reflect_posture_names_the_rules_the_gate_resolves() {
     let r = reflect_reply(&AgentId::from("fb"), &meta, &Ok(PathBuf::from("/")));
     assert_eq!(r["ingress_rule"], "allow_all_ingress");
     assert_eq!(r["egress_rule"], "silent_egress");
-    assert_eq!(r["sealed"], false);
     // No posture at all => sealed by default.
     let r = reflect_reply(&AgentId::from("fb"), &Map::new(), &Ok(PathBuf::from("/")));
     assert_eq!(r["ingress_rule"], "deny_ingress");
     assert_eq!(r["egress_rule"], "silent_egress");
-    assert_eq!(r["sealed"], true);
 }
 
 #[tokio::test]
@@ -978,7 +974,7 @@ async fn a_sealed_leg_denies_every_verb_but_reflect() {
     assert_eq!(r["reason"], "unauthorized", "{r}");
     // reflect still answers on a sealed leg.
     let r = call(&kernel, json!({"type": "reflect"})).await;
-    assert_eq!(r["sealed"], true, "{r}");
+    assert_eq!(r["ingress_rule"], "deny_ingress", "{r}");
 }
 
 #[tokio::test]

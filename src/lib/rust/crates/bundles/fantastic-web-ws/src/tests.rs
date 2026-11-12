@@ -85,7 +85,6 @@ async fn reflect_keys_match_python() {
             "sentence",
             "ingress_rule",
             "egress_rule",
-            "sealed",
         ]
     );
     assert_eq!(

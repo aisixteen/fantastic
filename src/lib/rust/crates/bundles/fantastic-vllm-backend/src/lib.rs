@@ -1124,7 +1124,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
     let meta = helpers::agent_meta(agent_id, kernel);
     let (sampling, explicit) = sampling(&meta);
     let secs = |key: &str| seconds(&meta, key);
-    out.insert("sampling".into(), Value::Object(sampling));
+    out.extend(sampling);
     out.insert("usage".into(), usage_now(agent_id.as_str()));
     out.insert(
         "thinking_token_budget_source".into(),
@@ -1142,13 +1142,8 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "max_tokens".into(),
         meta.get("max_tokens").cloned().unwrap_or(Value::Null),
     );
-    out.insert(
-        "timeouts".into(),
-        json!({
-            "connect": secs("connect_timeout"),
-            "read": secs("read_timeout"),
-        }),
-    );
+    out.insert("connect_timeout".into(), json!(secs("connect_timeout")));
+    out.insert("read_timeout".into(), json!(secs("read_timeout")));
     let mut kv = Map::new();
     kv.insert(
         "slots".into(),

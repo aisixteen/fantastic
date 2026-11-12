@@ -192,7 +192,15 @@ pub fn docs_reply(kernel: &Arc<Kernel>, args: &Docs) -> Value {
         .as_deref()
         .map(|a| bundle.dynamic_verbs(a))
         .unwrap_or_default();
-    let table = entries_of_decls(&[bundle.verbs(), crate::declared::common::VERBS], &dynamic);
+    // The root answers the kernel's verbs too, as its `reflect` lists them.
+    let is_root = agent.as_deref().is_some_and(|a| a.parent_id.is_none());
+    let mut lists: Vec<&[crate::verbs::Verb]> = Vec::new();
+    if is_root {
+        lists.push(crate::declared::kernel::VERBS);
+    }
+    lists.push(bundle.verbs());
+    lists.push(crate::declared::common::VERBS);
+    let table = entries_of_decls(&lists, &dynamic);
     render(of, json!(module), tier, verb, &table, Some(bundle.man()))
 }
 

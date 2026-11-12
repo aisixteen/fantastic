@@ -112,10 +112,8 @@ async fn reflect_keys_match_python() {
             "sentence",
             "ingress_rule",
             "egress_rule",
-            "sealed",
         ]
     );
-    assert_eq!(obj["sealed"], json!(true));
 }
 
 /// The record declaration judges the ingress rule: a name no rule spells, a number, an

@@ -95,7 +95,6 @@ tags, `$` included (`<callable_by><$self>*</$self><AGENT><item>VERB</item></AGEN
 A body (a file, a patch) goes in `<bytes>`…`</bytes>` VERBATIM — real newlines and quotes,
 nothing escaped, no fence; it ends at the first `</bytes>`. `<reply_to>` in `<routing>` picks where the reply
 goes: you by default (your next message), another id hands it to them, `null` discards it.
-`reflect` goes to the agent itself and says what it IS; how to CALL it is `docs`.
 
 ## Grants — every call is DENY-ALL
 You may call only what your `can_call` (in your self block) grants: `{key: "*" | [verbs]}`,
@@ -125,9 +124,9 @@ resend it, or drop it with `kernel` `<type>ack_deadletter</type>`.
 (an agent id, a bundle by its listed name, or
 `kernel` for create_agent, update_agent, ps, …): `<payload><type>docs</type><of>AGENT</of></payload>`.
 It answers one signature per verb; add `<verb>write</verb> <tier>detailed</tier>` for one
-verb's full text. A docs reply is TRANSIENT: after your next message it becomes a
-one-line stub — act on it then, or ask again. Reflect only agents you are granted; for part
-of a tree, `reflect` takes `<show_subtrees>` or `<ignore_subtrees>`, each a list of `<item>` ids.
+verb's full text. A `docs` reply folds after your next message: in that answer,
+restate only the essentials you will still need (the few fields, types, ids), never the whole
+reply; asking again costs a turn.
 
 ## Inquiries
 Look it up, or take the obvious reading and say your assumption. Send an `inquiry` only when
@@ -139,6 +138,15 @@ for it. Asked one yourself
 <call name="inquiry_answer"><answer>what you concluded</answer></call>
 — nothing else counts as your answer.
 "#;
+
+/// What an agent IS — `reflect`, rendered from its one declaration (every argument).
+fn reflect_howto() -> String {
+    let rows = fantastic_kernel::verbs::rows(&[fantastic_kernel::declared::common::VERBS], &[]);
+    format!(
+        "## What an agent IS — `reflect`\nSend it to any agent you are granted; to `kernel` for the tree, and with `bundles` the bundles' records (the fields `create_agent` takes); name only the ones you need, e.g. `<payload><type>reflect</type><bundles>all</bundles><bundle_names><item>BUNDLE</item></bundle_names></payload>` — each argument closes with its own tag.\n{}",
+        rows.first().map(fantastic_kernel::verbs::detail).unwrap_or_default()
+    )
+}
 
 /// The titles how-to, appended when the record sets `context_titles`. A title
 /// rides on the reply's tag and is what REMAINS once the body is stripped.
@@ -213,7 +221,7 @@ Your view is finite: when it overflows, older turns are compacted and a
 `[context-notice]` says so; the transcript stays whole. Send your OWN id
 `<type>recall</type>` (`<query>`, `<limit>`) to page dropped turns back, `<type>context_status</type>`
 for your budget.
-A [folded …], [thought …] or [cut …] anchor stands for a body you already saw in full; `recall` with its id to read it again — it folds back after your next answer. A folded `reflect` or `docs` reply has no id: call it again for the current state.
+A [folded …], [thought …] or [cut …] anchor stands for a body you already saw in full; `recall` with its id to read it again — it folds back after your next answer. A folded `docs` reply has no id: use what you restated; call it again only when the state may have changed. {reflect_fold}
 A reply that will fold after your answer ends with a `keep` call holding its id: write what you will still need of it in `summary`, short, and the folded block shows that in place of the body; leave it out and the block folds to its anchor.
 Your thinking lasts one turn: after you answer it folds to a [thought …] anchor and is not kept. Use it to choose the next step, not to gather again what you already know. Do not repeat a call whose result you still have or noted; fetch again only what was folded and you need.
 "#;
@@ -342,7 +350,15 @@ async fn parts(
         let flag = |k: &str| meta.get(k).and_then(Value::as_bool) == Some(true);
         let mut blocks = vec![
             SEND_TO_HOWTO.to_string(),
-            CONTEXT_HOWTO.to_string(),
+            reflect_howto(),
+            CONTEXT_HOWTO.replace(
+                "{reflect_fold}",
+                if flag("reflect_fold") {
+                    "A `reflect` reply folds the same way."
+                } else {
+                    "A `reflect` reply stays whole."
+                },
+            ),
             MEMORY_HOWTO.replace("{store}", &store),
         ];
         if flag("context_titles") {
@@ -611,10 +627,11 @@ pub async fn assemble_messages(
     };
     *state.view_source.lock().expect("view_source poisoned") = Some(source.to_string());
     let rendered = render_history(&store, listed.as_deref(), caching.cleans());
+    let reflect_fold = crate::record::reflect_fold(&crate::helpers::agent_meta(self_id, kernel));
     let pics = Pictures::of(self_id, state, kernel, &store, &rendered);
     for r in rendered {
         let (msg, form) = if caching.folds() && r.res == "full" {
-            crate::history_view::autofold(&store, r.idx, &r.msg, Some(user_text))
+            crate::history_view::autofold(&store, r.idx, &r.msg, Some(user_text), reflect_fold)
         } else {
             (r.msg, if r.res == "full" { "whole" } else { "anchor" })
         };

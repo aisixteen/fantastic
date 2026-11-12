@@ -505,7 +505,7 @@ fn recalled_what(store: &[Value], tag_line: &str, agent: &str, nth: usize) -> St
 }
 
 /// The token count over which a block of this `verb` folds once answered:
-/// reference replies (`reflect`, `docs`) fold sooner than any other body (#634).
+/// `docs` replies fold sooner than any other body (#634); a `reflect` never folds.
 fn fold_limit(verb: &str) -> usize {
     if matches!(verb, "reflect" | "docs") {
         REFERENCE_FOLD_AT
@@ -516,17 +516,19 @@ fn fold_limit(verb: &str) -> usize {
 
 /// Whether a user turn's content will fold once it is answered: it opens with a
 /// reply tag and carries a recall reply or a body over its verb's fold limit
-/// ([`AUTOFOLD_AT`] tokens; [`REFERENCE_FOLD_AT`] for `reflect` and `docs`).
+/// ([`AUTOFOLD_AT`] tokens; [`REFERENCE_FOLD_AT`] for `docs`; a `reflect` never folds).
 #[must_use]
-pub fn will_fold(content: &str) -> bool {
-    parse_reply_tag(content).is_some() && reply_blocks(content).into_iter().any(block_folds)
+pub fn will_fold(content: &str, reflect_fold: bool) -> bool {
+    parse_reply_tag(content).is_some()
+        && reply_blocks(content).into_iter().any(|b| block_folds(b, reflect_fold))
 }
 
 /// Whether one reply block folds once answered: a recall reply, or a body over its
 /// verb's fold limit.
-fn block_folds(block: &str) -> bool {
+fn block_folds(block: &str, reflect_fold: bool) -> bool {
     let verb = parse_reply_tag(block).map_or("", |(_, v)| v);
-    verb == "recall" || body_tokens(body_of(block)) > fold_limit(verb)
+    verb == "recall"
+        || ((reflect_fold || verb != "reflect") && body_tokens(body_of(block)) > fold_limit(verb))
 }
 
 /// The pid a reply block names (`[reply to <pid> · …]`), when it is a number.
@@ -540,13 +542,13 @@ pub fn reply_pid(block: &str) -> Option<i64> {
 /// — the block's pid filled in — closing each reply block that will fold. The call's
 /// presence is the cue; the model's view of the turn only, never stored.
 #[must_use]
-pub fn mark_keep(content: &str) -> String {
+pub fn mark_keep(content: &str, reflect_fold: bool) -> String {
     if parse_reply_tag(content).is_none() {
         return content.to_string();
     }
     reply_blocks(content)
         .into_iter()
-        .map(|b| match reply_pid(b).filter(|_| block_folds(b)) {
+        .map(|b| match reply_pid(b).filter(|_| block_folds(b, reflect_fold)) {
             Some(pid) => format!(
                 "{b}\n<call name=\"keep\"><of>{pid}</of><summary>\u{2026}</summary></call>"
             ),
@@ -613,6 +615,7 @@ pub fn autofold(
     idx: usize,
     msg: &Value,
     incoming: Option<&str>,
+    reflect_fold: bool,
 ) -> (Value, &'static str) {
     let (Some(row), Some(content)) = (store.get(idx), msg.get("content").and_then(Value::as_str))
     else {
@@ -675,7 +678,7 @@ pub fn autofold(
                             ),
                             kept_summary(row, reply_pid(b)),
                         )
-                    } else if x > fold_limit(verb) {
+                    } else if (reflect_fold || verb != "reflect") && x > fold_limit(verb) {
                         changed = true;
                         let head = cap120(body.split('\n').next().unwrap_or("").trim());
                         let summary = kept_summary(row, reply_pid(b));
@@ -886,7 +889,7 @@ mod tests {
 
     /// The view message of `store[idx]` after autofold.
     fn folded(store: &[Value], idx: usize, incoming: Option<&str>) -> String {
-        let (out, _) = autofold(store, idx, &store[idx], incoming);
+        let (out, _) = autofold(store, idx, &store[idx], incoming, false);
         out["content"].as_str().unwrap().to_string()
     }
 
@@ -1079,19 +1082,27 @@ mod tests {
     }
 
     #[test]
-    fn reflect_and_docs_replies_fold_over_the_reference_limit_only() {
+    fn docs_replies_fold_over_the_reference_limit_and_a_reflect_never_folds() {
         use crate::constants::REFERENCE_FOLD_AT;
         let over = "x".repeat(REFERENCE_FOLD_AT * 4 + 4);
         let at = "x".repeat(REFERENCE_FOLD_AT * 4);
-        for verb in ["reflect", "docs"] {
+        // a reflect stays whole at any size, answered or not
+        let big = format!("[reply to 3 \u{b7} ai reflect]\nhead line\n{}", "x".repeat(AUTOFOLD_AT * 8));
+        assert!(!will_fold(&big, false));
+        let kept = [row(7, "user", &big), row(8, "assistant", "ok")];
+        assert_eq!(autofold(&kept, 0, &kept[0], None, false).1, "whole");
+        // `reflect_fold` on: a reflect folds like a docs reply
+        assert!(will_fold(&big, true));
+        assert_eq!(autofold(&kept, 0, &kept[0], None, true).1, "anchor");
+        for verb in ["docs"] {
             let tag = format!("[reply to 3 \u{b7} ai {verb}]\n");
-            assert!(will_fold(&format!("{tag}{over}")), "{verb}");
-            assert!(!will_fold(&format!("{tag}{at}")), "{verb}");
+            assert!(will_fold(&format!("{tag}{over}"), false), "{verb}");
+            assert!(!will_fold(&format!("{tag}{at}"), false), "{verb}");
             let store = [
                 row(7, "user", &format!("{tag}head line\n{over}")),
                 row(8, "assistant", "ok"),
             ];
-            let (out, form) = autofold(&store, 0, &store[0], None);
+            let (out, form) = autofold(&store, 0, &store[0], None, false);
             assert_eq!(form, "anchor");
             assert_eq!(
                 out["content"].as_str().unwrap(),
@@ -1102,27 +1113,27 @@ mod tests {
             );
             // one under the limit stays inline; so does an unanswered one
             let small = [row(7, "user", &format!("{tag}{at}")), row(8, "assistant", "ok")];
-            assert_eq!(autofold(&small, 0, &small[0], None).1, "whole");
-            assert_eq!(autofold(&store[..1], 0, &store[0], None).1, "whole");
+            assert_eq!(autofold(&small, 0, &small[0], None, false).1, "whole");
+            assert_eq!(autofold(&store[..1], 0, &store[0], None, false).1, "whole");
         }
         // any other verb keeps the large-body limit
         let other = format!("[reply to 3 \u{b7} ai read]\n{}", "x".repeat(REFERENCE_FOLD_AT * 4 + 4));
-        assert!(!will_fold(&other));
+        assert!(!will_fold(&other, false));
     }
 
     #[test]
     fn will_fold_is_true_for_a_recall_or_a_large_block_only() {
-        assert!(will_fold("[reply to 3 · ai recall]\nx"));
+        assert!(will_fold("[reply to 3 · ai recall]\nx", false));
         assert!(will_fold(&format!(
             "[reply to 3 · notes read]\n{}",
             "x".repeat(AUTOFOLD_AT * 4 + 4)
-        )));
+        ), false));
         assert!(!will_fold(&format!(
             "[reply to 3 · notes read]\n{}",
             "x".repeat(AUTOFOLD_AT * 4)
-        )));
-        assert!(!will_fold("[reply to 3 · notes read]\nsmall"));
-        assert!(!will_fold(&"x".repeat(AUTOFOLD_AT * 8)));
+        ), false));
+        assert!(!will_fold("[reply to 3 · notes read]\nsmall", false));
+        assert!(!will_fold(&"x".repeat(AUTOFOLD_AT * 8), false));
     }
 
     fn kept_row(content: &str, keep: Option<&str>) -> Vec<Value> {
@@ -1137,19 +1148,19 @@ mod tests {
     fn keep_marks_the_blocks_that_will_fold_only() {
         let big = format!("[reply to 3 · ai read]\nhead\n{}", "x".repeat(AUTOFOLD_AT * 4 + 4));
         let small = "[reply to 4 · ai read]\nsmall";
-        let marked = mark_keep(&format!("{small}\n\n{big}"));
+        let marked = mark_keep(&format!("{small}\n\n{big}"), false);
         assert_eq!(marked.matches("<call name=\"keep\">").count(), 1);
         assert!(marked.starts_with(small), "{marked}");
         assert!(marked.ends_with("<call name=\"keep\"><of>3</of><summary>\u{2026}</summary></call>"));
-        assert_eq!(mark_keep(small), small);
-        assert_eq!(mark_keep("plain text"), "plain text");
+        assert_eq!(mark_keep(small, false), small);
+        assert_eq!(mark_keep("plain text", false), "plain text");
     }
 
     #[test]
     fn a_kept_summary_stands_for_the_body_when_it_folds() {
         let big = format!("[reply to 3 · ai read]\nhead\n{}", "x".repeat(AUTOFOLD_AT * 4 + 4));
         let store = kept_row(&big, Some("the part I need"));
-        let (out, form) = autofold(&store, 0, &store[0], None);
+        let (out, form) = autofold(&store, 0, &store[0], None, false);
         assert_eq!(form, "anchor");
         assert_eq!(
             out["content"],
@@ -1164,12 +1175,12 @@ mod tests {
         let long = "y".repeat(KEEP_SUMMARY_MAX * 4 + 4);
         for keep in [None, Some(long.as_str()), Some("\u{2026}"), Some(" ... "), Some("")] {
             let store = kept_row(&big, keep);
-            let (out, _) = autofold(&store, 0, &store[0], None);
+            let (out, _) = autofold(&store, 0, &store[0], None, false);
             assert_eq!(out["content"], json!(plain), "{keep:?}");
         }
         let at = "y".repeat(KEEP_SUMMARY_MAX * 4);
         let store = kept_row(&big, Some(&at));
-        let (out, _) = autofold(&store, 0, &store[0], None);
+        let (out, _) = autofold(&store, 0, &store[0], None, false);
         assert!(out["content"].as_str().unwrap().ends_with(&at));
     }
 }

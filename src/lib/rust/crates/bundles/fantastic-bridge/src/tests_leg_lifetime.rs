@@ -70,7 +70,7 @@ async fn resealing_a_live_leg_refuses_the_next_inbound_call() {
     .await;
     assert_eq!(sealed["updated"], true, "{sealed}");
     let shown = ask(&k, &bid, json!({"type": "reflect"})).await;
-    assert_eq!(shown["sealed"], true, "{shown}");
+    assert_eq!(shown["ingress_rule"], "deny_ingress", "{shown}");
     let out = inbound(&peer, &bid, 2).await;
     assert_eq!(out["reason"], "unauthorized", "{out}");
     assert!(

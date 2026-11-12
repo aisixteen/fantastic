@@ -590,8 +590,9 @@ async fn tick_now_fires_immediately_and_appends_history() {
         .remove(0)
         .result;
     assert_eq!(fired["fired"], true);
+    // exactly one of the two: the target's answer, or why it did not answer
     assert!(
-        fired.get("result").is_some() && fired.get("error").is_some(),
+        fired.get("result").is_some() != fired.get("error").is_some(),
         "{fired}"
     );
     let hist = kernel

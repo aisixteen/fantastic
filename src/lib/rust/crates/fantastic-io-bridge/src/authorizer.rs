@@ -232,14 +232,13 @@ impl Rules {
         serde_json::from_value(Value::Object(own)).map_err(|e| e.to_string())
     }
 
-    /// A leg's auth POSTURE for `reflect` — the rule NAMES (never the env var) plus
-    /// whether the leg is sealed: `{ingress_rule, egress_rule, sealed}`.
+    /// A leg's auth POSTURE for `reflect` — the rule NAMES (never the env var) as
+    /// `{ingress_rule, egress_rule}`.
     #[must_use]
     pub fn describe(&self) -> Value {
         json!({
             "ingress_rule": self.ingress_rule.as_str(),
-            "egress_rule": self.egress_rule.as_str(),
-            "sealed": self.ingress_rule != IngressName::AllowAll,
+            "egress_rule": self.egress_rule.as_str()
         })
     }
 }
@@ -271,18 +270,18 @@ mod rules_tests {
     fn a_record_without_rules_is_sealed_and_silent() {
         assert_eq!(
             rules(json!({})).unwrap().describe(),
-            json!({"ingress_rule": "deny_ingress", "egress_rule": "silent_egress", "sealed": true})
+            json!({"ingress_rule": "deny_ingress", "egress_rule": "silent_egress"})
         );
         assert_eq!(rules(json!({})).unwrap().token_env, DEFAULT_TOKEN_ENV);
         assert_eq!(
             rules(json!({"ingress_rule": "allow_all_ingress"})).unwrap().describe(),
-            json!({"ingress_rule": "allow_all_ingress", "egress_rule": "silent_egress", "sealed": false})
+            json!({"ingress_rule": "allow_all_ingress", "egress_rule": "silent_egress"})
         );
         assert_eq!(
             rules(json!({"ingress_rule": "password_ingress", "egress_rule": "password_egress", "token_env": "MY_TOKEN"}))
                 .unwrap()
                 .describe(),
-            json!({"ingress_rule": "password_ingress", "egress_rule": "password_egress", "sealed": true})
+            json!({"ingress_rule": "password_ingress", "egress_rule": "password_egress"})
         );
     }
 

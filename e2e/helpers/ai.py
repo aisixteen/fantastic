@@ -85,8 +85,8 @@ class Connected:
 # the pair: `connect` uses it, and so does every probe that wires its own AI.
 CHAT_MODULE = "ai_chat.tools"
 PROVIDER_CALLS = ["complete", "watch", "reflect"]
-#: record fields the CHAT takes too (it sizes its own context and output)
-CHAT_SHARED = ("model", "max_tokens", "context_window")
+#: record fields the CHAT takes too (it sizes its own context; output is the provider's max_tokens)
+CHAT_SHARED = ("model", "context_window", "caching")
 #: record fields that are the PROVIDER's only, wherever a probe puts them
 PROVIDER_ONLY = ("handler_module", "endpoint", "credentials", "num_ctx", "kv_slots",
                  "kv_overflow", "no_repeat_ngram_size", "repetition_penalty",
@@ -135,6 +135,9 @@ def chat_pair(backend, chat: dict, *, role: str | None = None,
     # the KEY is the provider's: the chat names no credentials and reads no `creds`
     chat_fields.pop("credentials", None)
     chat_fields["can_call"].pop(creds.CREDS, None)
+    # `REFLECT_FOLD=1`: the chat folds answered reflect replies (its record's `reflect_fold`)
+    if os.environ.get("REFLECT_FOLD") == "1":
+        chat_fields["reflect_fold"] = True
     return prov, {"type": "create_agent", **chat_fields, "handler_module": CHAT_MODULE,
                   "provider_id": pid}
 

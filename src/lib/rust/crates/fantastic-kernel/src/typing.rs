@@ -39,7 +39,7 @@ fn kinds(schema: &Value) -> Vec<&str> {
 /// `Err(want)` names the declared kind the text is not.
 fn read(schema: &Value, s: &str) -> Result<Value, String> {
     let ks = kinds(schema);
-    if ks.is_empty() || ks.contains(&"string") {
+    if ks.is_empty() || takes_text(schema, s) {
         return Ok(Value::String(s.to_string()));
     }
     let t = s.trim();
@@ -67,6 +67,26 @@ fn read(schema: &Value, s: &str) -> Result<Value, String> {
         }
     }
     Err(ks.join(" or "))
+}
+
+/// Whether some string alternative of `schema` accepts `s`: a string schema with no
+/// `enum`, or an `enum` that lists it (searched through `type`/`anyOf`/`oneOf`).
+fn takes_text(schema: &Value, s: &str) -> bool {
+    if let Some(Value::Array(vals)) = schema.get("enum") {
+        return vals.iter().any(|v| v.as_str() == Some(s));
+    }
+    let typed = match schema.get("type") {
+        Some(Value::String(t)) => t == "string",
+        Some(Value::Array(ts)) => ts.iter().any(|t| t.as_str() == Some("string")),
+        _ => false,
+    };
+    typed
+        || ["anyOf", "oneOf"].iter().any(|key| {
+            schema
+                .get(key)
+                .and_then(Value::as_array)
+                .is_some_and(|alts| alts.iter().any(|a| takes_text(a, s)))
+        })
 }
 
 fn is_integer(t: &str) -> bool {
@@ -272,6 +292,16 @@ pub fn operator_payload(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn union_text_goes_to_the_alternative_that_accepts_it() {
+        let shell = json!({"anyOf": [{"type": "boolean"}, {"type": "string", "enum": ["login"]}]});
+        assert_eq!(read(&shell, "false"), Ok(json!(false)));
+        assert_eq!(read(&shell, "true"), Ok(json!(true)));
+        assert_eq!(read(&shell, "login"), Ok(json!("login")));
+        assert!(read(&shell, "other").is_err());
+        assert_eq!(read(&json!({"type": "string"}), "false"), Ok(json!("false")));
+    }
 
     #[test]
     fn text_becomes_the_type_the_schema_states() {

@@ -1971,7 +1971,7 @@ async fn reflect_sentence_and_verbs_match_python() {
     );
     let verbs = reply["verbs"].as_object().expect("a verbs block");
     // `reflect` is the common verb every agent answers: its rendered line
-    assert_eq!(verbs["reflect"], json!("args: detail:'distilled'|'full'?, tree:'all'|'ids'|'none'?, show_subtrees:list[string]?, ignore_subtrees:list[string]?, handler_modules:list[string]?, bundles:'all'|'ids'?, limit:int >= 1?, after:string? — What this agent IS: identity, sentence, state, grants — and, by flags, its subtree and the installable bundles"));
+    assert_eq!(verbs["reflect"], json!("args: detail:'distilled'|'full'?, tree:'all'|'ids'|'none'?, show_subtrees:list[string]?, ignore_subtrees:list[string]?, handler_modules:list[string]?, bundles:'all'|'ids'?, bundle_names:list[string]?, limit:int >= 1?, after:string? — What this agent IS: identity, sentence, state, grants — and, by flags, its subtree and the installable bundles"));
     for name in ["boot", "stop", "mount", "unmount", "fetch_file"] {
         assert!(verbs[name].is_string(), "{name}: {verbs:?}");
     }
