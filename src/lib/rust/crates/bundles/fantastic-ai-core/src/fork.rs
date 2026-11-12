@@ -75,15 +75,24 @@ fn leaves(fold: &Value, folds: &[&Value], seen: &mut HashSet<i64>, out: &mut Vec
     }
 }
 
-/// Why `at` is not a fork point: `(reason, why)`.
-type NoFork = (&'static str, String);
+/// Why `at` is not a fork point: the kernel refusal code it answers with, what is
+/// wrong, and what to do instead.
+struct NoFork {
+    code: &'static str,
+    why: String,
+    hint: &'static str,
+}
 
 /// The rows a fork at `at` carries over, in id order — or why `at` is no fork
 /// point. `rows` is the parent's WHOLE store.
 fn plan(rows: &[Value], at: i64) -> Result<Vec<Value>, NoFork> {
     let conv: Vec<&Value> = rows.iter().filter(|r| is_conversation(r)).collect();
     if !conv.iter().any(|r| row_id(r) == Some(at)) {
-        return Err(("no_such_row", format!("no row {at} in this conversation")));
+        return Err(NoFork {
+            code: NOT_FOUND,
+            why: format!("no row {at} in this conversation"),
+            hint: "name a row of this conversation (see `history`)",
+        });
     }
     // Folds first: a fold whose members straddle `at` is cut, whatever else holds.
     let folds: Vec<&Value> = conv.iter().copied().filter(|r| is_fold(r)).collect();
@@ -95,10 +104,11 @@ fn plan(rows: &[Value], at: i64) -> Result<Vec<Value>, NoFork> {
         let below = ls.iter().any(|&l| l <= at);
         let above = ls.iter().any(|&l| l > at);
         if above && (below || id <= at) {
-            return Err((
-                "cuts_fold",
-                format!("row {at} cuts fold {id}: some of its members are before it, some after"),
-            ));
+            return Err(NoFork {
+                code: BAD_ARG,
+                why: format!("row {at} cuts fold {id}: some of its members are before it, some after"),
+                hint: "fork at a row before the fold or after all of it",
+            });
         }
         if id > at && below {
             whole.insert(id);
@@ -120,10 +130,11 @@ fn plan(rows: &[Value], at: i64) -> Result<Vec<Value>, NoFork> {
             .iter()
             .any(|&i| row_id(&in_chain[i]).is_some_and(|id| id > at));
         if below && (above || is_open(&in_chain, &chain)) {
-            return Err((
-                "cuts_turn",
-                format!("row {at} is inside a turn that is not finished"),
-            ));
+            return Err(NoFork {
+                code: BAD_ARG,
+                why: format!("row {at} is inside a turn that is not finished"),
+                hint: "fork at the end of a finished turn, or at a `mark`",
+            });
         }
     }
     // What the prompt is assembled from: the newest `view` row at or
@@ -196,14 +207,7 @@ pub async fn fork(
     let rows = whole_store(agent_id, kernel).await?;
     let copy = match plan(&rows, at) {
         Ok(c) => c,
-        Err((reason, why)) => {
-            let (code, hint) = match reason {
-                "no_such_row" => (NOT_FOUND, "name a row of this conversation (see `history`)"),
-                "cuts_fold" => (BAD_ARG, "fork at a row before the fold or after all of it"),
-                _ => (BAD_ARG, "fork at the end of a finished turn, or at a `mark`"),
-            };
-            return Ok(refuse(verb, code, &why, hint, Some(at)));
-        }
+        Err(no) => return Ok(refuse(verb, no.code, &no.why, no.hint, Some(at))),
     };
     let store = store_of(agent_id, kernel)?;
     let Some(parent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
@@ -380,11 +384,11 @@ pub async fn mark(
             None,
         ));
     };
-    if let Err((_, text)) = plan(&rows, at) {
+    if let Err(no) = plan(&rows, at) {
         return Ok(refuse(
             verb,
             BAD_ARG,
-            &text,
+            &no.why,
             "mark once the turn has ended",
             Some(at),
         ));

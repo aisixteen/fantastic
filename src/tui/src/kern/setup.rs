@@ -14,6 +14,8 @@
 //! (the root's `memory_store_id`, which admits it); `user`'s own side and each
 //! target's `callable_by` are `kern/reach`'s — an AI agent is a holder.
 
+use std::sync::Arc;
+
 use serde_json::{json, Map, Value};
 
 use crate::kern::host::Host;
@@ -87,30 +89,31 @@ impl Backend {
     }
 }
 
-/// The AI backend bundles a set-up can name.
-pub const BACKENDS: [&str; 5] =
-    ["anthropic_backend.tools", "ollama_backend.tools", "responses_backend.tools", "vllm_backend.tools", "foundation_models_backend.tools"];
-
-/// The schema of a set-up's backend: one of the five backend bundle names.
-pub fn handler_schema() -> Value {
-    json!({"type": "string", "minLength": 1, "enum": BACKENDS})
+/// The backend bundles this build links: every registered bundle whose declared verbs
+/// include the provider contract's `complete` (the verb a chat completes through) —
+/// read from the bundles' own declarations, no list kept here.
+fn is_backend(b: &Arc<dyn fantastic_kernel::Bundle>) -> bool {
+    b.verbs().iter().any(|v| v.name == "complete")
 }
 
-/// A set-up record's declared schema as the shared engine reads it: its
-/// `handler_module` is one of [`BACKENDS`].
-pub fn check_backend(handler: &str) -> Result<(), Value> {
-    let schema = json!({"type": "object", "required": ["handler_module"], "properties": {"handler_module": handler_schema()}});
-    fantastic_kernel::verbs::validate("set-up", &schema, &json!({"handler_module": handler})).map(|_| ())
+/// `handler` is one of the backends this build links; otherwise the refusal.
+pub fn check_backend(host: &Host, handler: &str) -> Result<(), Value> {
+    match host.kernel.bundles.catalog().find(|(m, _)| *m == handler) {
+        Some((_, b)) if is_backend(b) => Ok(()),
+        _ => Err(fantastic_kernel::refusal(
+            fantastic_kernel::refusal::BAD_ARG,
+            format!("{handler:?} is not a backend this build links"),
+        )),
+    }
 }
 
-/// The backends this build links — every registered module with a record
-/// schema that is one of the five backend names — with their schemas.
+/// The backends this build links with their schemas.
 pub fn backends(host: &Host) -> Vec<Backend> {
     let mut v: Vec<Backend> = host
         .kernel
         .bundles
         .catalog()
-        .filter(|(m, _)| BACKENDS.contains(m))
+        .filter(|(_, b)| is_backend(b))
         .map(|(m, b)| Backend::from_schema(m, b.record().schema()))
         .collect();
     v.sort_by(|a, b| a.module.cmp(&b.module));
@@ -187,7 +190,7 @@ pub fn typed(host: &Host, handler: &str, texts: &Map<String, Value>) -> Result<M
 /// properties (the write-owned ones left out), nothing else allowed, none required
 /// (a change names only what it sets).
 pub fn fields_schema(host: &Host, handler: &str) -> Result<Value, String> {
-    check_backend(handler).map_err(|r| r["error"].as_str().unwrap_or("not a backend").to_string())?;
+    check_backend(host, handler).map_err(|r| r["error"].as_str().unwrap_or("not a backend").to_string())?;
     let (_, bundle) = host
         .kernel
         .bundles

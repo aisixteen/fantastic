@@ -153,20 +153,10 @@ pub fn loader_dir(kernel: &Kernel, loader: &Agent) -> Result<PathBuf, String> {
 }
 
 /// The children-container name a loader's records nest under — python
-/// `_children_name(agent)`: its own `children_dir` meta, default `agents`.
+/// `_children_name(agent)`: its own `children_dir` meta, else the declared default.
 #[must_use]
 pub fn loader_children(loader: &Agent) -> String {
-    loader
-        .meta
-        .read()
-        .ok()
-        .and_then(|m| {
-            m.get("children_dir")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| crate::kernel::DEFAULT_CHILDREN_DIR.to_string())
+    crate::declared::record::children_dir(&loader.meta.read().expect("meta poisoned"))
 }
 
 /// DISCOVER a loader's persistence provider — python `_find_store(agent)`: a

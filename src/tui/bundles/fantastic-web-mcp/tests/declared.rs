@@ -53,7 +53,7 @@ async fn every_verb_is_checked_by_its_declaration() {
         let r = op(&k, "mcp", json!({"type": v.name, "zzz_unknown": 1})).await;
         assert_eq!(why(&r), (Some("bad_arg"), Some("zzz_unknown")), "{}: {r}", v.name);
     }
-    for (verb, arg) in [("inbound_send", "items"), ("inquiry", "text"), ("answer", "re")] {
+    for (verb, arg) in [("inbound_send", "items"), ("inquiry", "text"), ("answer_inquiry", "re")] {
         let r = op(&k, "mcp", json!({"type": verb})).await;
         assert_eq!(why(&r), (Some("missing_arg"), Some(arg)), "{verb}: {r}");
     }
@@ -66,9 +66,9 @@ async fn every_verb_is_checked_by_its_declaration() {
         (json!({"type": "inquiry", "text": "q", "options": []}), "options"),
         (json!({"type": "inquiry", "text": "q", "reply_client_id": ""}), "reply_client_id"),
         (json!({"type": "inquiries", "asker": 5}), "asker"),
-        (json!({"type": "answer", "re": "7", "text": "yes"}), "re"),
-        (json!({"type": "answer", "re": 7, "text": 4}), "text"),
-        (json!({"type": "answer", "re": 7, "text": ""}), "text"),
+        (json!({"type": "answer_inquiry", "re": "7", "answer": "yes"}), "re"),
+        (json!({"type": "answer_inquiry", "re": 7, "answer": 4}), "answer"),
+        (json!({"type": "answer_inquiry", "re": 7, "answer": ""}), "answer"),
     ] {
         let r = op(&k, "mcp", p.clone()).await;
         assert_eq!(why(&r), (Some("bad_arg"), Some(arg)), "{p}: {r}");
@@ -108,11 +108,11 @@ async fn reflect_and_docs_render_the_declarations_and_the_record_is_declared() {
     let k = setup().await;
     let r = op(&k, "mcp", json!({"type": "reflect"})).await;
     assert_eq!(r["id"], "mcp", "{r}");
-    for v in ["inbound_send", "inquiry", "inquiries", "answer", "boot", "reflect"] {
+    for v in ["inbound_send", "inquiry", "inquiries", "answer_inquiry", "boot", "reflect"] {
         assert!(r["verbs"].get(v).is_some(), "{v} in {r}");
     }
     let d = op(&k, "kernel", json!({"type": "docs", "of": "mcp", "tier": "detailed"})).await;
-    assert!(d["verbs"]["answer"].as_str().unwrap().contains("re:int (req)"), "{d}");
+    assert!(d["verbs"]["answer_inquiry"].as_str().unwrap().contains("re:int (req)"), "{d}");
     assert!(d["man"].as_str().is_some_and(|m| !m.is_empty()), "{d}");
     // the record: its three fields and no other
     let root = k.root().unwrap().id.0.clone();

@@ -370,8 +370,9 @@ pub mod record {
         /// `true` refuses a delete of this agent or an ancestor.
         pub delete_lock: Option<bool>,
         /// The folder name its children live under on disk (one safe segment: no separator, no `|`, not hidden, no `..`, not all digits).
+        #[serde(default = "agents_dir")]
         #[schemars(regex(pattern = "^[0-9]*[^/\\\\|.0-9](?:[^/\\\\|.]|\\.[^/\\\\|.])*\\.?$"))]
-        pub children_dir: Option<String>,
+        pub children_dir: String,
         /// How a client draws the agent.
         pub view: Option<Value>,
         /// The agent that stores the kernel's execution rows (the root's).
@@ -392,6 +393,20 @@ pub mod record {
             }
         }))
         .expect("a grant map schema")
+    }
+
+    fn agents_dir() -> String {
+        "agents".to_string()
+    }
+
+    /// The folder name the children of an agent with this record live under: its own
+    /// `children_dir`, else the declared default.
+    #[must_use]
+    pub fn children_dir(meta: &serde_json::Map<String, serde_json::Value>) -> String {
+        RECORD
+            .get(meta, "children_dir")
+            .and_then(|v| v.as_str().map(str::to_string))
+            .expect("children_dir declares a default")
     }
 
     crate::record!(CommonRecord);
