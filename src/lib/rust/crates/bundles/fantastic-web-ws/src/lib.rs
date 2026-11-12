@@ -132,13 +132,13 @@ impl Handler for WebWsBundle {
     }
 }
 
-/// The record's optional `route` — a literal mount path; empty reads as unset.
+/// The record's optional `route` — a literal mount path (its type and non-emptiness
+/// are the record declaration's).
 fn route_of(agent_id: &AgentId, kernel: &Kernel) -> Option<String> {
     let a = kernel.agents.get(agent_id)?;
     let meta = a.meta.read().expect("meta poisoned");
     meta.get("route")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
         .map(str::to_string)
 }
 
@@ -148,7 +148,9 @@ fn mount_path(agent_id: &AgentId, kernel: &Kernel) -> String {
 }
 
 /// `route` must be a literal path: a pattern sent as `route` would be a
-/// disguised second catch-all.
+/// disguised second catch-all. A `route` of the wrong type is already refused by the
+/// record declaration (`record::Record`), which runs first; only the text's shape
+/// is judged here.
 fn route_refusal(meta: &Map<String, Value>) -> Option<String> {
     let s = meta.get("route")?.as_str()?;
     if s.starts_with('/') && !s.contains('{') && !s.contains('}') {

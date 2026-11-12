@@ -39,8 +39,8 @@ pub enum RelayKind {
 /// The fields a ws_bridge's record carries.
 #[derive(Debug, JsonSchema)]
 pub struct WsRecord {
-    /// The transport; `ws` when absent.
-    pub transport: Option<WsKind>,
+    /// The transport this bridge dials.
+    pub transport: WsKind,
     /// The far kernel's host (the `ws` transport; nothing is guessed).
     #[schemars(length(min = 1))]
     pub host: Option<String>,
@@ -61,8 +61,8 @@ pub struct WsRecord {
 /// The fields a relay_connector's record carries.
 #[derive(Debug, JsonSchema)]
 pub struct RelayRecord {
-    /// The transport; the relay when absent.
-    pub transport: Option<RelayKind>,
+    /// The transport this connector dials.
+    pub transport: RelayKind,
     /// The relay's WebSocket URL.
     #[schemars(length(min = 1))]
     pub relay_url: Option<String>,
@@ -74,11 +74,11 @@ pub struct RelayRecord {
     pub guid: Option<String>,
     /// The credential store and ref holding the relay group password (field `password`, bound to the relay's host).
     pub credentials: Option<Credentials>,
-    /// Seconds between heartbeats to the relay; 0 or less turns them off (30 when absent).
-    pub heartbeat: Option<f64>,
-    /// Seconds before a dropped link redials (10 when absent).
-    pub reconnect: Option<f64>,
-    /// Advertised in the relay's directory; `kernel` when absent.
+    /// Seconds between heartbeats to the relay; 0 or less turns them off.
+    pub heartbeat: f64,
+    /// Seconds before a dropped link redials.
+    pub reconnect: f64,
+    /// What this peer is in the relay's directory; absent, none is advertised.
     pub role: Option<Role>,
     /// The guid of the manager this kernel belongs to; absent, standalone.
     pub owner_guid: Option<String>,

@@ -94,7 +94,8 @@ async fn watch_directory_re_emits_directory_events_on_the_connector_inbox() {
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel_state",
                    "handler_module": RELAY_HANDLER_MODULE, "id": leg,
-                   "transport": "memory", "partner_guid": "B"}),
+                   "transport": "memory", "partner_guid": "B",
+                   "heartbeat": 0, "reconnect": 0}),
         )])
         .await
         .remove(0)

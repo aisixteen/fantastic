@@ -465,7 +465,7 @@ async fn c_a_ws_bridge_forward_text_call_binary_reply() {
     let out = op(
         &ka,
         &a_leg,
-        json!({"type": "forward", "target": "probe", "payload": {"type": "events"}}),
+        json!({"type": "forward", "target": "probe", "payload": {"type": "events"}, "forward_timeout": 30.0}),
     )
     .await;
     assert_eq!(

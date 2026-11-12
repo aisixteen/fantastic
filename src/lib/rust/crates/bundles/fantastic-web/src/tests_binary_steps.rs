@@ -329,7 +329,8 @@ async fn a_literal_key_crosses_a_ws_bridge_forward_both_ways() {
         .send(vec![Item::new(
             AgentId::from(a_leg.as_str()),
             json!({"type": "forward", "target": "echo",
-                   "payload": {"type": "take", "a": {"b": "kept"}, "a.b": null}}),
+                   "payload": {"type": "take", "a": {"b": "kept"}, "a.b": null},
+                   "forward_timeout": 30.0}),
         )
         .with_binary(
             vec![Step::from("payload"), Step::from("a.b")],

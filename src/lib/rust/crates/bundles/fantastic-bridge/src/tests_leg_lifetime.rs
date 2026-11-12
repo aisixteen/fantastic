@@ -106,7 +106,7 @@ async fn forward_frame(k: &Arc<Kernel>, bid: &str, peer: &Arc<dyn BridgeTranspor
         ask(
             &kk,
             &id,
-            json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}}),
+            json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}, "forward_timeout": 30.0}),
         )
         .await
     });
@@ -164,7 +164,7 @@ async fn an_unknown_egress_rule_written_live_refuses_the_forward() {
     let out = ask(
         &k,
         &bid,
-        json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}}),
+        json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}, "forward_timeout": 30.0}),
     )
     .await;
     assert_eq!(
@@ -199,7 +199,8 @@ async fn write_doc(ka: &Arc<Kernel>, a_id: &str, doc: &str, text: &str) -> Value
         ka,
         a_id,
         json!({"type": "forward", "target": doc,
-               "payload": {"type": "write", "path": "doc.txt", "bytes": text}}),
+               "payload": {"type": "write", "path": "doc.txt", "bytes": text},
+               "forward_timeout": 30.0}),
     )
     .await
 }

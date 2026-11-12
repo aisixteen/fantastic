@@ -197,6 +197,22 @@ async fn a_route_mounts_only_its_literal() {
     );
 }
 
+/// A `route` of the wrong type, or empty, is refused by the record declaration.
+#[test]
+fn the_record_declaration_refuses_a_route_of_the_wrong_type() {
+    for bad in [json!(5), json!(true), json!(["/a"]), json!("")] {
+        let mut meta = Map::new();
+        meta.insert("route".into(), bad.clone());
+        let refused = <WebWsBundle as fantastic_kernel::Bundle>::check_record(
+            &WebWsBundle,
+            "create_agent",
+            &meta,
+        )
+        .expect_err(&format!("{bad} must be refused"));
+        assert_eq!(refused["arg"], "route", "{refused}");
+    }
+}
+
 /// A `route` that is not a literal path is refused at the write.
 #[test]
 fn validate_meta_refuses_a_route_that_is_not_a_literal_path() {

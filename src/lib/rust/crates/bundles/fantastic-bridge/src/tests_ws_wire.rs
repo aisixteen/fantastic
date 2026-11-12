@@ -402,7 +402,7 @@ async fn a_dropped_leg_reflects_down_and_boot_dials_again() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let fwd = ask(json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}})).await;
+    let fwd = ask(json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}, "forward_timeout": 30.0})).await;
     assert_eq!(fwd["reason"], json!("not_connected"), "{fwd}");
 
     // the leg's own redial has been hung up on: it is waiting out its backoff

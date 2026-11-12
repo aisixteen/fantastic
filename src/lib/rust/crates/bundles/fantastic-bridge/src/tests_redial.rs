@@ -120,7 +120,7 @@ async fn a_dropped_link_is_redialled_by_the_leg_with_its_watches_and_answers_aga
         ask(
             &k,
             &id,
-            json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}}),
+            json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}, "forward_timeout": 30.0}),
         )
         .await
     });

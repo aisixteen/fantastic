@@ -23,7 +23,7 @@
 //! | `boot` | none | `{booted, transport}` or `{error, already}` |
 //! | `shutdown` | none | `{stopped:true}` (runs the `on_delete` cascade) |
 //! | `reconnect` | none | shutdown + boot (the manual redial; a dropped `ws` link redials by itself) |
-//! | `forward` | `{target, payload, forward_timeout?}` | the unwrapped reply from the remote |
+//! | `forward` | `{target, payload, forward_timeout}` | the unwrapped reply from the remote |
 //! | `watch_remote` | `{target}` | `{ok, watching}` — stream a remote agent's emits onto this bridge's inbox |
 //! | `unwatch_remote` | `{target}` | `{ok, unwatched}` |
 //!
@@ -94,6 +94,7 @@ pub mod verbs;
 
 use authorizer::{Action, Decision};
 use transport::memory::MemoryTransport;
+use verbs::CallFrame;
 use transport::relay::{RelaySpawn, RelayTransport};
 use transport::ws::WsTransport;
 use transport::{BridgeTransport, TransportError};
@@ -122,26 +123,7 @@ impl Family {
             Family::Relay => "Cross-kernel comms through a relay-kernel router — dial-out WS, group-password auth (X-Fantastic-Auth), GUID-routed; symmetric RPC tunneled over the relay; auto-reconnecting.",
         }
     }
-
-    /// python's `make_verbs(default_kind=…)` — the reflect fallback only; `boot`
-    /// defaults to `ws` for BOTH derivations (the shared engine).
-    fn default_kind(self) -> &'static str {
-        match self {
-            Family::Ws => "ws",
-            Family::Relay => "relay",
-        }
-    }
 }
-
-/// Default forward timeout in seconds. Caller can override per call
-/// via `payload.timeout`.
-pub const DEFAULT_FORWARD_TIMEOUT_SECS: f64 = 30.0;
-
-/// python `relay_connector._relay.DEFAULT_HEARTBEAT` (0 or less = off).
-pub const DEFAULT_HEARTBEAT_SECS: f64 = 30.0;
-
-/// python `relay_connector._relay.DEFAULT_RECONNECT`.
-pub const DEFAULT_RECONNECT_SECS: f64 = 10.0;
 
 /// python `relay_connector` fixes the directory watch timeout at 10 s.
 const DIRECTORY_WATCH_TIMEOUT_SECS: f64 = 10.0;
@@ -232,31 +214,41 @@ pub struct RelayConnectorBundle;
 /// own `relay` agent (`target:"relay"`), not the partner. `list_peers` is a
 /// one-shot snapshot; `watch_directory` subscribes so `peer_*` events re-emit on
 /// this connector's inbox; `unwatch_directory` stops it.
-async fn directory_reply(
-    agent_id: &AgentId,
-    list_timeout: Option<f64>,
-    op: &str,
-) -> Result<Value, BundleError> {
+enum DirectoryOp {
+    /// `list_peers`, with the seconds to wait for the relay's answer.
+    ListPeers(f64),
+    Watch,
+    Unwatch,
+}
+
+impl DirectoryOp {
+    fn name(&self) -> &'static str {
+        match self {
+            DirectoryOp::ListPeers(_) => "list_peers",
+            DirectoryOp::Watch => "watch_directory",
+            DirectoryOp::Unwatch => "unwatch_directory",
+        }
+    }
+}
+
+async fn directory_reply(agent_id: &AgentId, op: DirectoryOp) -> Result<Value, BundleError> {
     let state = BRIDGES.lock().get(agent_id).cloned();
     let live = state.as_ref().filter(|s| !s.transport.closed());
     let Some(state) = live else {
         // python: `unwatch_directory` on a leg with no transport is simply `ok`.
-        if op == "unwatch_directory" {
+        if let DirectoryOp::Unwatch = op {
             return Ok(json!({"ok": true}));
         }
         return Ok(refusal_hint(
             NOT_CONNECTED,
-            format!("relay_connector.{op}: not connected"),
+            format!("relay_connector.{}: not connected", op.name()),
             "call boot first",
         ));
     };
     Ok(match op {
-        "list_peers" => {
-            let timeout = list_timeout.unwrap_or(DEFAULT_FORWARD_TIMEOUT_SECS);
-            state.transport.list_peers(timeout).await
-        }
+        DirectoryOp::ListPeers(timeout) => state.transport.list_peers(timeout).await,
         // python passes NO timeout here — the transport's own 10 s stands.
-        "watch_directory" => {
+        DirectoryOp::Watch => {
             // The leg SUBSCRIBES to the directory as `watch_remote` does to a
             // remote agent — before asking: the read loop may hand the engine an
             // event that follows the relay's ack before this verb resumes. A
@@ -280,7 +272,7 @@ async fn directory_reply(
             }
             out
         }
-        _ => {
+        DirectoryOp::Unwatch => {
             state
                 .watching
                 .lock()
@@ -334,7 +326,7 @@ async fn set_identity_reply(
 }
 
 /// `forward` — the one verb that carries bytes either way: the local caller sends
-/// `{type:forward, target, payload, forward_timeout?}`, a request body (if any)
+/// `{type:forward, target, payload, forward_timeout}`, a request body (if any)
 /// inside the INNER payload (`Item::with_binary(["payload", …], …)` — python's
 /// forward payload holds the bytes there); the bridge ships a `call` frame (binary
 /// when it carries that body, text otherwise) and returns `(reply, reply_body)` —
@@ -543,13 +535,13 @@ impl Handler for RelayConnectorBundle {
                 watch_remote_reply(agent_id, &a.target, "unwatch").await
             }
             verbs::relay::Call::ListPeers(a) => {
-                directory_reply(agent_id, Some(a.list_timeout), "list_peers").await?
+                directory_reply(agent_id, DirectoryOp::ListPeers(a.list_timeout)).await?
             }
             verbs::relay::Call::WatchDirectory(_) => {
-                directory_reply(agent_id, None, "watch_directory").await?
+                directory_reply(agent_id, DirectoryOp::Watch).await?
             }
             verbs::relay::Call::UnwatchDirectory(_) => {
-                directory_reply(agent_id, None, "unwatch_directory").await?
+                directory_reply(agent_id, DirectoryOp::Unwatch).await?
             }
             verbs::relay::Call::SetIdentity(a) => set_identity_reply(agent_id, a, kernel).await,
         };
@@ -701,13 +693,11 @@ fn rule_spec(agent_id: &AgentId, kernel: &Kernel, primary: &str) -> Option<Value
 
 fn reflect_reply(family: Family, agent_id: &AgentId, kernel: &Kernel) -> Value {
     let bridge = BRIDGES.lock().get(agent_id).cloned();
-    // python: `st.transport_kind or rec.get("transport") or default_kind`.
-    let transport_kind = bridge
-        .as_ref()
-        .map(|b| b.transport_kind.clone())
-        .filter(|k| !k.is_empty())
-        .or_else(|| meta_string(agent_id, kernel, "transport"))
-        .unwrap_or_else(|| family.default_kind().to_string());
+    // the live transport's kind, else the record's `transport` as stored
+    let transport_kind = match bridge.as_ref() {
+        Some(b) => json!(b.transport_kind),
+        None => meta_value(agent_id, kernel, "transport").unwrap_or(Value::Null),
+    };
     // python's engine: the transport EXISTS and is not closed. The relay leg
     // overrides it in `reflect_fields` with the LIVE socket state.
     let connected = match bridge.as_ref() {
@@ -752,30 +742,18 @@ fn reflect_reply(family: Family, agent_id: &AgentId, kernel: &Kernel) -> Value {
             }
         }
         Family::Relay => {
-            for key in ["relay_url", "guid", "partner_guid"] {
+            for key in ["relay_url", "guid", "partner_guid", "reconnect", "role"] {
                 out.insert(
                     key.into(),
                     meta_value(agent_id, kernel, key).unwrap_or(Value::Null),
                 );
             }
-            out.insert(
-                "reconnect".into(),
-                json!(meta_f64(agent_id, kernel, "reconnect").unwrap_or(DEFAULT_RECONNECT_SECS)),
-            );
-            out.insert(
-                "role".into(),
-                json!(meta_string(agent_id, kernel, "role").unwrap_or_else(|| "kernel".into())),
-            );
-            out.insert(
-                "owner_guid".into(),
-                meta_value(agent_id, kernel, "owner_guid").unwrap_or(Value::Null),
-            );
-            out.insert(
-                "exposes".into(),
-                meta_value(agent_id, kernel, "exposes")
-                    .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
-                    .unwrap_or_else(|| json!([])),
-            );
+            for key in ["owner_guid", "exposes"] {
+                out.insert(
+                    key.into(),
+                    meta_value(agent_id, kernel, key).unwrap_or(Value::Null),
+                );
+            }
         }
     }
     Value::Object(out)
@@ -821,9 +799,11 @@ async fn boot_carrying_inner(
         return json!({"error": format!("bridge: bad auth rule: {e}")});
     }
 
-    // python's shared engine: `kind = rec.get("transport") or "ws"` for BOTH
-    // derivations; the builder is chosen by the derivation, not by the kind.
-    let kind = meta_string(agent_id, kernel, "transport").unwrap_or_else(|| "ws".to_string());
+    // The record declares its `transport` (required); the builder is chosen by
+    // the derivation, not by the kind.
+    let Some(kind) = meta_string(agent_id, kernel, "transport") else {
+        return json!({"error": "bridge: the record has no `transport`"});
+    };
     let transport: Arc<dyn BridgeTransport> = if kind == "memory" {
         match take_injected(agent_id) {
             Some(t) => t,
@@ -938,6 +918,12 @@ async fn build_relay_transport(
     let (Some(relay_url), Some(partner)) = (relay_url, partner) else {
         return Err("relay_connector requires relay_url, partner_guid".to_string());
     };
+    let (Some(heartbeat), Some(reconnect)) = (
+        meta_f64(agent_id, kernel, "heartbeat"),
+        meta_f64(agent_id, kernel, "reconnect"),
+    ) else {
+        return Err("relay_connector requires heartbeat, reconnect".to_string());
+    };
     // The relay password lives in a credential_store, named by `credentials`:
     // no field ⇒ the boot fails loud, before any identity is minted or anything
     // dialed.
@@ -963,8 +949,6 @@ async fn build_relay_transport(
             g
         }
     };
-    let heartbeat = meta_f64(agent_id, kernel, "heartbeat").unwrap_or(DEFAULT_HEARTBEAT_SECS);
-    let reconnect = meta_f64(agent_id, kernel, "reconnect").unwrap_or(DEFAULT_RECONNECT_SECS);
     let identity = identity_from_meta(agent_id, kernel);
     RelayTransport::connect(
         &relay_url,
@@ -1263,28 +1247,39 @@ async fn serve_inbound_call(
     frame: Value,
     body: Option<Blob>,
 ) {
-    let corr_id = frame.get("id").cloned().unwrap_or(Value::Null);
-    let target = frame
-        .get("target")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    // python `frame.get("payload") or {}` — a missing or falsy payload is an
-    // empty call, not a null one.
-    let inner = match frame.get("payload") {
-        Some(v) if py_truthy(v) => v.clone(),
-        _ => json!({}),
+    // The frame is typed once: its id, target and the call's verb come from the
+    // declaration, not from reads of the raw value. A frame that is not a call of
+    // that shape is answered with the refusal.
+    let CallFrame {
+        id: corr_id,
+        target,
+        payload,
+    } = match serde_json::from_value::<CallFrame>(frame.clone()) {
+        Ok(f) => f,
+        Err(e) => {
+            let id = frame.get("id").cloned().unwrap_or(Value::Null);
+            let _ = state
+                .transport
+                .send_frame(json!({
+                    "type": "reply",
+                    "id": id,
+                    "data": fantastic_kernel::verbs::unparsed("call", &e.to_string()),
+                }))
+                .await;
+            return;
+        }
     };
+    let verb = payload.verb.clone();
+    let inner = payload.into_value();
     // AUTH GATE — the single choke point. The leg's INGRESS rule — read off the
     // LIVE record, per frame, as every web/file/exec leg does — decides whether
     // this inbound call dispatches locally; on deny we reply {error,
     // reason:"unauthorized"} (fail-fast, not a silent drop).
-    let verb = inner.get("type").and_then(Value::as_str).unwrap_or("");
     let decision = authorizer::ingress::resolve(rule_spec(&leg, &kernel, "ingress_rule").as_ref())
         .authorize(&Action {
             kind: "call",
             target: &target,
-            verb,
+            verb: &verb,
             // the `auth_token` rides the frame envelope, not the payload
             token: frame.get("auth_token").and_then(Value::as_str),
         });
@@ -1302,7 +1297,7 @@ async fn serve_inbound_call(
         // batch item — pid, call/settle rows, `ps` row, dedup — on the binary
         // channel, at that path of the payload. A body the frame put anywhere else
         // is not in the payload python's decoder hands the kernel.
-        let mut item = Item::from_frame(AgentId::from(target.as_str()), inner, corr_id.as_str());
+        let mut item = Item::from_frame(AgentId::from(target.as_str()), inner, Some(corr_id.as_str()));
         // Whatever frame asked — text or binary — the reply carries a body
         // whenever the verb answered one: python's reply dict holds bytes at a
         // key, and the frame kind follows from that alone.

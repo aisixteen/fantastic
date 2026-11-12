@@ -7,11 +7,6 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
 use crate::record::Role;
-use crate::DEFAULT_FORWARD_TIMEOUT_SECS;
-
-fn default_timeout() -> f64 {
-    DEFAULT_FORWARD_TIMEOUT_SECS
-}
 
 /// Build the transport from the record (`transport` and its fields), spawn the read loop and emit `bridge_up`. Idempotent: booting a connected bridge changes nothing. Returns {booted, transport}, or {error} / {already}.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -33,7 +28,6 @@ pub struct Forward {
     /// The call to run there: a verb frame with its own `type`.
     pub payload: Map<String, Value>,
     /// Seconds to wait for the reply (not `timeout`, which is a call's own routing field).
-    #[serde(default = "default_timeout")]
     pub forward_timeout: f64,
 }
 
@@ -60,7 +54,6 @@ pub struct UnwatchRemote {
 #[serde(deny_unknown_fields)]
 pub struct ListPeers {
     /// Seconds to wait for the relay's answer (not `timeout`, which is a call's own routing field).
-    #[serde(default = "default_timeout")]
     pub list_timeout: f64,
 }
 
@@ -96,6 +89,40 @@ where
     D: Deserializer<'de>,
 {
     Option::<T>::deserialize(d).map(Some)
+}
+
+/// An inbound `call` frame a peer sent over the transport, typed: the envelope the
+/// leg serves as its own call. The verb is the payload's `type`.
+#[derive(Debug, Deserialize)]
+pub struct CallFrame {
+    /// The correlator the reply echoes; it names the execution.
+    pub id: String,
+    /// The local agent the call is for.
+    pub target: String,
+    /// The call.
+    pub payload: CallPayload,
+}
+
+/// The call an inbound frame carries: its verb, then its arguments.
+#[derive(Debug, Deserialize)]
+pub struct CallPayload {
+    /// The verb's name.
+    #[serde(rename = "type")]
+    pub verb: String,
+    /// Its arguments.
+    #[serde(flatten)]
+    pub args: Map<String, Value>,
+}
+
+impl CallPayload {
+    /// The call as the payload the target's entry parses.
+    #[must_use]
+    pub fn into_value(self) -> Value {
+        let mut out = Map::new();
+        out.insert("type".to_string(), Value::String(self.verb));
+        out.extend(self.args);
+        Value::Object(out)
+    }
 }
 
 /// The verbs of a `ws_bridge`.

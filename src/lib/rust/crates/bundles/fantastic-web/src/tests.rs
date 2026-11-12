@@ -1866,9 +1866,9 @@ async fn octet_leg_header_contract_matches_python() {
     stop(&kernel, "web_oct").await;
 }
 
-/// The GET `_reflect` shortcuts read their flags: `tree` from its three tiers,
-/// `bundles` from its two, nothing else (a flag `reflect` does not take is never
-/// sent), and a null reply is a bare 404.
+/// The GET `_reflect` shortcuts send their `tree` and `bundles` flags as given
+/// (the target's entry refuses a value it does not list), nothing else (a flag
+/// `reflect` does not take is never sent), and a null reply is a bare 404.
 #[tokio::test]
 async fn get_reflect_query_flags_match_python() {
     assert_eq!(routes::reflect_payload(""), json!({"type": "reflect"}));
@@ -1883,12 +1883,12 @@ async fn get_reflect_query_flags_match_python() {
     );
     assert_eq!(
         routes::reflect_payload("tree=none&bundles=none"),
-        json!({"type": "reflect", "tree": "none"}),
-        "`bundles` has no `none` tier"
+        json!({"type": "reflect", "tree": "none", "bundles": "none"}),
+        "values are sent as given: the target's entry judges them"
     );
     assert_eq!(
         routes::reflect_payload("tree=deep"),
-        json!({"type": "reflect"})
+        json!({"type": "reflect", "tree": "deep"})
     );
 
     // ...and over the wire: a flag `reflect` does not take is dropped, not refused
@@ -1967,7 +1967,9 @@ async fn reflect_sentence_and_verbs_match_python() {
         vec!["boot", "stop", "mount", "unmount", "fetch_file"]
     );
     let verbs = reply["verbs"].as_object().expect("a verbs block");
-    for name in ["boot", "stop", "mount", "unmount", "fetch_file", "reflect"] {
+    // `reflect` is the common verb every agent answers: its rendered line
+    assert_eq!(verbs["reflect"], json!("args: detail:'distilled'|'full'?, tree:'all'|'ids'|'none'?, show_subtrees:list[string]?, ignore_subtrees:list[string]?, handler_modules:list[string]?, bundles:'all'|'ids'?, limit:int >= 1?, after:string? — What this agent IS: identity, sentence, state, grants — and, by flags, its subtree and the installable bundles"));
+    for name in ["boot", "stop", "mount", "unmount", "fetch_file"] {
         assert!(verbs[name].is_string(), "{name}: {verbs:?}");
     }
     assert!(
@@ -1979,6 +1981,50 @@ async fn reflect_sentence_and_verbs_match_python() {
         verbs["mount"]
     );
     stop(&kernel, "web_r").await;
+}
+
+/// The record's `host`, `bind` and `port` are judged by the record declaration at
+/// the write: an empty text or a port that is not a number never reaches a read.
+#[test]
+fn the_record_declaration_refuses_an_empty_host_or_bind_and_a_text_port() {
+    for (field, bad) in [
+        ("host", json!("")),
+        ("bind", json!("")),
+        ("port", json!("8080")),
+        ("port", json!(0)),
+    ] {
+        let mut meta = Map::new();
+        meta.insert(field.into(), bad.clone());
+        let refused = <WebBundle as fantastic_kernel::Bundle>::check_record(
+            &WebBundle,
+            "create_agent",
+            &meta,
+        )
+        .expect_err(&format!("{field}={bad} must be refused"));
+        assert_eq!(refused["arg"], field, "{refused}");
+    }
+}
+
+/// A `?tree=` or `?bundles=` value `reflect` does not list is the target's refusal,
+/// never dropped on the way.
+#[tokio::test]
+async fn a_reflect_flag_value_that_is_not_listed_is_refused_by_the_target() {
+    let tmp = TempDir::new().unwrap();
+    let port = free_port();
+    let kernel = stage_host(&tmp, port, "web_qr", "rest", "fb_qr").await;
+    for q in ["tree=deep", "bundles=none"] {
+        let r = kernel
+            .send(vec![Item::new(
+                AgentId::from("web_qr"),
+                routes::reflect_payload(q),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["reason"], "bad_arg", "{q}: {r}");
+        assert_eq!(r["arg"], q.split('=').next().unwrap(), "{q}: {r}");
+    }
+    stop(&kernel, "web_qr").await;
 }
 
 /// `boot` answers `{running, surfaces}`, a missing port RAISES, and
@@ -3393,7 +3439,7 @@ fn reflect_query_is_parsed_like_starlette() {
     );
     assert_eq!(
         crate::routes::reflect_payload("tree=ids;bundles=all"),
-        json!({"type": "reflect"})
+        json!({"type": "reflect", "tree": "ids;bundles=all"})
     );
     assert_eq!(
         crate::routes::reflect_payload("tree=none&tree=ids&bundles=all"),
