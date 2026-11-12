@@ -481,7 +481,7 @@ async fn oracle_renders_non_string_lines_with_python_str() {
     );
 }
 
-/// `limit` is an integer, clamped to 1..=20, six when absent; a value of another
+/// `limit` is an integer, clamped to 1..=20, six when absent or 0; a value of another
 /// type is refused by name, never coerced.
 #[tokio::test]
 async fn oracle_limit_is_clamped_and_typed() {
@@ -490,7 +490,7 @@ async fn oracle_limit_is_clamped_and_typed() {
     let id = agent(&k, "oracle_limit", ORACLE_MODULE, json!({"lines": lines}));
     for (limit, want) in [
         (json!(3), 3),
-        (json!(0), 1),
+        (json!(0), 6),
         (json!(99), 20),
         (json!(-5), 1),
     ] {

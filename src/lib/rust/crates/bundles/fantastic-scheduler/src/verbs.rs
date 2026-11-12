@@ -31,6 +31,22 @@ pub struct Schedule {
     pub fire_timeout: Option<serde_json::Number>,
 }
 
+/// The shape every stored schedule has (what `schedule` writes): decoded strictly
+/// from `schedules.yaml` before a fire; other stored fields are carried untouched.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct Stored {
+    /// The agent each fire calls.
+    pub target: String,
+    /// The stored call.
+    pub payload: Map<String, Value>,
+    /// Epoch seconds of the next fire.
+    pub next_run: f64,
+    /// Seconds between fires.
+    pub interval_seconds: f64,
+    /// Fires so far.
+    pub run_count: u64,
+}
+
 fn sixty() -> u64 {
     60
 }
@@ -103,7 +119,7 @@ pub struct TickNow {
 pub struct History {
     /// How many of the newest fires, at most 500.
     #[serde(default = "hundred")]
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 1, max = 500))]
     pub limit: u64,
     /// Keep only this schedule's fires.
     #[schemars(length(min = 1))]

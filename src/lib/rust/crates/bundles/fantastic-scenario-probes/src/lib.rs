@@ -572,7 +572,7 @@ impl Handler for OracleProbe {
                         })
                     } else {
                         self.asked.with(agent_id, |n| *n += 1);
-                        let limit = a.limit.clamp(1, 20) as usize;
+                        let limit = if a.limit == 0 { 6 } else { a.limit.clamp(1, 20) } as usize;
                         let words = keywords(&q);
                         let mut scored: Vec<(usize, String)> = lines
                             .into_iter()

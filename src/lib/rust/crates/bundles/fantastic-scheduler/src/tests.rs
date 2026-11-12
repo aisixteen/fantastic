@@ -1556,18 +1556,18 @@ async fn two_schedulers_share_nothing_and_delete_frees_only_its_own() {
 
 #[test]
 fn stored_schedule_fields_are_read_strictly() {
-    let good = json!({"target": "t", "next_run": 1.5, "interval_seconds": 60, "run_count": 0});
+    let good = json!({"target": "t", "payload": {"type": "x"}, "next_run": 1.5, "interval_seconds": 60, "run_count": 0});
     assert!(check_stored(&good).is_ok());
     for (key, bad) in [
         ("target", json!(7)),
         ("next_run", json!("soon")),
         ("interval_seconds", Value::Null),
         ("run_count", json!(-1)),
+        ("payload", json!("x")),
     ] {
         let mut s = good.clone();
         s[key] = bad;
-        let why = check_stored(&s).unwrap_err();
-        assert!(why.contains(key), "{why}");
+        assert!(check_stored(&s).is_err(), "{key} wrongly typed must be refused");
     }
     let mut missing = good.clone();
     missing.as_object_mut().unwrap().remove("run_count");

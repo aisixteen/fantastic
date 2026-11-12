@@ -524,21 +524,12 @@ async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
     }
 }
 
-/// Refuse a stored schedule whose fields are not the types `schedule` writes —
-/// no coercion, no defaults for stored data.
+/// Refuse a stored schedule that is not the declared stored shape
+/// (`verbs::Stored`) — decoded strictly, no coercion, no defaults for stored data.
 fn check_stored(sch: &Value) -> Result<(), String> {
-    let kinds: [(&str, fn(&Value) -> bool); 4] = [
-        ("target", Value::is_string),
-        ("next_run", Value::is_number),
-        ("interval_seconds", Value::is_number),
-        ("run_count", Value::is_u64),
-    ];
-    for (key, ok) in kinds {
-        if !sch.get(key).is_some_and(ok) {
-            return Err(format!("stored field `{key}` is missing or wrongly typed"));
-        }
-    }
-    Ok(())
+    serde_json::from_value::<verbs::Stored>(sch.clone())
+        .map(|_| ())
+        .map_err(|e| format!("stored schedule is wrongly shaped: {e}"))
 }
 
 /// A schedule's `target`; `check_stored` has already required a string.
@@ -546,12 +537,9 @@ fn sched_target(sch: &Value) -> String {
     sch["target"].as_str().unwrap_or_default().to_string()
 }
 
-/// A schedule's `payload`: the stored call object, `{}` when none.
+/// A schedule's `payload`; `check_stored` has already required an object.
 fn sched_payload(sch: &Value) -> Value {
-    match sch.get("payload").filter(|v| v.is_object()) {
-        Some(p) => p.clone(),
-        None => json!({}),
-    }
+    sch["payload"].clone()
 }
 
 fn fire_item(sch: &Value) -> Item {
@@ -873,7 +861,7 @@ async fn tick_now_reply(agent_id: &AgentId, sid: &str, kernel: &Arc<Kernel>) -> 
 }
 
 async fn history_reply(agent_id: &AgentId, a: verbs::History, kernel: &Arc<Kernel>) -> Value {
-    let limit = a.limit.min(500) as usize;
+    let limit = a.limit as usize;
     // every fire, then the newest `limit` of them.
     let fires: Vec<Value> = read_history(agent_id, kernel, 2 * HISTORY_MAX).await;
     let from = fires.len().saturating_sub(limit);
