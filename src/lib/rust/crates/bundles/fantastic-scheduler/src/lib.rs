@@ -827,12 +827,15 @@ async fn tick_now_reply(agent_id: &AgentId, sid: &str, kernel: &Arc<Kernel>) -> 
         .await
         .pop()
         .unwrap_or(Value::Null);
-    json!({
-        "fired": true,
-        "schedule_id": sid,
-        "result": ev.get("result").cloned().unwrap_or(Value::Null),
-        "error": ev.get("error").cloned().unwrap_or(Value::Null),
-    })
+    // the outcome: its `result` when the target answered, its `error` when it did
+    // not — never both, never an empty one
+    let mut out = json!({"fired": true, "schedule_id": sid});
+    for key in ["result", "error"] {
+        if let Some(v) = ev.get(key).filter(|v| !v.is_null()) {
+            out[key] = v.clone();
+        }
+    }
+    out
 }
 
 async fn history_reply(agent_id: &AgentId, a: verbs::History, kernel: &Arc<Kernel>) -> Value {

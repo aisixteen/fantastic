@@ -717,7 +717,7 @@ async def score(root, store_id, total, new_total, transcript):
         # builder's own build-time runs do not count).
         if tick_at:
             starts += sum(
-                len(re.findall(r"<type>\s*start\s*</type>", str(m.get("content") or "")))
+                len(re.findall(r"<type>\s*(?:start|run)\s*</type>", str(m.get("content") or "")))
                 for m in msgs[tick_at[0] :]
                 if m.get("role") == "assistant"
             )
