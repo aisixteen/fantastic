@@ -170,9 +170,6 @@ fn text_gate<'a>(
     if mutate && readonly {
         return Err(readonly_refusal());
     }
-    if path.is_empty() {
-        return Err(rf::missing(verb, "path"));
-    }
     if let Some(err) = gate_path(verb, root, &allow_list(meta), path) {
         return Err(err);
     }
@@ -456,9 +453,6 @@ async fn edit(
         Ok(d) => d,
         Err(e) => return e,
     };
-    if data.is_empty() {
-        return rf::missing("edit", "bytes (the patch — all hunks, in edits order)");
-    }
     let Ok(text) = std::str::from_utf8(&data) else {
         return rf::bad("edit", "bytes", "valid utf-8 (the patch is text)");
     };

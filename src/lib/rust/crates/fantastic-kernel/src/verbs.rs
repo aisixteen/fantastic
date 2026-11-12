@@ -509,9 +509,6 @@ fn type_label(s: &Value) -> String {
     if let Some(n) = s.get("minItems").and_then(Value::as_u64) {
         label.push_str(&format!(" with at least {n} item(s)"));
     }
-    if let Some(n) = s.get("minProperties").and_then(Value::as_u64) {
-        label.push_str(&format!(" with at least {n} entry(ies)"));
-    }
     if let Some(p) = s.get("pattern").and_then(Value::as_str) {
         label.push_str(&format!(" matching /{p}/"));
     }
@@ -803,11 +800,7 @@ fn matches_type(schema: &Value, v: &Value) -> bool {
                 }
                 _ => false,
             },
-            "object" => v.as_object().is_some_and(|m| {
-                o.get("minProperties")
-                    .and_then(Value::as_u64)
-                    .is_none_or(|n| m.len() as u64 >= n)
-            }),
+            "object" => v.is_object(),
             _ => true,
         }
     };
@@ -962,23 +955,6 @@ fn check_object(
             format!("{path}.{k}")
         }
     };
-    // a declared object (a map above all) below its `minProperties`
-    if let Some(n) = schema.get("minProperties").and_then(Value::as_u64) {
-        if !path.is_empty() && (raw.len() as u64) < n {
-            return Err(refuse_arg(
-                name,
-                BAD_ARG,
-                path,
-                format!(
-                    "argument {} must be {}, got an object with {} entry(ies)",
-                    fantastic_bundle::py_repr(path),
-                    type_label(schema),
-                    raw.len()
-                ),
-                top,
-            ));
-        }
-    }
     let props = schema.get("properties").and_then(Value::as_object);
     let open = open_ended(schema);
     for (k, v) in raw {

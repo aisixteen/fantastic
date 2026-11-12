@@ -894,16 +894,6 @@ async fn missing_args_and_unknown_verbs_are_refused_by_the_agents_entry() {
         assert_eq!(bad["reason"], json!("bad_arg"), "{bad}");
         assert_eq!(bad["arg"], json!(arg), "{bad}");
     }
-    // a map with no entry at all is the one thing the declaration cannot say
-    let bad = call(
-        &f.k,
-        json!({"type": "set", "ref": "r", "fields": {}}),
-        None,
-    )
-    .await
-    .result;
-    assert_eq!(bad["reason"], json!("bad_arg"), "{bad}");
-    assert_eq!(bad["arg"], json!("fields"), "{bad}");
     // `shutdown` is no verb of this bundle: the shared entry answers it, nothing to release
     let unk = call(&f.k, json!({"type": "nonsense"}), None).await.result;
     assert_eq!(unk["reason"], json!("unhandled"), "{unk}");

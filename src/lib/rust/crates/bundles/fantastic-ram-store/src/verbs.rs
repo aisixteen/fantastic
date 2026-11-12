@@ -63,7 +63,7 @@ pub struct Search {
     pub width: Option<u64>,
 }
 
-/// Delete the caller's rows below `before_id`, or exactly `ids`, except kinds in `keep`; every fold ref naming a deleted row goes with it (FK cascade). One of `before_id` and `ids` is required. Returns {pruned}.
+/// Delete the caller's rows below `before_id`, or exactly `ids`, except kinds in `keep`; every fold ref naming a deleted row goes with it (FK cascade). With neither `before_id` nor `ids`, nothing is deleted. Returns {pruned}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Prune {

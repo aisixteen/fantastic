@@ -92,13 +92,6 @@ pub fn row_refs(row: &Map<String, Value>) -> Option<&Vec<Value>> {
     row.get("refs").filter(|v| !v.is_null()).and_then(Value::as_array)
 }
 
-/// `prune` needs one of `before_id` and `ids`: the schema language of the one
-/// engine states a field's type, not "one of these two", so this stays one shared
-/// rule, used by every store that answers the verb.
-pub fn prune_selector_missing(a: &verbs::Prune) -> Option<Value> {
-    (a.before_id.is_none() && a.ids.is_none()).then(|| missing("prune", "before_id"))
-}
-
 /// The rows of an `append`, typed — shared by every store that answers the verb:
 /// each row gets the id it carries (a kernel int) or one minted, no id twice in
 /// the batch, and `refs` is a list of row ids. What a store still checks is
@@ -681,9 +674,6 @@ impl RamStoreBundle {
             Ok(o) => o,
             Err(r) => return r,
         };
-        if let Some(e) = prune_selector_missing(a) {
-            return e;
-        }
         let wanted: HashSet<i64> = a.ids.iter().flatten().copied().collect();
         let keep: &[Value] = a.keep.as_deref().unwrap_or(&[]);
         self.with_tables(id, |t| {

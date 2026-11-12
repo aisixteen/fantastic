@@ -49,7 +49,7 @@ use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::outcome::{body_at, Blob};
 use fantastic_kernel::refusal::{missing, refusal, refusal_hint, with, BAD_ARG, EXISTS, NOT_FOUND, UNHANDLED};
 use fantastic_kernel::{AgentId, Kernel};
-use fantastic_ram_store::{as_id, prune_selector_missing, row_refs, stage_rows};
+use fantastic_ram_store::{as_id, row_refs, stage_rows};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 
@@ -884,9 +884,6 @@ impl SqliteStoreBundle {
             Ok(o) => o,
             Err(r) => return r,
         };
-        if let Some(e) = prune_selector_missing(a) {
-            return e;
-        }
         let wanted: HashSet<i64> = a.ids.iter().flatten().copied().collect();
         let keep: &[Value] = a.keep.as_deref().unwrap_or(&[]);
         let out = self.tx(id, kernel, |db| {

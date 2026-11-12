@@ -28,6 +28,7 @@ pub struct List {
 #[serde(deny_unknown_fields)]
 pub struct Read {
     /// The file, relative to the root (a bridge needs it; a file view reads its own file).
+    #[schemars(length(min = 1))]
     pub path: Option<String>,
     /// The first line of the page, counted from 0.
     pub offset: Option<u64>,
@@ -41,6 +42,7 @@ pub struct Read {
 #[serde(deny_unknown_fields)]
 pub struct Write {
     /// The file, relative to the root (a bridge needs it; a file view writes its own file).
+    #[schemars(length(min = 1))]
     pub path: Option<String>,
     /// The whole document (text; a binary channel carries it as the request body at `bytes`).
     pub bytes: Option<String>,
@@ -68,6 +70,7 @@ pub struct Edit {
     #[schemars(length(min = 1))]
     pub edits: Vec<EditFile>,
     /// The patch: every hunk of every edit, concatenated in `edits` order (text; a binary channel carries it as the request body at `bytes`).
+    #[schemars(length(min = 1))]
     pub bytes: Option<String>,
     /// Verify every hunk and write nothing.
     pub dry_run: Option<bool>,

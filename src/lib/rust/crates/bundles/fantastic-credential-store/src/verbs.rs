@@ -14,7 +14,6 @@ fn text_fields(_gen: &mut SchemaGenerator) -> Schema {
     serde_json::from_value(serde_json::json!({
         "type": "object",
         "additionalProperties": {"type": "string", "minLength": 1},
-        "minProperties": 1,
     }))
     .expect("a map schema")
 }
@@ -27,7 +26,7 @@ pub struct Set {
     #[serde(rename = "ref")]
     #[schemars(length(min = 1))]
     pub ref_name: String,
-    /// The value: a non-empty map of field name to string value.
+    /// The value: a map of field name to string value.
     #[schemars(schema_with = "text_fields")]
     pub fields: BTreeMap<String, String>,
 }
