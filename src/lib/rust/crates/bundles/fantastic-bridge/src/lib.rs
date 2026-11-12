@@ -95,7 +95,7 @@ pub mod verbs;
 
 use authorizer::{Action, Decision};
 use transport::memory::MemoryTransport;
-use verbs::CallFrame;
+use verbs::{CallFrame, FrameId, WatchFrame};
 use transport::relay::{RelaySpawn, RelayTransport};
 use transport::ws::WsTransport;
 use transport::{BridgeTransport, TransportError};
@@ -1267,10 +1267,11 @@ async fn serve_inbound_call(
         id: corr_id,
         target,
         payload,
+        auth_token,
     } = match serde_json::from_value::<CallFrame>(frame.clone()) {
         Ok(f) => f,
         Err(e) => {
-            let id = frame.get("id").cloned().unwrap_or(Value::Null);
+            let id = FrameId::deserialize(&frame).unwrap_or_default().id.unwrap_or(Value::Null);
             let _ = state
                 .transport
                 .send_frame(json!({
@@ -1294,7 +1295,7 @@ async fn serve_inbound_call(
             target: &target,
             verb: &verb,
             // the `auth_token` rides the frame envelope, not the payload
-            token: frame.get("auth_token").and_then(Value::as_str),
+            token: auth_token.as_deref(),
         });
     if let Decision::Deny(denial) = decision {
         let _ = state
@@ -1394,12 +1395,12 @@ async fn send_event(
 
 /// `{type:"error", id, src, …refusal}` — the answer to an inbound `watch` that
 /// did not register (its keys flattened, as `web_ws` answers a refused watch).
-async fn refuse_watch(state: &Arc<BridgeState>, frame: &Value, src: &str, r: &Value) {
+async fn refuse_watch(state: &Arc<BridgeState>, id: Option<Value>, src: &str, r: &Value) {
     let mut out = Map::new();
     out.insert("type".into(), json!("error"));
     out.insert(
         "id".into(),
-        frame.get("id").cloned().unwrap_or_else(|| json!("")),
+        id.unwrap_or_else(|| json!("")),
     );
     out.insert("src".into(), json!(src));
     if let Value::Object(m) = r {
@@ -1420,7 +1421,12 @@ async fn refuse_watch(state: &Arc<BridgeState>, frame: &Value, src: &str, r: &Va
 /// `error` frame and nothing is registered. Inline in the read loop, so a call
 /// frame that follows it is served after the watch is in place.
 async fn serve_watch(leg: &AgentId, state: &Arc<BridgeState>, kernel: &Arc<Kernel>, frame: &Value) {
-    let src = frame.get("src").and_then(Value::as_str).unwrap_or("");
+    let WatchFrame {
+        id,
+        src,
+        auth_token,
+    } = WatchFrame::deserialize(frame).unwrap_or_default();
+    let src = src.as_deref().unwrap_or("");
     if src.is_empty()
         || state
             .served
@@ -1435,10 +1441,10 @@ async fn serve_watch(leg: &AgentId, state: &Arc<BridgeState>, kernel: &Arc<Kerne
             kind: "watch",
             target: src,
             verb: "watch",
-            token: frame.get("auth_token").and_then(Value::as_str),
+            token: auth_token.as_deref(),
         });
     if let Decision::Deny(denial) = decision {
-        refuse_watch(state, frame, src, &deny_reply(&denial)).await;
+        refuse_watch(state, id, src, &deny_reply(&denial)).await;
         return;
     }
     let Some(target) = kernel.resolve_target(src) else {
@@ -1446,7 +1452,7 @@ async fn serve_watch(leg: &AgentId, state: &Arc<BridgeState>, kernel: &Arc<Kerne
             fantastic_kernel::refusal::UNKNOWN_AGENT,
             format!("watch: no agent {} (an id, or `kernel`)", py_repr(src)),
         );
-        refuse_watch(state, frame, src, &r).await;
+        refuse_watch(state, id.clone(), src, &r).await;
         return;
     };
     // THIS WATCH'S OWN READER — registered before the watch asks for one.
@@ -1455,7 +1461,7 @@ async fn serve_watch(leg: &AgentId, state: &Arc<BridgeState>, kernel: &Arc<Kerne
     let ready = kernel.ensure_inbox(&reader);
     if let Some(denial) = kernel.watch(&target.id, reader.clone()).await {
         kernel.remove_inbox(&reader);
-        refuse_watch(state, frame, src, &denial).await;
+        refuse_watch(state, id.clone(), src, &denial).await;
         return;
     }
     let task = kernel.spawn_task(leg, "watch_drain", {

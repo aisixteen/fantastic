@@ -7,6 +7,7 @@
 //! selftest, not in-process Rust unit tests.
 
 use super::*;
+use fantastic_kernel::bundle::Bundle;
 use fantastic_io_bridge::authorizer;
 use fantastic_kernel::Agent;
 use fantastic_kernel::Item;
@@ -2955,5 +2956,33 @@ async fn a_bridge_record_is_born_with_its_required_fields() {
             .result;
         assert_eq!(r["reason"], json!("missing_arg"), "{handler} {arg}: {r}");
         assert_eq!(r["arg"], json!(arg), "{handler} {arg}: {r}");
+    }
+}
+
+/// A forwarded `set` names its fields as secret in the CALLER's records (the far
+/// bundle is unknown before sending); nothing else a bridge is sent does.
+#[test]
+fn bridge_payload_secret_marks_only_a_forwarded_set_fields() {
+    let set = json!({"type": "forward", "target": "creds",
+                     "payload": {"type": "set", "ref": "r", "fields": {"a": "1", "b": "2"}}});
+    let dotted = json!({"type": "forward", "target": "creds",
+                        "payload": {"type": "set", "ref": "r", "fields": {"a.b": "1"}}});
+    let get = json!({"type": "forward", "target": "creds",
+                     "payload": {"type": "get", "ref": "r", "fields": {"a": "1"}}});
+    let reflect = json!({"type": "forward", "target": "creds", "payload": {"type": "reflect"}});
+    let plain = json!({"type": "set", "fields": {"a": "1"}});
+    let nofields = json!({"type": "forward", "target": "creds", "payload": {"type": "set"}});
+    for b in [
+        &WsBridgeBundle as &dyn Bundle,
+        &RelayConnectorBundle as &dyn Bundle,
+    ] {
+        assert_eq!(
+            b.payload_secret(&set),
+            vec!["payload.fields.a".to_string(), "payload.fields.b".to_string()]
+        );
+        assert_eq!(b.payload_secret(&dotted), vec!["payload.fields".to_string()]);
+        for none in [&get, &reflect, &plain, &nofields] {
+            assert!(b.payload_secret(none).is_empty(), "{none}");
+        }
     }
 }

@@ -101,6 +101,33 @@ pub struct CallFrame {
     pub target: String,
     /// The call.
     pub payload: CallPayload,
+    /// The token the frame's envelope carries for the leg's ingress rule.
+    #[serde(default)]
+    pub auth_token: Option<String>,
+}
+
+/// The correlator of any inbound frame, for the refusal of a frame that is not
+/// the shape its kind needs.
+#[derive(Debug, Default, Deserialize)]
+pub struct FrameId {
+    /// The correlator the answer echoes.
+    #[serde(default)]
+    pub id: Option<Value>,
+}
+
+/// An inbound `watch` frame, typed: the agent to watch, the correlator an error
+/// answer echoes, and the token for the ingress rule.
+#[derive(Debug, Default, Deserialize)]
+pub struct WatchFrame {
+    /// The correlator the refusal echoes.
+    #[serde(default)]
+    pub id: Option<Value>,
+    /// The local agent the far side asks to watch.
+    #[serde(default)]
+    pub src: Option<String>,
+    /// The token the frame's envelope carries for the leg's ingress rule.
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 /// The call an inbound frame carries: its verb, then its arguments.
