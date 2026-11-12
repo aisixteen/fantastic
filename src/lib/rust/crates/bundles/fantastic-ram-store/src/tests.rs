@@ -107,18 +107,24 @@ async fn rows_are_keyed_by_caller() {
 #[tokio::test]
 async fn owner_is_never_a_writable_field() {
     let k = store();
-    // an `owner` on the call names nobody: the row lands under the CALLER's key
+    // an `owner` on the call is no argument of the verb: refused by name, nothing written
     let out = call(
         &k,
         json!({"type": "append", "owner": "bob", "rows": [{"id": 5}]}),
         Some("alice"),
     )
     .await;
-    assert_eq!(out["ids"], json!([5]), "{out}");
+    assert_eq!(out["reason"], json!("bad_arg"), "{out}");
+    assert_eq!(out["arg"], json!("owner"), "{out}");
+    let alice = call(&k, json!({"type": "read"}), Some("alice")).await;
+    assert_eq!(alice["rows"], json!([]));
+    let read = call(&k, json!({"type": "read", "owner": "bob"}), Some("alice")).await;
+    assert_eq!(read["reason"], json!("bad_arg"), "{read}");
+    assert_eq!(read["arg"], json!("owner"), "{read}");
+    // the row lands under the CALLER's key
+    append(&k, "alice", json!([{"id": 5}])).await;
     let bob = call(&k, json!({"type": "read"}), Some("bob")).await;
     assert_eq!(bob["rows"], json!([]));
-    let alice = call(&k, json!({"type": "read", "owner": "bob"}), Some("alice")).await;
-    assert_eq!(ids(&alice), vec![5]);
 }
 
 #[tokio::test]
@@ -332,13 +338,16 @@ async fn reflect_names_the_posture_and_the_verbs() {
     assert_eq!(r["owners"], json!(1));
     assert_eq!(r["rows"], json!(1));
     assert_eq!(r["optional_verbs"], json!(["search"]));
-    assert!(r.get("verbs").is_none(), "{r}");
-    let verbs: Vec<&str> = VERB_DOCS.iter().map(|(n, _)| *n).collect();
+    // `reflect` renders the declared verbs, builtin and common, in declaration order
+    let names: Vec<&str> = r["verbs"]
+        .as_object()
+        .expect("reflect carries the verbs block")
+        .keys()
+        .map(String::as_str)
+        .collect();
     assert_eq!(
-        verbs,
+        names,
         vec![
-            "reflect",
-            "boot",
             "append",
             "read",
             "search",
@@ -346,50 +355,19 @@ async fn reflect_names_the_posture_and_the_verbs() {
             "inject",
             "dump",
             "put_bytes",
-            "get_bytes"
+            "get_bytes",
+            "reflect",
+            "boot",
+            "shutdown"
         ]
     );
 }
 
+/// A number whose text is not JSON (`Infinity`) cannot be typed into the declared
+/// `rows`: the entry refuses the call by name, and the store — never reached,
+/// never poisoned — answers the next call of every owner.
 #[tokio::test]
-async fn verb_docs_are_pythons_first_docstring_lines() {
-    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../python/bundled_agents/memory/ram_store/src/ram_store/tools.py");
-    let src = std::fs::read_to_string(&py).expect("python ram_store");
-    // `put_bytes` / `get_bytes` are Rust-only so far (#622): python has no twin to read
-    for &(name, doc) in VERB_DOCS
-        .iter()
-        .filter(|(n, _)| !matches!(*n, "put_bytes" | "get_bytes"))
-    {
-        let head = format!("async def _{name}(id, payload, agent):\n    \"\"\"");
-        let at = src
-            .find(&head)
-            .unwrap_or_else(|| panic!("no python _{name}"));
-        let rest = &src[at + head.len()..];
-        let line = rest
-            .split('\n')
-            .next()
-            .unwrap()
-            .trim_end_matches("\"\"\"")
-            .trim();
-        assert_eq!(doc, line, "{name}");
-    }
-}
-
-#[test]
-fn readme_is_pythons_verbatim() {
-    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../python/bundled_agents/memory/ram_store/src/ram_store/readme.md");
-    assert_eq!(README, std::fs::read_to_string(py).expect("python readme"));
-}
-
-/// A row may carry the one number the kernel keeps whose text is not JSON — the
-/// `Infinity` a model's `3e500123` (a hex job id `float()` reads as infinity)
-/// coerces to. Reading it back must answer, not panic: a panic here fires under
-/// the store's lock and poisons it, so every later call on EVERY owner would
-/// fail.
-#[tokio::test]
-async fn a_row_holding_a_non_json_number_reads_back_and_the_store_survives() {
+async fn a_row_holding_a_non_json_number_is_refused_and_the_store_survives() {
     let k = store();
     let inf = fantastic_kernel::test_support::non_finite("Infinity");
     assert_eq!(inf.to_string(), "Infinity", "the token under test");
@@ -401,18 +379,16 @@ async fn a_row_holding_a_non_json_number_reads_back_and_the_store_survives() {
     payload.insert("type".to_string(), Value::from("append"));
     payload.insert("rows".to_string(), Value::Array(vec![Value::Object(row)]));
     let out = call(&k, Value::Object(payload), Some("alice")).await;
-    assert_eq!(out["appended"], json!(1), "{out}");
+    assert_eq!(out["reason"], json!("bad_arg"), "{out}");
     let read = call(&k, json!({"type": "read"}), Some("alice")).await;
-    assert_eq!(read["rows"][0]["job_id"].to_string(), "Infinity", "{read}");
+    assert_eq!(read["rows"], json!([]), "{read}");
     // the lock is not poisoned: another owner's call still answers
     let other = append(&k, "bob", json!([{"id": 1, "content": "after"}])).await;
     assert_eq!(other["appended"], json!(1), "{other}");
 }
 
 #[tokio::test]
-async fn digit_string_refs_are_not_found_like_python() {
-    // `_as_id('3')` passes the type check, but `t.has(owner, '3')` asks a str of
-    // int-keyed tables: never found — NOT_FOUND naming the raw ref.
+async fn digit_string_refs_are_refused_as_not_row_ids() {
     let k = store();
     let first = append(&k, "alice", json!([{"kind": "msg", "content": "a"}])).await;
     let rid = first["ids"][0].as_i64().unwrap();
@@ -422,12 +398,9 @@ async fn digit_string_refs_are_not_found_like_python() {
         json!([{"kind": "fold", "content": "f", "refs": [rid.to_string()]}]),
     )
     .await;
-    assert_eq!(r["reason"], "not_found", "{r}");
+    assert_eq!(r["reason"], "bad_arg", "{r}");
     assert!(
-        r["error"]
-            .as_str()
-            .unwrap()
-            .ends_with(&format!("this owner: ['{rid}']")),
+        r["error"].as_str().unwrap().ends_with("refs must be row ids"),
         "{r}"
     );
     // The int ref is found.
@@ -441,10 +414,7 @@ async fn digit_string_refs_are_not_found_like_python() {
 }
 
 #[tokio::test]
-async fn prune_keep_is_python_in() {
-    // `row.get("kind") in keep`: a STRING keep is a substring test; a row whose
-    // kind is not a str makes that `in` raise TypeError; an int keep is not
-    // iterable.
+async fn prune_keep_is_a_list_of_kinds() {
     let k = store();
     append(
         &k,
@@ -455,48 +425,38 @@ async fn prune_keep_is_python_in() {
     .await;
     let out = call(
         &k,
-        json!({"type": "prune", "before_id": 1_000_000, "keep": "folder"}),
+        json!({"type": "prune", "before_id": 1_000_000, "keep": ["fold", "old"]}),
         Some("alice"),
     )
     .await;
-    assert_eq!(
-        out["pruned"], 1,
-        "'fold' and 'old' are substrings of 'folder': {out}"
-    );
+    assert_eq!(out["pruned"], 1, "only `msg` is not kept: {out}");
+    // a kind-less row is not in `keep`
     append(&k, "alice", json!([{"content": "kindless"}])).await;
-    let out = as_agent(
-        AgentId::from("alice"),
-        k.send(vec![Item::new(
-            AgentId::from("mem"),
-            json!({"type": "prune", "before_id": 1_000_000, "keep": "fold"}),
-        )]),
+    let out = call(
+        &k,
+        json!({"type": "prune", "before_id": 1_000_000, "keep": ["fold"]}),
+        Some("alice"),
     )
-    .await
-    .remove(0);
-    assert_eq!(out.status, fantastic_kernel::Status::Failed, "{out:?}");
-    assert_eq!(
-        out.result["error"],
-        "TypeError: 'in <string>' requires string as left operand, not NoneType"
-    );
-    let out = as_agent(
-        AgentId::from("alice"),
-        k.send(vec![Item::new(
-            AgentId::from("mem"),
-            json!({"type": "prune", "before_id": 1_000_000, "keep": 5}),
-        )]),
-    )
-    .await
-    .remove(0);
-    assert_eq!(
-        out.result["error"],
-        "TypeError: argument of type 'int' is not iterable"
-    );
+    .await;
+    assert_eq!(out["pruned"], 2, "`old` and the kind-less row go: {out}");
+    // a `keep` that is not a list is refused by name, nothing deleted
+    for keep in [json!("fold"), json!(5)] {
+        let out = call(
+            &k,
+            json!({"type": "prune", "before_id": 1_000_000, "keep": keep}),
+            Some("alice"),
+        )
+        .await;
+        assert_eq!(out["reason"], json!("bad_arg"), "{out}");
+        assert_eq!(out["arg"], json!("keep"), "{out}");
+    }
+    let left = call(&k, json!({"type": "read"}), Some("alice")).await;
+    assert_eq!(ids(&left).len(), 1, "{left}");
 }
 
 #[tokio::test]
-async fn a_zero_limit_is_no_limit_like_python() {
-    // `ids[:limit] if limit else ids` and `_as_id(limit) or 100`: the string
-    // "0" passes `_as_id` as 0, which is falsy.
+async fn a_zero_limit_is_no_limit() {
+    // `read` with limit 0 is no limit; `search` falls back to its defaults
     let k = store();
     append(
         &k,
@@ -504,12 +464,12 @@ async fn a_zero_limit_is_no_limit_like_python() {
         json!([{"kind": "msg", "content": "x one"}, {"kind": "msg", "content": "x two"}]),
     )
     .await;
-    let r = call(&k, json!({"type": "read", "limit": "0"}), Some("alice")).await;
+    let r = call(&k, json!({"type": "read", "limit": 0}), Some("alice")).await;
     assert_eq!(ids(&r).len(), 2, "{r}");
     assert_eq!(r["next"], Value::Null);
     let r = call(
         &k,
-        json!({"type": "search", "query": "x", "limit": "0", "width": "0"}),
+        json!({"type": "search", "query": "x", "limit": 0, "width": 0}),
         Some("alice"),
     )
     .await;
@@ -534,16 +494,12 @@ async fn unknown_type_is_coded_unhandled_with_the_raw_verb_in_order() {
     let k = store();
     for (verb, want) in [
         (
-            "frob",
-            r#"{"error":"ram_store: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#,
+            json!("frob"),
+            r#"{"error":"unknown verb 'frob'; mem answers: append, read, search, prune, inject, dump, put_bytes, get_bytes, reflect, boot, shutdown","reason":"unhandled","hint":"docs of=mem lists each verb's arguments","verb":"frob"}"#,
         ),
         (
-            "it's",
-            r#"{"error":"ram_store: unknown type \"it's\"","reason":"unhandled","verb":"it's"}"#,
-        ),
-        (
-            "shutdown",
-            r#"{"error":"ram_store: unknown type 'shutdown'","reason":"unhandled","verb":"shutdown"}"#,
+            json!("it's"),
+            r#"{"error":"unknown verb \"it's\"; mem answers: append, read, search, prune, inject, dump, put_bytes, get_bytes, reflect, boot, shutdown","reason":"unhandled","hint":"docs of=mem lists each verb's arguments","verb":"it's"}"#,
         ),
     ] {
         assert_eq!(
@@ -551,16 +507,10 @@ async fn unknown_type_is_coded_unhandled_with_the_raw_verb_in_order() {
             want
         );
     }
-    // a typeless payload never reaches a bundle through `send`; the bundle's
-    // own rendering of it is python's `None`, the verb the raw null
-    let r = RamStoreBundle::default()
-        .handle(&AgentId::from("mem"), &json!({}), &k)
-        .await
-        .unwrap()
-        .unwrap();
+    // a verb the store declares neither of: the shared entry answers `shutdown` itself
     assert_eq!(
-        wire(&r),
-        r#"{"error":"ram_store: unknown type None","reason":"unhandled","verb":null}"#
+        call(&k, json!({"type": "shutdown"}), Some("alice")).await,
+        Value::Null
     );
 }
 
@@ -569,10 +519,6 @@ async fn arg_refusals_carry_error_reason_arg_in_that_order() {
     let k = store();
     append(&k, "alice", json!([{"id": 1, "content": "a"}])).await;
     for (payload, want) in [
-        (
-            json!({"type": "append", "rows": []}),
-            r#"{"error":"append: `rows` must be a non-empty list of rows","reason":"bad_arg","arg":"rows"}"#,
-        ),
         (
             json!({"type": "append", "rows": [{"id": "5"}]}),
             r#"{"error":"append: a row id is a kernel int, got '5'","reason":"bad_arg","arg":"rows"}"#,
@@ -585,30 +531,30 @@ async fn arg_refusals_carry_error_reason_arg_in_that_order() {
         let got = call(&k, payload.clone(), Some("alice")).await;
         assert_eq!(wire(&got), want, "{payload}");
     }
+    // an empty list, a missing list and a wrongly typed one are the entry's refusals
+    for (payload, reason) in [
+        (json!({"type": "append", "rows": []}), "missing_arg"),
+        (json!({"type": "append"}), "missing_arg"),
+        (json!({"type": "append", "rows": "x"}), "bad_arg"),
+        (json!({"type": "append", "rows": [1]}), "bad_arg"),
+    ] {
+        let got = call(&k, payload.clone(), Some("alice")).await;
+        assert_eq!(got["reason"], json!(reason), "{payload}: {got}");
+        assert_eq!(got["arg"], json!("rows"), "{payload}: {got}");
+    }
 }
 
 #[tokio::test]
-async fn row_ids_and_limits_parse_as_python_ascii_digit_ids() {
-    // python `_as_id`: an int > 0, or a STRIPPED ASCII-digit string — never a
-    // Unicode digit, never a sign. `limit`/`width` fall back on a falsy id.
+async fn limits_and_ids_are_typed_integers() {
+    // `limit`/`width` are integers: 0 falls back to the default; text, a float, a
+    // bool and a negative number are refused by name.
     let k = store();
     let rows: Vec<Value> = (1..=5)
         .map(|i| json!({"id": i, "content": format!("needle {i}")}))
         .collect();
     append(&k, "alice", Value::Array(rows)).await;
     let hits = |r: &Value| r["matches"].as_array().unwrap().len();
-    for (limit, want) in [
-        (json!(2), 2),
-        (json!(" 2 "), 2),
-        (json!("3"), 3),
-        (json!("٢"), 5),  // a Unicode digit is not an id → the default 100
-        (json!("+2"), 5), // a sign is not a digit → the default
-        (json!(0), 5),    // falsy → the default
-        (json!("0"), 5),  // `_as_id("0")` is 0 → `or 100`
-        (json!(-1), 5),   // not > 0 → the default
-        (json!(2.0), 5),  // a float is not an int
-        (json!(true), 5), // a bool is not an id
-    ] {
+    for (limit, want) in [(json!(2), 2), (json!(3), 3), (json!(0), 5)] {
         let r = call(
             &k,
             json!({"type": "search", "query": "needle", "limit": limit.clone()}),
@@ -619,14 +565,27 @@ async fn row_ids_and_limits_parse_as_python_ascii_digit_ids() {
         assert_eq!(r["total"], json!(5), "limit={limit}");
         assert_eq!(r["truncated"], json!(want < 5), "limit={limit}");
     }
-    // `width` takes the same parse
+    for limit in [json!("3"), json!(" 2 "), json!(-1), json!(2.0), json!(true)] {
+        let r = call(
+            &k,
+            json!({"type": "search", "query": "needle", "limit": limit.clone()}),
+            Some("alice"),
+        )
+        .await;
+        assert_eq!(r["reason"], json!("bad_arg"), "limit={limit}: {r}");
+        assert_eq!(r["arg"], json!("limit"), "limit={limit}: {r}");
+    }
     let r = call(
         &k,
-        json!({"type": "search", "query": "needle", "width": " 3 "}),
+        json!({"type": "search", "query": "needle", "width": 3}),
         Some("alice"),
     )
     .await;
     assert_eq!(r["matches"][0]["text"], json!("nee"));
+    // a row-id list takes integers only
+    let r = call(&k, json!({"type": "read", "ids": ["1"]}), Some("alice")).await;
+    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    assert_eq!(r["arg"], json!("ids"), "{r}");
 }
 
 #[tokio::test]
@@ -705,7 +664,7 @@ async fn append_emits_one_appended_event_per_new_row() {
     assert_eq!(on_state, want);
     // a refused append emits nothing
     let refused = append(&k, "alice", json!([])).await;
-    assert_eq!(refused["reason"], json!("bad_arg"), "{refused}");
+    assert_eq!(refused["reason"], json!("missing_arg"), "{refused}");
     while let Some(item) = rx.try_recv() {
         assert_ne!(item.payload["type"], json!("appended"), "{refused}");
     }

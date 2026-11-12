@@ -9,15 +9,17 @@ description = "The DURABLE memory store agent (`sqlite_store.tools`): ram_store'
 [dependencies]
 fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
+fantastic-ram-store = { path = "../fantastic-ram-store" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
 tokio = { workspace = true }
 # `bundled`: SQLite compiled in (FTS5 included) — no system library to guess at.
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
-fantastic-ram-store = { path = "../fantastic-ram-store" }
 fantastic-ai-core = { path = "../fantastic-ai-core" }
 futures-util = "0.3"
 tempfile = "3"

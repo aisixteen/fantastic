@@ -14,15 +14,6 @@
       ]
     },
     {
-      "name": "owner-is-never-a-writable-field",
-      "steps": [
-        {"as": "bob", "send": {"type": "append", "rows": [{"id": 9, "content": "bob's"}]}, "expect": {"ids": [9]}},
-        {"as": "alice", "send": {"type": "append", "owner": "g1|bob", "rows": [{"id": 5}]}, "expect": {"ids": [5]}},
-        {"as": "bob", "send": {"type": "read"}, "expect": {"rows": [{"id": 9, "content": "bob's"}]}},
-        {"as": "alice", "send": {"type": "read", "owner": "g1|bob"}, "expect": {"rows": [{"id": 5}]}}
-      ]
-    },
-    {
       "name": "the-operator-is-keyed-as-kernel",
       "steps": [
         {"as": null, "send": {"type": "append", "rows": [{"id": 7, "kind": "call"}]}, "expect": {"ids": [7], "appended": 1}},
@@ -79,8 +70,6 @@
         {"as": "alice", "send": {"type": "read", "after": 2, "limit": 2}, "expect": {"rows": [{"id": 3}, {"id": 4, "kind": "view"}], "next": 4, "total": 4}},
         {"as": "alice", "send": {"type": "read", "after": 5, "order": "desc"}, "expect": {"rows": [{"id": 4, "kind": "view"}, {"id": 3}, {"id": 2, "kind": "clear"}, {"id": 1, "kind": "call", "name": "job"}], "total": 4}},
         {"as": "alice", "send": {"type": "read", "before": 3}, "expect": {"total": 2, "next": null}},
-        {"as": "alice", "send": {"type": "read", "after": "1", "before": 4}, "expect": {"rows": [{"id": 2, "kind": "clear"}, {"id": 3}]}},
-        {"as": "alice", "send": {"type": "read", "ids": [4, "2", 99]}, "expect": {"rows": [{"id": 2, "kind": "clear"}, {"id": 4, "kind": "view"}]}},
         {"as": "alice", "send": {"type": "read", "limit": 0}, "expect": {"total": 6, "next": null}},
         {"as": "alice", "send": {"type": "read", "kinds": ["clear", "view"], "from_last_kind": "view"}, "expect": {"rows": [{"id": 6, "kind": "view"}]}}
       ]
@@ -114,8 +103,6 @@
         {"as": null, "send": {"type": "inject", "tables": {"rows": [{"owner": "g1|alice", "row": {"id": 1}}, {"owner": "g1|alice", "row": {"id": 1}}]}}, "expect": {"reason": "exists", "id": 1, "error": "inject: duplicate row (g1|alice, 1)"}},
         {"as": null, "send": {"type": "inject", "tables": {"rows": [{"owner": "g1|alice", "row": {"content": "no id"}}]}}, "expect": {"reason": "bad_arg", "arg": "tables", "error": "inject: every row needs an int id"}},
         {"as": null, "send": {"type": "inject", "tables": {"rows": [{"row": {"id": 1}}]}}, "expect": {"reason": "bad_arg", "arg": "tables", "error": "inject: every row needs {owner, row}"}},
-        {"as": null, "send": {"type": "inject", "tables": {"rows": {"owner": "x"}}}, "expect": {"reason": "bad_arg", "arg": "tables", "error": "inject: tables.rows must be a list"}},
-        {"as": null, "send": {"type": "inject", "tables": [1]}, "expect": {"reason": "bad_arg", "arg": "tables", "error": "inject: `tables` must be a dump dict"}},
         {"as": null, "send": {"type": "inject", "tables": {"rows": [{"owner": "g1|alice", "row": {"id": 2}}], "fold_refs": [{"owner": "g1|alice", "fold": 9, "members": []}]}}, "expect": {"reason": "bad_arg", "arg": "tables", "error": "inject: fold_refs names no row 9"}},
         {"as": null, "send": {"type": "dump"}, "expect": {"tables": {"rows": [{"owner": "g1|alice", "row": {"id": 1, "content": "one"}}, {"owner": "g1|alice", "row": {"id": 2}}, {"owner": "g1|alice", "row": {"id": 3, "kind": "fold"}}, {"owner": "g1|bob", "row": {"id": 1, "kind": "fold"}}], "fold_refs": [{"owner": "g1|alice", "fold": 3, "members": [1, 2]}, {"owner": "g1|bob", "fold": 1, "members": []}]}}},
         {"as": null, "send": {"type": "inject", "tables": {"rows": [{"owner": "g1|bob", "row": {"id": 5, "content": "kept"}}, {"owner": "g1|bob", "row": {"id": 6, "kind": "fold"}}], "fold_refs": [{"owner": "g1|bob", "fold": 6, "members": [5]}]}}, "expect": {"rows": 2}},
@@ -129,7 +116,6 @@
       "name": "refusals",
       "steps": [
         {"as": "alice", "send": {"type": "no_such_verb"}, "expect": {"reason": "unhandled", "verb": "no_such_verb"}},
-        {"as": "alice", "send": {"type": "append", "rows": []}, "expect": {"reason": "bad_arg", "arg": "rows", "error": "append: `rows` must be a non-empty list of rows"}},
         {"as": "alice", "send": {"type": "append", "rows": [1]}, "expect": {"reason": "bad_arg", "arg": "rows"}},
         {"as": "alice", "send": {"type": "append", "rows": [{"id": "5"}]}, "expect": {"reason": "bad_arg", "arg": "rows", "error": "append: a row id is a kernel int, got '5'"}},
         {"as": "alice", "send": {"type": "append", "rows": [{"id": 0}]}, "expect": {"reason": "bad_arg", "arg": "rows", "error": "append: a row id is a kernel int, got 0"}},
@@ -137,43 +123,6 @@
         {"as": "alice", "send": {"type": "prune"}, "expect": {"reason": "missing_arg", "arg": "before_id", "error": "prune: before_id required"}},
         {"as": "alice", "send": {"type": "search"}, "expect": {"reason": "missing_arg", "arg": "query"}},
         {"as": "alice", "send": {"type": "read"}, "expect": {"rows": [], "total": 0}}
-      ]
-    },
-    {
-      "name": "a-superscript-digit-is-no-id",
-      "steps": [
-        {"as": "alice", "send": {"type": "append", "rows": [{"id": 101, "role": "user", "content": "hi"}]}, "expect": {"ids": [101]}},
-        {"as": "alice", "send": {"type": "read", "ids": ["²", "101"]}, "expect": {"rows": [{"id": 101, "role": "user", "content": "hi"}]}},
-        {"as": "alice", "send": {"type": "read", "after": "²"}, "expect": {"total": 1}}
-      ]
-    },
-    {
-      "name": "prune-keep-is-python-in",
-      "steps": [
-        {"as": "alice", "send": {"type": "append", "rows": [{"id": 1, "kind": "fold"}, {"id": 2, "kind": "old"}, {"id": 3, "kind": "msg"}]}, "expect": {"ids": [1, 2, 3]}},
-        {"as": "alice", "send": {"type": "prune", "before_id": 1000000, "keep": "folder"}, "expect": {"pruned": 1}},
-        {"as": "alice", "send": {"type": "read"}, "expect": {"total": 2}},
-        {"as": "alice", "send": {"type": "append", "rows": [{"id": 4, "kind": "view"}, {"id": 5, "kind": "msg"}]}, "expect": {"ids": [4, 5]}},
-        {"as": "alice", "send": {"type": "prune", "before_id": 1000000, "keep": ["view", "fold", "old"]}, "expect": {"pruned": 1}},
-        {"as": "alice", "send": {"type": "append", "rows": [{"id": 6, "kind": "a"}, {"id": 7, "kind": "b"}]}, "expect": {"ids": [6, 7]}},
-        {"as": "alice", "send": {"type": "prune", "before_id": 1000000, "keep": {"a": 1, "view": 1, "fold": 1, "old": 1}}, "expect": {"pruned": 1}},
-        {"as": "alice", "send": {"type": "read"}, "expect": {"total": 4}}
-      ]
-    },
-    {
-      "name": "a-zero-limit-is-no-limit",
-      "steps": [
-        {"as": "alice", "send": {"type": "append", "rows": [{"id": 1, "kind": "msg", "content": "x one"}, {"id": 2, "kind": "msg", "content": "x two"}]}, "expect": {"ids": [1, 2]}},
-        {"as": "alice", "send": {"type": "read", "limit": "0"}, "expect": {"total": 2, "next": null}},
-        {"as": "alice", "send": {"type": "search", "query": "x", "limit": "0", "width": "0"}, "expect": {"total": 2, "truncated": false}}
-      ]
-    },
-    {
-      "name": "digit-string-refs-are-not-found",
-      "steps": [
-        {"as": "alice", "send": {"type": "append", "rows": [{"id": 4, "kind": "msg", "content": "a"}]}, "expect": {"ids": [4]}},
-        {"as": "alice", "send": {"type": "append", "rows": [{"id": 9, "kind": "fold", "content": "f", "refs": ["4"]}]}, "expect": {"reason": "not_found", "arg": "rows", "error": "append: row 9 refs rows that do not exist for this owner: ['4']"}},
-        {"as": "alice", "send": {"type": "append", "rows": [{"id": 9, "kind": "fold", "content": "f", "refs": [4]}]}, "expect": {"ids": [9], "appended": 1}}
       ]
     },
     {

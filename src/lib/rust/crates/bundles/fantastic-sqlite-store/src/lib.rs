@@ -44,12 +44,10 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use fantastic_bundle::{py_json_dumps, py_repr_value, py_type_name, py_splitlines, py_str, py_strip, py_truthy};
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_bundle::{py_json_dumps, py_repr_value, py_splitlines, py_strip};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::outcome::{body_at, Blob};
-use fantastic_kernel::refusal::{
-    missing, refusal, refusal_hint, with, BAD_ARG, EXISTS, NOT_FOUND, UNHANDLED,
-};
+use fantastic_kernel::refusal::{missing, refusal, refusal_hint, with, BAD_ARG, EXISTS, NOT_FOUND, UNHANDLED};
 use fantastic_kernel::{AgentId, Kernel};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
@@ -57,8 +55,8 @@ use serde_json::{json, Map, Value};
 /// The `handler_module` this bundle answers to.
 pub const HANDLER_MODULE: &str = "sqlite_store.tools";
 
-/// The short orientation readme.
-pub const README: &str = include_str!("readme.md");
+pub mod record;
+pub mod verbs;
 
 const OPERATOR: &str = "kernel";
 
@@ -103,19 +101,10 @@ CREATE TRIGGER IF NOT EXISTS rows_text_gone AFTER DELETE ON rows BEGIN
 END;
 "#;
 
-/// ram_store `_as_id`: a positive int, or the decimal digits a caller wrote.
+/// A row id inside a stored row or a dump: a positive JSON integer.
 fn as_id(x: &Value) -> Option<i64> {
     match x {
-        Value::Bool(_) => None,
         Value::Number(n) => n.as_i64().filter(|i| *i > 0),
-        Value::String(s) => {
-            let t = py_strip(s);
-            if !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()) {
-                t.parse::<i64>().ok()
-            } else {
-                None
-            }
-        }
         _ => None,
     }
 }
@@ -400,18 +389,9 @@ struct Staged {
     fold_refs: Vec<(String, i64, Vec<i64>)>,
 }
 
-fn stage_tables(tables: &Value) -> Result<Staged, Value> {
-    let Some(tables) = tables.as_object() else {
-        return Err(bad_tables("inject: `tables` must be a dump dict"));
-    };
-    let rows = match tables.get("rows") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(a)) => a.clone(),
-        Some(v) if !py_truthy(v) => Vec::new(),
-        Some(_) => return Err(bad_tables("inject: tables.rows must be a list")),
-    };
+fn stage_tables(tables: &verbs::StoreTables) -> Result<Staged, Value> {
     let mut by_owner: Vec<(String, Vec<Row>)> = Vec::new();
-    for item in &rows {
+    for item in tables.rows.iter().flatten() {
         let owner = item.get("owner").and_then(Value::as_str);
         let (Some(_), Some(owner)) = (item.as_object(), owner) else {
             return Err(bad_tables("inject: every row needs {owner, row}"));
@@ -446,9 +426,8 @@ fn stage_tables(tables: &Value) -> Result<Staged, Value> {
         }
     }
     let has = |owner: &str, id: i64| have.contains(&(owner.to_string(), id));
-    let empty = Vec::new();
     let mut fold_refs = Vec::new();
-    for fr in tables.get("fold_refs").and_then(Value::as_array).unwrap_or(&empty) {
+    for fr in tables.fold_refs.iter().flatten() {
         let owner = fr.get("owner").and_then(Value::as_str).unwrap_or("").to_string();
         let fold = fr.get("fold").and_then(as_id);
         let members: Vec<Value> = fr.get("members").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -526,44 +505,6 @@ fn fold_closure(db: &Db<'_>, owner: &str, fold: i64) -> rusqlite::Result<HashSet
         }
     }
     Ok(out)
-}
-
-/// ram_store's verb docs, word for word — the one on `boot` names the file.
-pub const VERB_DOCS: [(&str, &str); 10] = [
-    ("reflect", "Identity + posture: how many owners/rows, which optional verbs exist. No args."),
-    ("boot", "Opens (creating if absent) the SQLite file named by `path`; the tables survive the process."),
-    ("append", "args: rows:list[dict] (req). Appends rows under the CALLER's key, all or none. A row carries the kernel id it was minted with, or none and the next id is taken from the kernel's counter; `refs` must name rows of the same owner (this batch included). Returns {ids:[int], appended:int}."),
-    ("read", "args: after:int?, before:int?, limit:int?, order:'asc'|'desc'?, kinds:list?, match:dict? (exact field equality), ids:list?, from_last_kind:str? (start at the newest row of that kind). Rows whole, oldest first by default. Returns {rows, next, total}."),
-    ("search", "args: query:str (req — case-insensitive substring), ids:list? (rows to search; a fold id includes its members), limit:int? (default 100), width:int? (chars per line, default 200). Every matching LINE with its row id and line number. Returns {matches:[{id, line, text}], total, truncated}."),
-    ("prune", "args: before_id:int? and/or ids:list? (req — one of them), keep:list? (kinds kept). Deletes YOUR rows below `before_id` (or exactly `ids`) except kinds in `keep`; every fold ref naming a deleted row goes with it (FK cascade). Returns {pruned}."),
-    ("inject", "args: tables:dict (req — a `dump`). Replaces the WHOLE store with the given tables, every key and FK checked; nothing changes on a refusal. Returns {rows}."),
-    ("dump", "No args. The whole store as tables — {rows:[{owner, row}], fold_refs:[{owner, fold, members}]} — exactly what `inject` takes back. Returns {tables}."),
-    ("put_bytes", "args: ref:str (req), media_type:str (req), and the raw bytes as the request body at `data`. Stores them under the CALLER's key and `ref` (a second put to the same ref replaces them). They are not rows: `read`, `search` and `dump` never show them. Returns {ref, media_type, bytes} (the byte count)."),
-    ("get_bytes", "args: ref:str (req). The bytes the caller put under `ref`, as the reply body at `data`. Returns {ref, media_type, bytes} (the byte count), or not_found."),
-];
-
-/// python `x in container` for the JSON value a payload carried. `Err` is the
-/// TypeError python raises (`'in <string>' requires string as left operand`,
-/// `argument of type 'int' is not iterable`, `unhashable type: 'list'`) — the
-/// same text as ram_store's.
-fn py_in(x: &Value, container: &Value) -> Result<bool, BundleError> {
-    let type_error = |m: String| -> BundleError { format!("TypeError: {m}").into() };
-    match container {
-        Value::Array(items) => Ok(items.contains(x)),
-        Value::String(s) => match x {
-            Value::String(needle) => Ok(s.contains(needle.as_str())),
-            other => Err(type_error(format!(
-                "'in <string>' requires string as left operand, not {}",
-                py_type_name(other)
-            ))),
-        },
-        Value::Object(m) => match x {
-            Value::String(k) => Ok(m.contains_key(k)),
-            Value::Array(_) | Value::Object(_) => Err(type_error(format!("unhashable type: '{}'", py_type_name(x)))),
-            _ => Ok(false),
-        },
-        other => Err(type_error(format!("argument of type '{}' is not iterable", py_type_name(other)))),
-    }
 }
 
 /// Why a record's `path` cannot name the file: it is required, relative, and
@@ -757,24 +698,15 @@ impl SqliteStoreBundle {
         Value::Object(out)
     }
 
-    fn append(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    fn append(&self, id: &AgentId, a: &verbs::Append, kernel: &Arc<Kernel>) -> Value {
         let (owner, _) = match caller(kernel) {
             Ok(o) => o,
             Err(r) => return r,
         };
-        let rows = match payload.get("rows").and_then(Value::as_array) {
-            Some(r) if !r.is_empty() && r.iter().all(Value::is_object) => r.clone(),
-            _ => {
-                let mut r = refusal(BAD_ARG, "append: `rows` must be a non-empty list of rows");
-                with(&mut r, "arg", json!("rows"));
-                return r;
-            }
-        };
         self.tx(id, kernel, |db| {
             let mut staged: Vec<Row> = Vec::new();
             let mut batch: HashSet<i64> = HashSet::new();
-            for r in &rows {
-                let r = r.as_object().expect("checked");
+            for r in &a.rows {
                 let rid = match r.get("id") {
                     None | Some(Value::Null) => kernel.mint_id(),
                     Some(v) => match (v, as_id(v)) {
@@ -806,14 +738,11 @@ impl SqliteStoreBundle {
                     with(&mut e, "arg", json!("rows"));
                     return Err(e);
                 };
-                // python `t.has(owner, m) or m in batch` on the RAW ref: the tables
-                // are keyed by int, so a digit STRING passes `as_id` and is still
-                // never found.
                 let mut missing_refs: Vec<Value> = Vec::new();
                 for m in list {
-                    let held = match (m.is_number(), as_id(m)) {
-                        (true, Some(i)) => db.has(&owner, i).map_err(db_err)? || batch.contains(&i),
-                        _ => false,
+                    let held = match as_id(m) {
+                        Some(i) => db.has(&owner, i).map_err(db_err)? || batch.contains(&i),
+                        None => false,
                     };
                     if !held {
                         missing_refs.push(m.clone());
@@ -829,32 +758,19 @@ impl SqliteStoreBundle {
                 }
             }
             let ids: Vec<Value> = staged.iter().map(|r| r.get("id").cloned().unwrap_or(Value::Null)).collect();
-            // The file holds JSON: a row whose text does not parse back (the one
-            // non-JSON number the kernel keeps, `Infinity`) is refused, never
-            // rewritten — all or none, like python's `_encode`.
-            for r in &staged {
-                if let Err(e) = serde_json::from_str::<Value>(&to_text(r)) {
-                    let mut e = refusal(
-                        BAD_ARG,
-                        format!("append: row {} is not JSON: {e}", r.get("id").map_or("None".to_string(), Value::to_string)),
-                    );
-                    with(&mut e, "arg", json!("rows"));
-                    return Err(e);
-                }
-            }
             let n = staged.len();
             db.insert(&owner, &staged).map_err(db_err)?;
             Ok(json!({"ids": ids, "appended": n}))
         })
     }
 
-    fn read(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    fn read(&self, id: &AgentId, a: &verbs::Read, kernel: &Arc<Kernel>) -> Value {
         self.tx(id, kernel, |db| {
             let (owner, _) = caller(kernel)?;
-            let flk = payload.get("from_last_kind").and_then(Value::as_str).filter(|s| !s.is_empty());
-            let after = payload.get("after").and_then(as_id);
-            let before = payload.get("before").and_then(as_id);
-            let desc = payload.get("order").and_then(Value::as_str) == Some("desc");
+            let flk = a.from_last_kind.as_deref().filter(|s| !s.is_empty());
+            let after = a.after;
+            let before = a.before;
+            let desc = a.order == Some(verbs::Order::Desc);
             // THE ID BOUNDS IN THE SQL, before any row is read: `after`/`before`
             // only look at ids, so a cursor read ("what came after my newest row")
             // costs the rows after the cursor, not the owner's whole history. Not
@@ -872,8 +788,8 @@ impl SqliteStoreBundle {
             // Rows are decoded only when a filter reads them, and only the ids
             // still in play.
             let needs_rows = flk.is_some()
-                || payload.get("kinds").and_then(Value::as_array).is_some_and(|k| !k.is_empty())
-                || payload.get("match").and_then(Value::as_object).is_some_and(|m| !m.is_empty());
+                || a.kinds.as_ref().is_some_and(|k| !k.is_empty())
+                || a.r#match.as_ref().is_some_and(|m| !m.is_empty());
             let (mut ids, rows) = if !needs_rows {
                 (db.ids_between(&owner, lo, hi).map_err(db_err)?, HashMap::new())
             } else if flk.is_some() {
@@ -886,12 +802,12 @@ impl SqliteStoreBundle {
                 // `kinds` first — a superset of the exact filter below, which still
                 // decides — so the kernel's per-send lookups (`{kinds:[call],
                 // match:{name}}`, `{kinds:[settle], match:{parent}}`) are index hits.
-                let eq: Vec<(String, Value)> = payload
-                    .get("match")
-                    .and_then(Value::as_object)
+                let eq: Vec<(String, Value)> = a
+                    .r#match
+                    .as_ref()
                     .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                     .unwrap_or_default();
-                let kinds: Option<Vec<String>> = payload.get("kinds").and_then(Value::as_array).and_then(|k| {
+                let kinds: Option<Vec<String>> = a.kinds.as_ref().and_then(|k| {
                     let s: Vec<String> = k.iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
                     (s.len() == k.len() && !s.is_empty()).then_some(s)
                 });
@@ -911,33 +827,33 @@ impl SqliteStoreBundle {
                     ids.retain(|i| *i >= last);
                 }
             }
-            if let Some(kinds) = payload.get("kinds").and_then(Value::as_array).filter(|k| !k.is_empty()) {
+            if let Some(kinds) = a.kinds.as_ref().filter(|k| !k.is_empty()) {
                 ids.retain(|i| kinds.contains(&row_of(i).get("kind").cloned().unwrap_or(Value::Null)));
             }
-            if let Some(m) = payload.get("match").and_then(Value::as_object).filter(|m| !m.is_empty()) {
+            if let Some(m) = a.r#match.as_ref().filter(|m| !m.is_empty()) {
                 ids.retain(|i| {
                     let r = row_of(i);
                     m.iter().all(|(k, v)| r.get(k).unwrap_or(&Value::Null) == v)
                 });
             }
-            if let Some(want) = payload.get("ids").and_then(Value::as_array) {
-                let wanted: HashSet<Option<i64>> = want.iter().map(as_id).collect();
-                ids.retain(|i| wanted.contains(&Some(*i)));
+            if let Some(want) = &a.ids {
+                let wanted: HashSet<i64> = want.iter().copied().collect();
+                ids.retain(|i| wanted.contains(i));
             }
             if desc {
                 ids.reverse();
-                if let Some(a) = after {
-                    ids.retain(|i| *i < a);
+                if let Some(after) = after {
+                    ids.retain(|i| *i < after);
                 }
-            } else if let Some(a) = after {
-                ids.retain(|i| *i > a);
+            } else if let Some(after) = after {
+                ids.retain(|i| *i > after);
             }
             if let Some(b) = before {
                 ids.retain(|i| *i < b);
             }
             let total = ids.len();
-            // `ids[:limit] if limit else ids` — a `0` is falsy: no limit.
-            let limit = payload.get("limit").and_then(as_id).filter(|l| *l != 0);
+            // `limit` 0 is no limit.
+            let limit = a.limit.filter(|l| *l != 0);
             let page: Vec<i64> = match limit {
                 Some(l) => ids.iter().take(usize::try_from(l).unwrap_or(usize::MAX)).copied().collect(),
                 None => ids.clone(),
@@ -956,20 +872,18 @@ impl SqliteStoreBundle {
         })
     }
 
-    fn search(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-        let q = py_strip(&payload.get("query").filter(|v| py_truthy(v)).map(py_str).unwrap_or_default()).to_lowercase();
+    fn search(&self, id: &AgentId, a: &verbs::Search, kernel: &Arc<Kernel>) -> Value {
+        let q = py_strip(&a.query).to_lowercase();
         if q.is_empty() {
             return missing("search", "query");
         }
         self.tx(id, kernel, |db| {
             let (owner, _) = caller(kernel)?;
             let mut ids = db.ids(&owner).map_err(db_err)?;
-            if let Some(want) = payload.get("ids").and_then(Value::as_array).filter(|w| !w.is_empty()) {
+            if let Some(want) = a.ids.as_ref().filter(|w| !w.is_empty()) {
                 let mut scope: HashSet<i64> = HashSet::new();
-                for x in want {
-                    if let Some(rid) = as_id(x) {
-                        scope.extend(fold_closure(db, &owner, rid).map_err(db_err)?);
-                    }
+                for rid in want {
+                    scope.extend(fold_closure(db, &owner, *rid).map_err(db_err)?);
                 }
                 ids.retain(|i| scope.contains(i));
             }
@@ -986,9 +900,9 @@ impl SqliteStoreBundle {
                     .map_err(db_err)?;
                 found
             };
-            // `_as_id(limit) or 100` / `or 200`: a `0` falls back too.
-            let limit = usize::try_from(payload.get("limit").and_then(as_id).filter(|l| *l != 0).unwrap_or(100)).unwrap_or(usize::MAX);
-            let width = usize::try_from(payload.get("width").and_then(as_id).filter(|w| *w != 0).unwrap_or(200)).unwrap_or(usize::MAX);
+            // a `0` falls back to the default too
+            let limit = usize::try_from(a.limit.filter(|l| *l != 0).unwrap_or(100)).unwrap_or(usize::MAX);
+            let width = usize::try_from(a.width.filter(|w| *w != 0).unwrap_or(200)).unwrap_or(usize::MAX);
             let mut matches: Vec<Value> = Vec::new();
             let mut total = 0usize;
             for i in &ids {
@@ -1012,38 +926,25 @@ impl SqliteStoreBundle {
         })
     }
 
-    /// `Err` is python's TypeError out of `kind in keep` — a raise.
-    fn prune(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Value, BundleError> {
+    fn prune(&self, id: &AgentId, a: &verbs::Prune, kernel: &Arc<Kernel>) -> Value {
         let (owner, _) = match caller(kernel) {
             Ok(o) => o,
-            Err(r) => return Ok(r),
+            Err(r) => return r,
         };
-        let before = payload.get("before_id").and_then(as_id);
-        let want = payload.get("ids").and_then(Value::as_array);
-        if before.is_none() && want.is_none() {
-            return Ok(missing("prune", "before_id"));
+        if a.before_id.is_none() && a.ids.is_none() {
+            return missing("prune", "before_id");
         }
-        let wanted: HashSet<Option<i64>> = want.map(|w| w.iter().map(as_id).collect()).unwrap_or_default();
-        // `keep = payload.get("keep") or []`, then `row.get("kind") in keep` —
-        // python's `in` on WHATEVER arrived: a list is membership, a string a
-        // SUBSTRING test, a dict its keys, and anything else raises.
-        let keep: Value = payload.get("keep").filter(|v| py_truthy(v)).cloned().unwrap_or_else(|| json!([]));
-        let has_want = want.is_some();
-        let mut raised: Option<BundleError> = None;
+        let wanted: HashSet<i64> = a.ids.iter().flatten().copied().collect();
+        let keep: &[Value] = a.keep.as_deref().unwrap_or(&[]);
         let out = self.tx(id, kernel, |db| {
             let rows = db.all_rows(&owner).map_err(db_err)?;
             let mut doomed: HashSet<i64> = HashSet::new();
             for i in db.ids(&owner).map_err(db_err)? {
                 let kind = rows.get(&i).and_then(|r| r.get("kind")).cloned().unwrap_or(Value::Null);
-                match py_in(&kind, &keep) {
-                    Ok(true) => continue,
-                    Ok(false) => {}
-                    Err(e) => {
-                        raised = Some(e);
-                        return Err(refusal(UNHANDLED, "prune raised"));
-                    }
+                if keep.contains(&kind) {
+                    continue;
                 }
-                if before.is_some_and(|b| i < b) || (has_want && wanted.contains(&Some(i))) {
+                if a.before_id.is_some_and(|b| i < b) || (a.ids.is_some() && wanted.contains(&i)) {
                     doomed.insert(i);
                 }
             }
@@ -1058,14 +959,11 @@ impl SqliteStoreBundle {
                 let _ = c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
             }
         }
-        match raised {
-            Some(e) => Err(e),
-            None => Ok(out),
-        }
+        out
     }
 
-    fn inject(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-        let staged = match stage_tables(payload.get("tables").unwrap_or(&Value::Null)) {
+    fn inject(&self, id: &AgentId, a: &verbs::Inject, kernel: &Arc<Kernel>) -> Value {
+        let staged = match stage_tables(&a.tables) {
             Ok(s) => s,
             Err(e) => return e,
         };
@@ -1088,29 +986,13 @@ impl SqliteStoreBundle {
         })
     }
 
-    /// The `ref` of a bytes verb: a non-empty string.
-    fn blob_ref(verb: &str, payload: &Value) -> Result<String, Value> {
-        match payload.get("ref") {
-            Some(Value::String(r)) if !r.is_empty() => Ok(r.clone()),
-            None | Some(Value::Null) => Err(missing(verb, "ref")),
-            Some(_) => Err(refusal(BAD_ARG, format!("{verb}: `ref` must be a non-empty string"))),
-        }
-    }
-
-    fn put_bytes(&self, id: &AgentId, payload: &Value, body: Option<&Blob>, kernel: &Arc<Kernel>) -> Value {
+    fn put_bytes(&self, id: &AgentId, a: &verbs::PutBytes, body: Option<&Blob>, kernel: &Arc<Kernel>) -> Value {
         let (owner, _) = match caller(kernel) {
             Ok(o) => o,
             Err(r) => return r,
         };
-        let key = match Self::blob_ref("put_bytes", payload) {
-            Ok(r) => r,
-            Err(e) => return e,
-        };
-        let media = match payload.get("media_type") {
-            Some(Value::String(m)) if !m.is_empty() => m.clone(),
-            None | Some(Value::Null) => return missing("put_bytes", "media_type"),
-            Some(_) => return refusal(BAD_ARG, "put_bytes: `media_type` must be a non-empty string"),
-        };
+        let key = a.ref_name.clone();
+        let media = a.media_type.clone();
         let Some(bytes) = body_at(body, "data") else {
             return missing("put_bytes", "data (the raw bytes, as the request body)");
         };
@@ -1124,15 +1006,12 @@ impl SqliteStoreBundle {
         })
     }
 
-    fn get_bytes(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> (Value, Option<Blob>) {
+    fn get_bytes(&self, id: &AgentId, a: &verbs::GetBytes, kernel: &Arc<Kernel>) -> (Value, Option<Blob>) {
         let (owner, _) = match caller(kernel) {
             Ok(o) => o,
             Err(r) => return (r, None),
         };
-        let key = match Self::blob_ref("get_bytes", payload) {
-            Ok(r) => r,
-            Err(e) => return (e, None),
-        };
+        let key = a.ref_name.clone();
         let mut found: Option<Vec<u8>> = None;
         let out = self.tx(id, kernel, |db| {
             let row = db
@@ -1165,16 +1044,12 @@ impl SqliteStoreBundle {
     }
 }
 
+/// What the bundle is for — its one short man text.
+const MAN: &str = "A durable memory store: conversation rows per owner (the caller), folds, search and raw bytes by ref, kept in one SQLite file (`path` on the record) that survives the process.";
+
 #[async_trait]
-impl Bundle for SqliteStoreBundle {
-    /// HOW TO CALL it — served by the kernel's `docs` verb, never on a reflect.
-    fn verb_docs(&self) -> Value {
-        let mut verbs = Map::new();
-        for (name, d) in VERB_DOCS {
-            verbs.insert(name.to_string(), Value::from(d));
-        }
-        Value::Object(verbs)
-    }
+impl Handler for SqliteStoreBundle {
+    type Call = verbs::Call;
 
     /// The CATALOG name — python's entry-point name, not the handler module
     /// (the kind `reflect bundles=all` lists and a system prompt names).
@@ -1182,8 +1057,20 @@ impl Bundle for SqliteStoreBundle {
         "sqlite_store"
     }
 
-    fn readme(&self) -> Option<&'static str> {
-        Some(README)
+    fn man(&self) -> &'static str {
+        MAN
+    }
+
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        verbs::VERBS
+    }
+
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        verbs::dynamic_verbs(agent)
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &record::RECORD
     }
 
     /// `path` — required, relative, inside.
@@ -1195,40 +1082,38 @@ impl Bundle for SqliteStoreBundle {
         check_path(&merged).err()
     }
 
-    async fn handle(&self, agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        let out = match verb {
-            "reflect" => self.reflect(agent_id, kernel),
+    async fn handle(&self, agent_id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
+        use verbs::Call;
+        let out = match call {
+            Call::Reflect(_) => self.reflect(agent_id, kernel),
             // Opens the file (the schema ensured): a bad `path` fails LOUD here,
             // at boot, not on the first turn.
-            "boot" => match self.conn(agent_id, kernel) {
+            Call::Boot(_) => match self.conn(agent_id, kernel) {
                 Ok(_) => return Ok(None),
                 Err(e) => e,
             },
-            "append" => {
-                let out = self.append(agent_id, payload, kernel);
+            Call::Append(a) => {
+                let out = self.append(agent_id, &a, kernel);
                 // one `appended` event per new row; a refusal has no `ids`
                 for id in out.get("ids").and_then(Value::as_array).into_iter().flatten() {
                     kernel.emit(agent_id, json!({"type": "appended", "table": "rows", "id": id})).await;
                 }
                 out
             }
-            "read" => self.read(agent_id, payload, kernel),
-            "search" => self.search(agent_id, payload, kernel),
-            "prune" => self.prune(agent_id, payload, kernel)?,
-            "inject" => self.inject(agent_id, payload, kernel),
-            "dump" => self.dump(agent_id, kernel),
+            Call::Read(a) => self.read(agent_id, &a, kernel),
+            Call::Search(a) => self.search(agent_id, &a, kernel),
+            Call::Prune(a) => self.prune(agent_id, &a, kernel),
+            Call::Inject(a) => self.inject(agent_id, &a, kernel),
+            Call::Dump(_) => self.dump(agent_id, kernel),
             // the bytes verbs ride the binary path only (`handle_binary`)
-            "put_bytes" | "get_bytes" => refusal(
+            Call::PutBytes(_) => refusal(
                 BAD_ARG,
-                format!("sqlite_store: {verb} carries its bytes as a binary body, at `data`"),
+                "sqlite_store: put_bytes carries its bytes as a binary body, at `data`",
             ),
-            _ => {
-                let t = payload.get("type").cloned().unwrap_or(Value::Null);
-                let mut r = refusal(UNHANDLED, format!("sqlite_store: unknown type {}", py_repr_value(&t)));
-                with(&mut r, "verb", t);
-                r
-            }
+            Call::GetBytes(_) => refusal(
+                BAD_ARG,
+                "sqlite_store: get_bytes carries its bytes as a binary body, at `data`",
+            ),
         };
         Ok(Some(out))
     }
@@ -1238,20 +1123,20 @@ impl Bundle for SqliteStoreBundle {
     async fn handle_binary(
         &self,
         agent_id: &AgentId,
-        header: Value,
+        call: Self::Call,
         body: Option<Blob>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Option<Blob>), BundleError> {
-        match header.get("type").and_then(Value::as_str) {
-            Some("put_bytes") => {
-                let out = self.put_bytes(agent_id, &header, body.as_ref(), kernel);
+        match call {
+            verbs::Call::PutBytes(a) => {
+                let out = self.put_bytes(agent_id, &a, body.as_ref(), kernel);
                 Ok((Some(out), None))
             }
-            Some("get_bytes") => {
-                let (out, blob) = self.get_bytes(agent_id, &header, kernel);
+            verbs::Call::GetBytes(a) => {
+                let (out, blob) = self.get_bytes(agent_id, &a, kernel);
                 Ok((Some(out), blob))
             }
-            _ => Ok((self.handle(agent_id, &header, kernel).await?, None)),
+            other => Ok((self.handle(agent_id, other, kernel).await?, None)),
         }
     }
 

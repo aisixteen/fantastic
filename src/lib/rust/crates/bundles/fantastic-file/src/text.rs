@@ -6,8 +6,8 @@
 //! and `readonly`; a commit is [`crate::fs::write_bytes`] (tmp sibling + atomic
 //! replace), the tmp judged by the TARGET path's exposure.
 
-use crate::{allow_list, clamped, fs, gate_path, int_arg, norm, path_arg, readonly_refusal};
-use fantastic_bundle::{py_repr, py_truthy};
+use crate::{allow_list, clamped, fs, gate_path, norm, readonly_refusal, rel_path, verbs};
+use fantastic_bundle::py_repr;
 use fantastic_kernel::refusal as rf;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -17,9 +17,6 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// Lines per `read` page when the caller names no `limit`.
 pub(crate) const READ_LIMIT: u64 = 200;
-
-/// The verbs this module answers.
-pub(crate) const TEXT_VERBS: [&str; 5] = ["read", "write", "edit", "append", "undo"];
 
 type Key = (String, String);
 type LockMap = Mutex<HashMap<Key, Arc<tokio::sync::Mutex<()>>>>;
@@ -121,13 +118,13 @@ fn key_of(path: &str) -> String {
 /// IS the `bytes` argument (present even when empty); on the text channel a str
 /// `bytes` is utf-8-encoded (a spawned program's ctrl-fd wire is JSON and has no
 /// bytes type). Anything else is `missing`.
-fn doc(verb: &str, payload: &Value, blob: Option<&[u8]>, what: &str) -> Result<Vec<u8>, Value> {
+fn doc(verb: &str, bytes: Option<&str>, blob: Option<&[u8]>, what: &str) -> Result<Vec<u8>, Value> {
     if let Some(b) = blob {
         return Ok(b.to_vec());
     }
-    match payload.get("bytes") {
-        Some(Value::String(s)) => Ok(s.as_bytes().to_vec()),
-        _ => Err(rf::missing(
+    match bytes {
+        Some(s) => Ok(s.as_bytes().to_vec()),
+        None => Err(rf::missing(
             verb,
             &format!("bytes ({what} — str is utf-8-encoded)"),
         )),
@@ -145,27 +142,10 @@ fn current(root: &Path, path: &str) -> Result<Option<Vec<u8>>, String> {
 
 /// The on-demand optimistic guard: a refusal when `if_match` names another
 /// version (an absent document has no version and never matches). `expected`
-/// echoes the caller's RAW value.
-/// Does the caller's `if_match` name this version? A string compares as text;
-/// a JSON number matches when its text form is the version, or when the version
-/// parses as the same JSON number (e.g. `12e45` arrives as f64 and was never
-/// the digits the caller meant).
-pub(crate) fn same_version(want: &Value, have: &str) -> bool {
-    match want {
-        Value::String(s) => s == have,
-        Value::Number(n) => {
-            n.to_string() == have
-                || serde_json::from_str::<Value>(have)
-                    .ok()
-                    .is_some_and(|v| v.as_number() == Some(n))
-        }
-        _ => false,
-    }
-}
-
-fn mismatch(path: &str, want: &Value, have_bytes: Option<&[u8]>) -> Option<Value> {
+/// echoes the caller's value.
+fn mismatch(path: &str, want: &str, have_bytes: Option<&[u8]>) -> Option<Value> {
     let have = have_bytes.map(version_of);
-    if have.as_deref().is_some_and(|h| same_version(want, h)) {
+    if have.as_deref() == Some(want) {
         return None;
     }
     Some(json!({
@@ -175,11 +155,6 @@ fn mismatch(path: &str, want: &Value, have_bytes: Option<&[u8]>) -> Option<Value
         "expected": want,
         "actual": have,
     }))
-}
-
-/// `if_match` as python reads it: present and not null.
-fn if_match(payload: &Value) -> Option<&Value> {
-    payload.get("if_match").filter(|v| !v.is_null())
 }
 
 /// python `_text_gate`: readonly for a mutate, a real path, the clamp and the
@@ -220,23 +195,23 @@ fn not_found(root: &std::path::Path, path: &str) -> Value {
 
 /// One text verb. `blob` is the binary channel's body (`None` on the text
 /// channel).
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch(
     st: &TextState,
-    verb: &str,
     bridge: &str,
     meta: &Map<String, Value>,
     root: &Result<PathBuf, String>,
-    payload: &Value,
+    call: &verbs::Call,
     blob: Option<&[u8]>,
     readonly: bool,
 ) -> Value {
-    match verb {
-        "read" => read(bridge, meta, root, payload),
-        "write" => write(st, bridge, meta, root, payload, blob, readonly).await,
-        "append" => append(st, bridge, meta, root, payload, blob, readonly).await,
-        "edit" => edit(st, bridge, meta, root, payload, blob, readonly).await,
-        _ => undo(st, bridge, meta, root, payload, readonly).await,
+    use verbs::Call;
+    match call {
+        Call::Read(a) => read(bridge, meta, root, a),
+        Call::Write(a) => write(st, bridge, meta, root, a, blob, readonly).await,
+        Call::Append(a) => append(st, bridge, meta, root, a, blob, readonly).await,
+        Call::Edit(a) => edit(st, bridge, meta, root, a, blob, readonly).await,
+        Call::Undo(a) => undo(st, bridge, meta, root, a, readonly).await,
+        _ => unreachable!("only the text verbs are dispatched here"),
     }
 }
 
@@ -244,20 +219,14 @@ fn read(
     bridge: &str,
     meta: &Map<String, Value>,
     root: &Result<PathBuf, String>,
-    payload: &Value,
+    a: &verbs::Read,
 ) -> Value {
-    let path = match path_arg("read", payload, "path") {
+    let path = match rel_path("read", "path", a.path.as_deref().unwrap_or("")) {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let off = match int_arg("read", payload, "offset", 0, 0) {
-        Ok(n) => n as usize,
-        Err(e) => return e,
-    };
-    let limit = match int_arg("read", payload, "limit", READ_LIMIT, 1) {
-        Ok(n) => n as usize,
-        Err(e) => return e,
-    };
+    let off = a.offset.unwrap_or(0) as usize;
+    let limit = a.limit.unwrap_or(READ_LIMIT) as usize;
     let root = match text_gate("read", root, meta, path, false, false) {
         Ok(r) => r,
         Err(e) => return e,
@@ -312,11 +281,11 @@ async fn write(
     bridge: &str,
     meta: &Map<String, Value>,
     root: &Result<PathBuf, String>,
-    payload: &Value,
+    a: &verbs::Write,
     blob: Option<&[u8]>,
     readonly: bool,
 ) -> Value {
-    let path = match path_arg("write", payload, "path") {
+    let path = match rel_path("write", "path", a.path.as_deref().unwrap_or("")) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -324,7 +293,7 @@ async fn write(
         Ok(r) => r,
         Err(e) => return e,
     };
-    let data = match doc("write", payload, blob, "the whole document") {
+    let data = match doc("write", a.bytes.as_deref(), blob, "the whole document") {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -334,7 +303,7 @@ async fn write(
         Ok(b) => b,
         Err(e) => return transport(e),
     };
-    if let Some(want) = if_match(payload) {
+    if let Some(want) = a.if_match.as_deref() {
         if let Some(err) = mismatch(path, want, before.as_deref()) {
             return err;
         }
@@ -351,11 +320,11 @@ async fn append(
     bridge: &str,
     meta: &Map<String, Value>,
     root: &Result<PathBuf, String>,
-    payload: &Value,
+    a: &verbs::Append,
     blob: Option<&[u8]>,
     readonly: bool,
 ) -> Value {
-    let path = match path_arg("append", payload, "path") {
+    let path = match rel_path("append", "path", &a.path) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -363,7 +332,7 @@ async fn append(
         Ok(r) => r,
         Err(e) => return e,
     };
-    let data = match doc("append", payload, blob, "one chunk") {
+    let data = match doc("append", a.bytes.as_deref(), blob, "one chunk") {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -460,7 +429,7 @@ fn count_occurrences(haystack: &str, needle: &str) -> usize {
 struct Edit {
     path: String,
     hunks: Vec<(String, String)>,
-    if_match: Option<Value>,
+    if_match: Option<String>,
     before: Vec<u8>,
     new: Vec<u8>,
 }
@@ -470,23 +439,17 @@ async fn edit(
     bridge: &str,
     meta: &Map<String, Value>,
     root: &Result<PathBuf, String>,
-    payload: &Value,
+    a: &verbs::Edit,
     blob: Option<&[u8]>,
     readonly: bool,
 ) -> Value {
     if readonly {
         return readonly_refusal();
     }
-    let Some(edits) = payload
-        .get("edits")
-        .and_then(Value::as_array)
-        .filter(|a| !a.is_empty())
-    else {
-        return rf::missing("edit", "edits (a list of {path, hunks, if_match?})");
-    };
+    let edits = &a.edits;
     let data = match doc(
         "edit",
-        payload,
+        a.bytes.as_deref(),
         blob,
         "the patch — all hunks, in edits order",
     ) {
@@ -519,11 +482,7 @@ async fn edit(
         if hunks.iter().any(|(f, _, _)| f.is_none()) {
             return rf::bad("edit", "bytes", "name the file on every block or on none");
         }
-        let known: Vec<Option<String>> = edits
-            .iter()
-            .filter_map(|e| e.get("path").and_then(Value::as_str))
-            .map(norm)
-            .collect();
+        let known: Vec<Option<String>> = edits.iter().map(|e| norm(&e.path)).collect();
         for (file, _, _) in &hunks {
             let Some(file) = file else { continue };
             if !known.iter().any(|k| *k == norm(file)) {
@@ -538,17 +497,7 @@ async fn edit(
     let mut plan: Vec<Edit> = Vec::new();
     let mut cursor = 0usize;
     for (i, e) in edits.iter().enumerate() {
-        let Some(path) = e
-            .get("path")
-            .and_then(Value::as_str)
-            .filter(|p| !p.is_empty())
-        else {
-            return rf::bad(
-                "edit",
-                "edits",
-                &format!("edit {i}: an object with a `path`"),
-            );
-        };
+        let path = e.path.as_str();
         if plan.iter().any(|p| norm(&p.path) == norm(path)) {
             return rf::bad(
                 "edit",
@@ -573,8 +522,8 @@ async fn edit(
                     &format!("edit {i} ({}): no block names it", py_repr(path)),
                 );
             }
-            if let Some(stated) = e.get("hunks").filter(|v| !v.is_null()) {
-                if stated.as_u64() != Some(mine.len() as u64) {
+            if let Some(stated) = e.hunks.map(std::num::NonZeroU64::get) {
+                if stated != mine.len() as u64 {
                     return rf::bad(
                         "edit",
                         "edits",
@@ -591,7 +540,7 @@ async fn edit(
             plan.push(Edit {
                 path: path.to_string(),
                 hunks: mine,
-                if_match: e.get("if_match").filter(|v| !v.is_null()).cloned(),
+                if_match: e.if_match.clone(),
                 before: Vec::new(),
                 new: Vec::new(),
             });
@@ -599,10 +548,10 @@ async fn edit(
         }
         // #206 — with exactly one file, `hunks` may be left out: every block of
         // the blob applies to it. With several files the split must be stated.
-        let n = if edits.len() == 1 && e.get("hunks").filter(|v| !v.is_null()).is_none() {
+        let n = if edits.len() == 1 && e.hunks.is_none() {
             hunks.len()
         } else {
-            let Some(n) = e.get("hunks").and_then(Value::as_u64).filter(|n| *n >= 1) else {
+            let Some(n) = e.hunks.map(std::num::NonZeroU64::get) else {
                 return rf::bad(
                     "edit",
                     "edits",
@@ -621,7 +570,7 @@ async fn edit(
                 .iter()
                 .map(|(_, s, r)| (s.clone(), r.clone()))
                 .collect(),
-            if_match: e.get("if_match").filter(|v| !v.is_null()).cloned(),
+            if_match: e.if_match.clone(),
             before: Vec::new(),
             new: Vec::new(),
         });
@@ -654,7 +603,7 @@ async fn edit(
         bridge,
         root,
         plan,
-        py_truthy(payload.get("dry_run").unwrap_or(&Value::Null)),
+        a.dry_run.unwrap_or(false),
     )
 }
 
@@ -674,7 +623,7 @@ fn edit_txn(
             Ok(None) => return not_found(root, &e.path),
             Err(err) => return transport(err),
         };
-        if let Some(want) = &e.if_match {
+        if let Some(want) = e.if_match.as_deref() {
             if let Some(err) = mismatch(&e.path, want, Some(&raw)) {
                 return err;
             }
@@ -763,10 +712,10 @@ async fn undo(
     bridge: &str,
     meta: &Map<String, Value>,
     root: &Result<PathBuf, String>,
-    payload: &Value,
+    a: &verbs::Undo,
     readonly: bool,
 ) -> Value {
-    let path = match path_arg("undo", payload, "path") {
+    let path = match rel_path("undo", "path", &a.path) {
         Ok(p) => p,
         Err(e) => return e,
     };

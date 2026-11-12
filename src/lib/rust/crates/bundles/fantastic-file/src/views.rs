@@ -14,12 +14,13 @@ use std::sync::{Arc, Mutex};
 
 use fantastic_bundle::py_repr;
 use fantastic_kernel::inbox::{InboxItem, InboxReceiver};
-use fantastic_kernel::lifecycle::create_from_payload;
+use fantastic_kernel::declared::kernel::CreateAgent;
+use fantastic_kernel::lifecycle::create_agent;
 use fantastic_kernel::refusal as rf;
-use fantastic_kernel::{Agent, AgentId, Item, Kernel};
+use fantastic_kernel::{Agent, AgentId, DynVerb, Item, Kernel, Verb};
 use serde_json::{json, Map, Value};
 
-use super::{clamp_root, gate_path, norm, path_arg};
+use super::{clamp_root, gate_path, norm, rel_path, verbs};
 
 pub(crate) const FILE: &str = "file";
 pub(crate) const FOLDER: &str = "folder";
@@ -31,37 +32,23 @@ const FOLDER_GRANTS: [&str; 3] = ["list", "watch_path", "unwatch_path"];
 const FILE_ANSWERS: [&str; 4] = ["read", "write", "watch", "reflect"];
 const FOLDER_ANSWERS: [&str; 4] = ["list", "reveal", "watch", "reflect"];
 
-/// python `file_agent.VERBS` docs — what `docs of=<file view>` serves: the view's own
-/// table, never the bridge's (a view refuses a delete it is not granted).
-const FILE_VERB_DOCS: [(&str, &str); 4] = [
-    ("reflect", "Identity, the file it views, its bridge, and whether its change relay is on. No args."),
-    ("read", "args: path? (this file only), offset:int=0 (line), limit:int=200 — the file's text page {path, lines:[{n,text}], total, eof, version}; refuses binary."),
-    ("write", "args: bytes (req — the whole document), if_match:str? (the version you read; a changed document is refused) — atomic whole-document write; {path, size, version}."),
-    ("watch", "args: none — start relaying this file's changes onto this agent: `{type: changed, path, kind: added|modified|deleted}`; WATCH this agent to receive them. Idempotent."),
-];
+/// The verbs only a view answers, declared like any other (`watch`, `reveal`).
+static WATCH: Verb = Verb::of::<verbs::Watch>("watch");
+static REVEAL: Verb = Verb::of::<verbs::Reveal>("reveal");
 
-/// python `folder_agent.VERBS` docs — the folder view's own table, as `FILE_VERB_DOCS`.
-const FOLDER_VERB_DOCS: [(&str, &str); 4] = [
-    ("reflect", "Identity, the folder it views, its bridge, and whether its change relay is on. No args."),
-    ("list", "args: path? (a folder inside this one, relative to it; empty = this folder) — the folder's entries {files: [{name, path, type, size?}]}."),
-    ("reveal", "args: path (req — a file or folder inside this one, relative to it) — shows where it sits: {revealed, folder_path, dirs} where dirs are the folders to open on the way down; not_found when nothing is there."),
-    ("watch", "args: none — start relaying this folder's entry changes onto this agent: `{type: added|changed|removed, path, name}` (path relative to the folder's bridge); WATCH this agent to receive them. Idempotent."),
-];
+fn dynamic(v: &Verb) -> DynVerb {
+    DynVerb::new(v.name, &v.doc(), v.schema())
+}
 
-/// The verb docs a view record answers (python `instance_verbs(agent)`): its own
-/// table for `view: file|folder`, None for any other record (the bridge's table).
-pub(crate) fn verb_docs_of(meta: &Map<String, Value>) -> Option<Value> {
-    let table: &[(&str, &str)] = match meta.get("view").and_then(Value::as_str)? {
-        FILE => &FILE_VERB_DOCS,
-        FOLDER => &FOLDER_VERB_DOCS,
-        _ => return None,
-    };
-    Some(Value::Object(
-        table
-            .iter()
-            .map(|(n, d)| (n.to_string(), json!(d)))
-            .collect(),
-    ))
+/// The verbs a view record answers beside the bridge's (`read`, `write` of a file,
+/// `list` of a folder are the bridge's own, declared once): `watch`, and for a
+/// folder `reveal`. None for any other record.
+pub(crate) fn dynamic_verbs(meta: &Map<String, Value>) -> Vec<DynVerb> {
+    match meta.get("view").and_then(Value::as_str) {
+        Some(FILE) => vec![dynamic(&WATCH)],
+        Some(FOLDER) => vec![dynamic(&WATCH), dynamic(&REVEAL)],
+        _ => Vec::new(),
+    }
 }
 
 /// python `views.FOLDER_EVENT` — the bridge's disk kind → a folder's event type. Any
@@ -222,12 +209,8 @@ fn bridge_path(kind: &str, own: &str, rel: &str) -> Option<String> {
 }
 
 /// python `views.scope`: the bridge path a verb's `path` names, or the refusal.
-fn scope(verb: &str, kind: &str, own: &str, rel: Option<&Value>) -> Result<String, Value> {
-    let rel = match rel {
-        None | Some(Value::Null) => "",
-        Some(Value::String(s)) => s.as_str(),
-        Some(_) => return Err(rf::bad(verb, "path", "a string")),
-    };
+fn scope(verb: &str, kind: &str, own: &str, rel: Option<&str>) -> Result<String, Value> {
+    let rel = rel.unwrap_or("");
     bridge_path(kind, own, rel).ok_or_else(|| {
         let mut v = rf::refusal(
             rf::UNAUTHORIZED,
@@ -248,19 +231,6 @@ fn scope(verb: &str, kind: &str, own: &str, rel: Option<&Value>) -> Result<Strin
         rf::with(&mut v, "path", Value::String(rel.to_string()));
         v
     })
-}
-
-/// python `_forward_args`: the verb's own arguments, minus the routing fields.
-fn forward_args(payload: &Value) -> Map<String, Value> {
-    payload
-        .as_object()
-        .map(|o| {
-            o.iter()
-                .filter(|(k, _)| k.as_str() != "type" && k.as_str() != "path")
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// python `send_bridge`: one send to the bridge, as the calling view. A send that
@@ -380,7 +350,10 @@ pub(crate) async fn open_view(
     if let Some(chosen) = chosen {
         payload["id"] = json!(chosen);
     }
-    let made = create_from_payload(kernel, &root, &payload).await;
+    let made = match serde_json::from_value::<CreateAgent>(payload) {
+        Ok(args) => create_agent(kernel, &root, args).await,
+        Err(e) => return rf::bad("open_view", "id", &e.to_string()),
+    };
     if made.get("error").is_some() {
         return made;
     }
@@ -600,9 +573,9 @@ pub(crate) async fn dispatch(
     relays: &Relays,
     id: &AgentId,
     kind: &str,
-    verb: &str,
-    payload: &Value,
+    call: verbs::Call,
 ) -> Value {
+    use verbs::Call;
     let meta = kernel
         .agents
         .get(id)
@@ -618,29 +591,60 @@ pub(crate) async fn dispatch(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    match (kind, verb) {
-        (_, "reflect") => {
+    match (kind, call) {
+        // the kernel's start call: a view holds nothing to open
+        (_, Call::Boot(_)) => Value::Null,
+        (_, Call::Reflect(_)) => {
             let watching = relays.held.lock().expect("relays").contains_key(&id.0);
             reflect(kind, id, &meta, watching)
         }
-        (FILE, "read" | "write") => match scope(verb, FILE, &own, payload.get("path")) {
+        (FILE, Call::Read(a)) => match scope("read", FILE, &own, a.path.as_deref()) {
             Err(e) => e,
             Ok(target) => {
-                let mut body = forward_args(payload);
-                body.insert("type".into(), json!(verb));
+                let mut body = Map::new();
+                body.insert("type".into(), json!("read"));
                 body.insert("path".into(), json!(target));
+                if let Some(n) = a.offset {
+                    body.insert("offset".into(), json!(n));
+                }
+                if let Some(n) = a.limit {
+                    body.insert("limit".into(), json!(n));
+                }
                 send_bridge(kernel, &bridge, Value::Object(body)).await
             }
         },
-        (FILE | FOLDER, "watch") => watch(kernel, relays, id, kind, &own, &bridge).await,
-        (FOLDER, "list") => match scope("list", FOLDER, &own, payload.get("path")) {
+        (FILE, Call::Write(a)) => match scope("write", FILE, &own, a.path.as_deref()) {
+            Err(e) => e,
+            Ok(target) => {
+                let mut body = Map::new();
+                body.insert("type".into(), json!("write"));
+                body.insert("path".into(), json!(target));
+                if let Some(b) = &a.bytes {
+                    body.insert("bytes".into(), json!(b));
+                }
+                if let Some(m) = &a.if_match {
+                    body.insert("if_match".into(), json!(m));
+                }
+                send_bridge(kernel, &bridge, Value::Object(body)).await
+            }
+        },
+        (FILE | FOLDER, Call::Dynamic(c)) if c.name == "watch" => {
+            watch(kernel, relays, id, kind, &own, &bridge).await
+        }
+        (FOLDER, Call::List(a)) => match scope("list", FOLDER, &own, a.path.as_deref()) {
             Err(e) => e,
             Ok(target) => {
                 send_bridge(kernel, &bridge, json!({"type": "list", "path": target})).await
             }
         },
-        (FOLDER, "reveal") => reveal(kernel, &own, &bridge, payload).await,
-        _ => {
+        (FOLDER, Call::Dynamic(c)) if c.name == "reveal" => {
+            match serde_json::from_value::<verbs::Reveal>(c.args) {
+                Ok(a) => reveal(kernel, &own, &bridge, &a).await,
+                Err(e) => rf::missing("reveal", &e.to_string()),
+            }
+        }
+        (_, other) => {
+            let verb = super::verb_name(&other);
             let mut v = rf::refusal(
                 rf::UNHANDLED,
                 format!("{kind} agent: unknown type {}", py_repr(verb)),
@@ -671,15 +675,9 @@ fn reflect(kind: &str, id: &AgentId, meta: &Map<String, Value>, watching: bool) 
 
 /// python `_reveal`: where a path inside the folder sits — the folders to open on the
 /// way down. `not_found` when nothing is there.
-async fn reveal(kernel: &Arc<Kernel>, own: &str, bridge: &str, payload: &Value) -> Value {
-    let Some(rel) = payload
-        .get("path")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    else {
-        return rf::missing("reveal", "path");
-    };
-    let target = match scope("reveal", FOLDER, own, payload.get("path")) {
+async fn reveal(kernel: &Arc<Kernel>, own: &str, bridge: &str, a: &verbs::Reveal) -> Value {
+    let rel = a.path.as_str();
+    let target = match scope("reveal", FOLDER, own, Some(rel)) {
         Ok(t) => t,
         Err(e) => return e,
     };
@@ -734,14 +732,13 @@ pub(crate) async fn open_view_verb(
     kernel: &Arc<Kernel>,
     meta: &Map<String, Value>,
     agent_id: &AgentId,
-    payload: &Value,
+    a: &verbs::OpenView,
 ) -> Value {
-    let kind = payload.get("kind").and_then(Value::as_str);
-    let kind = match kind {
-        Some(k @ (FILE | FOLDER)) => k,
-        _ => return rf::bad("open_view", "kind", "`file` or `folder`"),
+    let kind = match a.kind {
+        verbs::ViewKind::File => FILE,
+        verbs::ViewKind::Folder => FOLDER,
     };
-    let path = match path_arg("open_view", payload, "path") {
+    let path = match rel_path("open_view", "path", &a.path) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -759,18 +756,14 @@ pub(crate) async fn open_view_verb(
     if let Some(err) = gate_path("open_view", &root, &allow, &norm_path) {
         return err;
     }
-    let chosen = match payload.get("id") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) => {
+    let chosen = match a.id.as_deref() {
+        None => None,
+        Some(s) => {
             if let Some(err) = rf::guard_agent_id("open_view", s) {
                 return err;
             }
-            Some(s.as_str())
+            Some(s)
         }
-        Some(_) => return rf::bad("open_view", "id", "an agent id (a string)"),
-    };
-    let Some(bridge) = kernel.agents.get(agent_id).map(|a| Arc::clone(a.value())) else {
-        return json!({"error": format!("no agent {}", agent_id.0)});
     };
     open_view(kernel, &bridge, kind, &norm_path, chosen).await
 }

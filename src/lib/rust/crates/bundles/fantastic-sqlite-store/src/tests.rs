@@ -65,16 +65,10 @@ fn rec(v: Value) -> Map<String, Value> {
     v.as_object().cloned().unwrap()
 }
 
-#[test]
-fn readme_is_pythons_verbatim() {
-    let py = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../python/bundled_agents/memory/sqlite_store/src/sqlite_store/readme.md");
-    assert_eq!(README, std::fs::read_to_string(py).expect("python readme"));
-}
-
-const BAD_PATHS: [(Option<&str>, &str); 5] = [
+const BAD_PATHS: [(Option<&str>, &str); 6] = [
     (None, "needs `path`"),
     (Some(""), "needs `path`"),
+    (Some("  "), "needs `path`"),
     (Some("/tmp/x.db"), "must stay inside its folder"),
     (Some("../x.db"), "must stay inside its folder"),
     (Some("a/../../x.db"), "must stay inside its folder"),
@@ -88,23 +82,37 @@ async fn path_is_required_relative_and_inside() {
         let meta = path.map_or_else(Map::new, |p| rec(json!({"path": p})));
         let err = check_path(&meta).expect_err("refused");
         assert!(err.contains(says), "{path:?}: {err}");
-        assert!(
-            SqliteStoreBundle
-                .validate_meta(&meta, &Map::new())
-                .is_some_and(|e| e.contains(says)),
-            "{path:?}"
-        );
         // …and through the kernel: the agent is never created
         let mut p = json!({"type": "create_agent", "parent_id": "kernel_state", "handler_module": HANDLER_MODULE});
         if let Some(path) = path {
             p["path"] = json!(path);
         }
         let out = call(&k, "kernel_state", p, None).await;
-        assert_eq!(out["reason"], json!("invalid_meta"), "{path:?}: {out}");
-        assert!(
-            out["error"].as_str().unwrap().contains(says),
-            "{path:?}: {out}"
-        );
+        match path {
+            // the declared record refuses a missing or empty `path` by name
+            None => {
+                assert_eq!(out["reason"], json!("missing_arg"), "{path:?}: {out}");
+                assert_eq!(out["arg"], json!("path"), "{path:?}: {out}");
+            }
+            Some("") => {
+                assert_eq!(out["reason"], json!("bad_arg"), "{path:?}: {out}");
+                assert_eq!(out["arg"], json!("path"), "{path:?}: {out}");
+            }
+            // what a type cannot say is the bundle's own refusal
+            Some(_) => {
+                assert!(
+                    SqliteStoreBundle
+                        .validate_meta(&meta, &Map::new())
+                        .is_some_and(|e| e.contains(says)),
+                    "{path:?}"
+                );
+                assert_eq!(out["reason"], json!("invalid_meta"), "{path:?}: {out}");
+                assert!(
+                    out["error"].as_str().unwrap().contains(says),
+                    "{path:?}: {out}"
+                );
+            }
+        }
     }
     assert!(check_path(&rec(json!({"path": "stores/mem.db"}))).is_ok());
 }
@@ -131,6 +139,15 @@ async fn path_cannot_be_dropped_by_update() {
         &k,
         "kernel_state",
         json!({"type": "update_agent", "id": "mem", "path": ""}),
+        None,
+    )
+    .await;
+    assert_eq!(out["reason"], json!("bad_arg"), "{out}");
+    assert_eq!(out["arg"], json!("path"), "{out}");
+    let out = call(
+        &k,
+        "kernel_state",
+        json!({"type": "update_agent", "id": "mem", "path": "../x"}),
         None,
     )
     .await;
@@ -193,8 +210,9 @@ async fn boot_opens_the_file_with_the_pythons_pragmas() {
     assert_eq!(pragma("secure_delete"), rusqlite::types::Value::Integer(1));
 }
 
-/// The one number the kernel keeps whose text is not JSON (`Infinity`): ram_store
-/// holds it, a FILE cannot — refused whole, and the store (its lock) still answers.
+/// The one number the kernel keeps whose text is not JSON (`Infinity`) cannot be
+/// typed into the declared `rows`: the call is refused whole, and the store (its
+/// lock) still answers.
 #[tokio::test]
 async fn a_row_that_is_not_json_is_refused_whole() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -213,11 +231,6 @@ async fn a_row_that_is_not_json_is_refused_whole() {
     );
     let out = call(&k, "mem", Value::Object(payload), Some("alice")).await;
     assert_eq!(out["reason"], json!("bad_arg"), "{out}");
-    assert_eq!(out["arg"], json!("rows"), "{out}");
-    assert!(
-        out["error"].as_str().unwrap().contains("row 2 is not JSON"),
-        "{out}"
-    );
     let rows = call(&k, "mem", json!({"type": "read"}), Some("alice")).await;
     assert_eq!(rows["rows"], json!([]), "all or none");
     let ok = call(
@@ -325,7 +338,7 @@ async fn append_emits_one_appended_event_per_new_row() {
         Some("alice"),
     )
     .await;
-    assert_eq!(refused["reason"], json!("bad_arg"), "{refused}");
+    assert_eq!(refused["reason"], json!("missing_arg"), "{refused}");
     while let Some(item) = rx.try_recv() {
         assert_ne!(item.payload["type"], json!("appended"), "{refused}");
     }

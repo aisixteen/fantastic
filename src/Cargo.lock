@@ -663,6 +663,8 @@ dependencies = [
  "image",
  "libc",
  "regex",
+ "schemars",
+ "serde",
  "serde_json",
  "sha2",
  "tokio",
@@ -679,6 +681,8 @@ dependencies = [
  "fantastic-kernel",
  "futures-util",
  "reqwest",
+ "schemars",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -742,6 +746,8 @@ dependencies = [
  "fantastic-kernel",
  "keyring",
  "libc",
+ "schemars",
+ "serde",
  "serde_json",
 ]
 
@@ -774,6 +780,8 @@ dependencies = [
  "fantastic-kernel",
  "libc",
  "notify",
+ "schemars",
+ "serde",
  "serde_json",
  "sha2",
  "tokio",
@@ -789,6 +797,8 @@ dependencies = [
  "fantastic-bundle",
  "fantastic-kernel",
  "futures-util",
+ "schemars",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -874,6 +884,8 @@ dependencies = [
  "fantastic-kernel",
  "futures-util",
  "reqwest",
+ "schemars",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -888,6 +900,8 @@ dependencies = [
  "fantastic-kernel",
  "futures-util",
  "reqwest",
+ "schemars",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -911,6 +925,8 @@ dependencies = [
  "async-trait",
  "fantastic-bundle",
  "fantastic-kernel",
+ "schemars",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -925,6 +941,8 @@ dependencies = [
  "fantastic-kernel",
  "futures-util",
  "reqwest",
+ "schemars",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -961,7 +979,10 @@ dependencies = [
  "async-trait",
  "fantastic-bundle",
  "fantastic-kernel",
+ "fantastic-ram-store",
  "rusqlite",
+ "schemars",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -1052,6 +1073,8 @@ dependencies = [
  "fantastic-kernel",
  "futures-util",
  "reqwest",
+ "schemars",
+ "serde",
  "serde_json",
  "sha2",
  "tokio",
