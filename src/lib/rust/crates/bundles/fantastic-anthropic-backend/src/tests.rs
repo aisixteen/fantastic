@@ -2043,7 +2043,13 @@ fn turn_events(out: i64) -> String {
 
 /// One turn through the agent's own provider, as a send runs it, stream drained.
 async fn turn(kernel: &Arc<Kernel>, id: &str) {
-    let p = build_provider(&AgentId::from(id), kernel);
+    let p = build_provider_with(
+        &AgentId::from(id),
+        kernel,
+        helpers::agent_meta(&AgentId::from(id), kernel),
+        None,
+        Images::default(),
+    );
     let msgs = [json!({"role": "user", "content": "hi"})];
     let mut s = p
         .chat(&msgs, None)

@@ -374,7 +374,7 @@ impl Provider for RemoteProvider {
         self.send_images(messages, &rid).await?;
         // the reader: an inbox of this pass only, watching the provider's stream
         let reader = AgentId::from(format!("_provider_reader_{}_{n}", self.chat.as_str()));
-        let mut inbox = self.kernel.ensure_inbox(&reader);
+        let inbox = self.kernel.ensure_inbox(&reader);
         if let Some(refused) = self.kernel.watch(&self.provider, reader.clone()).await {
             self.kernel.remove_inbox(&reader);
             return Err(ProviderError::raised(format!(

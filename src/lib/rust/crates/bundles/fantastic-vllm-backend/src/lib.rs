@@ -1518,14 +1518,6 @@ impl Handler for VllmBundle {
     }
 }
 
-/// The sampling default for `key` — the one table the provider fills from.
-fn sampling_default(key: &str) -> Value {
-    sampling_defaults()
-        .into_iter()
-        .find(|(k, _)| *k == key)
-        .map_or(Value::Null, |(_, v)| v)
-}
-
 #[cfg(test)]
 mod tests;
 

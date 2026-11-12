@@ -11,8 +11,6 @@ use fantastic_kernel::{Agent, Item};
 use std::time::Duration;
 use tempfile::TempDir;
 
-const OFF_DEVICE_REFUSAL: &str = "foundation_models_backend: `{key}` has no meaning here — the model is Apple's on-device system model (no endpoint, no model choice, no credentials)";
-const MISSING_STORE: &str = "foundation_models_backend: required on the record and missing: memory_store_id — nothing is guessed. memory_store_id = the memory store agent that keeps this agent's conversation (e.g. a ram_store)";
 const TOO_BIG_4096: &str = "context_window must be a positive int no larger than the on-device model's window (4096 tokens)";
 const NOT_A_USER_TURN: &str = "RuntimeError: foundation_models_backend: the last message is not a user turn (role {role}) — the on-device session answers a prompt";
 

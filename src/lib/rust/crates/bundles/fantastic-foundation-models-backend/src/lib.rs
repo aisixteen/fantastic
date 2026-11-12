@@ -93,11 +93,7 @@ impl FoundationModelsBackendBundle {
     /// refuses the turn up front ([`Provider::ready`]) — naming the reason,
     /// before the context is projected — so the caller reads why, not a window
     /// failure on a model that could never have answered.
-    fn build_provider(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider> {
-        self.build_provider_with(agent_id, kernel, helpers::agent_meta(agent_id, kernel))
-    }
-
-    /// [`Self::build_provider`] from a record (`complete` lays the pass's `model` over the agent's).
+    /// The record is passed in (`complete` lays the pass's `model` over the agent's).
     fn build_provider_with(&self, _agent_id: &AgentId, _kernel: &Arc<Kernel>, meta: Map<String, Value>) -> Arc<dyn Provider> {
         let refusal = self
             .engine

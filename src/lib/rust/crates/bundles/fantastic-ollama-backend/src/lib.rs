@@ -521,12 +521,8 @@ impl Handler for OllamaBackendBundle {
 ///
 /// `endpoint` and `model` are REQUIRED on the record — nothing is guessed; a
 /// record without them builds a provider whose every pass raises, naming the
-/// field (python `required_meta`).
-fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider> {
-    build_provider_with(agent_id, kernel, helpers::agent_meta(agent_id, kernel))
-}
-
-/// [`build_provider`] from a record (`complete` lays the pass's `model` over the agent's).
+/// field (python `required_meta`). The record is passed in (`complete` lays the
+/// pass's `model` over the agent's).
 fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<String, Value>) -> Arc<dyn Provider> {
     let (endpoint, model) = match (
         helpers::required_meta(&meta, "endpoint", BACKEND),

@@ -765,11 +765,7 @@ impl Handler for ResponsesBundle {
 /// The provider this agent is configured for — built per call from the record
 /// (python `make_provider`); the key is read through the reader inside each pass,
 /// from the record's `credentials`.
-fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider> {
-    build_provider_with(agent_id, kernel, helpers::agent_meta(agent_id, kernel))
-}
-
-/// [`build_provider`] from a record (`complete` lays the pass's `model` over the agent's).
+/// The record is passed in (`complete` lays the pass's `model` over the agent's).
 fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<String, Value>) -> Arc<dyn Provider> {
     // python's argument order: `endpoint`, `model`, `max_tokens`, then the
     // provider's own check of `sampling`.

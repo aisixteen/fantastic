@@ -1540,23 +1540,13 @@ fn required_int(meta: &Map<String, Value>, key: &str) -> Result<i64, ProviderErr
     })
 }
 
-fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider> {
-    build_provider_with(
-        agent_id,
-        kernel,
-        helpers::agent_meta(agent_id, kernel),
-        None,
-        Images::default(),
-    )
-}
-
 /// The chat that sent a `complete`: its `rid` is `<chat id>~<n>`.
 fn caller_of(rid: &str) -> Option<String> {
     let (chat, _) = rid.rsplit_once('~')?;
     (!chat.is_empty()).then(|| chat.to_string())
 }
 
-/// [`build_provider`] from a record (`complete` lays the pass's `model` over the agent's),
+/// The provider for a record (`complete` lays the pass's `model` over the agent's),
 /// for the `caller` chat whose spend `by_agent` keeps.
 fn build_provider_with(
     agent_id: &AgentId,

@@ -26,7 +26,7 @@ use fantastic_file::fs;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use fantastic_kernel::refusal::{refusal, refusal_hint, UNAUTHORIZED, UNHANDLED};
+use fantastic_kernel::refusal::{refusal_hint, UNAUTHORIZED};
 use fantastic_kernel::{yaml_io, Agent, AgentId, Kernel};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
