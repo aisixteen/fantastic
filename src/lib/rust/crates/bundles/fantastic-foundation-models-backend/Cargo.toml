@@ -22,6 +22,7 @@ tokio = { workspace = true }
 futures-util = { workspace = true }
 
 [dev-dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 # Every AI agent keeps its conversation in a memory store; the tests wire one.
 fantastic-ram-store = { path = "../fantastic-ram-store" }
 tempfile = "3"

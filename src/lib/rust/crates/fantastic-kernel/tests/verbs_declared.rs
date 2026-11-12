@@ -132,7 +132,7 @@ impl Handler for Tools {
                         fantastic_kernel::DynVerb::new(
                             t["name"].as_str().unwrap_or(""),
                             t["description"].as_str().unwrap_or(""),
-                            &t["schema"],
+                            t["schema"].as_object().expect("a schema object"),
                         )
                     })
                     .collect()
@@ -308,7 +308,7 @@ async fn an_unknown_verb_is_refused_with_the_list() {
     assert_eq!(r["reason"], "unhandled", "{r}");
     assert_eq!(r["verb"], "nope", "{r}");
     assert_eq!(
-        r["error"], "unknown verb 'nope'; p answers: greet, tally, reflect, boot, shutdown",
+        r["error"], "unknown verb 'nope'; p answers: greet, tally, reflect",
         "{r}"
     );
 }
@@ -335,7 +335,7 @@ async fn an_unknown_type_echoes_the_raw_value_as_verb() {
         let r = k.bookkeeping(&agent, payload.clone(), None).await.result;
         assert_eq!(
             r["error"],
-            format!("unknown verb {shown}; p answers: greet, tally, reflect, boot, shutdown"),
+            format!("unknown verb {shown}; p answers: greet, tally, reflect"),
             "{payload}: {r}"
         );
         assert_eq!(r["reason"], "unhandled", "{payload}: {r}");
@@ -562,23 +562,17 @@ async fn a_handler_that_is_not_installed_is_refused_at_create() {
 }
 
 #[tokio::test]
-async fn boot_and_shutdown_are_answered_for_a_bundle_that_declares_neither() {
+async fn boot_and_shutdown_are_not_answered_for_a_bundle_that_declares_neither() {
     let (_t, k) = with_probe().await;
     for verb in ["boot", "shutdown"] {
         let r = call(&k, "p", json!({"type": verb})).await;
-        assert!(r.is_null(), "{verb}: {r}");
+        assert_eq!(r["reason"], "unhandled", "{verb}: {r}");
+        assert_eq!(
+            r["error"],
+            format!("unknown verb '{verb}'; p answers: greet, tally, reflect"),
+            "{r}"
+        );
     }
-    let r = call(&k, "p", json!({"type": "shutdown", "reason": "reloaded"})).await;
-    assert!(r.is_null(), "{r}");
-    // the common verbs are declared once and validated the same way
-    let r = call(&k, "p", json!({"type": "boot", "now": true})).await;
-    assert_eq!(r["arg"], "now", "{r}");
-    assert_eq!(r["error"], "boot: unknown argument 'now'", "{r}");
-    let r = call(&k, "p", json!({"type": "shutdown", "reason": 4})).await;
-    assert_eq!(
-        r["error"], "shutdown: argument 'reason' must be string, got int",
-        "{r}"
-    );
 }
 
 async fn with_tools() -> (TempDir, Arc<Kernel>) {
@@ -629,7 +623,7 @@ async fn a_dynamic_verb_is_checked_by_the_same_engine() {
     // an unknown verb lists the builtin and the dynamic ones
     let r = call(&k, "t", json!({"type": "nope"})).await;
     assert_eq!(
-        r["error"], "unknown verb 'nope'; t answers: tools, reflect, boot, shutdown, search, ping",
+        r["error"], "unknown verb 'nope'; t answers: tools, reflect, search, ping",
         "{r}"
     );
     // the builtin verb of a bundle with dynamic verbs
@@ -698,7 +692,7 @@ async fn reflect_and_docs_render_both_kinds_of_verb_from_the_agent() {
         .collect();
     assert_eq!(
         names,
-        ["tools", "reflect", "boot", "shutdown", "search", "ping"]
+        ["tools", "reflect", "search", "ping"]
     );
     assert_eq!(
         r["verbs"]["search"],
@@ -738,7 +732,7 @@ async fn reflect_renders_the_verbs_from_the_declarations() {
     let names: Vec<&str> = verbs.keys().map(String::as_str).collect();
     assert_eq!(
         names,
-        ["greet", "tally", "reflect", "boot", "shutdown"],
+        ["greet", "tally", "reflect"],
         "{r}"
     );
     assert_eq!(
@@ -788,7 +782,7 @@ async fn docs_render_both_tiers_from_the_declarations() {
     .await;
     assert_eq!(r["error"], "docs: p has no verb 'nope'", "{r}");
     assert_eq!(
-        r["hint"], "its verbs: greet, tally, reflect, boot, shutdown",
+        r["hint"], "its verbs: greet, tally, reflect",
         "{r}"
     );
 }

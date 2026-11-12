@@ -153,7 +153,7 @@ fn a_running_program_declares_verbs_the_same_engine_checks() {
             {"name":"say","description":"Say a thing. More.",
              "inputSchema":{"type":"object","properties":{"text":{"type":"string"},
                 "n":{"type":"integer","default":2}},"required":["text"]}},
-            {"name":"stop"}
+            {"name":"stop","inputSchema":{"additionalProperties":false}}
         ]),
         PROGRAM_VERBS,
     )
@@ -177,7 +177,7 @@ fn a_running_program_declares_verbs_the_same_engine_checks() {
     assert_eq!(r["arg"], "x");
 
     // a later declaration REPLACES the list; forget drops it
-    reg.declare("a1", &json!([{"name":"only"}]), PROGRAM_VERBS)
+    reg.declare("a1", &json!([{"name":"only","inputSchema":{}}]), PROGRAM_VERBS)
         .unwrap();
     assert_eq!(reg.of("a1").len(), 1);
     reg.forget("a1");
@@ -189,12 +189,16 @@ fn a_program_cannot_declare_a_reserved_or_repeated_or_malformed_verb() {
     let reg = DynRegistry::new();
     let reserved: &[&[Verb]] = &[&[Verb::of::<Wire>("wire")]];
     for (decl, why) in [
-        (json!([{"name":"wire"}]), "already a verb"),
-        (json!([{"name":"x"},{"name":"x"}]), "already a verb"),
-        (json!([{"description":"no name"}]), "no 'name'"),
-        (json!([{"name":""}]), "no 'name'"),
-        (json!([{"name":"x","inputSchema":5}]), "must be an object"),
-        (json!({"name":"x"}), "expected a list"),
+        (json!([{"name":"wire","inputSchema":{}}]), "already a verb"),
+        (
+            json!([{"name":"x","inputSchema":{}},{"name":"x","inputSchema":{}}]),
+            "already a verb",
+        ),
+        (json!([{"description":"no name","inputSchema":{}}]), "missing field `name`"),
+        (json!([{"name":"","inputSchema":{}}]), "empty or already"),
+        (json!([{"name":"x"}]), "missing field `inputSchema`"),
+        (json!([{"name":"x","inputSchema":5}]), "invalid type"),
+        (json!({"name":"x"}), "invalid type"),
     ] {
         let r = reg.declare("a1", &decl, reserved).unwrap_err();
         assert!(r["error"].as_str().unwrap().contains(why), "{decl}: {r}");

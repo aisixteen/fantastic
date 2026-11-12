@@ -558,7 +558,7 @@ async fn reflect_carries_the_declared_verbs_and_no_other_docs() {
         .collect();
     assert_eq!(
         shown,
-        ["boom", "modeless", "ping", "reflect", "boot", "shutdown"],
+        ["boom", "modeless", "ping", "reflect"],
         "{c}"
     );
     // Python order: `tree`, `next`, `bundles`.

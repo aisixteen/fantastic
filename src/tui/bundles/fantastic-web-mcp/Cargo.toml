@@ -18,6 +18,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1.40", features = ["sync", "time"] }
 
 [dev-dependencies]
+fantastic-kernel = { path = "../../../lib/rust/crates/fantastic-kernel", features = ["test-support"] }
 fantastic-core = { path = "../../../lib/rust/crates/bundles/fantastic-core" }
 fantastic-file = { path = "../../../lib/rust/crates/bundles/fantastic-file" }
 tempfile = "3"

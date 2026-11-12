@@ -165,7 +165,9 @@ pub fn refusal(code: &str, error: impl Into<String>) -> Value {
 /// a string `message` is appended as `: {message}`.
 #[must_use]
 pub fn error_text(reply: &Value) -> Option<String> {
-    let e = reply.get("error")?;
+    let e = reply
+        .get("error")
+        .filter(|e| !e.is_null() && e.as_str() != Some(""))?;
     let mut s = e
         .as_str()
         .map(str::to_string)
@@ -174,6 +176,12 @@ pub fn error_text(reply: &Value) -> Option<String> {
         s = format!("{s}: {m}");
     }
     Some(s)
+}
+
+/// Does the reply carry an `error` (present, not null, not empty text)?
+#[must_use]
+pub fn is_refused(reply: &Value) -> bool {
+    error_text(reply).is_some()
 }
 
 /// `refusal`, plus `hint` — what to do instead. Prefer this over the bare form
@@ -289,24 +297,6 @@ pub const RESERVED_ID: &str = "kernel";
 #[must_use]
 pub fn missing(verb: &str, arg: &str) -> Value {
     let mut v = refusal(MISSING_ARG, format!("{verb}: {arg} required"));
-    with(&mut v, "arg", Value::String(arg.to_string()));
-    v
-}
-
-/// `missing` WITH a recipe. Use this rather than `refusal_hint(MISSING_ARG, …)`:
-/// the hand-rolled form drops the machine-readable `arg`, which is the whole
-/// point of the code: `create_agent: parent_id required` with a hint and no
-/// `arg` would disagree with python on a field a caller branches on.
-///
-/// KEY ORDER matches python's `refusal(code, error, hint=hint, arg=arg)`:
-/// `error, reason, hint, arg` — `hint` is a named parameter of `refusal()`
-/// itself and is inserted before `**extra` (which is where `arg` rides), so
-/// hint precedes arg. `missing()` alone has no hint and stays `error, reason,
-/// arg`.
-#[must_use]
-pub fn missing_hint(verb: &str, arg: &str, hint: impl Into<String>) -> Value {
-    let mut v = refusal(MISSING_ARG, format!("{verb}: {arg} required"));
-    with(&mut v, "hint", Value::String(hint.into()));
     with(&mut v, "arg", Value::String(arg.to_string()));
     v
 }

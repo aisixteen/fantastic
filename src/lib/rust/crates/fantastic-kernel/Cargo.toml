@@ -38,6 +38,12 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Threading",
 ] }
 
+[features]
+# The stand-ins tests build on (`test_support`): a dev-dependency turns it on, nothing ships it.
+test-support = []
+
 [dev-dependencies]
+# this crate's own integration tests and examples use its `test-support`
+fantastic-kernel = { path = ".", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = "3"

@@ -109,19 +109,10 @@ pub struct DynVerb {
 
 impl DynVerb {
     /// Declare a dynamic verb from a name, what it does and the JSON schema of its
-    /// arguments (an MCP tool's `name`, `description`, `inputSchema`). An absent or
-    /// non-object schema is a verb without arguments.
+    /// arguments (an MCP tool's `name`, `description`, `inputSchema`).
     #[must_use]
-    pub fn new(name: impl Into<String>, description: &str, input_schema: &Value) -> DynVerb {
-        let mut schema = match input_schema {
-            Value::Object(o) => o.clone(),
-            // no schema: a verb with no arguments, so any argument is refused
-            _ => {
-                let mut none = Map::new();
-                none.insert("additionalProperties".to_string(), json!(false));
-                none
-            }
-        };
+    pub fn new(name: impl Into<String>, description: &str, input_schema: &Map<String, Value>) -> DynVerb {
+        let mut schema = input_schema.clone();
         schema.insert("type".to_string(), json!("object"));
         schema.insert("description".to_string(), json!(description));
         DynVerb {
@@ -129,6 +120,18 @@ impl DynVerb {
             schema: Value::Object(schema),
         }
     }
+}
+
+/// One verb a running program declares: its name, what it does and the JSON schema of
+/// its arguments.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Declaration {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(rename = "inputSchema")]
+    input_schema: Map<String, Value>,
 }
 
 /// The verbs a RUNNING PROGRAM declares for its agent at runtime (an exec_bridge
@@ -166,41 +169,20 @@ impl DynRegistry {
                 "declare a list of {name, description, inputSchema}".to_string(),
             )
         };
-        let Value::Array(items) = declaration else {
-            return Err(bad(format!(
-                "expected a list, got {}",
-                fantastic_bundle::py_type_name(declaration)
-            )));
-        };
+        let items: Vec<Declaration> = serde_json::from_value(declaration.clone())
+            .map_err(|e| bad(e.to_string()))?;
         let mut out: Vec<DynVerb> = Vec::new();
-        for (i, item) in items.iter().enumerate() {
-            let Some(name) = item
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|n| !n.is_empty())
-            else {
-                return Err(bad(format!("entry {i} has no 'name' text")));
-            };
-            if reserved.iter().any(|l| l.iter().any(|v| v.name == name))
-                || out.iter().any(|d| d.name == name)
+        for item in items {
+            if item.name.is_empty()
+                || reserved.iter().any(|l| l.iter().any(|v| v.name == item.name))
+                || out.iter().any(|d| d.name == item.name)
             {
                 return Err(bad(format!(
-                    "{} is already a verb of this agent",
-                    fantastic_bundle::py_repr(name)
+                    "{} is empty or already a verb of this agent",
+                    fantastic_bundle::py_repr(&item.name)
                 )));
             }
-            let description = item
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let schema = item.get("inputSchema").unwrap_or(&Value::Null);
-            if !matches!(schema, Value::Null | Value::Object(_)) {
-                return Err(bad(format!(
-                    "entry {} 'inputSchema' must be an object",
-                    fantastic_bundle::py_repr(name)
-                )));
-            }
-            out.push(DynVerb::new(name, description, schema));
+            out.push(DynVerb::new(item.name, &item.description, &item.input_schema));
         }
         self.lock().insert(agent.to_string(), out);
         Ok(())
@@ -481,6 +463,9 @@ fn type_label(s: &Value) -> String {
     }
     if let Some(n) = s.get("minItems").and_then(Value::as_u64) {
         label.push_str(&format!(" with at least {n} item(s)"));
+    }
+    if let Some(n) = s.get("minLength").and_then(Value::as_u64) {
+        label.push_str(&format!(" of at least {n} character(s)"));
     }
     if let Some(p) = s.get("pattern").and_then(Value::as_str) {
         label.push_str(&format!(" matching /{p}/"));
@@ -832,10 +817,9 @@ fn matches_type(schema: &Value, v: &Value) -> bool {
             }),
             "boolean" => v.is_boolean(),
             "null" => v.is_null(),
-            "integer" => v.as_number().is_some_and(|n| {
-                (n.is_i64() || n.is_u64() || fantastic_bundle::py_type_name(v) == "int")
-                    && within(n)
-            }),
+            "integer" => v
+                .as_number()
+                .is_some_and(|n| (n.is_i64() || n.is_u64()) && within(n)),
             "number" => v.as_number().is_some_and(within),
             "array" => match (v, o.get("items")) {
                 (Value::Array(items), it) => {
@@ -939,25 +923,10 @@ fn apply_defaults(schema: &Value, raw: &mut Map<String, Value>) {
     }
 }
 
-fn bound_of(schema: &Value, name: &str, key: &str) -> u64 {
-    schema
-        .get("properties")
-        .and_then(|p| p.get(name))
-        .and_then(|p| p.get(key))
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-}
-
-/// Is a required argument ABSENT: not sent, null, or an empty text where the
-/// declaration asks for a non-empty one, or an empty list where it asks for at
-/// least one item (python's falsy rule).
-fn is_missing(schema: &Value, name: &str, value: Option<&Value>) -> bool {
-    match value {
-        None | Some(Value::Null) => true,
-        Some(Value::String(s)) if s.is_empty() => bound_of(schema, name, "minLength") >= 1,
-        Some(Value::Array(a)) if a.is_empty() => bound_of(schema, name, "minItems") >= 1,
-        Some(_) => false,
-    }
+/// Is a required argument ABSENT: not sent. A value sent is judged by its declared
+/// type, `minLength` and `minItems`, never read as "not there".
+fn is_missing(value: Option<&Value>) -> bool {
+    value.is_none()
 }
 
 /// Does the schema describe an object with declared properties (so its fields are
@@ -1038,7 +1007,7 @@ fn check_object(
     }
     if let Some(Value::Array(req)) = schema.get("required") {
         for r in req.iter().filter_map(Value::as_str) {
-            if is_missing(schema, r, raw.get(r)) {
+            if is_missing(raw.get(r)) {
                 return Err(refuse_arg(
                     name,
                     MISSING_ARG,
@@ -1050,7 +1019,7 @@ fn check_object(
         }
     }
     if let Some((key, groups)) = required_alternatives(schema) {
-        let given = |g: &Vec<&str>| g.iter().all(|f| !is_missing(schema, f, raw.get(*f)));
+        let given = |g: &Vec<&str>| g.iter().all(|f| !is_missing(raw.get(*f)));
         let n = groups.iter().filter(|g| given(g)).count();
         let names = alternatives_names(&groups);
         if n == 0 {
@@ -1209,9 +1178,8 @@ pub fn resolve(
 /// (`own`) — the SHARED ENTRY a bundle's [`Bundle::check_record`](crate::Bundle::check_record)
 /// runs, so the target's bundle judges the fields, never the kernel.
 ///
-/// First the SUBSTRATE WIRING no record may carry (`root_path`, `ctx`, `parent`, and
-/// at update `handler_module`, fixed at create, and `parent_id`, the tree's) and the `children_dir` rule
-/// (one safe path segment). Then a field neither record names is refused by name,
+/// First the SUBSTRATE WIRING no record may carry (`root_path`, `ctx`, `parent`,
+/// `handler_module`, fixed at create, and `parent_id`, the tree's). Then a field neither record names is refused by name,
 /// with both lists; a known one must be of its type. A freeform record (`own.open`)
 /// accepts any field the common record does not own.
 pub fn check_record(
@@ -1226,35 +1194,17 @@ pub fn check_record(
     // swapping it would leave a live agent whose in-process state belongs to the OLD
     // bundle. The reserved keys name substrate wiring; dropping them without a word
     // would let the caller believe a change had landed that never did.
-    let mut wiring: Vec<&str> = crate::agent::RESERVED_RECORD_KEYS.to_vec();
-    wiring.sort_unstable();
-    if verb == "update_agent" {
-        wiring.insert(0, "parent_id");
-        wiring.insert(0, "handler_module");
-    }
-    for k in wiring {
+    let mut reserved: Vec<&str> = crate::agent::RESERVED_RECORD_KEYS.to_vec();
+    reserved.sort_unstable();
+    for k in ["handler_module", "parent_id"].into_iter().chain(reserved) {
         if fields.contains_key(k) {
-            let why = if k == "parent_id" {
-                "absent — parent_id is structural: where an agent sits is the \
-                 tree's, never its record's"
-            } else if k == "handler_module" {
-                "absent — handler_module is fixed at create_agent, and \
-                 root_path/ctx/parent name substrate wiring the record may \
-                 not carry"
-            } else {
-                "absent — root_path/ctx/parent name substrate wiring the \
-                 record may not carry"
-            };
-            return Err(crate::refusal::bad(verb, k, why));
-        }
-    }
-    // `children_dir` BECOMES A DIRECTORY (`<agent>/<children_dir>/<child>`): one safe
-    // segment, exactly as an id is. A non-string is judged as "".
-    if let Some(cd) = fields.get("children_dir") {
-        if let Some(r) =
-            crate::refusal::guard_agent_id_as(verb, "children_dir", cd.as_str().unwrap_or(""))
-        {
-            return Err(r);
+            return Err(crate::refusal::bad(
+                verb,
+                k,
+                "absent — handler_module is fixed at create_agent, parent_id is the \
+                 tree's, and root_path/ctx/parent name substrate wiring: no record \
+                 field carries them",
+            ));
         }
     }
     let (cs, os) = (common.schema(), own.schema());
@@ -1317,7 +1267,7 @@ pub fn check_record(
         for schema in [cs, os] {
             if let Some(Value::Array(req)) = schema.get("required") {
                 for r in req.iter().filter_map(Value::as_str) {
-                    if matches!(fields.get(r), None | Some(Value::Null)) {
+                    if is_missing(fields.get(r)) {
                         let mut refused = refusal_hint(
                             MISSING_ARG,
                             format!(

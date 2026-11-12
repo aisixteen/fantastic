@@ -157,17 +157,14 @@ pub async fn persist_blob(
         content.as_bytes().to_vec(),
     )
     .await;
-    if let Some(e) = reply
-        .get("error")
-        .filter(|v| fantastic_bundle::py_truthy(v))
-    {
+    if let Some(e) = crate::refusal::error_text(&reply) {
         let mut out = json!({
-            "error": format!("persist_blob: {}", fantastic_bundle::py_str(e)),
+            "error": format!("persist_blob: {e}"),
         });
         // Carry the provider's own machine fields through — a gate denial on the
         // store must not be relabelled, and python copies each only when truthy.
         for k in ["reason", "hint"] {
-            if let Some(v) = reply.get(k).filter(|v| fantastic_bundle::py_truthy(v)) {
+            if let Some(v) = reply.get(k).filter(|v| !v.is_null() && v.as_str() != Some("")) {
                 out[k] = v.clone();
             }
         }
@@ -189,8 +186,7 @@ fn decoded_blob(name: &Value, raw: Vec<u8>) -> Value {
         Ok(text) => json!({ "name": name, "content": text }),
         Err(e) => json!({
             "error": format!(
-                "load_blob: {} is not utf-8 at byte {}",
-                fantastic_bundle::py_str(name),
+                "load_blob: {name} is not utf-8 at byte {}",
                 e.utf8_error().valid_up_to()
             ),
             "reason": "bad_encoding",
@@ -247,7 +243,7 @@ pub async fn load_blob(
                     "error": format!(
                         "load_blob: {} stalled at offset {offset} — the store \
                          returned no forward progress",
-                        fantastic_bundle::py_str(&name)
+                        name = name
                     ),
                     "name": name,
                     "content": Value::Null,
@@ -262,12 +258,12 @@ pub async fn load_blob(
         let mut out = json!({
             "error": format!(
                 "load_blob: {}",
-                last.get("error")
-                    .map_or_else(|| "unauthorized".to_string(), fantastic_bundle::py_str)
+                crate::refusal::error_text(&last)
+                    .unwrap_or_else(|| "unauthorized".to_string())
             ),
             "reason": "unauthorized",
         });
-        if let Some(h) = last.get("hint").filter(|v| fantastic_bundle::py_truthy(v)) {
+        if let Some(h) = last.get("hint").filter(|v| !v.is_null() && v.as_str() != Some("")) {
             out["hint"] = h.clone();
         }
         return Ok(out);

@@ -74,39 +74,21 @@ pub fn mint_guid() -> String {
     hex(&b)
 }
 
-/// A grant map's SHAPE, judged at WRITE time — the gate only judges edges.
-///
-/// `{key: "*" | [verbs]}`, a key being one of [`crate::authz::legal_keys`] —
-/// anything else is refused here, so a record can never carry a grant the gate
-/// would have to guess on. Ported from python: a silently-dead grant is the
-/// wrong answer — refuse loud.
-pub fn bad_grant_shape(meta: &Map<String, Value>) -> Option<String> {
+/// The KEYS of a grant map, judged at WRITE time — the gate only judges edges. The
+/// shape (`{key: "*" | [verbs]}`) is the record declaration's; a key is one of
+/// [`crate::authz::legal_keys`], which depends on the field, so a record can never
+/// carry a grant the gate would have to guess on.
+pub fn bad_grant_key(meta: &Map<String, Value>) -> Option<String> {
     for field in ["can_call", "callable_by"] {
-        let Some(g) = meta.get(field) else { continue };
-        let Some(map) = g.as_object() else {
-            // NAME WHAT ARRIVED — python's `got {type(g).__name__}.`; without it
-            // the refusal says a map is wanted but never what was sent.
-            return Some(format!(
-                "{field} must be a grant MAP {{\"<id|$token>\": \"*\" | \
-                 [\"<verb>\", …]}} — got {}. To open wide, grant per key \
-                 (e.g. {{\"$self\": \"*\", \"ai\": \"*\"}}), never a bare value",
-                fantastic_bundle::py_type_name(g)
-            ));
+        let Some(map) = meta.get(field).and_then(Value::as_object) else {
+            continue;
         };
-        for (k, v) in map {
-            let kr = fantastic_bundle::py_repr(k);
+        for k in map.keys() {
             if !crate::authz::is_grant_key(field, k) {
                 return Some(format!(
-                    "{field}[{kr}] is not a grant key — legal keys: {}",
+                    "{field}[{}] is not a grant key — legal keys: {}",
+                    fantastic_bundle::py_repr(k),
                     crate::authz::legal_keys(field)
-                ));
-            }
-            let ok = v.as_str() == Some("*")
-                || v.as_array()
-                    .is_some_and(|a| a.iter().all(|x| x.is_string()));
-            if !ok {
-                return Some(format!(
-                    "{field}[{kr}] must be \"*\" or a list of verb strings"
                 ));
             }
         }
@@ -128,9 +110,7 @@ pub async fn create_agent(
     let supplied_id = args.id.clone();
     // THE BUNDLE'S FIELDS go under the arguments' (`crate::inherit`).
     let (hm, meta) = crate::inherit::create_args(&kernel.bundles, args);
-    let Some(hm) = hm.as_deref() else {
-        return crate::refusal::missing("create_agent", "handler_module");
-    };
+    let hm = hm.as_str();
     let pid = pid.as_str();
 
     // `parent_id` NAMES THE OWNER. It is a real, REQUIRED argument — resolved
@@ -175,7 +155,7 @@ pub async fn create_agent(
     // WRITE-TIME VALIDATION, same gate as `update_agent` (py-canonical), so a
     // field has one answer at create and at update. Record is empty
     // at create: the merged view IS the patch.
-    if let Some(why) = bad_grant_shape(&meta) {
+    if let Some(why) = bad_grant_key(&meta) {
         return crate::refusal::refusal(crate::refusal::INVALID_META, &why);
     }
     // THE RECORD'S FIELDS and the bundle's own check: the target's bundle judges them
@@ -185,7 +165,7 @@ pub async fn create_agent(
     }
 
     // A supplied id — even "" — is the caller's choice and is validated as one
-    // by `guard_agent_id`; only an ABSENT id is minted (python parity). Minted
+    // by the declaration; only an ABSENT id is minted (python parity). Minted
     // AFTER every refusal above (python's `parent.create()` runs last, inside
     // `rec = parent.create(...)`).
     let id = match supplied_id {
@@ -194,8 +174,16 @@ pub async fn create_agent(
     };
     // An id BECOMES A DIRECTORY, so it must be one safe segment. Enforced at
     // the mint, so every consumer inherits it rather than each remembering.
-    if let Some(r) = crate::refusal::guard_agent_id("create_agent", &id) {
-        return r;
+    // The id's shape is the declaration's (`CreateAgent.id`); `kernel` is the operator's.
+    if id == crate::refusal::RESERVED_ID {
+        return crate::refusal::bad(
+            "create_agent",
+            "id",
+            &format!(
+                "a name other than the reserved {}",
+                fantastic_bundle::py_repr(crate::refusal::RESERVED_ID)
+            ),
+        );
     }
     if kernel.agents.contains_key(&AgentId::from(id.as_str())) {
         let mut r = crate::refusal::refusal(
@@ -269,7 +257,7 @@ pub async fn create_agent(
         println!(
             "  [create_agent] {} boot failed: {}",
             new_id.0,
-            fantastic_bundle::py_str(&boot.result)
+            boot.result
         );
     }
     // Lifecycle event on the PARENT's inbox, not the root's: whoever watches an

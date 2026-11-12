@@ -1164,9 +1164,11 @@ async fn docs_of_an_agent_render_its_dynamic_verbs_beside_the_bundles_own() {
             vec![crate::DynVerb::new(
                 format!("own_{}", agent.id.as_str()),
                 "Only mine. A second sentence.",
-                &json!({"type": "object",
+                json!({"type": "object",
                         "properties": {"x": {"type": "integer", "description": "The x."}},
-                        "required": ["x"]}),
+                        "required": ["x"]})
+                .as_object()
+                .expect("an object"),
             )]
         }
         fn record(&self) -> &'static crate::RecordDecl {

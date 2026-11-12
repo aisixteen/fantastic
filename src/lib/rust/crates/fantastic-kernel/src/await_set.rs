@@ -230,16 +230,27 @@ struct Report {
 
 /// THE HOOK in `dispatch`: is this `report` held for an open wait?
 ///
-/// `Some(reply)` = held (the reporter is answered at once, never blocked on the
-/// lead's turn); `None` = dispatch it normally.
+/// `Some(Ok(reply))` = held (the reporter is answered at once, never blocked on the
+/// lead's turn); `Some(Err(refusal))` = a wait holds for this reporter and the
+/// report is malformed; `None` = dispatch it normally.
 pub(crate) fn hold_report(
     kernel: &Arc<Kernel>,
     target: &AgentId,
     origin: Option<&AgentId>,
     payload: &Value,
-) -> Option<Value> {
+) -> Option<Result<Value, Value>> {
     let origin = origin?;
-    let report: Report = crate::verbs::decode("report", payload).ok()?;
+    let awaited = table(kernel)
+        .lock()
+        .values()
+        .any(|w| &w.caller == target && w.ids.contains(&origin.0));
+    if !awaited {
+        return None;
+    }
+    let report: Report = match crate::verbs::decode("report", payload) {
+        Ok(r) => r,
+        Err(refusal) => return Some(Err(refusal)),
+    };
     let held = Held {
         state: report.state,
         result: report.result,
@@ -275,7 +286,7 @@ pub(crate) fn hold_report(
             tokio::spawn(async move { finish(&k, wait_id, w, false).await });
         }
     }
-    Some(json!({"held": true, "wait_id": wait_id}))
+    Some(Ok(json!({"held": true, "wait_id": wait_id})))
 }
 
 /// Close a claimed wait and deliver its ONE combined message.

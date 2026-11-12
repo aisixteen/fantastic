@@ -50,8 +50,7 @@ pub(super) async fn handle_kernel_verb(
             // that never learned about paging is unaffected; the cursor is the
             // last id handed over, never an offset.
             let (out, next) = crate::paging::page(out, args.limit, args.after.as_deref(), |r| {
-                r.get("id")
-                    .map_or_else(String::new, fantastic_bundle::py_str)
+                crate::paging::id_text(r.get("id"))
             });
             // `more` is not decoration (py-canonical): a model that opens with
             // `list_agents` gets bare records and never learns that authoring a
@@ -87,8 +86,7 @@ pub(super) async fn handle_kernel_verb(
                 })
                 .collect();
             let (rows, next) = crate::paging::page(rows, args.limit, args.after.as_deref(), |r| {
-                r.get("id")
-                    .map_or_else(String::new, fantastic_bundle::py_str)
+                crate::paging::id_text(r.get("id"))
             });
             json!({ "executions": rows, "next": next })
         }
@@ -111,8 +109,7 @@ pub(super) async fn handle_kernel_verb(
                 args.limit,
                 args.after.as_deref(),
                 |r| {
-                    r.get("id")
-                        .map_or_else(String::new, fantastic_bundle::py_str)
+                    crate::paging::id_text(r.get("id"))
                 },
             );
             json!({ "tasks": rows, "next": next })
@@ -128,7 +125,7 @@ pub(super) async fn handle_kernel_verb(
         // a stranger's id ever existed.
         K::Cancel(args) => {
             let resolved = match args.task_id {
-                IdOrName::Id(n) => (n > 0).then_some(n),
+                IdOrName::Id(n) => Some(n),
                 IdOrName::Name(name) => kernel.ledger.resolve_name(&name),
             };
             match resolved {
@@ -196,10 +193,9 @@ async fn update_agent(
             kernel.agents.iter().map(|e| e.key().to_string()).collect(),
         );
     };
-    // Grant-map SHAPE, judged here at write time — the gate only judges edges
-    // (py-canonical: `can_call:"*"` accepted as a bare string would leave a
-    // silently-dead grant; refuse loud at the point of the mistake).
-    if let Some(why) = crate::lifecycle::bad_grant_shape(&patch) {
+    // Grant-map KEYS, judged here at write time — the gate only judges edges. The
+    // maps' shape is the record declaration's, judged by the target's own entry below.
+    if let Some(why) = crate::lifecycle::bad_grant_key(&patch) {
         let mut r = crate::refusal::refusal(crate::refusal::INVALID_META, &why);
         crate::refusal::with(&mut r, "id", json!(id));
         return r;
@@ -305,7 +301,7 @@ async fn ack_deadletter(kernel: &Arc<Kernel>, id: &IdOrName) -> Result<Value, Va
         crate::refusal::with(&mut r, "arg", json!("id"));
         return Ok(r);
     }
-    if hit.get("acked").is_some_and(fantastic_bundle::py_truthy) {
+    if hit.get("acked").and_then(Value::as_bool) == Some(true) {
         return Ok(json!({"acked": true, "id": hid, "already": true}));
     }
     if let Some(root) = kernel.root() {

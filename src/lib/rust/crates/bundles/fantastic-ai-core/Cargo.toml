@@ -27,6 +27,7 @@ regex = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [dev-dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 fantastic-file = { path = "../fantastic-file" }
 # Every AI agent keeps its conversation in a memory store; the tests wire one.
 fantastic-ram-store = { path = "../fantastic-ram-store" }

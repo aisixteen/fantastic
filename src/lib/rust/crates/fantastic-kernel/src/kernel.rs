@@ -369,7 +369,7 @@ impl Kernel {
 
     /// BOTH grant maps as ONE step: `edit` gets `can_call` and `callable_by` as they are at
     /// the write and returns which of the two it changed. One record lock, one run of the
-    /// write-time checks (`bad_grant_shape`, the bundle's `validate_meta`) over what changed,
+    /// write-time checks (the grant keys, the common record's shape, the bundle's `validate_meta`) over what changed,
     /// one `updated` event: a shape refused in either map writes neither.
     pub fn edit_grants(
         &self,
@@ -398,8 +398,11 @@ impl Kernel {
             if cb_edited {
                 patch.insert("callable_by".to_string(), Value::Object(cb.clone()));
             }
-            if let Some(why) = crate::lifecycle::bad_grant_shape(&patch) {
+            if let Some(why) = crate::lifecycle::bad_grant_key(&patch) {
                 return Err(why.to_string());
+            }
+            if let Err(refused) = crate::declared::bare_record::check("edit_grants", &patch) {
+                return Err(crate::refusal::error_text(&refused).unwrap_or_default());
             }
             if let Some(hm) = handler.as_deref() {
                 if let Some(bundle) = self.bundles.get(hm) {
@@ -1205,12 +1208,12 @@ mod tests;
 /// # Errors
 /// [`KernelError::InvalidSnapshot`] carrying python's `SnapshotError` text.
 pub fn validate_records(records: &[Map<String, Value>]) -> KernelResult<String> {
-    use fantastic_bundle::{py_repr, py_repr_value, py_truthy};
+    use fantastic_bundle::{py_repr, py_repr_value};
     let bad = |m: String| Err(KernelError::InvalidSnapshot(m));
     let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut roots: Vec<String> = Vec::new();
     for r in records {
-        let Some(rid) = r.get("id").filter(|v| py_truthy(v)) else {
+        let Some(rid) = r.get("id").filter(|v| v.as_str().is_some_and(|s| !s.is_empty())) else {
             return bad("snapshot record missing id".to_string());
         };
         // THE SAME ID RULE AS A CREATE: a record edited on disk to carry the

@@ -47,6 +47,7 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 # The ROOT LOADER bundle — tests need it registered so the root answers the
 # verbs it serves (`persist_blob`/`load_blob`, `boot`), as it does in production.
 fantastic-core = { path = "../fantastic-core" }

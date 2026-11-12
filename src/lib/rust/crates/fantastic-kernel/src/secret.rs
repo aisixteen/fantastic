@@ -13,7 +13,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 /// What a marked value is shown as.
 pub const SHOWN: &str = "[secret]";
@@ -63,44 +63,30 @@ pub fn current_secret() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The item's marks, or a `bad_arg` refusal for a malformed field. Absent ⇒ none.
+/// The item's marks, or a `bad_arg` refusal for a mark that is not a dotted path
+/// into the payload or that marks `type`.
 ///
 /// # Errors
-/// The refusal, as python words it.
-pub fn check(raw: Option<&Value>) -> Result<Vec<String>, Value> {
-    let Some(raw) = raw.filter(|v| !v.is_null()) else {
-        return Ok(Vec::new());
-    };
-    let marks: Option<Vec<String>> = raw.as_array().and_then(|a| {
-        a.iter()
-            .map(|m| {
-                m.as_str()
-                    .filter(|s| !s.is_empty() && !s.split('.').any(str::is_empty))
-                    .map(String::from)
-            })
-            .collect()
-    });
-    let Some(marks) = marks else {
-        let mut r = crate::refusal::refusal(
-            crate::refusal::BAD_ARG,
-            format!(
-                "send: secret must be a list of dotted paths into the payload \
-                 (e.g. [\"fields.api_key\"]), got {}",
-                fantastic_bundle::py_repr_value(raw)
+/// The refusal.
+pub fn check(marks: &[String]) -> Result<Vec<String>, Value> {
+    if let Some(m) = marks.iter().find(|m| m.is_empty() || m.split('.').any(str::is_empty)) {
+        return Err(crate::refusal::bad(
+            "send",
+            "secret",
+            &format!(
+                "a list of dotted paths into the payload, got {}",
+                fantastic_bundle::py_repr(m)
             ),
-        );
-        crate::refusal::with(&mut r, "arg", json!("secret"));
-        return Err(r);
-    };
-    if marks.iter().any(|m| m == "type") {
-        let mut r = crate::refusal::refusal(
-            crate::refusal::BAD_ARG,
-            "send: secret may not mark `type` — the verb is not data",
-        );
-        crate::refusal::with(&mut r, "arg", json!("secret"));
-        return Err(r);
+        ));
     }
-    Ok(marks)
+    if marks.iter().any(|m| m == "type") {
+        return Err(crate::refusal::bad(
+            "send",
+            "secret",
+            "a list of paths that leave out `type` (the verb is not data)",
+        ));
+    }
+    Ok(marks.to_vec())
 }
 
 /// `payload` with every marked value replaced by [`SHOWN`]; no marks ⇒ a copy.

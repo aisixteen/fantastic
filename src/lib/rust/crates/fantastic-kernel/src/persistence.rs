@@ -271,9 +271,8 @@ fn persist_failed(kernel: &Kernel, loader: &AgentId, store: &AgentId, path: &str
         other => other.clone(),
     };
     eprintln!(
-        "  [{loader}] persist through {} failed: {path}: {}",
-        fantastic_bundle::py_repr(&store.0),
-        fantastic_bundle::py_str(&msg)
+        "  [{loader}] persist through {} failed: {path}: {msg}",
+        fantastic_bundle::py_repr(&store.0)
     );
     health(kernel)
         .0
@@ -296,7 +295,7 @@ fn persist_landed(kernel: &Kernel, loader: &AgentId) {
 /// A reply that failed: not an object, or an object with a truthy `error`.
 fn write_failed(r: &Value) -> bool {
     match r {
-        Value::Object(o) => o.get("error").is_some_and(fantastic_bundle::py_truthy),
+        Value::Object(_) => crate::refusal::is_refused(r),
         _ => true,
     }
 }
@@ -422,9 +421,10 @@ pub async fn read_via_store(kernel: &Arc<Kernel>, store_id: &AgentId, path: &str
             return Vec::new();
         }
         out.extend_from_slice(&body.unwrap_or_default());
-        // A provider that reports neither `eof` nor a moving cursor gets ONE
-        // pass — the loop must not spin on a surface that cannot answer.
-        let eof = meta.get("eof").and_then(Value::as_bool).unwrap_or(true);
+        // `eof` is part of a `read_stream` reply: a reply without it is no read.
+        let Some(eof) = meta.get("eof").and_then(Value::as_bool) else {
+            return Vec::new();
+        };
         let next = meta.get("next_offset").and_then(Value::as_u64);
         match next {
             Some(n) if !eof && n > offset => offset = n,
@@ -564,7 +564,8 @@ pub async fn forget_path(kernel: &Arc<Kernel>, loader: &Agent, agent_root: &Path
     .0;
     if out
         .as_object()
-        .is_some_and(|o| o.get("error").is_some_and(fantastic_bundle::py_truthy))
+        .is_some()
+        && crate::refusal::is_refused(&out)
     {
         persist_failed(kernel, &loader.id, &store_id, &reldir, &out);
     }

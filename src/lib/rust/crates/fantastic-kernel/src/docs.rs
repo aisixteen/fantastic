@@ -92,13 +92,8 @@ pub fn render(
 /// how a model learns a page agent's verbs at all.
 pub async fn remote_docs_reply(kernel: &Arc<Kernel>, args: &Docs) -> Value {
     let of = args.of.as_str();
-    let (guid, agent_id) = of.split_once('|').unwrap_or(("", ""));
-    let target = if !guid.is_empty() && !agent_id.is_empty() && !agent_id.contains('|') {
-        kernel.qualified_target(&format!("{guid}|kernel"))
-    } else {
-        None
-    };
-    let Some(target) = target else {
+    let (guid, agent_id) = of.split_once('|').unwrap_or(("", of));
+    let Some(target) = kernel.qualified_target(&format!("{guid}|kernel")) else {
         let mut r = refusal_hint(
             BAD_ARG,
             format!(

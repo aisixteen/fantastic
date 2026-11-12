@@ -518,7 +518,7 @@ async fn missing_hint_orders_hint_before_arg() {
     let hint = r["hint"].as_str().unwrap();
     assert!(
         hint.starts_with(
-            "create_agent takes — args: handler_module:string?, parent_id:string (req)"
+            "create_agent takes — args: handler_module:string (req), parent_id:string (req)"
         ),
         "{hint}"
     );
@@ -532,7 +532,7 @@ async fn missing_hint_orders_hint_before_arg() {
 }
 
 #[tokio::test]
-async fn empty_required_args_are_missing() {
+async fn empty_required_args_are_refused_by_their_declaration() {
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
     let empty_hm = kernel
@@ -543,7 +543,7 @@ async fn empty_required_args_are_missing() {
         .await
         .remove(0)
         .result;
-    assert_eq!(empty_hm["reason"], "missing_arg");
+    assert_eq!(empty_hm["reason"], "bad_arg");
     assert_eq!(empty_hm["arg"], "handler_module");
     let empty_pid = kernel
         .send(vec![Item::new(
@@ -553,7 +553,7 @@ async fn empty_required_args_are_missing() {
         .await
         .remove(0)
         .result;
-    assert_eq!(empty_pid["reason"], "missing_arg");
+    assert_eq!(empty_pid["reason"], "bad_arg");
     assert_eq!(empty_pid["arg"], "parent_id");
 }
 
@@ -565,8 +565,8 @@ async fn create_refusal_precedence_matches_python() {
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
 
-    // Both handler_module AND parent_id absent -> the declared REQUIRED argument
-    // (parent_id) is refused first, by the shared entry's check of the declaration.
+    // Both handler_module AND parent_id absent -> the first declared REQUIRED argument
+    // (handler_module) is refused first, by the shared entry's check of the declaration.
     let r = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
@@ -575,7 +575,7 @@ async fn create_refusal_precedence_matches_python() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["arg"], "parent_id");
+    assert_eq!(r["arg"], "handler_module");
     // parent_id given, handler_module absent -> handler_module.
     let r = kernel
         .send(vec![Item::new(
@@ -614,43 +614,40 @@ async fn create_refusal_precedence_matches_python() {
         .result;
     assert_eq!(r["arg"], "parent");
 
-    // Reserved keys clear but the grant shape is bad -> invalid_meta before
-    // `guard_agent_id`/`exists` are ever reached (the id is not a valid one).
+    // Reserved keys clear but the grant shape is bad: the target's record entry
+    // refuses the field by name (the declared shape: a map of `*` or verb lists).
     let r = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","handler_module":"counting.tools",
-                   "parent_id":"kernel","can_call":"*","id":".."}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r["reason"], "invalid_meta");
-    // python NAMES THE TYPE THAT ARRIVED: `— got str. To open wide, …`.
-    assert_eq!(
-        r["error"],
-        "can_call must be a grant MAP {\"<id|$token>\": \"*\" | [\"<verb>\", …]} \
-         — got str. To open wide, grant per key (e.g. {\"$self\": \"*\", \"ai\": \"*\"}), \
-         never a bare value"
-    );
-
-    // Grant shape fine, id invalid (a digit-only name) -> guard_agent_id fires
-    // before the (irrelevant here) exists check.
-    let r = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type":"create_agent","handler_module":"counting.tools",
-                   "parent_id":"kernel","id":"123"}),
+                   "parent_id":"kernel","can_call":"*","id":"granted"}),
         )])
         .await
         .remove(0)
         .result;
     assert_eq!(r["reason"], "bad_arg");
+    assert_eq!(r["arg"], "can_call");
+
+    // An id that is not one safe path segment (or is all digits) is refused by the
+    // declaration of `id`, before any agent exists.
+    for bad_id in ["..", "a/b", ".hidden", "a|b", "123"] {
+        let r = kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel"),
+                json!({"type":"create_agent","handler_module":"counting.tools",
+                       "parent_id":"kernel","id":bad_id}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["reason"], "bad_arg", "{bad_id}: {r}");
+        assert_eq!(r["arg"], "id", "{bad_id}: {r}");
+    }
 }
 
-/// An unknown grant key, and a value that is not `"*"` or a list of strings, are
-/// refused at WRITE time — python `_bad_grant_shape`, text for text, the legal
-/// keys named per field (a peer address is a `can_call` key only).
+/// An unknown grant key is refused at WRITE time — the legal keys named per field (a
+/// peer address is a `can_call` key only); a value that is not `"*"` or a list of
+/// strings is refused by the record's declared shape.
 #[tokio::test]
 async fn unknown_grant_keys_and_bad_values_are_refused_at_write_time() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -686,14 +683,6 @@ async fn unknown_grant_keys_and_bad_values_are_refused_at_write_time() {
             json!({"callable_by": {"g1|ai": "*"}}),
             key("callable_by", "g1|ai"),
         ),
-        (
-            json!({"can_call": {"served": {"verbs": ["list"]}}}),
-            "can_call['served'] must be \"*\" or a list of verb strings".to_string(),
-        ),
-        (
-            json!({"can_call": {"served": 7}}),
-            "can_call['served'] must be \"*\" or a list of verb strings".to_string(),
-        ),
     ];
     for (patch, want) in cases {
         let mut payload = json!({"type": "update_agent", "id": "hub"});
@@ -707,6 +696,22 @@ async fn unknown_grant_keys_and_bad_values_are_refused_at_write_time() {
             .result;
         assert_eq!(r["reason"], "invalid_meta", "{patch}: {r}");
         assert_eq!(r["error"], want, "{patch}");
+    }
+    for patch in [
+        json!({"can_call": {"served": {"verbs": ["list"]}}}),
+        json!({"can_call": {"served": 7}}),
+    ] {
+        let mut payload = json!({"type": "update_agent", "id": "hub"});
+        for (k, v) in patch.as_object().unwrap() {
+            payload[k] = v.clone();
+        }
+        let r = kernel
+            .send(vec![Item::new(AgentId::from("kernel"), payload)])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["reason"], "bad_arg", "{patch}: {r}");
+        assert_eq!(r["arg"], "can_call.served", "{patch}: {r}");
     }
 }
 
@@ -781,7 +786,7 @@ async fn update_agent_refuses_substrate_wiring_through_the_targets_bundle() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["reason"], "missing_arg");
+    assert_eq!(r["reason"], "bad_arg");
     assert_eq!(r["arg"], "id");
 }
 
@@ -809,7 +814,7 @@ async fn delete_agent_refuses_the_root_with_python_text() {
 }
 
 #[tokio::test]
-async fn delete_agent_empty_id_is_missing_arg() {
+async fn delete_agent_empty_id_is_refused_by_its_declaration() {
     let tmp = tempfile::TempDir::new().unwrap();
     let kernel = mk_rooted(&tmp);
     let r = kernel
@@ -820,7 +825,7 @@ async fn delete_agent_empty_id_is_missing_arg() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["reason"], "missing_arg");
+    assert_eq!(r["reason"], "bad_arg");
     assert_eq!(r["arg"], "id");
 }
 

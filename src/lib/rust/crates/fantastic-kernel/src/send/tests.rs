@@ -2022,7 +2022,7 @@ async fn docs_of_kernel_serves_the_rendered_text_of_all_fourteen_verbs() {
 #[test]
 fn the_one_line_tier_is_the_first_sentence_of_the_doc() {
     let line = |doc: &str| {
-        let v = crate::DynVerb::new("v", doc, &json!({"type": "object"}));
+        let v = crate::DynVerb::new("v", doc, json!({"type": "object"}).as_object().expect("an object"));
         crate::verbs::line(&crate::verbs::Row {
             name: &v.name,
             schema: &v.schema,
@@ -2145,7 +2145,7 @@ async fn a_binary_kernel_verb_on_the_root_is_answered_as_text() {
 }
 
 #[tokio::test]
-async fn a_binary_reflect_or_lifecycle_verb_on_a_bare_agent_answers_as_text() {
+async fn a_binary_reflect_on_a_bare_agent_answers_as_text_and_a_lifecycle_verb_is_refused() {
     let kernel = root_and_child();
     let bin = send_binary(&kernel, "kid", json!({"type": "reflect"}), vec![1]).await;
     let txt = send_text(&kernel, "kid", json!({"type": "reflect"})).await;
@@ -2156,9 +2156,8 @@ async fn a_binary_reflect_or_lifecycle_verb_on_a_bare_agent_answers_as_text() {
     for verb in ["boot", "shutdown"] {
         let bin = send_binary(&kernel, "kid", json!({"type": verb}), vec![1]).await;
         let txt = send_text(&kernel, "kid", json!({"type": verb})).await;
-        assert_eq!(bin.result, Value::Null, "{verb} on a bare agent is null");
-        assert_eq!(txt.result, Value::Null, "{verb}");
-        assert_eq!(bin.status, crate::outcome::Status::Completed, "{verb}");
+        assert_eq!(bin.result["reason"], "unhandled", "{verb}: a bare agent has no such verb");
+        assert_eq!(bin.result, txt.result, "{verb}");
         assert_eq!(bin.body, None, "{verb}");
     }
 }
@@ -2738,20 +2737,14 @@ async fn a_marked_value_is_shown_never_kept() {
     );
     assert!(events.contains("[secret]"));
     // malformed marks are refused before anything runs
-    for bad in [
-        json!("fields.api_key"),
-        json!([""]),
-        json!(["a..b"]),
-        json!([1]),
-        json!(["type"]),
-    ] {
+    for bad in [vec![""], vec!["a..b"], vec!["type"]] {
         let out = kernel
             .send(vec![
-                Item::new("sp", json!({"type": "set"})).with_raw_secret(bad.clone())
+                Item::new("sp", json!({"type": "set"})).with_secret(bad.clone())
             ])
             .await
             .remove(0);
-        assert_eq!(out.result["arg"], json!("secret"), "{bad}");
+        assert_eq!(out.result["arg"], json!("secret"), "{bad:?}");
     }
 }
 

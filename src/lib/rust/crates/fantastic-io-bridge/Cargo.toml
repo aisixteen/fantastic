@@ -7,11 +7,12 @@ license.workspace = true
 description = "IO base — shared library (NOT a bundle): per-leg ingress/egress rule registries + the binary-safe frame codec + permessage-deflate for the WS legs. Every io derivation (ws_bridge/relay_connector/web_ws/web_rest/file_bridge) imports it. Mirrors python/bundled_agents/io/io_bridge."
 
 [dependencies]
-# python-format helpers (truthiness in `parse_spec`).
+# python-format helpers (the frame codec).
 fantastic-bundle = { path = "../fantastic-bundle" }
 # The inbound verbs of a wire leg (`inbound`) send onward through the kernel.
 fantastic-kernel = { path = "../fantastic-kernel" }
 serde = { workspace = true }
+schemars = { workspace = true }
 serde_json = { workspace = true }
 # permessage-deflate on the WS legs (`ws_deflate`): the frame stream, zlib with
 # a negotiated window, the client handshake head.

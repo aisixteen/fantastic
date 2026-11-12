@@ -194,10 +194,6 @@ fn every_builder_serializes_in_pythons_key_order() {
         r#"{"error":"create_agent: parent_id required","reason":"missing_arg","arg":"parent_id"}"#
     );
     assert_eq!(
-        s(missing_hint("create_agent", "parent_id", "name it")),
-        r#"{"error":"create_agent: parent_id required","reason":"missing_arg","hint":"name it","arg":"parent_id"}"#
-    );
-    assert_eq!(
         s(bad("send", "timeout", "a positive number")),
         r#"{"error":"send: timeout must be a positive number","reason":"bad_arg","arg":"timeout"}"#
     );

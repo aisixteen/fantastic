@@ -23,6 +23,7 @@ tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 
 [dev-dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 fantastic-file = { path = "../fantastic-file" }
 # The memory store each test kernel flushes into — the secret tests read every
 # record a kernel keeps, the store's included.

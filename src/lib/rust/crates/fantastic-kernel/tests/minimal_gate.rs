@@ -330,7 +330,7 @@ async fn a_missing_operand_or_an_unknown_id_gets_the_verbs_own_refusal() {
             json!({"type": "delete_agent", "id": ""}),
             "delete_agent",
             "id",
-            "missing_arg",
+            "bad_arg",
         ),
     ] {
         let out = as_agent(&k, "a", "kernel", payload.clone()).await;

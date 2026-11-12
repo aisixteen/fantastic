@@ -35,14 +35,13 @@ pub fn apply(bundles: &BundleRegistry, handler_module: &str, meta: &mut Map<Stri
 }
 
 /// What a `create_agent` makes of its arguments once the bundle's fields are under
-/// them: the handler module the agent runs (`None`: none was named) and its record's
-/// fields. `bundle: X` (beside the base's handler_module, or alone) is the same
-/// create as `handler_module: X`.
+/// them: the handler module the agent runs and its record's fields. A `bundle` that
+/// is not the handler module names the bundle the record inherits from.
 #[must_use]
 pub fn create_args(
     bundles: &BundleRegistry,
     args: crate::declared::kernel::CreateAgent,
-) -> (Option<String>, Map<String, Value>) {
+) -> (String, Map<String, Value>) {
     let crate::declared::kernel::CreateAgent {
         handler_module,
         bundle,
@@ -50,20 +49,11 @@ pub fn create_args(
         ..
     } = args;
     let mut meta = fields;
-    let mut hm = handler_module.filter(|h| !h.is_empty());
-    if let Some(b) = bundle.filter(|b| !b.is_empty()) {
-        // the bundle's own base (or none named): the kind IS the bundle. Another base:
-        // it keeps its handler and names the bundle it inherits from.
-        let h = hm.as_deref().unwrap_or("");
-        if h.is_empty() || h == b || h == bundles.base_of(&b) {
-            hm = Some(b);
-        } else {
-            meta.insert("bundle".into(), Value::String(b));
-        }
+    let hm = handler_module;
+    if let Some(b) = bundle.filter(|b| *b != hm) {
+        meta.insert("bundle".into(), Value::String(b));
     }
-    if let Some(h) = &hm {
-        apply(bundles, h, &mut meta);
-    }
+    apply(bundles, &hm, &mut meta);
     (hm, meta)
 }
 

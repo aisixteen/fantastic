@@ -22,7 +22,7 @@
 //! Every mode autoloads `.env` first and honours `--ledger-cap` /
 //! `FANTASTIC_LEDGER_CAP`, as python's `main_dispatch` does.
 
-use fantastic_bundle::{is_space, py_int, py_json_dumps};
+use fantastic_bundle::{is_space, py_json_dumps};
 use fantastic_kernel::bootstrap::{self, BootedKernel, BootstrapOptions, DEFAULT_ROOT_ID};
 use fantastic_kernel::{lock, AgentId, BundleRegistry, Item, KernelError};
 use serde_json::{json, Map, Value};
@@ -377,10 +377,10 @@ fn ledger_cap_from(argv: Vec<String>) -> Result<(Vec<String>, Option<Option<usiz
     if raw == "inf" {
         return Ok((out, Some(None)));
     }
-    match py_int(&Value::String(raw)) {
-        // A negative ring keeps nothing; `usize` cannot hold it, so it floors at 0.
-        Ok(n) => Ok((out, Some(Some(usize::try_from(n).unwrap_or(0))))),
-        Err(e) => Err(format!("{}: {e}", e.class_name())),
+    // the operator's flag, read as the count it is: `inf` or a non-negative integer
+    match raw.parse::<usize>() {
+        Ok(n) => Ok((out, Some(Some(n)))),
+        Err(e) => Err(format!("--ledger-cap {raw:?}: {e}")),
     }
 }
 
@@ -621,16 +621,13 @@ async fn dispatch(
     // start: fail loud, exit non-zero — the lock released and the agents torn
     // down on the way out, as python's `with FantasticLock()` + atexit do.
     let started = kernel.start(true).await;
-    if let Some(err) = started
-        .get("error")
-        .filter(|e| fantastic_bundle::py_truthy(e))
-    {
-        let mut msg = fantastic_bundle::py_str(err);
+    if let Some(mut msg) = fantastic_kernel::refusal::error_text(&started) {
         if let Some(hint) = started
             .get("hint")
-            .filter(|h| fantastic_bundle::py_truthy(h))
+            .and_then(Value::as_str)
+            .filter(|h| !h.is_empty())
         {
-            msg.push_str(&format!("\n  hint: {}", fantastic_bundle::py_str(hint)));
+            msg.push_str(&format!("\n  hint: {hint}"));
         }
         stop_kernel(&kernel).await;
         bootstrap::shutdown(&state_dir)?;
@@ -705,18 +702,24 @@ fn refuse_args(refused: &Value) -> ExitCode {
 /// literal is a list or an object only where the verb declares one). The reader is the
 /// kernel's ([`fantastic_kernel::typing`]), the same code the model's `<k>v</k>` goes
 /// through; a value that is not its declared type is refused by argument name, and an
-/// agent or verb this kernel does not declare leaves the text as written.
+/// agent or verb this kernel does not declare is refused by the reader.
 fn typed_payload(
     kernel: &std::sync::Arc<fantastic_kernel::Kernel>,
     target: &str,
     verb: &str,
     kvs: &[String],
 ) -> Result<Map<String, Value>, Value> {
-    let pairs: Vec<(String, String)> = kvs
-        .iter()
-        .filter_map(|kv| kv.split_once('='))
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for kv in kvs {
+        let Some((k, v)) = kv.split_once('=') else {
+            return Err(fantastic_kernel::refusal::bad(
+                verb,
+                kv,
+                "written k=v (an argument without `=` is refused, never dropped)",
+            ));
+        };
+        pairs.push((k.to_string(), v.to_string()));
+    }
     fantastic_kernel::typing::operator_payload(kernel, target, verb, &pairs)
 }
 
@@ -733,18 +736,22 @@ mod typed_payload_tests {
             &kernel,
             "nobody",
             "ping",
-            &[
-                "n=42".into(),
-                "flag=true".into(),
-                "w=[1]".into(),
-                "no_equals".into(),
-            ],
+            &["n=42".into(), "flag=true".into(), "w=[1]".into()],
         )
         .unwrap();
         assert_eq!(
             serde_json::Value::Object(p),
             json!({"type": "ping", "n": "42", "flag": "true", "w": "[1]"})
         );
+    }
+
+    #[test]
+    fn an_argument_without_an_equals_sign_is_refused_not_dropped() {
+        let kernel = Arc::new(fantastic_kernel::Kernel::new());
+        let e = typed_payload(&kernel, "nobody", "ping", &["n=42".into(), "no_equals".into()])
+            .unwrap_err();
+        assert_eq!(e["reason"], json!("bad_arg"));
+        assert_eq!(e["arg"], json!("no_equals"));
     }
 }
 

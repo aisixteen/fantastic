@@ -19,6 +19,7 @@ tokio = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 fantastic-ai-core = { path = "../fantastic-ai-core" }
 futures-util = "0.3"

@@ -201,7 +201,8 @@ fn boot_disk(
         .iter()
         .find(|r| r.get("parent_id").is_none_or(Value::is_null))
         .and_then(|r| r.get("handler_module"))
-        .map(fantastic_bundle::py_str)
+        .and_then(Value::as_str)
+        .map(str::to_string)
         .unwrap_or_default();
     // FOLDER BUNDLES before the tree loads, so an instance's handler resolves
     // (python main._bootstrap → kernel_state.load_bundles).

@@ -59,6 +59,7 @@ pub mod typing;
 pub mod verbs;
 pub mod yaml_io;
 
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_support;
 
@@ -73,7 +74,7 @@ pub use kernel::{
 pub use outcome::{body_at, Blob, Item, Outcome, Status, Step};
 pub use paging::page;
 pub use peers::{PeerCallFuture, PeerEmitFuture, PeerReply, PeerRoute};
-pub use refusal::{bad, error_text, missing, not_here, refusal, refusal_hint, unknown_agent};
+pub use refusal::{error_text, is_refused, not_here, refusal, refusal_hint, unknown_agent};
 pub use rows::{Row, RowStore, RowTail};
 pub use secret::{current_secret, note_reply_secret};
 pub use send::{current_origin, current_sender, Signal, ON_BATCH_LAUNCHED};

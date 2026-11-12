@@ -8,13 +8,72 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// A task or execution named by its id, or by the name a caller gave its own execution.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum IdOrName {
     /// The numeric id.
     Id(i64),
     /// The name the caller gave its own execution (text is never read as a number).
     Name(String),
+}
+
+impl From<i64> for IdOrName {
+    fn from(n: i64) -> Self {
+        Self::Id(n)
+    }
+}
+
+impl From<String> for IdOrName {
+    fn from(s: String) -> Self {
+        Self::Name(s)
+    }
+}
+
+impl From<&str> for IdOrName {
+    fn from(s: &str) -> Self {
+        Self::Name(s.to_string())
+    }
+}
+
+impl IdOrName {
+    /// The id as JSON: a number or a string.
+    #[must_use]
+    pub fn to_value(&self) -> Value {
+        match self {
+            Self::Id(n) => Value::from(*n),
+            Self::Name(s) => Value::from(s.as_str()),
+        }
+    }
+}
+
+/// The call a wire leg's hand-in carries onward: the `item` of its `inbound_call`
+/// message, read once here by the kernel (the drain gate) and by the io-bridge.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InboundItem {
+    /// Who the onward call is for.
+    pub target: String,
+    /// The onward call's payload.
+    pub payload: Value,
+    /// Secret marks: dotted paths into `payload`.
+    #[serde(default)]
+    pub secret: Vec<String>,
+}
+
+/// A hand-in to a wire leg: the transport gives its leg an admitted frame as one
+/// `inbound_call`, which the leg sends onward as itself; every other hand-in verb
+/// is `Other`. An `inbound_call` that is not of this shape does not parse.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum HandIn {
+    /// One admitted call.
+    #[serde(rename = "inbound_call")]
+    InboundCall {
+        /// The call carried.
+        item: InboundItem,
+    },
+    /// Any other verb handed to the leg.
+    #[serde(other)]
+    Other,
 }
 
 /// The schema of a positive number of seconds, or none.
@@ -86,15 +145,17 @@ pub enum BundlesKind {
 pub mod kernel {
     use super::*;
 
-    /// Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent. A handler_module that is a meta bundle (`bundles/<name>/bundle.yaml` with a base and no program) runs its base, with the `record` of the bundle under your fields; `bundle:<name>` beside the base is the same. The handler must be installed. Every argument beyond these is a field of that bundle's record (`reflect bundles=all` lists them), and a field it does not have is refused.
+    /// Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent. A handler_module that is a meta bundle (`bundles/<name>/bundle.yaml` with a base and no program) runs its base, with the `record` of the bundle under your fields; `bundle:<name>` beside another handler_module names the bundle the record inherits from. The handler must be installed. Every argument beyond these is a field of that bundle's record (`reflect bundles=all` lists them), and a field it does not have is refused.
     #[derive(Debug, Deserialize, JsonSchema)]
     pub struct CreateAgent {
         /// The bundle the agent runs (`file_bridge.tools`, or a bare bundle name such as `file_bridge`).
-        pub handler_module: Option<String>,
+        #[schemars(length(min = 1))]
+        pub handler_module: String,
         /// The agent that will OWN the new one: your own id for a tool you keep, `kernel_state` for a top-level agent.
         #[schemars(length(min = 1))]
         pub parent_id: String,
-        /// Its id. Absent: minted from the bundle's name.
+        /// Its id (one safe path segment: no separator, no `|`, not hidden, no `..`, not all digits). Absent: minted from the bundle's name.
+        #[schemars(regex(pattern = "^[0-9]*[^/\\\\|.0-9](?:[^/\\\\|.]|\\.[^/\\\\|.])*\\.?$"))]
         pub id: Option<String>,
         /// The bundle a record inherits from when it runs another base than the bundle's own.
         pub bundle: Option<String>,
@@ -194,6 +255,7 @@ pub mod kernel {
     #[serde(deny_unknown_fields)]
     pub struct Docs {
         /// An agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'.
+        #[schemars(regex(pattern = "^[^|]+(?:\\|[^|]+)?$"))]
         pub of: String,
         /// How much of each verb: `oneliners` (default) or `detailed`.
         pub tier: Option<Tier>,
@@ -298,12 +360,15 @@ pub mod record {
         /// One line saying what the agent is for; every reflect shows it.
         pub description: Option<String>,
         /// What this agent may call: a map of target → verbs (`*` for all). Sent WHOLE.
+        #[schemars(schema_with = "grant_map")]
         pub can_call: Option<Value>,
         /// Who may call this agent: a map of caller → verbs (`*` for all). Sent WHOLE.
+        #[schemars(schema_with = "grant_map")]
         pub callable_by: Option<Value>,
         /// `true` refuses a delete of this agent or an ancestor.
         pub delete_lock: Option<bool>,
-        /// The folder name its children live under on disk (one safe segment).
+        /// The folder name its children live under on disk (one safe segment: no separator, no `|`, not hidden, no `..`, not all digits).
+        #[schemars(regex(pattern = "^[0-9]*[^/\\\\|.0-9](?:[^/\\\\|.]|\\.[^/\\\\|.])*\\.?$"))]
         pub children_dir: Option<String>,
         /// How a client draws the agent.
         pub view: Option<Value>,
@@ -311,6 +376,20 @@ pub mod record {
         pub memory_store_id: Option<String>,
         /// The bundle the record inherits its fields from.
         pub bundle: Option<String>,
+    }
+
+    /// The schema of a grant map: each key `"*"` (every verb) or a list of verbs.
+    fn grant_map(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        serde_json::from_value(serde_json::json!({
+            "type": ["object", "null"],
+            "additionalProperties": {
+                "anyOf": [
+                    {"enum": ["*"]},
+                    {"type": "array", "items": {"type": "string"}}
+                ]
+            }
+        }))
+        .expect("a grant map schema")
     }
 
     crate::record!(CommonRecord);

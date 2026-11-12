@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use fantastic_bundle::{py_repr, py_str, py_truthy};
+use fantastic_bundle::py_repr;
 use serde_json::{json, Map, Value};
 
 use crate::agent::AgentId;
@@ -257,7 +257,7 @@ impl Kernel {
                         "kernel_start: boot of {} did not complete ({}): {}",
                         py_repr(&a.id.0),
                         out.status.as_str(),
-                        py_str(&out.result)
+                        out.result
                     ),
                 );
             }
@@ -267,11 +267,12 @@ impl Kernel {
             .bookkeeping(&store, json!({"type": "read", "limit": 1}), None)
             .await
             .result;
-        if let Some(err) = probe.get("error").filter(|e| py_truthy(e)) {
+        if let Some(err) = crate::refusal::error_text(&probe) {
             let hint = probe
                 .get("hint")
-                .filter(|h| py_truthy(h))
-                .map(py_str)
+                .and_then(Value::as_str)
+                .filter(|h| !h.is_empty())
+                .map(str::to_string)
                 .unwrap_or_else(|| {
                     format!(
                         "the store must answer the operator's `read` — check {}",
@@ -283,7 +284,7 @@ impl Kernel {
                 format!(
                     "kernel_start: the memory store {} refuses the kernel: {}",
                     py_repr(&store.id.0),
-                    py_str(err)
+                    err
                 ),
                 hint,
             );
@@ -325,7 +326,7 @@ impl Kernel {
                         "  [kernel] boot {}: {} {}",
                         py_repr(&id.0),
                         out.status.as_str(),
-                        py_str(&out.result)
+                        out.result
                     );
                 }
             }
@@ -394,14 +395,14 @@ impl Kernel {
         // nothing of this write is published on the state stream
         let write = self.bookkeeping(&store, Value::Object(payload), None);
         let out = crate::send::STATE_QUIET.scope(true, write).await;
-        let refused = out.result.get("error").is_some_and(py_truthy);
+        let refused = crate::refusal::is_refused(&out.result);
         if out.status != Status::Completed || refused {
             eprintln!(
                 "  [kernel] flush of {} execution row(s) to {} failed: {} {}",
                 ids.len(),
                 py_repr(&store_id.0),
                 out.status.as_str(),
-                py_str(&out.result)
+                out.result
             );
             return json!({"flushed": 0, "error": out.result});
         }
@@ -453,7 +454,7 @@ impl Kernel {
         };
         let calls: Vec<&Row> = rows
             .iter()
-            .filter(|r| kind_of(r) == Some("call") && !r.get("internal").is_some_and(py_truthy))
+            .filter(|r| kind_of(r) == Some("call") && r.get("internal").and_then(Value::as_bool) != Some(true))
             .collect();
         let mut settles: HashMap<i64, &Row> = HashMap::new();
         let mut acked: HashSet<i64> = HashSet::new();
@@ -499,7 +500,7 @@ impl Kernel {
                 if doomed_calls.len() >= over {
                     break;
                 }
-                if c.get("named").is_some_and(py_truthy) == named_pass && prunable(c) {
+                if (c.get("named").and_then(Value::as_bool) == Some(true)) == named_pass && prunable(c) {
                     if let Some(id) = c.get("id").and_then(Value::as_i64) {
                         doomed_calls.push(id);
                     }
@@ -560,11 +561,8 @@ impl Kernel {
             .bookkeeping(&store, json!({"type": "prune", "ids": ids}), None)
             .await
             .result;
-        if out.get("error").is_some_and(py_truthy) {
-            eprintln!(
-                "  [kernel] prune of the kernel's store failed: {}",
-                py_str(&out)
-            );
+        if crate::refusal::is_refused(&out) {
+            eprintln!("  [kernel] prune of the kernel's store failed: {out}");
             return 0;
         }
         let mut st = self.exec.lock();
@@ -605,12 +603,9 @@ impl Kernel {
                 .scope(true, self.bookkeeping(&store, Value::Object(q), None))
                 .await
                 .result;
-            let ok = res.is_object() && !res.get("error").is_some_and(py_truthy);
+            let ok = res.is_object() && !crate::refusal::is_refused(&res);
             if !ok {
-                return Err(format!(
-                    "kernel: memory store read failed: {}",
-                    py_str(&res)
-                ));
+                return Err(format!("kernel: memory store read failed: {res}"));
             }
             if let Some(rows) = res.get("rows").and_then(Value::as_array) {
                 out.extend(rows.iter().filter_map(|r| r.as_object().cloned()));
@@ -656,33 +651,34 @@ impl Kernel {
             }
         }
         for r in &rows {
-            if kind_of(r) != Some("call") || r.get("internal").is_some_and(py_truthy) {
+            if kind_of(r) != Some("call") || r.get("internal").and_then(Value::as_bool) == Some(true) {
                 continue;
             }
             let Some(eid) = r.get("id").and_then(Value::as_i64) else {
                 continue;
             };
+            // a call row always carries its attempts and retries; one without is not a call
+            let (Some(attempts), Some(retries)) = (r.get("attempts"), r.get("retries")) else {
+                continue;
+            };
+            let attempts = attempts.clone();
             let mut e = Map::new();
             e.insert("id".to_string(), Value::from(eid));
             e.insert(
                 "target".to_string(),
                 r.get("agent").cloned().unwrap_or(Value::Null),
             );
-            let attempts = r.get("attempts").cloned().unwrap_or(Value::from(1));
             e.insert("attempts".to_string(), attempts.clone());
-            e.insert(
-                "retries".to_string(),
-                r.get("retries").cloned().unwrap_or(Value::from(0)),
-            );
+            e.insert("retries".to_string(), retries.clone());
             e.insert(
                 "named".to_string(),
-                Value::from(r.get("named").is_some_and(py_truthy)),
+                Value::from(r.get("named").and_then(Value::as_bool) == Some(true)),
             );
             e.insert(
                 "_caller".to_string(),
                 r.get("caller").cloned().unwrap_or(Value::Null),
             );
-            if let Some(n) = r.get("name").filter(|n| py_truthy(n)) {
+            if let Some(n) = r.get("name").filter(|n| n.as_str().is_some_and(|s| !s.is_empty())) {
                 e.insert("name".to_string(), n.clone());
             }
             match settles.get(&eid) {
@@ -696,11 +692,7 @@ impl Kernel {
                         "status".to_string(),
                         oc.get("status").cloned().unwrap_or(Value::Null),
                     );
-                    let att = st
-                        .get("attempts")
-                        .filter(|a| py_truthy(a))
-                        .cloned()
-                        .unwrap_or(attempts);
+                    let att = st.get("attempts").cloned().unwrap_or(attempts);
                     e.insert("attempts".to_string(), att.clone());
                     let mut outcome = Map::new();
                     outcome.insert("pid".to_string(), Value::from(eid));
@@ -742,11 +734,7 @@ impl Kernel {
         }
         let mut wanted: Vec<Want> = Vec::new();
         for it in items {
-            let raw = it
-                .raw_id
-                .clone()
-                .or_else(|| it.id.clone().map(Value::String));
-            match raw {
+            match it.id.as_ref().map(crate::declared::IdOrName::to_value) {
                 Some(Value::String(s)) if !s.is_empty() => {
                     if self.ledger.resolve_name(&s).is_none() {
                         wanted.push(Want::Name(s));
@@ -788,12 +776,16 @@ impl Kernel {
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            let attempts = st
+            // a settle row carries the attempts its execution spent; one that does not
+            // has no execution to rebuild
+            let Some(attempts) = st
                 .get("attempts")
-                .filter(|a| py_truthy(a))
-                .or_else(|| call.get("attempts").filter(|a| py_truthy(a)))
+                .or_else(|| call.get("attempts"))
                 .and_then(Value::as_u64)
-                .unwrap_or(1) as u32;
+            else {
+                continue;
+            };
+            let attempts = attempts as u32;
             self.ledger.put_settled(cid, call, &oc, attempts);
         }
         Ok(())

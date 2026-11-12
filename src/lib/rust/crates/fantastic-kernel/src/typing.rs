@@ -132,9 +132,9 @@ fn operator_text(verb: &str, name: &str, schema: &Value, text: &str) -> Result<V
 /// the verb's declared arguments (the agent's bundle's builtin and dynamic verbs, the
 /// verbs every agent answers, the kernel's own on the root) and — for `create_agent` and
 /// `update_agent`, whose further arguments are fields of a RECORD — the fields of the
-/// record of the agent the call concerns (`handler_module` / `bundle` at create, `id` at
+/// record of the agent the call concerns (`handler_module` at create, `id` at
 /// update), read from `args`. `None` when the agent or the verb is not declared here (a
-/// peer's agent): the text stays as written.
+/// peer's agent): nothing is typed, and the target's own entry judges the call.
 #[must_use]
 pub fn verb_schema(
     kernel: &Arc<Kernel>,
@@ -166,8 +166,7 @@ pub fn verb_schema(
     if agent.parent_id.is_none() {
         let kind = match verb {
             "create_agent" => args
-                .get("bundle")
-                .or_else(|| args.get("handler_module"))
+                .get("handler_module")
                 .and_then(Value::as_str)
                 .and_then(|hm| kernel.bundles.get(hm)),
             "update_agent" => args

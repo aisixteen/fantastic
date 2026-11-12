@@ -498,22 +498,22 @@ async fn the_unnamed_kernel_reflect_honours_its_timeout() {
 
 #[tokio::test]
 async fn timeout_prose_and_row_keep_the_number_the_caller_gave() {
-    // `f"{d.timeout}s"` keeps python's number: an int prints `1s`, a float `0.1s`
-    // / `1e-07s`; the call row stores the value as given.
+    // The timeout is a typed float: it prints as `1.0s`, `0.1s`, `1e-07s`; the call
+    // row stores the value as given.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "b_prose").await;
     let out = kernel
         .send(vec![
-            Item::new(a.clone(), json!({"type": "slow"})).with_raw_timeout(json!(1)),
-            Item::new(a.clone(), json!({"type": "slow"})).with_raw_timeout(json!(1e-7)),
+            Item::new(a.clone(), json!({"type": "slow"})).with_timeout(1.0),
+            Item::new(a.clone(), json!({"type": "slow"})).with_timeout(1e-7),
             Item::new(a.clone(), json!({"type": "slow"})).with_timeout(0.1),
         ])
         .await;
     let text = |i: usize| out[i].result["error"].as_str().unwrap_or("").to_string();
     assert_eq!(
         text(0),
-        "send: b_prose 'slow' exceeded its 1s timeout; task cancelled"
+        "send: b_prose 'slow' exceeded its 1.0s timeout; task cancelled"
     );
     assert_eq!(
         text(1),
@@ -527,8 +527,8 @@ async fn timeout_prose_and_row_keep_the_number_the_caller_gave() {
     let row = kernel.rows.get_one(pid).expect("the call row");
     assert_eq!(
         row["timeout"].to_string(),
-        "1",
-        "the row keeps the int: {row:?}"
+        "1.0",
+        "the row keeps the number: {row:?}"
     );
 }
 

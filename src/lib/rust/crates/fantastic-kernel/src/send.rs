@@ -11,7 +11,7 @@
 //! ### System verbs vs bundle verbs
 //!
 //! Substrate-native verbs (`create_agent`, `delete_agent`,
-//! `update_agent`, `list_agents`, `reflect`, `boot`, `shutdown`) are
+//! `update_agent`, `list_agents`, `reflect`) are
 //! resolved on the target agent itself without consulting its bundle.
 //! Everything else routes to the bundle whose `handler_module` matches
 //! the agent's record. Unknown bundle → `{"error": "no bundle for
@@ -32,24 +32,15 @@ use crate::outcome::{Item, Outcome, Status};
 use crate::tasks::{
     current_killed, current_task, TaskHandle, TaskId, CURRENT_KILLED, CURRENT_TASK,
 };
-use fantastic_bundle::{py_str, py_truthy};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::task_local;
 
-/// Whether a handler's reply is a REFUSAL — a map carrying a truthy `error`.
-/// The one test, so no consumer makes its own off the result body.
-///
-/// Python `ERRORED if isinstance(reply, dict) and reply.get("error")
-/// else COMPLETED` (`_agent.py:1051-1052`) — FULL python truthiness, not just
-/// bool/string. `error: 0`, `0.0`, `[]`, `{}` and `""` are all falsy and
-/// settle COMPLETED; only a truthy `error` value settles ERRORED.
+/// Whether a handler's reply is a REFUSAL — a map carrying an `error` (not null,
+/// not empty text). The one test, so no consumer makes its own off the result body.
 fn error_shaped(v: &Value) -> bool {
-    match v.get("error") {
-        None => false,
-        Some(e) => py_truthy(e),
-    }
+    crate::refusal::is_refused(v)
 }
 
 task_local! {
@@ -273,24 +264,6 @@ fn not_installed_refusal(id: &str, hm: &str, verb: &str) -> Value {
     r
 }
 
-/// `<verb>: <arg> must be <want>, got <repr>` — python's fuller `bad()` form
-/// that also echoes the received value: `refusal(BAD_ARG, f"...got
-/// {v!r}", arg=arg)`. C30/C38's `timeout`/`retries` refusals need the RAW
-/// value in the message (`payload.type` names only a non-string's TYPE —
-/// see `launch`); the shared `refusal::bad` omits the
-/// `got` clause because most call sites never have it to hand.
-fn bad_got(verb: &str, arg: &str, want: &str, got: &Value) -> Value {
-    let mut r = crate::refusal::refusal(
-        crate::refusal::BAD_ARG,
-        format!(
-            "{verb}: {arg} must be {want}, got {}",
-            fantastic_bundle::py_repr_value(got)
-        ),
-    );
-    crate::refusal::with(&mut r, "arg", json!(arg));
-    r
-}
-
 /// An item's validated deadline: the seconds the kernel waits, and the number
 /// the caller GAVE. Python keeps `timeout` as whatever arrived — the call row
 /// stores it and the timeout prose prints it (`f"{d.timeout}s"`: `5` → `5s`,
@@ -304,51 +277,29 @@ struct Deadline {
 impl Deadline {
     /// `{d.timeout}` — python's `str()` of the number the caller gave.
     fn shown(&self) -> String {
-        py_str(&self.given)
+        fantastic_bundle::py_float_repr(self.secs)
     }
 }
 
-/// `timeout` validation (C30/C38): `item.raw_timeout`, when forwarded by a
-/// caller relaying an untyped value, SUPERSEDES the typed `item.timeout`.
-/// Python: `if timeout is not None and (isinstance(timeout, bool) or not
-/// isinstance(timeout, (int, float)) or timeout <= 0): refuse`.
+/// `timeout` validation: the typed `item.timeout`, a positive finite number of seconds.
 fn validate_timeout(item: &Item) -> Result<Option<Deadline>, Value> {
-    if let Some(raw) = &item.raw_timeout {
-        if raw.is_null() {
-            return Ok(None);
-        }
-        let secs = match raw {
-            Value::Number(n) => n.as_f64().filter(|f| *f > 0.0),
-            _ => None,
-        };
-        let Some(secs) = secs else {
-            return Err(bad_got(
-                "send",
-                "timeout",
-                "a positive number of seconds",
-                raw,
-            ));
-        };
-        return Ok(Some(Deadline {
-            secs,
-            given: raw.clone(),
-        }));
+    let Some(t) = item.timeout else {
+        return Ok(None);
+    };
+    if !(t.is_finite() && t > 0.0) {
+        return Err(crate::refusal::bad(
+            "send",
+            "timeout",
+            &format!(
+                "a positive number of seconds, got {}",
+                fantastic_bundle::py_repr_value(&json!(t))
+            ),
+        ));
     }
-    if let Some(t) = item.timeout {
-        if !(t.is_finite() && t > 0.0) {
-            return Err(bad_got(
-                "send",
-                "timeout",
-                "a positive number of seconds",
-                &json!(t),
-            ));
-        }
-        return Ok(Some(Deadline {
-            secs: t,
-            given: Value::from(t),
-        }));
-    }
-    Ok(None)
+    Ok(Some(Deadline {
+        secs: t,
+        given: Value::from(t),
+    }))
 }
 
 /// python's `refusal(TIMEOUT, f"send: {d.target.id} {d.payload.get('type')!r}
@@ -365,27 +316,6 @@ fn own_deadline_refusal(target: &AgentId, verb: &str, d: &Deadline, task_id: Val
     );
     crate::refusal::with(&mut r, "task_id", task_id);
     r
-}
-
-/// `retries` validation (C30/C38): `item.raw_retries` SUPERSEDES the typed
-/// `item.retries` (which is always valid by construction — a `u32` cannot be
-/// negative or a bool). Python: `retries = item.get("retries", 0); if
-/// isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
-/// refuse`.
-fn resolve_retries(item: &Item) -> Result<u32, Value> {
-    let Some(raw) = &item.raw_retries else {
-        return Ok(item.retries.unwrap_or(0));
-    };
-    if raw.is_null() {
-        return Ok(item.retries.unwrap_or(0));
-    }
-    match raw {
-        Value::Number(n) => match n.as_i64() {
-            Some(v) if v >= 0 => Ok(u32::try_from(v).unwrap_or(u32::MAX)),
-            _ => Err(bad_got("send", "retries", "a non-negative int", raw)),
-        },
-        _ => Err(bad_got("send", "retries", "a non-negative int", raw)),
-    }
 }
 
 /// A launched batch item: either it settled before ever reaching the task table
@@ -462,16 +392,15 @@ impl Kernel {
     /// drain gate keeps it open while the kernel stops. Python
     /// `Agent._is_control`.
     fn is_control(&self, target: &str, payload: &Value) -> bool {
-        let (target, payload) = match payload.get("type").and_then(Value::as_str) {
-            Some("inbound_call") => {
-                let Some(item) = payload.get("item").filter(|i| i["payload"].is_object()) else {
-                    return false;
-                };
-                (item["target"].as_str().unwrap_or(""), &item["payload"])
+        let carried;
+        let (target, payload) = match serde_json::from_value::<crate::declared::HandIn>(payload.clone()) {
+            Ok(crate::declared::HandIn::InboundCall { item }) => {
+                carried = item;
+                (carried.target.as_str(), &carried.payload)
             }
-            _ => (target, payload),
+            Ok(crate::declared::HandIn::Other) | Err(_) => (target, payload),
         };
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        let verb = verb_of(payload);
         let to_root = target == "kernel" || self.root().is_some_and(|r| r.id.as_str() == target);
         to_root && (is_kernel_verb(verb) || verb == "reflect")
     }
@@ -522,7 +451,7 @@ impl Kernel {
         if self.store_id().is_some()
             && items
                 .iter()
-                .any(|it| it.id.is_some() || it.raw_id.as_ref().is_some_and(|v| !v.is_null()))
+                .any(|it| it.id.is_some())
         {
             if let Err(e) = self.recall_executions(&items).await {
                 let r = crate::executions::raised("RuntimeError", &e);
@@ -588,47 +517,24 @@ impl Kernel {
         out
     }
 
-    /// `id` validation + resolution (C30/C38): a NAME (non-empty string)
-    /// opens-or-joins by name; an int JOINS an existing execution or
-    /// refuses; a bool or anything else is `bad_arg`. `item.raw_id`, when a
-    /// caller is forwarding a value it did not itself parse, SUPERSEDES the
-    /// typed `item.id`.
+    /// `id` resolution: a NAME opens-or-joins by name; a number JOINS an existing
+    /// execution or refuses.
     ///
     /// Returns `(join_id, name, caller_id)`: `join_id` is `Some` when an
-    /// existing execution must be joined (an int naming one, or a name the
-    /// ledger already resolves); `name` is `Some` only for the string case
-    /// (what a FRESH open binds); `caller_id` is the raw id `Value` itself
+    /// existing execution must be joined (a number naming one, or a name the
+    /// ledger already resolves); `name` is `Some` only for the name case
+    /// (what a FRESH open binds); `caller_id` is the id as JSON
     /// (`Value::Null` when the item carried none), kept for the ledger's
     /// rebind text.
-    ///
-    /// Python: `_agent.py:614-681` (`_launch`'s `exec_id`/`join_id`/`name`
-    /// block).
     fn resolve_exec_id(&self, item: &Item) -> Result<(Option<i64>, Option<String>, Value), Value> {
-        let raw = item
-            .raw_id
-            .clone()
-            .or_else(|| item.id.clone().map(Value::String));
-        let Some(raw) = raw else {
+        use crate::declared::IdOrName;
+        let Some(id) = &item.id else {
             return Ok((None, None, Value::Null));
         };
-        if raw.is_null() {
-            return Ok((None, None, Value::Null));
-        }
-        let bad_shape = || {
-            bad_got(
-                "send",
-                "id",
-                "a name (non-empty string) or a message id (int)",
-                &raw,
-            )
-        };
-        match &raw {
-            Value::Bool(_) => Err(bad_shape()),
-            Value::Number(n) => {
-                let Some(n) = n.as_i64() else {
-                    return Err(bad_shape());
-                };
-                if !self.ledger.has(n) {
+        let raw = id.to_value();
+        match id {
+            IdOrName::Id(n) => {
+                if !self.ledger.has(*n) {
                     let mut r = crate::refusal::refusal(
                         crate::refusal::BAD_ARG,
                         format!(
@@ -640,14 +546,13 @@ impl Kernel {
                     crate::refusal::with(&mut r, "arg", json!("id"));
                     return Err(r);
                 }
-                Ok((Some(n), None, raw))
+                Ok((Some(*n), None, raw))
             }
-            Value::String(s) if !s.is_empty() => {
+            IdOrName::Name(s) if !s.is_empty() => {
                 let joined = self.ledger.resolve_name(s);
                 Ok((joined, Some(s.clone()), raw))
             }
-            Value::String(_) => Err(crate::refusal::bad("send", "id", "a non-empty name")),
-            _ => Err(bad_shape()),
+            IdOrName::Name(_) => Err(crate::refusal::bad("send", "id", "a non-empty name")),
         }
     }
 
@@ -770,12 +675,9 @@ impl Kernel {
             Err(r) => return Launched::Settled(Outcome::refused(r)),
         };
         // 6. retries — a non-negative int, never defaulted otherwise.
-        let retries = match resolve_retries(&item) {
-            Ok(v) => v,
-            Err(r) => return Launched::Settled(Outcome::refused(r)),
-        };
+        let retries = item.retries.unwrap_or(0);
         // 6b. secret marks — paths into the payload, shown as `[secret]`.
-        let marks = match crate::secret::check(item.secret.as_ref()) {
+        let marks = match crate::secret::check(&item.secret) {
             Ok(m) => Arc::new(m),
             Err(r) => return Launched::Settled(Outcome::refused(r)),
         };
@@ -1339,12 +1241,12 @@ impl Kernel {
         // bundle marked (`Outcome.secret`, e.g. an `error` path) never reaches the row.
         let shown_result = crate::secret::shown(&out.result, &out.secret);
         if let Some(res) = shown_result.as_object() {
-            if let Some(err) = res.get("error").filter(|v| py_truthy(v)) {
+            if let Some(err) = crate::refusal::error_text(&shown_result) {
                 stamp.insert(
                     "error".to_string(),
-                    Value::from(py_str(err).chars().take(200).collect::<String>()),
+                    Value::from(err.chars().take(200).collect::<String>()),
                 );
-                if let Some(reason) = res.get("reason").filter(|v| py_truthy(v)) {
+                if let Some(reason) = res.get("reason").filter(|v| !v.is_null()) {
                     stamp.insert("reason".to_string(), reason.clone());
                 }
             }
@@ -2084,7 +1986,7 @@ fn dispatch(
                 current_origin().as_ref(),
                 &payload,
             ) {
-                return Ok((held, None));
+                return held.map(|h| (h, None));
             }
         }
         if is_kernel_verb(verb) {
@@ -2148,8 +2050,7 @@ fn dispatch(
         };
         // The kernel ROUTES: the bundle's own entry (the generated `Parse`, shared
         // library code the bundle cannot skip) checks the verb and its arguments
-        // and replies with the refusal; `boot` and `shutdown` an agent does not
-        // declare are answered there too.
+        // and replies with the refusal.
         // The reply body comes back AT ITS SLOT of the reply: `bytes` for a
         // `read_stream`, a bundle's own key for its own verb, the peer's own key
         // for a bridge relaying a peer's reply.

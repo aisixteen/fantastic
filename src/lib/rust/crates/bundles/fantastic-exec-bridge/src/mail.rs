@@ -10,7 +10,7 @@
 use std::sync::LazyLock;
 
 use fantastic_kernel::verbs::DynCall;
-use fantastic_kernel::{AgentId, DynRegistry, DynVerb, Parse};
+use fantastic_kernel::{AgentId, DynRegistry, DynVerb, Parse, Routed};
 use serde_json::{json, Value};
 
 use crate::verbs;
@@ -65,7 +65,7 @@ pub(crate) fn payload_of(c: &DynCall) -> Value {
 /// answers itself, telemetry, a call the entry refuses).
 pub(crate) fn of(owner: &AgentId, payload: &Value) -> Option<DynCall> {
     match <verbs::Call as Parse>::parse(owner.as_str(), payload, &declared(owner)) {
-        Ok(verbs::Call::Dynamic(c)) => Some(c),
+        Ok(Routed::Call(verbs::Call::Dynamic(c))) => Some(c),
         _ => None,
     }
 }

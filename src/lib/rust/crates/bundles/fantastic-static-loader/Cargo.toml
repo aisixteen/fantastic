@@ -19,6 +19,7 @@ schemars = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 # The shared agentic corpus is TEST data (`contract/`), read by the agentic
 # runner — not a manifest, so it needs no PyYAML semantics.
 serde_yaml = "0.9"

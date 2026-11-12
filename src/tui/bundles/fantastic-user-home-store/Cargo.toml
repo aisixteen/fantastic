@@ -29,5 +29,6 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+fantastic-kernel = { path = "../../../lib/rust/crates/fantastic-kernel", features = ["test-support"] }
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tempfile = "3"

@@ -19,5 +19,6 @@ serde_json = { workspace = true }
 serde_yaml = "0.9"
 
 [dev-dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = "3"

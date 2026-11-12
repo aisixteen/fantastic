@@ -40,4 +40,5 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 tempfile = "3"

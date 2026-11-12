@@ -135,7 +135,7 @@ async fn roster_node(kernel: &Arc<Kernel>, a: &Arc<Agent>) -> Result<Map<String,
         node.insert("id".to_string(), json!(a.id.0));
         if let Some(sentence) = raw
             .get("sentence")
-            .filter(|v| fantastic_bundle::py_truthy(v))
+            .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
         {
             node.insert("sentence".to_string(), sentence.clone());
         }
