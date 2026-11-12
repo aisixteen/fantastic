@@ -694,6 +694,7 @@ dependencies = [
  "async-trait",
  "fantastic-ai-core",
  "fantastic-bundle",
+ "fantastic-credential-store",
  "fantastic-io-bridge",
  "fantastic-kernel",
  "futures-util",
