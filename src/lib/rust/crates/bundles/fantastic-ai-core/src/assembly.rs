@@ -143,7 +143,7 @@ for it. Asked one yourself
 fn reflect_howto() -> String {
     let rows = fantastic_kernel::verbs::rows(&[fantastic_kernel::declared::common::VERBS], &[]);
     format!(
-        "## What an agent IS — `reflect`\nSend it to any agent you are granted; to `kernel` for the tree, and with `bundles` every bundle's record (the fields `create_agent` takes).\n{}",
+        "## What an agent IS — `reflect`\nSend it to any agent you are granted; to `kernel` for the tree, and with `bundles` every bundle's record (the fields `create_agent` takes), e.g. `<payload><type>reflect</type><bundles>all</bundles></payload>` — each argument closes with its own tag.\n{}",
         rows.first().map(fantastic_kernel::verbs::detail).unwrap_or_default()
     )
 }
