@@ -18,7 +18,7 @@ fn the_idle_window_defaults_and_takes_a_positive_number() {
         stream_idle_of(&Map::new()),
         Duration::from_secs(60)
     );
-    // a JSON null is the same as unset
+    // a value the declaration does not allow (null is not a number) reads as the default
     assert_eq!(
         stream_idle_of(&meta(Value::Null)),
         Duration::from_secs(60)

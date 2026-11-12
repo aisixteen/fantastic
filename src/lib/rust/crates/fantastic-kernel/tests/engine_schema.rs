@@ -301,3 +301,70 @@ fn reflect_and_docs_render_the_alternatives() {
     assert!(d.contains("one of before_id | ids is required."), "{d}");
     assert!(!line.contains("any|any"), "{line}");
 }
+
+fn versions() -> Value {
+    json!({"type": "object", "required": ["versions"], "properties": {
+        "versions": {"type": "array", "items": {"type": "object",
+            "required": ["branch"], "additionalProperties": false,
+            "properties": {
+                "branch": {"type": "string", "minLength": 1},
+                "tags": {"type": "array", "items": {"type": "string", "pattern": "^[a-z]+$"}}
+            }}}}})
+}
+
+fn refused_at(payload: Value) -> (String, String) {
+    let r = validate("v", &versions(), &payload).unwrap_err();
+    (
+        r["arg"].as_str().unwrap().to_string(),
+        r["reason"].as_str().unwrap_or_default().to_string(),
+    )
+}
+
+#[test]
+fn array_items_are_checked_by_their_fields_and_the_refusal_names_the_path() {
+    assert!(validate("v", &versions(), &json!({"versions": [{"branch": "main"}]})).is_ok());
+    // empty text
+    assert_eq!(refused_at(json!({"versions": [{"branch": "main"}, {"branch": ""}]})).0, "versions[1].branch");
+    // missing required field
+    let r = validate("v", &versions(), &json!({"versions": [{}]})).unwrap_err();
+    assert_eq!(r["arg"], "versions[0].branch");
+    assert_eq!(r["reason"], "missing_arg");
+    // wrong type
+    assert_eq!(refused_at(json!({"versions": [{"branch": 3}]})).0, "versions[0].branch");
+    // unknown field
+    assert_eq!(refused_at(json!({"versions": [{"branch": "a", "x": 1}]})).0, "versions[0].x");
+    // an item that is not an object
+    assert_eq!(refused_at(json!({"versions": ["a"]})).0, "versions[0]");
+    // a pattern inside a list inside an item
+    assert_eq!(
+        refused_at(json!({"versions": [{"branch": "a", "tags": ["ok", "NO"]}]})).0,
+        "versions[0].tags[1]"
+    );
+}
+
+fn nullable() -> Value {
+    json!({"type": "object", "required": ["max", "name"], "properties": {
+        "max": {"type": ["integer", "null"]},
+        "name": {"type": "string"},
+        "note": {"type": ["string", "null"]}
+    }})
+}
+
+#[test]
+fn required_nullable_takes_null_and_is_refused_when_absent() {
+    let ok = validate("v", &nullable(), &json!({"max": null, "name": "a"})).unwrap();
+    assert!(ok["max"].is_null());
+    let r = validate("v", &nullable(), &json!({"name": "a"})).unwrap_err();
+    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("missing_arg"), Some("max")));
+    // a nullable that is not required may be absent or null
+    assert!(validate("v", &nullable(), &json!({"max": 1, "name": "a", "note": null})).is_ok());
+    assert!(validate("v", &nullable(), &json!({"max": 1, "name": "a"})).is_ok());
+}
+
+#[test]
+fn null_is_refused_where_the_type_does_not_include_null() {
+    let r = validate("v", &nullable(), &json!({"max": 1, "name": null})).unwrap_err();
+    assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("name")));
+    let r = validate("v", &versions(), &json!({"versions": null})).unwrap_err();
+    assert_eq!(r["arg"], "versions");
+}

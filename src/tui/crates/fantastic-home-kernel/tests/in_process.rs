@@ -582,7 +582,7 @@ async fn call_is_user_forward_and_a_refusal_is_err() {
         .call(json!({"type": "open", "paths": ["relative"]}))
         .await
         .unwrap_err();
-    assert!(e.contains("argument 'paths' must be"), "{e}");
+    assert!(e.contains("argument 'paths[0]' must be"), "{e}");
     hk.shutdown().await.expect("a clean stop");
 }
 

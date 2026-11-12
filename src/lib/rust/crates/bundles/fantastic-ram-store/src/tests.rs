@@ -397,11 +397,7 @@ async fn digit_string_refs_are_refused_as_not_row_ids() {
     )
     .await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
-    assert_eq!(
-        r["error"],
-        format!("append: the arguments do not parse (invalid type: string \"{rid}\", expected i64)"),
-        "{r}"
-    );
+    assert_eq!(r["arg"], "rows[0].refs[0]", "{r}");
     // The int ref is found.
     let r = append(
         &k,
@@ -518,14 +514,14 @@ async fn arg_refusals_carry_error_reason_arg_in_that_order() {
     let k = store();
     append(&k, "alice", json!([{"id": 1, "content": "a"}])).await;
     // a row id that is not a kernel int and refs that are not row ids are the engine's refusals
-    for (payload, why) in [
-        (json!({"type": "append", "rows": [{"id": "5"}]}), "invalid type: string \"5\", expected a nonzero u64"),
-        (json!({"type": "append", "rows": [{"id": 0}]}), "invalid value: integer `0`, expected a nonzero u64"),
-        (json!({"type": "append", "rows": [{"id": 7, "refs": ["x"]}]}), "invalid type: string \"x\", expected i64"),
+    for (payload, at) in [
+        (json!({"type": "append", "rows": [{"id": "5"}]}), "rows[0].id"),
+        (json!({"type": "append", "rows": [{"id": 0}]}), "rows[0].id"),
+        (json!({"type": "append", "rows": [{"id": 7, "refs": ["x"]}]}), "rows[0].refs[0]"),
     ] {
         let got = call(&k, payload.clone(), Some("alice")).await;
         assert_eq!(got["reason"], "bad_arg", "{payload}: {got}");
-        assert_eq!(got["error"], format!("append: the arguments do not parse ({why})"), "{payload}: {got}");
+        assert_eq!(got["arg"], at, "{payload}: {got}");
     }
     // an empty list, a missing list and a wrongly typed one are the entry's refusals
     for (payload, reason) in [
@@ -536,7 +532,8 @@ async fn arg_refusals_carry_error_reason_arg_in_that_order() {
     ] {
         let got = call(&k, payload.clone(), Some("alice")).await;
         assert_eq!(got["reason"], json!(reason), "{payload}: {got}");
-        assert_eq!(got["arg"], json!("rows"), "{payload}: {got}");
+        let at = if payload["rows"] == json!([1]) { "rows[0]" } else { "rows" };
+        assert_eq!(got["arg"], json!(at), "{payload}: {got}");
     }
 }
 
@@ -581,7 +578,7 @@ async fn limits_and_ids_are_typed_integers() {
     // a row-id list takes integers only
     let r = call(&k, json!({"type": "read", "ids": ["1"]}), Some("alice")).await;
     assert_eq!(r["reason"], json!("bad_arg"), "{r}");
-    assert_eq!(r["arg"], json!("ids"), "{r}");
+    assert_eq!(r["arg"], json!("ids[0]"), "{r}");
 }
 
 #[tokio::test]

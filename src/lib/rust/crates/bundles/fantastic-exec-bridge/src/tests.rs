@@ -188,11 +188,11 @@ async fn the_record_declaration_shapes_the_fields() {
     for (field, value, arg) in [
         ("allowed", json!([]), "allowed"),
         ("allowed", json!("ls"), "allowed"),
-        ("allowed", json!([7]), "allowed"),
+        ("allowed", json!([7]), "allowed[0]"),
         ("cwd", json!(""), "cwd"),
         ("env", json!(["A=1"]), "env"),
         ("env", json!({"A": ["no"]}), "env.A"),
-        ("inherit_env", json!([""]), "inherit_env"),
+        ("inherit_env", json!([""]), "inherit_env[0]"),
         ("inherit_env", json!("PATH"), "inherit_env"),
         // a leg with no wire envelope takes no password rule; no other name is a rule
         ("ingress_rule", json!("password_ingress"), "ingress_rule"),
@@ -272,7 +272,7 @@ async fn every_start_refusal_carries_a_code() {
     let r = ask(json!({"type": "start", "command": "echo", "args": [{"no": 1}]})).await;
     assert_eq!(
         (&r["reason"], &r["arg"]),
-        (&json!("bad_arg"), &json!("args")),
+        (&json!("bad_arg"), &json!("args[0]")),
         "{r}"
     );
     let r = ask(json!({"type": "start", "command": "echo", "env": {"K": ["no"]}})).await;

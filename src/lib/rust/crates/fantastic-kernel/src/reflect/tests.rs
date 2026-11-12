@@ -888,11 +888,11 @@ async fn handler_modules_with_show_and_ignore_subtrees() {
 #[tokio::test]
 async fn a_bad_handler_modules_is_refused_bad_arg() {
     let (kernel, _root) = handler_tree();
-    for bad in [
-        json!("roster_probe.tools"),
-        json!(1),
-        json!({}),
-        json!(["a", 1]),
+    for (bad, at) in [
+        (json!("roster_probe.tools"), "handler_modules"),
+        (json!(1), "handler_modules"),
+        (json!({}), "handler_modules"),
+        (json!(["a", 1]), "handler_modules[1]"),
     ] {
         let r = kernel_reflect(
             &kernel,
@@ -902,7 +902,7 @@ async fn a_bad_handler_modules_is_refused_bad_arg() {
         .result;
         assert!(r["error"].is_string(), "{bad}: {r}");
         assert_eq!(r["reason"], "bad_arg", "{bad}: {r}");
-        assert_eq!(r["arg"], "handler_modules");
+        assert_eq!(r["arg"], at);
         assert!(r.get("tree").is_none());
         let off = kernel_reflect(
             &kernel,
@@ -913,7 +913,7 @@ async fn a_bad_handler_modules_is_refused_bad_arg() {
         // a wrongly typed argument is refused by the shared entry's check of the
         // declaration, whether or not a tree is asked for
         assert_eq!(off["reason"], "bad_arg", "{off}");
-        assert_eq!(off["arg"], "handler_modules", "{off}");
+        assert_eq!(off["arg"], at, "{off}");
     }
     let r = kernel_reflect(&kernel, json!({"type": "reflect", "handler_modules": null}))
         .await

@@ -310,7 +310,7 @@ async fn await_set_refuses_bad_args() {
             "ids",
         ),
         (json!({"type": "await_set", "ids": "w1"}), "bad_arg", "ids"),
-        (json!({"type": "await_set", "ids": [3]}), "bad_arg", "ids"),
+        (json!({"type": "await_set", "ids": [3]}), "bad_arg", "ids[0]"),
         (
             json!({"type": "await_set", "ids": ["nobody"]}),
             "unknown_agent",

@@ -833,7 +833,7 @@ async fn the_refs_declaration_judges_each_entry_by_name() {
         (json!({"r": {"host": "://"}}), "bad_arg", "refs.r.host"),
         (json!({"r": {"host": "  "}}), "bad_arg", "refs.r.host"),
         (json!({"r": {"host": "h", "env": {"api_key": ""}}}), "bad_arg", "refs.r.env.api_key"),
-        (json!({"r": {"host": "h", "fields": [""]}}), "bad_arg", "refs.r.fields"),
+        (json!({"r": {"host": "h", "fields": [""]}}), "bad_arg", "refs.r.fields[0]"),
         (json!({"r": {"host": "h", "extra": 1}}), "bad_arg", "refs.r.extra"),
     ] {
         let r = refuse(refs.clone()).await;

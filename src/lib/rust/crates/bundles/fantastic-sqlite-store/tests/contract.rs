@@ -137,26 +137,30 @@ fn alpha(cases: &mut Value) {
                         "error": "prune: one of before_id | ids is required"
                     });
                 }
+                ("refusals", "append") if send["rows"] == json!([1]) => {
+                    // a row that is no object: refused at its own path
+                    st["expect"] = json!({"reason": "bad_arg", "arg": "rows[0]"});
+                }
                 ("refusals", "append") if send["rows"] == json!([]) => {
                     // an empty list is below the declared `minItems`: a wrong value
                     st["expect"] = json!({"reason": "bad_arg", "arg": "rows"});
                 }
                 ("digit-string-refs-are-not-found", "append") if send["rows"][0]["refs"] == json!(["4"]) => {
-                    // a text ref is no row id: refused, not looked up
-                    st["expect"] = json!({"reason": "bad_arg", "error": "append: the arguments do not parse (invalid type: string \"4\", expected i64)"});
+                    // a text ref is no row id: refused naming its path, not looked up
+                    st["expect"] = json!({"reason": "bad_arg", "arg": "rows[0].refs[0]"});
                 }
-                // a row id or refs of the wrong type: the engine's own refusal text
+                // a row id or refs of the wrong type: the engine's refusal, naming the path
                 (_, "append") if send["rows"][0]["id"] == json!("5") => {
-                    st["expect"] = json!({"reason": "bad_arg", "error": "append: the arguments do not parse (invalid type: string \"5\", expected a nonzero u64)"});
+                    st["expect"] = json!({"reason": "bad_arg", "arg": "rows[0].id"});
                 }
                 (_, "append") if send["rows"][0]["id"] == json!(true) => {
-                    st["expect"] = json!({"reason": "bad_arg", "error": "append: the arguments do not parse (invalid type: boolean `true`, expected a nonzero u64)"});
+                    st["expect"] = json!({"reason": "bad_arg", "arg": "rows[0].id"});
                 }
                 (_, "append") if send["rows"][0]["id"] == json!(0) => {
-                    st["expect"] = json!({"reason": "bad_arg", "error": "append: the arguments do not parse (invalid value: integer `0`, expected a nonzero u64)"});
+                    st["expect"] = json!({"reason": "bad_arg", "arg": "rows[0].id"});
                 }
                 (_, "append") if send["rows"][0]["refs"] == json!("1") => {
-                    st["expect"] = json!({"reason": "bad_arg", "error": "append: the arguments do not parse (invalid type: string \"1\", expected a sequence)"});
+                    st["expect"] = json!({"reason": "bad_arg", "arg": "rows[0].refs"});
                 }
                 (_, "inject")
                     if send["tables"] == json!([1]) || send["tables"]["rows"] == json!({"owner": "x"}) =>
