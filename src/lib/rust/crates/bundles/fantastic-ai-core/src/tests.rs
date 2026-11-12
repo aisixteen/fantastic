@@ -1048,6 +1048,31 @@ fn send_id_is_pythons_token_urlsafe_shape() {
     }
 }
 
+/// The client id is declared in the schema: text with a non-space character, default `cli`.
+/// A blank one is refused by name on `send` and `inquiry`; an absent one takes the default.
+#[tokio::test]
+async fn a_blank_client_id_is_refused_and_an_absent_one_defaults() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "cid").await;
+    for (verb, field) in [("send", "client_id"), ("inquiry", "reply_client_id")] {
+        for bad in ["", "  ", "\u{1f}"] {
+            let r = kernel
+                .send(vec![Item::new(
+                    backend.clone(),
+                    json!({"type": verb, "text": "hi", field: bad}),
+                )])
+                .await
+                .remove(0)
+                .result;
+            assert_eq!(r["reason"], json!("bad_arg"), "{verb} {bad:?}: {r:#?}");
+            assert_eq!(r["arg"], json!(field), "{verb} {bad:?}: {r:#?}");
+        }
+    }
+    assert_eq!(fantastic_kernel::inquiry::default_client_id(), "cli");
+    let d: crate::declared::Send = serde_json::from_value(json!({"text": "hi"})).unwrap();
+    assert_eq!(d.client_id, "cli");
+}
+
 /// Python `_safe_client`, per CODE POINT: `str.isalnum` is Unicode-aware
 /// and there is no length cap, and the strip is python's whitespace set.
 #[test]
@@ -1055,8 +1080,6 @@ fn safe_client_strips_python_whitespace() {
     use crate::helpers::safe_client;
     // `\x1c`–`\x1f` are python whitespace; `str::trim` keeps them.
     assert_eq!(safe_client("\u{1f} p \u{1f}"), "p");
-    assert_eq!(safe_client("  "), "cli");
-    assert_eq!(safe_client(""), "cli");
     // UNICODE ALPHANUMERICS SURVIVE, and 70 of them are still 70.
     let long: String = "é".repeat(70);
     assert_eq!(safe_client(&long), long);

@@ -3,7 +3,7 @@
 //! `docs` render. `reflect` is declared once, in the kernel.
 
 use schemars::JsonSchema;
-use fantastic_kernel::inquiry::{Answer, Inquiries, Inquiry};
+use fantastic_kernel::inquiry::{AnswerInquiry, Inquiries, Inquiry};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -58,43 +58,39 @@ pub struct ReflectTool {
     pub args: Map<String, Value>,
 }
 
-/// Dispatch to agents — the kernel's one verb, batch form: send([{target, payload:{type:<verb>, ...args}, timeout?}]) -> [{pid, status: completed|failed|cancelled|timed_out, result}]. Discover verbs with reflect on the target; `kernel` is the alias for the root. A `timeout` (seconds) on an item CANCELS it when it expires. The call answers when it ends; each call is a kernel task, listed by send [{target:"kernel", payload:{type:"ps"}}]. A refusal (no grant) comes back as a result with an `error`, and a ledger row, like any other call.
+/// Dispatch a batch to agents: items [{target, payload:{type:<verb>, ...args}, timeout?}], one dispatch each, answered with one outcome per item {pid, status: completed|failed|cancelled|timed_out, result}. Discover verbs with reflect on the target; `kernel` is the alias for the root. A `timeout` (seconds) on an item CANCELS it when it expires. The call answers when it ends; each call is a kernel task, listed by send [{target:"kernel", payload:{type:"ps"}}]. A refusal (no grant) comes back as a result with an `error`, and a ledger row, like any other call.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SendTool {
+pub struct SendBatch {
     /// The batch. One item is one dispatch.
     #[schemars(length(min = 1))]
     pub items: Vec<SendItem>,
 }
 
+impl SendBatch {
+    /// The batch as the kernel sends it, item for item.
+    #[must_use]
+    pub fn into_items(self) -> Vec<fantastic_kernel::Item> {
+        self.items
+            .into_iter()
+            .map(|it| {
+                let mut item = fantastic_kernel::Item::new(fantastic_kernel::AgentId::from(it.target.as_str()), it.payload.into_value());
+                item.timeout = it.timeout;
+                item
+            })
+            .collect()
+    }
+}
+
 /// The `reflect` tool, declared like a verb: its schema is the tool's input schema.
 pub static REFLECT_TOOL: fantastic_kernel::Verb = fantastic_kernel::Verb::of::<ReflectTool>("reflect");
 /// The `send` tool.
-pub static SEND_TOOL: fantastic_kernel::Verb = fantastic_kernel::Verb::of::<SendTool>("send");
-
-/// Send the batch onward AS THIS LEG — how a carrier's batch becomes the leg's own calls, gated as the leg. Returns {outcomes:[{pid, status, result}]}.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct InboundSend {
-    /// The batch; one item is one dispatch.
-    #[schemars(length(min = 1))]
-    pub items: Vec<SendItem>,
-}
-
-/// The person's answer, sent to the asker under the inquiry's pid; then the question is closed. Returns {answered, asker}.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AnswerInquiry {
-    /// The inquiry's pid.
-    pub re: i64,
-    /// The answer.
-    pub text: Answer,
-}
+pub static SEND_TOOL: fantastic_kernel::Verb = fantastic_kernel::Verb::of::<SendBatch>("send");
 
 fantastic_kernel::verbs! {
     "boot" => Boot,
-    "inbound_send" => InboundSend,
+    "inbound_send" => SendBatch,
     "inquiry" => Inquiry,
     "inquiries" => Inquiries,
-    "answer" => AnswerInquiry,
+    "answer_inquiry" => AnswerInquiry,
 }

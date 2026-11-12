@@ -104,7 +104,7 @@ fn provider(endpoint: &str, key: Arc<dyn KeySource>) -> AnthropicProvider {
     provider_idle(
         endpoint,
         key,
-        Duration::from_secs_f64(fantastic_ai_core::constants::STREAM_IDLE_SECONDS),
+        fantastic_ai_core::provider::stream_idle_of(&serde_json::Map::new()),
     )
 }
 

@@ -4,7 +4,7 @@
 //! own declaration (`fantastic_core::verbs`), the same engine under `user`.
 
 use schemars::JsonSchema;
-use fantastic_kernel::inquiry::{Answer, Inquiries, Inquiry};
+use fantastic_kernel::inquiry::{AnswerInquiry, Inquiries, Inquiry};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -63,16 +63,6 @@ fn positive_number(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schem
 pub struct Path {
     /// `true` scans again.
     pub rescan: Option<bool>,
-}
-
-/// The person's answer, sent to the asker under the inquiry's pid; then the question is closed. Returns {answered, asker}.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AnswerInquiry {
-    /// The inquiry's pid.
-    pub re: i64,
-    /// The answer.
-    pub answer: Answer,
 }
 
 fn root_view_id() -> String {

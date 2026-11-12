@@ -7,8 +7,6 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub use crate::constants::DEFAULT_CLIENT_ID;
-
 /// Read a string meta field off the agent record.
 pub fn meta_string(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<String> {
     let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
@@ -55,13 +53,8 @@ pub fn agent_meta(agent_id: &AgentId, kernel: &Kernel) -> serde_json::Map<String
 /// python's whitespace set (`\x1c`–`\x1f` included), which `str::trim` does not
 /// cover.
 pub fn safe_client(client_id: &str) -> String {
-    let stripped = py_strip(client_id);
-    let raw = if stripped.is_empty() {
-        DEFAULT_CLIENT_ID
-    } else {
-        stripped
-    };
-    raw.chars()
+    py_strip(client_id)
+        .chars()
         .map(|c| {
             if is_alnum(c) || c == '.' || c == '_' || c == '-' {
                 c

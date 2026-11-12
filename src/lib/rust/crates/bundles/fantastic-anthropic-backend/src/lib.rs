@@ -1898,10 +1898,9 @@ pub struct AnthropicRecord {
     /// A file every request appends one JSON usage line to.
     #[schemars(length(min = 1))]
     pub usage_log: Option<String>,
-    /// The read clock on the answer stream: seconds with no byte from the API (headers included) before the turn is judged stalled.
-    #[serde(default)]
-    #[schemars(schema_with = "fantastic_ai_core::record::stream_idle_seconds")]
-    pub stream_idle_seconds: Option<f64>,
+    /// The read clock of the answer stream.
+    #[serde(flatten)]
+    pub clock: fantastic_ai_core::record::StreamClock,
     /// The API key's credential store and ref; absent, no key header goes out.
     pub credentials: Option<Credentials>,
     /// The memory store agent that keeps this agent's settings (e.g. a ram_store).

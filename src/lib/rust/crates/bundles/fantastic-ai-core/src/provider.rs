@@ -15,7 +15,6 @@
 //! [`crate::think::THINK_OPEN`]/[`crate::think::THINK_CLOSE`] once per turn, or a
 //! reasoning model's whole turn reads as an empty completion.
 
-use crate::constants::STREAM_IDLE_SECONDS;
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use serde_json::{Map, Value};
@@ -116,14 +115,14 @@ impl Provider for Unconfigured {
 /// driven inside a spawned task.
 pub type ProviderStream = BoxStream<'static, Result<ProviderEvent, ProviderError>>;
 
-/// The read clock a provider's stream runs on: the record's `stream_idle_seconds`
-/// (declared as positive seconds, see [`crate::record::stream_idle_seconds`]), else
-/// the declared default [`STREAM_IDLE_SECONDS`].
+/// The read clock a provider's stream runs on: the record's `stream_idle_seconds`, else
+/// the default its declaration ([`crate::record::StreamClock`]) states.
 pub fn stream_idle_of(meta: &Map<String, Value>) -> Duration {
     Duration::from_secs_f64(
-        meta.get("stream_idle_seconds")
-            .and_then(Value::as_f64)
-            .unwrap_or(STREAM_IDLE_SECONDS),
+        crate::record::clock::RECORD
+            .get(meta, "stream_idle_seconds")
+            .and_then(|v| v.as_f64())
+            .expect("stream_idle_seconds declares a default"),
     )
 }
 

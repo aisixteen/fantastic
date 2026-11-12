@@ -43,7 +43,9 @@ pub struct Send {
     /// The message.
     pub text: String,
     /// Whose turn it is: `cli`, or the tab whose socket filters by it.
-    pub client_id: Option<String>,
+    #[serde(default = "fantastic_kernel::inquiry::default_client_id")]
+    #[schemars(schema_with = "fantastic_kernel::inquiry::client_id")]
+    pub client_id: String,
     /// REPLACES the built system block for this delivery.
     pub system_prompt: Option<String>,
     /// Hand this pass's text to that agent id as a fresh turn, once.
@@ -120,7 +122,9 @@ pub struct Inquiry {
     /// The asker's own tag, echoed in the reply.
     pub request_id: Option<String>,
     /// Whose conversation the answer returns to.
-    pub reply_client_id: Option<String>,
+    #[serde(default = "fantastic_kernel::inquiry::default_client_id")]
+    #[schemars(schema_with = "fantastic_kernel::inquiry::client_id")]
+    pub reply_client_id: String,
     /// REPLACES the built system block for this delivery.
     pub system_prompt: Option<String>,
 }

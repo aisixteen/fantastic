@@ -618,7 +618,7 @@ async fn an_unreachable_endpoint_is_a_transport_failure() {
         think: None,
         key: Arc::new(crate::tests_server::NoKey),
         report: Default::default(),
-        stream_idle: Duration::from_secs_f64(fantastic_ai_core::constants::STREAM_IDLE_SECONDS),
+        stream_idle: fantastic_ai_core::provider::stream_idle_of(&serde_json::Map::new()),
     };
     let err = match p
         .chat(&[json!({"role": "user", "content": "hi"})], None)
@@ -644,9 +644,7 @@ async fn an_empty_model_fails_loud_in_chat() {
             think: None,
             key: Arc::new(crate::tests_server::NoKey),
             report: Default::default(),
-            stream_idle: std::time::Duration::from_secs_f64(
-                fantastic_ai_core::constants::STREAM_IDLE_SECONDS,
-            ),
+            stream_idle: fantastic_ai_core::provider::stream_idle_of(&serde_json::Map::new()),
         };
         let err = match p
             .chat(&[json!({"role": "user", "content": "hi"})], None)

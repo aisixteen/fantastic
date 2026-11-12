@@ -545,6 +545,9 @@ fn type_label(s: &Value) -> String {
     if let Some(n) = s.get("minItems").and_then(Value::as_u64) {
         label.push_str(&format!(" with at least {n} item(s)"));
     }
+    if let Some(n) = s.get("maxItems").and_then(Value::as_u64) {
+        label.push_str(&format!(" with at most {n} item(s)"));
+    }
     if let Some(n) = s.get("minLength").and_then(Value::as_u64) {
         label.push_str(&format!(" of at least {n} character(s)"));
     }
@@ -892,6 +895,9 @@ fn matches_type(schema: &Value, v: &Value) -> bool {
                 o.get("minLength")
                     .and_then(Value::as_u64)
                     .is_none_or(|m| t.chars().count() as u64 >= m)
+                    && o.get("maxLength")
+                        .and_then(Value::as_u64)
+                        .is_none_or(|m| t.chars().count() as u64 <= m)
                     && o.get("pattern")
                         .and_then(Value::as_str)
                         .is_none_or(|p| pattern_matches(p, t))
@@ -907,6 +913,9 @@ fn matches_type(schema: &Value, v: &Value) -> bool {
                     o.get("minItems")
                         .and_then(Value::as_u64)
                         .is_none_or(|m| items.len() as u64 >= m)
+                        && o.get("maxItems")
+                            .and_then(Value::as_u64)
+                            .is_none_or(|m| items.len() as u64 <= m)
                         && it.is_none_or(|it| items.iter().all(|x| matches_type(it, x)))
                 }
                 _ => false,

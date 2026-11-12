@@ -8,14 +8,13 @@
 //! timeout), `around` (the cells of a page view near a point, from the page records,
 //! judged by the CALLER's own page grants), `path` (the human's programs, scanned at
 //! boot), `export_subtree` / `import_subtree` (a subtree as a blueprint folder and back,
-//! `export.rs` / `import.rs`), and the person's inquiries (`inquiries.rs`). A
+//! `export.rs` / `import.rs`), and the person's inquiries (the kernel's `inquiry` module). A
 //! page loader serves record verbs inside its caller's subtree; the canvas's loader sits
 //! under `user`.
 
 pub mod export;
 pub mod grants;
 pub mod import;
-pub mod inquiries;
 pub mod path;
 pub mod record;
 mod sys;
@@ -88,8 +87,6 @@ fn refuse(reason: &str, msg: impl Into<String>) -> Value {
 pub struct UserBundle {
     /// `path`'s scan, made at boot (RAM only — a stale path is never stored)
     programs: Arc<tokio::sync::Mutex<Option<Value>>>,
-    /// the questions agents asked the person, open until answered
-    inquiries: inquiries::Inquiries,
 }
 
 impl UserBundle {
@@ -285,11 +282,11 @@ impl UserBundle {
         held.clone().unwrap_or(Value::Null)
     }
 
-    fn reflect(&self, agent_id: &AgentId) -> Value {
+    fn reflect(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         json!({
             "id": agent_id.as_str(),
             "handler_module": HANDLER_MODULE,
-            "inquiries": self.inquiries.count(),
+            "inquiries": fantastic_kernel::inquiry::open_count(kernel, agent_id),
         })
     }
 }
@@ -352,7 +349,7 @@ impl Handler for UserBundle {
                 let (r, b) = Self::forward(a, body, kernel).await;
                 return Ok((Some(r), b));
             }
-            verbs::Call::Reflect(_) => self.reflect(agent_id),
+            verbs::Call::Reflect(_) => self.reflect(agent_id, kernel),
             verbs::Call::Path(a) => self.path(&a).await,
             verbs::Call::Around(a) => Self::around(agent_id, a, kernel).await,
             // A SUBTREE AS A BLUEPRINT, outside references as ports (`export.rs`)
@@ -369,10 +366,10 @@ impl Handler for UserBundle {
             verbs::Call::ImportSubtree(a) => {
                 import::import_subtree(kernel, a).await
             }
-            // THE PERSON'S INQUIRIES: held, listed, answered (`inquiries.rs`)
-            verbs::Call::Inquiry(a) => self.inquiries.ask(a),
-            verbs::Call::Inquiries(a) => self.inquiries.list(&a),
-            verbs::Call::AnswerInquiry(a) => self.inquiries.answer(agent_id, a, kernel).await,
+            // THE PERSON'S INQUIRIES: held, listed, answered (the kernel's `inquiry` module)
+            verbs::Call::Inquiry(a) => fantastic_kernel::inquiry::ask(agent_id, a, kernel),
+            verbs::Call::Inquiries(a) => fantastic_kernel::inquiry::list(agent_id, &a, kernel),
+            verbs::Call::AnswerInquiry(a) => fantastic_kernel::inquiry::answer(agent_id, a, kernel).await,
         };
         Ok((Some(reply), None))
     }

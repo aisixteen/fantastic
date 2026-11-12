@@ -201,7 +201,7 @@ impl BackendBundle {
         let Some(t) = shelf.saved.iter().find(|t| t.name == name) else {
             return fantastic_kernel::refusal_hint(fantastic_kernel::refusal::NOT_FOUND, format!("no saved set-up `{name}`"), "open ⚙ AI set-up to see your saved set-ups");
         };
-        if let Err(r) = crate::kern::setup::check_backend(&t.handler()) {
+        if let Err(r) = crate::kern::setup::check_backend(host, &t.handler()) {
             return fantastic_kernel::refusal_hint(fantastic_kernel::refusal::BAD_ARG, format!("saved set-up `{name}` is not an AI set-up: {}", r["error"].as_str().unwrap_or("")), "open ⚙ AI set-up to see your saved set-ups");
         }
         let ai = format!("ai_{}", hex8());
@@ -481,7 +481,7 @@ impl BackendBundle {
         let want_id = child.id.clone();
         let rec = child.into_map();
         // an AI is a chat on its provider: asked as either, the chat is the child
-        let is_ai = crate::kern::setup::check_backend(handler).is_ok() || handler == CHAT_HANDLER;
+        let is_ai = crate::kern::setup::check_backend(host, handler).is_ok() || handler == CHAT_HANDLER;
         let made = if is_ai { CHAT_HANDLER } else { handler };
         // a child asked again is the same child
         if let Some(id) = want_id.as_deref() {
@@ -843,7 +843,7 @@ pub(crate) mod create_tests {
     /// A registered AI handler, registered under the name it carries.
     pub(crate) struct FakeAi(pub(crate) &'static str);
 
-    fantastic_kernel::stand_in_verbs!(fake_ai_verbs { Ping "ping" {} });
+    fantastic_kernel::stand_in_verbs!(fake_ai_verbs { Ping "ping" {}, Complete "complete" {} });
 
     #[async_trait]
     impl Handler for FakeAi {
@@ -872,6 +872,7 @@ pub(crate) mod create_tests {
         async fn handle(&self, _id: &AgentId, call: Self::Call, _k: &Arc<Kernel>) -> Result<Option<Value>, BundleError> {
             Ok(match call {
                 fake_ai_verbs::Call::Ping(_) => Some(json!({"pong": true})),
+                fake_ai_verbs::Call::Complete(_) => Some(json!({"done": true})),
                 fake_ai_verbs::Call::Reflect(_) => None,
             })
         }

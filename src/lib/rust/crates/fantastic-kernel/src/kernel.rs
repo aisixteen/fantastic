@@ -208,9 +208,6 @@ pub struct Kernel {
     children_dir: RwLock<String>,
 }
 
-/// The children-container dir name when the root record declares none.
-pub const DEFAULT_CHILDREN_DIR: &str = "agents";
-
 /// One bound for every agent's `shutdown` dispatch. Python
 /// `Kernel.SHUTDOWN_VERB_TIMEOUT`.
 const SHUTDOWN_VERB_TIMEOUT: f64 = 30.0;
@@ -274,7 +271,7 @@ impl Kernel {
             extensions: DashMap::new(),
             peers: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             peer_watches: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-            children_dir: RwLock::new(DEFAULT_CHILDREN_DIR.to_string()),
+            children_dir: RwLock::new(crate::declared::record::children_dir(&serde_json::Map::new())),
         }
     }
 
@@ -1029,13 +1026,8 @@ impl Kernel {
         // "agents") — set BEFORE the build, since every agent derives its
         // address from it.
         if let Some(root) = state.agents.iter().find(|r| r.parent_id.is_none()) {
-            *self.children_dir.write().expect("children_dir poisoned") = root
-                .meta
-                .get("children_dir")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(DEFAULT_CHILDREN_DIR)
-                .to_string();
+            *self.children_dir.write().expect("children_dir poisoned") =
+                crate::declared::record::children_dir(&root.meta);
         }
 
         // Drop the current tree. Inboxes close as their senders are

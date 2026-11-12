@@ -692,10 +692,7 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, args: crate::verbs::ImportSubt
     let top = plan.agents.first().map(|a| a.new_id.clone());
     for a in &plan.agents {
         // the declared arguments of `create_agent`; the rest of the record rides as its fields
-        let mut fields = a.meta.clone();
-        let bundle = fields
-            .remove("bundle")
-            .and_then(|b| b.as_str().map(str::to_string));
+        let fields = a.meta.clone();
         let r = fantastic_kernel::lifecycle::create_agent(
             kernel,
             &root,
@@ -703,7 +700,6 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, args: crate::verbs::ImportSubt
                 handler_module: a.handler_module.clone(),
                 parent_id: a.parent.clone(),
                 id: Some(a.new_id.clone()),
-                bundle,
                 fields,
             },
         )
