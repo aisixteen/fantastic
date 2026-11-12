@@ -117,11 +117,20 @@ fn a_declared_default_is_applied_by_the_engine_and_shown() {
     // no default declared: nothing is invented
     assert!(ok.get("limit").is_none());
 
-    let row = Row { name: "wire", schema: WIRE.schema() };
+    let row = Row {
+        name: "wire",
+        schema: WIRE.schema(),
+    };
     let line = verbs::line(&row);
-    assert!(line.contains("host:string (default \"127.0.0.1\")"), "{line}");
+    assert!(
+        line.contains("host:string (default \"127.0.0.1\")"),
+        "{line}"
+    );
     assert!(line.contains("routes:map[object] (req)"), "{line}");
-    assert!(line.contains("store:string matching /^[a-z]+$/ (req)"), "{line}");
+    assert!(
+        line.contains("store:string matching /^[a-z]+$/ (req)"),
+        "{line}"
+    );
     let d = verbs::detail(&row);
     assert!(d.contains("labels:map[string]?"), "{d}");
 }
@@ -150,7 +159,10 @@ fn a_running_program_declares_verbs_the_same_engine_checks() {
     )
     .unwrap();
     let dynamic = reg.of("a1");
-    assert_eq!(dynamic.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["say", "stop"]);
+    assert_eq!(
+        dynamic.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+        ["say", "stop"]
+    );
     // other agents have none
     assert!(reg.of("a2").is_empty());
 
@@ -165,7 +177,8 @@ fn a_running_program_declares_verbs_the_same_engine_checks() {
     assert_eq!(r["arg"], "x");
 
     // a later declaration REPLACES the list; forget drops it
-    reg.declare("a1", &json!([{"name":"only"}]), PROGRAM_VERBS).unwrap();
+    reg.declare("a1", &json!([{"name":"only"}]), PROGRAM_VERBS)
+        .unwrap();
     assert_eq!(reg.of("a1").len(), 1);
     reg.forget("a1");
     assert!(reg.of("a1").is_empty());
@@ -188,4 +201,99 @@ fn a_program_cannot_declare_a_reserved_or_repeated_or_malformed_verb() {
     }
     // a refused declaration leaves the agent's list as it was
     assert!(reg.of("a1").is_empty());
+}
+
+fn either() -> Value {
+    json!({
+        "type": "object",
+        "description": "Remove entries.",
+        "properties": {
+            "before_id": {"type": "string", "description": "Cut point."},
+            "ids": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+        },
+        "anyOf": [{"required": ["before_id"]}, {"required": ["ids"]}],
+        "additionalProperties": false
+    })
+}
+
+#[test]
+fn any_of_requires_one_alternative_and_names_them_in_the_refusal() {
+    let s = either();
+    assert!(validate("cut", &s, &json!({"type":"cut","before_id":"a"})).is_ok());
+    assert!(validate("cut", &s, &json!({"type":"cut","ids":["a"]})).is_ok());
+    assert!(validate(
+        "cut",
+        &s,
+        &json!({"type":"cut","before_id":"a","ids":["b"]})
+    )
+    .is_ok());
+    for none in [json!({"type":"cut"}), json!({"type":"cut","ids":[]})] {
+        let r = validate("cut", &s, &none).expect_err("refused");
+        let text = r.to_string();
+        assert!(
+            text.contains("one of before_id | ids is required"),
+            "{text}"
+        );
+        assert!(
+            text.contains("missing_arg") || text.contains("MISSING"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn one_of_refuses_none_and_more_than_one() {
+    let mut s = either();
+    let o = s.as_object_mut().unwrap();
+    let alts = o.remove("anyOf").unwrap();
+    o.insert("oneOf".to_string(), alts);
+    assert!(validate("cut", &s, &json!({"type":"cut","ids":["a"]})).is_ok());
+    let none = validate("cut", &s, &json!({"type":"cut"})).expect_err("refused");
+    assert!(none
+        .to_string()
+        .contains("one of before_id | ids is required"));
+    let both = validate(
+        "cut",
+        &s,
+        &json!({"type":"cut","before_id":"a","ids":["b"]}),
+    )
+    .expect_err("refused");
+    assert!(
+        both.to_string()
+            .contains("only one of before_id | ids may be given"),
+        "{both}"
+    );
+}
+
+#[test]
+fn alternatives_may_be_groups_of_fields() {
+    let s = json!({
+        "type": "object",
+        "properties": {"a": {"type":"string"}, "b": {"type":"string"}, "c": {"type":"string"}},
+        "anyOf": [{"required": ["a", "b"]}, {"required": ["c"]}]
+    });
+    assert!(validate("v", &s, &json!({"a":"1","b":"2"})).is_ok());
+    assert!(validate("v", &s, &json!({"c":"1"})).is_ok());
+    let r = validate("v", &s, &json!({"a":"1"})).expect_err("refused");
+    assert!(
+        r.to_string().contains("one of (a + b) | c is required"),
+        "{r}"
+    );
+}
+
+#[test]
+fn reflect_and_docs_render_the_alternatives() {
+    let s = either();
+    let row = Row {
+        name: "cut",
+        schema: &s,
+    };
+    let line = verbs::line(&row);
+    assert!(
+        line.contains("one of before_id | ids is required"),
+        "{line}"
+    );
+    let d = verbs::detail(&row);
+    assert!(d.contains("one of before_id | ids is required."), "{d}");
+    assert!(!line.contains("any|any"), "{line}");
 }
