@@ -39,6 +39,10 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Threading",
 ] }
 
+[features]
+# the private-file test fixtures (set a mode, read it back) for a dependent crate's tests
+test-support = []
+
 [dev-dependencies]
 fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 tempfile = "3"

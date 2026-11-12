@@ -20,7 +20,7 @@ use fantastic_kernel::refusal as rf;
 use fantastic_kernel::{Agent, AgentId, DynVerb, Item, Kernel, Verb};
 use serde_json::{json, Map, Value};
 
-use super::{clamp_root, gate_path, norm, rel_path, verbs};
+use super::{clamp_root, gate_path, norm, verbs};
 
 pub(crate) const FILE: &str = "file";
 pub(crate) const FOLDER: &str = "folder";
@@ -593,8 +593,6 @@ pub(crate) async fn dispatch(
         .unwrap_or("")
         .to_string();
     match (kind, call) {
-        // the kernel's start call: a view holds nothing to open
-        (_, Call::Boot(_)) => Value::Null,
         (_, Call::Reflect(_)) => {
             let watching = relays.held.lock().expect("relays").contains_key(&id.0);
             reflect(kind, id, &meta, watching)
@@ -605,12 +603,8 @@ pub(crate) async fn dispatch(
                 let mut body = Map::new();
                 body.insert("type".into(), json!("read"));
                 body.insert("path".into(), json!(target));
-                if let Some(n) = a.offset {
-                    body.insert("offset".into(), json!(n));
-                }
-                if let Some(n) = a.limit {
-                    body.insert("limit".into(), json!(n));
-                }
+                body.insert("offset".into(), json!(a.offset));
+                body.insert("limit".into(), json!(a.limit));
                 send_bridge(kernel, &bridge, "read", Value::Object(body)).await
             }
         },
@@ -641,7 +635,7 @@ pub(crate) async fn dispatch(
         (FOLDER, Call::Dynamic(c)) if c.name == "reveal" => {
             match serde_json::from_value::<verbs::Reveal>(c.args) {
                 Ok(a) => reveal(kernel, &own, &bridge, &a).await,
-                Err(e) => rf::missing("reveal", &e.to_string()),
+                Err(e) => rf::bad("reveal", "path", &e.to_string()),
             }
         }
         (_, other) => {
@@ -739,10 +733,7 @@ pub(crate) async fn open_view_verb(
         verbs::ViewKind::File => FILE,
         verbs::ViewKind::Folder => FOLDER,
     };
-    let path = match rel_path("open_view", "path", &a.path) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
+    let path = a.path.as_str();
     let Some(norm_path) = norm(path) else {
         return rf::bad("open_view", "path", "a root-relative path inside the root");
     };

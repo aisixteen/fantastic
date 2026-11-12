@@ -83,7 +83,6 @@ async fn reflect_keys_match_python() {
         vec![
             "id",
             "sentence",
-            "path_pattern",
             "ingress_rule",
             "egress_rule",
             "sealed",
@@ -91,9 +90,8 @@ async fn reflect_keys_match_python() {
     );
     assert_eq!(
         obj["sentence"],
-        json!("WS verb-invocation surface; mounts /<host_id>/ws on the parent web.")
+        json!(crate::MAN)
     );
-    assert_eq!(obj["path_pattern"], json!("/{host_id}/ws"));
 }
 
 /// The inbound verbs refuse what their declaration does not take, by name: an unknown
@@ -176,10 +174,6 @@ async fn a_leg_without_route_keeps_the_catch_all() {
             ask(&kernel, "get_routes").await,
             json!({"routes": [{"kind": "websocket", "path": "/{host_id}/ws"}]})
         );
-        assert_eq!(
-            ask(&kernel, "reflect").await["path_pattern"],
-            json!("/{host_id}/ws")
-        );
     }
 }
 
@@ -190,10 +184,6 @@ async fn a_route_mounts_only_its_literal() {
     assert_eq!(
         ask(&kernel, "get_routes").await,
         json!({"routes": [{"kind": "websocket", "path": "/page_ws/ws"}]})
-    );
-    assert_eq!(
-        ask(&kernel, "reflect").await["path_pattern"],
-        json!("/page_ws/ws")
     );
 }
 

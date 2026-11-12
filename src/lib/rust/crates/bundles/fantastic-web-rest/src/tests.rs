@@ -98,8 +98,7 @@ async fn inbound_call_is_checked_by_its_declaration() {
     }
 }
 
-/// The reflect frame: no `mounted_on`, no example strings,
-/// the `auth_header` and the leg posture from `describe`.
+/// The reflect frame: identity, sentence and the leg posture from `describe`.
 #[tokio::test]
 async fn reflect_keys_match_python() {
     let kernel = kernel_with_leg();
@@ -111,11 +110,6 @@ async fn reflect_keys_match_python() {
         vec![
             "id",
             "sentence",
-            "path_pattern",
-            "method",
-            "reflect_url",
-            "reflect_pattern",
-            "auth_header",
             "ingress_rule",
             "egress_rule",
             "sealed",

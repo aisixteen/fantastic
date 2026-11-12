@@ -46,48 +46,6 @@ pub const HANDLER_MODULE: &str = "kernel_state.tools";
 /// its declared verbs (`docs`, `reflect`).
 const MAN: &str = "The kernel's root agent: it owns the durable state of the tree. It reads and writes agent records and sidecar files through the store, reloads folder bundles, exports a subtree as a blueprint, and starts and stops the record writer.";
 
-/// The SHORT `self_extension` a DISTILLED root reflect carries — python
-/// `reflect_root_extra`'s non-full branch, verbatim.
-const SELF_EXTENSION_SHORT: &str = "A DURABLE PROGRAM is a FILE plus a command (no `code` field): write it with a file agent's <type>write_stream</type> (`bytes` verbatim), run it on an `exec_bridge.tools` agent — <type>start</type> <command>python3</command> <args><item>prog.py</item></args>, matched against its `allowed` — and re-run to update. Wiring an agent to another takes BOTH halves: its `can_call` and the other's `callable_by`.";
-
-/// The LONG `self_extension` a `detail:"full"` root reflect carries — python's
-/// full branch, verbatim (it has no fd-wire tail sentence).
-const SELF_EXTENSION_FULL: &str =
-    "A DURABLE PROGRAM is a FILE you write plus a command that runs it — not a \
-`code`-carrying agent (there is no `code` field). A program carried as a \
-JSON string is exactly how a call gets lost to escaping. Assemble these \
-THREE pieces and you have built something that persists and re-runs:\n1. \
-WRITE THE PROGRAM TO A FILE: never carry file contents in a JSON string. \
-Use the file leg's STREAM verbs — <type>write_stream</type> <path>…</path> \
-<truncate>true</truncate> <bytes>…</bytes> to write, \
-<type>read_stream</type> <path>…</path> <offset>0</offset> to read, one raw \
-chunk at a time. `bytes` is VERBATIM: the program between `<bytes>` and \
-`</bytes>` exactly as written, real newlines, nothing escaped. The text \
-verbs (`write`, `edit`, `append`) take `bytes` the same way.\n2. RUN IT: \
-the executor is a general-purpose COMMAND runner. Reflect it, read its \
-`allowed` regexes, then send <type>start</type> <command>path</command> \
-<args><item>…</item></args>; poll <type>status</type>. It runs commands, \
-not inline programs.\n3. RE-RUN: the file is durable on disk, so the SAME \
-`start` command run again later re-executes the SAME program against \
-whatever the inputs hold THEN — that is how a thing 'keeps itself up to \
-date'.\nA WORKER THAT COMPUTES is an `exec_bridge.tools` agent (the \
-EXISTING command runner) that owns a program file — you never author a new \
-handler_module (you cannot add modules to the catalog and do not need to). \
-'A specialist with child workers' = a parent agent whose children are \
-exec_bridge runners, each with its own program file.\nWIRING TO A SIBLING: \
-a record is edited with `update_agent` on the root — holding that grant (both \
-ends) you edit ANY record, `totals`/`readings` included; without it you cannot \
-raise your OWN authority. To let your worker call `totals`: grant the worker \
-`can_call:{totals}` AND `update_agent id='totals'` to add the worker to \
-`totals.callable_by` (send the WHOLE map — update replaces, not merges).\nA SPAWNED PROGRAM reaches agents over its \
-control fd — a TWO-WAY socket (FANTASTIC_CTRL_FD): write {op:'send', rid, \
-target, payload}; the reply comes back on the SAME fd as {op:'reply', rid, \
-data}. It is not inline — read frames until one carries your `rid`, \
-skipping event/inbox frames.\nCOMPOSE the agents you were given for \
-everything else (`list_agents`, reflect each, send). CREATE/DELETE plain \
-agents (create_agent with a handler_module and grants, delete_agent) work \
-as before.";
-
 /// Per-loader process state — what `boot` installed, so a second `boot` is a
 /// no-op and `on_shutdown` can tear it down. Python keeps it on the agent
 /// object (`_fs_flush_loop`).
@@ -341,18 +299,16 @@ impl KernelStateBundle {
             return Ok(denied);
         }
         let record = &args.record;
-        if let Some(bad) = guard_id("persist_record", record.get("id")) {
+        // the declaration made `id` text and `parent_id` text or null; what is left is
+        // the kernel's one agent-id rule (an id becomes a directory)
+        let id = record.get("id").and_then(Value::as_str).unwrap_or("");
+        if let Some(bad) = fantastic_kernel::refusal::guard_agent_id("persist_record", id) {
             return Ok(bad);
         }
-        let id = record.get("id").and_then(Value::as_str).unwrap_or("");
-        let parent_id = record.get("parent_id");
-        let parent = parent_id.and_then(Value::as_str);
+        let parent = record.get("parent_id").and_then(Value::as_str);
         let mut at = Places::new(agent, kernel);
-        // python `_guard_parent_chain`: a parent_id that is not None must be a
-        // valid id — a non-string included.
-        if let Some(bad) = parent_id
-            .filter(|p| !p.is_null())
-            .and_then(|p| guard_id("persist_record", Some(p)))
+        if let Some(bad) =
+            parent.and_then(|p| fantastic_kernel::refusal::guard_agent_id("persist_record", p))
         {
             return Ok(bad);
         }
@@ -396,12 +352,6 @@ impl KernelStateBundle {
         }
         Ok(json!({ "ok": true }))
     }
-}
-
-/// `guard_agent_id` on the RAW value: python refuses a non-string id with the
-/// same `bad_arg` an empty one gets.
-fn guard_id(verb: &str, v: Option<&Value>) -> Option<Value> {
-    fantastic_kernel::refusal::guard_agent_id(verb, v.and_then(Value::as_str).unwrap_or(""))
 }
 
 /// Merge-write one record's `agent.yaml` in `root` (the agent's own dir, already
@@ -566,11 +516,11 @@ impl Handler for KernelStateBundle {
         let reply = match call {
             verbs::Call::Reflect(_) => json!({
                 "id": agent.id.0,
-                "sentence": "Disk persistence/hydration root — owns .fantastic; \
-                             answers load_tree / persist_record / forget_record.",
+                "sentence": MAN,
                 "root": reported_root(&agent, kernel)?,
             }),
             verbs::Call::Boot(_) => self.boot(&agent, kernel).await?,
+            verbs::Call::Shutdown(_) => Value::Null,
             verbs::Call::LoadTree(_) => self.load_tree(&agent, kernel).await?,
             verbs::Call::PersistRecord(args) => self.persist_record(&agent, args, kernel).await?,
             verbs::Call::ForgetRecord(args) => self.forget_record(&agent, args, kernel).await?,
@@ -594,7 +544,7 @@ impl Handler for KernelStateBundle {
     fn reflect_root_extra(
         &self,
         agent: &Arc<Agent>,
-        full: bool,
+        _full: bool,
         kernel: &Arc<Kernel>,
     ) -> Result<Option<Map<String, Value>>, Value> {
         let mut out = Map::new();
@@ -613,11 +563,6 @@ impl Handler for KernelStateBundle {
                 .and_then(|m| m.get("guid").cloned())
                 .unwrap_or(Value::Null),
         );
-        if !full {
-            out.insert("self_extension".to_string(), json!(SELF_EXTENSION_SHORT));
-            return Ok(Some(out));
-        }
-        out.insert("self_extension".to_string(), json!(SELF_EXTENSION_FULL));
         Ok(Some(out))
     }
 
@@ -688,7 +633,7 @@ async fn reload_bundle(
     let root = clamp(kernel, &loader_root(kernel, agent)?)?;
     let shown = fantastic_fs::file_name(&root);
     let rel = format!("{}/{name}", crate::folders::BUNDLES_DIR);
-    if !(crate::folders::is_folder_name(name) && root.join(&rel).exists()) {
+    if !root.join(&rel).exists() {
         return Ok(refusal_hint(
             NOT_FOUND,
             format!("reload_bundle: no folder {shown}/{rel}"),
@@ -732,7 +677,7 @@ fn read_bundles(
     args: verbs::ReadBundles,
     kernel: &Arc<Kernel>,
 ) -> Result<Value, BundleError> {
-    use crate::folders::{is_folder_name, BUNDLES_DIR, BUNDLE_FILE};
+    use crate::folders::{BUNDLES_DIR, BUNDLE_FILE};
     use fantastic_kernel::refusal::{refusal_hint, NOT_FOUND};
     let root = clamp(kernel, &loader_root(kernel, agent)?)?;
     let shown = fantastic_fs::file_name(&root);
@@ -758,9 +703,8 @@ fn read_bundles(
         }
         Some(n) => {
             let rel = format!("{BUNDLES_DIR}/{n}");
-            // a name the folder rule refuses is never joined into a path
-            if !(is_folder_name(n)
-                && fantastic_fs::exists(&root, &rel).map_err(raise_fs)?
+            // the declaration made `n` a folder name: it never joins a path as anything else
+            if !(fantastic_fs::exists(&root, &rel).map_err(raise_fs)?
                 && fantastic_fs::is_dir(&root, &rel).map_err(raise_fs)?)
             {
                 return Ok(refusal_hint(

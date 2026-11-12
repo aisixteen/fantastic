@@ -95,9 +95,6 @@ const NAME: &str = "credential_store";
 const CREDENTIALS_DIR: &str = "user/credentials";
 const KEYCHAIN_NAMESPACE: &str = "fantastic";
 
-/// What `reflect` says this agent IS — python's `sentence`, verbatim.
-pub const SENTENCE: &str = "Credential store — secrets by ref, each bound to one host.";
-
 /// What the bundle is for — its one short man text.
 const MAN: &str = "A store of secrets by ref, each bound to one host: a value is stored under a declared ref, read back only for the host it is bound to, and never shown by reflect or list.";
 
@@ -565,7 +562,7 @@ impl CredentialStoreBundle {
         };
         let mut out = Map::new();
         out.insert("id".into(), json!(id.0));
-        out.insert("sentence".into(), json!(SENTENCE));
+        out.insert("sentence".into(), json!(MAN));
         out.insert(
             "backend".into(),
             json!(match backend {

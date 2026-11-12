@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 pub use fantastic_web_ws::verbs::InboundCall;
 
-/// Declare this surface's HTTP route mounts for the parent `web` agent: `POST /<id>/{target_id}`, `GET /<id>/_reflect` and `GET /<id>/_reflect/{target_id}`.
+/// Declare this surface's HTTP route mounts for the parent `web` agent. Returns {routes:[{kind, method, path}]}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetRoutes {}

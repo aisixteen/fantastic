@@ -18,14 +18,6 @@ fn size(_gen: &mut SchemaGenerator) -> Schema {
     .expect("a size schema")
 }
 
-/// A number greater than zero.
-fn positive(_gen: &mut SchemaGenerator) -> Schema {
-    serde_json::from_value(serde_json::json!({
-        "type": ["number", "null"], "exclusiveMinimum": 0,
-    }))
-    .expect("a number schema")
-}
-
 /// The object schema of `Start` and `Run`: the fields of `props` plus `pty`, and
 /// the rule that a `command` is given unless the job runs on a terminal (the
 /// engine's `anyOf` of `required` lists), so a call naming neither is refused by
@@ -115,26 +107,26 @@ impl Mime {
 fn sixty() -> f64 {
     60.0
 }
-fn two_hundred() -> i64 {
+fn two_hundred() -> u64 {
     200
 }
-fn twenty() -> i64 {
+fn twenty() -> u64 {
     20
 }
-fn fifty() -> i64 {
+fn fifty() -> u64 {
     50
 }
-fn hundred() -> i64 {
+fn hundred() -> u64 {
     100
 }
 fn both() -> Stream {
     Stream::Both
 }
 
-/// Open nothing and answer nothing: the kernel's start call, gated like any verb. Nothing auto-restarts: a command is started by a caller, not by the record.
+/// Tear down every job of this agent before the kernel stops; sent by the kernel at shutdown.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Boot {}
+pub struct Shutdown {}
 
 /// Spawn a command in the BACKGROUND and return at once with {job_id, status, pty}. The FULL line (command + args) must fullmatch one of the record's `allowed` regexes, or be the shell line the record's `shell` permits. Where it runs and with what environment are the record's, never the call's.
 #[derive(Debug, Deserialize)]
@@ -183,7 +175,7 @@ pub struct Run {
     pub wait_s: f64,
     /// How many of its last lines come back.
     #[serde(default = "two_hundred")]
-    pub tail: i64,
+    pub tail: u64,
 }
 
 /// `run`'s declaration: `start`'s fields, the two waits, and the same rule that a
@@ -206,7 +198,7 @@ impl JsonSchema for Run {
             "description": "How many seconds to wait for it to finish.",
         }));
         props.insert("tail".into(), serde_json::json!({
-            "type": "integer", "minimum": 1, "maximum": 2000, "default": 200,
+            "type": "integer", "minimum": 1, "maximum": 500, "default": 200,
             "description": "How many of its last lines come back.",
         }));
         command_or_pty(gen, "Start, wait, and return the output in ONE reply: {job_id, status, exit_code, lines}. For short commands; a job still running at `wait_s` comes back running (continue with status wait_s / tail). Read files with files.read, not run.", props)
@@ -303,7 +295,7 @@ pub struct Tail {
     /// How many lines.
     #[serde(default = "twenty")]
     #[schemars(range(min = 1, max = 500))]
-    pub lines: i64,
+    pub lines: u64,
     /// Which stream.
     #[serde(default = "both")]
     pub stream: Stream,
@@ -322,7 +314,7 @@ pub struct Grep {
     /// The most matches returned (the LAST ones).
     #[serde(default = "fifty")]
     #[schemars(range(min = 1, max = 500))]
-    pub lines: i64,
+    pub lines: u64,
     /// Which stream.
     #[serde(default = "both")]
     pub stream: Stream,
@@ -340,34 +332,58 @@ pub struct PasteImage {
     pub mime: Mime,
 }
 
-/// The reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message). Returns {source, howto}.
+/// The reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message). Returns {source}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Connector {}
 
 /// Watch a running job's output AS IT ARRIVES and SEND what matches to `notify` as a turn — it polls nothing. Returns {monitor_id, job_id, notify, match, every, tail, label}; kernel `cancel` (or `unmonitor`) ends it, and it ends with its job.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Monitor {
     /// A RUNNING job of this agent.
     pub job_id: i64,
     /// The agent told.
-    #[schemars(length(min = 1))]
     pub notify: String,
     /// A regex; absent = every line.
     #[serde(rename = "match")]
-    #[schemars(length(min = 1))]
     pub pattern: Option<String>,
     /// Seconds: at most one delivery per window; required without `match`.
     #[serde(default)]
-    #[schemars(schema_with = "positive")]
     pub every: Option<serde_json::Number>,
     /// The newest lines per delivery.
     #[serde(default = "hundred")]
-    #[schemars(range(min = 1))]
-    pub tail: i64,
+    pub tail: u64,
     /// A label for the deliveries.
     pub label: Option<String>,
+}
+
+/// `monitor`'s declaration: its fields, and the rule that `match` or `every` is
+/// given (the engine's `anyOf` of `required` lists) — without `match` every line
+/// counts, so the window its deliveries are gathered in must be named.
+impl JsonSchema for Monitor {
+    fn schema_name() -> String {
+        "Monitor".to_string()
+    }
+
+    fn json_schema(_gen: &mut SchemaGenerator) -> Schema {
+        serde_json::from_value(serde_json::json!({
+            "type": "object",
+            "description": "Watch a running job's output AS IT ARRIVES and SEND what matches to `notify` as a turn — it polls nothing. Returns {monitor_id, job_id, notify, match, every, tail, label}; kernel `cancel` (or `unmonitor`) ends it, and it ends with its job.",
+            "properties": {
+                "job_id": {"type": "integer", "description": "A RUNNING job of this agent."},
+                "notify": {"type": "string", "minLength": 1, "description": "The agent told."},
+                "match": {"type": "string", "minLength": 1, "description": "A regex; absent = every line."},
+                "every": {"type": "number", "exclusiveMinimum": 0, "description": "Seconds: at most one delivery per window; required without `match`."},
+                "tail": {"type": "integer", "minimum": 1, "default": 100, "description": "The newest lines per delivery."},
+                "label": {"type": "string", "minLength": 1, "description": "A label for the deliveries."},
+            },
+            "required": ["job_id", "notify"],
+            "anyOf": [{"required": ["match"]}, {"required": ["every"]}],
+            "additionalProperties": false,
+        }))
+        .expect("a monitor schema")
+    }
 }
 
 /// This agent's monitors: {monitors:[{monitor_id, job_id, notify, match, every, tail, label, delivered, pending, status, error}]}. `status` is running, or dead once `notify` REFUSED a delivery (`error` says why; nothing more is sent) — `unmonitor` clears it.
@@ -407,7 +423,7 @@ pub struct DeclareVerbs {
 
 fantastic_kernel::verbs! {
     dynamic;
-    "boot" => Boot,
+    "shutdown" => Shutdown,
     "start" => Start,
     "run" => Run,
     "status" => Status,

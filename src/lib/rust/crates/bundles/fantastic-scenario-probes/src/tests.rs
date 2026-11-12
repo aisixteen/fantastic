@@ -523,14 +523,14 @@ async fn oracle_renders_non_string_lines_with_python_str() {
     );
 }
 
-/// `limit` is an integer of 1 or more, clamped to 20, six when absent; 0 or less and a value of another
+/// `limit` is an integer of 1 to 20, six when absent; 0 or less and a value of another
 /// type is refused by name, never coerced.
 #[tokio::test]
-async fn oracle_limit_is_clamped_and_typed() {
+async fn oracle_limit_is_bounded_and_typed() {
     let k = kernel();
     let lines: Vec<String> = (0..25).map(|i| format!("fact number {i} here")).collect();
     let id = agent(&k, "oracle_limit", ORACLE_MODULE, json!({"lines": lines}));
-    for (limit, want) in [(json!(3), 3), (json!(99), 20)] {
+    for (limit, want) in [(json!(3), 3), (json!(20), 20)] {
         let r = call(
             &k,
             &id,
@@ -551,6 +551,7 @@ async fn oracle_limit_is_clamped_and_typed() {
         json!("x"),
         json!(0),
         json!(-5),
+        json!(99),
     ] {
         let r = call(
             &k,

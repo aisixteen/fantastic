@@ -456,8 +456,7 @@ async fn prune_keep_is_a_list_of_kinds() {
 }
 
 #[tokio::test]
-async fn a_zero_limit_is_no_limit() {
-    // `read` with limit 0 is no limit; `search` falls back to its defaults
+async fn a_zero_limit_is_refused_by_the_declared_minimum() {
     let k = store();
     append(
         &k,
@@ -465,20 +464,21 @@ async fn a_zero_limit_is_no_limit() {
         json!([{"kind": "msg", "content": "x one"}, {"kind": "msg", "content": "x two"}]),
     )
     .await;
-    let r = call(&k, json!({"type": "read", "limit": 0}), Some("alice")).await;
+    for (payload, arg) in [
+        (json!({"type": "read", "limit": 0}), "limit"),
+        (json!({"type": "search", "query": "x", "limit": 0}), "limit"),
+        (json!({"type": "search", "query": "x", "width": 0}), "width"),
+    ] {
+        let r = call(&k, payload.clone(), Some("alice")).await;
+        assert_eq!(
+            (r["reason"].as_str(), r["arg"].as_str()),
+            (Some("bad_arg"), Some(arg)),
+            "{payload}: {r}"
+        );
+    }
+    let r = call(&k, json!({"type": "read"}), Some("alice")).await;
     assert_eq!(ids(&r).len(), 2, "{r}");
     assert_eq!(r["next"], Value::Null);
-    let r = call(
-        &k,
-        json!({"type": "search", "query": "x", "limit": 0, "width": 0}),
-        Some("alice"),
-    )
-    .await;
-    assert_eq!(r["matches"].as_array().unwrap().len(), 2, "{r}");
-    assert_eq!(
-        r["matches"][0]["text"], "x one",
-        "width 0 falls back to 200"
-    );
 }
 
 // ─── refusal wire shapes + the id parser ────────────────────────────────────

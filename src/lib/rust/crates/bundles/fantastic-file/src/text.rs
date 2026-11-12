@@ -6,7 +6,7 @@
 //! and `readonly`; a commit is [`crate::fs::write_bytes`] (tmp sibling + atomic
 //! replace), the tmp judged by the TARGET path's exposure.
 
-use crate::{allow_list, clamped, fs, gate_path, norm, readonly_refusal, rel_path, verbs};
+use crate::{allow_list, clamped, fs, gate_path, norm, readonly_refusal, verbs};
 use fantastic_bundle::py_repr;
 use fantastic_kernel::refusal as rf;
 use serde_json::{json, Map, Value};
@@ -218,12 +218,9 @@ fn read(
     root: &Result<PathBuf, String>,
     a: &verbs::Read,
 ) -> Value {
-    let path = match rel_path("read", "path", a.path.as_deref().unwrap_or("")) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-    let off = a.offset.unwrap_or(0) as usize;
-    let limit = a.limit.unwrap_or(READ_LIMIT) as usize;
+    let path = a.path.as_deref().unwrap_or_default();
+    let off = a.offset as usize;
+    let limit = a.limit as usize;
     let root = match text_gate("read", root, meta, path, false, false) {
         Ok(r) => r,
         Err(e) => return e,
@@ -282,10 +279,7 @@ async fn write(
     blob: Option<&[u8]>,
     readonly: bool,
 ) -> Value {
-    let path = match rel_path("write", "path", a.path.as_deref().unwrap_or("")) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
+    let path = a.path.as_deref().unwrap_or_default();
     let root = match text_gate("write", root, meta, path, true, readonly) {
         Ok(r) => r,
         Err(e) => return e,
@@ -321,10 +315,7 @@ async fn append(
     blob: Option<&[u8]>,
     readonly: bool,
 ) -> Value {
-    let path = match rel_path("append", "path", &a.path) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
+    let path = a.path.as_str();
     let root = match text_gate("append", root, meta, path, true, readonly) {
         Ok(r) => r,
         Err(e) => return e,
@@ -597,7 +588,7 @@ async fn edit(
         bridge,
         root,
         plan,
-        a.dry_run.unwrap_or(false),
+        a.dry_run,
     )
 }
 
@@ -709,10 +700,7 @@ async fn undo(
     a: &verbs::Undo,
     readonly: bool,
 ) -> Value {
-    let path = match rel_path("undo", "path", &a.path) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
+    let path = a.path.as_str();
     let root = match text_gate("undo", root, meta, path, true, readonly) {
         Ok(r) => r,
         Err(e) => return e,

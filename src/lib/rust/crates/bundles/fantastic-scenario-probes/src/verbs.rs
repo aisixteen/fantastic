@@ -161,9 +161,9 @@ pub mod oracle {
         /// The question; every word of three letters or more is a keyword.
         #[schemars(length(min = 1), regex(pattern = "\\S"))]
         pub question: String,
-        /// How many lines at most, 1 or more; above 20 is clamped to 20.
+        /// How many lines at most.
         #[serde(default = "six")]
-        #[schemars(range(min = 1))]
+        #[schemars(range(min = 1, max = 20))]
         pub limit: i64,
     }
 

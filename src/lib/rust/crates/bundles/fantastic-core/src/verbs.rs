@@ -12,6 +12,11 @@ use serde_json::{Map, Value};
 #[serde(deny_unknown_fields)]
 pub struct Boot {}
 
+/// Land the record writer before the kernel stops; sent by the kernel at shutdown.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Shutdown {}
+
 /// Read this loader's subtree from disk → {records}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -76,8 +81,8 @@ pub struct LoadBlob {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReloadBundle {
-    /// A folder under `.fantastic/bundles/`.
-    #[schemars(length(min = 1))]
+    /// A folder under `.fantastic/bundles/`: letters, digits, `_` and `-`, starting with a letter or `_`.
+    #[schemars(regex(pattern = r"^[A-Za-z_][A-Za-z0-9_-]*$"))]
     pub name: String,
 }
 
@@ -85,8 +90,8 @@ pub struct ReloadBundle {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadBundles {
-    /// One folder only; absent, all of them.
-    #[schemars(length(min = 1))]
+    /// One folder only (letters, digits, `_` and `-`, starting with a letter or `_`); absent, all of them.
+    #[schemars(regex(pattern = r"^[A-Za-z_][A-Za-z0-9_-]*$"))]
     pub name: Option<String>,
 }
 
@@ -95,13 +100,16 @@ pub struct ReadBundles {
 #[serde(deny_unknown_fields)]
 pub struct ExportSubtree {
     /// The agent whose subtree is written.
+    #[schemars(length(min = 1))]
     pub agent_id: String,
-    /// A new or empty folder, relative to the running dir (no `..`).
+    /// A new or empty folder, relative to the running dir (no `..` segment).
+    #[schemars(length(min = 1), regex(pattern = r"^/*(?:(?:\.\.[^/]+|\.[^/.][^/]*|[^/.][^/]*|\.)/+)*(?:\.\.[^/]+|\.[^/.][^/]*|[^/.][^/]*|\.)?$"))]
     pub path: String,
 }
 
 fantastic_kernel::verbs! {
     "boot" => Boot,
+    "shutdown" => Shutdown,
     "load_tree" => LoadTree,
     "persist_record" => PersistRecord,
     "forget_record" => ForgetRecord,

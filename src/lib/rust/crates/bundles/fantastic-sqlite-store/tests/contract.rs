@@ -178,13 +178,14 @@ fn alpha(cases: &mut Value) {
             }
         }
     }
-    // zero means no limit, as numbers
+    // a limit or width below 1 is refused by name
     scenarios.push(json!({
-        "name": "a-zero-limit-is-no-limit-as-numbers",
+        "name": "a-zero-limit-is-refused-by-the-declared-minimum",
         "steps": [
             {"as": "alice", "send": {"type": "append", "rows": [{"id": 1, "kind": "msg", "content": "x one"}, {"id": 2, "kind": "msg", "content": "x two"}]}, "expect": {"ids": [1, 2]}},
-            {"as": "alice", "send": {"type": "read", "limit": 0}, "expect": {"total": 2, "next": null}},
-            {"as": "alice", "send": {"type": "search", "query": "x", "limit": 0, "width": 0}, "expect": {"total": 2, "truncated": false}},
+            {"as": "alice", "send": {"type": "read", "limit": 0}, "expect": {"reason": "bad_arg", "arg": "limit"}},
+            {"as": "alice", "send": {"type": "search", "query": "x", "limit": 0}, "expect": {"reason": "bad_arg", "arg": "limit"}},
+            {"as": "alice", "send": {"type": "search", "query": "x", "width": 0}, "expect": {"reason": "bad_arg", "arg": "width"}},
             {"as": "alice", "send": {"type": "read", "limit": "0"}, "expect": {"reason": "bad_arg", "arg": "limit"}},
             {"as": "alice", "send": {"type": "read", "ids": ["2"]}, "expect": {"reason": "bad_arg"}}
         ]

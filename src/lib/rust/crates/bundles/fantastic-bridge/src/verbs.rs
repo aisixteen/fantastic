@@ -13,6 +13,11 @@ use crate::record::Role;
 #[serde(deny_unknown_fields)]
 pub struct Boot {}
 
+/// Release the transport before the kernel stops; sent by the kernel at shutdown.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Shutdown {}
+
 /// Tear the transport down and boot again: the manual redial. A `ws` leg whose link dropped redials its known address by itself, with a backoff, and keeps its watches; `bridge_down` then `bridge_up` mark the drop and the return.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -156,9 +161,10 @@ impl CallPayload {
 
 /// The verbs of a `ws_bridge`.
 pub mod ws {
-    use super::{Boot, Forward, Reconnect, UnwatchRemote, WatchRemote};
+    use super::{Boot, Forward, Reconnect, Shutdown, UnwatchRemote, WatchRemote};
     fantastic_kernel::verbs! {
         "boot" => Boot,
+        "shutdown" => Shutdown,
         "reconnect" => Reconnect,
         "forward" => Forward,
         "watch_remote" => WatchRemote,
@@ -169,11 +175,12 @@ pub mod ws {
 /// The verbs of a `relay_connector`: the bridge's, and the relay directory's.
 pub mod relay {
     use super::{
-        Boot, Forward, ListPeers, Reconnect, SetIdentity, UnwatchDirectory, UnwatchRemote,
-        WatchDirectory, WatchRemote,
+        Boot, Forward, ListPeers, Reconnect, SetIdentity, Shutdown, UnwatchDirectory,
+        UnwatchRemote, WatchDirectory, WatchRemote,
     };
     fantastic_kernel::verbs! {
         "boot" => Boot,
+        "shutdown" => Shutdown,
         "reconnect" => Reconnect,
         "forward" => Forward,
         "watch_remote" => WatchRemote,

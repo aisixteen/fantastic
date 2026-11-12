@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use fancy_regex::Regex;
 use fantastic_bundle::py_repr_value;
-use fantastic_kernel::refusal::{bad, refusal, with, MISSING_ARG, NOT_FOUND};
+use fantastic_kernel::refusal::{bad, refusal, with, NOT_FOUND};
 use fantastic_kernel::{AgentId, Item, Kernel, TaskId};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
@@ -59,7 +59,7 @@ struct Mon {
     matcher: Option<Regex>,
     /// As the caller wrote it (an int stays an int), echoed by `monitor`/`monitors`.
     every: Value,
-    tail: i64,
+    tail: u64,
     label: Option<String>,
     tx: mpsc::UnboundedSender<Msg>,
     carry: String,
@@ -402,17 +402,8 @@ pub(crate) async fn monitor_reply(
         },
     };
     let every = a.every.as_ref().and_then(serde_json::Number::as_f64);
-    if matcher.is_none() && every.is_none() {
-        let mut r = refusal(
-            MISSING_ARG,
-            "monitor: every required — without `match` every line counts, so name the \
-             window (`every`, seconds) its deliveries are gathered in",
-        );
-        with(&mut r, "arg", json!("every"));
-        return r;
-    }
     let tail = a.tail;
-    let label = a.label.clone().filter(|l| !l.is_empty());
+    let label = a.label.clone();
     let (tx, rx) = mpsc::unbounded_channel();
     let (id_tx, id_rx) = oneshot::channel();
     let cfg = Cfg {
@@ -420,7 +411,7 @@ pub(crate) async fn monitor_reply(
         job_id,
         notify: notify.clone(),
         every,
-        tail: usize::try_from(tail).unwrap_or(usize::MAX),
+        tail: tail as usize,
         label: label.clone(),
         caller: fantastic_kernel::send::current_origin().map(|a| a.0),
         call: fantastic_kernel::current_task().map(|t| t.get()),

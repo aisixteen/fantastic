@@ -11,6 +11,11 @@ use serde_json::{Map, Value};
 #[serde(deny_unknown_fields)]
 pub struct Boot {}
 
+/// Stop the tick loop before the kernel stops; sent by the kernel at shutdown.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Shutdown {}
+
 /// Add a recurring call: every fire runs AS THE SCHEDULER, so it reaches what the scheduler's can_call grants. Persisted THROUGH the loader; refused when no store is wired. Returns {schedule_id, schedule}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -105,9 +110,9 @@ pub struct TickNow {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct History {
-    /// How many of the newest fires, at most 500 (above 500 is clamped to 500).
+    /// How many of the newest fires.
     #[serde(default = "hundred")]
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 1, max = 500))]
     pub limit: u64,
     /// Keep only this schedule's fires.
     #[schemars(length(min = 1))]
@@ -120,6 +125,7 @@ fn hundred() -> u64 {
 
 fantastic_kernel::verbs! {
     "boot" => Boot,
+    "shutdown" => Shutdown,
     "schedule" => Schedule,
     "unschedule" => Unschedule,
     "list" => List,

@@ -14,7 +14,6 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use fantastic_bundle::{py_repr_value, py_str};
 use fantastic_kernel::refusal::{bad, refusal, with, NOT_FOUND, TRANSPORT_ERROR};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
@@ -233,9 +232,9 @@ fn pty_job(verb: &str, owner: &AgentId, jid: &JobRef) -> Result<Arc<Pty>, Value>
     if !jobs::alive(job) || pty.lock().eof {
         let mut v = refusal(
             NOT_FOUND,
-            format!("exec_bridge: job {} has ended", py_repr_value(&jid.raw)),
+            format!("exec_bridge: job {} has ended", jid.id.0),
         );
-        with(&mut v, "job_id", jid.raw.clone());
+        with(&mut v, "job_id", json!(jid.id.0));
         return Err(v);
     }
     Ok(pty)
@@ -353,9 +352,9 @@ pub fn output_reply(owner: &AgentId, a: &verbs::Output) -> Value {
             text = text[start..].to_string();
         }
     }
-    let shown = py_str(&jid.raw);
+    let shown = jid.id.0;
     json!({
-        "job_id": jid.raw,
+        "job_id": jid.id.0,
         "output": text,
         "origin": format!("{owner} output {{job_id: {shown}}} — the ring NOW; re-send, it moves"),
     })

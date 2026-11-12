@@ -165,10 +165,9 @@ fn spawn(
     Ok(Spawned { child, ctrl })
 }
 
-/// Stringify an env value exactly as python's `str(v)` does — a string as itself,
-/// everything else through CPython's repr (`True`, not `true`).
+/// An env value: the record declares every one a string.
 fn value_to_env(v: &Value) -> String {
-    fantastic_bundle::py_str(v)
+    v.as_str().unwrap_or_default().to_string()
 }
 
 /// The number the child is told to use (`FANTASTIC_CTRL_FD`): the control end's

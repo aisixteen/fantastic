@@ -8,15 +8,13 @@ use crate::jobs::{self, Job};
 use crate::verbs::{self, Stream};
 use crate::JobRef;
 use fancy_regex::Regex;
-use fantastic_bundle::{py_repr, py_splitlines, py_str};
+use fantastic_bundle::{py_repr, py_splitlines};
 use fantastic_kernel::refusal::bad;
 use fantastic_kernel::AgentId;
 use serde_json::{json, Value};
 
 /// A pipe job's live line ring, in bytes — the same bound as the PTY ring.
 pub const LINE_RING: usize = 256 * 1024;
-/// The most lines one `tail` / `grep` reply carries.
-pub const MAX_LINES: i64 = 500;
 
 /// Append one printed line to a pipe job's ring, dropping the oldest past
 /// [`LINE_RING`]. Python `_line_ring_add`.
@@ -59,8 +57,8 @@ fn row(r: &(u64, String, String)) -> Value {
 }
 
 /// `tail {job_id, lines, stream}` — the last lines a job has printed so far.
-pub fn tail_reply(owner: &AgentId, jid: &JobRef, lines: i64, stream: Stream) -> Value {
-    let n = usize::try_from(lines).unwrap_or(0);
+pub fn tail_reply(owner: &AgentId, jid: &JobRef, lines: u64, stream: Stream) -> Value {
+    let n = lines as usize;
     let stream = stream.as_str();
     let g = jobs::jobs();
     let Some(job) = jid.find(&g, owner) else {
@@ -72,9 +70,9 @@ pub fn tail_reply(owner: &AgentId, jid: &JobRef, lines: i64, stream: Stream) -> 
     } else {
         job.lines
     };
-    let shown = py_str(&jid.raw);
+    let shown = jid.id.0;
     json!({
-        "job_id": jid.raw,
+        "job_id": jid.id.0,
         "status": job.status,
         "lines": rows[rows.len().saturating_sub(n)..].iter().map(row).collect::<Vec<_>>(),
         "printed": printed,
@@ -92,7 +90,7 @@ pub fn grep_reply(owner: &AgentId, a: &verbs::Grep) -> Value {
         Ok(r) => r,
         Err(e) => return bad("grep", "match", &format!("a valid regex ({e})")),
     };
-    let n = usize::try_from(a.lines).unwrap_or(0);
+    let n = a.lines as usize;
     let stream = a.stream.as_str();
     let g = jobs::jobs();
     let Some(job) = jid.find(&g, owner) else {
@@ -103,9 +101,9 @@ pub fn grep_reply(owner: &AgentId, a: &verbs::Grep) -> Value {
         .iter()
         .filter(|r| rx.is_match(&r.2).unwrap_or(false))
         .collect();
-    let shown = py_str(&jid.raw);
+    let shown = jid.id.0;
     json!({
-        "job_id": jid.raw,
+        "job_id": jid.id.0,
         "status": job.status,
         "matches": hits[hits.len().saturating_sub(n)..].iter().map(|r| row(r)).collect::<Vec<_>>(),
         "total": hits.len(),

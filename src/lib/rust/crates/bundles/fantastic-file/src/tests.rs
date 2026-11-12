@@ -283,12 +283,11 @@ fn tilde_root_is_literal_not_home() {
 #[test]
 fn gate_seals_by_default_and_opens_with_allow_all() {
     let id = AgentId::from("fb");
-    // No ingress_rule ⇒ SEALED: every verb but `reflect` denied — `boot` too.
+    // No ingress_rule ⇒ SEALED: every verb but `reflect` denied.
     let bare = Map::new();
     assert!(gate(&bare, &id, "read_stream").is_some());
     assert!(gate(&bare, &id, "write_stream").is_some());
     assert!(gate(&bare, &id, "list").is_some());
-    assert!(gate(&bare, &id, "boot").is_some());
     let denied = gate(&bare, &id, "list").unwrap();
     assert_eq!(denied["reason"], "unauthorized");
     // ingress_rule=allow_all_ingress ⇒ OPEN.
@@ -296,7 +295,6 @@ fn gate_seals_by_default_and_opens_with_allow_all() {
     open.insert("ingress_rule".into(), json!("allow_all_ingress"));
     assert!(gate(&open, &id, "read_stream").is_none());
     assert!(gate(&open, &id, "write_stream").is_none());
-    assert!(gate(&open, &id, "boot").is_none());
 }
 
 // ─── kernel-driven ───────────────────────────────────────────────────
@@ -615,108 +613,68 @@ fn os_error_text_is_python_oserror_str() {
     );
 }
 
+/// The refusal the agent's entry gives a call (`Err`), or a panic when it passes.
+fn entry_refuses(payload: &Value) -> Value {
+    match <verbs::Call as fantastic_kernel::verbs::Parse>::parse("fb", payload, &[]) {
+        Err(refused) => refused,
+        Ok(routed) => panic!("{payload} was accepted: {routed:?}"),
+    }
+}
+
 #[test]
-fn empty_path_delete_rename_mkdir_are_refused() {
+fn empty_or_absent_path_delete_rename_mkdir_are_refused_by_the_entry() {
+    for payload in [
+        json!({"type": "delete", "path": "", "recursive": true}),
+        json!({"type": "delete", "recursive": true}),
+        json!({"type": "rename", "old_path": "", "new_path": "x"}),
+        json!({"type": "rename", "old_path": "a", "new_path": ""}),
+        json!({"type": "mkdir", "path": ""}),
+        json!({"type": "mkdir"}),
+    ] {
+        let r = entry_refuses(&payload);
+        assert_eq!(r["reason"], "missing_arg", "{payload} → {r}");
+    }
+}
+
+#[test]
+fn the_root_itself_is_no_operand_of_delete_rename_mkdir() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = served(&tmp);
     std::fs::write(root.join("keep.txt"), b"k").unwrap();
     std::fs::create_dir_all(root.join("a")).unwrap();
     let r = at(&root);
-    for (payload, arg, reason) in [
-        (
-            json!({"path": "", "recursive": true}),
-            "path",
-            "missing_arg",
-        ),
-        (json!({"recursive": true}), "path", "missing_arg"),
-        (
-            json!({"path": ".", "recursive": true}),
-            "path",
-            "missing_arg",
-        ),
-        (
-            json!({"path": "a/..", "recursive": true}),
-            "path",
-            "bad_arg",
-        ),
-    ] {
-        let Ok(a) = serde_json::from_value::<verbs::Delete>(payload.clone()) else {
-            // no `path` at all: the entry refuses it before the verb runs
-            assert_eq!(arg, "path");
-            continue;
-        };
-        let reply = delete_reply(&r, &a, false);
-        assert_eq!(reply["reason"], reason, "{payload} → {reply}");
-        assert_eq!(reply["arg"], arg);
+    for path in [".", "a/.."] {
+        let reply = delete_reply(&r, &args(json!({"path": path, "recursive": true})), false);
+        assert_eq!(reply["reason"], "bad_arg", "{path} → {reply}");
+        assert_eq!(reply["arg"], "path");
+        let reply = mkdir_reply(&r, &args(json!({"path": path})), false);
+        assert_eq!(reply["reason"], "bad_arg", "{path} → {reply}");
     }
-    for (payload, arg, reason) in [
-        (
-            json!({"old_path": "", "new_path": "x"}),
-            "old_path",
-            "missing_arg",
-        ),
-        (
-            json!({"old_path": "a", "new_path": ""}),
-            "new_path",
-            "missing_arg",
-        ),
-        (
-            json!({"old_path": ".", "new_path": "x"}),
-            "old_path",
-            "missing_arg",
-        ),
-        (
-            json!({"old_path": "a", "new_path": "a/.."}),
-            "new_path",
-            "bad_arg",
-        ),
+    for (payload, arg) in [
+        (json!({"old_path": ".", "new_path": "x"}), "old_path"),
+        (json!({"old_path": "a", "new_path": "a/.."}), "new_path"),
     ] {
         let reply = rename_reply(&r, &args(payload.clone()), false);
-        assert_eq!(reply["reason"], reason, "{payload} → {reply}");
+        assert_eq!(reply["reason"], "bad_arg", "{payload} → {reply}");
         assert_eq!(reply["arg"], arg);
-    }
-    for (payload, reason) in [
-        (json!({"path": ""}), "missing_arg"),
-        (json!({}), "missing_arg"),
-        (json!({"path": "."}), "missing_arg"),
-        (json!({"path": "a/.."}), "bad_arg"),
-    ] {
-        let Ok(a) = serde_json::from_value::<verbs::Mkdir>(payload.clone()) else {
-            continue;
-        };
-        let reply = mkdir_reply(&r, &a, false);
-        assert_eq!(reply["reason"], reason, "{payload} → {reply}");
-        assert_eq!(reply["arg"], "path");
     }
     assert!(root.join("keep.txt").exists() && root.join("a").is_dir());
 }
 
 #[test]
 fn absolute_path_is_refused_with_bad_arg() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = served(&tmp);
-    std::fs::write(root.join("README.md"), b"r").unwrap();
-    let r = at(&root);
-    let replies = [
-        read_stream_reply(&fb(), &r, &args(json!({"path": "/README.md"}))).0,
-        write_stream_reply(&r, &args(json!({"path": "/x"})), Some(b"b"), false),
-        list_reply(&fb(), &r, &args(json!({"path": "/"}))),
-        delete_reply(&r, &args(json!({"path": "/README.md"})), false),
-        mkdir_reply(&r, &args(json!({"path": "/x"})), false),
-        rename_reply(
-            &r,
-            &args(json!({"old_path": "/README.md", "new_path": "y"})),
-            false,
-        ),
-    ];
-    for reply in replies {
-        assert_eq!(reply["reason"], "bad_arg", "{reply}");
-        assert!(
-            reply["error"].as_str().unwrap().contains("root-relative"),
-            "{reply}"
-        );
+    for payload in [
+        json!({"type": "read_stream", "path": "/README.md"}),
+        json!({"type": "write_stream", "path": "/x"}),
+        json!({"type": "list", "path": "/"}),
+        json!({"type": "delete", "path": "/README.md"}),
+        json!({"type": "mkdir", "path": "/x"}),
+        json!({"type": "rename", "old_path": "/README.md", "new_path": "y"}),
+        json!({"type": "open_view", "kind": "file", "path": "/etc"}),
+    ] {
+        let reply = entry_refuses(&payload);
+        assert_eq!(reply["reason"], "bad_arg", "{payload} → {reply}");
     }
-    assert_eq!(std::fs::read(root.join("README.md")).unwrap(), b"r");
 }
 
 #[test]
@@ -959,10 +917,8 @@ async fn reflect_key_order_matches_python() {
     assert_eq!(r["egress_rule"], "silent_egress");
     assert_eq!(r["sealed"], false);
     assert_eq!(
-        r["sentence"],
-        "Filesystem edge of the io family — sealed by default, running-dir only."
+        r["sentence"], crate::MAN
     );
-    assert_eq!(call(&kernel, json!({"type": "boot"})).await, Value::Null);
 }
 
 #[test]
@@ -976,7 +932,6 @@ fn verbs_are_declared_in_order() {
     assert_eq!(
         names,
         [
-            "boot",
             "list",
             "read",
             "write",
@@ -1087,22 +1042,19 @@ async fn unknown_verb_on_sealed_bridge_is_unhandled() {
         r["error"]
             .as_str()
             .unwrap()
-            .starts_with("unknown verb 'frobnicate'; fb answers: boot, list, read, write,"),
+            .starts_with("unknown verb 'frobnicate'; fb answers: list, read, write,"),
         "{r}"
     );
 }
 
 #[tokio::test]
-async fn sealed_boot_is_denied_and_shutdown_is_unhandled() {
+async fn a_sealed_leg_denies_every_verb_but_reflect() {
     // The gate exemption covers `reflect` only.
     let tmp = tempfile::TempDir::new().unwrap();
     served(&tmp);
     let kernel = mk_kernel_with(&tmp, json!({})).await;
-    let r = call(&kernel, json!({"type": "boot"})).await;
+    let r = call(&kernel, json!({"type": "list"})).await;
     assert_eq!(r["reason"], "unauthorized", "{r}");
-    // `shutdown` is not a verb of this bundle: the shared entry answers it itself
-    let r = call(&kernel, json!({"type": "shutdown"})).await;
-    assert_eq!(r, Value::Null, "{r}");
     // reflect still answers on a sealed leg.
     let r = call(&kernel, json!({"type": "reflect"})).await;
     assert_eq!(r["sealed"], true, "{r}");
@@ -1193,26 +1145,31 @@ async fn text_write_stream_with_a_json_bytes_is_an_unknown_argument() {
 }
 
 #[tokio::test]
-async fn pump_falsy_args_fall_back_like_python() {
-    // `payload.get(k) or <fallback>` on every pump argument.
+async fn pump_ends_default_to_this_bridge() {
     let tmp = tempfile::TempDir::new().unwrap();
     let served = served(&tmp);
     let kernel = mk_kernel(&tmp).await;
     std::fs::write(served.join("src.txt"), b"hello pump").unwrap();
-    // Every falsy argument falls back: source/sink to THIS agent, `sink_path` to
-    // `source_path` — a pump onto its own source.
+    // A chunk floor of 1, and an empty end is no end: the entry refuses both.
     let r = call(
         &kernel,
-        json!({"type": "pump", "source": "", "sink": null, "source_path": "src.txt",
-               "sink_path": "", "chunk": 0}),
+        json!({"type": "pump", "source_path": "src.txt", "sink_path": "copy.txt", "chunk": 0}),
     )
     .await;
     assert_eq!(r["reason"], "bad_arg", "a chunk floor of 1: {r}");
+    let r = call(
+        &kernel,
+        json!({"type": "pump", "source": "", "source_path": "src.txt", "sink_path": "copy.txt"}),
+    )
+    .await;
+    assert_eq!(r["reason"], "bad_arg", "an empty end: {r}");
+    // `sink_path` left out is `source_path`: a pump onto its own source.
+    let r = call(&kernel, json!({"type": "pump", "source_path": "src.txt"})).await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
     // A real copy, chunk by chunk, to another path.
     let r = call(
         &kernel,
-        json!({"type": "pump", "source": "", "sink": null, "source_path": "src.txt",
-               "sink_path": "copy.txt", "chunk": 4}),
+        json!({"type": "pump", "source_path": "src.txt", "sink_path": "copy.txt", "chunk": 4}),
     )
     .await;
     assert_eq!(
@@ -1702,8 +1659,6 @@ async fn a_binary_verb_the_leg_does_not_own_takes_the_text_path() {
     let v: Value = serde_json::from_str(&bin).unwrap();
     assert_eq!((v["reason"].as_str(), v["verb"].as_str()), (Some("unhandled"), Some("frob")));
     assert_eq!(body, None);
-    let (txt, bin, body) = both(&kernel, json!({"type": "boot"}), b"x").await;
-    assert_eq!((txt.as_str(), bin.as_str(), body), ("null", "null", None));
 }
 
 #[tokio::test]
