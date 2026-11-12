@@ -78,19 +78,6 @@ fn the_verbs_are_declared_in_order_each_with_what_it_does() {
     assert_eq!(token.schema()["required"], json!(["text"]));
 }
 
-/// The vendored cheatsheet is python's `cli/help.md`, byte for byte.
-/// The binary prints THIS file, so a drift here is a drift in `fantastic --help`.
-#[test]
-fn help_md_is_pythons_verbatim() {
-    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(4)
-        .expect("repo's src/lib above the crate")
-        .join("python/bundled_agents/cli/src/cli/help.md");
-    assert_eq!(HELP, std::fs::read_to_string(&py).expect("python help.md"));
-    assert_eq!(HELP.len(), 1545, "python's help.md is 1545 bytes");
-}
-
 #[tokio::test]
 async fn an_unknown_verb_is_refused_by_the_agents_own_entry() {
     let reply = dispatch(json!({"type": "nonsense_verb"})).await;

@@ -2957,7 +2957,8 @@ async fn an_image_item_without_bytes_or_media_type_is_refused() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    assert_eq!(r["reason"], json!("missing_arg"), "{r}");
+    assert_eq!(r["arg"], json!("image.media_type"), "{r}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -250,8 +250,8 @@ fn one_shot_dispatch_returns_json_reply() {
 /// crate source so a test can compare without shelling out twice.
 const HELP_MD: &str = include_str!("../../bundles/fantastic-cli-bundle/src/help.md");
 
-/// `help` / `-h` / `--help` as the FIRST word prints python's
-/// `cli/help.md` rstripped plus one `\n`, exits 0, and seeds the workdir like
+/// `help` / `-h` / `--help` as the FIRST word prints the
+/// crate's `help.md` rstripped plus one `\n`, exits 0, and seeds the workdir like
 /// every other mode. Later words are ignored.
 #[test]
 fn help_prints_cli_help_md_verbatim() {
@@ -279,7 +279,6 @@ fn help_prints_cli_help_md_verbatim() {
             expected,
             "{spelling:?} did not print help.md verbatim"
         );
-        assert_eq!(out.stdout.len(), 1545, "python's help.md is 1545 bytes");
         assert!(
             !tmp.path().join(".fantastic").exists(),
             "{spelling:?} takes no lock, so it writes nothing"
@@ -933,7 +932,7 @@ fn a_non_finite_kv_argument_round_trips_instead_of_panicking() {
             "kernel",
             "create_agent",
             "parent_id=kernel",
-            "handler_module=file_bridge.tools",
+            "handler_module=core.tools",
             "id=coerced",
             "big2=123456789012345678901234567890",
             "inf=inf",
@@ -1269,7 +1268,7 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
     // a required field has no default; the counts a record leaves out are read
     // from the server before a turn — no default either
     assert!(required.iter().all(|n| fields[n].get("default").is_none()));
-    for n in ["model", "max_tokens", "context_window", "kv_slots"] {
+    for n in ["model", "max_tokens", "kv_slots"] {
         assert!(fields[n].get("default").is_none(), "{n}");
         assert!(
             fields[n]["hint"]
@@ -1278,12 +1277,10 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
             "{n}"
         );
     }
-    // the defaulted fields carry THE BACKEND'S OWN values
-    assert_eq!(fields["temperature"]["default"], serde_json::json!(0.2));
-    assert_eq!(
-        fields["thinking_token_budget"]["default"],
-        serde_json::json!(16000)
-    );
+    // the backend declares no value for a sampling knob it leaves out
+    for n in ["temperature", "thinking_token_budget", "context_window"] {
+        assert!(fields[n].get("default").is_none(), "{n}");
+    }
     assert_eq!(
         fields["kv_overflow"]["enum"],
         serde_json::json!(["evict", "reject"])
@@ -1293,10 +1290,7 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
         serde_json::json!(["low", "medium", "xhigh"])
     );
     // the key: optional where a server may be keyless, required where it never is
-    assert_eq!(
-        fields["credentials"]["type"],
-        serde_json::json!("credentials")
-    );
+    assert_eq!(fields["credentials"]["type"], serde_json::json!("object"));
     assert_eq!(fields["credentials"]["required"], serde_json::json!(false));
     let sch = &by["responses_backend"]["schema"];
     assert!(sch.get("key_var").is_none());
@@ -1307,14 +1301,23 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
         .find(|f| f["name"] == "credentials")
         .expect("responses_backend: no credentials field");
     assert_eq!(cred["required"], serde_json::json!(true));
-    // the credential store is an installed bundle, and publishes no schema
+    // every installed bundle publishes the record it declares
     assert_eq!(
         by["credential_store"]["handler_module"],
         serde_json::json!("credential_store.tools")
     );
-    assert!(by["credential_store"].get("schema").is_none());
-    // a bundle that is not a backend publishes none
-    assert!(by["file_bridge"].get("schema").is_none());
+    let store_fields: Vec<&str> = by["credential_store"]["schema"]["fields"]
+        .as_array()
+        .expect("credential_store declares a record")
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(store_fields, ["backend", "file", "keychain_namespace", "refs"]);
+    let bridge_fields = by["file_bridge"]["schema"]["fields"]
+        .as_array()
+        .expect("file_bridge declares a record");
+    assert!(bridge_fields.iter().any(|f| f["name"] == "root"));
+    assert_eq!(by["file_bridge"]["schema"]["open"], serde_json::json!(false));
 }
 
 /// The on-device backend is in the REAL catalog of this binary, in every tier,
@@ -1357,9 +1360,8 @@ fn the_catalog_carries_the_on_device_backend() {
             "post_system_prompt"
         ]
     );
-    // the on-device model's own window — 0 on a Mac with no model (a CI VM)
-    let window = fields[3]["default"].as_i64().expect("an int window");
-    assert!(window >= 0, "{window}");
+    // the window is the model's own, read at use: the record declares no default
+    assert!(fields[3].get("default").is_none(), "{}", fields[3]);
 }
 
 /// Python `test_the_schema_is_what_the_write_enforces`: ONE
@@ -1380,12 +1382,9 @@ fn the_schema_is_what_the_write_enforces() {
         one_shot_json(tmp.path(), &args)
     };
     let r = create(&["id=a1"]);
-    assert_eq!(r["reason"], "invalid_meta", "{r}");
+    assert_eq!(r["reason"], "missing_arg", "{r}");
     assert!(
-        r["error"]
-            .as_str()
-            .unwrap()
-            .contains("missing: endpoint, credentials, memory_store_id"),
+        r["error"].as_str().unwrap().contains("'credentials'"),
         "{r}"
     );
     let r = create(&[
@@ -1396,7 +1395,7 @@ fn the_schema_is_what_the_write_enforces() {
         r#"credentials={"store": "creds", "ref": "claude"}"#,
         "context_strategy=bogus",
     ]);
-    assert_eq!(r["reason"], "invalid_meta", "{r}");
+    assert_eq!(r["reason"], "bad_arg", "{r}");
     assert!(
         r["error"].as_str().unwrap().contains("context_strategy"),
         "{r}"
@@ -1408,12 +1407,9 @@ fn the_schema_is_what_the_write_enforces() {
         "memory_store_id=memory",
         r#"credentials={"store": "creds"}"#,
     ]);
-    assert_eq!(r["reason"], "invalid_meta", "{r}");
+    assert_eq!(r["reason"], "missing_arg", "{r}");
     assert!(
-        r["error"]
-            .as_str()
-            .unwrap()
-            .contains("credentials must be {store"),
+        r["error"].as_str().unwrap().contains("credentials.ref"),
         "{r}"
     );
     let r = create(&[

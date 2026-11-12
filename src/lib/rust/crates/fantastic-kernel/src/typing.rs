@@ -103,10 +103,23 @@ fn read_value(verb: &str, name: &str, schema: &Value, v: &Value) -> Result<Value
 }
 
 /// One `k=v` an OPERATOR typed, as the value the argument's schema declares: a JSON
-/// literal where it declares a list or an object, else the [`read`] text.
+/// literal where it declares a list or an object (or declares nothing: any), else the
+/// [`read`] text.
 fn operator_text(verb: &str, name: &str, schema: &Value, text: &str) -> Result<Value, Value> {
     let ks = kinds(schema);
     let wants = |k: &str| ks.contains(&k);
+    // An argument the schema leaves untyped (`any`) takes any value: an operator's JSON
+    // literal (object or list) is that value; anything else is the text as typed.
+    if ks.is_empty() && schema.is_object() {
+        let literal = (text.starts_with('{') && text.ends_with('}'))
+            || (text.starts_with('[') && text.ends_with(']'));
+        if literal {
+            if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                return Ok(parsed);
+            }
+        }
+        return Ok(Value::String(text.to_string()));
+    }
     if (wants("object") && !wants("string")) || (wants("array") && !wants("string")) {
         let parsed = serde_json::from_str::<Value>(text)
             .map_err(|_| crate::refusal::bad(verb, name, &ks.join(" or ")))?;
@@ -392,5 +405,16 @@ mod tests {
             operator_text("v", "a", &Value::Null, "42").unwrap(),
             json!("42")
         );
+        // undeclared stays text; declared-untyped (`any`) takes a JSON literal
+        assert_eq!(
+            operator_text("v", "a", &Value::Null, "{\"a\":1}").unwrap(),
+            json!("{\"a\":1}")
+        );
+        let any = json!({"description": "anything"});
+        assert_eq!(
+            operator_text("v", "a", &any, "{\"a\":1}").unwrap(),
+            json!({"a": 1})
+        );
+        assert_eq!(operator_text("v", "a", &any, "x{").unwrap(), json!("x{"));
     }
 }
