@@ -95,7 +95,7 @@ impl RecordDecl {
     pub fn get(&self, meta: &Map<String, Value>, field: &str) -> Option<Value> {
         let decl = self.schema().get("properties").and_then(|p| p.get(field));
         meta.get(field)
-            .filter(|v| !v.is_null() && decl.is_none_or(|d| matches_type(d, v)))
+            .filter(|v| decl.map_or(!v.is_null(), |d| matches_type(d, v)))
             .cloned()
             .or_else(|| {
                 decl.and_then(|f| f.get("default"))
@@ -1061,6 +1061,66 @@ fn described_object(schema: &Value) -> Option<&Value> {
         .find(|alt| is(alt))
 }
 
+/// The array part of a schema (itself, or the array alternative of an optional one).
+fn array_schema(schema: &Value) -> Option<&Value> {
+    let is = |s: &Value| match s.get("type") {
+        Some(Value::String(t)) => t == "array",
+        Some(Value::Array(ts)) => ts.iter().any(|t| t.as_str() == Some("array")),
+        _ => false,
+    };
+    if is(schema) {
+        return Some(schema);
+    }
+    ["anyOf", "oneOf"]
+        .iter()
+        .filter_map(|k| schema.get(*k).and_then(Value::as_array))
+        .flatten()
+        .find(|alt| is(alt))
+}
+
+/// The items of an array value, each checked at `path[i]`.
+fn check_items(name: &str, path: &str, schema: &Value, v: &Value, top: &Value) -> Result<(), Value> {
+    if let (Some(items), Value::Array(list)) =
+        (array_schema(schema).and_then(|a| a.get("items")), v)
+    {
+        for (i, x) in list.iter().enumerate() {
+            check_value(name, &format!("{path}[{i}]"), items, x, top)?;
+        }
+    }
+    Ok(())
+}
+
+/// One value against its schema, at `path`: a declared object is checked by its
+/// fields, an array item by item (`versions[0].branch`), anything else by its type.
+/// The refusal names the path of the part that failed.
+fn check_value(
+    name: &str,
+    path: &str,
+    schema: &Value,
+    v: &Value,
+    top: &Value,
+) -> Result<(), Value> {
+    if let (Some(obj), Value::Object(inner)) = (described_object(schema), v) {
+        return check_object(name, path, obj, inner, top);
+    }
+    check_items(name, path, schema, v, top)?;
+    if !matches_type(schema, v) {
+        return Err(refuse_arg(
+            name,
+            BAD_ARG,
+            path,
+            format!(
+                "argument {} must be {}, got {}",
+                fantastic_bundle::py_repr(path),
+                type_label(schema),
+                fantastic_bundle::py_type_name(v)
+            ),
+            top,
+        ));
+    }
+    Ok(())
+}
+
 /// One object against its schema: unknown → missing → wrongly typed, a nested
 /// object checked the same way under its dotted path (`record.id`). `top` is the
 /// verb's own schema, for the hint.
@@ -1084,22 +1144,7 @@ fn check_object(
         let known = props.is_some_and(|p| p.contains_key(k));
         // a MAP: a field not named is one entry, checked by the declared value shape
         if let (false, Some(value_schema)) = (known, map_value(schema)) {
-            if let (Some(obj), Value::Object(inner)) = (described_object(value_schema), v) {
-                check_object(name, &dotted(k), obj, inner, top)?;
-            } else if !matches_type(value_schema, v) {
-                return Err(refuse_arg(
-                    name,
-                    BAD_ARG,
-                    &dotted(k),
-                    format!(
-                        "argument {} must be {}, got {}",
-                        fantastic_bundle::py_repr(&dotted(k)),
-                        type_label(value_schema),
-                        fantastic_bundle::py_type_name(v)
-                    ),
-                    top,
-                ));
-            }
+            check_value(name, &dotted(k), value_schema, v, top)?;
             continue;
         }
         if !known && !open {
@@ -1151,24 +1196,7 @@ fn check_object(
     if let Some(props) = props {
         for (k, v) in raw {
             let Some(p) = props.get(k) else { continue };
-            if let (Some(obj), Value::Object(inner)) = (described_object(p), v) {
-                check_object(name, &dotted(k), obj, inner, top)?;
-                continue;
-            }
-            if !matches_type(p, v) {
-                return Err(refuse_arg(
-                    name,
-                    BAD_ARG,
-                    &dotted(k),
-                    format!(
-                        "argument {} must be {}, got {}",
-                        fantastic_bundle::py_repr(&dotted(k)),
-                        type_label(p),
-                        fantastic_bundle::py_type_name(v)
-                    ),
-                    top,
-                ));
-            }
+            check_value(name, &dotted(k), p, v, top)?;
         }
     }
     Ok(())
@@ -1322,14 +1350,11 @@ pub fn check_record(
         all.extend(args(os));
         all.iter().map(arg_text).collect::<Vec<_>>().join(", ")
     };
-    let mut mine = Map::new();
-    let mut theirs = Map::new();
-    for (k, v) in fields {
-        if cprops.is_some_and(|p| p.contains_key(k)) {
-            theirs.insert(k.clone(), v.clone());
-        } else if oprops.is_some_and(|p| p.contains_key(k)) || own.open {
-            mine.insert(k.clone(), v.clone());
-        } else {
+    for k in fields.keys() {
+        if !(cprops.is_some_and(|p| p.contains_key(k))
+            || oprops.is_some_and(|p| p.contains_key(k))
+            || own.open)
+        {
             let mut r = refusal_hint(
                 BAD_ARG,
                 format!(
@@ -1342,17 +1367,20 @@ pub fn check_record(
             return Err(r);
         }
     }
-    for (schema, part) in [(cs, theirs), (os, mine)] {
-        for (k, v) in &part {
+    // a field is judged by EVERY declaration that names it (the common record's and
+    // the bundle's own): a bundle may narrow what the common record allows
+    for schema in [cs, os] {
+        for (k, v) in fields {
             let Some(p) = schema.get("properties").and_then(|p| p.get(k)) else {
                 continue;
             };
-            // a field that is itself a declared object is checked the same way,
-            // by its own fields (`credentials.store`)
+            // a declared object is checked by its own fields (`credentials.store`),
+            // a list item by item (`versions[0].branch`)
             if let (Some(obj), Value::Object(inner)) = (described_object(p), v) {
                 check_object(verb, k, obj, inner, schema)?;
                 continue;
             }
+            check_items(verb, k, p, v, schema)?;
             if !matches_type(p, v) {
                 let mut r = refusal_hint(
                     BAD_ARG,
@@ -1374,8 +1402,7 @@ pub fn check_record(
         for schema in [cs, os] {
             if let Some(Value::Array(req)) = schema.get("required") {
                 for r in req.iter().filter_map(Value::as_str) {
-                    // a record field set to null is unset: it is not born with it
-                    if fields.get(r).map_or(true, Value::is_null) {
+                    if !fields.contains_key(r) {
                         let mut refused = refusal_hint(
                             MISSING_ARG,
                             format!(

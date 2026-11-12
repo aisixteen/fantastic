@@ -224,7 +224,7 @@ async fn open_refuses_a_relative_path_or_a_file_and_opens_nothing() {
     let before = t.call(json!({"type": "list"})).await;
     let r = t.call(json!({"type": "open", "paths": ["notes"]})).await;
     assert_eq!(r["reason"], json!("bad_arg"), "{r}");
-    assert_eq!(r["arg"], json!("paths"), "{r}");
+    assert_eq!(r["arg"], json!("paths[0]"), "{r}");
     assert!(r["error"].as_str().is_some_and(|e| e.contains("/^(?:/")), "{r}");
     t.os.set_resolve(
         &format!("{D}/w/file.txt"),
@@ -262,7 +262,8 @@ async fn open_refuses_a_relative_path_or_a_file_and_opens_nothing() {
     ] {
         let r = t.call(payload.clone()).await;
         assert_eq!(r["reason"], json!(reason), "{payload}: {r}");
-        assert_eq!(r["arg"], json!("paths"), "{payload}: {r}");
+        let at = if payload["paths"] == json!([7]) { "paths[0]" } else { "paths" };
+        assert_eq!(r["arg"], json!(at), "{payload}: {r}");
     }
     t.bundle.runner().settle().await;
     assert!(
@@ -701,7 +702,7 @@ async fn every_verb_is_checked_by_its_declaration() {
     // wrongly typed, never coerced
     for (p, arg) in [
         (json!({"type": "open", "paths": "/w/a"}), "paths"),
-        (json!({"type": "open", "paths": [3]}), "paths"),
+        (json!({"type": "open", "paths": [3]}), "paths[0]"),
         (json!({"type": "select_page", "index": "0"}), "index"),
         (json!({"type": "select_page", "index": -1}), "index"),
         (json!({"type": "select", "id": 3}), "id"),

@@ -261,7 +261,7 @@ fn default_stream_idle() -> Option<f64> {
 pub struct StreamClock {
     /// The read clock on the answer stream: seconds with no byte from the server (headers included) before the turn is judged stalled and ends with an error row. A bound BETWEEN bytes, never a widened send ceiling.
     #[schemars(range(min = 0.001), default = "default_stream_idle")]
-    pub stream_idle_seconds: Option<f64>,
+    pub stream_idle_seconds: f64,
 }
 
 /// The declaration of the stream clock, for a reader of it

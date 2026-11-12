@@ -1268,7 +1268,8 @@ async fn the_list_is_validated_at_write() {
         )
         .await;
         assert_eq!(r["reason"], "bad_arg", "{bad}: {r}");
-        assert_eq!(r["arg"], "allow", "{bad}: {r}");
+        let at = if bad.is_array() { "allow[0]" } else { "allow" };
+        assert_eq!(r["arg"], at, "{bad}: {r}");
     }
     let r = call_root(
         &kernel,

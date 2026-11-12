@@ -213,8 +213,8 @@
    },
    "expect_refusal": {
     "reason": "bad_arg",
-    "arg": "paths",
-    "error_contains": "argument 'paths' must be"
+    "arg": "paths[0]",
+    "error_contains": "argument 'paths[0]' must be"
    }
   },
   {

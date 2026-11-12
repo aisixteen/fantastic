@@ -88,8 +88,7 @@ async fn inbound_send_sends_the_batch_as_the_leg() {
     assert_eq!(r["outcomes"][0]["result"], json!({"inquiries": []}), "{r}");
     // an item is a declared shape too
     let r = op(&k, "mcp", json!({"type": "inbound_send", "items": [{"target": "kernel"}]})).await;
-    assert_eq!(why(&r), (Some("bad_arg"), None), "{r}");
-    assert!(r["error"].as_str().unwrap().starts_with("inbound_send: the arguments do not parse"), "{r}");
+    assert_eq!(why(&r), (Some("missing_arg"), Some("items[0].payload")), "{r}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

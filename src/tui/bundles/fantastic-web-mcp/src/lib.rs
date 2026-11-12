@@ -517,7 +517,7 @@ mod tests {
     fn send_refuses_an_item_whose_verb_is_not_in_payload_type() {
         let err = send_items(&json!({"items": [{"target": "files", "payload": {"verb": "read"}}]}))
             .unwrap_err();
-        assert_eq!(err, "send: the arguments do not parse (missing field `type`)");
+        assert_eq!(err, "send: missing argument 'items[0].payload.type'");
     }
 
     #[test]

@@ -326,11 +326,7 @@ async fn s_digit_string_refs_are_refused_as_not_row_ids(t: &mut T) {
     let rid = first["ids"][0].as_i64().unwrap();
     let r = t.append("alice", json!([{"id": 9, "kind": "fold", "content": "f", "refs": [rid.to_string()]}])).await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
-    assert_eq!(
-        r["error"],
-        format!("append: the arguments do not parse (invalid type: string \"{rid}\", expected i64)"),
-        "{r}"
-    );
+    assert_eq!(r["arg"], "rows[0].refs[0]", "{r}");
     let r = t.append("alice", json!([{"id": 9, "kind": "fold", "content": "f", "refs": [rid]}])).await;
     assert_eq!(r["appended"], 1, "{r}");
 }
@@ -354,7 +350,7 @@ async fn s_limits_and_ids_are_typed_integers(t: &mut T) {
     assert_eq!(r["matches"][0]["text"], json!("nee"));
     let r = t.call(json!({"type": "read", "ids": ["1"]}), Some("alice")).await;
     assert_eq!(r["reason"], json!("bad_arg"), "{r}");
-    assert_eq!(r["arg"], json!("ids"), "{r}");
+    assert_eq!(r["arg"], json!("ids[0]"), "{r}");
 }
 conform!(limits_and_ids_are_typed_integers, s_limits_and_ids_are_typed_integers);
 
@@ -384,14 +380,14 @@ async fn s_unknown_type_is_coded_unhandled_with_the_raw_verb(t: &mut T) {
 
 async fn s_arg_refusals_carry_error_reason_arg_in_that_order(t: &mut T) {
     t.append("alice", json!([{"id": 1, "content": "a"}])).await;
-    for (payload, why) in [
-        (json!({"type": "append", "rows": [{"id": "5"}]}), "invalid type: string \"5\", expected a nonzero u64"),
-        (json!({"type": "append", "rows": [{"id": 0}]}), "invalid value: integer `0`, expected a nonzero u64"),
-        (json!({"type": "append", "rows": [{"id": 7, "refs": ["x"]}]}), "invalid type: string \"x\", expected i64"),
+    for (payload, at) in [
+        (json!({"type": "append", "rows": [{"id": "5"}]}), "rows[0].id"),
+        (json!({"type": "append", "rows": [{"id": 0}]}), "rows[0].id"),
+        (json!({"type": "append", "rows": [{"id": 7, "refs": ["x"]}]}), "rows[0].refs[0]"),
     ] {
         let got = t.call(payload.clone(), Some("alice")).await;
         assert_eq!(got["reason"], "bad_arg", "{payload}: {got}");
-        assert_eq!(got["error"], format!("append: the arguments do not parse ({why})"), "{payload}: {got}");
+        assert_eq!(got["arg"], at, "{payload}: {got}");
     }
     for (payload, reason) in [
         (json!({"type": "append", "rows": []}), "bad_arg"),
@@ -401,7 +397,8 @@ async fn s_arg_refusals_carry_error_reason_arg_in_that_order(t: &mut T) {
     ] {
         let got = t.call(payload.clone(), Some("alice")).await;
         assert_eq!(got["reason"], json!(reason), "{payload}: {got}");
-        assert_eq!(got["arg"], json!("rows"), "{payload}: {got}");
+        let at = if payload["rows"] == json!([1]) { "rows[0]" } else { "rows" };
+        assert_eq!(got["arg"], json!(at), "{payload}: {got}");
     }
 }
 
