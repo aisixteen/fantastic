@@ -357,41 +357,35 @@ async fn forward_call(
     .await
 }
 
-/// The calls whose secret paths the CALLER's records can name before sending.
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum Marked {
-    /// A `forward` carrying the call to run on the far kernel.
-    Forward { payload: ForwardedCall },
-}
-
-/// The far call inside a `forward`: only a `set` carries secret fields.
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ForwardedCall {
-    /// A credential store's `set`.
-    Set { fields: Option<Value> },
-}
-
-/// The secret paths of a FORWARDED call: a `forward` of a `set` marks each
-/// `payload.fields.<name>` (a name that is empty or holds a dot marks the whole
-/// `payload.fields`, as the credential store's own `field_marks` does). The
-/// caller cannot know the far bundle before sending, so this is deliberate
-/// over-redaction in the CALLER's records for every forwarded `set`: the far
+/// The secret paths of a FORWARDED call: the forwarded payload is read through
+/// the credential store's declared `set` (the only call that carries secret
+/// fields), and each mark is placed under `payload.`. The caller cannot know the
+/// far bundle before sending, so this is deliberate over-redaction in the
+/// CALLER's records for every forwarded call that reads as a store `set`: the far
 /// kernel's own record is exact. A `get`'s reply marks come back on the reply
-/// frame instead.
-fn forward_payload_secret(payload: &Value) -> Vec<String> {
-    let Ok(Marked::Forward {
-        payload: ForwardedCall::Set { fields },
-    }) = serde_json::from_value::<Marked>(payload.clone())
-    else {
-        return Vec::new();
-    };
-    match fields {
-        Some(Value::Object(m)) if m.keys().all(|k| !k.is_empty() && !k.contains('.')) => {
-            m.keys().map(|k| format!("payload.fields.{k}")).collect()
-        }
-        Some(Value::Object(_)) => vec!["payload.fields".to_string()],
+/// frame instead. The call itself is read through the bridge's own declared
+/// `forward`.
+fn forward_marks(f: &verbs::Forward) -> Vec<String> {
+    fantastic_credential_store::set_marks(&Value::Object(f.payload.clone()))
+        .into_iter()
+        .map(|m| format!("payload.{m}"))
+        .collect()
+}
+
+/// [`forward_marks`] of a `ws_bridge` call.
+fn ws_payload_secret(payload: &Value) -> Vec<String> {
+    use fantastic_kernel::verbs::{Parse, Routed};
+    match verbs::ws::Call::parse("ws_bridge", payload, &[]) {
+        Ok(Routed::Call(verbs::ws::Call::Forward(f))) => forward_marks(&f),
+        _ => Vec::new(),
+    }
+}
+
+/// [`forward_marks`] of a `relay_connector` call.
+fn relay_payload_secret(payload: &Value) -> Vec<String> {
+    use fantastic_kernel::verbs::{Parse, Routed};
+    match verbs::relay::Call::parse("relay_connector", payload, &[]) {
+        Ok(Routed::Call(verbs::relay::Call::Forward(f))) => forward_marks(&f),
         _ => Vec::new(),
     }
 }
@@ -427,7 +421,7 @@ impl Handler for WsBridgeBundle {
     }
 
     fn payload_secret(&self, payload: &Value) -> Vec<String> {
-        forward_payload_secret(payload)
+        ws_payload_secret(payload)
     }
 
     /// The JSON half of [`Self::handle_binary`] — a `forward` reply body is not carried.
@@ -512,7 +506,7 @@ impl Handler for RelayConnectorBundle {
     }
 
     fn payload_secret(&self, payload: &Value) -> Vec<String> {
-        forward_payload_secret(payload)
+        relay_payload_secret(payload)
     }
 
     /// The JSON half of [`Self::handle_binary`] — a `forward` reply body is not carried.

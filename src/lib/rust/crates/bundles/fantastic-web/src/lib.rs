@@ -18,7 +18,7 @@
 //!
 //! ### Verbs
 //!
-//! - `reflect` → identity, port, host, allowed_origins, running, served_agent_count, surfaces, routes,
+//! - `reflect` → identity, port, host, allowed_origins, running, served_agent_count, surfaces,
 //!   browser_reachable
 //! - `boot`    → `{running, surfaces}`. Idempotent; a missing `port` RAISES.
 //! - `stop`    → `{stopped}`
@@ -250,21 +250,6 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     out.insert("running".into(), json!(running));
     out.insert("served_agent_count".into(), json!(kernel.agents.len()));
     out.insert("surfaces".into(), Value::Object(surface_map));
-    // THE BROWSER-FACING CONTRACT. `/file/` is the only route a browser hits,
-    // and without a description a model that reflects this agent finds no
-    // route contract and HALLUCINATES one. This field is that contract.
-    out.insert(
-        "routes".into(),
-        json!({
-            "GET /<agent_id>/file/<path>":
-                "Streams a file by read_stream-ing through the named agent. The \
-        read is dispatched AS THIS WEB AGENT, so it needs BOTH sides of \
-        the call gate — this host's can_call[<agent_id>] (egress) AND that \
-        agent's callable_by[<this web id>] (ingress) — plus that agent's \
-        own io leg open (ingress_rule). Any one missing → 404. See \
-        browser_reachable for who actually passes all three."
-        }),
-    );
     // The PROPERTY, computed — not a description of it. `ingress_rule=allow_all_ingress`
     // reads like "open" while the call gate still refuses, so config never
     // carried the answer to "what can a browser actually get?".

@@ -11,6 +11,7 @@ fantastic-kernel = { path = "../../fantastic-kernel" }
 fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
 fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-ai-core = { path = "../fantastic-ai-core" }
+fantastic-credential-store = { path = "../fantastic-credential-store" }
 async-trait = { workspace = true }
 serde = { workspace = true }
 schemars = { workspace = true }
@@ -28,6 +29,5 @@ fantastic-file = { path = "../fantastic-file" }
 fantastic-ram-store = { path = "../fantastic-ram-store" }
 # The relay password a relay leg reads before every dial: a
 # credential_store on its in-memory keychain double.
-fantastic-credential-store = { path = "../fantastic-credential-store" }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }

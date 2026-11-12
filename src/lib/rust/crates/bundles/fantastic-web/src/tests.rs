@@ -1926,7 +1926,7 @@ async fn reflect_sentence_and_verbs_match_python() {
     // The bundle's own frame, in python's key order; the kernel then appends
     // its reflect decoration (can_call / callable_by / kernel_verbs / tree).
     assert_eq!(
-        obj.keys().map(String::as_str).take(10).collect::<Vec<_>>(),
+        obj.keys().map(String::as_str).take(9).collect::<Vec<_>>(),
         vec![
             "id",
             "sentence",
@@ -1936,7 +1936,6 @@ async fn reflect_sentence_and_verbs_match_python() {
             "running",
             "served_agent_count",
             "surfaces",
-            "routes",
             "browser_reachable",
         ]
     );
@@ -1954,10 +1953,8 @@ async fn reflect_sentence_and_verbs_match_python() {
     // The io leg is open AND both call gates name the host, so the file bridge
     // is the one agent a browser could actually fetch.
     assert_eq!(obj["browser_reachable"], json!(["fb_r"]));
-    assert!(obj["routes"]["GET /<agent_id>/file/<path>"]
-        .as_str()
-        .expect("route contract")
-        .starts_with("Streams a file by read_stream-ing through the named agent."));
+    // the route contract is the man text plus the declared `fetch_file`, not a reflect block
+    assert!(!obj.contains_key("routes"));
     // the declared verbs, in declaration order, rendered in the reply's `verbs` block
     assert_eq!(
         Handler::verbs(&WebBundle)

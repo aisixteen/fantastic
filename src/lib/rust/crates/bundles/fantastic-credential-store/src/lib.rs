@@ -744,6 +744,19 @@ fn field_marks(fields: Option<&Value>) -> Vec<String> {
     }
 }
 
+/// The secret paths of a call to a credential store: a `set`'s field values. The
+/// call is read through the declared entry; a `set` the entry refuses (a bad
+/// `fields`) is marked whole, since its values were never checked. Shared with
+/// every bundle that forwards calls to a store.
+pub fn set_marks(payload: &Value) -> Vec<String> {
+    use fantastic_kernel::verbs::{Parse, Routed};
+    match verbs::Call::parse(NAME, payload, &[]) {
+        Ok(Routed::Call(verbs::Call::Set(a))) => field_marks(Some(&json!(a.fields))),
+        Err(refusal) if refusal.get("verb") == Some(&json!("set")) => vec!["fields".to_string()],
+        _ => Vec::new(),
+    }
+}
+
 #[async_trait]
 impl Handler for CredentialStoreBundle {
     type Call = verbs::Call;
@@ -773,12 +786,7 @@ impl Handler for CredentialStoreBundle {
     /// through the declared entry; a `set` the entry refuses (a bad `fields`) is
     /// recorded whole as secret, since its values were never checked.
     fn payload_secret(&self, payload: &Value) -> Vec<String> {
-        use fantastic_kernel::verbs::{Parse, Routed};
-        match verbs::Call::parse(NAME, payload, &[]) {
-            Ok(Routed::Call(verbs::Call::Set(a))) => field_marks(Some(&json!(a.fields))),
-            Err(refusal) if refusal.get("verb") == Some(&json!("set")) => vec!["fields".to_string()],
-            _ => Vec::new(),
-        }
+        set_marks(payload)
     }
 
     /// A `get` reply's field values are secret: recorded as `[secret]`; the

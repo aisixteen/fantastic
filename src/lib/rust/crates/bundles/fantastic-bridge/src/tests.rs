@@ -2996,7 +2996,9 @@ fn bridge_payload_secret_marks_only_a_forwarded_set_fields() {
             vec!["payload.fields.a".to_string(), "payload.fields.b".to_string()]
         );
         assert_eq!(b.payload_secret(&dotted), vec!["payload.fields".to_string()]);
-        for none in [&get, &reflect, &plain, &nofields] {
+        // a `set` the store's entry refuses is marked whole: its values were never checked.
+        assert_eq!(b.payload_secret(&nofields), vec!["payload.fields".to_string()]);
+        for none in [&get, &reflect, &plain] {
             assert!(b.payload_secret(none).is_empty(), "{none}");
         }
     }

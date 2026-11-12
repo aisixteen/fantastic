@@ -98,8 +98,8 @@ async fn inbound_call_is_checked_by_its_declaration() {
     }
 }
 
-/// The reflect frame is python's: no `mounted_on`, the curl examples,
-/// the `auth_header`, the leg posture from `describe`, and python's verb docs.
+/// The reflect frame: no `mounted_on`, no example strings,
+/// the `auth_header` and the leg posture from `describe`.
 #[tokio::test]
 async fn reflect_keys_match_python() {
     let kernel = kernel_with_leg();
@@ -116,25 +116,10 @@ async fn reflect_keys_match_python() {
             "reflect_url",
             "reflect_pattern",
             "auth_header",
-            "curl_post",
-            "curl_reflect",
-            "curl_reflect_target",
             "ingress_rule",
             "egress_rule",
             "sealed",
         ]
-    );
-    assert_eq!(
-        obj["curl_post"],
-        json!("curl -X POST -H \"content-type: application/json\" -d '{\"type\":\"reflect\"}' http://<host>/rest/<target_id>")
-    );
-    assert_eq!(
-        obj["curl_reflect"],
-        json!("curl http://<host>/rest/_reflect           # root reflect (tree)")
-    );
-    assert_eq!(
-        obj["curl_reflect_target"],
-        json!("curl http://<host>/rest/_reflect/<target_id>  # any agent")
     );
     assert_eq!(obj["sealed"], json!(true));
 }
