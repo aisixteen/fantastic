@@ -381,13 +381,9 @@ impl Host {
         if let Err(e) = crate::kern::mcp_config::ensure(&host).await {
             notes.push(e);
         }
-        // the orientation a coding CLI opened here reads (`kern/orient`), and the
-        // state folder's readme, rewritten from the live values
+        // the state folder's readme, rewritten from the live values
         match (host.kernel.state_dir(), host.kernel.work_dir()) {
             (Ok(state), Ok(work)) => {
-                if let Err(e) = crate::kern::orient::seed(&state) {
-                    notes.push(e);
-                }
                 if let Err(e) = crate::kern::orient::write_readme(&host, &state, &work) {
                     notes.push(e);
                 }

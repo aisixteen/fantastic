@@ -48,24 +48,24 @@ test("follow takes the selection; pin freezes it; unpin follows again; open pins
   assert.equal(r.bridge.watched.has("src/one.txt"), false, "the old file is no longer held");
 });
 
-test("the verbs refuse: bad_arg, outside_root, not_found, nothing_shown, not_an_agent, not_editing, not_mounted", async () => {
+test("the verbs refuse: bad_arg, not_allowed, not_found, not_here", async () => {
   const r = rig();
   project(r.bridge);
   await r.mountPreview("pv");
   assert.equal((await r.call("pv", { type: "open" }))["reason"], "missing_arg");
-  assert.equal((await r.call("pv", { type: "open", path: "/etc/passwd" }))["reason"], "outside_root");
-  assert.equal((await r.call("pv", { type: "open", path: "../x" }))["reason"], "outside_root");
+  assert.equal((await r.call("pv", { type: "open", path: "/etc/passwd" }))["reason"], "not_allowed");
+  assert.equal((await r.call("pv", { type: "open", path: "../x" }))["reason"], "not_allowed");
   assert.equal((await r.call("pv", { type: "open", path: "nope.txt" }))["reason"], "not_found");
   await r.call("pv", { type: "unpin" });
-  assert.equal((await r.call("pv", { type: "pin" }))["reason"], "nothing_shown");
-  assert.equal((await r.call("pv", { type: "edit" }))["reason"], "nothing_shown");
+  assert.equal((await r.call("pv", { type: "pin" }))["reason"], "not_found");
+  assert.equal((await r.call("pv", { type: "edit" }))["reason"], "not_found");
   assert.equal((await r.call("pv", { type: "mode", mode: "moon" }))["reason"], "bad_arg");
-  assert.equal((await r.call("pv", { type: "mode", mode: "agent" }))["reason"], "not_an_agent");
-  assert.equal((await r.call("pv", { type: "save" }))["reason"], "not_editing");
-  assert.equal((await r.call("pv", { type: "revert" }))["reason"], "nothing_to_revert");
+  assert.equal((await r.call("pv", { type: "mode", mode: "agent" }))["reason"], "bad_arg");
+  assert.equal((await r.call("pv", { type: "save" }))["reason"], "not_allowed");
+  assert.equal((await r.call("pv", { type: "revert" }))["reason"], "not_found");
   assert.equal((await r.call("pv", { type: "nope" }))["reason"], "unhandled");
   r.k.register(new Agent({ id: "pv_ghost", parentId: "canvas", handlerModule: "preview_view.ts" }));
-  assert.equal((await r.call("pv_ghost", { type: "unpin" }))["reason"], "not_mounted");
+  assert.equal((await r.call("pv_ghost", { type: "unpin" }))["reason"], "not_here");
 });
 
 test("what cannot be edited says why: binary, image, large, folder", async () => {
@@ -82,7 +82,7 @@ test("what cannot be edited says why: binary, image, large, folder", async () =>
   };
   const b = await edit("blob.dat");
   assert.equal(p.mode, "binary", "the bridge's bad_arg on path is a binary file");
-  assert.equal(b["reason"], "not_editable");
+  assert.equal(b["reason"], "not_allowed");
   assert.match(String(b["why"]), /binary/);
   assert.equal(p.content.k, "binary");
   assert.match(String((await edit("pic.png"))["why"]), /image/);
@@ -126,7 +126,7 @@ test("a change on disk under unsaved edits is a loud conflict: nothing overwritt
   assert.equal(p.editor.state.k, "conflict");
   assert.equal(r.bridge.files.get("src/one.txt"), "disk wins", "nothing overwritten");
   const s = await r.call("prev_pin", { type: "save" });
-  assert.equal(s["reason"], "conflict");
+  assert.equal(s["reason"], "locked");
   assert.equal(s["expected"], versionOf("one"));
   assert.equal(s["actual"], versionOf("disk wins"));
   assert.equal(r.bridge.files.get("src/one.txt"), "disk wins");
@@ -165,7 +165,7 @@ test("revert: edits drop; a save is undone through the bridge; then nothing to r
   assert.equal(r.bridge.files.get("src/one.txt"), "one");
   await settle();
   assert.equal(p.editor.text(), "one");
-  assert.equal((await r.call("pv", { type: "revert" }))["reason"], "nothing_to_revert");
+  assert.equal((await r.call("pv", { type: "revert" }))["reason"], "not_found");
 });
 
 test("a lost undo slot (the host restarted) is the bridge's refusal, passed on", async () => {
@@ -268,7 +268,7 @@ test("a save refused as a mismatch on a file deleted meanwhile returns to dirty,
   assert.equal(p.gone, true);
   assert.match(String(p.editor.error), /deleted/);
   assert.equal(p.editor.text(), "mine", "the edits are kept");
-  assert.equal((await r.call("pv", { type: "save" }))["reason"], "file_deleted");
+  assert.equal((await r.call("pv", { type: "save" }))["reason"], "not_found");
   r.bridge.put("src/one.txt", "back");
   await settle();
   assert.equal(p.editor.state.k, "conflict", "back with other text: the person resolves it");

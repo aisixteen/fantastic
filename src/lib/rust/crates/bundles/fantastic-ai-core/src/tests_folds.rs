@@ -7,7 +7,7 @@
 //! exists to prevent.
 
 use crate::folds::{
-    anchors_of, chains, clean_title, expand_ids, is_open, make_fold, quoted_title, render, row_id,
+    chains, clean_title, expand_ids, is_open, make_fold, quoted_title, render, row_id,
     SUMMARY_INPUT_CAP,
 };
 use crate::strategies::fold::{next_span, FOLD_RUN, KEEP_TAIL};
@@ -28,9 +28,9 @@ fn turn(id: i64, role: &str, parent: Option<i64>, content: &str) -> Value {
     json!({"role": role, "id": id, "parent": parent, "content": content})
 }
 
-/// `render` over rows that are the whole head: anchors from the same rows.
+/// `render` over rows that are the whole head.
 fn view_of(rows: &[Value]) -> Vec<Value> {
-    render(rows, &anchors_of(rows))
+    render(rows)
 }
 
 // ─── folds: the mark ────────────────────────────────────────────

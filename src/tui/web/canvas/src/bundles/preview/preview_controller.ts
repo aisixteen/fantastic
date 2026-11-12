@@ -529,19 +529,19 @@ export const PREVIEW_MAN = "A preview cell: shows a file or the live agent, foll
 const previewHandler: Handler = async (id, payload): Promise<Json> => {
   const verb = str(payload, "type");
   const ctl = previews.get(id);
-  if (ctl === undefined) return refuse("not_mounted", "preview: the cell is not on screen", { hint: "the cell is not on screen" });
-  const nothing = (): Json => refuse("nothing_shown", "preview: nothing is shown", { hint: "open {path} or select something in the tree" });
-  const asRefusal = (r: Refusal | null, fallback: string): Json => (r !== null ? (r as Json) : refuse("refused", fallback));
+  if (ctl === undefined) return refuse("not_here", "preview: the cell is not on screen", { hint: "the cell is not on screen" });
+  const nothing = (): Json => refuse("not_found", "preview: nothing is shown", { hint: "open {path} or select something in the tree" });
+  const asRefusal = (r: Refusal | null, fallback: string): Json => (r !== null ? (r as Json) : refuse("bad_arg", fallback));
   const pathArg = (): { path: string } | { refused: Json } => {
     const p = payload["path"] as string;
-    if (!inRoot(p)) return { refused: refuse("outside_root", `preview: '${p}' is outside the project`, { arg: "path", hint: "paths are relative to the project folder, with no leading / and no .." }) };
+    if (!inRoot(p)) return { refused: refuse("not_allowed", `preview: '${p}' is outside the project`, { arg: "path", hint: "paths are relative to the project folder, with no leading / and no .." }) };
     return { path: norm(p) };
   };
   switch (verb) {
     case "open": {
       const a = pathArg();
       if ("refused" in a) return a.refused;
-      if (ctl.dirty && a.path !== ctl.path) return refuse("unsaved_edits", `preview: unsaved edits in ${ctl.path}`, { hint: "save or revert first" });
+      if (ctl.dirty && a.path !== ctl.path) return refuse("locked", `preview: unsaved edits in ${ctl.path}`, { hint: "save or revert first" });
       await ctl.pin(a.path);
       if (ctl.mode === "error" && ctl.gone) return asRefusal(ctl.lastRefusal, `preview: '${a.path}' is not in the project`);
       return { opened: a.path, mode: ctl.mode };
@@ -562,9 +562,9 @@ const previewHandler: Handler = async (id, payload): Promise<Json> => {
       return { following: true };
     case "mode": {
       const m = payload["mode"] as "file" | "agent";
-      if (!ctl.isAgent) return refuse("not_an_agent", "preview: what is shown is not an agent's folder", { hint: "select an agent folder first" });
+      if (!ctl.isAgent) return refuse("bad_arg", "preview: what is shown is not an agent's folder", { hint: "select an agent folder first" });
       const unsaved = await ctl.setFileMode(m);
-      if (unsaved !== null) return refuse("unsaved_edits", `preview: unsaved edits in ${ctl.path}`, { hint: "save or revert first" });
+      if (unsaved !== null) return refuse("locked", `preview: unsaved edits in ${ctl.path}`, { hint: "save or revert first" });
       return { mode: m };
     }
     case "edit": {
@@ -572,29 +572,29 @@ const previewHandler: Handler = async (id, payload): Promise<Json> => {
         const a = pathArg();
         if ("refused" in a) return a.refused;
         if (a.path !== ctl.path) {
-          if (ctl.dirty) return refuse("unsaved_edits", `preview: unsaved edits in ${ctl.path}`, { hint: "save or revert first" });
+          if (ctl.dirty) return refuse("locked", `preview: unsaved edits in ${ctl.path}`, { hint: "save or revert first" });
           await ctl.pin(a.path);
         }
       }
       if (ctl.path === null && ctl.content.k !== "agent") return nothing();
       const why = ctl.setEditing(true);
-      if (why !== null) return refuse("not_editable", `preview: not editable — ${why}`, { why });
+      if (why !== null) return refuse("not_allowed", `preview: not editable — ${why}`, { why });
       return { editing: ctl.path, version: ctl.editor.version() };
     }
     case "save": {
-      if (!ctl.editing) return refuse("not_editing", "preview: not editing", { hint: "edit first" });
-      if (ctl.gone) return refuse("file_deleted", "preview: the file was deleted on disk", { hint: "saving waits until the file is back; revert drops the edits" });
+      if (!ctl.editing) return refuse("not_allowed", "preview: not editing", { hint: "edit first" });
+      if (ctl.gone) return refuse("not_found", "preview: the file was deleted on disk", { hint: "saving waits until the file is back; revert drops the edits" });
       const s = ctl.editor.state;
-      if (s.k === "conflict" || s.k === "comparing") return refuse("conflict", "preview: the file changed on disk under your edits", { expected: s.baseVersion, actual: s.theirsVersion, hint: "reload, keep mine or compare in the cell" });
+      if (s.k === "conflict" || s.k === "comparing") return refuse("locked", "preview: the file changed on disk under your edits", { expected: s.baseVersion, actual: s.theirsVersion, hint: "reload, keep mine or compare in the cell" });
       await ctl.save();
       const after = ctl.editor.state;
-      if (after.k === "conflict" || after.k === "comparing") return refuse("conflict", "preview: the file changed on disk under your edits", { expected: after.baseVersion, actual: after.theirsVersion, hint: "reload, keep mine or compare in the cell" });
+      if (after.k === "conflict" || after.k === "comparing") return refuse("locked", "preview: the file changed on disk under your edits", { expected: after.baseVersion, actual: after.theirsVersion, hint: "reload, keep mine or compare in the cell" });
       if (ctl.editor.error !== null) return asRefusal(ctl.lastRefusal, ctl.editor.error);
       return { saved: ctl.path, version: ctl.editor.version() };
     }
     case "revert": {
       const r = ctl.editor.revert();
-      if (!r.ok) return refuse("nothing_to_revert", "preview: nothing to revert", { hint: "revert drops unsaved edits, or undoes the last save" });
+      if (!r.ok) return refuse("not_found", "preview: nothing to revert", { hint: "revert drops unsaved edits, or undoes the last save" });
       ctl.lastRefusal = null;
       await ctl.exec(r.effects);
       if (ctl.lastRefusal !== null) return ctl.lastRefusal as Json;

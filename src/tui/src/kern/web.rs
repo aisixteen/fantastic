@@ -102,10 +102,8 @@ async fn merge_verbs(
 
 async fn create(h: &Host, spec: Value) -> Result<(), String> {
     let id = spec["id"].as_str().unwrap_or("?").to_string();
-    let mut spec = spec;
-    spec["type"] = json!("create_agent");
-    let r = h.operator("kernel", spec).await;
-    err_of(&r).map_or(Ok(()), |e| Err(format!("could not create `{id}`: {e}")))
+    let r = fantastic_kernel::verbs::create_agent(&h.kernel, spec).await;
+    fantastic_kernel::refusal::error_text(&r).map_or(Ok(()), |e| Err(format!("could not create `{id}`: {e}")))
 }
 
 /// A CANVAS (phase 4): a `canvas.tools` node under `parent` (`canvas_page`, or the

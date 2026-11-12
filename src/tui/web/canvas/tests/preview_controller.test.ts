@@ -34,7 +34,7 @@ test("deleted while dirty: the edits stay on screen, saving waits, and the file 
   await p.save();
   assert.match(p.notice ?? "", /deleted on disk: saving waits/);
   assert.equal(r.bridge.files.has("src/one.txt"), false, "nothing was written");
-  assert.equal((await r.call("pv_dd", { type: "save" }))["reason"], "file_deleted");
+  assert.equal((await r.call("pv_dd", { type: "save" }))["reason"], "not_found");
 
   r.bridge.put("src/one.txt", "elsewhere");
   await settle();
@@ -340,15 +340,15 @@ test("the verbs: open, pin, unpin, mode, edit, save and revert each refuse what 
   const p = await r.mountPreview("pv_v", { pinned: "top.txt", follow: false });
   assert.equal((await r.call("pv_v", { type: "frobnicate" }))["reason"], "unhandled");
   assert.equal((await r.call("pv_v", { type: "" }))["reason"], "bad_arg", "a call with no verb is refused by the kernel");
-  assert.equal((await r.call("pv_v", { type: "open", path: "/abs" }))["reason"], "outside_root");
+  assert.equal((await r.call("pv_v", { type: "open", path: "/abs" }))["reason"], "not_allowed");
   assert.equal((await r.call("pv_v", { type: "open" }))["reason"], "missing_arg");
   assert.equal((await r.call("pv_v", { type: "open", path: "nope.txt" }))["reason"], "not_found");
   assert.deepEqual(await r.call("pv_v", { type: "open", path: "top.txt" }), { opened: "top.txt", mode: "text" }, "open pins: back to the file");
-  assert.equal((await r.call("pv_v", { type: "mode", mode: "agent" }))["reason"], "not_an_agent");
+  assert.equal((await r.call("pv_v", { type: "mode", mode: "agent" }))["reason"], "bad_arg");
   assert.equal((await r.call("pv_v", { type: "mode", mode: "sideways" }))["reason"], "bad_arg");
-  assert.equal((await r.call("pv_v", { type: "save" }))["reason"], "not_editing");
-  assert.equal((await r.call("pv_v", { type: "revert" }))["reason"], "nothing_to_revert");
-  assert.equal((await r.call("pv_v", { type: "edit", path: "/abs" }))["reason"], "outside_root");
+  assert.equal((await r.call("pv_v", { type: "save" }))["reason"], "not_allowed");
+  assert.equal((await r.call("pv_v", { type: "revert" }))["reason"], "not_found");
+  assert.equal((await r.call("pv_v", { type: "edit", path: "/abs" }))["reason"], "not_allowed");
 
   await r.call("pv_v", { type: "edit" });
   assert.equal(p.editing, true);
@@ -356,21 +356,21 @@ test("the verbs: open, pin, unpin, mode, edit, save and revert each refuse what 
   await r.call("pv_v", { type: "open", path: "top.txt" });
   await r.call("pv_v", { type: "edit" });
   p.editor.edit("t!");
-  assert.equal((await r.call("pv_v", { type: "open", path: "docs/a.md" }))["reason"], "unsaved_edits");
-  assert.equal((await r.call("pv_v", { type: "edit", path: "docs/a.md" }))["reason"], "unsaved_edits");
+  assert.equal((await r.call("pv_v", { type: "open", path: "docs/a.md" }))["reason"], "locked");
+  assert.equal((await r.call("pv_v", { type: "edit", path: "docs/a.md" }))["reason"], "locked");
   assert.equal((await r.call("pv_v", { type: "edit", path: "top.txt" }))["editing"], "top.txt", "the same file: no change of file");
   r.bridge.put("top.txt", "theirs");
   await settle();
-  assert.equal((await r.call("pv_v", { type: "save" }))["reason"], "conflict");
+  assert.equal((await r.call("pv_v", { type: "save" }))["reason"], "locked");
   assert.equal((await r.call("pv_v", { type: "pin" }))["reason"], undefined, "pin with no path re-pins what is shown");
   assert.equal((await r.call("pv_v", { type: "pin", path: 9 }))["reason"], "bad_arg", "a path that is not a string is refused, not read as none");
-  assert.equal((await r.call("pv_v", { type: "pin", path: "../x" }))["reason"], "outside_root");
+  assert.equal((await r.call("pv_v", { type: "pin", path: "../x" }))["reason"], "not_allowed");
   await p.revert();
   assert.deepEqual(await r.call("pv_v", { type: "unpin" }), { following: true });
   p.dispose();
   const nothing = await r.mountPreview("pv_v2", {});
-  assert.equal((await r.call("pv_v2", { type: "pin" }))["reason"], "nothing_shown");
-  assert.equal((await r.call("pv_v2", { type: "edit" }))["reason"], "nothing_shown");
+  assert.equal((await r.call("pv_v2", { type: "pin" }))["reason"], "not_found");
+  assert.equal((await r.call("pv_v2", { type: "edit" }))["reason"], "not_found");
   nothing.dispose();
 });
 
@@ -380,7 +380,7 @@ test("the verbs: edit refuses what cannot be edited, saying why; save of a delet
   r.bridge.binary.add("top.txt");
   await r.mountPreview("pv_v3", { pinned: "top.txt", follow: false });
   const e = await r.call("pv_v3", { type: "edit" });
-  assert.equal(e["reason"], "not_editable");
+  assert.equal(e["reason"], "not_allowed");
   assert.equal(e["why"], "a binary file is not editable");
 
   r.bridge.binary.delete("top.txt");
@@ -390,7 +390,7 @@ test("the verbs: edit refuses what cannot be edited, saying why; save of a delet
   p.editor.edit("one!");
   r.bridge.remove("src/one.txt");
   await settle();
-  assert.equal((await r.call("pv_v3", { type: "save" }))["reason"], "file_deleted");
+  assert.equal((await r.call("pv_v3", { type: "save" }))["reason"], "not_found");
 });
 
 test("the verbs: a revert the bridge refuses is the bridge's refusal, said", async () => {
@@ -678,7 +678,7 @@ test("the mode verb is refused with unsaved edits, and the mode stays", async ()
   assert.equal(p.isAgent, true);
   p.setEditing(true);
   p.edit("name: changed\n");
-  assert.equal((await r.call("pv_mode_dirty", { type: "mode", mode: "agent" }))["reason"], "unsaved_edits");
+  assert.equal((await r.call("pv_mode_dirty", { type: "mode", mode: "agent" }))["reason"], "locked");
   assert.equal(p.fileMode, "file");
   p.dispose();
 });
@@ -698,7 +698,7 @@ test("save: a disk change that lands as the write goes out is a conflict in the 
     return next();
   });
   const x = await r.call("pv_silent_conflict", { type: "save" });
-  assert.equal(x["reason"], "conflict");
+  assert.equal(x["reason"], "locked");
   assert.equal(typeof x["expected"], "string");
   assert.equal(typeof x["actual"], "string");
   assert.equal(p.editor.state.k, "conflict");
@@ -727,7 +727,7 @@ test("save: with an error the editor holds and no refusal of the bridge, the err
   p.lastRefusal = null;
   const x = await r.call("pv_bare_error", { type: "save" });
   assert.equal(x["error"], "the editor says no");
-  assert.equal(x["reason"], "refused");
+  assert.equal(x["reason"], "bad_arg");
   p.dispose();
 });
 

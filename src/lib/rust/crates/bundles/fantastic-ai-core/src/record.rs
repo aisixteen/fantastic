@@ -113,6 +113,56 @@ pub struct AiRecord {
     /// Text placed AFTER the system block on every turn; null = nothing.
     #[schemars(length(min = 1), regex(pattern = r"\S"))]
     pub post_system_prompt: Option<String>,
+    /// Bytes of one image, lowering what the model takes; null = the model's.
+    #[schemars(range(min = 1))]
+    pub image_max_bytes: Option<i64>,
+    /// Pixels of one image, lowering what the model takes; null = the model's.
+    #[schemars(range(min = 1))]
+    pub image_max_pixels: Option<i64>,
+    /// What the chat's provider says its model can do; written by the chat itself.
+    pub provider_capabilities: Option<ProviderCapabilities>,
+}
+
+fn default_image_bytes() -> Option<i64> {
+    Some(5_000_000)
+}
+
+fn default_image_pixels() -> Option<i64> {
+    Some(1_150_000)
+}
+
+/// What a provider says one of its models takes of images.
+#[derive(Debug, JsonSchema)]
+pub struct ImageCapabilities {
+    /// Does the model take images?
+    pub images: Option<bool>,
+    /// How many images one request may carry; null = no bound.
+    #[schemars(range(min = 1))]
+    pub max_images: Option<i64>,
+    /// The bytes of one image.
+    #[schemars(range(min = 1), default = "default_image_bytes")]
+    pub max_bytes: Option<i64>,
+    /// The pixels of one image.
+    #[schemars(range(min = 1), default = "default_image_pixels")]
+    pub max_pixels: Option<i64>,
+}
+
+/// The chat's `provider_capabilities`: the provider and model asked, and the model's entry.
+#[derive(Debug, JsonSchema)]
+pub struct ProviderCapabilities {
+    /// The provider asked.
+    pub provider: Option<String>,
+    /// The model asked about.
+    pub model: Option<String>,
+    /// The model's entry (empty when it has none).
+    pub capabilities: Option<ImageCapabilities>,
+}
+
+/// The declaration of a model's image capabilities, for a reader of one entry
+/// ([`fantastic_kernel::RecordDecl::get`]: the entry's value, else the declared default).
+pub mod image_caps {
+    fantastic_kernel::record!(ImageCapabilities);
+    use super::ImageCapabilities;
 }
 
 /// The declaration of the fields every ai_core agent takes, for a reader of one of them

@@ -24,7 +24,7 @@ use super::{Projection, ProjectionCtx};
 use crate::constants::NOTICE_ENVELOPE_RESERVE;
 use crate::context::{estimate_one, estimate_tokens};
 use crate::folds::{
-    chain_text, is_fold, level, make_fold, member_anchor, own_anchor, quoted_title, render, row_id,
+    chain_text, is_fold, level, make_fold, member_anchor, quoted_title, render, row_id,
     row_parent, row_role, unanchored, FoldAnchorError,
 };
 use crate::memory::{save_history, MemoryStoreError};
@@ -347,9 +347,8 @@ pub async fn write_fold(
     ctx: &ProjectionCtx<'_>,
     rows: &[Value],
     idxs: &[usize],
-    anchors: &HashMap<i64, i64>,
 ) -> Result<Value, FoldFail> {
-    let anchor = member_anchor(rows, idxs, anchors).map_err(FoldFail::Anchor)?;
+    let anchor = member_anchor(rows, idxs).map_err(FoldFail::Anchor)?;
     let (title, text, degraded) = summarize_span(ctx.provider, rows, idxs).await?;
     append_fold(
         ctx.self_id,
@@ -478,9 +477,8 @@ pub fn next_span(rows: &[Value], view: &[Value], keep_tail: usize, need: i64) ->
 /// (a store longer than the window, e.g. written under a larger one) share it.
 /// Python `fold_down`.
 ///
-/// Folds are placed by `ctx.anchors` (computed over the HEAD by the caller), so
-/// a body rebuilt from the view array, which holds folds without their members,
-/// keeps every fold in place.
+/// Folds are placed by their own `anchor`, so a body rebuilt from the view array,
+/// which holds folds without their members, keeps every fold in place.
 ///
 /// # Errors
 /// The memory store refused a fold row, a summary would not fit, or a span
@@ -490,9 +488,8 @@ pub async fn fold_down(
     ctx: &ProjectionCtx<'_>,
     budget: i64,
 ) -> Result<(Vec<Value>, Vec<Value>, usize, usize), FoldFail> {
-    let mut anchors = ctx.anchors.clone();
     let mut rows: Vec<Value> = rows.to_vec();
-    let mut view = render(&rows, &anchors);
+    let mut view = render(&rows);
     let mut folded = 0usize;
     if estimate_tokens(&view) > (budget as f64 * FOLD_AT) as i64 && rows.len() > 2 {
         let target = (budget as f64 * LOW) as i64;
@@ -505,11 +502,10 @@ pub async fn fold_down(
             if span.is_empty() {
                 break;
             }
-            let fr = write_fold(ctx, &rows, &span, &anchors).await?;
-            remember(&mut anchors, &fr);
+            let fr = write_fold(ctx, &rows, &span).await?;
             rows.push(fr);
             folded += 1;
-            view = render(&rows, &anchors);
+            view = render(&rows);
         }
     }
     // TIDY THE HEAD, budget or no budget. Coalescing only while the view is OVER
@@ -525,21 +521,13 @@ pub async fn fold_down(
         if span.is_empty() || !span.iter().all(|&i| is_fold(&rows[i])) {
             break;
         }
-        let fr = write_fold(ctx, &rows, &span, &anchors).await?;
-        remember(&mut anchors, &fr);
+        let fr = write_fold(ctx, &rows, &span).await?;
         rows.push(fr);
         folded += 1;
-        view = render(&rows, &anchors);
+        view = render(&rows);
     }
-    let lost = unanchored(&rows, &anchors);
+    let lost = unanchored(&rows);
     Ok((rows, view, folded, lost))
-}
-
-/// A fold just written places by its own anchor from here on.
-fn remember(anchors: &mut HashMap<i64, i64>, fold: &Value) {
-    if let (Some(id), Some(a)) = (row_id(fold), own_anchor(fold)) {
-        anchors.insert(id, a);
-    }
 }
 
 /// Fold the oldest stretches of the view down to the low watermark, tidy the

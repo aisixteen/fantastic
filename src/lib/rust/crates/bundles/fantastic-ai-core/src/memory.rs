@@ -221,9 +221,9 @@ pub(crate) fn rows_of(res: &Map<String, Value>, self_id: &AgentId) -> Vec<Value>
 }
 
 /// The store holds this agent's conversation AND its view rows. The CONVERSATION
-/// a reader sees is everything but the view and the recorded fold anchors (an
+/// a reader sees is everything but the view and keep rows (an
 /// allow-list of kinds to HIDE: a kind forgotten here lands in the model's prompt).
-pub const BOOKKEEPING: [&str; 3] = ["view", "anchors", "keep"];
+pub const BOOKKEEPING: [&str; 2] = ["view", "keep"];
 
 /// The chat roles a TURN carries.
 pub const TURN_ROLES: [&str; 3] = ["user", "assistant", "system"];

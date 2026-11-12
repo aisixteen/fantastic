@@ -156,7 +156,7 @@ test("a path outside the project is refused before anything is looked up", async
   const probe: Look = { ...look, kindOf: async () => ((asked = true), undefined) };
   for (const p of ["/etc/passwd", "../x", "docs/../../x", "C:/x"]) {
     const r = await resolveTarget({ kind: "any", path: p }, probe);
-    assert.equal("error" in r && r.reason, "outside_root", p);
+    assert.equal("error" in r && r.reason, "not_allowed", p);
   }
   assert.equal(asked, false);
 });
@@ -282,7 +282,7 @@ test("open refuses: no target, both targets, a bad x, an unknown path, an outsid
   assert.equal((await call(k, { type: "open", path: "docs", agent: "ea" }))["reason"], "bad_arg");
   assert.equal((await call(k, { type: "open", path: "docs", x: 1 }))["reason"], "bad_arg");
   assert.equal((await call(k, { type: "open", path: "nope/x" }))["reason"], "not_found");
-  assert.equal((await call(k, { type: "open", path: "../x" }))["reason"], "outside_root");
+  assert.equal((await call(k, { type: "open", path: "../x" }))["reason"], "not_allowed");
   assert.equal((await call(k, { type: "open", agent: "ghost" }))["reason"], "not_found");
   assert.deepEqual(cellsOf(k), [], "nothing was opened");
 });
@@ -296,7 +296,7 @@ test("open: a folder that is not there is not in the project; a refused listing 
   // `top.txt` is a file: its listing is refused, and the refusal is said, never guessed past
   const r = await call(k, { type: "open", path: "top.txt/x" });
   assert.match(String(r["error"]), /^view: open — /);
-  assert.equal(r["reason"], "refused");
+  assert.equal(r["reason"], "bad_arg");
   assert.deepEqual(cellsOf(k), []);
 });
 
@@ -311,7 +311,7 @@ test("open is refused, not run, when the view was never granted the listing", as
   k.setRoot(new Agent({ id: "canvas", handlerModule: "canvas.ts" }));
   k.register(new Agent({ id: "view_root", parentId: "canvas", handlerModule: "view.ts" }));
   const r = await call(k, { type: "open", path: "docs/a.md" });
-  assert.equal(r["reason"], "refused");
+  assert.equal(r["reason"], "bad_arg");
   assert.match(String(r["error"]), /may not call 'list'/);
 });
 
@@ -374,7 +374,7 @@ test("a rooted tree answers for what is under its root, and refuses the rest", a
   const r = rig();
   project(r.bridge);
   await r.mountTree("tree_root", "docs");
-  assert.equal((await r.call("tree_root", { type: "select", path: "top.txt" }))["reason"], "outside_root");
+  assert.equal((await r.call("tree_root", { type: "select", path: "top.txt" }))["reason"], "not_allowed");
   assert.deepEqual(await r.call("tree_root", { type: "select", path: "docs/a.md" }), { selected: "docs/a.md", kind: "file" });
 });
 

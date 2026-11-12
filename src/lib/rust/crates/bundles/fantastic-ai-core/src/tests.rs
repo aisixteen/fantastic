@@ -5345,7 +5345,7 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
             .collect();
         levels.sort_unstable();
         levels.dedup();
-        let view = crate::folds::render(&rows, &crate::folds::anchors_of(&rows));
+        let view = crate::folds::render(&rows);
         let shape: String = view
             .iter()
             .map(|r| {

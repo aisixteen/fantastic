@@ -387,7 +387,7 @@ async fn export_subtree_refuses_with_secret_found_when_agent_py_holds_a_key() {
         json!({"type": "export_subtree", "agent_id": "a", "path": "out_keyed"}),
     )
     .await;
-    assert_eq!(r["reason"], "secret_found", "{r}");
+    assert_eq!(r["reason"], "store_refused", "{r}");
     assert!(
         r["error"]
             .as_str()

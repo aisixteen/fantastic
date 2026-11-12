@@ -83,7 +83,7 @@ export type Opened = { kind: "agent"; agent: string } | { kind: "file"; path: st
 /** A target that cannot be opened, said loudly: what, and the argument it came in. */
 export interface Refusal {
   error: string;
-  reason: "bad_arg" | "outside_root" | "not_found";
+  reason: "bad_arg" | "not_allowed" | "not_found";
   arg: string;
   hint?: string;
 }
@@ -109,7 +109,7 @@ export async function resolveTarget(t: Target, look: Look): Promise<Opened | Ref
   if (t.kind === "agent") {
     return (await look.hasAgent(t.id)) ? { kind: "agent", agent: t.id } : refusal(`no host agent '${t.id}'`, "not_found", "agent", "the agents are the host's: drag one from the tree");
   }
-  if (!inRoot(t.path)) return refusal(`'${t.path}' is outside the project`, "outside_root", "path", "paths are relative to the project folder, with no leading / and no ..");
+  if (!inRoot(t.path)) return refusal(`'${t.path}' is outside the project`, "not_allowed", "path", "paths are relative to the project folder, with no leading / and no ..");
   const p = norm(t.path);
   const agent = t.kind === "file" ? undefined : look.agentAt(p);
   if (agent !== undefined) {

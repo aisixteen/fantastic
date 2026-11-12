@@ -172,7 +172,7 @@ test("the verbs: collapse says what was open; select of an agent's folder carrie
 });
 
 test("filesAgent is the handler the kernel calls: it needs a cell on screen (registered by the file tree view)", async () => {
-  assert.deepEqual(await filesAgent("nobody", { type: "select", path: "a" }), { error: "files: the cell is not on screen", reason: "not_mounted", hint: "the cell is not on screen" });
+  assert.deepEqual(await filesAgent("nobody", { type: "select", path: "a" }), { error: "files: the cell is not on screen", reason: "not_here", hint: "the cell is not on screen" });
 });
 
 test("registerFilesView: the tree's name registers the handler, its verbs rendered from the declaration, with its man text", () => {

@@ -46,8 +46,19 @@ export interface Verb {
 
 export type Declared = { readonly [verb: string]: Verb };
 
+/** The kernel's closed set of refusal codes (`fantastic-kernel` `refusal::CODES`). */
+export const CODES = [
+  "unauthorized", "unknown_agent", "missing_arg", "bad_arg", "invalid_meta", "locked", "not_here", "exists",
+  "unhandled", "not_found", "not_connected", "transport_error", "transport_closed", "timeout", "draining",
+  "no_consumer", "limit", "not_allowed", "grant_failed", "unknown_tier", "bad_tier", "no_root", "not_spawned",
+  "disabled", "store_refused", "already_held", "not_held", "not_in_subtree",
+] as const;
+
+/** One of the kernel's refusal codes. */
+export type Code = (typeof CODES)[number];
+
 /** The one refusal builder of the page's verbs. */
-export function refuse(reason: string, error: string, extra: Record<string, unknown> = {}): Json {
+export function refuse(reason: Code, error: string, extra: Record<string, unknown> = {}): Json {
   return { error, reason, ...extra } as Json;
 }
 

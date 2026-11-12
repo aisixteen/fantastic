@@ -221,9 +221,6 @@ pub async fn project_context(
         })));
     }
     let recent = cfg_recent_n(&meta);
-    // Over the HEAD, not the body: a body rebuilt from the view array holds the
-    // folds without the rows they hide.
-    let anchors = crate::folds::anchors_of(&crate::memory::head(self_id, kernel).await?);
     let pctx = ProjectionCtx {
         budget: body_budget,
         recent_n: recent,
@@ -231,7 +228,6 @@ pub async fn project_context(
         self_id,
         kernel,
         client_id,
-        anchors: &anchors,
     };
     let proj = match strat_name.as_str() {
         "truncate" => truncate(&body, body_budget),

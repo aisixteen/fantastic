@@ -19,7 +19,6 @@ use fantastic_bundle::py_strip;
 use fantastic_kernel::{AgentId, Kernel};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// The stub used when a summarizer is unavailable / fails — a degraded
@@ -67,9 +66,6 @@ pub struct ProjectionCtx<'a> {
     pub kernel: &'a Arc<Kernel>,
     /// The conversation this projection is for.
     pub client_id: &'a str,
-    /// fold id → anchor over the agent's HEAD (`folds::anchors_of`), not over the
-    /// body: a body rebuilt from the view array holds folds without their members.
-    pub anchors: &'a HashMap<i64, i64>,
 }
 
 /// Keep the largest SUFFIX of `turns` that fits `budget`, always including

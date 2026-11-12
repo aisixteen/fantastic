@@ -259,18 +259,18 @@ function target(p: Payload, ctl: FilesController): { path: string } | { refused:
     if (folder === undefined) return { refused: refuse("not_found", `files: no folder on disk for agent '${agent}'`, { arg: "agent", hint: "the agent folders are read from .fantastic; an agent with no folder is not on disk" }) };
     path = folder;
   } else {
-    if (!inRoot(p["path"] as string)) return { refused: refuse("outside_root", `files: '${p["path"]}' is outside the project`, { arg: "path", hint: "paths are relative to the project folder, with no leading / and no .." }) };
+    if (!inRoot(p["path"] as string)) return { refused: refuse("not_allowed", `files: '${p["path"]}' is outside the project`, { arg: "path", hint: "paths are relative to the project folder, with no leading / and no .." }) };
     path = norm(p["path"] as string);
   }
   // a tree rooted at a folder (#135) shows nothing above it
-  if (!under(path, ctl.root)) return { refused: refuse("outside_root", `files: '${path}' is outside this tree (its root is ${ctl.root === "" ? "the project" : ctl.root})`, { arg: agent !== "" ? "agent" : "path" }) };
+  if (!under(path, ctl.root)) return { refused: refuse("not_allowed", `files: '${path}' is outside this tree (its root is ${ctl.root === "" ? "the project" : ctl.root})`, { arg: agent !== "" ? "agent" : "path" }) };
   return { path };
 }
 
 const filesHandler: Handler = async (id, payload): Promise<Json> => {
   const verb = str(payload, "type");
   const ctl = controllers.get(id);
-  if (ctl === undefined) return refuse("not_mounted", "files: the cell is not on screen", { hint: "the cell is not on screen" });
+  if (ctl === undefined) return refuse("not_here", "files: the cell is not on screen", { hint: "the cell is not on screen" });
   const t = target(payload, ctl);
   if ("refused" in t) return t.refused;
   const p = t.path;
@@ -284,7 +284,7 @@ const filesHandler: Handler = async (id, payload): Promise<Json> => {
       if (!(await ctl.reveal(p))) return notFound(p, ctl);
       const n = ctl.model.nodes.get(p);
       if (n === undefined) return notFound(p, ctl);
-      if (n.type !== "dir") return refuse("not_a_dir", `files: '${p}' is a file, not a folder`, { arg: "path" });
+      if (n.type !== "dir") return refuse("bad_arg", `files: '${p}' is a file, not a folder`, { arg: "path" });
       await ctl.expand(p);
       const e = ctl.errors.get(p);
       if (e !== undefined) return e as Json;

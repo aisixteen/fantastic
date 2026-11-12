@@ -492,7 +492,7 @@ async function openView(view: string, payload: Payload, kernel: Kernel): Promise
     r = await resolveTarget(target, viewLook(kernel));
   } catch (err) {
     // the file bridge refused the listing: the path is not one it can look at
-    return { error: `view: open — ${(err as Error).message}`, reason: "refused", arg: "path", hint: "the file bridge would not list it" };
+    return { error: `view: open — ${(err as Error).message}`, reason: "bad_arg", arg: "path", hint: "the file bridge would not list it" };
   }
   if (isRefusalOf(r)) return r as unknown as Json;
   if (r.kind === "agent") return openAgent(view, r.agent, at, kernel);

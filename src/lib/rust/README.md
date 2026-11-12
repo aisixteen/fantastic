@@ -146,7 +146,7 @@ retired). Python has no such backend (Apple-only native).
 - **Tests:** the default suite uses a fake engine plus the real bridge's
   pre-model refusals (no prompt reaches the model); `FM_LIVE=1 cargo test -p
   fantastic-foundation-models-backend live_on_device_model -- --nocapture` runs
-  tiny real prompts. Spec: [`selftest/foundation_models_backend.md`](selftest/foundation_models_backend.md).
+  tiny real prompts.
 - **The window is the model's** (4096 tokens, read from the SDK): ai-core's
   `BackendConfig::model_window` makes it the `context_window` default. The
   kernel's default system block does not fit it (~5,800 tokens); a `send`
@@ -261,7 +261,6 @@ rust/
 │   ├── bench-coldstart.sh                 3-metric boot benchmark
 │   ├── quality.sh                         canonical pre-push gate
 │   └── compat-python.sh                   black-box wire-protocol probes
-└── selftest/                              Rust-specific selftest overlays
 ```
 
 ## Bundle model
@@ -365,9 +364,6 @@ An `exec_bridge` record names its own interpreters in the
 the record itself is the durable, deterministic answer both runtimes
 hit on subsequent opens.
 
-See [`selftest/cross_runtime_workdir.md`](selftest/cross_runtime_workdir.md)
-for the round-trip test plan.
-
 ## Cold start
 
 Release binary's boot budget, measured by `scripts/bench-coldstart.sh`:
@@ -389,20 +385,6 @@ cd src/lib/rust
 cargo build --release --bin fantastic_kernel
 ./scripts/bench-coldstart.sh
 ```
-
-## Selftests
-
-Most user-facing behaviour is identical across Python and Rust
-runtimes — Python's per-bundle selftests under
-[`../python/bundled_agents/*/selftest.md`](../python/bundled_agents/)
-drive the wire surface against either binary by swapping `PATH`.
-
-Rust-specific behaviour lives in [`selftest/`](selftest/):
-
-- `feature_gates.md` — `full` vs `embedded` compile matrix
-- `foundation_models_backend.md` — the on-device backend: hermetic suite, the
-  opt-in live run, the linked binary
-- `cross_runtime_workdir.md` — round-trip workdir loading
 
 ## Pre-push checks
 

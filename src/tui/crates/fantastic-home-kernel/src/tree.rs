@@ -102,13 +102,13 @@ pub async fn operator(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Res
     }
 }
 
-async fn create(kernel: &Arc<Kernel>, mut spec: Value) -> Result<(), String> {
+async fn create(kernel: &Arc<Kernel>, spec: Value) -> Result<(), String> {
     let id = spec["id"].as_str().unwrap_or_default().to_string();
-    spec["type"] = json!("create_agent");
-    operator(kernel, "kernel", spec)
-        .await
-        .map(|_| ())
-        .map_err(|e| format!("could not create `{id}`: {e}"))
+    let r = fantastic_kernel::verbs::create_agent(kernel, spec).await;
+    match r.get("error").and_then(Value::as_str) {
+        Some(e) => Err(format!("could not create `{id}`: {}", sys::with_hint(e, &r))),
+        None => Ok(()),
+    }
 }
 
 /// Create what is missing, write every grant whole, boot, mount. `port` is the

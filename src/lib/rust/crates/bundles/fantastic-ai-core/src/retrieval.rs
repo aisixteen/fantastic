@@ -341,7 +341,6 @@ pub async fn context_fold(
     provider: &Arc<dyn Provider>,
     model_window: i64,
 ) -> Result<Value, crate::assembly::BlockFail> {
-    use crate::folds::anchors_of;
     use crate::memory::load_view;
     use fantastic_kernel::refusal::{bad, refusal_hint, with, BAD_ARG, LOCKED};
     let verb = "context_fold";
@@ -379,7 +378,6 @@ pub async fn context_fold(
         Some(_) => return Ok(bad(verb, "summary", "a non-empty string")),
     };
     let rows = load_history(agent_id, kernel, false).await?;
-    let anchors = anchors_of(&crate::memory::head(agent_id, kernel).await?);
     let listed = listed_entries(&rows, load_view(agent_id, kernel).await?.as_ref());
     let view = render_history(&rows, listed.as_deref(), caching.cleans());
     let pos_of = |id: i64| view.iter().position(|r| row_id(&rows[r.idx]) == Some(id));
@@ -445,8 +443,7 @@ pub async fn context_fold(
         with(&mut v, "arg", Value::from("from"));
         return Ok(v);
     }
-    let anchor =
-        member_anchor(&rows, &span, &anchors).map_err(crate::assembly::BlockFail::FoldAnchor)?;
+    let anchor = member_anchor(&rows, &span).map_err(crate::assembly::BlockFail::FoldAnchor)?;
     let (title, body, summarized) = match summary {
         // Verbatim: the body IS the given text, its first line the title.
         Some(text) => (summary_title(text), text.to_string(), true),
@@ -493,10 +490,8 @@ pub async fn context_fold(
 
 /// `context_forget`: compact this agent's OWN store — drop the rows the model can
 /// no longer see and keep every fold. Python `_context_forget`, rule for rule:
-/// under the turn lock, ONE `anchors` row for the folds written without an
-/// `anchor` whose place is about to rest on it, ONE `prune {ids}`, and the head
-/// cache read again from the store (the prune cascaded each pruned member out of
-/// every fold's refs).
+/// under the turn lock, ONE `prune {ids}`, and the head cache read again from
+/// the store (the prune cascaded each pruned member out of every fold's refs).
 ///
 /// # Errors
 /// The memory store refused a read, the append or the prune.
@@ -505,7 +500,7 @@ pub async fn context_forget(
     include_cleared: bool,
     kernel: &Arc<Kernel>,
 ) -> MemResult<Value> {
-    use crate::folds::{anchors_of, chains, is_fold, is_open, recorded_anchors, refs_of};
+    use crate::folds::{chains, is_fold, is_open, own_anchor, refs_of};
     use crate::memory::{refresh_head, rows_of, BOOKKEEPING, TURN_ROLES};
     let st = crate::state::state_for(agent_id);
     let lock = Arc::clone(&st.lock);
@@ -516,7 +511,6 @@ pub async fn context_forget(
         &store_call(agent_id, kernel, json!({"type": "read"})).await?,
         agent_id,
     );
-    let anchors = anchors_of(&head_rows);
     let by_id: std::collections::HashMap<i64, &Value> = head_rows
         .iter()
         .filter_map(|r| row_id(r).map(|id| (id, r)))
@@ -544,7 +538,7 @@ pub async fn context_forget(
     let mut doomed: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
     // 1. the rows folds already summarise — under a fold whose place is known
     for f in &head_folds {
-        if !row_id(f).is_some_and(|id| anchors.contains_key(&id)) {
+        if own_anchor(f).is_none() {
             continue;
         }
         let mut stack = refs_of(f);
@@ -585,48 +579,6 @@ pub async fn context_forget(
             doomed.extend(everything[..last].iter().filter_map(row_id));
         }
     }
-    // A fold written before folds carried `anchor` is placed by deriving from its
-    // members — about to go. Its place is recorded first, in ONE `anchors` row; an
-    // older `anchors` row is superseded by the newest one that holds it all.
-    let want: std::collections::BTreeMap<i64, i64> = head_folds
-        .iter()
-        .filter(|f| crate::folds::own_anchor(f).is_none())
-        .filter_map(|f| row_id(f).and_then(|id| anchors.get(&id).map(|a| (id, *a))))
-        .collect();
-    let rows_of_anchors: Vec<&Value> = head_rows
-        .iter()
-        .filter(|r| kind(r).as_deref() == Some("anchors"))
-        .collect();
-    let newest = rows_of_anchors.last().copied();
-    let holds = newest.is_some_and(|n| {
-        let rec = recorded_anchors(std::slice::from_ref(n));
-        want.iter().all(|(k, v)| rec.get(k) == Some(v))
-    });
-    if !want.is_empty() && !holds {
-        let map: Map<String, Value> = want
-            .iter()
-            .map(|(k, v)| (k.to_string(), Value::from(*v)))
-            .collect();
-        save_history(
-            agent_id,
-            kernel,
-            &[json!({"kind": "anchors", "anchors": map})],
-        )
-        .await?;
-        doomed.extend(rows_of_anchors.iter().filter_map(|r| row_id(r)));
-    } else {
-        let keep = if want.is_empty() {
-            None
-        } else {
-            newest.and_then(row_id)
-        };
-        doomed.extend(
-            rows_of_anchors
-                .iter()
-                .filter_map(|r| row_id(r))
-                .filter(|id| Some(*id) != keep),
-        );
-    }
     let mut pruned = 0i64;
     if !doomed.is_empty() {
         let res = store_call(
@@ -641,12 +593,8 @@ pub async fn context_forget(
     // fold's refs, so the head cache is read again, not patched.
     crate::memory::forget_head(agent_id, kernel);
     let fresh = head(agent_id, kernel).await?;
-    let after = anchors_of(&fresh);
     let left: Vec<&Value> = fresh.iter().filter(|r| is_fold(r)).collect();
-    let lost = left
-        .iter()
-        .filter(|f| !row_id(f).is_some_and(|id| after.contains_key(&id)))
-        .count();
+    let lost = left.iter().filter(|f| own_anchor(f).is_none()).count();
     Ok(json!({"pruned": pruned, "kept_folds": left.len(), "unanchored": lost}))
 }
 
@@ -744,7 +692,6 @@ pub async fn context_recall(
     // and drops what still does not fit. Folding takes the model (a summary per
     // span), so a `dry` recall does not fold.
     let mut folded = 0usize;
-    let anchors = crate::folds::anchors_of(&head(agent_id, kernel).await?);
     if let Some(p) = provider {
         if meta.get("context_strategy").and_then(Value::as_str) == Some("fold") {
             let fctx = ProjectionCtx {
@@ -754,14 +701,13 @@ pub async fn context_recall(
                 self_id: agent_id,
                 kernel,
                 client_id: client_id.unwrap_or(""),
-                anchors: &anchors,
             };
             let (r, _, f, _) = fold_down(&rows, &fctx, body_budget).await?;
             rows = r;
             folded = f;
         }
     }
-    let view: Vec<Value> = fold_render(&rows, &anchors)
+    let view: Vec<Value> = fold_render(&rows)
         .into_iter()
         .filter(|r| row_id(r).is_some())
         .collect();

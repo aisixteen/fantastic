@@ -484,6 +484,16 @@ pub fn call(verb: &str, args: Value) -> Value {
     Value::Object(out)
 }
 
+/// The ONE `create_agent` send: the record's fields under the verb [`call`] names,
+/// to the root, as the operator. The reply (a refusal carries `error`).
+///
+/// # Panics
+/// As [`call`]: `record` is not an object or names a `type` of its own.
+pub async fn create_agent(kernel: &std::sync::Arc<crate::Kernel>, record: Value) -> Value {
+    let item = crate::Item::new(crate::AgentId::from("kernel"), call("create_agent", record));
+    std::sync::Arc::clone(kernel).send(vec![item]).await.remove(0).result
+}
+
 /// The payload without its `type`: the arguments alone.
 #[doc(hidden)]
 #[must_use]

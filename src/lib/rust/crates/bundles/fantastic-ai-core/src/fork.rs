@@ -126,7 +126,7 @@ fn plan(rows: &[Value], at: i64) -> Result<Vec<Value>, NoFork> {
             ));
         }
     }
-    // What the prompt is assembled from: the newest `view` and `anchors` row at or
+    // What the prompt is assembled from: the newest `view` row at or
     // before `at`, so the fork's prompt is the parent's for the same prefix.
     let newest = |k: &str| {
         rows.iter()
@@ -135,7 +135,7 @@ fn plan(rows: &[Value], at: i64) -> Result<Vec<Value>, NoFork> {
             .filter(|&id| id <= at)
             .max()
     };
-    let (view, anchors) = (newest("view"), newest("anchors"));
+    let view = newest("view");
     let mut out: Vec<Value> = rows
         .iter()
         .filter(|r| {
@@ -146,9 +146,6 @@ fn plan(rows: &[Value], at: i64) -> Result<Vec<Value>, NoFork> {
             }
             if kind == Some("view") {
                 return Some(id) == view;
-            }
-            if kind == Some("anchors") {
-                return Some(id) == anchors;
             }
             id <= at && !kind.is_some_and(|k| NOT_COPIED.contains(&k))
         })
