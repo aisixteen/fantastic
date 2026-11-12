@@ -79,4 +79,4 @@ pub use send::{current_origin, current_sender, Signal, ON_BATCH_LAUNCHED};
 pub use state::{KernelState, CURRENT_VERSION};
 pub use storage::StorageMode;
 pub use tasks::{current_killed, current_task, spawn_inherit, TaskId, TaskTable, CURRENT_TASK};
-pub use verbs::{DynVerb, Parse, RecordDecl, Routed, Verb};
+pub use verbs::{DynRegistry, DynVerb, Parse, RecordDecl, Routed, Verb};

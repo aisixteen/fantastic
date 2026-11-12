@@ -115,7 +115,12 @@ impl DynVerb {
     pub fn new(name: impl Into<String>, description: &str, input_schema: &Value) -> DynVerb {
         let mut schema = match input_schema {
             Value::Object(o) => o.clone(),
-            _ => Map::new(),
+            // no schema: a verb with no arguments, so any argument is refused
+            _ => {
+                let mut none = Map::new();
+                none.insert("additionalProperties".to_string(), json!(false));
+                none
+            }
         };
         schema.insert("type".to_string(), json!("object"));
         schema.insert("description".to_string(), json!(description));
@@ -123,6 +128,101 @@ impl DynVerb {
             name: name.into(),
             schema: Value::Object(schema),
         }
+    }
+}
+
+/// The verbs a RUNNING PROGRAM declares for its agent at runtime (an exec_bridge
+/// agent's child process): shared library state a bundle keeps, one list per agent.
+/// The program sends `[{name, description, inputSchema}]`; [`declare`](Self::declare)
+/// checks it and REPLACES the agent's list; the bundle's `dynamic_verbs` returns
+/// [`of`](Self::of), so the entry validates later calls (mail) of those verbs with
+/// the same engine as every other verb. No "accept any verb" mode.
+#[derive(Debug, Default)]
+pub struct DynRegistry {
+    by_agent: std::sync::Mutex<std::collections::HashMap<String, Vec<DynVerb>>>,
+}
+
+impl DynRegistry {
+    /// An empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace `agent`'s declared verbs with the program's `declaration` — a JSON
+    /// list of `{name, description?, inputSchema?}`. `reserved` are the verbs the
+    /// bundle already answers (`&[VERBS, declared::common::VERBS]`): a program cannot
+    /// redeclare one, nor declare a name twice. `Err` is the refusal naming the entry.
+    pub fn declare(
+        &self,
+        agent: &str,
+        declaration: &Value,
+        reserved: &[&[Verb]],
+    ) -> Result<(), Value> {
+        let bad = |why: String| {
+            refusal_hint(
+                BAD_ARG,
+                format!("declare verbs: {why}"),
+                "declare a list of {name, description, inputSchema}".to_string(),
+            )
+        };
+        let Value::Array(items) = declaration else {
+            return Err(bad(format!(
+                "expected a list, got {}",
+                fantastic_bundle::py_type_name(declaration)
+            )));
+        };
+        let mut out: Vec<DynVerb> = Vec::new();
+        for (i, item) in items.iter().enumerate() {
+            let Some(name) = item
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|n| !n.is_empty())
+            else {
+                return Err(bad(format!("entry {i} has no 'name' text")));
+            };
+            if reserved.iter().any(|l| l.iter().any(|v| v.name == name))
+                || out.iter().any(|d| d.name == name)
+            {
+                return Err(bad(format!(
+                    "{} is already a verb of this agent",
+                    fantastic_bundle::py_repr(name)
+                )));
+            }
+            let description = item
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let schema = item.get("inputSchema").unwrap_or(&Value::Null);
+            if !matches!(schema, Value::Null | Value::Object(_)) {
+                return Err(bad(format!(
+                    "entry {} 'inputSchema' must be an object",
+                    fantastic_bundle::py_repr(name)
+                )));
+            }
+            out.push(DynVerb::new(name, description, schema));
+        }
+        self.lock().insert(agent.to_string(), out);
+        Ok(())
+    }
+
+    /// `agent`'s declared verbs now (empty before the program declared any).
+    #[must_use]
+    pub fn of(&self, agent: &str) -> Vec<DynVerb> {
+        self.lock().get(agent).cloned().unwrap_or_default()
+    }
+
+    /// Drop `agent`'s verbs (its program ended).
+    pub fn forget(&self, agent: &str) {
+        self.lock().remove(agent);
+    }
+
+    fn lock(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Vec<DynVerb>>> {
+        self.by_agent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -409,7 +509,16 @@ fn type_label(s: &Value) -> String {
     if let Some(n) = s.get("minItems").and_then(Value::as_u64) {
         label.push_str(&format!(" with at least {n} item(s)"));
     }
+    if let Some(p) = s.get("pattern").and_then(Value::as_str) {
+        label.push_str(&format!(" matching /{p}/"));
+    }
     label
+}
+
+/// The declared value schema of a MAP (`additionalProperties` as a schema: every
+/// key not named is a field of this shape), when the schema has one.
+fn map_value(schema: &Value) -> Option<&Value> {
+    schema.get("additionalProperties").filter(|v| v.is_object())
 }
 
 fn base_label(s: &Value) -> String {
@@ -448,7 +557,10 @@ fn base_label(s: &Value) -> String {
                 "list[{}]",
                 o.get("items").map_or_else(|| "any".to_string(), type_label)
             ),
-            "object" => "object".to_string(),
+            "object" => map_value(s).map_or_else(
+                || "object".to_string(),
+                |v| format!("map[{}]", type_label(v)),
+            ),
             other => other.to_string(),
         }
     };
@@ -520,10 +632,13 @@ pub fn arg_list(schema: &Value) -> String {
     )
 }
 
-/// Does the schema accept fields it does not name? Only `deny_unknown_fields`
-/// (`additionalProperties: false`) closes a struct.
+/// Does the schema accept ANY field it does not name, unchecked? Only
+/// `deny_unknown_fields` (`additionalProperties: false`) closes a struct, and a map
+/// (`additionalProperties` as a schema) checks every other field against its value
+/// shape instead.
 fn open_ended(schema: &Value) -> bool {
     !matches!(schema.get("additionalProperties"), Some(Value::Bool(false)))
+        && map_value(schema).is_none()
 }
 
 /// The FIRST SENTENCE of a doc: cut at its first `. ` or end of the first paragraph.
@@ -665,6 +780,9 @@ fn matches_type(schema: &Value, v: &Value) -> bool {
                 o.get("minLength")
                     .and_then(Value::as_u64)
                     .is_none_or(|m| t.chars().count() as u64 >= m)
+                    && o.get("pattern")
+                        .and_then(Value::as_str)
+                        .is_none_or(|p| pattern_matches(p, t))
             }),
             "boolean" => v.is_boolean(),
             "null" => v.is_null(),
@@ -693,6 +811,23 @@ fn matches_type(schema: &Value, v: &Value) -> bool {
     }
 }
 
+/// Does `text` match the declared `pattern` (JSON-schema: found anywhere in the
+/// text; anchor with `^…$`)? A pattern that is not a valid regex matches nothing:
+/// the declaration is wrong and every value is refused by it.
+fn pattern_matches(pattern: &str, text: &str) -> bool {
+    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<String, Option<regex::Regex>>>> =
+        OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache
+        .entry(pattern.to_string())
+        .or_insert_with(|| regex::Regex::new(pattern).ok())
+        .as_ref()
+        .is_some_and(|re| re.is_match(text))
+}
+
 fn refuse_arg(verb: &str, code: &str, arg: &str, why: String, schema: &Value) -> Value {
     // the hint: the verb's real argument list, and what the named argument is
     let mut hint = format!("{verb} takes — {}", arg_list(schema));
@@ -714,11 +849,47 @@ fn refuse_arg(verb: &str, code: &str, arg: &str, why: String, schema: &Value) ->
 ///
 /// Order: unknown → missing → wrongly typed.
 pub fn validate(name: &str, schema: &Value, payload: &Value) -> Result<Value, Value> {
-    let Value::Object(raw) = args_of(payload) else {
+    let Value::Object(mut raw) = args_of(payload) else {
         return Ok(Value::Object(Map::new()));
     };
     check_object(name, "", schema, &raw, schema)?;
+    apply_defaults(schema, &mut raw);
     Ok(Value::Object(raw))
+}
+
+/// Put the declared DEFAULT of every argument the call left out (an argument is
+/// part of the API, shown by `reflect` as `(default …)`); a nested declared object
+/// and the values of a map are filled the same way. Runs after the check, so only
+/// a call that passed is completed.
+fn apply_defaults(schema: &Value, raw: &mut Map<String, Value>) {
+    if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+        for (k, p) in props {
+            match raw.get_mut(k) {
+                None => {
+                    if let Some(d) = p.get("default").filter(|d| !d.is_null()) {
+                        raw.insert(k.clone(), d.clone());
+                    }
+                }
+                Some(Value::Object(inner)) => {
+                    if let Some(obj) = described_object(p) {
+                        apply_defaults(obj, inner);
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    if let Some(value_schema) = map_value(schema) {
+        let named = schema.get("properties").and_then(Value::as_object);
+        for (k, v) in raw.iter_mut() {
+            if named.is_some_and(|p| p.contains_key(k)) {
+                continue;
+            }
+            if let (Some(obj), Value::Object(inner)) = (described_object(value_schema), v) {
+                apply_defaults(obj, inner);
+            }
+        }
+    }
 }
 
 fn bound_of(schema: &Value, name: &str, key: &str) -> u64 {
@@ -751,7 +922,10 @@ fn described_object(schema: &Value) -> Option<&Value> {
             Some(Value::Array(ts)) => ts.iter().any(|t| t.as_str() == Some("object")),
             _ => false,
         };
-        object && (s.get("properties").is_some() || s.get("required").is_some())
+        object
+            && (s.get("properties").is_some()
+                || s.get("required").is_some()
+                || map_value(s).is_some())
     };
     if is(schema) {
         return Some(schema);
@@ -783,8 +957,28 @@ fn check_object(
     };
     let props = schema.get("properties").and_then(Value::as_object);
     let open = open_ended(schema);
-    for k in raw.keys() {
+    for (k, v) in raw {
         let known = props.is_some_and(|p| p.contains_key(k));
+        // a MAP: a field not named is one entry, checked by the declared value shape
+        if let (false, Some(value_schema)) = (known, map_value(schema)) {
+            if let (Some(obj), Value::Object(inner)) = (described_object(value_schema), v) {
+                check_object(name, &dotted(k), obj, inner, top)?;
+            } else if !matches_type(value_schema, v) {
+                return Err(refuse_arg(
+                    name,
+                    BAD_ARG,
+                    &dotted(k),
+                    format!(
+                        "argument {} must be {}, got {}",
+                        fantastic_bundle::py_repr(&dotted(k)),
+                        type_label(value_schema),
+                        fantastic_bundle::py_type_name(v)
+                    ),
+                    top,
+                ));
+            }
+            continue;
+        }
         if !known && !open {
             return Err(refuse_arg(
                 name,
