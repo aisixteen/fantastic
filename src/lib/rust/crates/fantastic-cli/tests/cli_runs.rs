@@ -932,7 +932,7 @@ fn a_non_finite_kv_argument_round_trips_instead_of_panicking() {
             "kernel",
             "create_agent",
             "parent_id=kernel",
-            "handler_module=core.tools",
+            "handler_module=kernel_state.tools",
             "id=coerced",
             "big2=123456789012345678901234567890",
             "inf=inf",
@@ -1282,12 +1282,12 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
         assert!(fields[n].get("default").is_none(), "{n}");
     }
     assert_eq!(
-        fields["kv_overflow"]["enum"],
-        serde_json::json!(["evict", "reject"])
+        fields["kv_overflow"]["type"],
+        serde_json::json!("'evict'|'reject'")
     );
     assert_eq!(
-        fields["reasoning_effort"]["enum"],
-        serde_json::json!(["low", "medium", "xhigh"])
+        fields["reasoning_effort"]["type"],
+        serde_json::json!("'low'|'medium'|'xhigh'")
     );
     // the key: optional where a server may be keyless, required where it never is
     assert_eq!(fields["credentials"]["type"], serde_json::json!("object"));

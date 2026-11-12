@@ -115,7 +115,7 @@ requirements:
     title: "forget drops the value and keeps the declaration; only update_agent declares or undeclares a ref"
   - id: DOC-1
     level: MUST
-    title: "a reflect carries no verb docs — no `verbs`, `emits`, `cancel`, `more` or `kernel_verbs`"
+    title: "a reflect lists the agent's own verbs, one signature line each (`verbs`), builtin and dynamic; it carries no `emits`, `cancel`, `more` or `kernel_verbs`"
   - id: DOC-2
     level: MUST
     title: "`docs` is gated like any kernel verb — a `docs` grant on the root (both halves) reads it; an agent without one is refused at egress"
