@@ -36,7 +36,9 @@ def slow(p):
 fa.serve({"echo": echo, "die": die, "slow": slow, "chatty": chatty})
 "#;
 
-const VERBS: &str = "  echo: 'args: text:str. Returns {echo, pid}.'\n  die: 'No args. The program exits.'\n  slow: 'No args. Sleeps 30 s.'\n  chatty: 'No args. Writes 300 kB to stdout.'\n";
+const NONE: &str = "{type: object, properties: {}, additionalProperties: false}";
+
+const VERBS: &str = "  echo: {doc: 'Echoes the text. Returns {echo, pid}.', schema: {type: object, properties: {text: {type: string}}, required: [text], additionalProperties: false}}\n  die: {doc: 'The program exits.', schema: {type: object, properties: {}, additionalProperties: false}}\n  slow: {doc: 'Sleeps 30 s.', schema: {type: object, properties: {}, additionalProperties: false}}\n  chatty: {doc: 'Writes 300 kB to stdout.', schema: {type: object, properties: {}, additionalProperties: false}}\n";
 
 /// Write `bundles/<name>/` with the helper, `program` and a bundle.yaml.
 fn bundle(tmp: &TempDir, name: &str, program: &str, verbs: &str) -> PathBuf {
@@ -165,13 +167,26 @@ async fn docs_and_the_catalog_read_bundle_yaml() {
     bundle(&tmp, "rs_documented", ECHO, VERBS);
     let kernel = kernel_for(&tmp);
     load(&kernel, &tmp);
-    let d = call(
+    // the program's verbs are the instance's dynamic verbs: `docs` of the AGENT
+    // renders them beside the declared `boot` and `shutdown`
+    create(&kernel, "rs_documented", "rs_d1").await;
+    let d = call(&kernel, "kernel", json!({"type": "docs", "of": "rs_d1"})).await;
+    let echo = d["verbs"]["echo"].as_str().unwrap_or_default();
+    assert!(echo.contains("Echoes the text"), "{d}");
+    assert!(echo.contains("text"), "{d}");
+    for verb in ["boot", "shutdown", "reflect", "die", "slow", "chatty"] {
+        assert!(d["verbs"].get(verb).is_some(), "{verb}: {d}");
+    }
+    // the bundle's own docs name the declared verbs only
+    let b = call(
         &kernel,
         "kernel",
         json!({"type": "docs", "of": "rs_documented"}),
     )
     .await;
-    assert_eq!(d["verbs"]["echo"], "args: text:str", "{d}");
+    assert!(b["verbs"].get("boot").is_some(), "{b}");
+    assert!(b["verbs"].get("echo").is_none(), "{b}");
+    delete(&kernel, "rs_d1").await;
     let r = call(
         &kernel,
         "kernel",
@@ -199,7 +214,7 @@ async fn a_program_that_serves_other_verbs_than_declared_stops_saying_so() {
         &tmp,
         "rs_liar",
         ECHO,
-        &format!("{VERBS}  extra: 'No args.'\n"),
+        &format!("{VERBS}  extra: {{doc: 'Extra.', schema: {NONE}}}\n"),
     );
     let kernel = kernel_for(&tmp);
     load(&kernel, &tmp);
@@ -244,6 +259,29 @@ async fn an_exit_settles_the_call_and_nothing_respawns() {
         "{again}"
     );
     delete(&kernel, "rs_m1").await;
+}
+
+/// A `shutdown` call with no reason stops the program at that call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_without_a_reason_stops_the_program() {
+    let tmp = TempDir::new().unwrap();
+    bundle(&tmp, "rs_noreason", ECHO, VERBS);
+    let kernel = kernel_for(&tmp);
+    load(&kernel, &tmp);
+    create(&kernel, "rs_noreason", "rs_n1").await;
+    let first = call(&kernel, "rs_n1", json!({"type": "echo", "text": "a"})).await;
+    assert_eq!(first["echo"], "a", "{first}");
+    let a = kernel
+        .agents
+        .get(&AgentId::from("rs_n1"))
+        .map(|e| Arc::clone(e.value()))
+        .unwrap();
+    kernel
+        .bookkeeping(&a, json!({"type": "shutdown"}), None)
+        .await;
+    let after = call(&kernel, "rs_n1", json!({"type": "echo", "text": "b"})).await;
+    assert_eq!(after["reason"], "transport_closed", "{after}");
+    delete(&kernel, "rs_n1").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -462,4 +500,32 @@ async fn a_bundle_folder_linking_outside_is_refused() {
             .expect("refused");
     assert!(err.contains("escapes root"), "{err}");
     assert!(kernel.bundles.get("rs_escape").is_none());
+}
+
+/// A call the program does not serve is refused by the instance's own entry, naming
+/// what it answers; the base answers no program verb.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unknown_verb_is_refused_by_the_entry_and_the_base_has_none() {
+    let tmp = TempDir::new().unwrap();
+    bundle(&tmp, "rs_strict", ECHO, VERBS);
+    let kernel = kernel_for(&tmp);
+    load(&kernel, &tmp);
+    create(&kernel, "rs_strict", "rs_s1").await;
+    let out = call(&kernel, "rs_s1", json!({"type": "frob"})).await;
+    assert_eq!(out["reason"], "unhandled", "{out}");
+    assert_eq!(out["verb"], "frob", "{out}");
+    for verb in ["echo", "die", "slow", "chatty"] {
+        assert!(out["error"].as_str().unwrap().contains(verb), "{out}");
+    }
+    // `boot` takes no argument, `shutdown` only a reason: refused by name
+    let out = call(&kernel, "rs_s1", json!({"type": "boot", "now": true})).await;
+    assert_eq!(out["reason"], "bad_arg", "{out}");
+    assert_eq!(out["arg"], "now", "{out}");
+    let out = call(&kernel, "rs_s1", json!({"type": "shutdown", "reason": 5})).await;
+    assert_eq!(out["reason"], "bad_arg", "{out}");
+    assert_eq!(out["arg"], "reason", "{out}");
+    // the base declares the two verbs every folder bundle answers
+    let base = PyAgentBundle;
+    assert_eq!(Handler::verbs(&base).len(), 2);
+    delete(&kernel, "rs_s1").await;
 }
