@@ -574,7 +574,7 @@ impl Handler for FolderBundle {
     fn dynamic_verbs(&self, _agent: &fantastic_kernel::Agent) -> Vec<DynVerb> {
         self.verbs
             .iter()
-            .map(|(name, doc)| DynVerb::new(name, doc.as_str().unwrap_or_default(), &json!({})))
+            .map(|(name, doc)| DynVerb::new(name, doc.as_str().expect("bundle.yaml verb doc is a string"), &json!({})))
             .collect()
     }
 
@@ -593,10 +593,11 @@ impl Handler for FolderBundle {
             verbs::Call::Boot(_) => self.start(agent_id, kernel).await,
             verbs::Call::Shutdown(a) => {
                 // a reload (`reload_bundle`: shutdown, then boot) or a stop
-                // The kernel's own stop sends no reason: `on_shutdown` stops it, saying so.
-                if let Some(reason) = a.reason {
-                    stop_by_id(agent_id, format!("{}: {reason}", agent_id.as_str()));
-                }
+                let why = match a.reason {
+                    Some(reason) => format!("{}: {reason}", agent_id.as_str()),
+                    None => agent_id.as_str().to_string(),
+                };
+                stop_by_id(agent_id, why);
                 Value::Null
             }
             // one of the program's verbs: forwarded as the call it was

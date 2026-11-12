@@ -258,6 +258,27 @@ async fn an_exit_settles_the_call_and_nothing_respawns() {
     delete(&kernel, "rs_m1").await;
 }
 
+/// A `shutdown` call with no reason stops the program at that call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_without_a_reason_stops_the_program() {
+    let tmp = TempDir::new().unwrap();
+    bundle(&tmp, "rs_noreason", ECHO, VERBS);
+    let kernel = kernel_for(&tmp);
+    load(&kernel, &tmp);
+    create(&kernel, "rs_noreason", "rs_n1").await;
+    let first = call(&kernel, "rs_n1", json!({"type": "echo", "text": "a"})).await;
+    assert_eq!(first["echo"], "a", "{first}");
+    let a = kernel
+        .agents
+        .get(&AgentId::from("rs_n1"))
+        .map(|e| Arc::clone(e.value()))
+        .unwrap();
+    kernel.bookkeeping(&a, json!({"type": "shutdown"}), None).await;
+    let after = call(&kernel, "rs_n1", json!({"type": "echo", "text": "b"})).await;
+    assert_eq!(after["reason"], "transport_closed", "{after}");
+    delete(&kernel, "rs_n1").await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reload_restarts_the_instance_and_answers_the_inflight_call() {
     let tmp = TempDir::new().unwrap();

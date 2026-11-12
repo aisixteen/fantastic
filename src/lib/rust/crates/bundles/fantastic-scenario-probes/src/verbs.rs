@@ -116,12 +116,7 @@ pub mod user {
         /// Names this inquiry in the answer.
         pub request_id: Option<String>,
         /// The client the answer is addressed to.
-        #[serde(default = "cli")]
         pub reply_client_id: String,
-    }
-
-    fn cli() -> String {
-        "cli".to_string()
     }
 
     /// How many inquiries this agent has received, and every `action` one handed it. Returns {inquiries, proposals}: the tally, not prose.
@@ -173,12 +168,7 @@ pub mod oracle {
         #[schemars(length(min = 1))]
         pub question: String,
         /// How many lines at most; clamped to 1..20.
-        #[serde(default = "six")]
         pub limit: i64,
-    }
-
-    fn six() -> i64 {
-        6
     }
 
     fantastic_kernel::verbs! {
