@@ -241,39 +241,20 @@ async fn update_agent(
         crate::refusal::with(&mut r, "id", json!(id));
         return r;
     }
-    // WRITE-TIME VALIDATION. The target's bundle judges the patch before anything
-    // changes — its shared record entry (the fields its record declares, their types,
-    // the substrate wiring no record carries), then its own `validate_meta` — so a
-    // refusal names the bad field at the point of the mistake instead of surfacing
-    // calls later. A bare agent (no bundle) is judged by the kernel as the agent it
-    // is: the common record, open to whatever fields it was given.
-    match target
+    // WRITE-TIME VALIDATION: the target's own entry judges the patch before anything
+    // changes (a bundle's shared record entry and its `validate_meta`; a bare agent's
+    // open common record); the kernel only routes the refusal.
+    let current = target.meta.read().expect("meta poisoned").clone();
+    let judged = match target
         .handler_module
         .as_deref()
         .and_then(|hm| kernel.bundles.get(hm))
     {
-        Some(bundle) => {
-            if let Err(refused) = bundle.check_record("update_agent", &patch) {
-                return refused;
-            }
-            let current = target.meta.read().expect("meta poisoned").clone();
-            if let Some(why) = bundle.validate_meta(&patch, &current) {
-                let mut r = crate::refusal::refusal(crate::refusal::INVALID_META, why);
-                crate::refusal::with(&mut r, "id", json!(id));
-                return r;
-            }
-        }
-        None => {
-            if let Err(refused) = crate::verbs::check_record(
-                "update_agent",
-                "bare agent",
-                &patch,
-                &crate::declared::record::RECORD,
-                &crate::declared::bare_record::RECORD,
-            ) {
-                return refused;
-            }
-        }
+        Some(bundle) => bundle.check_write("update_agent", &patch, &current, Some(&id.0)),
+        None => crate::declared::bare_record::check("update_agent", &patch),
+    };
+    if let Err(refused) = judged {
+        return refused;
     }
     let rec = target.update_meta(patch);
     // NO INLINE PERSIST: the `updated` event published below is what the root

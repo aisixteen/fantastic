@@ -21,10 +21,28 @@ pub fn routing(name: &str, v: &Value) -> Result<Value, Value> {
     }
 }
 
+/// A call's integer argument that is not a verb's (a control call's `of`, a recall's
+/// `id`), read by the same schema reader as every other typed value. `Err` is the
+/// refusal naming the argument.
+pub fn integer(name: &str, v: &Value) -> Result<i64, Value> {
+    let n = fantastic_kernel::typing::routing(name, "integer", v)?;
+    n.as_i64()
+        .ok_or_else(|| fantastic_kernel::refusal::bad("send", name, "integer"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_integer_argument_is_read_by_the_schema_reader() {
+        assert_eq!(integer("of", &json!("3")).unwrap(), 3);
+        assert_eq!(integer("of", &json!(3)).unwrap(), 3);
+        for bad in ["+5", "03", "", "x", "٣"] {
+            assert_eq!(integer("of", &json!(bad)).unwrap_err()["arg"], json!("of"), "{bad:?}");
+        }
+    }
 
     #[test]
     fn only_timeout_and_retries_are_read_as_numbers_in_routing() {

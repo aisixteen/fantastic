@@ -91,6 +91,30 @@ pub trait Bundle: sealed::Sealed + Send + Sync {
         )
     }
 
+    /// THE WRITE'S SHARED ENTRY: the record's fields ([`Bundle::check_record`]), then
+    /// the bundle's own [`Bundle::validate_meta`] over what changes against `current`
+    /// (empty at create). `id` names the agent in a `validate_meta` refusal (update).
+    /// `Err` is the refusal; the kernel only routes it.
+    fn check_write(
+        &self,
+        verb: &str,
+        fields: &Map<String, Value>,
+        current: &Map<String, Value>,
+        id: Option<&str>,
+    ) -> Result<(), Value> {
+        self.check_record(verb, fields)?;
+        match self.validate_meta(fields, current) {
+            None => Ok(()),
+            Some(why) => {
+                let mut r = crate::refusal::refusal(crate::refusal::INVALID_META, why);
+                if let Some(id) = id {
+                    crate::refusal::with(&mut r, "id", Value::from(id));
+                }
+                Err(r)
+            }
+        }
+    }
+
     /// Refuse a record this bundle cannot honour (see [`Handler::validate_meta`]).
     fn validate_meta(
         &self,

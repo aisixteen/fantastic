@@ -342,6 +342,21 @@ pub mod bare_record {
     pub struct BareRecord {}
 
     crate::record!(BareRecord, open);
+
+    /// Judge the fields of an `update_agent` patch on a bare agent: the common record,
+    /// open to whatever fields it was given. The agent-side entry for a record with no bundle.
+    pub fn check(
+        verb: &str,
+        fields: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), serde_json::Value> {
+        crate::verbs::check_record(
+            verb,
+            "bare agent",
+            fields,
+            &crate::declared::record::RECORD,
+            &RECORD,
+        )
+    }
 }
 
 /// The kernel's own verbs, as `name → declaration`, for `docs of=kernel`.

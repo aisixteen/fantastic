@@ -46,18 +46,6 @@ pub fn as_id(x: &Value) -> Option<i64> {
     }
 }
 
-/// A message id the model WROTE as text (a pid or id it copied out of a tag): ASCII
-/// digits only, whitespace around them ignored.
-#[must_use]
-pub fn id_text(text: &str) -> Option<i64> {
-    let t = py_strip(text);
-    if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
-        t.parse::<i64>().ok()
-    } else {
-        None
-    }
-}
-
 fn bad_arg(msg: &str, arg: &str) -> Value {
     json!({"error": msg, "reason": "bad_arg", "arg": arg})
 }
@@ -129,7 +117,7 @@ pub async fn grep(
             }
             let c = m.get("content").and_then(Value::as_str).unwrap_or("");
             for block in reply_blocks(c) {
-                if let Some(p) = pid_of(block).and_then(id_text) {
+                if let Some(p) = pid_of(block).and_then(|t| t.parse::<i64>().ok()) {
                     reach.insert(p);
                 }
             }

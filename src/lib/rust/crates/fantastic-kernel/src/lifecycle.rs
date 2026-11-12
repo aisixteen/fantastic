@@ -167,13 +167,6 @@ pub async fn create_agent(
         return r;
     };
 
-    // THE RECORD'S FIELDS are judged by the target's own bundle, through its shared
-    // entry: the substrate wiring no record may carry, `children_dir`, the fields its
-    // record declares and their types.
-    if let Err(refused) = bundle.check_record("create_agent", &meta) {
-        return refused;
-    }
-
     // The structural authority baseline ({$self:*} on both
     // `can_call` and `callable_by`) is stamped + merged uniformly in `Agent::new`
     // for EVERY agent — so it is NOT re-stamped here; an explicit grant in the
@@ -185,8 +178,10 @@ pub async fn create_agent(
     if let Some(why) = bad_grant_shape(&meta) {
         return crate::refusal::refusal(crate::refusal::INVALID_META, &why);
     }
-    if let Some(why) = bundle.validate_meta(&meta, &Map::new()) {
-        return crate::refusal::refusal(crate::refusal::INVALID_META, why);
+    // THE RECORD'S FIELDS and the bundle's own check: the target's bundle judges them
+    // through its shared entry; the kernel only routes the refusal.
+    if let Err(refused) = bundle.check_write("create_agent", &meta, &Map::new(), None) {
+        return refused;
     }
 
     // A supplied id — even "" — is the caller's choice and is validated as one

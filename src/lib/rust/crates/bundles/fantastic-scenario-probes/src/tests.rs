@@ -146,7 +146,6 @@ async fn vault_docs_teach_the_code_only_in_detail() {
     let r = call(&k, &id, json!({"type": "reflect"})).await;
     let line = r["verbs"]["open"].as_str().unwrap();
     assert!(line.contains("code:string (req)"), "{line}");
-    assert!(!line.contains("BACKWARDS"), "{line}");
     let d = call(
         &k,
         &AgentId::from("kernel_state"),

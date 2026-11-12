@@ -5461,8 +5461,8 @@ fn budget_meta_reads_integers_only() {
 }
 
 #[test]
-fn ids_are_numbers_and_text_ids_are_ascii_digits_only() {
-    use crate::retrieval::{as_id, id_text};
+fn ids_are_numbers() {
+    use crate::retrieval::as_id;
     // a JSON id is a positive integer, nothing else
     for (v, want) in [
         (json!(7), Some(7)),
@@ -5472,19 +5472,6 @@ fn ids_are_numbers_and_text_ids_are_ascii_digits_only() {
         (json!("3"), None),
     ] {
         assert_eq!(as_id(&v), want, "as_id({v})");
-    }
-    // an id the model WROTE is ASCII digits
-    for (t, want) in [
-        ("٣", None),
-        ("²", None),
-        ("12٣", None),
-        (" 3 ", Some(3)),
-        ("\u{2003}3\u{2003}", Some(3)),
-        ("0", Some(0)),
-        ("+5", None),
-        ("", None),
-    ] {
-        assert_eq!(id_text(t), want, "id_text({t:?})");
     }
     // a record's numbers are numbers: text there is not read
     let meta = |v: Value| v.as_object().unwrap().clone();

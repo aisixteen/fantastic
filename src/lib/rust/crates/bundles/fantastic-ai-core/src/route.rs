@@ -984,8 +984,7 @@ async fn keep_note(
     let of = call
         .arguments
         .get("of")
-        .and_then(Value::as_str)
-        .and_then(crate::retrieval::id_text);
+        .and_then(|v| crate::tool_parse::typed::integer("of", v).ok());
     let summary = call.arguments.get("summary").map(py_str);
     let (Some(of), Some(summary)) = (of, summary) else {
         return Some(
