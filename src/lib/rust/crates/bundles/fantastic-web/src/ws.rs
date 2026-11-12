@@ -548,7 +548,7 @@ pub(crate) async fn ws_loop(
                 let denial = match gate_leg(&kernel, &leg, "call", &frame) {
                     Decision::Allow => None,
                     // TEACHING DENIAL: the caller's promise resolves with the
-                    // reason plus the pointer to the readme that says how to
+                    // reason plus the pointer that says how to
                     // open the edge.
                     Decision::Deny(d) => Some(d.to_refusal()),
                 };

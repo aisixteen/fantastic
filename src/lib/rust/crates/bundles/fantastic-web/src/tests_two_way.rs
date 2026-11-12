@@ -16,7 +16,7 @@ use fantastic_ai_core::agent_loop::BackendConfig;
 use fantastic_ai_core::provider::{Provider, ProviderError, ProviderEvent, ProviderStream};
 use fantastic_bridge::transport::{BridgeTransport, Frame};
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
-use fantastic_kernel::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+use fantastic_kernel::bundle::{BundleError, BundleRegistry, Reply};
 use fantastic_kernel::test_support::register_root_loader;
 use fantastic_kernel::{Blob, Outcome};
 use futures_util::{SinkExt, StreamExt};
@@ -35,26 +35,45 @@ struct Probe {
     held: Arc<tokio::sync::Notify>,
 }
 
+fantastic_kernel::stand_in_verbs!(probe_verbs {
+    Echo "echo" { text: Option<serde_json::Value> },
+    Hold "hold" {}
+});
+
 #[async_trait]
-impl Bundle for Probe {
+impl fantastic_kernel::Handler for Probe {
+    type Call = probe_verbs::Call;
     fn name(&self) -> &str {
         "two_way_probe.tools"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        probe_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        probe_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        match payload["type"].as_str().unwrap_or("") {
-            "reflect" => Ok(Some(json!({"id": id.0, "sentence": "probe", "verbs": {}}))),
-            "echo" => Ok(Some(json!({"echo": payload["text"]}))),
-            "hold" => {
+        match call {
+            probe_verbs::Call::Reflect(_) => {
+                Ok(Some(json!({"id": id.0, "sentence": "probe", "verbs": {}})))
+            }
+            probe_verbs::Call::Echo(e) => Ok(Some(json!({"echo": e.text}))),
+            probe_verbs::Call::Hold(_) => {
                 self.held.notify_one();
                 std::future::pending::<()>().await;
                 unreachable!("a pending future never completes")
             }
-            _ => Ok(None),
         }
     }
 }
@@ -87,26 +106,40 @@ const CFG: BackendConfig = BackendConfig {
 struct CannedAi;
 
 #[async_trait]
-impl Bundle for CannedAi {
+impl fantastic_kernel::Handler for CannedAi {
+    type Call = fantastic_ai_core::declared::chat::Call;
     fn name(&self) -> &str {
         "canned_ai.tools"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in: the AI chat verbs over a scripted model."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        fantastic_ai_core::declared::chat::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        fantastic_ai_core::declared::chat::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         k: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        if payload["type"] == json!("reflect") {
-            return Ok(Some(
-                json!({"id": id.0, "sentence": "canned AI", "verbs": {"send": ""}}),
-            ));
-        }
-        let out = fantastic_ai_core::verbs::handle_common(id, payload, k, CFG, |_| {
-            Arc::new(Canned) as Arc<dyn Provider>
-        })
+        let reflect = || json!({"id": id.0, "sentence": "canned AI", "verbs": {"send": ""}});
+        let out = fantastic_ai_core::verbs::handle(
+            id,
+            call,
+            k,
+            CFG,
+            |_| Arc::new(Canned) as Arc<dyn Provider>,
+            reflect,
+        )
         .await?;
-        Ok(Some(out.unwrap_or_else(|| json!({"reason": "unhandled"}))))
+        Ok(Some(out))
     }
     async fn on_delete(&self, id: &AgentId, k: &Arc<Kernel>) -> Result<(), BundleError> {
         fantastic_ai_core::verbs::on_delete(id, k).await;

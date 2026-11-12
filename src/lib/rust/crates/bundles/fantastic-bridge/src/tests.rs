@@ -183,23 +183,6 @@ async fn mk_kernel_guid(tmp: &TempDir, guid: &str) -> Arc<Kernel> {
     k
 }
 
-/// TWO readmes, each python's byte for byte.
-#[test]
-fn readme_present_and_titled() {
-    // `src/lib` above the crate (crates/bundles/fantastic-bridge).
-    let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(4)
-        .expect("src/lib above the crate")
-        .join("python/bundled_agents/io");
-    let ws = std::fs::read_to_string(py.join("ws_bridge/src/ws_bridge/readme.md"))
-        .expect("python ws_bridge readme");
-    let relay = std::fs::read_to_string(py.join("relay_connector/src/relay_connector/readme.md"))
-        .expect("python relay_connector readme");
-    assert_eq!(ws, WS_README, "ws_bridge readme has drifted");
-    assert_eq!(relay, RELAY_README, "relay_connector readme has drifted");
-}
-
 #[tokio::test]
 async fn identity_from_meta_builds_directory_attrs_blob() {
     // The kernelgroup typing we advertise: well-known keys present → blob; defaults
@@ -260,7 +243,7 @@ async fn reflect_shape_for_memory_transport() {
     assert_eq!(r["connected"], false);
     assert_eq!(r["peer_id"], "peer_x");
     assert_eq!(r["pending_count"], 0);
-    assert!(r.get("verbs").is_none() && r.get("emits").is_none(), "{r}");
+    assert!(r["verbs"]["forward"].is_string(), "{r}");
     let d = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
@@ -270,7 +253,6 @@ async fn reflect_shape_for_memory_transport() {
         .remove(0)
         .result;
     assert!(d["verbs"]["forward"].is_string(), "{d}");
-    assert!(d["emits"]["bridge_up"].is_string(), "{d}");
 }
 
 #[tokio::test]
@@ -1332,31 +1314,43 @@ async fn asymmetric_ingress_egress_via_engine() {
 /// inside `kernel.send` and can never read the reply to its own outbound frame.
 struct BouncerBundle;
 
+fantastic_kernel::stand_in_verbs!(bouncer_verbs {
+    Bounce "bounce" { bridge: String, back_to: String }
+});
+
 #[async_trait]
-impl Bundle for BouncerBundle {
+impl Handler for BouncerBundle {
+    type Call = bouncer_verbs::Call;
     fn name(&self) -> &str {
         "bouncer.tools"
     }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        bouncer_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &Agent) -> Vec<fantastic_kernel::DynVerb> {
+        bouncer_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
+    }
     async fn handle(
         &self,
-        _agent_id: &AgentId,
-        payload: &Value,
+        agent_id: &AgentId,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        if payload.get("type").and_then(Value::as_str) != Some("bounce") {
-            return Ok(Some(json!({"error": "unknown verb"})));
-        }
-        let bridge = payload
-            .get("bridge")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        let bouncer_verbs::Call::Bounce(b) = call else {
+            return Ok(Some(json!({"id": agent_id.0, "sentence": "bouncer"})));
+        };
         let out = kernel
             .send(vec![Item::new(
-                AgentId::from(bridge.as_str()),
+                AgentId::from(b.bridge.as_str()),
                 json!({
                     "type": "forward",
-                    "target": payload.get("back_to").cloned().unwrap_or(Value::Null),
+                    "target": b.back_to,
                     "payload": {"type": "reflect"},
                     // Short, so the OLD inline code fails this in seconds rather
                     // than parking it for the 30s default.
@@ -1570,25 +1564,26 @@ async fn mk_two_family_kernel(tmp: &TempDir) -> Arc<Kernel> {
     kernel
 }
 
-/// An unknown verb (and `shutdown`, and a ws leg's directory
-/// verbs) take python's `bridge: unknown type` reply, envelope hint and all.
+/// An unknown verb is refused by the leg's own entry; `shutdown` is a verb every
+/// agent answers (the teardown lives in `on_delete`), and a ws leg's directory verbs
+/// are not its verbs.
 #[tokio::test]
-async fn unknown_type_is_pythons_reply_with_the_envelope_hint() {
+async fn unknown_type_is_refused_by_the_leg_s_entry() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_two_family_kernel(&tmp).await;
     let ws = id_for("a72_ws", &tmp);
     create_leg(&kernel, WS_HANDLER_MODULE, &ws, json!({})).await;
     let r = ask(&kernel, &ws, json!({"type": "garbage"})).await;
-    assert_eq!(r["error"], json!("bridge: unknown type 'garbage'"));
-    assert_eq!(
-        r["hint"],
-        json!("every bridge frame needs a \"type\"; to reach a remote agent use {\"type\":\"forward\",\"target\":\"<remote_id>\",\"payload\":{\"type\":\"<verb>\",...}} — the inner payload is itself a verb frame and needs its own \"type\".")
+    assert_eq!(r["reason"], json!("unhandled"));
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("unknown verb 'garbage'; "),
+        "{r}"
     );
-    // `shutdown` is not in the table either — the teardown lives in on_delete.
-    assert_eq!(
-        ask(&kernel, &ws, json!({"type": "shutdown"})).await["error"],
-        json!("bridge: unknown type 'shutdown'")
-    );
+    // `shutdown` is a common verb the shared entry answers with null.
+    assert_eq!(ask(&kernel, &ws, json!({"type": "shutdown"})).await, Value::Null);
     // The directory verbs belong to relay_connector only.
     for verb in [
         "list_peers",
@@ -1596,11 +1591,9 @@ async fn unknown_type_is_pythons_reply_with_the_envelope_hint() {
         "unwatch_directory",
         "set_identity",
     ] {
-        assert_eq!(
-            ask(&kernel, &ws, json!({ "type": verb })).await["error"],
-            json!(format!("bridge: unknown type '{verb}'")),
-            "{verb} must not exist on a ws leg"
-        );
+        let r = ask(&kernel, &ws, json!({ "type": verb })).await;
+        assert_eq!(r["reason"], json!("unhandled"), "{verb}: {r}");
+        assert_eq!(r["verb"], json!(verb), "{verb} must not exist on a ws leg");
     }
 }
 
@@ -1727,15 +1720,11 @@ async fn reflect_key_order_per_family() {
     assert_eq!(r["transport"], json!("ws"), "the ws default kind");
     assert_eq!(r["connected"], json!(false));
     assert_eq!(r["sealed"], json!(true));
-    let docs = WsBridgeBundle.verb_docs();
-    assert_eq!(docs.as_object().unwrap().len(), 6);
+    // the declared verbs, in declaration order
+    let names: Vec<&str> = Handler::verbs(&WsBridgeBundle).iter().map(|v| v.name).collect();
     assert_eq!(
-        docs["reflect"],
-        json!("Identity + transport + connectivity. No args.")
-    );
-    assert_eq!(
-        WsBridgeBundle.emits_doc().unwrap()["bridge_down"],
-        json!("{type:'bridge_down'} — emitted when the transport drops (peer closed, tunnel died)")
+        names,
+        ["boot", "reconnect", "forward", "watch_remote", "unwatch_remote"]
     );
 
     let r = ask(&kernel, &relay, json!({"type": "reflect"})).await;
@@ -1774,13 +1763,31 @@ async fn reflect_key_order_per_family() {
     assert_eq!(r["reconnect"], json!(10.0));
     assert_eq!(r["role"], json!("kernel"));
     assert_eq!(r["exposes"], json!([]));
+    let names: Vec<&str> = Handler::verbs(&RelayConnectorBundle)
+        .iter()
+        .map(|v| v.name)
+        .collect();
     assert_eq!(
-        RelayConnectorBundle.verb_docs().as_object().unwrap().len(),
-        10
+        names,
+        [
+            "boot",
+            "reconnect",
+            "forward",
+            "watch_remote",
+            "unwatch_remote",
+            "list_peers",
+            "watch_directory",
+            "unwatch_directory",
+            "set_identity",
+        ]
     );
+    let unwatch = Handler::verbs(&RelayConnectorBundle)
+        .iter()
+        .find(|v| v.name == "unwatch_directory")
+        .expect("declared");
     assert_eq!(
-        RelayConnectorBundle.verb_docs()["unwatch_directory"],
-        json!("No args. Stop the directory subscription started by `watch_directory`.")
+        unwatch.doc(),
+        "Stop the directory subscription `watch_directory` started."
     );
 }
 
@@ -1818,21 +1825,18 @@ async fn boot_error_texts_match_python() {
         ask(&kernel, &ws2, json!({"type": "boot"})).await,
         json!({"error": "bridge: ws boot failed: ws transport requires port"})
     );
-    // an unknown kind on the ws derivation (no "not in this derivation" gate).
+    // an unknown kind is refused at the write, by the record's declaration.
     let odd = id_for("a713_odd", &tmp);
-    create_leg(
+    let r = ask(
         &kernel,
-        WS_HANDLER_MODULE,
-        &odd,
-        json!({"transport": "carrier-pigeon", "peer_id": "p"}),
+        "kernel",
+        json!({"type": "create_agent", "parent_id": "kernel", "id": odd,
+               "handler_module": WS_HANDLER_MODULE, "transport": "carrier-pigeon",
+               "peer_id": "p"}),
     )
     .await;
-    assert_eq!(
-        ask(&kernel, &odd, json!({"type": "boot"})).await,
-        json!({
-            "error": "bridge: carrier-pigeon boot failed: unknown transport 'carrier-pigeon'"
-        })
-    );
+    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    assert_eq!(r["arg"], json!("transport"), "{r}");
 
     // an egress rule the registry does not know refuses the boot, before dialing
     // (the leg's rules are read per frame — boot caches none).
@@ -1893,16 +1897,17 @@ async fn relay_boot_missing_partner_mints_no_guid() {
         RELAY_HANDLER_MODULE,
         &bad_role,
         json!({"transport": "relay", "relay_url": "ws://127.0.0.1:1",
-               "partner_guid": "B", "role": "boss",
-               // checked (shape) before the guid; the store is never asked
+               "partner_guid": "B", "heartbeat": 0, "reconnect": 0,
                "credentials": {"store": "creds", "ref": RELAY_REF}}),
     )
     .await;
-    assert_eq!(
-        ask(&kernel, &bad_role, json!({"type": "boot"})).await,
-        json!({
-            "error": "bridge: relay boot failed: relay_connector role must be one of ('manager', 'kernel'), got 'boss'"
-        })
+    // the dial fails AFTER the guid is minted
+    let booted = ask(&kernel, &bad_role, json!({"type": "boot"})).await;
+    assert!(
+        booted["error"]
+            .as_str()
+            .is_some_and(|e| e.starts_with("bridge: relay boot failed: ")),
+        "{booted}"
     );
     assert!(
         seen.lock()
@@ -1959,11 +1964,10 @@ async fn forward_error_texts_match_python() {
     let kernel = mk_kernel(&tmp).await;
     let bid = id_for("a715", &tmp);
     create_bridge(&kernel, &bid, "peer", "memory").await;
-    // validation — python says `(dict)`.
-    assert_eq!(
-        ask(&kernel, &bid, json!({"type": "forward", "target": "x"})).await,
-        json!({"error": "bridge.forward: target (str) + payload (dict) required"})
-    );
+    // validation: the declaration names the missing argument.
+    let r = ask(&kernel, &bid, json!({"type": "forward", "target": "x"})).await;
+    assert_eq!(r["error"], json!("forward: missing argument 'payload'"), "{r}");
+    assert_eq!(r["reason"], json!("missing_arg"), "{r}");
     // pre-boot
     let r = ask(
         &kernel,
@@ -2038,22 +2042,16 @@ async fn directory_replies_match_python() {
     );
     assert_eq!(r["reason"], json!("not_connected"));
     assert_eq!(r["hint"], json!("call boot first"));
-    // a bad role is a bad_arg refusal naming the arg — python checks the
-    // CONNECTION first, so the leg has to be up to reach it.
-    let _peer = inject_one(&AgentId::from(relay.as_str()));
-    let _ = ask(&kernel, &relay, json!({"type": "boot"})).await;
+    // a bad role is a bad_arg refusal naming the arg, by the declaration — before
+    // the connection is looked at.
     let r = ask(
         &kernel,
         &relay,
         json!({"type": "set_identity", "role": "boss"}),
     )
     .await;
-    assert_eq!(
-        r["error"],
-        json!("set_identity: role must be one of ('manager', 'kernel')")
-    );
-    assert_eq!(r["reason"], json!("bad_arg"));
-    assert_eq!(r["arg"], json!("role"));
+    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    assert_eq!(r["arg"], json!("role"), "{r}");
 }
 
 /// A reconnect announces exactly one `bridge_down`, then `bridge_up`.
@@ -2290,13 +2288,10 @@ async fn a_malformed_frame_is_skipped_and_the_reader_survives() {
     server.abort();
 }
 
-/// python `float(payload.get("forward_timeout", 30))` in `_forward` (and
-/// `list_timeout` in `_list_peers`):
-/// `null` raises TypeError and a non-numeric string ValueError — the handler
-/// fails (`raised`), before the not-connected check; a numeric string is a
-/// timeout like any number.
+/// `forward_timeout` (and `list_timeout`) is a number: the declaration refuses
+/// `null` or a string by name, none is coerced to one.
 #[tokio::test]
-async fn forward_timeout_is_python_float() {
+async fn forward_timeout_is_a_number() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_two_family_kernel(&tmp).await;
     let leg = id_for("a739_leg", &tmp);
@@ -2311,38 +2306,22 @@ async fn forward_timeout_is_python_float() {
         json!({"type": "forward", "target": "x", "payload": {"type": "reflect"},
                "forward_timeout": timeout})
     };
-    let out = kernel
-        .send(vec![Item::new(
-            AgentId::from(leg.as_str()),
-            fwd(Value::Null),
-        )])
-        .await
-        .remove(0);
-    assert_eq!(out.status, fantastic_kernel::Status::Failed, "{out:?}");
-    assert_eq!(
-        out.result["error"],
-        "TypeError: float() argument must be a string or a real number, not 'NoneType'"
-    );
-    let out = kernel
-        .send(vec![Item::new(
-            AgentId::from(leg.as_str()),
-            fwd(json!("soon")),
-        )])
-        .await
-        .remove(0);
-    assert_eq!(
-        out.result["error"],
-        "ValueError: could not convert string to float: 'soon'"
-    );
-    // A numeric string passes the coercion and reaches the connection check.
-    let r = ask(&kernel, &leg, fwd(json!("5"))).await;
+    // a `forward_timeout` that is not a number is refused by name — no string or
+    // null is coerced to one
+    for bad in [Value::Null, json!("soon"), json!("5")] {
+        let r = ask(&kernel, &leg, fwd(bad.clone())).await;
+        assert_eq!(r["reason"], "bad_arg", "{bad}: {r}");
+        assert_eq!(r["arg"], "forward_timeout", "{bad}: {r}");
+    }
+    // a number reaches the connection check
+    let r = ask(&kernel, &leg, fwd(json!(5))).await;
     assert_eq!(r["reason"], "not_connected", "{r}");
 }
 
-/// Both families' unknown type, as TEXT — `error` then
-/// `hint`, no code. Key order is part of the wire and `Value` equality ignores it.
+/// An unknown verb is refused by each leg's own entry, naming what the leg answers;
+/// the relay's directory verbs are not a ws leg's. The raw `type` is echoed back.
 #[tokio::test]
-async fn unknown_type_wire_shape_is_byte_exact_on_both_families() {
+async fn an_unknown_verb_is_refused_by_the_leg_on_both_families() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_two_family_kernel(&tmp).await;
     let ws = id_for("s4_ws", &tmp);
@@ -2355,31 +2334,30 @@ async fn unknown_type_wire_shape_is_byte_exact_on_both_families() {
         json!({"transport": "relay", "relay_url": "ws://127.0.0.1:1"}),
     )
     .await;
-    let hint = "every bridge frame needs a \\\"type\\\"; to reach a remote agent use \
-                {\\\"type\\\":\\\"forward\\\",\\\"target\\\":\\\"<remote_id>\\\",\\\"payload\\\":\
-                {\\\"type\\\":\\\"<verb>\\\",...}} — the inner payload is itself a verb frame \
-                and needs its own \\\"type\\\".";
-    for id in [&ws, &relay] {
+    for (id, answers) in [
+        (
+            &ws,
+            "boot, reconnect, forward, watch_remote, unwatch_remote",
+        ),
+        (
+            &relay,
+            "boot, reconnect, forward, watch_remote, unwatch_remote, list_peers, \
+             watch_directory, unwatch_directory, set_identity",
+        ),
+    ] {
         let r = ask(&kernel, id, json!({"type": "garbage"})).await;
-        assert_eq!(
-            serde_json::to_string(&r).unwrap(),
-            format!(
-                r#"{{"error":"bridge: unknown type 'garbage'","reason":"unhandled","hint":"{hint}","verb":"garbage"}}"#
-            ),
-            "{id}"
+        assert_eq!(r["reason"], json!("unhandled"), "{id}");
+        assert_eq!(r["verb"], json!("garbage"), "{id}");
+        let error = r["error"].as_str().unwrap();
+        assert!(
+            error.starts_with("unknown verb 'garbage'; ") && error.contains(answers),
+            "{id}: {error}"
         );
     }
-    let r = WsBridgeBundle
-        .handle(&AgentId::from(ws.as_str()), &json!({}), &kernel)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        serde_json::to_string(&r).unwrap(),
-        format!(
-            r#"{{"error":"bridge: unknown type None","reason":"unhandled","hint":"{hint}","verb":null}}"#
-        )
-    );
+    // the directory verbs are the relay's only
+    let r = ask(&kernel, &ws, json!({"type": "list_peers"})).await;
+    assert_eq!(r["reason"], json!("unhandled"), "{r}");
+    assert_eq!(r["verb"], json!("list_peers"), "{r}");
 }
 
 /// A relay leg's minted `guid` is python's
@@ -2391,13 +2369,13 @@ async fn a_minted_relay_guid_is_a_uuid4_hex() {
     let mut seen = std::collections::HashSet::new();
     for n in 0..4 {
         let relay = id_for(&format!("s4_guid{n}"), &tmp);
-        // a bad role fails the boot AFTER the guid is minted
+        // a failed dial fails the boot AFTER the guid is minted
         create_leg(
             &kernel,
             RELAY_HANDLER_MODULE,
             &relay,
             json!({"transport": "relay", "relay_url": "ws://127.0.0.1:1",
-                   "partner_guid": "B", "role": "boss",
+                   "partner_guid": "B", "heartbeat": 0, "reconnect": 0,
                    "credentials": {"store": "creds", "ref": RELAY_REF}}),
         )
         .await;
@@ -2482,8 +2460,10 @@ async fn a_binary_non_forward_verb_is_answered_by_the_text_dispatch() {
         if header["type"] == "forward" {
             // `forward` IS the binary verb: it validates its own envelope
             assert_eq!(
-                serde_json::to_string(&bin.result).unwrap(),
-                r#"{"error":"bridge.forward: target (str) + payload (dict) required"}"#
+                bin.result["error"],
+                json!("forward: missing argument 'payload'"),
+                "{:?}",
+                bin.result
             );
         } else {
             assert_eq!(bin.result, txt, "{header}");
@@ -2615,15 +2595,11 @@ async fn a_binary_forward_before_boot_is_not_connected() {
     assert_eq!(out.body, None);
 }
 
-/// The two bundle shells differ ONLY in family, name
-/// and readme — the same binary routing, the same delete teardown.
+/// The two bundle shells differ ONLY in family and name — the same binary routing, the same delete teardown.
 #[tokio::test]
 async fn both_family_shells_share_one_behaviour() {
-    use fantastic_kernel::bundle::Bundle;
-    assert_eq!(WsBridgeBundle.name(), "ws_bridge");
-    assert_eq!(RelayConnectorBundle.name(), "relay_connector");
-    assert_eq!(WsBridgeBundle.readme(), Some(WS_README));
-    assert_eq!(RelayConnectorBundle.readme(), Some(RELAY_README));
+    assert_eq!(Handler::name(&WsBridgeBundle), "ws_bridge");
+    assert_eq!(Handler::name(&RelayConnectorBundle), "relay_connector");
     let tmp = TempDir::new().unwrap();
     let kernel = mk_two_family_kernel(&tmp).await;
     for (hm, tag) in [
@@ -2704,7 +2680,7 @@ mod two_way;
 /// it implements is not. Both bundles, the same text.
 #[test]
 fn validate_meta_refuses_an_unknown_or_malformed_ingress_rule() {
-    let legs: [&dyn Bundle; 2] = [&WsBridgeBundle, &RelayConnectorBundle];
+    let legs: [&dyn fantastic_kernel::Bundle; 2] = [&WsBridgeBundle, &RelayConnectorBundle];
     for leg in legs {
         for (spec, shown) in [
             (json!("open_sesame"), "'open_sesame'"),
@@ -2806,8 +2782,8 @@ fn bridge_payload_secret_marks_only_a_forwarded_set_fields() {
     let plain = json!({"type": "set", "fields": {"a": "1"}});
     let nofields = json!({"type": "forward", "target": "creds", "payload": {"type": "set"}});
     for b in [
-        &WsBridgeBundle as &dyn Bundle,
-        &RelayConnectorBundle as &dyn Bundle,
+        &WsBridgeBundle as &dyn fantastic_kernel::Bundle,
+        &RelayConnectorBundle as &dyn fantastic_kernel::Bundle,
     ] {
         assert_eq!(
             b.payload_secret(&set),
@@ -2818,4 +2794,121 @@ fn bridge_payload_secret_marks_only_a_forwarded_set_fields() {
             assert!(b.payload_secret(none).is_empty(), "{none}");
         }
     }
+}
+
+/// Every bridge verb is checked by its declaration before it runs: an unknown
+/// argument, a missing one, a wrongly typed one is refused by name, on both families.
+#[tokio::test]
+async fn every_bridge_verb_is_checked_by_its_declaration() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_two_family_kernel(&tmp).await;
+    let ws = id_for("decl_ws", &tmp);
+    create_leg(&kernel, WS_HANDLER_MODULE, &ws, json!({})).await;
+    let relay = id_for("decl_relay", &tmp);
+    create_leg(&kernel, RELAY_HANDLER_MODULE, &relay, json!({})).await;
+    let both = [
+        (json!({"type": "boot", "now": true}), "boot: unknown argument 'now'"),
+        (
+            json!({"type": "reconnect", "now": true}),
+            "reconnect: unknown argument 'now'",
+        ),
+        (
+            json!({"type": "forward", "payload": {"type": "x"}}),
+            "forward: missing argument 'target'",
+        ),
+        (
+            json!({"type": "forward", "target": "t", "payload": "x"}),
+            "forward: argument 'payload' must be",
+        ),
+        (
+            json!({"type": "forward", "target": "t", "payload": {"type": "x"}, "timeout": 1}),
+            "forward: unknown argument 'timeout'",
+        ),
+        (
+            json!({"type": "watch_remote"}),
+            "watch_remote: missing argument 'target'",
+        ),
+        (
+            json!({"type": "unwatch_remote", "target": 7}),
+            "unwatch_remote: argument 'target' must be",
+        ),
+        (
+            json!({"type": "watch_remote", "target": ""}),
+            "watch_remote: missing argument 'target'",
+        ),
+    ];
+    for id in [&ws, &relay] {
+        for (payload, want) in &both {
+            let r = ask(&kernel, id, payload.clone()).await;
+            assert!(
+                r["error"].as_str().unwrap_or_default().starts_with(want),
+                "{id} {payload} -> {r}"
+            );
+        }
+    }
+    for (payload, want) in [
+        (
+            json!({"type": "list_peers", "list_timeout": "5"}),
+            "list_peers: argument 'list_timeout' must be",
+        ),
+        (
+            json!({"type": "watch_directory", "x": 1}),
+            "watch_directory: unknown argument 'x'",
+        ),
+        (
+            json!({"type": "unwatch_directory", "x": 1}),
+            "unwatch_directory: unknown argument 'x'",
+        ),
+        (
+            json!({"type": "set_identity", "exposes": "all"}),
+            "set_identity: argument 'exposes' must be",
+        ),
+        (
+            json!({"type": "set_identity", "owner_guid": 5}),
+            "set_identity: argument 'owner_guid' must be",
+        ),
+        (
+            json!({"type": "set_identity", "role": "kernel", "nope": 1}),
+            "set_identity: unknown argument 'nope'",
+        ),
+    ] {
+        let r = ask(&kernel, &relay, payload.clone()).await;
+        assert!(
+            r["error"].as_str().unwrap_or_default().starts_with(want),
+            "{payload} -> {r}"
+        );
+    }
+}
+
+/// `set_identity` tells an ABSENT field from an explicit null: a field sent is merged
+/// over the record (null retracts it), a field left out stays as it was.
+#[tokio::test]
+async fn set_identity_merges_what_is_sent_and_null_retracts() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_two_family_kernel(&tmp).await;
+    let relay = id_for("ident_relay", &tmp);
+    create_leg(
+        &kernel,
+        RELAY_HANDLER_MODULE,
+        &relay,
+        json!({"transport": "memory", "owner_guid": "M1", "exposes": ["a"]}),
+    )
+    .await;
+    let _peer = inject_one(&AgentId::from(relay.as_str()));
+    let _ = ask(&kernel, &relay, json!({"type": "boot"})).await;
+    let _ = ask(&kernel, &relay, json!({"type": "set_identity", "role": "manager"})).await;
+    let r = ask(&kernel, &relay, json!({"type": "reflect"})).await;
+    assert_eq!(r["role"], json!("manager"), "{r}");
+    assert_eq!(r["owner_guid"], json!("M1"), "a field left out is untouched: {r}");
+    assert_eq!(r["exposes"], json!(["a"]), "{r}");
+    let _ = ask(
+        &kernel,
+        &relay,
+        json!({"type": "set_identity", "owner_guid": null, "role": null, "exposes": ["b", "c"]}),
+    )
+    .await;
+    let r = ask(&kernel, &relay, json!({"type": "reflect"})).await;
+    assert_eq!(r["role"], json!("kernel"), "null retracts the role: {r}");
+    assert_eq!(r["owner_guid"], Value::Null, "{r}");
+    assert_eq!(r["exposes"], json!(["b", "c"]), "{r}");
 }

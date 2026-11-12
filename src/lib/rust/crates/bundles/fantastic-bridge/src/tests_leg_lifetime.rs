@@ -254,33 +254,51 @@ struct TurnProbe {
     started: Arc<tokio::sync::Notify>,
 }
 
+fantastic_kernel::stand_in_verbs!(turn_verbs {
+    Turn "turn" { park: Option<bool> },
+    Status "status" {}
+});
+
 #[async_trait]
-impl Bundle for TurnProbe {
+impl Handler for TurnProbe {
+    type Call = turn_verbs::Call;
     fn name(&self) -> &str {
         "turn_probe.tools"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        turn_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &Agent) -> Vec<fantastic_kernel::DynVerb> {
+        turn_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        match payload["type"].as_str().unwrap_or("") {
-            "turn" => {
+        match call {
+            turn_verbs::Call::Turn(t) => {
                 if self.busy.swap(true, Ordering::SeqCst) {
                     return Ok(Some(json!({"error": "busy"})));
                 }
-                if payload["park"] == json!(true) {
+                if t.park == Some(true) {
                     self.started.notify_one();
                     std::future::pending::<()>().await;
                 }
                 self.busy.store(false, Ordering::SeqCst);
                 Ok(Some(json!({"answered": true})))
             }
-            "status" => Ok(Some(
+            turn_verbs::Call::Status(_) => Ok(Some(
                 json!({"generating": self.busy.load(Ordering::SeqCst)}),
             )),
-            _ => Ok(Some(
+            turn_verbs::Call::Reflect(_) => Ok(Some(
                 json!({"id": id.0, "sentence": "turn probe", "verbs": {}}),
             )),
         }

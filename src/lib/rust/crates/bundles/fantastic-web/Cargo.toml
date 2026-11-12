@@ -22,6 +22,7 @@ hyper = { workspace = true }
 hyper-util = { workspace = true }
 tokio-tungstenite = { workspace = true }
 serde = { workspace = true }
+schemars = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 tower = "0.5"

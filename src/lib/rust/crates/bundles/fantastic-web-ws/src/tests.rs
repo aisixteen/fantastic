@@ -3,14 +3,34 @@
 use super::*;
 use fantastic_kernel::Agent;
 
-/// The readme is python's file, byte for byte
-/// (`PB/io/web_ws/src/web_ws/readme.md`).
-#[test]
-fn readme_is_python_verbatim() {
-    assert_eq!(
-        README,
-        include_str!("../../../../../python/bundled_agents/io/web_ws/src/web_ws/readme.md")
-    );
+/// A kernel holding one `web_ws` leg "ws" with the given record fields.
+fn kernel_with_leg(meta: Value) -> Arc<Kernel> {
+    let kernel = Arc::new(Kernel::new());
+    kernel.register(Agent::new(
+        AgentId::from("ws"),
+        Some("web_ws.tools".into()),
+        None,
+        meta.as_object().cloned().unwrap_or_default(),
+        std::path::PathBuf::new(),
+        false,
+    ));
+    kernel
+}
+
+/// One payload to the leg `ws`, through the bundle's entry (the call is checked before
+/// the handler runs).
+async fn send(kernel: &Arc<Kernel>, payload: &Value) -> Value {
+    <WebWsBundle as fantastic_kernel::Bundle>::handle_binary(
+        &WebWsBundle,
+        &AgentId::from("ws"),
+        payload.clone(),
+        None,
+        kernel,
+    )
+    .await
+    .expect("handled")
+    .0
+    .expect("reply")
 }
 
 /// `get_routes` declares python's one websocket spec, with NO `method`
@@ -18,52 +38,44 @@ fn readme_is_python_verbatim() {
 /// spelling).
 #[tokio::test]
 async fn get_routes_match_python() {
-    let kernel = Arc::new(Kernel::new());
-    let reply = WebWsBundle
-        .handle(
-            &AgentId::from("ws"),
-            &json!({"type": "get_routes"}),
-            &kernel,
-        )
-        .await
-        .expect("handled")
-        .expect("reply");
+    let kernel = kernel_with_leg(json!({}));
     assert_eq!(
-        reply,
+        ask(&kernel, "get_routes").await,
         json!({"routes": [{"kind": "websocket", "path": "/{host_id}/ws"}]})
     );
 }
 
-/// An unknown verb is the shared `unhandled` refusal with python's
-/// `{t!r}` text and the verb echoed back; `shutdown` is no longer a verb.
+/// An unknown verb is refused by the leg's own entry, naming what the leg answers; the
+/// raw `type` is echoed back (`null` when absent, `5`, `""`).
 #[tokio::test]
 async fn unknown_verb_is_unhandled_refusal() {
-    let kernel = Arc::new(Kernel::new());
-    let reply = WebWsBundle
-        .handle(&AgentId::from("ws"), &json!({"type": "shutdown"}), &kernel)
-        .await
-        .expect("handled")
-        .expect("reply");
-    assert_eq!(
-        reply,
-        json!({
-            "error": "web_ws: unknown type 'shutdown'",
-            "reason": "unhandled",
-            "verb": "shutdown",
-        })
-    );
+    let kernel = kernel_with_leg(json!({}));
+    for (payload, verb) in [
+        (json!({"type": "frob"}), json!("frob")),
+        (json!({}), Value::Null),
+        (json!({"type": 5}), json!(5)),
+        (json!({"type": ""}), json!("")),
+    ] {
+        let reply = send(&kernel, &payload).await;
+        assert_eq!(reply["reason"], json!("unhandled"), "{payload}");
+        assert_eq!(reply["verb"], verb, "{payload}");
+        let error = reply["error"].as_str().expect("error text");
+        assert!(error.starts_with("unknown verb "), "{error}");
+        assert!(
+            error.contains(
+                "ws answers: get_routes, inbound_call, inbound_emit, inbound_watch, \
+                 inbound_state_subscribe"
+            ),
+            "{error}"
+        );
+    }
 }
 
-/// The reflect frame is python's: no `kind`, no `mounted_on`, the
-/// leg posture from `describe`, and python's verb docs.
+/// The reflect frame: no `kind`, no `mounted_on`, the leg posture from `describe`.
 #[tokio::test]
 async fn reflect_keys_match_python() {
-    let kernel = Arc::new(Kernel::new());
-    let reply = WebWsBundle
-        .handle(&AgentId::from("ws"), &json!({"type": "reflect"}), &kernel)
-        .await
-        .expect("handled")
-        .expect("reply");
+    let kernel = kernel_with_leg(json!({}));
+    let reply = ask(&kernel, "reflect").await;
     let obj = reply.as_object().expect("object");
     let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
     assert_eq!(
@@ -84,31 +96,40 @@ async fn reflect_keys_match_python() {
     assert_eq!(obj["path_pattern"], json!("/{host_id}/ws"));
 }
 
-/// The unknown-type refusal's KEY ORDER is part of the
-/// wire (`preserve_order`); `Value` equality ignores it, so the text is compared.
+/// The inbound verbs refuse what their declaration does not take, by name: an unknown
+/// argument, a missing one, a wrongly typed one — before any handler runs.
 #[tokio::test]
-async fn unknown_type_wire_shape_is_byte_exact() {
-    let kernel = Arc::new(Kernel::new());
+async fn the_inbound_verbs_are_checked_by_their_declaration() {
+    let kernel = kernel_with_leg(json!({}));
     for (payload, want) in [
         (
-            json!({"type": "frob"}),
-            r#"{"error":"web_ws: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#,
+            json!({"type": "inbound_emit", "target": "x", "payload": {}, "extra": 1}),
+            "inbound_emit: unknown argument 'extra'",
         ),
         (
-            json!({}),
-            r#"{"error":"web_ws: unknown type None","reason":"unhandled","verb":null}"#,
+            json!({"type": "inbound_emit", "payload": {}}),
+            "inbound_emit: missing argument 'target'",
         ),
         (
-            json!({"type": 5}),
-            r#"{"error":"web_ws: unknown type 5","reason":"unhandled","verb":5}"#,
+            json!({"type": "inbound_emit", "target": "x", "payload": "s"}),
+            "inbound_emit: argument 'payload' must be",
+        ),
+        (
+            json!({"type": "inbound_watch", "src": "a"}),
+            "inbound_watch: missing argument 'reader'",
+        ),
+        (
+            json!({"type": "inbound_call", "item": {"payload": {}}}),
+            "inbound_call: missing argument 'item.target'",
+        ),
+        (
+            json!({"type": "inbound_state_subscribe", "x": 1}),
+            "inbound_state_subscribe: unknown argument 'x'",
         ),
     ] {
-        let reply = WebWsBundle
-            .handle(&AgentId::from("ws"), &payload, &kernel)
-            .await
-            .expect("handled")
-            .expect("reply");
-        assert_eq!(serde_json::to_string(&reply).unwrap(), want, "{payload}");
+        let reply = send(&kernel, &payload).await;
+        let error = reply["error"].as_str().unwrap_or_default();
+        assert!(error.starts_with(want), "{payload} -> {reply}");
     }
 }
 
@@ -142,26 +163,8 @@ fn validate_meta_refuses_an_unknown_or_malformed_ingress_rule() {
     assert_eq!(WebWsBundle.validate_meta(&meta, &Map::new()), None);
 }
 
-/// A kernel holding one `web_ws` leg "ws" with the given record fields.
-fn kernel_with_leg(meta: Value) -> Arc<Kernel> {
-    let kernel = Arc::new(Kernel::new());
-    kernel.register(Agent::new(
-        AgentId::from("ws"),
-        Some("web_ws.tools".into()),
-        None,
-        meta.as_object().cloned().unwrap_or_default(),
-        std::path::PathBuf::new(),
-        false,
-    ));
-    kernel
-}
-
 async fn ask(kernel: &Arc<Kernel>, verb: &str) -> Value {
-    WebWsBundle
-        .handle(&AgentId::from("ws"), &json!({"type": verb}), kernel)
-        .await
-        .expect("handled")
-        .expect("reply")
+    send(kernel, &json!({"type": verb})).await
 }
 
 /// No `route` (absent or null): the leg keeps the catch-all.
@@ -197,7 +200,7 @@ async fn a_route_mounts_only_its_literal() {
 /// A `route` that is not a literal path is refused at the write.
 #[test]
 fn validate_meta_refuses_a_route_that_is_not_a_literal_path() {
-    for bad in [json!("/{x}/ws"), json!("page/ws"), json!(""), json!(7)] {
+    for bad in [json!("/{x}/ws"), json!("page/ws"), json!("")] {
         let mut meta = Map::new();
         meta.insert("route".into(), bad.clone());
         let text = WebWsBundle
@@ -206,15 +209,6 @@ fn validate_meta_refuses_a_route_that_is_not_a_literal_path() {
         assert!(text.starts_with("route="), "{text}");
         assert!(text.contains("is not a literal mount path"), "{text}");
     }
-    let mut meta = Map::new();
-    meta.insert("route".into(), json!(7));
-    assert_eq!(
-        WebWsBundle.validate_meta(&meta, &Map::new()),
-        Some(
-            "route=7 is not a literal mount path — a string starting with \"/\", with no \"{\" or \"}\""
-                .to_string()
-        )
-    );
     for ok in [json!("/page_ws/ws"), Value::Null] {
         let mut meta = Map::new();
         meta.insert("ingress_rule".into(), json!("allow_all_ingress"));

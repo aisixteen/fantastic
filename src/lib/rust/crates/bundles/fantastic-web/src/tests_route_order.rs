@@ -10,18 +10,35 @@ use crate::routes::{resolve, Handler, Resolved};
 /// A leg that declares ONE literal websocket path.
 struct LiteralLeg;
 
+fantastic_kernel::stand_in_verbs!(literal_verbs {
+    GetRoutes "get_routes" {}
+});
+
 #[async_trait::async_trait]
-impl fantastic_kernel::bundle::Bundle for LiteralLeg {
+impl fantastic_kernel::Handler for LiteralLeg {
+    type Call = literal_verbs::Call;
     fn name(&self) -> &str {
         "literal_leg"
+    }
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        literal_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        literal_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        fantastic_kernel::fixture_record!()
     }
     async fn handle(
         &self,
         _id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         _kernel: &Arc<Kernel>,
     ) -> Result<fantastic_kernel::bundle::Reply, fantastic_kernel::bundle::BundleError> {
-        if payload["type"] == "get_routes" {
+        if let literal_verbs::Call::GetRoutes(_) = call {
             return Ok(Some(
                 json!({"routes": [{"kind": "websocket", "path": "/z_literal/ws"}]}),
             ));

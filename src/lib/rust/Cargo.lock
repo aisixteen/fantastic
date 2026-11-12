@@ -500,6 +500,8 @@ dependencies = [
  "fantastic-ram-store",
  "futures-util",
  "libc",
+ "schemars",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -880,6 +882,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "reqwest",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",
@@ -893,9 +896,11 @@ name = "fantastic-web-rest"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "fantastic-bundle",
  "fantastic-io-bridge",
  "fantastic-kernel",
+ "fantastic-web-ws",
+ "schemars",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -908,6 +913,8 @@ dependencies = [
  "fantastic-bundle",
  "fantastic-io-bridge",
  "fantastic-kernel",
+ "schemars",
+ "serde",
  "serde_json",
  "tokio",
 ]

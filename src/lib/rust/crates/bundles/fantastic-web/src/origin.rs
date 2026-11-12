@@ -4,7 +4,7 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::response::Response;
-use fantastic_bundle::{py_json_dumps, py_repr, py_str, py_truthy};
+use fantastic_bundle::{py_json_dumps, py_repr, py_str};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 
@@ -16,9 +16,9 @@ pub const DEFAULT_HOST: &str = "127.0.0.1";
 
 /// python `rec.get("host") or DEFAULT_HOST`.
 pub(crate) fn effective_host(rec: &Map<String, Value>) -> String {
-    match rec.get("host") {
-        Some(v) if py_truthy(v) => py_str(v),
-        _ => DEFAULT_HOST.to_string(),
+    match rec.get("host").and_then(Value::as_str) {
+        Some(host) => host.to_string(),
+        None => DEFAULT_HOST.to_string(),
     }
 }
 
@@ -58,11 +58,9 @@ pub(crate) fn own_authorities(rec: &Map<String, Value>) -> BTreeSet<String> {
     out
 }
 
-/// The record's `allowed_origins`: a list of exact strings; a bare string counts
-/// as a one-item list (`k=v` on the CLI yields a string).
+/// The record's `allowed_origins`: a list of exact strings.
 pub(crate) fn extra_origins(rec: &Map<String, Value>) -> Vec<String> {
     match rec.get("allowed_origins") {
-        Some(Value::String(s)) if !s.is_empty() => vec![s.clone()],
         Some(Value::Array(items)) => items
             .iter()
             .filter_map(|v| v.as_str().map(str::to_string))
@@ -197,8 +195,9 @@ mod tests {
         assert!(!origin_allowed(&r, Some("http://localhost:9999")));
         let listed = rec(json!({"port": 8088, "allowed_origins": ["https://ui.example"]}));
         assert!(origin_allowed(&listed, Some("https://ui.example")));
+        // a list only: a bare string is no origin list (the record declares one)
         let bare = rec(json!({"port": 8088, "allowed_origins": "https://ui.example"}));
-        assert!(origin_allowed(&bare, Some("https://ui.example")));
+        assert!(!origin_allowed(&bare, Some("https://ui.example")));
     }
 
     #[test]

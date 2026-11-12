@@ -561,16 +561,9 @@ pub(crate) fn split_target(req: &Request<Body>) -> (String, String) {
 pub(crate) fn reflect_payload(query: &str) -> serde_json::Value {
     let mut out = serde_json::Map::new();
     out.insert("type".into(), serde_json::json!("reflect"));
-    if let Some(rm) = query_get(query, "readme") {
-        if matches!(rm.as_str(), "1" | "true" | "yes") {
-            out.insert("readme".into(), serde_json::json!(true));
-        } else if !rm.is_empty() && !matches!(rm.as_str(), "0" | "false" | "no") {
-            out.insert("readme".into(), serde_json::json!(rm));
-        }
-    }
-    for key in ["tree", "bundles"] {
+    for (key, kinds) in [("tree", &["all", "ids", "none"][..]), ("bundles", &["all", "ids"][..])] {
         if let Some(v) = query_get(query, key) {
-            if matches!(v.as_str(), "all" | "ids" | "none") {
+            if kinds.contains(&v.as_str()) {
                 out.insert(key.into(), serde_json::json!(v));
             }
         }

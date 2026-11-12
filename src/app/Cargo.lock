@@ -1061,6 +1061,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "tokio",
@@ -1076,6 +1077,8 @@ dependencies = [
  "fantastic-bundle",
  "fantastic-io-bridge",
  "fantastic-kernel",
+ "schemars 0.8.22",
+ "serde",
  "serde_json",
 ]
 

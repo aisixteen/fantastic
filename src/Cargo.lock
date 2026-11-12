@@ -663,6 +663,8 @@ dependencies = [
  "image",
  "libc",
  "regex",
+ "schemars",
+ "serde",
  "serde_json",
  "sha2",
  "tokio",
@@ -679,6 +681,8 @@ dependencies = [
  "fantastic-kernel",
  "futures-util",
  "reqwest",
+ "schemars",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -694,6 +698,8 @@ dependencies = [
  "fantastic-kernel",
  "futures-util",
  "libc",
+ "schemars",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite",
@@ -742,6 +748,8 @@ dependencies = [
  "fantastic-kernel",
  "keyring",
  "libc",
+ "schemars",
+ "serde",
  "serde_json",
 ]
 
@@ -789,6 +797,8 @@ dependencies = [
  "fantastic-bundle",
  "fantastic-kernel",
  "futures-util",
+ "schemars",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -874,6 +884,8 @@ dependencies = [
  "fantastic-kernel",
  "futures-util",
  "reqwest",
+ "schemars",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -888,6 +900,8 @@ dependencies = [
  "fantastic-kernel",
  "futures-util",
  "reqwest",
+ "schemars",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -925,6 +939,8 @@ dependencies = [
  "fantastic-kernel",
  "futures-util",
  "reqwest",
+ "schemars",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -1052,6 +1068,8 @@ dependencies = [
  "fantastic-kernel",
  "futures-util",
  "reqwest",
+ "schemars",
+ "serde",
  "serde_json",
  "sha2",
  "tokio",
@@ -1071,6 +1089,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "schemars",
  "serde",
  "serde_json",
  "tokio",
@@ -1099,6 +1118,8 @@ dependencies = [
  "fantastic-bundle",
  "fantastic-io-bridge",
  "fantastic-kernel",
+ "schemars",
+ "serde",
  "serde_json",
 ]
 

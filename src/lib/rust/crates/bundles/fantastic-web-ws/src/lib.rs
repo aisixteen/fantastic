@@ -6,7 +6,6 @@
 //!
 //! Verbs:
 //! - `reflect` — identity + the URL pattern this surface mounts + leg posture
-//! - `boot` — no-op; the parent web agent owns the route
 //! - `get_routes` — declares `{routes:[{kind:"websocket", path:"/{host_id}/ws"}]}`
 //!   (the catch-all), or the record's `route` literal when set
 //! - `inbound_call` / `inbound_emit` / `inbound_watch` / `inbound_state_subscribe`
@@ -15,19 +14,19 @@
 
 #![deny(missing_docs)]
 
+pub mod inbound;
+pub mod record;
+pub mod verbs;
+
 use async_trait::async_trait;
 use fantastic_bundle::py_repr_value;
-use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::refusal::{refusal, with, UNHANDLED};
-use fantastic_kernel::{AgentId, Kernel};
+use fantastic_kernel::bundle::{BundleError, Handler, Reply};
+use fantastic_kernel::{AgentId, Blob, Kernel};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
 /// `handler_module` key under which this bundle registers.
 pub const HANDLER_MODULE: &str = "web_ws.tools";
-
-/// readme.md auto-seeded into the agent's dir on creation.
-pub const README: &str = include_str!("readme.md");
 
 /// The path pattern this leg mounts on its parent `web` host. A literal —
 /// python bakes the same `{host_id}` placeholder, and the WS proxy reads the
@@ -35,49 +34,69 @@ pub const README: &str = include_str!("readme.md");
 /// its record names no `route`.
 pub const PATH_PATTERN: &str = "/{host_id}/ws";
 
+/// What the bundle is for — its one short man text.
+const MAN: &str = "The WebSocket call surface of a web host: it mounts ws://host/<id>/ws, and every admitted frame is sent onward as this leg, gated as the leg. Emits socket_open and socket_closed on its inbox.";
+
 /// The WS verb-channel bundle.
 pub struct WebWsBundle;
 
-/// HOW TO CALL this leg — python's `VERBS` docstrings (first line each), the
-/// inbound verbs included; served by the kernel's `docs` verb.
-fn verb_docs_json() -> Value {
-    let mut verbs = json!({
-        "reflect": "Identity + the URL pattern this surface mounts + this leg's auth posture",
-        "boot": "No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the WS endpoint onto its FastAPI app.",
-        "get_routes": "Declares this surface's HTTP/WS route mounts. No args. Returns",
-    });
-    if let Some(m) = verbs.as_object_mut() {
-        for (verb, doc) in fantastic_io_bridge::inbound::verb_docs() {
-            m.insert(verb.to_string(), json!(doc));
+/// Serve one checked call; a raw body rides the inbound verbs.
+async fn serve(
+    agent_id: &AgentId,
+    call: verbs::Call,
+    body: Option<Blob>,
+    kernel: &Arc<Kernel>,
+) -> (Reply, Option<Blob>) {
+    match call {
+        verbs::Call::Reflect(_) => (Some(reflect_reply(agent_id, kernel)), None),
+        verbs::Call::GetRoutes(_) => (
+            Some(json!({
+                "routes": [{
+                    "kind": "websocket",
+                    "path": mount_path(agent_id, kernel),
+                }]
+            })),
+            None,
+        ),
+        verbs::Call::InboundCall(a) => {
+            let (v, b) = inbound::call(a, body, kernel).await;
+            (Some(v), b)
+        }
+        verbs::Call::InboundEmit(a) => (Some(inbound::emit(a, body, kernel).await), None),
+        verbs::Call::InboundWatch(a) => (Some(inbound::watch(a, kernel).await), None),
+        verbs::Call::InboundStateSubscribe(_) => {
+            (Some(inbound::state_subscribe(agent_id, kernel)), None)
         }
     }
-    verbs
 }
 
 #[async_trait]
-impl Bundle for WebWsBundle {
+impl Handler for WebWsBundle {
+    type Call = verbs::Call;
+
     fn name(&self) -> &str {
         "web_ws"
     }
 
-    fn verb_docs(&self) -> Value {
-        verb_docs_json()
+    fn man(&self) -> &'static str {
+        MAN
     }
 
-    fn readme(&self) -> Option<&'static str> {
-        Some(README)
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        verbs::VERBS
     }
 
-    fn emits_doc(&self) -> Option<Value> {
-        Some(json!({
-            "socket_open": "{type:'socket_open', client_id} — emitted on this leg when a socket connects",
-            "socket_closed": "{type:'socket_closed', client_id, guid} — emitted on this leg when a socket closes (peer closed, tunnel died, keepalive timeout), after its waiting calls settled; `guid` is the peer kernel's when it said hello, else null. The dialed side never dials back: watch the leg and wait for the next socket_open",
-        }))
+    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        verbs::dynamic_verbs(agent)
+    }
+
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &record::RECORD
     }
 
     /// The leg's `ingress_rule`, refused at the WRITE when no rule implements it
     /// — the one check every leg makes (python `validate_meta` →
-    /// `io_bridge.unknown_ingress_refusal`).
+    /// `io_bridge.unknown_ingress_refusal`) — and a `route` that is not a literal path.
     fn validate_meta(
         &self,
         meta: &Map<String, Value>,
@@ -91,52 +110,25 @@ impl Bundle for WebWsBundle {
         })
     }
 
-    /// The INBOUND verbs (`fantastic_io_bridge::inbound`) first — an admitted
-    /// frame the transport hands in, sent onward as this leg, a raw body riding
-    /// either way — then this leg's own verbs.
+    /// The INBOUND verbs carry a raw body: an admitted frame the transport hands in,
+    /// sent onward as this leg.
     async fn handle_binary(
         &self,
         agent_id: &AgentId,
-        header: Value,
-        body: Option<fantastic_kernel::Blob>,
+        call: Self::Call,
+        body: Option<Blob>,
         kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<fantastic_kernel::Blob>), BundleError> {
-        if let Some((v, b)) =
-            fantastic_io_bridge::inbound::handle(agent_id, &header, body, kernel).await
-        {
-            return Ok((Some(v), b));
-        }
-        Ok((self.handle(agent_id, &header, kernel).await?, None))
+    ) -> Result<(Reply, Option<Blob>), BundleError> {
+        Ok(serve(agent_id, call, body, kernel).await)
     }
 
     async fn handle(
         &self,
         agent_id: &AgentId,
-        payload: &Value,
+        call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        let reply = match verb {
-            "reflect" => reflect_reply(agent_id, kernel),
-            // python's VERBS has no `shutdown`; an unknown type is refused.
-            "boot" => Value::Null,
-            "get_routes" => json!({
-                "routes": [{
-                    "kind": "websocket",
-                    "path": mount_path(agent_id, kernel),
-                }]
-            }),
-            _ => {
-                let raw = payload.get("type").cloned().unwrap_or(Value::Null);
-                let mut r = refusal(
-                    UNHANDLED,
-                    format!("web_ws: unknown type {}", py_repr_value(&raw)),
-                );
-                with(&mut r, "verb", raw);
-                r
-            }
-        };
-        Ok(Some(reply))
+        Ok(serve(agent_id, call, None, kernel).await.0)
     }
 }
 
@@ -158,17 +150,14 @@ fn mount_path(agent_id: &AgentId, kernel: &Kernel) -> String {
 /// `route` must be a literal path: a pattern sent as `route` would be a
 /// disguised second catch-all.
 fn route_refusal(meta: &Map<String, Value>) -> Option<String> {
-    let v = meta.get("route")?;
-    if v.is_null() {
+    let s = meta.get("route")?.as_str()?;
+    if s.starts_with('/') && !s.contains('{') && !s.contains('}') {
         return None;
     }
-    match v.as_str() {
-        Some(s) if s.starts_with('/') && !s.contains('{') && !s.contains('}') => None,
-        _ => Some(format!(
-            "route={} is not a literal mount path — a string starting with \"/\", with no \"{{\" or \"}}\"",
-            py_repr_value(v)
-        )),
-    }
+    Some(format!(
+        "route={} is not a literal mount path — a string starting with \"/\", with no \"{{\" or \"}}\"",
+        py_repr_value(&json!(s))
+    ))
 }
 
 /// python `web_ws/tools.py::_reflect` — identity, the mounted URL pattern and

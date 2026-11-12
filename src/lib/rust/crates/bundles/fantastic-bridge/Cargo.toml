@@ -12,6 +12,8 @@ fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
 fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-ai-core = { path = "../fantastic-ai-core" }
 async-trait = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 # `getentropy` — the OS CSPRNG behind python's `uuid.uuid4()`.

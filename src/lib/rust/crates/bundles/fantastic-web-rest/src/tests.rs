@@ -1,15 +1,36 @@
 //! Unit tests for this bundle crate.
 
 use super::*;
+use fantastic_kernel::Agent;
 
-/// The readme is python's file, byte for byte
-/// (`PB/io/web_rest/src/web_rest/readme.md`).
-#[test]
-fn readme_is_python_verbatim() {
-    assert_eq!(
-        README,
-        include_str!("../../../../../python/bundled_agents/io/web_rest/src/web_rest/readme.md")
-    );
+/// A kernel holding one `web_rest` leg "rest".
+fn kernel_with_leg() -> Arc<Kernel> {
+    let kernel = Arc::new(Kernel::new());
+    kernel.register(Agent::new(
+        AgentId::from("rest"),
+        Some("web_rest.tools".into()),
+        None,
+        Map::new(),
+        std::path::PathBuf::new(),
+        false,
+    ));
+    kernel
+}
+
+/// One payload to the leg `rest`, through the bundle's entry (the call is checked
+/// before the handler runs).
+async fn send(kernel: &Arc<Kernel>, payload: &Value) -> Value {
+    <WebRestBundle as fantastic_kernel::Bundle>::handle_binary(
+        &WebRestBundle,
+        &AgentId::from("rest"),
+        payload.clone(),
+        None,
+        kernel,
+    )
+    .await
+    .expect("handled")
+    .0
+    .expect("reply")
 }
 
 /// `get_routes` declares python's three specs: `{kind:"http", method,
@@ -28,40 +49,61 @@ fn get_routes_match_python() {
     );
 }
 
-/// An unknown verb is the shared `unhandled` refusal with python's
-/// `{t!r}` text and the verb echoed back; `shutdown` is no longer a verb.
+/// An unknown verb is refused by the leg's own entry, naming what the leg answers; the
+/// raw `type` is echoed back (`null` when absent, `5`, `""`). A REST leg carries calls
+/// only: the other inbound verbs are not its verbs.
 #[tokio::test]
 async fn unknown_verb_is_unhandled_refusal() {
-    let kernel = Arc::new(Kernel::new());
-    let reply = WebRestBundle
-        .handle(
-            &AgentId::from("rest"),
-            &json!({"type": "shutdown"}),
-            &kernel,
-        )
-        .await
-        .expect("handled")
-        .expect("reply");
-    assert_eq!(
-        reply,
-        json!({
-            "error": "web_rest: unknown type 'shutdown'",
-            "reason": "unhandled",
-            "verb": "shutdown",
-        })
-    );
+    let kernel = kernel_with_leg();
+    for (payload, verb) in [
+        (json!({"type": "frob"}), json!("frob")),
+        (json!({"type": "inbound_emit"}), json!("inbound_emit")),
+        (json!({}), Value::Null),
+        (json!({"type": 5}), json!(5)),
+        (json!({"type": ""}), json!("")),
+    ] {
+        let reply = send(&kernel, &payload).await;
+        assert_eq!(reply["reason"], json!("unhandled"), "{payload}");
+        assert_eq!(reply["verb"], verb, "{payload}");
+        let error = reply["error"].as_str().expect("error text");
+        assert!(
+            error.starts_with("unknown verb ") && error.contains("rest answers: get_routes, inbound_call"),
+            "{error}"
+        );
+    }
+}
+
+/// `inbound_call` is checked by its declaration: the item's `target` and `payload` are
+/// required, an unknown argument is refused by name.
+#[tokio::test]
+async fn inbound_call_is_checked_by_its_declaration() {
+    let kernel = kernel_with_leg();
+    for (payload, want) in [
+        (
+            json!({"type": "inbound_call"}),
+            "inbound_call: missing argument 'item'",
+        ),
+        (
+            json!({"type": "inbound_call", "item": {"target": "x"}}),
+            "inbound_call: missing argument 'item.payload'",
+        ),
+        (
+            json!({"type": "inbound_call", "item": {"target": "x", "payload": {}}, "extra": 1}),
+            "inbound_call: unknown argument 'extra'",
+        ),
+    ] {
+        let reply = send(&kernel, &payload).await;
+        let error = reply["error"].as_str().unwrap_or_default();
+        assert!(error.starts_with(want), "{payload} -> {reply}");
+    }
 }
 
 /// The reflect frame is python's: no `mounted_on`, the curl examples,
 /// the `auth_header`, the leg posture from `describe`, and python's verb docs.
 #[tokio::test]
 async fn reflect_keys_match_python() {
-    let kernel = Arc::new(Kernel::new());
-    let reply = WebRestBundle
-        .handle(&AgentId::from("rest"), &json!({"type": "reflect"}), &kernel)
-        .await
-        .expect("handled")
-        .expect("reply");
+    let kernel = kernel_with_leg();
+    let reply = send(&kernel, &json!({"type": "reflect"})).await;
     let obj = reply.as_object().expect("object");
     let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
     assert_eq!(
@@ -95,34 +137,6 @@ async fn reflect_keys_match_python() {
         json!("curl http://<host>/rest/_reflect/<target_id>  # any agent")
     );
     assert_eq!(obj["sealed"], json!(true));
-}
-
-/// The unknown-type refusal's KEY ORDER is part of the
-/// wire (`preserve_order`); `Value` equality ignores it, so the text is compared.
-#[tokio::test]
-async fn unknown_type_wire_shape_is_byte_exact() {
-    let kernel = Arc::new(Kernel::new());
-    for (payload, want) in [
-        (
-            json!({"type": "frob"}),
-            r#"{"error":"web_rest: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#,
-        ),
-        (
-            json!({}),
-            r#"{"error":"web_rest: unknown type None","reason":"unhandled","verb":null}"#,
-        ),
-        (
-            json!({"type": 5}),
-            r#"{"error":"web_rest: unknown type 5","reason":"unhandled","verb":5}"#,
-        ),
-    ] {
-        let reply = WebRestBundle
-            .handle(&AgentId::from("rest"), &payload, &kernel)
-            .await
-            .expect("handled")
-            .expect("reply");
-        assert_eq!(serde_json::to_string(&reply).unwrap(), want, "{payload}");
-    }
 }
 
 /// The one write-time check every leg makes (python

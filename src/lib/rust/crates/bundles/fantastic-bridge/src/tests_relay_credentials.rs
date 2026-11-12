@@ -194,22 +194,27 @@ async fn a_store_refusal_fails_the_dial_naming_store_and_ref() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_malformed_credentials_field_is_refused_at_the_write() {
-    let shape = "credentials must be {store: <credential_store id>, ref: <ref>}";
-    for (bad, why) in [
-        (json!("creds"), shape),
-        (json!({"store": "creds"}), shape),
-        (
-            json!({"store": "", "ref": "r"}),
-            "credentials.store must be a non-empty string",
-        ),
+    // the record's declaration judges the field: an object of a non-empty `store`
+    // and `ref`, nothing else
+    for bad in [
+        json!("creds"),
+        json!({"store": "creds"}),
+        json!({"store": "", "ref": "r"}),
+        json!({"store": "creds", "ref": "r", "extra": 1}),
     ] {
         let tmp = TempDir::new().unwrap();
         let (k, url, _dials, leg) = relay_kernel(&tmp).await;
         let out = mk_leg(&k, &leg, &url, json!({"credentials": bad})).await;
-        assert_eq!(
-            out,
-            json!({"error": why, "reason": "invalid_meta"}),
-            "{bad}"
+        assert!(
+            matches!(out["reason"].as_str(), Some("bad_arg" | "missing_arg")),
+            "{bad}: {out}"
+        );
+        assert!(
+            out["error"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("create_agent: "),
+            "{bad}: {out}"
         );
     }
 }
