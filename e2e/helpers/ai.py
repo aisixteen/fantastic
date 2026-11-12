@@ -88,7 +88,7 @@ PROVIDER_CALLS = ["complete", "watch", "reflect"]
 #: record fields the CHAT takes too (it sizes its own context; output is the provider's max_tokens)
 CHAT_SHARED = ("model", "context_window", "caching")
 #: record fields that are the PROVIDER's only, wherever a probe puts them
-PROVIDER_ONLY = ("handler_module", "endpoint", "credentials", "num_ctx", "kv_slots",
+PROVIDER_ONLY = ("handler_module", "endpoint", "credentials", "num_ctx", "max_tokens", "kv_slots",
                  "kv_overflow", "no_repeat_ngram_size", "repetition_penalty",
                  "thinking_token_budget", "temperature", "top_p", "top_k")
 
