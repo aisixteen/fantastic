@@ -36,8 +36,24 @@ pub struct Field {
     pub ty: String,
     pub required: bool,
     pub one_of: Vec<String>,
+    /// The declared schema takes text (`string`, constrained or not): the box's text is the value.
+    pub text: bool,
     pub default: Option<Value>,
     pub hint: String,
+}
+
+/// Whether a property schema takes text: its `type` names `string`, here or in an
+/// `anyOf`/`oneOf` variant.
+fn takes_text(prop: &Value) -> bool {
+    let named = |t: &Value| match t {
+        Value::String(s) => s == "string",
+        Value::Array(a) => a.iter().any(|x| x == "string"),
+        _ => false,
+    };
+    named(&prop["type"])
+        || ["anyOf", "oneOf"].iter().any(|k| {
+            prop[*k].as_array().is_some_and(|v| v.iter().any(|x| named(&x["type"])))
+        })
 }
 
 /// The enum set a property schema declares: its own `enum`, or the `enum` of each
@@ -74,6 +90,7 @@ impl Backend {
             .filter(|a| !WRITE_OWNED.contains(&a.name.as_str()))
             .map(|a| Field {
                 one_of: enum_set(&schema["properties"][a.name.as_str()]),
+                text: takes_text(&schema["properties"][a.name.as_str()]),
                 name: a.name,
                 ty: a.ty,
                 required: a.required,
@@ -130,7 +147,7 @@ pub fn literal(f: &Field, text: &str) -> Result<Option<Value>, String> {
     if t.is_empty() {
         return Ok(None);
     }
-    if f.ty == "string" || !f.one_of.is_empty() {
+    if f.text || !f.one_of.is_empty() {
         return Ok(Some(Value::String(t.to_string())));
     }
     serde_json::from_str::<Value>(t)
@@ -245,6 +262,22 @@ pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_constrained_string_field_takes_its_text_as_written() {
+        let schema = serde_json::json!({"type": "object", "properties": {
+            "endpoint": {"type": "string", "minLength": 1},
+            "max_tokens": {"type": "integer"},
+        }});
+        let b = super::Backend::from_schema("x.tools", &schema);
+        let ep = b.fields.iter().find(|f| f.name == "endpoint").expect("endpoint");
+        assert_eq!(
+            super::literal(ep, "http://127.0.0.1:1/v1").unwrap(),
+            Some(serde_json::json!("http://127.0.0.1:1/v1"))
+        );
+        let mt = b.fields.iter().find(|f| f.name == "max_tokens").expect("max_tokens");
+        assert_eq!(super::literal(mt, "8192").unwrap(), Some(serde_json::json!(8192)));
+    }
+
     use super::*;
     use crate::kern::backend::create_tests::{host, record_of};
 
