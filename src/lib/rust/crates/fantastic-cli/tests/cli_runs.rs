@@ -1283,6 +1283,7 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
     // a required field has no default; the counts a record leaves out are read
     // from the server before a turn — no default either
     assert!(required.iter().all(|n| fields[n].get("default").is_none()));
+    assert!(fields["context_window"].get("default").is_none(), "context_window");
     for n in ["model", "max_tokens", "kv_slots"] {
         assert!(fields[n].get("default").is_none(), "{n}");
         assert!(

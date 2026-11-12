@@ -360,6 +360,29 @@ fn the_verbs_are_the_agents_and_its_docs() {
     }
 }
 
+/// The corpus's `events` are what the agent really emits: the runner's emit
+/// stream, after a first look and a `focus`, holds exactly those event types.
+#[tokio::test]
+async fn the_events_are_what_the_agent_emits() {
+    let doc = corpus();
+    let r = Replay::new(&doc["fixture"]);
+    r.look().await;
+    r.call(&json!({"type": "focus"})).await;
+    r.runner.settle().await;
+    let mut seen: Vec<String> = r
+        .emitted
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| e["type"].as_str().expect("an emit's type").to_string())
+        .collect();
+    seen.sort_unstable();
+    seen.dedup();
+    let mut want = strings(&doc["events"]);
+    want.sort_unstable();
+    assert_eq!(seen, want, "the corpus events are the emitted types");
+}
+
 fn every_status() -> Vec<Status> {
     let canvas = Canvas {
         url: "http://127.0.0.1:1/".into(),

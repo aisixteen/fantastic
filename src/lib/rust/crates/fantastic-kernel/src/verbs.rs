@@ -1323,8 +1323,9 @@ pub fn check_record(
             }
         }
     }
-    // a record is BORN with the fields its bundle requires
-    if verb == "create_agent" {
+    // a record is BORN with the fields its bundle requires (a saved set-up is a
+    // record to be born, so it carries them too)
+    if matches!(verb, "create_agent" | "persist_record") {
         for schema in [cs, os] {
             if let Some(Value::Array(req)) = schema.get("required") {
                 for r in req.iter().filter_map(Value::as_str) {

@@ -121,7 +121,7 @@ async fn a_saved_setup_carries_no_identity_wiring_or_grants_and_passes_its_bundl
         assert!(err(&r).contains(field), "{field}: {r}");
     }
     let r = call(&k, "user", json!({"type": "persist_record", "name": "t", "record": {"handler_module": "demo_backend.tools"}})).await;
-    assert!(err(&r).contains("required and missing: model"), "the target bundle's declared record: {r}");
+    assert!(err(&r).contains("needs field 'model'"), "the target bundle's declared record: {r}");
     let r = call(&k, "user", json!({"type": "persist_record", "name": "t", "record": {"handler_module": "nope.tools", "model": "m"}})).await;
     assert!(err(&r).contains("no bundle"), "{r}");
     let r = call(&k, "user", json!({"type": "persist_record", "name": "../x", "record": {"handler_module": "demo_backend.tools", "model": "m"}})).await;

@@ -253,25 +253,10 @@ impl UserHomeStore {
         };
         // A saved set-up is checked against the bundle's DECLARED RECORD (the same
         // declaration its create is checked with, by the bundle's own shared entry):
-        // every field known and of its type, and the required ones present — minus
-        // what the CREATOR adds (`NOT_SAVED`: the memory store, id, grants…).
+        // every field known and of its type, and the required ones present.
         let mut fields = rec.clone();
         fields.remove("handler_module");
         bundle.check_record("persist_record", &fields)?;
-        let declared = fantastic_kernel::verbs::record_fields(bundle.record());
-        let mut missing_f: Vec<String> = Vec::new();
-        for f in declared["fields"].as_array().cloned().unwrap_or_default() {
-            let field = f["name"].as_str().unwrap_or("");
-            if NOT_SAVED.contains(&field) || f["required"].as_bool() != Some(true) {
-                continue;
-            }
-            if rec.get(field).is_none_or(Value::is_null) {
-                missing_f.push(format!("{field} = {}", f["hint"].as_str().unwrap_or("")));
-            }
-        }
-        if !missing_f.is_empty() {
-            return Err(refusal(INVALID_META, format!("persist_record: {hm} refuses this saved set-up — required and missing: {}", missing_f.join("; "))));
-        }
         let path = self.saved_for_write()?.join(format!("{name}.yaml"));
         let now = read_private(&path)?.map(|b| version(&b));
         if let Some(want) = a.if_match.as_deref() {
