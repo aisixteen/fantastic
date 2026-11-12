@@ -346,7 +346,7 @@ async fn schedule_persists_and_lists() {
         .await
         .remove(0)
         .result;
-    let sid = r["schedule_id"].as_str().unwrap().to_string();
+    let sid = r["schedule_id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
     assert!(sid.starts_with("sch_"));
     let listed = kernel
         .send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
@@ -379,7 +379,7 @@ async fn schedule_requires_target_and_payload_type() {
     let r2 = kernel
         .send(vec![Item::new(
             sch.clone(),
-            json!({"type": "schedule", "target": "kernel_state", "interval_seconds": 5}),
+            json!({"type": "schedule", "target": "kernel_state"}),
         )])
         .await
         .remove(0)
@@ -390,7 +390,7 @@ async fn schedule_requires_target_and_payload_type() {
     let r3 = kernel
         .send(vec![Item::new(
             sch.clone(),
-            json!({"type": "schedule", "target": "kernel_state", "payload": {}, "interval_seconds": 5}),
+            json!({"type": "schedule", "target": "kernel_state", "payload": {}}),
         )])
         .await
         .remove(0)
@@ -403,7 +403,7 @@ async fn schedule_requires_target_and_payload_type() {
     let r4 = kernel
         .send(vec![Item::new(
             sch.clone(),
-            json!({"type": "schedule", "target": "kernel_state", "payload": {"type": ""}, "interval_seconds": 5}),
+            json!({"type": "schedule", "target": "kernel_state", "payload": {"type": ""}}),
         )])
         .await
         .remove(0)
@@ -424,7 +424,6 @@ async fn schedule_rejects_a_bad_timeout() {
                     "type": "schedule",
                     "target": "kernel_state",
                     "payload": {"type": "list_agents"},
-                    "interval_seconds": 5,
                     "fire_timeout": bad_value,
                 }),
             )])
@@ -754,7 +753,7 @@ async fn a_schedule_timeout_bounds_its_fire() {
     let h = kernel
         .send(vec![Item::new(
             sch.clone(),
-            json!({"type": "history", "schedule_id": sid, "limit": 100}),
+            json!({"type": "history", "schedule_id": sid}),
         )])
         .await
         .remove(0)
@@ -801,8 +800,8 @@ async fn non_int_args_are_bad_arg_refusals() {
         .remove(0)
         .result;
     assert_eq!(listed["schedules"], json!([]), "{listed}");
-    // ABSENT is refused by name: there is no default.
-    let missing = kernel
+    // ABSENT still takes the documented default (60s), and is NOT refused.
+    let ok = kernel
         .send(vec![Item::new(
             sch.clone(),
             json!({"type": "schedule", "target": "p_x", "payload": {"type": "hit"}}),
@@ -810,8 +809,7 @@ async fn non_int_args_are_bad_arg_refusals() {
         .await
         .remove(0)
         .result;
-    assert_eq!(missing["reason"], json!("missing_arg"), "{missing}");
-    assert_eq!(missing["arg"], json!("interval_seconds"), "{missing}");
+    assert_eq!(ok["schedule"]["interval_seconds"], json!(60), "{ok}");
 
     for bad_value in [json!("100"), json!(2.0), json!(true), json!(null), json!(0)] {
         let h = kernel
@@ -825,14 +823,16 @@ async fn non_int_args_are_bad_arg_refusals() {
         assert_eq!(h["reason"], json!("bad_arg"), "{bad_value}: {h}");
         assert_eq!(h["arg"], json!("limit"), "{bad_value}: {h}");
     }
-    // ABSENT `limit` is refused by name: there is no default.
+    // ABSENT `limit` is the default page, not a refusal.
     let h = kernel
         .send(vec![Item::new(sch.clone(), json!({"type": "history"}))])
         .await
         .remove(0)
         .result;
-    assert_eq!(h["reason"], json!("missing_arg"), "{h}");
-    assert_eq!(h["arg"], json!("limit"), "{h}");
+    assert!(
+        h.get("history").is_some() && h.get("reason").is_none(),
+        "{h}"
+    );
 }
 
 #[tokio::test]
@@ -844,7 +844,7 @@ async fn schedule_refuses_a_non_object_payload() {
         let r = kernel
             .send(vec![Item::new(
                 sch.clone(),
-                json!({"type": "schedule", "target": "p_x", "payload": bad_value.clone(), "interval_seconds": 5}),
+                json!({"type": "schedule", "target": "p_x", "payload": bad_value.clone()}),
             )])
             .await
             .remove(0)
@@ -934,13 +934,13 @@ async fn reflect_renders_every_declared_verb() {
     );
     let schedule = verbs["schedule"].as_str().unwrap();
     assert!(
-        schedule.contains("interval_seconds:int >= 1 (req)"),
+        schedule.contains("interval_seconds:int >= 1 (default 60)"),
         "{schedule}"
     );
     assert!(schedule.contains("fire_timeout:number"), "{schedule}");
     let history = verbs["history"].as_str().unwrap();
     assert!(
-        history.contains("limit:int >= 1 (req)"),
+        history.contains("limit:int >= 1 (default 100)"),
         "{history}"
     );
 }
@@ -1073,11 +1073,7 @@ async fn schedule_id_must_be_text() {
             if wrong.is_null() && !nulls {
                 continue;
             }
-            let mut c = json!({"type": verb, "schedule_id": wrong.clone()});
-            if verb == "history" {
-                c["limit"] = json!(100);
-            }
-            let r = call(c).await;
+            let r = call(json!({"type": verb, "schedule_id": wrong.clone()})).await;
             assert!(
                 ["bad_arg", "missing_arg"].contains(&r["reason"].as_str().unwrap_or("")),
                 "{verb} {wrong}: {r}"

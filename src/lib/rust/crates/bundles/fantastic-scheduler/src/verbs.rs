@@ -22,11 +22,17 @@ pub struct Schedule {
     #[schemars(schema_with = "call_with_type")]
     pub payload: Map<String, Value>,
     /// Seconds between fires.
+    #[serde(default = "sixty")]
     #[schemars(range(min = 1))]
     pub interval_seconds: u64,
     /// Seconds each fire may take; absent = wait forever. Not `timeout`, which is a call's own routing field.
+    #[serde(default)]
     #[schemars(schema_with = "positive_seconds")]
     pub fire_timeout: Option<serde_json::Number>,
+}
+
+fn sixty() -> u64 {
+    60
 }
 
 /// The schema of a per-fire bound: a number greater than zero.
@@ -96,11 +102,16 @@ pub struct TickNow {
 #[serde(deny_unknown_fields)]
 pub struct History {
     /// How many of the newest fires, at most 500.
+    #[serde(default = "hundred")]
     #[schemars(range(min = 1))]
     pub limit: u64,
     /// Keep only this schedule's fires.
     #[schemars(length(min = 1))]
     pub schedule_id: Option<String>,
+}
+
+fn hundred() -> u64 {
+    100
 }
 
 fantastic_kernel::verbs! {
