@@ -39,10 +39,6 @@ pub struct BackendConfig {
     /// `contextSize`). Its schema's `context_window` default is the same number
     /// ([`crate::schema::schema_with_window`]).
     pub model_window: i64,
-    /// THE CAPABILITY: this backend can run the provider's own cache markers
-    /// (`caching=provider_cache`). A backend that cannot refuses that mode at the
-    /// write, and a turn on it refuses too. Only anthropic declares it.
-    pub provider_cache: bool,
 }
 
 /// Why a generation produced no completion. The two kinds settle differently,
@@ -220,11 +216,8 @@ pub async fn run_generation(
     // THE CACHING MODE IS CHECKED FIRST TOO: a record that asks for provider caching
     // on a backend that cannot cache is refused before any row is written, and so
     // before the owed recall below (which writes a view and a recall row).
-    let (caching, primer) = crate::caching::settings(&crate::helpers::agent_meta(self_id, kernel), cfg.provider_cache)
+    let (caching, primer) = crate::caching::settings(&crate::helpers::agent_meta(self_id, kernel))
         .map_err(|why| GenFailure::Provider(ProviderError::value_error(why)))?;
-    if caching.marks() && !cfg.provider_cache {
-        return Err(GenFailure::Provider(crate::caching::unsupported(cfg.name)));
-    }
     // A RECALL OWED FROM THE LAST FOLD BATCH (or from a boot) runs first, so this
     // turn is assembled over the head the recall chose — python `_recall_due`.
     let due = std::mem::take(&mut *state.recall_due.lock().expect("recall_due poisoned"));

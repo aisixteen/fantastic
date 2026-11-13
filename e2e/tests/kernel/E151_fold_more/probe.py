@@ -17,7 +17,7 @@ under the inline cap of about 127,000) is delivered inline.
          byte-equal in the next request, and a request never has fewer messages than the one
          before it (the property that makes the provider's cache hit, through a turn that
          produces a thought and the turns after it).
-  V  `cleanup` (the default), other verbs: the reply of an `exec_bridge` `run` (500 lines,
+  V  `provider_cache` (the default), other verbs: the reply of an `exec_bridge` `run` (500 lines,
      the verb's own cap) and of a `file_bridge` `list` (350 entries) each go through the same
      cycle as the `read` reply of E141: whole in its own turn, its
      `[folded · {verb} reply from {agent} · ~N tokens · head: "…" · get: ID]` anchor in the
@@ -297,7 +297,7 @@ def main() -> int:
                  f"T4: request {k + 2} has no fewer messages than request {k + 1}: "
                  f"{len(msgs(a))} then {len(msgs(b))}")
 
-        # ══ V · cleanup, the large replies of other verbs ═════════════════════
+        # ══ V · provider_cache, the large replies of other verbs ═════════════════════
         known: set = set()
 
         def cycle(label: str, send_text: str, the_call: str, whole: str,

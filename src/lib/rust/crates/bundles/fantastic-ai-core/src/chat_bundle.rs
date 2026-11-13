@@ -31,8 +31,7 @@ const MAN: &str = "An AI agent: it holds a conversation in its memory store, fol
 const CFG: BackendConfig = BackendConfig {
     name: NAME,
     model_window: crate::constants::DEFAULT_CONTEXT_WINDOW,
-    // the provider decides: a provider that cannot place cache markers ignores them; where marks go is this chat's `caching`
-    provider_cache: true,
+
 };
 
 /// The chat's own view (html, plain JS): the canvas draws the chat from it. `{{agent}}` is the

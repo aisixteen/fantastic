@@ -142,14 +142,12 @@ fn a_record_with_only_endpoint_and_a_store_is_accepted() {
 }
 
 #[test]
-fn caching_none_and_cleanup_are_accepted_and_provider_cache_is_refused_here() {
-    // ollama declares no provider caching: its record's `caching` has no such value,
-    // so the engine refuses it by field name; the two modes that send no marker are
-    // accepted.
-    for mode in ["none", "cleanup"] {
+fn caching_takes_the_two_modes_and_refuses_anything_else() {
+    // the same two modes as every backend; ollama sends no cache marks on the wire
+    for mode in ["none", "provider_cache"] {
         assert_eq!(at_the_write(&json!({"caching": mode})), None, "{mode}");
     }
-    for mode in ["provider_cache", "always"] {
+    for mode in ["cleanup", "always"] {
         let refused = at_the_write(&json!({"caching": mode})).expect("refused");
         assert_eq!(refused["arg"], json!("caching"), "{refused}");
     }

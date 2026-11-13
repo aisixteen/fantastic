@@ -255,7 +255,7 @@ async fn prompt(kernel: &Arc<Kernel>, agent: &AgentId) -> String {
             kernel,
             "c",
             Some("sys"),
-            crate::caching::Caching::Cleanup,
+            crate::caching::Caching::ProviderCache,
         ),
     )
     .await
@@ -285,7 +285,7 @@ async fn project(kernel: &Arc<Kernel>, agent: &AgentId) {
             kernel,
             "cli",
             Some("sys"),
-            crate::caching::Caching::Cleanup,
+            crate::caching::Caching::ProviderCache,
         ),
     )
     .await

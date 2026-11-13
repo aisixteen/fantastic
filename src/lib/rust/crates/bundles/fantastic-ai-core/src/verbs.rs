@@ -1874,7 +1874,7 @@ where
         // Fold a chosen stretch of the view into one fold row — the operator's mark.
         Call::ContextFold(a) => {
             let p = provider_for(&fantastic_kernel::inquiry::default_client_id());
-            crate::retrieval::context_fold(agent_id, &a, kernel, &p, cfg.model_window, cfg.provider_cache).await?
+            crate::retrieval::context_fold(agent_id, &a, kernel, &p, cfg.model_window).await?
         }
         // Compact the store: drop the rows the folds already summarise.
         Call::ContextForget(a) => {

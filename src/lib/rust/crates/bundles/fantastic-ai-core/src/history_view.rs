@@ -122,16 +122,6 @@ fn content_of(turn: &Value) -> &str {
     turn.get("content").and_then(Value::as_str).unwrap_or("")
 }
 
-/// A `docs` reply the model has ANSWERED is cut to this stub. The body itself
-/// stays HELD this run under its pid: the model keeps the lines it needs with its
-/// own `grep`, and those small replies stay in its view. Python `_DOCS_DROPPED`.
-fn docs_dropped(of: &str, tier: &str, pid: &str, verb: &str) -> String {
-    format!(
-        "[docs of={of} tier={tier} — dropped from your view; held this run: send yourself \
-         <type>grep</type> <ids><item>{pid}</item></ids> <query>{verb}</query>]"
-    )
-}
-
 /// A REAL verb of this docs body for the grep example: the first that is not
 /// `reflect`/`boot`, else the first. A placeholder example is copied verbatim —
 /// `<query>verb</query>` sent as written matches only the `<verbs>` lines, and the
@@ -183,68 +173,6 @@ pub fn docs_head(pid: i64, verb: &str) -> String {
     )
 }
 
-/// The `<of>`/`<tier>` lines of a rendered docs body. Python `_DOCS_FIELD`
-/// (`^<(of|tier)>([^<\n]*)</\1>$`, multiline).
-fn docs_field(block: &str, key: &str) -> Option<String> {
-    let open = format!("<{key}>");
-    let close = format!("</{key}>");
-    block.split('\n').find_map(|line| {
-        let inner = line
-            .strip_prefix(open.as_str())?
-            .strip_suffix(close.as_str())?;
-        (!inner.contains('<')).then(|| inner.to_string())
-    })
-}
-
-/// Replace every `docs` reply body the model has answered with its stub. The
-/// reply in the last turn (not answered yet) stays whole; a refusal (no `of` in
-/// the body) stays whole. Python `drop_read_docs`.
-pub fn drop_read_docs(history: &[Value]) -> Vec<Value> {
-    let mut out: Vec<Value> = Vec::with_capacity(history.len());
-    for (i, turn) in history.iter().enumerate() {
-        let content = content_of(turn);
-        let answered = history[i + 1..]
-            .iter()
-            .any(|t| t.get("role").and_then(Value::as_str) == Some("assistant"));
-        if turn.get("role").and_then(Value::as_str) != Some("user")
-            || !answered
-            || parse_reply_tag(content).is_none()
-        {
-            out.push(turn.clone());
-            continue;
-        }
-        let blocks = reply_blocks(content);
-        let trimmed: Vec<String> = blocks
-            .iter()
-            .map(|b| {
-                let docs = matches!(parse_reply_tag(b), Some((_, "docs")));
-                match (docs, docs_field(b, "of"), example_verb(b)) {
-                    (true, Some(of), Some(verb)) => {
-                        let head = b.split('\n').next().unwrap_or(b);
-                        let tier = docs_field(b, "tier").unwrap_or_default();
-                        let pid = head
-                            .strip_prefix("[reply to ")
-                            .and_then(|r| r.split(' ').next())
-                            .unwrap_or("-");
-                        format!("{head}\n{}", docs_dropped(&of, &tier, pid, &verb))
-                    }
-                    _ => (*b).to_string(),
-                }
-            })
-            .collect();
-        if trimmed
-            .iter()
-            .zip(blocks.iter())
-            .all(|(t, b)| t.as_str() == *b)
-        {
-            out.push(turn.clone());
-        } else {
-            out.push(with_content(turn, trimmed.join("\n\n")));
-        }
-    }
-    out
-}
-
 /// A refusal of the model's own call — a verb its target does not answer
 /// (`unhandled`, naming that verb), or an argument it did not send (`missing_arg`
 /// naming the `arg`) — names where the fix is, `docs`, when it carries no hint of
@@ -281,108 +209,6 @@ pub fn with_content(turn: &Value, content: String) -> Value {
     };
     row.insert("content".to_string(), json!(content));
     Value::Object(row)
-}
-
-/// Drop whole-state read replies that a later reply to the same `(agent, verb)`
-/// supersedes. Newest wins; order is otherwise preserved. Python
-/// `dedupe_stale_reads`.
-///
-/// This is dedup, NOT stripping: the newest reply stays verbatim, so the model
-/// keeps the facts (verbs, ids, tree) and has no reason to re-reflect — re-fetching
-/// what it lost is exactly the loop we are trying to avoid.
-pub fn dedupe_stale_reads(history: &[Value]) -> Vec<Value> {
-    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
-    let mut keep_rev: Vec<Value> = Vec::with_capacity(history.len());
-    for turn in history.iter().rev() {
-        let content = content_of(turn);
-        if turn.get("role").and_then(Value::as_str) != Some("user")
-            || parse_reply_tag(content).is_none()
-        {
-            keep_rev.push(turn.clone());
-            continue;
-        }
-        // Per BLOCK — a turn may carry a whole batch. A superseded whole-state
-        // read drops alone; its siblings stay. A turn whose every block is
-        // superseded drops entirely.
-        let mut kept_rev: Vec<&str> = Vec::new();
-        let mut changed = false;
-        for b in reply_blocks(content).into_iter().rev() {
-            if let Some((agent, verb)) = parse_reply_tag(b) {
-                if WHOLE_STATE_READS.contains(&verb) {
-                    let key = (agent.to_string(), verb.to_string());
-                    if seen.contains(&key) {
-                        changed = true;
-                        continue; // a later reply already carries this state
-                    }
-                    seen.insert(key);
-                }
-            }
-            kept_rev.push(b);
-        }
-        if kept_rev.is_empty() {
-            continue;
-        }
-        if !changed {
-            keep_rev.push(turn.clone());
-        } else {
-            kept_rev.reverse();
-            keep_rev.push(with_content(turn, kept_rev.join("\n\n")));
-        }
-    }
-    keep_rev.reverse();
-    keep_rev
-}
-
-/// A reply whose BODY is byte-identical to an EARLIER one (the same file read
-/// again, the same listing) is shown as a one-line stub citing the first — the
-/// first copy stays whole. Only bodies worth the saving are stubbed (400 chars
-/// and up), and a digested reply (its origin line, `(settled …`) is already one
-/// line. The view restarts at a clear, so a read after a clear is new again.
-/// Python `dedupe_repeat_bodies`.
-#[must_use]
-pub fn dedupe_repeat_bodies(history: &[Value]) -> Vec<Value> {
-    let mut seen: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-    let mut out: Vec<Value> = Vec::with_capacity(history.len());
-    for turn in history {
-        let content = turn.get("content").and_then(Value::as_str).unwrap_or("");
-        let is_user = turn.get("role").and_then(Value::as_str) == Some("user");
-        if !is_user || parse_reply_tag(content).is_none() {
-            out.push(turn.clone());
-            continue;
-        }
-        let mut changed = false;
-        let mut kept: Vec<String> = Vec::new();
-        for b in reply_blocks(content) {
-            let (head, body) = b.split_once('\n').unwrap_or((b, ""));
-            if body.chars().count() < 400 || body.starts_with("(settled") {
-                kept.push(b.to_string());
-                continue;
-            }
-            match seen.get(body) {
-                Some(first) => {
-                    kept.push(format!(
-                        "{head}\n[identical to the reply in row {} — the same {} bytes, not repeated]",
-                        crate::helpers::shown(first),
-                        body.chars().count()
-                    ));
-                    changed = true;
-                }
-                None => {
-                    seen.insert(
-                        body.to_string(),
-                        turn.get("id").cloned().unwrap_or(Value::Null),
-                    );
-                    kept.push(b.to_string());
-                }
-            }
-        }
-        if changed {
-            out.push(with_content(turn, kept.join("\n\n")));
-        } else {
-            out.push(turn.clone());
-        }
-    }
-    out
 }
 
 /// The tokens of `n` characters of text: `ceil(n / CHARS_PER_TOKEN)`.
@@ -721,52 +547,6 @@ pub fn autofold(
 mod tests {
     use super::*;
 
-    /// python `{**turn, "content": …}`: a trimmed row keeps `id`, `parent`,
-    /// `agent` and `ts`. Rebuilding a bare `{role, content}` made `next_span`
-    /// skip the row, `save_view` drop it from the array, and the estimate lose
-    /// its bytes (rust folds carried 7 refs where python carried 8).
-    #[test]
-    fn the_view_trimmers_keep_row_keys() {
-        let row = |id: i64, content: String| {
-            json!({"role": "user", "id": id, "parent": id - 1, "agent": "ai",
-                   "ts": 1.0, "content": content})
-        };
-        let keys = |out: &[Value]| {
-            for r in out {
-                if r["role"] == json!("assistant") {
-                    continue;
-                }
-                assert!(r.get("id").is_some(), "the row lost its id: {r:#?}");
-                assert!(r.get("parent").is_some(), "the row lost its parent: {r:#?}");
-                assert!(r.get("agent").is_some(), "the row lost its agent: {r:#?}");
-                assert!(r.get("ts").is_some(), "the row lost its ts: {r:#?}");
-            }
-        };
-        // `dedupe_stale_reads`: a SUPERSEDED whole-state block drops from a turn
-        // whose sibling block stays.
-        let batch = "[reply to 11 \u{b7} notes reflect]\nold state\n\n\
-                     [reply to 12 \u{b7} notes read]\nfile body"
-            .to_string();
-        let stale = vec![
-            row(11, batch.clone()),
-            row(
-                12,
-                "[reply to 13 \u{b7} notes reflect]\nnew state".to_string(),
-            ),
-        ];
-        let out = dedupe_stale_reads(&stale);
-        assert_ne!(out[0]["content"], json!(batch), "the stale block must drop");
-        keys(&out);
-    }
-
-    fn turn(role: &str, content: &str) -> Value {
-        json!({"role": role, "content": content})
-    }
-
-    fn text(t: &Value) -> &str {
-        t.get("content").and_then(Value::as_str).unwrap_or("")
-    }
-
     /// The verb group must exclude `]`: with `\S+`, on a reply whose BODY carries
     /// a bracket the run keeps `reflect]` and the regex closes on the body's
     /// bracket. The verb then reads `reflect]`, matches no vocabulary, and BOTH
@@ -780,86 +560,6 @@ mod tests {
             "[reply to notes:aa \u{b7} notes reflect \u{b7} 2 of 3 in batch ab12]\nv=[\"x\"]";
         assert_eq!(parse_reply_tag(stamped), Some(("notes", "reflect")));
         assert_eq!(parse_reply_tag("[reply to a:1 notes reflect]"), None);
-    }
-
-    #[test]
-    fn a_stale_reflect_whose_body_has_a_bracket_still_dedupes() {
-        let body = "verbs=[\"read\", \"write\"]  root=.";
-        let hist = [
-            turn("user", &format!("[reply to n:aa · notes reflect]\n{body}")),
-            turn("assistant", "SEEN notes"),
-            turn("user", &format!("[reply to n:bb · notes reflect]\n{body}")),
-        ];
-        let out = dedupe_stale_reads(&hist);
-        let kept = out.iter().filter(|t| text(t).contains(body)).count();
-        assert_eq!(kept, 1, "stale whole-state reflect not dropped: {out:?}");
-    }
-
-    #[test]
-    fn stale_whole_state_reads_dedupe_but_parameterised_reads_never_do() {
-        let body = [
-            turn("user", "[reply to ks:a1 · kernel_state reflect]\nOLD TREE"),
-            turn("assistant", "noted"),
-            turn("user", "[reply to fb:b1 · readings read]\nreading_1 = 41"),
-            turn("user", "[reply to fb:b2 · readings read]\nreading_2 = 42"),
-            turn("user", "[reply to ks:a2 · kernel_state reflect]\nNEW TREE"),
-        ];
-        let out = dedupe_stale_reads(&body);
-        let all = out.iter().map(text).collect::<Vec<_>>().join("\n");
-        // whole-state: the newest reflect supersedes the older one
-        assert!(!all.contains("OLD TREE"), "{all}");
-        assert!(all.contains("NEW TREE"), "{all}");
-        // parameterised: two `read`s are DIFFERENT FILES — dropping either loses
-        // data, and the reply tag carries no args to tell them apart.
-        assert!(all.contains("reading_1 = 41"), "{all}");
-        assert!(all.contains("reading_2 = 42"), "{all}");
-    }
-
-    /// A batch arrives as ONE turn holding several `[reply to …]` blocks. The
-    /// trimmer works per BLOCK: a superseded whole-state block dedupes alone, its
-    /// sibling replies stay. Treating the turn as one reply would either delete
-    /// siblings or trim nothing (a count guard skips every multi-reply turn).
-    #[test]
-    fn a_combined_turn_trims_per_block_never_whole() {
-        let combined = format!(
-            "[reply to ks:a1 · kernel_state reflect · 1 of 2 in batch ab12]\n{}\
-             \n\n[reply to tot:b1 · totals read · 2 of 2 in batch ab12]\nreading_1 = 41",
-            "TREE".repeat(100)
-        );
-        let body = [
-            turn("user", &combined),
-            turn("assistant", "noted"),
-            turn("user", "[reply to ks:a2 · kernel_state reflect]\nNEW TREE"),
-        ];
-
-        let out2 = dedupe_stale_reads(&body);
-        let first = text(&out2[0]);
-        assert!(
-            !first.contains(&"TREE".repeat(5)),
-            "older whole-state block is superseded"
-        );
-        assert!(
-            first.contains("reading_1 = 41"),
-            "parameterised sibling must survive"
-        );
-        assert!(out2.iter().any(|m| text(m).contains("NEW TREE")));
-    }
-
-    #[test]
-    fn a_turn_whose_every_block_is_superseded_drops_entirely() {
-        let body = [
-            turn(
-                "user",
-                "[reply to ks:a1 · kernel_state reflect · 1 of 2 in batch cd34]\nOLD\
-                 \n\n[reply to k:a2 · kernel ps · 2 of 2 in batch cd34]\nOLD ROWS",
-            ),
-            turn("assistant", "noted"),
-            turn("user", "[reply to ks:a3 · kernel_state reflect]\nNEW"),
-            turn("user", "[reply to k:a4 · kernel ps]\nNEW ROWS"),
-        ];
-        let out = dedupe_stale_reads(&body);
-        assert!(!out.iter().any(|m| text(m).contains("OLD")));
-        assert_eq!(out.len(), 3, "the emptied turn leaves no husk behind");
     }
 
     /// The tag matcher is python's regex, hand-scanned — including the `[^\]]*`

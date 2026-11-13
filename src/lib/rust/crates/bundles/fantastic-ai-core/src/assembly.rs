@@ -15,7 +15,6 @@
 //! void every emergence result taken afterwards.
 
 use crate::caching::Caching;
-use crate::history_view::{dedupe_repeat_bodies, dedupe_stale_reads, drop_read_docs};
 use crate::memory::{load_history, MemoryStoreError};
 use crate::prompt_file::PromptFileError;
 use crate::state::BackendState;
@@ -623,7 +622,7 @@ pub async fn assemble_messages(
         }
     };
     *state.view_source.lock().expect("view_source poisoned") = Some(source.to_string());
-    let rendered = render_history(&store, listed.as_deref(), caching.cleans());
+    let rendered = render_history(&store, listed.as_deref());
     let pics = Pictures::of(self_id, state, kernel, &store, &rendered);
     for r in rendered {
         let (msg, form) = if caching.folds() && r.res == "full" {
@@ -817,15 +816,12 @@ pub(crate) fn request_parts(assembled: &[Value], sent: &[Value]) -> Vec<Value> {
 }
 
 /// One entry of the persisted view array, resolved against the store: the row's
-/// index, the resolution it is shown at, and the body a trimmer left on it (absent,
-/// the row renders as its resolution gives it).
+/// index and the resolution it is shown at.
 pub struct ViewEntry {
     /// Index of the row in the store.
     pub idx: usize,
     /// The resolution the row is shown at.
     pub res: String,
-    /// The trimmed body, when a trimmer left one.
-    pub content: Option<String>,
 }
 
 /// One message of the history part of the model view: the store row's index, the
@@ -864,7 +860,6 @@ pub fn listed_entries(
                 .and_then(Value::as_str)
                 .unwrap_or("full")
                 .to_string(),
-            content: e.get("content").and_then(Value::as_str).map(str::to_string),
         });
     }
     (!out.is_empty()).then_some(out)
@@ -872,78 +867,37 @@ pub fn listed_entries(
 
 /// The history part of the model view (no system block, no user turn), as
 /// `assemble_messages` sends it: the listed entries each at its recorded
-/// resolution, then the rows after the newest of them with the trimmers applied;
-/// with no listed array, the whole store with the trimmers applied. Shared with
-/// `context_fold`, which persists exactly what this renders.
-///
-/// `cleanup` is the record's `caching` cleanup (see [`crate::caching::Caching::cleans`]).
-/// Off, the view is append-only: no trimmer runs, and a trimmed body an earlier
-/// cleanup left on a listed entry is ignored, so every row renders as stored.
-///
-/// The listed array is the record of what the view is, whatever mode wrote it. A row
-/// an earlier cleanup left out of a listed view stays out after a switch to `none`
-/// or `provider_cache`: only the rows after the newest listed entry render as stored.
-/// A `context_clear` starts a new thread, and the old rows leave the view with it.
-pub fn render_history(
-    store: &[Value],
-    listed: Option<&[ViewEntry]>,
-    cleanup: bool,
-) -> Vec<Rendered> {
+/// resolution, then every row after the newest of them as stored; with no listed
+/// array, the whole store as stored. Shared with `context_fold`, which persists
+/// exactly what this renders. A `context_clear` starts a new thread, and the old
+/// rows leave the view with it.
+pub fn render_history(store: &[Value], listed: Option<&[ViewEntry]>) -> Vec<Rendered> {
     let Some(entries) = listed else {
-        return trim_tail(store, 0, cleanup);
+        return rows_from(store, 0);
     };
     let mut out: Vec<Rendered> = entries
         .iter()
-        .map(|e| {
-            let row = &store[e.idx];
-            let msg = match &e.content {
-                Some(c) if cleanup => crate::history_view::with_content(row, c.clone()),
-                _ => crate::view::apply_res(row, &e.res),
-            };
-            Rendered {
-                idx: e.idx,
-                res: e.res.clone(),
-                msg,
-            }
+        .map(|e| Rendered {
+            idx: e.idx,
+            res: e.res.clone(),
+            msg: crate::view::apply_res(&store[e.idx], &e.res),
         })
         .collect();
     let newest = entries.iter().map(|e| e.idx).max().unwrap_or(0);
-    out.extend(trim_tail(store, newest + 1, cleanup));
+    out.extend(rows_from(store, newest + 1));
     out
 }
 
-/// The rows of `store` from `from` on, each with its store index. With `cleanup`
-/// they run through the three trimmers, and a trimmed row keeps its id while a
-/// dropped row is simply absent. Without it, every row is kept as stored, in order.
-fn trim_tail(store: &[Value], from: usize, cleanup: bool) -> Vec<Rendered> {
-    if !cleanup {
-        return store
-            .iter()
-            .enumerate()
-            .skip(from)
-            .map(|(idx, row)| Rendered {
-                idx,
-                res: crate::view::res_of(row).to_string(),
-                msg: row.clone(),
-            })
-            .collect();
-    }
-    let idx: HashMap<i64, usize> = store
+/// The rows of `store` from `from` on, each with its store index, as stored.
+fn rows_from(store: &[Value], from: usize) -> Vec<Rendered> {
+    store
         .iter()
         .enumerate()
-        .filter_map(|(i, r)| r.get("id").and_then(Value::as_i64).map(|id| (id, i)))
-        .collect();
-    let tail: Vec<Value> = store[from..].to_vec();
-    drop_read_docs(&dedupe_stale_reads(&dedupe_repeat_bodies(&tail)))
-        .into_iter()
-        .map(|msg| Rendered {
-            idx: msg
-                .get("id")
-                .and_then(Value::as_i64)
-                .and_then(|id| idx.get(&id).copied())
-                .expect("a trimmed row keeps its store id"),
-            res: crate::view::res_of(&msg).to_string(),
-            msg,
+        .skip(from)
+        .map(|(idx, row)| Rendered {
+            idx,
+            res: crate::view::res_of(row).to_string(),
+            msg: row.clone(),
         })
         .collect()
 }

@@ -23,7 +23,6 @@ const HANDLER: &str = "pause_mock.tools";
 const CFG: BackendConfig = BackendConfig {
     name: "pause_mock",
     model_window: crate::constants::DEFAULT_CONTEXT_WINDOW,
-    provider_cache: false,
 };
 
 /// Every model request one agent was served, in order.

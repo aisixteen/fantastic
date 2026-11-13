@@ -227,7 +227,7 @@ async fn embed_rows_never_reach_the_prompt() {
                 &kernel,
                 "probe",
                 None,
-                crate::caching::Caching::Cleanup,
+                crate::caching::Caching::ProviderCache,
             ),
         )
         .await

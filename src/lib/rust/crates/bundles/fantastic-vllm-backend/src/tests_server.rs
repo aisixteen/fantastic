@@ -383,16 +383,15 @@ fn an_endpoint_without_v1_passes_with_metrics_url_or_kv_slots() {
 }
 
 #[test]
-fn caching_none_and_cleanup_are_accepted_and_provider_cache_is_refused_here() {
-    // vllm declares no provider caching: the mode is refused at the write, naming
-    // the backend; the two modes that send no marker are accepted.
+fn caching_takes_the_two_modes_and_refuses_anything_else() {
+    // the same two modes as every backend; vllm sends no cache marks on the wire
     let rec = rec("http://vllm.test/v1", json!({}));
-    for mode in ["none", "cleanup"] {
+    for mode in ["none", "provider_cache"] {
         let meta = json!({"caching": mode});
         assert_eq!(validate(&obj(meta.clone()), &rec), None, "{mode}");
     }
-    // provider caching is no mode of this backend: the record declaration refuses it
-    let meta = json!({"caching": "provider_cache"});
+    // `cleanup` is no mode any more: the record declaration refuses it
+    let meta = json!({"caching": "cleanup"});
     let refused = crate::tests::at_the_write(&obj(meta.clone()), &rec).unwrap_or_default();
     assert!(refused.contains("caching"), "{refused}");
     // an unknown mode is the record declaration's refusal, by field name

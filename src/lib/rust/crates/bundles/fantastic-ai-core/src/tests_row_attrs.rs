@@ -186,11 +186,11 @@ async fn the_parts_follow_the_request_and_the_request_is_unchanged() {
         assert!(hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()));
     }
 
-    // THE REQUEST: role and content only, the system block exactly the pieces
-    // end to end, the history as the rows hold it
+    // THE REQUEST: role and content (and the agent's cache mark), the system block
+    // exactly the pieces end to end, the history as the rows hold it
     let sent = s.request_messages(1);
     for m in &sent {
-        let keys: Vec<&String> = m.as_object().unwrap().keys().collect();
+        let keys: Vec<&String> = m.as_object().unwrap().keys().filter(|k| *k != crate::caching::CACHE_MARK).collect();
         assert_eq!(keys, ["role", "content"], "{m}");
     }
     let system = sent[0]["content"].as_str().unwrap();
@@ -201,7 +201,7 @@ async fn the_parts_follow_the_request_and_the_request_is_unchanged() {
     assert_eq!(system.len(), pieces + 4, "two blank lines between pieces");
     assert_eq!(sent[1], json!({"role": "user", "content": "go"}));
     assert_eq!(sent[2]["content"], answer["content"]);
-    assert_eq!(sent[3], json!({"role": "user", "content": "again"}));
+    assert_eq!(sent[3], json!({"role": "user", "content": "again", "cache_mark": true}), "the tail carries the mark");
 }
 
 #[tokio::test]
@@ -221,7 +221,7 @@ async fn two_identical_builds_give_the_same_parts_and_a_changed_prompt_only_its_
                     &kernel,
                     "c",
                     Some(prompt),
-                    crate::caching::Caching::Cleanup,
+                    crate::caching::Caching::ProviderCache,
                 ),
             )
             .await

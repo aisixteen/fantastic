@@ -66,7 +66,6 @@ const CFG: BackendConfig = BackendConfig {
     // A server's window is the record's to name (`num_ctx` / `context_window`);
     // the kernel cannot read it.
     model_window: fantastic_ai_core::constants::DEFAULT_CONTEXT_WINDOW,
-    provider_cache: false,
 };
 
 // ── ollama provider (NDJSON transport) ──────────────────────────────
@@ -154,6 +153,17 @@ impl Provider for OllamaProvider {
         } else if let Some(n) = self.num_predict {
             options.insert("num_predict".to_string(), json!(n));
         }
+        // the agent's cache marks are anthropic's; ollama takes role and content only
+        let messages: Vec<Value> = messages
+            .iter()
+            .map(|m| {
+                let mut m = m.clone();
+                if let Some(o) = m.as_object_mut() {
+                    o.remove(fantastic_ai_core::caching::CACHE_MARK);
+                }
+                m
+            })
+            .collect();
         let mut body = json!({
             "model": self.model,
             "messages": messages,
@@ -406,7 +416,7 @@ pub struct OllamaRecord {
     #[serde(flatten)]
     pub clock: fantastic_ai_core::record::StreamClock,
     /// How the conversation is kept in the model's view.
-    pub caching: Option<fantastic_ai_core::record::UncachedMode>,
+    pub caching: Option<fantastic_ai_core::record::CachingMode>,
     /// A door's key, when the server sits behind one — absent = no header.
     pub credentials: Option<Credentials>,
     /// The memory store agent that keeps this agent's settings (e.g. a ram_store).

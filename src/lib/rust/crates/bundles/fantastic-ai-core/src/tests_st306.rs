@@ -23,7 +23,6 @@ const CLIENT: &str = "st306_client";
 const CFG: BackendConfig = BackendConfig {
     name: "st306_mock",
     model_window: crate::constants::DEFAULT_CONTEXT_WINDOW,
-    provider_cache: false,
 };
 
 /// Every model request one agent was served, in order.

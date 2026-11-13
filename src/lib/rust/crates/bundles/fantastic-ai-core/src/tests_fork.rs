@@ -84,7 +84,7 @@ async fn messages(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
             kernel,
             "c",
             Some("sys"),
-            crate::caching::Caching::Cleanup,
+            crate::caching::Caching::ProviderCache,
         ),
     )
     .await

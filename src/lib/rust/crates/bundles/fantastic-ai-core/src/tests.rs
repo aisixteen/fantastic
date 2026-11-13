@@ -272,7 +272,6 @@ fn pass(text: impl Into<String>) -> Vec<ScriptEvent> {
 const CFG: BackendConfig = BackendConfig {
     name: "mock_backend",
     model_window: crate::constants::DEFAULT_CONTEXT_WINDOW,
-    provider_cache: false,
 };
 
 #[async_trait]
@@ -2291,7 +2290,7 @@ async fn the_default_prompt_states_the_mechanism_not_a_strategy() {
             &kernel,
             "probe",
             None,
-            crate::caching::Caching::Cleanup,
+            crate::caching::Caching::ProviderCache,
         ),
     )
     .await
@@ -3020,13 +3019,13 @@ async fn the_batch_stamp_lives_inside_the_reply_tag() {
     );
 }
 
-/// Read a batch token out of a delivered turn. Anchored on the STAMP (`1 of 2 in
+/// Read the newest batch token out of a request. Anchored on the STAMP (`1 of 2 in
 /// batch …`), not on the words: the system block teaches the shape, so a bare
 /// `in batch ` search finds the prompt's own `<token>` placeholder first.
 fn batch_token_of(turn: &str) -> String {
     const MARK: &str = "1 of 2 in batch ";
     let at = turn
-        .find(MARK)
+        .rfind(MARK)
         .unwrap_or_else(|| panic!("no batch stamp in: {turn}"))
         + MARK.len();
     turn[at..].chars().take(4).collect()
@@ -3396,8 +3395,7 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
     let (kernel, backend) = mk_kernel(&tmp, "mark").await;
     let state = crate::state::state_for(&backend);
 
-    // ① the store length is what `assemble_messages` reports — even though the
-    //    view it built is SHORTER, because the stale reflect deduped away.
+    // ① the store length is what `assemble_messages` reports.
     let stale = "[reply to ks:a1 · core reflect]\nOLD TREE";
     let fresh = "[reply to ks:a2 · core reflect]\nNEW TREE";
     let turns = vec![
@@ -3421,21 +3419,13 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
             &kernel,
             "probe",
             None,
-            crate::caching::Caching::Cleanup,
+            crate::caching::Caching::ProviderCache,
         ),
     )
     .await
     .expect("store read");
     assert_eq!(store_len, 4, "the STORE keeps every turn");
-    assert!(
-        messages.len() < 1 + store_len + 1,
-        "the view must be shorter than the store: {} messages",
-        messages.len()
-    );
-    assert!(
-        !Value::Array(messages).to_string().contains("OLD TREE"),
-        "the superseded reflect must be gone from the VIEW"
-    );
+    let _ = messages;
 
     // ② and the mark records THAT number, not the view's length.
     let provider: Arc<dyn Provider> = Arc::new(SummaryProvider("SUMMARY"));
@@ -5189,7 +5179,7 @@ async fn a_fold_projection_over_budget_writes_folds() {
             &kernel,
             "cli",
             Some("sys"),
-            crate::caching::Caching::Cleanup,
+            crate::caching::Caching::ProviderCache,
         ),
     )
     .await
@@ -5370,7 +5360,7 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
                 &kernel,
                 "cli",
                 Some("sys"),
-                crate::caching::Caching::Cleanup,
+                crate::caching::Caching::ProviderCache,
             ),
         )
         .await
@@ -7102,57 +7092,6 @@ mod row_attrs;
 /// Images in a chat (#622).
 #[path = "tests_images.rs"]
 mod images;
-
-/// A docs body opens with the line naming the grep that keeps what the model needs,
-/// and once answered it is cut to a stub that names the same pid — python
-/// `test_a_docs_reply_is_cut_to_a_stub_naming_its_held_pid`.
-#[test]
-fn a_docs_reply_is_cut_to_a_stub_naming_its_held_pid() {
-    let body = "[reply to 12 · kernel docs]\n<of>runner</of>\n<bundle>exec_bridge.tools</bundle>\
-                \n<tier>oneliners</tier>\n<verbs>\n<start>args: command:str</start>\n</verbs>";
-    let sibling = "[reply to 13 · notes read]\nline one";
-    let hist = vec![
-        json!({"role": "user", "content": format!("{body}\n\n{sibling}"), "id": 7}),
-        json!({"role": "assistant", "content": "<call …>", "id": 8}),
-    ];
-    let out = crate::history_view::drop_read_docs(&hist);
-    let content = out[0]["content"].as_str().unwrap();
-    let blocks: Vec<&str> = content.split("\n\n").collect();
-    assert_eq!(
-        blocks[0],
-        "[reply to 12 · kernel docs]\n[docs of=runner tier=oneliners — dropped from your view; \
-         held this run: send yourself <type>grep</type> <ids><item>12</item></ids> \
-         <query>start</query>]"
-    );
-    assert_eq!(blocks[1], sibling);
-    assert!(crate::history_view::docs_head(12, "start").starts_with(
-        "[this reply is shortened to one line after your next message; to get lines back"
-    ));
-}
-
-/// The grep example is a REAL verb of the body, never a placeholder, and a body that
-/// lists no verbs is neither held nor cut — python
-/// `test_the_grep_example_is_a_real_verb_and_a_verbless_body_is_not_cut`.
-#[test]
-fn the_grep_example_is_a_real_verb_and_a_verbless_body_is_not_cut() {
-    use crate::history_view::{drop_read_docs, example_verb};
-    assert_eq!(
-        example_verb("<of>x</of>\n<verbs>\n<reflect>a</reflect>\n<boot>b</boot>\n<write>c\nmore</write>\n</verbs>")
-            .as_deref(),
-        Some("write")
-    );
-    assert_eq!(
-        example_verb("<of>x</of>\n<verbs>\n<reflect>a</reflect>\n</verbs>").as_deref(),
-        Some("reflect")
-    );
-    assert_eq!(example_verb("<of>x</of>\n<verbs>\n</verbs>"), None);
-    let bare = "[reply to 5 · kernel docs]\n<of>x</of>\n<bundle>x.tools</bundle>\n<tier>oneliners</tier>\n<verbs>\n</verbs>";
-    let hist = vec![
-        json!({"role": "user", "content": bare}),
-        json!({"role": "assistant", "content": "<call …>"}),
-    ];
-    assert_eq!(drop_read_docs(&hist), hist);
-}
 
 // ─── ONLY THE ANSWER ACTS ───────────────────────────────────────────────
 // A `<call>` written inside `<think>…</think>` is thinking — not dispatched, not

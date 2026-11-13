@@ -84,7 +84,6 @@ const CFG: BackendConfig = BackendConfig {
     // A server's window is the record's to name (`context_window`); the kernel
     // cannot read it.
     model_window: fantastic_ai_core::constants::DEFAULT_CONTEXT_WINDOW,
-    provider_cache: false,
 };
 
 // ── HTTP client cache (the key rides each request, never the client) ─
@@ -668,7 +667,7 @@ pub struct ResponsesRecord {
     #[schemars(range(min = 1), default = "default_max_tokens")]
     pub max_tokens: Option<i64>,
     /// How the conversation is kept in the model's view.
-    pub caching: Option<fantastic_ai_core::record::UncachedMode>,
+    pub caching: Option<fantastic_ai_core::record::CachingMode>,
     /// Runner params merged verbatim into the request body.
     pub sampling: Option<Map<String, Value>>,
     /// The credential store and ref holding the key, read at each request.

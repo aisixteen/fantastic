@@ -99,7 +99,6 @@ impl Provider for Canned {
 const CFG: BackendConfig = BackendConfig {
     name: "canned_ai",
     model_window: fantastic_ai_core::constants::DEFAULT_CONTEXT_WINDOW,
-    provider_cache: false,
 };
 
 /// The real ai_core verb table over [`Canned`].
