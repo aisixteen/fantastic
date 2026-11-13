@@ -4163,6 +4163,41 @@ async fn a_wake_that_never_runs_releases_the_held_senders_at_the_ceiling() {
     assert!(!state.chain.lock().unwrap().alive);
 }
 
+/// Whether `ps` shows a `chain_wake_watch` task of the agent.
+async fn wake_watch_in_ps(kernel: &Arc<Kernel>, backend: &AgentId) -> bool {
+    let table = kernel
+        .send(vec![Item::new(AgentId::from("kernel"), json!({"type": "ps"}))])
+        .await
+        .remove(0)
+        .result;
+    table["tasks"].as_array().expect("tasks").iter().any(|t| {
+        t["agent"] == json!(backend.as_str()) && t["verb"] == json!("chain_wake_watch")
+    })
+}
+
+/// A chain that ends with a held send and is woken leaves no wake watchdog behind
+/// once the wake answers: nothing idles out the send ceiling in `ps`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_woken_held_send_leaves_no_wake_watchdog() {
+    // the send ceiling is process-wide: run under the default one
+    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
+    let (_tmp, kernel, backend, _s, first, second) = held_behind_a_slow_pass("wakewatchgone").await;
+    let out = tokio::time::timeout(Duration::from_secs(10), second)
+        .await
+        .expect("the held sender was never answered")
+        .expect("second send");
+    assert!(out.get("error").is_none(), "{out}");
+    first.await.expect("first send");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while wake_watch_in_ps(&kernel, &backend).await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "chain_wake_watch is still in ps after the wake answered"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// ONE CHAIN PER AGENT (#227, bug 4): a routed reply carries the token of the
 /// chain that DECIDED it, read when it was decided — not the token a newer chain
 /// has when the delivery finally runs. Single-threaded, so nothing runs between

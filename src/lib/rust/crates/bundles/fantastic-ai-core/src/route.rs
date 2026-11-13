@@ -1198,8 +1198,23 @@ pub(crate) fn chain_ended_within(
         true,
     );
     let watched = self_id.clone();
+    let gone = state.chain.lock().expect("chain poisoned").held_gone.clone();
     kernel.spawn_task(self_id, "chain_wake_watch", async move {
-        tokio::time::sleep(ceiling).await;
+        // The watchdog ends as soon as the senders it watches are no longer held
+        // (the wake pass took them); on the ceiling it releases them.
+        let deadline = tokio::time::Instant::now() + ceiling;
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => break,
+                _ = gone.notified() => {
+                    let st = state_for(&watched);
+                    let chain = st.chain.lock().expect("chain poisoned");
+                    if !chain.held.iter().any(|h| ids.contains(&h.send_id)) {
+                        return;
+                    }
+                }
+            }
+        }
         state_for(&watched)
             .chain
             .lock()
