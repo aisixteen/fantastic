@@ -340,6 +340,7 @@ pub async fn context_fold(
     kernel: &Arc<Kernel>,
     provider: &Arc<dyn Provider>,
     model_window: i64,
+    can_mark: bool,
 ) -> Result<Value, crate::assembly::BlockFail> {
     use crate::memory::load_view;
     use fantastic_kernel::refusal::{bad, refusal_hint, with, BAD_ARG, LOCKED};
@@ -357,7 +358,7 @@ pub async fn context_fold(
     // The view is rendered as the record's caching mode renders it, so the fold
     // persists exactly the view the next turn will send. A primer pins its prefix.
     let meta = agent_meta(agent_id, kernel);
-    let (caching, primer) = match crate::caching::settings(&meta) {
+    let (caching, primer) = match crate::caching::settings(&meta, can_mark) {
         Ok(s) => s,
         Err(why) => {
             let mut v = refusal_hint(

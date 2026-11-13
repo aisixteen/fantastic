@@ -220,7 +220,7 @@ pub async fn run_generation(
     // THE CACHING MODE IS CHECKED FIRST TOO: a record that asks for provider caching
     // on a backend that cannot cache is refused before any row is written, and so
     // before the owed recall below (which writes a view and a recall row).
-    let (caching, primer) = crate::caching::settings(&crate::helpers::agent_meta(self_id, kernel))
+    let (caching, primer) = crate::caching::settings(&crate::helpers::agent_meta(self_id, kernel), cfg.provider_cache)
         .map_err(|why| GenFailure::Provider(ProviderError::value_error(why)))?;
     if caching.marks() && !cfg.provider_cache {
         return Err(GenFailure::Provider(crate::caching::unsupported(cfg.name)));
