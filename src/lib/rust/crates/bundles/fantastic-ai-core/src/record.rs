@@ -34,7 +34,8 @@ pub enum UncachedMode {
     Cleanup,
 }
 
-/// How the conversation is kept in the model's view.
+/// How the conversation is kept in the model's view. Absent: `provider_cache` where the backend
+/// places cache marks (every AI chat), else `cleanup`.
 #[derive(Debug, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CachingMode {

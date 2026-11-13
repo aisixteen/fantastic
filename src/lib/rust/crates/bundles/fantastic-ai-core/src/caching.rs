@@ -85,14 +85,16 @@ impl Caching {
     }
 }
 
-/// The record's `caching` mode. Absent or null is the default. Any other value is an
+/// The record's `caching` mode. Absent or null is the default: `provider_cache` where the
+/// backend can place cache marks (`can_mark`), else `cleanup`. Any other value is an
 /// error — the write refuses it, so only a hand-edited record reaches here, and that
 /// fails the turn rather than running a mode nobody chose.
 ///
 /// # Errors
 /// The record's `caching` is not one of [`MODES`]; the message names the value.
-pub fn mode_of(meta: &Map<String, Value>) -> Result<Caching, String> {
+pub fn mode_of(meta: &Map<String, Value>, can_mark: bool) -> Result<Caching, String> {
     let raw = match meta.get("caching") {
+        None | Some(Value::Null) if can_mark => return Ok(Caching::ProviderCache),
         None | Some(Value::Null) => return Ok(Caching::Cleanup),
         Some(v) => v,
     };
@@ -125,12 +127,12 @@ pub fn primer_of(meta: &Map<String, Value>) -> Result<Option<i64>, String> {
     }
 }
 
-/// The mode and the primer, read together off the agent's record.
+/// The mode and the primer, read together off the agent's record (`can_mark`: see [`mode_of`]).
 ///
 /// # Errors
 /// Either field is malformed; see [`mode_of`] and [`primer_of`].
-pub fn settings(meta: &Map<String, Value>) -> Result<(Caching, Option<i64>), String> {
-    Ok((mode_of(meta)?, primer_of(meta)?))
+pub fn settings(meta: &Map<String, Value>, can_mark: bool) -> Result<(Caching, Option<i64>), String> {
+    Ok((mode_of(meta, can_mark)?, primer_of(meta)?))
 }
 
 /// The refusal a turn fails with when its record asks for a caching the backend
@@ -201,35 +203,40 @@ mod tests {
     }
 
     #[test]
-    fn the_mode_defaults_to_cleanup_and_takes_the_three_names() {
-        assert_eq!(mode_of(&obj(json!({}))), Ok(Caching::Cleanup));
+    fn the_mode_defaults_to_provider_cache_where_marks_go_and_takes_the_three_names() {
+        assert_eq!(mode_of(&obj(json!({})), true), Ok(Caching::ProviderCache));
         assert_eq!(
-            mode_of(&obj(json!({"caching": null}))),
+            mode_of(&obj(json!({"caching": null})), true),
+            Ok(Caching::ProviderCache)
+        );
+        assert_eq!(mode_of(&obj(json!({})), false), Ok(Caching::Cleanup));
+        assert_eq!(
+            mode_of(&obj(json!({"caching": null})), false),
             Ok(Caching::Cleanup)
         );
-        assert_eq!(mode_of(&obj(json!({"caching": "none"}))), Ok(Caching::None));
+        assert_eq!(mode_of(&obj(json!({"caching": "none"})), true), Ok(Caching::None));
         assert_eq!(
-            mode_of(&obj(json!({"caching": "cleanup"}))),
+            mode_of(&obj(json!({"caching": "cleanup"})), true),
             Ok(Caching::Cleanup)
         );
         assert_eq!(
-            mode_of(&obj(json!({"caching": "provider_cache"}))),
+            mode_of(&obj(json!({"caching": "provider_cache"})), true),
             Ok(Caching::ProviderCache)
         );
         for m in [Caching::None, Caching::Cleanup, Caching::ProviderCache] {
-            assert_eq!(mode_of(&obj(json!({"caching": m.name()}))), Ok(m));
+            assert_eq!(mode_of(&obj(json!({"caching": m.name()})), true), Ok(m));
         }
     }
 
     #[test]
     fn an_unknown_mode_is_an_error_that_names_it() {
-        let err = mode_of(&obj(json!({"caching": "always"}))).unwrap_err();
+        let err = mode_of(&obj(json!({"caching": "always"})), true).unwrap_err();
         assert_eq!(
             err,
             "caching='always' is not one of the legal values: none, cleanup, provider_cache"
         );
-        assert!(mode_of(&obj(json!({"caching": true}))).is_err());
-        assert!(mode_of(&obj(json!({"caching": ["cleanup"]}))).is_err());
+        assert!(mode_of(&obj(json!({"caching": true})), true).is_err());
+        assert!(mode_of(&obj(json!({"caching": ["cleanup"]})), true).is_err());
     }
 
     #[test]
