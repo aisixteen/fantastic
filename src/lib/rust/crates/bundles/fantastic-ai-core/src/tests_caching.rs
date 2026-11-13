@@ -1,6 +1,6 @@
-//! The record's `caching` modes: `cleanup` trims the view, `none` and `provider_cache`
-//! keep it append-only, and `provider_cache` flags the primer's end and the last
-//! fold's. The primer pins its prefix against `context_fold`.
+//! The record's `caching` modes: `none` and `provider_cache` keep the view
+//! append-only, and `provider_cache` autofolds and flags the primer's end and the
+//! last fold's. The primer pins its prefix against `context_fold`.
 //!
 //! A child of `tests`, so it drives the same harness: a real `ram_store` under the
 //! root and `mk_kernel` backends (the mock bundle, which accepts any record).
@@ -135,7 +135,6 @@ const CACHING_MODULE: &str = "mock_caching.tools";
 const CACHING_CFG: BackendConfig = BackendConfig {
     name: "mock_caching",
     model_window: crate::constants::DEFAULT_CONTEXT_WINDOW,
-    provider_cache: true,
 };
 
 /// [`mk_kernel`] on the caching mock, so a `provider_cache` record is accepted and a
@@ -204,85 +203,23 @@ fn flagged_contents(msgs: &[Value], key: &str) -> Vec<String> {
 // ─── the record's values ────────────────────────────────────────────────────
 
 #[test]
-fn caching_is_an_enum_that_defaults_to_cleanup_and_refuses_anything_else() {
+fn caching_is_an_enum_of_two_modes_and_refuses_anything_else() {
     let check = |meta: Value| crate::tests_decl::refused_at_the_write(meta.as_object().unwrap());
-    for legal in ["none", "cleanup", "provider_cache"] {
+    for legal in ["none", "provider_cache"] {
         assert_eq!(check(json!({"caching": legal})), None, "{legal}");
     }
-    assert!(
-        check(json!({"caching": "always"})).is_some_and(|e| e.contains("caching")),
-        "an unknown mode is refused by name"
-    );
+    for gone in ["always", "cleanup"] {
+        assert!(
+            check(json!({"caching": gone})).is_some_and(|e| e.contains("caching")),
+            "{gone}: an unknown mode is refused by name"
+        );
+    }
     // the primer is a row id: a number, never text
     assert_eq!(check(json!({"cache_primer_until": 12})), None);
     assert!(check(json!({"cache_primer_until": "12"})).is_some());
 }
 
-// ─── the three modes over one history ───────────────────────────────────────
-
-#[tokio::test]
-async fn cleanup_trims_the_view_and_none_and_provider_cache_keep_every_row() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, agent) = mk_kernel(&tmp, "cm_modes").await;
-    // a whole-state read superseded by a later one
-    put(
-        &kernel,
-        &agent,
-        "user",
-        "[reply to 11 · notes reflect]\nold state",
-    )
-    .await;
-    put(&kernel, &agent, "assistant", "ok one").await;
-    put(
-        &kernel,
-        &agent,
-        "user",
-        "[reply to 14 · notes reflect]\nnew state",
-    )
-    .await;
-    put(&kernel, &agent, "assistant", "ok two").await;
-    // the same long body read twice
-    put(&kernel, &agent, "user", &reply(12, "read", &big())).await;
-    put(&kernel, &agent, "assistant", "ok three").await;
-    put(&kernel, &agent, "user", &reply(21, "read", &big())).await;
-    put(&kernel, &agent, "assistant", "ok four").await;
-    // a docs reply, answered
-    put(&kernel, &agent, "user", &docs(30)).await;
-    put(&kernel, &agent, "assistant", "ok five").await;
-
-    let stored = stored_turns(&kernel, &agent).await;
-    let cleaned = history(&view_with(&kernel, &agent, Caching::Cleanup).await);
-    let kept = history(&view_with(&kernel, &agent, Caching::None).await);
-    let marked = history(&view_with(&kernel, &agent, Caching::ProviderCache).await);
-
-    // cleanup: the superseded read, the repeated body and the used docs are trimmed
-    let text: String = cleaned
-        .iter()
-        .map(|(_, c)| c.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        !text.contains("old state"),
-        "a superseded read drops: {text}"
-    );
-    assert!(text.contains("[identical to the reply in row"), "{text}");
-    assert!(
-        !text.contains("<start>args"),
-        "the answered docs are cut: {text}"
-    );
-    assert_eq!(
-        cleaned.len(),
-        stored.len() - 1,
-        "one superseded read dropped"
-    );
-
-    // none and provider_cache: every stored row, in order, verbatim
-    assert_eq!(kept, stored, "none renders the stored rows, as stored");
-    assert_eq!(
-        marked, stored,
-        "provider_cache renders the stored rows, as stored"
-    );
-}
+// ─── the two modes over one history ───────────────────────────────────────
 
 #[tokio::test]
 async fn none_and_provider_cache_are_append_only_each_turn_a_prefix_of_the_next() {
@@ -483,32 +420,6 @@ async fn context_fold_refuses_a_caching_value_it_cannot_read() {
     assert_eq!(out["arg"], "caching", "{out}");
 }
 
-#[tokio::test]
-async fn provider_cache_is_refused_by_a_backend_that_cannot_cache() {
-    // the mock backend declares no provider caching: a turn on it refuses the mode
-    let tmp = TempDir::new().unwrap();
-    let (kernel, agent) = mk_kernel(&tmp, "cm_cap").await;
-    put(&kernel, &agent, "user", "kept").await;
-    set(&kernel, &agent, json!({"caching": "provider_cache"})).await;
-    let before = store(&kernel, &agent).await.len();
-    let reply = verb(
-        &kernel,
-        &agent,
-        json!({"type": "send", "text": "hi", "client_id": "c"}),
-    )
-    .await;
-    let text = reply.to_string();
-    assert!(
-        text.contains("mock_backend: caching=provider_cache is not supported by this backend"),
-        "{reply}"
-    );
-    assert_eq!(
-        store(&kernel, &agent).await.len(),
-        before,
-        "a refused turn stores no row: {reply}"
-    );
-}
-
 // ─── the flags reach the provider on a real turn ────────────────────────────
 
 #[tokio::test]
@@ -551,7 +462,7 @@ async fn a_provider_cache_turn_hands_the_provider_the_primer_and_the_last_fold_f
 }
 
 #[tokio::test]
-async fn a_cleanup_or_none_turn_hands_the_provider_no_flag_even_with_a_primer_and_folds() {
+async fn a_none_turn_hands_the_provider_no_flag_even_with_a_primer_and_folds() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_caching_kernel(&tmp, "cm_wire_off").await;
     put(&kernel, &agent, "user", "u1").await;
@@ -560,7 +471,7 @@ async fn a_cleanup_or_none_turn_hands_the_provider_no_flag_even_with_a_primer_an
     let a2 = put(&kernel, &agent, "assistant", "a2").await;
     set(&kernel, &agent, json!({"cache_primer_until": a1})).await;
     fold(&kernel, &agent, u2, a2, "fold one").await;
-    for mode in ["cleanup", "none"] {
+    for mode in ["none"] {
         set(&kernel, &agent, json!({"caching": mode})).await;
         let msgs = turn_messages(&kernel, &agent, "live").await;
         assert!(
@@ -571,56 +482,10 @@ async fn a_cleanup_or_none_turn_hands_the_provider_no_flag_even_with_a_primer_an
     }
 }
 
-// ─── a mode switch keeps the view array's membership ────────────────────────
-
-#[tokio::test]
-async fn a_mode_switch_keeps_the_rows_a_cleanup_left_out_of_the_view_array() {
-    // The view array is the record of what the view is. A fold written under cleanup
-    // lists only the rows cleanup kept, so the superseded read stays out after a
-    // switch to none: none renders the listed rows and the rows after the newest of
-    // them. The row returns only when the array is gone (a context_clear starts a new
-    // thread, so it never does within this one).
-    let tmp = TempDir::new().unwrap();
-    let (kernel, agent) = mk_kernel(&tmp, "cm_switch").await;
-    put(
-        &kernel,
-        &agent,
-        "user",
-        "[reply to 11 · notes reflect]\nold state",
-    )
-    .await;
-    put(&kernel, &agent, "assistant", "ok one").await;
-    put(
-        &kernel,
-        &agent,
-        "user",
-        "[reply to 14 · notes reflect]\nnew state",
-    )
-    .await;
-    put(&kernel, &agent, "assistant", "ok two").await;
-    let u5 = put(&kernel, &agent, "user", "question").await;
-    let a5 = put(&kernel, &agent, "assistant", "answer").await;
-    fold(&kernel, &agent, u5, a5, "fold").await;
-
-    let cleaned = history(&view_with(&kernel, &agent, Caching::Cleanup).await);
-    assert!(cleaned.iter().all(|(_, c)| !c.contains("old state")));
-    let switched = history(&view_with(&kernel, &agent, Caching::None).await);
-    assert_eq!(
-        switched.len(),
-        4,
-        "the listed rows, the fold among them: {switched:?}"
-    );
-    assert!(
-        switched.iter().all(|(_, c)| !c.contains("old state")),
-        "a dropped row stays out of the array's view: {switched:?}"
-    );
-    assert!(switched.iter().any(|(_, c)| c.contains("new state")));
-}
-
 // ─── autofold (#556) ────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn autofold_runs_in_cleanup_and_provider_cache_and_none_stays_append_only() {
+async fn autofold_runs_in_provider_cache_and_none_stays_append_only() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "cm_autofold").await;
     put(&kernel, &agent, "user", "hello").await;
@@ -639,7 +504,7 @@ async fn autofold_runs_in_cleanup_and_provider_cache_and_none_stays_append_only(
     let before = stored_turns(&kernel, &agent).await;
     let none = view_with(&kernel, &agent, Caching::None).await;
     assert_eq!(history(&none), before);
-    for mode in [Caching::Cleanup, Caching::ProviderCache] {
+    for mode in [Caching::ProviderCache] {
         let seen = history(&view_with(&kernel, &agent, mode).await)
             .iter()
             .map(|(_, c)| c.clone())
@@ -723,7 +588,7 @@ async fn the_request_parts_name_each_row_by_the_form_it_took() {
     let state = crate::state::state_for(&agent);
     for (mode, forms) in [
         (Caching::None, ["whole", "whole", "whole", "whole"]),
-        (Caching::Cleanup, ["whole", "thought", "anchor", "whole"]),
+        (Caching::ProviderCache, ["whole", "thought", "anchor", "whole"]),
     ] {
         let msgs = view_with(&kernel, &agent, mode).await;
         let parts = state.request_parts.lock().unwrap().clone();
@@ -749,7 +614,7 @@ async fn an_attribute_of_any_key_leaves_the_request_bytes_alone() {
     };
     put_row(&kernel, &agent, with("hello", "user")).await;
     put_row(&kernel, &agent, with("answer", "assistant")).await;
-    for mode in [Caching::None, Caching::Cleanup] {
+    for mode in [Caching::None, Caching::ProviderCache] {
         let msgs = view_with(&kernel, &agent, mode).await;
         let sent = crate::agent_loop::render_for_model(&msgs);
         let body = Value::Array(sent.clone()).to_string();

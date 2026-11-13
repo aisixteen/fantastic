@@ -67,7 +67,6 @@ const CFG: BackendConfig = BackendConfig {
     // A server's window is the record's to name (`context_window`); the kernel
     // cannot read it.
     model_window: fantastic_ai_core::constants::DEFAULT_CONTEXT_WINDOW,
-    provider_cache: false,
 };
 
 // ─── sampling ───────────────────────────────────────────────────────────────
@@ -304,10 +303,17 @@ pub fn one_system_message(messages: &[Value]) -> Vec<Value> {
         .filter(|m| role(m) == Some("system"))
         .map(content_text)
         .collect();
+    // the agent's cache marks are anthropic's; the OpenAI wire takes none
     let rest = messages
         .iter()
         .filter(|m| role(m) != Some("system"))
-        .cloned();
+        .map(|m| {
+            let mut m = m.clone();
+            if let Some(o) = m.as_object_mut() {
+                o.remove(fantastic_ai_core::caching::CACHE_MARK);
+            }
+            m
+        });
     if systems.is_empty() {
         return rest.collect();
     }
@@ -1320,7 +1326,7 @@ pub struct VllmRecord {
     /// The models this provider lists.
     pub models: Option<Vec<String>>,
     /// How the conversation is kept in the model's view.
-    pub caching: Option<fantastic_ai_core::record::UncachedMode>,
+    pub caching: Option<fantastic_ai_core::record::CachingMode>,
     /// The fields every ai_core agent takes.
     #[serde(flatten)]
     pub ai: AiRecord,

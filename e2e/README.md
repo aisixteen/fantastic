@@ -113,7 +113,7 @@ E2E_METER=1 \
 uv run python ../../../e2e/run.py --group agentic --lanes 1
 ```
 
-- `ANTHROPIC_CACHING` is `none`, `cleanup` or `provider_cache` (default
+- `ANTHROPIC_CACHING` is `none` or `provider_cache` (default
   `provider_cache`, so a long run reuses its prompt prefix).
 - The two prices are optional, but without them the report has no cost column. Add
   `ANTHROPIC_PRICE_CACHE_READ_PER_MTOK`, `ANTHROPIC_PRICE_CACHE_WRITE_PER_MTOK` and,

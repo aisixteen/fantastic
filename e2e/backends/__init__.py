@@ -239,9 +239,9 @@ def _vllm() -> Backend:
 #: the operator names the real one with `MAX_TOKENS` for a model that needs it.
 ANTHROPIC_OUTPUT_CAP = 32_000
 
-#: The caching modes the anthropic backend takes (`cleanup` clears the cache
+#: The caching modes the anthropic backend takes (`none` sends every row with no marks,
 #: between turns, `provider_cache` reuses the prompt prefix the provider caches).
-ANTHROPIC_CACHING = ("none", "cleanup", "provider_cache")
+ANTHROPIC_CACHING = ("none", "provider_cache")
 
 
 def anthropic_endpoint_problem(endpoint: str) -> str | None:

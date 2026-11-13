@@ -153,29 +153,6 @@ async fn a_turn_records_what_the_endpoint_reported() {
 
 // ── the same bytes twice: one copy in view ─────────────────────────────
 
-#[test]
-fn a_repeated_body_is_a_stub_citing_the_first() {
-    let body = "line\n".repeat(200);
-    let hist = vec![
-        json!({"role": "user", "id": 1, "content": format!("[reply to 10 · notes read]\n{body}")}),
-        json!({"role": "assistant", "id": 2, "content": "again"}),
-        json!({"role": "user", "id": 3, "content": format!("[reply to 11 · notes read]\n{body}")}),
-        json!({"role": "user", "id": 4, "content": "[reply to 12 · notes read]\nsmall"}),
-    ];
-    let out = crate::history_view::dedupe_repeat_bodies(&hist);
-    assert_eq!(out[0], hist[0], "the first copy stays whole");
-    assert!(
-        out[2]["content"]
-            .as_str()
-            .unwrap()
-            .contains("identical to the reply in row 1"),
-        "{}",
-        out[2]
-    );
-    assert_eq!(out[2]["id"], json!(3));
-    assert_eq!(out[3], hist[3]);
-}
-
 #[tokio::test]
 async fn a_row_another_writer_appends_reaches_the_next_head_read() {
     let tmp = TempDir::new().unwrap();

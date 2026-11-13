@@ -1,15 +1,5 @@
 """kernel/fold_cache — the fold cycle under `caching` (#556, #571) against a SCRIPTED model. NO MODEL.
 
-PART A, `caching: cleanup`, a scripted vllm plug on both lanes. The docs reply is whole in
-its own turn; in the NEXT request it is the stub main emits, after the block's own tag line:
-
-  [docs of={of} tier={tier} — dropped from your view; held this run: send yourself
-   <type>grep</type> <ids><item>{pid}</item></ids> <query>{verb}</query>]
-
-  Rust `docs_dropped` fantastic-ai-core/src/history_view.rs:126-133, `drop_read_docs`
-  :202-245 (applied only when `caching.cleans()`, assembly.rs:672, caching.rs:72-75).
-  Python `_DOCS_DROPPED` ai_core/core.py:1502-1505, `drop_read_docs` :1556, call :2934.
-
 PART B, `caching: provider_cache`: the whole cycle. Autofold (`Caching::folds`,
 caching.rs:85-88; Rust history_view.rs:522-603, Python ai_core/autofold.py:146-192):
 
@@ -237,7 +227,7 @@ def main() -> int:
                                 callable_by={"$self": "*", "$parent": "*",
                                              AI_A: "*", AI_B: "*"})
                 need(rec.get("id") == prov, f"create {prov}: {str(rec)[:200]}")
-            for aid, prov, mode in ((AI_A, PROV_A, "cleanup"), (AI_B, PROV_B, "provider_cache")):
+            for aid, prov, mode in ((AI_A, PROV_A, "none"), (AI_B, PROV_B, "provider_cache")):
                 rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
                                 provider_id=prov, model=MODEL, max_tokens=8192,
                                 context_window=262144, memory_store_id="memory",
@@ -248,7 +238,7 @@ def main() -> int:
             rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=AI_A,
                             endpoint=mA.url, model=MODEL, max_tokens=8192,
                             context_window=262144, kv_slots=4, kv_overflow="evict",
-                            memory_store_id="memory", caching="cleanup",
+                            memory_store_id="memory", caching="none",
                             can_call=can, callable_by=by)
             need(rec.get("id") == AI_A, f"create {AI_A}: {str(rec)[:200]}")
             mB.require_key(KEY)
@@ -263,31 +253,6 @@ def main() -> int:
                             memory_store_id="memory", caching="provider_cache",
                             can_call={**can, "creds": ["get"]}, callable_by=by)
             need(rec.get("id") == AI_B, f"create {AI_B}: {str(rec)[:200]}")
-
-        # ══ PART A · caching: cleanup ═════════════════════════════════════════
-        # A1 · the docs reply is whole in its own turn
-        mA.reply(docs, f"Noted.\n{DONE}")
-        turns = run(mA, AI_A, "A1", "docs", 2)
-        last = last_user(turns[1]) if len(turns) > 1 else ""
-        need(all(s in last for s in (" · kernel docs", f"<of>{BUNDLE}</of>",
-                                      "<tier>oneliners</tier>", DOCWORD)),
-             f"A1: request 2 carries the whole docs reply: {last[:200]!r}")
-        got = re.search(r"\[reply to (\S+) · kernel docs( · ↑\d+)?\]", last)
-        need(got is not None, "A1: the docs block names its row")
-        p = got.group(1) if got else "?"
-        tag = got.group(0) if got else "?"  # `[reply to P · kernel docs · ↑N]`
-
-        # A2 · the next request holds the stub, not the body
-        mA.clear()
-        mA.reply(DONE)
-        turns = run(mA, AI_A, "A2", "next", 1)
-        seen = full(turns[0]) if turns else ""
-        stub = (f"{tag}\n[docs of={BUNDLE} tier=oneliners — dropped "
-                f"from your view; held this run: send yourself <type>grep</type> "
-                f"<ids><item>{p}</item></ids> <query>{VERB}</query>]")
-        need(stub in seen, f"A2: the docs reply is its stub; docs block near: "
-             f"{seen[max(0, seen.find('kernel docs') - 40):][:420]!r}")
-        need(DOCWORD not in seen, "A2: the docs body is out of the view")
 
         # ══ PART B · caching: provider_cache ══════════════════════════════════
         def collect(turns: list[dict]) -> None:

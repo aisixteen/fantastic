@@ -1,41 +1,34 @@
 //! The record's `caching` mode, and the cache flags it asks ai-core to set.
 //!
 //! `caching` picks how the model view is kept:
-//! - `none`: the stored rows, in order, never trimmed. Append-only.
-//! - `cleanup` (the default): the view is trimmed. Superseded whole-state reads,
-//!   repeated reply bodies and used docs drop out of it. No markers.
-//! - `provider_cache`: `none`'s history, plus the cache marks the agent places on four
-//!   messages: its own system message, the PRIMER END (the row `cache_primer_until`
-//!   names), the LAST FOLD (the last fold or clear row in the view), and the TAIL: the
-//!   row before the first row that will fold, else the last row. Only a backend that
-//!   declares `provider_cache` accepts it.
-//!
-//! `cleanup` and `provider_cache` also AUTOFOLD the view: a thought, a cut answer and a
-//! large or recalled reply show as an anchor, never stored.
+//! - `none`: the stored rows, in order. Append-only, no autofold, no marks.
+//! - `provider_cache` (the default): append-only, AUTOFOLDED (a thought, a cut answer
+//!   and a large or recalled reply show as an anchor, never stored), plus the cache
+//!   marks the agent places on four messages: its own system message, the PRIMER END
+//!   (the row `cache_primer_until` names), the LAST FOLD (the last fold or clear row in
+//!   the view), and the TAIL: the row before the first row that will fold, else the
+//!   last row. A backend that cannot cache sends no marks.
 //!
 //! ai-core sets ONE flag, [`CACHE_MARK`], on each message it wants marked ([`mark`]).
 //! The backend forwards it and reads no mode.
 
-use crate::provider::ProviderError;
 use fantastic_bundle::py_repr_value;
 use serde_json::{json, Map, Value};
 
 /// The legal values of `caching`, in the order the schema lists them.
-pub const MODES: [&str; 3] = ["none", "cleanup", "provider_cache"];
+pub const MODES: [&str; 2] = ["none", "provider_cache"];
 /// The mode a record without `caching` runs in.
-pub const DEFAULT_MODE: &str = "cleanup";
+pub const DEFAULT_MODE: &str = "provider_cache";
 /// The one message flag the agent hands a backend: put a cache mark after this message.
 pub const CACHE_MARK: &str = "cache_mark";
 
 /// The `caching` field's hint.
-pub const CACHING_HINT: &str = "how the conversation is kept in the model's view: none = \
-     every stored row, in order, never trimmed (append-only); cleanup = trim superseded \
-     reads, repeated reply bodies and used docs from the view; provider_cache = none's \
-     history plus marks, with autofold (the provider's cache markers: the end of the primer \
-     row named by cache_primer_until, the end of the last fold, and the end of the row \
-     before the first row that will fold); provider_cache is refused by a \
-     backend that cannot cache. A switch keeps the view already written: a row a cleanup \
-     left out of it stays out until a context_clear starts a new thread";
+pub const CACHING_HINT: &str = "how the conversation is kept in the model's view: \
+     provider_cache (default) = every stored row, in order, autofolded, with the \
+     provider's cache marks where the backend places them (the end of the primer row \
+     named by cache_primer_until, the end of the last fold, and the end of the row \
+     before the first row that will fold); none = every stored row, in order, no \
+     autofold, no marks";
 
 /// The `cache_primer_until` field's hint.
 pub const CACHE_PRIMER_HINT: &str = "a row id: the row that ends the stable prefix. The \
@@ -49,9 +42,7 @@ pub const CACHE_PRIMER_HINT: &str = "a row id: the row that ends the stable pref
 pub enum Caching {
     /// Append-only: the stored rows, in order.
     None,
-    /// The view is trimmed; no markers.
-    Cleanup,
-    /// Append-only, with the provider's cache markers.
+    /// Append-only, autofolded, with the provider's cache markers.
     ProviderCache,
 }
 
@@ -61,15 +52,8 @@ impl Caching {
     pub fn name(self) -> &'static str {
         match self {
             Self::None => "none",
-            Self::Cleanup => "cleanup",
             Self::ProviderCache => "provider_cache",
         }
-    }
-
-    /// Whether the view is trimmed: the three cleanups run.
-    #[must_use]
-    pub fn cleans(self) -> bool {
-        self == Self::Cleanup
     }
 
     /// Whether the agent places cache marks.
@@ -85,22 +69,19 @@ impl Caching {
     }
 }
 
-/// The record's `caching` mode. Absent or null is the default: `provider_cache` where the
-/// backend can place cache marks (`can_mark`), else `cleanup`. Any other value is an
+/// The record's `caching` mode. Absent or null is the default, `provider_cache`. Any other value is an
 /// error — the write refuses it, so only a hand-edited record reaches here, and that
 /// fails the turn rather than running a mode nobody chose.
 ///
 /// # Errors
 /// The record's `caching` is not one of [`MODES`]; the message names the value.
-pub fn mode_of(meta: &Map<String, Value>, can_mark: bool) -> Result<Caching, String> {
+pub fn mode_of(meta: &Map<String, Value>) -> Result<Caching, String> {
     let raw = match meta.get("caching") {
-        None | Some(Value::Null) if can_mark => return Ok(Caching::ProviderCache),
-        None | Some(Value::Null) => return Ok(Caching::Cleanup),
+        None | Some(Value::Null) => return Ok(Caching::ProviderCache),
         Some(v) => v,
     };
     match raw.as_str() {
         Some("none") => Ok(Caching::None),
-        Some("cleanup") => Ok(Caching::Cleanup),
         Some("provider_cache") => Ok(Caching::ProviderCache),
         _ => Err(format!(
             "caching={} is not one of the legal values: {}",
@@ -127,21 +108,12 @@ pub fn primer_of(meta: &Map<String, Value>) -> Result<Option<i64>, String> {
     }
 }
 
-/// The mode and the primer, read together off the agent's record (`can_mark`: see [`mode_of`]).
+/// The mode and the primer, read together off the agent's record.
 ///
 /// # Errors
 /// Either field is malformed; see [`mode_of`] and [`primer_of`].
-pub fn settings(meta: &Map<String, Value>, can_mark: bool) -> Result<(Caching, Option<i64>), String> {
-    Ok((mode_of(meta, can_mark)?, primer_of(meta)?))
-}
-
-/// The refusal a turn fails with when its record asks for a caching the backend
-/// cannot do. Raised before the turn opens, so nothing is stored.
-#[must_use]
-pub fn unsupported(name: &str) -> ProviderError {
-    ProviderError::value_error(format!(
-        "{name}: caching=provider_cache is not supported by this backend — use none or cleanup"
-    ))
+pub fn settings(meta: &Map<String, Value>) -> Result<(Caching, Option<i64>), String> {
+    Ok((mode_of(meta)?, primer_of(meta)?))
 }
 
 /// Set [`CACHE_MARK`] on the messages the cache marks land on, in the list it is
@@ -203,50 +175,32 @@ mod tests {
     }
 
     #[test]
-    fn the_mode_defaults_to_provider_cache_where_marks_go_and_takes_the_three_names() {
-        assert_eq!(mode_of(&obj(json!({})), true), Ok(Caching::ProviderCache));
+    fn the_mode_defaults_to_provider_cache_and_takes_the_two_names() {
+        assert_eq!(mode_of(&obj(json!({}))), Ok(Caching::ProviderCache));
         assert_eq!(
-            mode_of(&obj(json!({"caching": null})), true),
+            mode_of(&obj(json!({"caching": null}))),
             Ok(Caching::ProviderCache)
         );
-        assert_eq!(mode_of(&obj(json!({})), false), Ok(Caching::Cleanup));
-        assert_eq!(
-            mode_of(&obj(json!({"caching": null})), false),
-            Ok(Caching::Cleanup)
-        );
-        assert_eq!(mode_of(&obj(json!({"caching": "none"})), true), Ok(Caching::None));
-        assert_eq!(
-            mode_of(&obj(json!({"caching": "cleanup"})), true),
-            Ok(Caching::Cleanup)
-        );
-        assert_eq!(
-            mode_of(&obj(json!({"caching": "provider_cache"})), true),
-            Ok(Caching::ProviderCache)
-        );
-        for m in [Caching::None, Caching::Cleanup, Caching::ProviderCache] {
-            assert_eq!(mode_of(&obj(json!({"caching": m.name()})), true), Ok(m));
+        for m in [Caching::None, Caching::ProviderCache] {
+            assert_eq!(mode_of(&obj(json!({"caching": m.name()}))), Ok(m));
         }
     }
 
     #[test]
     fn an_unknown_mode_is_an_error_that_names_it() {
-        let err = mode_of(&obj(json!({"caching": "always"})), true).unwrap_err();
+        let err = mode_of(&obj(json!({"caching": "always"}))).unwrap_err();
         assert_eq!(
             err,
-            "caching='always' is not one of the legal values: none, cleanup, provider_cache"
+            "caching='always' is not one of the legal values: none, provider_cache"
         );
-        assert!(mode_of(&obj(json!({"caching": true})), true).is_err());
-        assert!(mode_of(&obj(json!({"caching": ["cleanup"]})), true).is_err());
+        assert!(mode_of(&obj(json!({"caching": true}))).is_err());
+        assert!(mode_of(&obj(json!({"caching": ["none"]}))).is_err());
     }
 
     #[test]
-    fn only_cleanup_trims_and_only_provider_cache_marks() {
-        assert!(Caching::Cleanup.cleans());
-        assert!(!Caching::None.cleans());
-        assert!(!Caching::ProviderCache.cleans());
+    fn only_provider_cache_marks() {
         assert!(Caching::ProviderCache.marks());
         assert!(!Caching::None.marks());
-        assert!(!Caching::Cleanup.marks());
     }
 
     #[test]
@@ -314,8 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn folds_runs_in_cleanup_and_provider_cache_only() {
-        assert!(Caching::Cleanup.folds());
+    fn folds_runs_in_provider_cache_only() {
         assert!(Caching::ProviderCache.folds());
         assert!(!Caching::None.folds());
     }

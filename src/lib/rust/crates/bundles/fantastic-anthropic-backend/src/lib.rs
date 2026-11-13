@@ -72,7 +72,6 @@ pub const THINKING_FLOOR: i64 = 1024;
 const CFG: BackendConfig = BackendConfig {
     name: NAME,
     model_window: fantastic_ai_core::constants::DEFAULT_CONTEXT_WINDOW,
-    provider_cache: true,
 };
 
 /// ai-core's messages → (`system`, the user/assistant turns): every system message

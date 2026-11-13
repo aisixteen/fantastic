@@ -12,7 +12,7 @@ fold check asserts both halves: whole in the request that carries it, the anchor
   id P …]` after the next answer and the thought text is nowhere in that request, still in the
   store; across all five requests the messages up to the last cache mark are byte-equal in the
   next request and the message count never drops.
-- V (`cleanup`): an `exec_bridge` `run` reply (500 lines, the verb's cap) and a `file_bridge`
+- V (`provider_cache`, the default): an `exec_bridge` `run` reply (500 lines, the verb's cap) and a `file_bridge`
   `list` reply (350 entries) fold to `[folded · {verb} reply from {agent} …]`, recall by id gives
   them whole, the recall reply refolds, the store row stays whole. `history` is covered by a unit
   instead: its reply is a digest cut to what fits inline (about 25,000 tokens), so 16,000 tokens

@@ -81,7 +81,6 @@ impl FoundationModelsBackendBundle {
         BackendConfig {
             name: NAME,
             model_window: self.engine.context_size(),
-            provider_cache: false,
         }
     }
 
@@ -150,7 +149,7 @@ pub struct FoundationRecord {
     #[schemars(range(min = 1))]
     pub max_tokens: Option<i64>,
     /// How the conversation is kept in the model's view.
-    pub caching: Option<fantastic_ai_core::record::UncachedMode>,
+    pub caching: Option<fantastic_ai_core::record::CachingMode>,
     /// The memory store agent that keeps this agent's settings (e.g. a ram_store).
     pub memory_store_id: String,
     /// The fields every ai_core agent takes; `context_window` no larger than the model's.

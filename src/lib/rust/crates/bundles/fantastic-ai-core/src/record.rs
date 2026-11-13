@@ -23,27 +23,13 @@ pub enum ContextStrategy {
     None,
 }
 
-/// How the conversation is kept in the model's view, for a backend that cannot place
-/// the provider's cache markers.
-#[derive(Debug, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum UncachedMode {
-    /// Every stored row, in order, never trimmed.
-    None,
-    /// Trim superseded reads, repeated reply bodies and used docs from the view.
-    Cleanup,
-}
-
-/// How the conversation is kept in the model's view. Absent: `provider_cache` where the backend
-/// places cache marks (every AI chat), else `cleanup`.
+/// How the conversation is kept in the model's view. Absent: `provider_cache`.
 #[derive(Debug, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CachingMode {
-    /// Every stored row, in order, never trimmed.
+    /// Every stored row, in order: no autofold, no cache marks.
     None,
-    /// Trim superseded reads, repeated reply bodies and used docs from the view.
-    Cleanup,
-    /// None's history plus the provider's cache markers, with autofold.
+    /// Every stored row, in order, autofolded, with the provider's cache marks where the backend places them.
     ProviderCache,
 }
 

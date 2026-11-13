@@ -340,7 +340,6 @@ pub async fn context_fold(
     kernel: &Arc<Kernel>,
     provider: &Arc<dyn Provider>,
     model_window: i64,
-    can_mark: bool,
 ) -> Result<Value, crate::assembly::BlockFail> {
     use crate::memory::load_view;
     use fantastic_kernel::refusal::{bad, refusal_hint, with, BAD_ARG, LOCKED};
@@ -355,16 +354,16 @@ pub async fn context_fold(
             "fold once the running turn has answered",
         ));
     };
-    // The view is rendered as the record's caching mode renders it, so the fold
+    // The view is rendered as the next turn renders it, so the fold
     // persists exactly the view the next turn will send. A primer pins its prefix.
     let meta = agent_meta(agent_id, kernel);
-    let (caching, primer) = match crate::caching::settings(&meta, can_mark) {
+    let (_mode, primer) = match crate::caching::settings(&meta) {
         Ok(s) => s,
         Err(why) => {
             let mut v = refusal_hint(
                 BAD_ARG,
                 format!("{verb}: {why}"),
-                "set caching to none, cleanup or provider_cache",
+                "set caching to none or provider_cache",
             );
             with(&mut v, "arg", Value::from("caching"));
             return Ok(v);
@@ -380,7 +379,7 @@ pub async fn context_fold(
     };
     let rows = load_history(agent_id, kernel, false).await?;
     let listed = listed_entries(&rows, load_view(agent_id, kernel).await?.as_ref());
-    let view = render_history(&rows, listed.as_deref(), caching.cleans());
+    let view = render_history(&rows, listed.as_deref());
     let pos_of = |id: i64| view.iter().position(|r| row_id(&rows[r.idx]) == Some(id));
     let empty = |arg: &str, why: &str| {
         let mut v = refusal_hint(

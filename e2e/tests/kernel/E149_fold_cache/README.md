@@ -1,4 +1,4 @@
-# `fold_cache` (E149) — the fold cycle under `caching`: cleanup stub, provider_cache anchors, recall, grep, cache marks (#556)
+# `fold_cache` (E149) — the fold cycle under `caching: provider_cache`: anchors, recall, grep, cache marks (#556)
 
 Free: no model. A scripted server plays the model for two AI agents on the PACKAGED host
 of `RUNTIME`, next to a `file_bridge` agent (`files`, an 80 kB file whose line 50 holds a
@@ -6,18 +6,11 @@ word found nowhere else) and a test-only folder bundle `bigdoc` (written by the 
 runtime, as E117 does) whose verb doc is about 70,000 chars, over AUTOFOLD_AT (16000
 tokens = 64,000 chars). `context_window` is 262144, so both bodies are delivered inline.
 
-Plugs: Part A (`caching: cleanup`) is a scripted vllm plug on both lanes (rust: `ai_chat`
-naming a `vllm_backend` provider; python: a `vllm_backend` agent). Part B
-(`caching: provider_cache`) is rust: `ai_chat` on a scripted vllm plug; python: an
+Plugs: the cycle (`caching: provider_cache`) is rust: `ai_chat` on a scripted vllm plug; python: an
 `anthropic_backend` agent on the Anthropic mock (`e2e/mocks/anthropic.py`), because
 Python's `vllm_backend` refuses `provider_cache`. The wire readers differ per plug; the
 checks do not.
 
-- A1: `docs` of `bigdoc` (oneliners) is whole in its own turn, tag line `[reply to P ·
-  kernel docs · ↑N]` (N: the asking row).
-- A2: the next request holds exactly that tag line followed by `[docs of=bigdoc
-  tier=oneliners — dropped from your view; held this run: send yourself <type>grep</type>
-  <ids><item>P</item></ids> <query>survey</query>]`, and not the body.
 - B1a: a `read` of the big file is whole in its turn (and stored whole).
 - B1b: the next request holds `[folded · read reply from files · ~N tokens · head: "…" ·
   get: B]`, not the body; a `docs` of `bigdoc` (detailed) is whole in its turn.
