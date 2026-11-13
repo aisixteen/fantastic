@@ -15,7 +15,7 @@ the turn FAILS loud (`reason: system_prompt_file`), the model is never called:
      restart — and `{self}` is this agent's identity;
   3. an atomic save (a temp file renamed over) is seen too;
   4. precedence: the record's `system_prompt` beats the file; null brings it back;
-  5. `{tree}\\n\\n{self}\\n\\n{howto}` in the file == the default block, byte for byte;
+  5. `{self}\\n\\n{howto}` in the file == the default block, byte for byte;
   6. the file deleted → the turn fails naming the path (and reflect's
      `system_prompt_file_error` says it); written again → the file once more, the
      error gone;
@@ -240,13 +240,13 @@ def main() -> int:
         need(b == "ROLE-THREE\n", f"null: the file again: {b[:80]!r}")
 
         # 5 · the default layout in placeholders IS the default block
-        save("{tree}\n\n{self}\n\n{howto}")
+        save("{self}\n\n{howto}")
         layout = turn_until(lambda s: "You are `ai`." in s)
         update("ai", system_prompt_file=None)
         plain = turn()
         need(
             layout == plain and "You are `ai`." in plain,
-            f"{{tree}}\\n\\n{{self}}\\n\\n{{howto}} == the default block "
+            f"{{self}}\\n\\n{{howto}} == the default block "
             f"({len(layout)} vs {len(plain)} chars)",
         )
         update("ai", system_prompt_file=PATH)

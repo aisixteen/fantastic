@@ -1,8 +1,8 @@
 //! The system block's placeholders and its FILE — python
 //! `ai_core/tests/test_system_prompt_file.py`, over this harness.
 //!
-//! Placeholders `{tree}` `{self}` `{store}` `{howto}` are filled per agent and per
-//! turn in whichever prompt is in force; `{tree}\n\n{self}\n\n{howto}` IS the
+//! Placeholders `{self}` `{store}` `{howto}` are filled per agent and per
+//! turn in whichever prompt is in force; `{self}\n\n{howto}` IS the
 //! default block. `file_bridge_id` + `system_prompt_file` (a path on it) make a file
 //! — read THROUGH that file_bridge, as the agent — the block, re-read on the next
 //! turn after the bridge reports it changed. Not set: nothing is looked up, the
@@ -103,7 +103,7 @@ async fn the_default_layout_in_placeholders_is_the_default_block() {
         &kernel,
         &backend,
         "system_prompt",
-        json!("{tree}\n\n{self}\n\n{howto}"),
+        json!("{self}\n\n{howto}"),
     )
     .await;
     assert_eq!(turn(&kernel, &backend, &s, 2, json!({})).await, default);

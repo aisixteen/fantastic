@@ -3,8 +3,8 @@
 //!
 //! The default system block states the MECHANISM (how to call, grants, replies,
 //! the state lines) and a few short working rules (act early, batch, read
-//! narrowly, verify before `done`, a retry cap). NO agent menu (the primer's
-//! id-index is the tree, and the model reflects what it needs). It never
+//! narrowly, verify before `done`, a retry cap). NO agent menu and no tree: the
+//! model reflects what it needs, and the block stays the same as the tree changes. It never
 //! dictates a loop or a fixed procedure. A caller that wants a different role
 //! supplies its own `system_prompt`, which REPLACES this block whole.
 //!
@@ -201,8 +201,8 @@ later result contradicts is corrected. Each turn, start from your latest state a
 about the next step. Other text outside calls: only your last message.
 Read only what the request names; no docs or reflect sweep before your first real call. Make
 the first call that changes or tests something as soon as you can — an error reply names the
-missing argument. The tree above lists what exists and `can_call` what you may use: do not
-reflect to rediscover them; `docs` only for a verb you are about to call.
+missing argument. Your `can_call` above lists what you may use; `reflect` shows what exists;
+`docs` only for a verb you are about to call.
 One answer may hold many <call> elements; they run at once. Put in it every call that does not
 need another's reply; a call waits for a later turn only when it does.
 Find before you read: locate first, then fetch only the part you need. Keep large outputs
@@ -240,12 +240,12 @@ const SELF_KEYS: [&str; 5] = [
 
 /// THE PLACEHOLDERS a system prompt may hold, filled per agent and per turn —
 /// so a prompt that REPLACES the default block keeps its
-/// live parts: `{tree}` the kernel primer, `{self}` this agent's identity and
-/// grants, `{store}` its memory store id, `{howto}` the fixed how-to blocks.
-/// `{tree}\n\n{self}\n\n{howto}` IS the default block, byte for byte. Only the
+/// live parts: `{self}` this agent's identity and grants, `{store}` its memory
+/// store id, `{howto}` the fixed how-to blocks. `{self}\n\n{howto}` IS the
+/// default block, byte for byte. Only the
 /// parts a prompt names are built; any other `{…}` stays as written. Python
 /// `_PLACEHOLDER`.
-pub const PLACEHOLDERS: [&str; 4] = ["tree", "self", "store", "howto"];
+pub const PLACEHOLDERS: [&str; 3] = ["self", "store", "howto"];
 
 /// The placeholders `text` names (python `_PLACEHOLDER.findall`).
 fn named(text: &str) -> Vec<&'static str> {
@@ -257,8 +257,8 @@ fn named(text: &str) -> Vec<&'static str> {
 }
 
 /// One piece of the system block, in the order the block concatenates them:
-/// `part` names what it is (`system_text`, `prompt_file`, `reflect_tree`,
-/// `self_reflect`, `verb_docs`), or is empty for the blank line between two pieces.
+/// `part` names what it is (`system_text`, `prompt_file`, `self_reflect`,
+/// `verb_docs`), or is empty for the blank line between two pieces.
 /// The block IS the pieces' texts end to end, so the request carries the same bytes
 /// however they are told apart.
 pub(crate) struct SystemPiece {
@@ -295,7 +295,6 @@ fn fill(
             if tail.starts_with(&token) {
                 if let Some(v) = parts.get(p) {
                     let named = match p {
-                        "tree" => Some("reflect_tree"),
                         "self" => Some("self_reflect"),
                         "howto" => Some("verb_docs"),
                         _ => None,
@@ -328,11 +327,6 @@ async fn parts(
     need: &[&str],
 ) -> HashMap<&'static str, String> {
     let mut out: HashMap<&'static str, String> = HashMap::new();
-    if need.contains(&"tree") {
-        // Lean primer: a flat id-index of the tree + the bundle catalog by name.
-        let primer = kernel.tree_ids_primer().await;
-        out.insert("tree", render_reflect(&primer));
-    }
     if need.contains(&"self") {
         out.insert("self", self_part(self_id, kernel).await);
     }
@@ -385,8 +379,9 @@ async fn render_prompt(
     fill(text, &parts(self_id, kernel, &need).await, literal)
 }
 
-/// The DEFAULT system block: `{tree}\n\n{self}\n\n{howto}` — the lean primer,
-/// this agent's own reflect, and the how-to sections its record earns. Extracted
+/// The DEFAULT system block: `{self}\n\n{howto}` — this agent's own reflect and
+/// the how-to sections its record earns. Nothing in it changes when the tree does,
+/// so the cached prefix holds for the whole conversation. Extracted
 /// so `context_recall` can MEASURE the same block the next turn will carry —
 /// python's `_default_system_content`.
 pub async fn default_system_content(self_id: &AgentId, kernel: &Arc<Kernel>) -> String {
@@ -397,13 +392,11 @@ pub async fn default_system_content(self_id: &AgentId, kernel: &Arc<Kernel>) -> 
         .collect()
 }
 
-/// The default block as its pieces: the primer, this agent's own reflect and the
-/// how-to sections, a blank line between.
+/// The default block as its pieces: this agent's own reflect and the how-to
+/// sections, a blank line between.
 async fn default_pieces(self_id: &AgentId, kernel: &Arc<Kernel>) -> Vec<SystemPiece> {
-    let mut p = parts(self_id, kernel, &["tree", "self", "howto"]).await;
+    let mut p = parts(self_id, kernel, &["self", "howto"]).await;
     vec![
-        piece("reflect_tree", p.remove("tree").unwrap_or_default()),
-        piece("", SEPARATOR),
         piece("self_reflect", p.remove("self").unwrap_or_default()),
         piece("", SEPARATOR),
         piece("verb_docs", p.remove("howto").unwrap_or_default()),
@@ -564,7 +557,7 @@ impl From<BlockFail> for fantastic_kernel::bundle::BundleError {
 /// persisted history + the user turn. A caller-supplied `system_prompt` REPLACES
 /// the default system block (a caller that wants a different role, or a different
 /// convention, owns it whole); absent that, the record's own `system_prompt` does;
-/// the default is a lean primer + self-identity +
+/// the default is self-identity +
 /// [`SEND_TO_HOWTO`] + [`CONTEXT_HOWTO`] + [`MEMORY_HOWTO`], and NO agent menu.
 ///
 /// The conversation is ALWAYS this agent's own (its memory store): there is no

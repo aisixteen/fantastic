@@ -157,14 +157,13 @@ async fn the_parts_follow_the_request_and_the_request_is_unchanged() {
     let first = replay(&rows(&kernel, &agent).await).pop().unwrap().1;
     assert_eq!(
         names(&first),
-        ["reflect_tree", "self_reflect", "verb_docs", "new_input"]
+        ["self_reflect", "verb_docs", "new_input"]
     );
     say(&kernel, &agent, "again").await;
     let second = replay(&rows(&kernel, &agent).await).pop().unwrap().1;
     assert_eq!(
         names(&second),
         [
-            "reflect_tree",
             "self_reflect",
             "verb_docs",
             "row",
@@ -194,11 +193,11 @@ async fn the_parts_follow_the_request_and_the_request_is_unchanged() {
         assert_eq!(keys, ["role", "content"], "{m}");
     }
     let system = sent[0]["content"].as_str().unwrap();
-    let pieces: usize = ["reflect_tree", "self_reflect", "verb_docs"]
+    let pieces: usize = ["self_reflect", "verb_docs"]
         .iter()
         .map(|n| part(&second, n)["bytes"].as_u64().unwrap() as usize)
         .sum();
-    assert_eq!(system.len(), pieces + 4, "two blank lines between pieces");
+    assert_eq!(system.len(), pieces + 2, "one blank line between the pieces");
     assert_eq!(sent[1], json!({"role": "user", "content": "go"}));
     assert_eq!(sent[2]["content"], answer["content"]);
     assert_eq!(sent[3], json!({"role": "user", "content": "again", "cache_mark": true}), "the tail carries the mark");
