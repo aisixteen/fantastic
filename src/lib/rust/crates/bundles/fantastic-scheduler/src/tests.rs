@@ -945,7 +945,7 @@ async fn reflect_renders_every_declared_verb() {
     assert!(schedule.contains("fire_timeout:number"), "{schedule}");
     let history = verbs["history"].as_str().unwrap();
     assert!(
-        history.contains("limit:int >= 1 (default 100)"),
+        history.contains("limit:int >= 1 <= 500 (default 100)"),
         "{history}"
     );
 }
