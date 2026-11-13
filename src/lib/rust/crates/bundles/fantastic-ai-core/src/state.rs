@@ -146,6 +146,9 @@ pub struct ChainState {
     /// oneshot its caller awaits, so a held send returns the answer of the
     /// pass that reads it.
     pub held: Vec<HeldMsg>,
+    /// Signalled whenever `held` is taken, cleared or released: a wake watchdog
+    /// waiting on it looks again whether the senders it watches are still held.
+    pub held_gone: Arc<tokio::sync::Notify>,
 }
 
 /// A message held while its agent's chain is alive: its client_id, and the
@@ -188,6 +191,7 @@ impl ChainState {
         for h in std::mem::take(&mut self.held) {
             Self::release(h, why);
         }
+        self.held_gone.notify_one();
         self.alive = false;
         self.token = String::new();
     }

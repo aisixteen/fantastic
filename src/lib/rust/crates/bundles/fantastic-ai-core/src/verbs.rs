@@ -331,6 +331,7 @@ pub async fn stop(agent_id: &AgentId, stream_id: Option<&str>, kernel: &Arc<Kern
         let mut chain = state.chain.lock().expect("chain poisoned");
         chain.alive = false;
         chain.held.clear();
+        chain.held_gone.notify_one();
         // Rotate the token: a routed reply still in flight carries the old one (#227 Bug 5).
         chain.token = mint_send_id();
     }
@@ -1206,6 +1207,7 @@ pub async fn send(
             chain.token = mint_send_id();
         }
         chain.alive = true;
+        chain.held_gone.notify_one();
         std::mem::take(&mut chain.held)
     };
     // Fired by `stop` ([`stop`]) — the generation below watches it.
@@ -1318,6 +1320,7 @@ pub async fn send(
             let mut chain = state.chain.lock().expect("chain poisoned");
             chain.alive = false;
             chain.held.clear();
+            chain.held_gone.notify_one();
             chain.token = mint_send_id();
         }
         drop(_guard);

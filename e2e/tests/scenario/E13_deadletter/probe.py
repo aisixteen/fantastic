@@ -133,9 +133,7 @@ def main() -> int:
         end = time.monotonic() + bound
         while time.monotonic() < end:
             tasks = hk.send("kernel", {"type": "ps"}).get("tasks") or []
-            # a chain's wake watchdog sleeps out the send ceiling: it is not work
-            left = [t for t in tasks if t.get("agent") in (LEAD, WORKER)
-                    and t.get("verb") != "chain_wake_watch"]
+            left = [t for t in tasks if t.get("agent") in (LEAD, WORKER)]
             if not left:
                 return True
             time.sleep(0.05)
