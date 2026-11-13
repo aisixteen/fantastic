@@ -897,10 +897,8 @@ fn stream_idle_seconds_is_validated_at_the_write() {
 }
 
 #[test]
-fn caching_none_and_cleanup_are_accepted_and_provider_cache_is_refused_here() {
-    // responses declares no provider caching: its record's `caching` has no such value,
-    // so the engine refuses it by field name; the two modes that send no marker are
-    // accepted.
+fn caching_takes_the_two_modes_and_refuses_anything_else() {
+    // the same two modes as every backend
     let at_the_write = |mode: &str| {
         let meta = json!({"caching": mode});
         fantastic_kernel::verbs::check_record(
@@ -911,10 +909,10 @@ fn caching_none_and_cleanup_are_accepted_and_provider_cache_is_refused_here() {
             &RECORD,
         )
     };
-    for mode in ["none", "cleanup"] {
+    for mode in ["none", "provider_cache"] {
         assert!(at_the_write(mode).is_ok(), "{mode}");
     }
-    for mode in ["provider_cache", "always"] {
+    for mode in ["cleanup", "always"] {
         let refused = at_the_write(mode).expect_err("refused");
         assert_eq!(refused["arg"], json!("caching"), "{refused}");
     }
