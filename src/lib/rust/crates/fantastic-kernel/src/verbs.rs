@@ -542,6 +542,12 @@ fn type_label(s: &Value) -> String {
     {
         label.push_str(&format!(" >= {n}"));
     }
+    if let Some(n) = s.get("maximum").and_then(Value::as_f64) {
+        label.push_str(&format!(" <= {n}"));
+    }
+    if let Some(n) = s.get("exclusiveMaximum").and_then(Value::as_f64) {
+        label.push_str(&format!(" < {n}"));
+    }
     if let Some(n) = s.get("minItems").and_then(Value::as_u64) {
         label.push_str(&format!(" with at least {n} item(s)"));
     }
@@ -1437,4 +1443,18 @@ pub fn record_fields(decl: &RecordDecl) -> Value {
         })
         .collect();
     json!({ "fields": fields, "open": decl.open })
+}
+
+#[cfg(test)]
+mod label_bounds {
+    use super::type_label;
+    use serde_json::json;
+
+    #[test]
+    fn a_bounded_number_names_both_ends() {
+        let s = json!({"type": "integer", "minimum": 1, "maximum": 100});
+        assert_eq!(type_label(&s), "int >= 1 <= 100");
+        let s = json!({"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 5});
+        assert_eq!(type_label(&s), "number > 0 < 5");
+    }
 }
