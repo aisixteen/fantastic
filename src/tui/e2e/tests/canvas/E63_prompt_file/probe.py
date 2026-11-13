@@ -2,7 +2,7 @@
 (`.fantastic/agents/user/agents/prompt_file/`), the project's system block:
 
 a) a fresh project SEEDS it with ai_core's default block as placeholders
-   (`{tree}`, `{self}`, `{howto}`) and the CLI's building rules — so the first
+   (`{self}`, `{howto}`) and the CLI's building rules — so the first
    turn's system block is the default one (who it is, the tree, the how-tos)
    and the rules;
 b) a canvas AI names it (`system_prompt_file: {bridge: prompt_file, path:
@@ -98,13 +98,13 @@ def main() -> bool:
             await asyncio.sleep(1.5)
             # a) seeded, the default layout
             seeded = prompt.read_text() if prompt.exists() else ""
-            r["seeded"] = seeded.startswith("{tree}\n\n{self}\n\n{howto}\n\n## Building here\n") and "create_agent" in seeded
+            r["seeded"] = seeded.startswith("{self}\n\n{howto}\n\n## Building here\n") and "create_agent" in seeded
             await open_chat(pg, 400, 300)
             await say(pg, "hello")
             r["turn1"] = await turns(1)
             s1 = systems[0] if systems else ""
             info["turn1"] = s1[:300]
-            r["turn1_default"] = "You are `" in s1 and "## Reaching other agents" in s1 and "{tree}" not in s1 and "## Building here" in s1
+            r["turn1_default"] = "You are `" in s1 and "## Reaching other agents" in s1 and "{self}" not in s1 and "## Building here" in s1
             # b) the AI names the file
             import yaml
             recs = [yaml.safe_load(p.read_text()) or {} for p in (rig.proj / ".fantastic" / "agents").rglob("agent.yaml")]

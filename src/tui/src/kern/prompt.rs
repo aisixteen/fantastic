@@ -3,7 +3,7 @@
 //! "bundled default, seeded, then replace if defined, no appends").
 //!
 //! - SEEDED when missing, at every boot, with [`DEFAULT`] — ai_core's own block
-//!   written in its placeholders (`{tree}\n\n{self}\n\n{howto}`, ai_core's
+//!   written in its placeholders (`{self}\n\n{howto}`, ai_core's
 //!   default), then the CLI's building rules — until the human edits it. A
 //!   human, or a coding CLI reading the folder, sees and changes it.
 //! - Every backend agent READS it, as itself, through [`BRIDGE`] (a read-only
@@ -28,7 +28,7 @@ pub const BRIDGE: &str = "prompt_file";
 /// What a fresh project's file holds: ai_core's default block, as placeholders,
 /// then the CLI's building rules (owner 2026-10-16: agents through `create_agent`,
 /// a new bundle only when the user asks, `fit` an html cell after placing it).
-pub const DEFAULT: &str = "{tree}\n\n{self}\n\n{howto}\n\n## Building here\n- Make every agent with a `create_agent` call to `kernel`, from the bundles reflect lists.\n- Write a new bundle (`.fantastic/bundles/<name>/`, or `spawn` with `bundle`) ONLY when the user asks for one.\n- After placing or updating an html cell, size it to its content: `fit {id}` on its view.\n";
+pub const DEFAULT: &str = "{self}\n\n{howto}\n\n## Building here\n- Make every agent with a `create_agent` call to `kernel`, from the bundles reflect lists.\n- Write a new bundle (`.fantastic/bundles/<name>/`, or `spawn` with `bundle`) ONLY when the user asks for one.\n- After placing or updating an html cell, size it to its content: `fit {id}` on its view.\n";
 
 fn err_of(r: &Value) -> Option<String> {
     r.get("error").and_then(Value::as_str).map(str::to_string)

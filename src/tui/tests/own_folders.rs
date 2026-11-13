@@ -51,7 +51,7 @@ async fn the_prompt_file_lives_in_its_bridges_own_folder() {
     let state = d.join(".fantastic");
     let text = std::fs::read_to_string(bridge_dir(&state, "prompt_file").join("prompt.md"))
         .expect("seeded in the bridge's folder");
-    assert!(text.starts_with("{tree}\n\n{self}\n\n{howto}"), "{text}");
+    assert!(text.starts_with("{self}\n\n{howto}"), "{text}");
     assert!(
         !state.join("prompt.md").exists(),
         "not at the state folder's top"
