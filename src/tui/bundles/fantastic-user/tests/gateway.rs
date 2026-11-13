@@ -67,7 +67,7 @@ impl Handler for Loader {
     }
 }
 
-fantastic_kernel::stand_in_verbs!(echo_verbs { Ping "ping" {} });
+fantastic_kernel::stand_in_verbs!(echo_verbs { Ping "ping" {}, Wait "wait" { wait_s: f64 } });
 
 /// Echo: the payload it was called with. Only `user` may call it.
 struct Echo;
@@ -311,6 +311,24 @@ async fn a_tab_forwards_through_user() {
     )
     .await;
     assert_eq!(r["echo"]["type"], "ping", "only `user` may call echo: {r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forwarded_call_written_as_text_takes_its_target_verbs_types() {
+    let k = setup().await;
+    let r = tab(
+        &k,
+        json!({"type": "forward", "target": "echo", "payload": {"type": "wait", "wait_s": "30"}}),
+    )
+    .await;
+    assert_eq!(r["echo"]["wait_s"].as_f64(), Some(30.0), "the text `30` is the number 30 here: {r}");
+    let r = tab(
+        &k,
+        json!({"type": "forward", "target": "echo", "payload": {"type": "wait", "wait_s": "soon"}}),
+    )
+    .await;
+    assert_eq!(r["reason"], "bad_arg", "a value that is not a number is refused by name: {r}");
+    assert!(r.to_string().contains("wait_s"), "the refusal names the argument: {r}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

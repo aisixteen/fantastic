@@ -164,8 +164,14 @@ impl UserBundle {
 
     /// `forward` — `user` calls `target`.
     async fn forward(a: verbs::Forward, body: Option<Blob>, kernel: &Arc<Kernel>) -> (Value, Option<Blob>) {
-        let (target, inner, timeout) = (a.target, Value::Object(a.payload), a.timeout);
-        let mut item = Item::new(AgentId::from(target.as_str()), inner);
+        let (target, mut inner, timeout) = (a.target, a.payload, a.timeout);
+        // A call made as text on a peer (a model's `<wait_s>30</wait_s>`) could not be typed
+        // there: its target is declared only here. Its values take the type the target
+        // verb's schema states, or the call is refused by argument name.
+        if let Err(refused) = fantastic_kernel::typing::payload(kernel, &target, &mut inner) {
+            return (refused, None);
+        }
+        let mut item = Item::new(AgentId::from(target.as_str()), Value::Object(inner));
         item.timeout = timeout;
         if let Some(b) = body {
             // the body's slot is under this call's `payload`: one step less on the far item
