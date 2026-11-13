@@ -163,41 +163,6 @@ async fn roster_node(kernel: &Arc<Kernel>, a: &Arc<Agent>) -> Result<Map<String,
     }
 }
 
-impl Kernel {
-    /// The kernel's own `reflect` with `tree: ids, bundles: ids`, answered
-    /// straight from the root with NO call gate: the same reply the gated
-    /// `reflect` on `kernel` renders, for in-process readers (an AI chat's
-    /// system block) that must not send as the operator. Read-only.
-    pub async fn tree_ids_primer(self: &Arc<Self>) -> Value {
-        let Some(root) = self.root() else {
-            return json!({"error": "no root agent"});
-        };
-        let mut reply = reflect_identity(&root);
-        let args = Reflect {
-            detail: None,
-            tree: Some(TreeKind::Ids),
-            show_subtrees: None,
-            ignore_subtrees: None,
-            handler_modules: None,
-            bundles: Some(BundlesKind::Ids),
-            bundle_names: None,
-            limit: None,
-            after: None,
-        };
-        match apply_reflect_flags(self, &root, &args, &mut reply).await {
-            Ok(()) => {
-                // LEAN: the primer is the tree and the bundle names; the verbs are
-                // what `docs` and a direct `reflect` serve.
-                if let Some(o) = reply.as_object_mut() {
-                    o.shift_remove("verbs");
-                }
-                reply
-            }
-            Err(raised) => raised,
-        }
-    }
-}
-
 /// Append the composable reflect flags to any reflect reply — applied
 /// uniformly to bare-agent and bundle reflects (python
 /// `_apply_reflect_flags`). Non-object replies and refusals pass through.

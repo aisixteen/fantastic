@@ -242,45 +242,19 @@ async fn set_can_call(kernel: &Arc<Kernel>, backend: &AgentId, can_call: Value) 
     assert!(r.get("error").is_none(), "{r}");
 }
 
-/// The default block's tree primer for one chat, plus what the operator's own
-/// `reflect` renders to.
-async fn primer_run(tag: &str, grant_kernel_state: bool) -> (String, String) {
+/// The default system block holds no tree: it is the same before and after an agent is made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_default_block_does_not_change_when_the_tree_does() {
     let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, tag).await;
-    let mut can_call = helpers::agent_meta(&backend, &kernel)["can_call"].clone();
-    if !grant_kernel_state {
-        can_call.as_object_mut().unwrap().remove("kernel_state");
-        can_call.as_object_mut().unwrap().remove("kernel");
-    }
-    set_can_call(&kernel, &backend, can_call).await;
-    let s = script(
-        &backend,
-        vec![pass(r#"ok <call name="done"></call>"#)],
-        Duration::ZERO,
-    );
-    say(&kernel, &backend, json!({"type": "send", "text": "go"})).await;
-    assert!(until_passes(&s, 1).await);
-    let operator = kernel
+    let (kernel, agent) = mk_kernel(&tmp, "sp_notree").await;
+    let before = assembly::default_system_content(&agent, &kernel).await;
+    let _ = kernel
         .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type": "reflect", "tree": "ids", "bundles": "ids"}),
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "handler_module": "file_bridge.tools", "parent_id": "kernel",
+                   "id": "sp_new", "root": tmp.path().to_string_lossy(), "allow": ["."]}),
         )])
-        .await
-        .remove(0)
-        .result;
-    (system_of(&s, 0), assembly::render_reflect(&operator))
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_chat_without_a_kernel_state_grant_still_gets_the_tree_primer() {
-    let (system, expected) = primer_run("sp_nogrant", false).await;
-    assert!(!system.contains("unauthorized"), "{system}");
-    assert!(!system.contains("error="), "{system}");
-    assert!(system.contains(&expected), "{system}\n--\n{expected}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_chat_with_the_grant_gets_the_same_primer_text() {
-    let (system, expected) = primer_run("sp_grant", true).await;
-    assert!(system.contains(&expected), "{system}\n--\n{expected}");
+        .await;
+    assert!(kernel.resolve_target("sp_new").is_some(), "the new agent is in the tree");
+    assert_eq!(assembly::default_system_content(&agent, &kernel).await, before);
 }

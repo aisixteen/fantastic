@@ -8,7 +8,7 @@ task below names none of them.
 
 THE FIXTURE. A ~30-agent estate: four wings, rooms below them, and one VAULT five
 levels down (`ai / site / south_wing / basement / archive_room / vault` — under the
-AI, which reaches it as `$subtree`; its system block has no `{tree}`, so no id is given). The vault's
+AI, which reaches it as `$subtree`; the system block names no other agent, so no id is given). The vault's
 `open` takes `code:str`; only its DETAILED docs say how the code is made from the
 `serial` its reflect shows (backwards, prefixed `V-`), so a model that never pulls
 detailed docs for `open` cannot open it. Structural rooms are sealed file legs
@@ -151,7 +151,7 @@ async def main():
         BK,
         agent_id=AID,
         # THE VAULT'S ID IS NOWHERE IN THE MODEL'S VIEW: it holds the
-        # estate as `$subtree`, not by name, and its system block leaves out `{tree}`
+        # estate as `$subtree`, not by name, and the system block names no other agent
         # (the primer lists every id) — so finding the vault takes the tree itself.
         can_call={root.id: "*", "$subtree": "*", "desk": "*", "cli": "*", "user": "*"},
         callable_by={"user": "*"},
