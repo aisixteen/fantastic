@@ -5,6 +5,7 @@
 // the host link (the kernel bridge) — routes to other FRONTEND agents locally or
 // to HOST agents over the bridge, transparently. The iframe has NO host URL, NO
 // WebSocket, NO same-origin access: postMessage to its parent is its only channel.
+// The connector text is the base's ONE view relay (`web/page/view_relay.js`); the canvas adds its size measure.
 // (This replaces the old `_bridge.js`, which bypassed the JS kernel by dialing the
 // host directly — never again.)
 //
@@ -16,43 +17,6 @@
 //   fantastic.openCanvas("canvas_child_a");                              // → the page switches to that canvas
 
 import { MEASURE_SRC } from "../canvas/fit.ts";
+import { connectorSrc } from "../../../../page/view_relay.js";
 
-export const CONNECTOR_SRC = `(() => {
-  const pending = new Map();
-  const watchers = new Map();
-  const inboxCbs = new Set();
-  let rid = 0;
-  const post = (m) => parent.postMessage(Object.assign({ __ft: true }, m), "*");
-  addEventListener("message", (e) => {
-    const m = e.data;
-    if (!m || m.__ft !== true) return;
-    if (m.op === "reply") {
-      const r = pending.get(m.rid);
-      if (r) { pending.delete(m.rid); r(m.data); }
-    } else if (m.op === "event") {
-      const s = watchers.get(m.src);
-      if (s) for (const cb of [...s]) { try { cb(m.payload); } catch (_) {} }
-    } else if (m.op === "inbox") {
-      for (const cb of [...inboxCbs]) { try { cb(m.payload); } catch (_) {} }
-    }
-  });
-  ${MEASURE_SRC}
-  globalThis.fantastic = {
-    send(target, payload) {
-      const id = String(++rid);
-      return new Promise((res) => {
-        pending.set(id, res);
-        post({ op: "send", rid: id, target: target, payload: payload || {} });
-      });
-    },
-    emit(target, payload) { post({ op: "emit", target: target, payload: payload || {} }); },
-    watch(src, cb) {
-      let s = watchers.get(src);
-      if (!s) { s = new Set(); watchers.set(src, s); post({ op: "watch", src: src }); }
-      s.add(cb);
-      return () => { s.delete(cb); if (s.size === 0) { watchers.delete(src); post({ op: "unwatch", src: src }); } };
-    },
-    onMessage(cb) { inboxCbs.add(cb); return () => inboxCbs.delete(cb); },
-    openCanvas(id) { post({ op: "open_canvas", target: String(id) }); },
-  };
-})();`;
+export const CONNECTOR_SRC = connectorSrc(MEASURE_SRC);
