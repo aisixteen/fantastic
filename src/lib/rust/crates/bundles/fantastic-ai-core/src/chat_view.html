@@ -172,6 +172,7 @@ var THINK = /<think>[\s\S]*?(?:<\/think>|$)/g;
 var CALL_HEAD = /<call name="([^"]+)">(?:[\s\S]*?<target_id>([^<]*)<\/target_id>)?(?:[\s\S]*?<type>([^<]*)<\/type>)?/;
 var REPLY_HEAD = /^\[reply to \d+ · ([^\]·]+?)(?: · [^\]]*)?\]/;
 var MONITOR_HEAD = /^\[monitor (\d+) · job (\d+) · from (.+?) call (\S+?)(?: · "([^"]*)")?( · job ended)?\]\s*/;
+var ANSWER = /^\[reply to \d+ · user inquiry[^\]]*\]\s*<answer>([\s\S]*?)(?:<\/answer>|$)/;
 var MALFORMED = "[malformed call — nothing ran]";
 
 function words(t) { return t.replace(THINK, "").replace(CALLS, "").replace(OPEN_CALL, "").trim(); }
@@ -184,7 +185,10 @@ function parseFrom(text) {
 function personText(text) {
   var spot = SPOT.exec(text);
   var t = (spot ? text.slice(0, spot.index) : text).replace(SETUP_BLOCK, "");
-  return parseFrom(t);
+  var f = parseFrom(t);
+  // the person's answer to an inquiry arrives as a message: it shows as the answer itself
+  var a = ANSWER.exec(f.text);
+  return a ? { sender: f.sender, text: a[1].trim() } : f;
 }
 function monitorOf(text) {
   var f = parseFrom(text);
@@ -274,7 +278,7 @@ function inquiryAge(ts, nowMs) {
   return min < 60 ? min + " min" : Math.floor(min / 60) + " h";
 }
 // the meta line over a message from another agent
-function metaOf(sender, name) { return sender ? sender + " to " + name : ""; }
+function metaOf(sender, name) { return sender && sender !== "user" ? sender + " to " + name : ""; }
 // `code` spans of a text, in order: [{text, code}]
 function codeSpans(text) {
   var out = [], re = /`([^`\n]+)`/g, at = 0, m;

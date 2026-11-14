@@ -173,6 +173,7 @@ test("the inquiry's age: minutes from its ts in seconds, just now under a minute
 test("a message from another agent gets a `sender to <name>` meta line; the person's own has none", () => {
   assert.equal(P.metaOf("planner", "lead"), "planner to lead");
   assert.equal(P.metaOf("", "lead"), "");
+  assert.equal(P.metaOf("user", "lead"), "", "the person's own turns carry `[from user]`: no meta line");
 });
 
 test("`code` spans split out of a text, the text stays whole", () => {
@@ -256,4 +257,11 @@ test("calls written with words are a run after the bubble; one reply row answers
   assert.deepEqual(g.calls.map((c) => [c.verb, c.reply?.startsWith("[reply to 7")]), [["list", true], ["read", true]]);
   assert.equal(g.calls[0]!.reply?.includes("read"), false, "each reply keeps only its own part");
   assert.deepEqual(P.groupTitle(g as never), { n: "2 tool calls", verbs: "list, read" });
+});
+
+test("the person's answer to an inquiry shows as the answer, not as the reply tag", () => {
+  const out = P.shapeRows([{ id: 1, role: "user", head: "[from user] [reply to 1512 · user inquiry] <answer>red</answer> <request_id></request_id>" }]);
+  assert.deepEqual([out[0]!["kind"], out[0]!["role"], out[0]!["text"]], ["msg", "user", "red"]);
+  const cut = P.shapeRows([{ id: 2, role: "user", head: "[from user] [reply to 9 · user inquiry] <answer>a long answer cut" }]);
+  assert.equal(cut[0]!["text"], "a long answer cut");
 });
