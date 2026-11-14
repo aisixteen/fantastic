@@ -2289,7 +2289,6 @@ async fn the_default_prompt_states_the_mechanism_not_a_strategy() {
             "hi",
             &kernel,
             "probe",
-            None,
             crate::caching::Caching::ProviderCache,
         ),
     )
@@ -2710,7 +2709,6 @@ async fn every_model_call_carries_the_layer_default_timeout() {
         call,
         "probe".to_string(),
         None,
-        None,
         String::new(),
         0.2,
         crate::constants::DEFAULT_CONTEXT_WINDOW,
@@ -2768,7 +2766,6 @@ async fn a_malformed_timeout_arg_is_refused_by_name() {
         call,
         "probe".to_string(),
         None,
-        None,
         String::new(),
         0.2,
         crate::constants::DEFAULT_CONTEXT_WINDOW,
@@ -2815,7 +2812,6 @@ async fn a_reply_to_naming_no_agent_dispatches_nothing_and_says_so() {
         Arc::clone(&kernel),
         call,
         "probe".to_string(),
-        None,
         None,
         String::new(),
         5.0,
@@ -3418,7 +3414,6 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
             "hi",
             &kernel,
             "probe",
-            None,
             crate::caching::Caching::ProviderCache,
         ),
     )
@@ -3483,7 +3478,6 @@ async fn a_batch_of_calls_without_reply_to_all_come_back() {
         Arc::clone(&kernel),
         text,
         "probe".to_string(),
-        None,
         None,
         "[reply to x · y z]".to_string(),
         30.0,
@@ -4105,7 +4099,6 @@ async fn a_wake_that_cannot_be_delivered_releases_the_held_senders() {
         ghost.as_str(),
         "wake",
         "h",
-        None,
         crate::state::incarnation(&ghost),
         true,
         "tok".to_string(),
@@ -4144,7 +4137,7 @@ async fn a_wake_that_never_runs_releases_the_held_senders_at_the_ceiling() {
     }
     // The FIFO lock is taken, so the wake can never run.
     let _busy = Arc::clone(&state.lock).lock_owned().await;
-    crate::route::chain_ended_within(&kernel, &backend, None, Duration::from_millis(200));
+    crate::route::chain_ended_within(&kernel, &backend, Duration::from_millis(200));
     let out = tokio::time::timeout(Duration::from_secs(5), rx)
         .await
         .expect("the held sender was left waiting past the ceiling")
@@ -4203,7 +4196,7 @@ async fn a_routed_reply_carries_the_token_read_when_it_was_decided() {
         c.alive = true;
         c.token = "old".to_string();
     }
-    crate::route::deliver_soon(&kernel, backend.as_str(), "an old reply", "cli", None, true);
+    crate::route::deliver_soon(&kernel, backend.as_str(), "an old reply", "cli", true);
     {
         // A NEW chain began before the delivery ran.
         let mut c = state.chain.lock().unwrap();
@@ -4255,7 +4248,6 @@ async fn a_reply_in_flight_across_a_stop_runs_nothing() {
         backend.as_str(),
         "[reply to 1 · peer]\nanswered",
         "cli",
-        None,
         true,
     );
     let _ = kernel
@@ -5007,7 +4999,6 @@ async fn recall_long_head(
             kernel,
             Some(&provider),
             crate::constants::DEFAULT_CONTEXT_WINDOW,
-            Some("sys"),
             client_id,
         ),
     )
@@ -5178,7 +5169,6 @@ async fn a_fold_projection_over_budget_writes_folds() {
             "next",
             &kernel,
             "cli",
-            Some("sys"),
             crate::caching::Caching::ProviderCache,
         ),
     )
@@ -5359,7 +5349,6 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
                 "next",
                 &kernel,
                 "cli",
-                Some("sys"),
                 crate::caching::Caching::ProviderCache,
             ),
         )
@@ -5668,13 +5657,12 @@ async fn a_message_held_on_a_chain_that_just_ended_wakes_it() {
     let state = crate::state::state_for(&backend);
     state.chain.lock().unwrap().alive = true;
     // The chain ends (nothing held yet) while the send is still storing its row.
-    crate::route::chain_ended(&kernel, &backend, None);
+    crate::route::chain_ended(&kernel, &backend);
     assert!(!state.chain.lock().unwrap().alive);
     let (tx, _rx) = tokio::sync::oneshot::channel();
     crate::verbs::push_held_or_wake(
         &kernel,
         &backend,
-        None,
         crate::state::HeldMsg {
             client_id: "h".to_string(),
             send_id: "sid".to_string(),
@@ -6114,7 +6102,6 @@ async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
         backend.as_str(),
         "[reply to 1 · n r]\nlate",
         "cli",
-        None,
         born,
         false,
         String::new(),
@@ -6140,7 +6127,6 @@ async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
         backend.as_str(),
         "fresh",
         "cli",
-        None,
         born + 1,
         false,
         String::new(),

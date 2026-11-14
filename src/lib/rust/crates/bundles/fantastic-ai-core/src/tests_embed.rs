@@ -226,7 +226,6 @@ async fn embed_rows_never_reach_the_prompt() {
                 "hi",
                 &kernel,
                 "probe",
-                None,
                 crate::caching::Caching::ProviderCache,
             ),
         )

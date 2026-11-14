@@ -46,8 +46,6 @@ pub struct Send {
     #[serde(default = "fantastic_kernel::inquiry::default_client_id")]
     #[schemars(schema_with = "fantastic_kernel::inquiry::client_id")]
     pub client_id: String,
-    /// REPLACES the built system block for this delivery.
-    pub system_prompt: Option<String>,
     /// Hand this pass's text to that agent id as a fresh turn, once.
     pub send_to: Option<String>,
     /// Images that ride this message.
@@ -125,8 +123,6 @@ pub struct Inquiry {
     #[serde(default = "fantastic_kernel::inquiry::default_client_id")]
     #[schemars(schema_with = "fantastic_kernel::inquiry::client_id")]
     pub reply_client_id: String,
-    /// REPLACES the built system block for this delivery.
-    pub system_prompt: Option<String>,
 }
 
 /// The conversation at DIGEST resolution, oldest first, paged; with `fold`, that fold's title and summary and its members. A row's text is behind `recall` and `grep`. Returns {rows, next, total, fold?}.

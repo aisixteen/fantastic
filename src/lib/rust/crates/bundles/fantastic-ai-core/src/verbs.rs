@@ -885,7 +885,6 @@ fn would_hold(state: &crate::state::BackendState, agent_id: &AgentId, args: &cra
 pub(crate) fn push_held_or_wake(
     kernel: &Arc<Kernel>,
     agent_id: &AgentId,
-    system_prompt: Option<&str>,
     msg: crate::state::HeldMsg,
 ) {
     let state = state_for(agent_id);
@@ -902,7 +901,7 @@ pub(crate) fn push_held_or_wake(
         dead
     };
     if revived {
-        crate::route::chain_ended(kernel, agent_id, system_prompt);
+        crate::route::chain_ended(kernel, agent_id);
     }
 }
 
@@ -981,11 +980,9 @@ pub async fn send(
     // captured for routing before any shadowing below
     let incoming_text = text.clone();
     // Optional caller-supplied system block (a caller teaches its own tool convention).
-    let system_prompt = args.system_prompt.clone();
     // Cloned BEFORE the generation moves it: the follow-up turn must be assembled
     // against the SAME system block this pass ran under, or a caller-driven agent
     // loses its role on hop 2.
-    let system_prompt_for_route = system_prompt.clone();
     // Where this pass's TEXT goes when the model issues no call of its own. Once,
     // and it does not propagate — a caller cannot spend the model's turns for it.
     //
@@ -1090,7 +1087,6 @@ pub async fn send(
         push_held_or_wake(
             kernel,
             agent_id,
-            system_prompt_for_route.as_deref(),
             crate::state::HeldMsg {
                 client_id: client_id.clone(),
                 send_id: send_id.clone(),
@@ -1266,7 +1262,6 @@ pub async fn send(
                     kernel,
                     &client_id,
                     cfg,
-                    system_prompt.clone(),
                 ),
             ) => Some(r),
         };
@@ -1508,7 +1503,6 @@ pub async fn send(
                 agent_id,
                 &client_id,
                 send_to.as_deref(),
-                system_prompt_for_route.as_deref(),
                 why,
             )
             .await
@@ -1516,7 +1510,7 @@ pub async fn send(
         None => false,
     };
     if !retrying && (reply.get("error").is_some() || raise.is_some()) {
-        crate::route::chain_ended(kernel, agent_id, system_prompt_for_route.as_deref());
+        crate::route::chain_ended(kernel, agent_id);
     }
 
     // ONE CHAIN PER AGENT (#227): the pass that read the held messages answers
@@ -1590,7 +1584,6 @@ pub async fn send(
                 text,
                 route_client,
                 send_to,
-                system_prompt_for_route,
                 route_incoming,
                 // THE ROUTE DEFAULT DEADLINE (root `send_timeout`, else the env /
                 // 600 s), threaded to every call the router dispatches. The
@@ -1703,7 +1696,6 @@ pub fn inquiry_accept(
         agent_id.as_str(),
         text,
         &client,
-        args.system_prompt.as_deref(),
         false,
     );
     json!({
@@ -1861,7 +1853,6 @@ where
                 kernel,
                 Some(&p),
                 cfg.model_window,
-                None,
                 None,
             )
             .await?

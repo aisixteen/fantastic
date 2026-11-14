@@ -55,7 +55,6 @@ async fn view_with(kernel: &Arc<Kernel>, agent: &AgentId, caching: Caching) -> V
             "next",
             kernel,
             "c",
-            Some("sys"),
             caching,
         ),
     )

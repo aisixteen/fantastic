@@ -83,7 +83,6 @@ async fn messages(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
             "next",
             kernel,
             "c",
-            Some("sys"),
             crate::caching::Caching::ProviderCache,
         ),
     )
