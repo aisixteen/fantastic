@@ -263,6 +263,22 @@
           "hex": "#d05a5a"
         }
       },
+      "error-surface": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [1.0, 0.6039, 0.6039],
+          "hex": "#ff9a9a",
+          "alpha": 0.12
+        }
+      },
+      "error-line": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [1.0, 0.6039, 0.6039],
+          "hex": "#ff9a9a",
+          "alpha": 0.45
+        }
+      },
       "lock": {
         "$value": {
           "colorSpace": "srgb",
@@ -479,6 +495,14 @@
           "components": [0.1412, 0.149, 0.2196],
           "hex": "#242638",
           "alpha": 0.35
+        }
+      },
+      "bubble-user": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [1.0, 1.0, 1.0],
+          "hex": "#ffffff",
+          "alpha": 0.12
         }
       },
       "code": {
