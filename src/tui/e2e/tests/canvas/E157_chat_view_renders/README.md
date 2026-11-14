@@ -10,8 +10,8 @@ three turns (a reply and a run of two calls, an inquiry, a closing reply).
 | 1 | the cell draws the view (`#dialog`), the header names the chat and shows its model |
 | 2 | the person's message is a right-hand bubble (`.who.user`) |
 | 3 | the agent's reply is a bubble (`.who.assistant`) and its `` `ls` `` is a code chip |
-| 4 | the two calls of one run are ONE row, `2 tool calls`, opening to two call entries |
+| 4 | the two calls of one run are ONE row, `2 tool calls`, opening to two call entries (drawn when the run ends, from its stored rows) |
 | 5 | an inquiry to `user` is a card with its question and its options; the header says `asks you` |
 | 6 | a click on an option answers it: the card is `answered`, the header's `asks you` is gone |
-| 7 | after a page reload the cell draws the same history (bubbles, one tool row, the answered turn) |
+| 7 | after a page reload the cell draws the same history (bubbles, the `2 tool calls` row, the inquiry's `1 tool call` row) |
 | 8 | no page error |

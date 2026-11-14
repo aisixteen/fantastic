@@ -594,7 +594,7 @@ async function keptThoughts(call, pageSize) { return thoughtsOf(await readHead(c
   }
 
   // INQUIRIES this agent asked the person: `user` holds them
-  var seenInq = {};
+  var seenInq = {}, answered = []; // answered: this session's answered cards, kept over a redraw
   function inquiryEl(q) {
     var re = Number(q.re), kind = s(q, "kind") || "text";
     var card = el("section", "inq"), row = el("div", "row"), st = el("div", "st");
@@ -605,6 +605,7 @@ async function keptThoughts(call, pageSize) { return thoughtsOf(await readHead(c
       fantastic.send("user", { type: "answer_inquiry", re: re, answer: answer }).then(function (r) {
         if (r && typeof r.error === "string") { st.textContent = "✕ " + r.error; lock(false); return; }
         card.classList.add("answered");
+        answered.push(card);
         row.textContent = "";
         st.textContent = "✓ you answered: " + shownAs;
         again();
@@ -648,14 +649,15 @@ async function keptThoughts(call, pageSize) { return thoughtsOf(await readHead(c
   }
 
   // rows after the last seen: embed cards and the checker's reports arrive as rows, not events
-  var lastRow = 0;
+  var lastRow = 0, stale = false;
   async function newRows() {
-    var read = function (a) { return call(Object.assign({ type: "history", client_id: me }, a)).catch(function () { return null; }); };
+    var read = function (a) { return call(Object.assign({ type: "history" }, a)).catch(function () { return null; }); };
     var rowsOf = function (h) { return h && Array.isArray(h.rows) ? h.rows : []; };
     var fresh = lastRow > 0 ? rowsOf(await read({ after: lastRow })) : [];
     if (fresh.length === 0) fresh = rowsOf(await read({})).filter(function (m) { return typeof m.id === "number" && m.id > lastRow; });
     tokTotal += tokensOf(fresh);
     drawUsage();
+
     fresh.forEach(function (m) {
       if (typeof m.id === "number") lastRow = Math.max(lastRow, m.id);
       if (m.kind === "embed" || m.kind === "unembed") {
@@ -664,6 +666,11 @@ async function keptThoughts(call, pageSize) { return thoughtsOf(await readHead(c
         else if (!have) push(cardEl(s(m, "head")));
       } else if (s(m, "head").indexOf(MALFORMED) >= 0) notice(s(m, "head").slice(s(m, "head").indexOf(MALFORMED)), "report warn");
     });
+    // tool calls and their replies are rows, not events: a run that ended is drawn from the stored rows
+    if (stale || fresh.some(function (m) { return m.kind !== "notice" && toolOf(String(m.role || ""), typeof m.head === "string" ? m.head : "") !== null; })) {
+      stale = !(await drawHistory(keepRows, true));
+      if (!stale) { seenInq = {}; await inquiries(); drawUsage(); }
+    }
   }
   var timer = null, rowTimer = null;
   function soon() { if (timer) return; timer = setTimeout(function () { timer = null; inquiries(); newRows(); }, 250); }
@@ -702,22 +709,26 @@ async function keptThoughts(call, pageSize) { return thoughtsOf(await readHead(c
 
   // the transcript from the stored rows: the newest `keep`, their kept thoughts and whole texts
   var keepRows = 300;
-  async function drawHistory(keep) {
+  async function drawHistory(keep, soft) {
     keepRows = keep;
-    var tl = await historyTail(function (p) { return call(Object.assign({}, p, { client_id: me })); }, keep);
+    var tl = await historyTail(call, keep);
     var long = tl.rows.some(function (m) { return typeof m.bytes === "number" && m.bytes > CUT; });
     var head = long || tl.rows.some(function (m) { return m.has_thinking === true; })
       ? await readHead(function (p) { return call(p).catch(function () { return null; }); }, 200) : [];
+    // a redraw on the way (soft) never takes a turn's live text away
+    if (soft && (busy() || Object.keys(drafts).length > 0)) return false;
     tail = null;
     var kids = Array.prototype.slice.call(dialog.children, 1);
     kids.forEach(function (k) { k.remove(); });
     drawItems(shapeRows(tl.rows, thoughtsOf(head), textsOf(head)));
+    answered.forEach(push);
     lastRow = tl.lastId;
     tokTotal = tl.tokens;
     var more = $("earlier");
     more.hidden = tl.earlier <= 0;
     more.textContent = "Earlier: " + tl.earlier + " message" + (tl.earlier === 1 ? "" : "s");
     more.disabled = false;
+    return true;
   }
   $("earlier").onclick = function () {
     if (busy()) return;

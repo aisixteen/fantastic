@@ -135,9 +135,9 @@ def main() -> bool:
                     ok = True
                     break
                 await asyncio.sleep(0.5)
-            got = await until(pg, lambda g: len(g["user"]) >= before[0] and len(g["tools"]) >= before[2]) if ok else {}
+            got = await until(pg, lambda g: len(g["user"]) >= before[0] and len(g["tools"]) >= 2) if ok else {}
             info["reloaded"] = got
-            r["7 a reload replays the history"] = bool(got) and any("hello there" in m for m in got["user"]) and len(got["tools"]) == 1 and got["tools"][0]["n"] == "2 tool calls" \
+            r["7 a reload replays the history"] = bool(got) and any("hello there" in m for m in got["user"]) and len(got["tools"]) == 2 and got["tools"][0]["n"] == "2 tool calls" and got["tools"][1]["n"] == "1 tool call" \
                 and any("Both calls are back" in m for m in got["agent"])
             info["page_errors"] = [x for x in pg.logs if "WebGL" not in x][:8]
             r["8 no page error"] = not info["page_errors"]
