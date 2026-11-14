@@ -91,6 +91,10 @@ def main() -> bool:
             r["5b with the Files switch still on"] = await until(pg, "document.querySelector('button[role=switch]')?.getAttribute('aria-checked') === 'true'", 20)
             r["5c and the folder still open"] = await until(pg, "!!document.querySelector('#tree [data-path=\"docs/a.md\"]')", 30)
 
+            before = await pg.js("document.querySelectorAll('.agent-frame').length")
+            r["5d a file row dragged out of the panel"] = await side(pg, "(()=>{const w=document.querySelector('#tree [data-path=\"docs/a.md\"]'); if(!w||!w.draggable) return false; w.dispatchEvent(new DragEvent('dragend',{bubbles:true,clientX:window.innerWidth+200,clientY:40})); return true})()") is True
+            r["5e opens it on the canvas: a cell is drawn"] = bool(await pg.until(f"document.querySelectorAll('.agent-frame').length > {before or 0}", 20))
+
             r["6a the filter narrows the tree"] = await side(pg, "(()=>{const i=document.getElementById('filter'); i.value='a.md'; i.dispatchEvent(new Event('input')); return true})()") is True
             r["6b to the match and the rows above it"] = await until(pg, "(()=>{const t=[...document.querySelectorAll('#tree [role=treeitem]')]; return t.length >= 2 && t.length < 12 && !!document.querySelector('#tree [data-path=\"docs/a.md\"]') && !document.querySelector('#tree [data-path=\"notes.txt\"]')})()", 10)
 

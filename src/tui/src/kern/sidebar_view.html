@@ -299,6 +299,8 @@ function failed(r) { return !r || typeof r !== "object" || typeof r.error === "s
 function call(target, p) { return fantastic.send(target, p).then(function (r) { return r; }, function () { return null; }); }
 // what the view says to its host (the canvas hears it on this cell's inbox; a host with no handler ignores it)
 function post(msg) { try { fantastic.emit(SELF, msg); } catch (e) {} }
+// a drag that ended past the panel's edges left it (dropped on the canvas)
+function outside(e) { return e.clientX < 0 || e.clientY < 0 || e.clientX > window.innerWidth || e.clientY > window.innerHeight; }
 function keep() { post({ type: "state", state: keptState(st) }); }
 function select(id) { if (id) { st.selected = id; st.selPath = ""; post({ type: "select", id: id }); paint(); } }
 function selectPath(path) { st.selPath = path; st.selected = ""; post({ type: "select_file", path: path }); paint(); }
@@ -382,6 +384,13 @@ function fileRow(row, base) {
   var go = el("button", "go hov", "↗"); go.type = "button"; go.title = "Open " + row.name + " on the canvas"; go.setAttribute("aria-label", "Open " + row.name + " on the canvas");
   go.addEventListener("click", function (e) { e.stopPropagation(); post({ type: row.dir ? "open_dir" : "open_file", path: row.path }); });
   w.appendChild(go);
+  // a drag out of the panel onto the canvas: the same "open on the canvas" message (the
+  // frame cannot see the drop point; the host places it as its own open does)
+  w.draggable = true;
+  w.addEventListener("dragstart", function (e) { try { e.dataTransfer.setData("text/plain", row.path); } catch (x) {} });
+  w.addEventListener("dragend", function (e) {
+    if (outside(e)) post({ type: row.dir ? "open_dir" : "open_file", path: row.path });
+  });
   return w;
 }
 function paintTree() {
