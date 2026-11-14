@@ -8187,7 +8187,17 @@ struct EchoWords(String);
 
 #[async_trait]
 impl Provider for EchoWords {
-    async fn chat(&self, _m: &[Value], _x: Option<i64>) -> Result<ProviderStream, ProviderError> {
+    async fn chat(&self, m: &[Value], _x: Option<i64>) -> Result<ProviderStream, ProviderError> {
+        // `m-call`: the answer is a call to `vault` (once), then done — the chat's own call
+        if self.0 == "m-call" {
+            let replied = m.iter().any(|x| x["content"].to_string().contains("vault"));
+            let text = if replied {
+                "<call name=\"done\"></call>".to_string()
+            } else {
+                "<call name=\"send\"><routing><target_id>vault</target_id></routing><payload><type>reflect</type></payload></call>".to_string()
+            };
+            return Ok(Box::pin(futures_util::stream::iter(vec![Ok(ProviderEvent::Token(text))])));
+        }
         let toks: Vec<Result<ProviderEvent, ProviderError>> = vec![
             Ok(ProviderEvent::Token("hel".into())),
             Ok(ProviderEvent::Token("lo".into())),
@@ -8322,6 +8332,95 @@ async fn an_ai_chat_holds_the_conversation_and_completes_through_its_provider() 
     assert_eq!(r["response"], "hello from m-big", "{r}");
     let rows = kernel.send(vec![Item::new(AgentId::from("chat1"), json!({"type": "rows"}))]).await.remove(0).result;
     assert!(rows.to_string().contains("hi"), "the first turn is still the chat's: {rows}");
+}
+
+/// THE CHAT'S OWN IDENTITY: a call the model makes through an `ai_chat` is the CHAT's,
+/// judged by the chat's grants — never by its provider's, which may reach far more.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chats_call_is_judged_by_the_chats_grants_not_its_providers() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = base_kernel(&tmp, |k| {
+        k.bundles.register("echo_provider.tools", EchoProvider);
+        k.bundles.register(crate::chat_bundle::HANDLER_MODULE, crate::chat_bundle::AiChatBundle);
+    })
+    .await;
+    // `vault`: only the provider may call it
+    make_provider(&kernel, "vault", json!({"callable_by": {"prov": "*", "$self": "*"}}), None).await;
+    make_provider(&kernel, "prov", json!({"callable_by": {"chat1": "*", "$self": "*"}, "models": ["m-call"]}), Some("m-call")).await;
+    kernel
+        .edit_can_call(&AgentId::from("prov"), |cc| {
+            cc.insert("vault".into(), json!("*"));
+            true
+        })
+        .expect("the provider may call vault");
+    let memory = fantastic_ram_store::test_support::memory_meta(&kernel, "chat1", json!({"cli": "*", "prov": ["complete", "watch"]})).await;
+    let mut create = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "ai_chat.tools",
+                            "id": "chat1", "provider_id": "prov", "context_window": 32768});
+    for (k, v) in memory {
+        create[k] = v;
+    }
+    let made = kernel.send(vec![Item::new(AgentId::from("kernel_state"), create)]).await.remove(0).result;
+    assert_eq!(made["id"], "chat1", "{made}");
+    let _ = kernel.send(vec![Item::new(AgentId::from("chat1"), json!({"type": "send", "text": "go"}))]).await;
+    let mut text = String::new();
+    for _ in 0..50 {
+        let rows = kernel.send(vec![Item::new(AgentId::from("chat1"), json!({"type": "rows"}))]).await.remove(0).result;
+        text = rows.to_string();
+        if text.contains("· vault reflect") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(text.contains("· vault reflect"), "the call's reply is in the chat: {text}");
+    assert!(text.contains("chat1 may not call"), "the chat's own grants refuse it, not the provider's: {text}");
+}
+
+/// A turn another agent STARTS is still the chat's own: its calls are judged by the
+/// chat's grants, not by the grants of whoever sent the message that woke it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_turn_woken_by_a_broad_agent_keeps_the_chats_own_grants() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = base_kernel(&tmp, |k| {
+        k.bundles.register("echo_provider.tools", EchoProvider);
+        k.bundles.register(crate::chat_bundle::HANDLER_MODULE, crate::chat_bundle::AiChatBundle);
+    })
+    .await;
+    // `boss` may call vault and the chat; vault accepts boss only
+    make_provider(&kernel, "vault", json!({"callable_by": {"boss": "*", "$self": "*"}}), None).await;
+    make_provider(&kernel, "boss", json!({}), None).await;
+    for (who, to) in [("boss", "vault"), ("boss", "chat2")] {
+        kernel.edit_can_call(&AgentId::from(who), |cc| { cc.insert(to.into(), json!("*")); true }).expect("grant");
+    }
+    make_provider(&kernel, "prov2", json!({"callable_by": {"chat2": "*", "$self": "*"}, "models": ["m-call"]}), Some("m-call")).await;
+    let memory = fantastic_ram_store::test_support::memory_meta(&kernel, "chat2", json!({"cli": "*", "boss": "*", "prov2": ["complete", "watch"]})).await;
+    let mut create = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "ai_chat.tools",
+                            "id": "chat2", "provider_id": "prov2", "context_window": 32768});
+    for (k, v) in memory {
+        create[k] = v;
+    }
+    let made = kernel.send(vec![Item::new(AgentId::from("kernel_state"), create)]).await.remove(0).result;
+    assert_eq!(made["id"], "chat2", "{made}");
+    kernel.edit_callable_by(&AgentId::from("chat2"), |cb| { cb.insert("boss".into(), json!("*")); true }).expect("grant");
+    // boss wakes the chat
+    let woke = fantastic_kernel::test_support::as_agent(
+        "boss",
+        kernel.send(vec![Item::new(AgentId::from("chat2"), json!({"type": "send", "text": "go"}))]),
+    )
+    .await
+    .remove(0)
+    .result;
+    assert!(woke.get("reason").is_none(), "boss may wake the chat: {woke}");
+    let mut text = String::new();
+    for _ in 0..50 {
+        let rows = kernel.send(vec![Item::new(AgentId::from("chat2"), json!({"type": "rows"}))]).await.remove(0).result;
+        text = rows.to_string();
+        if text.contains("· vault reflect") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(text.contains("· vault reflect"), "the call's reply is in the chat: {text}");
+    assert!(text.contains("chat2 may not call"), "the chat's own grants refuse it, not boss's: {text}");
 }
 
 #[tokio::test]
