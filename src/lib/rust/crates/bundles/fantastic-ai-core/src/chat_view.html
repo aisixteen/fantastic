@@ -196,8 +196,15 @@ function monitorOf(text) {
 // a row that is a tool call (assistant, calls only) or its reply (the next user turn)
 function toolOf(role, text) {
   if (role === "assistant" && words(text) === "") {
-    var c = CALL_HEAD.exec(text);
-    if (c) return { call: { target: c[2] || c[1], verb: c[3] || "", args: text } };
+    // one row may carry several calls: each is an entry of the run (a cut-off head holds the first)
+    var calls = [];
+    (text.match(CALLS) || []).forEach(function (blk) {
+      var b = CALL_HEAD.exec(blk);
+      if (b) calls.push({ target: b[2] || b[1], verb: b[3] || "", args: blk });
+    });
+    var c = calls.length === 0 ? CALL_HEAD.exec(text) : null;
+    if (c) calls.push({ target: c[2] || c[1], verb: c[3] || "", args: text });
+    if (calls.length > 0) return { calls: calls };
   }
   if (role === "user") {
     var r = REPLY_HEAD.exec(text);
@@ -207,7 +214,7 @@ function toolOf(role, text) {
 }
 function newGroup() { return { kind: "tools", calls: [] }; }
 function addTool(g, t) {
-  if (t.call) { g.calls.push({ id: t.call.id || "", target: t.call.target, verb: t.call.verb, args: t.call.args, reply: null }); return; }
+  if (t.calls) { t.calls.forEach(function (c) { g.calls.push({ id: "", target: c.target, verb: c.verb, args: c.args, reply: null }); }); return; }
   var open = null;
   for (var i = 0; i < g.calls.length; i++) if (g.calls[i].reply === null) { open = g.calls[i]; break; }
   if (open) open.reply = t.reply.text;
@@ -594,7 +601,7 @@ async function keptThoughts(call, pageSize) { return thoughtsOf(await readHead(c
   }
 
   // INQUIRIES this agent asked the person: `user` holds them
-  var seenInq = {}, answered = []; // answered: this session's answered cards, kept over a redraw
+  var seenInq = {}, answered = [], heldRe = {}; // answered: this session's answered cards, kept over a redraw
   function inquiryEl(q) {
     var re = Number(q.re), kind = s(q, "kind") || "text";
     var card = el("section", "inq"), row = el("div", "row"), st = el("div", "st");
@@ -602,10 +609,12 @@ async function keptThoughts(call, pageSize) { return thoughtsOf(await readHead(c
     function lock(on) { row.querySelectorAll("button,input").forEach(function (b) { b.disabled = on; }); }
     function reply(answer, shownAs) {
       lock(true);
+      // kept over a redraw from the moment it is sent: the turn it wakes can redraw before the answer returns
+      if (answered.indexOf(card) < 0) answered.push(card);
+      heldRe[re] = true;
       fantastic.send("user", { type: "answer_inquiry", re: re, answer: answer }).then(function (r) {
-        if (r && typeof r.error === "string") { st.textContent = "✕ " + r.error; lock(false); return; }
+        if (r && typeof r.error === "string") { st.textContent = "✕ " + r.error; lock(false); answered.splice(answered.indexOf(card), 1); delete heldRe[re]; return; }
         card.classList.add("answered");
-        answered.push(card);
         row.textContent = "";
         st.textContent = "✓ you answered: " + shownAs;
         again();
@@ -642,7 +651,7 @@ async function keptThoughts(call, pageSize) { return thoughtsOf(await readHead(c
     drawState();
     open.forEach(function (q) {
       var re = Number(q.re);
-      if (!Number.isFinite(re) || seenInq[re]) return;
+      if (!Number.isFinite(re) || seenInq[re] || heldRe[re]) return;
       seenInq[re] = true;
       push(inquiryEl(q));
     });

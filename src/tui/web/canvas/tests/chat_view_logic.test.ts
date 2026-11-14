@@ -227,3 +227,19 @@ test("the tool-call row title stays `N tool calls` with its verbs, for the mock'
   ]);
   assert.deepEqual(P.groupTitle(out[0] as never), { n: "2 tool calls", verbs: "list, read" });
 });
+
+test("one row with several calls is several entries of ONE run; a cut-off call head still counts one", () => {
+  const two = call("list") + "\n" + call("read");
+  const out = P.shapeRows([
+    { id: 1, role: "assistant", head: two },
+    { id: 2, role: "user", head: reply("list") },
+    { id: 3, role: "user", head: reply("read") },
+    { id: 4, role: "assistant", head: `<call name="c"><target_id>files</target_id><type>wri` },
+  ]);
+  assert.deepEqual(out.map((x) => x["kind"]), ["tools"]);
+  const g = out[0] as unknown as { calls: { verb: string; reply: string | null }[] };
+  assert.deepEqual(g.calls.map((c) => c.verb), ["list", "read", ""]);
+  assert.equal(g.calls[0]!.reply?.includes("list"), true);
+  assert.equal(g.calls[1]!.reply?.includes("read"), true);
+  assert.deepEqual(P.groupTitle(g as never), { n: "3 tool calls", verbs: "list, read, files" });
+});

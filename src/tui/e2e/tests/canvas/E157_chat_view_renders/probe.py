@@ -85,12 +85,12 @@ def main() -> bool:
             await asyncio.sleep(0.5)
         return got
 
+    from canvas import host_call
+
     async def open_chat(pg) -> None:
         """The chat is made as the canvas makes every AI (`canvas_root create`: a provider
         and its chat, the chat holding `user` `inquiry`) and shown by a cell the root view
         places; the cell draws the view the chat's `reflect` returns."""
-        from canvas import host_call
-
         made = await host_call(rig.port, "canvas_root", {"type": "create", "record": {
             "id": "chat_e157", "handler_module": "vllm_backend.tools", "endpoint": stub.base_url(), "model": "stub",
             "context_window": 32768, "max_tokens": 4096, "kv_slots": 4, "kv_overflow": "evict",
@@ -139,6 +139,7 @@ def main() -> bool:
             info["reloaded"] = got
             r["7 a reload replays the history"] = bool(got) and any("hello there" in m for m in got["user"]) and len(got["tools"]) == 2 and got["tools"][0]["n"] == "2 tool calls" and got["tools"][1]["n"] == "1 tool call" \
                 and any("Both calls are back" in m for m in got["agent"])
+            info["history"] = [(x.get("role"), x.get("kind"), x.get("head")) for x in ((await host_call(rig.port, "chat_e157", {"type": "history"})).get("rows") or [])]
             info["page_errors"] = [x for x in pg.logs if "WebGL" not in x][:8]
             r["8 no page error"] = not info["page_errors"]
 
