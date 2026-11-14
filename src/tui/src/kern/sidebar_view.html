@@ -6,6 +6,7 @@
 --fc-color-accent-on:rgb(255 255 255);
 --fc-color-line-button:rgb(0 0 0 / 0.1);
 --fc-color-line-faint:rgb(0 0 0 / 0.06);
+--fc-color-line-selected:rgb(0 0 0 / 0.3);
 --fc-color-line-strong:rgb(0 0 0 / 0.18);
 --fc-color-status-error:rgb(179 38 30);
 --fc-color-status-ok:rgb(27 116 70);
@@ -19,7 +20,9 @@
 --fc-color-surface-button:rgb(0 0 0 / 0.05);
 --fc-color-surface-code:rgb(0 0 0 / 0.045);
 --fc-color-surface-field:rgb(0 0 0 / 0.06);
+--fc-color-surface-hover:rgb(0 0 0 / 0.09);
 --fc-color-surface-raised:rgb(255 255 255 / 0.72);
+--fc-color-surface-selected:rgb(0 0 0 / 0.08);
 --fc-color-surface-well:rgb(0 0 0 / 0.06);
 --fc-color-text-code:rgb(69 69 69);
 --fc-color-text-cool:rgb(69 69 69);
@@ -47,64 +50,96 @@ html,body{height:100%;margin:0}
 body{display:flex;flex-direction:column;min-height:0;overflow:hidden;background:transparent;color:var(--fc-color-text-primary);font:13px/1.45 var(--fc-font-family-sans)}
 button{font:inherit;color:inherit;cursor:pointer;border:0;background:transparent;padding:0;text-align:left}
 button:focus-visible,input:focus-visible{outline:2px solid var(--fc-color-accent-base);outline-offset:1px}
-.hov:hover{background:var(--fc-color-surface-button)}
-.strip{flex:none;display:flex;gap:6px;overflow-x:auto;padding:10px 10px 8px;border-bottom:1px solid var(--fc-color-line-faint);scrollbar-width:none}
-.k{flex:none;display:flex;flex-direction:column;align-items:center;gap:3px;width:56px;padding:5px 0 4px;border-radius:var(--fc-radius-control)}
-.k .mark{display:grid;place-items:center;width:32px;height:32px;border-radius:var(--fc-radius-card);font:600 11px/1 var(--fc-font-family-mono);text-transform:uppercase;background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
-.k.here .mark{background:var(--fc-color-accent-deep);color:var(--fc-color-accent-on)}
-.k .nm{max-width:54px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--fc-color-text-muted)}
+.hov:hover{background:var(--fc-color-surface-hover)}
+.head{flex:none;display:flex;align-items:center;justify-content:space-between;gap:8px;height:32px;padding:0 10px 0 12px}
+.head h1{margin:0;font:600 11px/1 var(--fc-font-family-mono);letter-spacing:.5px;text-transform:uppercase;color:var(--fc-color-text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip{flex:none;height:20px;padding:0 8px;border-radius:var(--fc-radius-chip);background:var(--fc-color-surface-button);box-shadow:inset 0 0 0 1px var(--fc-color-line-faint);font-size:11px;line-height:20px;color:var(--fc-color-text-muted)}
+.split{flex:1 1 0;min-height:0;display:flex;border-top:1px solid var(--fc-color-line-button)}
+.rail{flex:0 0 64px;display:flex;flex-direction:column;align-items:center;gap:8px;padding:10px 0;border-right:1px solid var(--fc-color-line-button);overflow-y:auto;scrollbar-width:none}
+.k{display:flex;flex-direction:column;align-items:center;gap:3px;width:60px;padding:3px 0;border-radius:var(--fc-radius-control)}
+.k .mark{display:grid;place-items:center;width:34px;height:34px;border-radius:var(--fc-radius-card);font:600 11px/1 var(--fc-font-family-mono);text-transform:uppercase;background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
+.k.here .mark{background:var(--fc-color-accent-base);color:var(--fc-color-accent-on)}
+.k .nm{max-width:58px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--fc-color-text-muted)}
 .k.here .nm{color:var(--fc-color-text-primary);font-weight:600}
-.scroll{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:none;padding:8px 8px 4px;display:flex;flex-direction:column;gap:12px}
-.wait{display:flex;flex-direction:column;gap:2px;padding:8px 4px 4px;border-radius:var(--fc-radius-panel);background:var(--fc-color-status-warn-surface);box-shadow:inset 0 0 0 1px var(--fc-color-status-warn-line)}
+.agents{flex:1 1 0;min-width:0;display:flex;flex-direction:column;padding:12px 8px 8px;gap:12px}
+.title{flex:none;display:flex;align-items:center;gap:10px;padding:0 4px}
+.title .logo{flex:none;display:grid;place-items:center;width:32px;height:32px;border-radius:var(--fc-radius-card);background:var(--fc-color-surface-selected);color:var(--fc-color-text-primary)}
+.title .who{display:flex;flex-direction:column;min-width:0}
+.title b{font:600 15px/1.3 var(--fc-font-family-sans);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.title span{font-size:11px;color:var(--fc-color-text-subtle)}
+.wait{flex:none;display:flex;flex-direction:column;gap:2px;padding:8px 4px 4px;border-radius:var(--fc-radius-panel);background:var(--fc-color-status-warn-surface);box-shadow:inset 0 0 0 1px var(--fc-color-status-warn-line)}
 .wait[hidden]{display:none}
-.wait h2{margin:0;padding:0 8px 4px;font:600 11px/1.4 var(--fc-font-family-mono);letter-spacing:.5px;text-transform:uppercase;color:var(--fc-color-status-warn)}
+.wait h2{display:flex;align-items:center;gap:8px;margin:0;padding:0 8px 4px;font:600 11px/1.4 var(--fc-font-family-mono);letter-spacing:.5px;text-transform:uppercase;color:var(--fc-color-status-warn)}
+.pill{font:600 10px/16px var(--fc-font-family-mono);min-width:18px;padding:0 5px;border-radius:var(--fc-radius-pill);text-align:center;background:var(--fc-color-status-warn);color:var(--fc-color-status-warn-on)}
 .w{display:flex;align-items:center;gap:9px;width:100%;min-height:44px;padding:5px 8px;border-radius:var(--fc-radius-card)}
+.w .gl{background:var(--fc-color-surface-raised)}
 .w .who{display:flex;flex-direction:column;flex:1;min-width:0}
 .w .who b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .w .who span{font-size:12px;color:var(--fc-color-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .w .age{flex:none;font:500 11px/1 var(--fc-font-family-mono);color:var(--fc-color-status-warn)}
+.tools{flex:none;display:flex;align-items:center;gap:8px}
+.tools input{flex:1;min-width:0;height:32px;padding:0 10px;border-radius:var(--fc-radius-card);border:0;background:var(--fc-color-surface-raised);box-shadow:inset 0 0 0 1px var(--fc-color-line-button);font:inherit;color:inherit}
+.tools input:focus{outline:0;box-shadow:inset 0 0 0 1px var(--fc-color-line-selected)}
+.sw{flex:none;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--fc-color-text-muted)}
+.sw i{position:relative;display:block;width:30px;height:18px;border-radius:var(--fc-radius-pill);background:var(--fc-color-surface-well);box-shadow:inset 0 0 0 1px var(--fc-color-line-button)}
+.sw i::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--fc-color-text-subtle)}
+.sw[aria-checked="true"] i{background:var(--fc-color-accent-base)}
+.sw[aria-checked="true"] i::after{left:14px;background:var(--fc-color-accent-on)}
+.scroll{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:none}
 .tree{display:flex;flex-direction:column;gap:1px}
-.r{display:flex;align-items:center;border-radius:var(--fc-radius-card)}
+.r{position:relative;display:flex;align-items:center;border-radius:var(--fc-radius-card)}
 .r .tw{flex:none;display:grid;place-items:center;width:18px;height:28px;border-radius:var(--fc-radius-chip);color:var(--fc-color-text-subtle);font-size:10px}
 .r .tw.none{visibility:hidden}
-.r .main{flex:1;min-width:0;display:flex;align-items:center;gap:9px;min-height:30px;padding:3px 8px 3px 4px;border-radius:var(--fc-radius-card)}
-.r .gl{position:relative;flex:none;display:grid;place-items:center;width:26px;height:26px;border-radius:var(--fc-radius-card);background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
+.r .main{flex:1;min-width:0;display:flex;align-items:center;gap:9px;min-height:40px;padding:3px 8px 3px 4px;border-radius:var(--fc-radius-card)}
+.r .gl{position:relative;flex:none;display:grid;place-items:center;width:28px;height:28px;border-radius:var(--fc-radius-card);background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
 .r .gl svg{display:block}
-.r .name{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.r .two{display:flex;flex-direction:column;min-width:0;flex:1}
+.r .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .r .name.chat{font-weight:600}
-.r .tag{flex:none;font:10px/15px var(--fc-font-family-mono);padding:0 5px;border-radius:var(--fc-radius-chip);color:var(--fc-color-text-muted);background:var(--fc-color-surface-well);max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.r .sp{flex:1}
+.r .sub{font-size:12px;line-height:1.3;color:var(--fc-color-text-subtle);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .r .count{flex:none;font:11px/1 var(--fc-font-family-mono);color:var(--fc-color-text-subtle)}
-.r .st{flex:none;font:11px/1 var(--fc-font-family-mono);color:var(--fc-color-text-subtle);white-space:nowrap}
+.sub.ask,.sub.queued{color:var(--fc-color-status-warn)}
+.sub.active{color:var(--fc-color-status-ok)}
 .badge{position:absolute;right:-4px;bottom:-4px;display:none;place-items:center;width:13px;height:13px;border-radius:50%;font:700 9px/1 var(--fc-font-family-sans);border:2px solid transparent;box-sizing:content-box;margin:-2px}
 .badge.ask{display:grid;background:var(--fc-color-status-warn);color:var(--fc-color-status-warn-on)}
 .badge.queued{display:grid;background:var(--fc-color-status-warn-surface);color:var(--fc-color-status-warn);box-shadow:inset 0 0 0 1px var(--fc-color-status-warn-line)}
-.badge.active{display:grid;width:11px;height:11px;margin:-1px;border:2px solid var(--fc-color-status-ok);border-top-color:transparent;background:transparent;animation:spin 900ms linear infinite}
-.r.sel,.r.sel .main{background:var(--fc-color-surface-raised);box-shadow:inset 0 0 0 1px var(--fc-color-line-button)}
-.st.ask{color:var(--fc-color-status-warn)}
-.st.active{color:var(--fc-color-status-ok)}
-.st.queued{color:var(--fc-color-status-warn)}
-.pins{flex:none;display:flex;flex-direction:column;gap:1px;padding:6px 8px 8px;border-top:1px solid var(--fc-color-line-faint)}
-.f .name{font:12px/1.3 var(--fc-font-family-mono)}
-.f .gl{width:22px;height:22px;border-radius:var(--fc-radius-control)}
+.badge.active{display:grid;width:11px;height:11px;margin:-1px;border:2px solid var(--fc-color-accent-base);border-top-color:transparent;background:transparent;animation:spin 1100ms linear infinite}
+.r.sel,.r.sel .main{background:var(--fc-color-surface-selected);box-shadow:inset 0 0 0 1px var(--fc-color-line-selected)}
+.r.f .main{min-height:26px;gap:7px;padding:1px 8px 1px 2px}
+.r.f .gl{width:14px;height:14px;background:transparent;border-radius:0}
+.r.f .name{font:12px/1.3 var(--fc-font-family-mono)}
+.r.f .tw{height:26px}
+.gd{position:absolute;top:0;bottom:0;width:1px;background:var(--fc-color-line-button);pointer-events:none}
+.go{flex:none;display:none;place-items:center;width:22px;height:22px;margin-right:4px;border-radius:var(--fc-radius-chip);color:var(--fc-color-text-subtle);font-size:12px}
+.r:hover .go,.r:focus-within .go,.r.sel .go{display:grid}
 .note{padding:4px 8px;font-size:12px;color:var(--fc-color-text-subtle)}
 .note.err{color:var(--fc-color-status-error)}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important}}
 </style>
-<div class="strip" id="strip" role="navigation" aria-label="Kernels"></div>
-<div class="scroll">
+<header class="head"><h1 id="ttl">Agents</h1><button class="chip hov" id="hide" type="button" aria-label="Hide the tree">Hide the tree</button></header>
+<div class="split">
+<nav class="rail" id="strip" aria-label="Kernels"></nav>
+<nav class="agents" aria-label="Agents">
+<div class="title"><span class="logo" id="logo"></span><span class="who"><b id="name"></b><span id="count"></span></span></div>
 <section class="wait" id="wait" aria-label="Waiting for you" hidden></section>
-<nav class="tree" id="tree" aria-label="Agents"></nav>
-<div class="note err" id="err" hidden></div>
+<div class="tools">
+<input id="filter" type="search" placeholder="Filter agents and files" aria-label="Filter agents and files" autocomplete="off">
+<button class="sw" id="sw" type="button" role="switch" aria-checked="false" aria-label="Show files in the tree"><i></i>Files</button>
 </div>
-<div class="pins" id="pins" role="group" aria-label="Files"></div>
+<div class="scroll"><div class="tree" id="tree" role="tree"></div><div class="note err" id="err" hidden></div></div>
+</nav>
+</div>
 <script>
 // pure
 var CHAT_REPLY_KEYS = ["tree"];
+var FILES_ID = "files";
+var ROOT = ".";
+var IGNORED = [".git", "node_modules", "target", "dist", "__pycache__"];
 function oneLine(t) { return String(t == null ? "" : t).replace(/\s+/g, " ").trim(); }
 function shortGuid(g) { return String(g == null ? "" : g).slice(0, 6); }
 function markOf(name) { return String(name == null ? "" : name).replace(/[^A-Za-z0-9]/g, "").slice(0, 2) || "?"; }
+function parentOf(p) { var i = String(p).lastIndexOf("/"); return i < 0 ? ROOT : String(p).slice(0, i); }
 // the kernel strip: this kernel first (highlighted), then each connected peer row {guid, via}
 function kernelStrip(root, peers) {
   var here = { key: "here", guid: String(root && root.guid || ""), name: String(root && (root.display_name || root.id) || "this kernel"), here: true };
@@ -141,26 +176,66 @@ function totalBelow(n) {
   (n && n.children || []).forEach(function (k) { c += 1 + totalBelow(k); });
   return c;
 }
+// a folder listing, directories first, then by name; the folders a tree hides (.git ...) are left out
+function sortedListing(files) {
+  return (Array.isArray(files) ? files : []).filter(function (f) { return f && typeof f.name === "string"; })
+    .slice().sort(function (a, b) {
+      var da = a.type === "dir" ? 0 : 1, db = b.type === "dir" ? 0 : 1;
+      if (da !== db) return da - db;
+      return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : a.name.toLowerCase() > b.name.toLowerCase() ? 1 : 0;
+    });
+}
+// the project folder as rows: `lists` = {path: files|undefined}, `open` = {path: true}
+function fileRows(lists, open, path, depth) {
+  var out = [];
+  sortedListing(lists[path]).forEach(function (f) {
+    var isDir = f.type === "dir";
+    if (isDir && IGNORED.indexOf(f.name) >= 0) return;
+    out.push({ kind: "file", path: f.path, name: f.name, dir: isDir, open: isDir && !!open[f.path], depth: depth });
+    if (isDir && open[f.path]) out = out.concat(fileRows(lists, open, f.path, depth + 1));
+  });
+  return out;
+}
 // the agent tree as rows: parent order, root first, children nested in the order reflect gives them.
 // `folded` = {id: true}; a folded branch shows its child count and hides what is below it.
-function treeRows(root, chats, folded, status, asks) {
+// `files` = {on, lists, open}: with `on`, the project's files are rows INSIDE the tree, under the `files` agent.
+function treeRows(root, chats, folded, status, asks, files) {
   var rows = [];
+  var fl = files && files.on ? files : null;
   function walk(n, depth) {
     if (!n || typeof n.id !== "string") return;
     var kids = countKids(n);
+    var fileKids = fl && n.id === FILES_ID ? fileRows(fl.lists, fl.open, ROOT, depth + 1) : [];
+    var foldable = kids > 0 || fileKids.length > 0;
     var isChat = !!chats[n.id];
-    var isFolded = kids > 0 && !!folded[n.id];
+    var isFolded = foldable && !!folded[n.id];
     rows.push({
-      id: n.id, depth: depth,
+      kind: "agent", id: n.id, depth: depth,
       name: String(n.display_name || n.id),
       tag: n.handler_module ? String(n.handler_module).replace(/\.tools$/, "") : "",
-      chat: isChat, kids: kids, folded: isFolded, below: isFolded ? totalBelow(n) : 0,
+      chat: isChat, kids: kids, foldable: foldable, folded: isFolded,
+      below: isFolded ? totalBelow(n) + fileKids.length : 0,
       state: isChat ? stateOf(status[n.id], !!asks[n.id]) : null
     });
-    if (!isFolded) (n.children || []).forEach(function (k) { walk(k, depth + 1); });
+    if (isFolded) return;
+    (n.children || []).forEach(function (k) { walk(k, depth + 1); });
+    fileKids.forEach(function (f) { rows.push(f); });
   }
   walk(root, 0);
   return rows;
+}
+// the rows whose name holds `q`, and the rows above them (the branch that leads to a match)
+function filterRows(rows, q) {
+  q = String(q == null ? "" : q).trim().toLowerCase();
+  if (!q) return rows;
+  var keep = rows.map(function () { return false; });
+  rows.forEach(function (r, i) {
+    if (String(r.name).toLowerCase().indexOf(q) < 0) return;
+    keep[i] = true;
+    var d = r.depth;
+    for (var j = i - 1; j >= 0 && d > 0; j--) if (rows[j].depth < d) { keep[j] = true; d = rows[j].depth; }
+  });
+  return rows.filter(function (r, i) { return keep[i]; });
 }
 // open inquiries by who asked: {asker: true}
 function askers(inq) {
@@ -181,29 +256,37 @@ function waitingRows(inq, names, now) {
       return { asker: q.asker, who: names[q.asker] || q.asker, text: oneLine(q.text), age: ageText(q.ts, now), re: q.re };
     });
 }
-// a folder listing, directories first, then by name
-function sortedListing(files) {
-  return (Array.isArray(files) ? files : []).filter(function (f) { return f && typeof f.name === "string"; })
-    .slice().sort(function (a, b) {
-      var da = a.type === "dir" ? 0 : 1, db = b.type === "dir" ? 0 : 1;
-      if (da !== db) return da - db;
-      return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : a.name.toLowerCase() > b.name.toLowerCase() ? 1 : 0;
-    });
+// what the view keeps across a reload: which branches are folded, which folders are open, whether files show
+function keptState(st) {
+  return { folded: st.folded, open: st.open, filesOn: !!st.filesOn };
 }
-// the project folder as rows: `lists` = {path: files|undefined}, `open` = {path: true}
-function fileRows(lists, open, path, depth) {
-  var out = [];
-  sortedListing(lists[path]).forEach(function (f) {
-    var isDir = f.type === "dir";
-    out.push({ path: f.path, name: f.name, dir: isDir, open: isDir && !!open[f.path], depth: depth });
-    if (isDir && open[f.path]) out = out.concat(fileRows(lists, open, f.path, depth + 1));
+function restoredState(saved) {
+  var out = { folded: {}, open: {}, filesOn: false };
+  if (!saved || typeof saved !== "object") return out;
+  ["folded", "open"].forEach(function (k) {
+    var m = saved[k];
+    if (m && typeof m === "object") Object.keys(m).forEach(function (key) { if (m[key] === true) out[k][key] = true; });
   });
+  out.filesOn = saved.filesOn === true;
   return out;
+}
+// the folders to hold a watch on: the project's root and every open folder, while files show
+function wantedWatches(filesOn, open) {
+  if (!filesOn) return [];
+  return [ROOT].concat(Object.keys(open).filter(function (p) { return open[p]; })).sort();
+}
+// the folders to read again when `ev` ({type: "changed", path}) arrives: its parent, and itself when it is a listed folder
+function changedDirs(ev, lists) {
+  if (!ev || ev.type !== "changed" || typeof ev.path !== "string") return [];
+  var out = [parentOf(ev.path)];
+  if (lists[ev.path] !== undefined) out.push(ev.path);
+  return out.filter(function (p) { return lists[p] !== undefined; });
 }
 // end pure
 
-var SELF = "{{cell}}", ME = "{{agent}}", ROOT = ".";
-var st = { root: null, chats: {}, status: {}, inq: [], folded: {}, selected: "", filesOpen: false, projOpen: false, open: {}, lists: {}, tick: 0, busy: false };
+var SELF = "{{cell}}", ME = "{{agent}}";
+var st = { root: null, chats: {}, status: {}, inq: [], folded: {}, selected: "", selPath: "", filesOn: false, open: {}, lists: {}, filter: "", tick: 0, busy: false };
+var watching = {}, filesWatch = false;
 var $ = function (id) { return document.getElementById(id); };
 var ROBOT = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="11" height="8" rx="2"/><path d="M8 5V2.5M5.8 9v.01M10.2 9v.01M6 11.2h4"/></svg>';
 var TOOL = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 3a3 3 0 0 0 3.2 3.9L6 13.6a1.4 1.4 0 0 1-2-2l6.7-6.7A3 3 0 0 0 9.5 3z"/></svg>';
@@ -214,7 +297,11 @@ function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.cl
 function say(msg) { var e = $("err"); e.hidden = !msg; e.textContent = msg || ""; }
 function failed(r) { return !r || typeof r !== "object" || typeof r.error === "string"; }
 function call(target, p) { return fantastic.send(target, p).then(function (r) { return r; }, function () { return null; }); }
-function select(id) { if (id) { st.selected = id; fantastic.emit(SELF, { type: "select", id: id }); paintTree(); } }
+// what the view says to its host (the canvas hears it on this cell's inbox; a host with no handler ignores it)
+function post(msg) { try { fantastic.emit(SELF, msg); } catch (e) {} }
+function keep() { post({ type: "state", state: keptState(st) }); }
+function select(id) { if (id) { st.selected = id; st.selPath = ""; post({ type: "select", id: id }); paint(); } }
+function selectPath(path) { st.selPath = path; st.selected = ""; post({ type: "select_file", path: path }); paint(); }
 
 function paintStrip() {
   var host = $("strip"); host.textContent = "";
@@ -222,101 +309,131 @@ function paintStrip() {
     var b = el("button", "k hov" + (k.here ? " here" : ""));
     b.type = "button"; b.title = k.here ? k.name + " (this kernel)" : "kernel " + k.guid;
     b.appendChild(el("span", "mark", k.mark)); b.appendChild(el("span", "nm", k.name));
-    if (!k.here) b.addEventListener("click", function () { fantastic.emit(SELF, { type: "select_kernel", guid: k.guid }); });
+    if (!k.here) b.addEventListener("click", function () { post({ type: "select_kernel", guid: k.guid }); });
     host.appendChild(b);
   });
 }
 function nameMap(n, out) { if (n && typeof n.id === "string") { out[n.id] = String(n.display_name || n.id); (n.children || []).forEach(function (k) { nameMap(k, out); }); } return out; }
+function glyph(inner) { var g = el("span", "gl"); g.innerHTML = inner; return g; }
+function paintHead() {
+  var n = st.root ? String(st.root.display_name || st.root.id || "") : "";
+  $("ttl").textContent = n || "Agents";
+  $("name").textContent = n || "Agents";
+  $("logo").innerHTML = ROBOT;
+  $("count").textContent = st.tree ? (1 + totalBelow(st.tree)) + " agents" : "";
+}
 function paintWait() {
   var host = $("wait"); host.textContent = "";
   var rows = waitingRows(st.inq, nameMap(st.tree, {}), Date.now() / 1000);
   host.hidden = rows.length === 0;
   if (!rows.length) return;
-  host.appendChild(el("h2", "", "Waiting for you · " + rows.length));
+  var h = el("h2", "", "Waiting for you"); h.appendChild(el("span", "pill", String(rows.length)));
+  host.appendChild(h);
   rows.forEach(function (w) {
     var b = el("button", "w hov"); b.type = "button";
+    b.appendChild(glyph(st.chats[w.asker] ? ROBOT : TOOL));
     var who = el("span", "who"); who.appendChild(el("b", "", w.who)); who.appendChild(el("span", "", w.text));
     b.appendChild(who); b.appendChild(el("span", "age", w.age));
     b.addEventListener("click", function () { select(w.asker); });
     host.appendChild(b);
   });
 }
-function glyph(inner) { var g = el("span", "gl"); g.innerHTML = inner; return g; }
-function treeButton(row, fold, onFold) {
-  var w = el("div", "r" + (st.selected === row.id ? " sel" : ""));
-  var tw = el("button", "tw" + (fold === null ? " none" : " hov"), fold === null ? "" : fold ? "▸" : "▾");
-  tw.type = "button"; tw.setAttribute("aria-label", fold ? "unfold" : "fold");
-  if (fold !== null) tw.addEventListener("click", function (e) { e.stopPropagation(); onFold(); });
-  w.appendChild(tw);
+function foldButton(row, foldable, folded, onFold) {
+  var tw = el("button", "tw" + (foldable ? " hov" : " none"), foldable ? (folded ? "▸" : "▾") : "");
+  tw.type = "button";
+  if (foldable) {
+    tw.setAttribute("aria-label", (folded ? "Unfold " : "Fold ") + row.name);
+    tw.setAttribute("aria-expanded", String(!folded));
+    tw.addEventListener("click", function (e) { e.stopPropagation(); onFold(); });
+  }
+  return tw;
+}
+function agentRow(row) {
+  var w = el("div", "r a" + (st.selected === row.id ? " sel" : ""));
+  w.setAttribute("role", "treeitem"); w.dataset.id = row.id;
+  w.style.paddingLeft = (row.depth * 14) + "px";
+  w.appendChild(foldButton(row, row.foldable, row.folded, function () { st.folded[row.id] = !st.folded[row.id]; keep(); paint(); }));
+  var b = el("button", "main hov"); b.type = "button"; b.title = row.id;
+  var g = glyph(row.chat ? ROBOT : TOOL);
+  if (row.state) g.appendChild(el("span", "badge " + row.state.kind, row.state.kind === "ask" ? "?" : ""));
+  b.appendChild(g);
+  var two = el("span", "two");
+  two.appendChild(el("span", "name" + (row.chat ? " chat" : ""), row.name));
+  var active = row.state && row.state.kind !== "idle";
+  var sub = active ? row.state.label : row.tag;
+  if (sub) two.appendChild(el("span", "sub" + (active ? " " + row.state.kind : ""), sub));
+  b.appendChild(two);
+  if (row.folded) b.appendChild(el("span", "count", String(row.below)));
+  b.addEventListener("click", function () { select(row.id); });
+  w.appendChild(b);
+  return w;
+}
+function fileRow(row, base) {
+  var w = el("div", "r f" + (st.selPath === row.path ? " sel" : ""));
+  w.setAttribute("role", "treeitem"); w.dataset.path = row.path;
+  w.style.paddingLeft = (row.depth * 14) + "px";
+  for (var d = base + 1; d <= row.depth; d++) { var gd = el("span", "gd"); gd.style.left = (d * 14 - 1) + "px"; w.appendChild(gd); }
+  w.appendChild(foldButton(row, row.dir, !row.open, function () { toggleDir(row.path); }));
+  var b = el("button", "main hov"); b.type = "button"; b.title = row.path;
+  b.appendChild(glyph(row.dir ? FOLDER : FILE));
+  b.appendChild(el("span", "name", row.name));
+  b.addEventListener("click", function () { if (row.dir) toggleDir(row.path); else selectPath(row.path); });
+  w.appendChild(b);
+  var go = el("button", "go hov", "↗"); go.type = "button"; go.title = "Open " + row.name + " on the canvas"; go.setAttribute("aria-label", "Open " + row.name + " on the canvas");
+  go.addEventListener("click", function (e) { e.stopPropagation(); post({ type: row.dir ? "open_dir" : "open_file", path: row.path }); });
+  w.appendChild(go);
   return w;
 }
 function paintTree() {
   var host = $("tree"); host.textContent = "";
   if (!st.tree) return;
-  treeRows(st.tree, st.chats, st.folded, st.status, askers(st.inq)).forEach(function (row) {
-    var w = treeButton(row, row.kids > 0 ? row.folded : null, function () { st.folded[row.id] = !st.folded[row.id]; paintTree(); });
-    w.style.paddingLeft = (row.depth * 14) + "px";
-    var b = el("button", "main hov"); b.type = "button"; b.title = row.id;
-    var g = glyph(row.chat ? ROBOT : TOOL);
-    if (row.state) { var bd = el("span", "badge " + row.state.kind, row.state.kind === "ask" ? "?" : ""); g.appendChild(bd); }
-    b.appendChild(g);
-    b.appendChild(el("span", "name" + (row.chat ? " chat" : ""), row.name));
-    if (row.tag) b.appendChild(el("span", "tag", row.tag));
-    b.appendChild(el("span", "sp"));
-    if (row.folded) b.appendChild(el("span", "count", String(row.below)));
-    if (row.state && row.state.kind !== "idle") b.appendChild(el("span", "st " + row.state.kind, row.state.label));
-    b.addEventListener("click", function () { select(row.id); });
-    w.appendChild(b);
-    host.appendChild(w);
+  var rows = filterRows(treeRows(st.tree, st.chats, st.folded, st.status, askers(st.inq), { on: st.filesOn, lists: st.lists, open: st.open }), st.filter);
+  var base = 0;
+  rows.forEach(function (row) {
+    if (row.kind === "file") host.appendChild(fileRow(row, base));
+    else { if (row.id === FILES_ID) base = row.depth; host.appendChild(agentRow(row)); }
   });
+  if (st.filesOn && st.lists[ROOT] === undefined) host.appendChild(el("div", "note", "reading the files…"));
 }
-function fileLine(depth, isDir, open, name, tag, onClick, onFold) {
-  var w = el("div", "r f"); w.style.paddingLeft = (depth * 14) + "px";
-  var tw = el("button", "tw" + (isDir ? " hov" : " none"), isDir ? (open ? "▾" : "▸") : "");
-  tw.type = "button"; if (isDir) tw.addEventListener("click", function (e) { e.stopPropagation(); onFold(); });
-  w.appendChild(tw);
-  var b = el("button", "main hov"); b.type = "button"; b.title = name;
-  b.appendChild(glyph(isDir ? FOLDER : FILE));
-  b.appendChild(el("span", "name", name));
-  if (tag) b.appendChild(el("span", "tag", tag));
-  b.addEventListener("click", onClick);
-  w.appendChild(b);
-  return w;
+function paintSwitch() { $("sw").setAttribute("aria-checked", String(st.filesOn)); }
+function paint() { paintHead(); paintTree(); paintWait(); paintSwitch(); }
+
+function toggleDir(path) {
+  st.open[path] = !st.open[path];
+  keep(); paint(); syncFiles();
 }
-function paintPins() {
-  var host = $("pins"); host.textContent = "";
-  host.appendChild(fileLine(0, true, st.filesOpen, "files", "tool", function () { select("files"); }, function () { st.filesOpen = !st.filesOpen; paintPins(); }));
-  if (!st.filesOpen) return;
-  host.appendChild(fileLine(1, true, st.projOpen, "project folder", "", function () { toggleDir(ROOT, true); }, function () { toggleDir(ROOT, true); }));
-  if (!st.projOpen) return;
-  fileRows(st.lists, st.open, ROOT, 2).forEach(function (f) {
-    host.appendChild(fileLine(f.depth, f.dir, f.open, f.name, "", function () { f.dir ? toggleDir(f.path, false) : openFile(f.path); }, function () { toggleDir(f.path, false); }));
-  });
-  if (st.lists[ROOT] === undefined) host.appendChild(el("div", "note", "reading…"));
-}
-function toggleDir(path, project) {
-  if (project) st.projOpen = !st.projOpen; else st.open[path] = !st.open[path];
-  paintPins();
-  if (project ? st.projOpen : st.open[path]) readDir(path);
+function setFiles(on) {
+  st.filesOn = on; keep(); paint(); syncFiles();
 }
 function readDir(path) {
   return call("files", { type: "list", path: path }).then(function (r) {
     if (failed(r)) { say("files: " + (r && r.error || "no answer")); return; }
-    st.lists[path] = r.files || []; paintPins();
+    st.lists[path] = r.files || []; paintTree();
   });
 }
-function openFile(path) {
-  call("files", { type: "open_view", kind: "file", path: path }).then(function (r) {
-    if (failed(r)) { say("open " + path + ": " + (r && r.error || "no answer")); return; }
-    if (typeof r.id === "string") select(r.id);
+// the files agent holds one watch per shown folder (its `watch_path`), and tells this view with `changed`
+function syncFiles() {
+  var want = wantedWatches(st.filesOn, st.open), have = Object.keys(watching);
+  want.forEach(function (p) {
+    if (watching[p]) return;
+    watching[p] = true;
+    call("files", { type: "watch_path", path: p });
+    readDir(p);
   });
-}
-// folders are read again every tick while open (the files agent's watch is not granted here)
-function refreshDirs() {
-  var paths = [];
-  if (st.filesOpen && st.projOpen) paths.push(ROOT);
-  Object.keys(st.open).forEach(function (p) { if (st.open[p] && st.filesOpen && st.projOpen) paths.push(p); });
-  return Promise.all(paths.map(readDir));
+  have.forEach(function (p) {
+    if (want.indexOf(p) >= 0) return;
+    delete watching[p];
+    call("files", { type: "unwatch_path", path: p });
+  });
+  if (st.filesOn && !filesWatch) {
+    filesWatch = true;
+    var timer = null, dirty = {};
+    fantastic.watch("files", function (ev) {
+      changedDirs(ev, st.lists).forEach(function (p) { dirty[p] = true; });
+      if (timer !== null) return;
+      timer = setTimeout(function () { timer = null; var ps = Object.keys(dirty); dirty = {}; ps.forEach(readDir); }, 150);
+    });
+  }
 }
 function refreshStatus() {
   var ids = Object.keys(st.chats);
@@ -342,15 +459,26 @@ function refreshTree() {
     say("");
     st.root = rs[0]; st.tree = rs[0].tree && !Array.isArray(rs[0].tree) ? rs[0].tree : null;
     st.chats = failed(rs[1]) ? {} : chatSet(rs[1]);
-    paintStrip(); paintTree(); watchChats();
+    paintStrip(); paint(); watchChats();
   });
 }
 function tick() {
   if (st.busy) return; st.busy = true;
-  var p = (st.tick++ % 2 === 0 ? refreshTree() : Promise.resolve()).then(refreshStatus).then(refreshDirs);
+  var p = (st.tick++ % 2 === 0 ? refreshTree() : Promise.resolve()).then(refreshStatus);
   p.then(function () { st.busy = false; }, function () { st.busy = false; });
 }
+// the host sends what it kept of the last visit (`restore`), after this view says `ready`
+fantastic.onMessage(function (m) {
+  if (!m || m.type !== "restore") return;
+  var r = restoredState(m.state);
+  st.folded = r.folded; st.open = r.open; st.filesOn = r.filesOn;
+  paint(); syncFiles();
+});
+$("hide").addEventListener("click", function () { post({ type: "hide_tree" }); });
+$("sw").addEventListener("click", function () { setFiles(!st.filesOn); });
+$("filter").addEventListener("input", function () { st.filter = $("filter").value; paintTree(); });
 tick();
 setInterval(tick, 5000);
-paintPins();
+post({ type: "ready" });
+paint();
 </script>

@@ -51,6 +51,7 @@ with `src/tui/e2e/wipe.sh`.
 | E154 `headless_port` | scripted: `--headless --port N --host 127.0.0.1` moves the recorded `web` onto N and serves its page, a restart with no flags reuses N; a `web` with no port picks a free one once, records it and reuses it | #580: embedders boot through the lib | scripted |
 | E155 `store_view` | scripted, browser: a placed `ram_store.tools` shows its rows counted from `tables.rows`, and a real `append` shows in the view with no click (the `appended` event) | #505, #508: the store view | scripted |
 | E156 `scheduler_view` | scripted, browser: a real `scheduler.tools` (create, schedule, tick, unschedule) shows its job, its run and last result in the scheduler view | #507: the scheduler view | scripted |
+| E158 `sidebar_render` | scripted, browser: the left column draws the sidebar view as the one tree widget: kernel strip, header with "Hide the tree", agent rows (root, user, files), the Waiting box hidden when empty, the Files switch shows the project's files inside the tree, a click on an agent row opens its view, the open folders survive a reload, the filter, hide | #608: the one tree widget | scripted |
 
 The `home` group drives the HOME (`_lib/home_live.py`, `HomeRig`): the test-only
 host `fantastic-home-host`, the `fantastic canvas` processes it lists, and Chrome

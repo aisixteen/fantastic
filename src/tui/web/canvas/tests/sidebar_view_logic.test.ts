@@ -19,14 +19,19 @@ interface Pure {
   kernelStrip(root: Obj, peers: Obj[]): Obj[];
   chatSet(reply: Obj): Record<string, boolean>;
   stateOf(status: Obj | undefined, asks: boolean): { kind: string; label: string };
-  treeRows(root: Obj, chats: Record<string, boolean>, folded: Record<string, boolean>, status: Record<string, Obj>, asks: Record<string, boolean>): Obj[];
+  treeRows(root: Obj, chats: Record<string, boolean>, folded: Record<string, boolean>, status: Record<string, Obj>, asks: Record<string, boolean>, files?: Obj): Obj[];
+  filterRows(rows: Obj[], q: string): Obj[];
+  keptState(st: Obj): Obj;
+  restoredState(saved: unknown): Obj;
+  wantedWatches(filesOn: boolean, open: Record<string, boolean>): string[];
+  changedDirs(ev: Obj, lists: Record<string, Obj[]>): string[];
   askers(inq: Obj[]): Record<string, boolean>;
   waitingRows(inq: Obj[], names: Record<string, string>, now: number): Obj[];
   sortedListing(files: Obj[]): Obj[];
   fileRows(lists: Record<string, Obj[]>, open: Record<string, boolean>, path: string, depth: number): Obj[];
 }
 const ctx = vm.createContext({});
-vm.runInContext(`${src.slice(from, to)}\nthis.api = { kernelStrip, chatSet, stateOf, treeRows, askers, waitingRows, sortedListing, fileRows };`, ctx);
+vm.runInContext(`${src.slice(from, to)}\nthis.api = { kernelStrip, chatSet, stateOf, treeRows, filterRows, keptState, restoredState, wantedWatches, changedDirs, askers, waitingRows, sortedListing, fileRows };`, ctx);
 const raw = (ctx as unknown as { api: Pure }).api;
 // the vm's objects are of another realm: compare them as plain JSON
 const plain = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
@@ -116,4 +121,58 @@ test("file rows nest the open folders, listed sorted", () => {
   };
   const rows = plain(raw.fileRows(lists, { src: true }, ".", 2));
   assert.deepEqual(rows.map((r) => [r["path"], r["depth"], r["open"]]), [["docs", 2, false], ["src", 2, true], ["src/kern", 3, false], ["src/main.rs", 3, false], ["f.md", 2, false]]);
+});
+
+const lists = {
+  ".": [{ name: "f.md", path: "f.md", type: "file" }, { name: "src", path: "src", type: "dir" }, { name: ".git", path: ".git", type: "dir" }, { name: "node_modules", path: "node_modules", type: "dir" }],
+  src: [{ name: "main.rs", path: "src/main.rs", type: "file" }],
+};
+
+test("file rows leave out the folders a tree hides (.git, node_modules ...)", () => {
+  const rows = plain(raw.fileRows(lists, {}, ".", 0));
+  assert.deepEqual(rows.map((r) => r["path"]), ["src", "f.md"]);
+  assert.ok(rows.every((r) => r["kind"] === "file"));
+});
+
+test("files show INSIDE the tree, under the files agent, only while the toggle is on", () => {
+  const off = plain(raw.treeRows(tree, {}, {}, {}, {}, { on: false, lists, open: {} }));
+  assert.deepEqual(off.map((r) => r["id"]), ["kernel_state", "user", "files", "coder", "chat1"], "no file rows with the toggle off");
+  const on = plain(raw.treeRows(tree, {}, {}, {}, {}, { on: true, lists, open: { src: true } }));
+  assert.deepEqual(on.map((r) => r["id"] ?? r["path"]), ["kernel_state", "user", "files", "src", "src/main.rs", "f.md", "coder", "chat1"]);
+  assert.deepEqual(on.filter((r) => r["kind"] === "file").map((r) => r["depth"]), [3, 4, 3], "one level below the files agent");
+  assert.equal(on.find((r) => r["id"] === "files")!["foldable"], true, "the files agent folds over its rows though it has no agent children");
+});
+
+test("folding the files agent hides its file rows and counts them", () => {
+  const rows = plain(raw.treeRows(tree, {}, { files: true }, {}, {}, { on: true, lists, open: {} }));
+  assert.deepEqual(rows.map((r) => r["id"] ?? r["path"]), ["kernel_state", "user", "files", "coder", "chat1"]);
+  assert.equal(rows.find((r) => r["id"] === "files")!["below"], 2);
+});
+
+test("the filter keeps the matches and the branch that leads to them", () => {
+  const rows = plain(raw.treeRows(tree, {}, {}, {}, {}, { on: true, lists, open: { src: true } }));
+  assert.deepEqual(plain(raw.filterRows(rows, "main")).map((r) => r["id"] ?? r["path"]), ["kernel_state", "user", "files", "src", "src/main.rs"], "a match keeps the rows above it, not its siblings");
+  assert.equal(raw.filterRows(rows, "  ").length, rows.length, "a blank filter keeps all");
+  assert.deepEqual(plain(raw.filterRows(rows, "CODER")).map((r) => r["id"]), ["kernel_state", "user", "coder"], "case does not matter");
+});
+
+test("what the view keeps across a reload: folded branches, open folders, the files switch", () => {
+  const kept = plain(raw.keptState({ folded: { user: true }, open: { src: true }, filesOn: true, lists: { ".": [] }, selected: "x" }));
+  assert.deepEqual(kept, { folded: { user: true }, open: { src: true }, filesOn: true });
+  assert.deepEqual(plain(raw.restoredState(kept)), kept);
+  assert.deepEqual(plain(raw.restoredState({ folded: { a: true, b: false, c: "yes" }, open: 3, filesOn: "true" })), { folded: { a: true }, open: {}, filesOn: false }, "only what is exactly true comes back");
+  assert.deepEqual(plain(raw.restoredState(null)), { folded: {}, open: {}, filesOn: false });
+});
+
+test("a watch is held on the root and every open folder while files show, none otherwise", () => {
+  assert.deepEqual(plain(raw.wantedWatches(true, { src: true, docs: false })), [".", "src"]);
+  assert.deepEqual(plain(raw.wantedWatches(false, { src: true })), []);
+});
+
+test("a change reads again the folder that holds it, and the folder itself when listed", () => {
+  const held = { ".": [], src: [] };
+  assert.deepEqual(plain(raw.changedDirs({ type: "changed", path: "src/a.rs", kind: "added" }, held)), ["src"]);
+  assert.deepEqual(plain(raw.changedDirs({ type: "changed", path: "src", kind: "modified" }, held)), [".", "src"]);
+  assert.deepEqual(plain(raw.changedDirs({ type: "changed", path: "other/x", kind: "added" }, held)), [], "a folder the view does not list is not read");
+  assert.deepEqual(plain(raw.changedDirs({ type: "watching" }, held)), []);
 });

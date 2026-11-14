@@ -10,8 +10,12 @@ import type { Rec } from "./host_views.ts";
 // it): a zoom or a pan does not move it. The view is the agent's; this is only the place it
 // sits and the grant of the cell that shows it (`cellGrant`, with the view's `"*"` reach
 // written out per agent). No `sidebar` agent (a folder seeded before it): no column.
-// What the view emits (`select {id}`) is heard on its cell's inbox.
-// The open state is not kept: there is no storage in the panel, and no field for it.
+// What the view emits is heard on its cell's inbox (`hearSidebar`): `select {id}` (an agent's cell),
+// `select_file {path}` (the previews that follow the selection), `open_file`/`open_dir {path}` (the
+// canvas's own `open`), `hide_tree`, and `state {state}`: which branches and folders the view has open.
+// The page keeps that state (its own storage, per canvas: the panel has none, and the record has no
+// field for it) and gives it back as `restore {state}` when the view says `ready`: it survives a reload.
+// The kernel strip's `select_kernel {guid}` is heard and left to the host.
 
 /** The host agent whose view this is. */
 export const SIDEBAR_AGENT = "sidebar";
@@ -34,6 +38,74 @@ export interface SidebarColumn {
   dispose(): void;
 }
 
+/** What the page does with each thing the view says (`hearSidebar`). */
+export interface SidebarEars {
+  select(id: string): void;
+  selectPath(path: string): void;
+  open(path: string, dir: boolean): void;
+  hide(): void;
+  /** the view is up: give it what was kept */
+  ready(): void;
+  /** the view's open state, to keep */
+  keep(state: unknown): void;
+}
+
+const text = (v: unknown): string | null => (typeof v === "string" && v !== "" ? v : null);
+
+/** One message the view posted: what it means for the page. Anything else (the view's own echoes, `select_kernel`) is ignored. */
+export function hearSidebar(m: Record<string, unknown>, ears: SidebarEars): void {
+  const id = text(m["id"]);
+  const path = text(m["path"]);
+  switch (m["type"]) {
+    case "select":
+      if (id !== null) ears.select(id);
+      break;
+    case "select_file":
+      if (path !== null) ears.selectPath(path);
+      break;
+    case "open_file":
+    case "open_dir":
+      if (path !== null) ears.open(path, m["type"] === "open_dir");
+      break;
+    case "hide_tree":
+      ears.hide();
+      break;
+    case "ready":
+      ears.ready();
+      break;
+    case "state":
+      ears.keep(m["state"]);
+      break;
+  }
+}
+
+/** The page's own storage of the view's open state, one key per canvas. A browser that refuses storage keeps nothing: the view starts closed. */
+export interface SidebarStore {
+  load(): unknown;
+  save(state: unknown): void;
+}
+
+export function pageStore(key: string, storage: () => Pick<Storage, "getItem" | "setItem"> = () => localStorage): SidebarStore {
+  const name = `fantastic.${key}`;
+  return {
+    load(): unknown {
+      try {
+        const raw = storage().getItem(name);
+        return raw === null ? null : (JSON.parse(raw) as unknown);
+      } catch {
+        return null;
+      }
+    },
+    save(state: unknown): void {
+      try {
+        storage().setItem(name, JSON.stringify(state));
+      } catch {
+        // no storage: nothing kept
+      }
+    },
+  };
+}
+
 /** The cell's `can_call` for the view `rec` declares, `"*"` written out for `ids`; null when it is not an html view. */
 export function sidebarGrant(rec: Rec | undefined, ids: Iterable<string>): Record<string, string[]> | null {
   if (rec === undefined) return null;
@@ -52,6 +124,13 @@ export async function mountSidebarColumn(o: {
   ids: () => Iterable<string>;
   wide: boolean;
   onSelect: (id: string) => void;
+  /** a file the view selects (`select_file {path}`) */
+  onSelectPath?: (path: string) => void;
+  /** a file or folder the view asks to open on the canvas (`open_file`, `open_dir`) */
+  onOpen?: (path: string, dir: boolean) => void;
+  /** the key the view's open state is kept under (one per canvas); the state is not kept without it */
+  storageKey?: string;
+  store?: SidebarStore;
   onPlace?: () => void;
 }): Promise<SidebarColumn | null> {
   const { kernel } = o;
@@ -79,12 +158,26 @@ export async function mountSidebarColumn(o: {
   o.mount.appendChild(el);
 
   const handle = mountHostPanel({ kernel, mount: body, selfId: SIDEBAR_CELL, backend: SIDEBAR_AGENT, close: () => {} }, SIDEBAR_AGENT);
-  const off = kernel.onInbox(SIDEBAR_CELL, (p) => {
-    const m = p as Record<string, unknown>;
-    if (m["type"] === "select" && typeof m["id"] === "string" && m["id"] !== "") o.onSelect(m["id"]);
-    // `select_kernel {guid}`: the host decides; the canvas does nothing yet
-  });
+  const store = o.store ?? (o.storageKey !== undefined ? pageStore(o.storageKey) : undefined);
+  const off = kernel.onInbox(SIDEBAR_CELL, (p) =>
+    hearSidebar(p as Record<string, unknown>, {
+      select: o.onSelect,
+      selectPath: (path) => o.onSelectPath?.(path),
+      open: (path, dir) => o.onOpen?.(path, dir),
+      hide: () => setOpen(false),
+      ready: () => {
+        const state = store?.load();
+        if (state !== null && state !== undefined) kernel.emit(SIDEBAR_CELL, { type: "restore", state } as unknown as Payload);
+      },
+      keep: (state) => store?.save(state),
+    }),
+  );
 
+  const setOpen = (v: boolean): void => {
+    open = v;
+    paint();
+    o.onPlace?.();
+  };
   const place = (): void => {
     o.mount.classList.toggle(BESIDE, wide);
   };
@@ -97,22 +190,14 @@ export async function mountSidebarColumn(o: {
   };
   place();
   paint();
-  toggle.addEventListener("click", () => {
-    open = !open;
-    paint();
-    o.onPlace?.();
-  });
+  toggle.addEventListener("click", () => setOpen(!open));
 
   return {
     el,
     get open(): boolean {
       return open;
     },
-    setOpen(v: boolean): void {
-      open = v;
-      paint();
-      o.onPlace?.();
-    },
+    setOpen,
     setWide(v: boolean): void {
       wide = v;
       place();
