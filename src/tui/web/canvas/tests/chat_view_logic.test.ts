@@ -243,3 +243,17 @@ test("one row with several calls is several entries of ONE run; a cut-off call h
   assert.equal(g.calls[1]!.reply?.includes("read"), true);
   assert.deepEqual(P.groupTitle(g as never), { n: "3 tool calls", verbs: "list, read, files" });
 });
+
+test("calls written with words are a run after the bubble; one reply row answers several calls; a closing done is no run", () => {
+  const out = P.shapeRows([
+    { id: 1, role: "assistant", head: "Listing now. " + call("list") + call("read") },
+    { id: 2, role: "user", head: reply("list") + " " + reply("read") },
+    { id: 3, role: "assistant", head: "All back. " + '<call name="done"></call>' },
+  ]);
+  assert.deepEqual(out.map((x) => x["kind"]), ["msg", "tools", "msg"]);
+  assert.deepEqual([out[0]!["text"], out[2]!["text"]], ["Listing now.", "All back."]);
+  const g = out[1] as unknown as { calls: { verb: string; reply: string | null }[] };
+  assert.deepEqual(g.calls.map((c) => [c.verb, c.reply?.startsWith("[reply to 7")]), [["list", true], ["read", true]]);
+  assert.equal(g.calls[0]!.reply?.includes("read"), false, "each reply keeps only its own part");
+  assert.deepEqual(P.groupTitle(g as never), { n: "2 tool calls", verbs: "list, read" });
+});

@@ -137,7 +137,7 @@ def main() -> bool:
                 await asyncio.sleep(0.5)
             got = await until(pg, lambda g: len(g["user"]) >= before[0] and len(g["tools"]) >= 2) if ok else {}
             info["reloaded"] = got
-            r["7 a reload replays the history"] = bool(got) and any("hello there" in m for m in got["user"]) and len(got["tools"]) == 2 and got["tools"][0]["n"] == "2 tool calls" and got["tools"][1]["n"] == "1 tool call" \
+            r["7 a reload replays the history"] = bool(got) and any("hello there" in m for m in got["user"]) and len(got["tools"]) >= 2 and got["tools"][0]["n"] == "2 tool calls" and not any("[reply to" in m for m in got["user"]) \
                 and any("Both calls are back" in m for m in got["agent"])
             info["history"] = [(x.get("role"), x.get("kind"), x.get("head")) for x in ((await host_call(rig.port, "chat_e157", {"type": "history"})).get("rows") or [])]
             info["page_errors"] = [x for x in pg.logs if "WebGL" not in x][:8]

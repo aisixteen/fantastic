@@ -193,32 +193,42 @@ function monitorOf(text) {
   if (!m) return null;
   return { tag: "monitor " + m[1] + " · job " + m[2] + (m[5] ? ' "' + m[5] + '"' : "") + (m[6] ? " · ended" : ""), lines: f.text.slice(m[0].length).replace(/\s+$/, "") };
 }
-// a row that is a tool call (assistant, calls only) or its reply (the next user turn)
+// the calls a text makes: one entry each (a cut-off call head still counts one)
+function callsOf(text) {
+  var calls = [];
+  (text.match(CALLS) || []).forEach(function (blk) {
+    var b = CALL_HEAD.exec(blk);
+    if (b) calls.push({ target: b[2] || b[1], verb: b[3] || "", args: blk });
+  });
+  var c = calls.length === 0 ? CALL_HEAD.exec(text) : null;
+  if (c) calls.push({ target: c[2] || c[1], verb: c[3] || "", args: text });
+  return calls;
+}
+// a row that is a tool call (assistant, calls only) or its replies (the next user turn: one or several `[reply to …]`)
 function toolOf(role, text) {
   if (role === "assistant" && words(text) === "") {
-    // one row may carry several calls: each is an entry of the run (a cut-off head holds the first)
-    var calls = [];
-    (text.match(CALLS) || []).forEach(function (blk) {
-      var b = CALL_HEAD.exec(blk);
-      if (b) calls.push({ target: b[2] || b[1], verb: b[3] || "", args: blk });
-    });
-    var c = calls.length === 0 ? CALL_HEAD.exec(text) : null;
-    if (c) calls.push({ target: c[2] || c[1], verb: c[3] || "", args: text });
+    var calls = callsOf(text);
     if (calls.length > 0) return { calls: calls };
   }
-  if (role === "user") {
-    var r = REPLY_HEAD.exec(text);
-    if (r) return { reply: { label: r[1], text: text } };
+  if (role === "user" && REPLY_HEAD.test(text)) {
+    var replies = [];
+    text.split(/(?=\[reply to \d+ · )/).forEach(function (part) {
+      var r = REPLY_HEAD.exec(part);
+      if (r) replies.push({ label: r[1], text: part.replace(/\s+$/, "") });
+    });
+    return { replies: replies };
   }
   return null;
 }
 function newGroup() { return { kind: "tools", calls: [] }; }
 function addTool(g, t) {
   if (t.calls) { t.calls.forEach(function (c) { g.calls.push({ id: "", target: c.target, verb: c.verb, args: c.args, reply: null }); }); return; }
-  var open = null;
-  for (var i = 0; i < g.calls.length; i++) if (g.calls[i].reply === null) { open = g.calls[i]; break; }
-  if (open) open.reply = t.reply.text;
-  else g.calls.push({ id: "", target: "", verb: t.reply.label, args: "", reply: t.reply.text });
+  t.replies.forEach(function (rp) {
+    var open = null;
+    for (var i = 0; i < g.calls.length; i++) if (g.calls[i].reply === null) { open = g.calls[i]; break; }
+    if (open) open.reply = rp.text;
+    else g.calls.push({ id: "", target: "", verb: rp.label, args: "", reply: rp.text });
+  });
 }
 function groupTitle(g) {
   var verbs = [];
@@ -329,6 +339,9 @@ function shapeRows(rows, thoughts, texts) {
     } else {
       var w = words(head);
       if (w !== "") out.push({ kind: "msg", role: "assistant", sender: "", text: w });
+      // the calls written in the same message are a run of their own, after its words
+      var written = w !== "" ? callsOf(head).filter(function (c) { return c.target !== "done"; }) : [];
+      if (written.length > 0) { group = newGroup(); out.push(group); addTool(group, { calls: written }); }
     }
   });
   return out;
