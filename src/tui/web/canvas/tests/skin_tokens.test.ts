@@ -264,7 +264,7 @@ test("the stock skins compile: day and dark are web, glass is native; dark's val
   assert.equal(dark.skin.backdrop, "web");
   assert.equal(glass.skin.backdrop, "native");
   assert.equal(dark.skin.css.size, SKIN_SCHEMA.length);
-  assert.equal(SKIN_SCHEMA.length, 100);
+  assert.equal(SKIN_SCHEMA.length, 103);
   const css = (p: string): string | undefined => dark.skin.css.get(p);
   assert.equal(css("color.surface.bezel"), "rgb(15 15 25 / 0.88)");
   assert.equal(css("color.page.bg"), "rgb(6 6 12)");

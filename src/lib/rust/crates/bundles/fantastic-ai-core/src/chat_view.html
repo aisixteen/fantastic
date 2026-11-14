@@ -8,6 +8,8 @@
 --fc-color-line-faint:rgb(0 0 0 / 0.06);
 --fc-color-line-strong:rgb(0 0 0 / 0.18);
 --fc-color-status-error:rgb(179 38 30);
+--fc-color-status-error-line:rgb(179 38 30 / 0.45);
+--fc-color-status-error-surface:rgb(179 38 30 / 0.12);
 --fc-color-status-ok:rgb(27 116 70);
 --fc-color-status-warn:rgb(143 82 0);
 --fc-color-status-warn-field:rgb(255 255 255 / 0.6);
@@ -16,6 +18,7 @@
 --fc-color-status-warn-on:rgb(255 255 255);
 --fc-color-status-warn-surface:rgb(143 82 0 / 0.12);
 --fc-color-surface-bubble:rgb(255 255 255 / 0.6);
+--fc-color-surface-bubble-user:rgb(0 0 0 / 0.1);
 --fc-color-surface-button:rgb(0 0 0 / 0.05);
 --fc-color-surface-code:rgb(0 0 0 / 0.045);
 --fc-color-surface-field:rgb(0 0 0 / 0.06);
@@ -43,34 +46,58 @@
 }
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
-body{display:flex;flex-direction:column;min-height:0;overflow:hidden;background:transparent;color:var(--fc-color-text-primary);font:14px/1.5 var(--fc-font-family-sans)}
+body{--pad:max(24px, calc((100% - 780px) / 2));display:flex;flex-direction:column;min-height:0;overflow:hidden;background:transparent;color:var(--fc-color-text-primary);font:14px/1.5 var(--fc-font-family-sans)}
 button{font:inherit;color:inherit;cursor:pointer}
 button:focus-visible,input:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--fc-color-accent-base);outline-offset:2px}
-.head{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:10px 14px;border-bottom:1px solid var(--fc-color-line-faint)}
-.head .name{font-size:15px;font-weight:600;letter-spacing:-.01em}
-.head .tag{font:11px/18px var(--fc-font-family-mono);padding:0 7px;border-radius:var(--fc-radius-key);color:var(--fc-color-text-muted);background:var(--fc-color-surface-well)}
-.head .model{margin-left:auto;font:12px/1 var(--fc-font-family-mono);color:var(--fc-color-text-subtle)}
-.head .stop{height:30px;padding:0 12px;border:1px solid var(--fc-color-status-error);border-radius:var(--fc-radius-card);background:transparent;color:var(--fc-color-status-error);font-weight:600}
+.head{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:14px var(--pad);border-bottom:1px solid var(--fc-color-line-button)}
+.avatar{position:relative;flex:none;width:44px;height:44px;border-radius:var(--fc-radius-panel);background:var(--fc-color-surface-well);color:var(--fc-color-text-muted);display:flex;align-items:center;justify-content:center}
+.avatar svg{width:28px;height:28px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.badge{position:absolute;right:-5px;bottom:-5px;width:18px;height:18px;border-radius:var(--fc-radius-pill);box-shadow:0 0 0 2px var(--fc-color-surface-raised);background:var(--fc-color-text-subtle);color:var(--fc-color-accent-on);font:700 11px/18px var(--fc-font-family-sans);text-align:center}
+.badge[hidden]{display:none}
+.badge[data-state=asks]{background:var(--fc-color-status-warn)}
+.badge[data-state=failed]{background:var(--fc-color-status-error)}
+.badge[data-state=done]{background:var(--fc-color-status-ok)}
+.badge[data-state=working]{background:transparent;border:2px solid var(--fc-color-line-strong);border-top-color:var(--fc-color-accent-base);animation:spin 900ms linear infinite}
+.titles{flex:1 1 160px;min-width:0;display:flex;flex-direction:column;gap:3px}
+.titles .line{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
+.head .name{font-size:18px;font-weight:600;letter-spacing:-.01em;line-height:1.3}
+.head .tag{font:11px/18px var(--fc-font-family-mono);padding:0 7px;border-radius:var(--fc-radius-control);color:var(--fc-color-text-muted);background:var(--fc-color-surface-well)}
+.state{font-size:11px;font-weight:600;line-height:18px;padding:0 8px;border-radius:var(--fc-radius-pill);color:var(--fc-color-text-muted);background:var(--fc-color-surface-well);box-shadow:inset 0 0 0 1px var(--fc-color-line-button)}
+.state[hidden]{display:none}
+.state[data-state=asks]{color:var(--fc-color-status-warn);background:var(--fc-color-status-warn-surface);box-shadow:inset 0 0 0 1px var(--fc-color-status-warn-line)}
+.state[data-state=failed]{color:var(--fc-color-status-error);background:var(--fc-color-status-error-surface);box-shadow:inset 0 0 0 1px var(--fc-color-status-error-line)}
+.chip{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 12px;border:1px solid var(--fc-color-line-button);border-radius:var(--fc-radius-card);min-width:0}
+.chip[hidden]{display:none}
+.chip .m{font:13px/1 var(--fc-font-family-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip .p{font-size:12px;color:var(--fc-color-text-subtle);white-space:nowrap}
+.head .stop{height:36px;padding:0 14px;border:1px solid var(--fc-color-status-error-line);border-radius:var(--fc-radius-card);background:var(--fc-color-status-error-surface);color:var(--fc-color-status-error);font-weight:600}
 .head .stop[hidden]{display:none}
-.dialog{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;display:flex;flex-direction:column;gap:10px;padding:14px}
+.dialog{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;display:flex;flex-direction:column;gap:14px;padding:16px var(--pad) 18px;line-height:1.55}
+.earlier{align-self:center;height:28px;padding:0 12px;border:0;border-radius:var(--fc-radius-pill);background:var(--fc-color-surface-button);color:var(--fc-color-text-subtle);font-size:12px}
+.earlier[hidden]{display:none}
+.earlier:disabled{opacity:.5;cursor:default}
 .who{display:flex;flex-direction:column;gap:3px;max-width:85%}
 .who.user{align-self:flex-end;align-items:flex-end}
 .who.assistant{align-self:flex-start;align-items:flex-start}
 .meta{font:11px/1.4 var(--fc-font-family-mono);color:var(--fc-color-text-subtle)}
 .msg{padding:8px 12px;border-radius:var(--fc-radius-bubble);white-space:pre-wrap;word-wrap:break-word;box-shadow:var(--fc-shadow-bubble);background:var(--fc-color-surface-bubble)}
-.who.user .msg{background:var(--fc-color-surface-field)}
+.msg code{font:12px var(--fc-font-family-mono);padding:1px 5px;border-radius:var(--fc-radius-chip);background:var(--fc-color-surface-well)}
+.who.user .msg{background:var(--fc-color-surface-bubble-user)}
 .msg.not-sent{opacity:.5;text-decoration:line-through}
 .who.queued{max-width:100%;opacity:.6;font-style:italic}
-.queue{flex:none;display:flex;flex-direction:column;gap:6px;padding:0 14px}
+.queue{flex:none;display:flex;flex-direction:column;gap:6px;padding:0 var(--pad)}
 .queue:empty{display:none}
 .notice{align-self:center;max-width:92%;padding:3px 10px;border-radius:var(--fc-radius-pill);font-size:12px;color:var(--fc-color-text-muted);background:var(--fc-color-surface-well);text-align:center;white-space:pre-wrap}
 .notice.warn{color:var(--fc-color-status-warn);background:var(--fc-color-status-warn-surface)}
 .notice.error{color:var(--fc-color-status-error);box-shadow:inset 0 0 0 1px var(--fc-color-status-error)}
 .notice.report{align-self:stretch;text-align:left;border-radius:var(--fc-radius-card);font:11.5px/1.45 var(--fc-font-family-mono)}
-details.tools,details.think{align-self:flex-start;width:85%;border-radius:var(--fc-radius-card);background:var(--fc-color-surface-code);box-shadow:inset 0 0 0 1px var(--fc-color-line-faint);font-size:12px}
-details.tools>summary,details.think>summary{display:flex;align-items:center;gap:8px;min-height:32px;padding:0 12px;cursor:pointer;list-style-position:inside;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-details.tools .n{font-weight:500}
-details.tools .verbs{font-family:var(--fc-font-family-mono);color:var(--fc-color-text-subtle);overflow:hidden;text-overflow:ellipsis}
+details.tools,details.think{align-self:flex-start;width:85%;border-radius:var(--fc-radius-card);background:var(--fc-color-surface-code);box-shadow:inset 0 0 0 1px var(--fc-color-line-button);font-size:12px}
+details.tools>summary,details.think>summary{display:flex;align-items:center;gap:8px;min-height:34px;padding:0 12px;cursor:pointer;list-style:none;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+details.tools>summary::-webkit-details-marker,details.think>summary::-webkit-details-marker{display:none}
+details.tools>summary::before,details.think>summary::before{content:"";flex:none;width:6px;height:6px;margin:0 3px 0 1px;border-right:1.5px solid var(--fc-color-text-subtle);border-bottom:1.5px solid var(--fc-color-text-subtle);transform:rotate(45deg);transition:transform 120ms var(--fc-easing-in-out)}
+details.tools:not([open])>summary::before,details.think:not([open])>summary::before{transform:rotate(-45deg)}
+details.tools .n{font-weight:500;flex:none}
+details.tools .verbs{flex:1;min-width:0;font-family:var(--fc-font-family-mono);color:var(--fc-color-text-subtle);overflow:hidden;text-overflow:ellipsis}
 details.think>summary{font-style:italic;color:var(--fc-color-text-muted)}
 details.think.live>summary{animation:pulse var(--fc-duration-think) var(--fc-easing-in-out) infinite}
 .think .body{padding:0 12px 10px;white-space:pre-wrap;color:var(--fc-color-text-muted);max-height:320px;overflow:auto}
@@ -81,34 +108,59 @@ details.think.live>summary{animation:pulse var(--fc-duration-think) var(--fc-eas
 .card{align-self:stretch;display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:var(--fc-radius-card);background:var(--fc-color-surface-raised);box-shadow:inset 0 0 0 1px var(--fc-color-line-faint)}
 .card .k{font:600 10.5px var(--fc-font-family-mono);letter-spacing:.1em;text-transform:uppercase;color:var(--fc-color-text-subtle)}
 .card .id{font:12px var(--fc-font-family-mono)}
-.inq{align-self:stretch;display:flex;flex-direction:column;gap:10px;padding:14px;border-radius:var(--fc-radius-bubble);background:var(--fc-color-status-warn-surface);box-shadow:inset 0 0 0 1px var(--fc-color-status-warn-line)}
+.inq{align-self:stretch;display:flex;flex-direction:column;gap:12px;padding:16px;border-radius:var(--fc-radius-bubble);background:var(--fc-color-status-warn-surface);box-shadow:inset 0 0 0 1px var(--fc-color-status-warn-line)}
 .inq .k{font:600 11px var(--fc-font-family-mono);letter-spacing:.5px;text-transform:uppercase;color:var(--fc-color-status-warn)}
-.inq .q{font-size:15px;font-weight:600;white-space:pre-wrap}
+.inq .q{font-size:15px;line-height:1.4;font-weight:600;white-space:pre-wrap}
 .inq .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-.inq button{min-height:34px;padding:0 14px;border:1px solid var(--fc-color-line-strong);border-radius:var(--fc-radius-card);background:var(--fc-color-surface-raised);font-weight:500}
+.inq button{min-height:40px;padding:0 14px;border:1px solid var(--fc-color-line-strong);border-radius:var(--fc-radius-card);background:var(--fc-color-surface-raised);font-size:13px;font-weight:500}
 .inq button.primary{background:var(--fc-color-status-warn);border-color:var(--fc-color-status-warn);color:var(--fc-color-status-warn-on);font-weight:600}
-.inq input[type=text]{flex:1;min-width:140px;height:34px;padding:0 10px;border:1px solid var(--fc-color-status-warn-line);border-radius:var(--fc-radius-card);background:var(--fc-color-status-warn-field);font:inherit;color:inherit}
+.inq .free{flex:1 1 100%;display:flex;align-items:center;gap:6px;min-width:0;padding:4px 4px 4px 12px;border:1px solid var(--fc-color-line-strong);border-radius:var(--fc-radius-card);background:var(--fc-color-surface-raised)}
+.inq .free:focus-within{box-shadow:var(--fc-shadow-focus)}
+.inq .free input[type=text]{flex:1;min-width:0;height:32px;padding:0;border:0;outline:none;background:transparent;font:inherit;color:inherit}
+.inq .free button{min-height:32px;padding:0 12px;border:0;border-radius:var(--fc-radius-control);background:var(--fc-color-accent-deep);color:var(--fc-color-accent-on);font-weight:600}
 .inq .st{font-size:12px;color:var(--fc-color-status-warn-muted)}
 .inq.answered{opacity:.75}
-.foot{flex:none;display:flex;align-items:center;gap:10px;min-height:28px;padding:4px 14px;border-top:1px solid var(--fc-color-line-faint);font:11px var(--fc-font-family-mono);color:var(--fc-color-text-subtle)}
+.foot{flex:none;display:flex;align-items:center;gap:10px;min-height:28px;padding:4px var(--pad);font:11px var(--fc-font-family-mono);color:var(--fc-color-text-subtle)}
 .pill{padding:1px 9px;border-radius:var(--fc-radius-pill);background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
 .pill[data-phase=queued]{color:var(--fc-color-status-warn);background:var(--fc-color-status-warn-surface)}
 .pill[data-phase=thinking],.pill[data-phase=tool_calling],.pill[data-phase=streaming]{color:var(--fc-color-status-ok);animation:pulse var(--fc-duration-pulse) var(--fc-easing-in-out) infinite}
-.foot .clear{margin-left:auto;border:0;background:transparent;color:var(--fc-color-text-subtle);padding:2px 8px;border-radius:var(--fc-radius-control)}
+.foot .usage{margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.foot .clear{border:0;background:transparent;color:var(--fc-color-text-subtle);padding:2px 8px;border-radius:var(--fc-radius-control)}
 .foot .clear:hover{background:var(--fc-color-surface-button)}
-.input{flex:none;display:flex;align-items:flex-end;gap:8px;padding:8px 14px 12px}
-.input textarea{flex:1;min-width:0;min-height:38px;max-height:140px;resize:none;padding:8px 12px;border:0;border-radius:var(--fc-radius-panel);background:var(--fc-color-surface-field);box-shadow:inset 0 0 0 1px var(--fc-color-line-button);font:inherit;color:inherit}
-.input textarea:focus{box-shadow:var(--fc-shadow-focus);outline:none}
-.input .send{height:38px;padding:0 16px;border:0;border-radius:var(--fc-radius-panel);background:var(--fc-color-accent-deep);color:var(--fc-color-accent-on);font-weight:600}
-.input .send:hover{background:var(--fc-color-accent-deep-hover)}
+.input{flex:none;padding:0 var(--pad) 16px}
+.field{display:flex;align-items:flex-end;gap:8px;padding:4px;border-radius:var(--fc-radius-panel);background:var(--fc-color-surface-field);box-shadow:inset 0 0 0 1px var(--fc-color-line-button)}
+.field:focus-within{box-shadow:var(--fc-shadow-focus)}
+.field textarea{flex:1;min-width:0;min-height:36px;max-height:140px;resize:none;padding:8px 8px;border:0;outline:none;background:transparent;font:inherit;color:inherit}
+.field .send{flex:none;height:36px;padding:0 16px;border:0;border-radius:var(--fc-radius-card);background:var(--fc-color-accent-deep);color:var(--fc-color-accent-on);font-weight:600}
+.field .send:hover{background:var(--fc-color-accent-deep-hover)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (max-width:520px){
+body{--pad:16px;font-size:15px}
+.head .name{font-size:16px}
+.chip{height:44px}
+.head .stop,.field .send{height:44px}
+.field textarea{min-height:44px;font-size:16px}
+details.tools>summary,details.think>summary{min-height:40px}
+.inq .q{font-size:16px}
+.inq .row{flex-direction:column;align-items:stretch}
+.inq button{min-height:44px;text-align:left}
+.inq .free{padding:4px 4px 4px 12px}
+.inq .free input[type=text]{height:44px;font-size:16px}
+.inq .free button{min-height:44px;text-align:center}
+}
 @media (prefers-reduced-motion:reduce){*{animation:none!important}}
 </style>
-<div class="head"><span class="name" id="name"></span><span class="tag" id="tag"></span><span class="model" id="model"></span><button class="stop" id="stop" type="button" hidden>Stop</button></div>
-<div class="dialog" id="dialog"></div>
+<div class="head">
+<div class="avatar" aria-hidden="true"><svg viewBox="0 0 28 28"><rect x="5" y="8" width="18" height="14" rx="4"/><path d="M14 8V4"/><circle cx="10.5" cy="15" r="1.2"/><circle cx="17.5" cy="15" r="1.2"/><path d="M11 19h6"/></svg><span class="badge" id="badge" data-state="idle" hidden></span></div>
+<div class="titles"><div class="line"><span class="name" id="name"></span><span class="tag" id="tag"></span><span class="state" id="state" data-state="idle" hidden></span></div></div>
+<span class="chip" id="model" title="Chat settings: provider and model" hidden><span class="m" id="modelname"></span><span class="p" id="prov"></span></span>
+<button class="stop" id="stop" type="button" hidden>Stop</button>
+</div>
+<div class="dialog" id="dialog"><button class="earlier" id="earlier" type="button" hidden></button></div>
 <div class="queue" id="queue"></div>
-<div class="foot"><span class="pill" id="pill" data-phase="idle">idle</span><span id="hint"></span><span id="others"></span><button class="clear" id="clear" type="button" title="start a new thread: nothing is deleted, the earlier one stays recallable">clear</button></div>
-<div class="input"><textarea id="text" rows="1" placeholder="Message" aria-label="Message"></textarea><button class="send" id="send" type="button">Send</button></div>
+<div class="foot"><span class="pill" id="pill" data-phase="idle" data-reason="">idle</span><span id="hint"></span><span id="others"></span><span class="usage" id="usage"></span><button class="clear" id="clear" type="button" title="start a new thread: nothing is deleted, the earlier one stays recallable">clear</button></div>
+<div class="input"><div class="field"><textarea id="text" rows="1" placeholder="Message" aria-label="Message"></textarea><button class="send" id="send" type="button">Send</button></div></div>
 <script>
 // pure
 var FROM = /^\[from ([^\]\s·]+)[^\]]*\]\s*/;
@@ -120,6 +172,7 @@ var THINK = /<think>[\s\S]*?(?:<\/think>|$)/g;
 var CALL_HEAD = /<call name="([^"]+)">(?:[\s\S]*?<target_id>([^<]*)<\/target_id>)?(?:[\s\S]*?<type>([^<]*)<\/type>)?/;
 var REPLY_HEAD = /^\[reply to \d+ · ([^\]·]+?)(?: · [^\]]*)?\]/;
 var MONITOR_HEAD = /^\[monitor (\d+) · job (\d+) · from (.+?) call (\S+?)(?: · "([^"]*)")?( · job ended)?\]\s*/;
+var ANSWER = /^\[reply to \d+ · user inquiry[^\]]*\]\s*<answer>([\s\S]*?)(?:<\/answer>|$)/;
 var MALFORMED = "[malformed call — nothing ran]";
 
 function words(t) { return t.replace(THINK, "").replace(CALLS, "").replace(OPEN_CALL, "").trim(); }
@@ -132,7 +185,10 @@ function parseFrom(text) {
 function personText(text) {
   var spot = SPOT.exec(text);
   var t = (spot ? text.slice(0, spot.index) : text).replace(SETUP_BLOCK, "");
-  return parseFrom(t);
+  var f = parseFrom(t);
+  // the person's answer to an inquiry arrives as a message: it shows as the answer itself
+  var a = ANSWER.exec(f.text);
+  return a ? { sender: f.sender, text: a[1].trim() } : f;
 }
 function monitorOf(text) {
   var f = parseFrom(text);
@@ -141,25 +197,42 @@ function monitorOf(text) {
   if (!m) return null;
   return { tag: "monitor " + m[1] + " · job " + m[2] + (m[5] ? ' "' + m[5] + '"' : "") + (m[6] ? " · ended" : ""), lines: f.text.slice(m[0].length).replace(/\s+$/, "") };
 }
-// a row that is a tool call (assistant, calls only) or its reply (the next user turn)
+// the calls a text makes: one entry each (a cut-off call head still counts one)
+function callsOf(text) {
+  var calls = [];
+  (text.match(CALLS) || []).forEach(function (blk) {
+    var b = CALL_HEAD.exec(blk);
+    if (b) calls.push({ target: b[2] || b[1], verb: b[3] || "", args: blk });
+  });
+  var c = calls.length === 0 ? CALL_HEAD.exec(text) : null;
+  if (c) calls.push({ target: c[2] || c[1], verb: c[3] || "", args: text });
+  return calls;
+}
+// a row that is a tool call (assistant, calls only) or its replies (the next user turn: one or several `[reply to …]`)
 function toolOf(role, text) {
   if (role === "assistant" && words(text) === "") {
-    var c = CALL_HEAD.exec(text);
-    if (c) return { call: { target: c[2] || c[1], verb: c[3] || "", args: text } };
+    var calls = callsOf(text);
+    if (calls.length > 0) return { calls: calls };
   }
-  if (role === "user") {
-    var r = REPLY_HEAD.exec(text);
-    if (r) return { reply: { label: r[1], text: text } };
+  if (role === "user" && REPLY_HEAD.test(text)) {
+    var replies = [];
+    text.split(/(?=\[reply to \d+ · )/).forEach(function (part) {
+      var r = REPLY_HEAD.exec(part);
+      if (r) replies.push({ label: r[1], text: part.replace(/\s+$/, "") });
+    });
+    return { replies: replies };
   }
   return null;
 }
 function newGroup() { return { kind: "tools", calls: [] }; }
 function addTool(g, t) {
-  if (t.call) { g.calls.push({ id: t.call.id || "", target: t.call.target, verb: t.call.verb, args: t.call.args, reply: null }); return; }
-  var open = null;
-  for (var i = 0; i < g.calls.length; i++) if (g.calls[i].reply === null) { open = g.calls[i]; break; }
-  if (open) open.reply = t.reply.text;
-  else g.calls.push({ id: "", target: "", verb: t.reply.label, args: "", reply: t.reply.text });
+  if (t.calls) { t.calls.forEach(function (c) { g.calls.push({ id: "", target: c.target, verb: c.verb, args: c.args, reply: null }); }); return; }
+  t.replies.forEach(function (rp) {
+    var open = null;
+    for (var i = 0; i < g.calls.length; i++) if (g.calls[i].reply === null) { open = g.calls[i]; break; }
+    if (open) open.reply = rp.text;
+    else g.calls.push({ id: "", target: "", verb: rp.label, args: "", reply: rp.text });
+  });
 }
 function groupTitle(g) {
   var verbs = [];
@@ -187,13 +260,64 @@ function collapseReports(rows) {
   });
   return out;
 }
-// history rows (+ the thoughts kept on their rows: id -> {text, cut}) -> what the transcript shows, in order
-function shapeRows(rows, thoughts) {
+// a turn that ended with one of these reasons is not a failure
+var CALM = { "": 1, ok: 1, awaiting: 1, nothing_to_await: 1 };
+// the agent's state, as the header shows it: working while a turn runs, asks you while an
+// inquiry is open, failed when the last turn ended with a failure reason, done after a good one
+function stateOf(phase, reason, asks) {
+  if (asks > 0) return "asks";
+  if (phase === "thinking" || phase === "streaming" || phase === "tool_calling" || phase === "queued") return "working";
+  if (!CALM[reason || ""]) return "failed";
+  return reason === "ok" ? "done" : "idle";
+}
+// "asks you · 12 min": the age of the oldest open inquiry (`ts` is seconds since the epoch)
+function inquiryAge(ts, nowMs) {
+  if (typeof ts !== "number" || !(ts > 0)) return "";
+  var min = Math.floor((nowMs / 1000 - ts) / 60);
+  if (min < 1) return "just now";
+  return min < 60 ? min + " min" : Math.floor(min / 60) + " h";
+}
+// the meta line over a message from another agent
+function metaOf(sender, name) { return sender && sender !== "user" ? sender + " to " + name : ""; }
+// `code` spans of a text, in order: [{text, code}]
+function codeSpans(text) {
+  var out = [], re = /`([^`\n]+)`/g, at = 0, m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > at) out.push({ text: text.slice(at, m.index), code: false });
+    out.push({ text: m[1], code: true });
+    at = m.index + m[0].length;
+  }
+  if (at < text.length) out.push({ text: text.slice(at), code: false });
+  return out;
+}
+// tokens a row's provider call used, from the usage the row keeps in its attributes
+function tokensOf(rows) {
+  var n = 0;
+  rows.forEach(function (m) {
+    var a = m && m.attributes, u = a && a.usage;
+    if (u && typeof u === "object") ["input", "output", "cache_read", "cache_write"].forEach(function (k) { if (typeof u[k] === "number") n += u[k]; });
+  });
+  return n;
+}
+function fmtTokens(n) {
+  if (n < 1000) return n + " tok";
+  if (n < 100000) return (Math.round(n / 100) / 10) + "k tok";
+  return Math.round(n / 1000) + "k tok";
+}
+// a digest cuts a long message at 120 characters; the loaded head holds it whole
+var CUT = 120;
+function bodyOf(m, texts) {
+  var head = typeof m.head === "string" ? m.head : "";
+  var full = texts && typeof m.id === "number" ? texts.get(m.id) : undefined;
+  return typeof m.bytes === "number" && m.bytes > CUT && typeof full === "string" ? full : head;
+}
+// history rows (+ the thoughts kept on their rows: id -> {text, cut}; + the whole texts: id -> text) -> what the transcript shows, in order
+function shapeRows(rows, thoughts, texts) {
   var out = [];
   var group = null;
   var shown = cardRows(rows);
   collapseReports(rows).forEach(function (m) {
-    var role = String(m.role || ""), head = typeof m.head === "string" ? m.head : "", kind = m.kind || "";
+    var role = String(m.role || ""), head = bodyOf(m, texts), kind = m.kind || "";
     if (kind === "embed" || kind === "unembed") {
       group = null;
       if (kind === "embed" && shown[head] === m.id) out.push({ kind: "card", agent: head });
@@ -219,6 +343,9 @@ function shapeRows(rows, thoughts) {
     } else {
       var w = words(head);
       if (w !== "") out.push({ kind: "msg", role: "assistant", sender: "", text: w });
+      // the calls written in the same message are a run of their own, after its words
+      var written = w !== "" ? callsOf(head).filter(function (c) { return c.target !== "done"; }) : [];
+      if (written.length > 0) { group = newGroup(); out.push(group); addTool(group, { calls: written }); }
     }
   });
   return out;
@@ -226,11 +353,13 @@ function shapeRows(rows, thoughts) {
 // the newest `keep` history rows, oldest first, over every page (`next` is the cursor)
 async function historyTail(call, keep) {
   keep = keep || 300;
-  var win = [], bytes = 0, lastId = 0, args = { type: "history" };
+  var win = [], bytes = 0, lastId = 0, seen = 0, tokens = 0, args = { type: "history" };
   for (var page = 0; page < 1000; page++) {
     var r = await call(args);
     if (r === null || r === undefined) break;
     var rows = Array.isArray(r.rows) ? r.rows : [];
+    seen += rows.length;
+    tokens += tokensOf(rows);
     rows.forEach(function (m) {
       if (typeof m.bytes === "number") bytes += m.bytes;
       if (typeof m.id === "number") lastId = Math.max(lastId, m.id);
@@ -240,24 +369,37 @@ async function historyTail(call, keep) {
     if (typeof r.next !== "number") break;
     args = { type: "history", after: r.next };
   }
-  return { rows: win, bytes: bytes, lastId: lastId };
+  return { rows: win, bytes: bytes, lastId: lastId, earlier: seen - win.length, tokens: tokens };
 }
-// the thoughts kept on rows (the `rows` verb), from the head, following `next`
-async function keptThoughts(call, pageSize) {
-  var out = new Map(), after;
+// the loaded head (the `rows` verb), from its first row, following `next`
+async function readHead(call, pageSize) {
+  var out = [], after;
   for (var page = 0; page < 20; page++) {
     var args = { type: "rows", limit: pageSize || 200 };
     if (after !== undefined) args.after = after;
     var r = await call(args);
     var got = r && Array.isArray(r.rows) ? r.rows : [];
-    got.forEach(function (x) {
-      if (typeof x.id === "number" && typeof x.thinking === "string") out.set(x.id, { text: x.thinking, cut: typeof x.thinking_cut === "number" ? x.thinking_cut : 0 });
-    });
+    out = out.concat(got);
     if (!r || r.next === null || r.next === undefined) break;
     after = r.next;
   }
   return out;
 }
+// the thoughts kept on rows: id -> {text, cut}
+function thoughtsOf(rows) {
+  var out = new Map();
+  rows.forEach(function (x) {
+    if (typeof x.id === "number" && typeof x.thinking === "string") out.set(x.id, { text: x.thinking, cut: typeof x.thinking_cut === "number" ? x.thinking_cut : 0 });
+  });
+  return out;
+}
+// the whole texts of rows: id -> text
+function textsOf(rows) {
+  var out = new Map();
+  rows.forEach(function (x) { if (typeof x.id === "number" && typeof x.content === "string") out.set(x.id, x.content); });
+  return out;
+}
+async function keptThoughts(call, pageSize) { return thoughtsOf(await readHead(call, pageSize)); }
 // end pure
 
 (function () {
@@ -277,10 +419,18 @@ async function keptThoughts(call, pageSize) {
   var tail = null; // the open tool group: {g, box}
   function push(node) { tail = null; dialog.appendChild(node); return node; }
   function notice(txt, cls) { return push(el("div", "notice" + (cls ? " " + cls : ""), txt)); }
+  var title = AGENT; // the agent's shown name, once reflect has answered
+  // a message's words: `code` spans of an agent's text become chips; the text itself stays whole
+  function fill(node, txt, role) {
+    node.textContent = "";
+    if (role !== "assistant") { node.textContent = txt; return; }
+    codeSpans(txt).forEach(function (sp) { node.append(sp.code ? el("code", "", sp.text) : document.createTextNode(sp.text)); });
+  }
   function bubble(role, txt, sender) {
-    var w = el("div", "who " + role);
+    var w = el("div", "who " + role), m = el("div", "msg");
     if (sender) w.appendChild(el("div", "meta", sender));
-    w.appendChild(el("div", "msg", txt));
+    fill(m, txt, role);
+    w.appendChild(m);
     return w;
   }
 
@@ -329,7 +479,7 @@ async function keptThoughts(call, pageSize) {
       else if (it.kind === "card") push(cardEl(it.agent));
       else if (it.kind === "report") notice(it.text, "report warn");
       else if (it.kind === "monitor") { var b = bubble("assistant", it.text, it.tag); push(b); }
-      else push(bubble(it.role, it.text, it.sender));
+      else push(bubble(it.role, it.text, metaOf(it.sender, title)));
     });
   }
 
@@ -339,11 +489,32 @@ async function keptThoughts(call, pageSize) {
   var drafts = {};
   function busy() { return inflight !== null || pending.length > 0; }
   function refresh() { $("stop").hidden = !busy(); }
-  function phase(p, hint) {
+  var curPhase = "idle", lastReason = "", asks = 0, askTs = 0;
+  function phase(p, hint, reason) {
+    curPhase = p;
+    if (reason !== undefined) lastReason = reason;
     $("pill").dataset.phase = p;
+    $("pill").dataset.reason = p === "idle" ? lastReason : "";
     $("pill").textContent = p;
     $("hint").textContent = hint || "";
+    drawState();
   }
+  // the header's state: the badge on the avatar and the pill by the name
+  function drawState() {
+    var st = stateOf(curPhase, lastReason, asks);
+    var badge = $("badge"), pill = $("state");
+    var glyph = { asks: "?", failed: "×", done: "✓" }[st] || "";
+    badge.dataset.state = st;
+    badge.textContent = glyph;
+    badge.hidden = st === "idle";
+    var label = st === "asks" ? "asks you" + (inquiryAge(askTs, Date.now()) ? " · " + inquiryAge(askTs, Date.now()) : "") : st === "working" ? "working" : st === "failed" ? "failed · " + lastReason : "";
+    pill.dataset.state = st;
+    pill.textContent = label;
+    pill.hidden = label === "";
+  }
+  setInterval(drawState, 30000);
+  var tokTotal = 0, modelName = "";
+  function drawUsage() { $("usage").textContent = (modelName ? modelName + " · " : "") + fmtTokens(tokTotal); }
   function bind(sendId) {
     if (!sendId || pending.some(function (q) { return q.sendId === sendId; })) return;
     var q = pending.find(function (x) { return !x.sendId; });
@@ -399,7 +570,7 @@ async function keptThoughts(call, pageSize) {
           if (inflight && (!sid || inflight.sendId === sid)) inflight = null;
           refresh();
           var why = s(det, "reason");
-          phase("idle", why && why !== "ok" ? why : "");
+          phase("idle", why && why !== "ok" ? why : "", why);
         }
         break;
       }
@@ -419,7 +590,7 @@ async function keptThoughts(call, pageSize) {
         if (!d) break;
         d.text += s(p, "text");
         if (d.kind === "thinking") d.el.querySelector(".body").textContent = d.text;
-        else if (d.kind === "text") d.el.textContent = d.text;
+        else if (d.kind === "text") fill(d.el, d.text, "assistant");
         break;
       case "part_end":
         if (!toMe(p)) break;
@@ -447,7 +618,7 @@ async function keptThoughts(call, pageSize) {
   }
 
   // INQUIRIES this agent asked the person: `user` holds them
-  var seenInq = {};
+  var seenInq = {}, answered = [], heldRe = {}; // answered: this session's answered cards, kept over a redraw
   function inquiryEl(q) {
     var re = Number(q.re), kind = s(q, "kind") || "text";
     var card = el("section", "inq"), row = el("div", "row"), st = el("div", "st");
@@ -455,14 +626,19 @@ async function keptThoughts(call, pageSize) {
     function lock(on) { row.querySelectorAll("button,input").forEach(function (b) { b.disabled = on; }); }
     function reply(answer, shownAs) {
       lock(true);
+      // kept over a redraw from the moment it is sent: the turn it wakes can redraw before the answer returns
+      if (answered.indexOf(card) < 0) answered.push(card);
+      heldRe[re] = true;
       fantastic.send("user", { type: "answer_inquiry", re: re, answer: answer }).then(function (r) {
-        if (r && typeof r.error === "string") { st.textContent = "✕ " + r.error; lock(false); return; }
+        if (r && typeof r.error === "string") { st.textContent = "✕ " + r.error; lock(false); answered.splice(answered.indexOf(card), 1); delete heldRe[re]; return; }
         card.classList.add("answered");
         row.textContent = "";
         st.textContent = "✓ you answered: " + shownAs;
+        again();
       });
     }
     function button(label, fn, primary) { var b = el("button", primary ? "primary" : "", label); b.type = "button"; b.onclick = fn; return b; }
+    function again() { inquiries(); }
     var opts = (Array.isArray(q.options) ? q.options : []).map(function (x) {
       if (x !== null && typeof x === "object") { var v = String(x.value !== undefined ? x.value : x.label); return { value: v, label: String(x.label !== undefined ? x.label : v) }; }
       return { value: String(x), label: String(x) };
@@ -478,27 +654,36 @@ async function keptThoughts(call, pageSize) {
       var inp = el("input"); inp.type = "text"; inp.placeholder = kind === "single" ? "Or answer in your own words" : "Your answer"; inp.setAttribute("aria-label", "Your answer");
       var go = function () { var v = inp.value.trim(); if (v) reply(v, v); };
       inp.onkeydown = function (e) { if (e.key === "Enter") go(); };
-      row.append(inp, button("Answer", go, kind !== "single"));
+      var free = el("div", "free");
+      free.append(inp, button("Answer", go));
+      row.append(free);
     }
     return card;
   }
   async function inquiries() {
     var r = await fantastic.send("user", { type: "inquiries", asker: AGENT }).catch(function () { return null; });
-    (r && Array.isArray(r.inquiries) ? r.inquiries : []).forEach(function (q) {
+    var open = r && Array.isArray(r.inquiries) ? r.inquiries : [];
+    asks = open.length;
+    askTs = open.reduce(function (lo, q) { return typeof q.ts === "number" && (lo === 0 || q.ts < lo) ? q.ts : lo; }, 0);
+    drawState();
+    open.forEach(function (q) {
       var re = Number(q.re);
-      if (!Number.isFinite(re) || seenInq[re]) return;
+      if (!Number.isFinite(re) || seenInq[re] || heldRe[re]) return;
       seenInq[re] = true;
       push(inquiryEl(q));
     });
   }
 
   // rows after the last seen: embed cards and the checker's reports arrive as rows, not events
-  var lastRow = 0;
+  var lastRow = 0, stale = false;
   async function newRows() {
-    var read = function (a) { return call(Object.assign({ type: "history", client_id: me }, a)).catch(function () { return null; }); };
+    var read = function (a) { return call(Object.assign({ type: "history" }, a)).catch(function () { return null; }); };
     var rowsOf = function (h) { return h && Array.isArray(h.rows) ? h.rows : []; };
     var fresh = lastRow > 0 ? rowsOf(await read({ after: lastRow })) : [];
     if (fresh.length === 0) fresh = rowsOf(await read({})).filter(function (m) { return typeof m.id === "number" && m.id > lastRow; });
+    tokTotal += tokensOf(fresh);
+    drawUsage();
+
     fresh.forEach(function (m) {
       if (typeof m.id === "number") lastRow = Math.max(lastRow, m.id);
       if (m.kind === "embed" || m.kind === "unembed") {
@@ -507,6 +692,11 @@ async function keptThoughts(call, pageSize) {
         else if (!have) push(cardEl(s(m, "head")));
       } else if (s(m, "head").indexOf(MALFORMED) >= 0) notice(s(m, "head").slice(s(m, "head").indexOf(MALFORMED)), "report warn");
     });
+    // tool calls and their replies are rows, not events: a run that ended is drawn from the stored rows
+    if (stale || fresh.some(function (m) { return m.kind !== "notice" && toolOf(String(m.role || ""), typeof m.head === "string" ? m.head : "") !== null; })) {
+      stale = !(await drawHistory(keepRows, true));
+      if (!stale) { seenInq = {}; await inquiries(); drawUsage(); }
+    }
   }
   var timer = null, rowTimer = null;
   function soon() { if (timer) return; timer = setTimeout(function () { timer = null; inquiries(); newRows(); }, 250); }
@@ -543,20 +733,52 @@ async function keptThoughts(call, pageSize) {
     });
   };
 
+  // the transcript from the stored rows: the newest `keep`, their kept thoughts and whole texts
+  var keepRows = 300;
+  async function drawHistory(keep, soft) {
+    keepRows = keep;
+    var tl = await historyTail(call, keep);
+    var long = tl.rows.some(function (m) { return typeof m.bytes === "number" && m.bytes > CUT; });
+    var head = long || tl.rows.some(function (m) { return m.has_thinking === true; })
+      ? await readHead(function (p) { return call(p).catch(function () { return null; }); }, 200) : [];
+    // a redraw on the way (soft) never takes a turn's live text away
+    if (soft && (busy() || Object.keys(drafts).length > 0)) return false;
+    tail = null;
+    var kids = Array.prototype.slice.call(dialog.children, 1);
+    kids.forEach(function (k) { k.remove(); });
+    drawItems(shapeRows(tl.rows, thoughtsOf(head), textsOf(head)));
+    answered.forEach(push);
+    lastRow = tl.lastId;
+    tokTotal = tl.tokens;
+    var more = $("earlier");
+    more.hidden = tl.earlier <= 0;
+    more.textContent = "Earlier: " + tl.earlier + " message" + (tl.earlier === 1 ? "" : "s");
+    more.disabled = false;
+    return true;
+  }
+  $("earlier").onclick = function () {
+    if (busy()) return;
+    $("earlier").disabled = true;
+    seenInq = {};
+    drawHistory(keepRows + 300).then(function () { inquiries(); drawUsage(); }).catch(function (e) { notice("✕ " + (e && e.message ? e.message : e), "error"); });
+  };
+
   // BOOT: head, history, live snapshot, then the watch
   async function boot() {
     fantastic.watch(AGENT, onEvent);
     var rf = await call({ type: "reflect" });
-    $("name").textContent = s(rf, "display_name") || s(rf, "id") || AGENT;
+    title = s(rf, "display_name") || s(rf, "id") || AGENT;
+    $("name").textContent = title;
+    text.placeholder = "Message " + title;
     $("tag").textContent = s(rf, "handler_module") || "ai_chat";
     var prov = s(rf, "provider_id"), model = s(rf, "model");
-    $("model").textContent = prov ? (model ? model + " · " : "") + prov : "";
+    modelName = model;
+    $("modelname").textContent = model;
+    $("prov").textContent = prov;
+    $("model").hidden = !prov;
     if (!prov) notice("No model set", "warn");
-    var tl = await historyTail(function (p) { return call(Object.assign({}, p, { client_id: me })); }, 300);
-    var thoughts = tl.rows.some(function (m) { return m.has_thinking === true; })
-      ? await keptThoughts(function (p) { return call(p).catch(function () { return null; }); }) : new Map();
-    drawItems(shapeRows(tl.rows, thoughts));
-    lastRow = tl.lastId;
+    await drawHistory(300);
+    drawUsage();
     var snap = await call({ type: "status", client_id: me });
     if (snap && typeof snap === "object") {
       $("others").textContent = typeof snap.others_pending === "number" && snap.others_pending > 0 ? "+" + snap.others_pending + " from other clients" : "";

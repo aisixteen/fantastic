@@ -538,8 +538,9 @@ async def open_tree(pg: Page, x: int, y: int) -> str | None:
 
 
 # THE CHAT is the html view its agent's `reflect` returns, drawn in the cell's panel
-# iframe (`fantastic-ai-core/src/chat_view.html`): the dialog `#dialog` (`.msg` rows,
-# assistant ones `.assistant`), the input `#text`, `#send`, and the phase pill `#pill`
+# iframe (`fantastic-ai-core/src/chat_view.html`): the dialog `#dialog` (a bubble is
+# `.who.user > .msg` or `.who.assistant > .msg`, a tool-call run `details.tools`, an
+# inquiry `.inq`), the input `#text`, `#send`, and the phase pill `#pill`
 # (`data-phase`, `data-reason`). `cell` is the chat's frame by order on the page. The panel
 # is SANDBOXED (null origin), so the page cannot look inside it: the chat is read and driven
 # through CDP, in the frame itself (`dev_surface.frame_eval`).
@@ -578,7 +579,7 @@ async def wait_quiet(pg: Page, total: float, quiet: float, cell: int = 0) -> boo
     seen_live = False
     ended = 0.0
     look = ("({n: d.querySelectorAll('#dialog .msg').length,"
-            " said: [...d.querySelectorAll('#dialog .msg.assistant')].some(m=>m.textContent.trim()),"
+            " said: [...d.querySelectorAll('#dialog .who.assistant .msg')].some(m=>m.textContent.trim()),"
             " phase: d.getElementById('pill')?.dataset.phase || '',"
             " reason: d.getElementById('pill')?.dataset.reason || ''})")
     while time.time() < deadline:
@@ -604,9 +605,24 @@ async def wait_quiet(pg: Page, total: float, quiet: float, cell: int = 0) -> boo
 async def answer(pg: Page, cell: int = 0) -> str:
     """The AI's last WORDS: its last assistant message with text, skipping one that
     is only call markup (a malformed call shows as text but is no answer)."""
-    return await chat_eval(pg, "(()=>{const m=[...d.querySelectorAll('#dialog .msg.assistant')]"
+    return await chat_eval(pg, "(()=>{const m=[...d.querySelectorAll('#dialog .who.assistant .msg')]"
                                ".filter(x=>{const t=x.textContent.trim(); return t && !/^(<?\\/?call\\b[^>]*>\\s*)+$/.test(t);});"
                                " return m.length ? m[m.length-1].textContent : '';})()", cell) or ""
+
+
+async def chat_rows(pg: Page, cell: int = 0) -> dict:
+    """What chat cell #cell shows: its person and agent bubbles (text), its tool-call
+    runs (title and verbs), its inquiry cards (question, option labels, answered) and
+    the header's state."""
+    return await chat_eval(pg, """(()=>({
+      user: [...d.querySelectorAll('#dialog .who.user .msg')].map(m=>m.textContent),
+      agent: [...d.querySelectorAll('#dialog .who.assistant .msg')].map(m=>m.textContent),
+      code: [...d.querySelectorAll('#dialog .who.assistant .msg code')].map(m=>m.textContent),
+      tools: [...d.querySelectorAll('#dialog details.tools')].map(g=>({n:g.querySelector('.n')?.textContent||'', verbs:g.querySelector('.verbs')?.textContent||'', calls:g.querySelectorAll('.call').length})),
+      inquiries: [...d.querySelectorAll('#dialog .inq')].map(q=>({q:q.querySelector('.q')?.textContent||'', options:[...q.querySelectorAll('.row > button')].map(b=>b.textContent), answered:q.classList.contains('answered'), status:q.querySelector('.st')?.textContent||''})),
+      state: {badge: d.getElementById('badge')?.dataset.state||'', badge_hidden: !!d.getElementById('badge')?.hidden, pill: d.getElementById('state')?.textContent||'', pill_hidden: !!d.getElementById('state')?.hidden},
+      name: d.getElementById('name')?.textContent||'', model: d.getElementById('modelname')?.textContent||'',
+    }))()""", cell) or {}
 
 
 async def in_frame(pg: Page, cell_id: str, expr: str) -> Any:

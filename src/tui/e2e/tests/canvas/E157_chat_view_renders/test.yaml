@@ -1,0 +1,10 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint (the
+# plug names those). Scripted: a stub model (no GPU).
+id: chat_view_renders
+group: canvas
+title: "a chat cell draws the html chat view: a person bubble, an agent bubble with a code chip, ONE grouped tool-call row, an inquiry card that answers, and a reload replays the history (#609)"
+runner: probe.py
+costs: free
+limits:
+  seconds: 40
+env: {}
