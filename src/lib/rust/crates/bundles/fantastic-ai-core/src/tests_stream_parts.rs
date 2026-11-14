@@ -610,7 +610,6 @@ async fn stop_reaches_a_reply_woken_turn() {
             target.as_str(),
             "tool reply",
             "tab",
-            None,
             born,
             false,
             String::new(),

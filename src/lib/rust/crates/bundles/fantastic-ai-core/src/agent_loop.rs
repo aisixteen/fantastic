@@ -205,7 +205,6 @@ pub async fn run_generation(
     kernel: &Arc<Kernel>,
     client_id: &str,
     cfg: BackendConfig,
-    system_prompt: Option<String>,
 ) -> Result<Generation, GenFailure> {
     // A PROVIDER THAT CANNOT RUN REFUSES THE TURN FIRST — before the owed
     // recall, the assembly and the projection, so the caller reads why it
@@ -228,7 +227,6 @@ pub async fn run_generation(
             kernel,
             Some(provider),
             cfg.model_window,
-            system_prompt.as_deref(),
             Some(client_id),
         )
         .await?;
@@ -239,7 +237,6 @@ pub async fn run_generation(
         user_text,
         kernel,
         client_id,
-        system_prompt.as_deref(),
         caching,
     )
     .await?;

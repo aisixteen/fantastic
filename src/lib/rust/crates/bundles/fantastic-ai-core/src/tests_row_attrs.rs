@@ -211,6 +211,14 @@ async fn two_identical_builds_give_the_same_parts_and_a_changed_prompt_only_its_
     let build = |prompt: &'static str| {
         let (kernel, agent, state) = (kernel.clone(), agent.clone(), state.clone());
         async move {
+            // the record's prompt: a send carries none
+            let r = ask(
+                &kernel,
+                &AgentId::from("kernel_state"),
+                json!({"type": "update_agent", "id": agent.as_str(), "system_prompt": prompt}),
+            )
+            .await;
+            assert!(r.get("error").is_none(), "{r}");
             fantastic_kernel::test_support::as_agent(
                 agent.clone(),
                 crate::assembly::assemble_messages(
@@ -219,7 +227,6 @@ async fn two_identical_builds_give_the_same_parts_and_a_changed_prompt_only_its_
                     "next",
                     &kernel,
                     "c",
-                    Some(prompt),
                     crate::caching::Caching::ProviderCache,
                 ),
             )

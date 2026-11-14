@@ -59,24 +59,21 @@ async fn the_record_prompt_is_the_system_block_of_a_main_and_a_reply_woken_turn(
     assert_eq!(system_of(&s, 1), "You are the record's role.");
 }
 
+/// A send carries no system prompt: the block is the record's, the same for every turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_per_call_prompt_beats_the_record() {
+async fn a_send_takes_no_system_prompt() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "sp_call").await;
-    set_record_prompt(&kernel, &backend, json!("record role")).await;
-    let s = script(
-        &backend,
-        vec![pass(r#"ok <call name="done"></call>"#)],
-        Duration::ZERO,
-    );
-    say(
-        &kernel,
-        &backend,
-        json!({"type": "send", "text": "go", "system_prompt": "call role"}),
-    )
-    .await;
-    assert!(until_passes(&s, 1).await);
-    assert_eq!(system_of(&s, 0), "call role");
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "system_prompt": "call role"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert!(r.to_string().contains("system_prompt"), "the refusal names it: {r}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -180,7 +177,7 @@ async fn pre_and_post_wrap_whichever_block_is_in_force() {
     let done = || pass(r#"ok <call name="done"></call>"#);
     let s = script(
         &backend,
-        vec![done(), done(), done(), done()],
+        vec![done(), done(), done()],
         Duration::ZERO,
     );
     say(&kernel, &backend, json!({"type": "send", "text": "go"})).await;
@@ -194,14 +191,6 @@ async fn pre_and_post_wrap_whichever_block_is_in_force() {
     say(&kernel, &backend, json!({"type": "send", "text": "go"})).await;
     assert!(until_passes(&s, 2).await);
     assert_eq!(system_of(&s, 1), "PRE {tree}\n\nROLE\n\nPOST");
-    say(
-        &kernel,
-        &backend,
-        json!({"type": "send", "text": "go", "system_prompt": "CALL"}),
-    )
-    .await;
-    assert!(until_passes(&s, 3).await);
-    assert_eq!(system_of(&s, 2), "PRE {tree}\n\nCALL\n\nPOST");
     update(
         &kernel,
         &backend,
@@ -209,8 +198,8 @@ async fn pre_and_post_wrap_whichever_block_is_in_force() {
     )
     .await;
     say(&kernel, &backend, json!({"type": "send", "text": "go"})).await;
-    assert!(until_passes(&s, 4).await);
-    assert_eq!(system_of(&s, 3), "ROLE");
+    assert!(until_passes(&s, 3).await);
+    assert_eq!(system_of(&s, 2), "ROLE");
 }
 
 #[test]

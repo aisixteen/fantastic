@@ -122,7 +122,6 @@ pub(crate) fn deliver_soon(
     target: &str,
     text: &str,
     client_id: &str,
-    system_prompt: Option<&str>,
     notice: bool,
 ) {
     let born = crate::state::incarnation(&AgentId::from(target));
@@ -144,7 +143,6 @@ pub(crate) fn deliver_soon(
         target,
         text,
         client_id,
-        system_prompt,
         born,
         notice,
         chain,
@@ -167,7 +165,6 @@ fn deliver_soon_with_born(
     target: &str,
     text: &str,
     client_id: &str,
-    system_prompt: Option<&str>,
     born: u64,
     notice: bool,
     chain: String,
@@ -176,14 +173,12 @@ fn deliver_soon_with_born(
     let work_kernel = Arc::clone(kernel);
     let (target, text) = (target.to_string(), text.to_string());
     let client_id = client_id.to_string();
-    let system_prompt = system_prompt.map(str::to_string);
     kernel.spawn_task(&target_id, "deliver_reply", async move {
         deliver(
             &work_kernel,
             &target,
             &text,
             &client_id,
-            system_prompt.as_deref(),
             born,
             notice,
             chain,
@@ -210,7 +205,6 @@ pub(crate) async fn deliver(
     target: &str,
     text: &str,
     client_id: &str,
-    system_prompt: Option<&str>,
     born: u64,
     notice: bool,
     chain: String,
@@ -242,9 +236,6 @@ pub(crate) async fn deliver(
         // the one that replaced it is on other work. The TARGET writes it (a store
         // keys every row by its writer), so it rides a `send` marked `late`.
         payload.insert("late".to_string(), json!(true));
-    }
-    if let Some(sp) = system_prompt {
-        payload.insert("system_prompt".to_string(), json!(sp));
     }
     let out = kernel
         .send(vec![Item::new(
@@ -780,7 +771,7 @@ pub(crate) fn watch_job(
             "job_done {}",
             json!({"job_id": job, "exit_code": exit, "tail": tail})
         );
-        deliver_soon(&work, &owner_s, &text, &cid, None, false);
+        deliver_soon(&work, &owner_s, &text, &cid, false);
     });
 }
 
@@ -929,7 +920,6 @@ async fn deliver_answer(
             self_id,
             &format!("[your inquiry answer did not reach {asker}: {why}]"),
             client_id,
-            None,
             true,
         );
     }
@@ -1091,7 +1081,6 @@ pub async fn route_reply(
     text: String,
     client_id: String,
     send_to: Option<String>,
-    system_prompt: Option<String>,
     incoming: String,
     send_timeout: f64,
     model_window: i64,
@@ -1106,15 +1095,13 @@ pub async fn route_reply(
     // carries the dispatch identity into it (a bare tokio spawn would not):
     // dispatches, the binary carrier, and reply deliveries all attribute to the
     // AI agent.
-    let (wake_kernel, wake_id, wake_sp) =
-        (Arc::clone(&kernel), self_id.clone(), system_prompt.clone());
+    let (wake_kernel, wake_id) = (Arc::clone(&kernel), self_id.clone());
     let goes_on = route_reply_gated(
         self_id,
         kernel,
         text,
         client_id,
         send_to,
-        system_prompt,
         incoming,
         send_timeout,
         model_window,
@@ -1126,7 +1113,7 @@ pub async fn route_reply(
     )
     .await;
     if !goes_on {
-        chain_ended(&wake_kernel, &wake_id, wake_sp.as_deref());
+        chain_ended(&wake_kernel, &wake_id);
     }
 }
 
@@ -1155,11 +1142,10 @@ pub(crate) fn route_deadline(kernel: &Kernel) -> f64 {
 /// The wake can be lost (refused by the gate, a send error, an agent being shut
 /// down), so a watchdog releases the senders it was for if no pass has taken them
 /// within the send ceiling.
-pub(crate) fn chain_ended(kernel: &Arc<Kernel>, self_id: &AgentId, system_prompt: Option<&str>) {
+pub(crate) fn chain_ended(kernel: &Arc<Kernel>, self_id: &AgentId) {
     chain_ended_within(
         kernel,
         self_id,
-        system_prompt,
         std::time::Duration::from_secs_f64(crate::constants::send_timeout_secs()),
     );
 }
@@ -1168,7 +1154,6 @@ pub(crate) fn chain_ended(kernel: &Arc<Kernel>, self_id: &AgentId, system_prompt
 pub(crate) fn chain_ended_within(
     kernel: &Arc<Kernel>,
     self_id: &AgentId,
-    system_prompt: Option<&str>,
     ceiling: std::time::Duration,
 ) {
     let state = state_for(self_id);
@@ -1194,7 +1179,6 @@ pub(crate) fn chain_ended_within(
         self_id.as_str(),
         &text,
         &held[0],
-        system_prompt,
         true,
     );
     let watched = self_id.clone();
@@ -1274,7 +1258,6 @@ async fn route_reply_gated(
     text: String,
     client_id: String,
     send_to: Option<String>,
-    system_prompt: Option<String>,
     incoming: String,
     send_timeout: f64,
     model_window: i64,
@@ -1288,7 +1271,6 @@ async fn route_reply_gated(
     let _release = FireOnDrop(launched.clone());
     // ONE CHAIN PER AGENT (#227): true while the chain goes on (see the caller).
     let mut goes_on = false;
-    let sp = system_prompt.as_deref();
     // THE MATCH: a dispatched message carries the `stream_id`
     // of the part it was streamed as, so a consumer settles its draft on it.
     // Matched by the call's exact body, in order — one reading of the text, not
@@ -1974,10 +1956,10 @@ async fn route_reply_gated(
     // Only broken calls: their reports are the next turn — unless this chain has
     // now been silent MAX_SILENT_TURNS in a row, and gives up.
     if !any_calls && any_blocks {
-        if foreign && cut_turn(&kernel, &self_id, &client_id, send_to.as_deref(), sp).await {
+        if foreign && cut_turn(&kernel, &self_id, &client_id, send_to.as_deref()).await {
             return false;
         }
-        if silent_turn(&kernel, &self_id, &client_id, send_to.as_deref(), sp).await {
+        if silent_turn(&kernel, &self_id, &client_id, send_to.as_deref()).await {
             return false;
         }
     }
@@ -1989,7 +1971,6 @@ async fn route_reply_gated(
             self_id.as_str(),
             blocks,
             &client_id,
-            sp,
             message_id,
         )
         .await;
@@ -2012,7 +1993,7 @@ async fn route_reply_gated(
         // text is what it asked to have delivered.
         if !any_blocks {
             if let Some(to) = send_to.as_deref() {
-                deliver_soon(&kernel, to, &text, &client_id, sp, false);
+                deliver_soon(&kernel, to, &text, &client_id, false);
             }
         }
         return false;
@@ -2076,7 +2057,7 @@ async fn route_reply_gated(
         // that asked for the result by `send_to` gets it as a turn; a clock's tick
         // has nobody reading, so the status event is the record, and the next
         // tick starts a fresh chain with a fresh count.
-        if silent_turn(&kernel, &self_id, &client_id, send_to.as_deref(), sp).await {
+        if silent_turn(&kernel, &self_id, &client_id, send_to.as_deref()).await {
             return false;
         }
         let mut nudge = if dead_turn {
@@ -2099,7 +2080,7 @@ async fn route_reply_gated(
                 None,
             ));
         }
-        deliver_soon(&kernel, self_id.as_str(), &nudge, &client_id, sp, true);
+        deliver_soon(&kernel, self_id.as_str(), &nudge, &client_id, true);
         return true;
     }
     if any_calls {
@@ -2111,7 +2092,7 @@ async fn route_reply_gated(
     // this pass's TEXT to `send_to`, once. It must not propagate — a caller cannot
     // spend the model's turns for it.
     if let Some(to) = send_to.as_deref() {
-        deliver_soon(&kernel, to, &text, &client_id, sp, false);
+        deliver_soon(&kernel, to, &text, &client_id, false);
     }
     goes_on
 }
@@ -2163,9 +2144,8 @@ async fn silent_turn(
     self_id: &AgentId,
     client_id: &str,
     send_to: Option<&str>,
-    sp: Option<&str>,
 ) -> bool {
-    count_silent_turn(kernel, self_id, client_id, send_to, sp, None).await
+    count_silent_turn(kernel, self_id, client_id, send_to, None).await
 }
 
 /// A FAILED turn (the provider errored, or the answer was cut at `max_tokens`) is
@@ -2178,17 +2158,16 @@ pub(crate) async fn failed_turn_retry(
     self_id: &AgentId,
     client_id: &str,
     send_to: Option<&str>,
-    sp: Option<&str>,
     reason: &str,
 ) -> bool {
-    if count_silent_turn(kernel, self_id, client_id, send_to, sp, Some(reason)).await {
+    if count_silent_turn(kernel, self_id, client_id, send_to, Some(reason)).await {
         return true;
     }
     let text = format!(
         "[turn failed] {reason}. Your last turn produced no answer, and nothing it meant \
          to send was dispatched. Try again."
     );
-    deliver_soon(kernel, self_id.as_str(), &text, client_id, sp, true);
+    deliver_soon(kernel, self_id.as_str(), &text, client_id, true);
     false
 }
 
@@ -2197,7 +2176,6 @@ async fn count_silent_turn(
     self_id: &AgentId,
     client_id: &str,
     send_to: Option<&str>,
-    sp: Option<&str>,
     failure: Option<&str>,
 ) -> bool {
     let chain = (self_id.as_str().to_string(), client_id.to_string());
@@ -2221,7 +2199,7 @@ async fn count_silent_turn(
         ),
         None => gave_up_text(limit),
     };
-    give_up(kernel, self_id, client_id, send_to, sp, &gave_up, streak).await;
+    give_up(kernel, self_id, client_id, send_to, &gave_up, streak).await;
     true
 }
 
@@ -2232,7 +2210,6 @@ async fn cut_turn(
     self_id: &AgentId,
     client_id: &str,
     send_to: Option<&str>,
-    sp: Option<&str>,
 ) -> bool {
     let chain = (self_id.as_str().to_string(), client_id.to_string());
     let streak = {
@@ -2249,7 +2226,6 @@ async fn cut_turn(
         self_id,
         client_id,
         send_to,
-        sp,
         &cut_gave_up_text(MAX_CUT_TURNS),
         streak,
     )
@@ -2264,7 +2240,6 @@ async fn give_up(
     self_id: &AgentId,
     client_id: &str,
     send_to: Option<&str>,
-    sp: Option<&str>,
     gave_up: &str,
     streak: usize,
 ) {
@@ -2281,7 +2256,7 @@ async fn give_up(
     body.insert("error".to_string(), json!(gave_up));
     close_inquiry(kernel, self_id.as_str(), client_id, body).await;
     if let Some(to) = send_to {
-        deliver_soon(kernel, to, gave_up, client_id, sp, false);
+        deliver_soon(kernel, to, gave_up, client_id, false);
     }
 }
 
@@ -2302,7 +2277,6 @@ async fn deliver_grouped(
     self_id: &str,
     blocks: Vec<Block>,
     client_id: &str,
-    sp: Option<&str>,
     message_id: Option<i64>,
 ) {
     // Destination order = first appearance, so the model reads them in the order
@@ -2368,7 +2342,6 @@ async fn deliver_grouped(
             &dest,
             &body,
             client_id,
-            sp,
             born.get(&dest).copied().unwrap_or_default(),
             notice,
             // ONE CHAIN PER AGENT (#227 Bug 4): the token is read when this routing

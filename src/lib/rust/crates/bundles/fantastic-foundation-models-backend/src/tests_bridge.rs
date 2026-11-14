@@ -339,11 +339,17 @@ async fn live_kernel_turn() -> (
     use fantastic_kernel::{AgentId, Item};
     use serde_json::json;
     let (k, tmp) = live_kernel("fm_live_turn").await;
+    let _ = k
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": "fm_live_turn",
+                   "system_prompt": "Be terse. End every turn with <call name=\"done\"></call>."}),
+        )])
+        .await;
     let reply = k
         .send(vec![Item::new(
             AgentId::from("fm_live_turn"),
-            json!({"type": "send", "text": "Say hello, then end the chain.",
-                   "system_prompt": "Be terse. End every turn with <call name=\"done\"></call>."}),
+            json!({"type": "send", "text": "Say hello, then end the chain."}),
         )])
         .await
         .remove(0)

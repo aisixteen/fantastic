@@ -254,7 +254,6 @@ async fn prompt(kernel: &Arc<Kernel>, agent: &AgentId) -> String {
             "next",
             kernel,
             "c",
-            Some("sys"),
             crate::caching::Caching::ProviderCache,
         ),
     )
@@ -284,7 +283,6 @@ async fn project(kernel: &Arc<Kernel>, agent: &AgentId) {
             "next",
             kernel,
             "cli",
-            Some("sys"),
             crate::caching::Caching::ProviderCache,
         ),
     )

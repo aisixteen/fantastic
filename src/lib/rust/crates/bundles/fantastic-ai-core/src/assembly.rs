@@ -201,7 +201,7 @@ later result contradicts is corrected. Each turn, start from your latest state a
 about the next step. Other text outside calls: only your last message.
 Read only what the request names; no docs or reflect sweep before your first real call. Make
 the first call that changes or tests something as soon as you can — an error reply names the
-missing argument. Your `can_call` above lists what you may use; `reflect` shows what exists;
+missing argument. `reflect` shows what exists and your own `reflect` what you may call (`can_call`);
 `docs` only for a verb you are about to call.
 One answer may hold many <call> elements; they run at once. Put in it every call that does not
 need another's reply; a call waits for a later turn only when it does.
@@ -230,12 +230,10 @@ Your thinking lasts one turn: after you answer it folds to a [thought …] ancho
 "#;
 
 /// The fields of an agent's own reflect its system block shows — python `_SELF_KEYS`.
-const SELF_KEYS: [&str; 5] = [
+const SELF_KEYS: [&str; 3] = [
     "id",
     "description",
     "memory_store_id",
-    "can_call",
-    "callable_by",
 ];
 
 /// THE PLACEHOLDERS a system prompt may hold, filled per agent and per turn —
@@ -413,7 +411,8 @@ async fn self_part(self_id: &AgentId, kernel: &Arc<Kernel>) -> String {
         .await
         .remove(0)
         .result;
-    // WHO YOU ARE, not how you are tuned: identity, memory and grants. The rest of
+    // WHO YOU ARE, not how you are tuned: identity and memory — nothing that changes
+    // during a run (grants change on every spawn; `reflect` reads them live). The rest of
     // the agent's own reflect (sampling, kv table, timeouts, endpoint) is operator
     // posture the model never acts on. Python `_SELF_KEYS`.
     let me = match me {
@@ -440,9 +439,8 @@ async fn self_part(self_id: &AgentId, kernel: &Arc<Kernel>) -> String {
 pub async fn system_content(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
-    system_prompt: Option<&str>,
 ) -> Result<String, PromptFileError> {
-    Ok(system_pieces(self_id, kernel, system_prompt)
+    Ok(system_pieces(self_id, kernel)
         .await?
         .into_iter()
         .map(|p| p.text)
@@ -453,14 +451,13 @@ pub async fn system_content(
 pub(crate) async fn system_pieces(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
-    system_prompt: Option<&str>,
 ) -> Result<Vec<SystemPiece>, PromptFileError> {
     // THE WRAP: the record's `pre_system_prompt` goes BEFORE
     // whichever prompt is in force and `post_system_prompt` AFTER it, each read
     // live and taken verbatim — no placeholders, and neither replaces anything.
     // Absent or null adds nothing (python `_system_content`).
     let meta = crate::helpers::agent_meta(self_id, kernel);
-    let inner = inner_system_pieces(self_id, kernel, system_prompt).await?;
+    let inner = inner_system_pieces(self_id, kernel).await?;
     let wrap = |key: &str| {
         crate::record::record_wrap_prompt(&meta, key).map(|s| vec![piece("system_text", s)])
     };
@@ -488,11 +485,7 @@ pub(crate) async fn system_pieces(
 async fn inner_system_pieces(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
-    system_prompt: Option<&str>,
 ) -> Result<Vec<SystemPiece>, PromptFileError> {
-    if let Some(s) = system_prompt.filter(|s| !s.trim().is_empty()) {
-        return Ok(render_prompt(s, self_id, kernel, "system_text").await);
-    }
     if let Some(s) =
         crate::record::record_system_prompt(&crate::helpers::agent_meta(self_id, kernel))
     {
@@ -574,10 +567,9 @@ pub async fn assemble_messages(
     user_text: &str,
     kernel: &Arc<Kernel>,
     _client_id: &str,
-    system_prompt: Option<&str>,
     caching: Caching,
 ) -> Result<(Vec<Value>, usize), BlockFail> {
-    let pieces = system_pieces(self_id, kernel, system_prompt).await?;
+    let pieces = system_pieces(self_id, kernel).await?;
     let system_content: String = pieces.iter().map(|p| p.text.as_str()).collect();
     let mut messages = vec![json!({"role": "system", "content": system_content})];
     // WHAT THE REQUEST CARRIES, piece by piece — kept for the row the turn writes;
