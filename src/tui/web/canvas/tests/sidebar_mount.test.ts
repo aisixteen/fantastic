@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hearSidebar, pageStore, sidebarGrant } from "../src/bundles/canvas/sidebar_mount.ts";
+import { sidebarGrant } from "../src/bundles/canvas/sidebar_mount.ts";
+import { hearSidebar, pageStore } from "../../page/view_relay.js";
+import type { SidebarEars } from "../../page/view_relay.js";
 import { panelRelay } from "../src/bundles/panel_relay.ts";
 import { Agent, Kernel } from "../src/lib.ts";
 import type { Payload } from "../src/lib.ts";
@@ -54,7 +56,7 @@ test("a host agent's view says kernel for the HOST's root; any other panel keeps
   assert.deepEqual(hosts, ["kernel"], "a page-content panel still reaches the page's own kernel");
 });
 
-function ears(): { calls: unknown[][]; e: Parameters<typeof hearSidebar>[1] } {
+function ears(): { calls: unknown[][]; e: SidebarEars } {
   const calls: unknown[][] = [];
   return {
     calls,

@@ -27,3 +27,17 @@ export interface ViewHandle {
 export function connectorSrc(extra?: string): string;
 export function callAllowed(calls: Calls, target: string, verb: string): boolean;
 export function mountView(opts: ViewOptions): ViewHandle;
+export interface SidebarEars {
+  select?(id: string): void;
+  selectPath?(path: string): void;
+  open?(path: string, dir: boolean): void;
+  hide?(): void;
+  ready?(): void;
+  keep?(state: unknown): void;
+}
+export interface SidebarStore {
+  load(): unknown;
+  save(state: unknown): void;
+}
+export function hearSidebar(m: Record<string, unknown>, ears: SidebarEars): void;
+export function pageStore(key: string, storage?: () => Pick<Storage, "getItem" | "setItem">): SidebarStore;

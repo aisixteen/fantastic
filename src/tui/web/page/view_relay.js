@@ -205,3 +205,61 @@ export function mountView(opts) {
     },
   };
 }
+
+// ---- what a page does with the base SIDEBAR view (the canvas's column and the team's left cell) ----
+
+const text = (v) => (typeof v === "string" && v !== "" ? v : null);
+
+/** One message the sidebar view posted: what it means for the page. `ears` has any of
+ *  `select(id)`, `selectPath(path)`, `open(path, dir)`, `hide()`, `ready()`, `keep(state)`;
+ *  one a page does not need is left out. Anything else (the view's own echoes,
+ *  `select_kernel`) is ignored. */
+export function hearSidebar(m, ears) {
+  const id = text(m.id);
+  const path = text(m.path);
+  switch (m.type) {
+    case "select":
+      if (id !== null && ears.select) ears.select(id);
+      break;
+    case "select_file":
+      if (path !== null && ears.selectPath) ears.selectPath(path);
+      break;
+    case "open_file":
+    case "open_dir":
+      if (path !== null && ears.open) ears.open(path, m.type === "open_dir");
+      break;
+    case "hide_tree":
+      if (ears.hide) ears.hide();
+      break;
+    case "ready":
+      if (ears.ready) ears.ready();
+      break;
+    case "state":
+      if (ears.keep) ears.keep(m.state);
+      break;
+  }
+}
+
+/** The page's own storage of the view's open state, one key per page (`fantastic.<key>`).
+ *  A browser that refuses storage keeps nothing: the view starts closed. It is the `keep`
+ *  of `mountView` as it stands. */
+export function pageStore(key, storage = () => localStorage) {
+  const name = `fantastic.${key}`;
+  return {
+    load() {
+      try {
+        const raw = storage().getItem(name);
+        return raw === null ? null : JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    },
+    save(state) {
+      try {
+        storage().setItem(name, JSON.stringify(state));
+      } catch {
+        // no storage: nothing kept
+      }
+    },
+  };
+}

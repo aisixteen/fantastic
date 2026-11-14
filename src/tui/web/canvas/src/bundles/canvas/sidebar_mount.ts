@@ -4,6 +4,8 @@ import { mountHostPanel } from "../agent_view/agent_view.ts";
 import { AGENT_VIEW } from "../agent_view/agent_view.ts";
 import { cellGrant, expandReach, viewOf, viewRecordFresh } from "./host_views.ts";
 import type { Rec } from "./host_views.ts";
+import { hearSidebar, pageStore } from "../../../../page/view_relay.js";
+import type { SidebarStore } from "../../../../page/view_relay.js";
 
 // THE CANVAS'S LEFT COLUMN (#608): the host agent `sidebar`'s html view, drawn by its
 // `reflect` in a panel fixed to the viewport's left edge, beside the zoomed world (never in
@@ -15,6 +17,7 @@ import type { Rec } from "./host_views.ts";
 // canvas's own `open`), `hide_tree`, and `state {state}`: which branches and folders the view has open.
 // The page keeps that state (its own storage, per canvas: the panel has none, and the record has no
 // field for it) and gives it back as `restore {state}` when the view says `ready`: it survives a reload.
+// `hearSidebar` and `pageStore` are the base relay module's (`web/page/view_relay.js`): the team page uses the same two.
 // The kernel strip's `select_kernel {guid}` is heard and left to the host.
 
 /** The host agent whose view this is. */
@@ -36,74 +39,6 @@ export interface SidebarColumn {
   /** the sidebar agent's `view` as reflected now, and the host agents that exist now: the cell's grant follows */
   follow(rec: Rec | undefined, ids: Iterable<string>): void;
   dispose(): void;
-}
-
-/** What the page does with each thing the view says (`hearSidebar`). */
-export interface SidebarEars {
-  select(id: string): void;
-  selectPath(path: string): void;
-  open(path: string, dir: boolean): void;
-  hide(): void;
-  /** the view is up: give it what was kept */
-  ready(): void;
-  /** the view's open state, to keep */
-  keep(state: unknown): void;
-}
-
-const text = (v: unknown): string | null => (typeof v === "string" && v !== "" ? v : null);
-
-/** One message the view posted: what it means for the page. Anything else (the view's own echoes, `select_kernel`) is ignored. */
-export function hearSidebar(m: Record<string, unknown>, ears: SidebarEars): void {
-  const id = text(m["id"]);
-  const path = text(m["path"]);
-  switch (m["type"]) {
-    case "select":
-      if (id !== null) ears.select(id);
-      break;
-    case "select_file":
-      if (path !== null) ears.selectPath(path);
-      break;
-    case "open_file":
-    case "open_dir":
-      if (path !== null) ears.open(path, m["type"] === "open_dir");
-      break;
-    case "hide_tree":
-      ears.hide();
-      break;
-    case "ready":
-      ears.ready();
-      break;
-    case "state":
-      ears.keep(m["state"]);
-      break;
-  }
-}
-
-/** The page's own storage of the view's open state, one key per canvas. A browser that refuses storage keeps nothing: the view starts closed. */
-export interface SidebarStore {
-  load(): unknown;
-  save(state: unknown): void;
-}
-
-export function pageStore(key: string, storage: () => Pick<Storage, "getItem" | "setItem"> = () => localStorage): SidebarStore {
-  const name = `fantastic.${key}`;
-  return {
-    load(): unknown {
-      try {
-        const raw = storage().getItem(name);
-        return raw === null ? null : (JSON.parse(raw) as unknown);
-      } catch {
-        return null;
-      }
-    },
-    save(state: unknown): void {
-      try {
-        storage().setItem(name, JSON.stringify(state));
-      } catch {
-        // no storage: nothing kept
-      }
-    },
-  };
 }
 
 /** The cell's `can_call` for the view `rec` declares, `"*"` written out for `ids`; null when it is not an html view. */

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mountView, connectorSrc, callAllowed } from "../../page/view_relay.js";
+import { mountView, connectorSrc, callAllowed, hearSidebar } from "../../page/view_relay.js";
 import { CONNECTOR_SRC } from "../src/bundles/html_agent/connector.ts";
 import { MEASURE_SRC } from "../src/bundles/canvas/fit.ts";
 
@@ -173,4 +173,10 @@ test("the cell's inbox goes to the view; reload_html renders again; unmount clea
   assert.equal(r.iframe.removed, true);
   assert.equal(r.listeners.length, 0);
   assert.deepEqual(r.calls.at(-1), ["off", "s"]);
+});
+
+test("a page that needs only some of what the sidebar view says leaves the other ears out", () => {
+  const got: string[] = [];
+  for (const m of [{ type: "select", id: "a" }, { type: "open_file", path: "p" }, { type: "hide_tree" }, { type: "ready" }, { type: "state", state: 1 }]) hearSidebar(m, { select: (id) => got.push(id) });
+  assert.deepEqual(got, ["a"]);
 });
