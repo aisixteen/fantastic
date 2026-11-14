@@ -671,16 +671,15 @@ def peer_grants(rig: "Rig") -> dict:
     return out
 
 
-async def open_chat(pg: Page, x: int, y: int, extra_grants: dict | None = None) -> str:
+async def open_chat(pg: Page, x: int, y: int) -> str:
     """Make the canvas's AI and show it: the host spawns the AI from the saved set-up
     (`canvas_root spawn`, with the canvas's reach), the root view places a cell that
     shows it at (x, y) (`place {backend_id}`), and the cell draws the html chat view
-    its `reflect` returns. `extra_grants` is more reach for the AI (agent -> verbs, as
-    `peer_grants`). Returns the AI's id once the view is up."""
+    its `reflect` returns. Returns the AI's id once the view is up."""
     from canvas import host_call
 
     rig = pg.rig
-    made = await host_call(rig.port, "canvas_root", {"type": "spawn", "peer_grants": {**peer_grants(rig), **(extra_grants or {})}})
+    made = await host_call(rig.port, "canvas_root", {"type": "spawn", "peer_grants": peer_grants(rig)})
     if "id" not in made:
         raise SystemExit(f"open_chat: the AI was not made: {made}")
     placed = await host_call(rig.port, f"{rig.page_guid()}|view_root",

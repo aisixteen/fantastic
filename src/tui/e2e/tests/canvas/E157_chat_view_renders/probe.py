@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import Rig, verdict, open_chat, say, chat_eval, chat_rows, chat_drawn  # noqa: E402
+from _lib.canvas_live import Rig, verdict, say, chat_eval, chat_rows, chat_drawn  # noqa: E402
 
 E2E = Path(__file__).resolve().parents[6] / "e2e"
 DONE = '<call name="done"></call>'
@@ -85,10 +85,27 @@ def main() -> bool:
             await asyncio.sleep(0.5)
         return got
 
+    async def open_chat(pg) -> None:
+        """The chat is made as the canvas makes every AI (`canvas_root create`: a provider
+        and its chat, the chat holding `user` `inquiry`) and shown by a cell the root view
+        places; the cell draws the view the chat's `reflect` returns."""
+        from canvas import host_call
+
+        made = await host_call(rig.port, "canvas_root", {"type": "create", "record": {
+            "id": "chat_e157", "handler_module": "vllm_backend.tools", "endpoint": stub.base_url(), "model": "stub",
+            "context_window": 32768, "max_tokens": 4096, "kv_slots": 4, "kv_overflow": "evict",
+            "can_call": {"user": ["inquiry", "inquiries"]}}})
+        info["made"] = made
+        placed = await host_call(rig.port, f"{rig.page_guid()}|view_root",
+                                 {"type": "place", "backend_id": made.get("id", "chat_e157"), "x": 300, "y": 200, "width": 440, "height": 520})
+        info["placed"] = placed
+        if not await chat_drawn(pg, 30):
+            raise SystemExit(f"the chat view never drew: {made} {placed}")
+
     async def drive() -> None:
         async with rig.page(1600, 1000) as pg:
             await asyncio.sleep(1.5)
-            await open_chat(pg, 300, 200, {"user": ["inquiry", "inquiries"]})
+            await open_chat(pg)
             got = await chat_rows(pg)
             info["head"] = {k: got.get(k) for k in ("name", "model")}
             r["1 the view draws, header names the chat and its model"] = bool(got.get("name")) and got.get("model") == "stub"
