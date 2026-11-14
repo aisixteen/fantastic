@@ -4991,6 +4991,13 @@ async fn recall_long_head(
     let provider: Arc<dyn Provider> = Arc::new(MockProvider {
         script: script_for(backend),
     });
+    // the short prompt the recall is sized against lives on the record
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": backend.as_str(), "system_prompt": "sys"}),
+        )])
+        .await;
     let r = fantastic_kernel::test_support::as_agent(
         backend.clone(),
         crate::retrieval::context_recall(
@@ -5126,7 +5133,8 @@ async fn a_fold_projection_over_budget_writes_folds() {
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": backend.as_str(),
                    "context_strategy": "fold", "context_window": 2600,
-                   "output_reserve": 200, "context_titles": true, "context_async": true}),
+                   "output_reserve": 200, "context_titles": true, "context_async": true,
+                   "system_prompt": "sys"}),
         )])
         .await;
     let goal = put_row(
@@ -5306,7 +5314,7 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "folddepth").await;
     let _ = kernel.send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "update_agent", "id": backend.as_str(),
-        "context_strategy": "fold", "context_window": 2600, "output_reserve": 200, "context_titles": true, "context_async": true}))]).await;
+        "context_strategy": "fold", "context_window": 2600, "output_reserve": 200, "context_titles": true, "context_async": true, "system_prompt": "sys"}))]).await;
     let mut prev = put_row(
         &kernel,
         &backend,

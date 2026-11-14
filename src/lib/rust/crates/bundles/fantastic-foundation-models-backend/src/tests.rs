@@ -637,7 +637,12 @@ async fn a_lean_system_prompt_turn_runs_in_the_real_on_device_window() {
     // 4096 tokens, the window the SDK reports on macOS 27.0: a caller's own
     // short system block is the instructions, verbatim, and the turn runs.
     let engine = Arc::new(FakeEngine::new().context_size(4096));
-    let fx = kernel(&engine, json!({"system_prompt": "Be terse."})).await;
+    let fx = kernel(&engine, json!({})).await;
+    // the chat's record holds the prompt: a send carries none
+    let chat = fantastic_ai_core::remote_provider::pair_chat(&fx.k, &AgentId::from(fx.id.as_str())).await;
+    let up = call(&fx.k, "kernel_state",
+        json!({"type": "update_agent", "id": chat.as_str(), "system_prompt": "Be terse."})).await;
+    assert!(up.get("error").is_none(), "{up}");
     let r = fx.send("hi", json!({})).await;
     assert!(
         r["response"].as_str().is_some_and(|t| t.starts_with("ok ")),
@@ -717,7 +722,7 @@ async fn unavailability_is_named_before_the_window_is_judged() {
 #[tokio::test]
 async fn a_kernel_cancel_of_the_send_cancels_the_on_device_stream() {
     let engine = Arc::new(FakeEngine::new().hang());
-    let fx = Arc::new(kernel(&engine, json!({"system_prompt": "Be terse."})).await);
+    let fx = Arc::new(kernel(&engine, json!({})).await);
     let fx2 = Arc::clone(&fx);
     let join = tokio::spawn(async move { fx2.send("hi", json!({})).await });
     // wait for the generation to be in flight: the chat's turn (its provider completes it)
