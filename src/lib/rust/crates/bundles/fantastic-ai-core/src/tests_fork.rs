@@ -450,6 +450,15 @@ async fn the_forks_prompt_equals_the_parents_for_the_same_prefix() {
         });
         m
     };
+    // one short record prompt for both: the default block names each agent's own id
+    for a in [&fork, &reference] {
+        let _ = kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel_state"),
+                json!({"type": "update_agent", "id": a.as_str(), "system_prompt": "sys"}),
+            )])
+            .await;
+    }
     let theirs = plain(messages(&kernel, &fork).await);
     let wanted = plain(messages(&kernel, &reference).await);
     assert!(theirs.len() > 3, "a real prompt: {theirs:?}");

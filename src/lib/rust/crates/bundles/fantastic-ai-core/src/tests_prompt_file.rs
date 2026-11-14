@@ -129,14 +129,8 @@ async fn placeholders_fill_and_unknown_ones_stay() {
         turn(&kernel, &backend, &s, 1, json!({})).await,
         format!("store={store} {{nope}}")
     );
-    let per_call = turn(
-        &kernel,
-        &backend,
-        &s,
-        2,
-        json!({"system_prompt": "me={self}"}),
-    )
-    .await;
+    update(&kernel, &backend, "system_prompt", json!("me={self}")).await;
+    let per_call = turn(&kernel, &backend, &s, 2, json!({})).await;
     assert!(
         per_call.starts_with(&format!("me=You are `{}`.", backend.as_str())),
         "{per_call}"
