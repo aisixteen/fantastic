@@ -369,6 +369,22 @@
       }
     },
     "surface": {
+      "hover": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [1.0, 1.0, 1.0],
+          "hex": "#ffffff",
+          "alpha": 0.12
+        }
+      },
+      "selected": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [1.0, 1.0, 1.0],
+          "hex": "#ffffff",
+          "alpha": 0.14
+        }
+      },
       "bezel": {
         "$value": {
           "colorSpace": "srgb",
@@ -483,6 +499,14 @@
       }
     },
     "line": {
+      "selected": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [1.0, 1.0, 1.0],
+          "hex": "#ffffff",
+          "alpha": 0.35
+        }
+      },
       "button": {
         "$value": {
           "colorSpace": "srgb",

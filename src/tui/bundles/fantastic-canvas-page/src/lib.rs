@@ -55,8 +55,13 @@ pub const HOME_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\">
 /// served as `list.html`.
 pub const LIST_HTML: &str = include_str!("../../../web/home/list.html");
 
+/// THE ONE VIEW RELAY (`src/tui/web/page/view_relay.js`), served as `view_relay.js`: the
+/// plain-JS ES module any page of the web host loads to mount a view in a sandboxed iframe
+/// (the canvas bundle imports the same file). A product's page serves it from this const.
+pub const VIEW_RELAY_JS: &str = include_str!("../../../web/page/view_relay.js");
+
 /// Every served file, inflated once: the zip's entries plus `index.html`,
-/// `home.html` and `list.html`.
+/// `home.html`, `list.html` and `view_relay.js`.
 fn files() -> &'static BTreeMap<String, Vec<u8>> {
     static FILES: OnceLock<BTreeMap<String, Vec<u8>>> = OnceLock::new();
     FILES.get_or_init(|| {
@@ -75,6 +80,7 @@ fn files() -> &'static BTreeMap<String, Vec<u8>> {
         out.insert("index.html".into(), INDEX_HTML.as_bytes().to_vec());
         out.insert("home.html".into(), HOME_HTML.as_bytes().to_vec());
         out.insert("list.html".into(), LIST_HTML.as_bytes().to_vec());
+        out.insert("view_relay.js".into(), VIEW_RELAY_JS.as_bytes().to_vec());
         out
     })
 }
@@ -198,6 +204,13 @@ mod tests {
         assert_eq!(body.unwrap(), LIST_HTML.as_bytes());
     }
 
+    #[test]
+    fn view_relay_is_served_as_the_one_module_pages_load() {
+        let (head, body) = read_stream(&rs("view_relay.js", None, None));
+        assert_eq!(head["eof"], json!(true));
+        assert_eq!(body.unwrap(), VIEW_RELAY_JS.as_bytes());
+        assert!(VIEW_RELAY_JS.contains("export function mountView"));
+    }
 
     /// A kernel holding the agent `id` (its bundle is the one under test).
     fn kernel_with(id: &str) -> std::sync::Arc<Kernel> {

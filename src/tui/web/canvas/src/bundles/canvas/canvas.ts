@@ -25,7 +25,7 @@ import { schedulerView } from "../scheduler_view/scheduler_view.ts";
 import { credentialsView } from "../credentials_view/credentials_view.ts";
 import { canvasesView, setCanvasesDeps } from "../side_view/side_view.ts";
 import { filesView } from "../files/files_view.ts";
-import { renderFileTrees, setFilesDeps } from "../files/files_deps.ts";
+import { agentIndex, renderFileTrees, select, setFilesDeps } from "../files/files_deps.ts";
 import { DRAG_MIME, boxCentre, decodeDrag, dropPlan, worldAt, zoomAbout } from "../files/drag.ts";
 import { SIDEBAR_AGENT, SIDEBAR_CELL, mountSidebarColumn } from "./sidebar_mount.ts";
 import type { SidebarColumn } from "./sidebar_mount.ts";
@@ -1797,6 +1797,18 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     e.dataTransfer.dropEffect = "copy";
     canvas.classList.add("drop-target");
   });
+  // WHAT A DROP DOES, and what the sidebar's "open on the canvas" does: the view's `open` verb (a
+  // file a preview, a folder a file tree, an agent its cell), at the drop's point when there is one.
+  // A refusal is the toast; the send failing is too, and the caller goes on.
+  const openOnCanvas = async (what: { agent: string } | { path: string }, at?: { x: number; y: number }): Promise<void> => {
+    try {
+      const r = (await kernel.send([{ target: containerNow(), payload: { type: "open", ...what, ...(at ?? {}) } as unknown as Payload }]))[0]?.result as Rec | null;
+      const err = r?.["error"];
+      if (typeof err === "string") toast(`✕ ${err}`);
+    } catch (err) {
+      toast(`✕ ${(err as Error).message}`);
+    }
+  };
   canvas.addEventListener("dragleave", (e) => {
     if (!canvas.contains(e.relatedTarget as Node | null)) canvas.classList.remove("drop-target");
   });
@@ -1886,15 +1898,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
             // the listing failed: the view's `open` below says why
           }
         }
-        const what = it.kind === "agent" ? { agent: it.id } : { path: it.path };
-        try {
-          const r = (await kernel.send([{ target: containerNow(), payload: { type: "open", ...what, x, y } as unknown as Payload }]))[0]?.result as Rec | null;
-          const err = r?.["error"];
-          if (typeof err === "string") toast(`✕ ${err}`);
-        } catch (err) {
-          // the send itself failed: say so, and go on with the rest of the drop
-          toast(`✕ ${(err as Error).message}`);
-        }
+        await openOnCanvas(it.kind === "agent" ? { agent: it.id } : { path: it.path }, { x, y });
       }
     })();
   });
@@ -1905,7 +1909,15 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // THE CANVAS'S LEFT COLUMN (#608): the `sidebar` agent's own view beside the zoomed world, never in it,
   // so a zoom or a pan leaves it where it is. A click in it (`select {id}`) opens that agent.
   // (its open or its place moves the canvas's box: the GL camera reads that box, so it follows)
-  void mountSidebarColumn({ kernel, mount, ids: () => registry.keys(), wide: innerWidth > 768, onSelect: selectAgent, onPlace: () => glHost?.applyCamera() }).then((col) => {
+  void mountSidebarColumn({ kernel, mount, ids: () => registry.keys(), wide: innerWidth > 768, onSelect: (id) => {
+      select({ path: null, agent: id }, SIDEBAR_CELL);
+      selectAgent(id);
+    },
+    // a file the view selects: the previews that follow the selection show it (the agent of its folder, when it is one)
+    onSelectPath: (path) => select({ path, agent: agentIndex.agentAt(path)?.id ?? null }, SIDEBAR_CELL),
+    onOpen: (path) => void openOnCanvas({ path }),
+    storageKey: `sidebar:${BACKEND}`,
+    onPlace: () => glHost?.applyCamera() }).then((col) => {
     sidebar = col;
   });
   // ESC LEAVES FULL VIEW (owner 2026-10-08: nothing floats, so this is the way

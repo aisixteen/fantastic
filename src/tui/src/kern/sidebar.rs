@@ -30,7 +30,7 @@ fn calls(id: &str) -> Value {
     json!({
         "kernel": ["reflect", "list_agents"],
         "user": ["inquiries"],
-        "files": ["list", "watch_path", "unwatch_path", "open_view"],
+        "files": ["list", "watch", "watch_path", "unwatch_path", "open_view"],
         "*": ["status"],
         id: ["watch"],
     })
@@ -153,7 +153,7 @@ mod tests {
             json!({
                 "kernel": ["reflect", "list_agents"],
                 "user": ["inquiries"],
-                "files": ["list", "watch_path", "unwatch_path", "open_view"],
+                "files": ["list", "watch", "watch_path", "unwatch_path", "open_view"],
                 "*": ["status"],
                 "sidebar": ["watch"],
             })

@@ -4,14 +4,21 @@ import { mountHostPanel } from "../agent_view/agent_view.ts";
 import { AGENT_VIEW } from "../agent_view/agent_view.ts";
 import { cellGrant, expandReach, viewOf, viewRecordFresh } from "./host_views.ts";
 import type { Rec } from "./host_views.ts";
+import { hearSidebar, pageStore } from "../../../../page/view_relay.js";
+import type { SidebarStore } from "../../../../page/view_relay.js";
 
 // THE CANVAS'S LEFT COLUMN (#608): the host agent `sidebar`'s html view, drawn by its
 // `reflect` in a panel fixed to the viewport's left edge, beside the zoomed world (never in
 // it): a zoom or a pan does not move it. The view is the agent's; this is only the place it
 // sits and the grant of the cell that shows it (`cellGrant`, with the view's `"*"` reach
 // written out per agent). No `sidebar` agent (a folder seeded before it): no column.
-// What the view emits (`select {id}`) is heard on its cell's inbox.
-// The open state is not kept: there is no storage in the panel, and no field for it.
+// What the view emits is heard on its cell's inbox (`hearSidebar`): `select {id}` (an agent's cell),
+// `select_file {path}` (the previews that follow the selection), `open_file`/`open_dir {path}` (the
+// canvas's own `open`), `hide_tree`, and `state {state}`: which branches and folders the view has open.
+// The page keeps that state (its own storage, per canvas: the panel has none, and the record has no
+// field for it) and gives it back as `restore {state}` when the view says `ready`: it survives a reload.
+// `hearSidebar` and `pageStore` are the base relay module's (`web/page/view_relay.js`): the team page uses the same two.
+// The kernel strip's `select_kernel {guid}` is heard and left to the host.
 
 /** The host agent whose view this is. */
 export const SIDEBAR_AGENT = "sidebar";
@@ -52,6 +59,13 @@ export async function mountSidebarColumn(o: {
   ids: () => Iterable<string>;
   wide: boolean;
   onSelect: (id: string) => void;
+  /** a file the view selects (`select_file {path}`) */
+  onSelectPath?: (path: string) => void;
+  /** a file or folder the view asks to open on the canvas (`open_file`, `open_dir`) */
+  onOpen?: (path: string, dir: boolean) => void;
+  /** the key the view's open state is kept under (one per canvas); the state is not kept without it */
+  storageKey?: string;
+  store?: SidebarStore;
   onPlace?: () => void;
 }): Promise<SidebarColumn | null> {
   const { kernel } = o;
@@ -79,12 +93,26 @@ export async function mountSidebarColumn(o: {
   o.mount.appendChild(el);
 
   const handle = mountHostPanel({ kernel, mount: body, selfId: SIDEBAR_CELL, backend: SIDEBAR_AGENT, close: () => {} }, SIDEBAR_AGENT);
-  const off = kernel.onInbox(SIDEBAR_CELL, (p) => {
-    const m = p as Record<string, unknown>;
-    if (m["type"] === "select" && typeof m["id"] === "string" && m["id"] !== "") o.onSelect(m["id"]);
-    // `select_kernel {guid}`: the host decides; the canvas does nothing yet
-  });
+  const store = o.store ?? (o.storageKey !== undefined ? pageStore(o.storageKey) : undefined);
+  const off = kernel.onInbox(SIDEBAR_CELL, (p) =>
+    hearSidebar(p as Record<string, unknown>, {
+      select: o.onSelect,
+      selectPath: (path) => o.onSelectPath?.(path),
+      open: (path, dir) => o.onOpen?.(path, dir),
+      hide: () => setOpen(false),
+      ready: () => {
+        const state = store?.load();
+        if (state !== null && state !== undefined) kernel.emit(SIDEBAR_CELL, { type: "restore", state } as unknown as Payload);
+      },
+      keep: (state) => store?.save(state),
+    }),
+  );
 
+  const setOpen = (v: boolean): void => {
+    open = v;
+    paint();
+    o.onPlace?.();
+  };
   const place = (): void => {
     o.mount.classList.toggle(BESIDE, wide);
   };
@@ -97,22 +125,14 @@ export async function mountSidebarColumn(o: {
   };
   place();
   paint();
-  toggle.addEventListener("click", () => {
-    open = !open;
-    paint();
-    o.onPlace?.();
-  });
+  toggle.addEventListener("click", () => setOpen(!open));
 
   return {
     el,
     get open(): boolean {
       return open;
     },
-    setOpen(v: boolean): void {
-      open = v;
-      paint();
-      o.onPlace?.();
-    },
+    setOpen,
     setWide(v: boolean): void {
       wide = v;
       place();

@@ -1,0 +1,8 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: sidebar_render
+group: canvas
+title: "the canvas's left column draws the sidebar view as the one tree widget: kernel strip, agent rows, files inside the tree behind the Files switch, a row click opens its view, the open folders survive a reload (#608)"
+runner: probe.py
+costs: free
+limits: {seconds: 240}
+env: {}
