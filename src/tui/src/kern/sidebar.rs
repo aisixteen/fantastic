@@ -24,13 +24,13 @@ const MAN: &str = "The canvas's left column as one html view its `reflect` retur
 const VIEW: &str = include_str!("sidebar_view.html");
 
 /// What the view calls: the root's reflect and listing, the person's open inquiries, the
-/// project's files, each chat's `status` (every other agent: read verbs only), and its own
+/// project's files (listed, held with `watch_path`, heard through `watch`), each chat's `status` (every other agent: read verbs only), and its own
 /// agent's events.
 fn calls(id: &str) -> Value {
     json!({
         "kernel": ["reflect", "list_agents"],
         "user": ["inquiries"],
-        "files": ["list", "watch_path", "unwatch_path", "open_view"],
+        "files": ["list", "watch_path", "unwatch_path", "open_view", "watch"],
         "*": ["status"],
         id: ["watch"],
     })
@@ -153,7 +153,7 @@ mod tests {
             json!({
                 "kernel": ["reflect", "list_agents"],
                 "user": ["inquiries"],
-                "files": ["list", "watch_path", "unwatch_path", "open_view"],
+                "files": ["list", "watch_path", "unwatch_path", "open_view", "watch"],
                 "*": ["status"],
                 "sidebar": ["watch"],
             })

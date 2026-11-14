@@ -24,9 +24,20 @@ interface Pure {
   waitingRows(inq: Obj[], names: Record<string, string>, now: number): Obj[];
   sortedListing(files: Obj[]): Obj[];
   fileRows(lists: Record<string, Obj[]>, open: Record<string, boolean>, path: string, depth: number): Obj[];
+  withFiles(rows: Obj[], files: { on: boolean; lists: Record<string, Obj[]>; open: Record<string, boolean> }): Obj[];
+  filterRows(rows: Obj[], q: string): Obj[];
+  visibleRows(tree: Obj, chats: Record<string, boolean>, folded: Record<string, boolean>, status: Record<string, Obj>, asks: Record<string, boolean>, files: { on: boolean; lists: Record<string, Obj[]>; open: Record<string, boolean> }, q: string): Obj[];
+  agentCount(tree: Obj | null): number;
+  titleOf(root: Obj | null): string;
+  wantedDirs(on: boolean, open: Record<string, boolean>): string[];
+  affectedDirs(wanted: string[], evPath: string): string[];
+  cleanState(s: unknown): { folded: Record<string, boolean>; open: Record<string, boolean>; filesOpen: boolean };
+  droppedOutside(x: number, y: number, w: number, h: number): boolean;
+  foldLabel(name: string, folded: boolean): string;
+  IGNORED: string[];
 }
 const ctx = vm.createContext({});
-vm.runInContext(`${src.slice(from, to)}\nthis.api = { kernelStrip, chatSet, stateOf, treeRows, askers, waitingRows, sortedListing, fileRows };`, ctx);
+vm.runInContext(`${src.slice(from, to)}\nthis.api = { kernelStrip, chatSet, stateOf, treeRows, askers, waitingRows, sortedListing, fileRows, withFiles, filterRows, visibleRows, agentCount, titleOf, wantedDirs, affectedDirs, cleanState, droppedOutside, foldLabel, IGNORED };`, ctx);
 const raw = (ctx as unknown as { api: Pure }).api;
 // the vm's objects are of another realm: compare them as plain JSON
 const plain = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
@@ -116,4 +127,60 @@ test("file rows nest the open folders, listed sorted", () => {
   };
   const rows = plain(raw.fileRows(lists, { src: true }, ".", 2));
   assert.deepEqual(rows.map((r) => [r["path"], r["depth"], r["open"]]), [["docs", 2, false], ["src", 2, true], ["src/kern", 3, false], ["src/main.rs", 3, false], ["f.md", 2, false]]);
+  assert.deepEqual(rows.map((r) => r["kind"]), ["dir", "dir", "dir", "file", "file"]);
+});
+
+const lists = { ".": [{ name: "src", path: "src", type: "dir" }, { name: "a.md", path: "a.md", type: "file" }, { name: "node_modules", path: "node_modules", type: "dir" }], src: [{ name: "main.rs", path: "src/main.rs", type: "file" }] };
+
+test("the files nest inside the tree, under the files agent's row, only while the switch is on", () => {
+  const rows = plain(raw.treeRows(tree, {}, {}, {}, {}));
+  assert.deepEqual(plain(raw.withFiles(rows, { on: false, lists, open: {} })).map((r) => r["id"]), rows.map((r) => r["id"]), "switch off: the agent tree alone");
+  const on = plain(raw.withFiles(rows, { on: true, lists, open: { src: true } }));
+  assert.deepEqual(on.map((r) => [r["id"], r["depth"]]), [["kernel_state", 0], ["user", 1], ["files", 2], ["src", 3], ["src/main.rs", 4], ["a.md", 3], ["coder", 2], ["chat1", 1]]);
+  const waiting = plain(raw.withFiles(rows, { on: true, lists: {}, open: {} }));
+  assert.deepEqual(waiting.find((r) => r["kind"] === "note")!["depth"], 3, "a note while the folder is read");
+  const kids = { ...tree, children: [{ ...(tree.children as Obj[])[0], children: [{ id: "files", display_name: "files", handler_module: "file_bridge.tools", children: [{ id: "f1", display_name: "f1", handler_module: "file_bridge.tools", children: [] }] }] }] };
+  const f2 = plain(raw.visibleRows(kids, {}, { files: true }, {}, {}, { on: true, lists, open: {} }, ""));
+  assert.equal(f2.some((r) => r["kind"] === "dir"), false, "folded files agent: no file rows");
+});
+
+test("the filter keeps a match and what holds it; a typed filter ignores the folds", () => {
+  const rows = plain(raw.visibleRows(tree, {}, {}, {}, {}, { on: true, lists, open: { src: true } }, "main"));
+  assert.deepEqual(rows.map((r) => r["id"]), ["kernel_state", "user", "files", "src", "src/main.rs"]);
+  assert.deepEqual(plain(raw.visibleRows(tree, {}, { user: true }, {}, {}, { on: false, lists, open: {} }, "coder")).map((r) => r["id"]), ["kernel_state", "user", "coder"]);
+  assert.equal(plain(raw.visibleRows(tree, {}, {}, {}, {}, { on: false, lists, open: {} }, "  ")).length, 5, "blank: all");
+});
+
+test("the title block: the kernel's name and its agent count", () => {
+  assert.equal(raw.titleOf({ id: "kernel_state", display_name: "demo" }), "demo");
+  assert.equal(raw.titleOf(null), "this kernel");
+  assert.equal(raw.agentCount(tree), 4);
+  assert.equal(raw.agentCount(null), 0);
+  assert.equal(raw.foldLabel("Coder", false), "Fold Coder");
+  assert.equal(raw.foldLabel("Coder", true), "Unfold Coder");
+});
+
+test("watches: the project folder and each open folder while the switch is on; a change reads the folder and its parent again", () => {
+  assert.deepEqual(plain(raw.wantedDirs(false, { src: true })), []);
+  assert.deepEqual(plain(raw.wantedDirs(true, { src: true, docs: false, "src/kern": true })), [".", "src", "src/kern"]);
+  const w = [".", "src", "src/kern"];
+  assert.deepEqual(plain(raw.affectedDirs(w, "src/kern/a.rs")), ["src/kern"]);
+  assert.deepEqual(plain(raw.affectedDirs(w, "src/new.rs")), ["src"]);
+  assert.deepEqual(plain(raw.affectedDirs(w, "src")), [".", "src"]);
+  assert.deepEqual(plain(raw.affectedDirs(w, "top.md")), ["."]);
+  assert.deepEqual(plain(raw.affectedDirs(w, "")), ["."]);
+  assert.deepEqual(plain(raw.affectedDirs(w, "other/x")), []);
+});
+
+test("what a reload keeps is only ids and paths set true; anything else is dropped", () => {
+  assert.deepEqual(plain(raw.cleanState({ folded: { a: true, b: false, c: "x" }, open: { "src/kern": true }, filesOpen: true, evil: 1 })), { folded: { a: true }, open: { "src/kern": true }, filesOpen: true });
+  assert.deepEqual(plain(raw.cleanState(null)), { folded: {}, open: {}, filesOpen: false });
+  assert.deepEqual(plain(raw.cleanState({ filesOpen: "yes" })), { folded: {}, open: {}, filesOpen: false });
+});
+
+test("a drag that ends outside the sidebar's frame is a drop on the canvas", () => {
+  assert.equal(raw.droppedOutside(100, 100, 360, 800), false);
+  assert.equal(raw.droppedOutside(400, 100, 360, 800), true);
+  assert.equal(raw.droppedOutside(-3, 100, 360, 800), true);
+  assert.equal(raw.droppedOutside(100, 900, 360, 800), true);
 });

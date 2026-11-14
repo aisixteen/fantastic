@@ -10,8 +10,12 @@ import type { Rec } from "./host_views.ts";
 // it): a zoom or a pan does not move it. The view is the agent's; this is only the place it
 // sits and the grant of the cell that shows it (`cellGrant`, with the view's `"*"` reach
 // written out per agent). No `sidebar` agent (a folder seeded before it): no column.
-// What the view emits (`select {id}`) is heard on its cell's inbox.
-// The open state is not kept: there is no storage in the panel, and no field for it.
+// What the view emits is heard on its cell's inbox: `select {id}` (an agent), `open_file {path}` and
+// `open_dir {path}` (a row clicked), `open_on_canvas {items}` (a row dragged out of the column: no
+// drop point, the canvas places it as its `open` does), `hide` (the "Hide the tree" button),
+// `ready` and `state {state}` (what the view keeps across a reload: the folds, the open folders,
+// the files switch). The view has no storage of its own (a null-origin frame): this page keeps the
+// state it is told, in the browser, and gives it back on `ready` as `restore {state}`.
 
 /** The host agent whose view this is. */
 export const SIDEBAR_AGENT = "sidebar";
@@ -34,6 +38,42 @@ export interface SidebarColumn {
   dispose(): void;
 }
 
+/** What the view asks the canvas to open: a project path, or an agent by id. */
+export type OpenItem = { path: string } | { agent: string };
+
+/** The items an `open_file` / `open_dir` / `open_on_canvas` message names; null when it is none of them or names nothing usable. */
+export function openItems(m: Record<string, unknown>): OpenItem[] | null {
+  const t = m["type"];
+  if (t === "open_file" || t === "open_dir") return typeof m["path"] === "string" && m["path"] !== "" ? [{ path: m["path"] }] : null;
+  if (t !== "open_on_canvas" || !Array.isArray(m["items"])) return null;
+  const out: OpenItem[] = [];
+  for (const it of m["items"] as unknown[]) {
+    const o = (it ?? {}) as Record<string, unknown>;
+    if ((o["kind"] === "file" || o["kind"] === "dir") && typeof o["path"] === "string" && o["path"] !== "") out.push({ path: o["path"] });
+    else if (o["kind"] === "agent" && typeof o["id"] === "string" && o["id"] !== "") out.push({ agent: o["id"] });
+  }
+  return out.length > 0 ? out : null;
+}
+
+/** Where the view's kept state lives in the browser (a per-viewer convenience, never needed). */
+export const STATE_KEY = "fantastic.sidebar.state";
+
+const readState = (): unknown => {
+  try {
+    const s = localStorage.getItem(STATE_KEY);
+    return s === null ? null : JSON.parse(s);
+  } catch {
+    return null;
+  }
+};
+const writeState = (s: unknown): void => {
+  try {
+    localStorage.setItem(STATE_KEY, JSON.stringify(s));
+  } catch {
+    // no storage: the state is simply not kept
+  }
+};
+
 /** The cell's `can_call` for the view `rec` declares, `"*"` written out for `ids`; null when it is not an html view. */
 export function sidebarGrant(rec: Rec | undefined, ids: Iterable<string>): Record<string, string[]> | null {
   if (rec === undefined) return null;
@@ -43,7 +83,7 @@ export function sidebarGrant(rec: Rec | undefined, ids: Iterable<string>): Recor
 
 /**
  * Mount the column into `mount` (the canvas's page). `onSelect` hears each `select {id}` the view
- * emits. `onPlace` runs after the column's width on the page changes (open or collapsed, beside
+ * emits, `onOpen` each open request. `onPlace` runs after the column's width on the page changes (open or collapsed, beside
  * or over), so what reads the canvas's box follows. Resolves to null when there is no sidebar agent.
  */
 export async function mountSidebarColumn(o: {
@@ -52,6 +92,8 @@ export async function mountSidebarColumn(o: {
   ids: () => Iterable<string>;
   wide: boolean;
   onSelect: (id: string) => void;
+  /** a row to open on the canvas (`open {path}` or `open {agent}`, as its drop does) */
+  onOpen?: (items: OpenItem[]) => void;
   onPlace?: () => void;
 }): Promise<SidebarColumn | null> {
   const { kernel } = o;
@@ -83,8 +125,21 @@ export async function mountSidebarColumn(o: {
     const m = p as Record<string, unknown>;
     if (m["type"] === "select" && typeof m["id"] === "string" && m["id"] !== "") o.onSelect(m["id"]);
     // `select_kernel {guid}`: the host decides; the canvas does nothing yet
+    const items = openItems(m);
+    if (items !== null) o.onOpen?.(items);
+    if (m["type"] === "hide") setOpen(false);
+    if (m["type"] === "state") writeState(m["state"]);
+    if (m["type"] === "ready") {
+      const kept = readState();
+      if (kept !== null) kernel.emit(SIDEBAR_CELL, { type: "restore", state: kept } as unknown as Payload);
+    }
   });
 
+  const setOpen = (v: boolean): void => {
+    open = v;
+    paint();
+    o.onPlace?.();
+  };
   const place = (): void => {
     o.mount.classList.toggle(BESIDE, wide);
   };
@@ -108,11 +163,7 @@ export async function mountSidebarColumn(o: {
     get open(): boolean {
       return open;
     },
-    setOpen(v: boolean): void {
-      open = v;
-      paint();
-      o.onPlace?.();
-    },
+    setOpen,
     setWide(v: boolean): void {
       wide = v;
       place();

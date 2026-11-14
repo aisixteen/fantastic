@@ -97,6 +97,22 @@
       }
     },
     "accent": {
+      "weak": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [1.0, 1.0, 1.0],
+          "hex": "#ffffff",
+          "alpha": 0.12
+        }
+      },
+      "line": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [1.0, 1.0, 1.0],
+          "hex": "#ffffff",
+          "alpha": 0.32
+        }
+      },
       "base": {
         "$value": {
           "colorSpace": "srgb",
@@ -369,6 +385,14 @@
       }
     },
     "surface": {
+      "hover": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [1.0, 1.0, 1.0],
+          "hex": "#ffffff",
+          "alpha": 0.14
+        }
+      },
       "bezel": {
         "$value": {
           "colorSpace": "srgb",

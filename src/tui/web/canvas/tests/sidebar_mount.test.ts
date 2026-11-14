@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sidebarGrant } from "../src/bundles/canvas/sidebar_mount.ts";
+import { openItems, sidebarGrant } from "../src/bundles/canvas/sidebar_mount.ts";
 import { panelRelay } from "../src/bundles/panel_relay.ts";
 import { Agent, Kernel } from "../src/lib.ts";
 import type { Payload } from "../src/lib.ts";
@@ -13,7 +13,7 @@ const view = {
     calls: {
       kernel: ["reflect", "list_agents"],
       user: ["inquiries"],
-      files: ["list", "watch_path", "unwatch_path", "open_view"],
+      files: ["list", "watch_path", "unwatch_path", "open_view", "watch"],
       "*": ["status"],
       sidebar: ["watch"],
     },
@@ -24,7 +24,7 @@ test("the sidebar cell is granted exactly the view's calls, `*` written out per 
   assert.deepEqual(sidebarGrant(view, ["chat1", "files"]), {
     kernel: ["reflect", "list_agents"],
     user: ["inquiries"],
-    files: ["list", "watch_path", "unwatch_path", "open_view", "status"],
+    files: ["list", "watch_path", "unwatch_path", "open_view", "watch", "status"],
     sidebar: ["watch"],
     chat1: ["status"],
   });
@@ -52,4 +52,16 @@ test("a host agent's view says kernel for the HOST's root; any other panel keeps
   assert.deepEqual(hosts, ["kernel"]);
   await run("plain");
   assert.deepEqual(hosts, ["kernel"], "a page-content panel still reaches the page's own kernel");
+});
+
+test("what a row asks the canvas to open: a path from a click, items from a drag; nothing else", () => {
+  assert.deepEqual(openItems({ type: "open_file", path: "src/a.rs", id: "file_1" }), [{ path: "src/a.rs" }]);
+  assert.deepEqual(openItems({ type: "open_dir", path: "src" }), [{ path: "src" }]);
+  assert.deepEqual(
+    openItems({ type: "open_on_canvas", items: [{ kind: "file", path: "a.md" }, { kind: "dir", path: "d" }, { kind: "agent", id: "chat1" }, { kind: "agent" }, 7] }),
+    [{ path: "a.md" }, { path: "d" }, { agent: "chat1" }],
+  );
+  for (const bad of [{ type: "open_file" }, { type: "open_file", path: "" }, { type: "open_on_canvas", items: [] }, { type: "open_on_canvas" }, { type: "select", id: "x" }]) {
+    assert.equal(openItems(bad), null, JSON.stringify(bad));
+  }
 });

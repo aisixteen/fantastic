@@ -1,6 +1,8 @@
 <style>
 :root{
 --fc-color-accent-base:rgb(17 17 17);
+--fc-color-accent-line:rgb(0 0 0 / 0.3);
+--fc-color-accent-weak:rgb(0 0 0 / 0.08);
 --fc-color-accent-deep:rgb(17 17 17);
 --fc-color-accent-deep-hover:rgb(43 43 43);
 --fc-color-accent-on:rgb(255 255 255);
@@ -19,6 +21,7 @@
 --fc-color-surface-button:rgb(0 0 0 / 0.05);
 --fc-color-surface-code:rgb(0 0 0 / 0.045);
 --fc-color-surface-field:rgb(0 0 0 / 0.06);
+--fc-color-surface-hover:rgb(0 0 0 / 0.09);
 --fc-color-surface-raised:rgb(255 255 255 / 0.72);
 --fc-color-surface-well:rgb(0 0 0 / 0.06);
 --fc-color-text-code:rgb(69 69 69);
@@ -47,58 +50,88 @@ html,body{height:100%;margin:0}
 body{display:flex;flex-direction:column;min-height:0;overflow:hidden;background:transparent;color:var(--fc-color-text-primary);font:13px/1.45 var(--fc-font-family-sans)}
 button{font:inherit;color:inherit;cursor:pointer;border:0;background:transparent;padding:0;text-align:left}
 button:focus-visible,input:focus-visible{outline:2px solid var(--fc-color-accent-base);outline-offset:1px}
-.hov:hover{background:var(--fc-color-surface-button)}
-.strip{flex:none;display:flex;gap:6px;overflow-x:auto;padding:10px 10px 8px;border-bottom:1px solid var(--fc-color-line-faint);scrollbar-width:none}
-.k{flex:none;display:flex;flex-direction:column;align-items:center;gap:3px;width:56px;padding:5px 0 4px;border-radius:var(--fc-radius-control)}
-.k .mark{display:grid;place-items:center;width:32px;height:32px;border-radius:var(--fc-radius-card);font:600 11px/1 var(--fc-font-family-mono);text-transform:uppercase;background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
-.k.here .mark{background:var(--fc-color-accent-deep);color:var(--fc-color-accent-on)}
+.hov:hover{background:var(--fc-color-surface-hover)}
+.head{flex:none;display:flex;align-items:center;justify-content:space-between;gap:8px;height:32px;padding:0 8px 0 12px;border-bottom:1px solid var(--fc-color-line-button)}
+.head h1{margin:0;font:600 11px/1 var(--fc-font-family-mono);letter-spacing:.5px;text-transform:uppercase;color:var(--fc-color-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip{flex:none;height:20px;padding:0 8px;border-radius:var(--fc-radius-key);background:var(--fc-color-surface-button);box-shadow:inset 0 0 0 1px var(--fc-color-line-button);font-size:11px;line-height:20px;color:var(--fc-color-text-muted)}
+.cols{flex:1 1 0;min-height:0;display:flex}
+.rail{flex:0 0 64px;display:flex;flex-direction:column;align-items:center;gap:8px;overflow-y:auto;padding:10px 0;border-right:1px solid var(--fc-color-line-button);scrollbar-width:none}
+.k{flex:none;display:flex;flex-direction:column;align-items:center;gap:3px;width:56px;padding:3px 0;border-radius:var(--fc-radius-control)}
+.k .mark{display:grid;place-items:center;width:34px;height:34px;border-radius:var(--fc-radius-card);font:600 11px/1 var(--fc-font-family-mono);text-transform:uppercase;background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
+.k.here .mark{background:var(--fc-color-accent-base);color:var(--fc-color-accent-on)}
 .k .nm{max-width:54px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--fc-color-text-muted)}
 .k.here .nm{color:var(--fc-color-text-primary);font-weight:600}
-.scroll{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:none;padding:8px 8px 4px;display:flex;flex-direction:column;gap:12px}
+.scroll{flex:1 1 0;min-width:0;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:none;padding:12px 8px 8px;display:flex;flex-direction:column;gap:14px}
+.title{display:flex;align-items:center;gap:10px;padding:0 4px}
+.title .tile{flex:none;display:grid;place-items:center;width:32px;height:32px;border-radius:var(--fc-radius-card);background:var(--fc-color-accent-weak);color:var(--fc-color-text-primary);font:600 11px/1 var(--fc-font-family-mono);text-transform:uppercase}
+.title .tx{display:flex;flex-direction:column;min-width:0}
+.title b{font-size:15px;font-weight:600;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.title span{font-size:11px;color:var(--fc-color-text-subtle)}
 .wait{display:flex;flex-direction:column;gap:2px;padding:8px 4px 4px;border-radius:var(--fc-radius-panel);background:var(--fc-color-status-warn-surface);box-shadow:inset 0 0 0 1px var(--fc-color-status-warn-line)}
 .wait[hidden]{display:none}
-.wait h2{margin:0;padding:0 8px 4px;font:600 11px/1.4 var(--fc-font-family-mono);letter-spacing:.5px;text-transform:uppercase;color:var(--fc-color-status-warn)}
+.wait h2{display:flex;align-items:center;gap:8px;margin:0;padding:0 8px 4px;font:600 11px/1.4 var(--fc-font-family-mono);letter-spacing:.5px;text-transform:uppercase;color:var(--fc-color-status-warn)}
+.wait h2 .n{padding:0 6px;border-radius:var(--fc-radius-pill);background:var(--fc-color-status-warn);color:var(--fc-color-status-warn-on);letter-spacing:0}
 .w{display:flex;align-items:center;gap:9px;width:100%;min-height:44px;padding:5px 8px;border-radius:var(--fc-radius-card)}
+.w .gl{background:var(--fc-color-surface-raised)}
 .w .who{display:flex;flex-direction:column;flex:1;min-width:0}
 .w .who b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .w .who span{font-size:12px;color:var(--fc-color-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .w .age{flex:none;font:500 11px/1 var(--fc-font-family-mono);color:var(--fc-color-status-warn)}
+.tools{display:flex;align-items:center;gap:8px}
+.q{flex:1;min-width:0;height:32px;padding:0 10px;border:0;border-radius:var(--fc-radius-card);background:var(--fc-color-surface-raised);box-shadow:inset 0 0 0 1px var(--fc-color-line-button);color:var(--fc-color-text-primary);font:inherit}
+.q:focus-visible{outline:none;box-shadow:var(--fc-shadow-focus)}
+.sw{flex:none;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--fc-color-text-muted)}
+.sw .track{position:relative;width:30px;height:18px;border-radius:var(--fc-radius-pill);background:var(--fc-color-surface-well);box-shadow:inset 0 0 0 1px var(--fc-color-line-button)}
+.sw .track i{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--fc-color-text-subtle)}
+.sw[aria-checked="true"] .track{background:var(--fc-color-accent-base)}
+.sw[aria-checked="true"] .track i{left:14px;background:var(--fc-color-accent-on)}
 .tree{display:flex;flex-direction:column;gap:1px}
 .r{display:flex;align-items:center;border-radius:var(--fc-radius-card)}
 .r .tw{flex:none;display:grid;place-items:center;width:18px;height:28px;border-radius:var(--fc-radius-chip);color:var(--fc-color-text-subtle);font-size:10px}
 .r .tw.none{visibility:hidden}
-.r .main{flex:1;min-width:0;display:flex;align-items:center;gap:9px;min-height:30px;padding:3px 8px 3px 4px;border-radius:var(--fc-radius-card)}
-.r .gl{position:relative;flex:none;display:grid;place-items:center;width:26px;height:26px;border-radius:var(--fc-radius-card);background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
-.r .gl svg{display:block}
+.r .main{flex:1;min-width:0;display:flex;align-items:center;gap:9px;min-height:40px;padding:3px 8px 3px 4px;border-radius:var(--fc-radius-card)}
+.r .gl,.w .gl{position:relative;flex:none;display:grid;place-items:center;width:28px;height:28px;border-radius:var(--fc-radius-card);background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
+.r .gl svg,.w .gl svg{display:block}
 .r .name{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .r .name.chat{font-weight:600}
 .r .tag{flex:none;font:10px/15px var(--fc-font-family-mono);padding:0 5px;border-radius:var(--fc-radius-chip);color:var(--fc-color-text-muted);background:var(--fc-color-surface-well);max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .r .sp{flex:1}
 .r .count{flex:none;font:11px/1 var(--fc-font-family-mono);color:var(--fc-color-text-subtle)}
 .r .st{flex:none;font:11px/1 var(--fc-font-family-mono);color:var(--fc-color-text-subtle);white-space:nowrap}
-.badge{position:absolute;right:-4px;bottom:-4px;display:none;place-items:center;width:13px;height:13px;border-radius:50%;font:700 9px/1 var(--fc-font-family-sans);border:2px solid transparent;box-sizing:content-box;margin:-2px}
+.r .go{flex:none;display:none;place-items:center;width:22px;height:22px;margin-right:4px;border-radius:var(--fc-radius-chip);color:var(--fc-color-text-subtle);font-size:12px}
+.r:hover .go,.r .go:focus-visible{display:grid}
+.badge{position:absolute;right:-4px;bottom:-4px;display:none;place-items:center;width:13px;height:13px;border-radius:50%;font:700 9px/1 var(--fc-font-family-sans);border:2px solid var(--fc-color-accent-on);box-sizing:content-box;margin:-2px}
 .badge.ask{display:grid;background:var(--fc-color-status-warn);color:var(--fc-color-status-warn-on)}
-.badge.queued{display:grid;background:var(--fc-color-status-warn-surface);color:var(--fc-color-status-warn);box-shadow:inset 0 0 0 1px var(--fc-color-status-warn-line)}
-.badge.active{display:grid;width:11px;height:11px;margin:-1px;border:2px solid var(--fc-color-status-ok);border-top-color:transparent;background:transparent;animation:spin 900ms linear infinite}
-.r.sel,.r.sel .main{background:var(--fc-color-surface-raised);box-shadow:inset 0 0 0 1px var(--fc-color-line-button)}
+.badge.queued{display:grid;background:var(--fc-color-status-warn-surface);color:var(--fc-color-status-warn)}
+.badge.active{display:grid;width:11px;height:11px;margin:-1px;border:2px solid var(--fc-color-accent-base);border-top-color:transparent;background:transparent;animation:spin 1100ms linear infinite}
+.r.sel,.r.sel .main{background:var(--fc-color-accent-weak);box-shadow:inset 0 0 0 1px var(--fc-color-accent-line)}
 .st.ask{color:var(--fc-color-status-warn)}
-.st.active{color:var(--fc-color-status-ok)}
+.st.active{color:var(--fc-color-accent-base)}
 .st.queued{color:var(--fc-color-status-warn)}
-.pins{flex:none;display:flex;flex-direction:column;gap:1px;padding:6px 8px 8px;border-top:1px solid var(--fc-color-line-faint)}
-.f .name{font:12px/1.3 var(--fc-font-family-mono)}
-.f .gl{width:22px;height:22px;border-radius:var(--fc-radius-control)}
+.r.f .main{min-height:26px}
+.r.f .name{font:12px/1.3 var(--fc-font-family-mono)}
+.r.f .gl{width:22px;height:22px;border-radius:var(--fc-radius-control);background:transparent}
+.r.f .name.dir{font-weight:600}
+.r.drag .main{cursor:grab}
 .note{padding:4px 8px;font-size:12px;color:var(--fc-color-text-subtle)}
 .note.err{color:var(--fc-color-status-error)}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important}}
 </style>
-<div class="strip" id="strip" role="navigation" aria-label="Kernels"></div>
+<header class="head"><h1 id="ttl">Agents</h1><button class="chip hov" id="hide" type="button" aria-label="Hide the tree" title="Hide the tree">Hide</button></header>
+<div class="cols">
+<nav class="rail" id="strip" aria-label="Kernels"></nav>
 <div class="scroll">
+<div class="title" id="title"></div>
 <section class="wait" id="wait" aria-label="Waiting for you" hidden></section>
+<div class="tools">
+<input class="q" id="q" type="search" placeholder="Filter" aria-label="Filter agents and files" autocomplete="off">
+<button class="sw" id="sw" type="button" role="switch" aria-checked="false" aria-label="Show files in the tree"><span>Files</span><span class="track"><i></i></span></button>
+</div>
 <nav class="tree" id="tree" aria-label="Agents"></nav>
 <div class="note err" id="err" hidden></div>
 </div>
-<div class="pins" id="pins" role="group" aria-label="Files"></div>
+</div>
 <script>
 // pure
 var CHAT_REPLY_KEYS = ["tree"];
@@ -151,7 +184,7 @@ function treeRows(root, chats, folded, status, asks) {
     var isChat = !!chats[n.id];
     var isFolded = kids > 0 && !!folded[n.id];
     rows.push({
-      id: n.id, depth: depth,
+      kind: "agent", id: n.id, depth: depth,
       name: String(n.display_name || n.id),
       tag: n.handler_module ? String(n.handler_module).replace(/\.tools$/, "") : "",
       chat: isChat, kids: kids, folded: isFolded, below: isFolded ? totalBelow(n) : 0,
@@ -181,29 +214,89 @@ function waitingRows(inq, names, now) {
       return { asker: q.asker, who: names[q.asker] || q.asker, text: oneLine(q.text), age: ageText(q.ts, now), re: q.re };
     });
 }
-// a folder listing, directories first, then by name
+// the folders the file tree hides (the canvas tree's own list: `paths.ts` IGNORED)
+var IGNORED = [".git", "node_modules", "target", "dist", "__pycache__"];
+// a folder listing: ignored folders out, directories first, then by name (the canvas tree's order)
 function sortedListing(files) {
-  return (Array.isArray(files) ? files : []).filter(function (f) { return f && typeof f.name === "string"; })
+  return (Array.isArray(files) ? files : []).filter(function (f) { return f && typeof f.name === "string" && !(f.type === "dir" && IGNORED.indexOf(f.name) >= 0); })
     .slice().sort(function (a, b) {
       var da = a.type === "dir" ? 0 : 1, db = b.type === "dir" ? 0 : 1;
       if (da !== db) return da - db;
-      return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : a.name.toLowerCase() > b.name.toLowerCase() ? 1 : 0;
+      return a.name.localeCompare(b.name);
     });
 }
-// the project folder as rows: `lists` = {path: files|undefined}, `open` = {path: true}
+// the project folder as rows under `path`: `lists` = {path: files|undefined}, `open` = {path: true}
 function fileRows(lists, open, path, depth) {
   var out = [];
   sortedListing(lists[path]).forEach(function (f) {
     var isDir = f.type === "dir";
-    out.push({ path: f.path, name: f.name, dir: isDir, open: isDir && !!open[f.path], depth: depth });
+    out.push({ kind: isDir ? "dir" : "file", id: f.path, path: f.path, name: f.name, dir: isDir, open: isDir && !!open[f.path], depth: depth });
     if (isDir && open[f.path]) out = out.concat(fileRows(lists, open, f.path, depth + 1));
   });
   return out;
 }
+// the files agent's row owns the project folder: its rows nest right under it (not when the
+// switch is off, or the agent's branch is folded away)
+function withFiles(rows, files) {
+  if (!files || !files.on) return rows;
+  var out = [];
+  rows.forEach(function (r) {
+    out.push(r);
+    if (r.kind === "agent" && r.id === "files" && !r.folded) {
+      if (files.lists["."] === undefined) out.push({ kind: "note", id: "files:reading", depth: r.depth + 1, name: "reading…" });
+      else out = out.concat(fileRows(files.lists, files.open, ".", r.depth + 1));
+    }
+  });
+  return out;
+}
+// the filter: a row stays when its name, tag or id has the text, or something below it does
+function filterRows(rows, q) {
+  var s = String(q == null ? "" : q).trim().toLowerCase();
+  if (s === "") return rows;
+  var has = function (r) { return (String(r.name) + " " + String(r.tag || "") + " " + String(r.id)).toLowerCase().indexOf(s) >= 0; };
+  return rows.filter(function (r, i) {
+    if (has(r)) return true;
+    for (var j = i + 1; j < rows.length && rows[j].depth > r.depth; j++) if (has(rows[j])) return true;
+    return false;
+  });
+}
+// the rows as drawn: the agent tree (folds forgotten while a filter is typed), the files inside it
+function visibleRows(tree, chats, folded, status, asks, files, q) {
+  var f = String(q == null ? "" : q).trim() === "" ? folded : {};
+  return filterRows(withFiles(treeRows(tree, chats, f, status, asks), files), q);
+}
+function agentCount(tree) { return tree ? totalBelow(tree) : 0; }
+function titleOf(root) { return String(root && (root.display_name || root.id) || "this kernel"); }
+// the folders to keep a watch on: the project folder and each open folder, while the switch is on
+function wantedDirs(filesOn, open) {
+  if (!filesOn) return [];
+  return ["."].concat(Object.keys(open).filter(function (p) { return open[p] === true; }).sort());
+}
+// which open folders a `changed {path}` event means to read again: the path itself (a folder) and the folder holding it
+function affectedDirs(wanted, evPath) {
+  var p = String(evPath == null ? "" : evPath).replace(/^\.?\/+|\/+$/g, "");
+  if (p === "" || p === ".") return wanted.filter(function (w) { return w === "."; });
+  var i = p.lastIndexOf("/"), parent = i < 0 ? "." : p.slice(0, i);
+  return wanted.filter(function (w) { return w === p || w === parent; });
+}
+// what a reload keeps: the folds, the open folders, the files switch (ids and paths only)
+function cleanState(s) {
+  var out = { folded: {}, open: {}, filesOpen: false };
+  if (!s || typeof s !== "object") return out;
+  ["folded", "open"].forEach(function (k) {
+    var m = s[k];
+    if (m && typeof m === "object") Object.keys(m).forEach(function (key) { if (m[key] === true) out[k][key] = true; });
+  });
+  out.filesOpen = s.filesOpen === true;
+  return out;
+}
+// a drag that ended outside the sidebar's own frame landed on the canvas
+function droppedOutside(x, y, w, h) { return x < 0 || y < 0 || x > w || y > h; }
+function foldLabel(name, folded) { return (folded ? "Unfold " : "Fold ") + name; }
 // end pure
 
 var SELF = "{{cell}}", ME = "{{agent}}", ROOT = ".";
-var st = { root: null, chats: {}, status: {}, inq: [], folded: {}, selected: "", filesOpen: false, projOpen: false, open: {}, lists: {}, tick: 0, busy: false };
+var st = { root: null, tree: null, chats: {}, status: {}, inq: [], folded: {}, selected: "", filesOpen: false, open: {}, lists: {}, held: {}, q: "", tick: 0, busy: false };
 var $ = function (id) { return document.getElementById(id); };
 var ROBOT = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="11" height="8" rx="2"/><path d="M8 5V2.5M5.8 9v.01M10.2 9v.01M6 11.2h4"/></svg>';
 var TOOL = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 3a3 3 0 0 0 3.2 3.9L6 13.6a1.4 1.4 0 0 1-2-2l6.7-6.7A3 3 0 0 0 9.5 3z"/></svg>';
@@ -214,7 +307,10 @@ function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.cl
 function say(msg) { var e = $("err"); e.hidden = !msg; e.textContent = msg || ""; }
 function failed(r) { return !r || typeof r !== "object" || typeof r.error === "string"; }
 function call(target, p) { return fantastic.send(target, p).then(function (r) { return r; }, function () { return null; }); }
-function select(id) { if (id) { st.selected = id; fantastic.emit(SELF, { type: "select", id: id }); paintTree(); } }
+// what the view tells its host (the canvas hears it; a page with no handler hears nothing)
+function tell(m) { try { fantastic.emit(SELF, m); } catch (e) { /* no host to tell */ } }
+function keep() { tell({ type: "state", state: { folded: st.folded, open: st.open, filesOpen: st.filesOpen } }); }
+function select(id) { if (id) { st.selected = id; tell({ type: "select", id: id }); paintTree(); } }
 
 function paintStrip() {
   var host = $("strip"); host.textContent = "";
@@ -222,102 +318,126 @@ function paintStrip() {
     var b = el("button", "k hov" + (k.here ? " here" : ""));
     b.type = "button"; b.title = k.here ? k.name + " (this kernel)" : "kernel " + k.guid;
     b.appendChild(el("span", "mark", k.mark)); b.appendChild(el("span", "nm", k.name));
-    if (!k.here) b.addEventListener("click", function () { fantastic.emit(SELF, { type: "select_kernel", guid: k.guid }); });
+    if (!k.here) b.addEventListener("click", function () { tell({ type: "select_kernel", guid: k.guid }); });
     host.appendChild(b);
   });
 }
+function paintTitle() {
+  $("ttl").textContent = "Agents";
+  var host = $("title"); host.textContent = "";
+  var name = titleOf(st.root);
+  host.appendChild(el("span", "tile", markOf(name)));
+  var tx = el("span", "tx"); tx.appendChild(el("b", "", name));
+  var n = agentCount(st.tree); tx.appendChild(el("span", "", n + (n === 1 ? " agent" : " agents")));
+  host.appendChild(tx);
+}
 function nameMap(n, out) { if (n && typeof n.id === "string") { out[n.id] = String(n.display_name || n.id); (n.children || []).forEach(function (k) { nameMap(k, out); }); } return out; }
+function glyph(inner) { var g = el("span", "gl"); g.innerHTML = inner; return g; }
 function paintWait() {
   var host = $("wait"); host.textContent = "";
   var rows = waitingRows(st.inq, nameMap(st.tree, {}), Date.now() / 1000);
   host.hidden = rows.length === 0;
   if (!rows.length) return;
-  host.appendChild(el("h2", "", "Waiting for you · " + rows.length));
+  var h = el("h2", "", "Waiting for you"); h.appendChild(el("span", "n", String(rows.length)));
+  host.appendChild(h);
   rows.forEach(function (w) {
     var b = el("button", "w hov"); b.type = "button";
+    b.appendChild(glyph(ROBOT));
     var who = el("span", "who"); who.appendChild(el("b", "", w.who)); who.appendChild(el("span", "", w.text));
     b.appendChild(who); b.appendChild(el("span", "age", w.age));
     b.addEventListener("click", function () { select(w.asker); });
     host.appendChild(b);
   });
 }
-function glyph(inner) { var g = el("span", "gl"); g.innerHTML = inner; return g; }
-function treeButton(row, fold, onFold) {
-  var w = el("div", "r" + (st.selected === row.id ? " sel" : ""));
+function foldBox(cls, fold, label, onFold) {
+  var w = el("div", cls);
   var tw = el("button", "tw" + (fold === null ? " none" : " hov"), fold === null ? "" : fold ? "▸" : "▾");
-  tw.type = "button"; tw.setAttribute("aria-label", fold ? "unfold" : "fold");
-  if (fold !== null) tw.addEventListener("click", function (e) { e.stopPropagation(); onFold(); });
+  tw.type = "button";
+  if (fold !== null) { tw.setAttribute("aria-label", label); tw.addEventListener("click", function (e) { e.stopPropagation(); onFold(); }); }
+  else tw.tabIndex = -1;
   w.appendChild(tw);
+  return w;
+}
+// a row can be dragged out onto the canvas: the drop is a message (no drop point), the canvas places it as its `open` does
+function draggable(w, item, label) {
+  w.draggable = true; w.className += " drag";
+  w.addEventListener("dragstart", function (e) { try { e.dataTransfer.setData("text/plain", label); e.dataTransfer.effectAllowed = "copy"; } catch (x) { /* no data transfer */ } });
+  w.addEventListener("dragend", function (e) { if (droppedOutside(e.clientX, e.clientY, innerWidth, innerHeight)) tell({ type: "open_on_canvas", items: [item] }); });
+}
+function agentRow(row) {
+  var w = foldBox("r" + (st.selected === row.id ? " sel" : ""), row.kids > 0 ? row.folded : null, foldLabel(row.name, row.folded), function () { st.folded[row.id] = !st.folded[row.id]; keep(); paintTree(); });
+  w.style.paddingLeft = (row.depth * 14) + "px";
+  var b = el("button", "main hov"); b.type = "button"; b.title = row.id;
+  var g = glyph(row.chat ? ROBOT : TOOL);
+  if (row.state) g.appendChild(el("span", "badge " + row.state.kind, row.state.kind === "ask" ? "?" : ""));
+  b.appendChild(g);
+  b.appendChild(el("span", "name" + (row.chat ? " chat" : ""), row.name));
+  if (row.tag) b.appendChild(el("span", "tag", row.tag));
+  b.appendChild(el("span", "sp"));
+  if (row.folded) b.appendChild(el("span", "count", String(row.below)));
+  if (row.state && row.state.kind !== "idle") b.appendChild(el("span", "st " + row.state.kind, row.state.label));
+  b.addEventListener("click", function () { select(row.id); });
+  w.appendChild(b);
+  draggable(w, { kind: "agent", id: row.id }, row.name);
+  return w;
+}
+function fileRow(row) {
+  var w = foldBox("r f" + (st.selected === row.path ? " sel" : ""), row.dir ? !row.open : null, foldLabel(row.name, !row.open), function () { toggleDir(row.path); });
+  w.style.paddingLeft = (row.depth * 14) + "px";
+  var b = el("button", "main hov"); b.type = "button"; b.title = row.path;
+  b.appendChild(glyph(row.dir ? FOLDER : FILE));
+  b.appendChild(el("span", "name" + (row.dir ? " dir" : ""), row.name));
+  b.addEventListener("click", function () { row.dir ? toggleDir(row.path) : openFile(row.path); });
+  w.appendChild(b);
+  if (row.dir) {
+    var go = el("button", "go hov", "↗"); go.type = "button"; go.title = "Open " + row.name + " on the canvas"; go.setAttribute("aria-label", "Open " + row.name + " on the canvas");
+    go.addEventListener("click", function () { openDir(row.path); });
+    w.appendChild(go);
+  }
+  draggable(w, { kind: row.dir ? "dir" : "file", path: row.path }, row.path);
   return w;
 }
 function paintTree() {
   var host = $("tree"); host.textContent = "";
   if (!st.tree) return;
-  treeRows(st.tree, st.chats, st.folded, st.status, askers(st.inq)).forEach(function (row) {
-    var w = treeButton(row, row.kids > 0 ? row.folded : null, function () { st.folded[row.id] = !st.folded[row.id]; paintTree(); });
-    w.style.paddingLeft = (row.depth * 14) + "px";
-    var b = el("button", "main hov"); b.type = "button"; b.title = row.id;
-    var g = glyph(row.chat ? ROBOT : TOOL);
-    if (row.state) { var bd = el("span", "badge " + row.state.kind, row.state.kind === "ask" ? "?" : ""); g.appendChild(bd); }
-    b.appendChild(g);
-    b.appendChild(el("span", "name" + (row.chat ? " chat" : ""), row.name));
-    if (row.tag) b.appendChild(el("span", "tag", row.tag));
-    b.appendChild(el("span", "sp"));
-    if (row.folded) b.appendChild(el("span", "count", String(row.below)));
-    if (row.state && row.state.kind !== "idle") b.appendChild(el("span", "st " + row.state.kind, row.state.label));
-    b.addEventListener("click", function () { select(row.id); });
-    w.appendChild(b);
-    host.appendChild(w);
+  visibleRows(st.tree, st.chats, st.folded, st.status, askers(st.inq), { on: st.filesOpen, lists: st.lists, open: st.open }, st.q).forEach(function (row) {
+    if (row.kind === "note") { var n = el("div", "note", row.name); n.style.paddingLeft = (row.depth * 14 + 22) + "px"; host.appendChild(n); }
+    else host.appendChild(row.kind === "agent" ? agentRow(row) : fileRow(row));
   });
 }
-function fileLine(depth, isDir, open, name, tag, onClick, onFold) {
-  var w = el("div", "r f"); w.style.paddingLeft = (depth * 14) + "px";
-  var tw = el("button", "tw" + (isDir ? " hov" : " none"), isDir ? (open ? "▾" : "▸") : "");
-  tw.type = "button"; if (isDir) tw.addEventListener("click", function (e) { e.stopPropagation(); onFold(); });
-  w.appendChild(tw);
-  var b = el("button", "main hov"); b.type = "button"; b.title = name;
-  b.appendChild(glyph(isDir ? FOLDER : FILE));
-  b.appendChild(el("span", "name", name));
-  if (tag) b.appendChild(el("span", "tag", tag));
-  b.addEventListener("click", onClick);
-  w.appendChild(b);
-  return w;
-}
-function paintPins() {
-  var host = $("pins"); host.textContent = "";
-  host.appendChild(fileLine(0, true, st.filesOpen, "files", "tool", function () { select("files"); }, function () { st.filesOpen = !st.filesOpen; paintPins(); }));
-  if (!st.filesOpen) return;
-  host.appendChild(fileLine(1, true, st.projOpen, "project folder", "", function () { toggleDir(ROOT, true); }, function () { toggleDir(ROOT, true); }));
-  if (!st.projOpen) return;
-  fileRows(st.lists, st.open, ROOT, 2).forEach(function (f) {
-    host.appendChild(fileLine(f.depth, f.dir, f.open, f.name, "", function () { f.dir ? toggleDir(f.path, false) : openFile(f.path); }, function () { toggleDir(f.path, false); }));
-  });
-  if (st.lists[ROOT] === undefined) host.appendChild(el("div", "note", "reading…"));
-}
-function toggleDir(path, project) {
-  if (project) st.projOpen = !st.projOpen; else st.open[path] = !st.open[path];
-  paintPins();
-  if (project ? st.projOpen : st.open[path]) readDir(path);
-}
+function paintSwitch() { $("sw").setAttribute("aria-checked", String(st.filesOpen)); }
+
+// the files: a folder is listed when it opens, and read again when the files agent says it changed
 function readDir(path) {
   return call("files", { type: "list", path: path }).then(function (r) {
     if (failed(r)) { say("files: " + (r && r.error || "no answer")); return; }
-    st.lists[path] = r.files || []; paintPins();
+    st.lists[path] = r.files || []; paintTree();
   });
 }
+function syncWatches() {
+  var want = {}; wantedDirs(st.filesOpen, st.open).forEach(function (p) { want[p] = true; });
+  Object.keys(want).forEach(function (p) { if (!st.held[p]) { st.held[p] = true; call("files", { type: "watch_path", path: p }); readDir(p); } });
+  Object.keys(st.held).forEach(function (p) { if (!want[p]) { delete st.held[p]; call("files", { type: "unwatch_path", path: p }); } });
+}
+function toggleDir(path) { st.open[path] = !st.open[path]; if (!st.open[path]) delete st.open[path]; keep(); paintTree(); syncWatches(); }
 function openFile(path) {
+  st.selected = path; paintTree();
   call("files", { type: "open_view", kind: "file", path: path }).then(function (r) {
     if (failed(r)) { say("open " + path + ": " + (r && r.error || "no answer")); return; }
-    if (typeof r.id === "string") select(r.id);
+    tell({ type: "open_file", path: path, id: typeof r.id === "string" ? r.id : "" });
   });
 }
-// folders are read again every tick while open (the files agent's watch is not granted here)
-function refreshDirs() {
-  var paths = [];
-  if (st.filesOpen && st.projOpen) paths.push(ROOT);
-  Object.keys(st.open).forEach(function (p) { if (st.open[p] && st.filesOpen && st.projOpen) paths.push(p); });
-  return Promise.all(paths.map(readDir));
+function openDir(path) {
+  call("files", { type: "open_view", kind: "folder", path: path }).then(function (r) {
+    if (failed(r)) { say("open " + path + ": " + (r && r.error || "no answer")); return; }
+    tell({ type: "open_dir", path: path, id: typeof r.id === "string" ? r.id : "" });
+  });
 }
+fantastic.watch("files", function (ev) {
+  if (!ev || ev.error || ev.type !== "changed") return;
+  affectedDirs(wantedDirs(st.filesOpen, st.open), ev.path).forEach(readDir);
+});
+
 function refreshStatus() {
   var ids = Object.keys(st.chats);
   return Promise.all(ids.map(function (id) {
@@ -342,15 +462,27 @@ function refreshTree() {
     say("");
     st.root = rs[0]; st.tree = rs[0].tree && !Array.isArray(rs[0].tree) ? rs[0].tree : null;
     st.chats = failed(rs[1]) ? {} : chatSet(rs[1]);
-    paintStrip(); paintTree(); watchChats();
+    paintStrip(); paintTitle(); paintTree(); watchChats();
   });
 }
+// the agents and the asks are polled (their events are the chats' own); the files are not: they are watched
 function tick() {
   if (st.busy) return; st.busy = true;
-  var p = (st.tick++ % 2 === 0 ? refreshTree() : Promise.resolve()).then(refreshStatus).then(refreshDirs);
+  var p = (st.tick++ % 2 === 0 ? refreshTree() : Promise.resolve()).then(refreshStatus);
   p.then(function () { st.busy = false; }, function () { st.busy = false; });
 }
+// the host gives back what it kept of the last visit (the canvas does; a page without a keeper does not)
+fantastic.onMessage(function (m) {
+  if (!m || m.type !== "restore") return;
+  var s = cleanState(m.state);
+  st.folded = s.folded; st.open = s.open; st.filesOpen = s.filesOpen;
+  paintSwitch(); paintTree(); syncWatches();
+});
+$("hide").addEventListener("click", function () { tell({ type: "hide" }); });
+$("sw").addEventListener("click", function () { st.filesOpen = !st.filesOpen; paintSwitch(); keep(); paintTree(); syncWatches(); });
+$("q").addEventListener("input", function (e) { st.q = e.target.value; paintTree(); });
+paintSwitch();
 tick();
 setInterval(tick, 5000);
-paintPins();
+tell({ type: "ready" });
 </script>
