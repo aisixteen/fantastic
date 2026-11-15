@@ -399,7 +399,6 @@ function textsOf(rows) {
   rows.forEach(function (x) { if (typeof x.id === "number" && typeof x.content === "string") out.set(x.id, x.content); });
   return out;
 }
-async function keptThoughts(call, pageSize) { return thoughtsOf(await readHead(call, pageSize)); }
 // end pure
 
 (function () {
