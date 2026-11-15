@@ -27,11 +27,11 @@ interface Pure {
   fmtTokens(n: number): string;
   readHead(call: (p: Row) => Promise<Row | null>, size?: number): Promise<Row[]>;
   textsOf(rows: Row[]): Map<number, string>;
-  keptThoughts(call: (p: Row) => Promise<Row | null>, size?: number): Promise<Map<number, { text: string; cut: number }>>;
+  thoughtsOf(rows: Row[]): Map<number, { text: string; cut: number }>;
   groupTitle(g: Row): { n: string; verbs: string };
 }
 const ctx = vm.createContext({});
-vm.runInContext(`${src.slice(from, to)}\nthis.api = { parseFrom, shapeRows, historyTail, keptThoughts, groupTitle, stateOf, inquiryAge, metaOf, codeSpans, tokensOf, fmtTokens, readHead, textsOf };`, ctx);
+vm.runInContext(`${src.slice(from, to)}\nthis.api = { parseFrom, shapeRows, historyTail, thoughtsOf, groupTitle, stateOf, inquiryAge, metaOf, codeSpans, tokensOf, fmtTokens, readHead, textsOf };`, ctx);
 const raw = (ctx as unknown as { api: Pure }).api;
 // the vm's objects are of another realm: compare them as plain JSON
 const plain = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
@@ -39,7 +39,7 @@ const P: Pure = {
   parseFrom: (t) => plain(raw.parseFrom(t)),
   shapeRows: (r, t, x) => plain(raw.shapeRows(r, t, x)),
   historyTail: async (c, k) => plain(await raw.historyTail(c, k)),
-  keptThoughts: async (c, n) => new Map(Object.entries(plain(Object.fromEntries(await raw.keptThoughts(c, n)))).map(([k, v]) => [Number(k), v])),
+  thoughtsOf: (r) => new Map(Object.entries(plain(Object.fromEntries(raw.thoughtsOf(r)))).map(([k, v]) => [Number(k), v])),
   groupTitle: (g) => plain(raw.groupTitle(g)),
   stateOf: (a, b, c) => raw.stateOf(a, b, c),
   inquiryAge: (a, b) => raw.inquiryAge(a, b),
@@ -134,7 +134,7 @@ test("historyTail keeps the newest 300 rows over the pages", async () => {
   assert.deepEqual(await P.historyTail(async () => null), { rows: [], bytes: 0, lastId: 0, earlier: 0, tokens: 0 });
 });
 
-test("keptThoughts pages the rows verb from the head and stops on a null answer", async () => {
+test("thoughtsOf of readHead pages the rows verb from the head and stops on a null answer", async () => {
   const head = [{ id: 101 }, { id: 160, thinking: "deep", thinking_cut: 3 }, { id: 161 }, { id: 230, thinking: "other" }];
   const call = async (p: Row): Promise<Row | null> => {
     let rows = head;
@@ -146,10 +146,10 @@ test("keptThoughts pages the rows verb from the head and stops on a null answer"
     const page = rows.slice(0, limit);
     return { rows: page, next: rows.length > limit ? page[page.length - 1]!.id : null };
   };
-  const got = await P.keptThoughts(call, 2);
+  const got = P.thoughtsOf(await P.readHead(call, 2));
   assert.deepEqual([...got.keys()], [160, 230]);
   assert.deepEqual(got.get(160), { text: "deep", cut: 3 });
-  assert.equal((await P.keptThoughts(async () => null)).size, 0);
+  assert.equal(P.thoughtsOf(await P.readHead(async () => null)).size, 0);
 });
 
 test("the agent's state: asks you beats working; a failure reason is failed; ok is done", () => {
