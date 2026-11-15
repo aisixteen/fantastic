@@ -46,6 +46,7 @@ export const SKIN_SCHEMA: ReadonlyArray<SchemaToken> = [
   { path: "color.status.ok-hover", type: "color", note: "start button hover" },
   { path: "color.status.ok-on", type: "color", note: "text on the start button" },
   { path: "color.status.ok-deep", type: "color", opaque: true, note: "streaming pill (tint)" },
+  { path: "color.status.ok-surface", type: "color", note: "ok and done fills: the live pill, the done badge" },
   { path: "color.status.monitor", type: "color", opaque: true, note: "monitor delivery (tints)" },
   { path: "color.status.monitor-text", type: "color", note: "monitor delivery text" },
   { path: "color.status.warn", type: "color", opaque: true, note: "notices, inquiries, queued" },
