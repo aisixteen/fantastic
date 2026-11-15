@@ -425,7 +425,7 @@ def group_ids(cwd: Path) -> list[str]:
     d = cwd / FOLDER / "agents"
     if not d.is_dir():
         return []
-    return sorted(r["id"] for f in d.glob("*/agent.yaml") if "id" in (r := yaml_of(f)))
+    return sorted(r["id"] for f in d.glob("*/agent.yaml") if (r := yaml_of(f)).get("id") not in (None, "static_files", "web_loader"))
 
 
 def host_record(cwd: Path, agent_id: str) -> Path | None:

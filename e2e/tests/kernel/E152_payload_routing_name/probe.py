@@ -2,19 +2,17 @@
 
 A local OpenAI-compatible server (`e2e/mocks/vllm.py`) plays the model; the kernel's own
 `ai_chat.tools` chat completes through a `vllm_backend` provider on the PACKAGED Rust host,
-every call from the test through `web_rest`. The target is the kernel's own `create_agent`
-(`**meta`: every field the payload carries becomes a field of the new record), so `title`
-is visible on the record it makes: no fixture, nothing written by the test but the script.
+every call from the test through `web_rest`. The target is the kernel's own `create_agent`, which takes `id` (the new agent's id), and `id`
+is also a routing name (the call's label): the one name that shows both readings.
 
 SCRIPT, one model answer per request:
-  1. the routing form: `<routing>` names the target and a routing `<title>` that labels the
-     call; `<payload>` carries `<type>create_agent</type>` and its own `<title>`. The payload
-     is delivered WHOLE: the new agent `made` holds the payload's title, not the label;
-  2. the same call in the INLINE form (`<target_id>`, `<title>` beside the verb's own arguments, no `<payload>`): there
-     `title` is call routing, lifted out and never sent: the new agent `made2` holds no
-     title (the verb does not document `title`, so no refusal; a verb that does is refused
-     loud, which the `fantastic-ai-core` unit
-     `a_routing_name_in_the_payload_of_a_routed_call_is_delivered` holds);
+  1. the routing form: `<routing>` names the target and a routing `<id>` that labels the
+     call; `<payload>` carries `<type>create_agent</type>` and its own `<id>`. The payload
+     is delivered WHOLE: the new agent `made` exists under the payload's id and the label
+     appears nowhere in its record;
+  2. the same call in the INLINE form (`<target_id>`, `<id>` beside the verb's other arguments,
+     no `<payload>`): there `id` is call routing AND an argument the verb documents, so the
+     call is refused loud with a clash naming `id`, and `made2` is never created;
   3. a plain answer + `done`.
 """
 
@@ -42,7 +40,6 @@ AI, PROV = "ai", "ai_prov"
 MADE, MADE2 = "made", "made2"
 MODEL = "mock-scripted"
 TOKEN = secrets.token_hex(4)
-TITLE = f"PAYLOAD-TITLE-{TOKEN}"
 LABEL = f"make-notes-{TOKEN}"
 DONE = '<call name="done"></call>'
 
@@ -99,9 +96,9 @@ def main() -> int:
         return (f"<type>create_agent</type><handler_module>ram_store.tools</handler_module>"
                 f"<parent_id>rest</parent_id><id>{aid}</id>{extra}")
 
-    routed = (f'<call name="send"><routing><target_id>kernel</target_id><title>{LABEL}</title></routing>'
-              f"<payload>{made(MADE, f'<title>{TITLE}</title>')}</payload></call>")
-    inline = (f'<call name="send"><target_id>kernel</target_id><title>{LABEL}</title>'
+    routed = (f'<call name="send"><routing><target_id>kernel</target_id><id>{LABEL}</id></routing>'
+              f"<payload>{made(MADE, '')}</payload></call>")
+    inline = (f'<call name="send"><target_id>kernel</target_id>'
               f"{made(MADE2, '')}</call>")
     script = [routed, inline, f"Saw both. {DONE}"]
     try:
@@ -133,17 +130,16 @@ def main() -> int:
         need(len(turns) == len(script), f"one request per scripted answer: {len(turns)} for {len(script)}")
         u = [last_user(t) for t in turns] + [""] * len(script)
 
-        # 1 · the routing form: the payload's title reaches the target
+        # 1 · the routing form: the payload is delivered whole, its own `id` makes the agent
         rec = record(MADE)
-        need(rec.get("title") == TITLE,
-             f"the new agent holds the payload's own title: {rec.get('title')!r}")
-        need(LABEL not in json.dumps(rec), "the routing title labels the call, it was not delivered")
+        need(rec.get("id") == MADE and rec.get("handler_module") == "ram_store.tools",
+             f"the new agent exists under the payload's own id: {rec}")
+        need(LABEL not in json.dumps(rec), "the routing id labels the call, it was not delivered")
         need(MADE in u[1] and "error" not in u[1].lower(),
              f"request 2 carries the create reply: {u[1][:300]!r}")
-        # 2 · the inline form: `title` is routing there, lifted out, never sent
-        rec2 = record(MADE2)
-        need(bool(rec2) and "title" not in rec2 and LABEL not in json.dumps(rec2),
-             f"the inline call made {MADE2} without a title: {rec2}")
+        # 2 · the inline form: `id` is routing there and a documented argument: refused, nothing made
+        need("clash" in u[2] and "id" in u[2] and not record(MADE2),
+             f"the inline call is refused with a clash and creates nothing: {u[2][:300]!r} {record(MADE2)}")
     finally:
         hk.close()
         m.stop()

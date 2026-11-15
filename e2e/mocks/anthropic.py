@@ -71,11 +71,23 @@ class AnthropicMock(MockServer):
                    "role": "assistant", "content": [], "model": self.model,
                    "stop_reason": None, "stop_sequence": None,
                    "usage": {"input_tokens": p, "output_tokens": 1}}),
-               ev("content_block_start", index=0, content_block={"type": "text", "text": ""}),
                ev("ping")]
-        out += [ev("content_block_delta", index=0, delta={"type": "text_delta", "text": p})
-                for p in halves(text)]
-        out += [ev("content_block_stop", index=0),
+        # a scripted `<think>T</think>A` streams T as a thinking block, then A as text
+        think, answer = "", text
+        if text.startswith("<think>") and "</think>" in text:
+            think, answer = text[len("<think>"):].split("</think>", 1)
+        index = 0
+        if think:
+            out.append(ev("content_block_start", index=index,
+                          content_block={"type": "thinking", "thinking": ""}))
+            out += [ev("content_block_delta", index=index, delta={"type": "thinking_delta", "thinking": t})
+                    for t in halves(think)]
+            out.append(ev("content_block_stop", index=index))
+            index += 1
+        out.append(ev("content_block_start", index=index, content_block={"type": "text", "text": ""}))
+        out += [ev("content_block_delta", index=index, delta={"type": "text_delta", "text": t})
+                for t in halves(answer)]
+        out += [ev("content_block_stop", index=index),
                 ev("message_delta", delta={"stop_reason": "end_turn", "stop_sequence": None},
                    usage={"output_tokens": c}),
                 ev("message_stop")]

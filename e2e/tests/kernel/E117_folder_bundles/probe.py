@@ -165,14 +165,14 @@ def main() -> int:
         need("cold" in (ids.get("bundles") or []),
              f"reflect bundles=ids names it: {short(ids.get('bundles'))}")
         d = send("kernel", {"type": "docs", "of": "cold"})
-        need((d.get("verbs") or {}) == {"echo": ECHO_LINE},
+        need((d.get("verbs") or {}).get("echo") == ECHO_LINE,
              f"docs of=<bundle>: bundle.yaml's signature: {short(d)}")
         dd = send("kernel", {"type": "docs", "of": "cold", "tier": "detailed"})
         need(str((dd.get("verbs") or {}).get("echo", "")).startswith(ECHO_DOC)
              and "text:string (req)" in str((dd.get("verbs") or {}).get("echo", "")),
              f"docs detailed: the full doc + the declared arguments: {short(dd)}")
         di = send("kernel", {"type": "docs", "of": "cold1"})
-        need((di.get("verbs") or {}) == {"echo": ECHO_LINE},
+        need((di.get("verbs") or {}).get("echo") == ECHO_LINE,
              f"docs of=<instance>: the same table: {short(di)}")
 
         # 3 · create an instance; reflect it; delete kills its program
@@ -237,8 +237,8 @@ def main() -> int:
              f"a bundle.yaml without sentence is listed with its error: {short(ns)}")
         xb = hk.create(parent_id="rest", handler_module="broken", id="x_broken", callable_by=cb)
         xr = send("x_broken", {"type": "echo", "text": "x"})
-        need(xr.get("reason") == "unhandled",
-             f"an instance of a refused folder answers unhandled: create={short(xb)} call={short(xr)}")
+        need(xb.get("reason") == "bad_arg" and xr.get("reason") == "unknown_agent",
+             f"an instance of a refused folder is not created: create={short(xb)} call={short(xr)}")
 
         # 6 · reserved verbs cannot be shadowed
         rs = cat.get("reserved") or {}

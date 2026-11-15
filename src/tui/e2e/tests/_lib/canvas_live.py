@@ -258,9 +258,19 @@ class Rig:
             if m:
                 self.url = m.group(1)
                 self.port = int(self.url.split("//", 1)[1].split("/", 1)[0].rsplit(":", 1)[1])  # what the host really serves on
+                break
+            time.sleep(0.2)
+        else:
+            raise SystemExit("the host never announced the canvas")
+        # the URL is printed before the kernel's send channel opens: wait for it
+        mcp = self.proj / ".fantastic" / "cli" / "mcp.yaml"
+        for _ in range(600):
+            if self.host.poll() is not None:
+                raise SystemExit(f"the host exited {self.host.returncode}: {self.log.read_text()[-800:]}")
+            if mcp.exists():
                 return
             time.sleep(0.2)
-        raise SystemExit("the host never announced the canvas")
+        raise SystemExit("the host never opened its send channel")
 
     def stop(self) -> None:
         if self.host is None:

@@ -62,13 +62,17 @@ async def panel_of(pg, cell: str) -> str:
     return await pg.js(f"document.querySelector('.agent-frame[data-id={json.dumps(cell)}] iframe')?.srcdoc || ''") or ""
 
 
-async def click_panel(pg, cell: str) -> None:
+async def click_panel(pg, cell: str) -> bool:
+    """Click the panel's button; False when the cell's iframe is not on the page."""
     r = await pg.rect(f".agent-frame[data-id={json.dumps(cell)}] iframe")
+    if r is None:
+        return False
     x, y = r["x"] + 40, r["y"] + 25
     # point at the cell first (its chrome shows on hover), then click the button
     await pg.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=x, y=y)
     await pg.mouse("mousePressed", x, y)
     await pg.mouse("mouseReleased", x, y)
+    return True
 
 
 async def click_reaches(pg, rig: Rig, cell: str, agent: str, verb: str) -> bool:

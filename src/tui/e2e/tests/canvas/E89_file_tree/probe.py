@@ -182,7 +182,7 @@ def main() -> bool:
             r["9c nothing was overwritten"] = (src / "one.txt").read_text() == "disk wins"
             sv = await call(PIN, {"type": "save"})
             info["9_save"] = sv
-            r["9d save is refused as a conflict"] = sv.get("reason") == "conflict"
+            r["9d save is refused as locked"] = sv.get("reason") == "locked"
             r["9e still nothing overwritten"] = (src / "one.txt").read_text() == "disk wins"
             await pg.js(f"[...{frame(PIN)}.querySelectorAll('.pv-conflict .pv-chip')].find(b=>b.textContent==='Reload')?.click()")
             r["9 Reload takes the disk's text and clears the banner"] = bool(await pg.until(

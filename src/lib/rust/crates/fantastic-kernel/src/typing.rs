@@ -39,6 +39,13 @@ fn kinds(schema: &Value) -> Vec<&str> {
 /// `Err(want)` names the declared kind the text is not.
 fn read(schema: &Value, s: &str) -> Result<Value, String> {
     let ks = kinds(schema);
+    // A field taking both an integer and text reads an all-digits text as the integer
+    // (an id); a name of only digits is written as a JSON string on the wire.
+    if ks.contains(&"integer") && ks.contains(&"string") && is_integer(s.trim()) {
+        if let Ok(n) = serde_json::from_str::<Number>(s.trim()) {
+            return Ok(Value::Number(n));
+        }
+    }
     if ks.is_empty() || takes_text(schema, s) {
         return Ok(Value::String(s.to_string()));
     }
@@ -301,6 +308,14 @@ mod tests {
         assert_eq!(read(&shell, "login"), Ok(json!("login")));
         assert!(read(&shell, "other").is_err());
         assert_eq!(read(&json!({"type": "string"}), "false"), Ok(json!("false")));
+    }
+
+    #[test]
+    fn digits_for_an_id_or_name_field_read_as_the_integer_id() {
+        let id_or_name = json!({"anyOf": [{"type": "integer"}, {"type": "string"}]});
+        assert_eq!(read(&id_or_name, "106"), Ok(json!(106)));
+        assert_eq!(read(&id_or_name, "lead"), Ok(json!("lead")));
+        assert_eq!(read(&id_or_name, "007"), Ok(json!("007")));
     }
 
     #[test]

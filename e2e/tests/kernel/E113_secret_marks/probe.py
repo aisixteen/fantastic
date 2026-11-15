@@ -192,7 +192,7 @@ def main() -> int:
     work = Path(tempfile.mkdtemp(prefix="e2e-secret-marks-"))
     served = work / "served"
     served.mkdir()
-    hk = HostKernel(spec, work, reach=[FB]).boot()
+    hk = HostKernel(spec, work, reach=[FB, EB]).boot()
     root = hk.root_id
     port = hk.port
     bad: list[str] = []

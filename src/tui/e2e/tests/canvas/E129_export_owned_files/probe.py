@@ -57,6 +57,11 @@ def main() -> bool:
     agents = team_agents(extra={
         "mid": {"system_prompt_file": "prompts/mid.md", "view": {"kind": "html", "bytes": VIEW, "calls": ["lead"]}},
     })
+    # `mid` is an AI chat record: `system_prompt_file` is a field of the AI record only (#651)
+    agents = [(p, ({"id": "mid", "handler_module": "ai_chat.tools", "display_name": "mid", "can_call": {"leaf": "*"},
+                    "callable_by": {"lead": "*"}, "system_prompt_file": rec["system_prompt_file"], "view": rec["view"],
+                    "api_key": SECRET, "guid": "guid-mid", "history": [ROW], "rows": [{"text": ROW}]}
+                   if rec["id"] == "mid" else rec)) for p, rec in agents]
     # `leaf` runs on the folder bundle
     agents = [(p, rec) for p, rec in agents if rec["id"] != "leaf"]
     agents.append((LEAF_AT, {"id": "leaf", "handler_module": BUNDLE, "display_name": "leaf", "callable_by": {"mid": "*"},

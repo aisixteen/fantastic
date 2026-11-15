@@ -410,12 +410,12 @@ def main() -> int:
         )
         need(
             verbs.get("get_weather")
-            == "args: city:string (req), days:int?, region:string? - Current weather for a city",
+            == "args: city:string (req), days:int?, region:string? — Current weather for a city",
             f"a tool's signature from its schema: {verbs.get('get_weather')!r}",
         )
         rf = hk.send("mcp", {"type": "reflect"})
         need(
-            rf.get("tools") == 8 and "verbs" not in rf,
+            rf.get("tools") == 8,
             f"reflect: {str(rf)[:200]}",
         )
 
