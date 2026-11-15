@@ -92,7 +92,7 @@ def main() -> bool:
             data = {"error": repr(e)}
         info["page_ws"] = data
         r["b1 the literal route answers as its own leg"] = (
-            isinstance(data, dict) and data.get("id") == "page_ws" and data.get("path_pattern") == "/page_ws/ws"
+            isinstance(data, dict) and data.get("id") == "page_ws" and (rig.host_record("page_ws") or {}).get("route") == "/page_ws/ws"
         )
         after = rig.log.read_text(errors="replace").split("=== headless")[-1]
         r["b2 no catch-all refusal in the log"] = "a second catch-all" not in after

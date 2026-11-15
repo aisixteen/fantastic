@@ -65,16 +65,16 @@ def main() -> bool:
         info["dots"] = dots
         r["c2 a `..` path is refused by the root (bad_arg), nothing written"] = dots.get("reason") == "bad_arg" and not (rig.proj / "x").exists() and not (rig.proj / "out" / ".." / "x").exists()
         dots_u = await user({"type": "export_subtree", "agent_id": "lead", "path": "out/../x"})
-        r["c3 and by user, each naming its own door in the message"] = (
-            dots_u.get("reason") == "bad_arg" and str(dots_u.get("error", "")).startswith("user.export_subtree")
-            and str(dots.get("error", "")).startswith("kernel_state.export_subtree"))
+        r["c3 and by user, the same refusal naming the verb first in the message"] = (
+            dots_u.get("reason") == "bad_arg" and str(dots_u.get("error", "")).startswith(("user.export_subtree", "export_subtree"))
+            and str(dots.get("error", "")).startswith("export_subtree"))
         nope = await root({"type": "export_subtree", "agent_id": "no_such_agent", "path": "out/nope"})
         info["nope"] = nope
         r["c4 an unknown agent id is refused by the root and no folder is made"] = "error" in nope and not (rig.proj / "out" / "nope").exists()
         nope_u = await user({"type": "export_subtree", "agent_id": "no_such_agent", "path": "out/nope"})
         r["c5 and by user, with the same reason"] = "error" in nope_u and nope_u.get("reason") == nope.get("reason") and not (rig.proj / "out" / "nope").exists()
         miss = await root({"type": "export_subtree", "path": "out/miss"})
-        r["c6 a missing agent_id is bad_arg"] = miss.get("reason") == "bad_arg"
+        r["c6 a missing agent_id is missing_arg"] = miss.get("reason") == "missing_arg"
         # d) only the root answers it as the root
         other = await host_call(rig.port, "lead", {"type": "export_subtree", "agent_id": "lead", "path": "out/other"})
         info["other"] = other

@@ -115,7 +115,7 @@ def main() -> int:
                         callable_by={"$self": "*", "$parent": "*", AI: "*"})
         need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
-                        provider_id=PROV, model=MODEL, max_tokens=8192,
+                        provider_id=PROV, model=MODEL,
                         context_window=262144, memory_store_id="memory",
                         can_call={"$self": "*", "memory": "*", **{hk.root_id: ["create_agent"]}, PROV: ["complete", "watch"]},
                         callable_by={"$self": "*", "$parent": "*", "rest": "*"})

@@ -48,7 +48,7 @@ def main() -> bool:
             "command": py_job("rec.py")[0], "can_call": {"$self": "*", BACKEND: VERBS}, "callable_by": {"$self": "*"},
             "x": 40, "y": 40, "width": 600, "height": 300}
     host = {"id": BACKEND, "handler_module": "exec_bridge.tools", "cwd": ".", "inherit_env": ["*"], "shell": "login",
-            "ingress_rule": "allow_all_ingress", "allowed": [py_job("rec.py")[1]], "cell_id": CELL, "can_call": {"$self": "*"},
+            "ingress_rule": "allow_all_ingress", "allowed": [py_job("rec.py")[1]], "can_call": {"$self": "*"},
             "callable_by": {"$self": "*", "mcp": ["*"], "user": ["*"], "canvas_root": ["*"], "canvas_ws": ["watch"]}}
     rig.init(cells=[cell], host_agents=[(FOLDER, host)])
     log = rig.proj / "keys.log"

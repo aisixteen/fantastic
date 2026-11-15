@@ -296,6 +296,20 @@ fn row(o: &Outcome) -> Value {
 /// learns is rendered from the agents' own declarations (`reflect`).
 pub const INSTRUCTIONS: &str = "A live Aisixteen Fantastic kernel: a tree of agents that all answer one verb, send. Start with `reflect` and no arguments for the agent tree and the bundles; reflect an agent before you send to it. A refusal is an ordinary result.";
 
+/// What `fantastic mcp` prints to stderr on start, for a coding CLI that ran it
+/// in a shell to learn what it is: what the server is, and how to register it
+/// as an MCP server in each client's own configuration.
+pub const SHAPE: &str = "fantastic mcp — the MCP face of the Aisixteen Fantastic kernel in this directory (stdio, protocol 2025-11-25; tools: reflect, send).\n\
+\n\
+Register it ONCE as a stdio MCP server — command `fantastic`, args [\"mcp\"] — and it serves the project directory it is started in: it attaches to the kernel already running there (the terminal UI or the canvas), or runs it itself.\n\
+\x20\x20Claude Code: claude mcp add --scope user fantastic -- fantastic mcp\n\
+\x20\x20Codex:       ~/.codex/config.toml   [mcp_servers.fantastic] command = \"fantastic\", args = [\"mcp\"]\n\
+\x20\x20Cursor:      ~/.cursor/mcp.json     {\"mcpServers\": {\"fantastic\": {\"command\": \"fantastic\", \"args\": [\"mcp\"]}}}\n\
+\x20\x20Gemini CLI:  ~/.gemini/settings.json  {\"mcpServers\": {\"fantastic\": {\"command\": \"fantastic\", \"args\": [\"mcp\"]}}}\n\
+\x20\x20VS Code:     .vscode/mcp.json       {\"servers\": {\"fantastic\": {\"type\": \"stdio\", \"command\": \"fantastic\", \"args\": [\"mcp\"]}}}\n\
+The server must start in the project directory.\n\
+\n";
+
 
 
 /// The carrier-agnostic MCP handler for one leg.

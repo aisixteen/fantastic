@@ -16,6 +16,8 @@ pub struct NeedsModelRecord {
     pub model: String,
     /// Where the backend listens.
     pub endpoint: Option<String>,
+    /// The memory store; required by a real backend, never saved (the creator adds it).
+    pub memory_store_id: String,
 }
 
 fantastic_kernel::record!(NeedsModelRecord);
@@ -127,6 +129,7 @@ async fn a_saved_setup_carries_no_identity_wiring_or_grants_and_passes_its_bundl
     }
     let r = call(&k, "user", json!({"type": "persist_record", "name": "t", "record": {"handler_module": "demo_backend.tools"}})).await;
     assert!(err(&r).contains("needs field 'model'"), "the target bundle's declared record: {r}");
+    assert!(!err(&r).contains("memory_store_id"), "the never-saved memory_store_id is not what a save misses: {r}");
     let r = call(&k, "user", json!({"type": "persist_record", "name": "t", "record": {"handler_module": "nope.tools", "model": "m"}})).await;
     assert!(err(&r).contains("no bundle"), "{r}");
     let r = call(&k, "user", json!({"type": "persist_record", "name": "../x", "record": {"handler_module": "demo_backend.tools", "model": "m"}})).await;

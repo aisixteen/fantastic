@@ -77,7 +77,7 @@ def main() -> bool:
             "command": py_job("ticker.py")[0], "can_call": {"$self": "*", BACKEND: VERBS}, "callable_by": {"$self": "*"},
             "display_name": CELL, "x": 420, "y": 60, "width": 420, "height": 240}
     host = {"id": BACKEND, "handler_module": "exec_bridge.tools", "cwd": ".", "inherit_env": ["*"], "shell": "login",
-            "ingress_rule": "allow_all_ingress", "allowed": [py_job("ticker.py")[1]], "cell_id": CELL, "can_call": {"$self": "*"},
+            "ingress_rule": "allow_all_ingress", "allowed": [py_job("ticker.py")[1]], "can_call": {"$self": "*"},
             "callable_by": {"$self": "*", "mcp": ["*"], "user": ["*"], "canvas_root": ["*"], "canvas_ws": ["watch"]}}
     r: dict = {}
     info: dict = {}

@@ -14,7 +14,7 @@
 //!
 //! `fantastic run COMMAND [ARGS…]` (`recipe.rs`): `term` runs exactly that argv
 //! instead of the shell — the user's own program from `$PATH`, as is, at their
-//! discretion. The argv rides `term`'s record (`command`), so a re-attach starts
+//! discretion. The argv is `term`'s one allowed line (read back by `recorded`), so a re-attach starts
 //! the same program; a different `run` remakes `term`. With the canvas the same
 //! program runs in a terminal CELL instead ([`canvas_cell`]).
 
@@ -57,11 +57,82 @@ fn line_record(argv: &[String]) -> Value {
     json!({"allowed": [exactly(&line)], "cwd": ".", "inherit_env": ["*"]})
 }
 
-/// The argv `term`'s record names (`run`), if any.
+/// Undo [`exactly`]: the line a `regex::escape`d pattern admits (every `\`
+/// escapes the char after it).
+fn unescape(pat: &str) -> String {
+    let mut out = String::with_capacity(pat.len());
+    let mut it = pat.chars();
+    while let Some(c) = it.next() {
+        if c == '\\' {
+            if let Some(n) = it.next() {
+                out.push(n);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Split a line `shlex_join` made back into its argv: tokens split on blanks,
+/// `'…'` literal, `"…"` with `\` escaping `"` and `\`. `None` on an unclosed quote.
+fn shlex_split(line: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut live = false;
+    let mut it = line.chars();
+    while let Some(c) = it.next() {
+        match c {
+            '\'' => {
+                live = true;
+                loop {
+                    match it.next()? {
+                        '\'' => break,
+                        ch => cur.push(ch),
+                    }
+                }
+            }
+            '"' => {
+                live = true;
+                loop {
+                    match it.next()? {
+                        '"' => break,
+                        '\\' => cur.push(it.next()?),
+                        ch => cur.push(ch),
+                    }
+                }
+            }
+            c if c.is_whitespace() => {
+                if live {
+                    out.push(std::mem::take(&mut cur));
+                    live = false;
+                }
+            }
+            ch => {
+                live = true;
+                cur.push(ch);
+            }
+        }
+    }
+    if live {
+        out.push(cur);
+    }
+    Some(out)
+}
+
+/// The argv `term`'s record names (`run`), if any: its ONE allowed line
+/// ([`line_record`]), unwrapped and split.
 fn recorded(host: &Host, id: &str) -> Option<Vec<String>> {
     let a = host.kernel.agents.get(&fantastic_kernel::AgentId::from(id))?;
-    let v = a.value().record().meta.get("command")?.as_array()?.clone();
-    v.iter().map(|x| x.as_str().map(str::to_string)).collect()
+    let meta = a.value().record().meta.clone();
+    argv_of(meta.get("allowed")?)
+}
+
+/// The argv a record's `allowed` list names: exactly one pattern, an
+/// [`exactly`] line.
+fn argv_of(allowed: &Value) -> Option<Vec<String>> {
+    let [pat] = allowed.as_array()?.as_slice() else { return None };
+    shlex_split(&unescape(pat.as_str()?))
 }
 
 /// `run COMMAND…` in the terminal UI: `term` will run exactly `argv`. A `term`
@@ -88,7 +159,6 @@ async fn create(host: &Host, argv: &[String]) -> Result<(), String> {
         "handler_module": fantastic_exec_bridge::HANDLER_MODULE,
         "ingress_rule": "allow_all_ingress",
         "callable_by": {host.cfg.user.as_str(): "*"},
-        "command": argv,
     });
     if let (Some(c), Value::Object(f)) = (create.as_object_mut(), line_record(argv)) {
         c.extend(f);
@@ -131,7 +201,6 @@ pub async fn canvas_cell(host: &Host, argv: &[String]) -> Result<Option<String>,
         "id": exec,
         "handler_module": fantastic_exec_bridge::HANDLER_MODULE,
         "ingress_rule": "allow_all_ingress",
-        "cell_id": cell,
     });
     if let (Some(c), Value::Object(f)) = (create.as_object_mut(), line_record(argv)) {
         c.extend(f);
@@ -250,5 +319,21 @@ mod tests {
         assert!(re.is_match("/bin/zsh"));
         assert!(!re.is_match("/bin/zsh -c id"));
         assert!(!re.is_match("/bin/zsha"));
+    }
+
+    #[test]
+    fn the_recorded_argv_is_read_back_from_the_allowed_line() {
+        for argv in [
+            vec!["/bin/zsh".to_string()],
+            vec!["echo".into(), "hi-42".into()],
+            vec!["sh".into(), "-c".into(), "a b|c (d) [e] $x.y+z".into()],
+            vec!["x".into(), "".into(), "it's".into()],
+        ] {
+            let rec = line_record(&argv);
+            assert_eq!(argv_of(&rec["allowed"]), Some(argv.clone()), "{rec}");
+        }
+        assert_eq!(argv_of(&json!([])), None);
+        assert_eq!(argv_of(&json!(["a", "b"])), None);
+        assert_eq!(shlex_split("a 'b"), None);
     }
 }

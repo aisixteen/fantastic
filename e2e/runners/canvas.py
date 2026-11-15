@@ -420,11 +420,12 @@ FOLDER = ".fantastic/agents/user/agents/web/agents/canvas_page/agents/canvas_roo
 
 
 def group_ids(cwd: Path) -> list[str]:
-    """The cells' backends: `canvas_root`'s children that carry a `cell_id`."""
+    """The cells' backends: `canvas_root`'s children (a cell names its backend by
+    its own `backend_id`)."""
     d = cwd / FOLDER / "agents"
     if not d.is_dir():
         return []
-    return sorted(r["id"] for f in d.glob("*/agent.yaml") if "cell_id" in (r := yaml_of(f)))
+    return sorted(r["id"] for f in d.glob("*/agent.yaml") if "id" in (r := yaml_of(f)))
 
 
 def host_record(cwd: Path, agent_id: str) -> Path | None:
@@ -675,17 +676,10 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
     if exp.get("view_bound") and m is not None:
         bid = m.get("backend_id")
 
-        def bound() -> dict:
-            # a record being rewritten (a grant update) reads empty for an instant
-            rec = host_record(cwd, bid) if bid else None
-            try:
-                return yaml_of(rec) if rec is not None else {}
-            except Exception:  # noqa: BLE001
-                return {}
-        wait_disk(lambda: bound().get("cell_id") == m.get("id"))
-        b = bound()
-        if b.get("cell_id") != m.get("id"):
-            bad.append(f"backend {bid} carries cell_id={b.get('cell_id')!r}, want {m.get('id')!r}")
+        # the cell's `backend_id` names a backend that is on the host, under `canvas_root`
+        wait_disk(lambda: bid in group_ids(cwd))
+        if bid not in group_ids(cwd):
+            bad.append(f"cell {m.get('id')!r} names backend {bid!r}, not a child of canvas_root: {group_ids(cwd)}")
         # the cell's own grant names its backend, and nothing else (the
         # kernel's own `$self` aside)
         cc = {k: v for k, v in (m.get("can_call") or {}).items() if k != "$self"}

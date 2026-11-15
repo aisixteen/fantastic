@@ -67,15 +67,15 @@ pub mod oracle {
     fantastic_kernel::record!(Record);
 }
 
-/// `slow_probe`'s record: no fields of its own.
+/// `slow_probe`'s record: freeform, any field is accepted (a fixture, so a test can round-trip typed fields).
 pub mod slow {
     use schemars::JsonSchema;
     use serde::Deserialize;
 
-    /// No fields of its own.
+    /// Freeform.
     #[derive(Debug, Deserialize, JsonSchema)]
     pub struct Record {}
-    fantastic_kernel::record!(Record);
+    fantastic_kernel::record!(Record, open);
 }
 
 /// `vault_probe`'s record.

@@ -46,7 +46,7 @@ def team_records(abs_path: str | None = None, extra: dict[str, dict] | None = No
     extra = extra or {}
     lead = _exec("lead", display_name="lead", can_call={"mid": "*", OUTSIDE: ["list"]}, **({"workdir": abs_path} if abs_path else {}), **extra.get("lead", {}))
     mid = _exec("mid", display_name="mid", can_call={"leaf": "*"}, callable_by={"lead": "*"}, **extra.get("mid", {}))
-    leaf = _exec("leaf", display_name="leaf", callable_by={"mid": "*"}, notes="the bottom of the team", **extra.get("leaf", {}))
+    leaf = _exec("leaf", display_name="leaf", callable_by={"mid": "*"}, description="the bottom of the team", **extra.get("leaf", {}))
     return {"lead": lead, "mid": mid, "leaf": leaf}
 
 

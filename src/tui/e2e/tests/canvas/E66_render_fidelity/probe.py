@@ -52,7 +52,7 @@ def seeds(k: int) -> tuple[list[dict], list[tuple[str, dict]]]:
                       "can_call": {"$self": "*", bid: VERBS}, "callable_by": {"$self": "*"},
                       "x": 10 + (i % 4) * 390, "y": 10 + (i // 4) * 300, "width": 380, "height": 290})
         hosts.append((FOLDER, {"id": bid, "handler_module": "exec_bridge.tools", "cwd": ".", "inherit_env": ["*"], "shell": "login",
-                               "ingress_rule": "allow_all_ingress", "cell_id": cid, "can_call": {"$self": "*"},
+                               "ingress_rule": "allow_all_ingress", "can_call": {"$self": "*"},
                                "callable_by": {"$self": "*", "mcp": ["*"], "user": ["*"], "canvas_root": ["*"], "canvas_ws": ["watch"]}}))
     return cells, hosts
 

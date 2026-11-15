@@ -74,7 +74,9 @@ impl SetupBundle {
                     };
                     let fields: serde_json::Map<String, Value> =
                         backend.fields.iter().filter_map(|f| meta.get(&f.name).map(|v| (f.name.clone(), v.clone()))).collect();
-                    json!({"id": a.id, "handler": handler, "fields": fields, "saved": meta.get("saved")})
+                    // the saved set-up it was made from lives on its kept dialog row
+                    let saved = crate::kern::backend::BackendBundle::dialogs_map(host).await.ok().and_then(|d| d.get(&a.id).and_then(|r| r.get("saved").cloned()));
+                    json!({"id": a.id, "handler": handler, "fields": fields, "saved": saved})
                 }
                 Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("ai_settings: {e}")),
             },

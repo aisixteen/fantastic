@@ -29,7 +29,7 @@ agents:
     agents:
       - id: lead
         handler_module: ram_store.tools
-        note: first
+        description: first
         can_call: {scout: '*', '@memory': '*'}
         memory_store_id: '@memory'
       - id: scout
@@ -47,7 +47,7 @@ agents:
     agents:
       - id: mate
         handler_module: ram_store.tools
-        note: first
+        description: first
       - id: deckhand
         handler_module: ram_store.tools
         callable_by: {mate: '*'}

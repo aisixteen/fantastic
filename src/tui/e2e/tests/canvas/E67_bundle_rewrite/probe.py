@@ -39,7 +39,7 @@ BUNDLE_YAML = '''base: py_agent
 sentence: A project dashboard (E67) — one verb, scan.
 command: [__PY__, agent.py]
 verbs:
-  scan: "args: none. Returns {files, lines}."
+  scan: {doc: "Count the project's files and lines. Returns {files, lines}.", schema: {type: object}}
 record:
   inherit_env: [PATH]
   view: {kind: html, bytes_file: panel.html, calls: [scan, watch]}

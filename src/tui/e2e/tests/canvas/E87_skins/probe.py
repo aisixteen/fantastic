@@ -33,7 +33,7 @@ def terminal_pair() -> tuple[dict, tuple[str, dict]]:
             "can_call": {"$self": "*", BACKEND: TERM_VERBS}, "callable_by": {"$self": "*"},
             "x": 520, "y": 120, "width": 360, "height": 220}
     host = (FOLDER, {"id": BACKEND, "handler_module": "exec_bridge.tools", "cwd": ".", "inherit_env": ["*"], "shell": "login",
-                     "ingress_rule": "allow_all_ingress", "cell_id": CELL, "can_call": {"$self": "*"},
+                     "ingress_rule": "allow_all_ingress", "can_call": {"$self": "*"},
                      "callable_by": {"$self": "*", "mcp": ["*"], "user": ["*"], "canvas_root": ["*"], "canvas_ws": ["watch"]}})
     return cell, host
 

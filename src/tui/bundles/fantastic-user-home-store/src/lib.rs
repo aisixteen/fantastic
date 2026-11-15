@@ -244,7 +244,11 @@ impl UserHomeStore {
         // declaration its create is checked with, by the bundle's own shared entry):
         // every field known and of its type, and the required ones present (a saved
         // set-up is a record to be born: the create's check).
-        bundle.check_record("create_agent", &a.record.rest)?;
+        // `memory_store_id` is required by a backend's record but is never saved (NOT_SAVED: the
+        // creator adds it), so the check sees it present, as the creator's create will
+        let mut probe = a.record.rest.clone();
+        probe.insert("memory_store_id".into(), Value::String(String::new()));
+        bundle.check_record("create_agent", &probe)?;
         let path = self.saved_for_write()?.join(format!("{name}.yaml"));
         let now = read_private(&path)?.map(|b| version(&b));
         if let Some(want) = a.if_match.as_deref() {
