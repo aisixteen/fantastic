@@ -177,7 +177,7 @@ async fn docs_and_the_catalog_read_bundle_yaml() {
     for verb in ["boot", "shutdown", "reflect", "die", "slow", "chatty"] {
         assert!(d["verbs"].get(verb).is_some(), "{verb}: {d}");
     }
-    // the bundle's own docs name the declared verbs only
+    // the bundle's own docs, with no agent, list the program's verbs too: the same table
     let b = call(
         &kernel,
         "kernel",
@@ -185,7 +185,7 @@ async fn docs_and_the_catalog_read_bundle_yaml() {
     )
     .await;
     assert!(b["verbs"].get("boot").is_some(), "{b}");
-    assert!(b["verbs"].get("echo").is_none(), "{b}");
+    assert_eq!(b["verbs"]["echo"], d["verbs"]["echo"], "{b}");
     delete(&kernel, "rs_d1").await;
     let r = call(
         &kernel,

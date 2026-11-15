@@ -42,8 +42,11 @@ DIRECTIVE = "You are the middle of the E129 team.\nAnswer briefly.\n"
 VIEW = "<div style='color:#cde'>E129 view é</div>\n"
 
 
-def bind_of(ports: list[str]) -> dict[str, str]:
-    return {p: p.split(":", 1)[-1].lstrip("@") for p in ports}
+def bind_of(ports: dict) -> dict[str, str]:
+    """Every declared port bound to the agent it stood for, read from its `why` ("agent X field F reaches <id>"):
+    `mid` is an AI chat, which holds the reach over every agent, so a kind has several ports (`@memory_2`)
+    that no name alone maps back to an id."""
+    return {p: str(d.get("why", "")).split(" reaches ")[1].split(";")[0].strip() for p, d in ports.items()}
 
 
 def main() -> bool:
@@ -119,7 +122,7 @@ def main() -> bool:
             == sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
             and all((o2 / p.relative_to(out)).read_bytes() == p.read_bytes() for p in out.rglob("*") if p.is_file()))
         # c) import
-        bind = bind_of(a.get("ports") or [])
+        bind = bind_of(doc.get("ports") or {})
         refused = await user({"type": "import_subtree", "path": "out/owned", "parent_id": "newparent", "bind": bind, "approve": True})
         info["refused"] = refused
         r["c1 without allow_code the import is refused"] = refused.get("reason") == "code_not_allowed"

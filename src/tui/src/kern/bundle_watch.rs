@@ -512,6 +512,18 @@ mod tests {
     }
 
     #[test]
+    fn the_python_starter_loads_as_a_folder_bundle() {
+        let dir = std::env::temp_dir().join(format!("fc-bw-{}-starter", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let folder = scaffold(&dir, "python_agent", "py_starter").unwrap();
+        let spec: Value = serde_yaml::from_str(&std::fs::read_to_string(folder.join("bundle.yaml")).unwrap()).unwrap();
+        let b = Handler::folder_bundle(&fantastic_py_agent::PyAgentBundle, "py_starter", &folder, &spec)
+            .unwrap_or_else(|e| panic!("the starter's bundle.yaml is refused: {e}"));
+        assert_eq!(b.name(), "py_starter");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn bundle_of_reads_paths_relative_to_the_store() {
         assert_eq!(
             bundle_of("bundles/board/panel.html"),

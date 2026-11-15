@@ -106,10 +106,18 @@ def blob(turn: dict) -> str:
 
 
 def unmarked(ms: list[dict]) -> list[dict]:
-    """The messages without `cache_control` on their blocks: the mark moves on, the bytes must not."""
-    return [{**m, "content": [{k: v for k, v in b.items() if k != "cache_control"} if isinstance(b, dict) else b
-                              for b in m["content"]]} if isinstance(m.get("content"), list) else m
-            for m in ms]
+    """The messages as the model reads them, without the mark: `cache_control` off the blocks, and a turn of
+    text blocks as the one string (the API's own shorthand: `"content": "x"` is `[{"type": "text", "text": "x"}]`).
+    The backend sends a turn as blocks only where the mark sits on it, so the same turn is a string in the
+    request after the mark moved on; the text the model reads, the cache prefix, is the same."""
+    def plain(c):
+        if not isinstance(c, list):
+            return c
+        bs = [{k: v for k, v in b.items() if k != "cache_control"} if isinstance(b, dict) else b for b in c]
+        if all(isinstance(b, dict) and b.get("type") == "text" for b in bs):
+            return "".join(b.get("text", "") for b in bs)
+        return bs
+    return [{**m, "content": plain(m.get("content"))} for m in ms]
 
 
 def marked(m: dict) -> bool:
