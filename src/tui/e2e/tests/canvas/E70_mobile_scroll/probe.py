@@ -60,7 +60,7 @@ def seeds() -> tuple[list[dict], list[tuple[str, dict]]]:
         html_cell("b", "B", 100, 500, "<p>B</p>", 300, 200),
     ]
     hosts = [(FOLDER, {"id": bid, "handler_module": "exec_bridge.tools", "cwd": ".", "inherit_env": ["*"], "shell": "login",
-                       "ingress_rule": "allow_all_ingress", "cell_id": cid, "can_call": {"$self": "*"},
+                       "ingress_rule": "allow_all_ingress", "can_call": {"$self": "*"},
                        "callable_by": {"$self": "*", "mcp": ["*"], "user": ["*"], "canvas_root": ["*"], "canvas_ws": ["watch"]}})]
     return cells, hosts
 

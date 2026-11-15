@@ -150,7 +150,7 @@ def main() -> int:
                             **fields)
             need(rec.get("id") == pv, f"create {pv}: {str(rec)[:200]}")
             rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
-                            provider_id=pv, model=model, max_tokens=8192,
+                            provider_id=pv, model=model,
                             context_window=262144, memory_store_id="memory",
                             can_call={**can, pv: ["complete", "watch", "reflect"]}, callable_by=by)
             need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")

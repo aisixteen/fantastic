@@ -27,18 +27,16 @@ impl Seen {
     }
 }
 
+/// The result JSON a combined message carries in its `text`.
+fn body(msg: &Value) -> Value {
+    serde_json::from_str(msg["text"].as_str().expect("a text")).expect("the text is JSON")
+}
+
 struct Rec(Arc<Seen>);
 
 fantastic_kernel::stand_in_verbs!(rec_verbs {
     ReportV "report" { state: Option<String>, result: Option<serde_json::Value> },
-    SendV "send" {
-        wait_id: Option<i64>,
-        label: Option<String>,
-        done: Option<Vec<serde_json::Value>>,
-        missing: Option<Vec<String>>,
-        timed_out: Option<bool>,
-        text: Option<String>,
-    },
+    SendV "send" { text: Option<String> },
 });
 
 #[async_trait]
@@ -208,11 +206,12 @@ async fn await_set_survives_a_restart() {
     let got = wait_for(&seen2, "lead", 1).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(seen2.of("lead").len(), 1, "ONE message");
-    assert_eq!(got[0]["wait_id"], json!(wid));
-    assert_eq!(got[0]["label"], json!("L"));
-    assert_eq!(got[0]["timed_out"], json!(false));
+    let m = body(&got[0]);
+    assert_eq!(m["wait_id"], json!(wid));
+    assert_eq!(m["label"], json!("L"));
+    assert_eq!(m["timed_out"], json!(false));
     assert_eq!(
-        got[0]["done"],
+        m["done"],
         json!([
             {"id": "w1", "state": "done", "result": "one"},
             {"id": "w2", "state": "done", "result": "two"},
@@ -238,10 +237,11 @@ async fn await_set_survives_a_restart() {
     .await;
     let (_k2, seen2) = restart(&k, tmp.path(), Duration::from_millis(450)).await;
     let got = wait_for(&seen2, "lead", 1).await;
-    assert_eq!(got[0]["timed_out"], json!(true));
-    assert_eq!(got[0]["missing"], json!(["w2"]));
+    let m = body(&got[0]);
+    assert_eq!(m["timed_out"], json!(true));
+    assert_eq!(m["missing"], json!(["w2"]));
     assert_eq!(
-        got[0]["done"],
+        m["done"],
         json!([{"id": "w1", "state": "done", "result": "one"}])
     );
 

@@ -73,6 +73,14 @@ def main() -> bool:
                 r["tx: nothing overflows at that size"] = info["tx_overflow"] == [False, False]
                 r["fit refuses what is not its cell"] = send(view, {"type": "fit", "id": "nope"}).get("reason") == "not_found"
                 # the layout holds it (a reload keeps it)
+                def held() -> bool:
+                    rs = rig.rects()
+                    return all(near((rs.get(k) or {}).get("width", 0), info[f"{k}_reply"].get("width", -99)) for k in ("sb", "tb", "tx"))
+
+                for _ in range(40):
+                    if held():
+                        break
+                    await asyncio.sleep(0.25)
                 rects = rig.rects()
                 info["rects"] = {k: rects.get(k) for k in ("sb", "tb", "tx")}
                 r["the layout holds the fitted rects"] = all(near((rects.get(k) or {}).get("width", 0), (info[f"{k}_reply"]).get("width", -99)) for k in ("sb", "tb", "tx"))

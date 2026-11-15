@@ -169,12 +169,12 @@ def main() -> int:
         need(r.get("updated") is True, f"memory accepts the AIs: {str(r)[:200]}")
 
         def make_ai(aid: str, mock: VllmMock, can_call: dict, cb: dict) -> None:
-            common = dict(max_tokens=8192, context_window=262144, memory_store_id="memory")
+            common = dict(context_window=262144, memory_store_id="memory")
             # a provider (the vllm_backend) and the chat naming it
             prov = f"{aid}_prov"
             rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=prov,
                             endpoint=mock.url, model=mock.model, kv_slots=4,
-                            kv_overflow="evict", **common,
+                            kv_overflow="evict", max_tokens=8192, **common,
                             can_call={"$self": "*", "memory": "*"},
                             callable_by={"$self": "*", "$parent": "*", aid: "*"})
             need(rec.get("id") == prov, f"create {prov}: {str(rec)[:200]}")

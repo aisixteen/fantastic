@@ -7,7 +7,7 @@ on the PACKAGED host of `RUNTIME` (python | rust), every call through
 `file_bridge_id` + `system_prompt_file` (a path on it). The agent reads the file
 THROUGH the bridge, as itself (both grant halves explicit), and watches it with
 `watch_path`. Not set → nothing looked up, the default block; set and unusable →
-the turn FAILS loud (`reason: system_prompt_file`), the model is never called:
+the turn FAILS loud (`reason: invalid_meta`), the model is never called:
 
   1. the file is the block, its placeholders filled per agent (`{store}`), an
      unknown `{…}` kept verbatim;
@@ -192,7 +192,7 @@ def main() -> int:
         ):
             r = update("ai", **{field: v})
             need(
-                f"{field} must be a non-empty" in str(r.get("error")),
+                r.get("reason") == "bad_arg" and f"record field '{field}' must be" in str(r.get("error")),
                 f"refused at the write: {field}={v!r} → {str(r)[:160]}",
             )
 
@@ -203,7 +203,7 @@ def main() -> int:
         update("ai", system_prompt_file=PATH)
         r = failed_turn()
         need(
-            r.get("reason") == "system_prompt_file" and "no file_bridge_id" in str(r.get("error")),
+            r.get("reason") == "invalid_meta" and "no file_bridge_id" in str(r.get("error")),
             f"a path without file_bridge_id fails loud: {str(r)[:200]}",
         )
         update("ai", system_prompt_file=None)
@@ -256,9 +256,9 @@ def main() -> int:
         turn_until(lambda s: s == "BACK\n")
         time.sleep(0.3)
         prompt.unlink()
-        r = failed_until(lambda r: r.get("reason") == "system_prompt_file")
+        r = failed_until(lambda r: r.get("reason") == "invalid_meta")
         need(
-            r.get("reason") == "system_prompt_file"
+            r.get("reason") == "invalid_meta"
             and "prompt.md" in str(r.get("error"))
             and not r.get("_called"),
             f"the file deleted: the turn fails loud: {str(r)[:200]}",
@@ -285,7 +285,7 @@ def main() -> int:
         update("ai", can_call=cc, file_bridge_id="pf_sealed", system_prompt_file="sealed.md")
         r = failed_turn()
         need(
-            r.get("reason") == "system_prompt_file"
+            r.get("reason") == "invalid_meta"
             and "watch_path" in str(r.get("error"))
             and "SECRET-ROLE" not in str(r),
             f"an ungranted bridge: the turn fails naming the refused verb: {str(r)[:200]}",

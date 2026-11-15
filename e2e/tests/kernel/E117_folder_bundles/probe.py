@@ -43,8 +43,17 @@ HELPER = (REPO / "src/lib/python/bundled_agents/io/py_agent/src/py_agent"
           / "fantastic_agent.py")
 PY = sys.executable  # absolute: the program gets no PATH unless the record says so
 
-ECHO_DOC = "args: text:str (req). Returns {echo, pid}."
-NOTES = "E117 notes: the cold bundle's own manual line."
+ECHO_DOC = "Echo the text back with the program's pid. Returns {echo, pid}."
+ECHO_LINE = "args: text:string (req) \u2014 Echo the text back with the program's pid"
+ECHO_SCHEMA = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+
+
+def decl(doc: str, schema: dict | None = None) -> dict:
+    """A verb as bundle.yaml declares it: {doc, schema}."""
+    return {"doc": doc, "schema": schema or {"type": "object", "properties": {}}}
+
+
+ECHO = decl(ECHO_DOC, ECHO_SCHEMA)
 CALL_S = 30
 
 
@@ -74,7 +83,7 @@ def bundle(root: Path, name: str, *, version: str = "v1", verbs: dict | None = N
         "base": "py_agent",
         "sentence": f"The {name} test agent.",
         "command": [PY, "agent.py"],
-        "verbs": verbs or {"echo": ECHO_DOC},
+        "verbs": verbs or {"echo": ECHO},
         **(spec or {}),
     }
     (folder / "bundle.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
@@ -111,13 +120,13 @@ def main() -> int:
         return json.dumps(x, default=str)[:300]
 
     # ── before boot: the folders and one seeded instance of `cold` ──
-    bundle(work, "cold", spec={"notes": NOTES})
+    bundle(work, "cold")
     bundle(work, "broken", raw="base: py_agent\nsentence: [unclosed\n  verbs: {\n")
     bundle(work, "nosentence", raw=f"base: py_agent\ncommand: [{json.dumps(PY)}, agent.py]\n"
-           "verbs: {echo: 'args: text:str.'}\n")
-    bundle(work, "reserved", verbs={"echo": ECHO_DOC, "reflect": "No args. Mine."},
+           "verbs: {echo: {doc: 'Echo.', schema: {type: object}}}\n")
+    bundle(work, "reserved", verbs={"echo": ECHO, "reflect": decl("Mine.")},
            extra=", 'reflect': ps")
-    bundle(work, "sysverb", verbs={"echo": ECHO_DOC, "ps": "No args. The program's ps."},
+    bundle(work, "sysverb", verbs={"echo": ECHO, "ps": decl("The program's ps.")},
            extra=", 'ps': ps")
     seeded = work / ".fantastic/agents/web/agents/rest/agents/cold1"
     seeded.mkdir(parents=True)
@@ -156,14 +165,14 @@ def main() -> int:
         need("cold" in (ids.get("bundles") or []),
              f"reflect bundles=ids names it: {short(ids.get('bundles'))}")
         d = send("kernel", {"type": "docs", "of": "cold"})
-        need((d.get("verbs") or {}) == {"echo": "args: text:str (req)"},
+        need((d.get("verbs") or {}).get("echo") == ECHO_LINE,
              f"docs of=<bundle>: bundle.yaml's signature: {short(d)}")
         dd = send("kernel", {"type": "docs", "of": "cold", "tier": "detailed"})
-        need((dd.get("verbs") or {}).get("echo") == ECHO_DOC
-             and NOTES in str(dd.get("notes", "")),
-             f"docs detailed: the full doc + the bundle's notes: {short(dd)}")
+        need(str((dd.get("verbs") or {}).get("echo", "")).startswith(ECHO_DOC)
+             and "text:string (req)" in str((dd.get("verbs") or {}).get("echo", "")),
+             f"docs detailed: the full doc + the declared arguments: {short(dd)}")
         di = send("kernel", {"type": "docs", "of": "cold1"})
-        need((di.get("verbs") or {}) == {"echo": "args: text:str (req)"},
+        need((di.get("verbs") or {}).get("echo") == ECHO_LINE,
              f"docs of=<instance>: the same table: {short(di)}")
 
         # 3 · create an instance; reflect it; delete kills its program
@@ -228,8 +237,8 @@ def main() -> int:
              f"a bundle.yaml without sentence is listed with its error: {short(ns)}")
         xb = hk.create(parent_id="rest", handler_module="broken", id="x_broken", callable_by=cb)
         xr = send("x_broken", {"type": "echo", "text": "x"})
-        need(xr.get("reason") == "unhandled",
-             f"an instance of a refused folder answers unhandled: create={short(xb)} call={short(xr)}")
+        need(xb.get("reason") == "bad_arg" and xr.get("reason") == "unknown_agent",
+             f"an instance of a refused folder is not created: create={short(xb)} call={short(xr)}")
 
         # 6 · reserved verbs cannot be shadowed
         rs = cat.get("reserved") or {}

@@ -73,10 +73,10 @@ def main() -> bool:
         n = agent_ids(rig)
         d1 = importing(rig, "withfile", PARENT, approve="true", allow_code=True)
         info["approve_string"] = d1
-        r["d1 approve as a string only previews"] = d1.get("approval_required") is True and "imported" not in d1 and agent_ids(rig) == n
+        r["d1 approve as a string is refused as bad_arg naming approve, nothing created"] = d1.get("reason") == "bad_arg" and d1.get("arg") == "approve" and "imported" not in d1 and agent_ids(rig) == n
         d2 = importing(rig, "withfile", PARENT, approve=True, allow_code="true")
         info["allow_code_string"] = d2
-        r["d2 allow_code as a string is still refused"] = d2.get("reason") == "code_not_allowed" and agent_ids(rig) == n
+        r["d2 allow_code as a string is refused as bad_arg naming allow_code, nothing created"] = d2.get("reason") == "bad_arg" and d2.get("arg") == "allow_code" and "imported" not in d2 and agent_ids(rig) == n
 
         # e) no blueprint
         (rig.proj / "empty").mkdir()

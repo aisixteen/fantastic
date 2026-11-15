@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -44,10 +45,16 @@ def cell(cid: str, handler: str, x: int, y: int, w: int, h: int, **extra) -> dic
     return {"id": cid, "handler_module": handler, "display_name": cid, "can_call": {"files": FILE_VERBS}, "x": x, "y": y, "width": w, "height": h, **extra}
 
 
+def view_records(proj: Path) -> list:
+    """Every `file_bridge_*/agent.yaml` on the host; a folder removed during the walk is skipped (os.walk ignores it)."""
+    return [Path(d) / "agent.yaml" for d, _, files in os.walk(proj / ".fantastic")
+            if Path(d).name.startswith("file_bridge_") and "agent.yaml" in files]
+
+
 def view_paths(proj: Path) -> set:
     """The paths of the file and folder view agents still on the host (`file_bridge_*`, #150)."""
     out = set()
-    for f in (proj / ".fantastic").rglob("file_bridge_*/agent.yaml"):
+    for f in view_records(proj):
         try:
             rec = yaml.safe_load(f.read_text()) or {}
         except FileNotFoundError:
@@ -60,7 +67,7 @@ def view_paths(proj: Path) -> set:
 def view_ids(proj: Path) -> dict:
     """The live file and folder views as {path: id} (`file_bridge_*`, #150)."""
     out = {}
-    for f in (proj / ".fantastic").rglob("file_bridge_*/agent.yaml"):
+    for f in view_records(proj):
         try:
             rec = yaml.safe_load(f.read_text()) or {}
         except FileNotFoundError:
@@ -182,7 +189,7 @@ def main() -> bool:
             r["9c nothing was overwritten"] = (src / "one.txt").read_text() == "disk wins"
             sv = await call(PIN, {"type": "save"})
             info["9_save"] = sv
-            r["9d save is refused as a conflict"] = sv.get("reason") == "conflict"
+            r["9d save is refused as locked"] = sv.get("reason") == "locked"
             r["9e still nothing overwritten"] = (src / "one.txt").read_text() == "disk wins"
             await pg.js(f"[...{frame(PIN)}.querySelectorAll('.pv-conflict .pv-chip')].find(b=>b.textContent==='Reload')?.click()")
             r["9 Reload takes the disk's text and clears the banner"] = bool(await pg.until(

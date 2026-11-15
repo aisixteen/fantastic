@@ -7,7 +7,9 @@ asserts BOTH halves: the body whole in the request that carries it, the anchor i
 `context_window` is 262144, so every body below (over 64,000 chars = AUTOFOLD_AT 16000 tokens,
 under the inline cap of about 127,000) is delivered inline.
 
-  T  `provider_cache`, a thinking model.
+  T  `provider_cache`, a thinking model, on the anthropic wire (the Anthropic mock, a mock key in
+     the creds store): vllm strips the cache mark from its wire (#669), anthropic shows it as
+     `cache_control` on a block.
      T1  the model thinks, reads, thinks, answers; T2 the model recalls its FIRST thought by
          id: request 1 shows the thought as `[thought ~N tokens · id P]` with none of its text,
          request 2 carries the recall reply with the thought WHOLE; T3 the recall reply is
@@ -57,6 +59,7 @@ sys.path.insert(0, str(E2E))
 from helpers import oslayer
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
 from helpers.verdict import verdict
+from mocks.anthropic import AnthropicMock
 from mocks.vllm import ThinkingVllmMock
 
 REPO = E2E.parent
@@ -65,6 +68,8 @@ FILES, EXEC = "files", "ex"
 AI_T, AI_V, AI_N, AI_U = "ai_t", "ai_v", "ai_n", "ai_u"
 AIS = [AI_T, AI_V, AI_N, AI_U]
 MODEL = "mock-scripted"
+KEY = "mock-e2e-" + secrets.token_hex(12)
+KEY_VAR = "E2E_MOCK_KEY"
 TOKEN = "E151-" + secrets.token_hex(4)
 DONE = '<call name="done"></call>'
 PY = sys.executable
@@ -101,12 +106,25 @@ def blob(turn: dict) -> str:
 
 
 def unmarked(ms: list[dict]) -> list[dict]:
-    """The messages without the `cache_mark` flag: the mark moves on, the bytes must not."""
-    return [{k: v for k, v in m.items() if k != "cache_mark"} for m in ms]
+    """The messages as the model reads them, without the mark: `cache_control` off the blocks, and a turn of
+    text blocks as the one string (the API's own shorthand: `"content": "x"` is `[{"type": "text", "text": "x"}]`).
+    The backend sends a turn as blocks only where the mark sits on it, so the same turn is a string in the
+    request after the mark moved on; the text the model reads, the cache prefix, is the same."""
+    def plain(c):
+        if not isinstance(c, list):
+            return c
+        bs = [{k: v for k, v in b.items() if k != "cache_control"} if isinstance(b, dict) else b for b in c]
+        if all(isinstance(b, dict) and b.get("type") == "text" for b in bs):
+            return "".join(b.get("text", "") for b in bs)
+        return bs
+    return [{**m, "content": plain(m.get("content"))} for m in ms]
 
 
 def marked(m: dict) -> bool:
-    return m.get("cache_mark") is True
+    """The anthropic wire's mark: an ephemeral `cache_control` on a block (vllm sends none, #669)."""
+    c = m.get("content")
+    return isinstance(c, list) and any(
+        isinstance(b, dict) and b.get("cache_control") == {"type": "ephemeral"} for b in c)
 
 
 def last_mark(ms: list[dict]) -> int:
@@ -134,10 +152,13 @@ def main() -> int:
         "".join(f"L{n:03d} " + "x" * 795 + "\n" for n in range(1, 101)))
     for n in range(MANY_N):
         (work / "files" / MANY / (f"n{n:04d}-" + "a" * 124)).write_text("")
-    hk = HostKernel(spec, work, reach=[*AIS, FILES, EXEC, "memory"]
+    os.environ[KEY_VAR] = KEY  # the creds store reads it at boot (env backend)
+    hk = HostKernel(spec, work, reach=[*AIS, FILES, EXEC, "memory", "creds"]
                     + [f"prov_{a}" for a in AIS]).boot()
     root = hk.root_id
-    mocks = {a: ThinkingVllmMock(model=MODEL).start() for a in AIS}
+    # AI_T is the marked chat: it runs on the anthropic wire, where a cache mark shows
+    mocks = {a: (AnthropicMock if a == AI_T else ThinkingVllmMock)(model=MODEL).start() for a in AIS}
+    mocks[AI_T].require_key(KEY)
     bad: list[str] = []
 
     def need(cond: bool, what: str) -> None:
@@ -223,17 +244,32 @@ def main() -> int:
         for aid, caching in ((AI_T, "provider_cache"), (AI_V, None),
                              (AI_N, "none"), (AI_U, None)):
             prov = f"prov_{aid}"
-            # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it
-            rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=prov,
-                            endpoint=mocks[aid].url, model=MODEL, max_tokens=8192,
-                            context_window=262144, kv_slots=4, kv_overflow="evict",
-                            memory_store_id="memory",
-                            can_call={"$self": "*", "memory": "*"},
-                            callable_by={"$self": "*", "$parent": "*", aid: "*"})
+            # a provider (the vllm_backend; the anthropic_backend for AI_T) and the chat
+            # (ai_chat.tools) naming it
+            if aid == AI_T:
+                r = hk.send(root, {"type": "update_agent", "id": "creds",
+                                   "refs": {"anthropic": {"host": mocks[aid].host,
+                                                          "env": {"api_key": KEY_VAR}}},
+                                   "callable_by": {**callable_by("creds"), prov: ["get"]}})
+                need(r.get("updated") is True, f"creds: the ref: {str(r)[:200]}")
+                rec = hk.create(parent_id="rest", handler_module="anthropic_backend.tools", id=prov,
+                                endpoint=mocks[aid].url,
+                                credentials={"store": "creds", "ref": "anthropic"},
+                                model=MODEL, max_tokens=8192, context_window=262144,
+                                memory_store_id="memory",
+                                can_call={"$self": "*", "memory": "*", "creds": ["get"]},
+                                callable_by={"$self": "*", "$parent": "*", aid: "*"})
+            else:
+                rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=prov,
+                                endpoint=mocks[aid].url, model=MODEL, max_tokens=8192,
+                                context_window=262144, kv_slots=4, kv_overflow="evict",
+                                memory_store_id="memory",
+                                can_call={"$self": "*", "memory": "*"},
+                                callable_by={"$self": "*", "$parent": "*", aid: "*"})
             need(rec.get("id") == prov, f"create {prov}: {str(rec)[:200]}")
             extra = {"caching": caching} if caching else {}
             rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
-                            provider_id=prov, model=MODEL, max_tokens=8192,
+                            provider_id=prov, model=MODEL,
                             context_window=262144, memory_store_id="memory", **extra,
                             can_call={**can, prov: ["complete", "watch"]}, callable_by=by)
             need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")

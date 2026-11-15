@@ -584,6 +584,15 @@ pub(crate) async fn ws_loop(
                     peer::mirror_reply(peer.mirror().siblings(), &fid, &data, None).await;
                     continue;
                 }
+                // the marks are a list of paths: anything else is refused here,
+                // before the call runs
+                if secret.as_ref().is_some_and(|m| !m.is_array()) {
+                    let data = fantastic_kernel::refusal::bad("secret", "secret", "a list of paths");
+                    let f = json!({"type": "reply", "id": fid, "data": data});
+                    let _ = out.send(Out::Text(encode_frame(&f))).await;
+                    peer::mirror_reply(peer.mirror().siblings(), &fid, &data, None).await;
+                    continue;
+                }
                 // python `frame.get("payload", {})`.
                 let payload = env.payload.take().unwrap_or_else(|| json!({}));
                 let body = inbound.body;

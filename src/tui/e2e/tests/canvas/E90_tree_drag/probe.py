@@ -132,7 +132,7 @@ def cell(cid: str, backend: str, x: int, y: int) -> dict:
 def host(backend: str, cid: str) -> dict:
     return {
         "id": backend, "handler_module": "exec_bridge.tools", "cwd": ".", "inherit_env": ["*"], "shell": "login",
-        "ingress_rule": "allow_all_ingress", "allowed": [py_job("ticker.py")[1]], "cell_id": cid, "can_call": {"$self": "*"},
+        "ingress_rule": "allow_all_ingress", "allowed": [py_job("ticker.py")[1]], "can_call": {"$self": "*"},
         "callable_by": {"$self": "*", "mcp": ["*"], "user": ["*"], "canvas_root": ["*"], "canvas_ws": ["watch"]},
     }
 

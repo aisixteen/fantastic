@@ -71,13 +71,13 @@ def main() -> bool:
         r["d3 the second copy is under the same parent"] = record(rig, "squad_2").get("parent_id") == PARENT
         r["d4 the second copy has its own grants"] = (
             set(record(rig, "lead_2").get("can_call", {})) >= {"scout_2", STORE} and "lead_2" in send(rig, STORE, {"type": "reflect"}).get("callable_by", {}))
-        edit = send(rig, "kernel_state", {"type": "update_agent", "id": "lead_1", "note": "edited"})
+        edit = send(rig, "kernel_state", {"type": "update_agent", "id": "lead_1", "description": "edited"})
         info["edit"] = edit
         end = time.time() + 10
-        while time.time() < end and record(rig, "lead_1", 1).get("note") != "edited":
+        while time.time() < end and record(rig, "lead_1", 1).get("description") != "edited":
             time.sleep(0.2)
-        r["d5 editing copy 1 changes copy 1"] = record(rig, "lead_1").get("note") == "edited"
-        r["d6 copy 2 is unchanged"] = record(rig, "lead_2").get("note") == "first"
+        r["d5 editing copy 1 changes copy 1"] = record(rig, "lead_1").get("description") == "edited"
+        r["d6 copy 2 is unchanged"] = record(rig, "lead_2").get("description") == "first"
 
         # e) the port left unbound
         n = agent_ids(rig)

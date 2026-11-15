@@ -57,10 +57,10 @@ RUNTIME_ONLY = {
 ROOT_KEYS = {
     "id", "sentence", "parent_id", "handler_module", "display_name", "can_call",
     "callable_by", "runtime", "peers", "env", "version", "persistence", "guid",
-    "self_extension", "tree",
+    "tree",
 }
 #: A reflect says what an agent IS, never how to call it.
-NEVER_ON_REFLECT = {"verbs", "emits", "cancel", "more", "kernel_verbs"}
+NEVER_ON_REFLECT = {"emits", "cancel", "more", "kernel_verbs"}
 #: The kernel verbs (CLAUDE.md "Architecture": create/delete/update/list_agents,
 #: ps/cancel, docs).
 KERNEL_VERBS = {"create_agent", "delete_agent", "update_agent", "list_agents",
@@ -138,37 +138,6 @@ def main() -> int:
         need(rf.get("peers") == [], f"no peers: {rf.get('peers')}")
         tree_ids = {c.get("id") for c in (rf.get("tree") or {}).get("children") or []}
         need({"web", "records"} <= tree_ids, f"tree nests the seeded children: {sorted(tree_ids)}")
-
-        # 3 · the full reflect carries the doc frame
-        full = hk.send(root, {"type": "reflect", "detail": "full", "tree": "none"})
-        need(isinstance(full.get("readmes"), list) and bool(full["readmes"])
-             and isinstance(full.get("docs"), str) and bool(full["docs"]),
-             f"detail=full carries readmes + docs: readmes={type(full.get('readmes')).__name__} "
-             f"docs={type(full.get('docs')).__name__}")
-
-        # 4 · the doc tree
-        idx = hk.send(root, {"type": "reflect", "readme": "index", "tree": "none"})
-        index = (idx.get("readme") or {}).get("index") if isinstance(idx.get("readme"), dict) else None
-        need(isinstance(index, list) and bool(index) and all(
-            isinstance(e, dict) and {"key", "desc", "tokens"} <= set(e) for e in index),
-            f"readme=index is [{{key, desc, tokens}}]: {str(idx.get('readme'))[:200]}")
-        topic_keys = [e["key"] for e in index or []]
-        need(topic_keys == (full.get("readmes") and [e.get("key") for e in full["readmes"]]),
-             f"the full reflect's readmes is that index: {topic_keys}")
-        undrilled = []
-        for k in topic_keys:
-            t = hk.send(root, {"type": "reflect", "readme": k, "tree": "none"})
-            body = t.get("readme")
-            if not (isinstance(body, dict) and isinstance(body.get("body"), str) and body["body"].strip()):
-                undrilled.append((k, str(body)[:80]))
-        need(not undrilled, f"every one of {len(topic_keys)} topics drills to a body: {undrilled[:3]}")
-        orient = hk.send(root, {"type": "reflect", "readme": True, "tree": "none"})
-        need(isinstance(orient.get("readme"), str) and len(orient["readme"]) > 100,
-             f"readme=true is the orientation: {str(orient.get('readme'))[:80]!r}")
-        unk = hk.send(root, {"type": "reflect", "readme": "no-such-topic", "tree": "none"})
-        ur = unk.get("readme") if isinstance(unk.get("readme"), dict) else unk
-        need(bool(ur.get("error")) and isinstance(ur.get("keys"), list),
-             f"an unknown topic → {{error, keys}}: {str(ur)[:160]}")
 
         # 5 · docs of=kernel
         dk = hk.send("kernel", {"type": "docs", "of": "kernel"})

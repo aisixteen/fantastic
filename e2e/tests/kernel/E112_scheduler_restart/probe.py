@@ -141,7 +141,7 @@ def main() -> int:
         r = hk.send("sch", {"type": "pause", "schedule_id": paused})
         need(r.get("paused") is True, f"pause one schedule: {r}")
         late = schedule(hk, "every 3 s, created just before the stop", target="tgt",
-                        payload={"type": "work", "tag": "late"}, interval_seconds=3)
+                        payload={"type": "work"}, interval_seconds=3)
         old = schedules(hk)
         need((old.get(late) or {}).get("run_count") == 0, "the late one has not fired before the stop")
         hk.close()

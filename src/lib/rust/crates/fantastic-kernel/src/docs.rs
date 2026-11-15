@@ -187,11 +187,20 @@ pub fn docs_reply(kernel: &Arc<Kernel>, args: &Docs) -> Value {
         return render(of, json!(module), tier, verb, &[], None);
     };
     // The bundle's declarations, with the verbs every agent answers.
-    // The agent's own dynamic verbs too (a bundle addressed by name has none).
-    let dynamic = agent
-        .as_deref()
-        .map(|a| bundle.dynamic_verbs(a))
-        .unwrap_or_default();
+    // The agent's own dynamic verbs too. A bundle addressed by name has no agent: it
+    // answers for a bare, unsaved one (no meta), so the verbs that do not depend on
+    // an agent (a folder bundle's, from its bundle.yaml) are listed.
+    let dynamic = match agent.as_deref() {
+        Some(a) => bundle.dynamic_verbs(a),
+        None => bundle.dynamic_verbs(&Agent::new(
+            crate::agent::AgentId(of.to_string()),
+            Some(module.clone()),
+            None,
+            Map::new(),
+            std::path::PathBuf::new(),
+            true,
+        )),
+    };
     // The root answers the kernel's verbs too, as its `reflect` lists them.
     let is_root = agent.as_deref().is_some_and(|a| a.parent_id.is_none());
     let mut lists: Vec<&[crate::verbs::Verb]> = Vec::new();

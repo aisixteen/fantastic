@@ -28,7 +28,7 @@ impl Rec {
 
 struct RecBundle(Arc<Rec>);
 
-crate::stand_in_verbs!(recbundle_verbs { NoteV "note" {  }, ReportV "report" { state: Option<String>, result: Option<serde_json::Value> }, SendV "send" { wait_id: Option<i64>, label: Option<String>, done: Option<Vec<serde_json::Value>>, missing: Option<Vec<String>>, timed_out: Option<bool>, text: Option<String> } });
+crate::stand_in_verbs!(recbundle_verbs { NoteV "note" {  }, ReportV "report" { state: Option<String>, result: Option<serde_json::Value> }, SendV "send" { text: Option<String> } });
 #[async_trait]
 impl Handler for RecBundle {
     type Call = recbundle_verbs::Call;
@@ -174,20 +174,20 @@ async fn await_set_wakes_the_caller_once_for_n_reports() {
     assert_eq!(got2.len(), 1, "ONE message, no per-report turns: {got2:?}");
     let m = &got[0];
     assert_eq!(m["type"], json!("send"));
-    assert_eq!(m["wait_id"], json!(wid));
-    assert_eq!(m["label"], json!("phase-1"));
-    assert_eq!(m["timed_out"], json!(false));
-    assert_eq!(m["missing"], json!([]));
+    assert_eq!(m.as_object().unwrap().len(), 2, "type and text only: {m}");
+    let text: Value = serde_json::from_str(m["text"].as_str().unwrap()).unwrap();
+    assert_eq!(text["wait_id"], json!(wid));
+    assert_eq!(text["label"], json!("phase-1"));
+    assert_eq!(text["timed_out"], json!(false));
+    assert_eq!(text["missing"], json!([]));
     assert_eq!(
-        m["done"],
+        text["done"],
         json!([
             {"id": "w1", "state": "done", "result": "r1"},
             {"id": "w2", "state": "done", "result": "r2"},
             {"id": "w3", "state": "done", "result": "r3"},
         ])
     );
-    let text: Value = serde_json::from_str(m["text"].as_str().unwrap()).unwrap();
-    assert_eq!(text["done"], m["done"], "`text` carries the same body");
     assert!(got2.iter().all(|p| p["type"] != json!("report")));
 }
 
@@ -204,12 +204,10 @@ async fn await_set_timeout_names_the_missing() {
         "nothing before the deadline"
     );
     let got = wait_for(&rec, "lead", 1).await;
-    assert_eq!(got[0]["timed_out"], json!(true));
-    assert_eq!(
-        got[0]["done"],
-        json!([{"id": "w1", "state": "done", "result": "a"}])
-    );
-    assert_eq!(got[0]["missing"], json!(["w2"]));
+    let m: Value = serde_json::from_str(got[0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(m["timed_out"], json!(true));
+    assert_eq!(m["done"], json!([{"id": "w1", "state": "done", "result": "a"}]));
+    assert_eq!(m["missing"], json!(["w2"]));
     // a late report is an ordinary message now
     let late = report(&k, "w2", "lead", json!({"state": "done", "result": "b"})).await;
     assert_eq!(late, json!({"ok": true}));
@@ -415,14 +413,15 @@ async fn a_duplicate_report_from_one_agent_replaces_the_first() {
     );
     report(&k, "w2", "lead", json!({"state": "done", "result": "w"})).await;
     let got = wait_for(&rec, "lead", 1).await;
+    let m: Value = serde_json::from_str(got[0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(
-        got[0]["done"],
+        m["done"],
         json!([
             {"id": "w1", "state": "done", "result": "second"},
             {"id": "w2", "state": "done", "result": "w"},
         ])
     );
-    assert_eq!(got[0]["missing"], json!([]));
+    assert_eq!(m["missing"], json!([]));
 }
 
 #[tokio::test]
@@ -435,7 +434,7 @@ async fn await_set_completion_race_delivers_once() {
     let _ = report(&k, "w1", "lead", json!({"state": "done", "result": "x"})).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     let all = rec.payloads("lead");
-    let combined: Vec<_> = all.iter().filter(|p| p.get("wait_id").is_some()).collect();
+    let combined: Vec<_> = all.iter().filter(|p| p["type"] == json!("send")).collect();
     assert_eq!(combined.len(), 1, "exactly one combined message: {all:?}");
 }
 

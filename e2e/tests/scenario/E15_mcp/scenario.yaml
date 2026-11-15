@@ -48,7 +48,7 @@ runs:
         args: {}
         expect:
           is_error: false
-          body_has_keys: [tree, bundles, readme]
+          body_has_keys: [tree, bundles]
           capture_root: true
       - tool: reflect
         args: {target: files}

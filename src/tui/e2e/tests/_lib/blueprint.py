@@ -29,7 +29,7 @@ agents:
     agents:
       - id: lead
         handler_module: ram_store.tools
-        note: first
+        description: first
         can_call: {scout: '*', '@memory': '*'}
         memory_store_id: '@memory'
       - id: scout
@@ -47,7 +47,7 @@ agents:
     agents:
       - id: mate
         handler_module: ram_store.tools
-        note: first
+        description: first
       - id: deckhand
         handler_module: ram_store.tools
         callable_by: {mate: '*'}
@@ -71,9 +71,10 @@ def agent_ids(rig) -> list[str]:
 
 def world(rig) -> None:
     """The parent every import goes under, and a second memory store to bind."""
-    send(rig, "kernel_state", {"type": "create_agent", "handler_module": "ram_store.tools", "id": PARENT, "parent_id": "kernel_state"})
-    send(rig, "kernel_state", {"type": "create_agent", "handler_module": "sqlite_store.tools", "id": STORE,
-                               "parent_id": "kernel_state", "path": f"{STORE}.db"})
+    for made in (send(rig, "kernel_state", {"type": "create_agent", "handler_module": "ram_store.tools", "id": PARENT, "parent_id": "kernel_state"}),
+                 send(rig, "kernel_state", {"type": "create_agent", "handler_module": "sqlite_store.tools", "id": STORE,
+                                            "parent_id": "kernel_state", "path": f"{STORE}.db"})):
+        assert "error" not in made, f"world: create refused: {made}"
 
 
 def write_blueprint(rig, folder: str, yaml_text: str, files: dict[str, str] | None = None) -> Path:

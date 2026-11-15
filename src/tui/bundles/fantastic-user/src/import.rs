@@ -394,7 +394,9 @@ pub fn plan(yaml: &str, files: &BTreeMap<String, String>, w: &World) -> Result<P
             ));
         };
         let target = v.as_str();
-        let Some(hm) = (w.agent)(target) else {
+        // the reserved address names the root: a connector port to the kernel binds to the root's id
+        let root = kind == "connector" && target == fantastic_kernel::refusal::RESERVED_ID;
+        let Some(hm) = (w.agent)(if root { w.root_id } else { target }) else {
             return Err(err(
                 "bad_binding",
                 format!("bind {name}: no agent {target:?}"),
@@ -407,7 +409,7 @@ pub fn plan(yaml: &str, files: &BTreeMap<String, String>, w: &World) -> Result<P
                 format!("bind {name}: the port wants a {kind} agent; {target} is {found} ({hm})"),
             ));
         }
-        ports.insert(name.clone(), target.to_string());
+        ports.insert(name.clone(), if root { w.root_id } else { target }.to_string());
     }
 
     // d. FRESH IDS: one suffix for all

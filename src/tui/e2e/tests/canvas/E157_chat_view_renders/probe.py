@@ -106,7 +106,7 @@ def main() -> bool:
         async with rig.page(1600, 1000) as pg:
             await asyncio.sleep(1.5)
             await open_chat(pg)
-            got = await chat_rows(pg)
+            got = await until(pg, lambda g: g.get("name") and g.get("model"))
             info["head"] = {k: got.get(k) for k in ("name", "model")}
             r["1 the view draws, header names the chat and its model"] = bool(got.get("name")) and got.get("model") == "stub"
             await say(pg, "hello there")

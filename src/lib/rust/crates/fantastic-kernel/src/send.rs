@@ -2093,9 +2093,7 @@ fn taped_payload(value: &Value, body: Option<&crate::outcome::Blob>) -> Value {
 /// Substrate verbs answered natively on every agent — explicitly
 /// `list_agents`' pointer back to the briefing — py-canonical `_LIST_HINT`.
 const LIST_HINT: &str = "Raw records — how agents are WIRED, not what they are FOR, \
-and no manual. <type>reflect</type> on the root is the briefing: each agent's purpose, \
-plus `self_extension` (how to author your own durable tools in THIS kernel — which \
-executor, and the fields without which the agent is created and never runs). Reflect \
+and no manual. <type>reflect</type> on the root is the briefing: each agent's purpose. Reflect \
 the root before building anything.";
 
 mod gate;

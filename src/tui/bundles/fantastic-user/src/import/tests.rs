@@ -267,6 +267,23 @@ fn plan_refuses_bind_of_missing_agent_naming_the_port() {
 }
 
 #[test]
+fn a_connector_port_binds_to_the_kernel_address() {
+    let y = "
+agents:
+  - id: a
+    handler_module: echo.tools
+    can_call: {'@connector:kernel': ['docs']}
+ports:
+  '@connector:kernel': {kind: connector, why: agent a field can_call reaches kernel, used_by: [a]}
+";
+    let p = ok(y, json!({"@connector:kernel": "kernel"}));
+    assert_eq!(agent(&p, "a_1").meta["can_call"], json!({ROOT: ["docs"]}));
+    // only a connector port: the kernel is no memory agent
+    let e = run(PORTED, &[], json!({"@memory": "kernel", "@exec": "exec"}), false, &[]).unwrap_err();
+    assert_eq!(e.reason, "bad_binding", "{}", e.message);
+}
+
+#[test]
 fn plan_refuses_bind_key_that_is_not_a_port() {
     let e = run(
         PORTED,

@@ -34,7 +34,7 @@ from _lib.export_live import LEAF_AT, SECRET, ROW, TEAM, check_folder, team_agen
 
 BUNDLE = "e129_card"
 BUNDLE_FILES = {
-    "bundle.yaml": "base: py_agent\nsentence: A card (E129).\ncommand: [python3, agent.py]\nverbs:\n  hello: \"args: none.\"\nrecord:\n  inherit_env: [PATH]\n",
+    "bundle.yaml": "base: py_agent\nsentence: A card (E129).\ncommand: [python3, agent.py]\nverbs:\n  hello: {doc: Say hello., schema: {type: object}}\nrecord:\n  inherit_env: [PATH]\n",
     "agent.py": "import fantastic_agent as fa\n\n\ndef hello(p):\n    return {'greeting': 'E129 hello é'}\n\n\nfa.serve({'hello': hello})\n",
     "panel.html": "<h3>E129 panel</h3>\n<button id=h>hello</button>\n",
 }
@@ -42,8 +42,11 @@ DIRECTIVE = "You are the middle of the E129 team.\nAnswer briefly.\n"
 VIEW = "<div style='color:#cde'>E129 view é</div>\n"
 
 
-def bind_of(ports: list[str]) -> dict[str, str]:
-    return {p: p.split(":", 1)[-1].lstrip("@") for p in ports}
+def bind_of(ports: dict) -> dict[str, str]:
+    """Every declared port bound to the agent it stood for, read from its `why` ("agent X field F reaches <id>"):
+    `mid` is an AI chat, which holds the reach over every agent, so a kind has several ports (`@memory_2`)
+    that no name alone maps back to an id."""
+    return {p: str(d.get("why", "")).split(" reaches ")[1].split(";")[0].strip() for p, d in ports.items()}
 
 
 def main() -> bool:
@@ -57,6 +60,11 @@ def main() -> bool:
     agents = team_agents(extra={
         "mid": {"system_prompt_file": "prompts/mid.md", "view": {"kind": "html", "bytes": VIEW, "calls": ["lead"]}},
     })
+    # `mid` is an AI chat record: `system_prompt_file` is a field of the AI record only (#651)
+    agents = [(p, ({"id": "mid", "handler_module": "ai_chat.tools", "display_name": "mid", "can_call": {"leaf": "*"},
+                    "callable_by": {"lead": "*"}, "system_prompt_file": rec["system_prompt_file"], "view": rec["view"],
+                    "api_key": SECRET, "guid": "guid-mid", "history": [ROW], "rows": [{"text": ROW}]}
+                   if rec["id"] == "mid" else rec)) for p, rec in agents]
     # `leaf` runs on the folder bundle
     agents = [(p, rec) for p, rec in agents if rec["id"] != "leaf"]
     agents.append((LEAF_AT, {"id": "leaf", "handler_module": BUNDLE, "display_name": "leaf", "callable_by": {"mid": "*"},
@@ -114,7 +122,7 @@ def main() -> bool:
             == sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
             and all((o2 / p.relative_to(out)).read_bytes() == p.read_bytes() for p in out.rglob("*") if p.is_file()))
         # c) import
-        bind = bind_of(a.get("ports") or [])
+        bind = bind_of(doc.get("ports") or {})
         refused = await user({"type": "import_subtree", "path": "out/owned", "parent_id": "newparent", "bind": bind, "approve": True})
         info["refused"] = refused
         r["c1 without allow_code the import is refused"] = refused.get("reason") == "code_not_allowed"

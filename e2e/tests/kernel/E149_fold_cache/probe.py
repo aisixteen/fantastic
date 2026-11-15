@@ -12,15 +12,12 @@ width): Rust verbs.rs:60 + retrieval.rs:83-238, Python core.py:4784; it returns
 {matches:[{id,line,text}], total, truncated}. The cache mark (#571): `mark()` Rust
 caching.rs:182-219, Python ai_core/caching.py:117-149, set only when `caching.marks()`
 (Rust agent_loop.rs:252-256, Python core.py:3542), carried by `render_for_model`
-(Rust agent_loop.rs:120-134, Python core.py:523-533). The plugs forward it:
-  rust vllm (fantastic-vllm-backend lib.rs:309-326 `one_system_message`): messages are
-    cloned verbatim, so a row carries `"cache_mark": true`; all system messages merge
-    into one new {role, content}, so the system mark does not reach this wire;
-  python anthropic (anthropic_backend/provider.py:386-428 `to_wire`/`turn_content`,
-    :532-548 `body`): a marked row's last block carries cache_control {"type":"ephemeral"},
-    a marked system message becomes `system: [{…, cache_control}]`.
-Rust runs the chat on `ai_chat.tools` + vllm plug (provider_cache=true on the chat); Python's
-`vllm_backend` refuses provider_cache, so Part B uses `anthropic_backend` on the Anthropic mock.
+(Rust agent_loop.rs:120-134, Python core.py:523-533). The anthropic plug forwards it (Rust fantastic-anthropic-backend lib.rs; Python
+anthropic_backend/provider.py `to_wire`/`body`): a marked row's last block carries
+cache_control {"type":"ephemeral"}, a marked system message becomes `system: [{…, cache_control}]`.
+The vllm and ollama plugs strip the flag from the wire (#669), so Part B runs the marked chat
+on `anthropic_backend` and the Anthropic mock, in both runtimes (the key is a mock key in the
+creds store's env backend); Rust: `ai_chat.tools` + that provider, Python: the backend itself.
 
 A test-only folder bundle `bigdoc` (written at runtime, as E117) supplies one verb doc over
 64,000 chars; no stock docs reply is that large.
@@ -78,7 +75,7 @@ def write_bundle(work: Path) -> None:
         "base": "py_agent",
         "sentence": "The big-doc test agent.",
         "command": [sys.executable, "agent.py"],
-        "verbs": {VERB: DOC},
+        "verbs": {VERB: {"doc": DOC, "schema": {"type": "object", "properties": {}}}},
     }, sort_keys=False))
 
 
@@ -96,8 +93,7 @@ def content_text(c) -> str:
 def texts(turn: dict) -> list[str]:
     """Every text the request carries."""
     out: list[str] = []
-    if RUNTIME == "python":  # anthropic: `system` (string or blocks) + message content
-        out.append(content_text(turn["body"].get("system")))
+    out.append(content_text(turn["body"].get("system")))  # anthropic: `system` (string or blocks)
     out += [content_text(m.get("content")) for m in msgs(turn)]
     return out
 
@@ -114,11 +110,9 @@ def last_user(turn: dict) -> str:
 
 
 def marked(m: dict) -> bool:
-    if RUNTIME == "python":
-        c = m.get("content")
-        return isinstance(c, list) and any(
-            isinstance(b, dict) and b.get("cache_control") == EPH for b in c)
-    return m.get("cache_mark") is True
+    c = m.get("content")
+    return isinstance(c, list) and any(
+        isinstance(b, dict) and b.get("cache_control") == EPH for b in c)
 
 
 def system_marked(turn: dict) -> bool:
@@ -139,13 +133,12 @@ def main() -> int:
         lines.append(head + "x" * (800 - len(head)) + "\n")
     (work / "files" / "big.txt").write_text("".join(lines))
     write_bundle(work)
-    if RUNTIME == "python":
-        os.environ[KEY_VAR] = KEY
+    os.environ[KEY_VAR] = KEY  # the creds store reads it at boot (env backend)
     hk = HostKernel(spec, work,
                     reach=[AI_A, AI_B, FILES, PROV_A, PROV_B, "creds", "memory"]).boot()
     root = hk.root_id
     mA = VllmMock(model=MODEL).start()
-    mB = (AnthropicMock(model=MODEL) if RUNTIME == "python" else VllmMock(model=MODEL)).start()
+    mB = AnthropicMock(model=MODEL).start()  # the marked chat: the anthropic wire shows cache_control
     bad: list[str] = []
 
     def need(cond: bool, what: str) -> None:
@@ -219,17 +212,28 @@ def main() -> int:
         can = {"$self": "*", "memory": "*", FILES: "*", root: ["docs"]}
         by = {"$self": "*", "$parent": "*", "rest": "*"}
         if RUNTIME == "rust":
-            for prov, m in ((PROV_A, mA), (PROV_B, mB)):
-                rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=prov,
-                                endpoint=m.url, model=MODEL, max_tokens=8192,
-                                context_window=262144, kv_slots=4, kv_overflow="evict",
-                                memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
-                                callable_by={"$self": "*", "$parent": "*",
-                                             AI_A: "*", AI_B: "*"})
-                need(rec.get("id") == prov, f"create {prov}: {str(rec)[:200]}")
+            mB.require_key(KEY)
+            r = hk.send(root, {"type": "update_agent", "id": "creds",
+                               "refs": {"anthropic": {"host": mB.host,
+                                                      "env": {"api_key": KEY_VAR}}},
+                               "callable_by": {**callable_by("creds"), PROV_B: ["get"]}})
+            need(r.get("updated") is True, f"creds: the ref: {str(r)[:200]}")
+            rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV_A,
+                            endpoint=mA.url, model=MODEL, max_tokens=8192,
+                            context_window=262144, kv_slots=4, kv_overflow="evict",
+                            memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
+                            callable_by={"$self": "*", "$parent": "*", AI_A: "*"})
+            need(rec.get("id") == PROV_A, f"create {PROV_A}: {str(rec)[:200]}")
+            rec = hk.create(parent_id="rest", handler_module="anthropic_backend.tools", id=PROV_B,
+                            endpoint=mB.url, credentials={"store": "creds", "ref": "anthropic"},
+                            model=MODEL, max_tokens=8192, context_window=262144,
+                            memory_store_id="memory",
+                            can_call={"$self": "*", "memory": "*", "creds": ["get"]},
+                            callable_by={"$self": "*", "$parent": "*", AI_B: "*"})
+            need(rec.get("id") == PROV_B, f"create {PROV_B}: {str(rec)[:200]}")
             for aid, prov, mode in ((AI_A, PROV_A, "none"), (AI_B, PROV_B, "provider_cache")):
                 rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
-                                provider_id=prov, model=MODEL, max_tokens=8192,
+                                provider_id=prov, model=MODEL,
                                 context_window=262144, memory_store_id="memory",
                                 caching=mode, can_call={**can, prov: ["complete", "watch", "reflect"]},
                                 callable_by=by)
@@ -309,7 +313,7 @@ def main() -> int:
         base = len(allb)
         collect(turns)
         anchor_docs = first_seen(
-            "B2", rf'\[folded · docs reply from kernel · ~\d+ tokens · head: "[^"]*" · get: {d}\]',
+            "B2", r'\[folded · docs reply from kernel · ~\d+ tokens · docs again for the current state\]',
             turns, base)
         need(bool(turns) and "S090 " not in full(turns[0]), "B2: the docs reply is folded")
         last = last_user(turns[1]) if len(turns) > 1 else ""
@@ -353,9 +357,8 @@ def main() -> int:
         need(all(any(marked(m) for m in msgs(t)) for t in allb),
              f"B4(a): every one of {len(allb)} requests carries a cache mark: "
              f"{[sum(marked(m) for m in msgs(t)) for t in allb]}")
-        if RUNTIME == "python":
-            need(all(system_marked(t) for t in allb),
-                 f"B4(a): every request marks the system block: {[system_marked(t) for t in allb]}")
+        need(all(system_marked(t) for t in allb),
+             f"B4(a): every request marks the system block: {[system_marked(t) for t in allb]}")
         for label, i in whole_marks:
             ms = msgs(allb[i])
             need(len(ms) >= 2 and not marked(ms[-1]) and marked(ms[-2]),

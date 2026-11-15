@@ -71,7 +71,7 @@ const PROVIDER_VERBS: [&str; 3] = ["complete", "watch", "reflect"];
 
 /// The spec fields that are the CHAT's alone (the conversation's, its prompt and its saved
 /// set-up's name): the provider's record does not carry them.
-const CHAT_ONLY: [&str; 13] = [
+const CHAT_ONLY: [&str; 12] = [
     "output_reserve",
     "context_strategy",
     "recent_n",
@@ -84,7 +84,6 @@ const CHAT_ONLY: [&str; 13] = [
     "system_prompt_file",
     "pre_system_prompt",
     "post_system_prompt",
-    "saved",
 ];
 
 /// The spec fields BOTH records carry: the model the chat runs (the provider's default), and
@@ -209,12 +208,11 @@ impl BackendBundle {
         spec.extend(stamp);
         // what the set-up is stays what it is, whatever the stamp says
         spec.insert("handler_module".into(), json!(t.handler()));
-        spec.insert("saved".into(), json!(name));
         match Self::make_ai(host, me, &ai, spec, peer).await {
             // EVERY dialog is KEPT from its start (owner 2026-10-12: no ephemeral
             // chats — the canvas and the terminal keep them alike): listed for reopening
             Ok(()) => {
-                let kept = Self::keep(host, verbs::Keep { id: ai.clone(), name: None }).await;
+                let kept = Self::keep_with(host, ai.clone(), None, Some(name.clone())).await;
                 if kept.get("error").is_some() {
                     return kept;
                 }
@@ -651,7 +649,7 @@ impl BackendBundle {
     /// The kept dialogs: `dialog` rows in the AI store under `user`'s key
     /// (no handler may write `canvas_root`'s record: grants and fields come
     /// from above), the newest row per AI wins — `{id: {name, saved set-up, record}}`.
-    async fn dialogs_map(host: &Host) -> Result<Map<String, Value>, String> {
+    pub(crate) async fn dialogs_map(host: &Host) -> Result<Map<String, Value>, String> {
         let store = host.ai_store()?;
         let r = host.act(&store, json!({"type": "read", "kinds": [DIALOG]})).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
@@ -680,7 +678,12 @@ impl BackendBundle {
     /// KEEP: the AI is on the project's memory store from its first turn, so a
     /// kept dialog is a recorded one — its name, saved set-up and how to re-make it.
     async fn keep(host: &Host, a: verbs::Keep) -> Value {
-        let ai = a.id;
+        Self::keep_with(host, a.id, a.name, None).await
+    }
+
+    /// `keep`, with the saved set-up the AI was made from (`spawn` hands it over;
+    /// the dialog row is the only place it is written).
+    async fn keep_with(host: &Host, ai: String, name: Option<String>, saved: Option<String>) -> Value {
         let Some(meta) = Self::meta_of(host, &ai) else {
             return fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, format!("keep: no AI {ai:?}"));
         };
@@ -708,8 +711,8 @@ impl BackendBundle {
             None => (snapshot(&meta), handler_of(&ai)),
         };
         record.insert("handler_module".into(), json!(handler));
-        let name = a.name.unwrap_or_else(|| ai.clone());
-        let d = json!({"name": name, "saved": meta.get("saved"), "record": record});
+        let name = name.unwrap_or_else(|| ai.clone());
+        let d = json!({"name": name, "saved": saved, "record": record});
         match Self::save_dialog(host, &ai, &d).await {
             Ok(()) => json!({"kept": ai, "name": name}),
             Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
@@ -1192,6 +1195,33 @@ pub(crate) mod create_tests {
         assert_eq!(rec["context_strategy"], json!("none"), "under the chat's");
         assert!(rec.get("provider_id").is_none(), "the saved set-up names no provider: it is made again at reopen");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn keep_writes_the_saved_set_up_on_the_dialog_row_and_not_on_the_chat_record() {
+        let (h, dir) = host("keep-saved", &["helper", "helper_provider", "memory"]).await;
+        let me = AgentId::from("canvas_root");
+        let made = BackendBundle::make_ai(&h, &me, "helper", rec_ai(json!({})).as_object().unwrap().clone(), Map::new()).await;
+        assert!(made.is_ok(), "{made:?}");
+        assert!(meta_has_no_saved(&h, "helper"), "a made chat carries no `saved` field");
+        h.operator("kernel", json!({"type": "delete_agent", "id": "memory"})).await;
+        let store = h
+            .operator("kernel", json!({"type": "create_agent", "parent_id": "kernel", "id": "memory", "handler_module": "fake_store.tools", "callable_by": {"$self": "*", crate::env::HUMAN: "*"}}))
+            .await;
+        assert!(store.result.get("error").is_none(), "{:?}", store.result);
+        h.kernel.edit_can_call(&AgentId::from(crate::env::HUMAN), |m| m.insert("memory".into(), json!("*")).is_none()).unwrap();
+        // what `spawn` hands over: the set-up's name, kept on the row (ai_settings reads it from here)
+        let out = BackendBundle::keep_with(&h, "helper".into(), None, Some("mine".into())).await;
+        assert_eq!(out["kept"], json!("helper"), "{out}");
+        let rows = BackendBundle::dialogs_map(&h).await.unwrap();
+        assert_eq!(rows["helper"]["saved"], json!("mine"), "{rows:?}");
+        assert!(rows["helper"]["record"].get("saved").is_none(), "{rows:?}");
+        assert!(meta_has_no_saved(&h, "helper"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn meta_has_no_saved(h: &Host, id: &str) -> bool {
+        BackendBundle::meta_of(h, id).is_some_and(|m| !m.contains_key("saved"))
     }
 
     #[tokio::test]

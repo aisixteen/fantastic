@@ -8,8 +8,8 @@ call carries it AS SHOWN — each marked value `[secret]`. On the PACKAGED host 
   1. REST `X-Fantastic-Secret: bytes` on a `file_bridge` write → the file on disk
      and a read-back hold the CLEAR value (the handler got it);
   2. a ws `call` frame's `secret` → the same, through the other face;
-  3. a NESTED mark (`cfg.x`) on `update_agent` → the record holds `cfg.x` clear,
-     its sibling `cfg.y` untouched;
+  3. a NESTED mark (`env.x`) on `update_agent` → the record holds `env.x` clear,
+     its sibling `env.y` untouched;
   4. the CALL ROWS in the memory store show `[secret]` at each marked path and
      record the marks (`row.secret`); the leg's own `inbound_call` row is marked
      under `item.payload.`; the clear value appears NOWHERE in the store;
@@ -53,6 +53,7 @@ S_WS = "ws-" + secrets.token_hex(10)
 S_NEST = "nest-" + secrets.token_hex(10)
 S_BAD = "bad-" + secrets.token_hex(10)
 FB = "fb"
+EB = "eb"  # an exec_bridge: its declared `env` map is where a nested secret path is meaningful
 
 
 # ─── wire helpers (local: the driver's `send` carries no secret header) ──
@@ -191,7 +192,7 @@ def main() -> int:
     work = Path(tempfile.mkdtemp(prefix="e2e-secret-marks-"))
     served = work / "served"
     served.mkdir()
-    hk = HostKernel(spec, work, reach=[FB]).boot()
+    hk = HostKernel(spec, work, reach=[FB, EB]).boot()
     root = hk.root_id
     port = hk.port
     bad: list[str] = []
@@ -224,6 +225,9 @@ def main() -> int:
             callable_by={"$self": "*", "$parent": "*", "ws": "*"},
         )
         need(rec.get("id") == FB, f"create {FB}: {str(rec)[:200]}")
+        rec = hk.create(parent_id="rest", handler_module="exec_bridge.tools", id=EB,
+                        callable_by={"$self": "*", "$parent": "*"})
+        need(rec.get("id") == EB, f"create {EB}: {str(rec)[:200]}")
         taps = Taps(port)
         # Both taps are live once a probe call shows up on each (no sleep-as-sync).
         warm = poll(
@@ -251,21 +255,21 @@ def main() -> int:
              "the file on disk holds the CLEAR value (ws)")
 
         # 3 · a NESTED mark on update_agent — stored clear, sibling untouched
-        r = post(port, root, {"type": "update_agent", "id": FB,
-                              "cfg": {"x": S_NEST, "y": "plain"}},
-                 {"X-Fantastic-Secret": "cfg.x"})
+        r = post(port, root, {"type": "update_agent", "id": EB,
+                              "env": {"x": S_NEST, "y": "plain"}},
+                 {"X-Fantastic-Secret": "env.x"})
         need("error" not in r, f"marked update_agent accepted: {str(r)[:200]}")
         la = hk.send(root, {"type": "list_agents"})
-        fbrec = next((a for a in la.get("agents") or [] if a.get("id") == FB), {})
-        need(fbrec.get("cfg") == {"x": S_NEST, "y": "plain"},
-             f"the record holds cfg.x CLEAR, cfg.y as sent: {fbrec.get('cfg')!r}")
+        fbrec = next((a for a in la.get("agents") or [] if a.get("id") == EB), {})
+        need(fbrec.get("env") == {"x": S_NEST, "y": "plain"},
+             f"the record holds env.x CLEAR, env.y as sent: {fbrec.get('env')!r}")
 
         # 4 · the call rows in the memory store
         # each face's leg is the caller of its onward call
         # every row this step reads has landed (the kernel flushes its rows to the
         # store on its own beat — a loaded runner lands the last ones later)
         poll(lambda: call_rows("write", FB, "rest") and call_rows("write", FB, "ws")
-             and any(isinstance(dig(r, "payload.cfg"), dict)
+             and any(isinstance(dig(r, "payload.env"), dict)
                      for r in call_rows("update_agent", root, "rest")), "rows")
         by_path = {dig(r, "payload.path"): r
                    for r in call_rows("write", FB, "rest") + call_rows("write", FB, "ws")}
@@ -282,12 +286,12 @@ def main() -> int:
              f"the legs' inbound_call rows show {[dig(r, 'payload.item.payload.bytes') for r in legs]}")
         need(all(r.get("secret") == ["item.payload.bytes"] for r in legs) and legs != [],
              f"the legs' rows are marked under item.payload.: {[r.get('secret') for r in legs]}")
-        up = [r for r in call_rows("update_agent", root, "rest") if dig(r, "payload.id") == FB
-              and isinstance(dig(r, "payload.cfg"), dict)]
+        up = [r for r in call_rows("update_agent", root, "rest") if dig(r, "payload.id") == EB
+              and isinstance(dig(r, "payload.env"), dict)]
         u = up[-1] if up else {}
-        need(dig(u, "payload.cfg.x") == SHOWN and dig(u, "payload.cfg.y") == "plain",
-             f"update_agent's row shows cfg={dig(u, 'payload.cfg')!r}")
-        need(u.get("secret") == ["cfg.x"], f"update_agent's row records the marks: {u.get('secret')!r}")
+        need(dig(u, "payload.env.x") == SHOWN and dig(u, "payload.env.y") == "plain",
+             f"update_agent's row shows env={dig(u, 'payload.env')!r}")
+        need(u.get("secret") == ["env.x"], f"update_agent's row records the marks: {u.get('secret')!r}")
         blob = json.dumps(store_rows())
         need(S_REST not in blob and S_WS not in blob,
              "the clear file values appear NOWHERE in the memory store")
@@ -305,10 +309,10 @@ def main() -> int:
              "the clear file values appear NOWHERE on the state stream (payload, summary)")
         upd = [f for f in taps.state if f.get("kind") == "send"
                and (f.get("payload") or {}).get("type") == "update_agent"]
-        need(bool(upd) and all(dig(f, "payload.cfg.x") == SHOWN for f in upd),
-             f"state stream: update_agent's send event shows cfg.x={[dig(f, 'payload.cfg.x') for f in upd]}")
+        need(bool(upd) and all(dig(f, "payload.env.x") == SHOWN for f in upd),
+             f"state stream: update_agent's send event shows env.x={[dig(f, 'payload.env.x') for f in upd]}")
         need(all(S_NEST not in json.dumps({k: f.get(k) for k in ('payload', 'summary')}) for f in upd),
-             "state stream: update_agent's payload/summary never carry cfg.x clear")
+             "state stream: update_agent's payload/summary never carry env.x clear")
         mir = poll(lambda: [p for p in taps.inbox if p.get("type") == "write"]
                    if len([p for p in taps.inbox if p.get("type") == "write"]) >= 2 else None, "inbox")
         need(bool(mir) and all(p.get("bytes") == SHOWN for p in mir),

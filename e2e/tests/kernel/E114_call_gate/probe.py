@@ -168,13 +168,13 @@ def main() -> int:
         need(refused(r, "egress"), f"and the edge it tried to open stays shut: {str(r)[:160]}")
 
         # 6 · grant shape, checked at the write
-        for field, grants, what in (
-            ("can_call", {"$bogus": "*"}, "an unknown $token"),
-            ("callable_by", {"g1|x": "*"}, "a peer address in callable_by"),
-            ("can_call", {"b": 5}, "a value that is neither '*' nor a verb list"),
+        for field, grants, what, reason in (
+            ("can_call", {"$bogus": "*"}, "an unknown $token", "invalid_meta"),
+            ("callable_by", {"g1|x": "*"}, "a peer address in callable_by", "invalid_meta"),
+            ("can_call", {"b": 5}, "a value that is neither '*' nor a verb list", "bad_arg"),
         ):
             r = hk.send(root, {"type": "update_agent", "id": "b", field: grants})
-            need(r.get("reason") == "invalid_meta", f"{field} {what} → invalid_meta: {str(r)[:200]}")
+            need(r.get("reason") == reason, f"{field} {what} → {reason}: {str(r)[:200]}")
         r = hk.send(root, {"type": "update_agent", "id": "b",
                            "can_call": {**SELF, "a": ["inquiries"], "c": ["reflect"], "g1|x": "*"}})
         need(r.get("updated") is True, f"can_call takes a <guid>|<agent> key: {str(r)[:160]}")

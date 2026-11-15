@@ -318,11 +318,15 @@ async fn finish(kernel: &Arc<Kernel>, wait_id: i64, w: Wait, timed_out: bool) {
     let Some(agent) = kernel.agents.get(&w.caller).map(|e| Arc::clone(&e)) else {
         return; // the lead left the tree: nobody to wake
     };
-    // `text` is what an AI lead reads; the structured fields ride beside it.
-    let mut msg = body.as_object().cloned().unwrap_or_default();
-    msg.insert("type".to_string(), json!("send"));
-    msg.insert("text".to_string(), json!(body.to_string()));
-    let _ = kernel.bookkeeping(&agent, Value::Object(msg), None).await;
+    // `text` carries the whole result JSON; the lead's `send` takes nothing else.
+    let msg = json!({"type": "send", "text": body.to_string()});
+    let out = kernel.bookkeeping(&agent, msg, None).await;
+    if !out.is_completed() {
+        eprintln!(
+            "  [kernel] await_set {wait_id}: delivery to '{}' refused: {}",
+            w.caller, out.result
+        );
+    }
 }
 
 /// Rebuild every wait the store holds an `await_open` for and no `await_close`.

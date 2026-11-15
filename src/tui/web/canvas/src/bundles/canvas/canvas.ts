@@ -129,8 +129,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   });
 
   // THE PAIR: a cell the canvas spawned a backend for, and that backend. The
-  // backend is a direct child of `canvas_root` on the host, carrying the
-  // cell's id (`cell_id`); the cell carries the backend's (`backend_id`,
+  // backend is a direct child of `canvas_root` on the host and names no cell;
+  // the cell carries the backend's (`backend_id`,
   // `owns_backend`) and the grant to call it (`can_call`). The backend lives
   // its own life — a page connecting, leaving or reloading never touches it;
   // only closing the cell deletes its backend.
@@ -149,9 +149,9 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     return false;
   };
 
-  // Spawn the backend `bundle` fronts, for cell `cellId`, under `canvas_root`.
+  // Spawn the backend `bundle` fronts, under `canvas_root`.
   // Returns its id, or null (said why).
-  const spawnBackend = async (bundle: ViewBundle, cellId: string, fields: Record<string, unknown> = {}): Promise<string | null> => {
+  const spawnBackend = async (bundle: ViewBundle, fields: Record<string, unknown> = {}): Promise<string | null> => {
     const module = bundle.fronts;
     if (module === undefined) {
       console.error(`[canvas] ${bundle.handles.join(",")} declares no backend it fronts — cannot spawn one`);
@@ -163,7 +163,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     }
     const created = (await host.callHost(BACKEND, {
       type: "create",
-      record: { ...(bundle.backendFields ?? {}), ...fields, handler_module: module, cell_id: cellId },
+      record: { ...(bundle.backendFields ?? {}), ...fields, handler_module: module },
     } as unknown as Payload)) as { id?: string; error?: string };
     if (!created || created.error || typeof created.id !== "string") {
       console.error("[canvas] backend create failed:", JSON.stringify(created));
@@ -1006,7 +1006,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       body.appendChild(note);
       frames.set(rec.id, { el, rec, kind: "inline" });
       reload = (): void => {
-        void spawnBackend(bundle, rec.id).then((bid) => {
+        void spawnBackend(bundle).then((bid) => {
           if (bid === null) return;
           removeFrame(rec.id);
           bind(rec.id, bundle, bid);
@@ -1349,7 +1349,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     // HOST-FIRST (backend-owned views): the host agent is made, then a cell
     // VIEWS it. The cell owns nothing: ✕ hides the cell, the agent lives on.
     const cellId = `cell_${crypto.randomUUID().slice(0, 8)}`;
-    const backendId = await spawnBackend(bundle, cellId, backendFields);
+    const backendId = await spawnBackend(bundle, backendFields);
     if (backendId === null) return;
     placing.add(backendId);
     registerCell(
@@ -1421,7 +1421,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // then a cell VIEWS it, drawn as the agent's own record says, like a terminal.
   const spawnBundleAt = async (w: { x: number; y: number }, what: { bundle: string } | { instance_of: string }): Promise<void> => {
     const cellId = `view_${crypto.randomUUID().slice(0, 8)}`;
-    const r = (await host.callHost(BACKEND, { type: "spawn", ...what, stamp: { cell_id: cellId } } as unknown as Payload)) as Rec;
+    const r = (await host.callHost(BACKEND, { type: "spawn", ...what } as unknown as Payload)) as Rec;
     if (typeof r["error"] === "string") {
       toast(`✕ ${r["error"]}`);
       return;

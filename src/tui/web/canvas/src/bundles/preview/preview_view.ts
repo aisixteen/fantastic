@@ -435,17 +435,22 @@ export const previewView: ViewBundle = {
           return;
         }
         case "agent": {
+          const mine = ctl.agent;
+          // a switch back to a file is loading: the agent is already let go
+          if (mine === null) return;
           const host = document.createElement("div");
           host.className = "pv-agent";
           body.replaceChildren(host);
-          const mine = ctl.agent!;
+          // the preview moved on while it mounted
+          const moved = () => ctl.content.k !== "agent" || ctl.agent !== mine || !host.isConnected;
           void d.mountAgentView(mine, host, `${ctx.selfId}:${mine}`).then(
             (h) => {
-              // the preview moved on while it mounted
-              if (ctl.content.k !== "agent" || ctl.agent !== mine || !host.isConnected) h.unmount();
+              if (moved()) h.unmount();
               else agentHandle = h;
             },
-            (err: Error) => message("pv-error", `agent ${mine}: ${err.message}`),
+            (err: Error) => {
+              if (!moved()) message("pv-error", `agent ${mine}: ${err.message}`);
+            },
           );
           return;
         }
