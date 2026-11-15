@@ -18,20 +18,19 @@ type Row = Record<string, unknown>;
 interface Pure {
   parseFrom(t: string): { sender: string; text: string };
   shapeRows(rows: Row[], thoughts?: Map<number, { text: string; cut: number }>, texts?: Map<number, string>): Row[];
-  historyTail(call: (p: Row) => Promise<Row | null>, keep?: number): Promise<{ rows: Row[]; bytes: number; lastId: number; earlier: number; tokens: number }>;
+  historyTail(call: (p: Row) => Promise<Row | null>, keep?: number): Promise<{ rows: Row[]; bytes: number; lastId: number }>;
   stateOf(phase: string, reason: string, asks: number): string;
   inquiryAge(ts: unknown, nowMs: number): string;
   metaOf(sender: string, name: string): string;
   codeSpans(text: string): { text: string; code: boolean }[];
-  tokensOf(rows: Row[]): number;
-  fmtTokens(n: number): string;
+  phaseWord(phase: string): string;
   readHead(call: (p: Row) => Promise<Row | null>, size?: number): Promise<Row[]>;
   textsOf(rows: Row[]): Map<number, string>;
   thoughtsOf(rows: Row[]): Map<number, { text: string; cut: number }>;
   groupTitle(g: Row): { n: string; verbs: string };
 }
 const ctx = vm.createContext({});
-vm.runInContext(`${src.slice(from, to)}\nthis.api = { parseFrom, shapeRows, historyTail, thoughtsOf, groupTitle, stateOf, inquiryAge, metaOf, codeSpans, tokensOf, fmtTokens, readHead, textsOf };`, ctx);
+vm.runInContext(`${src.slice(from, to)}\nthis.api = { parseFrom, shapeRows, historyTail, thoughtsOf, groupTitle, stateOf, inquiryAge, metaOf, codeSpans, phaseWord, readHead, textsOf };`, ctx);
 const raw = (ctx as unknown as { api: Pure }).api;
 // the vm's objects are of another realm: compare them as plain JSON
 const plain = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
@@ -45,8 +44,7 @@ const P: Pure = {
   inquiryAge: (a, b) => raw.inquiryAge(a, b),
   metaOf: (a, b) => raw.metaOf(a, b),
   codeSpans: (x) => plain(raw.codeSpans(x)),
-  tokensOf: (r) => raw.tokensOf(r),
-  fmtTokens: (n) => raw.fmtTokens(n),
+  phaseWord: (p) => raw.phaseWord(p),
   readHead: async (c, n) => plain(await raw.readHead(c, n)),
   textsOf: (r) => new Map(Object.entries(plain(Object.fromEntries(raw.textsOf(r)))).map(([k, v]) => [Number(k), v])),
 };
@@ -130,8 +128,7 @@ test("historyTail keeps the newest 300 rows over the pages", async () => {
   assert.equal(t.rows[299]!["id"], 600);
   assert.equal(t.lastId, 600);
   assert.equal(t.bytes, 6000);
-  assert.equal(t.earlier, 300, "the 300 older rows are counted, for the Earlier button");
-  assert.deepEqual(await P.historyTail(async () => null), { rows: [], bytes: 0, lastId: 0, earlier: 0, tokens: 0 });
+  assert.deepEqual(await P.historyTail(async () => null), { rows: [], bytes: 0, lastId: 0 });
 });
 
 test("thoughtsOf of readHead pages the rows verb from the head and stops on a null answer", async () => {
@@ -185,16 +182,8 @@ test("`code` spans split out of a text, the text stays whole", () => {
   assert.deepEqual(P.codeSpans(""), []);
 });
 
-test("tokens of a run: the usage the rows keep, summed; shown as N tok / Nk tok", () => {
-  const rows: Row[] = [
-    { id: 1, role: "user" },
-    { id: 2, role: "assistant", attributes: { usage: { input: 1000, output: 200, cache_read: 300 } } },
-    { id: 3, role: "assistant", attributes: { usage: { input: 10, output: 5, cache_write: 5 } } },
-    { id: 4, role: "assistant", attributes: { model: "m" } },
-  ];
-  assert.equal(P.tokensOf(rows), 1520);
-  assert.equal(P.tokensOf([]), 0);
-  assert.deepEqual([P.fmtTokens(0), P.fmtTokens(999), P.fmtTokens(1520), P.fmtTokens(96_400), P.fmtTokens(250_000)], ["0 tok", "999 tok", "1.5k tok", "96.4k tok", "250k tok"]);
+test("the running turn's word is the one the tree shows", () => {
+  assert.deepEqual(["thinking", "streaming", "tool_calling", "queued", "idle", ""].map((p) => P.phaseWord(p)), ["thinking", "writing", "using tools", "queued", "", ""]);
 });
 
 test("a message longer than the digest's 120 is shown whole from the loaded head; a short one keeps its head", () => {

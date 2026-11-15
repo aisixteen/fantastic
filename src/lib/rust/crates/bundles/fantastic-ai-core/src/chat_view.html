@@ -60,22 +60,14 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,summary:focus-vi
 .badge[data-state=working]{background:transparent;border:2px solid var(--fc-color-line-strong);border-top-color:var(--fc-color-accent-base);animation:spin 900ms linear infinite}
 .titles{flex:1 1 160px;min-width:0;display:flex;flex-direction:column;gap:3px}
 .titles .line{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
-.head .name{font-size:18px;font-weight:600;letter-spacing:-.01em;line-height:1.3}
-.head .tag{font:11px/18px var(--fc-font-family-mono);padding:0 7px;border-radius:var(--fc-radius-control);color:var(--fc-color-text-muted);background:var(--fc-color-surface-well)}
+.head .name{margin:0;font-size:18px;font-weight:600;letter-spacing:-.01em;line-height:1.3}
 .state{font-size:11px;font-weight:600;line-height:18px;padding:0 8px;border-radius:var(--fc-radius-pill);color:var(--fc-color-text-muted);background:var(--fc-color-surface-well);box-shadow:inset 0 0 0 1px var(--fc-color-line-button)}
 .state[hidden]{display:none}
 .state[data-state=asks]{color:var(--fc-color-status-warn);background:var(--fc-color-status-warn-surface);box-shadow:inset 0 0 0 1px var(--fc-color-status-warn-line)}
 .state[data-state=failed]{color:var(--fc-color-status-error);background:var(--fc-color-status-error-surface);box-shadow:inset 0 0 0 1px var(--fc-color-status-error-line)}
-.chip{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 12px;border:1px solid var(--fc-color-line-button);border-radius:var(--fc-radius-card);min-width:0}
-.chip[hidden]{display:none}
-.chip .m{font:13px/1 var(--fc-font-family-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chip .p{font-size:12px;color:var(--fc-color-text-subtle);white-space:nowrap}
 .head .stop{height:36px;padding:0 14px;border:1px solid var(--fc-color-status-error-line);border-radius:var(--fc-radius-card);background:var(--fc-color-status-error-surface);color:var(--fc-color-status-error);font-weight:600}
 .head .stop[hidden]{display:none}
 .dialog{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;display:flex;flex-direction:column;gap:14px;padding:16px var(--pad) 18px;line-height:1.55}
-.earlier{align-self:center;height:28px;padding:0 12px;border:0;border-radius:var(--fc-radius-pill);background:var(--fc-color-surface-button);color:var(--fc-color-text-subtle);font-size:12px}
-.earlier[hidden]{display:none}
-.earlier:disabled{opacity:.5;cursor:default}
 .who{display:flex;flex-direction:column;gap:3px;max-width:85%}
 .who.user{align-self:flex-end;align-items:flex-end}
 .who.assistant{align-self:flex-start;align-items:flex-start}
@@ -117,14 +109,10 @@ details.think.live>summary{animation:pulse var(--fc-duration-think) var(--fc-eas
 .inq .free{flex:1 1 100%;display:flex;align-items:center;gap:6px;min-width:0;padding:4px 4px 4px 12px;border:1px solid var(--fc-color-line-strong);border-radius:var(--fc-radius-card);background:var(--fc-color-surface-raised)}
 .inq .free:focus-within{box-shadow:var(--fc-shadow-focus)}
 .inq .free input[type=text]{flex:1;min-width:0;height:32px;padding:0;border:0;outline:none;background:transparent;font:inherit;color:inherit}
-.inq .free button{min-height:32px;padding:0 12px;border:0;border-radius:var(--fc-radius-control);background:var(--fc-color-accent-deep);color:var(--fc-color-accent-on);font-weight:600}
+.inq .free button{min-height:32px;padding:0 12px;border:1px solid var(--fc-color-line-strong);border-radius:var(--fc-radius-control);background:var(--fc-color-surface-raised);font-weight:500}
 .inq .st{font-size:12px;color:var(--fc-color-status-warn-muted)}
 .inq.answered{opacity:.75}
-.foot{flex:none;display:flex;align-items:center;gap:10px;min-height:28px;padding:4px var(--pad);font:11px var(--fc-font-family-mono);color:var(--fc-color-text-subtle)}
-.pill{padding:1px 9px;border-radius:var(--fc-radius-pill);background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
-.pill[data-phase=queued]{color:var(--fc-color-status-warn);background:var(--fc-color-status-warn-surface)}
-.pill[data-phase=thinking],.pill[data-phase=tool_calling],.pill[data-phase=streaming]{color:var(--fc-color-status-ok);animation:pulse var(--fc-duration-pulse) var(--fc-easing-in-out) infinite}
-.foot .usage{margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.foot{flex:none;display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:28px;padding:2px var(--pad);font:11px var(--fc-font-family-mono);color:var(--fc-color-text-subtle)}
 .foot .clear{border:0;background:transparent;color:var(--fc-color-text-subtle);padding:2px 8px;border-radius:var(--fc-radius-control)}
 .foot .clear:hover{background:var(--fc-color-surface-button)}
 .input{flex:none;padding:0 var(--pad) 16px}
@@ -137,14 +125,27 @@ details.think.live>summary{animation:pulse var(--fc-duration-think) var(--fc-eas
 @keyframes spin{to{transform:rotate(360deg)}}
 @media (max-width:520px){
 body{--pad:16px;font-size:15px}
-.head .name{font-size:16px}
-.chip{height:44px}
-.head .stop,.field .send{height:44px}
+.head{flex-wrap:nowrap;gap:12px;padding:10px 12px 10px 16px}
+.avatar{width:38px;height:38px}
+.avatar svg{width:24px;height:24px}
+.badge{width:16px;height:16px;line-height:16px;right:-4px;bottom:-4px}
+.titles{flex:1 1 0;gap:0}
+.titles .line{flex-direction:column;align-items:flex-start;gap:0}
+.head .name{font-size:16px;line-height:1.3;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.state{padding:0;font-size:13px;font-weight:400;line-height:1.3;background:none;box-shadow:none!important}
+.state[data-state=asks]{background:none}
+.state[data-state=failed]{background:none}
+.head .stop{height:36px}
+.field .send{width:44px;height:44px;padding:0;font-size:0}
+.field .send::before{content:"↑";font-size:22px;line-height:1}
 .field textarea{min-height:44px;font-size:16px}
 details.tools>summary,details.think>summary{min-height:40px}
 .inq .q{font-size:16px}
 .inq .row{flex-direction:column;align-items:stretch}
 .inq button{min-height:44px;text-align:left}
+.inq .row>button{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.inq .row>button::after{content:"›";color:var(--fc-color-text-subtle);font-size:18px}
+.inq .row>button.primary::after{color:inherit}
 .inq .free{padding:4px 4px 4px 12px}
 .inq .free input[type=text]{height:44px;font-size:16px}
 .inq .free button{min-height:44px;text-align:center}
@@ -153,14 +154,13 @@ details.tools>summary,details.think>summary{min-height:40px}
 </style>
 <div class="head">
 <div class="avatar" aria-hidden="true"><svg viewBox="0 0 28 28"><rect x="5" y="8" width="18" height="14" rx="4"/><path d="M14 8V4"/><circle cx="10.5" cy="15" r="1.2"/><circle cx="17.5" cy="15" r="1.2"/><path d="M11 19h6"/></svg><span class="badge" id="badge" data-state="idle" hidden></span></div>
-<div class="titles"><div class="line"><span class="name" id="name"></span><span class="tag" id="tag"></span><span class="state" id="state" data-state="idle" hidden></span></div></div>
-<span class="chip" id="model" title="Chat settings: provider and model" hidden><span class="m" id="modelname"></span><span class="p" id="prov"></span></span>
+<div class="titles"><div class="line"><h1 class="name" id="name"></h1><span class="state" id="state" data-state="idle" hidden></span></div></div>
 <button class="stop" id="stop" type="button" hidden>Stop</button>
 </div>
-<div class="dialog" id="dialog"><button class="earlier" id="earlier" type="button" hidden></button></div>
+<div class="dialog" id="dialog"></div>
 <div class="queue" id="queue"></div>
-<div class="foot"><span class="pill" id="pill" data-phase="idle" data-reason="">idle</span><span id="hint"></span><span id="others"></span><span class="usage" id="usage"></span><button class="clear" id="clear" type="button" title="start a new thread: nothing is deleted, the earlier one stays recallable">clear</button></div>
-<div class="input"><div class="field"><textarea id="text" rows="1" placeholder="Message" aria-label="Message"></textarea><button class="send" id="send" type="button">Send</button></div></div>
+<div class="foot"><span id="others"></span><button class="clear" id="clear" type="button" title="start a new thread: nothing is deleted, the earlier one stays recallable">clear</button></div>
+<div class="input"><div class="field"><textarea id="text" rows="1" placeholder="Message" aria-label="Message"></textarea><button class="send" id="send" type="button" aria-label="Send">Send</button></div></div>
 <script>
 // pure
 var FROM = /^\[from ([^\]\s·]+)[^\]]*\]\s*/;
@@ -270,6 +270,10 @@ function stateOf(phase, reason, asks) {
   if (!CALM[reason || ""]) return "failed";
   return reason === "ok" ? "done" : "idle";
 }
+// the word for a running turn, as the tree shows it
+function phaseWord(phase) {
+  return phase === "thinking" ? "thinking" : phase === "streaming" ? "writing" : phase === "tool_calling" ? "using tools" : phase === "queued" ? "queued" : "";
+}
 // "asks you · 12 min": the age of the oldest open inquiry (`ts` is seconds since the epoch)
 function inquiryAge(ts, nowMs) {
   if (typeof ts !== "number" || !(ts > 0)) return "";
@@ -289,20 +293,6 @@ function codeSpans(text) {
   }
   if (at < text.length) out.push({ text: text.slice(at), code: false });
   return out;
-}
-// tokens a row's provider call used, from the usage the row keeps in its attributes
-function tokensOf(rows) {
-  var n = 0;
-  rows.forEach(function (m) {
-    var a = m && m.attributes, u = a && a.usage;
-    if (u && typeof u === "object") ["input", "output", "cache_read", "cache_write"].forEach(function (k) { if (typeof u[k] === "number") n += u[k]; });
-  });
-  return n;
-}
-function fmtTokens(n) {
-  if (n < 1000) return n + " tok";
-  if (n < 100000) return (Math.round(n / 100) / 10) + "k tok";
-  return Math.round(n / 1000) + "k tok";
 }
 // a digest cuts a long message at 120 characters; the loaded head holds it whole
 var CUT = 120;
@@ -353,13 +343,11 @@ function shapeRows(rows, thoughts, texts) {
 // the newest `keep` history rows, oldest first, over every page (`next` is the cursor)
 async function historyTail(call, keep) {
   keep = keep || 300;
-  var win = [], bytes = 0, lastId = 0, seen = 0, tokens = 0, args = { type: "history" };
+  var win = [], bytes = 0, lastId = 0, args = { type: "history" };
   for (var page = 0; page < 1000; page++) {
     var r = await call(args);
     if (r === null || r === undefined) break;
     var rows = Array.isArray(r.rows) ? r.rows : [];
-    seen += rows.length;
-    tokens += tokensOf(rows);
     rows.forEach(function (m) {
       if (typeof m.bytes === "number") bytes += m.bytes;
       if (typeof m.id === "number") lastId = Math.max(lastId, m.id);
@@ -369,7 +357,7 @@ async function historyTail(call, keep) {
     if (typeof r.next !== "number") break;
     args = { type: "history", after: r.next };
   }
-  return { rows: win, bytes: bytes, lastId: lastId, earlier: seen - win.length, tokens: tokens };
+  return { rows: win, bytes: bytes, lastId: lastId };
 }
 // the loaded head (the `rows` verb), from its first row, following `next`
 async function readHead(call, pageSize) {
@@ -489,13 +477,9 @@ function textsOf(rows) {
   function busy() { return inflight !== null || pending.length > 0; }
   function refresh() { $("stop").hidden = !busy(); }
   var curPhase = "idle", lastReason = "", asks = 0, askTs = 0;
-  function phase(p, hint, reason) {
+  function phase(p, reason) {
     curPhase = p;
     if (reason !== undefined) lastReason = reason;
-    $("pill").dataset.phase = p;
-    $("pill").dataset.reason = p === "idle" ? lastReason : "";
-    $("pill").textContent = p;
-    $("hint").textContent = hint || "";
     drawState();
   }
   // the header's state: the badge on the avatar and the pill by the name
@@ -506,14 +490,12 @@ function textsOf(rows) {
     badge.dataset.state = st;
     badge.textContent = glyph;
     badge.hidden = st === "idle";
-    var label = st === "asks" ? "asks you" + (inquiryAge(askTs, Date.now()) ? " · " + inquiryAge(askTs, Date.now()) : "") : st === "working" ? "working" : st === "failed" ? "failed · " + lastReason : "";
+    var label = st === "asks" ? "asks you" + (inquiryAge(askTs, Date.now()) ? " · " + inquiryAge(askTs, Date.now()) : "") : st === "working" ? phaseWord(curPhase) : st === "failed" ? "failed · " + lastReason : "";
     pill.dataset.state = st;
     pill.textContent = label;
     pill.hidden = label === "";
   }
   setInterval(drawState, 30000);
-  var tokTotal = 0, modelName = "";
-  function drawUsage() { $("usage").textContent = (modelName ? modelName + " · " : "") + fmtTokens(tokTotal); }
   function bind(sendId) {
     if (!sendId || pending.some(function (q) { return q.sendId === sendId; })) return;
     var q = pending.find(function (x) { return !x.sendId; });
@@ -562,14 +544,14 @@ function textsOf(rows) {
         var ph = s(p, "phase"), det = o(p, "detail"), sid = s(det, "send_id");
         if (ph === "done") soon();
         if (!mine(p)) break;
-        if (ph === "queued") { bind(sid); phase("queued", typeof det.ahead === "number" ? det.ahead + " ahead" : ""); }
-        else if (ph === "thinking" || ph === "streaming") { if (!inflight || inflight.sendId !== sid) promote(sid); phase(ph, "Esc to stop"); }
-        else if (ph === "tool_calling") { tool(o(det, "tool")); phase(ph, "Esc to stop"); }
+        if (ph === "queued") { bind(sid); phase("queued"); }
+        else if (ph === "thinking" || ph === "streaming") { if (!inflight || inflight.sendId !== sid) promote(sid); phase(ph); }
+        else if (ph === "tool_calling") { tool(o(det, "tool")); phase(ph); }
         else if (ph === "done") {
           if (inflight && (!sid || inflight.sendId === sid)) inflight = null;
           refresh();
           var why = s(det, "reason");
-          phase("idle", why && why !== "ok" ? why : "", why);
+          phase("idle", why);
         }
         break;
       }
@@ -607,7 +589,7 @@ function textsOf(rows) {
       case "context": {
         if (!mine(p)) break;
         var cd = o(p, "detail");
-        if (s(p, "phase") === "too_small") { notice("context too small — " + s(cd, "hint"), "error"); phase("idle", "context too small"); refresh(); break; }
+        if (s(p, "phase") === "too_small") { notice("context too small — " + s(cd, "hint"), "error"); phase("idle"); refresh(); break; }
         var folded = typeof cd.folded === "number" ? cd.folded : 0, dropped = typeof cd.dropped_messages === "number" ? cd.dropped_messages : 0, kept = typeof cd.kept_messages === "number" ? cd.kept_messages : 0;
         if (folded === 0 && dropped === 0) break;
         notice(folded > 0 ? "context folded · " + folded + " older part" + (folded === 1 ? "" : "s") + " summarized · " + kept + " kept (recall to page back)" : "context compacted · " + s(cd, "strategy") + " · " + dropped + " dropped → " + kept + " kept (recall to page back)");
@@ -680,8 +662,6 @@ function textsOf(rows) {
     var rowsOf = function (h) { return h && Array.isArray(h.rows) ? h.rows : []; };
     var fresh = lastRow > 0 ? rowsOf(await read({ after: lastRow })) : [];
     if (fresh.length === 0) fresh = rowsOf(await read({})).filter(function (m) { return typeof m.id === "number" && m.id > lastRow; });
-    tokTotal += tokensOf(fresh);
-    drawUsage();
 
     fresh.forEach(function (m) {
       if (typeof m.id === "number") lastRow = Math.max(lastRow, m.id);
@@ -694,7 +674,7 @@ function textsOf(rows) {
     // tool calls and their replies are rows, not events: a run that ended is drawn from the stored rows
     if (stale || fresh.some(function (m) { return m.kind !== "notice" && toolOf(String(m.role || ""), typeof m.head === "string" ? m.head : "") !== null; })) {
       stale = !(await drawHistory(keepRows, true));
-      if (!stale) { seenInq = {}; await inquiries(); drawUsage(); }
+      if (!stale) { seenInq = {}; await inquiries(); }
     }
   }
   var timer = null, rowTimer = null;
@@ -743,25 +723,13 @@ function textsOf(rows) {
     // a redraw on the way (soft) never takes a turn's live text away
     if (soft && (busy() || Object.keys(drafts).length > 0)) return false;
     tail = null;
-    var kids = Array.prototype.slice.call(dialog.children, 1);
+    var kids = Array.prototype.slice.call(dialog.children, 0);
     kids.forEach(function (k) { k.remove(); });
     drawItems(shapeRows(tl.rows, thoughtsOf(head), textsOf(head)));
     answered.forEach(push);
     lastRow = tl.lastId;
-    tokTotal = tl.tokens;
-    var more = $("earlier");
-    more.hidden = tl.earlier <= 0;
-    more.textContent = "Earlier: " + tl.earlier + " message" + (tl.earlier === 1 ? "" : "s");
-    more.disabled = false;
     return true;
   }
-  $("earlier").onclick = function () {
-    if (busy()) return;
-    $("earlier").disabled = true;
-    seenInq = {};
-    drawHistory(keepRows + 300).then(function () { inquiries(); drawUsage(); }).catch(function (e) { notice("✕ " + (e && e.message ? e.message : e), "error"); });
-  };
-
   // BOOT: head, history, live snapshot, then the watch
   async function boot() {
     fantastic.watch(AGENT, onEvent);
@@ -769,15 +737,9 @@ function textsOf(rows) {
     title = s(rf, "display_name") || s(rf, "id") || AGENT;
     $("name").textContent = title;
     text.placeholder = "Message " + title;
-    $("tag").textContent = s(rf, "handler_module") || "ai_chat";
-    var prov = s(rf, "provider_id"), model = s(rf, "model");
-    modelName = model;
-    $("modelname").textContent = model;
-    $("prov").textContent = prov;
-    $("model").hidden = !prov;
+    var prov = s(rf, "provider_id");
     if (!prov) notice("No model set", "warn");
     await drawHistory(300);
-    drawUsage();
     var snap = await call({ type: "status", client_id: me });
     if (snap && typeof snap === "object") {
       $("others").textContent = typeof snap.others_pending === "number" && snap.others_pending > 0 ? "+" + snap.others_pending + " from other clients" : "";
@@ -788,7 +750,7 @@ function textsOf(rows) {
         inflight = { sendId: s(cur, "send_id") };
         var lt = o(cur, "last_tool");
         if (Object.keys(lt).length > 0) tool(lt);
-        phase(s(cur, "phase") || "thinking", "Esc to stop");
+        phase(s(cur, "phase") || "thinking");
       }
       (Array.isArray(snap.mine_pending) ? snap.mine_pending : []).forEach(function (e) {
         var b = bubble("user", s(e, "text"), ""); b.classList.add("queued"); queue.appendChild(b);

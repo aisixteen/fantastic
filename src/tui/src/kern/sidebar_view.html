@@ -57,16 +57,12 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--fc-color-accent
 .split{flex:1 1 0;min-height:0;display:flex;border-top:1px solid var(--fc-color-line-button)}
 .rail{flex:0 0 64px;display:flex;flex-direction:column;align-items:center;gap:8px;padding:10px 0;border-right:1px solid var(--fc-color-line-button);overflow-y:auto;scrollbar-width:none}
 .k{display:flex;flex-direction:column;align-items:center;gap:3px;width:60px;padding:3px 0;border-radius:var(--fc-radius-control)}
-.k .mark{display:grid;place-items:center;width:34px;height:34px;border-radius:var(--fc-radius-card);font:600 11px/1 var(--fc-font-family-mono);text-transform:uppercase;background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
+.k .mark{position:relative;display:grid;place-items:center;width:34px;height:34px;border-radius:var(--fc-radius-card);font:600 11px/1 var(--fc-font-family-mono);text-transform:uppercase;background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
+.k .kb{position:absolute;top:-5px;right:-5px;display:grid;place-items:center;min-width:16px;height:16px;padding:0 4px;border-radius:var(--fc-radius-pill);font:700 10px/1 var(--fc-font-family-sans);background:var(--fc-color-status-warn);color:var(--fc-color-status-warn-on);box-shadow:0 0 0 2px var(--fc-color-surface-raised)}
 .k.here .mark{background:var(--fc-color-accent-base);color:var(--fc-color-accent-on)}
 .k .nm{max-width:58px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--fc-color-text-muted)}
 .k.here .nm{color:var(--fc-color-text-primary);font-weight:600}
-.agents{flex:1 1 0;min-width:0;display:flex;flex-direction:column;padding:12px 8px 8px;gap:12px}
-.title{flex:none;display:flex;align-items:center;gap:10px;padding:0 4px}
-.title .logo{flex:none;display:grid;place-items:center;width:32px;height:32px;border-radius:var(--fc-radius-card);background:var(--fc-color-surface-selected);color:var(--fc-color-text-primary)}
-.title .who{display:flex;flex-direction:column;min-width:0}
-.title b{font:600 15px/1.3 var(--fc-font-family-sans);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.title span{font-size:11px;color:var(--fc-color-text-subtle)}
+.agents{flex:1 1 0;min-width:0;display:flex;flex-direction:column;padding:12px 8px 8px;gap:14px}
 .wait{flex:none;display:flex;flex-direction:column;gap:2px;padding:8px 4px 4px;border-radius:var(--fc-radius-panel);background:var(--fc-color-status-warn-surface);box-shadow:inset 0 0 0 1px var(--fc-color-status-warn-line)}
 .wait[hidden]{display:none}
 .wait h2{display:flex;align-items:center;gap:8px;margin:0;padding:0 8px 4px;font:600 11px/1.4 var(--fc-font-family-mono);letter-spacing:.5px;text-transform:uppercase;color:var(--fc-color-status-warn)}
@@ -95,10 +91,22 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--fc-color-accent
 .r .gl svg{display:block}
 .r .two{display:flex;flex-direction:column;min-width:0;flex:1}
 .r .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.r .name.chat{font-weight:600}
+.r .name.top{font-weight:600}
+.r .name.tool{flex:0 1 auto}
+.r .line{display:flex;align-items:center;gap:6px;min-width:0}
+.r .tag{flex:none;font:10px/16px var(--fc-font-family-mono);padding:0 5px;border-radius:var(--fc-radius-chip);color:var(--fc-color-text-muted);background:var(--fc-color-surface-well)}
+.r .age{flex:none;font:500 11px/1 var(--fc-font-family-mono);color:var(--fc-color-status-warn)}
 .r .sub{font-size:12px;line-height:1.3;color:var(--fc-color-text-subtle);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.r .count{flex:none;font:11px/1 var(--fc-font-family-mono);color:var(--fc-color-text-subtle)}
+.r .asks{flex:none;font:500 11px/1 var(--fc-font-family-mono);color:var(--fc-color-status-warn)}
 .sub.ask,.sub.queued{color:var(--fc-color-status-warn)}
+.pins{flex:none;display:flex;flex-direction:column;gap:1px;padding-top:6px;border-top:1px solid var(--fc-color-line-button)}
+.pins[hidden]{display:none}
+.tg{display:flex;align-items:center;gap:10px;width:100%;min-height:40px;margin-left:12px;padding:4px 8px 4px 0;border-radius:var(--fc-radius-card)}
+.tg .tw{flex:none;display:grid;place-items:center;width:18px;height:28px;color:var(--fc-color-text-subtle);font-size:10px}
+.tg .ic{flex:none;display:flex}
+.tg .ic span{display:grid;place-items:center;width:24px;height:24px;margin-left:-6px;border-radius:var(--fc-radius-control);background:var(--fc-color-surface-well);color:var(--fc-color-text-muted);box-shadow:0 0 0 2px var(--fc-color-surface-raised)}
+.tg .ic span:first-child{margin-left:0}
+.tg .lb{flex:1;min-width:0;font-weight:500;color:var(--fc-color-text-muted)}
 .sub.active{color:var(--fc-color-status-ok)}
 .badge{position:absolute;right:-4px;bottom:-4px;display:none;place-items:center;width:13px;height:13px;border-radius:50%;font:700 9px/1 var(--fc-font-family-sans);border:2px solid transparent;box-sizing:content-box;margin:-2px}
 .badge.ask{display:grid;background:var(--fc-color-status-warn);color:var(--fc-color-status-warn-on)}
@@ -115,19 +123,44 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--fc-color-accent
 .note{padding:4px 8px;font-size:12px;color:var(--fc-color-text-subtle)}
 .note.err{color:var(--fc-color-status-error)}
 @keyframes spin{to{transform:rotate(360deg)}}
+@media (max-width:520px){
+.head{height:44px;padding:0 12px}
+.head h1{font:600 17px/1.3 var(--fc-font-family-sans);letter-spacing:-.01em;text-transform:none}
+#hide{display:none}
+.split{flex-direction:column}
+.rail{flex:none;flex-direction:row;justify-content:flex-start;gap:6px;padding:6px 12px;border-right:0;border-bottom:1px solid var(--fc-color-line-button);overflow-x:auto;overflow-y:hidden}
+.k{flex:none;flex-direction:row;gap:8px;width:auto;min-height:44px;padding:0 8px 0 6px;border-radius:var(--fc-radius-panel);box-shadow:inset 0 0 0 1px var(--fc-color-line-button)}
+.k .nm{max-width:120px;font-size:13px}
+.agents{padding:12px 12px 0;gap:12px}
+.wait{border-radius:12px}
+.w{min-height:46px;gap:10px}
+.w .who span{font-size:13px}
+.tools input{height:44px;font-size:16px}
+.sw{min-height:44px}
+.r .tw{width:22px;height:44px}
+.r .main{min-height:44px;gap:11px}
+.r .gl{width:30px;height:30px}
+.r .sub{font-size:13px}
+.r.f .main{min-height:34px}
+.r.f .tw{height:34px}
+.r.f .name{font-size:13px}
+.go{display:grid;width:34px;height:34px}
+.tg{min-height:44px;margin-left:14px}
+.pins{margin:0 -12px;padding:6px 12px 14px}
+}
 @media (prefers-reduced-motion:reduce){*{animation:none!important}}
 </style>
 <header class="head"><h1 id="ttl">Agents</h1><button class="chip hov" id="hide" type="button" aria-label="Hide the tree">Hide the tree</button></header>
 <div class="split">
 <nav class="rail" id="strip" aria-label="Kernels"></nav>
 <nav class="agents" aria-label="Agents">
-<div class="title"><span class="logo" id="logo"></span><span class="who"><b id="name"></b><span id="count"></span></span></div>
 <section class="wait" id="wait" aria-label="Waiting for you" hidden></section>
 <div class="tools">
 <input id="filter" type="search" placeholder="Filter agents and files" aria-label="Filter agents and files" autocomplete="off">
 <button class="sw" id="sw" type="button" role="switch" aria-checked="false" aria-label="Show files in the tree"><i></i>Files</button>
 </div>
 <div class="scroll"><div class="tree" id="tree" role="tree"></div><div class="note err" id="err" hidden></div></div>
+<div class="pins" id="pins" hidden></div>
 </nav>
 </div>
 <script>
@@ -141,8 +174,8 @@ function shortGuid(g) { return String(g == null ? "" : g).slice(0, 6); }
 function markOf(name) { return String(name == null ? "" : name).replace(/[^A-Za-z0-9]/g, "").slice(0, 2) || "?"; }
 function parentOf(p) { var i = String(p).lastIndexOf("/"); return i < 0 ? ROOT : String(p).slice(0, i); }
 // the kernel strip: this kernel first (highlighted), then each connected peer row {guid, via}
-function kernelStrip(root, peers) {
-  var here = { key: "here", guid: String(root && root.guid || ""), name: String(root && (root.display_name || root.id) || "this kernel"), here: true };
+function kernelStrip(root, peers, waiting) {
+  var here = { key: "here", guid: String(root && root.guid || ""), name: String(root && (root.display_name || root.id) || "this kernel"), here: true, waiting: waiting > 0 ? waiting : 0 };
   here.mark = markOf(here.name);
   var rows = [here];
   (Array.isArray(peers) ? peers : []).forEach(function (p) {
@@ -199,11 +232,15 @@ function fileRows(lists, open, path, depth) {
 // the agent tree as rows: parent order, root first, children nested in the order reflect gives them.
 // `folded` = {id: true}; a folded branch shows its child count and hides what is below it.
 // `files` = {on, lists, open}: with `on`, the project's files are rows INSIDE the tree, under the `files` agent.
-function treeRows(root, chats, folded, status, asks, files) {
+// `opts` = {ages: {id: "12m"}, tools: true}: the age of an asking agent's oldest question; with `tools`,
+// the leaf tool agents under the root are left out (they sit in the tools group, see toolRows).
+function treeRows(root, chats, folded, status, asks, files, opts) {
   var rows = [];
   var fl = files && files.on ? files : null;
+  var ages = opts && opts.ages || {};
+  var grouped = opts && opts.tools ? toolIds(root, chats) : {};
   function walk(n, depth) {
-    if (!n || typeof n.id !== "string") return;
+    if (!n || typeof n.id !== "string" || grouped[n.id]) return;
     var kids = countKids(n);
     var fileKids = fl && n.id === FILES_ID ? fileRows(fl.lists, fl.open, ROOT, depth + 1) : [];
     var foldable = kids > 0 || fileKids.length > 0;
@@ -215,6 +252,8 @@ function treeRows(root, chats, folded, status, asks, files) {
       tag: n.handler_module ? String(n.handler_module).replace(/\.tools$/, "") : "",
       chat: isChat, kids: kids, foldable: foldable, folded: isFolded,
       below: isFolded ? totalBelow(n) + fileKids.length : 0,
+      asksBelow: isFolded ? asksUnder(n, asks) : 0,
+      age: typeof ages[n.id] === "string" ? ages[n.id] : "",
       state: isChat ? stateOf(status[n.id], !!asks[n.id]) : null
     });
     if (isFolded) return;
@@ -223,6 +262,31 @@ function treeRows(root, chats, folded, status, asks, files) {
   }
   walk(root, 0);
   return rows;
+}
+// how many agents below `n` have an open question
+function asksUnder(n, asks) {
+  var c = 0;
+  (n && n.children || []).forEach(function (k) { if (k && asks[k.id]) c++; c += asksUnder(k, asks); });
+  return c;
+}
+// the tools: the root's direct children that are not chats, have no children and are not the files agent
+function toolIds(root, chats) {
+  var out = {};
+  (root && root.children || []).forEach(function (k) {
+    if (k && typeof k.id === "string" && !chats[k.id] && countKids(k) === 0 && k.id !== FILES_ID) out[k.id] = true;
+  });
+  return out;
+}
+// the tools group's rows, in tree order, as agent rows at depth 0
+function toolRows(root, chats) {
+  var ids = toolIds(root, chats);
+  return (root && root.children || []).filter(function (k) { return k && ids[k.id]; }).map(function (k) {
+    return {
+      kind: "agent", id: k.id, depth: 0, name: String(k.display_name || k.id),
+      tag: k.handler_module ? String(k.handler_module).replace(/\.tools$/, "") : "",
+      chat: false, kids: 0, foldable: false, folded: false, below: 0, asksBelow: 0, age: "", state: null
+    };
+  });
 }
 // the rows whose name holds `q`, and the rows above them (the branch that leads to a match)
 function filterRows(rows, q) {
@@ -243,6 +307,16 @@ function askers(inq) {
   (inq || []).forEach(function (q) { if (q && typeof q.asker === "string") out[q.asker] = true; });
   return out;
 }
+// the age of each asker's oldest open question: {asker: "12m"}
+function askAges(inq, now) {
+  var oldest = {};
+  (inq || []).forEach(function (q) {
+    if (q && typeof q.asker === "string" && typeof q.ts === "number" && (oldest[q.asker] === undefined || q.ts < oldest[q.asker])) oldest[q.asker] = q.ts;
+  });
+  var out = {};
+  Object.keys(oldest).forEach(function (a) { out[a] = ageText(oldest[a], now); });
+  return out;
+}
 function ageText(ts, now) {
   if (typeof ts !== "number") return "";
   var s = Math.max(0, now - ts);
@@ -258,16 +332,17 @@ function waitingRows(inq, names, now) {
 }
 // what the view keeps across a reload: which branches are folded, which folders are open, whether files show
 function keptState(st) {
-  return { folded: st.folded, open: st.open, filesOn: !!st.filesOn };
+  return { folded: st.folded, open: st.open, filesOn: !!st.filesOn, toolsOpen: !!st.toolsOpen };
 }
 function restoredState(saved) {
-  var out = { folded: {}, open: {}, filesOn: false };
+  var out = { folded: {}, open: {}, filesOn: false, toolsOpen: false };
   if (!saved || typeof saved !== "object") return out;
   ["folded", "open"].forEach(function (k) {
     var m = saved[k];
     if (m && typeof m === "object") Object.keys(m).forEach(function (key) { if (m[key] === true) out[k][key] = true; });
   });
   out.filesOn = saved.filesOn === true;
+  out.toolsOpen = saved.toolsOpen === true;
   return out;
 }
 // the folders to hold a watch on: the project's root and every open folder, while files show
@@ -285,7 +360,7 @@ function changedDirs(ev, lists) {
 // end pure
 
 var SELF = "{{cell}}", ME = "{{agent}}";
-var st = { root: null, chats: {}, status: {}, inq: [], folded: {}, selected: "", selPath: "", filesOn: false, open: {}, lists: {}, filter: "", tick: 0, busy: false };
+var st = { toolsOpen: false, root: null, chats: {}, status: {}, inq: [], folded: {}, selected: "", selPath: "", filesOn: false, open: {}, lists: {}, filter: "", tick: 0, busy: false };
 var watching = {}, filesWatch = false;
 var $ = function (id) { return document.getElementById(id); };
 var ROBOT = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="11" height="8" rx="2"/><path d="M8 5V2.5M5.8 9v.01M10.2 9v.01M6 11.2h4"/></svg>';
@@ -307,10 +382,12 @@ function selectPath(path) { st.selPath = path; st.selected = ""; post({ type: "s
 
 function paintStrip() {
   var host = $("strip"); host.textContent = "";
-  kernelStrip(st.root, st.root && st.root.peers).forEach(function (k) {
+  kernelStrip(st.root, st.root && st.root.peers, st.inq.length).forEach(function (k) {
     var b = el("button", "k hov" + (k.here ? " here" : ""));
-    b.type = "button"; b.title = k.here ? k.name + " (this kernel)" : "kernel " + k.guid;
-    b.appendChild(el("span", "mark", k.mark)); b.appendChild(el("span", "nm", k.name));
+    b.type = "button"; b.setAttribute("aria-label", k.here ? k.name + (k.waiting ? ", " + k.waiting + " waiting for you" : "") : "Kernel " + k.name);
+    var mk = el("span", "mark", k.mark);
+    if (k.waiting) mk.appendChild(el("span", "kb", String(k.waiting)));
+    b.appendChild(mk); b.appendChild(el("span", "nm", k.name));
     if (!k.here) b.addEventListener("click", function () { post({ type: "select_kernel", guid: k.guid }); });
     host.appendChild(b);
   });
@@ -320,9 +397,6 @@ function glyph(inner) { var g = el("span", "gl"); g.innerHTML = inner; return g;
 function paintHead() {
   var n = st.root ? String(st.root.display_name || st.root.id || "") : "";
   $("ttl").textContent = n || "Agents";
-  $("name").textContent = n || "Agents";
-  $("logo").innerHTML = ROBOT;
-  $("count").textContent = st.tree ? (1 + totalBelow(st.tree)) + " agents" : "";
 }
 function paintWait() {
   var host = $("wait"); host.textContent = "";
@@ -355,17 +429,24 @@ function agentRow(row) {
   w.setAttribute("role", "treeitem"); w.dataset.id = row.id;
   w.style.paddingLeft = (row.depth * 14) + "px";
   w.appendChild(foldButton(row, row.foldable, row.folded, function () { st.folded[row.id] = !st.folded[row.id]; keep(); paint(); }));
-  var b = el("button", "main hov"); b.type = "button"; b.title = row.id;
+  var b = el("button", "main hov"); b.type = "button";
   var g = glyph(row.chat ? ROBOT : TOOL);
   if (row.state) g.appendChild(el("span", "badge " + row.state.kind, row.state.kind === "ask" ? "?" : ""));
   b.appendChild(g);
   var two = el("span", "two");
-  two.appendChild(el("span", "name" + (row.chat ? " chat" : ""), row.name));
   var active = row.state && row.state.kind !== "idle";
-  var sub = active ? row.state.label : row.tag;
-  if (sub) two.appendChild(el("span", "sub" + (active ? " " + row.state.kind : ""), sub));
+  if (row.chat) {
+    two.appendChild(el("span", "name" + (row.depth === 0 ? " top" : ""), row.name));
+    if (active) two.appendChild(el("span", "sub " + row.state.kind, row.state.label));
+  } else {
+    var line = el("span", "line");
+    line.appendChild(el("span", "name tool", row.name));
+    if (row.tag) line.appendChild(el("span", "tag", row.tag));
+    two.appendChild(line);
+  }
   b.appendChild(two);
-  if (row.folded) b.appendChild(el("span", "count", String(row.below)));
+  if (row.age) b.appendChild(el("span", "age", row.age));
+  if (row.folded && row.asksBelow > 0) b.appendChild(el("span", "asks", row.asksBelow + " asks"));
   b.addEventListener("click", function () { select(row.id); });
   w.appendChild(b);
   return w;
@@ -396,7 +477,8 @@ function fileRow(row, base) {
 function paintTree() {
   var host = $("tree"); host.textContent = "";
   if (!st.tree) return;
-  var rows = filterRows(treeRows(st.tree, st.chats, st.folded, st.status, askers(st.inq), { on: st.filesOn, lists: st.lists, open: st.open }), st.filter);
+  var searching = st.filter.trim() !== "";
+  var rows = filterRows(treeRows(st.tree, st.chats, st.folded, st.status, askers(st.inq), { on: st.filesOn, lists: st.lists, open: st.open }, { ages: askAges(st.inq, Date.now() / 1000), tools: !searching }), st.filter);
   var base = 0;
   rows.forEach(function (row) {
     if (row.kind === "file") host.appendChild(fileRow(row, base));
@@ -404,8 +486,24 @@ function paintTree() {
   });
   if (st.filesOn && st.lists[ROOT] === undefined) host.appendChild(el("div", "note", "reading the files…"));
 }
+function paintPins() {
+  var host = $("pins"); host.textContent = "";
+  var rows = st.tree && st.filter.trim() === "" ? toolRows(st.tree, st.chats) : [];
+  host.hidden = rows.length === 0;
+  if (!rows.length) return;
+  var b = el("button", "tg hov"); b.type = "button";
+  b.setAttribute("aria-expanded", String(st.toolsOpen));
+  b.appendChild(el("span", "tw", st.toolsOpen ? "▾" : "▸"));
+  var ic = el("span", "ic");
+  rows.slice(0, 3).forEach(function () { var i = el("span"); i.innerHTML = TOOL; ic.appendChild(i); });
+  b.appendChild(ic);
+  b.appendChild(el("span", "lb", rows.length + " tools"));
+  b.addEventListener("click", function () { st.toolsOpen = !st.toolsOpen; keep(); paintPins(); });
+  if (st.toolsOpen) rows.forEach(function (r) { host.appendChild(agentRow(r)); });
+  host.appendChild(b);
+}
 function paintSwitch() { $("sw").setAttribute("aria-checked", String(st.filesOn)); }
-function paint() { paintHead(); paintTree(); paintWait(); paintSwitch(); }
+function paint() { paintHead(); paintTree(); paintPins(); paintWait(); paintSwitch(); }
 
 function toggleDir(path) {
   st.open[path] = !st.open[path];
@@ -450,7 +548,7 @@ function refreshStatus() {
     return call(id, { type: "status" }).then(function (r) { if (!failed(r)) st.status[id] = r; else delete st.status[id]; });
   })).then(function () {
     return call("user", { type: "inquiries" });
-  }).then(function (r) { st.inq = failed(r) ? [] : (r.inquiries || []); paintWait(); paintTree(); });
+  }).then(function (r) { st.inq = failed(r) ? [] : (r.inquiries || []); paintWait(); paintTree(); paintStrip(); });
 }
 var watched = {};
 function watchChats() {
@@ -480,12 +578,12 @@ function tick() {
 fantastic.onMessage(function (m) {
   if (!m || m.type !== "restore") return;
   var r = restoredState(m.state);
-  st.folded = r.folded; st.open = r.open; st.filesOn = r.filesOn;
+  st.folded = r.folded; st.open = r.open; st.filesOn = r.filesOn; st.toolsOpen = r.toolsOpen;
   paint(); syncFiles();
 });
 $("hide").addEventListener("click", function () { post({ type: "hide_tree" }); });
 $("sw").addEventListener("click", function () { setFiles(!st.filesOn); });
-$("filter").addEventListener("input", function () { st.filter = $("filter").value; paintTree(); });
+$("filter").addEventListener("input", function () { st.filter = $("filter").value; paintTree(); paintPins(); });
 tick();
 setInterval(tick, 5000);
 post({ type: "ready" });
