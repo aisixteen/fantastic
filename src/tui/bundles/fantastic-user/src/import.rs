@@ -394,7 +394,9 @@ pub fn plan(yaml: &str, files: &BTreeMap<String, String>, w: &World) -> Result<P
             ));
         };
         let target = v.as_str();
-        let Some(hm) = (w.agent)(target) else {
+        // the reserved address names the root: a connector port to the kernel binds to it
+        let root = kind == "connector" && target == fantastic_kernel::refusal::RESERVED_ID;
+        let Some(hm) = (w.agent)(if root { w.root_id } else { target }) else {
             return Err(err(
                 "bad_binding",
                 format!("bind {name}: no agent {target:?}"),

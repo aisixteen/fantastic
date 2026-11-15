@@ -313,7 +313,7 @@ def main() -> int:
         base = len(allb)
         collect(turns)
         anchor_docs = first_seen(
-            "B2", rf'\[folded · docs reply from kernel · ~\d+ tokens · head: "[^"]*" · get: {d}\]',
+            "B2", r'\[folded · docs reply from kernel · ~\d+ tokens · docs again for the current state\]',
             turns, base)
         need(bool(turns) and "S090 " not in full(turns[0]), "B2: the docs reply is folded")
         last = last_user(turns[1]) if len(turns) > 1 else ""
