@@ -16,10 +16,14 @@ assert.ok(from >= 0 && to > from, "the view marks its pure block");
 
 type Obj = Record<string, unknown>;
 interface Pure {
-  kernelStrip(root: Obj, peers: Obj[]): Obj[];
+  kernelStrip(root: Obj, peers: Obj[], waiting?: number): Obj[];
+  askAges(inq: Obj[], now: number): Record<string, string>;
+  toolRows(root: Obj, chats: Record<string, boolean>): Obj[];
+  pinRows(root: Obj, chats: Record<string, boolean>, folded: Record<string, boolean>, status: Record<string, Obj>, asks: Record<string, boolean>, files: Obj, project: string, opts?: Obj): Obj[];
+  projectName(p: unknown): string;
   chatSet(reply: Obj): Record<string, boolean>;
   stateOf(status: Obj | undefined, asks: boolean): { kind: string; label: string };
-  treeRows(root: Obj, chats: Record<string, boolean>, folded: Record<string, boolean>, status: Record<string, Obj>, asks: Record<string, boolean>, files?: Obj): Obj[];
+  treeRows(root: Obj, chats: Record<string, boolean>, folded: Record<string, boolean>, status: Record<string, Obj>, asks: Record<string, boolean>, files?: Obj, opts?: Obj): Obj[];
   filterRows(rows: Obj[], q: string): Obj[];
   keptState(st: Obj): Obj;
   restoredState(saved: unknown): Obj;
@@ -31,7 +35,7 @@ interface Pure {
   fileRows(lists: Record<string, Obj[]>, open: Record<string, boolean>, path: string, depth: number): Obj[];
 }
 const ctx = vm.createContext({});
-vm.runInContext(`${src.slice(from, to)}\nthis.api = { kernelStrip, chatSet, stateOf, treeRows, filterRows, keptState, restoredState, wantedWatches, changedDirs, askers, waitingRows, sortedListing, fileRows };`, ctx);
+vm.runInContext(`${src.slice(from, to)}\nthis.api = { askAges, toolRows, pinRows, projectName, kernelStrip, chatSet, stateOf, treeRows, filterRows, keptState, restoredState, wantedWatches, changedDirs, askers, waitingRows, sortedListing, fileRows };`, ctx);
 const raw = (ctx as unknown as { api: Pure }).api;
 // the vm's objects are of another realm: compare them as plain JSON
 const plain = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
@@ -52,6 +56,34 @@ test("the kernel strip: this kernel first and highlighted, then each peer by sho
   assert.equal(rows.length, 2);
   assert.deepEqual([rows[0]!["here"], rows[0]!["mark"], rows[0]!["name"]], [true, "de", "demo"]);
   assert.deepEqual([rows[1]!["here"], rows[1]!["mark"], rows[1]!["name"], rows[1]!["guid"]], [false, "99", "99aabb", "99aabbccdd"]);
+  assert.equal(rows[0]!["waiting"], 0, "no badge without a question");
+});
+
+test("the current kernel carries the number of questions waiting in it", () => {
+  const rows = plain(raw.kernelStrip({ id: "k", display_name: "demo", guid: "abcdef" }, [{ guid: "99aabbccdd" }], 3));
+  assert.deepEqual(rows.map((r) => r["waiting"]), [3, undefined], "a peer has no source for it, so no badge");
+});
+
+test("a folded branch counts the questions below it; an asking row carries its age", () => {
+  const t = { id: "r", display_name: "r", children: [{ id: "a", display_name: "a", children: [{ id: "b", display_name: "b", children: [] }, { id: "c", display_name: "c", children: [] }] }] };
+  const rows = plain(raw.treeRows(t, {}, { a: true }, {}, { b: true, a: true }, undefined, { ages: { a: "12m", b: "3m" } }));
+  assert.deepEqual(rows.map((r) => [r["id"], r["asksBelow"], r["age"]]), [["r", 0, ""], ["a", 1, "12m"]], "the branch's own question is not counted below it");
+  const open = plain(raw.treeRows(t, {}, {}, {}, { b: true }, undefined, { ages: { b: "3m" } }));
+  assert.deepEqual(open.map((r) => [r["id"], r["asksBelow"], r["age"]]), [["r", 0, ""], ["a", 0, ""], ["b", 0, "3m"], ["c", 0, ""]], "an open branch counts nothing");
+});
+
+test("ask ages: the oldest question of each asker", () => {
+  assert.deepEqual(plain(raw.askAges([{ asker: "a", ts: 400 }, { asker: "a", ts: 100 }, { asker: "b", ts: 940 }, { ts: 1 }, { asker: "c" }], 1000)), { a: "15m", b: "1m" });
+});
+
+test("leaf tool agents under the root go to the tools group, not the tree", () => {
+  const rows = plain(raw.treeRows(tree, { chat1: true }, {}, {}, {}, undefined, { tools: true }));
+  assert.deepEqual(rows.map((r) => r["id"]), ["kernel_state", "user", "files", "coder", "chat1"], "user has children, files is the files agent: both stay; only direct leaf tools leave");
+  const t2 = { id: "r", display_name: "r", children: [{ id: "tasks", display_name: "tasks", handler_module: "task.tools", children: [] }, { id: "c", display_name: "c", handler_module: "ai_chat.tools", children: [] }, { id: "files", display_name: "files", children: [] }] };
+  const tr = plain(raw.treeRows(t2, { c: true }, {}, {}, {}, undefined, { tools: true }));
+  assert.deepEqual(tr.map((r) => r["id"]), ["r", "c", "files"]);
+  assert.deepEqual(plain(raw.toolRows(t2, { c: true })).map((r) => [r["id"], r["tag"], r["depth"]]), [["tasks", "task", 0]]);
+  assert.deepEqual(plain(raw.treeRows(t2, { c: true }, {}, {}, {})).map((r) => r["id"]), ["r", "tasks", "c", "files"], "without the option the tree keeps them");
 });
 
 test("the tree rows keep parent order, nested depth, and the order reflect gives", () => {
@@ -158,10 +190,11 @@ test("the filter keeps the matches and the branch that leads to them", () => {
 
 test("what the view keeps across a reload: folded branches, open folders, the files switch", () => {
   const kept = plain(raw.keptState({ folded: { user: true }, open: { src: true }, filesOn: true, lists: { ".": [] }, selected: "x" }));
-  assert.deepEqual(kept, { folded: { user: true }, open: { src: true }, filesOn: true });
+  assert.deepEqual(kept, { folded: { user: true }, open: { src: true }, filesOn: true, toolsOpen: false });
   assert.deepEqual(plain(raw.restoredState(kept)), kept);
-  assert.deepEqual(plain(raw.restoredState({ folded: { a: true, b: false, c: "yes" }, open: 3, filesOn: "true" })), { folded: { a: true }, open: {}, filesOn: false }, "only what is exactly true comes back");
-  assert.deepEqual(plain(raw.restoredState(null)), { folded: {}, open: {}, filesOn: false });
+  assert.deepEqual(plain(raw.restoredState({ folded: { a: true, b: false, c: "yes" }, open: 3, filesOn: "true" })), { folded: { a: true }, open: {}, filesOn: false, toolsOpen: false }, "only what is exactly true comes back");
+  assert.deepEqual(plain(raw.restoredState(null)), { folded: {}, open: {}, filesOn: false, toolsOpen: false });
+  assert.equal(plain(raw.restoredState({ toolsOpen: true }))["toolsOpen"], true);
 });
 
 test("a watch is held on the root and every open folder while files show, none otherwise", () => {
@@ -175,4 +208,26 @@ test("a change reads again the folder that holds it, and the folder itself when 
   assert.deepEqual(plain(raw.changedDirs({ type: "changed", path: "src", kind: "modified" }, held)), [".", "src"]);
   assert.deepEqual(plain(raw.changedDirs({ type: "changed", path: "other/x", kind: "added" }, held)), [], "a folder the view does not list is not read");
   assert.deepEqual(plain(raw.changedDirs({ type: "watching" }, held)), []);
+});
+
+test("the pinned rows: the files agent, the project folder under it, its files while they show, then its file views", () => {
+  const root = { id: "r", display_name: "r", children: [
+    { id: "files", display_name: "files", handler_module: "file_bridge.tools", children: [{ id: "view1", display_name: "view1", handler_module: "file_view.tools", children: [] }] },
+    { id: "c", display_name: "c", handler_module: "ai_chat.tools", children: [] },
+  ] };
+  const lists = { ".": [{ name: "src", path: "src", type: "dir" }, { name: "a.txt", path: "a.txt", type: "file" }] };
+  const off = plain(raw.pinRows(root, { c: true }, {}, {}, {}, { on: false, lists, open: {} }, "demo"));
+  assert.deepEqual(off.map((r) => [r["kind"], r["id"] ?? r["name"], r["depth"]]), [["agent", "files", 0], ["project", "demo", 1], ["agent", "view1", 1]]);
+  assert.equal(off[1]!["open"], false);
+  const on = plain(raw.pinRows(root, { c: true }, {}, {}, {}, { on: true, lists, open: {} }, "demo"));
+  assert.deepEqual(on.map((r) => r["name"]), ["files", "demo", "src", "a.txt", "view1"]);
+  assert.deepEqual(on.map((r) => r["depth"]), [0, 1, 2, 2, 1]);
+  assert.deepEqual(plain(raw.pinRows(root, {}, {}, {}, {}, { on: false, lists: {}, open: {} }, "")).map((r) => r["name"]), ["files", "view1"], "no project name: no folder row");
+  assert.deepEqual(plain(raw.pinRows({ id: "r", children: [] }, {}, {}, {}, {}, { on: true, lists, open: {} }, "demo")), [], "no files agent: nothing pinned");
+  assert.deepEqual(plain(raw.treeRows(root, { c: true }, {}, {}, {}, undefined, { pinned: true })).map((r) => r["id"]), ["r", "c"], "pinned: the files agent leaves the tree");
+  assert.deepEqual(plain(raw.treeRows(root, { c: true }, {}, {}, {}, undefined, {})).map((r) => r["id"]), ["r", "files", "view1", "c"]);
+});
+
+test("the project name is the last part of the files root", () => {
+  assert.deepEqual(["/a/b/launch-week", "/a/b/launch-week/", "x", "", null].map((p) => raw.projectName(p)), ["launch-week", "launch-week", "x", "", ""]);
 });

@@ -1,3 +1,4 @@
+import { agentChain, kindOf, metaOf, noViewHandler, trail } from "./header_model.ts";
 import type { Payload } from "../../lib.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { onMac } from "../canvas/viewer.ts";
@@ -75,10 +76,15 @@ export const previewView: ViewBundle = {
 
     const el = document.createElement("div");
     el.className = "preview-view";
-    el.innerHTML = `<div class="pv-bar"><span class="pv-title"></span></div><div class="pv-note" role="status" hidden></div><div class="pv-conflict" role="alert" hidden></div><div class="pv-body"></div>`;
+    el.innerHTML = `<div class="pv-bar"><span class="pv-title"></span><span class="pv-kind"></span></div><div class="pv-head"><span class="pv-glyph" aria-hidden="true"></span><h1 class="pv-name"></h1><span class="pv-meta"></span></div><div class="pv-note" role="status" hidden></div><div class="pv-conflict" role="alert" hidden></div><div class="pv-body"></div>`;
     ctx.mount.appendChild(el);
     const bar = el.querySelector(".pv-bar") as HTMLElement;
     const title = el.querySelector(".pv-title") as HTMLElement;
+    const kind = el.querySelector(".pv-kind") as HTMLElement;
+    const head = el.querySelector(".pv-head") as HTMLElement;
+    const glyph = el.querySelector(".pv-glyph") as HTMLElement;
+    const nameEl = el.querySelector(".pv-name") as HTMLElement;
+    const metaEl = el.querySelector(".pv-meta") as HTMLElement;
     const note = el.querySelector(".pv-note") as HTMLElement;
     const conflict = el.querySelector(".pv-conflict") as HTMLElement;
     const body = el.querySelector(".pv-body") as HTMLElement;
@@ -121,8 +127,17 @@ export const previewView: ViewBundle = {
     // ─── the bar ──────────────────────────────────────────────────────────
     const drawBar = (): void => {
       const live = ctl.isLive() && !ctl.gone;
-      title.textContent = ctl.title();
+      const agentView = ctl.content.k === "agent";
+      const parts = agentView ? agentChain(ctl.agent ?? "", agentIndex) : trail(ctl.path, agentIndex);
+      title.textContent = parts.length === 0 ? "nothing selected" : parts.join(" / ");
       title.title = ctl.path ?? "";
+      const kindName = kindOf(ctl.mode, agentView);
+      kind.hidden = parts.length === 0;
+      kind.textContent = kindName;
+      head.hidden = parts.length === 0;
+      glyph.textContent = kindName === "folder" ? "📁" : kindName === "agent" ? "◇" : "▤";
+      nameEl.textContent = agentView ? (ctl.agent ?? "") : ctl.path === "" ? "project" : ctl.name();
+      metaEl.textContent = agentView ? "" : metaOf({ name: ctl.name(), ...(ctl.size > 0 ? { size: ctl.size } : {}), ...(ctl.content.k === "text" ? { text: ctl.editor.text() } : {}) });
       if (live) {
         const s = document.createElement("span");
         s.className = "pv-live";
@@ -143,7 +158,7 @@ export const previewView: ViewBundle = {
       const pinned = "pinned" in ctl.binding;
       button(
         bar,
-        "📌 pin",
+        "Pin",
         pinned ? "pinned: click to follow the tree again" : "pin this preview to what it shows",
         () => {
           if (pinned) void ctl.unpin();
@@ -153,12 +168,12 @@ export const previewView: ViewBundle = {
         pinned ? "active" : "",
       );
       if (ctl.mode === "markdown" && ctl.content.k === "text" && !ctl.editing) {
-        button(bar, "‹› source", "show the Markdown source", () => ctl.setSource(!ctl.source), ctl.source ? "active" : "");
+        button(bar, "Source", "show the Markdown source", () => ctl.setSource(!ctl.source), ctl.source ? "active" : "");
       }
       const can = ctl.canEdit() || ctl.editing;
       button(
         bar,
-        "✎ edit",
+        "Edit",
         can ? "edit this file" : `not editable: ${ctl.whyNot()}`,
         () => {
           const why = ctl.setEditing(!ctl.editing);
@@ -168,9 +183,9 @@ export const previewView: ViewBundle = {
       ).setAttribute("aria-disabled", String(!can));
       if (ctl.editing) {
         const blocked = ctl.editor.state.k !== "dirty" || ctl.gone;
-        const save = button(bar, "💾 save", ctl.gone ? "the file was deleted on disk: saving waits until it is back" : `save (${mac ? "⌘" : "Ctrl"}+S)`, () => void ctl.save(), blocked ? "off" : "");
+        const save = button(bar, "Save", ctl.gone ? "the file was deleted on disk: saving waits until it is back" : `save (${mac ? "⌘" : "Ctrl"}+S)`, () => void ctl.save(), blocked ? "off" : "");
         save.disabled = blocked;
-        button(bar, "↺ revert", "drop the unsaved edits, or undo the last save", () => void ctl.revert());
+        button(bar, "Revert", "drop the unsaved edits, or undo the last save", () => void ctl.revert());
       }
     };
     const say = (m: string | null): void => {
@@ -346,7 +361,7 @@ export const previewView: ViewBundle = {
       const wrap = document.createElement("div");
       wrap.className = "pv-dir";
       const sorted = [...entries].sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "dir" ? -1 : 1));
-      if (sorted.length === 0) message("pv-empty", "an empty folder");
+      if (sorted.length === 0) message("pv-empty", "This folder is empty.");
       for (const e of sorted) {
         const row = document.createElement("div");
         row.className = "e";
@@ -449,7 +464,27 @@ export const previewView: ViewBundle = {
               else agentHandle = h;
             },
             (err: Error) => {
-              if (!moved()) message("pv-error", `agent ${mine}: ${err.message}`);
+              if (moved()) return;
+              const handler = noViewHandler(err.message);
+              if (handler === null) {
+                message("pv-error", `agent ${mine}: ${err.message}`);
+                return;
+              }
+              // an agent with no view of its own: its name card
+              const card = document.createElement("div");
+              card.className = "pv-card";
+              const line = document.createElement("div");
+              line.className = "big";
+              const info = agentIndex.agentAt(agentIndex.folderOf(mine) ?? "");
+              line.textContent = info !== undefined && info.displayName !== "" ? info.displayName : mine;
+              const tag = document.createElement("span");
+              tag.className = "pv-chip";
+              tag.textContent = handler.replace(/\.tools$/, "");
+              line.append(" ", tag);
+              const sub = document.createElement("div");
+              sub.textContent = "This agent has no view of its own.";
+              card.append(line, sub);
+              host.replaceChildren(card);
             },
           );
           return;

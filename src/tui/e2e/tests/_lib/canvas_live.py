@@ -550,8 +550,8 @@ async def open_tree(pg: Page, x: int, y: int) -> str | None:
 # THE CHAT is the html view its agent's `reflect` returns, drawn in the cell's panel
 # iframe (`fantastic-ai-core/src/chat_view.html`): the dialog `#dialog` (a bubble is
 # `.who.user > .msg` or `.who.assistant > .msg`, a tool-call run `details.tools`, an
-# inquiry `.inq`), the input `#text`, `#send`, and the phase pill `#pill`
-# (`data-phase`, `data-reason`). `cell` is the chat's frame by order on the page. The panel
+# inquiry `.inq`), the input `#text`, `#send`, and the header state `#state`
+# (`data-state`, `data-phase`, `data-reason`; its text is the label, hidden while idle). `cell` is the chat's frame by order on the page. The panel
 # is SANDBOXED (null origin), so the page cannot look inside it: the chat is read and driven
 # through CDP, in the frame itself (`dev_surface.frame_eval`).
 async def chat_eval(pg: Page, expr: str, cell: int = 0) -> Any:
@@ -581,7 +581,7 @@ async def say(pg: Page, text: str, cell: int = 0) -> None:
 
 
 async def wait_quiet(pg: Page, total: float, quiet: float, cell: int = 0) -> bool:
-    """Until chat cell #cell's chain is OVER — its pill says idle with a reason that
+    """Until chat cell #cell's chain is OVER — its header state says idle with a reason that
     names no work still awaited — or, when that never arrives, until it has answered
     in words and gone QUIET `quiet` s."""
     deadline = time.time() + total
@@ -590,8 +590,8 @@ async def wait_quiet(pg: Page, total: float, quiet: float, cell: int = 0) -> boo
     ended = 0.0
     look = ("({n: d.querySelectorAll('#dialog .msg').length,"
             " said: [...d.querySelectorAll('#dialog .who.assistant .msg')].some(m=>m.textContent.trim()),"
-            " phase: d.getElementById('pill')?.dataset.phase || '',"
-            " reason: d.getElementById('pill')?.dataset.reason || ''})")
+            " phase: d.getElementById('state')?.dataset.phase || '',"
+            " reason: d.getElementById('state')?.dataset.reason || ''})")
     while time.time() < deadline:
         got = await chat_eval(pg, look, cell) or {}
         n, said, phase, reason = got.get("n", 0), got.get("said", False), got.get("phase", ""), got.get("reason", "")
@@ -631,7 +631,7 @@ async def chat_rows(pg: Page, cell: int = 0) -> dict:
       tools: [...d.querySelectorAll('#dialog details.tools')].map(g=>({n:g.querySelector('.n')?.textContent||'', verbs:g.querySelector('.verbs')?.textContent||'', calls:g.querySelectorAll('.call').length})),
       inquiries: [...d.querySelectorAll('#dialog .inq')].map(q=>({q:q.querySelector('.q')?.textContent||'', options:[...q.querySelectorAll('.row > button')].map(b=>b.textContent), answered:q.classList.contains('answered'), status:q.querySelector('.st')?.textContent||''})),
       state: {badge: d.getElementById('badge')?.dataset.state||'', badge_hidden: !!d.getElementById('badge')?.hidden, pill: d.getElementById('state')?.textContent||'', pill_hidden: !!d.getElementById('state')?.hidden},
-      name: d.getElementById('name')?.textContent||'', model: d.getElementById('modelname')?.textContent||'',
+      name: d.getElementById('name')?.textContent||'',
     }))()""", cell) or {}
 
 

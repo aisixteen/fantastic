@@ -168,6 +168,14 @@
           "hex": "#50b478"
         }
       },
+      "ok-surface": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.3137, 0.7059, 0.4706],
+          "hex": "#50b478",
+          "alpha": 0.12
+        }
+      },
       "monitor": {
         "$value": {
           "colorSpace": "srgb",
