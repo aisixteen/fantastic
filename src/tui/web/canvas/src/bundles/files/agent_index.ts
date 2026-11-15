@@ -9,13 +9,15 @@ export interface AgentInfo {
   id: string;
   handler: string;
   displayName: string;
+  /** the agent that owns it (the parent_id of its record), when the head names one */
+  parentId?: string;
 }
 
 const unquote = (v: string): string => v.trim().replace(/^(["'])(.*)\1$/, "$2");
 
 /** The identity fields from the head of an agent.yaml: top-level keys only (an
  *  indented `id:` belongs to a nested map). `id` null when the head names none. */
-export function agentIdOf(lines: string[]): { id: string | null; handler: string | null; displayName: string | null } {
+export function agentIdOf(lines: string[]): { id: string | null; handler: string | null; displayName: string | null; parentId: string | null } {
   const top = (key: string): string | null => {
     for (const l of lines) {
       const m = new RegExp(`^${key}:\\s*(\\S.*)?$`).exec(l);
@@ -30,6 +32,7 @@ export function agentIdOf(lines: string[]): { id: string | null; handler: string
     id: top("id"),
     handler: top("handler_module"),
     displayName: top("display_name"),
+    parentId: top("parent_id"),
   };
 }
 

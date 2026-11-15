@@ -99,7 +99,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--fc-color-accent
 .r .sub{font-size:12px;line-height:1.3;color:var(--fc-color-text-subtle);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .r .asks{flex:none;font:500 11px/1 var(--fc-font-family-mono);color:var(--fc-color-status-warn)}
 .sub.ask,.sub.queued{color:var(--fc-color-status-warn)}
-.pins{flex:none;display:flex;flex-direction:column;gap:1px;padding-top:6px;border-top:1px solid var(--fc-color-line-button)}
+.pins{flex:none;display:flex;flex-direction:column;gap:1px;padding-top:6px;border-top:1px solid var(--fc-color-line-button);max-height:45%;overflow-y:auto}
 .pins[hidden]{display:none}
 .tg{display:flex;align-items:center;gap:10px;width:100%;min-height:40px;margin-left:12px;padding:4px 8px 4px 0;border-radius:var(--fc-radius-card)}
 .tg .tw{flex:none;display:grid;place-items:center;width:18px;height:28px;color:var(--fc-color-text-subtle);font-size:10px}
@@ -239,6 +239,7 @@ function treeRows(root, chats, folded, status, asks, files, opts) {
   var fl = files && files.on ? files : null;
   var ages = opts && opts.ages || {};
   var grouped = opts && opts.tools ? toolIds(root, chats) : {};
+  if (opts && opts.pinned && filesNode(root)) grouped[FILES_ID] = true;
   function walk(n, depth) {
     if (!n || typeof n.id !== "string" || grouped[n.id]) return;
     var kids = countKids(n);
@@ -262,6 +263,29 @@ function treeRows(root, chats, folded, status, asks, files, opts) {
   }
   walk(root, 0);
   return rows;
+}
+// the files agent, a direct child of the root
+function filesNode(root) {
+  var k = (root && root.children || []).filter(function (c) { return c && c.id === FILES_ID; });
+  return k.length ? k[0] : null;
+}
+// the project's folder name: the last part of the files agent's `root` path
+function projectName(rootPath) {
+  var parts = String(rootPath == null ? "" : rootPath).split("/").filter(function (x) { return x !== ""; });
+  return parts.length ? parts[parts.length - 1] : "";
+}
+// the pinned rows under the tree: the files agent, the project folder under it (with its files while they show)
+// and the file views below it. `project` = the folder's name ("" leaves the folder row out).
+function pinRows(root, chats, folded, status, asks, files, project, opts) {
+  var f = filesNode(root);
+  if (!f) return [];
+  var rows = treeRows(f, chats, folded, status, asks, null, opts);
+  var on = !!(files && files.on);
+  var under = [];
+  if (project !== "") under.push({ kind: "project", name: project, open: on, depth: 1 });
+  if (on) under = under.concat(fileRows(files.lists || {}, files.open || {}, ROOT, project !== "" ? 2 : 1));
+  var at = rows.length > 0 ? 1 : 0;
+  return rows.slice(0, at).concat(under, rows.slice(at));
 }
 // how many agents below `n` have an open question
 function asksUnder(n, asks) {
@@ -360,7 +384,7 @@ function changedDirs(ev, lists) {
 // end pure
 
 var SELF = "{{cell}}", ME = "{{agent}}";
-var st = { toolsOpen: false, root: null, chats: {}, status: {}, inq: [], folded: {}, selected: "", selPath: "", filesOn: false, open: {}, lists: {}, filter: "", tick: 0, busy: false };
+var st = { filesRoot: "", toolsOpen: false, root: null, chats: {}, status: {}, inq: [], folded: {}, selected: "", selPath: "", filesOn: false, open: {}, lists: {}, filter: "", tick: 0, busy: false };
 var watching = {}, filesWatch = false;
 var $ = function (id) { return document.getElementById(id); };
 var ROBOT = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="11" height="8" rx="2"/><path d="M8 5V2.5M5.8 9v.01M10.2 9v.01M6 11.2h4"/></svg>';
@@ -429,7 +453,7 @@ function agentRow(row) {
   w.setAttribute("role", "treeitem"); w.dataset.id = row.id;
   w.style.paddingLeft = (row.depth * 14) + "px";
   w.appendChild(foldButton(row, row.foldable, row.folded, function () { st.folded[row.id] = !st.folded[row.id]; keep(); paint(); }));
-  var b = el("button", "main hov"); b.type = "button";
+  var b = el("button", "main hov"); b.type = "button"; b.title = row.id;
   var g = glyph(row.chat ? ROBOT : TOOL);
   if (row.state) g.appendChild(el("span", "badge " + row.state.kind, row.state.kind === "ask" ? "?" : ""));
   b.appendChild(g);
@@ -478,18 +502,38 @@ function paintTree() {
   var host = $("tree"); host.textContent = "";
   if (!st.tree) return;
   var searching = st.filter.trim() !== "";
-  var rows = filterRows(treeRows(st.tree, st.chats, st.folded, st.status, askers(st.inq), { on: st.filesOn, lists: st.lists, open: st.open }, { ages: askAges(st.inq, Date.now() / 1000), tools: !searching }), st.filter);
+  var rows = filterRows(treeRows(st.tree, st.chats, st.folded, st.status, askers(st.inq), { on: st.filesOn, lists: st.lists, open: st.open }, { ages: askAges(st.inq, Date.now() / 1000), tools: !searching, pinned: !searching }), st.filter);
   var base = 0;
   rows.forEach(function (row) {
     if (row.kind === "file") host.appendChild(fileRow(row, base));
     else { if (row.id === FILES_ID) base = row.depth; host.appendChild(agentRow(row)); }
   });
-  if (st.filesOn && st.lists[ROOT] === undefined) host.appendChild(el("div", "note", "reading the files…"));
+  if (searching && st.filesOn && st.lists[ROOT] === undefined) host.appendChild(el("div", "note", "reading the files…"));
+}
+function projectRow(row) {
+  var w = el("div", "r f");
+  w.setAttribute("role", "treeitem"); w.style.paddingLeft = (row.depth * 14) + "px";
+  w.appendChild(foldButton(row, true, !row.open, function () { setFiles(!st.filesOn); }));
+  var b = el("button", "main hov"); b.type = "button"; b.title = st.filesRoot;
+  b.appendChild(glyph(FOLDER));
+  b.appendChild(el("span", "name", row.name));
+  b.addEventListener("click", function () { setFiles(!st.filesOn); });
+  w.appendChild(b);
+  return w;
 }
 function paintPins() {
   var host = $("pins"); host.textContent = "";
-  var rows = st.tree && st.filter.trim() === "" ? toolRows(st.tree, st.chats) : [];
-  host.hidden = rows.length === 0;
+  var searching = st.filter.trim() !== "";
+  var files = !searching && st.tree ? pinRows(st.tree, st.chats, st.folded, st.status, askers(st.inq), { on: st.filesOn, lists: st.lists, open: st.open }, projectName(st.filesRoot), { ages: askAges(st.inq, Date.now() / 1000) }) : [];
+  var rows = !searching && st.tree ? toolRows(st.tree, st.chats) : [];
+  host.hidden = rows.length === 0 && files.length === 0;
+  if (host.hidden) return;
+  files.forEach(function (row) {
+    if (row.kind === "file") host.appendChild(fileRow(row, 1));
+    else if (row.kind === "project") host.appendChild(projectRow(row));
+    else host.appendChild(agentRow(row));
+  });
+  if (st.filesOn && st.lists[ROOT] === undefined && files.length) host.appendChild(el("div", "note", "reading the files…"));
   if (!rows.length) return;
   var b = el("button", "tg hov"); b.type = "button";
   b.setAttribute("aria-expanded", String(st.toolsOpen));
@@ -515,7 +559,7 @@ function setFiles(on) {
 function readDir(path) {
   return call("files", { type: "list", path: path }).then(function (r) {
     if (failed(r)) { say("files: " + (r && r.error || "no answer")); return; }
-    st.lists[path] = r.files || []; paintTree();
+    st.lists[path] = r.files || []; paintTree(); paintPins();
   });
 }
 // the files agent holds one watch per shown folder (its `watch_path`), and tells this view with `changed`
@@ -548,7 +592,7 @@ function refreshStatus() {
     return call(id, { type: "status" }).then(function (r) { if (!failed(r)) st.status[id] = r; else delete st.status[id]; });
   })).then(function () {
     return call("user", { type: "inquiries" });
-  }).then(function (r) { st.inq = failed(r) ? [] : (r.inquiries || []); paintWait(); paintTree(); paintStrip(); });
+  }).then(function (r) { st.inq = failed(r) ? [] : (r.inquiries || []); paintWait(); paintTree(); paintPins(); paintStrip(); });
 }
 var watched = {};
 function watchChats() {
@@ -560,8 +604,10 @@ function watchChats() {
 function refreshTree() {
   return Promise.all([
     call("kernel", { type: "reflect", detail: "full" }),
-    call("kernel", { type: "reflect", handler_modules: ["ai_chat.tools"], tree: "ids" })
+    call("kernel", { type: "reflect", handler_modules: ["ai_chat.tools"], tree: "ids" }),
+    st.filesRoot === "" ? call("files", { type: "reflect" }) : Promise.resolve(null)
   ]).then(function (rs) {
+    if (rs[2] && !failed(rs[2]) && typeof rs[2].root === "string") st.filesRoot = rs[2].root;
     if (failed(rs[0])) { say("kernel reflect: " + (rs[0] && rs[0].error || "no answer")); return; }
     say("");
     st.root = rs[0]; st.tree = rs[0].tree && !Array.isArray(rs[0].tree) ? rs[0].tree : null;

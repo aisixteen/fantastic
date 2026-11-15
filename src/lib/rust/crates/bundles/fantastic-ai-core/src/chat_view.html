@@ -72,6 +72,9 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,summary:focus-vi
 .who.user{align-self:flex-end;align-items:flex-end}
 .who.assistant{align-self:flex-start;align-items:flex-start}
 .meta{font:11px/1.4 var(--fc-font-family-mono);color:var(--fc-color-text-subtle)}
+.earlier{align-self:center;height:28px;padding:0 12px;border:0;border-radius:var(--fc-radius-pill);background:var(--fc-color-surface-button);color:var(--fc-color-text-subtle);font-size:12px}
+.earlier[hidden]{display:none}
+.earlier:disabled{opacity:.5;cursor:default}
 .msg{padding:8px 12px;border-radius:var(--fc-radius-bubble);white-space:pre-wrap;word-wrap:break-word;box-shadow:var(--fc-shadow-bubble);background:var(--fc-color-surface-bubble)}
 .msg code{font:12px var(--fc-font-family-mono);padding:1px 5px;border-radius:var(--fc-radius-chip);background:var(--fc-color-surface-well)}
 .who.user .msg{background:var(--fc-color-surface-bubble-user)}
@@ -157,7 +160,7 @@ details.tools>summary,details.think>summary{min-height:40px}
 <div class="titles"><div class="line"><h1 class="name" id="name"></h1><span class="state" id="state" data-state="idle" hidden></span></div></div>
 <button class="stop" id="stop" type="button" hidden>Stop</button>
 </div>
-<div class="dialog" id="dialog"></div>
+<div class="dialog" id="dialog"><button class="earlier" id="earlier" type="button" hidden></button></div>
 <div class="queue" id="queue"></div>
 <div class="foot"><span id="others"></span><button class="clear" id="clear" type="button" title="start a new thread: nothing is deleted, the earlier one stays recallable">clear</button></div>
 <div class="input"><div class="field"><textarea id="text" rows="1" placeholder="Message" aria-label="Message"></textarea><button class="send" id="send" type="button" aria-label="Send">Send</button></div></div>
@@ -343,11 +346,12 @@ function shapeRows(rows, thoughts, texts) {
 // the newest `keep` history rows, oldest first, over every page (`next` is the cursor)
 async function historyTail(call, keep) {
   keep = keep || 300;
-  var win = [], bytes = 0, lastId = 0, args = { type: "history" };
+  var win = [], bytes = 0, lastId = 0, seen = 0, args = { type: "history" };
   for (var page = 0; page < 1000; page++) {
     var r = await call(args);
     if (r === null || r === undefined) break;
     var rows = Array.isArray(r.rows) ? r.rows : [];
+    seen += rows.length;
     rows.forEach(function (m) {
       if (typeof m.bytes === "number") bytes += m.bytes;
       if (typeof m.id === "number") lastId = Math.max(lastId, m.id);
@@ -357,7 +361,7 @@ async function historyTail(call, keep) {
     if (typeof r.next !== "number") break;
     args = { type: "history", after: r.next };
   }
-  return { rows: win, bytes: bytes, lastId: lastId };
+  return { rows: win, bytes: bytes, lastId: lastId, earlier: seen - win.length };
 }
 // the loaded head (the `rows` verb), from its first row, following `next`
 async function readHead(call, pageSize) {
@@ -492,6 +496,8 @@ function textsOf(rows) {
     badge.hidden = st === "idle";
     var label = st === "asks" ? "asks you" + (inquiryAge(askTs, Date.now()) ? " · " + inquiryAge(askTs, Date.now()) : "") : st === "working" ? phaseWord(curPhase) : st === "failed" ? "failed · " + lastReason : "";
     pill.dataset.state = st;
+    pill.dataset.phase = curPhase;
+    pill.dataset.reason = curPhase === "idle" ? lastReason : "";
     pill.textContent = label;
     pill.hidden = label === "";
   }
@@ -632,6 +638,7 @@ function textsOf(rows) {
       row.append(button("Answer", function () { var ch = picks.filter(function (c) { return c.checked; }).map(function (c) { return c.value; }); if (ch.length) reply(ch, ch.join(", ")); }, true));
     }
     if (kind !== "confirm" && kind !== "multi") {
+      card.answerText = function (v) { reply(v, v); };
       var inp = el("input"); inp.type = "text"; inp.placeholder = kind === "single" ? "Or answer in your own words" : "Your answer"; inp.setAttribute("aria-label", "Your answer");
       var go = function () { var v = inp.value.trim(); if (v) reply(v, v); };
       inp.onkeydown = function (e) { if (e.key === "Enter") go(); };
@@ -641,18 +648,30 @@ function textsOf(rows) {
     }
     return card;
   }
+  // the open question the composer answers: the oldest card that takes free text and is not answered yet
+  function freeCard() {
+    var cards = dialog.querySelectorAll(".inq:not(.answered)");
+    for (var i = 0; i < cards.length; i++) {
+      var inp = cards[i].querySelector(".free input");
+      if (cards[i].answerText && inp && !inp.disabled) return cards[i];
+    }
+    return null;
+  }
+  function composer() { text.placeholder = freeCard() ? "Answer in your own words" : "Message " + title; }
   async function inquiries() {
     var r = await fantastic.send("user", { type: "inquiries", asker: AGENT }).catch(function () { return null; });
     var open = r && Array.isArray(r.inquiries) ? r.inquiries : [];
     asks = open.length;
     askTs = open.reduce(function (lo, q) { return typeof q.ts === "number" && (lo === 0 || q.ts < lo) ? q.ts : lo; }, 0);
     drawState();
+    composer();
     open.forEach(function (q) {
       var re = Number(q.re);
       if (!Number.isFinite(re) || seenInq[re] || heldRe[re]) return;
       seenInq[re] = true;
       push(inquiryEl(q));
     });
+    composer();
   }
 
   // rows after the last seen: embed cards and the checker's reports arrive as rows, not events
@@ -685,6 +704,8 @@ function textsOf(rows) {
   function submit() {
     var typed = text.value.trim();
     if (!typed) return;
+    var ic = freeCard();
+    if (ic) { text.value = ""; text.style.height = ""; ic.answerText(typed); composer(); return; }
     text.value = "";
     text.style.height = "";
     pinned = true;
@@ -723,20 +744,30 @@ function textsOf(rows) {
     // a redraw on the way (soft) never takes a turn's live text away
     if (soft && (busy() || Object.keys(drafts).length > 0)) return false;
     tail = null;
-    var kids = Array.prototype.slice.call(dialog.children, 0);
+    var kids = Array.prototype.slice.call(dialog.children, 1);
     kids.forEach(function (k) { k.remove(); });
     drawItems(shapeRows(tl.rows, thoughtsOf(head), textsOf(head)));
     answered.forEach(push);
     lastRow = tl.lastId;
+    var more = $("earlier");
+    more.hidden = tl.earlier <= 0;
+    more.textContent = "Earlier: " + tl.earlier + " message" + (tl.earlier === 1 ? "" : "s");
+    more.disabled = false;
     return true;
   }
+  $("earlier").onclick = function () {
+    if (busy()) return;
+    $("earlier").disabled = true;
+    seenInq = {};
+    drawHistory(keepRows + 300).then(function () { inquiries(); }).catch(function (e) { notice("✕ " + (e && e.message ? e.message : e), "error"); });
+  };
   // BOOT: head, history, live snapshot, then the watch
   async function boot() {
     fantastic.watch(AGENT, onEvent);
     var rf = await call({ type: "reflect" });
     title = s(rf, "display_name") || s(rf, "id") || AGENT;
     $("name").textContent = title;
-    text.placeholder = "Message " + title;
+    composer();
     var prov = s(rf, "provider_id");
     if (!prov) notice("No model set", "warn");
     await drawHistory(300);

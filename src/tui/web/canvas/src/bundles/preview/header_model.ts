@@ -43,3 +43,46 @@ export function metaOf(o: { name: string; size?: number; text?: string }): strin
   if (ext !== "") parts.push(ext);
   return parts.join(" · ");
 }
+
+/** What the breadcrumb reads of the agent index. */
+export interface AgentLookup {
+  agentAt(path: string): { id: string; displayName: string; parentId?: string } | undefined;
+  folderOf(id: string): string | undefined;
+}
+
+/** The agents above (and including) agent `id`, outermost first, as their shown names: its `parent_id` chain as far as the index knows it. */
+export function agentChain(id: string, index: AgentLookup): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  let cur: string | undefined = id;
+  while (cur !== undefined && !seen.has(cur)) {
+    seen.add(cur);
+    const folder = index.folderOf(cur);
+    const info = folder === undefined ? undefined : index.agentAt(folder);
+    if (info === undefined) {
+      if (cur === id) out.push(id);
+      break;
+    }
+    out.push(info.displayName !== "" ? info.displayName : info.id);
+    cur = info.parentId;
+  }
+  return out.reverse();
+}
+
+/** The breadcrumb of a path inside an agent's folder: the agent chain, then the path below that folder. Outside any agent folder it is `crumbs`. */
+export function trail(path: string | null, index: AgentLookup & { paths(): string[] }): string[] {
+  if (path === null || path === "") return crumbs(path);
+  let home = "";
+  for (const p of index.paths()) {
+    if ((path === p || path.startsWith(`${p}/`)) && p.length > home.length) home = p;
+  }
+  const info = home === "" ? undefined : index.agentAt(home);
+  if (info === undefined) return crumbs(path);
+  return [...agentChain(info.id, index), ...crumbs(path.slice(home.length))];
+}
+
+/** The handler a "no view for X" refusal names: an agent that has no view of its own. */
+export function noViewHandler(message: string): string | null {
+  const m = /^no view for (.+)$/.exec(message);
+  return m === null ? null : m[1]!;
+}

@@ -19,6 +19,8 @@ interface Pure {
   kernelStrip(root: Obj, peers: Obj[], waiting?: number): Obj[];
   askAges(inq: Obj[], now: number): Record<string, string>;
   toolRows(root: Obj, chats: Record<string, boolean>): Obj[];
+  pinRows(root: Obj, chats: Record<string, boolean>, folded: Record<string, boolean>, status: Record<string, Obj>, asks: Record<string, boolean>, files: Obj, project: string, opts?: Obj): Obj[];
+  projectName(p: unknown): string;
   chatSet(reply: Obj): Record<string, boolean>;
   stateOf(status: Obj | undefined, asks: boolean): { kind: string; label: string };
   treeRows(root: Obj, chats: Record<string, boolean>, folded: Record<string, boolean>, status: Record<string, Obj>, asks: Record<string, boolean>, files?: Obj, opts?: Obj): Obj[];
@@ -33,7 +35,7 @@ interface Pure {
   fileRows(lists: Record<string, Obj[]>, open: Record<string, boolean>, path: string, depth: number): Obj[];
 }
 const ctx = vm.createContext({});
-vm.runInContext(`${src.slice(from, to)}\nthis.api = { askAges, toolRows, kernelStrip, chatSet, stateOf, treeRows, filterRows, keptState, restoredState, wantedWatches, changedDirs, askers, waitingRows, sortedListing, fileRows };`, ctx);
+vm.runInContext(`${src.slice(from, to)}\nthis.api = { askAges, toolRows, pinRows, projectName, kernelStrip, chatSet, stateOf, treeRows, filterRows, keptState, restoredState, wantedWatches, changedDirs, askers, waitingRows, sortedListing, fileRows };`, ctx);
 const raw = (ctx as unknown as { api: Pure }).api;
 // the vm's objects are of another realm: compare them as plain JSON
 const plain = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
@@ -206,4 +208,26 @@ test("a change reads again the folder that holds it, and the folder itself when 
   assert.deepEqual(plain(raw.changedDirs({ type: "changed", path: "src", kind: "modified" }, held)), [".", "src"]);
   assert.deepEqual(plain(raw.changedDirs({ type: "changed", path: "other/x", kind: "added" }, held)), [], "a folder the view does not list is not read");
   assert.deepEqual(plain(raw.changedDirs({ type: "watching" }, held)), []);
+});
+
+test("the pinned rows: the files agent, the project folder under it, its files while they show, then its file views", () => {
+  const root = { id: "r", display_name: "r", children: [
+    { id: "files", display_name: "files", handler_module: "file_bridge.tools", children: [{ id: "view1", display_name: "view1", handler_module: "file_view.tools", children: [] }] },
+    { id: "c", display_name: "c", handler_module: "ai_chat.tools", children: [] },
+  ] };
+  const lists = { ".": [{ name: "src", path: "src", type: "dir" }, { name: "a.txt", path: "a.txt", type: "file" }] };
+  const off = plain(raw.pinRows(root, { c: true }, {}, {}, {}, { on: false, lists, open: {} }, "demo"));
+  assert.deepEqual(off.map((r) => [r["kind"], r["id"] ?? r["name"], r["depth"]]), [["agent", "files", 0], ["project", "demo", 1], ["agent", "view1", 1]]);
+  assert.equal(off[1]!["open"], false);
+  const on = plain(raw.pinRows(root, { c: true }, {}, {}, {}, { on: true, lists, open: {} }, "demo"));
+  assert.deepEqual(on.map((r) => r["name"]), ["files", "demo", "src", "a.txt", "view1"]);
+  assert.deepEqual(on.map((r) => r["depth"]), [0, 1, 2, 2, 1]);
+  assert.deepEqual(plain(raw.pinRows(root, {}, {}, {}, {}, { on: false, lists: {}, open: {} }, "")).map((r) => r["name"]), ["files", "view1"], "no project name: no folder row");
+  assert.deepEqual(plain(raw.pinRows({ id: "r", children: [] }, {}, {}, {}, {}, { on: true, lists, open: {} }, "demo")), [], "no files agent: nothing pinned");
+  assert.deepEqual(plain(raw.treeRows(root, { c: true }, {}, {}, {}, undefined, { pinned: true })).map((r) => r["id"]), ["r", "c"], "pinned: the files agent leaves the tree");
+  assert.deepEqual(plain(raw.treeRows(root, { c: true }, {}, {}, {}, undefined, {})).map((r) => r["id"]), ["r", "files", "view1", "c"]);
+});
+
+test("the project name is the last part of the files root", () => {
+  assert.deepEqual(["/a/b/launch-week", "/a/b/launch-week/", "x", "", null].map((p) => raw.projectName(p)), ["launch-week", "launch-week", "x", "", ""]);
 });

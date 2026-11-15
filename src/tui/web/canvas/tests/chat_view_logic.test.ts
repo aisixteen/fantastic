@@ -18,7 +18,7 @@ type Row = Record<string, unknown>;
 interface Pure {
   parseFrom(t: string): { sender: string; text: string };
   shapeRows(rows: Row[], thoughts?: Map<number, { text: string; cut: number }>, texts?: Map<number, string>): Row[];
-  historyTail(call: (p: Row) => Promise<Row | null>, keep?: number): Promise<{ rows: Row[]; bytes: number; lastId: number }>;
+  historyTail(call: (p: Row) => Promise<Row | null>, keep?: number): Promise<{ rows: Row[]; bytes: number; lastId: number; earlier: number }>;
   stateOf(phase: string, reason: string, asks: number): string;
   inquiryAge(ts: unknown, nowMs: number): string;
   metaOf(sender: string, name: string): string;
@@ -128,7 +128,8 @@ test("historyTail keeps the newest 300 rows over the pages", async () => {
   assert.equal(t.rows[299]!["id"], 600);
   assert.equal(t.lastId, 600);
   assert.equal(t.bytes, 6000);
-  assert.deepEqual(await P.historyTail(async () => null), { rows: [], bytes: 0, lastId: 0 });
+  assert.equal(t.earlier, 300, "the 300 older rows are counted, for the Earlier button");
+  assert.deepEqual(await P.historyTail(async () => null), { rows: [], bytes: 0, lastId: 0, earlier: 0 });
 });
 
 test("thoughtsOf of readHead pages the rows verb from the head and stops on a null answer", async () => {

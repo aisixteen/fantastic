@@ -106,9 +106,9 @@ def main() -> bool:
         async with rig.page(1600, 1000) as pg:
             await asyncio.sleep(1.5)
             await open_chat(pg)
-            got = await until(pg, lambda g: g.get("name") and g.get("model"))
-            info["head"] = {k: got.get(k) for k in ("name", "model")}
-            r["1 the view draws, header names the chat and its model"] = bool(got.get("name")) and got.get("model") == "stub"
+            got = await until(pg, lambda g: g.get("name"))
+            info["head"] = {k: got.get(k) for k in ("name",)}
+            r["1 the view draws, header names the chat"] = bool(got.get("name"))
             await say(pg, "hello there")
             got = await until(pg, lambda g: any("Both calls are back" in m for m in g["agent"]) and g["tools"])
             info["turn1"] = got

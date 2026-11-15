@@ -1,4 +1,4 @@
-import { crumbs, kindOf, metaOf } from "./header_model.ts";
+import { agentChain, kindOf, metaOf, noViewHandler, trail } from "./header_model.ts";
 import type { Payload } from "../../lib.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { onMac } from "../canvas/viewer.ts";
@@ -128,7 +128,7 @@ export const previewView: ViewBundle = {
     const drawBar = (): void => {
       const live = ctl.isLive() && !ctl.gone;
       const agentView = ctl.content.k === "agent";
-      const parts = agentView ? [ctl.agent ?? ""] : crumbs(ctl.path);
+      const parts = agentView ? agentChain(ctl.agent ?? "", agentIndex) : trail(ctl.path, agentIndex);
       title.textContent = parts.length === 0 ? "nothing selected" : parts.join(" / ");
       title.title = ctl.path ?? "";
       const kindName = kindOf(ctl.mode, agentView);
@@ -464,7 +464,27 @@ export const previewView: ViewBundle = {
               else agentHandle = h;
             },
             (err: Error) => {
-              if (!moved()) message("pv-error", `agent ${mine}: ${err.message}`);
+              if (moved()) return;
+              const handler = noViewHandler(err.message);
+              if (handler === null) {
+                message("pv-error", `agent ${mine}: ${err.message}`);
+                return;
+              }
+              // an agent with no view of its own: its name card
+              const card = document.createElement("div");
+              card.className = "pv-card";
+              const line = document.createElement("div");
+              line.className = "big";
+              const info = agentIndex.agentAt(agentIndex.folderOf(mine) ?? "");
+              line.textContent = info !== undefined && info.displayName !== "" ? info.displayName : mine;
+              const tag = document.createElement("span");
+              tag.className = "pv-chip";
+              tag.textContent = handler.replace(/\.tools$/, "");
+              line.append(" ", tag);
+              const sub = document.createElement("div");
+              sub.textContent = "This agent has no view of its own.";
+              card.append(line, sub);
+              host.replaceChildren(card);
             },
           );
           return;

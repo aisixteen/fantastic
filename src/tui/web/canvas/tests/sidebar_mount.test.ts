@@ -15,7 +15,7 @@ const view = {
     calls: {
       kernel: ["reflect", "list_agents"],
       user: ["inquiries"],
-      files: ["list", "watch", "watch_path", "unwatch_path", "open_view"],
+      files: ["list", "reflect", "watch", "watch_path", "unwatch_path", "open_view"],
       "*": ["status"],
       sidebar: ["watch"],
     },
@@ -26,7 +26,7 @@ test("the sidebar cell is granted exactly the view's calls, `*` written out per 
   assert.deepEqual(sidebarGrant(view, ["chat1", "files"]), {
     kernel: ["reflect", "list_agents"],
     user: ["inquiries"],
-    files: ["list", "watch", "watch_path", "unwatch_path", "open_view", "status"],
+    files: ["list", "reflect", "watch", "watch_path", "unwatch_path", "open_view", "status"],
     sidebar: ["watch"],
     chat1: ["status"],
   });

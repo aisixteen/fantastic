@@ -7,6 +7,7 @@ test("agentIdOf reads the top-level id, never an indented one", () => {
   assert.equal(y.id, "files");
   assert.equal(y.handler, "file_bridge.tools");
   assert.equal(y.displayName, "The files");
+  assert.equal(y.parentId, "user");
   assert.equal(agentIdOf(["can_call:", "  id: nested"]).id, null);
   assert.equal(agentIdOf(["id: null"]).id, null);
 });
