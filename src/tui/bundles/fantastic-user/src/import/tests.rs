@@ -277,7 +277,7 @@ ports:
   '@connector:kernel': {kind: connector, why: agent a field can_call reaches kernel, used_by: [a]}
 ";
     let p = ok(y, json!({"@connector:kernel": "kernel"}));
-    assert_eq!(agent(&p, "a_1").meta["can_call"], json!({"kernel": ["docs"]}));
+    assert_eq!(agent(&p, "a_1").meta["can_call"], json!({ROOT: ["docs"]}));
     // only a connector port: the kernel is no memory agent
     let e = run(PORTED, &[], json!({"@memory": "kernel", "@exec": "exec"}), false, &[]).unwrap_err();
     assert_eq!(e.reason, "bad_binding", "{}", e.message);
