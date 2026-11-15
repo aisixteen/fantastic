@@ -8,7 +8,15 @@ const CSS = `
     color: ${tint("color.text.cool", 85)}; font: 12px ${tok("font.family.mono")}; background: ${tok("color.surface.well")}; }
   .preview-view .pv-bar { display: flex; align-items: center; gap: 6px; padding: 5px 8px; flex: none; border-bottom: 1px solid ${tok("color.line.faint")}; }
   .preview-view .pv-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: ${tint("color.text.cool", 75)}; }
-  .preview-view .pv-live { color: ${tok("color.status.ok")}; }
+  .preview-view .pv-live { color: ${tok("color.status.ok")}; background: ${tok("color.status.ok-surface")}; border-radius: ${tok("radius.pill")}; padding: 0 6px; }
+  .preview-view .pv-kind { flex: none; padding: 0 6px; border: 1px solid ${tok("color.line.faint")}; border-radius: ${tok("radius.chip")}; background: ${tok("color.surface.button")}; color: ${tok("color.text.subtle")}; font-size: 10px; line-height: 16px; }
+  .preview-view .pv-kind[hidden], .preview-view .pv-head[hidden] { display: none; }
+  /* the header: a glyph tile, the name, the meta line under it */
+  .preview-view .pv-head { flex: none; display: grid; grid-template-columns: auto 1fr; column-gap: 12px; align-items: center; padding: 12px 16px; border-bottom: 1px solid ${tok("color.line.faint")}; }
+  .preview-view .pv-glyph { grid-row: 1 / span 2; display: grid; place-items: center; width: 40px; height: 40px; border-radius: ${tok("radius.panel")}; background: ${tok("color.surface.selected")}; color: ${tok("color.text.muted")}; font-size: 18px; }
+  .preview-view .pv-name { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 16px/1.3 ${tok("font.family.mono")}; color: ${tok("color.text.primary")}; }
+  .preview-view .pv-meta { min-width: 0; font: 12px/1.3 ${tok("font.family.sans")}; color: ${tok("color.text.subtle")}; }
+  .preview-view .pv-meta:empty { display: none; }
   .preview-view .pv-unsaved { color: ${tok("color.status.warn")}; }
   .preview-view .pv-chip { flex: none; cursor: pointer; padding: 1px 7px; border: 1px solid ${tok("color.line.button")}; border-radius: ${tok("radius.chip")};
     background: ${tok("color.surface.button")}; color: ${tok("color.text.primary")}; font: inherit; transition: background ${tok("duration.hover")}; }
@@ -21,8 +29,8 @@ const CSS = `
     color: ${tok("color.status.warn-text")}; background: ${tint("color.status.warn", 16)}; border-bottom: 1px solid ${tok("color.status.warn-line")}; }
   .preview-view .pv-conflict .msg { flex: 1 1 220px; }
   .preview-view .pv-body { flex: 1; min-height: 0; position: relative; overflow: hidden; display: flex; flex-direction: column; }
-  .preview-view .pv-empty { padding: 16px; color: ${tok("color.text.faint")}; }
-  .preview-view .pv-error { padding: 16px; color: ${tok("color.status.error-text")}; white-space: pre-wrap; word-break: break-word; }
+  .preview-view .pv-empty { padding: 16px; color: ${tok("color.text.subtle")}; }
+  .preview-view .pv-error { margin: 12px 16px; padding: 10px 12px; color: ${tok("color.status.error-text")}; background: ${tok("color.status.error-surface")}; border: 1px solid ${tok("color.status.error-line")}; border-radius: ${tok("radius.panel")}; white-space: pre-wrap; word-break: break-word; }
   .preview-view .pv-card { padding: 16px; line-height: 1.6; }
   .preview-view .pv-card .big { color: ${tok("color.text.bright")}; }
   /* text: a gutter and the highlighted source; the editor lays a textarea over the same box */
