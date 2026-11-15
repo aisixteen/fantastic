@@ -219,6 +219,8 @@ test("the pinned rows: the files agent, the project folder under it, its files w
   const off = plain(raw.pinRows(root, { c: true }, {}, {}, {}, { on: false, lists, open: {} }, "demo"));
   assert.deepEqual(off.map((r) => [r["kind"], r["id"] ?? r["name"], r["depth"]]), [["agent", "files", 0], ["project", "demo", 1], ["agent", "view1", 1]]);
   assert.equal(off[1]!["open"], false);
+  assert.equal(off[0]!["tag"], "tool", "the pinned files row carries the tool tag, not its handler's");
+  assert.equal(off[2]!["tag"], "file_view", "other pinned agent rows keep their handler tag");
   const on = plain(raw.pinRows(root, { c: true }, {}, {}, {}, { on: true, lists, open: {} }, "demo"));
   assert.deepEqual(on.map((r) => r["name"]), ["files", "demo", "src", "a.txt", "view1"]);
   assert.deepEqual(on.map((r) => r["depth"]), [0, 1, 2, 2, 1]);

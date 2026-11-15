@@ -1,4 +1,7 @@
 import type { AgentInfo } from "../files/agent_index.ts";
+import { extOf, human } from "../../../../../../lib/rust/crates/bundles/fantastic-file/src/file_head.mjs";
+
+export { extOf, human };
 
 // WHAT THE PREVIEWER SHOWS for a path, and where it is bound. Pure; no DOM.
 
@@ -15,11 +18,6 @@ export const PAGE = 65536;
 
 const IMAGES = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif"];
 const BINARIES = ["zip", "gz", "db", "sqlite", "wasm", "exe", "so", "dylib", "dll", "o", "a", "class", "jar", "woff", "woff2", "ttf", "mp3", "mp4", "mov"];
-
-export function extOf(name: string): string {
-  const i = name.lastIndexOf(".");
-  return i <= 0 ? "" : name.slice(i + 1).toLowerCase();
-}
 
 export interface Subject {
   type: "dir" | "file";
@@ -108,11 +106,4 @@ export function pageText(raw: Uint8Array, first: boolean): string | null {
   } catch {
     return null;
   }
-}
-
-export function human(n: number): string {
-  if (n < 0) return "unknown size";
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MiB`;
 }

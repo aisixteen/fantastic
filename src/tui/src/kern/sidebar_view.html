@@ -280,6 +280,7 @@ function pinRows(root, chats, folded, status, asks, files, project, opts) {
   var f = filesNode(root);
   if (!f) return [];
   var rows = treeRows(f, chats, folded, status, asks, null, opts);
+  rows[0].tag = "tool"; // the files agent is the files tool, whatever bundle serves it
   var on = !!(files && files.on);
   var under = [];
   if (project !== "") under.push({ kind: "project", name: project, open: on, depth: 1 });
