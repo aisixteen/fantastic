@@ -116,6 +116,9 @@ impl Handler for AiChatBundle {
         let reflect = || {
             let mut out = verbs::reflect_base(agent_id, kernel, MAN, CFG.model_window);
             let meta = crate::helpers::agent_meta(agent_id, kernel);
+            // the name the view shows in its head: the record's `display_name`, else the id
+            let shown = meta.get("display_name").and_then(Value::as_str).filter(|n| !n.is_empty());
+            out.insert("display_name".into(), json!(shown.unwrap_or(agent_id.as_str())));
             out.insert(
                 PROVIDER_FIELD.into(),
                 meta.get(PROVIDER_FIELD).cloned().unwrap_or(Value::Null),
