@@ -345,3 +345,13 @@ test("the page's walker is the one ensureWalker made, and getWalker says so", as
   assert.equal(getWalker(), w);
   await w.request();
 });
+
+test("a folder's watch is armed before its listing is read (a file made between them would be in neither)", async () => {
+  const r = rig();
+  project(r.bridge);
+  const ctl = await r.mountTree("t_order");
+  const from = r.bridge.calls.length;
+  await ctl.toggle("docs");
+  const seen = r.bridge.calls.slice(from).filter((c) => c["path"] === "docs").map((c) => c["type"]);
+  assert.ok(seen.indexOf("watch_path") >= 0 && seen.indexOf("list") > seen.indexOf("watch_path"), `got ${seen.join(",")}`);
+});
