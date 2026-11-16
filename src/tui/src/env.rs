@@ -153,7 +153,8 @@ mod tests {
     #[test]
     fn resolve_reads_the_recorded_workdir_back() {
         let s = scratch("rec");
-        std::fs::write(s.join("agent.yaml"), format!("id: root\nworkdir: '{}'\n", abs("/w").display())).unwrap();
+        // `/w` as recorded: on Windows a drive-relative path, resolved against the cwd's drive
+        std::fs::write(s.join("agent.yaml"), "id: root\nworkdir: /w\n").unwrap();
         let p = Paths::resolve(Some(&s), None).unwrap();
         assert_eq!(p.work, abs("/w"));
         assert_eq!(p.store, s);

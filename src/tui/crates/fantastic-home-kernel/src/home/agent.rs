@@ -186,9 +186,11 @@ fn folder_of(
     arg: &str,
     path: &str,
 ) -> Result<Opened, Value> {
-    if rows.iter().any(|r| same_path(&r.path, path)) {
+    // a listed folder answers in the registry's own spelling, so the view model
+    // (plain `==`) knows it whatever case or separators the caller used
+    if let Some(r) = rows.iter().find(|r| same_path(&r.path, path)) {
         return Ok(Opened {
-            path: path.to_string(),
+            path: r.path.clone(),
             workdir: None,
         });
     }
