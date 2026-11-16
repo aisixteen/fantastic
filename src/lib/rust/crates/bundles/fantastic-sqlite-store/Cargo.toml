@@ -16,7 +16,7 @@ serde = { workspace = true }
 schemars = { workspace = true }
 tokio = { workspace = true }
 # `bundled`: SQLite compiled in (FTS5 included) — no system library to guess at.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
 
 [dev-dependencies]
 fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }

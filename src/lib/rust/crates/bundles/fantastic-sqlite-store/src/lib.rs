@@ -47,7 +47,7 @@ use async_trait::async_trait;
 use fantastic_bundle::{py_json_dumps, py_repr_value, py_splitlines, py_strip};
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::outcome::{body_at, Blob};
-use fantastic_kernel::refusal::{missing, refusal, refusal_hint, with, BAD_ARG, EXISTS, NOT_FOUND, UNHANDLED};
+use fantastic_kernel::refusal::{missing, refusal, refusal_hint, with, BAD_ARG, EXISTS, NOT_ALLOWED, NOT_FOUND, UNHANDLED};
 use fantastic_kernel::{AgentId, Kernel};
 use fantastic_ram_store::{as_id, row_refs, stage_rows, stage_tables};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -60,6 +60,15 @@ pub mod record;
 pub mod verbs;
 
 const OPERATOR: &str = "kernel";
+
+/// The rows `query` returns when `limit` is absent, and the most it ever returns.
+const QUERY_LIMIT_DEFAULT: u64 = 500;
+const QUERY_LIMIT_MAX: u64 = 5000;
+
+/// The store's own view (html, plain JS): the allowlist as (file, size) rows. `{{agent}}` is the store's id.
+const VIEW: &str = include_str!("store_view.html");
+/// The verbs the view calls on its own agent: reads only.
+pub const VIEW_CALLS: [&str; 1] = ["reflect"];
 
 type Row = Map<String, Value>;
 
@@ -571,6 +580,149 @@ impl SqliteStoreBundle {
         }
     }
 
+    /// The files in `query_allow` as written, each resolved by [`resolve_path`] (the same rules as `path`).
+    fn allowed(&self, id: &AgentId, kernel: &Arc<Kernel>) -> Vec<(String, Result<PathBuf, String>)> {
+        let rec = record(kernel, id);
+        let own = own_root(kernel, id);
+        rec.get("query_allow")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(|f| {
+                let mut one = Map::new();
+                one.insert("path".to_string(), Value::from(f));
+                (f.to_string(), resolve_path(&one, kernel, &own))
+            })
+            .collect()
+    }
+
+    fn query(&self, id: &AgentId, a: &verbs::Query, kernel: &Arc<Kernel>) -> Value {
+        let bad = |arg: &str, msg: String| {
+            let mut r = refusal(BAD_ARG, format!("sqlite_store: query: {msg}"));
+            with(&mut r, "arg", json!(arg));
+            r
+        };
+        let Some((_, resolved)) = self.allowed(id, kernel).into_iter().find(|(f, _)| *f == a.db) else {
+            let mut r = refusal_hint(
+                NOT_ALLOWED,
+                format!("sqlite_store: query: {:?} is not in this store's query_allow", a.db),
+                "name one entry of the record's `query_allow`, as written there",
+            );
+            with(&mut r, "arg", json!("db"));
+            return r;
+        };
+        let path = match resolved {
+            Ok(p) => p,
+            Err(e) => return bad("db", e),
+        };
+        if !path.is_file() {
+            let mut r = refusal(NOT_FOUND, format!("sqlite_store: query: {:?} does not exist", a.db));
+            with(&mut r, "arg", json!("db"));
+            return r;
+        }
+        let limit = a.limit.unwrap_or(QUERY_LIMIT_DEFAULT);
+        if limit == 0 {
+            return bad("limit", "`limit` is at least 1".to_string());
+        }
+        let limit = limit.min(QUERY_LIMIT_MAX) as usize;
+        let mut binds: Vec<rusqlite::types::Value> = Vec::new();
+        for p in a.params.iter().flatten() {
+            binds.push(match p {
+                Value::Null => rusqlite::types::Value::Null,
+                Value::Bool(b) => rusqlite::types::Value::Integer(i64::from(*b)),
+                Value::Number(n) => match n.as_i64() {
+                    Some(i) => rusqlite::types::Value::Integer(i),
+                    None => match n.as_f64() {
+                        Some(f) => rusqlite::types::Value::Real(f),
+                        None => return bad("params", format!("{n} is not a number SQLite holds")),
+                    },
+                },
+                Value::String(s) => rusqlite::types::Value::Text(s.clone()),
+                _ => return bad("params", "each param is null, a boolean, a number or a string".to_string()),
+            });
+        }
+        let conn = match Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) {
+            Ok(c) => c,
+            Err(e) => return bad("db", format!("{:?} cannot be opened read-only: {e}", a.db)),
+        };
+        if let Err(e) = conn.pragma_update(None, "query_only", "ON") {
+            return db_err(e);
+        }
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+        // Only reads: a select's own reads and functions. Anything else (a write, ATTACH, a pragma) is refused as the statement is prepared.
+        conn.authorizer(Some(|ctx: rusqlite::hooks::AuthContext<'_>| {
+            use rusqlite::hooks::{AuthAction, Authorization};
+            match ctx.action {
+                AuthAction::Select | AuthAction::Read { .. } | AuthAction::Function { .. } | AuthAction::Recursive => Authorization::Allow,
+                _ => Authorization::Deny,
+            }
+        }));
+        // One statement: the batch yields a second one when there is one.
+        let mut batch = rusqlite::Batch::new(&conn, &a.sql);
+        let denied = |e: &rusqlite::Error| match e {
+            rusqlite::Error::SqlInputError { error, .. } => error.code == rusqlite::ErrorCode::AuthorizationForStatementDenied,
+            rusqlite::Error::SqliteFailure(e, _) => e.code == rusqlite::ErrorCode::AuthorizationForStatementDenied,
+            _ => false,
+        };
+        let mut stmt = match batch.next() {
+            Ok(Some(s)) => s,
+            Ok(None) => return bad("sql", "`sql` holds no statement".to_string()),
+            Err(e) if denied(&e) => return bad("sql", "only a read-only select is allowed".to_string()),
+            Err(e) => return bad("sql", e.to_string()),
+        };
+        match batch.next() {
+            Ok(None) => {}
+            Ok(Some(_)) => return bad("sql", "one statement only".to_string()),
+            Err(e) if denied(&e) => return bad("sql", "one statement only".to_string()),
+            Err(e) => return bad("sql", format!("one statement only ({e})")),
+        }
+        if !stmt.readonly() {
+            return bad("sql", "only a read-only select is allowed".to_string());
+        }
+        if stmt.parameter_count() != binds.len() {
+            return bad(
+                "params",
+                format!("the statement has {} placeholder(s), `params` has {}", stmt.parameter_count(), binds.len()),
+            );
+        }
+        let columns: Vec<String> = stmt.column_names().into_iter().map(str::to_string).collect();
+        let mut rows = match stmt.query(rusqlite::params_from_iter(binds.iter())) {
+            Ok(r) => r,
+            Err(e) => return bad("sql", e.to_string()),
+        };
+        let mut out: Vec<Value> = Vec::new();
+        let mut truncated = false;
+        loop {
+            match rows.next() {
+                Ok(Some(row)) => {
+                    if out.len() == limit {
+                        truncated = true;
+                        break;
+                    }
+                    let mut cells = Vec::with_capacity(columns.len());
+                    for i in 0..columns.len() {
+                        cells.push(match row.get_ref(i) {
+                            Ok(rusqlite::types::ValueRef::Null) => Value::Null,
+                            Ok(rusqlite::types::ValueRef::Integer(n)) => json!(n),
+                            Ok(rusqlite::types::ValueRef::Real(f)) => json!(f),
+                            Ok(rusqlite::types::ValueRef::Text(t)) => Value::from(String::from_utf8_lossy(t).into_owned()),
+                            Ok(rusqlite::types::ValueRef::Blob(b)) => json!({"bytes": b.len()}),
+                            Err(e) => return bad("sql", e.to_string()),
+                        });
+                    }
+                    out.push(Value::Array(cells));
+                }
+                Ok(None) => break,
+                Err(e) => return bad("sql", e.to_string()),
+            }
+        }
+        json!({"columns": columns, "rows": out, "truncated": truncated})
+    }
+
     fn reflect(&self, id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         let rec = record(kernel, id);
         let counts = self.tx(id, kernel, |db| {
@@ -598,6 +750,22 @@ impl SqliteStoreBundle {
             out.insert("error".to_string(), counts.get("error").cloned().unwrap_or(Value::Null));
         }
         out.insert("optional_verbs".to_string(), json!(["search"]));
+        // the allowlist `query` reads, as (file, size) rows; a file not there yet has no size
+        let allow: Vec<Value> = self
+            .allowed(id, kernel)
+            .into_iter()
+            .map(|(file, p)| {
+                let size = p.ok().and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len());
+                json!({"file": file, "size": size})
+            })
+            .collect();
+        out.insert("query_allow".to_string(), Value::Array(allow));
+        // HOW IT IS DRAWN: an html view, compiled in
+        let me = id.as_str();
+        out.insert(
+            "view".to_string(),
+            json!({"kind": "html", "bytes": VIEW.replace("{{agent}}", me), "calls": {me: VIEW_CALLS}}),
+        );
         Value::Object(out)
     }
 
@@ -972,6 +1140,7 @@ impl Handler for SqliteStoreBundle {
             Call::Prune(a) => self.prune(agent_id, &a, kernel),
             Call::Inject(a) => self.inject(agent_id, &a, kernel),
             Call::Dump(_) => self.dump(agent_id, kernel),
+            Call::Query(a) => self.query(agent_id, &a, kernel),
             // the bytes verbs ride the binary path only (`handle_binary`)
             Call::PutBytes(_) => refusal(
                 BAD_ARG,
