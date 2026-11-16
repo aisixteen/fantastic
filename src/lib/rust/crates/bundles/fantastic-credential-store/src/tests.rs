@@ -644,6 +644,38 @@ async fn a_read_pinned_to_another_host_is_refused() {
         .ends_with("not None — refused, nothing read"));
 }
 
+#[tokio::test]
+async fn one_ref_bound_to_several_hosts_reads_for_each_and_refuses_a_third() {
+    let f = mk(json!({})).await;
+    declare(&f.k, json!({"mail/main": {"host": ["IMAP.example.com", "https://smtp.example.com:465", "imap.example.com"]}})).await;
+    let set = call(
+        &f.k,
+        json!({"type": "set", "ref": "mail/main", "fields": {"username": "me", "password": KEY}}),
+        None,
+    )
+    .await;
+    assert_eq!(set.result["host"], json!(["imap.example.com", "smtp.example.com:465"]), "{}", set.result);
+    for h in ["imap.example.com", "smtp.example.com:465", "https://SMTP.example.com:465/x"] {
+        let got = call(&f.k, json!({"type": "get", "ref": "mail/main", "host": h}), None).await;
+        assert_eq!(got.result["fields"], json!({"username": "me", "password": KEY}), "{h}: {}", got.result);
+    }
+    let third = call(&f.k, json!({"type": "get", "ref": "mail/main", "host": "evil.example.net"}), None).await;
+    assert_eq!(third.result["reason"], json!("bad_arg"), "{}", third.result);
+    assert_eq!(third.result["arg"], json!("host"));
+    assert!(third.result["error"].as_str().unwrap().contains("is bound to host"));
+    assert!(!third.result.to_string().contains(KEY));
+    // the listing shows both hosts, never a value
+    let listed = call(&f.k, json!({"type": "list"}), None).await;
+    assert_eq!(listed.result["refs"][0]["host"], json!(["imap.example.com", "smtp.example.com:465"]));
+    // the same hosts in another order still read; another list reads nothing
+    declare(&f.k, json!({"mail/main": {"host": ["smtp.example.com:465", "imap.example.com"], "fields": ["username", "password"]}})).await;
+    let again = call(&f.k, json!({"type": "get", "ref": "mail/main", "host": "imap.example.com"}), None).await;
+    assert_eq!(again.result["fields"]["username"], json!("me"), "{}", again.result);
+    declare(&f.k, json!({"mail/main": {"host": ["imap.example.com", "other.example.com"], "fields": ["username", "password"]}})).await;
+    let moved = call(&f.k, json!({"type": "get", "ref": "mail/main", "host": "imap.example.com"}), None).await;
+    assert_eq!(moved.result["reason"], json!("bad_arg"), "{}", moved.result);
+}
+
 // ─── the host at rest ────────────────────────────────────────────────────────
 
 /// python `_at_rest` — the `get {ref, host}` host-mismatch shape: bound to the
