@@ -177,6 +177,7 @@ body{position:relative}
 <div class="tools">
 <label class="fl"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg><input id="filter" type="search" placeholder="Filter agents and files" aria-label="Filter agents and files" autocomplete="off"></label>
 <button class="sw" id="sw" type="button" role="switch" aria-checked="false" aria-label="Show files in the tree"><i></i>Files</button>
+<button class="sw" id="full" type="button" role="switch" aria-checked="false" aria-label="Show the whole kernel tree" title="Compact: the AI agents under the root, the rest in the tools group. Full: the whole kernel tree."><i></i>Full</button>
 </div>
 <div class="scroll"><div class="tree" id="tree" role="tree"></div><div class="note err" id="err" hidden></div></div>
 <div class="pins" id="pins" hidden></div>
@@ -396,12 +397,13 @@ function waitingRows(inq, names, now) {
       return { asker: q.asker, who: names[q.asker] || q.asker, text: oneLine(q.text), age: ageText(q.ts, now), re: q.re };
     });
 }
-// what the view keeps across a reload: which branches are folded, which folders are open, whether files show
+// what the view keeps across a reload: which branches are folded, which folders are open, whether files
+// show, whether the tools group is open, and whether the tree is full (the whole kernel) or compact
 function keptState(st) {
-  return { folded: st.folded, open: st.open, filesOn: !!st.filesOn, toolsOpen: !!st.toolsOpen };
+  return { folded: st.folded, open: st.open, filesOn: !!st.filesOn, toolsOpen: !!st.toolsOpen, full: !!st.full };
 }
 function restoredState(saved) {
-  var out = { folded: {}, open: {}, filesOn: false, toolsOpen: false };
+  var out = { folded: {}, open: {}, filesOn: false, toolsOpen: false, full: false };
   if (!saved || typeof saved !== "object") return out;
   ["folded", "open"].forEach(function (k) {
     var m = saved[k];
@@ -409,6 +411,7 @@ function restoredState(saved) {
   });
   out.filesOn = saved.filesOn === true;
   out.toolsOpen = saved.toolsOpen === true;
+  out.full = saved.full === true;
   return out;
 }
 // the folders to hold a watch on: the project's root and every open folder, while files show
@@ -447,7 +450,7 @@ function withPhase(phases, agent, phase) {
 // end pure
 
 var SELF = "{{cell}}", ME = "{{agent}}";
-var st = { filesRoot: "", toolsOpen: false, root: null, chats: {}, status: {}, inq: [], folded: {}, selected: "", selPath: "", filesOn: false, open: {}, lists: {}, filter: "" };
+var st = { filesRoot: "", toolsOpen: false, full: false, root: null, chats: {}, status: {}, inq: [], folded: {}, selected: "", selPath: "", filesOn: false, open: {}, lists: {}, filter: "" };
 var watching = {};
 var $ = function (id) { return document.getElementById(id); };
 // an AI agent's face (the design's robot head, a small png inline: the view loads nothing)
@@ -568,7 +571,7 @@ function paintTree() {
   var host = $("tree"); host.textContent = "";
   if (!st.tree) return;
   var searching = st.filter.trim() !== "";
-  var rows = filterRows(treeRows(st.tree, st.chats, st.folded, st.status, askers(st.inq), { on: st.filesOn, lists: st.lists, open: st.open }, { ages: askAges(st.inq, Date.now() / 1000), tools: !searching, pinned: !searching }), st.filter);
+  var rows = filterRows(treeRows(st.tree, st.chats, st.folded, st.status, askers(st.inq), { on: st.filesOn, lists: st.lists, open: st.open }, { ages: askAges(st.inq, Date.now() / 1000), tools: !searching && !st.full, pinned: !searching && !st.full }), st.filter);
   var base = 0;
   rows.forEach(function (row) {
     if (row.kind === "file") host.appendChild(fileRow(row, base));
@@ -589,7 +592,7 @@ function projectRow(row) {
 }
 function paintPins() {
   var host = $("pins"); host.textContent = "";
-  var searching = st.filter.trim() !== "";
+  var searching = st.filter.trim() !== "" || st.full;
   var files = !searching && st.tree ? pinRows(st.tree, st.chats, st.folded, st.status, askers(st.inq), { on: st.filesOn, lists: st.lists, open: st.open }, projectName(st.filesRoot), { ages: askAges(st.inq, Date.now() / 1000) }) : [];
   var rows = !searching && st.tree ? toolRows(st.tree, st.chats) : [];
   host.hidden = rows.length === 0 && files.length === 0;
@@ -613,7 +616,7 @@ function paintPins() {
   if (st.toolsOpen) rows.forEach(function (r) { host.appendChild(agentRow(r)); });
   host.appendChild(b);
 }
-function paintSwitch() { $("sw").setAttribute("aria-checked", String(st.filesOn)); }
+function paintSwitch() { $("sw").setAttribute("aria-checked", String(st.filesOn)); $("full").setAttribute("aria-checked", String(st.full)); }
 function paint() { paintHead(); paintTree(); paintPins(); paintWait(); paintSwitch(); }
 
 function toggleDir(path) {
@@ -694,11 +697,12 @@ function clock() { paintWait(); paintTree(); paintPins(); }
 fantastic.onMessage(function (m) {
   if (!m || m.type !== "restore") return;
   var r = restoredState(m.state);
-  st.folded = r.folded; st.open = r.open; st.filesOn = r.filesOn; st.toolsOpen = r.toolsOpen;
+  st.folded = r.folded; st.open = r.open; st.filesOn = r.filesOn; st.toolsOpen = r.toolsOpen; st.full = r.full;
   paint(); syncFiles();
 });
 $("hide").addEventListener("click", function () { post({ type: "hide_tree" }); });
 $("sw").addEventListener("click", function () { setFiles(!st.filesOn); });
+$("full").addEventListener("click", function () { st.full = !st.full; keep(); paint(); });
 $("filter").addEventListener("input", function () { st.filter = $("filter").value; paintTree(); paintPins(); });
 post({ type: "ready" });
 paint();

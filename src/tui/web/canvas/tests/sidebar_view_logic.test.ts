@@ -199,13 +199,15 @@ test("the filter keeps the matches and the branch that leads to them", () => {
   assert.deepEqual(plain(raw.filterRows(rows, "CODER")).map((r) => r["id"]), ["kernel_state", "user", "coder"], "case does not matter");
 });
 
-test("what the view keeps across a reload: folded branches, open folders, the files switch", () => {
+test("what the view keeps across a reload: folded branches, open folders, the files and full switches", () => {
   const kept = plain(raw.keptState({ folded: { user: true }, open: { src: true }, filesOn: true, lists: { ".": [] }, selected: "x" }));
-  assert.deepEqual(kept, { folded: { user: true }, open: { src: true }, filesOn: true, toolsOpen: false });
+  assert.deepEqual(kept, { folded: { user: true }, open: { src: true }, filesOn: true, toolsOpen: false, full: false });
   assert.deepEqual(plain(raw.restoredState(kept)), kept);
-  assert.deepEqual(plain(raw.restoredState({ folded: { a: true, b: false, c: "yes" }, open: 3, filesOn: "true" })), { folded: { a: true }, open: {}, filesOn: false, toolsOpen: false }, "only what is exactly true comes back");
-  assert.deepEqual(plain(raw.restoredState(null)), { folded: {}, open: {}, filesOn: false, toolsOpen: false });
+  assert.deepEqual(plain(raw.restoredState({ folded: { a: true, b: false, c: "yes" }, open: 3, filesOn: "true" })), { folded: { a: true }, open: {}, filesOn: false, toolsOpen: false, full: false }, "only what is exactly true comes back");
+  assert.deepEqual(plain(raw.restoredState(null)), { folded: {}, open: {}, filesOn: false, toolsOpen: false, full: false });
   assert.equal(plain(raw.restoredState({ toolsOpen: true }))["toolsOpen"], true);
+  assert.equal(plain(raw.restoredState({ full: true }))["full"], true, "the full switch comes back");
+  assert.equal(plain(raw.keptState({ folded: {}, open: {}, full: true }))["full"], true);
 });
 
 test("a watch is held on the root and every open folder while files show, none otherwise", () => {
