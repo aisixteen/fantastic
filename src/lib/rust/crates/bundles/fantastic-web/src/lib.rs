@@ -244,7 +244,10 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     }
     let mut out = Map::new();
     out.insert("id".into(), json!(agent_id.as_str()));
-    out.insert("sentence".into(), json!(MAN));
+    out.insert(
+        "sentence".into(),
+        json!(MAN),
+    );
     out.insert("port".into(), port.map_or(Value::Null, |p| json!(p)));
     let rec = read_rec(agent_id, kernel);
     out.insert("host".into(), json!(origin::effective_host(&rec)));
@@ -578,9 +581,7 @@ async fn mount_surface(
 fn read_port(agent_id: &AgentId, kernel: &Kernel) -> Option<u16> {
     let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
     let meta = agent.meta.read().expect("meta poisoned");
-    meta.get("port")?
-        .as_u64()
-        .and_then(|n| u16::try_from(n).ok())
+    meta.get("port")?.as_u64().and_then(|n| u16::try_from(n).ok())
 }
 
 /// The agent's record meta (python `kernel.get(id) or {}`).

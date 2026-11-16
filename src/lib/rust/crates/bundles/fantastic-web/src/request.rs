@@ -188,11 +188,25 @@ fn default_port(scheme: &str) -> Option<u16> {
     }
 }
 
+/// Whether a credential may travel to `url`: only over https, or to a loopback
+/// host (127.0.0.1, ::1, localhost). Over plain http to any other host the call
+/// goes WITHOUT the credential (it is not read from the store at all).
+fn may_carry_key(url: &Url) -> bool {
+    url.scheme() == "https"
+        || matches!(
+            url.host_str().map(str::to_ascii_lowercase).as_deref(),
+            Some("127.0.0.1" | "[::1]" | "localhost")
+        )
+}
+
 /// The key for `url`'s host, read from the store at use; `None` when no ref is
-/// bound to the host. A store that answers without the key is a refusal naming
+/// bound to the host or the scheme may not carry it. A store that answers without the key is a refusal naming
 /// the ref, never a value.
 async fn secret_for(kernel: &Arc<Kernel>, url: &Url) -> Result<Option<String>, Value> {
     let loc = netloc(url);
+    if !may_carry_key(url) {
+        return Ok(None);
+    }
     let Some((store, r)) = find_ref(kernel, &loc).await else {
         return Ok(None);
     };
@@ -303,6 +317,27 @@ fn redact(hay: &[u8], needle: &[u8]) -> Vec<u8> {
         }
     }
     out
+}
+
+/// The body to return: the key redacted FIRST, then the cap applied. `more` says
+/// the reader stopped with bytes left. Returns `(body, truncated)`; a partial key
+/// left at the very end of a cut body is dropped.
+fn finish_body(raw: Vec<u8>, more: bool, key: Option<&[u8]>) -> (Vec<u8>, bool) {
+    let mut body = key.map_or(raw.clone(), |k| redact(&raw, k));
+    let mut truncated = more;
+    if body.len() > BODY_CAP {
+        body.truncate(BODY_CAP);
+        truncated = true;
+    }
+    if let (true, Some(k)) = (truncated, key) {
+        for n in (1..k.len().min(body.len() + 1)).rev() {
+            if body.ends_with(&k[..n]) {
+                body.truncate(body.len() - n);
+                break;
+            }
+        }
+    }
+    (body, truncated)
 }
 
 /// What a finished transport error says, with nothing from the request in it.
@@ -583,14 +618,17 @@ async fn run(plan: Plan, allow: &[String], kernel: &Arc<Kernel>) -> (Value, Stri
                 continue;
             }
         }
+        // read up to the cap plus a key's length less one, so a key straddling the
+        // cap is whole when it is redacted; the cut comes after (see `finish_body`)
+        let limit = BODY_CAP + secret.as_deref().map_or(0, |k| k.len().saturating_sub(1));
         let mut buf: Vec<u8> = Vec::new();
-        let mut truncated = false;
+        let mut more = false;
         loop {
             match resp.chunk().await {
                 Ok(Some(c)) => {
-                    if buf.len() + c.len() > BODY_CAP {
-                        buf.extend_from_slice(&c[..BODY_CAP - buf.len()]);
-                        truncated = true;
+                    if buf.len() + c.len() > limit {
+                        buf.extend_from_slice(&c[..limit - buf.len()]);
+                        more = true;
                         break;
                     }
                     buf.extend_from_slice(&c);
@@ -618,7 +656,15 @@ async fn run(plan: Plan, allow: &[String], kernel: &Arc<Kernel>) -> (Value, Stri
             .and_then(Value::as_str)
             .is_some_and(|t| t.to_ascii_lowercase().contains("json"));
         out.insert("headers".into(), Value::Object(hdrs));
-        let buf = secret_bytes.map_or(buf.clone(), |s| redact(&buf, s));
+        let (mut buf, truncated) = finish_body(buf, more, secret_bytes);
+        if truncated {
+            // a cut inside a multi-byte character stays text: back to the last whole one
+            if let Err(e) = std::str::from_utf8(&buf) {
+                if e.error_len().is_none() {
+                    buf.truncate(e.valid_up_to());
+                }
+            }
+        }
         match String::from_utf8(buf) {
             Ok(text) => match serde_json::from_str::<Value>(&text) {
                 Ok(v) if is_json && !truncated => out.insert("json".into(), v),
@@ -697,6 +743,35 @@ mod tests {
             b"a [secret] b [secret]"
         );
         assert_eq!(redact(b"none", b"SECRET"), b"none");
+    }
+
+    #[test]
+    fn a_key_straddling_the_cap_is_redacted_before_the_cut() {
+        let key = b"SECRETKEY12345";
+        let mut raw = vec![b'x'; BODY_CAP - 5];
+        raw.extend_from_slice(key); // starts 5 bytes before the cap
+        raw.extend_from_slice(b"tail");
+        let (body, truncated) = finish_body(raw, true, Some(key));
+        assert!(truncated);
+        assert!(body.len() <= BODY_CAP);
+        let text = String::from_utf8(body).unwrap();
+        assert!(!text.contains("SECRET") && !text.contains("12345"), "leak");
+        assert!(text.ends_with("[secr"), "redacted whole, then cut: {}", &text[BODY_CAP - 8..]);
+        // an uncut partial key at the very end of a cut body is dropped too
+        let mut raw = vec![b'x'; BODY_CAP - 3];
+        raw.extend_from_slice(&key[..8]);
+        let (body, _) = finish_body(raw, true, Some(key));
+        assert!(!String::from_utf8(body).unwrap().contains("SECR"));
+    }
+
+    #[test]
+    fn a_credential_goes_over_https_or_loopback_only() {
+        assert!(may_carry_key(&url("https://api.example.com/")));
+        assert!(may_carry_key(&url("http://127.0.0.1:8080/")));
+        assert!(may_carry_key(&url("http://[::1]:8080/")));
+        assert!(may_carry_key(&url("http://localhost:8080/")));
+        assert!(!may_carry_key(&url("http://api.example.com/")));
+        assert!(!may_carry_key(&url("http://10.0.0.5:8080/")));
     }
 
     #[test]
