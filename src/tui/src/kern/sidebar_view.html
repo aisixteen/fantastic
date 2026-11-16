@@ -53,30 +53,38 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--fc-color-accent
 .hov:hover{background:var(--fc-color-surface-hover)}
 .head{flex:none;display:flex;align-items:center;justify-content:space-between;gap:8px;height:32px;padding:0 10px 0 12px}
 .head h1{margin:0;font:600 11px/1 var(--fc-font-family-mono);letter-spacing:.5px;text-transform:uppercase;color:var(--fc-color-text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chip{flex:none;height:20px;padding:0 8px;border-radius:var(--fc-radius-chip);background:var(--fc-color-surface-button);box-shadow:inset 0 0 0 1px var(--fc-color-line-faint);font-size:11px;line-height:20px;color:var(--fc-color-text-muted)}
+.chip{flex:none;display:grid;place-items:center;width:20px;height:20px;border-radius:var(--fc-radius-chip);background:var(--fc-color-surface-button);box-shadow:inset 0 0 0 1px var(--fc-color-line-faint);color:var(--fc-color-text-muted)}
+/* a host that draws the cell's own title bar (and its hide button) mounts the view with data-host-head */
+:root[data-host-head] .head{display:none}
+:root[data-host-head] .split{border-top:0}
 .split{flex:1 1 0;min-height:0;display:flex;border-top:1px solid var(--fc-color-line-button)}
-.rail{flex:0 0 64px;display:flex;flex-direction:column;align-items:center;gap:8px;padding:10px 0;border-right:1px solid var(--fc-color-line-button);overflow-y:auto;scrollbar-width:none}
-.k{display:flex;flex-direction:column;align-items:center;gap:3px;width:60px;padding:3px 0;border-radius:var(--fc-radius-control)}
+.rail{flex:0 0 64px;display:flex;flex-direction:column;align-items:center;gap:4px;padding:12px 0;border-right:1px solid var(--fc-color-line-button);overflow-y:auto;scrollbar-width:none}
+.k{display:flex;flex-direction:column;align-items:center;gap:4px;width:58px;padding:6px 0 5px;border-radius:var(--fc-radius-card)}
 .k .mark{position:relative;display:grid;place-items:center;width:34px;height:34px;border-radius:var(--fc-radius-card);font:600 11px/1 var(--fc-font-family-mono);text-transform:uppercase;background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
 .k .kb{position:absolute;top:-5px;right:-5px;display:grid;place-items:center;min-width:16px;height:16px;padding:0 4px;border-radius:var(--fc-radius-pill);font:700 10px/1 var(--fc-font-family-sans);background:var(--fc-color-status-warn);color:var(--fc-color-status-warn-on);box-shadow:0 0 0 2px var(--fc-color-surface-raised)}
 .k.here .mark{background:var(--fc-color-accent-base);color:var(--fc-color-accent-on)}
-.k .nm{max-width:58px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--fc-color-text-muted)}
+.k .nm{max-width:56px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--fc-color-text-muted)}
 .k.here .nm{color:var(--fc-color-text-primary);font-weight:600}
 .agents{flex:1 1 0;min-width:0;display:flex;flex-direction:column;padding:12px 8px 8px;gap:14px}
 .wait{flex:none;display:flex;flex-direction:column;gap:2px;padding:8px 4px 4px;border-radius:var(--fc-radius-panel);background:var(--fc-color-status-warn-surface);box-shadow:inset 0 0 0 1px var(--fc-color-status-warn-line)}
 .wait[hidden]{display:none}
+.wait{margin:0 4px}
 .wait h2{display:flex;align-items:center;gap:8px;margin:0;padding:0 8px 4px;font:600 11px/1.4 var(--fc-font-family-mono);letter-spacing:.5px;text-transform:uppercase;color:var(--fc-color-status-warn)}
-.pill{font:600 10px/16px var(--fc-font-family-mono);min-width:18px;padding:0 5px;border-radius:var(--fc-radius-pill);text-align:center;background:var(--fc-color-status-warn);color:var(--fc-color-status-warn-on)}
+.pill{display:grid;place-items:center;font:700 11px/1 var(--fc-font-family-sans);min-width:18px;height:18px;padding:0 5px;border-radius:var(--fc-radius-pill);text-align:center;background:var(--fc-color-status-warn);color:var(--fc-color-status-warn-on)}
 .w{display:flex;align-items:center;gap:9px;width:100%;min-height:44px;padding:5px 8px;border-radius:var(--fc-radius-card)}
-.w .gl{background:var(--fc-color-surface-raised)}
+.w .gl{flex:none;display:grid;place-items:center;width:24px;height:24px;border-radius:var(--fc-radius-control);background:var(--fc-color-surface-raised);color:var(--fc-color-text-muted)}
+.w .gl .face{width:16px}
 .w .who{display:flex;flex-direction:column;flex:1;min-width:0}
 .w .who b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .w .who span{font-size:12px;color:var(--fc-color-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .w .age{flex:none;font:500 11px/1 var(--fc-font-family-mono);color:var(--fc-color-status-warn)}
-.tools{flex:none;display:flex;align-items:center;gap:8px}
-.tools input{flex:1;min-width:0;height:32px;padding:0 10px;border-radius:var(--fc-radius-card);border:0;background:var(--fc-color-surface-raised);box-shadow:inset 0 0 0 1px var(--fc-color-line-button);font:inherit;color:inherit}
-.tools input:focus{outline:0;box-shadow:inset 0 0 0 1px var(--fc-color-line-selected)}
-.sw{flex:none;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--fc-color-text-muted)}
+.tools{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;padding:0 4px}
+.sws{flex:none;margin-left:auto;display:flex;align-items:center;gap:10px}
+.fl{flex:1 1 180px;min-width:0;display:flex;align-items:center;gap:7px;height:32px;padding:0 10px;border-radius:var(--fc-radius-card);background:var(--fc-color-surface-raised);box-shadow:inset 0 0 0 1px var(--fc-color-line-button);color:var(--fc-color-text-subtle)}
+.fl:focus-within{box-shadow:inset 0 0 0 1px var(--fc-color-line-selected)}
+.tools input{flex:1;min-width:0;height:28px;padding:0;border:0;outline:0;background:transparent;font:inherit;font-size:12px;color:var(--fc-color-text-primary)}
+.tools input:focus-visible{outline:0}
+.sw{flex:none;display:flex;flex-direction:row-reverse;align-items:center;gap:7px;font-size:12px;color:var(--fc-color-text-muted)}
 .sw i{position:relative;display:block;width:30px;height:18px;border-radius:var(--fc-radius-pill);background:var(--fc-color-surface-well);box-shadow:inset 0 0 0 1px var(--fc-color-line-button)}
 .sw i::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--fc-color-text-subtle)}
 .sw[aria-checked="true"] i{background:var(--fc-color-accent-base)}
@@ -84,25 +92,31 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--fc-color-accent
 .scroll{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:none}
 .tree{display:flex;flex-direction:column;gap:1px}
 .r{position:relative;display:flex;align-items:center;border-radius:var(--fc-radius-card)}
-.r .tw{flex:none;display:grid;place-items:center;width:18px;height:28px;border-radius:var(--fc-radius-chip);color:var(--fc-color-text-subtle);font-size:10px}
+.tw svg{display:block;transition:transform .12s}
+.tw.open svg{transform:rotate(90deg)}
+.r .tw{flex:none;display:grid;place-items:center;width:18px;height:28px;border-radius:var(--fc-radius-chip);color:var(--fc-color-text-subtle)}
 .r .tw.none{visibility:hidden}
-.r .main{flex:1;min-width:0;display:flex;align-items:center;gap:9px;min-height:40px;padding:3px 8px 3px 4px;border-radius:var(--fc-radius-card)}
+.r .main{flex:1;min-width:0;display:flex;align-items:center;gap:10px;min-height:40px;padding:4px 8px 4px 4px;border-radius:var(--fc-radius-card)}
 .r .gl{position:relative;flex:none;display:grid;place-items:center;width:28px;height:28px;border-radius:var(--fc-radius-card);background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
 .r .gl svg{display:block}
+.r .gl.ai{background:var(--fc-color-surface-selected)}
+.face{display:block;width:18px;height:auto}
 .r .two{display:flex;flex-direction:column;min-width:0;flex:1}
-.r .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.r .name{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .r .name.top{font-weight:600}
 .r .name.tool{flex:0 1 auto}
 .r .line{display:flex;align-items:center;gap:6px;min-width:0}
-.r .tag{flex:none;font:10px/16px var(--fc-font-family-mono);padding:0 5px;border-radius:var(--fc-radius-chip);color:var(--fc-color-text-muted);background:var(--fc-color-surface-well)}
+.r .tag{flex:none;font:10px/15px var(--fc-font-family-mono);padding:0 5px;border-radius:var(--fc-radius-chip);color:var(--fc-color-text-muted);background:var(--fc-color-surface-well)}
 .r .age{flex:none;font:500 11px/1 var(--fc-font-family-mono);color:var(--fc-color-status-warn)}
+.r.f .name{color:var(--fc-color-text-muted)}
+.r.f.d .name{font-weight:500;color:var(--fc-color-text-primary)}
 .r .sub{font-size:12px;line-height:1.3;color:var(--fc-color-text-subtle);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .r .asks{flex:none;font:500 11px/1 var(--fc-font-family-mono);color:var(--fc-color-status-warn)}
 .sub.ask,.sub.queued{color:var(--fc-color-status-warn)}
 .pins{flex:none;display:flex;flex-direction:column;gap:1px;padding-top:6px;border-top:1px solid var(--fc-color-line-button);max-height:45%;overflow-y:auto}
 .pins[hidden]{display:none}
-.tg{display:flex;align-items:center;gap:10px;width:100%;min-height:40px;margin-left:12px;padding:4px 8px 4px 0;border-radius:var(--fc-radius-card)}
-.tg .tw{flex:none;display:grid;place-items:center;width:18px;height:28px;color:var(--fc-color-text-subtle);font-size:10px}
+.tg{display:flex;align-items:center;gap:10px;width:100%;min-height:40px;padding:4px 8px 4px 0;border-radius:var(--fc-radius-card)}
+.tg .tw{flex:none;display:grid;place-items:center;width:18px;height:28px;color:var(--fc-color-text-subtle)}
 .tg .ic{flex:none;display:flex}
 .tg .ic span{display:grid;place-items:center;width:24px;height:24px;margin-left:-6px;border-radius:var(--fc-radius-control);background:var(--fc-color-surface-well);color:var(--fc-color-text-muted);box-shadow:0 0 0 2px var(--fc-color-surface-raised)}
 .tg .ic span:first-child{margin-left:0}
@@ -111,7 +125,9 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--fc-color-accent
 .badge{position:absolute;right:-4px;bottom:-4px;display:none;place-items:center;width:13px;height:13px;border-radius:50%;font:700 9px/1 var(--fc-font-family-sans);border:2px solid transparent;box-sizing:content-box;margin:-2px}
 .badge.ask{display:grid;background:var(--fc-color-status-warn);color:var(--fc-color-status-warn-on)}
 .badge.queued{display:grid;background:var(--fc-color-status-warn-surface);color:var(--fc-color-status-warn);box-shadow:inset 0 0 0 1px var(--fc-color-status-warn-line)}
-.badge.active{display:grid;width:11px;height:11px;margin:-1px;border:2px solid var(--fc-color-accent-base);border-top-color:transparent;background:transparent;animation:spin 1100ms linear infinite}
+.badge.active{display:grid;width:11px;height:11px;margin:-1px;border:2px solid var(--fc-color-accent-base);border-top-color:transparent;background:var(--fc-color-surface-raised);animation:spin 1100ms linear infinite}
+.r.t .main{min-height:34px;padding:2px 8px 2px 4px}
+.r.t .gl{width:24px;height:24px;border-radius:var(--fc-radius-control)}
 .r.sel,.r.sel .main{background:var(--fc-color-surface-selected);box-shadow:inset 0 0 0 1px var(--fc-color-line-selected)}
 .r.f .main{min-height:26px;gap:7px;padding:1px 8px 1px 2px}
 .r.f .gl{width:14px;height:14px;background:transparent;border-radius:0}
@@ -124,18 +140,22 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--fc-color-accent
 .note.err{color:var(--fc-color-status-error)}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media (max-width:520px) and (pointer:coarse){
-.head{height:44px;padding:0 12px}
-.head h1{font:600 17px/1.3 var(--fc-font-family-sans);letter-spacing:-.01em;text-transform:none}
+body{position:relative}
+:root[data-host-head] .head{display:flex}
+.head{height:56px;padding:0 128px 0 16px}
+.head h1{font:600 18px/1.3 var(--fc-font-family-sans);letter-spacing:-.01em;text-transform:none}
 #hide{display:none}
 .split{flex-direction:column}
-.rail{flex:none;flex-direction:row;justify-content:flex-start;gap:6px;padding:6px 12px;border-right:0;border-bottom:1px solid var(--fc-color-line-button);overflow-x:auto;overflow-y:hidden}
-.k{flex:none;flex-direction:row;gap:8px;width:auto;min-height:44px;padding:0 8px 0 6px;border-radius:var(--fc-radius-panel);box-shadow:inset 0 0 0 1px var(--fc-color-line-button)}
-.k .nm{max-width:120px;font-size:13px}
+.rail{position:absolute;top:6px;right:12px;max-width:110px;flex-direction:row;justify-content:flex-end;gap:6px;padding:0;border-right:0;overflow-x:auto;overflow-y:hidden}
+.k{flex:none;width:auto;min-height:44px;padding:4px;border-radius:var(--fc-radius-panel);box-shadow:inset 0 0 0 1px var(--fc-color-line-button)}
+.k .nm{display:none}
+.k .mark{width:30px;height:30px}
 .agents{padding:12px 12px 0;gap:12px}
 .wait{border-radius:12px}
 .w{min-height:46px;gap:10px}
 .w .who span{font-size:13px}
-.tools input{height:44px;font-size:16px}
+.fl{height:44px}
+.tools input{height:40px;font-size:16px}
 .sw{min-height:44px}
 .r .tw{width:22px;height:44px}
 .r .main{min-height:44px;gap:11px}
@@ -150,14 +170,15 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--fc-color-accent
 }
 @media (prefers-reduced-motion:reduce){*{animation:none!important}}
 </style>
-<header class="head"><h1 id="ttl">Agents</h1><button class="chip hov" id="hide" type="button" aria-label="Hide the tree">Hide the tree</button></header>
+<header class="head"><h1 id="ttl">Agents</h1><button class="chip hov" id="hide" type="button" aria-label="Hide the tree" title="Hide the tree"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M6 3v10"/></svg></button></header>
 <div class="split">
 <nav class="rail" id="strip" aria-label="Kernels"></nav>
 <nav class="agents" aria-label="Agents">
 <section class="wait" id="wait" aria-label="Waiting for you" hidden></section>
 <div class="tools">
-<input id="filter" type="search" placeholder="Filter agents and files" aria-label="Filter agents and files" autocomplete="off">
-<button class="sw" id="sw" type="button" role="switch" aria-checked="false" aria-label="Show files in the tree"><i></i>Files</button>
+<label class="fl"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg><input id="filter" type="search" placeholder="Filter agents and files" aria-label="Filter agents and files" autocomplete="off"></label>
+<span class="sws"><button class="sw" id="sw" type="button" role="switch" aria-checked="false" aria-label="Show files in the tree"><i></i>Files</button>
+<button class="sw" id="full" type="button" role="switch" aria-checked="false" aria-label="Show the whole kernel tree" title="Compact: the AI agents under the root, the rest in the tools group. Full: the whole kernel tree."><i></i>Full</button></span>
 </div>
 <div class="scroll"><div class="tree" id="tree" role="tree"></div><div class="note err" id="err" hidden></div></div>
 <div class="pins" id="pins" hidden></div>
@@ -171,7 +192,11 @@ var ROOT = ".";
 var IGNORED = [".git", "node_modules", "target", "dist", "__pycache__"];
 function oneLine(t) { return String(t == null ? "" : t).replace(/\s+/g, " ").trim(); }
 function shortGuid(g) { return String(g == null ? "" : g).slice(0, 6); }
-function markOf(name) { return String(name == null ? "" : name).replace(/[^A-Za-z0-9]/g, "").slice(0, 2) || "?"; }
+function markOf(name) {
+  var words = String(name == null ? "" : name).split(/[^A-Za-z0-9]+/).filter(function (w) { return w !== ""; });
+  if (words.length > 1) return words[0].charAt(0) + words[1].charAt(0);
+  return (words[0] || "").slice(0, 2) || "?";
+}
 function parentOf(p) { var i = String(p).lastIndexOf("/"); return i < 0 ? ROOT : String(p).slice(0, i); }
 // the kernel strip: this kernel first (highlighted), then each connected peer row {guid, via}
 function kernelStrip(root, peers, waiting) {
@@ -233,13 +258,15 @@ function fileRows(lists, open, path, depth) {
 // `folded` = {id: true}; a folded branch shows its child count and hides what is below it.
 // `files` = {on, lists, open}: with `on`, the project's files are rows INSIDE the tree, under the `files` agent.
 // `opts` = {ages: {id: "12m"}, tools: true}: the age of an asking agent's oldest question; with `tools`,
-// the leaf tool agents under the root are left out (they sit in the tools group, see toolRows).
+// the tree holds the AI agents only, each under its nearest AI ancestor, the root's row left out (every
+// other agent sits in the tools group, see toolRows; the files agent is pinned, see pinRows).
 function treeRows(root, chats, folded, status, asks, files, opts) {
   var rows = [];
   var fl = files && files.on ? files : null;
   var ages = opts && opts.ages || {};
-  var grouped = opts && opts.tools ? toolIds(root, chats) : {};
-  if (opts && opts.pinned && filesNode(root)) grouped[FILES_ID] = true;
+  var grouped = {};
+  var f = opts && opts.pinned ? filesNode(root) : null;
+  if (f) grouped[f.id] = true;
   function walk(n, depth) {
     if (!n || typeof n.id !== "string" || grouped[n.id]) return;
     var kids = countKids(n);
@@ -261,13 +288,32 @@ function treeRows(root, chats, folded, status, asks, files, opts) {
     (n.children || []).forEach(function (k) { walk(k, depth + 1); });
     fileKids.forEach(function (f) { rows.push(f); });
   }
-  walk(root, 0);
+  if (opts && opts.tools) chatsOnly(root, chats).children.forEach(function (k) { walk(k, 0); });
+  else walk(root, 0);
   return rows;
 }
-// the files agent, a direct child of the root
+// the AI agents of `n`'s branch as a tree: `n` with, as its children, its nearest AI descendants, each
+// with its own (an agent between two of them, not an AI agent, is left out)
+function chatsOnly(n, chats) {
+  var kids = [];
+  (function under(m) {
+    (m && m.children || []).forEach(function (k) {
+      if (!k || typeof k.id !== "string") return;
+      if (chats[k.id]) kids.push(chatsOnly(k, chats)); else under(k);
+    });
+  })(n);
+  var out = {};
+  Object.keys(n || {}).forEach(function (key) { if (key !== "children") out[key] = n[key]; });
+  out.children = kids;
+  return out;
+}
+// the files agent: the first agent named `files` in the tree
 function filesNode(root) {
-  var k = (root && root.children || []).filter(function (c) { return c && c.id === FILES_ID; });
-  return k.length ? k[0] : null;
+  if (!root || typeof root.id !== "string") return null;
+  if (root.id === FILES_ID) return root;
+  var kids = root.children || [];
+  for (var i = 0; i < kids.length; i++) { var f = filesNode(kids[i]); if (f) return f; }
+  return null;
 }
 // the project's folder name: the last part of the files agent's `root` path
 function projectName(rootPath) {
@@ -294,24 +340,21 @@ function asksUnder(n, asks) {
   (n && n.children || []).forEach(function (k) { if (k && asks[k.id]) c++; c += asksUnder(k, asks); });
   return c;
 }
-// the tools: the root's direct children that are not chats, have no children and are not the files agent
-function toolIds(root, chats) {
-  var out = {};
-  (root && root.children || []).forEach(function (k) {
-    if (k && typeof k.id === "string" && !chats[k.id] && countKids(k) === 0 && k.id !== FILES_ID) out[k.id] = true;
-  });
-  return out;
-}
-// the tools group's rows, in tree order, as agent rows at depth 0
+// the tools group's rows: every agent that is not an AI agent, in tree order, as `tool` rows at depth 0;
+// not the root (the head names it), not the files agent and what is under it (pinned, see pinRows)
 function toolRows(root, chats) {
-  var ids = toolIds(root, chats);
-  return (root && root.children || []).filter(function (k) { return k && ids[k.id]; }).map(function (k) {
-    return {
-      kind: "agent", id: k.id, depth: 0, name: String(k.display_name || k.id),
-      tag: k.handler_module ? String(k.handler_module).replace(/\.tools$/, "") : "",
-      chat: false, kids: 0, foldable: false, folded: false, below: 0, asksBelow: 0, age: "", state: null
-    };
-  });
+  var out = [];
+  (function walk(n) {
+    (n && n.children || []).forEach(function (k) {
+      if (!k || typeof k.id !== "string" || k.id === FILES_ID) return;
+      if (!chats[k.id]) out.push({
+        kind: "agent", id: k.id, depth: 0, name: String(k.display_name || k.id), tag: "tool",
+        chat: false, kids: 0, foldable: false, folded: false, below: 0, asksBelow: 0, age: "", state: null
+      });
+      walk(k);
+    });
+  })(root);
+  return out;
 }
 // the rows whose name holds `q`, and the rows above them (the branch that leads to a match)
 function filterRows(rows, q) {
@@ -355,12 +398,13 @@ function waitingRows(inq, names, now) {
       return { asker: q.asker, who: names[q.asker] || q.asker, text: oneLine(q.text), age: ageText(q.ts, now), re: q.re };
     });
 }
-// what the view keeps across a reload: which branches are folded, which folders are open, whether files show
+// what the view keeps across a reload: which branches are folded, which folders are open, whether files
+// show, whether the tools group is open, and whether the tree is full (the whole kernel) or compact
 function keptState(st) {
-  return { folded: st.folded, open: st.open, filesOn: !!st.filesOn, toolsOpen: !!st.toolsOpen };
+  return { folded: st.folded, open: st.open, filesOn: !!st.filesOn, toolsOpen: !!st.toolsOpen, full: !!st.full };
 }
 function restoredState(saved) {
-  var out = { folded: {}, open: {}, filesOn: false, toolsOpen: false };
+  var out = { folded: {}, open: {}, filesOn: false, toolsOpen: false, full: false };
   if (!saved || typeof saved !== "object") return out;
   ["folded", "open"].forEach(function (k) {
     var m = saved[k];
@@ -368,6 +412,7 @@ function restoredState(saved) {
   });
   out.filesOn = saved.filesOn === true;
   out.toolsOpen = saved.toolsOpen === true;
+  out.full = saved.full === true;
   return out;
 }
 // the folders to hold a watch on: the project's root and every open folder, while files show
@@ -406,10 +451,12 @@ function withPhase(phases, agent, phase) {
 // end pure
 
 var SELF = "{{cell}}", ME = "{{agent}}";
-var st = { filesRoot: "", toolsOpen: false, root: null, chats: {}, status: {}, inq: [], folded: {}, selected: "", selPath: "", filesOn: false, open: {}, lists: {}, filter: "" };
+var st = { filesRoot: "", toolsOpen: false, full: false, root: null, chats: {}, status: {}, inq: [], folded: {}, selected: "", selPath: "", filesOn: false, open: {}, lists: {}, filter: "" };
 var watching = {};
 var $ = function (id) { return document.getElementById(id); };
-var ROBOT = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="11" height="8" rx="2"/><path d="M8 5V2.5M5.8 9v.01M10.2 9v.01M6 11.2h4"/></svg>';
+// an AI agent's face (the design's robot head, a small png inline: the view loads nothing)
+var ROBOT = '<img class="face" alt="" src="data:image/png;base64,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">';
+var CHEV = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5L10.5 8L6 12.5"/></svg>';
 var TOOL = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 3a3 3 0 0 0 3.2 3.9L6 13.6a1.4 1.4 0 0 1-2-2l6.7-6.7A3 3 0 0 0 9.5 3z"/></svg>';
 var FOLDER = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.6l1.4 1.5h5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>';
 var FILE = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M4 2h5l3 3v9H4z"/><path d="M9 2v3h3"/></svg>';
@@ -439,7 +486,7 @@ function paintStrip() {
   });
 }
 function nameMap(n, out) { if (n && typeof n.id === "string") { out[n.id] = String(n.display_name || n.id); (n.children || []).forEach(function (k) { nameMap(k, out); }); } return out; }
-function glyph(inner) { var g = el("span", "gl"); g.innerHTML = inner; return g; }
+function glyph(inner, cls) { var g = el("span", "gl" + (cls ? " " + cls : "")); g.innerHTML = inner; return g; }
 function paintHead() {
   var n = st.root ? String(st.root.display_name || st.root.id || "") : "";
   $("ttl").textContent = n || "Agents";
@@ -453,7 +500,7 @@ function paintWait() {
   host.appendChild(h);
   rows.forEach(function (w) {
     var b = el("button", "w hov"); b.type = "button";
-    b.appendChild(glyph(st.chats[w.asker] ? ROBOT : TOOL));
+    b.appendChild(glyph(st.chats[w.asker] ? ROBOT : TOOL, st.chats[w.asker] ? "ai" : ""));
     var who = el("span", "who"); who.appendChild(el("b", "", w.who)); who.appendChild(el("span", "", w.text));
     b.appendChild(who); b.appendChild(el("span", "age", w.age));
     b.addEventListener("click", function () { select(w.asker); });
@@ -461,8 +508,9 @@ function paintWait() {
   });
 }
 function foldButton(row, foldable, folded, onFold) {
-  var tw = el("button", "tw" + (foldable ? " hov" : " none"), foldable ? (folded ? "▸" : "▾") : "");
+  var tw = el("button", "tw" + (foldable ? " hov" : " none") + (foldable && !folded ? " open" : ""));
   tw.type = "button";
+  if (foldable) tw.innerHTML = CHEV;
   if (foldable) {
     tw.setAttribute("aria-label", (folded ? "Unfold " : "Fold ") + row.name);
     tw.setAttribute("aria-expanded", String(!folded));
@@ -471,12 +519,12 @@ function foldButton(row, foldable, folded, onFold) {
   return tw;
 }
 function agentRow(row) {
-  var w = el("div", "r a" + (st.selected === row.id ? " sel" : ""));
+  var w = el("div", "r a" + (row.chat ? "" : " t") + (st.selected === row.id ? " sel" : ""));
   w.setAttribute("role", "treeitem"); w.dataset.id = row.id;
   w.style.paddingLeft = (row.depth * 14) + "px";
   w.appendChild(foldButton(row, row.foldable, row.folded, function () { st.folded[row.id] = !st.folded[row.id]; keep(); paint(); }));
   var b = el("button", "main hov"); b.type = "button"; b.title = row.id;
-  var g = glyph(row.chat ? ROBOT : TOOL);
+  var g = glyph(row.chat ? ROBOT : row.id === FILES_ID ? FOLDER : TOOL, row.chat ? "ai" : "");
   if (row.state) g.appendChild(el("span", "badge " + row.state.kind, row.state.kind === "ask" ? "?" : ""));
   b.appendChild(g);
   var two = el("span", "two");
@@ -498,7 +546,7 @@ function agentRow(row) {
   return w;
 }
 function fileRow(row, base) {
-  var w = el("div", "r f" + (st.selPath === row.path ? " sel" : ""));
+  var w = el("div", "r f" + (row.dir ? " d" : "") + (st.selPath === row.path ? " sel" : ""));
   w.setAttribute("role", "treeitem"); w.dataset.path = row.path;
   w.style.paddingLeft = (row.depth * 14) + "px";
   for (var d = base + 1; d <= row.depth; d++) { var gd = el("span", "gd"); gd.style.left = (d * 14 - 1) + "px"; w.appendChild(gd); }
@@ -524,7 +572,7 @@ function paintTree() {
   var host = $("tree"); host.textContent = "";
   if (!st.tree) return;
   var searching = st.filter.trim() !== "";
-  var rows = filterRows(treeRows(st.tree, st.chats, st.folded, st.status, askers(st.inq), { on: st.filesOn, lists: st.lists, open: st.open }, { ages: askAges(st.inq, Date.now() / 1000), tools: !searching, pinned: !searching }), st.filter);
+  var rows = filterRows(treeRows(st.tree, st.chats, st.folded, st.status, askers(st.inq), { on: st.filesOn, lists: st.lists, open: st.open }, { ages: askAges(st.inq, Date.now() / 1000), tools: !searching && !st.full, pinned: !searching && !st.full }), st.filter);
   var base = 0;
   rows.forEach(function (row) {
     if (row.kind === "file") host.appendChild(fileRow(row, base));
@@ -533,7 +581,7 @@ function paintTree() {
   if (searching && st.filesOn && st.lists[ROOT] === undefined) host.appendChild(el("div", "note", "reading the files…"));
 }
 function projectRow(row) {
-  var w = el("div", "r f");
+  var w = el("div", "r f d");
   w.setAttribute("role", "treeitem"); w.style.paddingLeft = (row.depth * 14) + "px";
   w.appendChild(foldButton(row, true, !row.open, function () { setFiles(!st.filesOn); }));
   var b = el("button", "main hov"); b.type = "button"; b.title = st.filesRoot;
@@ -545,7 +593,7 @@ function projectRow(row) {
 }
 function paintPins() {
   var host = $("pins"); host.textContent = "";
-  var searching = st.filter.trim() !== "";
+  var searching = st.filter.trim() !== "" || st.full;
   var files = !searching && st.tree ? pinRows(st.tree, st.chats, st.folded, st.status, askers(st.inq), { on: st.filesOn, lists: st.lists, open: st.open }, projectName(st.filesRoot), { ages: askAges(st.inq, Date.now() / 1000) }) : [];
   var rows = !searching && st.tree ? toolRows(st.tree, st.chats) : [];
   host.hidden = rows.length === 0 && files.length === 0;
@@ -559,7 +607,8 @@ function paintPins() {
   if (!rows.length) return;
   var b = el("button", "tg hov"); b.type = "button";
   b.setAttribute("aria-expanded", String(st.toolsOpen));
-  b.appendChild(el("span", "tw", st.toolsOpen ? "▾" : "▸"));
+  var tw = el("span", "tw" + (st.toolsOpen ? " open" : "")); tw.innerHTML = CHEV;
+  b.appendChild(tw);
   var ic = el("span", "ic");
   rows.slice(0, 3).forEach(function () { var i = el("span"); i.innerHTML = TOOL; ic.appendChild(i); });
   b.appendChild(ic);
@@ -568,7 +617,7 @@ function paintPins() {
   if (st.toolsOpen) rows.forEach(function (r) { host.appendChild(agentRow(r)); });
   host.appendChild(b);
 }
-function paintSwitch() { $("sw").setAttribute("aria-checked", String(st.filesOn)); }
+function paintSwitch() { $("sw").setAttribute("aria-checked", String(st.filesOn)); $("full").setAttribute("aria-checked", String(st.full)); }
 function paint() { paintHead(); paintTree(); paintPins(); paintWait(); paintSwitch(); }
 
 function toggleDir(path) {
@@ -649,11 +698,12 @@ function clock() { paintWait(); paintTree(); paintPins(); }
 fantastic.onMessage(function (m) {
   if (!m || m.type !== "restore") return;
   var r = restoredState(m.state);
-  st.folded = r.folded; st.open = r.open; st.filesOn = r.filesOn; st.toolsOpen = r.toolsOpen;
+  st.folded = r.folded; st.open = r.open; st.filesOn = r.filesOn; st.toolsOpen = r.toolsOpen; st.full = r.full;
   paint(); syncFiles();
 });
 $("hide").addEventListener("click", function () { post({ type: "hide_tree" }); });
 $("sw").addEventListener("click", function () { setFiles(!st.filesOn); });
+$("full").addEventListener("click", function () { st.full = !st.full; keep(); paint(); });
 $("filter").addEventListener("input", function () { st.filter = $("filter").value; paintTree(); paintPins(); });
 post({ type: "ready" });
 paint();
