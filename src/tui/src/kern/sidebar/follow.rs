@@ -32,7 +32,7 @@ pub const FILES_CHANGED: &str = "files_changed";
 
 /// The agent whose folder the tree shows (the view's `files`), and the holder of the
 /// person's questions (the view's `user`).
-const FILES: &str = "files";
+pub(super) const FILES: &str = "files";
 const PERSON: &str = "user";
 
 /// What one published kernel event is to the tree, or nothing.
@@ -124,41 +124,28 @@ pub fn start(kernel: &Arc<Kernel>, me: &AgentId) {
     if taps.contains_key(me.as_str()) {
         return;
     }
-    // the kernel is not touched from inside its own publish: changes are queued
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Change>();
-    let token = kernel.add_state_subscriber(Arc::new(move |ev: &Value, _body| {
-        if let Some(c) = change_of(ev) {
-            let _ = tx.send(c);
-        }
-    }));
-    taps.insert(me.as_str().to_string(), token);
-    drop(taps);
-    let weak = Arc::downgrade(kernel);
+    let me_key = me.as_str().to_string();
     let me = me.clone();
-    tokio::spawn(async move {
-        // the subscriber dropped (`stop`) drops the sender: the loop ends
-        while let Some(c) = rx.recv().await {
-            let Some(k) = weak.upgrade() else { return };
-            let ev = match c {
-                Change::Tree => json!({"type": TREE_CHANGED}),
-                Change::Status { agent, phase } => {
-                    let f = follow(&k);
-                    let mut all = f.phases.lock().expect("phases poisoned");
-                    let mine = all.entry(me.as_str().to_string()).or_default();
-                    if phase == "done" {
-                        mine.remove(&agent);
-                    } else {
-                        mine.insert(agent.clone(), phase.clone());
-                    }
-                    drop(all);
-                    json!({"type": STATUS_CHANGED, "agent": agent, "phase": phase})
+    let token = kernel.publish_changes(me.clone(), change_of, move |k, c| {
+        Some(match c {
+            Change::Tree => json!({"type": TREE_CHANGED}),
+            Change::Status { agent, phase } => {
+                let f = follow(k);
+                let mut all = f.phases.lock().expect("phases poisoned");
+                let mine = all.entry(me.as_str().to_string()).or_default();
+                if phase == "done" {
+                    mine.remove(&agent);
+                } else {
+                    mine.insert(agent.clone(), phase.clone());
                 }
-                Change::Inquiries => json!({"type": INQUIRIES_CHANGED, "open": open_questions(&k)}),
-                Change::File { path, change } => json!({"type": FILES_CHANGED, "path": path, "change": change}),
-            };
-            k.emit(&me, ev).await;
-        }
+                drop(all);
+                json!({"type": STATUS_CHANGED, "agent": agent, "phase": phase})
+            }
+            Change::Inquiries => json!({"type": INQUIRIES_CHANGED, "open": open_questions(k)}),
+            Change::File { path, change } => json!({"type": FILES_CHANGED, "path": path, "change": change}),
+        })
     });
+    taps.insert(me_key, token);
 }
 
 /// Stop following (the sidebar is deleted, or the kernel stops).
