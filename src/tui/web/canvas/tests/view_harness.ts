@@ -6,7 +6,8 @@ import vm from "node:vm";
 // THE HARNESS FOR AN HTML VIEW'S WHOLE SCRIPT (ONE MODEL, MANY VIEW-MODELS): a view of a base
 // agent watches the agents it shows and reads again only on what they publish — no timer
 // re-reads anything. The script runs in a vm, on a loose DOM (any element, any property) and a
-// fake `fantastic` connector that records every send, watch and timer.
+// fake `fantastic` connector that records every send, watch and timer. A test that reads what
+// the view drew asks for the text DOM (`{ textDom: true }`): elements that keep their text.
 //
 // AS THE KERNEL DOES, a watcher receives a COPY OF EVERY CALL made to the agent it watches
 // (kernel send.rs fanout; the web leg forwards only the payload): each send here is mirrored to
@@ -50,6 +51,86 @@ function loose(): unknown {
   });
 }
 
+/** A stand-in DOM whose elements keep their children, text, attributes and listeners: what a
+ *  test reads back of what the view drew (the loose DOM keeps nothing put in it). */
+export class TextNode {
+  tagName: string;
+  ownerDocument: TextDocument;
+  childNodes: TextNode[] = [];
+  parentNode: TextNode | null = null;
+  attrs: Record<string, string> = {};
+  listeners: Record<string, ((e: Obj) => void)[]> = {};
+  style = { setProperty(): void {} };
+  className = "";
+  value = "";
+  hidden = false;
+  private text = "";
+  constructor(tag: string, doc: TextDocument) {
+    this.tagName = String(tag).toUpperCase();
+    this.ownerDocument = doc;
+  }
+  appendChild(c: TextNode): TextNode {
+    this.childNodes.push(c);
+    c.parentNode = this;
+    return c;
+  }
+  get textContent(): string {
+    return this.text + this.childNodes.map((c) => c.textContent).join("");
+  }
+  set textContent(t: string) {
+    this.childNodes = [];
+    this.text = String(t);
+  }
+  setAttribute(k: string, v: unknown): void {
+    this.attrs[k] = String(v);
+  }
+  getAttribute(k: string): string | null {
+    return k in this.attrs ? this.attrs[k] : null;
+  }
+  removeAttribute(k: string): void {
+    delete this.attrs[k];
+  }
+  addEventListener(type: string, fn: (e: Obj) => void): void {
+    (this.listeners[type] ||= []).push(fn);
+  }
+  /** what a person's `type` (a click, a key) on the element does */
+  dispatch(type: string): void {
+    (this.listeners[type] || []).forEach((fn) => fn({ type, target: this }));
+  }
+  querySelector(): null {
+    return null;
+  }
+  querySelectorAll(): TextNode[] {
+    return [];
+  }
+  focus(): void {
+    this.ownerDocument.activeElement = this;
+  }
+  blur(): void {
+    if (this.ownerDocument.activeElement === this) this.ownerDocument.activeElement = null;
+  }
+}
+
+export class TextDocument {
+  activeElement: TextNode | null = null;
+  byId = new Map<string, TextNode>();
+  documentElement = new TextNode("html", this);
+  body = new TextNode("body", this);
+  createElement(tag: string): TextNode {
+    return new TextNode(tag, this);
+  }
+  createElementNS(_ns: string, tag: string): TextNode {
+    return new TextNode(tag, this);
+  }
+  createTextNode(t: unknown): { textContent: string } {
+    return { textContent: String(t) };
+  }
+  getElementById(id: string): TextNode {
+    if (!this.byId.has(id)) this.byId.set(id, new TextNode("div", this));
+    return this.byId.get(id) as TextNode;
+  }
+}
+
 export interface Harness {
   sends: { target: string; p: Obj }[];
   watches: Map<string, ((ev: Obj) => void)[]>;
@@ -63,9 +144,11 @@ export interface Harness {
   since(mark: number): { target: string; p: Obj }[];
   /** a message the host page sends the view (`fantastic.onMessage`) */
   message(m: Obj): Promise<void>;
+  /** the text DOM the view drew into (`{ textDom: true }`), else null */
+  document: TextDocument | null;
 }
 
-export function run(html: string, fill: Record<string, string>, reply: Reply): Harness {
+export function run(html: string, fill: Record<string, string>, reply: Reply, opts: { textDom?: boolean } = {}): Harness {
   let body = scriptOf(html);
   for (const [k, v] of Object.entries(fill)) body = body.replaceAll(`{{${k}}}`, v);
   const sends: Harness["sends"] = [];
@@ -74,12 +157,15 @@ export function run(html: string, fill: Record<string, string>, reply: Reply): H
   let timeouts: (() => void)[] = [];
   const byId = new Map<string, Record<string, unknown>>();
   const ears: ((m: Obj) => void)[] = [];
-  const doc = loose() as Record<string, unknown>;
-  doc["getElementById"] = (id: string) => {
-    if (!byId.has(id)) byId.set(id, loose() as Record<string, unknown>);
-    return byId.get(id);
-  };
-  doc["createElement"] = () => loose();
+  const text = opts.textDom ? new TextDocument() : null;
+  const doc = (text ?? loose()) as Record<string, unknown>;
+  if (!text) {
+    doc["getElementById"] = (id: string) => {
+      if (!byId.has(id)) byId.set(id, loose() as Record<string, unknown>);
+      return byId.get(id);
+    };
+    doc["createElement"] = () => loose();
+  }
   const fantastic = {
     send: (target: string, p: Obj) => {
       sends.push({ target, p });
@@ -101,9 +187,11 @@ export function run(html: string, fill: Record<string, string>, reply: Reply): H
       ears.push(cb);
     },
   };
+  const win = loose() as Record<string, unknown>;
+  win["fantastic"] = fantastic;
   const ctx = vm.createContext({
     document: doc,
-    window: loose(),
+    window: win,
     fantastic,
     CSS: { escape: (s: string) => s },
     MutationObserver: class {
@@ -143,6 +231,7 @@ export function run(html: string, fill: Record<string, string>, reply: Reply): H
       await settle();
     },
     since: (mark) => sends.slice(mark),
+    document: text,
     async message(m) {
       ears.forEach((cb) => cb(JSON.parse(JSON.stringify(m)) as Obj));
       await settle();
