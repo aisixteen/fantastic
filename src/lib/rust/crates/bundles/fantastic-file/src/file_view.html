@@ -1,0 +1,237 @@
+<style>
+:root{
+--fc-color-accent-base:rgb(17 17 17);
+--fc-color-accent-deep:rgb(17 17 17);
+--fc-color-accent-deep-hover:rgb(43 43 43);
+--fc-color-accent-on:rgb(255 255 255);
+--fc-color-line-button:rgb(0 0 0 / 0.1);
+--fc-color-line-faint:rgb(0 0 0 / 0.06);
+--fc-color-line-selected:rgb(0 0 0 / 0.3);
+--fc-color-line-strong:rgb(0 0 0 / 0.18);
+--fc-color-status-error:rgb(179 38 30);
+--fc-color-status-ok:rgb(27 116 70);
+--fc-color-status-warn:rgb(143 82 0);
+--fc-color-status-warn-field:rgb(255 255 255 / 0.6);
+--fc-color-status-warn-line:rgb(143 82 0 / 0.45);
+--fc-color-status-warn-muted:rgb(143 82 0);
+--fc-color-status-warn-on:rgb(255 255 255);
+--fc-color-status-warn-surface:rgb(143 82 0 / 0.12);
+--fc-color-surface-bubble:rgb(255 255 255 / 0.6);
+--fc-color-surface-button:rgb(0 0 0 / 0.05);
+--fc-color-surface-code:rgb(0 0 0 / 0.045);
+--fc-color-surface-field:rgb(0 0 0 / 0.06);
+--fc-color-surface-hover:rgb(0 0 0 / 0.09);
+--fc-color-surface-raised:rgb(255 255 255 / 0.72);
+--fc-color-surface-selected:rgb(0 0 0 / 0.08);
+--fc-color-surface-well:rgb(0 0 0 / 0.06);
+--fc-color-text-code:rgb(69 69 69);
+--fc-color-text-cool:rgb(69 69 69);
+--fc-color-text-muted:rgb(69 69 69);
+--fc-color-text-primary:rgb(11 11 11);
+--fc-color-text-subtle:rgb(107 107 107);
+--fc-duration-pulse:1400ms;
+--fc-duration-think:1100ms;
+--fc-easing-in-out:cubic-bezier(0.42, 0, 0.58, 1);
+--fc-font-family-mono:ui-monospace, SFMono-Regular, Menlo, monospace;
+--fc-font-family-sans:system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+--fc-radius-bubble:12px;
+--fc-radius-card:8px;
+--fc-radius-chip:4px;
+--fc-radius-control:6px;
+--fc-radius-key:5px;
+--fc-radius-panel:10px;
+--fc-radius-pill:999px;
+--fc-shadow-bubble:inset 0px 0px 0px 1px rgb(0 0 0 / 0.07);
+--fc-shadow-focus:inset 0px 0px 0px 1px rgb(17 17 17 / 0.45), 0px 0px 0px 3px rgb(17 17 17 / 0.1);
+}
+
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{display:flex;flex-direction:column;min-height:0;overflow:hidden;background:transparent;color:var(--fc-color-text-primary);font:13px/1.45 var(--fc-font-family-sans)}
+button{font:inherit;color:inherit;cursor:pointer;border:0;background:transparent;padding:0}
+button:focus-visible{outline:2px solid var(--fc-color-accent-base);outline-offset:2px}
+.hov:hover{background:var(--fc-color-surface-hover)}
+.crumbs{flex:none;padding:8px 16px 0;font:600 11px/1.3 var(--fc-font-family-mono);letter-spacing:.5px;text-transform:uppercase;color:var(--fc-color-text-subtle);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.crumbs span.last{color:var(--fc-color-text-primary)}
+.crumbs span.sep{opacity:.55;padding:0 4px}
+header{flex:none;display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--fc-color-line-faint)}
+.tile{flex:none;display:grid;place-items:center;width:40px;height:40px;border-radius:var(--fc-radius-panel);background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
+.who{flex:1;min-width:0;display:flex;flex-direction:column}
+h1{margin:0;font:600 16px/1.3 var(--fc-font-family-mono);letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.meta{font-size:12px;color:var(--fc-color-text-subtle)}
+.meta:empty{display:none}
+main{flex:1;min-height:0;display:flex;flex-direction:column;padding:12px 16px}
+.well{flex:1;min-height:0;overflow:auto;padding:10px 0;border-radius:var(--fc-radius-panel);background:var(--fc-color-surface-well);box-shadow:inset 0 0 0 1px var(--fc-color-line-faint);font:12.5px/1.65 var(--fc-font-family-mono)}
+.ln{display:flex;min-width:max-content}
+.ln .n{flex:none;width:44px;padding-right:14px;text-align:right;color:var(--fc-color-text-subtle);user-select:none}
+.ln .t{white-space:pre;padding-right:16px;color:var(--fc-color-text-primary)}
+.more{display:block;margin:8px 0 0 44px;padding:2px 10px;border-radius:var(--fc-radius-control);background:var(--fc-color-surface-button);box-shadow:inset 0 0 0 1px var(--fc-color-line-button);font:12px/20px var(--fc-font-family-sans)}
+.note{padding:16px;color:var(--fc-color-text-subtle);font-family:var(--fc-font-family-sans);line-height:1.6}
+.note b{display:block;font-weight:600;color:var(--fc-color-text-primary)}
+.note.err{margin:0;color:var(--fc-color-status-error);white-space:pre-wrap;word-break:break-word}
+.ent{display:flex;align-items:center;gap:10px;min-height:28px;padding:2px 16px}
+.ent .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ent .sz{flex:none;font-size:11px;color:var(--fc-color-text-subtle)}
+</style>
+<body>
+<div class="crumbs" id="crumbs" aria-label="Where this is"></div>
+<header><span class="tile" aria-hidden="true" id="glyph"></span><div class="who"><h1 id="name"></h1><span class="meta" id="meta"></span></div></header>
+<main id="body"></main>
+<script>
+/*{{head}}*/
+// pure
+// what a `read` reply means for the view: the text lines, empty, not text, gone, or an error said verbatim
+function readState(r) {
+  if (!r || typeof r !== "object") return { kind: "error", error: "no answer" };
+  if (typeof r.error === "string") {
+    if (r.reason === "not_found") return { kind: "gone" };
+    if (r.reason === "bad_arg" && r.arg === "path") return { kind: "binary" };
+    return { kind: "error", error: r.error };
+  }
+  var lines = Array.isArray(r.lines) ? r.lines : [];
+  var total = typeof r.total === "number" ? r.total : lines.length;
+  if (total === 0) return { kind: "empty" };
+  return { kind: "text", lines: lines, total: total };
+}
+// the state after a page read from line `offset`: a first page replaces the lines held, a later one is added by line number;
+// `eof` is true once every line of the file is held
+function nextState(held, offset, r) {
+  var s = readState(r);
+  if (s.kind !== "text") return s;
+  var by = {};
+  (offset === 0 ? s.lines : held.concat(s.lines)).forEach(function (l) { by[l.n] = l; });
+  s.lines = Object.keys(by).map(Number).sort(function (a, b) { return a - b; }).map(function (n) { return by[n]; });
+  s.eof = s.lines.length >= s.total;
+  return s;
+}
+// the folder's entries: folders first, then by name
+function sortedEntries(files) {
+  return (Array.isArray(files) ? files : []).filter(function (f) { return f && typeof f.name === "string"; }).slice().sort(function (a, b) {
+    var da = a.type === "dir" ? 0 : 1, db = b.type === "dir" ? 0 : 1;
+    return da !== db ? da - db : a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+  });
+}
+// the agents below a reflect tree's root by id, with the id of the agent above each (the root itself is no step of a breadcrumb)
+function agentsOf(tree) {
+  var out = {};
+  function walk(n, parent) {
+    if (!n || typeof n.id !== "string") return;
+    out[n.id] = { id: n.id, displayName: String(n.display_name || ""), parentId: parent };
+    (n.children || []).forEach(function (k) { walk(k, n.id); });
+  }
+  ((tree && tree.children) || []).forEach(function (k) { walk(k, undefined); });
+  return out;
+}
+// the lookup `trail` reads: the agent whose folder holds `path` (the last `agents/<id>` pair of the path
+// naming a known agent), and the agents above it by their ids
+function lookupFor(path, agents) {
+  var segs = String(path).split("/"), home = "", info;
+  for (var i = 0; i + 1 < segs.length; i++) {
+    if (segs[i] === "agents" && agents[segs[i + 1]]) { home = segs.slice(0, i + 2).join("/"); info = agents[segs[i + 1]]; }
+  }
+  return {
+    paths: function () { return home === "" ? [] : [home]; },
+    agentAt: function (p) { return p === home ? info : p.charAt(0) === "#" ? agents[p.slice(1)] : undefined; },
+    folderOf: function (id) { return agents[id] ? "#" + id : undefined; }
+  };
+}
+// end pure
+
+var AGENT = {{agent}}, PATH = {{path}}, KIND = {{kind}}, PAGE = 200;
+var $ = function (id) { return document.getElementById(id); };
+var st = { agents: {}, lines: [], total: 0, state: null, busy: false };
+var FILE = '<svg width="22" height="22" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 2.5h4.5l3 3V13a.5.5 0 0 1-.5.5h-7a.5.5 0 0 1-.5-.5V3a.5.5 0 0 1 .5-.5zM9 2.5v3h3"/></svg>';
+var FOLDER = '<svg width="22" height="22" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5a1 1 0 0 1 1-1h3l1.5 1.5H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z"/></svg>';
+function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function call(p) { return fantastic.send(AGENT, p).then(function (r) { return r; }, function (e) { return { error: String(e && e.message || e) }; }); }
+function baseName() { var c = crumbs(PATH); return PATH === "" ? "project" : c[c.length - 1] || PATH; }
+function paintHead(meta) {
+  var parts = trail(PATH, lookupFor(PATH, st.agents)), host = $("crumbs");
+  host.textContent = "";
+  parts.forEach(function (p, i) {
+    if (i > 0) host.appendChild(el("span", "sep", "/"));
+    host.appendChild(el("span", i === parts.length - 1 ? "last" : "", p));
+  });
+  $("glyph").innerHTML = KIND === "folder" ? FOLDER : FILE;
+  $("name").textContent = baseName();
+  $("meta").textContent = meta || "";
+}
+function paintNote(host, title, line, cls) {
+  var n = el("div", "note" + (cls ? " " + cls : ""));
+  n.appendChild(el("b", "", title));
+  if (line) n.appendChild(document.createTextNode(line));
+  host.appendChild(n);
+}
+function paintFile() {
+  var s = st.state, body = $("body");
+  body.textContent = "";
+  if (!s) { paintHead(""); return; }
+  paintHead(s.kind === "text" ? metaOf({ name: baseName(), lines: s.total }) : s.kind === "empty" ? metaOf({ name: baseName(), lines: 0 }) : metaOf({ name: baseName() }));
+  var well = el("div", "well"); well.setAttribute("role", "region"); well.setAttribute("aria-label", baseName()); well.tabIndex = 0;
+  if (s.kind === "empty") paintNote(well, "This file is empty.", "");
+  else if (s.kind === "binary") paintNote(well, "Not a text file.", "Its content is not shown here.");
+  else if (s.kind === "gone") paintNote(well, baseName() + " was deleted on disk", "It shows again if it comes back.");
+  else if (s.kind === "error") paintNote(well, "The file could not be read.", s.error, "err");
+  else {
+    st.lines.forEach(function (l) {
+      var r = el("div", "ln"); var n = el("span", "n", String(l.n)); n.setAttribute("aria-hidden", "true");
+      r.appendChild(n); r.appendChild(el("span", "t", l.text)); well.appendChild(r);
+    });
+    if (!s.eof) {
+      paintNote(well, "Too large to show whole.", "Showing the first " + st.lines.length + " of " + s.total + " lines.");
+      var b = el("button", "more hov", "Show " + PAGE + " more lines"); b.type = "button";
+      b.addEventListener("click", function () { read(st.lines.length); });
+      well.appendChild(b);
+    }
+  }
+  body.appendChild(well);
+}
+function paintFolder() {
+  var body = $("body"); body.textContent = "";
+  var s = st.state;
+  if (!s) { paintHead(""); return; }
+  if (s.kind !== "entries") {
+    paintHead("");
+    var w = el("div", "well"); paintNote(w, s.kind === "gone" ? baseName() + " was deleted on disk" : "The folder could not be read.", s.kind === "gone" ? "It shows again if it comes back." : s.error, s.kind === "error" ? "err" : ""); body.appendChild(w); return;
+  }
+  paintHead(s.entries.length + (s.entries.length === 1 ? " entry" : " entries"));
+  var well = el("div", "well");
+  if (!s.entries.length) paintNote(well, "This folder is empty.", "");
+  s.entries.forEach(function (f) {
+    var r = el("div", "ent"); r.appendChild(el("span", "nm", f.name + (f.type === "dir" ? "/" : "")));
+    if (f.type !== "dir" && typeof f.size === "number" && f.size >= 0) r.appendChild(el("span", "sz", sizeText(f.size)));
+    well.appendChild(r);
+  });
+  body.appendChild(well);
+}
+// one page of the file, from line `offset`; a first read (0) starts the held lines over
+function read(offset) {
+  if (st.busy) return; st.busy = true;
+  var keep = offset === 0 ? st.lines.length : 0;
+  call({ type: "read", offset: offset, limit: Math.max(PAGE, keep) }).then(function (r) {
+    st.busy = false;
+    var s = nextState(st.lines, offset, r);
+    st.lines = s.kind === "text" ? s.lines : [];
+    st.state = s; paintFile();
+  });
+}
+function list() {
+  call({ type: "list", path: "." }).then(function (r) {
+    if (r && r.reason === "not_found") st.state = { kind: "gone" };
+    else if (!r || typeof r.error === "string") st.state = { kind: "error", error: r ? r.error : "no answer" };
+    else st.state = { kind: "entries", entries: sortedEntries(r.files) };
+    paintFolder();
+  });
+}
+function refresh() { if (KIND === "folder") list(); else read(0); }
+function names() {
+  return fantastic.send("kernel", { type: "reflect", detail: "full" }).then(function (r) {
+    if (r && !r.error && r.tree && !Array.isArray(r.tree)) { st.agents = agentsOf(r.tree); }
+  }, function () {});
+}
+fantastic.watch(AGENT, function (ev) { if (ev && !ev.error && ev.type === "changed") refresh(); });
+call({ type: "watch" });
+paintHead("");
+names().then(function () { paintHead(""); refresh(); });
+</script>
+</body>

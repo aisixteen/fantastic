@@ -1037,3 +1037,32 @@ async fn open_view_leaves_a_two_token_entry_alone() {
     assert_eq!(entry_of(&k, &dv), two);
     assert!(refused_read(&k, &dv, "a.txt"));
 }
+
+#[tokio::test]
+async fn a_view_reflects_the_html_that_draws_it() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp).await;
+    std::fs::write(served(&tmp).join("a.txt"), "x\n").unwrap();
+    std::fs::create_dir(served(&tmp).join("box")).unwrap();
+    let f = open(&k, "file", "a.txt").await["id"].as_str().unwrap().to_string();
+    let d = open(&k, "folder", "box").await["id"].as_str().unwrap().to_string();
+    let r = call(&k, &f, json!({"type": "reflect"})).await;
+    let view = &r["view"];
+    assert_eq!(view["kind"], "html", "{r}");
+    assert_eq!(view["calls"], json!({f.as_str(): ["read", "watch"], "kernel": ["reflect"]}));
+    let bytes = view["bytes"].as_str().unwrap();
+    assert!(bytes.contains(&format!("PATH = \"a.txt\"")), "the path is in the page");
+    assert!(bytes.contains("KIND = \"file\""));
+    assert!(bytes.contains(&format!("AGENT = \"{f}\"")));
+    assert!(bytes.contains("function trail("), "the shared header logic is spliced in");
+    assert!(!bytes.contains("export "), "no module syntax reaches the page");
+    assert!(!bytes.contains("{{"), "every placeholder is filled");
+    let r = call(&k, &d, json!({"type": "reflect"})).await;
+    assert_eq!(r["view"]["calls"], json!({d.as_str(): ["list", "watch"], "kernel": ["reflect"]}));
+    assert!(r["view"]["bytes"].as_str().unwrap().contains("KIND = \"folder\""));
+}
+
+#[test]
+fn a_path_cannot_end_the_script() {
+    assert_eq!(crate::views::js_string("a</script>\"b"), "\"a\\u003c/script>\\\"b\"");
+}
