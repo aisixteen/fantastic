@@ -69,6 +69,9 @@ def main() -> bool:
             r["1b kernel strip, header with Hide the tree, Agents nav, filter, Files switch (off)"] = bool(parts) and parts["strip"] and parts["head"] and parts["agents"] and parts["filter"] and parts["files_switch"] == "false"
             r["1c the Waiting for you box is hidden while nothing asks"] = bool(parts) and parts["waiting_hidden"]
 
+            # the tree opens compact (AI agents under the root, the rest in the tools group); Full shows the whole kernel tree
+            r["1d the tree opens compact (the Full switch off)"] = await side(pg, "document.querySelector('#full')?.getAttribute('aria-checked') === 'false'") is True
+            r["1e the Full switch on"] = await click(pg, "#full") and await until(pg, "!!document.querySelector('#tree [data-id=files]') && !!document.querySelector('#tree [data-id=user]')", 20)
             rows = await side(pg, "[...document.querySelectorAll('#tree [role=treeitem]')].map(e => ({id: e.dataset.id || null, path: e.dataset.path || null, pad: e.style.paddingLeft}))")
             info["rows"] = rows
             ids = [x["id"] for x in rows or [] if x["id"]]
@@ -88,6 +91,7 @@ def main() -> bool:
 
             await pg.open(rig.url)
             r["5a after a reload the view draws again"] = await until(pg, "!!document.querySelector('.rail .k')", 40)
+            r["5b2 and the Full switch still on"] = await until(pg, "document.querySelector('#full')?.getAttribute('aria-checked') === 'true'", 20)
             r["5b with the Files switch still on"] = await until(pg, "document.querySelector('#sw')?.getAttribute('aria-checked') === 'true'", 20)
             r["5c and the folder still open"] = await until(pg, "!!document.querySelector('#tree [data-path=\"docs/a.md\"]')", 30)
 
