@@ -12,6 +12,8 @@ export const schedulerView: ViewBundle = {
   mount(ctx: ViewContext): Promise<ViewHandle> {
     return mountReadView<{ list: unknown; history: unknown }>(ctx, {
       name: "scheduler",
+      // a run (`schedule_fired`, with its result) and every change to the schedules
+      events: ["schedule_fired", "scheduled", "unscheduled", "paused", "resumed"],
       async load(call) {
         const [list, history] = await Promise.all([call({ type: "list" }), call({ type: "history", limit: 20 })]);
         return { list, history };

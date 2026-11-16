@@ -5,9 +5,10 @@ import type { Dict, Row } from "./agent_models/rows.ts";
 
 // THE SHARED BODY of the read-only agent views (store, scheduler,
 // credentials): a header with ⟳, rows drawn as TEXT (never
-// markup), and the agent's events as the live path — an event on the agent
-// reads it again. A view supplies `load` (the reads it may make: its grant) and
-// `shape` (the pure model: replies → rows).
+// markup), and the agent's PUBLISHED events as the live path — an event the view
+// names reads it again. A view supplies `load` (the reads it may make: its grant),
+// `shape` (the pure model: replies → rows) and `events` (what its agent publishes
+// when what the view shows changed).
 
 const CSS = `
   .ro-view { padding: 10px 14px; height: 100%; overflow: auto; box-sizing: border-box;
@@ -40,6 +41,10 @@ export interface ReadViewSpec<T> {
   load(call: Call, ctx: ViewContext): Promise<T>;
   /** the pure model: what was read → rows */
   shape(data: T): Row[];
+  /** the change events the agent publishes on its own inbox that read it again. A watcher
+   *  also receives a COPY OF EVERY CALL made to the agent (its own reads, another client's
+   *  writes): a copy is never a change, so only these names count */
+  events: readonly string[];
   /** extra controls under the header (a search box); `redraw` shapes again, `call` reads */
   controls?(box: HTMLElement, tools: { call: Call; redraw(): void }): void;
   /** a click on a row that carries an id */
@@ -58,13 +63,7 @@ export async function mountReadView<T>(ctx: ViewContext, spec: ReadViewSpec<T>):
   const root = el("div", `ro-view ${spec.name}`);
   ctx.mount.appendChild(root);
   const host = new Host(ctx.kernel, ctx.selfId);
-  // the verbs this view reads with: the kernel mirrors every call to a watcher, so its own
-  // reads come back as events, and an event that only echoes a read must not read again
-  const reads = new Set<string>();
-  const call: Call = (p) => {
-    reads.add(String(p["type"]));
-    return host.call(ctx.backend, p as never).catch((e: Error) => ({ error: e.message }));
-  };
+  const call: Call = (p) => host.call(ctx.backend, p as never).catch((e: Error) => ({ error: e.message }));
   const bar = el("div", "bar");
   const again = el("button", "refresh", "⟳ refresh");
   again.title = "read it again";
@@ -85,21 +84,34 @@ export async function mountReadView<T>(ctx: ViewContext, spec: ReadViewSpec<T>):
       body.appendChild(row);
     }
   };
+  // reads may overlap (an event, the socket coming up, a click): only the newest draws
+  let latest = 0;
   const refresh = async (): Promise<void> => {
-    data = await spec.load(call, ctx);
+    const mine = ++latest;
+    const got = await spec.load(call, ctx);
+    if (mine !== latest) return;
+    data = got;
     redraw();
   };
   again.addEventListener("click", () => void refresh());
   spec.controls?.(ctl, { call, redraw });
-  await refresh();
-  // LIVE: an event on the agent reads it again (the echo of one of its own reads does not)
+  // LIVE: an event the agent published, of a kind the view names, reads it again
+  const named = new Set(spec.events);
   const off = ctx.kernel.onInbox(ctx.backend, (ev) => {
-    if (!reads.has(String((ev as Dict)["type"]))) void refresh();
+    if (named.has(String((ev as Dict)["type"]))) void refresh();
+  });
+  // the watch rides the agent's own socket: what changed before it was up is not
+  // published to this view, so the view reads again each time it comes up (a dial
+  // queued behind other sockets, a reconnect)
+  const offUp = host.onLifecycle(ctx.backend, (state) => {
+    if (state === "connected") void refresh();
   });
   ctx.kernel.watch(ctx.backend, ctx.selfId);
+  await refresh();
   return {
     unmount(): void {
       off();
+      offUp();
       host.unwatch(ctx.backend);
       root.remove();
     },

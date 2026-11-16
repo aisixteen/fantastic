@@ -184,7 +184,7 @@ function parseFrom(text) {
   var m = FROM.exec(text);
   return m ? { sender: m[1], text: text.slice(m[0].length) } : { sender: "", text: text };
 }
-// a stored person turn, as shown: setup block, spot and sender header taken off
+// a stored person message, as shown: setup block, spot and sender header taken off
 function personText(text) {
   var spot = SPOT.exec(text);
   var t = (spot ? text.slice(0, spot.index) : text).replace(SETUP_BLOCK, "");
@@ -211,7 +211,7 @@ function callsOf(text) {
   if (c) calls.push({ target: c[2] || c[1], verb: c[3] || "", args: text });
   return calls;
 }
-// a row that is a tool call (assistant, calls only) or its replies (the next user turn: one or several `[reply to …]`)
+// a row that is a tool call (assistant, calls only) or its replies (the next user message: one or several `[reply to …]`)
 function toolOf(role, text) {
   if (role === "assistant" && words(text) === "") {
     var calls = callsOf(text);
@@ -263,17 +263,17 @@ function collapseReports(rows) {
   });
   return out;
 }
-// a turn that ended with one of these reasons is not a failure
+// a call that ended with one of these reasons is not a failure
 var CALM = { "": 1, ok: 1, awaiting: 1, nothing_to_await: 1 };
-// the agent's state, as the header shows it: working while a turn runs, asks you while an
-// inquiry is open, failed when the last turn ended with a failure reason, done after a good one
+// the agent's state, as the header shows it: working while a call runs, asks you while an
+// inquiry is open, failed when the last call ended with a failure reason, done after a good one
 function stateOf(phase, reason, asks) {
   if (asks > 0) return "asks";
   if (phase === "thinking" || phase === "streaming" || phase === "tool_calling" || phase === "queued") return "working";
   if (!CALM[reason || ""]) return "failed";
   return reason === "ok" ? "done" : "idle";
 }
-// the word for a running turn, as the tree shows it
+// the word for a running call, as the tree shows it
 function phaseWord(phase) {
   return phase === "thinking" ? "thinking" : phase === "streaming" ? "writing" : phase === "tool_calling" ? "using tools" : phase === "queued" ? "queued" : "";
 }
@@ -474,11 +474,13 @@ function textsOf(rows) {
     });
   }
 
-  // THE TURN
+  // THE CALLS: this view's own (sent from here) and every other one of the agent (the
+  // terminal, another page, another agent) — one model, many view-models
   var pending = []; // my queued sends: {el, sendId}
   var inflight = null;
   var drafts = {};
-  function busy() { return inflight !== null || pending.length > 0; }
+  var anyRunning = false; // a call of the agent runs, whoever made it (its `status` says)
+  function busy() { return inflight !== null || pending.length > 0 || anyRunning; }
   function refresh() { $("stop").hidden = !busy(); }
   var curPhase = "idle", lastReason = "", asks = 0, askTs = 0;
   function phase(p, reason) {
@@ -501,6 +503,7 @@ function textsOf(rows) {
     pill.textContent = label;
     pill.hidden = label === "";
   }
+  // THE CLOCK: the "asks you · N min" age drawn again from what the view holds; it reads nothing
   setInterval(drawState, 30000);
   function bind(sendId) {
     if (!sendId || pending.some(function (q) { return q.sendId === sendId; })) return;
@@ -517,6 +520,27 @@ function textsOf(rows) {
     }
     inflight = { sendId: sendId };
     refresh();
+  }
+  // THE AGENT'S STATE, read again on its events: whether a call runs (any client's), its phase
+  // while none of this view's own runs, and how many wait from other clients
+  function followStatus() {
+    return call({ type: "status", client_id: me }).then(function (snap) {
+      if (!snap || typeof snap !== "object" || typeof snap.error === "string") return;
+      var cur = snap.current && typeof snap.current === "object" ? snap.current : null;
+      anyRunning = cur !== null;
+      $("others").textContent = typeof snap.others_pending === "number" && snap.others_pending > 0 ? "+" + snap.others_pending + " from other clients" : "";
+      if (!inflight) {
+        if (cur && s(cur, "phase")) phase(s(cur, "phase"));
+        else if (!cur && curPhase !== "idle") phase("idle");
+      }
+      refresh();
+    }, function () {});
+  }
+  var following = false, followAgain = false;
+  function follow() {
+    if (following) { followAgain = true; return; }
+    following = true;
+    followStatus().then(function () { following = false; if (followAgain) { followAgain = false; follow(); } });
   }
   var mine = function (p) { return (!s(p, "client_id") || s(p, "client_id") === me) && (!s(p, "source") || s(p, "source") === AGENT); };
   var toMe = function (p) { return s(p, "client_id") === me && (!s(p, "source") || s(p, "source") === AGENT); };
@@ -548,8 +572,16 @@ function textsOf(rows) {
       case "queued": if (mine(p) && s(p, "send_id")) bind(s(p, "send_id")); break;
       case "status": {
         var ph = s(p, "phase"), det = o(p, "detail"), sid = s(det, "send_id");
+        // a COPY OF A `status` CALL (this view's own read, another view's) is no event: only
+        // the agent's status event carries a phase
+        if (!ph) break;
         if (ph === "done") soon();
-        if (!mine(p)) break;
+        if (!mine(p)) {
+          // another client's call: Stop shows while it runs, its rows are drawn when it ends
+          if (ph === "done") stale = true;
+          else { anyRunning = true; if (!inflight && ph !== "retrying") phase(ph); refresh(); follow(); }
+          break;
+        }
         if (ph === "queued") { bind(sid); phase("queued"); }
         else if (ph === "thinking" || ph === "streaming") { if (!inflight || inflight.sendId !== sid) promote(sid); phase(ph); }
         else if (ph === "tool_calling") { tool(o(det, "tool")); phase(ph); }
@@ -591,7 +623,9 @@ function textsOf(rows) {
         }
         break;
       case "part_abort": if (toMe(p)) settle(s(p, "stream_id"), s(p, "reason") || "aborted"); break;
-      case "done": soon(); if (mine(p)) { inflight = null; refresh(); } break;
+      case "done": soon(); if (mine(p)) { inflight = null; refresh(); } else stale = true; break;
+      // a question this agent asked the person opened or closed (the holder publishes it here too)
+      case "inquiry_opened": case "inquiry_closed": if (s(p, "asker") === AGENT) inquiries(); break;
       case "context": {
         if (!mine(p)) break;
         var cd = o(p, "detail");
@@ -605,7 +639,9 @@ function textsOf(rows) {
   }
 
   // INQUIRIES this agent asked the person: `user` holds them
-  var seenInq = {}, answered = [], heldRe = {}; // answered: this session's answered cards, kept over a redraw
+  // shown: the open cards by `re`, kept over a redraw (a redraw never takes a card away under a click);
+  // answered: this session's answered cards, kept over a redraw
+  var shown = {}, answered = [], heldRe = {};
   function inquiryEl(q) {
     var re = Number(q.re), kind = s(q, "kind") || "text";
     var card = el("section", "inq"), row = el("div", "row"), st = el("div", "st");
@@ -613,7 +649,7 @@ function textsOf(rows) {
     function lock(on) { row.querySelectorAll("button,input").forEach(function (b) { b.disabled = on; }); }
     function reply(answer, shownAs) {
       lock(true);
-      // kept over a redraw from the moment it is sent: the turn it wakes can redraw before the answer returns
+      // kept over a redraw from the moment it is sent: the call it wakes can redraw before the answer returns
       if (answered.indexOf(card) < 0) answered.push(card);
       heldRe[re] = true;
       fantastic.send("user", { type: "answer_inquiry", re: re, answer: answer }).then(function (r) {
@@ -653,11 +689,20 @@ function textsOf(rows) {
     asks = open.length;
     askTs = open.reduce(function (lo, q) { return typeof q.ts === "number" && (lo === 0 || q.ts < lo) ? q.ts : lo; }, 0);
     drawState();
+    var still = {};
     open.forEach(function (q) {
       var re = Number(q.re);
-      if (!Number.isFinite(re) || seenInq[re] || heldRe[re]) return;
-      seenInq[re] = true;
-      push(inquiryEl(q));
+      if (!Number.isFinite(re)) return;
+      still[re] = true;
+      if (shown[re] || heldRe[re]) return;
+      shown[re] = inquiryEl(q);
+      push(shown[re]);
+    });
+    // closed elsewhere (another client answered, or it timed out): the card goes; one answered here stays
+    Object.keys(shown).forEach(function (re) {
+      if (still[re] || heldRe[re]) return;
+      shown[re].remove();
+      delete shown[re];
     });
   }
 
@@ -680,11 +725,10 @@ function textsOf(rows) {
     // tool calls and their replies are rows, not events: a run that ended is drawn from the stored rows
     if (stale || fresh.some(function (m) { return m.kind !== "notice" && toolOf(String(m.role || ""), typeof m.head === "string" ? m.head : "") !== null; })) {
       stale = !(await drawHistory(keepRows, true));
-      if (!stale) { seenInq = {}; await inquiries(); }
     }
   }
   var timer = null, rowTimer = null;
-  function soon() { if (timer) return; timer = setTimeout(function () { timer = null; inquiries(); newRows(); }, 250); }
+  function soon() { if (timer) return; timer = setTimeout(function () { timer = null; followStatus().then(function () { inquiries(); newRows(); }); }, 250); }
   function rowsSoon() { if (rowTimer) return; rowTimer = setTimeout(function () { rowTimer = null; newRows(); }, 60); }
 
   // SEND / STOP / CLEAR
@@ -726,13 +770,14 @@ function textsOf(rows) {
     var long = tl.rows.some(function (m) { return typeof m.bytes === "number" && m.bytes > CUT; });
     var head = long || tl.rows.some(function (m) { return m.has_thinking === true; })
       ? await readHead(function (p) { return call(p).catch(function () { return null; }); }, 200) : [];
-    // a redraw on the way (soft) never takes a turn's live text away
+    // a redraw on the way (soft) never takes a call's live text away
     if (soft && (busy() || Object.keys(drafts).length > 0)) return false;
     tail = null;
     var kids = Array.prototype.slice.call(dialog.children, 1);
     kids.forEach(function (k) { k.remove(); });
     drawItems(shapeRows(tl.rows, thoughtsOf(head), textsOf(head)));
     answered.forEach(push);
+    Object.keys(shown).forEach(function (re) { if (answered.indexOf(shown[re]) < 0) push(shown[re]); });
     lastRow = tl.lastId;
     var more = $("earlier");
     more.hidden = tl.earlier <= 0;
@@ -743,8 +788,7 @@ function textsOf(rows) {
   $("earlier").onclick = function () {
     if (busy()) return;
     $("earlier").disabled = true;
-    seenInq = {};
-    drawHistory(keepRows + 300).then(function () { inquiries(); }).catch(function (e) { notice("✕ " + (e && e.message ? e.message : e), "error"); });
+    drawHistory(keepRows + 300).catch(function (e) { notice("✕ " + (e && e.message ? e.message : e), "error"); });
   };
   // BOOT: head, history, live snapshot, then the watch
   async function boot() {
@@ -760,6 +804,8 @@ function textsOf(rows) {
     if (snap && typeof snap === "object") {
       $("others").textContent = typeof snap.others_pending === "number" && snap.others_pending > 0 ? "+" + snap.others_pending + " from other clients" : "";
       var cur = o(snap, "current");
+      anyRunning = Object.keys(cur).length > 0;
+      if (anyRunning && cur.is_mine !== true && s(cur, "phase")) phase(s(cur, "phase"));
       if (cur.is_mine === true) {
         push(bubble("user", s(cur, "text"), ""));
         if (s(cur, "text_so_far")) push(bubble("assistant", s(cur, "text_so_far"), ""));

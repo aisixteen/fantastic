@@ -298,8 +298,8 @@ async fn reflect_says_how_it_is_set_up_and_carries_an_html_view() {
     assert_eq!(v["send_allow"], json!(["friend@example.org", "corp.test"]));
     assert_eq!(v["view"]["kind"], json!("html"));
     assert!(v["view"]["bytes"].as_str().unwrap().contains("var AGENT = \"mail\""));
-    // the view reads only
-    assert_eq!(v["view"]["calls"]["mail"], json!(["reflect", "list", "inquiries"]));
+    // the view reads, and watches what the agent publishes
+    assert_eq!(v["view"]["calls"]["mail"], json!(["reflect", "list", "inquiries", "watch"]));
 }
 
 #[tokio::test]
@@ -399,4 +399,31 @@ async fn tls_false_is_for_a_loopback_host_only() {
         let m = json!({"imap": {"host": h, "port": 143, "tls": false}}).as_object().cloned().unwrap();
         assert!(super::endpoint(&m, "imap", &AgentId::from("mail")).is_ok(), "{h}");
     }
+}
+
+/// WHAT CHANGED, PUBLISHED: a mark is `marked {mailbox, uid}` and a sent mail is
+/// `sent {message_id, to}` on the agent's own inbox, so a view watching it re-reads on
+/// those only; a refused mark and a send answered no publish nothing.
+#[tokio::test]
+async fn a_mark_and_a_sent_mail_are_published_on_the_agents_inbox() {
+    let r = rig().await;
+    let mut rx = r.kernel.ensure_inbox(&AgentId::from("mail_view"));
+    assert!(r.kernel.watch(&AgentId::from("mail"), AgentId::from("mail_view")).await.is_none());
+    send(&r.kernel, json!({"type": "mark", "mailbox": "INBOX", "uid": 2, "seen": true})).await;
+    send(&r.kernel, json!({"type": "mark", "mailbox": "INBOX", "uid": 2})).await;
+    let no = json!({"type": "send", "to": ["friend@example.org"], "subject": "No", "text": "x"});
+    let _ = tokio::join!(send(&r.kernel, no), approve(&r, json!(false)));
+    let yes = json!({"type": "send", "to": ["friend@example.org"], "subject": "Yes", "text": "x"});
+    let (out, _) = tokio::join!(send(&r.kernel, yes), approve(&r, json!(true)));
+    let mut got = Vec::new();
+    while let Ok(Some(it)) = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await {
+        if matches!(it.payload["type"].as_str(), Some("marked" | "sent")) {
+            got.push(it.payload.clone());
+        }
+    }
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert_eq!(got[0], json!({"type": "marked", "mailbox": "INBOX", "uid": 2}));
+    assert_eq!(got[1]["type"], json!("sent"));
+    assert_eq!(got[1]["message_id"], out.result["message_id"]);
+    assert_eq!(got[1]["to"], json!(["friend@example.org"]));
 }

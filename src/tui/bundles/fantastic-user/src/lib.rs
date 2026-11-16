@@ -373,7 +373,7 @@ impl Handler for UserBundle {
                 import::import_subtree(kernel, a).await
             }
             // THE PERSON'S INQUIRIES: held, listed, answered (the kernel's `inquiry` module)
-            verbs::Call::Inquiry(a) => fantastic_kernel::inquiry::ask(agent_id, a, kernel),
+            verbs::Call::Inquiry(a) => fantastic_kernel::inquiry::ask(agent_id, a, kernel).await,
             verbs::Call::Inquiries(a) => fantastic_kernel::inquiry::list(agent_id, &a, kernel),
             verbs::Call::AnswerInquiry(a) => fantastic_kernel::inquiry::answer(agent_id, a, kernel).await,
         };

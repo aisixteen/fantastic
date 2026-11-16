@@ -156,6 +156,26 @@ async fn seed(k: &Arc<Kernel>) -> Outcome {
     out
 }
 
+/// THE STORE PUBLISHES WHAT CHANGED on its own inbox: `stored {ref}` and `forgotten {ref}` —
+/// the ref's name only, never a field or a value (what its view re-reads `list` on). A
+/// refused set publishes nothing.
+#[tokio::test]
+async fn set_and_forget_are_published_by_ref_name_only() {
+    let f = mk(json!({})).await;
+    let mut rx = f.k.ensure_inbox(&AgentId::from("creds"));
+    let refused = call(&f.k, json!({"type": "set", "ref": "undeclared/x", "fields": {"api_key": KEY}}), None).await;
+    assert!(refused.result.get("error").is_some(), "{}", refused.result);
+    seed(&f.k).await;
+    call(&f.k, json!({"type": "forget", "ref": "openai/main"}), Some("bob")).await;
+    let mut got = Vec::new();
+    while let Some(item) = rx.try_recv() {
+        if matches!(item.payload["type"].as_str(), Some("stored" | "forgotten")) {
+            got.push(item.payload);
+        }
+    }
+    assert_eq!(got, vec![json!({"type": "stored", "ref": "openai/main"}), json!({"type": "forgotten", "ref": "openai/main"})]);
+}
+
 // ─── the file backend ────────────────────────────────────────────────────────
 
 #[tokio::test]

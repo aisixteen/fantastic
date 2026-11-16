@@ -848,17 +848,37 @@ impl Handler for CredentialStoreBundle {
         let out = match call {
             Call::Reflect(_) => Self::reflect(agent_id, &record(kernel, agent_id)),
             Call::Set(a) => {
-                let _one = self.writes.lock().unwrap_or_else(|p| p.into_inner());
-                self.set(agent_id, &a, kernel)?
+                let out = {
+                    let _one = self.writes.lock().unwrap_or_else(|p| p.into_inner());
+                    self.set(agent_id, &a, kernel)?
+                };
+                published(kernel, agent_id, "stored", &out).await;
+                out
             }
             Call::Get(a) => self.get(agent_id, &a, kernel)?,
             Call::List(_) => Self::list(agent_id, kernel),
             Call::Forget(a) => {
-                let _one = self.writes.lock().unwrap_or_else(|p| p.into_inner());
-                self.forget(agent_id, &a, kernel)?
+                let out = {
+                    let _one = self.writes.lock().unwrap_or_else(|p| p.into_inner());
+                    self.forget(agent_id, &a, kernel)?
+                };
+                published(kernel, agent_id, "forgotten", &out).await;
+                out
             }
         };
         Ok(Some(out))
+    }
+}
+
+/// WHAT CHANGED, PUBLISHED on the store's own inbox: a ref stored (`stored {ref}`) or
+/// forgotten (`forgotten {ref}`) — the ref's NAME only, never a field or a value. Its
+/// view re-reads `list` on these. A refusal (no `ref` in the reply) publishes nothing.
+async fn published(kernel: &Arc<Kernel>, agent_id: &AgentId, kind: &str, out: &Value) {
+    if out.get(kind).and_then(Value::as_bool) != Some(true) {
+        return;
+    }
+    if let Some(r) = out.get("ref").and_then(Value::as_str) {
+        kernel.emit(agent_id, json!({"type": kind, "ref": r})).await;
     }
 }
 

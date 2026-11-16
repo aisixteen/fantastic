@@ -1776,6 +1776,13 @@ impl Kernel {
         sender: Option<&AgentId>,
         publish: bool,
     ) {
+        // THE KERNEL'S OWN LEDGER WRITES AND READS REACH NO INBOX either: inside them
+        // (`STATE_QUIET`) the store's dispatch is mirrored to no watcher, and what the
+        // store emits (`appended` per execution row) reaches nobody. A view watching the
+        // store would read it again on each, its read would row, the row flush, forever.
+        if state_quiet() {
+            return;
+        }
         // `sender` is THE CALLER, not the target; an operator send carries JSON
         // null.
         let summary = summarize_payload(&item.payload, item.body.as_ref());

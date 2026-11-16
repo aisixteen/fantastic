@@ -27,9 +27,10 @@ interface Pure {
   lookupFor(path: string, agents: Record<string, Obj>): { paths(): string[]; agentAt(p: string): Obj | undefined; folderOf(id: string): string | undefined };
   trail(path: string, ix: unknown): string[];
   metaOf(o: Obj): string;
+  rereads(ev: unknown, kind: string, own: string): boolean;
 }
 const ctx = vm.createContext({});
-vm.runInContext(`${head}\n${html.slice(from, to)}\nthis.api = { readState, nextState, sortedEntries, agentsOf, lookupFor, trail, metaOf };`, ctx);
+vm.runInContext(`${head}\n${html.slice(from, to)}\nthis.api = { readState, nextState, sortedEntries, agentsOf, lookupFor, trail, metaOf, rereads };`, ctx);
 const raw = (ctx as unknown as { api: Pure }).api;
 const plain = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 
@@ -85,4 +86,22 @@ test("the breadcrumb: the agent chain from the kernel tree, then the path below 
   assert.deepEqual(plain(raw.trail("", raw.lookupFor("", agents))), ["project"]);
   // the module's own trail, on the same lookup, agrees
   assert.deepEqual(trail(at, raw.lookupFor(at, agents) as never), ["Lead", "cluster ops", "k-rollout", "deploy", "api", "api.yaml"]);
+});
+
+test("a folder view lists again only when an entry came or went", () => {
+  const r = (ev: Obj): boolean => raw.rereads(ev, "folder", "logs");
+  assert.equal(r({ type: "added", path: "logs/a", name: "a" }), true);
+  assert.equal(r({ type: "removed", path: "logs/a", name: "a" }), true);
+  assert.equal(r({ type: "changed", path: "logs/team.log", name: "team.log" }), false, "a file written in place is no new listing");
+  for (const copy of [{ type: "list", path: "." }, { type: "watch" }]) assert.equal(r(copy), false, `a copy of ${copy.type}`);
+});
+
+test("a file view reads again on every change of its own file", () => {
+  const OWN = "team.log";
+  const r = (ev: Obj): boolean => raw.rereads(ev, "file", OWN);
+  assert.equal(r({ type: "changed", path: OWN, kind: "modified" }), true, "someone wrote it");
+  assert.equal(r({ type: "changed", path: "other.log", kind: "modified" }), false, "not its file");
+  for (const copy of [{ type: "read", offset: 0, limit: 200 }, { type: "watch" }]) assert.equal(r(copy), false, `a copy of ${copy.type}`);
+  assert.equal(r({ type: "changed", path: OWN, kind: "deleted" }), true);
+  assert.equal(r({ type: "changed", path: OWN, kind: "added" }), true);
 });

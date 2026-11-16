@@ -82,9 +82,23 @@ td.size{text-align:right;color:var(--fc-color-text-subtle);white-space:nowrap}
     });
     out.appendChild(t);
   }
-  fantastic.send(AGENT, { type: "reflect" }).then(draw).catch(function () {
-    out.textContent = "";
-    out.appendChild(el("p", "err", "Could not read the store."));
+  // one read at a time: events heard while one runs ask for one more read after it
+  var reading = false, again = false;
+  function load() {
+    if (reading) { again = true; return; }
+    reading = true;
+    fantastic.send(AGENT, { type: "reflect" }).then(draw).catch(function () {
+      out.textContent = "";
+      out.appendChild(el("p", "err", "Could not read the store."));
+    }).then(function () { reading = false; if (again) { again = false; load(); } });
+  }
+  // THE STORE'S PUBLISHED WRITES — a closed list: the file grew, shrank or was replaced.
+  // A COPY OF A CALL made to the store (this view's own reflect, anyone's append or read)
+  // is never one: those carry the verb's name, not these
+  var WRITES = { appended: 1, pruned: 1, injected: 1, bytes_put: 1 };
+  fantastic.watch(AGENT, function (ev) {
+    if (ev && typeof ev === "object" && typeof ev.error !== "string" && WRITES[ev.type] === 1) load();
   });
+  load();
 })();
 </script>

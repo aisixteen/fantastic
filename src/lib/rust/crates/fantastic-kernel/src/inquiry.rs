@@ -163,8 +163,25 @@ pub fn open_count(kernel: &Arc<Kernel>, who: &AgentId) -> Value {
     open(kernel, who).map_or_else(|e| e, |l| json!(l.len()))
 }
 
+/// WHAT CHANGED, PUBLISHED: `inquiry_opened` / `inquiry_closed {re, asker, holder}` on
+/// the holder's own inbox (its view-models re-read `inquiries`), and the same event
+/// on the asker's inbox — kernel bookkeeping, like `agent_created` on a parent's: the
+/// asker's views show its "asks you" from it. A remote asker (another kernel) has no
+/// inbox here.
+async fn publish(kernel: &Arc<Kernel>, who: &AgentId, kind: &str, re: i64, asker: Option<&str>) {
+    let ev = json!({"type": kind, "re": re, "asker": asker, "holder": who.as_str()});
+    kernel.emit(who, ev.clone()).await;
+    let Some(asker) = asker.filter(|a| *a != who.as_str()) else { return };
+    let Some(target) = kernel.agents.get(&AgentId::from(asker)).map(|e| Arc::clone(&e)) else {
+        return;
+    };
+    kernel
+        .fanout(&target, "emit", &crate::inbox::InboxItem::text(ev), Some(who))
+        .await;
+}
+
 /// `inquiry`: held as open; the pid it runs under is its `re`.
-pub fn ask(who: &AgentId, a: Inquiry, kernel: &Arc<Kernel>) -> Value {
+pub async fn ask(who: &AgentId, a: Inquiry, kernel: &Arc<Kernel>) -> Value {
     let Some(re) = crate::current_task().map(|t| t.0) else {
         return refusal(refusal::NOT_CONNECTED, format!("{who}: inquiry outside a task — nothing to answer under"));
     };
@@ -182,14 +199,18 @@ pub fn ask(who: &AgentId, a: Inquiry, kernel: &Arc<Kernel>) -> Value {
         reply_client_id: a.reply_client_id,
         ts,
     };
-    let _g = HELD.lock().expect("inquiries poisoned");
-    let mut list = match open(kernel, who) {
-        Ok(l) => l,
-        Err(e) => return e,
+    let asker = held.asker.clone();
+    let n = {
+        let _g = HELD.lock().expect("inquiries poisoned");
+        let mut list = match open(kernel, who) {
+            Ok(l) => l,
+            Err(e) => return e,
+        };
+        list.push(held);
+        store(kernel, who, &list);
+        list.len()
     };
-    list.push(held);
-    let n = list.len();
-    store(kernel, who, &list);
+    publish(kernel, who, "inquiry_opened", re, asker.as_deref()).await;
     json!({"accepted": true, "re": re, "request_id": request_id, "open": n})
 }
 
@@ -254,6 +275,9 @@ pub async fn answer(who: &AgentId, a: AnswerInquiry, kernel: &Arc<Kernel>) -> Va
             store(kernel, who, &list);
             refusal(refusal::TRANSPORT_ERROR, format!("{who}: answer_inquiry: the answer did not reach {asker}: {e}"))
         }
-        None => json!({"answered": re, "asker": asker}),
+        None => {
+            publish(kernel, who, "inquiry_closed", re, Some(asker.as_str())).await;
+            json!({"answered": re, "asker": asker})
+        }
     }
 }

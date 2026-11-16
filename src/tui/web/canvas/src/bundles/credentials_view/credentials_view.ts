@@ -14,6 +14,8 @@ export const credentialsView: ViewBundle = {
   mount(ctx: ViewContext): Promise<ViewHandle> {
     return mountReadView<{ list: unknown; reflect: unknown }>(ctx, {
       name: "credentials",
+      // a ref stored or forgotten — the store publishes the ref's name, never a value
+      events: ["stored", "forgotten"],
       async load(call) {
         const [list, reflect] = await Promise.all([call({ type: "list" }), call({ type: "reflect" })]);
         return { list, reflect };

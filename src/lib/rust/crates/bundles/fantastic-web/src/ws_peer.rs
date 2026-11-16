@@ -413,6 +413,7 @@ impl PeerLink {
                 .push((self.me.clone(), out.downgrade()));
             let _ = self.guid.set(guid.to_string());
             self.pinned = Some((guid.to_string(), route));
+            peer_connected(kernel, leg, guid).await;
             return;
         };
         let weak_watch = out.downgrade();
@@ -451,6 +452,7 @@ impl PeerLink {
         for agent_id in kernel.peer_watched(guid) {
             watch_leg(out.downgrade(), agent_id, true).await;
         }
+        peer_connected(kernel, leg, guid).await;
     }
 
     /// An inbound `{type:"event", src, payload}` from a kernel's leg: an event of
@@ -604,4 +606,11 @@ async fn answer_error(out: &tokio::sync::mpsc::Sender<Out>, fid: &Value, r: &Val
             &error_frame(fid, r),
         )))
         .await;
+}
+
+/// THE LEG SAYS A PEER IS NOW ADDRESSABLE through it (after `hello`), on its own inbox —
+/// the pair of `socket_closed {guid}`: whoever shows the connected kernels re-reads them
+/// on the event.
+async fn peer_connected(kernel: &Arc<Kernel>, leg: &AgentId, guid: &str) {
+    kernel.emit(leg, json!({"type": "peer_connected", "guid": guid})).await;
 }

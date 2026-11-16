@@ -535,6 +535,10 @@ pub(crate) async fn serve(
         ),
     };
     remember(agent, &method, &last_host, status);
+    // WHAT CHANGED, PUBLISHED on the agent's own inbox: its view re-reads `recent_requests`
+    kernel
+        .emit(agent, json!({"type": "request_served", "method": method, "host": last_host, "status": status}))
+        .await;
     out
 }
 

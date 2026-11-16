@@ -15,6 +15,8 @@ export const storeView: ViewBundle = {
     let hits: Hits | null = null;
     return mountReadView<unknown>(ctx, {
       name: "store",
+      // the store's writes, as it publishes them (ram_store and sqlite_store alike; `bytes_put` is sqlite_store's alone)
+      events: ["appended", "pruned", "injected", "bytes_put"],
       load: (call) => call({ type: "dump" }),
       shape: (reply) => storeRows(storeState(reply), hits),
       controls(box, { call, redraw }) {

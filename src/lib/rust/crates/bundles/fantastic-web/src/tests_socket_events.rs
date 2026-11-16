@@ -1,6 +1,7 @@
 //! The leg tells its watchers when a socket opens and when it closes, so the side
 //! that was dialed (a box a master reaches over a tunnel) knows its link without a
-//! call: `socket_open {client_id}`, then `socket_closed {client_id, guid}`.
+//! call: `socket_open {client_id}`, `peer_connected {guid}` once a hello made the peer
+//! addressable, then `socket_closed {client_id, guid}`.
 
 use super::*;
 use futures_util::SinkExt;
@@ -41,7 +42,9 @@ async fn the_leg_emits_socket_open_and_socket_closed() {
     ws.send(TMessage::Text(json!({"type": "hello", "guid": "g-peer"}).to_string()))
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // the peer is addressable now: the leg says so, with the guid the view re-reads the peers for
+    let hello = next_of(&mut rx, "peer_connected").await;
+    assert_eq!(hello["guid"], json!("g-peer"), "{hello}");
     ws.close(None).await.unwrap();
     let closed = next_of(&mut rx, "socket_closed").await;
     assert_eq!(closed["client_id"], json!(client), "{closed}");

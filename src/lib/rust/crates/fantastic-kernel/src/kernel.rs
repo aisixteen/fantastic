@@ -902,6 +902,41 @@ impl Kernel {
         token
     }
 
+    /// AN AGENT PUBLISHES WHAT IT FOLLOWS: a state tap for agent `me`. Each state event
+    /// `pick` names a change of is queued (the kernel is not touched from inside its own
+    /// publish); a task then makes each change, in order, into the event `me` emits on its
+    /// own inbox (`publish` may answer none). [`Self::remove_state_subscriber`] with the
+    /// returned token drops the tap and its queue, and the task ends; so does the kernel
+    /// going away.
+    pub fn publish_changes<C, P, F>(
+        self: &Arc<Self>,
+        me: AgentId,
+        pick: P,
+        mut publish: F,
+    ) -> SubscriberToken
+    where
+        C: Send + 'static,
+        P: Fn(&Value) -> Option<C> + Send + Sync + 'static,
+        F: FnMut(&Arc<Kernel>, C) -> Option<Value> + Send + 'static,
+    {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<C>();
+        let token = self.add_state_subscriber(Arc::new(move |ev: &Value, _body| {
+            if let Some(c) = pick(ev) {
+                let _ = tx.send(c);
+            }
+        }));
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            while let Some(c) = rx.recv().await {
+                let Some(k) = weak.upgrade() else { return };
+                if let Some(ev) = publish(&k, c) {
+                    k.emit(&me, ev).await;
+                }
+            }
+        });
+        token
+    }
+
     /// Detach a previously-registered subscriber. No-op if `token`
     /// isn't (or no longer is) registered.
     pub fn remove_state_subscriber(&self, token: SubscriberToken) {

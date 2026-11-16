@@ -95,7 +95,7 @@ impl Handler for WebMcpBundle {
             },
             verbs::Call::SendBatch(a) => inbound_send(a, kernel).await,
             // THE PERSON'S INQUIRIES (#307): held on the record, listed, answered.
-            verbs::Call::Inquiry(a) => fantastic_kernel::inquiry::ask(agent_id, a, kernel),
+            verbs::Call::Inquiry(a) => fantastic_kernel::inquiry::ask(agent_id, a, kernel).await,
             verbs::Call::Inquiries(a) => fantastic_kernel::inquiry::list(agent_id, &a, kernel),
             verbs::Call::AnswerInquiry(a) => fantastic_kernel::inquiry::answer(agent_id, a, kernel).await,
             verbs::Call::Reflect(_) => {
