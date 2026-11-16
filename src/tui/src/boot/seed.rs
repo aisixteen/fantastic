@@ -506,7 +506,8 @@ mod tests {
                 if p.is_dir() {
                     walk(base, &p, out);
                 } else {
-                    let rel = p.strip_prefix(base).unwrap().to_string_lossy().into_owned();
+                    // `/`-joined whatever the OS: the keys are compared with `agents/<id>/agent.yaml`
+                    let rel = p.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
                     out.insert(rel, std::fs::read(&p).unwrap());
                 }
             }

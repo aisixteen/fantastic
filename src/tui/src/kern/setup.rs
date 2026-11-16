@@ -359,7 +359,7 @@ mod tests {
             may_call: vec![],
         };
         let at = write(&h, &rec).await.unwrap();
-        assert!(at.ends_with("/agents/mine/agent.yaml"), "{at}");
+        assert!(std::path::Path::new(&at).ends_with("agents/mine/agent.yaml"), "{at}");
         assert!(at.starts_with(&h.kernel.state_dir().unwrap().display().to_string()), "{at}");
         for id in ["mine", "mine_provider"] {
             assert!(

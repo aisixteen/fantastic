@@ -130,6 +130,12 @@ mod tests {
         d
     }
 
+    /// `/x` as this OS roots it: `/x` on Unix, `<drive>:\x` on Windows (where a
+    /// leading slash alone is not an absolute path).
+    fn abs(p: &str) -> PathBuf {
+        std::path::absolute(p).unwrap()
+    }
+
     #[test]
     fn resolve_defaults_to_cwd() {
         let cwd = std::env::current_dir().unwrap();
@@ -140,16 +146,17 @@ mod tests {
         let far = Paths::resolve(Some(Path::new("/s")), Some(Path::new("/w"))).unwrap();
         assert_eq!(
             (far.store, far.work),
-            (PathBuf::from("/s"), PathBuf::from("/w"))
+            (abs("/s"), abs("/w"))
         );
     }
 
     #[test]
     fn resolve_reads_the_recorded_workdir_back() {
         let s = scratch("rec");
+        // `/w` as recorded: on Windows a drive-relative path, resolved against the cwd's drive
         std::fs::write(s.join("agent.yaml"), "id: root\nworkdir: /w\n").unwrap();
         let p = Paths::resolve(Some(&s), None).unwrap();
-        assert_eq!(p.work, PathBuf::from("/w"));
+        assert_eq!(p.work, abs("/w"));
         assert_eq!(p.store, s);
         let _ = std::fs::remove_dir_all(&s);
     }
@@ -168,7 +175,7 @@ mod tests {
         let s = scratch("win");
         std::fs::write(s.join("agent.yaml"), "id: root\nworkdir: /recorded\n").unwrap();
         let p = Paths::resolve(Some(&s), Some(Path::new("/given"))).unwrap();
-        assert_eq!(p.work, PathBuf::from("/given"));
+        assert_eq!(p.work, abs("/given"));
         let _ = std::fs::remove_dir_all(&s);
     }
 

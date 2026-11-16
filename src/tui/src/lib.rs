@@ -278,10 +278,12 @@ mod tests {
     #[test]
     fn state_dir_of_derives_from_workdir_or_takes_statedir() {
         let v = |s: &str| state_dir_of(&a(s)).unwrap();
-        assert_eq!(v("--headless --workdir /w"), std::path::PathBuf::from("/w/.fantastic"));
-        assert_eq!(v("canvas --statedir /s"), std::path::PathBuf::from("/s"));
+        // `/w` is rooted at the current drive on Windows, where a bare `/w` is not absolute
+        let abs = |p: &str| std::path::absolute(p).unwrap();
+        assert_eq!(v("--headless --workdir /w"), abs("/w").join(".fantastic"));
+        assert_eq!(v("canvas --statedir /s"), abs("/s"));
         assert_eq!(v("mcp"), std::env::current_dir().unwrap().join(".fantastic"));
-        assert_eq!(v("mcp --workdir /w --statedir /s"), std::path::PathBuf::from("/s"));
+        assert_eq!(v("mcp --workdir /w --statedir /s"), abs("/s"));
         assert!(state_dir_of(&a("mcp --bogus")).is_err());
         assert!(state_dir_of(&a("bogus")).is_err());
     }
