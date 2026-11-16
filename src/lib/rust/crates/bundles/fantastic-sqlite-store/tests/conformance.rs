@@ -363,7 +363,7 @@ fn wire(v: &Value) -> String {
 /// store lists differ between the two bundles (`boot` is sqlite's own).
 async fn s_unknown_type_is_coded_unhandled_with_the_raw_verb(t: &mut T) {
     let verbs = if t.h == SQL {
-        "boot, append, read, search, prune, inject, dump, put_bytes, get_bytes, reflect"
+        "boot, append, read, search, prune, inject, dump, put_bytes, get_bytes, query, reflect"
     } else {
         "append, read, search, prune, inject, dump, put_bytes, get_bytes, reflect"
     };
@@ -528,20 +528,20 @@ async fn reflect_names_the_same_verbs_and_says_durable() {
         let verbs: Vec<&String> = d["verbs"].as_object().unwrap().keys().collect();
         let mut want = vec!["append", "read", "search", "prune", "inject", "dump", "put_bytes", "get_bytes", "reflect"];
         if h == SQL {
-            want = vec!["boot", "append", "read", "search", "prune", "inject", "dump", "put_bytes", "get_bytes", "reflect"];
+            want = vec!["boot", "append", "read", "search", "prune", "inject", "dump", "put_bytes", "get_bytes", "query", "reflect"];
         }
         assert_eq!(verbs, want);
     }
 }
 
-/// Every verb but `boot` (which opens the file) is declared once, in ram_store:
+/// Every verb but `boot` (which opens the file) and `query` (this store's own) is declared once, in ram_store:
 /// the same names in the same order, the same argument schemas.
 #[test]
 fn verbs_match_ram_store() {
     let ram = fantastic_ram_store::verbs::VERBS;
     let sql: Vec<_> = fantastic_sqlite_store::verbs::VERBS
         .iter()
-        .filter(|v| v.name != "boot")
+        .filter(|v| v.name != "boot" && v.name != "query")
         .collect();
     assert_eq!(ram.len(), sql.len());
     for (r, q) in ram.iter().zip(sql) {
