@@ -6,10 +6,19 @@
 //! read (`mailboxes`) and the recipients it may mail (`send_allow`); an empty list
 //! allows nothing.
 //!
+//! `tls: false` (the clear text of a test or local server) is allowed only for a loopback
+//! host (`127.0.0.1`, `::1`, `localhost`): a remote host with it is refused before any
+//! connection. One `credentials` ref may be bound to both server hosts in the store.
+//!
+//! `fetch` returns an attachment's bytes (base64) when its `attachment` argument names
+//! one, up to 1 MiB (1048576 bytes); a larger one is refused.
+//!
 //! `list`, `fetch` read; `mark` and `send` write (the kernel's call rows record them).
 //! `send` never sends on its own say: it holds an inquiry (confirm) showing the
 //! recipients, subject and text, and sends only when a person answers yes through
-//! `answer_inquiry`; on no it sends nothing.
+//! `answer_inquiry`; on no it sends nothing and replies `{sent: false}`. A person is the
+//! operator: an answer made by any agent (the asker included) is refused and the
+//! inquiry stays open. The recent sends are kept in memory only: they are gone at restart.
 //!
 //! Provider sign-in (OAuth, XOAUTH2) is not built here: it waits for the OAuth piece
 //! shared with MCP authorization (#690). The login is read as one [`Login`]; a token
@@ -46,7 +55,7 @@ pub const HANDLER_MODULE: &str = "mail.tools";
 const NAME: &str = "mail";
 const MAN: &str = "A mailbox: it reads mail over IMAP (list, fetch, mark) in the folders its record allows, and sends mail over SMTP only to the recipients its record allows and only after a person answers yes to an inquiry showing what would be sent.";
 
-/// The most recent sends the view shows.
+/// The most recent sends the view shows (kept in memory, since start).
 const RECENT: usize = 20;
 const VIEW: &str = include_str!("mail_view.html");
 const VIEW_CALLS: [&str; 3] = ["reflect", "list", "inquiries"];
@@ -89,7 +98,6 @@ enum Slot {
 #[derive(Clone)]
 struct Decision {
     yes: bool,
-    by: Option<String>,
 }
 
 /// The mail bundle: the sends waiting for an answer, and the recent sends, per agent.
@@ -130,11 +138,18 @@ fn endpoint(m: &Map<String, Value>, field: &str, id: &AgentId) -> Result<Endpoin
         rf::with(&mut r, "arg", json!(field));
         return Err(r);
     };
-    serde_json::from_value(v.clone()).map_err(|e| {
+    let ep: Endpoint = serde_json::from_value(v.clone()).map_err(|e| {
         let mut r = refusal(rf::BAD_ARG, format!("{id}: the record's `{field}` is malformed: {e}"));
         rf::with(&mut r, "arg", json!(field));
         r
-    })
+    })?;
+    let host = ep.host.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+    if ep.tls == Some(false) && !["127.0.0.1", "::1", "localhost"].contains(&host.as_str()) {
+        let mut r = refusal(rf::BAD_ARG, format!("{id}: the record's `{field}` has tls false for a host that is not this machine — refused, nothing connected"));
+        rf::with(&mut r, "arg", json!(field));
+        return Err(r);
+    }
+    Ok(ep)
 }
 
 fn list_of(m: &Map<String, Value>, field: &str) -> Vec<String> {
@@ -225,7 +240,7 @@ impl MailBundle {
             Read::List(a) => {
                 imap::list(&mut s, &ep.host, pass, &a.mailbox, a.unseen.unwrap_or(false), a.since.as_deref(), a.limit.unwrap_or(20) as usize).await
             }
-            Read::Fetch(a) => imap::fetch(&mut s, &ep.host, pass, &a.mailbox, a.uid).await,
+            Read::Fetch(a) => imap::fetch(&mut s, &ep.host, pass, &a.mailbox, a.uid, a.attachment.as_deref()).await,
             Read::Mark(a) => {
                 if a.seen.is_none() && a.flag.is_none() {
                     Err(Fail::new(rf::MISSING_ARG, "mail: mark needs `seen` or `flag`"))
@@ -276,7 +291,7 @@ impl MailBundle {
         };
         let d = rx.await.map_err(|_| refusal(rf::TRANSPORT_CLOSED, format!("{id}: the approval was lost — nothing was sent")))?;
         if !d.yes {
-            return Ok(json!({"sent": false, "reason": "declined", "to": a.to}));
+            return Ok(json!({"sent": false}));
         }
         // approved: sign in now, and thread the reply
         let login = read_login(id, kernel, &smtp.host).await?;
@@ -312,7 +327,7 @@ impl MailBundle {
             .map_err(failed)?;
         let mut sent = self.sent.lock().expect("sent poisoned");
         let q = sent.entry(id.0.clone()).or_default();
-        q.push_back(Sent { to: a.to.clone(), subject: a.subject.clone(), ts: now(), approved_by: d.by.or_else(|| Some("operator".to_string())), message_id: message_id.clone() });
+        q.push_back(Sent { to: a.to.clone(), subject: a.subject.clone(), ts: now(), approved_by: Some("operator".to_string()), message_id: message_id.clone() });
         while q.len() > RECENT {
             q.pop_front();
         }
@@ -320,13 +335,19 @@ impl MailBundle {
     }
 
     async fn answer(&self, id: &AgentId, kernel: &Arc<Kernel>, a: verbs::AnswerInquiry) -> Value {
+        // Approval is a person's: an operator send has no origin agent. Any agent (the
+        // asker, another AI) answering is refused, and the inquiry stays open.
+        if let Some(who) = current_origin() {
+            let mut r = refusal(rf::NOT_ALLOWED, format!("{id}: answer_inquiry: only a person answers a send's approval, not the agent {who}"));
+            rf::with(&mut r, "arg", json!("re"));
+            return r;
+        }
         let re = a.re;
         let yes = match &a.answer {
             Answer::Flag(b) => *b,
             other => other.text().eq_ignore_ascii_case("yes"),
         };
         let was_open = is_open(kernel, id, re);
-        let by = current_origin().map(|o| o.0);
         let out = inquiry::answer(id, a, kernel).await;
         if !was_open {
             return out;
@@ -336,7 +357,7 @@ impl MailBundle {
         if is_open(kernel, id, re) {
             drop_open(kernel, id, re);
         }
-        let d = Decision { yes, by };
+        let d = Decision { yes };
         let mut slots = self.slots.lock().expect("slots poisoned");
         match slots.remove(&(id.0.clone(), re)) {
             Some(Slot::Waiting(tx)) => {

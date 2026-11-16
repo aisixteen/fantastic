@@ -24,7 +24,7 @@ pub struct List {
     pub limit: Option<u32>,
 }
 
-/// One message: headers, text body, and the names and sizes of its attachments (their content is not returned). Returns {mailbox, uid, from, to, subject, date, flags, text, attachments:[{name, size}]}.
+/// One message: headers, text body, and the names and sizes of its attachments; with `attachment`, also that attachment's bytes (at most 1 MiB, larger is refused). Returns {mailbox, uid, from, to, subject, date, flags, text, attachments:[{name, size}], attachment?:{name, size, base64}}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Fetch {
@@ -34,6 +34,9 @@ pub struct Fetch {
     /// The message's uid, as `list` gave it.
     #[schemars(range(min = 1))]
     pub uid: u32,
+    /// The name of one attachment (as `attachments` lists it) whose bytes to return, base64.
+    #[schemars(length(min = 1))]
+    pub attachment: Option<String>,
 }
 
 /// Mark a message seen or unseen, flagged or unflagged. A write. Returns {mailbox, uid, flags}.

@@ -5,6 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_imap::types::Flag;
+use base64::Engine;
 use futures_util::TryStreamExt;
 use mail_parser::{MessageParser, MimeHeaders};
 use serde_json::{json, Value};
@@ -15,6 +16,8 @@ use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
 /// The largest message `fetch` reads whole.
 pub(crate) const MAX_MESSAGE: usize = 10 * 1024 * 1024;
+/// The most bytes of one attachment `fetch` returns.
+pub(crate) const MAX_ATTACHMENT: usize = 1024 * 1024;
 
 /// Any stream an IMAP session runs over.
 pub(crate) trait Io: AsyncRead + AsyncWrite + Unpin + Send + fmt::Debug {}
@@ -225,7 +228,7 @@ async fn raw(s: &mut Session, host: &str, pass: &str, mailbox: &str, uid: u32, e
 }
 
 /// `fetch`: one message.
-pub(crate) async fn fetch(s: &mut Session, host: &str, pass: &str, mailbox: &str, uid: u32) -> Result<Value, Fail> {
+pub(crate) async fn fetch(s: &mut Session, host: &str, pass: &str, mailbox: &str, uid: u32, attachment: Option<&str>) -> Result<Value, Fail> {
     let (bytes, flags) = raw(s, host, pass, mailbox, uid, true).await?;
     let Some(m) = MessageParser::default().parse(&bytes) else {
         return Err(Fail::new(fantastic_kernel::refusal::TRANSPORT_ERROR, format!("mail: message {uid} could not be read")));
@@ -234,7 +237,7 @@ pub(crate) async fn fetch(s: &mut Session, host: &str, pass: &str, mailbox: &str
         .attachments()
         .map(|a| json!({"name": a.attachment_name().unwrap_or("(unnamed)"), "size": a.contents().len()}))
         .collect();
-    Ok(json!({
+    let mut out = json!({
         "mailbox": mailbox, "uid": uid,
         "from": addresses(m.from()), "to": addresses(m.to()),
         "subject": m.subject().unwrap_or_default(),
@@ -242,7 +245,21 @@ pub(crate) async fn fetch(s: &mut Session, host: &str, pass: &str, mailbox: &str
         "flags": flags,
         "text": m.body_text(0).map(|t| t.into_owned()).unwrap_or_default(),
         "attachments": attachments,
-    }))
+    });
+    if let Some(name) = attachment {
+        let Some(a) = m.attachments().find(|a| a.attachment_name().unwrap_or("(unnamed)") == name) else {
+            return Err(Fail::new(fantastic_kernel::refusal::NOT_FOUND, format!("mail: message {uid} has no attachment named {name:?}")));
+        };
+        let bytes = a.contents();
+        if bytes.len() > MAX_ATTACHMENT {
+            return Err(Fail::new(
+                fantastic_kernel::refusal::LIMIT,
+                format!("mail: attachment {name:?} is {} bytes, over the {MAX_ATTACHMENT}-byte cap — not returned", bytes.len()),
+            ));
+        }
+        out["attachment"] = json!({"name": name, "size": bytes.len(), "base64": base64::engine::general_purpose::STANDARD.encode(bytes)});
+    }
+    Ok(out)
 }
 
 /// The Message-ID and References of message `uid`, for a reply's threading.

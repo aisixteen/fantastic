@@ -68,7 +68,7 @@ async fn rig_with(password: &str, tweak: impl FnOnce(&mut Map<String, Value>)) -
     let declared = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
-            json!({"type": "update_agent", "id": store.0, "refs": {"main": {"host": "127.0.0.1"}}}),
+            json!({"type": "update_agent", "id": store.0, "refs": {"main": {"host": ["127.0.0.1", "localhost"]}}}),
         )])
         .await
         .remove(0)
@@ -83,7 +83,8 @@ async fn rig_with(password: &str, tweak: impl FnOnce(&mut Map<String, Value>)) -
 
     let mut meta = Map::new();
     meta.insert("imap".into(), json!({"host": "127.0.0.1", "port": iport, "tls": false}));
-    meta.insert("smtp".into(), json!({"host": "127.0.0.1", "port": sport, "tls": false}));
+    // one ref serves both servers: the SMTP one is named by another host
+    meta.insert("smtp".into(), json!({"host": "localhost", "port": sport, "tls": false}));
     meta.insert("mailboxes".into(), json!(["INBOX", "Archive"]));
     meta.insert("send_allow".into(), json!(["friend@example.org", "corp.test"]));
     creds::add_credentials(&mut meta, "main");
@@ -229,14 +230,14 @@ async fn send_sends_nothing_on_no() {
     let payload = json!({"type": "send", "to": ["friend@example.org"], "subject": "Hi", "text": "x"});
     let (out, _) = tokio::join!(send(&r.kernel, payload), approve(&r, json!(false)));
     assert_eq!(out.status, Status::Completed, "{}", out.result);
-    assert_eq!(out.result["sent"], json!(false));
+    assert_eq!(out.result, json!({"sent": false}));
     assert!(r.smtp.lock().unwrap().mails.is_empty());
     let refl = send(&r.kernel, json!({"type": "reflect"})).await.result;
     assert_eq!(refl["recent_sends"], json!([]));
     // words other than yes are no, too
     let payload = json!({"type": "send", "to": ["friend@example.org"], "subject": "Hi", "text": "x"});
     let (out, _) = tokio::join!(send(&r.kernel, payload), approve(&r, json!("maybe later")));
-    assert_eq!(out.result["sent"], json!(false));
+    assert_eq!(out.result, json!({"sent": false}));
     assert!(r.smtp.lock().unwrap().mails.is_empty());
 }
 
@@ -299,4 +300,103 @@ async fn reflect_says_how_it_is_set_up_and_carries_an_html_view() {
     assert!(v["view"]["bytes"].as_str().unwrap().contains("var AGENT = \"mail\""));
     // the view reads only
     assert_eq!(v["view"]["calls"]["mail"], json!(["reflect", "list", "inquiries"]));
+}
+
+#[tokio::test]
+async fn only_a_person_approves_a_send() {
+    use fantastic_kernel::test_support::as_agent;
+    let r = rig_with(fake::PASS, |m| {
+        m.insert("callable_by".into(), json!({"asker": "*", "other": "*"}));
+    })
+    .await;
+    let root = r.kernel.root().unwrap().id.clone();
+    for name in ["asker", "other"] {
+        r.kernel.register(Agent::new(
+            AgentId::from(name),
+            None,
+            Some(root.clone()),
+            json!({"can_call": {"mail": "*"}}).as_object().cloned().unwrap(),
+            PathBuf::new(),
+            false,
+        ));
+    }
+    let payload = json!({"type": "send", "to": ["friend@example.org"], "subject": "Hi", "text": "x"});
+    let asker_send = as_agent(AgentId::from("asker"), send(&r.kernel, payload));
+    let answers = async {
+        let mut re = Value::Null;
+        for _ in 0..500 {
+            let q = send(&r.kernel, json!({"type": "inquiries"})).await.result;
+            if let Some(first) = q["inquiries"].get(0) {
+                re = first["re"].clone();
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!re.is_null(), "no inquiry was raised");
+        // the asker and another agent answering yes: refused, nothing sent, still open
+        for who in ["asker", "other"] {
+            let o = as_agent(AgentId::from(who), send(&r.kernel, json!({"type": "answer_inquiry", "re": re, "answer": true}))).await;
+            assert_eq!(reason(&o), "not_allowed", "{who}: {}", o.result);
+        }
+        assert!(r.smtp.lock().unwrap().mails.is_empty());
+        let q = send(&r.kernel, json!({"type": "inquiries"})).await.result;
+        assert_eq!(q["inquiries"].as_array().unwrap().len(), 1, "the question stays open");
+        // a person's no ends it
+        send(&r.kernel, json!({"type": "answer_inquiry", "re": re, "answer": false})).await;
+    };
+    let (out, ()) = tokio::join!(asker_send, answers);
+    assert_eq!(out.result, json!({"sent": false}), "{}", out.result);
+    assert!(r.smtp.lock().unwrap().mails.is_empty());
+}
+
+#[tokio::test]
+async fn fetch_returns_one_attachment_when_asked_and_refuses_one_over_the_cap() {
+    use base64::Engine;
+    let r = rig().await;
+    let o = send(&r.kernel, json!({"type": "fetch", "mailbox": "INBOX", "uid": 3, "attachment": "plan.pdf"})).await.result;
+    assert_eq!(o["attachment"]["name"], json!("plan.pdf"), "{o}");
+    let bytes = base64::engine::general_purpose::STANDARD.decode(o["attachment"]["base64"].as_str().unwrap()).unwrap();
+    assert_eq!(bytes, b"ABCDEFGH");
+    assert_eq!(o["attachment"]["size"], json!(8));
+    // without the argument no bytes come
+    let o = send(&r.kernel, json!({"type": "fetch", "mailbox": "INBOX", "uid": 3})).await.result;
+    assert!(o.get("attachment").is_none(), "{o}");
+    let o = send(&r.kernel, json!({"type": "fetch", "mailbox": "INBOX", "uid": 3, "attachment": "nope.pdf"})).await;
+    assert_eq!(reason(&o), "not_found", "{}", o.result);
+    // over the cap (1 MiB)
+    let big = base64::engine::general_purpose::STANDARD.encode(vec![b'z'; 1024 * 1024 + 1]);
+    let raw = format!(
+        "From: a@example.org\r\nTo: me@corp.test\r\nSubject: Big\r\nMessage-ID: <big@x>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=XX\r\n\r\n--XX\r\nContent-Type: text/plain\r\n\r\nbig\r\n--XX\r\nContent-Type: application/octet-stream; name=\"big.bin\"\r\nContent-Disposition: attachment; filename=\"big.bin\"\r\nContent-Transfer-Encoding: base64\r\n\r\n{big}\r\n--XX--\r\n"
+    );
+    r.imap.lock().unwrap().boxes.get_mut("INBOX").unwrap().push(msg(4, &[], raw.into_bytes()));
+    let o = send(&r.kernel, json!({"type": "fetch", "mailbox": "INBOX", "uid": 4, "attachment": "big.bin"})).await;
+    assert_eq!(reason(&o), "limit", "{}", o.result);
+    assert!(!o.result.to_string().contains("eno="), "{}", o.result);
+    // the listing of names and sizes still works for it
+    let o = send(&r.kernel, json!({"type": "fetch", "mailbox": "INBOX", "uid": 4})).await.result;
+    assert_eq!(o["attachments"][0]["size"], json!(1024 * 1024 + 1), "{o}");
+}
+
+#[tokio::test]
+async fn tls_false_is_for_a_loopback_host_only() {
+    for field in ["imap", "smtp"] {
+        let r = rig_with(fake::PASS, |m| {
+            m.insert(field.into(), json!({"host": "mail.example.com", "port": 143, "tls": false}));
+        })
+        .await;
+        let hit = if field == "imap" {
+            send(&r.kernel, json!({"type": "list", "mailbox": "INBOX"})).await
+        } else {
+            send(&r.kernel, json!({"type": "send", "to": ["friend@example.org"], "subject": "s", "text": "t"})).await
+        };
+        let hit = &hit;
+        assert_eq!(reason(hit), "bad_arg", "{field}: {}", hit.result);
+        assert_eq!(hit.result["arg"], json!(field));
+        no_secret(&hit.result);
+    }
+    // loopback spellings pass the check (the connection itself is not attempted for ::1 here)
+    for h in ["127.0.0.1", "localhost", "LOCALHOST", "::1", "[::1]"] {
+        let m = json!({"imap": {"host": h, "port": 143, "tls": false}}).as_object().cloned().unwrap();
+        assert!(super::endpoint(&m, "imap", &AgentId::from("mail")).is_ok(), "{h}");
+    }
 }
