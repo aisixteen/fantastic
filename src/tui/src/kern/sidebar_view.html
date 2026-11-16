@@ -78,8 +78,9 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--fc-color-accent
 .w .who b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .w .who span{font-size:12px;color:var(--fc-color-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .w .age{flex:none;font:500 11px/1 var(--fc-font-family-mono);color:var(--fc-color-status-warn)}
-.tools{flex:none;display:flex;align-items:center;gap:8px;padding:0 4px}
-.fl{flex:1;min-width:0;display:flex;align-items:center;gap:7px;height:32px;padding:0 10px;border-radius:var(--fc-radius-card);background:var(--fc-color-surface-raised);box-shadow:inset 0 0 0 1px var(--fc-color-line-button);color:var(--fc-color-text-subtle)}
+.tools{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;padding:0 4px}
+.sws{flex:none;margin-left:auto;display:flex;align-items:center;gap:10px}
+.fl{flex:1 1 180px;min-width:0;display:flex;align-items:center;gap:7px;height:32px;padding:0 10px;border-radius:var(--fc-radius-card);background:var(--fc-color-surface-raised);box-shadow:inset 0 0 0 1px var(--fc-color-line-button);color:var(--fc-color-text-subtle)}
 .fl:focus-within{box-shadow:inset 0 0 0 1px var(--fc-color-line-selected)}
 .tools input{flex:1;min-width:0;height:28px;padding:0;border:0;outline:0;background:transparent;font:inherit;font-size:12px;color:var(--fc-color-text-primary)}
 .tools input:focus-visible{outline:0}
@@ -176,8 +177,8 @@ body{position:relative}
 <section class="wait" id="wait" aria-label="Waiting for you" hidden></section>
 <div class="tools">
 <label class="fl"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg><input id="filter" type="search" placeholder="Filter agents and files" aria-label="Filter agents and files" autocomplete="off"></label>
-<button class="sw" id="sw" type="button" role="switch" aria-checked="false" aria-label="Show files in the tree"><i></i>Files</button>
-<button class="sw" id="full" type="button" role="switch" aria-checked="false" aria-label="Show the whole kernel tree" title="Compact: the AI agents under the root, the rest in the tools group. Full: the whole kernel tree."><i></i>Full</button>
+<span class="sws"><button class="sw" id="sw" type="button" role="switch" aria-checked="false" aria-label="Show files in the tree"><i></i>Files</button>
+<button class="sw" id="full" type="button" role="switch" aria-checked="false" aria-label="Show the whole kernel tree" title="Compact: the AI agents under the root, the rest in the tools group. Full: the whole kernel tree."><i></i>Full</button></span>
 </div>
 <div class="scroll"><div class="tree" id="tree" role="tree"></div><div class="note err" id="err" hidden></div></div>
 <div class="pins" id="pins" hidden></div>

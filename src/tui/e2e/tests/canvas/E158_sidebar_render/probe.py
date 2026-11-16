@@ -75,7 +75,7 @@ def main() -> bool:
             r["2a agent rows are drawn: the root first (depth 0), then user and files"] = bool(rows) and rows[0]["pad"] == "0px" and "user" in ids and "files" in ids
             r["2b no file row while the switch is off"] = bool(rows) and not any(x["path"] for x in rows)
 
-            r["3a the Files switch on"] = await click(pg, "button[role=switch]")
+            r["3a the Files switch on"] = await click(pg, "#sw")
             r["3b the project's files are rows inside the tree"] = await until(pg, "!!document.querySelector('#tree [data-path=\"docs\"]') && !!document.querySelector('#tree [data-path=\"notes.txt\"]')", 30)
             below = await side(pg, "(()=>{const f=document.querySelector('#tree [data-id=files]'), d=document.querySelector('#tree [data-path=\"docs\"]'); return !!f && !!d && parseFloat(d.style.paddingLeft) === parseFloat(f.style.paddingLeft) + 14 && !!(f.compareDocumentPosition(d) & Node.DOCUMENT_POSITION_FOLLOWING)})()")
             r["3c they sit one level under the files agent"] = bool(below)
@@ -88,7 +88,7 @@ def main() -> bool:
 
             await pg.open(rig.url)
             r["5a after a reload the view draws again"] = await until(pg, "!!document.querySelector('.rail .k')", 40)
-            r["5b with the Files switch still on"] = await until(pg, "document.querySelector('button[role=switch]')?.getAttribute('aria-checked') === 'true'", 20)
+            r["5b with the Files switch still on"] = await until(pg, "document.querySelector('#sw')?.getAttribute('aria-checked') === 'true'", 20)
             r["5c and the folder still open"] = await until(pg, "!!document.querySelector('#tree [data-path=\"docs/a.md\"]')", 30)
 
             before = await pg.js("document.querySelectorAll('.agent-frame').length")
