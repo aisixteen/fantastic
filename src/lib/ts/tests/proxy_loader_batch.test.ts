@@ -130,3 +130,32 @@ test("flush: parents before children — a child waits for its parent's wave; a 
   await assert.rejects(loader.flush(), /refused 1 write\(s\): persist_record c: refused by the host/);
   await loader.stop().catch(() => {});
 });
+
+test("stop waits for a flush under way: no wave is sent after stop has answered", async () => {
+  const k = new Kernel();
+  k.registerBundle("v.ts", () => null);
+  let stopped = false;
+  const lateWrites: string[] = [];
+  k.bridge = {
+    forward: async (_t, payload) => {
+      if (payload["type"] !== "persist_record") return { ok: true };
+      await new Promise((r) => setTimeout(r, 15));
+      if (stopped) lateWrites.push(String((payload["record"] as Payload)["id"]));
+      return { ok: true };
+    },
+    forwardBinary: () => Promise.resolve(null),
+    emitRemote: () => {},
+    watchRemote: () => {},
+    unwatchRemote: () => {},
+    onLifecycle: () => () => {},
+    subscribeState: () => () => {},
+  };
+  k.setRoot(new Agent({ id: "canvas", handlerModule: "v.ts" }));
+  k.register(new Agent({ id: "child", parentId: "canvas", handlerModule: "v.ts" }));
+  const loader = new ProxyLoader(k, "sess1", { debounceMs: 100000 });
+  loader.start();
+  const running = loader.flush(); // parent wave in flight, the child's wave still to come
+  await loader.stop().then(() => { stopped = true; });
+  await running;
+  assert.deepEqual(lateWrites, [], "every wave was sent before stop answered");
+});
