@@ -163,6 +163,19 @@ fn row_of(rows: &[Row], id: &str) -> Result<Row, Value> {
         .ok_or_else(|| not_found(format!("home: no fantastic \"{id}\" in the list"), "id"))
 }
 
+/// Two spellings of one path. On Windows the registry may hold `C:/w/a/.fantastic`
+/// while the folder resolves to `C:\w\a\.fantastic` (the kernel's `state_dir_for`
+/// makes the path absolute, which turns `/` into `\`), and the file system ignores
+/// the case: so there the separators and the letter case are not told apart.
+fn same_path(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        let norm = |s: &str| s.replace('\\', "/").to_lowercase();
+        norm(a) == norm(b)
+    } else {
+        a == b
+    }
+}
+
 /// One folder for `open` or `register`: a listed row's path (its state folder)
 /// as it is, else an absolute path resolved to the picked folder — its state
 /// folder `<folder>/.fantastic`, its work folder itself — never the home's own.
@@ -173,7 +186,7 @@ fn folder_of(
     arg: &str,
     path: &str,
 ) -> Result<Opened, Value> {
-    if rows.iter().any(|r| r.path == path) {
+    if rows.iter().any(|r| same_path(&r.path, path)) {
         return Ok(Opened {
             path: path.to_string(),
             workdir: None,
@@ -237,7 +250,7 @@ fn intent(runner: &Arc<Runner>, call: Call) -> Result<Option<Event>, Value> {
         Call::ClosePage(a) => checked_event(Intent::ClosePage { id: a.id }),
         Call::Register(a) => {
             let folder = folder_of(runner, &rows, "register", "path", &a.path)?;
-            if let Some(r) = rows.iter().find(|r| r.path == folder.path) {
+            if let Some(r) = rows.iter().find(|r| same_path(&r.path, &folder.path)) {
                 return Err(bad(
                     format!("home: {} is in the list already — open it", r.name),
                     "path",
