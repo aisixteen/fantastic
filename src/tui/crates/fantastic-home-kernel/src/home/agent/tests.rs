@@ -337,9 +337,14 @@ async fn register_refuses_a_listed_folder() {
     let s = t
         .call(json!({"type": "register", "path": &format!("{D}/w/new")}))
         .await;
+    // the state folder as the product spells it (native separators on Windows)
+    let new_state = fantastic_kernel::bootstrap::state_dir_for(None, Some(std::path::Path::new(&format!("{D}/w/new"))))
+        .unwrap()
+        .display()
+        .to_string();
     assert_eq!(
         s["selection"],
-        json!(&format!("adding:{D}/w/new/.fantastic"))
+        json!(&format!("adding:{new_state}"))
     );
     t.shutdown().await;
 }

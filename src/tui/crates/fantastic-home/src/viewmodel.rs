@@ -1265,10 +1265,12 @@ mod tests {
             paths: vec!["/w/alpha".to_string().into()],
             now_ms: 0,
         });
+        // the state folder is joined with the OS's separator (`\` on Windows)
+        let state = std::path::Path::new("/w/alpha").join(".fantastic");
         assert_eq!(
             effects,
             vec![Effect::Spawn {
-                path: "/w/alpha/.fantastic".into(),
+                path: state.to_string_lossy().into_owned(),
                 workdir: "/w/alpha".into()
             }]
         );

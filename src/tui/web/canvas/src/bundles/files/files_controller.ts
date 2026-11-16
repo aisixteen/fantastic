@@ -88,15 +88,20 @@ export class FilesController {
   // ─── effects ──────────────────────────────────────────────────────────
 
   private async run(fx: Effect[]): Promise<void> {
-    await Promise.all(fx.map((e) => this.exec(e)));
+    // A folder's watch is armed BEFORE its listing is read: the bridge judges a change against
+    // the disk as it stood at the arm, so a file made between a listing and a later arm is in
+    // neither the listing nor an event (a slow arm, as on macOS, makes that window wide).
+    const refused = new Set<string>();
+    await Promise.all(fx.filter((e) => e.kind === "watch").map((e) => this.exec(e).then((ok) => { if (!ok) refused.add(e.path); })));
+    await Promise.all(fx.filter((e) => e.kind !== "watch" && !(e.kind === "list" && refused.has(e.path))).map((e) => this.exec(e)));
   }
 
-  private async exec(e: Effect): Promise<void> {
-    if (this.disposed) return;
+  private async exec(e: Effect): Promise<boolean> {
+    if (this.disposed) return true;
     switch (e.kind) {
       case "unwatch":
         this.o.hub.drop(e.path, this.o.selfId);
-        return;
+        return true;
       case "watch":
         try {
           await this.o.hub.hold(e.path, this.o.selfId, (c) => this.onEvent(c));
@@ -112,11 +117,12 @@ export class FilesController {
           }
           this.errors.set(e.path, { error: why, reason: "watch_refused" });
           this.changed();
+          return false;
         }
-        return;
+        return true;
       case "list": {
         const r = (await this.o.bridge.call({ type: "list", path: wire(e.path) })) as Record<string, unknown>;
-        if (this.disposed) return;
+        if (this.disposed) return true;
         if (isRefusal(r)) {
           this.errors.set(e.path, r);
           this.model.listFailed(e.path, said(r));
@@ -134,7 +140,7 @@ export class FilesController {
         // a listing that no longer has a folder closed it: save that too
         this.persist();
         this.changed();
-        return;
+        return true;
       }
     }
   }

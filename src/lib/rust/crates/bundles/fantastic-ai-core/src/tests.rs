@@ -837,7 +837,7 @@ async fn status_current_shape_matches_python() {
             .remove(0)
             .result
     });
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert!(until_passes(&_s, 1).await, "the pass never started");
 
     let mine = kernel
         .send(vec![Item::new(
@@ -1471,7 +1471,7 @@ async fn kernel_cancel_kills_an_in_flight_send() {
 async fn status_during_in_flight_shows_phase() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "stat").await;
-    script(&backend, vec![pass("x")], Duration::from_millis(500));
+    let st = script(&backend, vec![pass("x")], Duration::from_millis(500));
     let _rx = rebind_backend_inbox(&kernel, &backend);
     let client_id = "browser_stat";
     let k = Arc::clone(&kernel);
@@ -1486,7 +1486,7 @@ async fn status_during_in_flight_shows_phase() {
         .remove(0)
         .result
     });
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert!(until_passes(&st, 1).await, "the pass never started");
     let snap = kernel
         .send(vec![Item::new(
             backend.clone(),

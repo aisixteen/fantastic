@@ -136,8 +136,19 @@ export class ProxyLoader {
     return d;
   }
 
-  /** Push all pending persists/forgets to the host loader over the bridge. */
-  async flush(): Promise<void> {
+  /** Push all pending persists/forgets to the host loader over the bridge. FLUSHES RUN ONE AT A
+   *  TIME: a flush is several waves (parents, then children), so `stop()`'s flush must wait for
+   *  one already under way — else the host is told the page has stopped while a later wave is
+   *  still to be sent, and that wave lands mid-drain (refused). */
+  flush(): Promise<void> {
+    const run = this.tail.then(() => this.flushNow());
+    this.tail = run.catch(() => undefined);
+    return run;
+  }
+
+  private tail: Promise<void> = Promise.resolve();
+
+  private async flushNow(): Promise<void> {
     const persist = [...this.dirtyPersist];
     this.dirtyPersist.clear();
     const forget = [...this.dirtyForget];

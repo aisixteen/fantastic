@@ -73,7 +73,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # per OS: runs for different OS sets on one ref run side by side (a push has no inputs: 'push')
+  group: ci-${{ github.ref }}-${{ inputs.os || 'push' }}
   cancel-in-progress: true
 
 jobs:
