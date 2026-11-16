@@ -572,6 +572,9 @@ function textsOf(rows) {
       case "queued": if (mine(p) && s(p, "send_id")) bind(s(p, "send_id")); break;
       case "status": {
         var ph = s(p, "phase"), det = o(p, "detail"), sid = s(det, "send_id");
+        // a COPY OF A `status` CALL (this view's own read, another view's) is no event: only
+        // the agent's status event carries a phase
+        if (!ph) break;
         if (ph === "done") soon();
         if (!mine(p)) {
           // another client's call: Stop shows while it runs, its rows are drawn when it ends

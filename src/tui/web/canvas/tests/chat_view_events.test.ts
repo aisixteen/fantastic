@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { clocksReadNothing, file, run } from "./view_harness.ts";
+import { clocksReadNothing, file, ownCopiesReadNothing, run } from "./view_harness.ts";
 import type { Obj } from "./view_harness.ts";
 
 test("the AI chat view follows every call of its agent, whoever made it", async () => {
@@ -38,4 +38,28 @@ test("the AI chat view follows every call of its agent, whoever made it", async 
   mark = h.sends.length;
   await h.publish("chat1", { type: "inquiry_opened", re: 9, asker: "chat1", holder: "user" });
   assert.deepEqual(h.since(mark).map((s) => `${s.target} ${String(s.p["type"])}`), ["user inquiries"]);
+});
+
+test("the AI chat view never reads again on a copy of a call — its own reads, another view's status read", async () => {
+  const h = run(file("src/lib/rust/crates/bundles/fantastic-ai-core/src/chat_view.html"), { agent: "chat1" }, (target, p) => {
+    if (target === "user") return { inquiries: [] };
+    if (p["type"] === "reflect") return { id: "chat1", display_name: "Chat", provider_id: "prov" };
+    if (p["type"] === "history") return { rows: [] };
+    if (p["type"] === "status") return { current: null, others_pending: 0, mine_pending: [] };
+    return {};
+  });
+  await h.settle();
+  await ownCopiesReadNothing(h);
+  const stop = h.byId.get("stop")!;
+  const state = h.byId.get("state")!;
+  const shown = state["textContent"];
+  assert.equal(stop["hidden"], true);
+  // two views on one chat: the other one's status read reaches this view as a copy
+  for (const copy of [{ type: "status", client_id: "_ws_other" }, { type: "status" }, { type: "history", client_id: "_ws_other" }, { type: "reflect" }]) {
+    const mark = h.sends.length;
+    await h.publish("chat1", copy);
+    assert.deepEqual(h.since(mark).map((s) => String(s.p["type"])), [], `a copy read again: ${JSON.stringify(copy)}`);
+    assert.equal(stop["hidden"], true, `a copy is no running call: ${JSON.stringify(copy)}`);
+    assert.equal(state["textContent"], shown, `a copy sets no phase: ${JSON.stringify(copy)}`);
+  }
 });
