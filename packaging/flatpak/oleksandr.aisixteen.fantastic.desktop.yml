@@ -1,6 +1,6 @@
 # Flatpak of the desktop app (#82). Built by flatpak-builder from THIS repo checkout, offline:
-# the crates and the npm packages are vendored by the generated cargo-sources*.json and
-# node-sources.json (regenerate them with generate-sources.sh when a lockfile changes).
+# the crates are vendored by the generated cargo-sources*.json (regenerate them with
+# generate-sources.sh when a lockfile changes).
 #
 #   flatpak-builder --user --install-deps-from=flathub --force-clean build-dir \
 #     packaging/flatpak/oleksandr.aisixteen.fantastic.desktop.yml
@@ -13,7 +13,6 @@ sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
   - org.freedesktop.Sdk.Extension.golang
-  - org.freedesktop.Sdk.Extension.node22 # npm, for the Tauri CLI
 command: fantastic-app
 
 # PLACEHOLDER sandbox decision (#82): wide on purpose, the maintainer will revisit it.
@@ -61,7 +60,7 @@ modules:
   - name: fantastic
     buildsystem: simple
     build-options:
-      append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/golang/bin:/usr/lib/sdk/node22/bin
+      append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/golang/bin
       env:
         CARGO_HOME: /run/build/fantastic/cargo
         CARGO_NET_OFFLINE: 'true'
@@ -74,9 +73,8 @@ modules:
       # toolchain, and the sidecar only has to run next to the app on the runtime's glibc.
       - cd src && cargo --offline build --release --locked --bin fantastic
       - mkdir -p src/app/binaries && cp src/target/release/fantastic src/app/binaries/fantastic-x86_64-unknown-linux-gnu
-      - cd src/app && npm ci --offline --no-audit --no-fund --cache=/run/build/fantastic/flatpak-node/npm-cache
-      # `tauri build` turns on tauri/custom-protocol, which a production app needs (as app.sh does).
-      - cd src/app && npx tauri build --no-bundle --ci --config "{\"version\":\"$FANTASTIC_VERSION\"}" -- --offline --locked
+      # tauri/custom-protocol is what a production app needs (as app.sh does); the version goes in through TAURI_CONFIG.
+      - cd src/app && TAURI_CONFIG="{\"version\":\"$FANTASTIC_VERSION\"}" cargo --offline build --release --locked --features tauri/custom-protocol
       - install -Dm755 src/app/target/release/fantastic-app /app/bin/fantastic-app
       - install -Dm755 src/target/release/fantastic /app/bin/fantastic
       - install -Dm644 packaging/flatpak/oleksandr.aisixteen.fantastic.desktop.desktop /app/share/applications/oleksandr.aisixteen.fantastic.desktop.desktop
@@ -87,7 +85,6 @@ modules:
         path: ../..
       - cargo-sources.json
       - cargo-sources-cli.json
-      - node-sources.json
       - type: inline
         dest: cargo
         dest-filename: config

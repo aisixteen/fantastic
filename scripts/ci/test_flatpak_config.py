@@ -86,13 +86,12 @@ class FlatpakManifest(unittest.TestCase):
         self.assertIn("tools/esbuild/linux-x64/esbuild", rest, "fantastic gets the staged esbuild")
         cargo_lines = [l for l in code.splitlines() if re.search(r"\bcargo\b.*\bbuild\b", l)]
         self.assertGreaterEqual(len(cargo_lines), 1, "the CLI sidecar is built with cargo")
-        tauri_lines = [l for l in code.splitlines() if "tauri build" in l]
-        self.assertEqual(len(tauri_lines), 1, "the app is built by tauri build")
-        for l in cargo_lines + tauri_lines:  # tauri hands what follows `--` to its cargo
+        app_lines = [l for l in cargo_lines if "tauri/custom-protocol" in l]
+        self.assertEqual(len(app_lines), 1, "the app is a plain cargo build with tauri/custom-protocol")
+        for l in cargo_lines:
             self.assertRegex(l, r"--offline.*--locked|--locked.*--offline")
         self.assertIn("CARGO_NET_OFFLINE", code)
-        self.assertIn("npm ci --offline", code)
-        for name in ("cargo-sources.json", "cargo-sources-cli.json", "node-sources.json"):
+        for name in ("cargo-sources.json", "cargo-sources-cli.json"):
             self.assertIn(f"- {name}", code, f"{name} is a source")
             data = json.loads((FLATPAK / name).read_text())
             self.assertIsInstance(data, list)

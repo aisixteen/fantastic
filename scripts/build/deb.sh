@@ -5,7 +5,7 @@
 #
 # Writes to `dist/deb/`:
 #   fantastic-app-<app triple>.deb       `aisixteen-fantastic`: the desktop app and
-#                                        its sidecar, from `tauri bundle --bundles deb`
+#                                        its sidecar, from `cargo tauri bundle --bundles deb`
 #
 # `--out` is not supported: the packages always go to `dist/deb/`.
 # `--target` is the CLI's triple, as in `app.sh`; the app is built for glibc
@@ -44,10 +44,12 @@ DEB_DIR="$REPO/dist/deb"
 mkdir -p "$DEB_DIR"
 
 # ── the app's .deb ──────────────────────────────────────────────────────────
-say "npm ci"
-npm ci --prefix "$APP" --no-audit --no-fund
-say "tauri bundle --bundles deb (version $VERSION)"
-( cd "$APP" && npx tauri bundle --ci --bundles deb --target "$APP_TARGET" --no-sign --no-binary-patching \
+cargo tauri --version >/dev/null 2>&1 || {
+  echo "deb.sh: cargo-tauri is missing: cargo install tauri-cli --version 2.12.1 --locked" >&2
+  exit 1
+}
+say "cargo tauri bundle --bundles deb (version $VERSION)"
+( cd "$APP" && cargo tauri bundle --ci --bundles deb --target "$APP_TARGET" --no-sign --no-binary-patching \
     --config "{\"version\":\"$VERSION\"}" )
 BUNDLE_GLOB="$APP/target/$APP_TARGET/release/bundle/deb/*.deb"
 # the file is named "<productName>_<version>_<arch>.deb", space included: only

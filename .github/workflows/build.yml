@@ -459,11 +459,6 @@ jobs:
       - name: zip (the canvas packer's; not on the Windows image)
         if: runner.os == 'Windows'
         run: choco install zip --no-progress -y
-      - uses: actions/setup-node@v7
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: src/app/package-lock.json
       - name: the desktop app's libraries (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev
@@ -705,11 +700,8 @@ jobs:
         with:
           fetch-depth: 0 # deb.sh reads the version from the last tag
       - uses: dtolnay/rust-toolchain@stable # `tauri bundle` runs `cargo metadata`
-      - uses: actions/setup-node@v7
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: src/app/package-lock.json
+      - name: the tauri CLI (the crates.io one, no npm)
+        run: cargo install tauri-cli --version 2.12.1 --locked
       - uses: actions/download-artifact@v7
         with:
           name: release-${{ matrix.target }}
