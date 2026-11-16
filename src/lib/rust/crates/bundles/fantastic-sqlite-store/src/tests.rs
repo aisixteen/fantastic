@@ -500,3 +500,21 @@ async fn reflect_lists_the_allowlist_as_file_and_size_rows_with_a_read_only_view
     assert!(out["view"]["bytes"].as_str().unwrap().contains("\"mem\""), "{out}");
     assert_eq!(out["view"]["calls"], json!({"mem": ["reflect"]}), "{out}");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_query_allow_entry_linked_out_of_the_folder_is_refused_without_a_host_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    Connection::open(outside.join("out.db")).unwrap();
+    let work = tmp.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::os::unix::fs::symlink(&outside, work.join("ext")).unwrap();
+    let k = query_kernel(&work, json!(["ext/out.db"]));
+    let out = query(&k, json!({"db": "ext/out.db", "sql": "SELECT 1;"})).await;
+    assert!(out.get("reason").is_some(), "refused: {out}");
+    let text = out.to_string();
+    assert!(text.contains("query_allow"), "names the field: {out}");
+    assert!(!text.contains(&tmp.path().display().to_string()), "no host path: {out}");
+}

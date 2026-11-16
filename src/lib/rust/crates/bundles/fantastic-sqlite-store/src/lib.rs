@@ -596,7 +596,9 @@ impl SqliteStoreBundle {
                 let r = resolve_path(&one, kernel, &own).map_err(|e| {
                     // `resolve_path` speaks of `path`, and may carry a host path
                     let e = e.replace("`path`", "`query_allow`");
-                    if e.contains(&own.display().to_string()) || e.contains('/') {
+                    let host_path = e.starts_with("sqlite_store: /")
+                        || e.contains(&own.display().to_string());
+                    if host_path {
                         "the `query_allow` entry does not resolve".to_string()
                     } else {
                         e
