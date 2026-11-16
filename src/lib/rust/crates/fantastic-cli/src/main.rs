@@ -78,6 +78,12 @@ fn register_default_bundles() -> BundleRegistry {
         fantastic_credential_store::HANDLER_MODULE,
         fantastic_credential_store::CredentialStoreBundle::default(),
     );
+    // A MAILBOX — IMAP read, SMTP send behind a person's approval; its login is a
+    // credential-store ref on its record.
+    reg.register(
+        fantastic_mail::HANDLER_MODULE,
+        fantastic_mail::MailBundle::default(),
+    );
     // The render sink AI backends stream their reply to. Without it that
     // stream had nowhere to land on rust.
     reg.register(

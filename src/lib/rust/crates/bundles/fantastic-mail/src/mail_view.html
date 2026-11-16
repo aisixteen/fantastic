@@ -1,0 +1,128 @@
+<style>
+:root{
+--fc-color-accent-base:rgb(17 17 17);
+--fc-color-accent-deep:rgb(17 17 17);
+--fc-color-accent-deep-hover:rgb(43 43 43);
+--fc-color-accent-on:rgb(255 255 255);
+--fc-color-line-button:rgb(0 0 0 / 0.1);
+--fc-color-line-faint:rgb(0 0 0 / 0.06);
+--fc-color-line-strong:rgb(0 0 0 / 0.18);
+--fc-color-status-error:rgb(179 38 30);
+--fc-color-status-error-line:rgb(179 38 30 / 0.45);
+--fc-color-status-error-surface:rgb(179 38 30 / 0.12);
+--fc-color-status-ok:rgb(27 116 70);
+--fc-color-status-warn:rgb(143 82 0);
+--fc-color-status-warn-field:rgb(255 255 255 / 0.6);
+--fc-color-status-warn-line:rgb(143 82 0 / 0.45);
+--fc-color-status-warn-muted:rgb(143 82 0);
+--fc-color-status-warn-on:rgb(255 255 255);
+--fc-color-status-warn-surface:rgb(143 82 0 / 0.12);
+--fc-color-surface-bubble:rgb(255 255 255 / 0.6);
+--fc-color-surface-bubble-user:rgb(0 0 0 / 0.1);
+--fc-color-surface-button:rgb(0 0 0 / 0.05);
+--fc-color-surface-code:rgb(0 0 0 / 0.045);
+--fc-color-surface-field:rgb(0 0 0 / 0.06);
+--fc-color-surface-raised:rgb(255 255 255 / 0.72);
+--fc-color-surface-well:rgb(0 0 0 / 0.06);
+--fc-color-text-code:rgb(69 69 69);
+--fc-color-text-cool:rgb(69 69 69);
+--fc-color-text-muted:rgb(69 69 69);
+--fc-color-text-primary:rgb(11 11 11);
+--fc-color-text-subtle:rgb(107 107 107);
+--fc-duration-pulse:1400ms;
+--fc-duration-think:1100ms;
+--fc-easing-in-out:cubic-bezier(0.42, 0, 0.58, 1);
+--fc-font-family-mono:ui-monospace, SFMono-Regular, Menlo, monospace;
+--fc-font-family-sans:system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+--fc-radius-bubble:12px;
+--fc-radius-card:8px;
+--fc-radius-chip:4px;
+--fc-radius-control:6px;
+--fc-radius-key:5px;
+--fc-radius-panel:10px;
+--fc-radius-pill:999px;
+--fc-shadow-bubble:inset 0px 0px 0px 1px rgb(0 0 0 / 0.07);
+--fc-shadow-focus:inset 0px 0px 0px 1px rgb(17 17 17 / 0.45), 0px 0px 0px 3px rgb(17 17 17 / 0.1);
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{padding:20px max(24px, calc((100% - 780px) / 2));background:transparent;color:var(--fc-color-text-primary);font:14px/1.5 var(--fc-font-family-sans)}
+h1{font-size:18px;margin:0}
+h2{font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--fc-color-text-subtle);margin:22px 0 8px}
+.sub{color:var(--fc-color-text-muted)}
+.card{background:var(--fc-color-surface-raised);border:1px solid var(--fc-color-line-faint);border-radius:var(--fc-radius-card);padding:10px 12px;margin:0 0 8px}
+.row{display:flex;justify-content:space-between;gap:12px;align-items:baseline}
+.badge{font-size:12px;border-radius:var(--fc-radius-pill);padding:1px 9px;background:var(--fc-color-surface-well);color:var(--fc-color-text-muted)}
+.badge.new{background:var(--fc-color-accent-base);color:var(--fc-color-accent-on)}
+.warn{border-color:var(--fc-color-status-warn-line);background:var(--fc-color-status-warn-surface)}
+.err{color:var(--fc-color-status-error)}
+.mono{font-family:var(--fc-font-family-mono);font-size:12px;color:var(--fc-color-text-code)}
+pre{white-space:pre-wrap;margin:6px 0 0;font:inherit}
+</style>
+<h1 id="name"></h1>
+<div class="sub" id="login"></div>
+<h2>Mailboxes</h2>
+<div id="boxes"></div>
+<h2>Waiting for approval</h2>
+<div id="pending"></div>
+<h2>Recent sends</h2>
+<div id="sends"></div>
+<script>
+(function () {
+  var AGENT = "{{agent}}";
+  var $ = function (id) { return document.getElementById(id); };
+  var el = function (tag, cls, txt) { var e = document.createElement(tag); if (cls) e.className = cls; if (txt !== undefined) e.textContent = txt; return e; };
+  var call = function (p) { return fantastic.send(AGENT, p); };
+  var when = function (ts) { return typeof ts === "number" ? new Date(ts * 1000).toLocaleString() : ""; };
+  var empty = function (box, t) { box.appendChild(el("div", "sub", t)); };
+  function box(parent, name) {
+    var card = el("div", "card"), row = el("div", "row");
+    row.appendChild(el("span", "", name));
+    var b = el("span", "badge", "…");
+    row.appendChild(b); card.appendChild(row); parent.appendChild(card);
+    call({ type: "list", mailbox: name, unseen: true, limit: 100 }).then(function (r) {
+      var n = r && Array.isArray(r.messages) ? r.messages.length : null;
+      if (n === null) { b.textContent = "unavailable"; b.className = "badge err"; return; }
+      b.textContent = n === 100 ? "100+ unseen" : n + " unseen";
+      if (n > 0) b.className = "badge new";
+    }).catch(function () { b.textContent = "unavailable"; });
+  }
+  function render(r) {
+    $("name").textContent = r.account || r.id || AGENT;
+    $("login").textContent = "sign-in: " + (r.login || "none");
+    var boxes = $("boxes"); boxes.textContent = "";
+    var names = Array.isArray(r.mailboxes) ? r.mailboxes : [];
+    if (!names.length) empty(boxes, "no mailbox is allowed");
+    names.forEach(function (n) { box(boxes, n); });
+    var sends = $("sends"); sends.textContent = "";
+    var list = Array.isArray(r.recent_sends) ? r.recent_sends.slice().reverse() : [];
+    if (!list.length) empty(sends, "nothing sent since start");
+    list.forEach(function (s) {
+      var c = el("div", "card"), row = el("div", "row");
+      row.appendChild(el("span", "", s.subject || "(no subject)"));
+      row.appendChild(el("span", "sub", when(s.ts)));
+      c.appendChild(row);
+      c.appendChild(el("div", "sub", "to " + (s.to || []).join(", ") + " · approved by " + (s.approved_by || "?")));
+      sends.appendChild(c);
+    });
+  }
+  function pending() {
+    call({ type: "inquiries" }).then(function (r) {
+      var box = $("pending"); box.textContent = "";
+      var q = r && Array.isArray(r.inquiries) ? r.inquiries : [];
+      if (!q.length) empty(box, "nothing waiting");
+      q.forEach(function (i) {
+        var c = el("div", "card warn");
+        c.appendChild(el("div", "mono", "re " + i.re));
+        c.appendChild(el("pre", "", i.text || ""));
+        box.appendChild(c);
+      });
+    }).catch(function () {});
+  }
+  function load() {
+    call({ type: "reflect" }).then(function (r) { render(r || {}); pending(); }).catch(function () { $("name").textContent = AGENT; });
+  }
+  load();
+  fantastic.watch(AGENT, function () { load(); });
+})();
+</script>

@@ -18,6 +18,7 @@ fantastic-file = { path = "../bundles/fantastic-file" }
 fantastic-ram-store = { path = "../bundles/fantastic-ram-store" }
 fantastic-sqlite-store = { path = "../bundles/fantastic-sqlite-store" }
 fantastic-credential-store = { path = "../bundles/fantastic-credential-store" }
+fantastic-mail = { path = "../bundles/fantastic-mail" }
 fantastic-web = { path = "../bundles/fantastic-web" }
 fantastic-web-ws = { path = "../bundles/fantastic-web-ws" }
 fantastic-web-rest = { path = "../bundles/fantastic-web-rest" }
