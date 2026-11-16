@@ -1,5 +1,5 @@
 //! The fields a credential_store record carries, beside the ones every record has
-//! (issue #642). The declared refs are a map of declared objects: each ref's host
+//! (issue #642). The declared refs are a map of declared objects: each ref's host (or list of hosts)
 //! is required, its field names and its variable names are non-empty text.
 
 use std::collections::BTreeMap;
@@ -48,13 +48,35 @@ fn variables(_gen: &mut SchemaGenerator) -> Schema {
     .expect("a map schema")
 }
 
-/// One declared ref: the one host its value may be sent to, and the names of what it holds.
+/// The binding of a ref: one host, or a list of hosts.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum HostBinding {
+    /// One host.
+    One(String),
+    /// Several hosts.
+    Many(Vec<String>),
+}
+
+/// A host text, or a non-empty list of host texts.
+fn bound_hosts(_gen: &mut SchemaGenerator) -> Schema {
+    let host = serde_json::json!({
+        "type": "string",
+        "pattern": r"^\s*(?:[A-Za-z][A-Za-z0-9+.\-]*://)?[^\s/?#:]\S*\s*$"
+    });
+    serde_json::from_value(serde_json::json!({
+        "anyOf": [host.clone(), {"type": "array", "minItems": 1, "items": host}]
+    }))
+    .expect("a host binding schema")
+}
+
+/// One declared ref: the host (or list of hosts) its value may be sent to, and the names of what it holds.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Ref {
-    /// The host (or a URL of it) the ref's value may be sent to — the binding.
-    #[schemars(regex(pattern = r"^\s*(?:[A-Za-z][A-Za-z0-9+.\-]*://)?[^\s/?#:]\S*\s*$"))]
-    pub host: String,
+    /// The host (or a URL of it) the ref's value may be sent to — the binding — or a non-empty list of them when one ref serves several hosts; a read for any listed host matches.
+    #[schemars(schema_with = "bound_hosts")]
+    pub host: HostBinding,
     /// The names of the stored value's fields.
     #[serde(default)]
     #[schemars(schema_with = "names")]
@@ -76,7 +98,7 @@ pub struct Record {
     /// The keychain namespace of the `keychain` backend; `fantastic` by default.
     #[schemars(length(min = 1))]
     pub keychain_namespace: Option<String>,
-    /// The declared refs by name: each `{host, fields?, env?}` — the one host the ref's value may be sent to.
+    /// The declared refs by name: each `{host, fields?, env?}` — the host (or list of hosts) the ref's value may be sent to.
     pub refs: Option<BTreeMap<String, Ref>>,
 }
 

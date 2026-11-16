@@ -759,7 +759,8 @@ impl Home {
         }
         let lock = self.config.mode == Mode::Lock;
         let mut effects = Vec::new();
-        for Opened { path, workdir } in paths {
+        for opened in paths {
+            let Opened { path, workdir } = self.resolved(opened);
             if let Some(reg) = self.entries.iter().find(|r| r.path == path) {
                 let id = reg.guid.clone();
                 let name = self.name_of_entry(reg);
@@ -792,6 +793,26 @@ impl Home {
             }
         }
         effects
+    }
+
+    /// A plain path (no work folder named) is a listed row's state folder, kept as it
+    /// is, or else a folder the person picked: the work folder, whose state folder is
+    /// its `.fantastic`.
+    fn resolved(&self, opened: Opened) -> Opened {
+        let Opened { path, workdir } = opened;
+        let known = self.entries.iter().any(|r| r.path == path)
+            || self.adding.iter().any(|a| a.path == path);
+        if workdir.is_some() || known {
+            return Opened { path, workdir };
+        }
+        let state = std::path::Path::new(&path)
+            .join(".fantastic")
+            .to_string_lossy()
+            .into_owned();
+        Opened {
+            path: state,
+            workdir: Some(path),
+        }
     }
 
     /// The add of `path` ends: its launch is dropped and `reason` is the problem.
@@ -1224,6 +1245,24 @@ mod tests {
                 path: "/w/alpha/.fantastic".into(),
                 workdir: Some("/w/alpha".into()),
             }],
+            now_ms: 0,
+        });
+        assert_eq!(
+            effects,
+            vec![Effect::Spawn {
+                path: "/w/alpha/.fantastic".into(),
+                workdir: "/w/alpha".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_plain_path_not_listed_is_a_picked_work_folder() {
+        let mut h = home(Mode::Lock);
+        read(&mut h, 0, vec![]);
+        probed(&mut h, 0, vec![]);
+        let effects = h.reduce(Event::Open {
+            paths: vec!["/w/alpha".to_string().into()],
             now_ms: 0,
         });
         assert_eq!(

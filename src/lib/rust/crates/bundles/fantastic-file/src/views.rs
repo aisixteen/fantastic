@@ -32,6 +32,29 @@ const FOLDER_GRANTS: [&str; 3] = ["list", "watch_path", "unwatch_path"];
 const FILE_ANSWERS: [&str; 4] = ["read", "write", "watch", "reflect"];
 const FOLDER_ANSWERS: [&str; 4] = ["list", "reveal", "watch", "reflect"];
 
+/// The html a view draws itself with: one page for a file and a folder, its pure header logic
+/// (`file_head.mjs`, also the canvas previewer's) spliced in with the `export` keywords dropped.
+const VIEW_HTML: &str = include_str!("file_view.html");
+const HEAD_JS: &str = include_str!("file_head.mjs");
+
+/// A string as a JS literal inside an html script: JSON, with `<` escaped so no value can end the script.
+pub(crate) fn js_string(s: &str) -> String {
+    json!(s).to_string().replace('<', "\\u003c")
+}
+
+/// The `view` a view's `reflect` returns, `{kind: html, bytes, calls}`: the page for this view's
+/// kind, id and path, and the calls it makes — read verbs of the view itself (a file reads and
+/// watches its path, a folder lists and watches it) and the kernel's `reflect` for the agent names.
+fn html_view(kind: &str, id: &str, path: &str) -> Value {
+    let bytes = VIEW_HTML
+        .replace("/*{{head}}*/", &HEAD_JS.replace("export ", ""))
+        .replace("{{agent}}", &js_string(id))
+        .replace("{{kind}}", &js_string(kind))
+        .replace("{{path}}", &js_string(path));
+    let own: &[&str] = if kind == FILE { &["read", "watch"] } else { &["list", "watch"] };
+    json!({"kind": "html", "bytes": bytes, "calls": {id: own, "kernel": ["reflect"]}})
+}
+
 /// The verbs only a view answers, declared like any other (`watch`, `reveal`).
 static WATCH: Verb = Verb::of::<verbs::Watch>("watch");
 static REVEAL: Verb = Verb::of::<verbs::Reveal>("reveal");
@@ -667,6 +690,7 @@ fn reflect(kind: &str, id: &AgentId, meta: &Map<String, Value>, watching: bool) 
         "path": meta.get("path").cloned().unwrap_or(Value::Null),
         "bridge": meta.get("bridge").cloned().unwrap_or(Value::Null),
         "watching": watching,
+        "view": html_view(kind, &id.0, meta.get("path").and_then(Value::as_str).unwrap_or("")),
     })
 }
 

@@ -1932,7 +1932,7 @@ async fn reflect_sentence_and_verbs_match_python() {
     // The bundle's own frame, in python's key order; the kernel then appends
     // its reflect decoration (can_call / callable_by / kernel_verbs / tree).
     assert_eq!(
-        obj.keys().map(String::as_str).take(9).collect::<Vec<_>>(),
+        obj.keys().map(String::as_str).take(13).collect::<Vec<_>>(),
         vec![
             "id",
             "sentence",
@@ -1943,6 +1943,10 @@ async fn reflect_sentence_and_verbs_match_python() {
             "served_agent_count",
             "surfaces",
             "browser_reachable",
+            "request_allow",
+            "request_credentials",
+            "recent_requests",
+            "view",
         ]
     );
     assert_eq!(
@@ -1967,7 +1971,15 @@ async fn reflect_sentence_and_verbs_match_python() {
             .iter()
             .map(|v| v.name)
             .collect::<Vec<_>>(),
-        vec!["boot", "shutdown", "stop", "mount", "unmount", "fetch_file"]
+        vec![
+            "boot",
+            "shutdown",
+            "stop",
+            "mount",
+            "unmount",
+            "fetch_file",
+            "request"
+        ]
     );
     let verbs = reply["verbs"].as_object().expect("a verbs block");
     // `reflect` is the common verb every agent answers: its rendered line
@@ -3669,3 +3681,7 @@ async fn fetch_file_is_checked_by_its_declaration() {
         );
     }
 }
+
+/// The outbound `request` verb (issue #695), against in-process loopback servers.
+#[path = "tests_request.rs"]
+mod request_verb;

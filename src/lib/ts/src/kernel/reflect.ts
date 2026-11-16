@@ -3,6 +3,7 @@ import { BAD_ARG, refusal } from "./refusal.ts";
 import type { Json, Payload } from "./json.ts";
 import type { Kernel } from "./kernel.ts";
 import { page } from "./paging.ts";
+import { signature } from "./docs.ts";
 
 // Uniform `reflect`, a port of python's `_reflect_identity` + `_roster` +
 // `_apply_reflect_flags` (kernel/_agent.py; rust `reflect.rs` matches it).
@@ -127,6 +128,15 @@ export function applyReflectFlags(
     // the kernel's instance `guid` (null until the root has booted).
     obj["persistence"] = { provider: kernel.persistenceProvider };
     obj["guid"] = kernel.guid;
+  }
+
+  // THE VERBS, one signature line each (the `docs` oneliners): the agent's own
+  // bundle's, never the kernel's. An agent whose bundle declares none has none.
+  const docs = kernel.verbDocsOf(target);
+  if (docs !== undefined && Object.keys(docs).length > 0) {
+    const verbs: Payload = {};
+    for (const [n, d] of Object.entries(docs)) verbs[n] = signature(d);
+    obj["verbs"] = verbs;
   }
 
   const tree = "tree" in payload ? payload["tree"] : "all";

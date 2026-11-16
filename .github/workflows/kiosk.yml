@@ -161,7 +161,7 @@ jobs:
             cat /etc/debian_version
             apt-get update -q
             apt-get install -y -q --no-install-recommends /deb/fantastic-app-*.deb /deb/fantastic-session_*_all.deb
-            fantastic readme | grep -q "fantastic canvas"
+            fantastic usage 2>&1 | grep -q "fantastic mcp"  # an unknown word prints the usage
             test -x /usr/bin/fantastic-app
             id fantastic
             test -L /etc/systemd/system/multi-user.target.wants/fantastic-kiosk.service

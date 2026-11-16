@@ -345,3 +345,176 @@ async fn stored_bytes_survive_a_reopen_of_the_file() {
     assert_eq!(out.result["media_type"], json!("image/png"), "{}", out.result);
     assert_eq!(out.body_bytes(), Some(&[9u8, 0, 9][..]));
 }
+
+// ─── query (issue #696) ──────────────────────────────────────────────────────
+
+/// A kernel over `dir` with a store `mem` allowed to query `data.db` (30 rows of `t(n, s, b)`).
+fn query_kernel(dir: &Path, allow: Value) -> Arc<Kernel> {
+    let c = Connection::open(dir.join("data.db")).unwrap();
+    c.execute_batch("CREATE TABLE t (n INTEGER, s TEXT, b BLOB); WITH RECURSIVE x(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM x WHERE i < 30) INSERT INTO t SELECT i, 'row' || i, zeroblob(4) FROM x;").unwrap();
+    drop(c);
+    let k = kernel(dir);
+    k.register(agent(
+        "mem",
+        Some(HANDLER_MODULE),
+        Some("kernel_state"),
+        json!({"path": "mem.db", "query_allow": allow, "callable_by": {"alice": "*"}}),
+    ));
+    k
+}
+
+async fn query(k: &Arc<Kernel>, p: Value) -> Value {
+    let mut p = p;
+    p["type"] = json!("query");
+    call(k, "mem", p, Some("alice")).await
+}
+
+#[tokio::test]
+async fn query_returns_columns_and_rows_and_blobs_as_sizes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = query_kernel(tmp.path(), json!(["data.db"]));
+    let out = query(&k, json!({"db": "data.db", "sql": "SELECT n, s, b FROM t WHERE n <= 2 ORDER BY n;"})).await;
+    assert_eq!(out["columns"], json!(["n", "s", "b"]), "{out}");
+    assert_eq!(out["rows"], json!([[1, "row1", {"bytes": 4}], [2, "row2", {"bytes": 4}]]), "{out}");
+    assert_eq!(out["truncated"], json!(false), "{out}");
+}
+
+#[tokio::test]
+async fn query_binds_params_and_never_splices_them() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = query_kernel(tmp.path(), json!(["data.db"]));
+    let out = query(&k, json!({"db": "data.db", "sql": "SELECT n FROM t WHERE n = ? AND s = ?", "params": [3, "row3"]})).await;
+    assert_eq!(out["rows"], json!([[3]]), "{out}");
+    let out = query(&k, json!({"db": "data.db", "sql": "SELECT n FROM t WHERE s = ?", "params": ["x' OR '1'='1"]})).await;
+    assert_eq!(out["rows"], json!([]), "{out}");
+    for bad in [json!([[1]]), json!([{"a": 1}]), json!([1, 2])] {
+        let out = query(&k, json!({"db": "data.db", "sql": "SELECT n FROM t WHERE n = ?", "params": bad})).await;
+        assert_eq!(out["reason"], json!("bad_arg"), "{bad}: {out}");
+        assert_eq!(out["arg"], json!("params"), "{bad}: {out}");
+    }
+    let out = query(&k, json!({"db": "data.db", "sql": "SELECT n FROM t WHERE n = ?"})).await;
+    assert_eq!(out["reason"], json!("bad_arg"), "{out}");
+}
+
+#[tokio::test]
+async fn query_limit_defaults_caps_and_reports_truncated() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = query_kernel(tmp.path(), json!(["data.db"]));
+    let out = query(&k, json!({"db": "data.db", "sql": "SELECT n FROM t", "limit": 10})).await;
+    assert_eq!(out["rows"].as_array().unwrap().len(), 10, "{out}");
+    assert_eq!(out["truncated"], json!(true), "{out}");
+    let out = query(&k, json!({"db": "data.db", "sql": "SELECT n FROM t", "limit": 30})).await;
+    assert_eq!(out["rows"].as_array().unwrap().len(), 30, "{out}");
+    assert_eq!(out["truncated"], json!(false), "{out}");
+    // default 500 and hard cap 5000, over a generated set larger than both
+    let big = "WITH RECURSIVE x(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM x WHERE i < 6000) SELECT i FROM x";
+    let out = query(&k, json!({"db": "data.db", "sql": big})).await;
+    assert_eq!(out["rows"].as_array().unwrap().len(), 500, "{out}");
+    assert_eq!(out["truncated"], json!(true), "{out}");
+    let out = query(&k, json!({"db": "data.db", "sql": big, "limit": 100000})).await;
+    assert_eq!(out["rows"].as_array().unwrap().len(), 5000, "{out}");
+    assert_eq!(out["truncated"], json!(true), "{out}");
+}
+
+#[tokio::test]
+async fn query_refuses_a_file_not_allowed_or_missing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = query_kernel(tmp.path(), json!(["data.db", "gone.db"]));
+    std::fs::copy(tmp.path().join("data.db"), tmp.path().join("other.db")).unwrap();
+    for db in ["other.db", "./data.db", "mem.db", "/etc/passwd"] {
+        let out = query(&k, json!({"db": db, "sql": "SELECT 1"})).await;
+        assert_eq!(out["reason"], json!("not_allowed"), "{db}: {out}");
+    }
+    let out = query(&k, json!({"db": "gone.db", "sql": "SELECT 1"})).await;
+    assert_eq!(out["reason"], json!("not_found"), "{out}");
+    // no allowlist at all: none
+    let tmp2 = tempfile::TempDir::new().unwrap();
+    let k2 = kernel(tmp2.path());
+    add_store(&k2, "mem.db");
+    let out = query(&k2, json!({"db": "mem.db", "sql": "SELECT 1"})).await;
+    assert_eq!(out["reason"], json!("not_allowed"), "{out}");
+}
+
+#[tokio::test]
+async fn query_reaches_the_stores_own_tables_only_when_its_file_is_listed() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = query_kernel(tmp.path(), json!(["data.db", "mem.db"]));
+    let out = call(&k, "mem", json!({"type": "boot"}), None).await;
+    assert!(out.get("reason").is_none(), "{out}");
+    let out = query(&k, json!({"db": "mem.db", "sql": "SELECT COUNT(*) FROM rows"})).await;
+    assert_eq!(out["rows"], json!([[0]]), "{out}");
+}
+
+#[tokio::test]
+async fn query_refuses_two_statements_and_anything_that_writes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = query_kernel(tmp.path(), json!(["data.db"]));
+    let out = query(&k, json!({"db": "data.db", "sql": "SELECT 1; SELECT 2"})).await;
+    assert_eq!(out["reason"], json!("bad_arg"), "{out}");
+    assert_eq!(out["arg"], json!("sql"), "{out}");
+    for sql in [
+        "DELETE FROM t",
+        "INSERT INTO t VALUES (1, 'x', NULL)",
+        "UPDATE t SET n = 0",
+        "DROP TABLE t",
+        "CREATE TABLE u (x)",
+        "PRAGMA journal_mode = DELETE",
+        "ATTACH DATABASE ':memory:' AS m",
+        "VACUUM INTO 'copy.db'",
+        "WITH x AS (SELECT 1) DELETE FROM t",
+    ] {
+        let out = query(&k, json!({"db": "data.db", "sql": sql})).await;
+        assert_eq!(out["reason"], json!("bad_arg"), "{sql}: {out}");
+        assert_eq!(out["arg"], json!("sql"), "{sql}: {out}");
+    }
+    let out = query(&k, json!({"db": "data.db", "sql": "SELECT COUNT(*) FROM t"})).await;
+    assert_eq!(out["rows"], json!([[30]]), "nothing was written: {out}");
+    assert!(!tmp.path().join("copy.db").exists());
+}
+
+#[tokio::test]
+async fn query_allow_refuses_absolute_and_climbing_paths_and_empty_entries() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(tmp.path());
+    for bad in ["/tmp/x.db", "../x.db", "a/../../x.db", "@state/../x.db", ""] {
+        let p = json!({"type": "create_agent", "parent_id": "kernel_state", "handler_module": HANDLER_MODULE, "path": "m.db", "query_allow": [bad]});
+        let out = call(&k, "kernel_state", p, None).await;
+        assert_eq!(out["reason"], json!("bad_arg"), "{bad}: {out}");
+        assert!(out["arg"].as_str().unwrap().starts_with("query_allow"), "{bad}: {out}");
+    }
+    let p = json!({"type": "create_agent", "parent_id": "kernel_state", "handler_module": HANDLER_MODULE, "path": "m.db", "query_allow": ["a/data.db", "@state/x.db", "@self/y.db"]});
+    let out = call(&k, "kernel_state", p, None).await;
+    assert!(out.get("reason").is_none(), "{out}");
+}
+
+#[tokio::test]
+async fn reflect_lists_the_allowlist_as_file_and_size_rows_with_a_read_only_view() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = query_kernel(tmp.path(), json!(["data.db", "gone.db"]));
+    let out = call(&k, "mem", json!({"type": "reflect"}), None).await;
+    let rows = out["query_allow"].as_array().unwrap();
+    assert_eq!(rows[0]["file"], json!("data.db"), "{out}");
+    assert!(rows[0]["size"].as_u64().unwrap() > 0, "{out}");
+    assert_eq!(rows[1], json!({"file": "gone.db", "size": null}), "{out}");
+    assert_eq!(out["view"]["kind"], json!("html"), "{out}");
+    assert!(out["view"]["bytes"].as_str().unwrap().contains("\"mem\""), "{out}");
+    assert_eq!(out["view"]["calls"], json!({"mem": ["reflect"]}), "{out}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_query_allow_entry_linked_out_of_the_folder_is_refused_without_a_host_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    Connection::open(outside.join("out.db")).unwrap();
+    let work = tmp.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::os::unix::fs::symlink(&outside, work.join("ext")).unwrap();
+    let k = query_kernel(&work, json!(["ext/out.db"]));
+    let out = query(&k, json!({"db": "ext/out.db", "sql": "SELECT 1;"})).await;
+    assert!(out.get("reason").is_some(), "refused: {out}");
+    let text = out.to_string();
+    assert!(text.contains("query_allow"), "names the field: {out}");
+    assert!(!text.contains(&tmp.path().display().to_string()), "no host path: {out}");
+}

@@ -5,8 +5,10 @@
 //! which is canonical — the verbs, the refusals and their texts, the record and
 //! the on-disk file.
 //!
-//! A credential is addressed by a REF (`openai/main`) and is bound to ONE HOST: a
-//! value plus the host it may be sent to. A bundle that needs one names it on its
+//! A credential is addressed by a REF (`openai/main`) and is bound to its HOST: a
+//! value plus the host it may be sent to — one host, or a list of hosts when one
+//! login serves several servers (a mailbox's IMAP and SMTP): a read naming any listed
+//! host matches, a read naming a host not listed is refused. A bundle that needs one names it on its
 //! own record (`credentials: {store, ref}`), reads it at USE time and refuses to
 //! send it to any other host — so rotating a key is rewriting the ref, and no
 //! restart is ever needed.
@@ -40,7 +42,7 @@
 //! A REF IS DECLARED ONLY BY `update_agent` on the store's own record — by the
 //! store's parent or the operator, the one path:
 //! `refs: {<ref>: {host, fields?/env?}}` (it
-//! replaces the whole map; `host` is required — the binding). The DECLARATION is
+//! replaces the whole map; `host` is required — the binding: a host, or a list of hosts). The DECLARATION is
 //! the operator's and only `update_agent` writes or removes it:
 //! `set` stores the value of a DECLARED ref, never creates one and
 //! takes no `host` (an undeclared ref answers "no such ref", to the operator too;
@@ -97,7 +99,7 @@ const CREDENTIALS_DIR: &str = "user/credentials";
 const KEYCHAIN_NAMESPACE: &str = "fantastic";
 
 /// What the bundle is for — its one short man text.
-const MAN: &str = "A store of secrets by ref, each bound to one host: a value is stored under a declared ref, read back only for the host it is bound to, and never shown by reflect or list.";
+const MAN: &str = "A store of secrets by ref, each bound to its host (or hosts): a value is stored under a declared ref, read back only for the host it is bound to, and never shown by reflect or list.";
 
 // ─── python raises ─────────────────────────────────────────────────
 
@@ -195,6 +197,39 @@ fn host(h: Option<&Value>) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+/// A ref's binding as stored and compared: the one host of a text, or each host of a
+/// list (a ref may serve several hosts); lowercased, repeats dropped, order kept.
+/// `None` when it names no host, or any entry is not a host.
+fn hosts(h: Option<&Value>) -> Option<Vec<String>> {
+    match h? {
+        Value::Array(a) => {
+            let mut out: Vec<String> = Vec::new();
+            for v in a {
+                let one = host(Some(v))?;
+                if !out.contains(&one) {
+                    out.push(one);
+                }
+            }
+            (!out.is_empty()).then_some(out)
+        }
+        one => host(Some(one)).map(|s| vec![s]),
+    }
+}
+
+/// A binding as the replies show it: the host's text when there is one, else the list.
+fn hosts_value(h: Option<Vec<String>>) -> Value {
+    match h {
+        None => Value::Null,
+        Some(mut v) if v.len() == 1 => Value::String(v.remove(0)),
+        Some(v) => json!(v),
+    }
+}
+
+/// Whether two bindings name the same hosts, in any order.
+fn same_hosts(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len() && a.iter().all(|h| b.contains(h))
+}
+
 /// The record's `backend` — the declared enum, `file` when the record names none.
 fn backend_kind(rec: &Map<String, Value>) -> Result<record::BackendKind, BundleError> {
     serde_json::from_value::<record::Kind>(Value::Object(rec.clone()))
@@ -261,13 +296,15 @@ fn host_mismatch(r: &str, bound: &Value, other: Option<&str>) -> Value {
 
 /// The refusal for a stored value whose host is not the declared one — or that
 /// carries none — or `None`. Python `_host_at_rest`.
-fn host_at_rest(r: &str, stored: Option<&Value>, declared: Option<String>) -> Option<Value> {
-    let at_rest = host(stored);
-    if at_rest.is_some() && at_rest == declared {
-        return None;
+fn host_at_rest(r: &str, stored: Option<&Value>, declared: Option<Vec<String>>) -> Option<Value> {
+    let at_rest = hosts(stored);
+    if let (Some(a), Some(d)) = (&at_rest, &declared) {
+        if same_hosts(a, d) {
+            return None;
+        }
     }
-    let bound = declared.map_or(Value::Null, Value::String);
-    Some(host_mismatch(r, &bound, at_rest.as_deref()))
+    let other = at_rest.map(|a| a.join(", "));
+    Some(host_mismatch(r, &hosts_value(declared), other.as_deref()))
 }
 
 /// The default backend: one YAML document of
@@ -485,7 +522,7 @@ impl Backend {
     fn put(
         &self,
         r: &str,
-        host: Option<String>,
+        host: Value,
         fields: Map<String, Value>,
     ) -> Result<(), BundleError> {
         let at_rest = json!({"host": host, "fields": fields});
@@ -611,18 +648,18 @@ impl CredentialStoreBundle {
         let Some(mut entry) = refs.get(r).filter(|v| !v.is_null()).map(entry_map) else {
             return Ok(no_such_ref(r));
         };
-        let h = host(entry.get("host"));
+        let h = hosts(entry.get("host"));
         // the declared host is stored WITH the value
         let mut sorted_names: Vec<String> = fields.keys().cloned().collect();
         sorted_names.sort();
-        self.backend(id, &rec)?.put(r, h.clone(), fields)?;
+        self.backend(id, &rec)?.put(r, hosts_value(h.clone()), fields)?;
         // the value's NAMES, never a value
         entry.insert("fields".into(), json!(sorted_names));
         refs.insert(r.to_string(), Value::Object(entry));
         let mut patch = Map::new();
         patch.insert("refs".into(), Value::Object(refs));
         kernel.update(id, patch);
-        Ok(json!({"ref": r, "host": h, "fields": sorted_names, "stored": true}))
+        Ok(json!({"ref": r, "host": hosts_value(h), "fields": sorted_names, "stored": true}))
     }
 
     fn get(&self, id: &AgentId, args: &verbs::Get, kernel: &Kernel) -> Result<Value, BundleError> {
@@ -634,7 +671,8 @@ impl CredentialStoreBundle {
         };
         if let Some(asked) = &args.host {
             let want = host(Some(&json!(asked)));
-            if want.is_none() || want != host(entry.get("host")) {
+            let declared = hosts(entry.get("host"));
+            if !want.as_ref().is_some_and(|w| declared.as_ref().is_some_and(|d| d.contains(w))) {
                 return Ok(host_mismatch(
                     r,
                     entry.get("host").unwrap_or(&Value::Null),
@@ -649,7 +687,7 @@ impl CredentialStoreBundle {
                 // THE HOST AT REST: a value is read only for the host it
                 // was stored with — the declaration of a store elsewhere sharing
                 // this id and ref names its own host, and reads nothing.
-                if let Some(bad) = host_at_rest(r, stored.get("host"), host(entry.get("host"))) {
+                if let Some(bad) = host_at_rest(r, stored.get("host"), hosts(entry.get("host"))) {
                     return Ok(bad);
                 }
                 fields = stored.get("fields").and_then(Value::as_object).cloned();
@@ -663,7 +701,7 @@ impl CredentialStoreBundle {
             with(&mut out, "arg", json!("ref"));
             return Ok(out);
         };
-        Ok(json!({"ref": r, "host": host(entry.get("host")), "fields": fields}))
+        Ok(json!({"ref": r, "host": hosts_value(hosts(entry.get("host"))), "fields": fields}))
     }
 
     fn list(id: &AgentId, kernel: &Kernel) -> Value {
@@ -686,7 +724,7 @@ impl CredentialStoreBundle {
             };
             let mut row = Map::new();
             row.insert("ref".into(), json!(r));
-            row.insert("host".into(), json!(host(entry.get("host"))));
+            row.insert("host".into(), hosts_value(hosts(entry.get("host"))));
             row.insert("fields".into(), fields);
             out.push(Value::Object(row));
         }

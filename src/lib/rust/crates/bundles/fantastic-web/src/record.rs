@@ -17,6 +17,8 @@ pub struct Record {
     pub bind: Option<String>,
     /// Further browser origins (exact strings) a page may call this host from.
     pub allowed_origins: Option<Vec<String>>,
+    /// The hosts `request` may call, each `scheme://host[:port]` (a leading `*.` on the host admits its subdomains); absent or empty = no outbound call.
+    pub request_allow: Option<Vec<String>>,
 }
 
 fantastic_kernel::record!(Record);
