@@ -15,7 +15,7 @@ const view = {
     calls: {
       kernel: ["reflect", "list_agents"],
       user: ["inquiries"],
-      files: ["list", "reflect", "watch_path", "unwatch_path", "open_view"],
+      files: ["list", "watch_path", "unwatch_path", "open_view"],
       sidebar: ["reflect", "watch"],
     },
   },
@@ -25,7 +25,7 @@ test("the sidebar cell is granted exactly the view's calls: its own agent and th
   assert.deepEqual(sidebarGrant(view), {
     kernel: ["reflect", "list_agents"],
     user: ["inquiries"],
-    files: ["list", "reflect", "watch_path", "unwatch_path", "open_view"],
+    files: ["list", "watch_path", "unwatch_path", "open_view"],
     sidebar: ["reflect", "watch"],
   });
   assert.equal(sidebarGrant(undefined), null, "no sidebar agent: no grant");

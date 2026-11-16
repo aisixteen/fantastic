@@ -28,16 +28,33 @@ const VIEW: &str = include_str!("sidebar_view.html");
 
 /// What the view calls: the root's reflect and listing, the person's open inquiries, the
 /// project's files (a listing, and a watch on each folder it shows, held by the files agent),
-/// and its OWN agent: its `reflect` (the chats' call phases now) and its events (`watch`) —
+/// and its OWN agent: its `reflect` (the chats' call phases now and the files' root, the
+/// project's name) and its events (`watch`) —
 /// the one agent it watches. It reads again only on what the agent publishes, never on a
 /// timer.
 fn calls(id: &str) -> Value {
     json!({
         "kernel": ["reflect", "list_agents"],
         "user": ["inquiries"],
-        "files": ["list", "reflect", "watch_path", "unwatch_path", "open_view"],
+        "files": ["list", "watch_path", "unwatch_path", "open_view"],
         id: ["reflect", "watch"],
     })
+}
+
+/// The root the files agent serves (its own `reflect`, asked by the sidebar agent), "" when
+/// there is no files agent: the view names the project from it.
+async fn files_root(kernel: &Arc<Kernel>) -> String {
+    let files = AgentId::from(follow::FILES);
+    let served = kernel.agents.get(&files).is_some_and(|a| a.handler_module.is_some());
+    if !served {
+        return String::new();
+    }
+    let r = kernel
+        .send(vec![fantastic_kernel::Item::new(files, json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
+    r.get("root").and_then(Value::as_str).unwrap_or_default().to_string()
 }
 
 /// The bundle.
@@ -86,6 +103,7 @@ impl Handler for SidebarBundle {
                     "sentence": MAN,
                     "phases": follow::phases(kernel, agent_id),
                     "open": follow::open_questions(kernel),
+                    "files_root": files_root(kernel).await,
                     "view": {"kind": "html", "bytes": VIEW.replace("{{agent}}", id), "calls": calls(id)},
                 })))
             }
@@ -176,12 +194,13 @@ mod tests {
             json!({
                 "kernel": ["reflect", "list_agents"],
                 "user": ["inquiries"],
-                "files": ["list", "reflect", "watch_path", "unwatch_path", "open_view"],
+                "files": ["list", "watch_path", "unwatch_path", "open_view"],
                 "sidebar": ["reflect", "watch"],
             })
         );
         assert_eq!(r["phases"], json!({}), "no chat inside a call");
         assert_eq!(r["open"], json!(0));
+        assert_eq!(r["files_root"], "", "no files agent: no root");
     }
 
     fn agent(kernel: &Arc<Kernel>, id: &str) {

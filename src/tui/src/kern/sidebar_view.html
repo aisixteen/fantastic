@@ -603,7 +603,9 @@ function syncFiles() {
 // the chats' call phases now, as the sidebar agent holds them
 function readPhases() {
   return call(ME, { type: "reflect" }).then(function (r) {
-    if (!failed(r) && r.phases && typeof r.phases === "object") st.status = r.phases;
+    if (failed(r)) return;
+    if (r.phases && typeof r.phases === "object") st.status = r.phases;
+    if (typeof r.files_root === "string") st.filesRoot = r.files_root;
   });
 }
 function readInquiries() {
@@ -612,10 +614,8 @@ function readInquiries() {
 function refreshTree() {
   return Promise.all([
     call("kernel", { type: "reflect", detail: "full" }),
-    call("kernel", { type: "reflect", handler_modules: ["ai_chat.tools"], tree: "ids" }),
-    st.filesRoot === "" ? call("files", { type: "reflect" }) : Promise.resolve(null)
+    call("kernel", { type: "reflect", handler_modules: ["ai_chat.tools"], tree: "ids" })
   ]).then(function (rs) {
-    if (rs[2] && !failed(rs[2]) && typeof rs[2].root === "string") st.filesRoot = rs[2].root;
     if (failed(rs[0])) { say("kernel reflect: " + (rs[0] && rs[0].error || "no answer")); return []; }
     say("");
     st.root = rs[0]; st.tree = rs[0].tree && !Array.isArray(rs[0].tree) ? rs[0].tree : null;

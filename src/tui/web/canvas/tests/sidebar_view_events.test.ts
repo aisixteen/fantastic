@@ -14,9 +14,9 @@ function sidebar(): Harness {
     if (target === "kernel" && p["handler_modules"]) return { tree: ["chat1"] };
     if (target === "kernel") return { id: "kernel", guid: "g1", peers: [], tree };
     if (target === "files" && p["type"] === "list") return { files: [{ name: "src", path: "src", type: "dir" }] };
-    if (target === "files") return { root: "/p/proj" };
+    if (target === "files") return {};
     if (target === "user") return { inquiries: [] };
-    if (target === "sidebar") return { id: "sidebar", phases: { chat1: "thinking" }, open: 0 };
+    if (target === "sidebar") return { id: "sidebar", phases: { chat1: "thinking" }, open: 0, files_root: "/p/proj" };
     return { error: `unexpected read of ${target}` };
   });
 }
@@ -30,6 +30,7 @@ test("the sidebar view watches its own agent alone, and reads the chats' phases 
   const booted = kinds(h, 0);
   assert.ok(booted.includes("sidebar reflect") && booted.includes("kernel reflect") && booted.includes("user inquiries"), `${booted}`);
   assert.ok(!booted.some((s) => s.endsWith(" status")), `no chat is read: ${booted}`);
+  assert.ok(!booted.includes("files reflect"), `the project's root comes from its own agent: ${booted}`);
   assert.deepEqual(h.intervals.map((t) => t.ms), [60000], "one clock, for the ages");
   await clocksReadNothing(h);
 });
