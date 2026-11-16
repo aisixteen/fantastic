@@ -27,7 +27,7 @@ interface Pure {
   lookupFor(path: string, agents: Record<string, Obj>): { paths(): string[]; agentAt(p: string): Obj | undefined; folderOf(id: string): string | undefined };
   trail(path: string, ix: unknown): string[];
   metaOf(o: Obj): string;
-  rereads(ev: unknown, kind: string, own: string, busy: boolean, sinceRead: number): boolean;
+  rereads(ev: unknown, kind: string, own: string): boolean;
 }
 const ctx = vm.createContext({});
 vm.runInContext(`${head}\n${html.slice(from, to)}\nthis.api = { readState, nextState, sortedEntries, agentsOf, lookupFor, trail, metaOf, rereads };`, ctx);
@@ -89,24 +89,19 @@ test("the breadcrumb: the agent chain from the kernel tree, then the path below 
 });
 
 test("a folder view lists again only when an entry came or went", () => {
-  const r = (ev: Obj): boolean => raw.rereads(ev, "folder", "logs", false, 10_000);
+  const r = (ev: Obj): boolean => raw.rereads(ev, "folder", "logs");
   assert.equal(r({ type: "added", path: "logs/a", name: "a" }), true);
   assert.equal(r({ type: "removed", path: "logs/a", name: "a" }), true);
   assert.equal(r({ type: "changed", path: "logs/team.log", name: "team.log" }), false, "a file written in place is no new listing");
   for (const copy of [{ type: "list", path: "." }, { type: "watch" }]) assert.equal(r(copy), false, `a copy of ${copy.type}`);
 });
 
-test("a file view reads again on a change of its own file, never on the change its own read made", () => {
+test("a file view reads again on every change of its own file", () => {
   const OWN = "team.log";
-  const idle = (ev: Obj): boolean => raw.rereads(ev, "file", OWN, false, 10_000);
-  assert.equal(idle({ type: "changed", path: OWN, kind: "modified" }), true, "someone wrote it");
-  assert.equal(idle({ type: "changed", path: "other.log", kind: "modified" }), false, "not its file");
-  for (const copy of [{ type: "read", offset: 0, limit: 200 }, { type: "watch" }]) assert.equal(idle(copy), false, `a copy of ${copy.type}`);
-  // the process logs each call into the file it reads: that write lands while the read runs or
-  // right after its answer, and is the read's own
-  assert.equal(raw.rereads({ type: "changed", path: OWN, kind: "modified" }, "file", OWN, true, 10_000), false, "during its read");
-  assert.equal(raw.rereads({ type: "changed", path: OWN, kind: "modified" }, "file", OWN, false, 40), false, "just after its answer");
-  // a file replaced or deleted reads, whenever it lands
-  assert.equal(raw.rereads({ type: "changed", path: OWN, kind: "deleted" }, "file", OWN, false, 40), true);
-  assert.equal(raw.rereads({ type: "changed", path: OWN, kind: "added" }, "file", OWN, true, 0), true);
+  const r = (ev: Obj): boolean => raw.rereads(ev, "file", OWN);
+  assert.equal(r({ type: "changed", path: OWN, kind: "modified" }), true, "someone wrote it");
+  assert.equal(r({ type: "changed", path: "other.log", kind: "modified" }), false, "not its file");
+  for (const copy of [{ type: "read", offset: 0, limit: 200 }, { type: "watch" }]) assert.equal(r(copy), false, `a copy of ${copy.type}`);
+  assert.equal(r({ type: "changed", path: OWN, kind: "deleted" }), true);
+  assert.equal(r({ type: "changed", path: OWN, kind: "added" }), true);
 });
