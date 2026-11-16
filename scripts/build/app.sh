@@ -9,9 +9,13 @@
 # (`scripts/build/cli.sh`): it is the app's canvas sidecar, staged as
 # `src/app/binaries/fantastic-<app triple>` for `externalBin`.
 #
-# `tauri build` adds the `tauri/custom-protocol` feature a production app needs,
-# so never ship a plain `cargo build`. The build links the home kernel, which
-# packs the canvas page: it needs Go, and `zip` on Windows.
+# This is a plain Cargo build. `tauri build` adds the `tauri/custom-protocol`
+# feature a production app needs, and so does this script: a build without that
+# feature loads the dev URL instead of the bundled page, so never ship one. The
+# version reaches `tauri.conf.json` through the `TAURI_CONFIG` env var (a JSON
+# string tauri-build and tauri-codegen merge into the parsed config:
+# tauri-build lib.rs, tauri-codegen lib.rs, tauri-utils acl/build.rs). The build
+# links the home kernel, which packs the canvas page: it needs Go, and `zip` on Windows.
 #
 # Writes `dist/fantastic-app-<app triple>.tar` holding `fantastic-app[.exe]`.
 . "$(dirname "$0")/common.sh"
@@ -40,13 +44,11 @@ say "staged the canvas sidecar: binaries/fantastic-$APP_TARGET$BIN_EXE"
 VERSION="${FANTASTIC_VERSION:-$(git -C "$REPO" describe --tags --abbrev=0 | sed 's/^v//')}"
 [ -n "$VERSION" ] || { echo "app.sh: no version (no tag, and FANTASTIC_VERSION is unset)" >&2; exit 1; }
 
-say "npm ci"
-npm ci --prefix "$APP" --no-audit --no-fund
-
-set -- build --no-bundle --ci --target "$APP_TARGET" --config "{\"version\":\"$VERSION\"}"
-[ "$PROFILE" = debug ] && set -- "$@" --debug
-say "tauri $* (version $VERSION)"
-( cd "$APP" && npx tauri "$@" )
+# --target-dir pins the output to src/app/target even when CARGO_TARGET_DIR is set
+set -- build --locked --target "$APP_TARGET" --target-dir "$APP/target" --features tauri/custom-protocol
+[ "$PROFILE" = debug ] || set -- "$@" --release
+say "cargo $* (version $VERSION)"
+( cd "$APP" && TAURI_CONFIG="{\"version\":\"$VERSION\"}" cargo "$@" )
 
 [ -n "$OUT" ] || OUT="$REPO/dist/fantastic-app-$APP_TARGET.tar"
 default_out app tar

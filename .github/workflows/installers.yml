@@ -75,9 +75,6 @@ defaults:
   run:
     shell: bash
 
-env:
-  NODE_VERSION: "24"
-
 jobs:
   guard:
     runs-on: ubuntu-latest
@@ -262,13 +259,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ env.APP_TARGET }}
-      - uses: actions/setup-node@v7
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: src/app/package-lock.json
-      - name: the tauri CLI
-        run: npm ci --prefix src/app --no-audit --no-fund
+      - name: the tauri CLI (the crates.io one, no npm)
+        run: cargo install tauri-cli --version 2.12.1 --locked
       - uses: actions/download-artifact@v7
         with:
           name: release-${{ env.CLI_TARGET }}
@@ -299,7 +291,7 @@ jobs:
       # bundler deletes that .app afterwards, and it is what gets signed.
       - name: bundle, unsigned
         run: |
-          cd src/app && npx tauri bundle --ci --bundles app,dmg --target "$APP_TARGET" --no-binary-patching --no-sign \
+          cd src/app && cargo tauri bundle --ci --bundles app,dmg --target "$APP_TARGET" --no-binary-patching --no-sign \
             --config "{\"version\":\"$VERSION\"}"
       - name: the installer, and the .app to sign
         run: |
@@ -347,13 +339,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ env.APP_TARGET }}
-      - uses: actions/setup-node@v7
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: src/app/package-lock.json
-      - name: the tauri CLI
-        run: npm ci --prefix src/app --no-audit --no-fund
+      - name: the tauri CLI (the crates.io one, no npm)
+        run: cargo install tauri-cli --version 2.12.1 --locked
       - uses: actions/download-artifact@v7
         with:
           name: release-${{ env.CLI_TARGET }}
@@ -392,7 +379,7 @@ jobs:
           Get-ChildItem src/app/binaries, $bin
       - name: bundle, unsigned
         run: |
-          cd src/app && npx tauri bundle --ci --bundles nsis --target "$APP_TARGET" --no-binary-patching --no-sign \
+          cd src/app && cargo tauri bundle --ci --bundles nsis --target "$APP_TARGET" --no-binary-patching --no-sign \
             --config "{\"version\":\"$VERSION\"}"
       - name: the installer, and the binaries to sign
         run: |
@@ -438,13 +425,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ env.APP_TARGET }}
-      - uses: actions/setup-node@v7
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: src/app/package-lock.json
-      - name: the tauri CLI
-        run: npm ci --prefix src/app --no-audit --no-fund
+      - name: the tauri CLI (the crates.io one, no npm)
+        run: cargo install tauri-cli --version 2.12.1 --locked
       - uses: actions/download-artifact@v7
         with:
           name: release-${{ env.CLI_TARGET }}

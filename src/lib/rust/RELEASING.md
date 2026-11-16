@@ -137,7 +137,7 @@ All steps run from the repo root, on `main`, with a clean tree.
    gh run download "$RUN" -n to-sign-x86_64-pc-windows-msvc -D sign/win
    tar -xf sign/win/fantastic-app-x86_64-pc-windows-msvc.stage.tar   # at the repo root, on the tag
    rustup target add x86_64-pc-windows-msvc
-   npm ci --prefix src/app
+   cargo install tauri-cli --version 2.12.1 --locked   # once
    TOKEN=$(az account get-access-token --resource https://codesigning.azure.net --query accessToken -o tsv)
    cat > sign/win/sign.json <<EOF
    {"version":"$V","bundle":{"windows":{"signCommand":{"cmd":"jsign","args":[
@@ -145,7 +145,7 @@ All steps run from the repo root, on `main`, with a clean tree.
      "--storepass","$TOKEN","--alias","<account>/<certificate profile>",
      "--tsaurl","http://timestamp.acs.microsoft.com","--tsmode","RFC3161","%1"]}}}}
    EOF
-   (cd src/app && npx tauri bundle --ci --bundles nsis --target x86_64-pc-windows-msvc \
+   (cd src/app && cargo tauri bundle --ci --bundles nsis --target x86_64-pc-windows-msvc \
      --no-binary-patching --config ../../sign/win/sign.json)
    rm sign/win/sign.json
    cp "src/app/target/x86_64-pc-windows-msvc/release/bundle/nsis/Aisixteen Fantastic_${V}_x64-setup.exe" \

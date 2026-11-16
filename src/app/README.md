@@ -1,12 +1,12 @@
 # Aisixteen Fantastic, the desktop app
 
-The Tauri 2 shell around the home kernel. `scripts/build/app.sh` builds it; `SMOKE.md` is
+The Tauri 2 shell around the home kernel. `scripts/build/app.sh` builds it (a plain `cargo build`, no npm; installers need `cargo install tauri-cli --version 2.12.1 --locked`); `SMOKE.md` is
 the by-hand check.
 
 ## Build the Flatpak locally
 
 The Flatpak (#82) is built by `flatpak-builder` from `packaging/flatpak/oleksandr.aisixteen.fantastic.desktop.yml`,
-offline: the crates and npm packages are vendored by the `packaging/flatpak/*-sources.json`
+offline: the crates are vendored by the `packaging/flatpak/*-sources.json`
 files (regenerate them with `sh packaging/flatpak/generate-sources.sh` after a lockfile
 changes). Linux only; install `flatpak` and `flatpak-builder` from your distro, then, from
 the repository root:
@@ -17,7 +17,7 @@ flatpak-builder --user --install-deps-from=flathub --force-clean --disable-rofil
   build-dir packaging/flatpak/oleksandr.aisixteen.fantastic.desktop.yml
 ```
 
-`--install-deps-from=flathub` fetches the GNOME runtime and the Rust, Go and Node SDK
+`--install-deps-from=flathub` fetches the GNOME runtime and the Rust and Go SDK
 extensions on the first run. To run the result without installing it:
 
 ```sh
