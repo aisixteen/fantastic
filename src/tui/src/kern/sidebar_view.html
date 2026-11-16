@@ -384,12 +384,15 @@ function changedDirs(ev, lists) {
 }
 // what an event a watched agent published asks the view to read again: "tree" (agents came,
 // went or changed, or a kernel connected or left), "status" (a chat's call moved), "inquiries"
-// (a question to the person opened or closed), or "" (nothing the view shows)
+// (a question to the person opened or closed), or "" (nothing the view shows). A watcher
+// also receives a COPY OF EVERY CALL made to the agent — this view's own `status` read, another
+// client's — and a copy is never a change: a chat's status EVENT carries its `phase`, a
+// `{type:"status"}` call carries none
 var TREE_EVENTS = { agent_created: 1, agent_deleted: 1, agent_updated: 1, peer_connected: 1, socket_closed: 1, bridge_up: 1, bridge_down: 1 };
 function rereadOf(ev) {
   if (!ev || typeof ev !== "object" || typeof ev.type !== "string" || typeof ev.error === "string") return "";
   if (TREE_EVENTS[ev.type] === 1) return "tree";
-  if (ev.type === "status") return "status";
+  if (ev.type === "status") return typeof ev.phase === "string" && ev.phase !== "" ? "status" : "";
   if ((ev.type === "inquiry_opened" || ev.type === "inquiry_closed") && (ev.holder === undefined || ev.holder === "user")) return "inquiries";
   return "";
 }

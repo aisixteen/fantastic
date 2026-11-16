@@ -7,6 +7,10 @@ import vm from "node:vm";
 // agent watches the agents it shows and reads again only on what they publish — no timer
 // re-reads anything. The script runs in a vm, on a loose DOM (any element, any property) and a
 // fake `fantastic` connector that records every send, watch and timer.
+//
+// AS THE KERNEL DOES, a watcher receives a COPY OF EVERY CALL made to the agent it watches
+// (kernel send.rs fanout; the web leg forwards only the payload): each send here is mirrored to
+// the target's watchers, the view's own reads included. A view that acts on a copy loops.
 
 const ROOT = new URL("../../../../../", import.meta.url);
 export const file = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, ROOT)), "utf8");
@@ -72,6 +76,8 @@ export function run(html: string, fill: Record<string, string>, reply: Reply): H
   const fantastic = {
     send: (target: string, p: Obj) => {
       sends.push({ target, p });
+      const copy = JSON.parse(JSON.stringify(p)) as Obj;
+      setImmediate(() => (watches.get(target) ?? []).slice().forEach((cb) => cb(copy)));
       return Promise.resolve(JSON.parse(JSON.stringify(reply(target, p) ?? {})));
     },
     watch: (src: string, cb: (ev: Obj) => void) => {
@@ -140,3 +146,13 @@ export async function clocksReadNothing(h: Harness): Promise<void> {
   assert.deepEqual(h.since(mark), [], "an interval re-read the agent's state");
 }
 
+
+/** Copies of every call the view made so far (its own reads), fed to it again as its watch
+ *  delivers them: none may make it read again. */
+export async function ownCopiesReadNothing(h: Harness): Promise<void> {
+  await h.settle();
+  const mark = h.sends.length;
+  for (const c of h.sends.slice(0, mark)) for (const cb of h.watches.get(c.target) ?? []) cb(JSON.parse(JSON.stringify(c.p)) as Obj);
+  await h.settle();
+  assert.deepEqual(h.since(mark).map((s) => `${s.target} ${String(s.p["type"])}`), [], "a copy of a call made the view read again");
+}
