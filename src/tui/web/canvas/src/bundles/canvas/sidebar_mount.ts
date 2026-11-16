@@ -2,7 +2,7 @@ import { Agent } from "../../lib.ts";
 import type { Kernel, Payload } from "../../lib.ts";
 import { mountHostPanel } from "../agent_view/agent_view.ts";
 import { AGENT_VIEW } from "../agent_view/agent_view.ts";
-import { cellGrant, expandReach, viewOf, viewRecordFresh } from "./host_views.ts";
+import { cellGrant, viewOf, viewRecordFresh } from "./host_views.ts";
 import type { Rec } from "./host_views.ts";
 import { hearSidebar, pageStore } from "../../../../page/view_relay.js";
 import type { SidebarStore } from "../../../../page/view_relay.js";
@@ -10,8 +10,7 @@ import type { SidebarStore } from "../../../../page/view_relay.js";
 // THE CANVAS'S LEFT COLUMN (#608): the host agent `sidebar`'s html view, drawn by its
 // `reflect` in a panel fixed to the viewport's left edge, beside the zoomed world (never in
 // it): a zoom or a pan does not move it. The view is the agent's; this is only the place it
-// sits and the grant of the cell that shows it (`cellGrant`, with the view's `"*"` reach
-// written out per agent). No `sidebar` agent (a folder seeded before it): no column.
+// sits and the grant of the cell that shows it (`cellGrant`: exactly the view's calls). No `sidebar` agent (a folder seeded before it): no column.
 // What the view emits is heard on its cell's inbox (`hearSidebar`): `select {id}` (an agent's cell),
 // `select_file {path}` (the previews that follow the selection), `open_file`/`open_dir {path}` (the
 // canvas's own `open`), `hide_tree`, and `state {state}`: which branches and folders the view has open.
@@ -36,16 +35,16 @@ export interface SidebarColumn {
   setOpen(open: boolean): void;
   /** the screen is wide (`true`: beside the canvas) or narrow (`false`: over it) */
   setWide(wide: boolean): void;
-  /** the sidebar agent's `view` as reflected now, and the host agents that exist now: the cell's grant follows */
-  follow(rec: Rec | undefined, ids: Iterable<string>): void;
+  /** the sidebar agent's `view` as reflected now: the cell's grant follows */
+  follow(rec: Rec | undefined): void;
   dispose(): void;
 }
 
-/** The cell's `can_call` for the view `rec` declares, `"*"` written out for `ids`; null when it is not an html view. */
-export function sidebarGrant(rec: Rec | undefined, ids: Iterable<string>): Record<string, string[]> | null {
+/** The cell's `can_call` for the view `rec` declares; null when it is not an html view. */
+export function sidebarGrant(rec: Rec | undefined): Record<string, string[]> | null {
   if (rec === undefined) return null;
   const v = viewOf(rec);
-  return v.kind === "html" && v.bytes !== undefined ? expandReach(cellGrant(SIDEBAR_AGENT, v), ids) : null;
+  return v.kind === "html" && v.bytes !== undefined ? cellGrant(SIDEBAR_AGENT, v) : null;
 }
 
 /**
@@ -56,7 +55,6 @@ export function sidebarGrant(rec: Rec | undefined, ids: Iterable<string>): Recor
 export async function mountSidebarColumn(o: {
   kernel: Kernel;
   mount: HTMLElement;
-  ids: () => Iterable<string>;
   wide: boolean;
   onSelect: (id: string) => void;
   /** a file the view selects (`select_file {path}`) */
@@ -69,7 +67,7 @@ export async function mountSidebarColumn(o: {
   onPlace?: () => void;
 }): Promise<SidebarColumn | null> {
   const { kernel } = o;
-  const grant = sidebarGrant(await viewRecordFresh(SIDEBAR_AGENT), o.ids());
+  const grant = sidebarGrant(await viewRecordFresh(SIDEBAR_AGENT));
   if (grant === null) return null;
   kernel.register(
     new Agent({
@@ -138,8 +136,8 @@ export async function mountSidebarColumn(o: {
       place();
       o.onPlace?.();
     },
-    follow(rec: Rec | undefined, ids: Iterable<string>): void {
-      const want = sidebarGrant(rec, ids);
+    follow(rec: Rec | undefined): void {
+      const want = sidebarGrant(rec);
       if (want === null) return;
       const have = kernel.get(SIDEBAR_CELL)?.meta["can_call"];
       if (JSON.stringify(have) !== JSON.stringify(want)) kernel.updateMeta(SIDEBAR_CELL, { can_call: want } as unknown as Payload);

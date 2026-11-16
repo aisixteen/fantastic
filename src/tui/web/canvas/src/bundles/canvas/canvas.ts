@@ -357,8 +357,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
             kernel.updateMeta(cell, { can_call: { ...have, [agent]: want[agent] } } as unknown as Payload);
           }
         }
-        // the sidebar's cell follows its agent's view, `"*"` written out for the agents that exist
-        sidebar?.follow(recs.get(SIDEBAR_AGENT), registry.keys());
+        // the sidebar's cell follows its agent's view
+        sidebar?.follow(recs.get(SIDEBAR_AGENT));
         // the first sync also cleans cells whose agent went while no page was open
         if (!synced) {
           for (const id of everyAgent()) {
@@ -1909,7 +1909,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // THE CANVAS'S LEFT COLUMN (#608): the `sidebar` agent's own view beside the zoomed world, never in it,
   // so a zoom or a pan leaves it where it is. A click in it (`select {id}`) opens that agent.
   // (its open or its place moves the canvas's box: the GL camera reads that box, so it follows)
-  void mountSidebarColumn({ kernel, mount, ids: () => registry.keys(), wide: innerWidth > 768, onSelect: (id) => {
+  void mountSidebarColumn({ kernel, mount, wide: innerWidth > 768, onSelect: (id) => {
       select({ path: null, agent: id }, SIDEBAR_CELL);
       selectAgent(id);
     },

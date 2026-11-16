@@ -51,7 +51,8 @@ agents:
     callable_by: {user: "*"}
 
   # THE SIDEBAR: the canvas's left column. Its `reflect` returns the html view; the human
-  # reads it through the canvas.
+  # reads it through the canvas. From its boot it follows the kernel and publishes each change
+  # its tree shows on its own inbox; its view watches it alone.
   - id: sidebar
     handler_module: sidebar.tools
     callable_by: {user: "*"}

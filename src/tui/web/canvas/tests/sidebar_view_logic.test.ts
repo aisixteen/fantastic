@@ -19,23 +19,25 @@ interface Pure {
   kernelStrip(root: Obj, peers: Obj[], waiting?: number): Obj[];
   askAges(inq: Obj[], now: number): Record<string, string>;
   toolRows(root: Obj, chats: Record<string, boolean>): Obj[];
-  pinRows(root: Obj, chats: Record<string, boolean>, folded: Record<string, boolean>, status: Record<string, Obj>, asks: Record<string, boolean>, files: Obj, project: string, opts?: Obj): Obj[];
+  pinRows(root: Obj, chats: Record<string, boolean>, folded: Record<string, boolean>, status: Record<string, string>, asks: Record<string, boolean>, files: Obj, project: string, opts?: Obj): Obj[];
   projectName(p: unknown): string;
   chatSet(reply: Obj): Record<string, boolean>;
-  stateOf(status: Obj | undefined, asks: boolean): { kind: string; label: string };
-  treeRows(root: Obj, chats: Record<string, boolean>, folded: Record<string, boolean>, status: Record<string, Obj>, asks: Record<string, boolean>, files?: Obj, opts?: Obj): Obj[];
+  stateOf(phase: string | undefined, asks: boolean): { kind: string; label: string };
+  treeRows(root: Obj, chats: Record<string, boolean>, folded: Record<string, boolean>, status: Record<string, string>, asks: Record<string, boolean>, files?: Obj, opts?: Obj): Obj[];
   filterRows(rows: Obj[], q: string): Obj[];
   keptState(st: Obj): Obj;
   restoredState(saved: unknown): Obj;
   wantedWatches(filesOn: boolean, open: Record<string, boolean>): string[];
   changedDirs(ev: Obj, lists: Record<string, Obj[]>): string[];
+  heardOf(ev: unknown): string;
+  withPhase(phases: Record<string, string>, agent: string, phase: string): Record<string, string>;
   askers(inq: Obj[]): Record<string, boolean>;
   waitingRows(inq: Obj[], names: Record<string, string>, now: number): Obj[];
   sortedListing(files: Obj[]): Obj[];
   fileRows(lists: Record<string, Obj[]>, open: Record<string, boolean>, path: string, depth: number): Obj[];
 }
 const ctx = vm.createContext({});
-vm.runInContext(`${src.slice(from, to)}\nthis.api = { askAges, toolRows, pinRows, projectName, kernelStrip, chatSet, stateOf, treeRows, filterRows, keptState, restoredState, wantedWatches, changedDirs, askers, waitingRows, sortedListing, fileRows };`, ctx);
+vm.runInContext(`${src.slice(from, to)}\nthis.api = { askAges, toolRows, pinRows, projectName, kernelStrip, chatSet, stateOf, treeRows, filterRows, keptState, restoredState, wantedWatches, changedDirs, heardOf, withPhase, askers, waitingRows, sortedListing, fileRows };`, ctx);
 const raw = (ctx as unknown as { api: Pure }).api;
 // the vm's objects are of another realm: compare them as plain JSON
 const plain = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
@@ -111,14 +113,14 @@ test("a folded branch shows its child count and hides what is below", () => {
 });
 
 test("state: asks > active phases > queued > idle", () => {
-  const S = (phase?: string): Obj => ({ current: phase === undefined ? null : { phase } });
+  const S = (phase?: string): string | undefined => phase;
   assert.deepEqual(plain(raw.stateOf(S("thinking"), true)).kind, "ask");
   for (const p of ["thinking", "streaming", "tool_calling"]) assert.equal(plain(raw.stateOf(S(p), false)).kind, "active", p);
   assert.equal(plain(raw.stateOf(S("queued"), false)).kind, "queued");
   assert.equal(plain(raw.stateOf(S("done"), false)).kind, "idle");
   assert.equal(plain(raw.stateOf(S(), false)).kind, "idle");
   assert.equal(plain(raw.stateOf(undefined, false)).kind, "idle");
-  const rows = plain(raw.treeRows(tree, { chat1: true }, {}, { chat1: S("streaming") }, { chat1: true }));
+  const rows = plain(raw.treeRows(tree, { chat1: true }, {}, { chat1: "streaming" }, { chat1: true }));
   assert.equal((rows.find((r) => r["id"] === "chat1")!["state"] as Obj)["kind"], "ask");
 });
 
@@ -202,12 +204,29 @@ test("a watch is held on the root and every open folder while files show, none o
   assert.deepEqual(plain(raw.wantedWatches(false, { src: true })), []);
 });
 
-test("a change reads again the folder that holds it, and the folder itself when listed", () => {
+test("an entry that came or went reads again the folder that holds it, when listed", () => {
   const held = { ".": [], src: [] };
-  assert.deepEqual(plain(raw.changedDirs({ type: "changed", path: "src/a.rs", kind: "added" }, held)), ["src"]);
-  assert.deepEqual(plain(raw.changedDirs({ type: "changed", path: "src", kind: "modified" }, held)), [".", "src"]);
-  assert.deepEqual(plain(raw.changedDirs({ type: "changed", path: "other/x", kind: "added" }, held)), [], "a folder the view does not list is not read");
+  assert.deepEqual(plain(raw.changedDirs({ type: "files_changed", path: "src/a.rs", change: "added" }, held)), ["src"]);
+  assert.deepEqual(plain(raw.changedDirs({ type: "files_changed", path: "src", change: "removed" }, held)), ["."]);
+  assert.deepEqual(plain(raw.changedDirs({ type: "files_changed", path: "other/x", change: "added" }, held)), [], "a folder the view does not list is not read");
   assert.deepEqual(plain(raw.changedDirs({ type: "watching" }, held)), []);
+});
+
+test("the view acts only on what its sidebar agent publishes; a copy of a call is nothing", () => {
+  assert.equal(raw.heardOf({ type: "tree_changed" }), "tree");
+  assert.equal(raw.heardOf({ type: "status_changed", agent: "c1", phase: "thinking" }), "status");
+  assert.equal(raw.heardOf({ type: "inquiries_changed", open: 1 }), "inquiries");
+  assert.equal(raw.heardOf({ type: "files_changed", path: "a", change: "added" }), "files");
+  assert.equal(raw.heardOf({ type: "files_changed", path: "a", change: "modified" }), "", "a write in place is not published, and is nothing");
+  for (const copy of [{ type: "reflect" }, { type: "status" }, { type: "status_changed" }, { type: "watch" }, { type: "agent_created", id: "x" }, { type: "changed", path: "a", kind: "added" }])
+    assert.equal(raw.heardOf(copy), "", JSON.stringify(copy));
+  assert.equal(raw.heardOf({ type: "tree_changed", error: "denied" }), "");
+});
+
+test("a chat's phase follows its status_changed; done is at rest", () => {
+  assert.deepEqual(plain(raw.withPhase({}, "c1", "thinking")), { c1: "thinking" });
+  assert.deepEqual(plain(raw.withPhase({ c1: "thinking", c2: "queued" }, "c1", "streaming")), { c1: "streaming", c2: "queued" });
+  assert.deepEqual(plain(raw.withPhase({ c1: "thinking" }, "c1", "done")), {});
 });
 
 test("the pinned rows: the files agent, the project folder under it, its files while they show, then its file views", () => {

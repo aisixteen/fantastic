@@ -1,59 +1,82 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { clocksReadNothing, file, ownCopiesReadNothing, run } from "./view_harness.ts";
-import type { Obj } from "./view_harness.ts";
+import type { Harness, Obj } from "./view_harness.ts";
 
-test("the sidebar watches every agent it shows and re-reads only what an event names", async () => {
-  const tree = { id: "kernel", children: [{ id: "chat1", handler_module: "ai_chat.tools", children: [] }, { id: "files", children: [] }, { id: "web", children: [] }] };
-  const h = run(file("src/tui/src/kern/sidebar_view.html"), { agent: "sidebar", cell: "view_sidebar" }, (target, p) => {
+// THE SIDEBAR VIEW WATCHES ONE AGENT, its own: the sidebar agent follows the kernel and
+// publishes what the tree shows changed (`tree_changed`, `status_changed {agent, phase}`,
+// `inquiries_changed {open}`, `files_changed {path, change}`). Its other calls are reads.
+
+const tree = { id: "kernel", children: [{ id: "chat1", handler_module: "ai_chat.tools", children: [] }, { id: "files", children: [] }, { id: "web", children: [] }, { id: "user", children: [] }] };
+
+function sidebar(): Harness {
+  return run(file("src/tui/src/kern/sidebar_view.html"), { agent: "sidebar", cell: "view_sidebar" }, (target, p) => {
     if (target === "kernel" && p["handler_modules"]) return { tree: ["chat1"] };
     if (target === "kernel") return { id: "kernel", guid: "g1", peers: [], tree };
+    if (target === "files" && p["type"] === "list") return { files: [{ name: "src", path: "src", type: "dir" }] };
     if (target === "files") return { root: "/p/proj" };
     if (target === "user") return { inquiries: [] };
-    return { current: null };
+    if (target === "sidebar") return { id: "sidebar", phases: { chat1: "thinking" }, open: 0 };
+    return { error: `unexpected read of ${target}` };
   });
+}
+
+const kinds = (h: Harness, mark: number): string[] => h.since(mark).map((s) => `${s.target} ${String(s.p["type"])}`);
+
+test("the sidebar view watches its own agent alone, and reads the chats' phases from it", async () => {
+  const h = sidebar();
   await h.settle();
-  for (const id of ["kernel", "chat1", "files", "web"]) assert.ok(h.watches.has(id), `the tree watches ${id}`);
+  assert.deepEqual([...h.watches.keys()], ["sidebar"], "one agent watched: its own");
+  const booted = kinds(h, 0);
+  assert.ok(booted.includes("sidebar reflect") && booted.includes("kernel reflect") && booted.includes("user inquiries"), `${booted}`);
+  assert.ok(!booted.some((s) => s.endsWith(" status")), `no chat is read: ${booted}`);
   assert.deepEqual(h.intervals.map((t) => t.ms), [60000], "one clock, for the ages");
   await clocksReadNothing(h);
-
-  const reads = async (src: string, ev: Obj): Promise<string[]> => {
-    const mark = h.sends.length;
-    await h.publish(src, ev);
-    return h.since(mark).map((s) => `${s.target} ${String(s.p["type"])}`);
-  };
-  assert.deepEqual(await reads("chat1", { type: "status", phase: "thinking" }), ["chat1 status"], "a chat's call moved: its status");
-  assert.deepEqual(await reads("chat1", { type: "inquiry_opened", re: 4, asker: "chat1", holder: "user" }), ["user inquiries"]);
-  assert.deepEqual(await reads("chat1", { type: "inquiry_opened", re: 5, asker: "chat1", holder: "mail" }), [], "another holder's questions are not the person's list");
-  assert.deepEqual((await reads("kernel", { type: "agent_created", id: "x" })).filter((s) => s.startsWith("kernel")), ["kernel reflect", "kernel reflect"], "the tree is read again");
-  assert.deepEqual((await reads("web", { type: "peer_connected", guid: "g2" })).filter((s) => s.startsWith("kernel")), ["kernel reflect", "kernel reflect"], "a kernel connected: the strip is read again");
-  assert.deepEqual(await reads("web", { type: "status", phase: "running" }), [], "a status of an agent that is not a chat reads nothing");
-  assert.deepEqual(await reads("chat1", { type: "send", text: "hi" }), [], "a call to a chat is not a change of it");
 });
 
-test("the sidebar never reads again on a copy of a call — its own reads, another client's status read", async () => {
-  const tree = { id: "kernel", children: [{ id: "chat1", handler_module: "ai_chat.tools", children: [] }, { id: "user", children: [] }] };
-  const h = run(file("src/tui/src/kern/sidebar_view.html"), { agent: "sidebar", cell: "view_sidebar" }, (target, p) => {
-    if (target === "kernel" && p["handler_modules"]) return { tree: ["chat1"] };
-    if (target === "kernel") return { id: "kernel", guid: "g1", peers: [], tree };
-    if (target === "files") return { root: "/p/proj" };
-    if (target === "user") return { inquiries: [] };
-    return { current: null };
-  });
+test("each event of its agent reads only what it names; a status carries its phase and reads nothing", async () => {
+  const h = sidebar();
   await h.settle();
-  const booted = h.sends.map((s) => `${s.target} ${String(s.p["type"])}`);
-  assert.ok(booted.includes("chat1 status") && booted.includes("kernel reflect"), `${booted}`);
-  // the watch delivered the copies of every boot read already: the view is quiet
-  await ownCopiesReadNothing(h);
-  const reads = async (src: string, ev: Obj): Promise<string[]> => {
+  const reads = async (ev: Obj): Promise<string[]> => {
     const mark = h.sends.length;
-    await h.publish(src, ev);
-    return h.since(mark).map((s) => `${s.target} ${String(s.p["type"])}`);
+    await h.publish("sidebar", ev);
+    return kinds(h, mark);
   };
-  assert.deepEqual(await reads("chat1", { type: "status" }), [], "a status read (no phase) is a call, not a change");
-  assert.deepEqual(await reads("chat1", { type: "status", client_id: "other-view" }), [], "another client's status read");
-  assert.deepEqual(await reads("user", { type: "inquiries" }), [], "an inquiries read");
-  assert.deepEqual(await reads("kernel", { type: "reflect", detail: "full" }), [], "a reflect");
-  // a real event still reads, once, and its own read's copy does not read again
-  assert.deepEqual(await reads("chat1", { type: "status", phase: "thinking", source: "chat1" }), ["chat1 status"]);
+  assert.deepEqual(await reads({ type: "status_changed", agent: "chat1", phase: "streaming" }), [], "the phase is in the event");
+  assert.deepEqual(await reads({ type: "inquiries_changed", open: 1 }), ["user inquiries"]);
+  assert.deepEqual((await reads({ type: "tree_changed" })).filter((s) => s.startsWith("kernel")), ["kernel reflect", "kernel reflect"], "the tree is read again");
+  assert.deepEqual(await reads({ type: "files_changed", path: "src/a.rs", change: "added" }), [], "the view lists no files: nothing to read");
+});
+
+test("with the files shown, an entry that came or went reads its folder; a write in place is never published", async () => {
+  const h = sidebar();
+  await h.settle();
+  // the host gives back what it kept (files shown): the view lists the root and asks the files agent to watch it
+  await h.message({ type: "restore", state: { folded: {}, open: {}, filesOn: true, toolsOpen: false } });
+  const listed = kinds(h, 0);
+  assert.ok(listed.includes("files watch_path") && listed.includes("files list"), `${listed}`);
+  const reads = async (ev: Obj): Promise<string[]> => {
+    const mark = h.sends.length;
+    await h.publish("sidebar", ev);
+    return kinds(h, mark);
+  };
+  assert.deepEqual(await reads({ type: "files_changed", path: "a.txt", change: "added" }), ["files list"]);
+  assert.deepEqual(await reads({ type: "files_changed", path: "gone.txt", change: "removed" }), ["files list"]);
+  assert.deepEqual(await reads({ type: "files_changed", path: "deep/x/y", change: "added" }), [], "a folder the view does not list");
+  assert.deepEqual([...h.watches.keys()], ["sidebar"], "the files agent is not watched");
+});
+
+test("the sidebar view never reads again on a copy of a call — its own reads, another client's", async () => {
+  const h = sidebar();
+  await h.settle();
+  await ownCopiesReadNothing(h);
+  const reads = async (ev: Obj): Promise<string[]> => {
+    const mark = h.sends.length;
+    await h.publish("sidebar", ev);
+    return kinds(h, mark);
+  };
+  for (const copy of [{ type: "reflect" }, { type: "reflect", detail: "full" }, { type: "watch" }, { type: "boot" }, { type: "status" }, { type: "inquiries" }])
+    assert.deepEqual(await reads(copy), [], JSON.stringify(copy));
+  // a real event still reads, once, and the copy of its own read does not read again
+  assert.deepEqual(await reads({ type: "inquiries_changed", open: 2 }), ["user inquiries"]);
 });

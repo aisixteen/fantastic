@@ -78,8 +78,8 @@ const READ_VIEWS = [
     name: "store",
     view: storeView,
     reply: (p: Dict): Dict => (p["type"] === "dump" ? { tables: { rows: [], fold_refs: [] } } : { matches: [] }),
-    copies: [{ type: "dump" }, { type: "search", query: "x" }, { type: "append", rows: [{ text: "a" }] }, { type: "prune", ids: [1] }, { type: "inject", tables: {} }, { type: "read" }],
-    events: [{ type: "appended", table: "rows", id: 1 }, { type: "pruned", n: 1 }, { type: "injected", rows: 2 }],
+    copies: [{ type: "dump" }, { type: "search", query: "x" }, { type: "append", rows: [{ text: "a" }] }, { type: "prune", ids: [1] }, { type: "inject", tables: {} }, { type: "read" }, { type: "put_bytes" }],
+    events: [{ type: "appended", table: "rows", id: 1 }, { type: "pruned", n: 1 }, { type: "injected", rows: 2 }, { type: "bytes_put", ref: "p1" }],
   },
   {
     name: "scheduler",

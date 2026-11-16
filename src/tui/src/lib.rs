@@ -72,6 +72,12 @@ pub use fantastic_kernel;
 pub use fantastic_kernel::BundleRegistry;
 /// The base's one view relay (plain JS, an ES module): a page serves it and loads it to mount views.
 pub use fantastic_canvas_page::VIEW_RELAY_JS;
+/// THE NODE HARNESS FOR AN HTML VIEW'S WHOLE SCRIPT (`run`, `clocksReadNothing`,
+/// `ownCopiesReadNothing`; a TypeScript ES module node runs as it is): the path of the file
+/// under this crate's manifest directory. A product's view tests import it from the checkout
+/// Cargo pins for this crate — the `fantastic-tui` package's `manifest_path` in `cargo
+/// metadata` — never a copy.
+pub const VIEW_HARNESS: &str = "web/canvas/tests/view_harness.ts";
 /// Seed a directory like the `fantastic` CLI's first run: writes the blueprint
 /// tree (the `user` record and its children) when `.fantastic` is absent and
 /// returns `Ok(true)`; a no-op returning `Ok(false)` once it exists.

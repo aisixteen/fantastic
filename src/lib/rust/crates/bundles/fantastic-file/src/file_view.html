@@ -135,11 +135,26 @@ function lookupFor(path, agents) {
     folderOf: function (id) { return agents[id] ? "#" + id : undefined; }
   };
 }
+// THE EVENTS THAT READ AGAIN, a closed list (a watcher also receives a COPY OF EVERY CALL to
+// the agent, this view's own `read` / `list` / `watch` included: those carry none of these).
+// A folder: an entry `added` or `removed` (an entry `changed` in place is no new listing).
+// A file: a `changed` of ITS path, but not a `modified` that lands while the view's own read
+// runs (`busy`) or within OWN_MS of its answer (`sinceRead`): reading a file the process logs
+// into writes that file, and reading again on that change is a loop. A file `added` (replaced)
+// or `deleted` always reads.
+var OWN_MS = 500;
+function rereads(ev, kind, own, busy, sinceRead) {
+  if (!ev || typeof ev !== "object" || typeof ev.error === "string") return false;
+  if (kind === "folder") return ev.type === "added" || ev.type === "removed";
+  if (ev.type !== "changed" || ev.path !== own) return false;
+  if (ev.kind !== "modified") return true;
+  return !busy && sinceRead >= OWN_MS;
+}
 // end pure
 
 var AGENT = {{agent}}, PATH = {{path}}, KIND = {{kind}}, PAGE = 200;
 var $ = function (id) { return document.getElementById(id); };
-var st = { agents: {}, lines: [], total: 0, state: null, busy: false };
+var st = { agents: {}, lines: [], total: 0, state: null, busy: false, readAt: 0 };
 var FILE = '<svg width="22" height="22" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 2.5h4.5l3 3V13a.5.5 0 0 1-.5.5h-7a.5.5 0 0 1-.5-.5V3a.5.5 0 0 1 .5-.5zM9 2.5v3h3"/></svg>';
 var FOLDER = '<svg width="22" height="22" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5a1 1 0 0 1 1-1h3l1.5 1.5H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z"/></svg>';
 function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
@@ -209,7 +224,7 @@ function read(offset) {
   if (st.busy) return; st.busy = true;
   var keep = offset === 0 ? st.lines.length : 0;
   call({ type: "read", offset: offset, limit: Math.max(PAGE, keep) }).then(function (r) {
-    st.busy = false;
+    st.busy = false; st.readAt = Date.now();
     var s = nextState(st.lines, offset, r);
     st.lines = s.kind === "text" ? s.lines : [];
     st.state = s; paintFile();
@@ -229,7 +244,7 @@ function names() {
     if (r && !r.error && r.tree && !Array.isArray(r.tree)) { st.agents = agentsOf(r.tree); }
   }, function () {});
 }
-fantastic.watch(AGENT, function (ev) { if (ev && !ev.error && ev.type === "changed") refresh(); });
+fantastic.watch(AGENT, function (ev) { if (rereads(ev, KIND, PATH, st.busy, Date.now() - st.readAt)) refresh(); });
 call({ type: "watch" });
 paintHead("");
 names().then(function () { paintHead(""); refresh(); });

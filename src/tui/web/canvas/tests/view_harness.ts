@@ -11,6 +11,10 @@ import vm from "node:vm";
 // AS THE KERNEL DOES, a watcher receives a COPY OF EVERY CALL made to the agent it watches
 // (kernel send.rs fanout; the web leg forwards only the payload): each send here is mirrored to
 // the target's watchers, the view's own reads included. A view that acts on a copy loops.
+//
+// A PRODUCT'S VIEW TESTS IMPORT THIS FILE from the checkout Cargo pins for `fantastic-tui`, at
+// `fantastic_tui::VIEW_HARNESS` under that package's manifest directory (`run` takes the html
+// itself; `file` reads a file of this repository).
 
 const ROOT = new URL("../../../../../", import.meta.url);
 export const file = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, ROOT)), "utf8");
@@ -57,6 +61,8 @@ export interface Harness {
   publish(src: string, ev: Obj): Promise<void>;
   /** the sends made since `mark` */
   since(mark: number): { target: string; p: Obj }[];
+  /** a message the host page sends the view (`fantastic.onMessage`) */
+  message(m: Obj): Promise<void>;
 }
 
 export function run(html: string, fill: Record<string, string>, reply: Reply): Harness {
@@ -67,6 +73,7 @@ export function run(html: string, fill: Record<string, string>, reply: Reply): H
   const intervals: Harness["intervals"] = [];
   let timeouts: (() => void)[] = [];
   const byId = new Map<string, Record<string, unknown>>();
+  const ears: ((m: Obj) => void)[] = [];
   const doc = loose() as Record<string, unknown>;
   doc["getElementById"] = (id: string) => {
     if (!byId.has(id)) byId.set(id, loose() as Record<string, unknown>);
@@ -90,7 +97,9 @@ export function run(html: string, fill: Record<string, string>, reply: Reply): H
       };
     },
     emit: () => {},
-    onMessage: () => {},
+    onMessage: (cb: (m: Obj) => void) => {
+      ears.push(cb);
+    },
   };
   const ctx = vm.createContext({
     document: doc,
@@ -134,6 +143,10 @@ export function run(html: string, fill: Record<string, string>, reply: Reply): H
       await settle();
     },
     since: (mark) => sends.slice(mark),
+    async message(m) {
+      ears.forEach((cb) => cb(JSON.parse(JSON.stringify(m)) as Obj));
+      await settle();
+    },
   };
 }
 

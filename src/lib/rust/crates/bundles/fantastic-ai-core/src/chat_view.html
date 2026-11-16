@@ -184,7 +184,7 @@ function parseFrom(text) {
   var m = FROM.exec(text);
   return m ? { sender: m[1], text: text.slice(m[0].length) } : { sender: "", text: text };
 }
-// a stored person turn, as shown: setup block, spot and sender header taken off
+// a stored person message, as shown: setup block, spot and sender header taken off
 function personText(text) {
   var spot = SPOT.exec(text);
   var t = (spot ? text.slice(0, spot.index) : text).replace(SETUP_BLOCK, "");
@@ -211,7 +211,7 @@ function callsOf(text) {
   if (c) calls.push({ target: c[2] || c[1], verb: c[3] || "", args: text });
   return calls;
 }
-// a row that is a tool call (assistant, calls only) or its replies (the next user turn: one or several `[reply to …]`)
+// a row that is a tool call (assistant, calls only) or its replies (the next user message: one or several `[reply to …]`)
 function toolOf(role, text) {
   if (role === "assistant" && words(text) === "") {
     var calls = callsOf(text);
@@ -263,17 +263,17 @@ function collapseReports(rows) {
   });
   return out;
 }
-// a turn that ended with one of these reasons is not a failure
+// a call that ended with one of these reasons is not a failure
 var CALM = { "": 1, ok: 1, awaiting: 1, nothing_to_await: 1 };
-// the agent's state, as the header shows it: working while a turn runs, asks you while an
-// inquiry is open, failed when the last turn ended with a failure reason, done after a good one
+// the agent's state, as the header shows it: working while a call runs, asks you while an
+// inquiry is open, failed when the last call ended with a failure reason, done after a good one
 function stateOf(phase, reason, asks) {
   if (asks > 0) return "asks";
   if (phase === "thinking" || phase === "streaming" || phase === "tool_calling" || phase === "queued") return "working";
   if (!CALM[reason || ""]) return "failed";
   return reason === "ok" ? "done" : "idle";
 }
-// the word for a running turn, as the tree shows it
+// the word for a running call, as the tree shows it
 function phaseWord(phase) {
   return phase === "thinking" ? "thinking" : phase === "streaming" ? "writing" : phase === "tool_calling" ? "using tools" : phase === "queued" ? "queued" : "";
 }
@@ -647,7 +647,7 @@ function textsOf(rows) {
     function lock(on) { row.querySelectorAll("button,input").forEach(function (b) { b.disabled = on; }); }
     function reply(answer, shownAs) {
       lock(true);
-      // kept over a redraw from the moment it is sent: the turn it wakes can redraw before the answer returns
+      // kept over a redraw from the moment it is sent: the call it wakes can redraw before the answer returns
       if (answered.indexOf(card) < 0) answered.push(card);
       heldRe[re] = true;
       fantastic.send("user", { type: "answer_inquiry", re: re, answer: answer }).then(function (r) {
@@ -760,7 +760,7 @@ function textsOf(rows) {
     var long = tl.rows.some(function (m) { return typeof m.bytes === "number" && m.bytes > CUT; });
     var head = long || tl.rows.some(function (m) { return m.has_thinking === true; })
       ? await readHead(function (p) { return call(p).catch(function () { return null; }); }, 200) : [];
-    // a redraw on the way (soft) never takes a turn's live text away
+    // a redraw on the way (soft) never takes a call's live text away
     if (soft && (busy() || Object.keys(drafts).length > 0)) return false;
     tail = null;
     var kids = Array.prototype.slice.call(dialog.children, 1);

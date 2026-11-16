@@ -182,3 +182,33 @@ async fn an_id_block_reserved_inside_the_flush_is_quiet() {
     );
     k.remove_state_subscriber(token);
 }
+
+/// What reached a watcher's inbox so far: the payload types, in order.
+fn drained(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Some(item) = rx.try_recv() {
+        out.push(item.payload["type"].as_str().unwrap_or_default().to_string());
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_store_view_s_reflect_does_not_come_back_as_appended() {
+    // A view watching the kernel's store reads it; its read is a call, the call rows,
+    // the kernel flushes the rows into this store. Were the flush's `appended` to reach
+    // the view, it would read again, and loop.
+    let k = started().await;
+    k.flush_executions().await;
+    let view = AgentId::from("_ws_store_view");
+    let mut rx = k.ensure_inbox(&view);
+    assert!(k.watch(&AgentId::from("memory"), view.clone()).await.is_none());
+    call(&k, "memory", json!({"type": "reflect"})).await;
+    let out = k.flush_executions().await;
+    assert!(out["flushed"].as_u64().unwrap() > 0, "{out}");
+    let got = drained(&mut rx);
+    assert!(!got.is_empty() && got.iter().all(|t| t == "reflect"), "only copies of the view's own read: {got:?}");
+    // a write that is not the kernel's own still publishes its rows
+    call(&k, "memory", json!({"type": "append", "rows": [{"text": "a"}]})).await;
+    let got = drained(&mut rx);
+    assert!(got.contains(&"appended".to_string()), "{got:?}");
+}

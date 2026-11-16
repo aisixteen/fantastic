@@ -15,23 +15,21 @@ const view = {
     calls: {
       kernel: ["reflect", "list_agents"],
       user: ["inquiries"],
-      files: ["list", "reflect", "watch", "watch_path", "unwatch_path", "open_view"],
-      "*": ["status"],
-      sidebar: ["watch"],
+      files: ["list", "reflect", "watch_path", "unwatch_path", "open_view"],
+      sidebar: ["reflect", "watch"],
     },
   },
 };
 
-test("the sidebar cell is granted exactly the view's calls, `*` written out per host agent", () => {
-  assert.deepEqual(sidebarGrant(view, ["chat1", "files"]), {
+test("the sidebar cell is granted exactly the view's calls: its own agent and the reads it makes, no other agent", () => {
+  assert.deepEqual(sidebarGrant(view), {
     kernel: ["reflect", "list_agents"],
     user: ["inquiries"],
-    files: ["list", "reflect", "watch", "watch_path", "unwatch_path", "open_view", "status"],
-    sidebar: ["watch"],
-    chat1: ["status"],
+    files: ["list", "reflect", "watch_path", "unwatch_path", "open_view"],
+    sidebar: ["reflect", "watch"],
   });
-  assert.equal(sidebarGrant(undefined, []), null, "no sidebar agent: no grant");
-  assert.equal(sidebarGrant({ id: "sidebar" }, []), null, "no view: no grant");
+  assert.equal(sidebarGrant(undefined), null, "no sidebar agent: no grant");
+  assert.equal(sidebarGrant({ id: "sidebar" }), null, "no view: no grant");
 });
 
 test("a host agent's view says kernel for the HOST's root; any other panel keeps the page's", async () => {
