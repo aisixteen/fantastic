@@ -474,11 +474,13 @@ function textsOf(rows) {
     });
   }
 
-  // THE TURN
+  // THE CALLS: this view's own (sent from here) and every other one of the agent (the
+  // terminal, another page, another agent) — one model, many view-models
   var pending = []; // my queued sends: {el, sendId}
   var inflight = null;
   var drafts = {};
-  function busy() { return inflight !== null || pending.length > 0; }
+  var anyRunning = false; // a call of the agent runs, whoever made it (its `status` says)
+  function busy() { return inflight !== null || pending.length > 0 || anyRunning; }
   function refresh() { $("stop").hidden = !busy(); }
   var curPhase = "idle", lastReason = "", asks = 0, askTs = 0;
   function phase(p, reason) {
@@ -501,6 +503,7 @@ function textsOf(rows) {
     pill.textContent = label;
     pill.hidden = label === "";
   }
+  // THE CLOCK: the "asks you · N min" age drawn again from what the view holds; it reads nothing
   setInterval(drawState, 30000);
   function bind(sendId) {
     if (!sendId || pending.some(function (q) { return q.sendId === sendId; })) return;
@@ -517,6 +520,27 @@ function textsOf(rows) {
     }
     inflight = { sendId: sendId };
     refresh();
+  }
+  // THE AGENT'S STATE, read again on its events: whether a call runs (any client's), its phase
+  // while none of this view's own runs, and how many wait from other clients
+  function followStatus() {
+    return call({ type: "status", client_id: me }).then(function (snap) {
+      if (!snap || typeof snap !== "object" || typeof snap.error === "string") return;
+      var cur = snap.current && typeof snap.current === "object" ? snap.current : null;
+      anyRunning = cur !== null;
+      $("others").textContent = typeof snap.others_pending === "number" && snap.others_pending > 0 ? "+" + snap.others_pending + " from other clients" : "";
+      if (!inflight) {
+        if (cur && s(cur, "phase")) phase(s(cur, "phase"));
+        else if (!cur && curPhase !== "idle") phase("idle");
+      }
+      refresh();
+    }, function () {});
+  }
+  var following = false, followAgain = false;
+  function follow() {
+    if (following) { followAgain = true; return; }
+    following = true;
+    followStatus().then(function () { following = false; if (followAgain) { followAgain = false; follow(); } });
   }
   var mine = function (p) { return (!s(p, "client_id") || s(p, "client_id") === me) && (!s(p, "source") || s(p, "source") === AGENT); };
   var toMe = function (p) { return s(p, "client_id") === me && (!s(p, "source") || s(p, "source") === AGENT); };
@@ -549,7 +573,12 @@ function textsOf(rows) {
       case "status": {
         var ph = s(p, "phase"), det = o(p, "detail"), sid = s(det, "send_id");
         if (ph === "done") soon();
-        if (!mine(p)) break;
+        if (!mine(p)) {
+          // another client's call: Stop shows while it runs, its rows are drawn when it ends
+          if (ph === "done") stale = true;
+          else { anyRunning = true; if (!inflight && ph !== "retrying") phase(ph); refresh(); follow(); }
+          break;
+        }
         if (ph === "queued") { bind(sid); phase("queued"); }
         else if (ph === "thinking" || ph === "streaming") { if (!inflight || inflight.sendId !== sid) promote(sid); phase(ph); }
         else if (ph === "tool_calling") { tool(o(det, "tool")); phase(ph); }
@@ -591,7 +620,9 @@ function textsOf(rows) {
         }
         break;
       case "part_abort": if (toMe(p)) settle(s(p, "stream_id"), s(p, "reason") || "aborted"); break;
-      case "done": soon(); if (mine(p)) { inflight = null; refresh(); } break;
+      case "done": soon(); if (mine(p)) { inflight = null; refresh(); } else stale = true; break;
+      // a question this agent asked the person opened or closed (the holder publishes it here too)
+      case "inquiry_opened": case "inquiry_closed": if (s(p, "asker") === AGENT) inquiries(); break;
       case "context": {
         if (!mine(p)) break;
         var cd = o(p, "detail");
@@ -684,7 +715,7 @@ function textsOf(rows) {
     }
   }
   var timer = null, rowTimer = null;
-  function soon() { if (timer) return; timer = setTimeout(function () { timer = null; inquiries(); newRows(); }, 250); }
+  function soon() { if (timer) return; timer = setTimeout(function () { timer = null; followStatus().then(function () { inquiries(); newRows(); }); }, 250); }
   function rowsSoon() { if (rowTimer) return; rowTimer = setTimeout(function () { rowTimer = null; newRows(); }, 60); }
 
   // SEND / STOP / CLEAR
@@ -760,6 +791,8 @@ function textsOf(rows) {
     if (snap && typeof snap === "object") {
       $("others").textContent = typeof snap.others_pending === "number" && snap.others_pending > 0 ? "+" + snap.others_pending + " from other clients" : "";
       var cur = o(snap, "current");
+      anyRunning = Object.keys(cur).length > 0;
+      if (anyRunning && cur.is_mine !== true && s(cur, "phase")) phase(s(cur, "phase"));
       if (cur.is_mine === true) {
         push(bubble("user", s(cur, "text"), ""));
         if (s(cur, "text_so_far")) push(bubble("assistant", s(cur, "text_so_far"), ""));
