@@ -75,12 +75,20 @@ pre{white-space:pre-wrap;margin:6px 0 0;font:inherit}
   var call = function (p) { return fantastic.send(AGENT, p); };
   var when = function (ts) { return typeof ts === "number" ? new Date(ts * 1000).toLocaleString() : ""; };
   var empty = function (box, t) { box.appendChild(el("div", "sub", t)); };
+  var badges = {}; // mailbox -> its unseen badge
   function box(parent, name) {
     var card = el("div", "card"), row = el("div", "row");
     row.appendChild(el("span", "", name));
     var b = el("span", "badge", "…");
+    badges[name] = b;
     row.appendChild(b); card.appendChild(row); parent.appendChild(card);
+    count(name);
+  }
+  function count(name) {
+    var b = badges[name];
+    if (!b) return;
     call({ type: "list", mailbox: name, unseen: true, limit: 100 }).then(function (r) {
+      b.className = "badge";
       var n = r && Array.isArray(r.messages) ? r.messages.length : null;
       if (n === null) { b.textContent = "unavailable"; b.className = "badge err"; return; }
       b.textContent = n === 100 ? "100+ unseen" : n + " unseen";
@@ -90,10 +98,13 @@ pre{white-space:pre-wrap;margin:6px 0 0;font:inherit}
   function render(r) {
     $("name").textContent = r.account || r.id || AGENT;
     $("login").textContent = "sign-in: " + (r.login || "none");
-    var boxes = $("boxes"); boxes.textContent = "";
+    var boxes = $("boxes"); boxes.textContent = ""; badges = {};
     var names = Array.isArray(r.mailboxes) ? r.mailboxes : [];
     if (!names.length) empty(boxes, "no mailbox is allowed");
     names.forEach(function (n) { box(boxes, n); });
+    drawSends(r);
+  }
+  function drawSends(r) {
     var sends = $("sends"); sends.textContent = "";
     var list = Array.isArray(r.recent_sends) ? r.recent_sends.slice().reverse() : [];
     if (!list.length) empty(sends, "nothing sent since start");
@@ -122,7 +133,23 @@ pre{white-space:pre-wrap;margin:6px 0 0;font:inherit}
   function load() {
     call({ type: "reflect" }).then(function (r) { render(r || {}); pending(); }).catch(function () { $("name").textContent = AGENT; });
   }
+  // what an event the agent published asks the view to read again — a closed list:
+  // "sends" (a mail was sent), "box" (a message was marked: that box's count), "pending"
+  // (a send's question to the person opened or closed), or "" — a COPY OF A CALL made to the
+  // agent (this view's own reflect, list, inquiries; anyone's mark or send) is never one
+  function rereadOf(ev) {
+    if (!ev || typeof ev !== "object" || typeof ev.error === "string") return "";
+    if (ev.type === "sent" && typeof ev.message_id === "string") return "sends";
+    if (ev.type === "marked" && typeof ev.mailbox === "string") return "box";
+    if ((ev.type === "inquiry_opened" || ev.type === "inquiry_closed") && ev.holder === AGENT) return "pending";
+    return "";
+  }
   load();
-  fantastic.watch(AGENT, function () { load(); });
+  fantastic.watch(AGENT, function (ev) {
+    var what = rereadOf(ev);
+    if (what === "sends") call({ type: "reflect" }).then(function (r) { drawSends(r || {}); }).catch(function () {});
+    else if (what === "box") count(ev.mailbox);
+    else if (what === "pending") pending();
+  });
 })();
 </script>

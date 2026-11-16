@@ -58,7 +58,8 @@ const MAN: &str = "A mailbox: it reads mail over IMAP (list, fetch, mark) in the
 /// The most recent sends the view shows (kept in memory, since start).
 const RECENT: usize = 20;
 const VIEW: &str = include_str!("mail_view.html");
-const VIEW_CALLS: [&str; 3] = ["reflect", "list", "inquiries"];
+/// The verbs the view calls on its own agent: reads, and `watch` (it re-reads on what the agent publishes).
+const VIEW_CALLS: [&str; 4] = ["reflect", "list", "inquiries", "watch"];
 
 /// How an account signs in. Only the password (or app password) is built; a provider
 /// token (XOAUTH2) is the second variant, once #690's OAuth piece exists.
@@ -451,8 +452,24 @@ impl Handler for MailBundle {
             }
             Call::List(a) => self.read(agent_id, kernel, Read::List(a)).await.unwrap_or_else(|e| e),
             Call::Fetch(a) => self.read(agent_id, kernel, Read::Fetch(a)).await.unwrap_or_else(|e| e),
-            Call::Mark(a) => self.read(agent_id, kernel, Read::Mark(a)).await.unwrap_or_else(|e| e),
-            Call::Send(a) => self.send(agent_id, kernel, a).await.unwrap_or_else(|e| e),
+            // WHAT CHANGED, PUBLISHED on the agent's own inbox: `marked {mailbox, uid}` after a
+            // mark, `sent {message_id, to}` after a sent mail — its view re-reads that box's
+            // count and the recent sends on these, never on a copy of a call
+            Call::Mark(a) => {
+                let (mailbox, uid) = (a.mailbox.clone(), a.uid);
+                let out = self.read(agent_id, kernel, Read::Mark(a)).await.unwrap_or_else(|e| e);
+                if out.get("error").is_none() {
+                    kernel.emit(agent_id, json!({"type": "marked", "mailbox": mailbox, "uid": uid})).await;
+                }
+                out
+            }
+            Call::Send(a) => {
+                let out = self.send(agent_id, kernel, a).await.unwrap_or_else(|e| e);
+                if out["sent"] == json!(true) {
+                    kernel.emit(agent_id, json!({"type": "sent", "message_id": out["message_id"], "to": out["to"]})).await;
+                }
+                out
+            }
             Call::Inquiries(a) => inquiry::list(agent_id, &a, kernel),
             Call::AnswerInquiry(a) => self.answer(agent_id, kernel, a).await,
         };
