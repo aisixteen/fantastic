@@ -639,7 +639,9 @@ function textsOf(rows) {
   }
 
   // INQUIRIES this agent asked the person: `user` holds them
-  var seenInq = {}, answered = [], heldRe = {}; // answered: this session's answered cards, kept over a redraw
+  // shown: the open cards by `re`, kept over a redraw (a redraw never takes a card away under a click);
+  // answered: this session's answered cards, kept over a redraw
+  var shown = {}, answered = [], heldRe = {};
   function inquiryEl(q) {
     var re = Number(q.re), kind = s(q, "kind") || "text";
     var card = el("section", "inq"), row = el("div", "row"), st = el("div", "st");
@@ -687,11 +689,20 @@ function textsOf(rows) {
     asks = open.length;
     askTs = open.reduce(function (lo, q) { return typeof q.ts === "number" && (lo === 0 || q.ts < lo) ? q.ts : lo; }, 0);
     drawState();
+    var still = {};
     open.forEach(function (q) {
       var re = Number(q.re);
-      if (!Number.isFinite(re) || seenInq[re] || heldRe[re]) return;
-      seenInq[re] = true;
-      push(inquiryEl(q));
+      if (!Number.isFinite(re)) return;
+      still[re] = true;
+      if (shown[re] || heldRe[re]) return;
+      shown[re] = inquiryEl(q);
+      push(shown[re]);
+    });
+    // closed elsewhere (another client answered, or it timed out): the card goes; one answered here stays
+    Object.keys(shown).forEach(function (re) {
+      if (still[re] || heldRe[re]) return;
+      shown[re].remove();
+      delete shown[re];
     });
   }
 
@@ -714,7 +725,6 @@ function textsOf(rows) {
     // tool calls and their replies are rows, not events: a run that ended is drawn from the stored rows
     if (stale || fresh.some(function (m) { return m.kind !== "notice" && toolOf(String(m.role || ""), typeof m.head === "string" ? m.head : "") !== null; })) {
       stale = !(await drawHistory(keepRows, true));
-      if (!stale) { seenInq = {}; await inquiries(); }
     }
   }
   var timer = null, rowTimer = null;
@@ -767,6 +777,7 @@ function textsOf(rows) {
     kids.forEach(function (k) { k.remove(); });
     drawItems(shapeRows(tl.rows, thoughtsOf(head), textsOf(head)));
     answered.forEach(push);
+    Object.keys(shown).forEach(function (re) { if (answered.indexOf(shown[re]) < 0) push(shown[re]); });
     lastRow = tl.lastId;
     var more = $("earlier");
     more.hidden = tl.earlier <= 0;
@@ -777,8 +788,7 @@ function textsOf(rows) {
   $("earlier").onclick = function () {
     if (busy()) return;
     $("earlier").disabled = true;
-    seenInq = {};
-    drawHistory(keepRows + 300).then(function () { inquiries(); }).catch(function (e) { notice("✕ " + (e && e.message ? e.message : e), "error"); });
+    drawHistory(keepRows + 300).catch(function (e) { notice("✕ " + (e && e.message ? e.message : e), "error"); });
   };
   // BOOT: head, history, live snapshot, then the watch
   async function boot() {
