@@ -27,6 +27,11 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 tower = "0.5"
 futures-util = "0.3"
+# The outbound `request` verb: the same HTTP client the other bundles use.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+base64 = "0.22"
+# The credential store's handler module and verbs the outbound request reads a host's key through.
+fantastic-credential-store = { path = "../fantastic-credential-store" }
 
 [dev-dependencies]
 fantastic-bridge = { path = "../fantastic-bridge", features = ["test-support"] }
@@ -36,7 +41,6 @@ fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"
 # verbs it serves (`persist_blob`/`load_blob`, `boot`), as it does in production.
 fantastic-core = { path = "../fantastic-core" }
 tempfile = "3"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 fantastic-web-ws = { path = "../fantastic-web-ws" }
 fantastic-web-rest = { path = "../fantastic-web-rest" }

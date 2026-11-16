@@ -1730,8 +1730,15 @@ fn a_null_reply_is_204_with_date_and_server_only() {
     assert_eq!(resp.status(), axum::http::StatusCode::NO_CONTENT);
     let names: Vec<&str> = resp.headers().keys().map(|k| k.as_str()).collect();
     assert_eq!(names.len(), 2, "{names:?}");
-    assert!(resp.headers().contains_key("date") && resp.headers().contains_key("server"), "{names:?}");
-    assert!(resp.headers().get("content-length").is_none() && resp.headers().get("content-type").is_none(), "{names:?}");
+    assert!(
+        resp.headers().contains_key("date") && resp.headers().contains_key("server"),
+        "{names:?}"
+    );
+    assert!(
+        resp.headers().get("content-length").is_none()
+            && resp.headers().get("content-type").is_none(),
+        "{names:?}"
+    );
 }
 
 /// The octet leg's header contract.
@@ -1864,10 +1871,7 @@ async fn octet_leg_header_contract_matches_python() {
         .expect("post");
     let body: Value = resp.json().await.expect("json");
     assert_eq!(body["reason"], "bad_arg", "body: {body}");
-    assert_eq!(
-        body["error"],
-        "write_stream: unknown argument 'bytes'"
-    );
+    assert_eq!(body["error"], "write_stream: unknown argument 'bytes'");
     assert!(!tmp.path().join("served/bf3.bin").exists());
     stop(&kernel, "web_oct").await;
 }
@@ -1932,7 +1936,7 @@ async fn reflect_sentence_and_verbs_match_python() {
     // The bundle's own frame, in python's key order; the kernel then appends
     // its reflect decoration (can_call / callable_by / kernel_verbs / tree).
     assert_eq!(
-        obj.keys().map(String::as_str).take(9).collect::<Vec<_>>(),
+        obj.keys().map(String::as_str).take(13).collect::<Vec<_>>(),
         vec![
             "id",
             "sentence",
@@ -1943,12 +1947,13 @@ async fn reflect_sentence_and_verbs_match_python() {
             "served_agent_count",
             "surfaces",
             "browser_reachable",
+            "request_allow",
+            "request_credentials",
+            "recent_requests",
+            "view",
         ]
     );
-    assert_eq!(
-        obj["sentence"],
-        json!(crate::MAN)
-    );
+    assert_eq!(obj["sentence"], json!(crate::MAN));
     assert_eq!(obj["port"], json!(port));
     assert_eq!(obj["running"], json!(true));
     assert_eq!(obj["served_agent_count"], json!(kernel.agents.len()));
@@ -1967,7 +1972,15 @@ async fn reflect_sentence_and_verbs_match_python() {
             .iter()
             .map(|v| v.name)
             .collect::<Vec<_>>(),
-        vec!["boot", "shutdown", "stop", "mount", "unmount", "fetch_file"]
+        vec![
+            "boot",
+            "shutdown",
+            "stop",
+            "mount",
+            "unmount",
+            "fetch_file",
+            "request"
+        ]
     );
     let verbs = reply["verbs"].as_object().expect("a verbs block");
     // `reflect` is the common verb every agent answers: its rendered line
@@ -2108,10 +2121,18 @@ async fn mount_unmount_and_unknown_verb_match_python() {
         }
     };
     let r = call(json!({"type": "mount"})).await;
-    assert_eq!(r["error"], json!("mount: missing argument 'child_id'"), "{r}");
+    assert_eq!(
+        r["error"],
+        json!("mount: missing argument 'child_id'"),
+        "{r}"
+    );
     assert_eq!(r["reason"], json!("missing_arg"), "{r}");
     let r = call(json!({"type": "unmount"})).await;
-    assert_eq!(r["error"], json!("unmount: missing argument 'child_id'"), "{r}");
+    assert_eq!(
+        r["error"],
+        json!("unmount: missing argument 'child_id'"),
+        "{r}"
+    );
     // an empty child is refused by the declaration too, a number by its type
     let r = call(json!({"type": "mount", "child_id": ""})).await;
     assert_eq!(r["arg"], json!("child_id"), "{r}");
@@ -3669,3 +3690,7 @@ async fn fetch_file_is_checked_by_its_declaration() {
         );
     }
 }
+
+/// The outbound `request` verb (issue #695), against in-process loopback servers.
+#[path = "tests_request.rs"]
+mod request_verb;

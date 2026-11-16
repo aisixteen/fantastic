@@ -20,6 +20,7 @@
 //!
 //! - `reflect` → identity, port, host, allowed_origins, running, served_agent_count, surfaces,
 //!   browser_reachable
+//! - `request` → one outbound HTTP call to a `request_allow` host (issue #695)
 //! - `boot`    → `{running, surfaces}`. Idempotent; a missing `port` RAISES.
 //! - `stop`    → `{stopped}`
 //! - `mount` / `unmount` → (re)mount one child's declared routes
@@ -39,6 +40,7 @@ pub(crate) mod mimetypes;
 mod mimetypes_table;
 pub(crate) mod origin;
 pub mod record;
+mod request;
 pub(crate) mod routes;
 pub mod verbs;
 pub(crate) mod ws;
@@ -144,6 +146,10 @@ async fn serve(
         verbs::Call::Stop(_) => stop_reply(agent_id).await,
         verbs::Call::Mount(a) => mount_reply(agent_id, &a.child_id, kernel).await,
         verbs::Call::Unmount(a) => unmount_reply(agent_id, &a.child_id).await,
+        verbs::Call::Request(a) => {
+            let rec = read_rec(agent_id, kernel);
+            request::serve(agent_id, &a, &rec, kernel).await
+        }
         verbs::Call::FetchFile(a) => {
             let (v, body) = fetch_file_reply(a, kernel).await;
             return Ok((Some(v), body));
@@ -202,6 +208,7 @@ impl Handler for WebBundle {
         _kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
         stop_reply(agent_id).await;
+        request::forget(agent_id);
         Ok(())
     }
     /// Shutdown frees what delete frees — declared, never a fallback.
@@ -237,10 +244,7 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     }
     let mut out = Map::new();
     out.insert("id".into(), json!(agent_id.as_str()));
-    out.insert(
-        "sentence".into(),
-        json!(MAN),
-    );
+    out.insert("sentence".into(), json!(MAN));
     out.insert("port".into(), port.map_or(Value::Null, |p| json!(p)));
     let rec = read_rec(agent_id, kernel);
     out.insert("host".into(), json!(origin::effective_host(&rec)));
@@ -258,8 +262,32 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         "browser_reachable".into(),
         json!(browser_reachable(agent_id, kernel)),
     );
+    // the outbound side: the allowlist, the credential ref per host (its name only)
+    // and the latest outcomes; HOW IT IS DRAWN is an html view, compiled in
+    let allow = request::allow_list(&rec);
+    out.insert("request_allow".into(), json!(allow));
+    out.insert(
+        "request_credentials".into(),
+        request::bound_refs(kernel, &allow).await,
+    );
+    out.insert("recent_requests".into(), request::recent(agent_id));
+    out.insert(
+        "view".into(),
+        json!({
+            "kind": "html",
+            "bytes": REQUEST_VIEW.replace("{{agent}}", agent_id.as_str()),
+            "calls": {agent_id.as_str(): VIEW_CALLS},
+        }),
+    );
     Value::Object(out)
 }
+
+/// The agent's own view (html, plain JS): the outbound allowlist, the credential ref per
+/// host and the recent requests. `{{agent}}` is the web agent's id, filled at reflect time.
+const REQUEST_VIEW: &str = include_str!("request_view.html");
+
+/// The verbs the view calls on its own agent: reads only.
+pub const VIEW_CALLS: [&str; 1] = ["reflect"];
 
 /// python `_browser_reachable` — which agents a browser could actually fetch
 /// through this host, RIGHT NOW. Asks the REAL gates (the same `authorize_call`
@@ -550,7 +578,9 @@ async fn mount_surface(
 fn read_port(agent_id: &AgentId, kernel: &Kernel) -> Option<u16> {
     let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
     let meta = agent.meta.read().expect("meta poisoned");
-    meta.get("port")?.as_u64().and_then(|n| u16::try_from(n).ok())
+    meta.get("port")?
+        .as_u64()
+        .and_then(|n| u16::try_from(n).ok())
 }
 
 /// The agent's record meta (python `kernel.get(id) or {}`).

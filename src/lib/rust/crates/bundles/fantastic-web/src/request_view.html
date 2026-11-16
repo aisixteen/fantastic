@@ -1,0 +1,122 @@
+<style>
+:root{
+--fc-color-accent-base:rgb(17 17 17);
+--fc-color-accent-deep:rgb(17 17 17);
+--fc-color-accent-deep-hover:rgb(43 43 43);
+--fc-color-accent-on:rgb(255 255 255);
+--fc-color-line-button:rgb(0 0 0 / 0.1);
+--fc-color-line-faint:rgb(0 0 0 / 0.06);
+--fc-color-line-strong:rgb(0 0 0 / 0.18);
+--fc-color-status-error:rgb(179 38 30);
+--fc-color-status-error-line:rgb(179 38 30 / 0.45);
+--fc-color-status-error-surface:rgb(179 38 30 / 0.12);
+--fc-color-status-ok:rgb(27 116 70);
+--fc-color-status-warn:rgb(143 82 0);
+--fc-color-status-warn-field:rgb(255 255 255 / 0.6);
+--fc-color-status-warn-line:rgb(143 82 0 / 0.45);
+--fc-color-status-warn-muted:rgb(143 82 0);
+--fc-color-status-warn-on:rgb(255 255 255);
+--fc-color-status-warn-surface:rgb(143 82 0 / 0.12);
+--fc-color-surface-bubble:rgb(255 255 255 / 0.6);
+--fc-color-surface-bubble-user:rgb(0 0 0 / 0.1);
+--fc-color-surface-button:rgb(0 0 0 / 0.05);
+--fc-color-surface-code:rgb(0 0 0 / 0.045);
+--fc-color-surface-field:rgb(0 0 0 / 0.06);
+--fc-color-surface-raised:rgb(255 255 255 / 0.72);
+--fc-color-surface-well:rgb(0 0 0 / 0.06);
+--fc-color-text-code:rgb(69 69 69);
+--fc-color-text-cool:rgb(69 69 69);
+--fc-color-text-muted:rgb(69 69 69);
+--fc-color-text-primary:rgb(11 11 11);
+--fc-color-text-subtle:rgb(107 107 107);
+--fc-duration-pulse:1400ms;
+--fc-duration-think:1100ms;
+--fc-easing-in-out:cubic-bezier(0.42, 0, 0.58, 1);
+--fc-font-family-mono:ui-monospace, SFMono-Regular, Menlo, monospace;
+--fc-font-family-sans:system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+--fc-radius-bubble:12px;
+--fc-radius-card:8px;
+--fc-radius-chip:4px;
+--fc-radius-control:6px;
+--fc-radius-key:5px;
+--fc-radius-panel:10px;
+--fc-radius-pill:999px;
+--fc-shadow-bubble:inset 0px 0px 0px 1px rgb(0 0 0 / 0.07);
+--fc-shadow-focus:inset 0px 0px 0px 1px rgb(17 17 17 / 0.45), 0px 0px 0px 3px rgb(17 17 17 / 0.1);
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{padding:18px 24px;background:transparent;color:var(--fc-color-text-primary);font:14px/1.5 var(--fc-font-family-sans)}
+h2{margin:18px 0 8px;font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--fc-color-text-subtle)}
+h2:first-child{margin-top:0}
+.pills{display:flex;flex-wrap:wrap;gap:6px}
+.pill{padding:2px 10px;border-radius:var(--fc-radius-pill);background:var(--fc-color-surface-well);font:12px/1.6 var(--fc-font-family-mono)}
+.card{border-radius:var(--fc-radius-card);background:var(--fc-color-surface-raised);box-shadow:var(--fc-shadow-bubble);padding:6px 12px}
+.row{display:flex;gap:12px;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--fc-color-line-faint)}
+.row:last-child{border-bottom:0}
+.k{flex:none;min-width:0;font:12px/1.6 var(--fc-font-family-mono);overflow-wrap:anywhere}
+.v{margin-left:auto;text-align:right;color:var(--fc-color-text-muted);font:12px/1.6 var(--fc-font-family-mono);overflow-wrap:anywhere}
+.m{flex:none;width:58px;font:600 12px/1.6 var(--fc-font-family-mono)}
+.m.write{color:var(--fc-color-status-warn)}
+.st{flex:none;width:36px;font:12px/1.6 var(--fc-font-family-mono)}
+.st.ok{color:var(--fc-color-status-ok)}
+.st.err{color:var(--fc-color-status-error)}
+.empty{color:var(--fc-color-text-subtle)}
+button{font:inherit;color:inherit;cursor:pointer;border:0;border-radius:var(--fc-radius-control);background:var(--fc-color-surface-button);padding:3px 10px;margin-top:14px}
+button:focus-visible{outline:2px solid var(--fc-color-accent-base);outline-offset:2px}
+</style>
+<h2>Outbound hosts</h2>
+<div id="allow" class="pills"></div>
+<h2>Credential per host</h2>
+<div id="creds" class="card"></div>
+<h2>Recent requests</h2>
+<div id="recent" class="card"></div>
+<button id="refresh" type="button">Refresh</button>
+<script>
+// pure
+var WRITES = { GET: 1, HEAD: 1 };
+function isWrite(method) { return !WRITES[String(method).toUpperCase()]; }
+function statusClass(status) { return typeof status !== "number" ? "err" : status < 400 ? "ok" : "err"; }
+function clock(secs) {
+  var d = new Date(secs * 1000), p = function (n) { return (n < 10 ? "0" : "") + n; };
+  return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+}
+function credLabel(ref) { return typeof ref === "string" && ref !== "" ? ref : "none"; }
+
+(function () {
+  var AGENT = "{{agent}}";
+  var $ = function (id) { return document.getElementById(id); };
+  var el = function (tag, cls, txt) { var e = document.createElement(tag); if (cls) e.className = cls; if (txt !== undefined) e.textContent = txt; return e; };
+  function empty(box, txt) { box.textContent = ""; box.appendChild(el("div", "empty", txt)); }
+  function draw(r) {
+    var allow = Array.isArray(r.request_allow) ? r.request_allow : [];
+    var creds = r.request_credentials && typeof r.request_credentials === "object" ? r.request_credentials : {};
+    var recent = Array.isArray(r.recent_requests) ? r.recent_requests : [];
+    var a = $("allow"); a.textContent = "";
+    if (allow.length === 0) a.appendChild(el("span", "empty", "no outbound host: request is off"));
+    allow.forEach(function (h) { a.appendChild(el("span", "pill", h)); });
+    var c = $("creds"); c.textContent = "";
+    if (allow.length === 0) empty(c, "none");
+    allow.forEach(function (h) {
+      var row = el("div", "row");
+      row.appendChild(el("span", "k", h));
+      row.appendChild(el("span", "v", credLabel(creds[h])));
+      c.appendChild(row);
+    });
+    var q = $("recent"); q.textContent = "";
+    if (recent.length === 0) empty(q, "none yet");
+    recent.forEach(function (x) {
+      var row = el("div", "row");
+      row.appendChild(el("span", "m" + (isWrite(x.method) ? " write" : ""), String(x.method)));
+      row.appendChild(el("span", "k", String(x.host)));
+      row.appendChild(el("span", "st " + statusClass(x.status), typeof x.status === "number" ? String(x.status) : "failed"));
+      row.appendChild(el("span", "v", clock(x.at)));
+      q.appendChild(row);
+    });
+  }
+  function load() { fantastic.send(AGENT, { type: "reflect" }).then(draw).catch(function () {}); }
+  $("refresh").addEventListener("click", load);
+  load();
+  setInterval(load, 10000);
+})();
+</script>
