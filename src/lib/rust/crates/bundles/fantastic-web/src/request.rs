@@ -340,6 +340,15 @@ fn finish_body(raw: Vec<u8>, more: bool, key: Option<&[u8]>) -> (Vec<u8>, bool) 
     (body, truncated)
 }
 
+/// A cut inside a multi-byte character stays text: back to the last whole one.
+fn whole_chars(buf: &mut Vec<u8>) {
+    if let Err(e) = std::str::from_utf8(buf) {
+        if e.error_len().is_none() {
+            buf.truncate(e.valid_up_to());
+        }
+    }
+}
+
 /// What a finished transport error says, with nothing from the request in it.
 fn transport(e: &reqwest::Error) -> Value {
     if e.is_timeout() {
@@ -658,12 +667,7 @@ async fn run(plan: Plan, allow: &[String], kernel: &Arc<Kernel>) -> (Value, Stri
         out.insert("headers".into(), Value::Object(hdrs));
         let (mut buf, truncated) = finish_body(buf, more, secret_bytes);
         if truncated {
-            // a cut inside a multi-byte character stays text: back to the last whole one
-            if let Err(e) = std::str::from_utf8(&buf) {
-                if e.error_len().is_none() {
-                    buf.truncate(e.valid_up_to());
-                }
-            }
+            whole_chars(&mut buf);
         }
         match String::from_utf8(buf) {
             Ok(text) => match serde_json::from_str::<Value>(&text) {
@@ -756,12 +760,28 @@ mod tests {
         assert!(body.len() <= BODY_CAP);
         let text = String::from_utf8(body).unwrap();
         assert!(!text.contains("SECRET") && !text.contains("12345"), "leak");
-        assert!(text.ends_with("[secr"), "redacted whole, then cut: {}", &text[BODY_CAP - 8..]);
+        assert!(
+            text.ends_with("[secr"),
+            "redacted whole, then cut: {}",
+            &text[BODY_CAP - 8..]
+        );
         // an uncut partial key at the very end of a cut body is dropped too
         let mut raw = vec![b'x'; BODY_CAP - 3];
         raw.extend_from_slice(&key[..8]);
         let (body, _) = finish_body(raw, true, Some(key));
-        assert!(!String::from_utf8(body).unwrap().contains("SECR"));
+        assert_eq!(body.len(), BODY_CAP - 3, "the partial key at the end is dropped");
+        assert!(body.iter().all(|&b| b == b'x'));
+    }
+
+    #[test]
+    fn a_cut_inside_a_multi_byte_character_stays_text() {
+        let mut buf = "ab\u{e9}".as_bytes().to_vec(); // 'é' is two bytes
+        buf.pop(); // cut inside it
+        whole_chars(&mut buf);
+        assert_eq!(String::from_utf8(buf).unwrap(), "ab");
+        let mut whole = "ab\u{e9}".as_bytes().to_vec();
+        whole_chars(&mut whole);
+        assert_eq!(String::from_utf8(whole).unwrap(), "ab\u{e9}");
     }
 
     #[test]
