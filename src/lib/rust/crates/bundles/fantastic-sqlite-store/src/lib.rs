@@ -69,7 +69,7 @@ const QUERY_LIMIT_MAX: u64 = 5000;
 /// The store's own view (html, plain JS): the allowlist as (file, size) rows. `{{agent}}` is the store's id.
 const VIEW: &str = include_str!("store_view.html");
 /// The verbs the view calls on its own agent: reads only.
-pub const VIEW_CALLS: [&str; 1] = ["reflect"];
+pub const VIEW_CALLS: [&str; 2] = ["reflect", "watch"];
 
 type Row = Map<String, Value>;
 
@@ -1149,8 +1149,23 @@ impl Handler for SqliteStoreBundle {
             }
             Call::Read(a) => self.read(agent_id, &a, kernel),
             Call::Search(a) => self.search(agent_id, &a, kernel),
-            Call::Prune(a) => self.prune(agent_id, &a, kernel),
-            Call::Inject(a) => self.inject(agent_id, &a, kernel),
+            // WHAT CHANGED, PUBLISHED on the store's own inbox, as `appended` is: a prune that
+            // removed rows (`pruned {n}`) and a whole-store inject (`injected {rows}`) — the
+            // file shrank or was replaced; its view re-reads the sizes on these
+            Call::Prune(a) => {
+                let out = self.prune(agent_id, &a, kernel);
+                if let Some(n) = out.get("pruned").and_then(Value::as_u64).filter(|n| *n > 0) {
+                    kernel.emit(agent_id, json!({"type": "pruned", "n": n})).await;
+                }
+                out
+            }
+            Call::Inject(a) => {
+                let out = self.inject(agent_id, &a, kernel);
+                if let Some(rows) = out.get("rows").filter(|_| out.get("error").is_none()).cloned() {
+                    kernel.emit(agent_id, json!({"type": "injected", "rows": rows})).await;
+                }
+                out
+            }
             Call::Dump(_) => self.dump(agent_id, kernel),
             Call::Query(a) => self.query(agent_id, &a, kernel),
             // the bytes verbs ride the binary path only (`handle_binary`)
@@ -1178,6 +1193,10 @@ impl Handler for SqliteStoreBundle {
         match call {
             verbs::Call::PutBytes(a) => {
                 let out = self.put_bytes(agent_id, &a, body.as_ref(), kernel);
+                // published as the other writes are: `bytes_put {ref}`
+                if out.get("error").is_none() {
+                    kernel.emit(agent_id, json!({"type": "bytes_put", "ref": out["ref"]})).await;
+                }
                 Ok((Some(out), None))
             }
             verbs::Call::GetBytes(a) => {

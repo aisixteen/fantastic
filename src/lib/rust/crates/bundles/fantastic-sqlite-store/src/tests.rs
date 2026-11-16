@@ -498,7 +498,7 @@ async fn reflect_lists_the_allowlist_as_file_and_size_rows_with_a_read_only_view
     assert_eq!(rows[1], json!({"file": "gone.db", "size": null}), "{out}");
     assert_eq!(out["view"]["kind"], json!("html"), "{out}");
     assert!(out["view"]["bytes"].as_str().unwrap().contains("\"mem\""), "{out}");
-    assert_eq!(out["view"]["calls"], json!({"mem": ["reflect"]}), "{out}");
+    assert_eq!(out["view"]["calls"], json!({"mem": ["reflect", "watch"]}), "{out}");
 }
 
 #[cfg(unix)]
@@ -517,4 +517,41 @@ async fn a_query_allow_entry_linked_out_of_the_folder_is_refused_without_a_host_
     let text = out.to_string();
     assert!(text.contains("query_allow"), "names the field: {out}");
     assert!(!text.contains(&tmp.path().display().to_string()), "no host path: {out}");
+}
+
+/// THE STORE'S WRITES ARE PUBLISHED on its own inbox, as `appended` is: a prune that
+/// removed rows (`pruned {n}`), a whole-store inject (`injected {rows}`) and stored bytes
+/// (`bytes_put {ref}`) — what its view (the file sizes) re-reads on. A prune that removed
+/// nothing and a refused inject publish nothing.
+#[tokio::test]
+async fn prune_inject_and_put_bytes_are_published_on_the_stores_inbox() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(tmp.path());
+    add_store(&k, "mem.db");
+    let mut rx = k.ensure_inbox(&AgentId::from("mem"));
+    let out = call(&k, "mem", json!({"type": "append", "rows": [{"content": "a"}, {"content": "b"}]}), Some("alice")).await;
+    let first = out["ids"][0].clone();
+    call(&k, "mem", json!({"type": "prune", "ids": [first]}), Some("alice")).await;
+    call(&k, "mem", json!({"type": "prune", "ids": [424242]}), Some("alice")).await;
+    let dup = json!({"rows": [{"owner": "alice", "row": {"id": 1}}, {"owner": "alice", "row": {"id": 1}}]});
+    call(&k, "mem", json!({"type": "inject", "tables": dup}), Some("alice")).await;
+    let one = json!({"rows": [{"owner": "alice", "row": {"id": 1}}]});
+    call(&k, "mem", json!({"type": "inject", "tables": one}), Some("alice")).await;
+    let item = Item::new(AgentId::from("mem"), json!({"type": "put_bytes", "ref": "p1", "media_type": "image/png"}))
+        .with_binary_key("data", vec![9, 0, 9]);
+    as_agent(AgentId::from("alice"), k.send(vec![item])).await;
+    let mut got = Vec::new();
+    while let Some(item) = rx.try_recv() {
+        if matches!(item.payload["type"].as_str(), Some("pruned" | "injected" | "bytes_put")) {
+            got.push(item.payload);
+        }
+    }
+    assert_eq!(
+        got,
+        vec![
+            json!({"type": "pruned", "n": 1}),
+            json!({"type": "injected", "rows": 1}),
+            json!({"type": "bytes_put", "ref": "p1"}),
+        ]
+    );
 }
