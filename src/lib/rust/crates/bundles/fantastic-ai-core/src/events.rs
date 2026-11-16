@@ -24,19 +24,19 @@ pub async fn to_caller(kernel: &Arc<Kernel>, self_id: &AgentId, client_id: &str,
         obj.entry("source")
             .or_insert_with(|| Value::String(self_id.as_str().to_string()));
     }
+    // ONE MODEL, MANY VIEW-MODELS: every event lands on the AGENT'S inbox, tagged
+    // with `client_id`, whoever made the call, so every view watching the agent
+    // (the web's bytes, the terminal's) follows the same state. A synthetic client
+    // id has no Agent and no watcher set: a watcher subscribes to the AGENT.
     if client_id == fantastic_kernel::inquiry::default_client_id() {
+        // the terminal keeps its own feed through the `cli` agent as well
         let _ = kernel
-            .send(vec![Item::new(AgentId::from("cli"), ev)])
+            .send(vec![Item::new(AgentId::from("cli"), ev.clone())])
             .await
             .remove(0)
             .result;
-    } else {
-        // ON THE AGENT'S INBOX, tagged with `client_id` — not on an inbox named
-        // after the client. A synthetic client id has no Agent, so it has no
-        // watcher set, and a watcher that subscribed to the AGENT (which is what
-        // a `watch` frame names) would never see these events at all.
-        kernel.emit(self_id, ev).await;
     }
+    kernel.emit(self_id, ev).await;
 }
 
 /// Broadcast a structured `status` event AND update the current entry's
@@ -130,10 +130,8 @@ impl PartPublisher {
         // every subscriber. `part_start`/`part_end`/`part_abort` stay on it.
         let quiet = ev.get("type").and_then(Value::as_str) == Some("part_delta");
         if part.kind != PartKind::Call || addrs.is_empty() {
-            // The terminal renders tokens, not parts.
-            if self.client_id == fantastic_kernel::inquiry::default_client_id() {
-                return;
-            }
+            // on the agent's inbox for every caller: the terminal's own feed renders
+            // tokens, and a web view watching the agent draws the parts
             ev.insert("client_id".to_string(), json!(self.client_id));
             self.emit(&self.self_id, Value::Object(ev), quiet).await;
             return;
