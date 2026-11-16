@@ -24,14 +24,17 @@ const MAN: &str = "The canvas's left column as one html view its `reflect` retur
 const VIEW: &str = include_str!("sidebar_view.html");
 
 /// What the view calls: the root's reflect and listing, the person's open inquiries, the
-/// project's files, each chat's `status` (every other agent: read verbs only), and its own
-/// agent's events.
+/// project's files, each chat's `status` (every other agent: read verbs only), and the
+/// events of its own agent and of every agent it shows (`watch`): the tree re-reads on
+/// what they publish (`agent_created`, `agent_deleted`, `agent_updated`, a chat's
+/// `status`, `inquiry_opened` / `inquiry_closed`, a leg's `peer_connected` /
+/// `socket_closed`), never on a timer.
 fn calls(id: &str) -> Value {
     json!({
         "kernel": ["reflect", "list_agents"],
         "user": ["inquiries"],
         "files": ["list", "reflect", "watch", "watch_path", "unwatch_path", "open_view"],
-        "*": ["status"],
+        "*": ["status", "watch"],
         id: ["watch"],
     })
 }
@@ -154,7 +157,7 @@ mod tests {
                 "kernel": ["reflect", "list_agents"],
                 "user": ["inquiries"],
                 "files": ["list", "reflect", "watch", "watch_path", "unwatch_path", "open_view"],
-                "*": ["status"],
+                "*": ["status", "watch"],
                 "sidebar": ["watch"],
             })
         );

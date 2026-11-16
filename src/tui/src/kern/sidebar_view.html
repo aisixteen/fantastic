@@ -382,10 +382,27 @@ function changedDirs(ev, lists) {
   if (lists[ev.path] !== undefined) out.push(ev.path);
   return out.filter(function (p) { return lists[p] !== undefined; });
 }
+// what an event a watched agent published asks the view to read again: "tree" (agents came,
+// went or changed, or a kernel connected or left), "status" (a chat's call moved), "inquiries"
+// (a question to the person opened or closed), or "" (nothing the view shows)
+var TREE_EVENTS = { agent_created: 1, agent_deleted: 1, agent_updated: 1, peer_connected: 1, socket_closed: 1, bridge_up: 1, bridge_down: 1 };
+function rereadOf(ev) {
+  if (!ev || typeof ev !== "object" || typeof ev.type !== "string" || typeof ev.error === "string") return "";
+  if (TREE_EVENTS[ev.type] === 1) return "tree";
+  if (ev.type === "status") return "status";
+  if ((ev.type === "inquiry_opened" || ev.type === "inquiry_closed") && (ev.holder === undefined || ev.holder === "user")) return "inquiries";
+  return "";
+}
+// every agent a reflect tree shows, root first: each is watched
+function treeIds(n, out) {
+  out = out || [];
+  if (n && typeof n.id === "string") { out.push(n.id); (n.children || []).forEach(function (k) { treeIds(k, out); }); }
+  return out;
+}
 // end pure
 
 var SELF = "{{cell}}", ME = "{{agent}}";
-var st = { filesRoot: "", toolsOpen: false, root: null, chats: {}, status: {}, inq: [], folded: {}, selected: "", selPath: "", filesOn: false, open: {}, lists: {}, filter: "", tick: 0, busy: false };
+var st = { filesRoot: "", toolsOpen: false, root: null, chats: {}, status: {}, inq: [], folded: {}, selected: "", selPath: "", filesOn: false, open: {}, lists: {}, filter: "" };
 var watching = {}, filesWatch = false;
 var $ = function (id) { return document.getElementById(id); };
 var ROBOT = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="11" height="8" rx="2"/><path d="M8 5V2.5M5.8 9v.01M10.2 9v.01M6 11.2h4"/></svg>';
@@ -587,20 +604,13 @@ function syncFiles() {
     });
   }
 }
-function refreshStatus() {
-  var ids = Object.keys(st.chats);
+function readStatus(ids) {
   return Promise.all(ids.map(function (id) {
     return call(id, { type: "status" }).then(function (r) { if (!failed(r)) st.status[id] = r; else delete st.status[id]; });
-  })).then(function () {
-    return call("user", { type: "inquiries" });
-  }).then(function (r) { st.inq = failed(r) ? [] : (r.inquiries || []); paintWait(); paintTree(); paintPins(); paintStrip(); });
+  }));
 }
-var watched = {};
-function watchChats() {
-  Object.keys(st.chats).forEach(function (id) {
-    if (watched[id]) return; watched[id] = true;
-    fantastic.watch(id, function (ev) { if (ev && !ev.error) refreshStatus(); });
-  });
+function readInquiries() {
+  return call("user", { type: "inquiries" }).then(function (r) { st.inq = failed(r) ? [] : (r.inquiries || []); });
 }
 function refreshTree() {
   return Promise.all([
@@ -609,18 +619,51 @@ function refreshTree() {
     st.filesRoot === "" ? call("files", { type: "reflect" }) : Promise.resolve(null)
   ]).then(function (rs) {
     if (rs[2] && !failed(rs[2]) && typeof rs[2].root === "string") st.filesRoot = rs[2].root;
-    if (failed(rs[0])) { say("kernel reflect: " + (rs[0] && rs[0].error || "no answer")); return; }
+    if (failed(rs[0])) { say("kernel reflect: " + (rs[0] && rs[0].error || "no answer")); return []; }
     say("");
     st.root = rs[0]; st.tree = rs[0].tree && !Array.isArray(rs[0].tree) ? rs[0].tree : null;
+    var had = st.chats;
     st.chats = failed(rs[1]) ? {} : chatSet(rs[1]);
-    paintStrip(); paint(); watchChats();
+    Object.keys(st.status).forEach(function (id) { if (!st.chats[id]) delete st.status[id]; });
+    watchTree();
+    // a chat the view did not show yet: its state is read once, then its events keep it
+    return Object.keys(st.chats).filter(function (id) { return !had[id]; });
   });
 }
-function tick() {
-  if (st.busy) return; st.busy = true;
-  var p = (st.tick++ % 2 === 0 ? refreshTree() : Promise.resolve()).then(refreshStatus);
-  p.then(function () { st.busy = false; }, function () { st.busy = false; });
+// ONE MODEL, MANY VIEW-MODELS: the view watches every agent it shows and reads again only
+// what an event names (`rereadOf`) — never on a timer
+var watchOffs = {};
+function watchTree() {
+  var want = {};
+  treeIds(st.tree).forEach(function (id) {
+    want[id] = true;
+    if (watchOffs[id]) return;
+    watchOffs[id] = fantastic.watch(id, function (ev) { heard(id, ev); }) || function () {};
+  });
+  Object.keys(watchOffs).forEach(function (id) { if (!want[id]) { watchOffs[id](); delete watchOffs[id]; } });
 }
+var due = { tree: false, inquiries: false, status: {} }, reading = false;
+function heard(id, ev) {
+  var what = rereadOf(ev);
+  if (what === "status") { if (!st.chats[id]) return; due.status[id] = true; }
+  else if (what !== "") due[what] = true;
+  else return;
+  if (!reading) readDue();
+}
+// what the events asked for, read once; events heard meanwhile are read right after
+function readDue() {
+  reading = true;
+  var d = due; due = { tree: false, inquiries: false, status: {} };
+  (d.tree ? refreshTree() : Promise.resolve([])).then(function (fresh) {
+    return Promise.all([readStatus(Object.keys(d.status).concat(fresh || [])), d.inquiries ? readInquiries() : null]);
+  }).then(paintAll, paintAll).then(function () {
+    reading = false;
+    if (due.tree || due.inquiries || Object.keys(due.status).length) readDue();
+  });
+}
+function paintAll() { paintStrip(); paint(); }
+// THE CLOCK: the ages ("12m") drawn again from what the view holds; it reads nothing
+function clock() { paintWait(); paintTree(); paintPins(); }
 // the host sends what it kept of the last visit (`restore`), after this view says `ready`
 fantastic.onMessage(function (m) {
   if (!m || m.type !== "restore") return;
@@ -631,8 +674,10 @@ fantastic.onMessage(function (m) {
 $("hide").addEventListener("click", function () { post({ type: "hide_tree" }); });
 $("sw").addEventListener("click", function () { setFiles(!st.filesOn); });
 $("filter").addEventListener("input", function () { st.filter = $("filter").value; paintTree(); paintPins(); });
-tick();
-setInterval(tick, 5000);
 post({ type: "ready" });
 paint();
+refreshTree().then(function () {
+  return Promise.all([readStatus(Object.keys(st.chats)), readInquiries()]);
+}).then(paintAll, paintAll);
+setInterval(clock, 60000);
 </script>
