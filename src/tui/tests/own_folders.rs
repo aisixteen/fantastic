@@ -98,17 +98,18 @@ async fn the_readme_names_the_live_paths_and_is_rewritten_each_boot() {
     let state = d.join(".fantastic");
     let readme = state.join("readme.md");
     let text = std::fs::read_to_string(&readme).expect("written at boot");
-    let st = std::fs::canonicalize(&state).unwrap();
+    // The readme names the folders as the boot was given them; a canonical form
+    // would differ where the temp dir is a symlink (macOS /var -> /private/var).
     for want in [
-        bridge_dir(&st, "prompt_file")
+        bridge_dir(&state, "prompt_file")
             .join("prompt.md")
             .display()
             .to_string(),
-        bridge_dir(&st, "mcp_config")
+        bridge_dir(&state, "mcp_config")
             .join(".mcp.json")
             .display()
             .to_string(),
-        std::fs::canonicalize(&d).unwrap().display().to_string(),
+        d.display().to_string(),
         "send".to_string(),
         "mcp".to_string(),
         "user".to_string(),
