@@ -229,3 +229,38 @@ async fn an_inquiry_without_text_is_refused() {
     let l = op(&k, "mcp", json!({"type": "inquiries"})).await;
     assert_eq!(l["inquiries"], json!([]));
 }
+
+/// THE HOLDER PUBLISHES WHAT CHANGED: an inquiry opened and closed is an event on the
+/// holder's own inbox and on the asker's, so a view watching either re-reads
+/// `inquiries` on it and never polls.
+#[tokio::test(flavor = "multi_thread")]
+async fn opening_and_closing_an_inquiry_is_published_on_the_holder_and_the_asker() {
+    let k = setup(None).await;
+    let (mut on_mcp, mut on_asker) = (k.ensure_inbox(&AgentId::from("w_mcp")), k.ensure_inbox(&AgentId::from("w_asker")));
+    // operator watches (outside every dispatch): the watchers stand in for two views
+    assert!(k.watch(&AgentId::from("mcp"), AgentId::from("w_mcp")).await.is_none());
+    assert!(k.watch(&AgentId::from("asker"), AgentId::from("w_asker")).await.is_none());
+    let re = ask(&k, "ship?").await["re"].as_u64().expect("an inquiry pid");
+    let r = op(&k, "mcp", json!({"type": "answer_inquiry", "re": re, "answer": "yes"})).await;
+    assert_eq!(r["answered"].as_u64(), Some(re), "{r}");
+
+    async fn events(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<Value> {
+        let mut out = Vec::new();
+        while let Ok(Some(it)) = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+            let t = it.payload["type"].as_str().unwrap_or("");
+            if t.starts_with("inquiry_") {
+                out.push(it.payload.clone());
+            }
+        }
+        out
+    }
+    for (who, rx) in [("mcp", &mut on_mcp), ("asker", &mut on_asker)] {
+        let got = events(rx).await;
+        let kinds: Vec<&str> = got.iter().filter_map(|e| e["type"].as_str()).collect();
+        assert_eq!(kinds, ["inquiry_opened", "inquiry_closed"], "on {who}'s inbox: {got:?}");
+        for e in &got {
+            assert_eq!(e["re"].as_u64(), Some(re), "{e}");
+            assert_eq!((e["asker"].as_str(), e["holder"].as_str()), (Some("asker"), Some("mcp")), "{e}");
+        }
+    }
+}

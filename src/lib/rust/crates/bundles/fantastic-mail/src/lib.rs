@@ -270,7 +270,8 @@ impl MailBundle {
             id,
             Inquiry { text, kind: Kind::Confirm, options: None, request_id: None, reply_client_id: inquiry::default_client_id() },
             kernel,
-        );
+        )
+        .await;
         let Some(re) = asked.get("re").and_then(Value::as_i64) else { return Err(asked) };
         let key = (id.0.clone(), re);
         let _guard = SlotGuard { slots: Arc::clone(&self.slots), key: key.clone() };
