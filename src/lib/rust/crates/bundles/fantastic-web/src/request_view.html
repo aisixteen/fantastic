@@ -116,7 +116,8 @@ function credLabel(ref) { return typeof ref === "string" && ref !== "" ? ref : "
   }
   function load() { fantastic.send(AGENT, { type: "reflect" }).then(draw).catch(function () {}); }
   $("refresh").addEventListener("click", load);
+  // the agent publishes each request it serves: the view re-reads on that event, never on a timer
+  fantastic.watch(AGENT, function (ev) { if (ev && ev.type === "request_served") load(); });
   load();
-  setInterval(load, 10000);
 })();
 </script>

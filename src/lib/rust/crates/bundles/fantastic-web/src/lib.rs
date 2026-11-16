@@ -289,8 +289,8 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
 /// host and the recent requests. `{{agent}}` is the web agent's id, filled at reflect time.
 const REQUEST_VIEW: &str = include_str!("request_view.html");
 
-/// The verbs the view calls on its own agent: reads only.
-pub const VIEW_CALLS: [&str; 1] = ["reflect"];
+/// The verbs the view calls on its own agent: reads only, and `watch` (it re-reads on `request_served`).
+pub const VIEW_CALLS: [&str; 2] = ["reflect", "watch"];
 
 /// python `_browser_reachable` — which agents a browser could actually fetch
 /// through this host, RIGHT NOW. Asks the REAL gates (the same `authorize_call`

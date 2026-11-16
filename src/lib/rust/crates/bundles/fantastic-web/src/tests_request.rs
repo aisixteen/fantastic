@@ -443,13 +443,35 @@ async fn reflect_carries_the_allowlist_the_ref_name_the_recent_rows_and_the_view
     assert_eq!(rows[1]["status"], json!(200));
     assert!(!r.to_string().contains(KEY), "{r}");
     assert_eq!(r["view"]["kind"], json!("html"));
-    assert_eq!(r["view"]["calls"], json!({"w_refl": ["reflect"]}));
+    assert_eq!(r["view"]["calls"], json!({"w_refl": ["reflect", "watch"]}));
     let html = r["view"]["bytes"].as_str().unwrap();
     assert!(
         html.contains("var AGENT = \"w_refl\"") || html.contains("AGENT = \"w_refl\""),
         "agent id filled"
     );
     assert!(!html.contains("{{agent}}"));
+}
+
+/// THE AGENT PUBLISHES EACH REQUEST IT SERVES (`request_served` on its own inbox), the
+/// failed ones too: the view watching it re-reads `recent_requests` on the event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_request_served_is_published_on_the_agents_inbox() {
+    let port = server().await;
+    let k = world_named("w_pub", &[base(port)], &format!("127.0.0.1:{port}")).await;
+    let mut rx = k.ensure_inbox(&AgentId::from("w_view"));
+    assert!(k.watch(&AgentId::from("w_pub"), AgentId::from("w_view")).await.is_none());
+    request_as(&k, "w_pub", json!({"method": "GET", "url": format!("{}/text", base(port))})).await;
+    request_as(&k, "w_pub", json!({"method": "GET", "url": format!("{}/slow", base(port)), "timeout": 0.3})).await;
+    let mut got = Vec::new();
+    while let Ok(Some(it)) = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await {
+        if it.payload["type"] == json!("request_served") {
+            got.push(it.payload.clone());
+        }
+    }
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert_eq!((&got[0]["method"], &got[0]["status"]), (&json!("GET"), &json!(200)), "{got:?}");
+    assert_eq!(got[0]["host"], json!(format!("127.0.0.1:{port}")));
+    assert_eq!(got[1]["status"], Value::Null, "a request that failed is published too: {got:?}");
 }
 
 /// The view's pure parts, run in node when it is installed (they are plain JS).
