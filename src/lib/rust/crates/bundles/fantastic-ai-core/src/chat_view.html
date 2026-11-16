@@ -51,7 +51,7 @@ button{font:inherit;color:inherit;cursor:pointer}
 button:focus-visible,input:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--fc-color-accent-base);outline-offset:2px}
 .head{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:14px var(--pad);border-bottom:1px solid var(--fc-color-line-button)}
 .avatar{position:relative;flex:none;width:44px;height:44px;border-radius:var(--fc-radius-panel);background:var(--fc-color-surface-well);color:var(--fc-color-text-muted);display:flex;align-items:center;justify-content:center}
-.avatar svg{width:28px;height:28px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.avatar .face{display:block;width:28px;height:auto}
 .badge{position:absolute;right:-5px;bottom:-5px;width:18px;height:18px;border-radius:var(--fc-radius-pill);box-shadow:0 0 0 2px var(--fc-color-surface-raised);background:var(--fc-color-text-subtle);color:var(--fc-color-accent-on);font:700 11px/18px var(--fc-font-family-sans);text-align:center}
 .badge[hidden]{display:none}
 .badge[data-state=asks]{background:var(--fc-color-status-warn)}
@@ -130,7 +130,7 @@ details.think.live>summary{animation:pulse var(--fc-duration-think) var(--fc-eas
 body{--pad:16px;font-size:15px}
 .head{flex-wrap:nowrap;gap:12px;padding:10px 12px 10px 16px}
 .avatar{width:38px;height:38px}
-.avatar svg{width:24px;height:24px}
+.avatar .face{width:24px}
 .badge{width:16px;height:16px;line-height:16px;right:-4px;bottom:-4px}
 .titles{flex:1 1 0;gap:0}
 .titles .line{flex-direction:column;align-items:flex-start;gap:0}
@@ -144,7 +144,8 @@ body{--pad:16px;font-size:15px}
 .field textarea{min-height:44px;font-size:16px}
 details.tools>summary,details.think>summary{min-height:40px}
 .inq .q{font-size:16px}
-.inq .row{flex-direction:column;align-items:stretch}
+.inq .row{flex-direction:column;flex-wrap:nowrap;align-items:stretch}
+.inq .free{flex:none}
 .inq button{min-height:44px;text-align:left}
 .inq .row>button{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .inq .row>button::after{content:"›";color:var(--fc-color-text-subtle);font-size:18px}
@@ -156,7 +157,7 @@ details.tools>summary,details.think>summary{min-height:40px}
 @media (prefers-reduced-motion:reduce){*{animation:none!important}}
 </style>
 <div class="head">
-<div class="avatar" aria-hidden="true"><svg viewBox="0 0 28 28"><rect x="5" y="8" width="18" height="14" rx="4"/><path d="M14 8V4"/><circle cx="10.5" cy="15" r="1.2"/><circle cx="17.5" cy="15" r="1.2"/><path d="M11 19h6"/></svg><span class="badge" id="badge" data-state="idle" hidden></span></div>
+<div class="avatar" aria-hidden="true"><img class="face" alt="" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACoAAAAwCAMAAABQUBiUAAABk2lDQ1BJQ0MgUHJvZmlsZQAAeJx9kc0rRGEUhx8zRD6yQFlY3AUWQkKyZCykqGlQvhbu3PlSM3fe7oykLJWtosTG18LWCksLW6WUj5I/QFbERrrOO5dmEKdO5+n3vr9zzz0v+E5MpZLFHZCys05oMGBMTE4ZpQ9U4KeOElpMK6P6g8FhJL7q93i9okjXyzbd6/f5v1EViWYsKDKE+yzlZIVnhYMLWaX5ULjWkaGEzzTHPb7RHPb4MXdnLDQAPt3TsBJmRFj3bLUSTkpYz90YSUW0rjy2Na9rDhd44wWcSs5bn3PqP6yM2uOj+r5kA4MMMUIQgzDzzJEkS5tUW5QMITkP/OHvzvkHSKNYxBFPnIS4DfpFUdIpKjwknSzaaRXupEOyR7/Nz53ntfQO9L6AfzWvhTfgeAXqb/Na4zZUL8PRmTIdMyf5JX2xGDwdyJNMQs0FlE9nYl2d3vSVASi5d93nJihdg/dV133bdd33PTHfwant7fmzF/vXMLYEw+ewuQXNcfnmzB/7KMvt4/+dlRXu/AMFQHfYB6nQZwAAAMBQTFRFpd7unNbu0+z1cKPg8+bo0en0t+nxtLS0kLjiAAD/sL7qarT/Vf//AKqqAH///7+/qqr/AAAAT+PnVdjk+/3+a6jac5fXkeXtpNjsaLTdldfqcufs//77jrnjjcfmWsridIzVcLviqOTv+vz8btrpjqbda8Tkf///WPP2bPT3AP//0vH3rLzojvL0mKziWrjckfP1p/b2hpzbqv//wuz0stnu7/X3g5virLzp0vb4f39/WsPe0eb15ez5yNfvsPb3+/flewAAAEB0Uk5Tptxt/h6NcgPmAbIDAwMCBAMA/v7//v7+/v7+/Qf8/f7+/v0u//3+Av/9Af/q0fv/+aj/A/+PRv/RVQL+VktyjsWhesMAAAMSSURBVHjajZUJe6IwEIaDV889EitCCFGIcih41XOt7f//VzuTAKK23f1U4kzeTL7k4UkILfQ6iSl9plQcSL5YELJtQY7Gk1iUBCnaCf4mVH14XsJAiZc3ftEYu/5coPEzbS07lDZSzRmluaJq+SHMgAKFORqLJG0vU1ZX4rXzJLEU/SFK9JUKmJexRcKulC6Yl+YHY4IgqfKEef0+u5XOpssWTkzgoRaYXTD2KYtOlgI8kHgicp3z2Ocs5tMPWBuJ6VJb7LMvpEukW/pK6CH9rmhZIxeCUJJUY792wNIDJS2L/Q/KiCDK66L6rPs96inSMahnGq3PvDKvQwgz/bDZlTwt869fWiPE6v5bBRpWiVGhKsTSZ9yq0FHNwKgeFLQ2MECNQsiG6+k0LJFwaoJwVKKNkUY5ZNcvqLUha4FZ9gF2dnTUKA9fjEKOtcqgH3JNEnwJLV3V4S+lAD0HgA66g64lJuSJNkbHCFCn6g15NQOW5biULYXXpcP5PDrWUYfzWhAiyvtvYIAMnGjugoFp0TmFYfWAD46cdzeIRpK7rnSqSg6iTmUG0AGguCwrkDKay6obySoA2w6fS84jREkgXfjobmftGFI3YagDGfHojAaGhfUUYC3growiGaHXDXA96TZdo+BSrjuPJHyjDqDvge/2XOnDs9dzrzQPIilhvIxws5SUwEg/0O0VLWWAqMulwoOo1fabPR8g37ClXPDl95quDALZUOYgohvr3tKsf8Ei6fZ8y7I2eFri8faTCqE0dclKHUklBH36XZyveGST5jVryGBDHzRQnNriLj75NnTYAI+RuC8H+Sq+E/W7YELFvW0EMKpna7JpiYera0PQN9++FJK2f6J3Vygc4e/XLM7QKC+NGgqp7Q3rq6pmHQW1s3EdHFvtem+FCvq+z+zxbDYba81gK+xs/05vbkO4PGZDfzgc2qsVkquVDf/94Uxd3YaIiqyJ0w8roYXdXlRlawYUsZolY4bsMiJuDejb8/Q4Xu12GrObu9WMbOmZrO8AJtWpQR73WZbtH8kbJB7OJP0Lexe4QcoX1z8AAAAASUVORK5CYII="><span class="badge" id="badge" data-state="idle" hidden></span></div>
 <div class="titles"><div class="line"><h1 class="name" id="name"></h1><span class="state" id="state" data-state="idle" hidden></span></div></div>
 <button class="stop" id="stop" type="button" hidden>Stop</button>
 </div>

@@ -58,6 +58,7 @@ test("the kernel strip: this kernel first and highlighted, then each peer by sho
   assert.equal(rows.length, 2);
   assert.deepEqual([rows[0]!["here"], rows[0]!["mark"], rows[0]!["name"]], [true, "de", "demo"]);
   assert.deepEqual([rows[1]!["here"], rows[1]!["mark"], rows[1]!["name"], rows[1]!["guid"]], [false, "99", "99aabb", "99aabbccdd"]);
+  assert.equal(plain(raw.kernelStrip({ id: "k", display_name: "launch-week", guid: "ab" }, []))[0]!["mark"], "lw", "a name of several words: its initials");
   assert.equal(rows[0]!["waiting"], 0, "no badge without a question");
 });
 
@@ -78,14 +79,22 @@ test("ask ages: the oldest question of each asker", () => {
   assert.deepEqual(plain(raw.askAges([{ asker: "a", ts: 400 }, { asker: "a", ts: 100 }, { asker: "b", ts: 940 }, { ts: 1 }, { asker: "c" }], 1000)), { a: "15m", b: "1m" });
 });
 
-test("leaf tool agents under the root go to the tools group, not the tree", () => {
-  const rows = plain(raw.treeRows(tree, { chat1: true }, {}, {}, {}, undefined, { tools: true }));
-  assert.deepEqual(rows.map((r) => r["id"]), ["kernel_state", "user", "files", "coder", "chat1"], "user has children, files is the files agent: both stay; only direct leaf tools leave");
-  const t2 = { id: "r", display_name: "r", children: [{ id: "tasks", display_name: "tasks", handler_module: "task.tools", children: [] }, { id: "c", display_name: "c", handler_module: "ai_chat.tools", children: [] }, { id: "files", display_name: "files", children: [] }] };
-  const tr = plain(raw.treeRows(t2, { c: true }, {}, {}, {}, undefined, { tools: true }));
-  assert.deepEqual(tr.map((r) => r["id"]), ["r", "c", "files"]);
-  assert.deepEqual(plain(raw.toolRows(t2, { c: true })).map((r) => [r["id"], r["tag"], r["depth"]]), [["tasks", "task", 0]]);
-  assert.deepEqual(plain(raw.treeRows(t2, { c: true }, {}, {}, {})).map((r) => r["id"]), ["r", "tasks", "c", "files"], "without the option the tree keeps them");
+test("with the tools group, the tree holds the AI agents only, each under its nearest AI ancestor", () => {
+  const rows = plain(raw.treeRows(tree, { chat1: true, coder: true }, {}, {}, {}, undefined, { tools: true }));
+  assert.deepEqual(rows.map((r) => [r["id"], r["depth"]]), [["coder", 0], ["chat1", 0]], "no root row; user and files are not AI agents");
+  const t2 = { id: "r", display_name: "r", children: [
+    { id: "u", display_name: "u", children: [{ id: "lead", display_name: "Lead", children: [
+      { id: "tasks", display_name: "tasks", handler_module: "task.tools", children: [] },
+      { id: "w", display_name: "w", children: [{ id: "c", display_name: "c", children: [] }] }] }] },
+    { id: "files", display_name: "files", children: [{ id: "v", display_name: "v", children: [] }] }] };
+  const chats = { lead: true, c: true };
+  const tr = plain(raw.treeRows(t2, chats, {}, {}, {}, undefined, { tools: true, pinned: true }));
+  assert.deepEqual(tr.map((r) => [r["id"], r["depth"], r["kids"]]), [["lead", 0, 1], ["c", 1, 0]], "c sits under Lead, past the agent between them");
+  const folded = plain(raw.treeRows(t2, chats, { lead: true }, {}, { c: true }, undefined, { tools: true }));
+  assert.deepEqual(folded.map((r) => [r["id"], r["below"], r["asksBelow"]]), [["lead", 1, 1]]);
+  assert.deepEqual(plain(raw.toolRows(t2, chats)).map((r) => [r["id"], r["tag"], r["depth"]]), [["u", "tool", 0], ["tasks", "tool", 0], ["w", "tool", 0]],
+    "every other agent, in tree order, tagged tool; not the root, not the files agent or what is under it");
+  assert.deepEqual(plain(raw.treeRows(t2, chats, {}, {}, {})).map((r) => r["id"]), ["r", "u", "lead", "tasks", "w", "c", "files", "v"], "without the option the tree keeps them all");
 });
 
 test("the tree rows keep parent order, nested depth, and the order reflect gives", () => {
@@ -245,6 +254,8 @@ test("the pinned rows: the files agent, the project folder under it, its files w
   assert.deepEqual(on.map((r) => r["depth"]), [0, 1, 2, 2, 1]);
   assert.deepEqual(plain(raw.pinRows(root, {}, {}, {}, {}, { on: false, lists: {}, open: {} }, "")).map((r) => r["name"]), ["files", "view1"], "no project name: no folder row");
   assert.deepEqual(plain(raw.pinRows({ id: "r", children: [] }, {}, {}, {}, {}, { on: true, lists, open: {} }, "demo")), [], "no files agent: nothing pinned");
+  const deep = { id: "r", children: [{ id: "user", children: [root.children[0]] }] };
+  assert.deepEqual(plain(raw.pinRows(deep, {}, {}, {}, {}, { on: false, lists: {}, open: {} }, "")).map((r) => r["name"]), ["files", "view1"], "the files agent is found below the root too");
   assert.deepEqual(plain(raw.treeRows(root, { c: true }, {}, {}, {}, undefined, { pinned: true })).map((r) => r["id"]), ["r", "c"], "pinned: the files agent leaves the tree");
   assert.deepEqual(plain(raw.treeRows(root, { c: true }, {}, {}, {}, undefined, {})).map((r) => r["id"]), ["r", "files", "view1", "c"]);
 });
