@@ -479,9 +479,7 @@ function textsOf(rows) {
   var inflight = null;
   var drafts = {};
   function busy() { return inflight !== null || pending.length > 0; }
-  // a turn another client started runs too: Stop ends the agent's turn, whoever sent it
-  var foreign = false;
-  function refresh() { $("stop").hidden = !(busy() || foreign); }
+  function refresh() { $("stop").hidden = !busy(); }
   var curPhase = "idle", lastReason = "", asks = 0, askTs = 0;
   function phase(p, reason) {
     curPhase = p;
@@ -550,8 +548,7 @@ function textsOf(rows) {
       case "queued": if (mine(p) && s(p, "send_id")) bind(s(p, "send_id")); break;
       case "status": {
         var ph = s(p, "phase"), det = o(p, "detail"), sid = s(det, "send_id");
-        if (ph === "done") { soon(); foreign = false; refresh(); }
-        else if (!inflight && (ph === "thinking" || ph === "streaming" || ph === "tool_calling" || ph === "queued")) { foreign = true; refresh(); }
+        if (ph === "done") soon();
         if (!mine(p)) break;
         if (ph === "queued") { bind(sid); phase("queued"); }
         else if (ph === "thinking" || ph === "streaming") { if (!inflight || inflight.sendId !== sid) promote(sid); phase(ph); }
@@ -594,7 +591,7 @@ function textsOf(rows) {
         }
         break;
       case "part_abort": if (toMe(p)) settle(s(p, "stream_id"), s(p, "reason") || "aborted"); break;
-      case "done": soon(); foreign = false; if (mine(p)) { inflight = null; } refresh(); break;
+      case "done": soon(); if (mine(p)) { inflight = null; refresh(); } break;
       case "context": {
         if (!mine(p)) break;
         var cd = o(p, "detail");
@@ -641,7 +638,6 @@ function textsOf(rows) {
       row.append(button("Answer", function () { var ch = picks.filter(function (c) { return c.checked; }).map(function (c) { return c.value; }); if (ch.length) reply(ch, ch.join(", ")); }, true));
     }
     if (kind !== "confirm" && kind !== "multi") {
-      card.answerText = function (v) { reply(v, v); };
       var inp = el("input"); inp.type = "text"; inp.placeholder = kind === "single" ? "Or answer in your own words" : "Your answer"; inp.setAttribute("aria-label", "Your answer");
       var go = function () { var v = inp.value.trim(); if (v) reply(v, v); };
       inp.onkeydown = function (e) { if (e.key === "Enter") go(); };
@@ -651,30 +647,18 @@ function textsOf(rows) {
     }
     return card;
   }
-  // the open question the composer answers: the oldest card that takes free text and is not answered yet
-  function freeCard() {
-    var cards = dialog.querySelectorAll(".inq:not(.answered)");
-    for (var i = 0; i < cards.length; i++) {
-      var inp = cards[i].querySelector(".free input");
-      if (cards[i].answerText && inp && !inp.disabled) return cards[i];
-    }
-    return null;
-  }
-  function composer() { text.placeholder = freeCard() ? "Answer in your own words" : "Message " + title; }
   async function inquiries() {
     var r = await fantastic.send("user", { type: "inquiries", asker: AGENT }).catch(function () { return null; });
     var open = r && Array.isArray(r.inquiries) ? r.inquiries : [];
     asks = open.length;
     askTs = open.reduce(function (lo, q) { return typeof q.ts === "number" && (lo === 0 || q.ts < lo) ? q.ts : lo; }, 0);
     drawState();
-    composer();
     open.forEach(function (q) {
       var re = Number(q.re);
       if (!Number.isFinite(re) || seenInq[re] || heldRe[re]) return;
       seenInq[re] = true;
       push(inquiryEl(q));
     });
-    composer();
   }
 
   // rows after the last seen: embed cards and the checker's reports arrive as rows, not events
@@ -694,8 +678,7 @@ function textsOf(rows) {
       } else if (s(m, "head").indexOf(MALFORMED) >= 0) notice(s(m, "head").slice(s(m, "head").indexOf(MALFORMED)), "report warn");
     });
     // tool calls and their replies are rows, not events: a run that ended is drawn from the stored rows
-    // a turn another client woke (the answer to a question) is not streamed to this chat: its words arrive as rows too
-    if (stale || fresh.some(function (m) { return m.kind !== "notice" && m.kind !== "embed" && m.kind !== "unembed"; })) {
+    if (stale || fresh.some(function (m) { return m.kind !== "notice" && toolOf(String(m.role || ""), typeof m.head === "string" ? m.head : "") !== null; })) {
       stale = !(await drawHistory(keepRows, true));
       if (!stale) { seenInq = {}; await inquiries(); }
     }
@@ -708,8 +691,6 @@ function textsOf(rows) {
   function submit() {
     var typed = text.value.trim();
     if (!typed) return;
-    var ic = freeCard();
-    if (ic) { text.value = ""; text.style.height = ""; ic.answerText(typed); composer(); return; }
     text.value = "";
     text.style.height = "";
     pinned = true;
@@ -771,7 +752,7 @@ function textsOf(rows) {
     var rf = await call({ type: "reflect" });
     title = s(rf, "display_name") || s(rf, "id") || AGENT;
     $("name").textContent = title;
-    composer();
+    text.placeholder = "Message " + title;
     var prov = s(rf, "provider_id");
     if (!prov) notice("No model set", "warn");
     await drawHistory(300);
@@ -791,7 +772,6 @@ function textsOf(rows) {
         var b = bubble("user", s(e, "text"), ""); b.classList.add("queued"); queue.appendChild(b);
         pending.push({ el: b, sendId: s(e, "send_id") });
       });
-      if (cur.is_mine !== true && s(cur, "phase") && s(cur, "phase") !== "idle") { foreign = true; phase(s(cur, "phase")); }
       refresh();
     }
     inquiries();
