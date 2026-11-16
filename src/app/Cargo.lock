@@ -899,6 +899,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "fantastic-kernel",
+ "schemars 0.8.22",
+ "serde",
  "serde_json",
  "zip",
 ]
@@ -960,6 +962,8 @@ dependencies = [
  "fantastic-web-ws",
  "futures-util",
  "libc",
+ "schemars 0.8.22",
+ "serde",
  "serde_json",
  "serde_yaml",
  "sha2",
@@ -977,6 +981,8 @@ dependencies = [
  "fantastic-kernel",
  "flate2",
  "httparse",
+ "schemars 0.8.22",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -1016,20 +1022,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fantastic-scenario-probes"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fantastic-bundle",
- "fantastic-kernel",
- "libc",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "fantastic-sqlite-store"
 version = "0.1.0"
 dependencies = [
@@ -1051,7 +1043,8 @@ dependencies = [
  "async-trait",
  "fantastic-core",
  "fantastic-kernel",
- "fantastic-scenario-probes",
+ "schemars 0.8.22",
+ "serde",
  "serde_json",
  "serde_yaml",
  "tokio",
@@ -1063,6 +1056,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "fantastic-kernel",
+ "schemars 0.8.22",
+ "serde",
  "serde_json",
  "sha2",
  "windows-sys 0.61.2",
