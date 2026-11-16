@@ -1,7 +1,8 @@
 //! sqlite_store — the DURABLE memory store agent (`sqlite_store.tools`).
 //!
-//! A 1:1 mirror of the lib's `ram_store` (python canonical, rust port in
-//! `fantastic-ram-store`): the SAME verbs, arguments, replies, refusal reasons and
+//! A mirror of the lib's `ram_store` (python canonical, rust port in
+//! `fantastic-ram-store`) — except `query` / `query_allow`, which belong to
+//! `sqlite_store` only: the SAME verbs, arguments, replies, refusal reasons and
 //! reflect, over the SAME tables with the same keys, uniqueness and foreign-key
 //! cascades — kept in ONE SQLite file per store agent instead of RAM maps. A caller
 //! cannot tell the two apart, except that this one survives the process.
@@ -592,7 +593,16 @@ impl SqliteStoreBundle {
             .map(|f| {
                 let mut one = Map::new();
                 one.insert("path".to_string(), Value::from(f));
-                (f.to_string(), resolve_path(&one, kernel, &own))
+                let r = resolve_path(&one, kernel, &own).map_err(|e| {
+                    // `resolve_path` speaks of `path`, and may carry a host path
+                    let e = e.replace("`path`", "`query_allow`");
+                    if e.contains(&own.display().to_string()) || e.contains('/') {
+                        "the `query_allow` entry does not resolve".to_string()
+                    } else {
+                        e
+                    }
+                });
+                (f.to_string(), r)
             })
             .collect()
     }
