@@ -208,8 +208,16 @@ fn folder_of(
     }
     let state = fantastic_kernel::bootstrap::state_dir_for(None, Some(Path::new(&folder)))
         .map_err(|e| bad(format!("home: {verb}: \"{path}\": {e}"), arg))?;
+    // a picked folder whose state folder is listed is that row, in the registry's spelling
+    let state = state.display().to_string();
+    if let Some(r) = rows.iter().find(|r| same_path(&r.path, &state)) {
+        return Ok(Opened {
+            path: r.path.clone(),
+            workdir: None,
+        });
+    }
     Ok(Opened {
-        path: state.display().to_string(),
+        path: state,
         workdir: Some(folder),
     })
 }
