@@ -323,7 +323,7 @@ function registerStandIns(k: Kernel, disk: Disk): void {
       default:
         return unknownVerb("file_bridge", verb);
     }
-  });
+  }, { list: "args: path:str (req). The files under a path." });
 
   // text_file: owns no disk — every byte is a GATED send to its `target_id` leg.
   k.registerBundle("text_file.tools", async (id, p, kk) => {
