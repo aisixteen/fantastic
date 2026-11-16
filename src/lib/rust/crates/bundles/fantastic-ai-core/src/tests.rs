@@ -4646,10 +4646,9 @@ async fn the_cli_caller_round_trips_through_the_cli_agent() {
     assert_eq!(handed.len(), 1, "the cli handler must run: {handed:?}");
     assert_eq!(handed[0]["client_id"], json!("cli"));
     assert_eq!(handed[0]["source"], json!(backend.as_str()));
-    assert!(
-        agent_rx.try_recv().is_none(),
-        "a cli event is dispatched, not emitted on the agent"
-    );
+    // one model: the same event also lands on the agent's own inbox, for every view watching it
+    let mirrored = agent_rx.try_recv().expect("a cli event is emitted on the agent too").payload;
+    assert_eq!(mirrored["client_id"], json!("cli"));
 
     // …and a NON-cli caller still lands on the agent's own inbox.
     crate::events::to_caller(&kernel, &backend, "browser_tok", json!({"type": "token"})).await;
