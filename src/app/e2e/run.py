@@ -177,6 +177,11 @@ def canonical(p: Path) -> str:
     return os.path.abspath(p) if WINDOWS else os.path.realpath(p)
 
 
+def state_of(folder: Path) -> str:
+    """The home's row path for an opened folder: its state folder, `<folder>/.fantastic`."""
+    return canonical(folder / ".fantastic")
+
+
 async def until(what: str, check, timeout: float, every: float = 0.5):
     """`check()` (sync or async) until it is truthy; its value. Fails naming `what`."""
     end = time.monotonic() + timeout
@@ -252,7 +257,7 @@ class Run:
 
     async def running_canvas(self, folder: Path, timeout: float = 60) -> dict:
         """`folder` listed `running`, its run file naming a live pid whose url answers."""
-        await self.row_status(canonical(folder), "running", timeout)
+        await self.row_status(state_of(folder), "running", timeout)
         run = await until(f"{folder.name}'s canvas.yaml", lambda: self.canvas_run(folder), 30)
         need(isinstance(run.get("pid"), int) and pid_alive(run["pid"]), f"{folder.name}: {run}")
         self.pids.add(run["pid"])
@@ -265,7 +270,7 @@ class Run:
         p = subprocess.run([str(self.app), str(self.beta)], env=self.env, capture_output=True, text=True, timeout=10)
         say(f"hand-over exited {p.returncode} in {time.monotonic() - t0:.1f} s; stderr: {p.stderr.strip()!r}")
         need(p.returncode == 0, f"the second launch exited {p.returncode}: {p.stderr}")
-        await until("beta listed", lambda: self.row(canonical(self.beta)), 60)
+        await until("beta listed", lambda: self.row(state_of(self.beta)), 60)
 
     async def canvas_survives(self, run: dict) -> None:
         """P is alive and answers; after a reflect on its kernel and 3 s more, still."""
@@ -398,7 +403,7 @@ async def webdriver(run: Run) -> None:
 async def sessions(run: Run, wd: WebDriver) -> None:
     """Steps 1–8, on one driver."""
     await until("tauri-driver up", lambda: _status(wd), 30)
-    alpha = canonical(run.alpha)
+    alpha = state_of(run.alpha)
 
     say("1. a session with alpha: the window shows the Home page")
     wd.start(run.app, [str(run.alpha)])
@@ -542,7 +547,7 @@ def quit_plain(app: subprocess.Popen) -> None:
 async def plain(run: Run) -> None:
     """macOS and Windows: steps 1, 3–7 without WebDriver (see the module docs):
     argv, the app's stderr announcements, the run file and the home's API."""
-    alpha = canonical(run.alpha)
+    alpha = state_of(run.alpha)
 
     say("1. launch with alpha: the home and the backdrop on stderr")
     app, err = launch(run, [str(run.alpha)], "first")

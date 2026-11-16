@@ -5,7 +5,7 @@ iframe: the probe reads it through CDP, as the chat probes read a chat). Seeded:
 `notes.txt` and `docs/a.md`. No cell, no model.
 
 1. the column and the view's parts are drawn, in the mock's layout: the Kernels strip with this
-   kernel highlighted, the header with "Hide the tree", the Agents nav with the title block, the
+   kernel highlighted, the header with "Hide the tree", the Agents nav with the tree, the
    filter field and the Files switch (off); the "Waiting for you" box is hidden (nothing asks);
 2. agent rows are drawn: the root (depth 0), `user` and `files`; no file row yet;
 3. the Files switch on: the project's `docs`, `notes.txt` (and the other root entries) are rows

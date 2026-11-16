@@ -61,7 +61,7 @@ def main() -> bool:
             parts = await side(pg, "({"
                 "strip: !!document.querySelector('nav[aria-label=Kernels] .k.here'),"
                 "head: !!document.querySelector('.head h1') && !!document.querySelector('button[aria-label=\"Hide the tree\"]'),"
-                "agents: !!document.querySelector('nav[aria-label=Agents] .title b'),"
+                "agents: !!document.querySelector('nav[aria-label=Agents] #tree[role=tree]'),"
                 "filter: !!document.querySelector('input[aria-label=\"Filter agents and files\"]'),"
                 "files_switch: document.querySelector('button[role=switch][aria-label=\"Show files in the tree\"]')?.getAttribute('aria-checked'),"
                 "waiting_hidden: document.getElementById('wait').hidden === true})")
