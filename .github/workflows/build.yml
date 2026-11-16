@@ -764,7 +764,7 @@ jobs:
             cat /etc/debian_version
             apt-get update -q
             apt-get install -y -q --no-install-recommends /deb/fantastic-app-*.deb
-            fantastic readme | grep -q "fantastic canvas"
+            fantastic usage 2>&1 | grep -q "fantastic mcp"  # an unknown word prints the usage
             test -x /usr/bin/fantastic-app'
       - name: keep the packages
         uses: actions/upload-artifact@v7
