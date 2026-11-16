@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { FakeEl, installFakeDom } from "./fake_dom.ts";
 import { credentialsView } from "../src/bundles/credentials_view/credentials_view.ts";
 import { storeView } from "../src/bundles/store_view/store_view.ts";
+import { schedulerView } from "../src/bundles/scheduler_view/scheduler_view.ts";
 import type { ViewContext } from "../src/bundles/view.ts";
 
 installFakeDom();
@@ -19,10 +20,12 @@ function rig(reply: (p: Dict) => Dict) {
     watch: () => {},
     unwatch: () => {},
     onInbox: (_src: string, fn: (p: Dict) => void) => ((inbox = fn), () => void (inbox = null)),
+    onLifecycle: (_src: string, fn: (s: "connected" | "disconnected") => void) => ((life = fn), () => void (life = null)),
   };
+  let life: ((s: "connected" | "disconnected") => void) | null = null;
   const mount = new FakeEl("div");
   const ctx = { kernel, mount, selfId: "v", backend: "agent", close: () => {} } as unknown as ViewContext;
-  return { ctx, mount, calls, fire: (p: Dict) => inbox?.(p), live: () => inbox !== null };
+  return { ctx, mount, calls, fire: (p: Dict) => inbox?.(p), live: () => inbox !== null, up: (s: "connected" | "disconnected") => life?.(s) };
 }
 
 test("credentials_view_dom_has_no_secret_text", async () => {
@@ -66,4 +69,88 @@ test("read_view_does_not_read_again_for_the_echo_of_its_own_reads", async () => 
   r.fire({ type: "appended", table: "rows", id: 1 });
   await flush();
   assert.equal(r.calls.length, before + 1, "an event of the agent reads it again");
+});
+
+/** Each read view against its own agent: copies of calls (its own reads, another client's
+ *  writes) read nothing; each change event the agent publishes reads it again. */
+const READ_VIEWS = [
+  {
+    name: "store",
+    view: storeView,
+    reply: (p: Dict): Dict => (p["type"] === "dump" ? { tables: { rows: [], fold_refs: [] } } : { matches: [] }),
+    copies: [{ type: "dump" }, { type: "search", query: "x" }, { type: "append", rows: [{ text: "a" }] }, { type: "prune", ids: [1] }, { type: "inject", tables: {} }, { type: "read" }],
+    events: [{ type: "appended", table: "rows", id: 1 }, { type: "pruned", n: 1 }, { type: "injected", rows: 2 }],
+  },
+  {
+    name: "scheduler",
+    view: schedulerView,
+    reply: (p: Dict): Dict => (p["type"] === "list" ? { schedules: [] } : { history: [] }),
+    copies: [{ type: "list" }, { type: "history", limit: 20 }, { type: "schedule", target: "t", payload: { type: "reflect" }, interval_seconds: 5 }, { type: "tick_now", schedule_id: "sch_1" }, { type: "unschedule", schedule_id: "sch_1" }, { type: "pause" }],
+    events: [{ type: "schedule_fired", schedule_id: "sch_1", result: {}, error: null }, { type: "scheduled", schedule_id: "sch_1" }, { type: "unscheduled", schedule_id: "sch_1" }, { type: "paused", schedule_id: "sch_1" }, { type: "resumed", schedule_id: "sch_1" }],
+  },
+  {
+    name: "credentials",
+    view: credentialsView,
+    reply: (p: Dict): Dict => (p["type"] === "list" ? { refs: [] } : { callable_by: {} }),
+    copies: [{ type: "list" }, { type: "reflect" }, { type: "set", ref: "a", fields: { k: "v" } }, { type: "forget", ref: "a" }, { type: "get", ref: "a" }],
+    events: [{ type: "stored", ref: "a" }, { type: "forgotten", ref: "a" }],
+  },
+];
+
+for (const c of READ_VIEWS) {
+  test(`${c.name} view: a copy of a call reads nothing; a published change reads again`, async () => {
+    const r = rig(c.reply);
+    await c.view.mount(r.ctx);
+    for (const copy of c.copies) {
+      const before = r.calls.length;
+      r.fire(copy);
+      await flush();
+      assert.equal(r.calls.length, before, `a copy read again: ${JSON.stringify(copy)}`);
+    }
+    for (const ev of c.events) {
+      const before = r.calls.length;
+      r.fire(ev);
+      await flush();
+      assert.ok(r.calls.length > before, `${String(ev.type)}: not read again`);
+    }
+  });
+
+  test(`${c.name} view: its watch coming up (a late dial, a reconnect) reads it again`, async () => {
+    const r = rig(c.reply);
+    await c.view.mount(r.ctx);
+    let before = r.calls.length;
+    r.up("disconnected");
+    await flush();
+    assert.equal(r.calls.length, before, "a drop reads nothing");
+    r.up("connected");
+    await flush();
+    assert.ok(r.calls.length > before, "the watch up: read again");
+    before = r.calls.length;
+    r.up("connected");
+    await flush();
+    assert.ok(r.calls.length > before, "a reconnect: read again");
+  });
+}
+
+test("read view: only the newest of overlapping reads draws", async () => {
+  let n = 0;
+  const gates: Array<() => void> = [];
+  const r = rig((p) => (p["type"] === "dump" ? { tables: { rows: Array.from({ length: n }, () => ({ owner: "alice", row: {} })), fold_refs: [] } } : {}));
+  const slow = r.ctx.kernel as unknown as { send: (items: Array<{ target: string; payload: Dict }>) => Promise<unknown> };
+  const fast = slow.send;
+  await storeView.mount(r.ctx);
+  // the first read hangs until released; the second answers at once with more rows
+  slow.send = (items) => new Promise((res) => gates.push(() => void fast(items).then(res)));
+  n = 1;
+  r.fire({ type: "appended", table: "rows", id: 1 });
+  slow.send = fast;
+  n = 2;
+  r.fire({ type: "appended", table: "rows", id: 2 });
+  await flush();
+  assert.match(r.mount.textContent, /alice {2}2 rows/);
+  n = 1;
+  gates.forEach((g) => g());
+  await flush();
+  await flush();
+  assert.match(r.mount.textContent, /alice {2}2 rows/, "the stale read did not draw over the newer one");
 });

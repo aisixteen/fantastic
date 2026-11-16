@@ -210,22 +210,46 @@ impl Handler for SchedulerBundle {
     ) -> Result<Reply, BundleError> {
         // `shutdown` is NOT a verb: the tick loop dies in `on_delete`, never behind
         // a verb.
-        let reply = match call {
-            verbs::Call::Reflect(_) => reflect_reply(agent_id, kernel),
-            verbs::Call::Boot(_) => boot_reply(agent_id, kernel).await,
-            verbs::Call::Shutdown(_) => Value::Null,
-            verbs::Call::Schedule(a) => schedule_reply(agent_id, a, kernel).await,
-            verbs::Call::Unschedule(a) => unschedule_reply(agent_id, &a.schedule_id, kernel).await,
-            verbs::Call::List(_) => list_reply(agent_id, kernel).await,
-            verbs::Call::Pause(a) => {
-                set_paused(agent_id, a.schedule_id, kernel, "pause", "paused", true).await
+        // WHAT CHANGED, PUBLISHED on the scheduler's own inbox (as `schedule_fired` is, per
+        // run): a schedule made (`scheduled`), removed (`unscheduled`), paused or resumed
+        // (`paused` / `resumed`) — its views re-read `list` on these, never on a call's copy
+        let (reply, changed) = match call {
+            verbs::Call::Reflect(_) => (reflect_reply(agent_id, kernel), None),
+            verbs::Call::Boot(_) => (boot_reply(agent_id, kernel).await, None),
+            verbs::Call::Shutdown(_) => (Value::Null, None),
+            verbs::Call::Schedule(a) => (schedule_reply(agent_id, a, kernel).await, Some(("scheduled", "schedule_id"))),
+            verbs::Call::Unschedule(a) => {
+                (unschedule_reply(agent_id, &a.schedule_id, kernel).await, Some(("unscheduled", "removed")))
             }
-            verbs::Call::Resume(a) => {
-                set_paused(agent_id, a.schedule_id, kernel, "resume", "resumed", false).await
-            }
-            verbs::Call::TickNow(a) => tick_now_reply(agent_id, &a.schedule_id, kernel).await,
-            verbs::Call::History(a) => history_reply(agent_id, a, kernel).await,
+            verbs::Call::List(_) => (list_reply(agent_id, kernel).await, None),
+            verbs::Call::Pause(a) => (
+                set_paused(agent_id, a.schedule_id, kernel, "pause", "paused", true).await,
+                Some(("paused", "paused")),
+            ),
+            verbs::Call::Resume(a) => (
+                set_paused(agent_id, a.schedule_id, kernel, "resume", "resumed", false).await,
+                Some(("resumed", "resumed")),
+            ),
+            verbs::Call::TickNow(a) => (tick_now_reply(agent_id, &a.schedule_id, kernel).await, None),
+            verbs::Call::History(a) => (history_reply(agent_id, a, kernel).await, None),
         };
+        if let Some((kind, done)) = changed {
+            // only a change that happened: an id was minted, or the flag the reply leads with is true
+            let happened = match reply.get(done) {
+                Some(Value::Bool(b)) => *b,
+                Some(Value::String(s)) => !s.is_empty(),
+                _ => false,
+            };
+            if happened && reply.get("error").is_none() {
+                let mut ev = json!({"type": kind});
+                for key in ["schedule_id", "scheduler_id"] {
+                    if let Some(v) = reply.get(key) {
+                        ev[key] = v.clone();
+                    }
+                }
+                kernel.emit(agent_id, ev).await;
+            }
+        }
         Ok(Some(reply))
     }
 

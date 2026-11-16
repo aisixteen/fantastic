@@ -812,8 +812,23 @@ impl Handler for RamStoreBundle {
             }
             Call::Read(a) => self.read(agent_id, &a, kernel),
             Call::Search(a) => self.search(agent_id, &a, kernel),
-            Call::Prune(a) => self.prune(agent_id, &a, kernel),
-            Call::Inject(a) => self.inject(agent_id, &a),
+            // WHAT CHANGED, PUBLISHED on the store's own inbox, as `appended` is (and as
+            // sqlite_store does): a prune that removed rows (`pruned {n}`) and a whole-store
+            // inject (`injected {rows}`) — its view re-reads the counts on these
+            Call::Prune(a) => {
+                let out = self.prune(agent_id, &a, kernel);
+                if let Some(n) = out.get("pruned").and_then(Value::as_u64).filter(|n| *n > 0) {
+                    kernel.emit(agent_id, json!({"type": "pruned", "n": n})).await;
+                }
+                out
+            }
+            Call::Inject(a) => {
+                let out = self.inject(agent_id, &a);
+                if let Some(rows) = out.get("rows").filter(|_| out.get("error").is_none()).cloned() {
+                    kernel.emit(agent_id, json!({"type": "injected", "rows": rows})).await;
+                }
+                out
+            }
             Call::Dump(_) => self.dump(agent_id),
             // the bytes verbs ride the binary path only (`handle_binary`)
             Call::PutBytes(_) => refusal(

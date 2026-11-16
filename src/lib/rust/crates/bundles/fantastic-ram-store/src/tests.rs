@@ -663,6 +663,30 @@ async fn append_emits_one_appended_event_per_new_row() {
     }
 }
 
+/// THE STORE'S OTHER WRITES ARE PUBLISHED too, as sqlite_store's are: a prune that removed
+/// rows (`pruned {n}`) and a whole-store inject (`injected {rows}`) — its view re-reads the
+/// counts on these. A prune that removed nothing and a refused inject publish nothing.
+#[tokio::test]
+async fn prune_and_inject_are_published_on_the_stores_inbox() {
+    let k = store();
+    let mut rx = k.ensure_inbox(&AgentId::from("mem"));
+    let out = append(&k, "alice", json!([{"content": "a"}, {"content": "b"}])).await;
+    let first = out["ids"][0].clone();
+    call(&k, json!({"type": "prune", "ids": [first]}), Some("alice")).await;
+    call(&k, json!({"type": "prune", "ids": [424242]}), Some("alice")).await;
+    let bad = json!({"rows": "not a list"});
+    call(&k, json!({"type": "inject", "tables": bad}), Some("alice")).await;
+    let one = json!({"rows": [{"owner": "alice", "row": {"id": 1}}]});
+    call(&k, json!({"type": "inject", "tables": one}), Some("alice")).await;
+    let mut got = Vec::new();
+    while let Some(item) = rx.try_recv() {
+        if matches!(item.payload["type"].as_str(), Some("pruned" | "injected")) {
+            got.push(item.payload);
+        }
+    }
+    assert_eq!(got, vec![json!({"type": "pruned", "n": 1}), json!({"type": "injected", "rows": 1})]);
+}
+
 // ─── put_bytes / get_bytes (#622) ───────────────────────────────────
 
 /// A call carrying `bytes` as the request body at `data`: the reply and its body.

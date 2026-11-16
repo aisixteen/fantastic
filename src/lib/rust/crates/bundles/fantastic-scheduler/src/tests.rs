@@ -1561,3 +1561,34 @@ fn stored_schedule_fields_are_read_strictly() {
     missing.as_object_mut().unwrap().remove("run_count");
     assert!(check_stored(&missing).is_err());
 }
+
+/// THE SCHEDULER PUBLISHES WHAT CHANGED on its own inbox — a schedule made, removed, paused,
+/// resumed, and each run (`schedule_fired`) — what its views re-read `list`/`history` on.
+/// A removal of an unknown id publishes nothing.
+#[tokio::test]
+async fn schedule_changes_and_runs_are_published_on_its_inbox() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    let mut rx = kernel.ensure_inbox(&sch);
+    let send = |p: Value| {
+        let kernel = Arc::clone(&kernel);
+        let sch = sch.clone();
+        async move { kernel.send(vec![Item::new(sch, p)]).await.remove(0).result }
+    };
+    let made = send(json!({"type": "schedule", "target": "kernel_state", "payload": {"type": "list_agents"}, "interval_seconds": 999_999})).await;
+    let sid = made["schedule_id"].as_str().unwrap().to_string();
+    send(json!({"type": "pause", "schedule_id": sid})).await;
+    send(json!({"type": "resume", "schedule_id": sid})).await;
+    send(json!({"type": "tick_now", "schedule_id": sid})).await;
+    send(json!({"type": "unschedule", "schedule_id": "sch_000000"})).await;
+    send(json!({"type": "unschedule", "schedule_id": sid})).await;
+    let mut got = Vec::new();
+    while let Some(item) = rx.try_recv() {
+        let kind = item.payload["type"].as_str().unwrap_or_default().to_string();
+        if matches!(kind.as_str(), "scheduled" | "paused" | "resumed" | "schedule_fired" | "unscheduled") {
+            assert_eq!(item.payload["schedule_id"], json!(sid), "{}", item.payload);
+            got.push(kind);
+        }
+    }
+    assert_eq!(got, ["scheduled", "paused", "resumed", "schedule_fired", "unscheduled"]);
+}
