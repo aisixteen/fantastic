@@ -3,6 +3,7 @@ import type { Json, Payload } from "../../lib.ts";
 import { forgetSize, reportSize, MEASURE_SRC } from "../canvas/fit.ts";
 import { mountView } from "../../../../page/view_relay.js";
 import { htmlBodyOf } from "./html_agent.ts";
+import { viewSkinBlock } from "../skin/view_skins.ts";
 
 // html_view — renders an html_agent's MUTABLE body (`meta.html`) as a FULLY
 // sandboxed `srcdoc` iframe, and wires it to the JS kernel through a per-iframe
@@ -47,6 +48,11 @@ export interface PanelOptions {
   cellInbox?: boolean;
 }
 
+/** The skin every view on the canvas is drawn with: `transparent` (the canvas's skin is fixed
+ *  at boot, so it never changes while the page lives). */
+let canvasSkin: string | null = null;
+const canvasViewSkin = (): string => (canvasSkin ??= viewSkinBlock("transparent"));
+
 export function mountPanel(ctx: ViewContext, body: () => string | Promise<string>, opts: PanelOptions = {}): ViewHandle & { reload(): void } {
   const { kernel, mount, selfId } = ctx;
   // null-origin sandbox: scripts run, but the ONLY way out is postMessage to us.
@@ -77,6 +83,8 @@ export function mountPanel(ctx: ViewContext, body: () => string | Promise<string
   const view = mountView({
     mount,
     html: body,
+    // a view on the canvas sits on it like a cell: see-through, the canvas's colours (#698)
+    skin: canvasViewSkin(),
     trusted,
     extra: MEASURE_SRC,
     transport: {

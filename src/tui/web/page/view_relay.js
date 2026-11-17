@@ -12,6 +12,11 @@
 // bookkeeping (pending watches, unmount, reload), and applies the view's own `calls`
 // when the page names them.
 //
+// THE SKIN (#698): a view declares no colour of its own; every value it draws with is a skin
+// token (`var(--fc-…)`). The page passes the token block of the skin it shows (`skin`: light,
+// dark or transparent, `web/page/view_skins/`) and the new block on a change (`skin(css)`):
+// the block is the frame's `<style id="fantastic-skin">`, the first thing in its head.
+//
 // Loaded by a page as an ES module: `const m = await import("./view_relay.js")` from the
 // host path it is served at (the canvas page's host serves `view_relay.js` beside its
 // files), or imported by the canvas bundle.
@@ -36,6 +41,9 @@ export function connectorSrc(extra = "") {
       if (s) for (const cb of [...s]) { try { cb(m.payload); } catch (_) {} }
     } else if (m.op === "inbox") {
       for (const cb of [...inboxCbs]) { try { cb(m.payload); } catch (_) {} }
+    } else if (m.op === "skin") {
+      const s = document.getElementById("fantastic-skin");
+      if (s && typeof m.css === "string" && s.textContent !== m.css) s.textContent = m.css;
     }
   });
   ${extra}
@@ -74,6 +82,7 @@ export function callAllowed(calls, target, verb) {
  * opts:
  *   mount      host element the iframe is appended to
  *   html       the view's body (a fragment), or a function returning it (or a promise); read at every render
+ *   skin       the token block of the skin the page shows (`:root { --fc-…: …; }`); `skin(css)` on the handle sends a new one
  *   transport  { send(target, payload) -> Promise<reply>,
  *                watch(src, deliver) -> Promise<{off} | {denied: payload}>  (gate and subscribe; `deliver(payload)` per event),
  *                emit?(target, payload) }
@@ -89,12 +98,14 @@ export function callAllowed(calls, target, verb) {
  *   inbox      subscribe(deliver) -> off: messages for the view (its cell's inbox); `reload_html` re-renders instead
  *   win, doc   window and document, for a host that is not the page (tests)
  *
- * Returns { iframe, reload(), inbox(payload), unmount() }.
+ * Returns { iframe, reload(), inbox(payload), skin(css), unmount() }.
  */
 export function mountView(opts) {
   const win = opts.win || globalThis.window;
   const doc = opts.doc || globalThis.document;
   const transport = opts.transport;
+  if (typeof opts.skin !== "string" || opts.skin === "") throw new Error("mountView: the page passes the skin's token block (opts.skin)");
+  let skin = opts.skin;
   const iframe = doc.createElement("iframe");
   if (!opts.trusted) iframe.setAttribute("sandbox", "allow-scripts");
   iframe.setAttribute("allow", "autoplay");
@@ -103,7 +114,7 @@ export function mountView(opts) {
     const src = typeof opts.html === "function" ? opts.html() : opts.html;
     return Promise.resolve(src).then((b) => {
       const body = opts.cell === undefined ? String(b) : String(b).split("{{cell}}").join(opts.cell);
-      iframe.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><script>${connector}</script></head><body>${body}</body></html>`;
+      iframe.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><style id="fantastic-skin">${skin}</style><script>${connector}</script></head><body>${body}</body></html>`;
     });
   };
   void render();
@@ -113,6 +124,8 @@ export function mountView(opts) {
     if (iframe.contentWindow) iframe.contentWindow.postMessage(Object.assign({ __ft: true }, m), "*");
   };
   const inbox = (payload) => toIframe({ op: "inbox", payload });
+  // a skin changed while a render was loading reached the old document: each load takes the current one
+  iframe.addEventListener("load", () => toIframe({ op: "skin", css: skin }));
   const watchOffs = new Map();
   const denial = (target, verb) => ({ error: `the view may not call ${target} ${verb}`, reason: "denied" });
   const reach = (target, verb) => opts.calls === undefined || callAllowed(opts.calls, target, verb);
@@ -196,6 +209,11 @@ export function mountView(opts) {
     iframe,
     reload: () => void render(),
     inbox,
+    skin(css) {
+      if (typeof css !== "string" || css === "" || css === skin) return;
+      skin = css;
+      toIframe({ op: "skin", css });
+    },
     unmount() {
       win.removeEventListener("message", onMsg);
       offInbox();
