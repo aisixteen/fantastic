@@ -36,6 +36,8 @@ test("the tree cell is granted exactly the view's calls: its own agent and the r
 
 test("a fresh canvas places the tree cell at its left, sized like a cell", () => {
   assert.ok(SIDEBAR_RECT.x < 100 && SIDEBAR_RECT.width >= 300 && SIDEBAR_RECT.height >= 480);
+  // its head (32 px above the body) starts below the background's headline (pinned top-left, ~190 px tall)
+  assert.ok(SIDEBAR_RECT.y - 32 >= 186);
 });
 
 test("what the tree view emits on its cell's inbox is heard, and nothing after the unsubscribe", () => {
