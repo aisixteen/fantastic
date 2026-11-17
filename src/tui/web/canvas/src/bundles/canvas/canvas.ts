@@ -277,7 +277,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // the tree cells (`sidebar_cell.ts`): what each one's view emits, heard while it is drawn
   const treeEars = new Map<string, () => void>();
   // THE TREE CELL (`sidebar_cell.ts`): a row click (`select {id}`) picks or opens that agent; a file row
-  // the previews follow; "open on the canvas" is the view's `open`; its hide button hides the cell; its
+  // the previews follow; "open on the canvas" is the view's `open`; its
   // open branches are kept per canvas, given back when the view says `ready`
   const treeStore = pageStore(`sidebar:${BACKEND}`);
   const hearTree = (cellId: string): (() => void) =>
@@ -288,7 +288,6 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       },
       selectPath: (path) => select({ path, agent: agentIndex.agentAt(path)?.id ?? null }, cellId),
       open: (path) => void openOnCanvas({ path }),
-      hide: () => hideCell(cellId),
       ready: () => {
         const state = treeStore.load();
         if (state !== null && state !== undefined) kernel.emit(cellId, { type: "restore", state } as unknown as Payload);

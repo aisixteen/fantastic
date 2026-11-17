@@ -229,7 +229,7 @@ export function mountView(opts) {
 const text = (v) => (typeof v === "string" && v !== "" ? v : null);
 
 /** One message the sidebar view posted: what it means for the page. `ears` has any of
- *  `select(id)`, `selectPath(path)`, `open(path, dir)`, `hide()`, `ready()`, `keep(state)`;
+ *  `select(id)`, `selectPath(path)`, `open(path, dir)`, `ready()`, `keep(state)`;
  *  one a page does not need is left out. Anything else (the view's own echoes,
  *  `select_kernel`) is ignored. */
 export function hearSidebar(m, ears) {
@@ -245,9 +245,6 @@ export function hearSidebar(m, ears) {
     case "open_file":
     case "open_dir":
       if (path !== null && ears.open) ears.open(path, m.type === "open_dir");
-      break;
-    case "hide_tree":
-      if (ears.hide) ears.hide();
       break;
     case "ready":
       if (ears.ready) ears.ready();

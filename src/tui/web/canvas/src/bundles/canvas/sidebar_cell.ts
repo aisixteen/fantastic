@@ -6,7 +6,7 @@ import type { SidebarEars } from "../../../../page/view_relay.js";
 // like any other agent's view — moved, sized, hidden and kept like any cell, see-through on the
 // canvas. A fresh canvas places one at its left (`SIDEBAR_RECT`). What the view emits is heard on
 // its cell's inbox (`hearSidebar`, the base relay module's, the team page's too): `select {id}`,
-// `select_file {path}`, `open_file`/`open_dir {path}`, `hide_tree`, `ready` and `state {state}`
+// `select_file {path}`, `open_file`/`open_dir {path}`, `ready` and `state {state}`
 // (which branches and folders are open: kept by the page per canvas, given back as `restore`).
 
 /** The host agent whose view the tree cell shows. */

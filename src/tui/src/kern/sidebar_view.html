@@ -7,8 +7,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--fc-color-accent
 .hov:hover{background:var(--fc-color-surface-hover)}
 .head{flex:none;display:flex;align-items:center;justify-content:space-between;gap:8px;height:32px;padding:0 10px 0 12px}
 .head h1{margin:0;font:600 11px/1 var(--fc-font-family-mono);letter-spacing:.5px;text-transform:uppercase;color:var(--fc-color-text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chip{flex:none;display:grid;place-items:center;width:20px;height:20px;border-radius:var(--fc-radius-chip);background:var(--fc-color-surface-button);box-shadow:inset 0 0 0 1px var(--fc-color-line-faint);color:var(--fc-color-text-muted)}
-/* a host that draws the cell's own title bar (and its hide button) mounts the view with data-host-head */
+/* a host that draws the cell's own title bar mounts the view with data-host-head */
 :root[data-host-head] .head{display:none}
 :root[data-host-head] .split{border-top:0}
 .split{flex:1 1 0;min-height:0;display:flex;border-top:1px solid var(--fc-color-line-button)}
@@ -98,7 +97,6 @@ body{position:relative}
 :root[data-host-head] .head{display:flex}
 .head{height:56px;padding:0 128px 0 16px}
 .head h1{font:600 18px/1.3 var(--fc-font-family-sans);letter-spacing:-.01em;text-transform:none}
-#hide{display:none}
 .split{flex-direction:column}
 .rail{position:absolute;top:6px;right:12px;max-width:110px;flex-direction:row;justify-content:flex-end;gap:6px;padding:0;border-right:0;overflow-x:auto;overflow-y:hidden}
 .k{flex:none;width:auto;min-height:44px;padding:4px;border-radius:var(--fc-radius-panel);box-shadow:inset 0 0 0 1px var(--fc-color-line-button)}
@@ -124,7 +122,7 @@ body{position:relative}
 }
 @media (prefers-reduced-motion:reduce){*{animation:none!important}}
 </style>
-<header class="head"><h1 id="ttl">Agents</h1><button class="chip hov" id="hide" type="button" aria-label="Hide the tree" title="Hide the tree"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M6 3v10"/></svg></button></header>
+<header class="head"><h1 id="ttl">Agents</h1></header>
 <div class="split">
 <nav class="rail" id="strip" aria-label="Kernels"></nav>
 <nav class="agents" aria-label="Agents">
@@ -655,7 +653,6 @@ fantastic.onMessage(function (m) {
   st.folded = r.folded; st.open = r.open; st.filesOn = r.filesOn; st.toolsOpen = r.toolsOpen; st.full = r.full;
   paint(); syncFiles();
 });
-$("hide").addEventListener("click", function () { post({ type: "hide_tree" }); });
 $("sw").addEventListener("click", function () { setFiles(!st.filesOn); });
 $("full").addEventListener("click", function () { st.full = !st.full; keep(); paint(); });
 $("filter").addEventListener("input", function () { st.filter = $("filter").value; paintTree(); paintPins(); });

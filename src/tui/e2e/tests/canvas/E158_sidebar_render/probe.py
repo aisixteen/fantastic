@@ -68,13 +68,13 @@ def main() -> bool:
             r["1a2 it is a cell like any other: at the canvas's left, not full screen"] = bool(tree_cell) and await pg.js(f"(()=>{{const f=document.querySelector('.agent-frame[data-id={tree_cell}]'); const c=document.getElementById('canvas').getBoundingClientRect(); const r=f.getBoundingClientRect(); return !f.classList.contains('full') && r.left - c.left < 200 && r.width < c.width / 2;}})()") is True
             parts = await side(pg, "({"
                 "strip: !!document.querySelector('nav[aria-label=Kernels] .k.here'),"
-                "head: !!document.querySelector('.head h1') && !!document.querySelector('button[aria-label=\"Hide the tree\"]'),"
+                "head: !!document.querySelector('.head h1'),"
                 "agents: !!document.querySelector('nav[aria-label=Agents] #tree[role=tree]'),"
                 "filter: !!document.querySelector('input[aria-label=\"Filter agents and files\"]'),"
                 "files_switch: document.querySelector('button[role=switch][aria-label=\"Show files in the tree\"]')?.getAttribute('aria-checked'),"
                 "waiting_hidden: document.getElementById('wait').hidden === true})")
             info["parts"] = parts
-            r["1b kernel strip, header with Hide the tree, Agents nav, filter, Files switch (off)"] = bool(parts) and parts["strip"] and parts["head"] and parts["agents"] and parts["filter"] and parts["files_switch"] == "false"
+            r["1b kernel strip, header, Agents nav, filter, Files switch (off)"] = bool(parts) and parts["strip"] and parts["head"] and parts["agents"] and parts["filter"] and parts["files_switch"] == "false"
             r["1c the Waiting for you box is hidden while nothing asks"] = bool(parts) and parts["waiting_hidden"]
 
             # the tree opens compact (AI agents under the root, the rest in the tools group); Full shows the whole kernel tree
@@ -111,12 +111,8 @@ def main() -> bool:
             r["6a the filter narrows the tree"] = await side(pg, "(()=>{const i=document.getElementById('filter'); i.value='a.md'; i.dispatchEvent(new Event('input')); return true})()") is True
             r["6b to the match and the rows above it"] = await until(pg, "(()=>{const t=[...document.querySelectorAll('#tree [role=treeitem]')]; return t.length >= 2 && t.length < 12 && !!document.querySelector('#tree [data-path=\"docs/a.md\"]') && !document.querySelector('#tree [data-path=\"notes.txt\"]')})()", 10)
 
-            r["7a Hide the tree"] = await click(pg, "button[aria-label=\"Hide the tree\"]")
-            await asyncio.sleep(1)
-            info["after_hide"] = await pg.js(f"(()=>{{const f=document.querySelector('.agent-frame[data-id={tree_cell}]'); return f ? [f.className, getComputedStyle(f).display, getComputedStyle(f).visibility] : 'gone';}})()")
-            r["7b hides the tree cell"] = bool(await pg.until(f"!document.querySelector('.agent-frame[data-id={tree_cell}]') || getComputedStyle(document.querySelector('.agent-frame[data-id={tree_cell}]')).display === 'none' || getComputedStyle(document.querySelector('.agent-frame[data-id={tree_cell}]')).visibility === 'hidden'", 10))
             info["page_errors"] = [x for x in pg.logs if "WebGL" not in x][:8]
-            r["8 no page error"] = not info["page_errors"]
+            r["7 no page error"] = not info["page_errors"]
 
     try:
         asyncio.run(run())
