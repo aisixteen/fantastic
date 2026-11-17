@@ -35,7 +35,9 @@ iframe: the probe reads it through CDP, as the chat probes read a chat). Seeded:
      first (B thinking, A's own call already done), then waits on the reply: `waiting` is drawn
      between B's answer and the call it wakes, read from the drawn states;
    - Asks you: A's inquiry to the person: `?` on warn; answered, the badge goes;
-   - Paused: the `pause` verb: II on muted, the face greyed; `resume` with nothing held: at rest.
+   - Paused: the `pause` verb: II on muted, the face greyed; then the host stops and starts
+     again (the page reopened): the sidebar boots before the chats, so A's own `paused` at its
+     boot is drawn again, II on muted; `resume` with nothing held: at rest.
 
    With `E158_SHOTS=<dir>` the probe saves the tree cell (`tree-<state>.png`) and A's and B's rows
    at 3x (`rows-<state>.png`; some also in the light view skin, `-light`) per state, and the

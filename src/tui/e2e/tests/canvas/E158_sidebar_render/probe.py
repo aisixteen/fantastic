@@ -334,6 +334,20 @@ async def states(pg, r: dict, info: dict) -> None:
     r["8k2 drawn as the design: II on muted, the face greyed"] = bool(x) and x["kind"] == "paused" and x["glyph"] == "II" and x["bg"] == x["tok"]["subtle"] \
         and x["fg"] == x["tok"]["accent_on"] and x["sub"] == "paused" and "grayscale(1)" in (x["face"] or "") and "opacity(0.6)" in (x["face"] or "")
     await shot(pg, "9-paused", info, light=True)
+
+    # Paused after a restart: the host stops and starts again; the sidebar boots before the
+    # chats, so A's own `paused` at its boot (its store says paused) is drawn again
+    await pg.cdp("Page.navigate", url="about:blank")
+    rig.stop()
+    rig.start()
+    await pg.open(rig.url)
+    r["8k3 after a restart the view draws again"] = await until(pg, f"!!document.querySelector('{row}')", 40)
+    await side(pg, WATCH_ROWS % json.dumps([A, B]))
+    r["8k4 after a restart: still II on muted, the word paused"] = await state("!!b && b.classList.contains('paused') && s && s.textContent==='paused'")
+    x = await now("paused_after_restart")
+    r["8k5 drawn as before the restart: II on muted, the face greyed"] = bool(x) and x["kind"] == "paused" and x["glyph"] == "II" and x["bg"] == x["tok"]["subtle"] \
+        and x["sub"] == "paused" and "grayscale(1)" in (x["face"] or "")
+    await shot(pg, "11-paused-after-restart", info)
     info["resume"] = await host_call(port, A, {"type": "resume"})
     r["8l resume with nothing held: at rest, no badge, no word, the face in colour"] = await state("(!b || getComputedStyle(b).display==='none') && !s && getComputedStyle(r.querySelector('.gl .face')).filter==='none'")
     await shot(pg, "10-resumed-idle", info)
