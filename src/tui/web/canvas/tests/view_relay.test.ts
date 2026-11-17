@@ -182,7 +182,7 @@ test("the cell's inbox goes to the view; reload_html renders again; unmount clea
 
 test("a page that needs only some of what the sidebar view says leaves the other ears out", () => {
   const got: string[] = [];
-  for (const m of [{ type: "select", id: "a" }, { type: "open_file", path: "p" }, { type: "hide_tree" }, { type: "ready" }, { type: "state", state: 1 }]) hearSidebar(m, { select: (id) => got.push(id) });
+  for (const m of [{ type: "select", id: "a" }, { type: "open_file", path: "p" }, { type: "ready" }, { type: "state", state: 1 }]) hearSidebar(m, { select: (id) => got.push(id) });
   assert.deepEqual(got, ["a"]);
 });
 

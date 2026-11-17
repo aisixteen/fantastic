@@ -43,12 +43,11 @@ test("what the tree view emits on its cell's inbox is heard, and nothing after t
   k.setRoot(new Agent({ id: "canvas", handlerModule: "canvas.ts" }));
   k.register(new Agent({ id: "view_tree", parentId: "canvas" }));
   const got: string[] = [];
-  const off = hearSidebarCell(k, "view_tree", { select: (id) => got.push(id), hide: () => got.push("hide") });
+  const off = hearSidebarCell(k, "view_tree", { select: (id) => got.push(id) });
   k.emit("view_tree", { type: "select", id: "a" } as unknown as Payload);
-  k.emit("view_tree", { type: "hide_tree" } as unknown as Payload);
   off();
   k.emit("view_tree", { type: "select", id: "b" } as unknown as Payload);
-  assert.deepEqual(got, ["a", "hide"]);
+  assert.deepEqual(got, ["a"]);
 });
 
 test("a host agent's view says kernel for the HOST's root; any other panel keeps the page's", async () => {
@@ -81,7 +80,6 @@ function ears(): { calls: unknown[][]; e: SidebarEars } {
       select: (id) => calls.push(["select", id]),
       selectPath: (p) => calls.push(["selectPath", p]),
       open: (p, dir) => calls.push(["open", p, dir]),
-      hide: () => calls.push(["hide"]),
       ready: () => calls.push(["ready"]),
       keep: (s) => calls.push(["keep", s]),
     },
@@ -95,7 +93,6 @@ test("each thing the view posts is heard once; anything else is ignored", () => 
     { type: "select_file", path: "src/a.rs" },
     { type: "open_file", path: "src/a.rs" },
     { type: "open_dir", path: "src" },
-    { type: "hide_tree" },
     { type: "ready" },
     { type: "state", state: { open: { src: true } } },
   ]) hearSidebar(m, e);
@@ -104,7 +101,6 @@ test("each thing the view posts is heard once; anything else is ignored", () => 
     ["selectPath", "src/a.rs"],
     ["open", "src/a.rs", false],
     ["open", "src", true],
-    ["hide"],
     ["ready"],
     ["keep", { open: { src: true } }],
   ]);

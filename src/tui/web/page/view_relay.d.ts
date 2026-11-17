@@ -35,7 +35,6 @@ export interface SidebarEars {
   select?(id: string): void;
   selectPath?(path: string): void;
   open?(path: string, dir: boolean): void;
-  hide?(): void;
   ready?(): void;
   keep?(state: unknown): void;
 }
