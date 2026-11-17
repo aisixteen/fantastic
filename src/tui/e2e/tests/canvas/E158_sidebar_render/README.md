@@ -21,16 +21,20 @@ iframe: the probe reads it through CDP, as the chat probes read a chat). Seeded:
    makes every AI (`canvas_root create`). A has `transport_retries: 1` and `misfire_limit: 2`
    (the least), so its second failed or dead call in a row gives the chain up. Each state comes
    from the chat's real path and is checked on A's row (badge class, glyph, colours against the
-   skin tokens, the word under the name, the face's filter):
-   - at rest: no badge, no word;
+   skin tokens, the word under the name, the face's filter, the outline round the tile: a 1.5px
+   ring 3px outside it in the state's colour, drawn by the tile's `::before`):
+   - at rest: no badge, no word, no outline;
    - Working: `thinking` (the stub holds its answer), `queued` (a second message meanwhile),
-     `writing` (the answer's first line, then a hold), `retrying` (a stream that dies);
+     `writing` (the answer's first line, then a hold), `retrying` (a stream that dies); its
+     outline is a ray running round the tile (the accent over the faint selected line);
    - Done: a call that completed: ✓ on ok, kept after the call;
    - Failed: the retried stream dies again, the failed call handed back dies too, the chain
      gives up: × on error, kept;
-   - Stalled: an empty answer (a dead call), twice: `!` on warn is drawn between the dead call
+   - Stalled: an empty answer (a dead call), twice: `!` in the stall colour (warn 40% into
+     error), the word in it too, a dashed ring, is drawn between the dead call
      and the next one (the chain rerolls at once, then gives up), so it is read from the row's
-     drawn states (a MutationObserver), not from a still row;
+     drawn states (a MutationObserver, which keeps the first Stalled row's look), not from a
+     still row;
    - Working, waiting: A hands B a slow message and calls `await`; the chain runs its calls
      first (B thinking, A's own call already done), then waits on the reply: `waiting` is drawn
      between B's answer and the call it wakes, read from the drawn states;

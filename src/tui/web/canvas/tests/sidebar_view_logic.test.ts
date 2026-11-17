@@ -23,6 +23,7 @@ interface Pure {
   projectName(p: unknown): string;
   chatSet(reply: Obj): Record<string, boolean>;
   stateOf(phase: string | undefined, asks: boolean): { kind: string; label: string; glyph: string };
+  outlineOf(kind: string): string;
   treeRows(root: Obj, chats: Record<string, boolean>, folded: Record<string, boolean>, status: Record<string, string>, asks: Record<string, boolean>, files?: Obj, opts?: Obj): Obj[];
   filterRows(rows: Obj[], q: string): Obj[];
   keptState(st: Obj): Obj;
@@ -37,7 +38,7 @@ interface Pure {
   fileRows(lists: Record<string, Obj[]>, open: Record<string, boolean>, path: string, depth: number): Obj[];
 }
 const ctx = vm.createContext({});
-vm.runInContext(`${src.slice(from, to)}\nthis.api = { askAges, toolRows, pinRows, projectName, kernelStrip, chatSet, stateOf, treeRows, filterRows, keptState, restoredState, wantedWatches, changedDirs, heardOf, withPhase, askers, waitingRows, sortedListing, fileRows };`, ctx);
+vm.runInContext(`${src.slice(from, to)}\nthis.api = { askAges, toolRows, pinRows, projectName, kernelStrip, chatSet, stateOf, outlineOf, treeRows, filterRows, keptState, restoredState, wantedWatches, changedDirs, heardOf, withPhase, askers, waitingRows, sortedListing, fileRows };`, ctx);
 const raw = (ctx as unknown as { api: Pure }).api;
 // the vm's objects are of another realm: compare them as plain JSON
 const plain = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
@@ -137,6 +138,16 @@ test("state: asks > the last phase > idle, each phase the design's badge", () =>
   for (const p of ["idle", "tool_calling", "", "toString", undefined]) assert.deepEqual(plain(raw.stateOf(S(p), false)), { kind: "idle", label: "idle", glyph: "" }, String(p));
   const rows = plain(raw.treeRows(tree, { chat1: true }, {}, { chat1: "streaming" }, { chat1: true }));
   assert.equal((rows.find((r) => r["id"] === "chat1")!["state"] as Obj)["kind"], "ask");
+});
+
+test("outline: every state's ring round the tile, Working's a ray, Stalled's dashed, none at rest", () => {
+  const of = (phase: string | undefined, asks = false): string => raw.outlineOf(raw.stateOf(phase, asks).kind);
+  for (const p of ["queued", "thinking", "streaming", "retrying", "awaiting"]) assert.equal(of(p), "ol ray", p);
+  assert.equal(of("done", true), "ol", "asks you");
+  assert.equal(of("stalled"), "ol dash");
+  for (const p of ["failed", "paused", "done"]) assert.equal(of(p), "ol", p);
+  for (const p of ["idle", "", "toString", undefined]) assert.equal(of(p), "", String(p));
+  for (const k of ["idle", "toString", "constructor", ""]) assert.equal(raw.outlineOf(k), "", k);
 });
 
 test("waiting rows: one per inquiry, the oldest first, one line, an age", () => {

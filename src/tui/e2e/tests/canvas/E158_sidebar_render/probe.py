@@ -109,19 +109,24 @@ document.documentElement.dataset.seen='[]';
 const note=()=>{const seen=JSON.parse(document.documentElement.dataset.seen);
  for(const id of %s){const r=t.querySelector('[data-id="'+id+'"]'); if(!r) continue; const b=r.querySelector('.badge'), s=r.querySelector('.sub');
   const now=id+':'+(b?b.className.replace('badge','').trim():'none')+':'+(s?s.textContent:'');
-  const last=seen.filter(x=>x.startsWith(id+':')).pop(); if(last!==now) seen.push(now);}
+  const last=seen.filter(x=>x.startsWith(id+':')).pop(); if(last!==now) seen.push(now);
+  if(b&&b.classList.contains('stalled')&&document.documentElement.dataset.stall===undefined){const g=r.querySelector('.gl'), o=getComputedStyle(g,'::before'), p=document.createElement('i'); p.style.color='color-mix(in srgb,var(--fc-color-status-warn) 40%%,var(--fc-color-status-error))'; document.body.appendChild(p);
+   document.documentElement.dataset.stall=JSON.stringify({gl:g.className, ol_img:o.backgroundImage, bg:getComputedStyle(b).backgroundColor, sub:s?getComputedStyle(s).color:null, stall:getComputedStyle(p).color}); p.remove();}}
  document.documentElement.dataset.seen=JSON.stringify(seen);};
 new MutationObserver(note).observe(t,{childList:true,subtree:true,characterData:true,attributes:true}); note(); return true;})()"""
 
 # what a chat row draws now: its badge (class, glyph, colours), its word, the face's filter
 ROW_STATE = """(()=>{const r=document.querySelector('#tree [data-id="%s"]'); if(!r) return null;
 const b=r.querySelector('.gl .badge'), s=r.querySelector('.sub'), f=r.querySelector('.gl .face'), root=getComputedStyle(document.documentElement);
-const cs=b?getComputedStyle(b):null; const tok=n=>{const p=document.createElement('i'); p.style.color='var('+n+')'; document.body.appendChild(p); const c=getComputedStyle(p).color; p.remove(); return c;};
+const cs=b?getComputedStyle(b):null; const col=e=>{const p=document.createElement('i'); p.style.color=e; document.body.appendChild(p); const c=getComputedStyle(p).color; p.remove(); return c;}; const tok=n=>col('var('+n+')');
+const g=r.querySelector('.gl'), o=getComputedStyle(g,'::before');
 return {kind: b?b.className.replace('badge','').trim():null, glyph: b?b.textContent:null, shown: !!cs && cs.display!=='none',
  bg: cs?cs.backgroundColor:null, fg: cs?cs.color:null, ring: cs?cs.boxShadow:null, border: cs?cs.borderTopColor+'|'+cs.borderRightColor:null, anim: cs?cs.animationName:null,
  sub: s?s.textContent:null, sub_fg: s?getComputedStyle(s).color:null, face: f?getComputedStyle(f).filter:null,
+ gl: g.className, ol_bg: o.backgroundColor, ol_img: o.backgroundImage, ol_anim: o.animationName, ol_content: o.content, ol_inset: o.top + ' ' + o.left, ol_pad: o.paddingTop,
  tok: {warn: tok('--fc-color-status-warn'), warn_on: tok('--fc-color-status-warn-on'), error: tok('--fc-color-status-error'), ok: tok('--fc-color-status-ok'), ok_on: tok('--fc-color-status-ok-on'),
-       subtle: tok('--fc-color-text-subtle'), accent: tok('--fc-color-accent-base'), accent_on: tok('--fc-color-accent-on'), raised: tok('--fc-color-surface-raised')}};})()"""
+       subtle: tok('--fc-color-text-subtle'), accent: tok('--fc-color-accent-base'), accent_on: tok('--fc-color-accent-on'), raised: tok('--fc-color-surface-raised'),
+       stall: col('color-mix(in srgb,var(--fc-color-status-warn) 40%%,var(--fc-color-status-error))')}};})()"""
 
 
 async def side(pg, expr: str):
@@ -223,7 +228,7 @@ async def states(pg, r: dict, info: dict) -> None:
             await host_call(port, "canvas_root", {"type": "create", "record": chat_record(A, rig.stub_url, {"user": ["inquiry", "inquiries"], B: ["send"]}, misfire=2)})]
     info["made"] = made
     row = f"#tree [data-id=\"{A}\"]"
-    r["8a the two chats are rows of the tree, at rest: no badge, no word"] = await until(pg, f"!!document.querySelector('{row}') && !!document.querySelector('#tree [data-id=\"{B}\"]') && getComputedStyle(document.querySelector('{row} .badge')).display==='none' && !document.querySelector('{row} .sub')", 30)
+    r["8a the two chats are rows of the tree, at rest: no badge, no word"] = await until(pg, f"!!document.querySelector('{row}') && !!document.querySelector('#tree [data-id=\"{B}\"]') && getComputedStyle(document.querySelector('{row} .badge')).display==='none' && !document.querySelector('{row} .sub') && !document.querySelector('{row} .gl').classList.contains('ol') && getComputedStyle(document.querySelector('{row} .gl'),'::before').content==='none'", 30)
     await side(pg, WATCH_ROWS % json.dumps([A, B]))
     await shot(pg, "0-idle", info)
 
@@ -232,7 +237,12 @@ async def states(pg, r: dict, info: dict) -> None:
 
     def look(x: dict | None, kind: str, glyph: str, bg: str, fg: str, sub: str) -> bool:
         return bool(x) and x["kind"] == kind and x["glyph"] == glyph and x["shown"] and x["bg"] == x["tok"][bg] and x["fg"] == x["tok"][fg] \
-            and x["sub"] == sub and x["ring"].startswith(x["tok"]["raised"]) and x["face"] == "none"
+            and x["sub"] == sub and x["ring"].startswith(x["tok"]["raised"]) and x["face"] == "none" and ringed(x, bg)
+
+    def ringed(x: dict | None, colour: str) -> bool:
+        """The outline round the tile: a plain 1.5px ring 3px outside it, in the state's colour."""
+        return bool(x) and "ol" in x["gl"].split() and "ray" not in x["gl"].split() and "dash" not in x["gl"].split() \
+            and x["ol_bg"] == x["tok"][colour] and x["ol_img"] == "none" and x["ol_inset"] == "-3px -3px" and x["ol_pad"] == "1.5px"
 
     async def seen() -> list:
         return json.loads(await side(pg, "document.documentElement.dataset.seen") or "[]")
@@ -260,6 +270,8 @@ async def states(pg, r: dict, info: dict) -> None:
     r["8b Working: the spinner, the word thinking"] = await state("!!b && b.classList.contains('active') && s && s.textContent==='thinking'")
     x = await now("thinking")
     r["8b2 the spinner is the accent ring that spins (no glyph)"] = bool(x) and x["glyph"] == "" and x["anim"] == "spin" and x["border"].endswith(x["tok"]["accent"]) and x["ring"].startswith(x["tok"]["raised"])
+    r["8b3 Working's outline: a ray running round the tile (accent over the faint line)"] = bool(x) and x["gl"].split()[-2:] == ["ol", "ray"] \
+        and x["ol_anim"] == "ray" and x["ol_img"].startswith("conic-gradient") and x["tok"]["accent"] in x["ol_img"]
     await shot(pg, "1-working-thinking", info, light=True)
     second = asyncio.create_task(fire(port, A, {"type": "send", "text": "S_AGAIN"}))
     r["8c Working: a message that waits for its call, the word queued"] = await state("!!b && b.classList.contains('active') && s && s.textContent==='queued'")
@@ -300,6 +312,11 @@ async def states(pg, r: dict, info: dict) -> None:
     r["8h Stalled: the dead call drew the ! badge, the word stalled; the chain then gave up (Failed)"] = await ends(n, "active:thinking", "stalled:stalled", "active:thinking", "stalled:stalled", "failed:failed")
     info["dead"] = await dead
     info["stalled_drawn"] = await seen()
+    st = json.loads(await side(pg, "document.documentElement.dataset.stall || 'null'") or "null")
+    info["stalled_look"] = st
+    r["8h2 Stalled drawn in its own colour (warn 40% into error): the ! badge, a dashed ring"] = bool(st) and st["bg"] == st["stall"] \
+        and "ol" in st["gl"].split() and "dash" in st["gl"].split() and st["ol_img"].startswith("repeating-conic-gradient") and st["stall"] in st["ol_img"]
+    r["8h3 the word stalled in the same colour"] = bool(st) and st["sub"] == st["stall"]
 
     # Working, waiting: A hands B a slow message and calls `await`. The chain runs its calls
     # first (B thinks meanwhile; A's own call has ended: done), then waits on the reply that is
@@ -332,7 +349,8 @@ async def states(pg, r: dict, info: dict) -> None:
     r["8k Paused: II on muted"] = await state("!!b && b.classList.contains('paused')")
     x = await now("paused")
     r["8k2 drawn as the design: II on muted, the face greyed"] = bool(x) and x["kind"] == "paused" and x["glyph"] == "II" and x["bg"] == x["tok"]["subtle"] \
-        and x["fg"] == x["tok"]["accent_on"] and x["sub"] == "paused" and "grayscale(1)" in (x["face"] or "") and "opacity(0.6)" in (x["face"] or "")
+        and x["fg"] == x["tok"]["accent_on"] and x["sub"] == "paused" and "grayscale(1)" in (x["face"] or "") and "opacity(0.6)" in (x["face"] or "") \
+        and ringed(x, "subtle")
     await shot(pg, "9-paused", info, light=True)
 
     # Paused after a restart: the host stops and starts again; the sidebar boots before the
@@ -346,10 +364,10 @@ async def states(pg, r: dict, info: dict) -> None:
     r["8k4 after a restart: still II on muted, the word paused"] = await state("!!b && b.classList.contains('paused') && s && s.textContent==='paused'")
     x = await now("paused_after_restart")
     r["8k5 drawn as before the restart: II on muted, the face greyed"] = bool(x) and x["kind"] == "paused" and x["glyph"] == "II" and x["bg"] == x["tok"]["subtle"] \
-        and x["sub"] == "paused" and "grayscale(1)" in (x["face"] or "")
+        and x["sub"] == "paused" and "grayscale(1)" in (x["face"] or "") and ringed(x, "subtle")
     await shot(pg, "11-paused-after-restart", info)
     info["resume"] = await host_call(port, A, {"type": "resume"})
-    r["8l resume with nothing held: at rest, no badge, no word, the face in colour"] = await state("(!b || getComputedStyle(b).display==='none') && !s && getComputedStyle(r.querySelector('.gl .face')).filter==='none'")
+    r["8l resume with nothing held: at rest, no badge, no word, the face in colour"] = await state("(!b || getComputedStyle(b).display==='none') && !s && getComputedStyle(r.querySelector('.gl .face')).filter==='none' && !r.querySelector('.gl').classList.contains('ol')")
     await shot(pg, "10-resumed-idle", info)
     info["seen"] = json.loads(await side(pg, "document.documentElement.dataset.seen") or "[]")
 

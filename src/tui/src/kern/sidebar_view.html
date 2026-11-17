@@ -65,7 +65,8 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--fc-color-accent
 .r.f.d .name{font-weight:500;color:var(--fc-color-text-primary)}
 .r .sub{font-size:12px;line-height:1.3;color:var(--fc-color-text-subtle);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .r .asks{flex:none;font:500 11px/1 var(--fc-font-family-mono);color:var(--fc-color-status-warn)}
-.sub.ask,.sub.stalled{color:var(--fc-color-status-warn)}
+.sub.ask{color:var(--fc-color-status-warn)}
+.sub.stalled{color:color-mix(in srgb,var(--fc-color-status-warn) 40%,var(--fc-color-status-error))}
 .sub.failed{color:var(--fc-color-status-error)}
 .sub.done{color:var(--fc-color-status-ok)}
 .pins{flex:none;display:flex;flex-direction:column;gap:1px;padding-top:6px;border-top:1px solid var(--fc-color-line-button);max-height:45%;overflow-y:auto}
@@ -77,12 +78,24 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--fc-color-accent
 .tg .ic span:first-child{margin-left:0}
 .tg .lb{flex:1;min-width:0;font-weight:500;color:var(--fc-color-text-muted)}
 .badge{position:absolute;right:-4px;bottom:-4px;display:none;place-items:center;box-sizing:border-box;width:13px;height:13px;border-radius:50%;font:700 9px/1 var(--fc-font-family-sans);box-shadow:0 0 0 2px var(--fc-color-surface-raised)}
-.badge.ask,.badge.stalled{display:grid;background:var(--fc-color-status-warn);color:var(--fc-color-status-warn-on)}
+.badge.ask{display:grid;background:var(--fc-color-status-warn);color:var(--fc-color-status-warn-on)}
+.badge.stalled{display:grid;background:color-mix(in srgb,var(--fc-color-status-warn) 40%,var(--fc-color-status-error));color:var(--fc-color-accent-on)}
 .badge.failed{display:grid;background:var(--fc-color-status-error);color:var(--fc-color-accent-on)}
 .badge.done{display:grid;background:var(--fc-color-status-ok);color:var(--fc-color-status-ok-on)}
 .badge.paused{display:grid;background:var(--fc-color-text-subtle);color:var(--fc-color-accent-on)}
 .badge.active{display:grid;border:2px solid var(--fc-color-accent-base);border-top-color:transparent;background:var(--fc-color-surface-raised);animation:spin 1100ms linear infinite}
 .r .gl.paused .face{filter:grayscale(1) opacity(.6)}
+/* the outline round a chat's tile, one per state (none at rest): a 1.5px ring 3px outside the
+   tile; Working's is a ray running round it, Stalled's is dashed */
+.r .gl.ol::before{content:"";position:absolute;inset:-3px;border-radius:calc(var(--fc-radius-card) + 3px);padding:1.5px;background:var(--olc);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none}
+.r .gl.ol.dash::before{background:repeating-conic-gradient(var(--olc) 0 9deg,transparent 9deg 15deg)}
+.r .gl.ol.ray::before{background:conic-gradient(from var(--ray),var(--fc-color-line-selected) 0 62%,var(--fc-color-accent-base) 86%,var(--fc-color-line-selected) 100%);animation:ray 1.6s linear infinite}
+.r .gl.active{--olc:var(--fc-color-accent-base)}
+.r .gl.ask{--olc:var(--fc-color-status-warn)}
+.r .gl.stalled{--olc:color-mix(in srgb,var(--fc-color-status-warn) 40%,var(--fc-color-status-error))}
+.r .gl.failed{--olc:var(--fc-color-status-error)}
+.r .gl.paused{--olc:var(--fc-color-text-subtle)}
+.r .gl.done{--olc:var(--fc-color-status-ok)}
 .r.t .main{min-height:34px;padding:2px 8px 2px 4px}
 .r.t .gl{width:24px;height:24px;border-radius:var(--fc-radius-control)}
 .r.sel,.r.sel .main{background:var(--fc-color-surface-selected);box-shadow:inset 0 0 0 1px var(--fc-color-line-selected)}
@@ -96,6 +109,8 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--fc-color-accent
 .note{padding:4px 8px;font-size:12px;color:var(--fc-color-text-subtle)}
 .note.err{color:var(--fc-color-status-error)}
 @keyframes spin{to{transform:rotate(360deg)}}
+@property --ray{syntax:'<angle>';initial-value:0deg;inherits:false}
+@keyframes ray{to{--ray:360deg}}
 @media (max-width:520px) and (pointer:coarse){
 body{position:relative}
 :root[data-host-head] .head{display:flex}
@@ -124,7 +139,7 @@ body{position:relative}
 .tg{min-height:44px;margin-left:14px}
 .pins{margin:0 -12px;padding:6px 12px 14px}
 }
-@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+@media (prefers-reduced-motion:reduce){*,.r .gl.ol.ray::before{animation:none!important}}
 </style>
 <header class="head"><h1 id="ttl">Agents</h1></header>
 <div class="split">
@@ -183,6 +198,14 @@ var ENDED = {
   done: { kind: "done", label: "done", glyph: "\u2713" },
   paused: { kind: "paused", label: "paused", glyph: "II" }
 };
+// the outline round the tile of a chat in state `kind`: Working's runs round it (ray),
+// Stalled's is dashed, each other state's is a plain ring, none at rest
+function outlineOf(kind) {
+  if (kind === "active") return "ol ray";
+  if (kind === "stalled") return "ol dash";
+  if (Object.prototype.hasOwnProperty.call(ENDED, kind) || kind === "ask") return "ol";
+  return "";
+}
 function stateOf(phase, asks) {
   if (asks) return { kind: "ask", label: "asks you", glyph: "?" };
   phase = typeof phase === "string" ? phase : "";
@@ -487,7 +510,8 @@ function agentRow(row) {
   w.style.paddingLeft = (row.depth * 14) + "px";
   w.appendChild(foldButton(row, row.foldable, row.folded, function () { st.folded[row.id] = !st.folded[row.id]; keep(); paint(); }));
   var b = el("button", "main hov"); b.type = "button"; b.title = row.id;
-  var g = glyph(row.chat ? ROBOT : row.id === FILES_ID ? FOLDER : TOOL, row.chat ? "ai" + (row.state && row.state.kind === "paused" ? " paused" : "") : "");
+  var ol = row.chat && row.state ? outlineOf(row.state.kind) : "";
+  var g = glyph(row.chat ? ROBOT : row.id === FILES_ID ? FOLDER : TOOL, row.chat ? "ai" + (ol ? " " + row.state.kind + " " + ol : "") : "");
   if (row.state) g.appendChild(el("span", "badge " + row.state.kind, row.state.glyph));
   b.appendChild(g);
   var two = el("span", "two");
