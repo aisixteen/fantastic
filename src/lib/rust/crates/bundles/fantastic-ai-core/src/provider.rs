@@ -33,7 +33,7 @@ pub enum ProviderEvent {
 /// raised: true}` — a FAILED execution, not a completed one carrying an error.
 #[derive(Clone, Debug)]
 pub struct ProviderError {
-    /// What `status(done, reason='error')` carries — python `str(e)`.
+    /// What `status(failed, reason='error')` carries — python `str(e)`.
     pub message: String,
     /// The python exception class a raise renders as (`RuntimeError`, or
     /// `ValueError` for a record field the backend cannot run without).
@@ -135,7 +135,7 @@ pub struct Stalled {
 
 impl Stalled {
     /// The turn's failure: `stream_stalled`, the seconds and the endpoint. A
-    /// raise, so the turn ends with an error row and `status(done, reason='error')`.
+    /// raise, so the call ends with an error row and `status(failed, reason='error')`.
     #[must_use]
     pub fn error(&self, name: &str, endpoint: &str) -> ProviderError {
         ProviderError::transport(format!(

@@ -24,13 +24,14 @@ interface Pure {
   metaOf(sender: string, name: string): string;
   codeSpans(text: string): { text: string; code: boolean }[];
   phaseWord(phase: string): string;
+  endsCall(phase: string): boolean;
   readHead(call: (p: Row) => Promise<Row | null>, size?: number): Promise<Row[]>;
   textsOf(rows: Row[]): Map<number, string>;
   thoughtsOf(rows: Row[]): Map<number, { text: string; cut: number }>;
   groupTitle(g: Row): { n: string; verbs: string };
 }
 const ctx = vm.createContext({});
-vm.runInContext(`${src.slice(from, to)}\nthis.api = { parseFrom, shapeRows, historyTail, thoughtsOf, groupTitle, stateOf, inquiryAge, metaOf, codeSpans, phaseWord, readHead, textsOf };`, ctx);
+vm.runInContext(`${src.slice(from, to)}\nthis.api = { parseFrom, shapeRows, historyTail, thoughtsOf, groupTitle, stateOf, inquiryAge, metaOf, codeSpans, phaseWord, endsCall, readHead, textsOf };`, ctx);
 const raw = (ctx as unknown as { api: Pure }).api;
 // the vm's objects are of another realm: compare them as plain JSON
 const plain = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
@@ -45,6 +46,7 @@ const P: Pure = {
   metaOf: (a, b) => raw.metaOf(a, b),
   codeSpans: (x) => plain(raw.codeSpans(x)),
   phaseWord: (p) => raw.phaseWord(p),
+  endsCall: (p) => raw.endsCall(p),
   readHead: async (c, n) => plain(await raw.readHead(c, n)),
   textsOf: (r) => new Map(Object.entries(plain(Object.fromEntries(raw.textsOf(r)))).map(([k, v]) => [Number(k), v])),
 };
@@ -181,6 +183,11 @@ test("`code` spans split out of a text, the text stays whole", () => {
   assert.deepEqual(P.codeSpans("no code, one ` tick"), [{ text: "no code, one ` tick", code: false }]);
   assert.deepEqual(P.codeSpans("`a\nb`"), [{ text: "`a\nb`", code: false }], "a span never crosses a line");
   assert.deepEqual(P.codeSpans(""), []);
+});
+
+test("a call ends on done, failed, stalled or awaiting; paused and idle are outside a call", () => {
+  for (const ph of ["done", "failed", "stalled", "awaiting", "paused", "idle"]) assert.equal(P.endsCall(ph), true, ph);
+  for (const ph of ["queued", "thinking", "streaming", "retrying", "tool_calling", ""]) assert.equal(P.endsCall(ph), false, ph);
 });
 
 test("the running turn's word is the one the tree shows", () => {

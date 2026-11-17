@@ -47,7 +47,7 @@ pub struct CurrentEntry {
     pub origin: String,
     /// Lock-acquisition timestamp.
     pub started_at: f64,
-    /// Current phase: thinking|streaming|tool_calling|done.
+    /// Current phase of the call: queued|thinking|streaming|retrying, or the phase that ended it.
     pub phase: String,
     /// Accumulated streamed text (for status snapshots).
     pub text_so_far: String,

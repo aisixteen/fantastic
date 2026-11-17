@@ -462,7 +462,7 @@ pub async fn run_generation(
             )],
         )
         .await?;
-        emit_status(kernel, state, self_id, client_id, "done", {
+        emit_status(kernel, state, self_id, client_id, "stalled", {
             let mut m = Map::new();
             m.insert("reason".to_string(), json!("dead_turn"));
             m

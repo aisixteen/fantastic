@@ -1994,7 +1994,7 @@ impl Handler for AnthropicBundle {
                 let capabilities = capabilities_of(agent_id, kernel).await;
                 reflect_reply(agent_id, kernel, capabilities)
             }
-            Call::Boot(_) => verbs::boot(agent_id, kernel),
+            Call::Boot(_) => verbs::boot(agent_id, kernel).await,
             Call::UsageVerb(a) => usage_reply(agent_id, a.reset == Some(true), kernel),
             Call::UsageResetVerb(_) => {
                 let out = usage_reset_reply(agent_id, kernel);

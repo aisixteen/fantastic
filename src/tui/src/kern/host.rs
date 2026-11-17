@@ -8,7 +8,8 @@
 //! root — which mints the guid and installs the record writer — then the MEMORY
 //! STORE the root names in `memory_store_id`, probes that it serves the operator,
 //! and starts flushing execution rows into it. Without a store it refuses, loud.
-//! Everyone else is booted by this shell afterwards, in registration order. A recorded
+//! Everyone else is booted by this shell afterwards: every sidebar first, then the rest in
+//! registration order ([`boot_order`]). A recorded
 //! `web` host is booted in every mode: it is the core listener whose routes every agent shares.
 //!
 //! THE KERNEL KEEPS NO CONVERSATION. An AI agent's rows live in the memory store
@@ -197,7 +198,21 @@ async fn set_web_bind(kernel: &Arc<Kernel>, id: &AgentId, addr: &str, notes: &mu
     }
 }
 
-/// Boot every agent the kernel's start did not (`done`), in registration order. A recorded
+/// The order the shell boots the tree in: every sidebar first (its boot taps the kernel's
+/// state stream, so a chat's status said at its own boot — `paused` from its store — is
+/// one it sees), then everyone else in registration order.
+pub(crate) fn boot_order(kernel: &Kernel) -> Vec<AgentId> {
+    let (mut first, rest): (Vec<AgentId>, Vec<AgentId>) = kernel.agent_ids().into_iter().partition(|id| {
+        kernel
+            .agents
+            .get(id)
+            .is_some_and(|a| a.handler_module.as_deref() == Some(crate::kern::sidebar::HANDLER_MODULE))
+    });
+    first.extend(rest);
+    first
+}
+
+/// Boot every agent the kernel's start did not (`done`), in [`boot_order`]. A recorded
 /// `web` host boots too, in every mode: it is the one HTTP/WS listener, and every agent with
 /// a route reuses it. `web_port`/`web_bind` (`--port`/`--host`) are set on it before
 /// it listens; a `web` with neither the flag nor a recorded port gets a free one. A tree with no `web` record binds no port. A failure is a note, and the boot
@@ -218,7 +233,7 @@ async fn boot_the_rest(kernel: &Arc<Kernel>, done: &[String], web_port: Option<u
         Some(ids) if found.get("error").is_none() => web = ids.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
         _ => notes.push(format!("the web hosts could not be listed: {}", found.get("error").and_then(Value::as_str).unwrap_or("no tree"))),
     }
-    for id in kernel.agent_ids() {
+    for id in boot_order(kernel) {
         if done.contains(&id.0) {
             continue;
         }
@@ -340,7 +355,7 @@ impl Host {
             .await
             .map_err(|e| KernelErr::Boot(format!("could not set the root's grants: {e}")))?;
 
-        // Everyone else, in registration order. A failure is logged and
+        // Everyone else: the sidebars, then the rest in registration order. A failure is logged and
         // skipped: one bundle refusing must not take the shell down with it.
         let mut notes = boot_the_rest(&kernel, &done, web_port, web_bind.as_deref()).await;
 
@@ -788,6 +803,30 @@ pub(crate) async fn stop_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sidebar_boots_before_a_chat_registered_ahead_of_it() {
+        // the disk walk's order on a restart: `canvas_root`'s chat sorts before `sidebar`
+        let kernel = Kernel::new();
+        for (id, hm, parent) in [
+            ("kernel_state", "kernel_state.tools", None),
+            ("canvas_root", "canvas.tools", Some("kernel_state")),
+            ("c1", "vllm_backend.tools", Some("canvas_root")),
+            ("sidebar", crate::kern::sidebar::HANDLER_MODULE, Some("kernel_state")),
+            ("user", "user.tools", Some("kernel_state")),
+        ] {
+            kernel.register(fantastic_kernel::Agent::new(
+                AgentId::from(id),
+                Some(hm.to_string()),
+                parent.map(AgentId::from),
+                Default::default(),
+                std::path::PathBuf::new(),
+                false,
+            ));
+        }
+        let order: Vec<String> = boot_order(&kernel).into_iter().map(|a| a.0).collect();
+        assert_eq!(order, ["sidebar", "kernel_state", "canvas_root", "c1", "user"]);
+    }
 
     #[test]
     fn the_registry_holds_exactly_the_declared_set() {

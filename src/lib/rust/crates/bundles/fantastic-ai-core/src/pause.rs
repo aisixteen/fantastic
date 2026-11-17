@@ -8,6 +8,10 @@
 //!   `{kind:"pause", paused_since}`   — the agent is paused from here on
 //!   `{kind:"held", payload}`         — an incoming message held while paused
 //!   `{kind:"resume", role:"user"}`   — released: the held messages after it run
+//!
+//! The chat says so on its own inbox, as a `status`: `paused` when the pause verb
+//! pauses it and when it boots with its store saying paused; `idle` when a resume
+//! has nothing held (held messages, released, move it through a call's own phases).
 
 use std::sync::Arc;
 
@@ -15,8 +19,10 @@ use fantastic_kernel::bundle::BundleError;
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Value};
 
+use crate::events::emit_status;
 use crate::helpers::now_secs;
-use crate::memory::{head, save_history, store_of, MemResult};
+use crate::memory::{head, save_history, store_call, store_of, MemResult};
+use crate::state::state_for;
 
 const PAUSE: &str = "pause";
 const RESUME: &str = "resume";
@@ -87,6 +93,49 @@ pub async fn hold_if_paused(
     Ok(Some(json!({"held": v.held.len() + 1, "paused": true})))
 }
 
+/// The chat's `status` outside a call — `paused` or `idle` — on its own inbox, for
+/// the terminal caller (no call of anyone's is running).
+async fn announce(agent_id: &AgentId, kernel: &Arc<Kernel>, phase: &str) {
+    let client_id = fantastic_kernel::inquiry::default_client_id();
+    emit_status(
+        kernel,
+        &state_for(agent_id),
+        agent_id,
+        &client_id,
+        phase,
+        serde_json::Map::new(),
+    )
+    .await;
+}
+
+/// AT BOOT: a chat whose store says it is paused says `paused`. Reads only the last
+/// `pause`/`resume` row since the last clear, straight from the store — the head is
+/// not loaded, so the boot stays lazy for the conversation.
+pub async fn announce_at_boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> MemResult<()> {
+    let res = store_call(
+        agent_id,
+        kernel,
+        json!({
+            "type": "read",
+            "from_last_kind": "clear",
+            "kinds": [PAUSE, RESUME],
+            "order": "desc",
+            "limit": 1,
+        }),
+    )
+    .await?;
+    let last = crate::memory::rows_of(&res, agent_id);
+    if last
+        .first()
+        .and_then(|r| r.get("kind"))
+        .and_then(Value::as_str)
+        == Some(PAUSE)
+    {
+        announce(agent_id, kernel, "paused").await;
+    }
+    Ok(())
+}
+
 /// The held call as the stored row keeps it: the `send` verb and its arguments, which
 /// `resume` hands back to the agent's entry.
 fn held_call(args: &crate::declared::Send) -> Value {
@@ -121,6 +170,7 @@ pub async fn pause(
         })],
     )
     .await?;
+    announce(agent_id, kernel, "paused").await;
     Ok(json!({"paused": true, "held": 0}))
 }
 
@@ -148,6 +198,9 @@ pub async fn resume(
     )
     .await?;
     let released = v.held.len();
+    if released == 0 {
+        announce(agent_id, kernel, "idle").await;
+    }
     let held = v.held;
     // Released as their own kernel task, one after another, so each held turn runs
     // after the resumed row and in arrival order, without holding this dispatch.

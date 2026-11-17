@@ -77,7 +77,7 @@ pub struct ErrorLine {
     pub client_id: Option<String>,
 }
 
-/// The phases of a turn a status marks.
+/// The phases of a call a status marks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusPhase {
@@ -89,8 +89,18 @@ pub enum StatusPhase {
     ToolCalling,
     /// The reply is streaming (no output: `token` covers it).
     Streaming,
-    /// The turn ended (no output: `done` covers it).
+    /// The call ended (no output: `done` covers it).
     Done,
+    /// The call ended in an error, a timeout or a give-up (no output: `error` covers it).
+    Failed,
+    /// The call ended with no reply (no output).
+    Stalled,
+    /// The call ended while the agent waits on its own work (no output).
+    Awaiting,
+    /// The agent is paused (no output).
+    Paused,
+    /// A resume found nothing held (no output).
+    Idle,
 }
 
 /// The phases of a context notice.
@@ -247,9 +257,15 @@ fn render_status(args: &Status) -> Option<String> {
                 )
             }
         }
-        // `streaming` and `done` are SILENT here: the token + done verbs
+        // `streaming` and the ends are SILENT here: the token + done verbs
         // already cover them, and printing twice would double the stream.
-        StatusPhase::Streaming | StatusPhase::Done => return None,
+        StatusPhase::Streaming
+        | StatusPhase::Done
+        | StatusPhase::Failed
+        | StatusPhase::Stalled
+        | StatusPhase::Awaiting
+        | StatusPhase::Paused
+        | StatusPhase::Idle => return None,
     };
     Some(line)
 }

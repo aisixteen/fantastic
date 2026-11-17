@@ -256,7 +256,7 @@ pub(crate) async fn deliver(
     // unwinding here would kill sibling branches that are still fine.
     //
     // THE ANNOUNCEMENT IS AN ORDINARY `status` EVENT — same shape a failed direct
-    // send produces (`{type:'status', source, phase:'done', detail:{…}, ts,
+    // send produces (`{type:'status', source, phase:'failed', detail:{…}, ts,
     // client_id}`), because that is the shape reflect's `emits` documents and the
     // shape a UI/harness subscribes to: `reason`/`error` ride in `detail`, where
     // every subscriber reads `ev.detail.reason`.
@@ -297,7 +297,7 @@ pub(crate) async fn deliver(
             &state_for(&target_id),
             &target_id,
             client_id,
-            "done",
+            "failed",
             detail,
         )
         .await;
@@ -2037,7 +2037,7 @@ async fn route_reply_gated(
             let mut detail = Map::new();
             detail.insert("reason".to_string(), json!("awaiting"));
             detail.insert("pending".to_string(), json!(pending));
-            emit_status(&kernel, &st, &self_id, &client_id, "done", detail).await;
+            emit_status(&kernel, &st, &self_id, &client_id, "awaiting", detail).await;
             // ONE CHAIN PER AGENT (#227): an await is not a running chain. Messages
             // that land while it waits are held and wake it through `chain_ended`.
             return false;
@@ -2100,7 +2100,7 @@ async fn route_reply_gated(
 /// An `await` with nothing in flight ends the chain VISIBLY (#177): the note is
 /// stored as a row the model reads on its next turn, and `status` goes to `done`
 /// with `reason='nothing_to_await'`. A store that refuses the note is reported on
-/// `status(done, reason='error')` instead — the end is never silent.
+/// `status(failed, reason='error')` instead — the end is never silent.
 async fn note_empty_await(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
@@ -2115,9 +2115,10 @@ async fn note_empty_await(
         "parent": parent,
     });
     let mut detail = Map::new();
-    match crate::memory::save_history(self_id, kernel, &[row]).await {
+    let phase = match crate::memory::save_history(self_id, kernel, &[row]).await {
         Ok(_) => {
             detail.insert("reason".to_string(), json!("nothing_to_await"));
+            "done"
         }
         Err(e) => {
             detail.insert("reason".to_string(), json!("error"));
@@ -2125,10 +2126,11 @@ async fn note_empty_await(
                 "error".to_string(),
                 json!(format!("the await's note could not be stored: {}", e.0)),
             );
+            "failed"
         }
-    }
+    };
     let st = state_for(self_id);
-    emit_status(kernel, &st, self_id, client_id, "done", detail).await;
+    emit_status(kernel, &st, self_id, client_id, phase, detail).await;
 }
 
 /// The calls that are not dispatches: they end, park or answer the chain, or (`keep`)
@@ -2251,7 +2253,7 @@ async fn give_up(
     detail.insert("reason".to_string(), json!("gave_up"));
     detail.insert("error".to_string(), json!(gave_up));
     detail.insert("silent_turns".to_string(), json!(streak));
-    emit_status(kernel, &st, self_id, client_id, "done", detail).await;
+    emit_status(kernel, &st, self_id, client_id, "failed", detail).await;
     let mut body = Map::new();
     body.insert("error".to_string(), json!(gave_up));
     close_inquiry(kernel, self_id.as_str(), client_id, body).await;

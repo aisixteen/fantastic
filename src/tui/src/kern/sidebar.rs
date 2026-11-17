@@ -28,7 +28,7 @@ const VIEW: &str = include_str!("sidebar_view.html");
 
 /// What the view calls: the root's reflect and listing, the person's open inquiries, the
 /// project's files (a listing, and a watch on each folder it shows, held by the files agent),
-/// and its OWN agent: its `reflect` (the chats' call phases now and the files' root, the
+/// and its OWN agent: its `reflect` (each chat's last phase and the files' root, the
 /// project's name) and its events (`watch`) —
 /// the one agent it watches. It reads again only on what the agent publishes, never on a
 /// timer.
@@ -198,7 +198,7 @@ mod tests {
                 "sidebar": ["reflect", "watch"],
             })
         );
-        assert_eq!(r["phases"], json!({}), "no chat inside a call");
+        assert_eq!(r["phases"], json!({}), "no chat has moved");
         assert_eq!(r["open"], json!(0));
         assert_eq!(r["files_root"], "", "no files agent: no root");
     }
@@ -264,9 +264,16 @@ mod tests {
         emit("files", json!({"type": "changed", "path": "src/a.rs", "kind": "deleted"})).await;
         assert_eq!(next(&mut rx).await, json!({"type": "files_changed", "path": "src/a.rs", "change": "removed"}));
 
-        // the call ended: the chat is at rest
-        emit("c1", json!({"type": "status", "source": "c1", "phase": "done"})).await;
-        assert_eq!(next(&mut rx).await, json!({"type": "status_changed", "agent": "c1", "phase": "done"}));
+        // the call ended: its end is the chat's last phase, kept until the next call
+        emit("c1", json!({"type": "status", "source": "c1", "phase": "failed"})).await;
+        assert_eq!(next(&mut rx).await, json!({"type": "status_changed", "agent": "c1", "phase": "failed"}));
+        assert_eq!(ask(json!({"type": "reflect"})).await["phases"], json!({"c1": "failed"}));
+        emit("c1", json!({"type": "status", "source": "c1", "phase": "paused"})).await;
+        assert_eq!(next(&mut rx).await, json!({"type": "status_changed", "agent": "c1", "phase": "paused"}));
+        assert_eq!(ask(json!({"type": "reflect"})).await["phases"], json!({"c1": "paused"}));
+        // resumed with nothing held: the chat is at rest
+        emit("c1", json!({"type": "status", "source": "c1", "phase": "idle"})).await;
+        assert_eq!(next(&mut rx).await, json!({"type": "status_changed", "agent": "c1", "phase": "idle"}));
         assert_eq!(ask(json!({"type": "reflect"})).await["phases"], json!({}));
         assert!(rx.try_recv().is_none(), "nothing else was published");
 

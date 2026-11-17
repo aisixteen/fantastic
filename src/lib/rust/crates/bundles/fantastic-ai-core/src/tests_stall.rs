@@ -162,12 +162,12 @@ async fn a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_window_ends
     // ONE CHAIN PER AGENT (#227): the second send is held; the wake turn that
     // answers it runs once the stalled chain has ended.
     assert_eq!(s.passes_served(), 2, "the queued send ran");
-    // status: the first turn is done with reason='error', naming the stall
+    // status: the first call FAILED with reason='error', naming the stall
     events_until(&mut rx, &mut seen, |ev| {
-        status_of(ev, "probe_a", "done").is_some()
+        status_of(ev, "probe_a", "failed").is_some()
     })
     .await;
-    let done_a = status_of(&seen, "probe_a", "done").expect("done");
+    let done_a = status_of(&seen, "probe_a", "failed").expect("failed");
     assert_eq!(done_a["detail"]["reason"], json!("error"), "{done_a}");
     let why = done_a["detail"]["error"].as_str().unwrap_or_default();
     assert!(why.contains("stream_stalled"), "{why}");
@@ -242,10 +242,10 @@ async fn a_timed_out_turn_settles_its_sender_with_reason_timeout_and_is_not_retr
     let error = out["error"].as_str().unwrap_or_default();
     assert!(error.starts_with("send: timeout after 0.1s"), "{out}");
     events_until(&mut rx, &mut seen, |ev| {
-        status_of(ev, "probe", "done").is_some()
+        status_of(ev, "probe", "failed").is_some()
     })
     .await;
-    let done = status_of(&seen, "probe", "done").expect("done");
+    let done = status_of(&seen, "probe", "failed").expect("failed");
     assert_eq!(done["detail"]["reason"], json!("timeout"), "{done}");
     let rows = stored_rows(&kernel, &backend).await;
     assert_eq!(error_rows(&rows).len(), 1, "{rows:#?}");
@@ -282,7 +282,7 @@ async fn a_failed_provider_turn_settles_its_sender_and_emits_done_error_once() {
     assert_eq!(out["raised"], json!(true), "{out}");
     assert!(out["error"].as_str().unwrap_or_default().contains("boom"));
     events_until(&mut rx, &mut seen, |ev| {
-        status_of(ev, "probe", "done").is_some()
+        status_of(ev, "probe", "failed").is_some()
     })
     .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -293,7 +293,7 @@ async fn a_failed_provider_turn_settles_its_sender_and_emits_done_error_once() {
         .iter()
         .filter(|e| {
             e["type"] == json!("status")
-                && e["phase"] == json!("done")
+                && e["phase"] == json!("failed")
                 && e["client_id"] == json!("probe")
                 && e["detail"]["reason"] == json!("error")
         })
@@ -566,6 +566,11 @@ async fn failures_in_a_row_end_in_gave_up_not_a_loop() {
     })
     .await;
     let gave_up = status_reason(&seen, "gave_up").expect("gave_up");
+    assert_eq!(
+        gave_up["phase"],
+        json!("failed"),
+        "a give-up is a failed call: {gave_up}"
+    );
     assert!(
         gave_up["detail"]["error"]
             .as_str()
