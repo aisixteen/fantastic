@@ -139,6 +139,9 @@ export const CANVAS_CSS = `
   #canvas.column .agent-frame.minimized::after { bottom: auto; height: 32px; }
   .frame-body { position: relative; z-index: 2; flex: 1 1 0; min-height: 0; overflow: hidden; background: transparent; border-radius: ${tok("radius.panel")}; }
   .frame-body iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; }
+  /* A VIEW'S BACKDROP IS ITS CELL'S (#698): the html views are see-through, so the body under one
+     always carries the bezel colour — not only while the pointer shows the chrome */
+  .frame-body:has(> iframe) { background: ${tok("color.surface.bezel")}; }
   /* A HANDLE ON EACH CORNER of the bezel (head included) */
   .resize-handle { position: absolute; width: 16px; height: 16px; z-index: 5; }
   .resize-handle.se { bottom: -8px; right: -8px; cursor: nwse-resize; border-radius: 0 0 ${tok("radius.handle")} 0;

@@ -12,8 +12,9 @@ import type { SidebarEars } from "../../../../page/view_relay.js";
 /** The host agent whose view the tree cell shows. */
 export const SIDEBAR_AGENT = "sidebar";
 
-/** Where a fresh canvas places the tree cell (world units, the cell's body). */
-export const SIDEBAR_RECT = { x: 16, y: 48, width: 340, height: 680 } as const;
+/** Where a fresh canvas places the tree cell (world units, the cell's body): below the background's
+ *  headline, which is pinned at the screen's top-left (`backgrounds/stock.ts` `headline`). */
+export const SIDEBAR_RECT = { x: 16, y: 220, width: 340, height: 640 } as const;
 
 /** Hear what the tree view in cell `cellId` emits; returns the unsubscribe. */
 export function hearSidebarCell(kernel: Kernel, cellId: string, ears: SidebarEars): () => void {
