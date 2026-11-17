@@ -1,6 +1,6 @@
-"""E158 sidebar_render — the sidebar view as drawn in the canvas's left column (#608).
+"""E158 sidebar_render — the sidebar view as drawn in the canvas's tree cell (#608, #698).
 
-The column's iframe is null-origin: its document is read through CDP (`frame_eval`)."""
+The cell's iframe is null-origin: its document is read through CDP (`frame_eval`)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import Rig, verdict  # noqa: E402
 from _lib.dev_surface import frame_eval  # noqa: E402
 
-COLUMN = ".sidebar-col .sb-body iframe"
+# the tree cell: the cell whose view draws the tree (the only cell on a fresh canvas)
+TREE = "(()=>{const f=[...document.querySelectorAll('.agent-frame')].find(f=>f.querySelector('iframe')); return f ? f.dataset.id : null;})()"
+CELL_IFRAME = ".agent-frame iframe"
+TREE_AT = {"id": None}  # the tree cell's id, once found
 
 
 async def side(pg, expr: str):
@@ -33,11 +36,13 @@ async def until(pg, expr: str, secs: float = 20) -> bool:
 
 async def click(pg, sel: str) -> bool:
     """A real mouse click at the middle of `sel` (an element of the view), through the column's iframe."""
-    box = await side(pg, f"(()=>{{const e=document.querySelector({json.dumps(sel)}); if(!e) return null; const r=e.getBoundingClientRect(); return [r.x+r.width/2, r.y+r.height/2];}})()")
-    frame = await pg.rect(COLUMN)
+    box = await side(pg, f"(()=>{{const e=document.querySelector({json.dumps(sel)}); if(!e) return null; const r=e.getBoundingClientRect(); return [r.x+r.width/2, r.y+r.height/2, window.innerWidth];}})()")
+    frame = await pg.rect(f".agent-frame[data-id={TREE_AT['id']}] iframe" if TREE_AT["id"] else CELL_IFRAME)
     if not box or not frame:
         return False
-    x, y = frame["x"] + box[0], frame["y"] + box[1]
+    # a cell is drawn at the canvas's zoom: the frame's own pixels are scaled to the page's
+    k = frame["w"] / box[2] if box[2] else 1
+    x, y = frame["x"] + box[0] * k, frame["y"] + box[1] * k
     await pg.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=x, y=y)
     await pg.mouse("mousePressed", x, y)
     await pg.mouse("mouseReleased", x, y)
@@ -51,13 +56,16 @@ def main() -> bool:
     (rig.proj / "docs").mkdir()
     (rig.proj / "docs" / "a.md").write_text("# a\n")
     (rig.proj / "notes.txt").write_text("notes\n")
-    rig.init()
+    rig.init(tree=True)
     r: dict = {}
     info: dict = {}
 
     async def run() -> None:
         async with rig.page(1400, 900) as pg:
-            r["1a the column is drawn and the view has drawn in it"] = bool(await pg.until(f"!!document.querySelector({json.dumps(COLUMN)})", 30)) and await until(pg, "!!document.querySelector('.rail .k')", 40)
+            r["1a the tree cell is drawn on the fresh canvas and the view has drawn in it"] = bool(await pg.until(f"!!document.querySelector({json.dumps(CELL_IFRAME)})", 30)) and await until(pg, "!!document.querySelector('.rail .k')", 40)
+            tree_cell = await pg.js(TREE)
+            info["tree_cell"] = TREE_AT["id"] = tree_cell
+            r["1a2 it is a cell like any other: at the canvas's left, not full screen"] = bool(tree_cell) and await pg.js(f"(()=>{{const f=document.querySelector('.agent-frame[data-id={tree_cell}]'); const c=document.getElementById('canvas').getBoundingClientRect(); const r=f.getBoundingClientRect(); return !f.classList.contains('full') && r.left - c.left < 200 && r.width < c.width / 2;}})()") is True
             parts = await side(pg, "({"
                 "strip: !!document.querySelector('nav[aria-label=Kernels] .k.here'),"
                 "head: !!document.querySelector('.head h1') && !!document.querySelector('button[aria-label=\"Hide the tree\"]'),"
@@ -87,6 +95,7 @@ def main() -> bool:
             before = await pg.js("document.querySelectorAll('.agent-frame').length")
             r["4a a click on the user agent row"] = await click(pg, "#tree [data-id=user] .main")
             r["4b opens its view: a cell is drawn"] = bool(await pg.until(f"document.querySelectorAll('.agent-frame').length > {before or 0}", 20))
+            r["4b2 as a cell, not full screen"] = await pg.js("!document.querySelector('#canvas.full-view')") is True
             r["4c and the row is selected"] = await until(pg, "document.querySelector('#tree [data-id=user]')?.classList.contains('sel')", 10)
 
             await pg.open(rig.url)
@@ -103,7 +112,9 @@ def main() -> bool:
             r["6b to the match and the rows above it"] = await until(pg, "(()=>{const t=[...document.querySelectorAll('#tree [role=treeitem]')]; return t.length >= 2 && t.length < 12 && !!document.querySelector('#tree [data-path=\"docs/a.md\"]') && !document.querySelector('#tree [data-path=\"notes.txt\"]')})()", 10)
 
             r["7a Hide the tree"] = await click(pg, "button[aria-label=\"Hide the tree\"]")
-            r["7b collapses the column"] = bool(await pg.until("document.querySelector('.sidebar-col')?.classList.contains('collapsed')", 10))
+            await asyncio.sleep(1)
+            info["after_hide"] = await pg.js(f"(()=>{{const f=document.querySelector('.agent-frame[data-id={tree_cell}]'); return f ? [f.className, getComputedStyle(f).display, getComputedStyle(f).visibility] : 'gone';}})()")
+            r["7b hides the tree cell"] = bool(await pg.until(f"!document.querySelector('.agent-frame[data-id={tree_cell}]') || getComputedStyle(document.querySelector('.agent-frame[data-id={tree_cell}]')).display === 'none' || getComputedStyle(document.querySelector('.agent-frame[data-id={tree_cell}]')).visibility === 'hidden'", 10))
             info["page_errors"] = [x for x in pg.logs if "WebGL" not in x][:8]
             r["8 no page error"] = not info["page_errors"]
 

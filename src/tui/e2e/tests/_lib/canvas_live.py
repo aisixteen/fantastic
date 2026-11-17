@@ -284,13 +284,17 @@ class Rig:
             self.host.wait()
         self.host = None
 
-    def init(self, cells: list[dict] | None = None, host_agents: list[tuple[str, dict]] | None = None) -> None:
+    def init(self, cells: list[dict] | None = None, host_agents: list[tuple[str, dict]] | None = None, tree: bool = False) -> None:
         """A fresh project, then SEEDED the way the product stores it: first boot
-        (inits the dir), one page load (the canvas root is made), stop, write the
-        seed records, boot again."""
+        (inits the dir), one page load (the canvas root is made, and the tree cell a fresh
+        canvas places), stop, write the seed records, boot again. Without `tree` the tree
+        cell is closed before the seeds (a canvas whose person closed it): the scenario's
+        own cells are the only ones."""
         self.start()
         asyncio.run(self._touch())
         self.stop()
+        if not tree:
+            self.close_tree()
         if cells:
             self.seed_cells(cells)
         for parent, rec in host_agents or []:
@@ -313,6 +317,11 @@ class Rig:
                 (self.art / "touch_page_errors.json").write_text(json.dumps(pg.logs, indent=1))
                 (self.art / "touch_page.html").write_text(await pg.js("document.documentElement.outerHTML") or "")
                 raise SystemExit(f"the page never stored its root view: {root}")
+            # and the tree cell a fresh canvas places (#698), stored like any cell
+            for _ in range(120):
+                if self.tree_cells():
+                    break
+                await asyncio.sleep(0.25)
             await asyncio.sleep(1.0)
             # the host stops next: this tab must not sit on a dead canvas, retrying
             await pg.cdp("Page.navigate", url="about:blank")
@@ -321,6 +330,31 @@ class Rig:
     @property
     def cells_dir(self) -> Path:
         return self.proj / ".fantastic" / "web" / "agents" / "canvas" / "agents" / "view_root" / "agents"
+
+    def tree_cells(self) -> list[str]:
+        """The root view's cells that show the `sidebar` agent's view (the tree cell)."""
+        out = []
+        for f in sorted(self.cells_dir.glob("*/agent.yaml")):
+            try:
+                rec = yaml.safe_load(oslayer.read_text(f)) or {}
+            except (OSError, yaml.YAMLError):
+                continue
+            if rec.get("backend_id") == "sidebar":
+                out.append(f.parent.name)
+        return out
+
+    def close_tree(self) -> None:
+        """Close the tree cell (host stopped): its record and its rects go, as a close leaves them."""
+        for cid in self.tree_cells():
+            shutil.rmtree(self.cells_dir / cid)
+            for d in self.cells_dir.glob("layout_*"):
+                f = d / "agent.yaml"
+                if not f.is_file():
+                    continue
+                rec = yaml.safe_load(oslayer.read_text(f)) or {}
+                if isinstance(rec.get("rects"), dict) and cid in rec["rects"]:
+                    del rec["rects"][cid]
+                    f.write_text(yaml.safe_dump(rec, sort_keys=False))
 
     def seed_cells(self, cells: list[dict]) -> None:
         """Write page cells into the root view as the page loader stores them (host stopped):
