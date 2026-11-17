@@ -1,30 +1,26 @@
 import day from "./stock/day.tokens.json" with { type: "json" };
 import dark from "./stock/view_dark.tokens.json" with { type: "json" };
-import transparent from "./stock/view_transparent.tokens.json" with { type: "json" };
-import { cssName } from "./schema.ts";
 import { compileSkin } from "./tokens.ts";
 
-// THE SKINS OF AN HTML VIEW (#698) — an agent's `view {kind: html}` runs in a sandboxed
-// frame and declares no colour of its own: every value it draws with is a skin token
-// (`var(--fc-…)`), and the HOST that mounts it passes the token block of the skin it
-// shows (`mountView({skin})` in `web/page/view_relay.js`), and the new block on a change.
+// THE SKINS OF AN HTML VIEW FOR A PRODUCT PAGE (#698) — an agent's `view {kind: html}` runs in a
+// sandboxed frame, is see-through (it paints no page of its own: the host's cell is its backdrop)
+// and declares no colour of its own: every value it draws with is a skin token (`var(--fc-…)`).
+// The HOST that mounts it passes the token block of its skin (`mountView({skin})` in
+// `web/page/view_relay.js`), and the new block on a change. The canvas passes its own skin
+// (`html_view.ts`); a page that compiles no tokens takes one of these:
 //
-//   light        the team design mock's light colours: the day skin, value for value
-//   dark         the mock's dark colours; what the mock has none for, the canvas's dark skin's
-//   transparent  for a view on the canvas: the canvas's backdrop shows through (page.bg alpha 0),
-//                in the colours of the canvas's own tree before the html sidebar (10a99899^:
-//                files/styles.ts on the dark skin: lilac accent tints, cool text at an alpha)
+//   light  the team design mock's light colours: the day skin, value for value
+//   dark   the mock's dark colours; what the mock has none for, the canvas's dark skin's
 //
-// The blocks are also written to `web/page/view_skins/<name>.css` (`scripts/view_skins.ts`),
-// for a host that does not compile tokens (a product page served from Rust).
+// They are written to `web/page/view_skins/<name>.css` (`scripts/view_skins.ts`), served from
+// Rust as `fantastic_tui::VIEW_SKINS`.
 
-export const VIEW_SKINS = ["light", "dark", "transparent"] as const;
+export const VIEW_SKINS = ["light", "dark"] as const;
 export type ViewSkin = (typeof VIEW_SKINS)[number];
 
 const TOKENS: Record<ViewSkin, Record<string, unknown>> = {
   light: day as Record<string, unknown>,
   dark: dark as Record<string, unknown>,
-  transparent: transparent as Record<string, unknown>,
 };
 
 /** A view skin's token document (as authored). */
@@ -37,10 +33,3 @@ export function viewSkinBlock(name: ViewSkin): string {
   return c.skin.text;
 }
 
-/** A view skin's tokens as `[--fc-name, value]` pairs: for a host element that sits with its view
- *  (the canvas's sidebar column), so its own chrome is drawn in the same skin. */
-export function viewSkinVars(name: ViewSkin): Array<[string, string]> {
-  const c = compileSkin(TOKENS[name]);
-  if (!c.ok) throw new Error(`[skin] the view skin ${name} does not compile: ${c.error}`);
-  return [...c.skin.css].map(([path, css]) => [cssName(path), css]);
-}

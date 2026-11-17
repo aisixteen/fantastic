@@ -6,7 +6,6 @@ import { cellGrant, viewOf, viewRecordFresh } from "./host_views.ts";
 import type { Rec } from "./host_views.ts";
 import { hearSidebar, pageStore } from "../../../../page/view_relay.js";
 import type { SidebarStore } from "../../../../page/view_relay.js";
-import { viewSkinVars } from "../skin/view_skins.ts";
 
 // THE CANVAS'S LEFT COLUMN (#608): the host agent `sidebar`'s html view, drawn by its
 // `reflect` in a panel fixed to the viewport's left edge, beside the zoomed world (never in
@@ -83,9 +82,6 @@ export async function mountSidebarColumn(o: {
 
   const el = document.createElement("aside");
   el.className = "sidebar-col";
-  // THE COLUMN IS DRAWN IN ITS VIEW'S SKIN (#698): transparent, so its panel, border and toggle take
-  // the colours of the tree in it (the canvas tree's own, before the html view)
-  for (const [name, value] of viewSkinVars("transparent")) el.style.setProperty(name, value);
   const toggle = document.createElement("button");
   toggle.className = "sb-toggle";
   toggle.type = "button";

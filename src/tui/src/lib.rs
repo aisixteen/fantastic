@@ -72,7 +72,7 @@ pub use fantastic_kernel;
 pub use fantastic_kernel::BundleRegistry;
 /// The base's one view relay (plain JS, an ES module): a page serves it and loads it to mount views.
 pub use fantastic_canvas_page::VIEW_RELAY_JS;
-/// The html views' skins `(name, token block)`: light, dark, transparent (#698). A page passes one to every view it mounts.
+/// The html views' skins `(name, token block)` for a product page: light, dark (#698). A page passes one to every view it mounts.
 pub use fantastic_canvas_page::VIEW_SKINS;
 /// THE NODE HARNESS FOR AN HTML VIEW'S WHOLE SCRIPT (`run`, `clocksReadNothing`,
 /// `ownCopiesReadNothing`; a TypeScript ES module node runs as it is): the path of the file

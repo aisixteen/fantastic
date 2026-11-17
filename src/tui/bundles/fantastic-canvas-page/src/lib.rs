@@ -60,15 +60,13 @@ pub const LIST_HTML: &str = include_str!("../../../web/home/list.html");
 /// (the canvas bundle imports the same file). A product's page serves it from this const.
 pub const VIEW_RELAY_JS: &str = include_str!("../../../web/page/view_relay.js");
 
-/// THE SKINS OF AN HTML VIEW (#698), `(name, token block)`: light, dark and transparent. A view
-/// declares no colour of its own; the page that mounts it passes the block of the skin it shows
-/// (`mountView({skin})`) and the new one on a change. Written from the skins' tokens by the
-/// canvas (`src/tui/web/canvas/scripts/view_skins.ts`, held to them by its tests); a product's
-/// page serves its own choice from these.
-pub const VIEW_SKINS: [(&str, &str); 3] = [
+/// THE SKINS OF AN HTML VIEW FOR A PRODUCT PAGE (#698), `(name, token block)`: light and dark. A
+/// view is see-through and declares no colour of its own; the page that mounts it passes the block
+/// of the skin it shows (`mountView({skin})`) and the new one on a change. Written from the skins'
+/// tokens by the canvas (`src/tui/web/canvas/scripts/view_skins.ts`, held to them by its tests).
+pub const VIEW_SKINS: [(&str, &str); 2] = [
     ("light", include_str!("../../../web/page/view_skins/light.css")),
     ("dark", include_str!("../../../web/page/view_skins/dark.css")),
-    ("transparent", include_str!("../../../web/page/view_skins/transparent.css")),
 ];
 
 /// Every served file, inflated once: the zip's entries plus `index.html`,
@@ -216,14 +214,13 @@ mod tests {
     }
 
     #[test]
-    fn the_view_skins_are_three_token_blocks_and_only_transparent_is_see_through() {
+    fn the_view_skins_are_the_light_and_dark_token_blocks() {
         let names: Vec<&str> = VIEW_SKINS.iter().map(|(n, _)| *n).collect();
-        assert_eq!(names, ["light", "dark", "transparent"]);
+        assert_eq!(names, ["light", "dark"]);
         for (name, css) in VIEW_SKINS {
             assert!(css.starts_with(":root {\n") && css.contains("--fc-color-text-primary:"), "{name}");
         }
-        assert!(VIEW_SKINS[2].1.contains("--fc-color-page-bg: rgb(0 0 0 / 0);"));
-        assert!(!VIEW_SKINS[0].1.contains("--fc-color-page-bg: rgb(0 0 0 / 0);"));
+        assert!(VIEW_SKINS[0].1.contains("--fc-color-page-bg: rgb(237 237 237);"));
     }
 
     #[test]

@@ -9,12 +9,13 @@ import { compileSkin } from "../src/bundles/skin/tokens.ts";
 import type { ColorValue } from "../src/bundles/skin/tokens.ts";
 import { VIEW_SKINS, viewSkinBlock, viewSkinTokens } from "../src/bundles/skin/view_skins.ts";
 import { mountPanel } from "../src/bundles/html_agent/html_view.ts";
+import { skinNow } from "../src/bundles/skin/apply.ts";
 import { Agent, Kernel } from "../src/lib.ts";
 import type { ViewContext } from "../src/bundles/view.ts";
 
-// THE SKINS OF AN HTML VIEW (#698): a view declares no colour of its own and no token
-// block: it draws with skin tokens only, and the host that mounts it passes the block of
-// the skin it shows (light, dark or transparent) — the canvas passes transparent.
+// THE SKINS OF AN HTML VIEW (#698): a view is see-through and declares no colour of its own and
+// no token block: it draws with skin tokens only, and the host that mounts it passes the block of
+// its skin — the canvas its own, a product page light or dark (`web/page/view_skins/`).
 
 const ROOT = fileURLToPath(new URL("../../../../../", import.meta.url));
 const PAGE = fileURLToPath(new URL("../../page/view_skins/", import.meta.url));
@@ -46,7 +47,7 @@ test("each view skin compiles, every opaque token at alpha 1", () => {
   }
 });
 
-test("light is the day skin; transparent is see-through; light and dark paint their page", () => {
+test("light is the day skin; dark is opaque", () => {
   const day = compileSkin(stockSkin("day")!.tokens);
   assert.ok(day.ok);
   assert.equal(viewSkinBlock("light"), day.ok ? day.skin.text : "");
@@ -54,7 +55,6 @@ test("light is the day skin; transparent is see-through; light and dark paint th
     const c = compileSkin(viewSkinTokens(name));
     return c.ok ? (c.skin.values.get("color.page.bg") as ColorValue).alpha : -1;
   };
-  assert.equal(bg("transparent"), 0);
   assert.equal(bg("light"), 1);
   assert.equal(bg("dark"), 1);
 });
@@ -71,7 +71,7 @@ test("the shipped views are found", () => {
 });
 
 for (const rel of views) {
-  test(`${rel}: skin tokens only — no token block of its own, no literal colour, its page is the skin's`, () => {
+  test(`${rel}: skin tokens only — no token block of its own, no literal colour, see-through`, () => {
     const html = readFileSync(ROOT + rel, "utf8");
     const style = [...html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)].map((m) => m[1]!).join("\n");
     assert.deepEqual([...html.matchAll(/(--fc-[\w-]+)\s*:/g)].map((m) => m[1]), [], "it declares no --fc-* value (the host passes the skin)");
@@ -81,11 +81,12 @@ for (const rel of views) {
     // a colour property (css, an inline style, a script's style write) set to a literal colour
     const literal = [...html.matchAll(/(?:color|background|border|fill|stroke|shadow|outline)[\w-]*["']?\s*[:=][^;"'}\n]*?(?:(?<![&\w])#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?)\()/gi)].map((m) => m[0]);
     assert.deepEqual(literal, [], "no literal colour");
-    assert.match(style, /body\s*\{[^}]*background:\s*var\(--fc-color-page-bg\)/, "the body is the skin's page (see-through in transparent)");
+    assert.match(style, /body\s*\{[^}]*background:\s*transparent/, "the body paints no page: the host's cell is its backdrop");
+    assert.ok(!html.includes("--fc-color-page-bg"), "the page colour is the host's, never the view's");
   });
 }
 
-test("the canvas mounts every view with the transparent skin", async () => {
+test("the canvas mounts every view with its own skin", async () => {
   const frame = { srcdoc: "", contentWindow: { postMessage: () => {} }, setAttribute: () => {}, addEventListener: () => {}, remove: () => {} };
   const g = globalThis as unknown as Record<string, unknown>;
   const was = { document: g["document"], window: g["window"] };
@@ -98,7 +99,8 @@ test("the canvas mounts every view with the transparent skin", async () => {
     const ctx = { kernel, mount: { appendChild: () => {} }, selfId: "cell", backend: "cell", close: () => {} } as unknown as ViewContext;
     const h = mountPanel(ctx, () => "<b>x</b>");
     await new Promise((r) => setTimeout(r, 0));
-    assert.ok(frame.srcdoc.includes(`<style id="fantastic-skin">${viewSkinBlock("transparent")}</style>`));
+    assert.ok(frame.srcdoc.includes(`<style id="fantastic-skin">${skinNow().skin.text}</style>`));
+    assert.equal(skinNow().name, "dark", "the web default");
     h.unmount();
   } finally {
     g["document"] = was.document;

@@ -8,7 +8,7 @@ import type { CompiledSkin } from "./tokens.ts";
 // THE SKIN AGENT (phase 4, #49) — the page's skin: the design tokens every view
 // is drawn with, and its backdrop. One per canvas (peer canvases too), a
 // delete-locked child of the page root, made by the canvas when missing
-// (`ensureSkin`). It is read only: the skin is fixed by the backdrop — day on
+// (`ensureSkin`). It is read only: the skin is fixed by the backdrop — dark on
 // the web, glass in the app's window (`DEFAULT_SKINS`) — and applied once by the
 // page (`apply.ts`); nothing on its record chooses it.
 
