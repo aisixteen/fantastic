@@ -4,6 +4,8 @@ import { mountView, connectorSrc, callAllowed, hearSidebar } from "../../page/vi
 import { CONNECTOR_SRC } from "../src/bundles/html_agent/connector.ts";
 import { MEASURE_SRC } from "../src/bundles/canvas/fit.ts";
 
+const SKIN = ":root {\n  --fc-color-page-bg: rgb(0 0 0 / 0);\n}\n";
+
 // A tiny window and iframe: messages the view "posts" are dispatched by hand; what the relay posts back is kept.
 function rig(extra: Record<string, unknown> = {}) {
   const listeners: ((e: unknown) => void)[] = [];
@@ -14,11 +16,13 @@ function rig(extra: Record<string, unknown> = {}) {
   const sent: Record<string, unknown>[] = [];
   const contentWindow = { postMessage: (m: Record<string, unknown>) => sent.push(m) };
   const attrs = new Map<string, string>();
+  const loads: (() => void)[] = [];
   const iframe = {
     srcdoc: "",
     contentWindow,
     removed: false,
     setAttribute: (k: string, v: string) => attrs.set(k, v),
+    addEventListener: (t: string, f: () => void) => t === "load" && loads.push(f),
     remove() {
       this.removed = true;
     },
@@ -32,6 +36,7 @@ function rig(extra: Record<string, unknown> = {}) {
     doc,
     win,
     html: "<p>hi {{cell}}</p>",
+    skin: SKIN,
     transport: {
       send: async (t: string, p: unknown) => {
         calls.push(["send", t, p]);
@@ -48,7 +53,7 @@ function rig(extra: Record<string, unknown> = {}) {
     },
     ...extra,
   };
-  return { view: mountView(base), iframe, mount, sent, attrs, post, listeners, calls };
+  return { view: mountView(base), iframe, mount, sent, attrs, post, listeners, calls, load: () => loads.forEach((f) => f()) };
 }
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -179,4 +184,53 @@ test("a page that needs only some of what the sidebar view says leaves the other
   const got: string[] = [];
   for (const m of [{ type: "select", id: "a" }, { type: "open_file", path: "p" }, { type: "hide_tree" }, { type: "ready" }, { type: "state", state: 1 }]) hearSidebar(m, { select: (id) => got.push(id) });
   assert.deepEqual(got, ["a"]);
+});
+
+// ---- the skin (#698): the page passes its token block; the view keeps none of its own ----
+
+test("the srcdoc's head starts with the page's skin block, before the connector and the body", async () => {
+  const r = rig();
+  await tick();
+  const head = `<head><meta charset="utf-8"><style id="fantastic-skin">${SKIN}</style><script>`;
+  assert.ok(r.iframe.srcdoc.includes(head), r.iframe.srcdoc.slice(0, 200));
+  assert.ok(r.iframe.srcdoc.indexOf(SKIN) < r.iframe.srcdoc.indexOf("<body>"));
+});
+
+test("a page that passes no skin is refused: there is no skin of the view's own to fall back on", () => {
+  assert.throws(() => rig({ skin: undefined }), /opts\.skin/);
+  assert.throws(() => rig({ skin: "" }), /opts\.skin/);
+});
+
+test("a skin change is sent to the frame, kept for the next render, and re-sent on each load", async () => {
+  let body = "one";
+  const r = rig({ html: () => body });
+  await tick();
+  const NEW = ":root {\n  --fc-color-page-bg: rgb(5 5 5);\n}\n";
+  r.view.skin(NEW);
+  assert.deepEqual(r.sent.at(-1), { __ft: true, op: "skin", css: NEW });
+  const n = r.sent.length;
+  r.view.skin(NEW);
+  assert.equal(r.sent.length, n, "the same block again sends nothing");
+  body = "two";
+  r.view.reload();
+  await tick();
+  assert.ok(r.iframe.srcdoc.includes(`<style id="fantastic-skin">${NEW}</style>`) && !r.iframe.srcdoc.includes(SKIN));
+  r.load();
+  assert.deepEqual(r.sent.at(-1), { __ft: true, op: "skin", css: NEW }, "a load takes the current block (a change that raced a render)");
+});
+
+test("the connector puts a skin the page sends into the frame's skin style", () => {
+  const style = { textContent: "old" };
+  let onMsg: (e: { data: unknown }) => void = () => {};
+  const g = {
+    addEventListener: (_t: string, f: (e: { data: unknown }) => void) => (onMsg = f),
+    document: { getElementById: (id: string) => (id === "fantastic-skin" ? style : null) },
+    parent: { postMessage: () => {} },
+    globalThis: {} as Record<string, unknown>,
+  };
+  new Function("addEventListener", "document", "parent", "globalThis", connectorSrc())(g.addEventListener, g.document, g.parent, g.globalThis);
+  onMsg({ data: { __ft: true, op: "skin", css: SKIN } });
+  assert.equal(style.textContent, SKIN);
+  onMsg({ data: { __ft: true, op: "skin", css: 7 } });
+  assert.equal(style.textContent, SKIN, "only a text block");
 });

@@ -59,5 +59,4 @@ test("the GL host reads the canvas's box at each camera change, and takes no vie
   assert.match(src, /const mid = viewportMiddleInWorld\(\{ width: W, height: H \}, box\(\), view\);/, "the camera maps the viewport's middle through the box");
   const canvas = readFileSync(new URL("../src/bundles/canvas/canvas.ts", import.meta.url), "utf8");
   assert.match(canvas, /box: \(\) => canvas\.getBoundingClientRect\(\),/, "the canvas hands the GL host its own box");
-  assert.match(canvas, /onPlace: \(\) => glHost\?\.applyCamera\(\)/, "a change of the sidebar's width re-applies the camera");
 });

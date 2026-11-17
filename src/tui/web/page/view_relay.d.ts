@@ -7,6 +7,8 @@ export interface ViewTransport {
 export interface ViewOptions {
   mount: { appendChild(n: unknown): unknown };
   html: string | (() => string | Promise<string>);
+  /** the token block of the skin the page shows (`:root { --fc-…: …; }`) */
+  skin: string;
   transport: ViewTransport;
   onMessage?: (m: any, raw?: any) => void;
   calls?: Calls;
@@ -22,6 +24,8 @@ export interface ViewHandle {
   iframe: any;
   reload(): void;
   inbox(payload: unknown): void;
+  /** the page's skin changed: its token block */
+  skin(css: string): void;
   unmount(): void;
 }
 export function connectorSrc(extra?: string): string;
