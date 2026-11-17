@@ -1,6 +1,7 @@
 import day from "./stock/day.tokens.json" with { type: "json" };
 import dark from "./stock/view_dark.tokens.json" with { type: "json" };
 import transparent from "./stock/view_transparent.tokens.json" with { type: "json" };
+import { cssName } from "./schema.ts";
 import { compileSkin } from "./tokens.ts";
 
 // THE SKINS OF AN HTML VIEW (#698) — an agent's `view {kind: html}` runs in a sandboxed
@@ -10,8 +11,9 @@ import { compileSkin } from "./tokens.ts";
 //
 //   light        the team design mock's light colours: the day skin, value for value
 //   dark         the mock's dark colours; what the mock has none for, the canvas's dark skin's
-//   transparent  for a view on the canvas: the page's backdrop shows through (page.bg alpha 0);
-//                the canvas's day colours, the tree's hover and selection as before the #608 restyle
+//   transparent  for a view on the canvas: the canvas's backdrop shows through (page.bg alpha 0),
+//                in the colours of the canvas's own tree before the html sidebar (10a99899^:
+//                files/styles.ts on the dark skin: lilac accent tints, cool text at an alpha)
 //
 // The blocks are also written to `web/page/view_skins/<name>.css` (`scripts/view_skins.ts`),
 // for a host that does not compile tokens (a product page served from Rust).
@@ -33,4 +35,12 @@ export function viewSkinBlock(name: ViewSkin): string {
   const c = compileSkin(TOKENS[name]);
   if (!c.ok) throw new Error(`[skin] the view skin ${name} does not compile: ${c.error}`);
   return c.skin.text;
+}
+
+/** A view skin's tokens as `[--fc-name, value]` pairs: for a host element that sits with its view
+ *  (the canvas's sidebar column), so its own chrome is drawn in the same skin. */
+export function viewSkinVars(name: ViewSkin): Array<[string, string]> {
+  const c = compileSkin(TOKENS[name]);
+  if (!c.ok) throw new Error(`[skin] the view skin ${name} does not compile: ${c.error}`);
+  return [...c.skin.css].map(([path, css]) => [cssName(path), css]);
 }

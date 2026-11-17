@@ -201,7 +201,9 @@ export const CANVAS_CSS = `
     color: ${tint("color.text.cool", 72)}; font: 400 13px/1.2 ${tok("font.family.sans")}; letter-spacing: 0.2px; }
   .full-hint[hidden] { display: none; }
   /* THE LEFT COLUMN (#608): the sidebar agent's view beside the zoomed world, fixed to the viewport's
-     left edge — a zoom or a pan never moves or scales it. Glass over the page; an overlay on a narrow screen. */
+     left edge — a zoom or a pan never moves or scales it. Its tokens are its view's skin (transparent, set on
+     the column by sidebar_mount.ts): the see-through view on the skin's panel, as the canvas's own tree
+     sidebar was drawn before the html view (10a99899^); an overlay on a narrow screen. */
   .sidebar-col { position: fixed; top: 0; bottom: 0; left: 0; z-index: 2; display: flex; box-sizing: border-box; width: 300px; max-width: 80vw;
     background: ${tok("color.surface.panel")}; border-right: 1px solid ${tint("color.accent.base", 30)}; }
   .sidebar-col.collapsed { width: 22px; }
