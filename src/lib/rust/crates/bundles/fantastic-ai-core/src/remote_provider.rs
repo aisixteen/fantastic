@@ -617,7 +617,7 @@ where
     use crate::declared::provider::Call;
     let reply = match call {
         Call::Reflect(_) => reflect(),
-        Call::Boot(_) => crate::verbs::boot(agent_id, kernel),
+        Call::Boot(_) => crate::verbs::boot(agent_id, kernel).await,
         Call::Complete(a) => complete_verb(agent_id, &a, kernel, build).await,
         Call::Models(_) => models_verb(agent_id, kernel, live).await,
         Call::SetDefaultModel(a) => set_default_verb(agent_id, &a, kernel).await,

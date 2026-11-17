@@ -168,9 +168,18 @@ fn status_handler_renders_phase_markers() {
         "  [ai] queued (0 ahead)"
     );
     assert_eq!(status(json!({"phase": "thinking"})).unwrap(), "  thinking…");
-    // `streaming` and `done` are silent.
-    assert!(status(json!({"phase": "streaming"})).is_none());
-    assert!(status(json!({"phase": "done"})).is_none());
+    // `streaming` and every phase that ends a call or is outside one are silent.
+    for p in [
+        "streaming",
+        "done",
+        "failed",
+        "stalled",
+        "awaiting",
+        "paused",
+        "idle",
+    ] {
+        assert!(status(json!({"phase": p})).is_none(), "{p}");
+    }
 }
 
 /// Detail values are rendered as text (`str()`), every default is keyed on

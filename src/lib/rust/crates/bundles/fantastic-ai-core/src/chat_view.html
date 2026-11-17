@@ -219,6 +219,9 @@ function collapseReports(rows) {
   });
   return out;
 }
+// the phases that end a call, or come outside one (`paused`, `idle`): nothing of it runs any more
+var ENDS = { done: 1, failed: 1, stalled: 1, awaiting: 1, paused: 1, idle: 1 };
+function endsCall(phase) { return ENDS[phase] === 1; }
 // a call that ended with one of these reasons is not a failure
 var CALM = { "": 1, ok: 1, awaiting: 1, nothing_to_await: 1 };
 // the agent's state, as the header shows it: working while a call runs, asks you while an
@@ -531,17 +534,17 @@ function textsOf(rows) {
         // a COPY OF A `status` CALL (this view's own read, another view's) is no event: only
         // the agent's status event carries a phase
         if (!ph) break;
-        if (ph === "done") soon();
+        if (endsCall(ph)) soon();
         if (!mine(p)) {
           // another client's call: Stop shows while it runs, its rows are drawn when it ends
-          if (ph === "done") stale = true;
+          if (endsCall(ph)) stale = true;
           else { anyRunning = true; if (!inflight && ph !== "retrying") phase(ph); refresh(); follow(); }
           break;
         }
         if (ph === "queued") { bind(sid); phase("queued"); }
         else if (ph === "thinking" || ph === "streaming") { if (!inflight || inflight.sendId !== sid) promote(sid); phase(ph); }
         else if (ph === "tool_calling") { tool(o(det, "tool")); phase(ph); }
-        else if (ph === "done") {
+        else if (endsCall(ph)) {
           if (inflight && (!sid || inflight.sendId === sid)) inflight = null;
           refresh();
           var why = s(det, "reason");

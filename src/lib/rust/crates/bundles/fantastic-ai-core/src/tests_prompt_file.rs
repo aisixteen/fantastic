@@ -47,9 +47,10 @@ async fn turn(
     system_of(s, n - 1)
 }
 
-/// A turn that must fail loud: its reply names the reason and the model is not
-/// called.
+/// A turn that must fail loud: its reply names the reason, the model is not
+/// called, and the call ends `failed` (reason `error`) on the agent's inbox.
 async fn failed_turn(kernel: &Arc<Kernel>, backend: &AgentId, s: &Arc<MockScript>) -> Value {
+    let mut rx = rebind_backend_inbox(kernel, backend);
     let before = s.passes_served();
     let r = kernel
         .send(vec![Item::new(
@@ -64,6 +65,13 @@ async fn failed_turn(kernel: &Arc<Kernel>, backend: &AgentId, s: &Arc<MockScript
         s.passes_served(),
         before,
         "the model was called on another block"
+    );
+    let evs = drain(&mut rx).await;
+    assert!(
+        evs.iter().any(|e| e["type"] == json!("status")
+            && e["phase"] == json!("failed")
+            && e["detail"]["reason"] == json!("error")),
+        "{evs:#?}"
     );
     r
 }

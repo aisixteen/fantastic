@@ -34,6 +34,19 @@ test("the AI chat view follows every call of its agent, whoever made it", async 
   assert.ok(after.includes("history"), `the rows are read again: ${after}`);
   assert.equal(stop["hidden"], true, "nothing runs: no Stop");
 
+  // every phase that ends a call (or comes outside one) ends it like `done`: Stop goes, the rows are read
+  for (const end of ["failed", "stalled", "awaiting", "paused", "idle"]) {
+    current = { phase: "thinking", is_mine: false };
+    await h.publish("chat1", { type: "status", phase: "thinking", client_id: "cli", source: "chat1", detail: { send_id: "s2" } });
+    assert.equal(stop["hidden"], false, `${end}: the call runs`);
+    current = null;
+    const at = h.sends.length;
+    await h.publish("chat1", { type: "status", phase: end, client_id: "cli", source: "chat1", detail: { send_id: "s2" } });
+    const read = h.since(at).map((s) => String(s.p["type"]));
+    assert.ok(read.includes("history"), `${end}: the rows are read again: ${read}`);
+    assert.equal(stop["hidden"], true, `${end}: nothing runs: no Stop`);
+  }
+
   // a question it asked the person: read on the event, not at a turn's end
   mark = h.sends.length;
   await h.publish("chat1", { type: "inquiry_opened", re: 9, asker: "chat1", holder: "user" });

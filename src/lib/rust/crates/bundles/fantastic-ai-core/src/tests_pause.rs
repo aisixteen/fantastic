@@ -359,3 +359,93 @@ async fn status_has_no_paused_field() {
     assert!(st.get("error").is_none(), "{st}");
     assert!(st.get("paused").is_none(), "{st}");
 }
+
+/// The phases of the `status` events the agent published on its own inbox so far.
+fn phases(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Some(v) = rx.try_recv() {
+        let p = v.payload;
+        if p.get("type").and_then(Value::as_str) == Some("status") {
+            if let Some(ph) = p.get("phase").and_then(Value::as_str) {
+                out.push(ph.to_string());
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn pause_says_paused_and_an_empty_resume_says_idle() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, id) = setup(&tmp, "phases").await;
+    let mut rx = kernel.ensure_inbox(&id);
+    let _ = phases(&mut rx);
+    send(&kernel, &id, json!({"type": "pause"})).await;
+    assert_eq!(phases(&mut rx), ["paused"]);
+    // already paused: a no-op, nothing said
+    send(&kernel, &id, json!({"type": "pause"})).await;
+    assert!(phases(&mut rx).is_empty());
+    // resumed with nothing held: the chat is at rest
+    send(&kernel, &id, json!({"type": "resume"})).await;
+    assert_eq!(phases(&mut rx), ["idle"]);
+    // not paused: a no-op, nothing said
+    send(&kernel, &id, json!({"type": "resume"})).await;
+    assert!(phases(&mut rx).is_empty());
+}
+
+#[tokio::test]
+async fn a_resume_with_held_messages_moves_through_their_call_not_idle() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, id) = setup(&tmp, "heldphases").await;
+    let served = served_for(&id);
+    let mut rx = kernel.ensure_inbox(&id);
+    send(&kernel, &id, json!({"type": "pause"})).await;
+    send(
+        &kernel,
+        &id,
+        json!({"type": "send", "text": "held-phase-probe"}),
+    )
+    .await;
+    let _ = phases(&mut rx);
+    send(&kernel, &id, json!({"type": "resume"})).await;
+    await_request(&served, "held-phase-probe")
+        .await
+        .expect("the held call never reached the model");
+    let mut seen = Vec::new();
+    for _ in 0..250 {
+        seen.extend(phases(&mut rx));
+        if seen.iter().any(|p| p == "done") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(seen.iter().any(|p| p == "thinking"), "{seen:?}");
+    assert!(seen.iter().any(|p| p == "done"), "{seen:?}");
+    assert!(
+        !seen.iter().any(|p| p == "idle"),
+        "held messages ran: no idle {seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_boot_says_paused_when_the_store_says_paused_and_loads_no_head() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, id) = setup(&tmp, "bootpaused").await;
+    let mut rx = kernel.ensure_inbox(&id);
+    // not paused: the boot says nothing
+    send(&kernel, &id, json!({"type": "boot"})).await;
+    assert!(phases(&mut rx).is_empty());
+    send(&kernel, &id, json!({"type": "pause"})).await;
+    let _ = phases(&mut rx);
+    let b = send(&kernel, &id, json!({"type": "boot"})).await;
+    assert!(b.get("error").is_none(), "{b}");
+    assert_eq!(phases(&mut rx), ["paused"]);
+    // the boot read only the pause rows: the conversation is not loaded
+    let rows = send(&kernel, &id, json!({"type": "rows"})).await;
+    assert_eq!(rows["loaded"], json!(false), "{rows}");
+    // resumed: a boot says nothing again
+    send(&kernel, &id, json!({"type": "resume"})).await;
+    let _ = phases(&mut rx);
+    send(&kernel, &id, json!({"type": "boot"})).await;
+    assert!(phases(&mut rx).is_empty());
+}

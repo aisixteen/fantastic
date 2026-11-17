@@ -1446,7 +1446,7 @@ impl Handler for VllmBundle {
         use declared::Call;
         let reply = match call {
             Call::Reflect(_) => reflect_reply(agent_id, kernel),
-            Call::Boot(_) => verbs::boot(agent_id, kernel),
+            Call::Boot(_) => verbs::boot(agent_id, kernel).await,
             Call::UsageVerb(a) => usage_reply(agent_id.as_str(), a.reset == Some(true)),
             Call::Complete(a) => {
                 // A verb that runs a turn first reads what the record leaves to the server;

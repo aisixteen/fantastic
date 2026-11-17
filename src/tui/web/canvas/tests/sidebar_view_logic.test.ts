@@ -22,7 +22,7 @@ interface Pure {
   pinRows(root: Obj, chats: Record<string, boolean>, folded: Record<string, boolean>, status: Record<string, string>, asks: Record<string, boolean>, files: Obj, project: string, opts?: Obj): Obj[];
   projectName(p: unknown): string;
   chatSet(reply: Obj): Record<string, boolean>;
-  stateOf(phase: string | undefined, asks: boolean): { kind: string; label: string };
+  stateOf(phase: string | undefined, asks: boolean): { kind: string; label: string; glyph: string };
   treeRows(root: Obj, chats: Record<string, boolean>, folded: Record<string, boolean>, status: Record<string, string>, asks: Record<string, boolean>, files?: Obj, opts?: Obj): Obj[];
   filterRows(rows: Obj[], q: string): Obj[];
   keptState(st: Obj): Obj;
@@ -121,14 +121,20 @@ test("a folded branch shows its child count and hides what is below", () => {
   assert.equal(rows[1]!["kids"], 2);
 });
 
-test("state: asks > active phases > queued > idle", () => {
+test("state: asks > the last phase > idle, each phase the design's badge", () => {
   const S = (phase?: string): string | undefined => phase;
-  assert.deepEqual(plain(raw.stateOf(S("thinking"), true)).kind, "ask");
-  for (const p of ["thinking", "streaming", "tool_calling"]) assert.equal(plain(raw.stateOf(S(p), false)).kind, "active", p);
-  assert.equal(plain(raw.stateOf(S("queued"), false)).kind, "queued");
-  assert.equal(plain(raw.stateOf(S("done"), false)).kind, "idle");
-  assert.equal(plain(raw.stateOf(S(), false)).kind, "idle");
-  assert.equal(plain(raw.stateOf(undefined, false)).kind, "idle");
+  // asks you: ? whatever the phase
+  for (const p of ["thinking", "done", "failed", "paused", undefined]) assert.deepEqual(plain(raw.stateOf(S(p), true)), { kind: "ask", label: "asks you", glyph: "?" }, String(p));
+  // Working: the spinner, no glyph, the phase's word
+  const working: [string, string][] = [["queued", "queued"], ["thinking", "thinking"], ["streaming", "writing"], ["retrying", "retrying"], ["awaiting", "waiting"]];
+  for (const [p, label] of working) assert.deepEqual(plain(raw.stateOf(S(p), false)), { kind: "active", label, glyph: "" }, p);
+  // a call's end and a pause keep their badge
+  assert.deepEqual(plain(raw.stateOf(S("stalled"), false)), { kind: "stalled", label: "stalled", glyph: "!" });
+  assert.deepEqual(plain(raw.stateOf(S("failed"), false)), { kind: "failed", label: "failed", glyph: "\u00d7" });
+  assert.deepEqual(plain(raw.stateOf(S("done"), false)), { kind: "done", label: "done", glyph: "\u2713" });
+  assert.deepEqual(plain(raw.stateOf(S("paused"), false)), { kind: "paused", label: "paused", glyph: "II" });
+  // at rest: no badge; the dead tool_calling is no phase any more
+  for (const p of ["idle", "tool_calling", "", "toString", undefined]) assert.deepEqual(plain(raw.stateOf(S(p), false)), { kind: "idle", label: "idle", glyph: "" }, String(p));
   const rows = plain(raw.treeRows(tree, { chat1: true }, {}, { chat1: "streaming" }, { chat1: true }));
   assert.equal((rows.find((r) => r["id"] === "chat1")!["state"] as Obj)["kind"], "ask");
 });
@@ -234,10 +240,12 @@ test("the view acts only on what its sidebar agent publishes; a copy of a call i
   assert.equal(raw.heardOf({ type: "tree_changed", error: "denied" }), "");
 });
 
-test("a chat's phase follows its status_changed; done is at rest", () => {
+test("a chat's phase follows its status_changed; its last phase stays, idle is at rest", () => {
   assert.deepEqual(plain(raw.withPhase({}, "c1", "thinking")), { c1: "thinking" });
   assert.deepEqual(plain(raw.withPhase({ c1: "thinking", c2: "queued" }, "c1", "streaming")), { c1: "streaming", c2: "queued" });
-  assert.deepEqual(plain(raw.withPhase({ c1: "thinking" }, "c1", "done")), {});
+  for (const end of ["done", "failed", "stalled", "awaiting", "paused"])
+    assert.deepEqual(plain(raw.withPhase({ c1: "thinking", c2: "done" }, "c1", end)), { c1: end, c2: "done" }, end);
+  assert.deepEqual(plain(raw.withPhase({ c1: "paused", c2: "done" }, "c1", "idle")), { c2: "done" });
 });
 
 test("the pinned rows: the files agent, the project folder under it, its files while they show, then its file views", () => {

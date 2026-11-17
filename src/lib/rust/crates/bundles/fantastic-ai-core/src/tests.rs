@@ -533,9 +533,12 @@ async fn drain(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<Value> {
             out.push(v.payload);
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
+        // a status that ENDS the call: done, failed, stalled or awaiting
         if out.iter().any(|v| {
             v.get("type").and_then(Value::as_str) == Some("status")
-                && v.get("phase").and_then(Value::as_str) == Some("done")
+                && v.get("phase")
+                    .and_then(Value::as_str)
+                    .is_some_and(|p| ["done", "failed", "stalled", "awaiting"].contains(&p))
         }) {
             while let Some(v) = rx.try_recv() {
                 out.push(v.payload);
@@ -1008,9 +1011,9 @@ async fn a_stalled_provider_times_out_at_the_python_float_ceiling() {
         .iter()
         .find(|v| {
             v.get("type").and_then(Value::as_str) == Some("status")
-                && v.get("phase").and_then(Value::as_str) == Some("done")
+                && v.get("phase").and_then(Value::as_str) == Some("failed")
         })
-        .expect("status(done)");
+        .expect("status(failed)");
     let keys: Vec<&String> = done["detail"].as_object().unwrap().keys().collect();
     assert_eq!(
         keys,
@@ -2069,7 +2072,7 @@ async fn unmapped_provider_error_settles_raised() {
         .iter()
         .filter(|v| {
             v.get("type").and_then(Value::as_str) == Some("status")
-                && v.get("phase").and_then(Value::as_str) == Some("done")
+                && v.get("phase").and_then(Value::as_str) == Some("failed")
                 && v["detail"]["reason"] == json!("error")
         })
         .collect();
@@ -2447,6 +2450,7 @@ async fn silent_chain_turns_are_nudged_until_a_call_or_done() {
 async fn a_dead_turn_is_discarded_and_rerolled() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "dead_think").await;
+    let mut rx = rebind_backend_inbox(&kernel, &backend);
     let s = script(
         &backend,
         vec![
@@ -2470,6 +2474,14 @@ async fn a_dead_turn_is_discarded_and_rerolled() {
         "{r:#?}"
     );
     assert!(until_passes(&s, 2).await, "the dead turn was not rerolled");
+    // the dead call ended STALLED (no reply), not done; the reroll is a call of its own
+    let evs = drain(&mut rx).await;
+    let ends: Vec<(&str, &str)> = evs
+        .iter()
+        .filter(|v| v["type"] == json!("status"))
+        .filter_map(|v| Some((v["phase"].as_str()?, v["detail"]["reason"].as_str()?)))
+        .collect();
+    assert_eq!(ends.first(), Some(&("stalled", "dead_turn")), "{evs:#?}");
     let incoming = s.request_messages(1);
     let last = incoming
         .last()
@@ -2529,11 +2541,16 @@ async fn a_chain_gives_up_after_max_silent_turns() {
     let mut dones = Vec::new();
     while let Some(v) = rx.try_recv() {
         let p = v.payload;
-        if p["type"] == json!("status") && p["phase"] == json!("done") {
+        // every status that ends a call: the give-up is the last, a FAILED call
+        if p["type"] == json!("status")
+            && ["done", "failed", "stalled", "awaiting"]
+                .contains(&p["phase"].as_str().unwrap_or_default())
+        {
             dones.push(p);
         }
     }
-    let last = dones.last().expect("a done status");
+    let last = dones.last().expect("an ending status");
+    assert_eq!(last["phase"], json!("failed"), "{dones:#?}");
     assert_eq!(last["detail"]["reason"], json!("gave_up"), "{dones:#?}");
     assert_eq!(
         last["detail"]["error"],
@@ -2584,11 +2601,16 @@ async fn a_chain_gives_up_after_its_misfire_limit() {
     let mut dones = Vec::new();
     while let Some(v) = rx.try_recv() {
         let p = v.payload;
-        if p["type"] == json!("status") && p["phase"] == json!("done") {
+        // every status that ends a call: the give-up is the last, a FAILED call
+        if p["type"] == json!("status")
+            && ["done", "failed", "stalled", "awaiting"]
+                .contains(&p["phase"].as_str().unwrap_or_default())
+        {
             dones.push(p);
         }
     }
-    let last = dones.last().expect("a done status");
+    let last = dones.last().expect("an ending status");
+    assert_eq!(last["phase"], json!("failed"), "{dones:#?}");
     assert_eq!(last["detail"]["reason"], json!("gave_up"), "{dones:#?}");
     assert_eq!(last["detail"]["silent_turns"], json!(3), "{last:#?}");
     assert_eq!(
@@ -3146,7 +3168,7 @@ async fn a_failed_handoff_is_a_status_event_with_detail() {
         .iter()
         .find(|e| e.get("type").and_then(Value::as_str) == Some("status"))
         .unwrap_or_else(|| panic!("the dead handoff was silent: {events:#?}"));
-    assert_eq!(status["phase"], "done", "{status:#?}");
+    assert_eq!(status["phase"], "failed", "{status:#?}");
     assert_eq!(status["detail"]["reason"], "error", "{status:#?}");
     // The error is the REPLY's own error, verbatim. python passes
     // `reply.get("error")` straight through; the raw status is the fallback and

@@ -1374,7 +1374,7 @@ pub async fn send(
         Ok(Err(GenFailure::Projection(refusal))) => refusal,
         // FAIL FAST: the store refused or is gone — no turn, said so.
         Ok(Err(GenFailure::Store(e))) => {
-            emit_status(kernel, &state, agent_id, &client_id, "done", {
+            emit_status(kernel, &state, agent_id, &client_id, "failed", {
                 let mut m = Map::new();
                 m.insert("reason".to_string(), json!("error"));
                 m.insert("error".to_string(), json!(e.0.clone()));
@@ -1386,7 +1386,7 @@ pub async fn send(
         // FAIL LOUD: a system_prompt_file is set and unusable — no turn on another
         // block, said so.
         Ok(Err(GenFailure::PromptFile(e))) => {
-            emit_status(kernel, &state, agent_id, &client_id, "done", {
+            emit_status(kernel, &state, agent_id, &client_id, "failed", {
                 let mut m = Map::new();
                 m.insert("reason".to_string(), json!("error"));
                 m.insert("error".to_string(), json!(e.0.clone()));
@@ -1398,7 +1398,7 @@ pub async fn send(
         // FAIL LOUD: a fold's summary would not fit its budget
         // after every re-summarise — no turn on an unfolded view, said so.
         Ok(Err(GenFailure::FoldSummary(e))) => {
-            emit_status(kernel, &state, agent_id, &client_id, "done", {
+            emit_status(kernel, &state, agent_id, &client_id, "failed", {
                 let mut m = Map::new();
                 m.insert("reason".to_string(), json!("error"));
                 m.insert("error".to_string(), json!(e.0.clone()));
@@ -1409,10 +1409,10 @@ pub async fn send(
         }
         // A FOLD THAT CANNOT BE PLACED (python `member_anchor`'s `ValueError`,
         // through `_send`'s `except Exception`): the turn fails, reported on
-        // `status(done, reason='error')`, then raised — a FAILED execution, never
+        // `status(failed, reason='error')`, then raised — a FAILED execution, never
         // a turn that dies in silence.
         Ok(Err(GenFailure::FoldAnchor(e))) => {
-            emit_status(kernel, &state, agent_id, &client_id, "done", {
+            emit_status(kernel, &state, agent_id, &client_id, "failed", {
                 let mut m = Map::new();
                 m.insert("reason".to_string(), json!("error"));
                 m.insert("error".to_string(), json!(e.0.clone()));
@@ -1423,12 +1423,12 @@ pub async fn send(
             Value::Null
         }
         // PROVIDER FAILURE (python `core.py`'s `except Exception`):
-        // `status(done, reason='error', error=str(e))` announces it, then python
+        // `status(failed, reason='error', error=str(e))` announces it, then python
         // re-raises, and a raise is a FAILED execution — which is what makes
         // `retries` live and dead-lettering possible. A completed
         // `{error, client_id}` would leave no AI failure retryable.
         Ok(Err(GenFailure::Provider(pe))) => {
-            emit_status(kernel, &state, agent_id, &client_id, "done", {
+            emit_status(kernel, &state, agent_id, &client_id, "failed", {
                 let mut m = Map::new();
                 m.insert("reason".to_string(), json!("error"));
                 m.insert("error".to_string(), json!(pe.message.clone()));
@@ -1458,11 +1458,11 @@ pub async fn send(
             Value::Null
         }
         Err(_elapsed) => {
-            // THE DETAIL IS `reason` AND THE AUTO-FILLS, nothing else — python
-            // `_emit_status(..., "done", reason="timeout")`. The
+            // THE DETAIL IS `reason` AND THE AUTO-FILLS, nothing else — as python's
+            // timeout status (`reason="timeout"`). The
             // `partial_chars`/`partial_head`/`partial_tail` keys rust added were
             // a rust-only shape on the one event a UI reads to close a turn.
-            emit_status(kernel, &state, agent_id, &client_id, "done", {
+            emit_status(kernel, &state, agent_id, &client_id, "failed", {
                 let mut m = Map::new();
                 m.insert("reason".to_string(), json!("timeout"));
                 m
@@ -1707,11 +1707,13 @@ pub fn inquiry_accept(
 
 // ── boot, the row event, context by grant ───────────────────────────────────
 
-/// `boot` — LAZY: never touches the memory store. Checks the record names one
-/// (fail loud otherwise), starts a new incarnation, and marks the view for
+/// `boot` — LAZY: never loads the conversation. Checks the record names a memory
+/// store (fail loud otherwise), starts a new incarnation, and marks the view for
 /// rebuilding — the first turn reads the head from the store and runs
-/// `context_recall`. Python `_make_boot`.
-pub fn boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
+/// `context_recall`. Python `_make_boot`. The one store read: whether the agent is
+/// paused (its last `pause`/`resume` row) — a paused agent says `paused` (#714); a
+/// store that refuses that read refuses the boot.
+pub async fn boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     crate::state::bump_incarnation(agent_id);
     // ONE CHAIN PER AGENT (#227): a new incarnation starts with no chain. Held
     // senders are dropped here, so their callers get the cancelled shape (Bug 2).
@@ -1736,6 +1738,9 @@ pub fn boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         .recall_due
         .lock()
         .expect("recall_due poisoned") = true;
+    if let Err(e) = crate::pause::announce_at_boot(agent_id, kernel).await {
+        return refusal(fantastic_kernel::refusal::STORE_REFUSED, e.0);
+    }
     Value::Null
 }
 
@@ -1819,7 +1824,7 @@ where
     use crate::declared::chat::Call;
     let reply = match call {
         Call::Reflect(_) => reflect(),
-        Call::Boot(_) => boot(agent_id, kernel),
+        Call::Boot(_) => boot(agent_id, kernel).await,
         Call::Send(a) => {
             let client = safe_client(&a.client_id);
             send(provider_for(&client), agent_id, &a, kernel, cfg).await?

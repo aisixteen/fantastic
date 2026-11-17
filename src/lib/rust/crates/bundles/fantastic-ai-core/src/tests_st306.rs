@@ -377,7 +377,7 @@ fn status_is(e: &Value, phase: &str, reason: &str) -> bool {
 /// An `awaiting` status that counted at least one pending piece of work.
 fn awaiting_with_pending(seen: &[Value]) -> bool {
     seen.iter().any(|e| {
-        status_is(e, "done", "awaiting")
+        status_is(e, "awaiting", "awaiting")
             && e.pointer("/detail/pending")
                 .and_then(Value::as_u64)
                 .unwrap_or(0)

@@ -7,8 +7,9 @@
 //! - `tree_changed {}` — an agent was created, deleted or updated (`update_agent`), or a
 //!   kernel connected or left (a leg's `peer_connected` / `socket_closed`, a bridge's
 //!   `bridge_up` / `bridge_down`);
-//! - `status_changed {agent, phase}` — a chat's call moved (its own `status` event; `done`
-//!   is the end of the call);
+//! - `status_changed {agent, phase}` — a chat's call moved (its own `status` event). The
+//!   sidebar keeps each chat's LAST phase — a call's end (`done`, `failed`, `stalled`,
+//!   `awaiting`) and `paused` stay until the next call moves the chat; `idle` drops it;
 //! - `inquiries_changed {open}` — a question to the person (`user`) opened or closed;
 //!   `open` is how many are open now;
 //! - `files_changed {path, change}` — an entry of a folder the files agent watches was
@@ -86,8 +87,8 @@ pub fn change_of(ev: &Value) -> Option<Change> {
     }
 }
 
-/// Each sidebar's tap on this kernel, and the call phase of each chat it has seen moving
-/// (a chat at rest has none).
+/// Each sidebar's tap on this kernel, and the last phase of each chat it has seen moving
+/// (a chat that never moved, or went `idle`, has none).
 #[derive(Default)]
 pub struct Follow {
     taps: Mutex<HashMap<String, SubscriberToken>>,
@@ -98,12 +99,22 @@ fn follow(kernel: &Kernel) -> Arc<Follow> {
     kernel.extension::<Follow>("sidebar.follow")
 }
 
-/// The phases sidebar `me` holds now: `{chat: phase}` for every chat inside a call.
+/// The phases sidebar `me` holds now: `{chat: phase}`, each chat's last phase.
 #[must_use]
 pub fn phases(kernel: &Kernel, me: &AgentId) -> Value {
     let f = follow(kernel);
     let all = f.phases.lock().expect("phases poisoned");
     json!(all.get(me.as_str()).cloned().unwrap_or_default())
+}
+
+/// A chat's `status` kept: its phase is its last until the next one; `idle` (a resume with
+/// nothing held) leaves it with none.
+fn keep_phase(mine: &mut BTreeMap<String, String>, agent: &str, phase: &str) {
+    if phase == "idle" {
+        mine.remove(agent);
+    } else {
+        mine.insert(agent.to_string(), phase.to_string());
+    }
 }
 
 /// How many questions to the person are open now (0 when `user` holds none or is absent).
@@ -132,12 +143,11 @@ pub fn start(kernel: &Arc<Kernel>, me: &AgentId) {
             Change::Status { agent, phase } => {
                 let f = follow(k);
                 let mut all = f.phases.lock().expect("phases poisoned");
-                let mine = all.entry(me.as_str().to_string()).or_default();
-                if phase == "done" {
-                    mine.remove(&agent);
-                } else {
-                    mine.insert(agent.clone(), phase.clone());
-                }
+                keep_phase(
+                    all.entry(me.as_str().to_string()).or_default(),
+                    &agent,
+                    &phase,
+                );
                 drop(all);
                 json!({"type": STATUS_CHANGED, "agent": agent, "phase": phase})
             }
@@ -189,6 +199,32 @@ mod tests {
         assert_eq!(
             change_of(&emit("files", json!({"type": "changed", "path": "src/a.rs", "kind": "deleted"}))),
             Some(Change::File { path: "src/a.rs".into(), change: "removed" })
+        );
+    }
+
+    #[test]
+    fn each_chat_keeps_its_last_phase_until_idle() {
+        let mut mine = BTreeMap::new();
+        // a call's phases, each the chat's last
+        for p in ["queued", "thinking", "streaming", "retrying"] {
+            keep_phase(&mut mine, "c1", p);
+            assert_eq!(mine.get("c1").map(String::as_str), Some(p));
+        }
+        // the ends and a pause stay: the tree shows them until the next call
+        for p in ["done", "failed", "stalled", "awaiting", "paused"] {
+            keep_phase(&mut mine, "c1", "thinking");
+            keep_phase(&mut mine, "c1", p);
+            assert_eq!(mine.get("c1").map(String::as_str), Some(p), "{p} is kept");
+        }
+        keep_phase(&mut mine, "c2", "done");
+        // the next call moves the chat on
+        keep_phase(&mut mine, "c1", "queued");
+        assert_eq!(mine.get("c1").map(String::as_str), Some("queued"));
+        // a resume with nothing held: the chat is at rest, another chat keeps its own
+        keep_phase(&mut mine, "c1", "idle");
+        assert_eq!(
+            mine,
+            BTreeMap::from([("c2".to_string(), "done".to_string())])
         );
     }
 

@@ -176,11 +176,16 @@ async fn nine_cut_turns_in_a_row_give_up() {
     let mut dones = Vec::new();
     while let Some(v) = rx.try_recv() {
         let p = v.payload;
-        if p["type"] == json!("status") && p["phase"] == json!("done") {
+        // every status that ends a call: the give-up is the last, a FAILED call
+        if p["type"] == json!("status")
+            && ["done", "failed", "stalled", "awaiting"]
+                .contains(&p["phase"].as_str().unwrap_or_default())
+        {
             dones.push(p);
         }
     }
-    let last = dones.last().expect("a done status");
+    let last = dones.last().expect("an ending status");
+    assert_eq!(last["phase"], json!("failed"), "{dones:#?}");
     assert_eq!(last["detail"]["reason"], json!("gave_up"), "{dones:#?}");
     assert_eq!(last["detail"]["error"], json!(text), "{last:#?}");
     assert_eq!(last["detail"]["silent_turns"], json!(9), "{last:#?}");
@@ -258,7 +263,7 @@ async fn gave_up_after(
     while let Some(v) = rx.try_recv() {
         let p = v.payload;
         if p["type"] == json!("status")
-            && p["phase"] == json!("done")
+            && p["phase"] == json!("failed")
             && p["detail"]["reason"] == json!("gave_up")
         {
             gave_up = true;
