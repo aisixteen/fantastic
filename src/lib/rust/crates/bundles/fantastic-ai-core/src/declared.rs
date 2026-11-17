@@ -20,7 +20,7 @@ fn default_grep_width() -> i64 {
     200
 }
 
-/// Start a new incarnation: lazy — it never loads the conversation, it checks the record names a memory store and marks the view for rebuilding (the first turn reads the head from the store). It reads only whether the agent is paused, and a paused agent says `paused` in its `status`.
+/// Start a new incarnation: lazy — it never loads the conversation, it checks the record names a memory store and marks the view for rebuilding (the first call reads the head from the store). It reads only whether the agent is paused, and a paused agent says `paused` in its `status`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Boot {}

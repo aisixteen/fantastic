@@ -1709,7 +1709,7 @@ pub fn inquiry_accept(
 
 /// `boot` — LAZY: never loads the conversation. Checks the record names a memory
 /// store (fail loud otherwise), starts a new incarnation, and marks the view for
-/// rebuilding — the first turn reads the head from the store and runs
+/// rebuilding — the first call reads the head from the store and runs
 /// `context_recall`. Python `_make_boot`. The one store read: whether the agent is
 /// paused (its last `pause`/`resume` row) — a paused agent says `paused` (#714); a
 /// store that refuses that read refuses the boot.

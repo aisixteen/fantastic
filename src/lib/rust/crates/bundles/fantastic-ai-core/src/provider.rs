@@ -135,7 +135,7 @@ pub struct Stalled {
 
 impl Stalled {
     /// The turn's failure: `stream_stalled`, the seconds and the endpoint. A
-    /// raise, so the turn ends with an error row and `status(failed, reason='error')`.
+    /// raise, so the call ends with an error row and `status(failed, reason='error')`.
     #[must_use]
     pub fn error(&self, name: &str, endpoint: &str) -> ProviderError {
         ProviderError::transport(format!(

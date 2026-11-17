@@ -47,7 +47,7 @@ async fn turn(
     system_of(s, n - 1)
 }
 
-/// A turn that must fail loud: its reply names the reason, the model is not
+/// A call that must fail loud: its reply names the reason, the model is not
 /// called, and the call ends `failed` (reason `error`) on the agent's inbox.
 async fn failed_turn(kernel: &Arc<Kernel>, backend: &AgentId, s: &Arc<MockScript>) -> Value {
     let mut rx = rebind_backend_inbox(kernel, backend);

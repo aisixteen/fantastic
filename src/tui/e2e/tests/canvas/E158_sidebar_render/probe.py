@@ -262,7 +262,7 @@ async def states(pg, r: dict, info: dict) -> None:
     r["8b2 the spinner is the accent ring that spins (no glyph)"] = bool(x) and x["glyph"] == "" and x["anim"] == "spin" and x["border"].endswith(x["tok"]["accent"]) and x["ring"].startswith(x["tok"]["raised"])
     await shot(pg, "1-working-thinking", info, light=True)
     second = asyncio.create_task(fire(port, A, {"type": "send", "text": "S_AGAIN"}))
-    r["8c Working: a message that waits its turn, the word queued"] = await state("!!b && b.classList.contains('active') && s && s.textContent==='queued'")
+    r["8c Working: a message that waits for its call, the word queued"] = await state("!!b && b.classList.contains('active') && s && s.textContent==='queued'")
     await shot(pg, "2-working-queued", info)
     info["slow"] = await slow
     info["again"] = await second
@@ -303,7 +303,7 @@ async def states(pg, r: dict, info: dict) -> None:
 
     # Working, waiting: A hands B a slow message and calls `await`. The chain runs its calls
     # first (B thinks meanwhile; A's own call has ended: done), then waits on the reply that is
-    # on its way: `awaiting` is drawn between B's answer and the turn that answer wakes
+    # on its way: `awaiting` is drawn between B's answer and the call that answer wakes
     n = len(await seen())
     wait = asyncio.create_task(fire(port, A, {"type": "send", "text": "S_AWAIT"}))
     r["8i the chat it handed work to is Working, thinking"] = await until(pg, f"document.querySelector('#tree [data-id=\"{B}\"] .sub')?.textContent==='thinking'", 20)

@@ -33,7 +33,7 @@ iframe: the probe reads it through CDP, as the chat probes read a chat). Seeded:
      drawn states (a MutationObserver), not from a still row;
    - Working, waiting: A hands B a slow message and calls `await`; the chain runs its calls
      first (B thinking, A's own call already done), then waits on the reply: `waiting` is drawn
-     between B's answer and the turn it wakes, read from the drawn states;
+     between B's answer and the call it wakes, read from the drawn states;
    - Asks you: A's inquiry to the person: `?` on warn; answered, the badge goes;
    - Paused: the `pause` verb: II on muted, the face greyed; `resume` with nothing held: at rest.
 
