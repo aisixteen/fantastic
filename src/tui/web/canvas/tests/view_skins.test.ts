@@ -8,7 +8,8 @@ import { stockSkin } from "../src/bundles/skin/stock.ts";
 import { compileSkin } from "../src/bundles/skin/tokens.ts";
 import type { ColorValue } from "../src/bundles/skin/tokens.ts";
 import { VIEW_SKINS, viewSkinBlock, viewSkinTokens } from "../src/bundles/skin/view_skins.ts";
-import { mountPanel } from "../src/bundles/html_agent/html_view.ts";
+import { CANVAS_VIEW_SKINS, mountPanel } from "../src/bundles/html_agent/html_view.ts";
+import { STOCK_SKINS } from "../src/bundles/skin/stock.ts";
 import { skinNow } from "../src/bundles/skin/apply.ts";
 import { Agent, Kernel } from "../src/lib.ts";
 import type { ViewContext } from "../src/bundles/view.ts";
@@ -86,7 +87,12 @@ for (const rel of views) {
   });
 }
 
-test("the canvas mounts every view with its own skin", async () => {
+test("every canvas skin has its view skin: dark and glass take dark, day takes light", () => {
+  assert.deepEqual(Object.keys(CANVAS_VIEW_SKINS).sort(), STOCK_SKINS.map((s) => s.name).sort());
+  assert.deepEqual(CANVAS_VIEW_SKINS, { day: "light", dark: "dark", glass: "dark" });
+});
+
+test("the canvas mounts every view with the view skin of its skin (dark by default)", async () => {
   const frame = { srcdoc: "", contentWindow: { postMessage: () => {} }, setAttribute: () => {}, addEventListener: () => {}, remove: () => {} };
   const g = globalThis as unknown as Record<string, unknown>;
   const was = { document: g["document"], window: g["window"] };
@@ -99,7 +105,7 @@ test("the canvas mounts every view with its own skin", async () => {
     const ctx = { kernel, mount: { appendChild: () => {} }, selfId: "cell", backend: "cell", close: () => {} } as unknown as ViewContext;
     const h = mountPanel(ctx, () => "<b>x</b>");
     await new Promise((r) => setTimeout(r, 0));
-    assert.ok(frame.srcdoc.includes(`<style id="fantastic-skin">${skinNow().skin.text}</style>`));
+    assert.ok(frame.srcdoc.includes(`<style id="fantastic-skin">${viewSkinBlock("dark")}</style>`), "the dark view skin, as the team page's dark");
     assert.equal(skinNow().name, "dark", "the web default");
     h.unmount();
   } finally {

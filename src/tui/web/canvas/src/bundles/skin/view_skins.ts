@@ -2,12 +2,12 @@ import day from "./stock/day.tokens.json" with { type: "json" };
 import dark from "./stock/view_dark.tokens.json" with { type: "json" };
 import { compileSkin } from "./tokens.ts";
 
-// THE SKINS OF AN HTML VIEW FOR A PRODUCT PAGE (#698) — an agent's `view {kind: html}` runs in a
+// THE SKINS OF AN HTML VIEW (#698) — an agent's `view {kind: html}` runs in a
 // sandboxed frame, is see-through (it paints no page of its own: the host's cell is its backdrop)
 // and declares no colour of its own: every value it draws with is a skin token (`var(--fc-…)`).
 // The HOST that mounts it passes the token block of its skin (`mountView({skin})` in
-// `web/page/view_relay.js`), and the new block on a change. The canvas passes its own skin
-// (`html_view.ts`); a page that compiles no tokens takes one of these:
+// `web/page/view_relay.js`), and the new block on a change. The canvas passes the one that goes
+// with its skin (`html_view.ts`: dark by default); a product page takes one of them too:
 //
 //   light  the team design mock's light colours: the day skin, value for value
 //   dark   the mock's dark colours; what the mock has none for, the canvas's dark skin's
