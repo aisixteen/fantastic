@@ -390,9 +390,13 @@ def yaml_of(p: Path) -> dict:
 ROOT_VIEW = ".fantastic/web/agents/canvas/agents/view_root/agents"
 
 
-def members(cwd: Path) -> list[dict]:
-    """The root view's cells — every child but its singleton background and a
-    double click's ephemeral selector (the popup's agent, never a cell)."""
+#: the host agent whose view a fresh canvas places as a cell at its left (#698):
+#: that tree cell is not this scenario's subject
+TREE_AGENT = "sidebar"
+
+
+def records(cwd: Path) -> list[dict]:
+    """Every child record of the root view, with its folder as `_dir`."""
     d = cwd / ROOT_VIEW
     every = []
     for f in sorted(d.glob("*/agent.yaml")) if d.is_dir() else []:
@@ -402,7 +406,26 @@ def members(cwd: Path) -> list[dict]:
             every.append(dict(yaml_of(f), _dir=f.parent.name))
         except FileNotFoundError:
             pass
-    return [m for m in every if m.get("handler_module") not in ("background.ts", "selector.ts", "layout.ts")]
+    return every
+
+
+def tree_cells(cwd: Path) -> list[str]:
+    """The tree cells: the root view's cells showing the `TREE_AGENT`'s view."""
+    return [m["_dir"] for m in records(cwd) if m.get("backend_id") == TREE_AGENT]
+
+
+def members(cwd: Path) -> list[dict]:
+    """The root view's cells — every child but its singleton background, a
+    double click's ephemeral selector (the popup's agent, never a cell), its
+    layout and the tree cell."""
+    return [m for m in records(cwd)
+            if m.get("handler_module") not in ("background.ts", "selector.ts", "layout.ts")
+            and m.get("backend_id") != TREE_AGENT]
+
+
+def cell_sel(cwd: Path) -> str:
+    """The page's cell frames but the tree cell's."""
+    return ".agent-frame" + "".join(f':not([data-id="{i}"])' for i in tree_cells(cwd))
 
 
 def rect_of(cwd: Path, cell: str) -> dict:
@@ -504,9 +527,9 @@ async def click(page: Page, sel: str, bad: list[str], shift: bool = False) -> No
     await page.mouse("mouseReleased", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2, modifiers=mods)
 
 
-async def head_menu(page: Page, intent: str, bad: list[str]) -> None:
+async def head_menu(page: Page, cwd: Path, intent: str, bad: list[str]) -> None:
     """Right-click a cell's head, then pick `intent` (`hide` | `delete`) from the menu it opens."""
-    r = await page.rect(".agent-frame .frame-head")
+    r = await page.rect(f"{cell_sel(cwd)} .frame-head")
     if r is None or not (r["w"] > 0 and r["h"] > 0):
         bad.append("no frame head to right-click")
         return
@@ -552,14 +575,14 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
             bad.append(f"no {kind} appeared after the double click")
         wait_disk(lambda: len(members(cwd)) > 0)
     if "drag" in run:
-        r = await page.rect(".agent-frame .frame-head")
+        r = await page.rect(f"{cell_sel(cwd)} .frame-head")
         if r is None:
             bad.append("no frame head to drag")
         else:
             x0, y0 = r["x"] + r["w"] / 2 - 40, r["y"] + r["h"] / 2
             # the head shows while the pointer is on the cell: point at the
             # content first, then up onto the head, as a hand does
-            body = await page.rect(".agent-frame .frame-body")
+            body = await page.rect(f"{cell_sel(cwd)} .frame-body")
             if body is not None:
                 await page.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=body["x"] + body["w"] / 2, y=body["y"] + 20)
                 await page.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=x0, y=y0)
@@ -570,9 +593,9 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
             await page.mouse("mouseReleased", x0 + run["drag"]["dx"], y0 + run["drag"]["dy"])
     # ✕ HIDES the cell (the agent lives on); "delete" is Shift+✕ (the agent goes too)
     if run.get("close"):
-        await click(page, ".agent-frame .close", bad, shift=run["close"] == "delete")
+        await click(page, f"{cell_sel(cwd)} .close", bad, shift=run["close"] == "delete")
     if "contextmenu" in run:
-        await head_menu(page, run["contextmenu"], bad)
+        await head_menu(page, cwd, run["contextmenu"], bad)
     if "click" in run:
         state["prev_backend"] = (members(cwd) or [{}])[0].get("backend_id")
         await click(page, run["click"], bad)
@@ -610,7 +633,7 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         if not await page.js(f"(()=>{{const g=document.querySelector({json.dumps(go)}); g?.click(); return !!g;}})()"):
             bad.append(f"no ↗ on the file tree's row for {bid}")
         # the shown terminal takes the keys (the row's click moved the focus off it)
-        await click(page, ".agent-frame .xterm-screen", bad)
+        await click(page, f"{cell_sel(cwd)} .xterm-screen", bad)
     if "type" in run:
         if not await page.until("!!document.querySelector('.xterm-helper-textarea')", 10):
             bad.append("no terminal to type into")
@@ -728,7 +751,7 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         # the page's skin (phase 4, #49): a delete-locked singleton under the page root
         if "canvas" in want and tree.get("skin") != "canvas":
             bad.append(f"load_tree has no skin singleton under the page root: {state.get('tree')}")
-        others = [i for i in tree if i not in ("canvas", "view_root", "web_loader", "background", "skin", "view_sidebar") and i not in state.get("tree_layouts", [])]
+        others = [i for i in tree if i not in ("canvas", "view_root", "web_loader", "background", "skin") and i not in state.get("tree_layouts", []) and i not in tree_cells(cwd)]
         if "member_parent" in want:
             if len(others) != 1 or tree[others[0]] != want["member_parent"]:
                 bad.append(f"load_tree members {[(i, tree[i]) for i in others]}, want one under {want['member_parent']}")
@@ -736,7 +759,7 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
             bad.append(f"load_tree still has {others}")
     if "page_frames" in exp:
         await asyncio.sleep(1.0)
-        n = await page.js("document.querySelectorAll('.agent-frame').length")
+        n = await page.js(f"document.querySelectorAll({json.dumps(cell_sel(cwd))}).length")
         if n != exp["page_frames"]:
             bad.append(f"{n} frames on the page, want {exp['page_frames']}")
     for line in page.logs:
