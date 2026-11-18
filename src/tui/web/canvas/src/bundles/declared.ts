@@ -163,6 +163,28 @@ export function docOf(v: Verb): string {
   return [v.doc, list, each].filter((s) => s !== "").join(" ");
 }
 
+/** One argument's JSON schema, from its declaration. */
+function argSchema(a: Arg): Json {
+  const s: { [k: string]: Json } =
+    a.type === "string[]" ? { type: "array", items: { type: "string" } }
+    : a.type === "bytes" ? { type: "string" }
+    : { type: a.type };
+  if (a.enum !== undefined) s["enum"] = [...a.enum];
+  if (a.min !== undefined) s[a.type === "number" ? "minimum" : a.type === "string[]" ? "minItems" : "minLength"] = a.min;
+  if (a.default !== undefined) s["default"] = a.default;
+  return s;
+}
+
+/** The page kernel's per-verb JSON schemas (`registerBundle`'s `schemas`), rendered from the
+ *  declarations: what a caller on another kernel types its call by (`docs part=schema`, #719). */
+export function schemasOf(declared: Declared): { [verb: string]: Json } {
+  return Object.fromEntries(Object.entries(declared).map(([n, v]) => {
+    const props = Object.fromEntries(Object.entries(v.args).map(([k, a]) => [k, argSchema(a)]));
+    const required = Object.entries(v.args).filter(([, a]) => a.required).map(([k]) => k);
+    return [n, { type: "object", properties: props, required }];
+  }));
+}
+
 /** The page kernel's per-verb docs (`registerBundle`'s table) rendered from the declarations. */
 export function docsOf(declared: Declared): { [verb: string]: string } {
   return Object.fromEntries(Object.entries(declared).map(([n, v]) => [n, docOf(v)]));

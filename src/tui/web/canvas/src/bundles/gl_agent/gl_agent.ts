@@ -1,6 +1,6 @@
 import { str } from "../../lib.ts";
 import { bodyText } from "../body_text.ts";
-import { docsOf, entry } from "../declared.ts";
+import { docsOf, schemasOf, entry } from "../declared.ts";
 import type { Declared } from "../declared.ts";
 import { PANEL_VERBS, panelRelay } from "../panel_relay.ts";
 import type { Handler, Json } from "../../lib.ts";
@@ -52,7 +52,7 @@ export const glAgent: Handler = entry("gl_agent", GL_DECL, glHandler);
 /** Register the gl_agent bundle so `handler_module: "gl_agent.ts"` records
  *  run locally (and weak-load elsewhere). */
 export function registerGlAgent(kernel: {
-  registerBundle(hm: string, h: Handler, verbs?: Record<string, string>): void;
+  registerBundle(hm: string, h: Handler, verbs?: Record<string, string>, opts?: { schemas?: Record<string, Json> }): void;
 }): void {
-  kernel.registerBundle(GL_AGENT, glAgent, docsOf(GL_DECL));
+  kernel.registerBundle(GL_AGENT, glAgent, docsOf(GL_DECL), { schemas: schemasOf(GL_DECL) });
 }

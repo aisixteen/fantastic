@@ -191,8 +191,10 @@ def main() -> int:
         return (f'<call name="send"><routing><target_id>{target}</target_id></routing>'
                 f'<payload>{payload}</payload></call>')
 
-    docs = call("kernel", f"<type>docs</type><of>{BUNDLE}</of>")
-    docs_detailed = call("kernel", f"<type>docs</type><of>{BUNDLE}</of><tier>detailed</tier>")
+    # the TEXT of the docs (`part` docs): a docs reply's fold is what is measured; the
+    # default `all` also carries every verb's schema (#719)
+    docs = call("kernel", f"<type>docs</type><of>{BUNDLE}</of><part>docs</part>")
+    docs_detailed = call("kernel", f"<type>docs</type><of>{BUNDLE}</of><tier>detailed</tier><part>docs</part>")
     read = call(FILES, "<type>read</type><path>big.txt</path>")
     allb: list[dict] = []
     anchors: list[tuple[str, str, int]] = []  # (label, anchor, index in allb of first sight)

@@ -529,3 +529,71 @@ async fn docs_of_an_unknown_guid_or_own_guid() {
     assert!(own.result["verbs"].get("create_agent").is_some());
     assert!(calls.lock().unwrap().is_empty());
 }
+
+/// `docs part`: `schema` answers each verb's JSON schema and no text, `docs` the text
+/// and no schemas, and left out it is `all`, both (#719).
+#[tokio::test]
+async fn docs_part_picks_text_schemas_or_both() {
+    let tmp = TempDir::new().unwrap();
+    let k = kernel(&tmp, Some(HOST));
+    let ask = |part: Option<&str>| {
+        let mut p = json!({"type": "docs", "of": "kernel", "verb": "list_agents"});
+        if let Some(part) = part {
+            p["part"] = json!(part);
+        }
+        p
+    };
+    let schema = send(&k, "kernel", ask(Some("schema")), None).await.result;
+    assert_eq!(
+        schema["schemas"]["list_agents"]["properties"]["limit"]["type"],
+        json!(["integer", "null"]),
+        "{schema}"
+    );
+    assert!(schema.get("verbs").is_none(), "{schema}");
+    let text = send(&k, "kernel", ask(Some("docs")), None).await.result;
+    assert!(text["verbs"].get("list_agents").is_some(), "{text}");
+    assert!(text.get("schemas").is_none(), "{text}");
+    let all = send(&k, "kernel", ask(None), None).await.result;
+    assert!(all["verbs"].get("list_agents").is_some() && all["schemas"].get("list_agents").is_some(), "{all}");
+    let bad = send(&k, "kernel", ask(Some("most")), None).await.result;
+    assert_eq!(bad["reason"], json!("bad_arg"), "{bad}");
+}
+
+/// A call to an agent on a CONNECTED kernel is typed by THAT kernel's declaration:
+/// the sender asks the peer's `docs part=schema` for the verb first, then reads the
+/// text by it — `x` written as `100` reaches the page as the number 100 (#719).
+#[tokio::test]
+async fn a_call_to_a_peer_agent_is_typed_by_the_peers_schema() {
+    let tmp = TempDir::new().unwrap();
+    let k = kernel(&tmp, Some(HOST));
+    let calls = Calls::default();
+    connect(
+        &k,
+        &calls,
+        Some(json!({"of": "view_root", "bundle": "view.ts", "schemas": {"place": {
+            "type": "object",
+            "properties": {"x": {"type": "number"}, "kind": {"type": "string"}},
+            "required": ["x"]}}})),
+    );
+    let mut payload = json!({"type": "place", "x": "100", "kind": "007"})
+        .as_object()
+        .cloned()
+        .unwrap();
+    fantastic_kernel::typing::payload(&k, &format!("{PAGE}|view_root"), &mut payload)
+        .await
+        .unwrap();
+    assert_eq!(payload["x"], json!(100));
+    assert_eq!(payload["kind"], json!("007"));
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![(
+            "kernel".to_string(),
+            json!({"type": "docs", "of": "view_root", "verb": "place", "part": "schema"})
+        )]
+    );
+    let mut wrong = json!({"type": "place", "x": "far"}).as_object().cloned().unwrap();
+    let refused = fantastic_kernel::typing::payload(&k, &format!("{PAGE}|view_root"), &mut wrong)
+        .await
+        .unwrap_err();
+    assert_eq!(refused["arg"], json!("x"), "{refused}");
+}

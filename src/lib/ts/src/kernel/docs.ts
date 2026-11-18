@@ -12,6 +12,9 @@ import { pyRepr } from "./pyjson.ts";
 
 export const TIERS = ["oneliners", "detailed"] as const;
 
+/** What a `docs` answer carries: the text, the verbs' JSON schemas, or both (#719). */
+export const PARTS = ["docs", "schema", "all"] as const;
+
 /** A verb's whole doc, trimmed (python `inspect.cleandoc`). */
 export function fullDoc(doc: string): string {
   return doc.trim();
@@ -40,15 +43,18 @@ export function signature(doc: string): string {
   return line.replace(/\.+$/, "");
 }
 
-/** The `docs` reply `{of, bundle, tier, verbs}` (python `_docs.render`). This
+/** The `docs` reply `{of, bundle, tier?, verbs?, schemas?}` (python `_docs.render`):
+ *  `part` `docs` gives the text, `schema` the verbs' JSON schemas, `all` both. This
  *  kernel's bundles publish no EMITS / CANCEL / NOTES, so a detailed reply
  *  carries verbs alone. */
 export function renderDocs(
   of: string,
   bundle: string | null,
   tier: string,
+  part: string,
   verb: string | null,
   docs: { [verb: string]: string },
+  schemas: { [verb: string]: Json },
 ): Json {
   if (verb !== null && !(verb in docs)) {
     return refusal(BAD_ARG, `docs: ${of} has no verb ${pyRepr(verb)}`, {
@@ -57,10 +63,20 @@ export function renderDocs(
     });
   }
   const names = verb !== null ? [verb] : Object.keys(docs);
-  const verbs: Payload = {};
-  for (const n of names) {
-    const d = docs[n] as string;
-    verbs[n] = tier === "detailed" ? fullDoc(d) : signature(d);
+  const out: Payload = { of, bundle };
+  if (part !== "schema") {
+    const verbs: Payload = {};
+    for (const n of names) {
+      const d = docs[n] as string;
+      verbs[n] = tier === "detailed" ? fullDoc(d) : signature(d);
+    }
+    out["tier"] = tier;
+    out["verbs"] = verbs;
   }
-  return { of, bundle, tier, verbs };
+  if (part !== "docs") {
+    const picked: Payload = {};
+    for (const n of names) if (schemas[n] !== undefined) picked[n] = schemas[n] as Json;
+    out["schemas"] = picked;
+  }
+  return out;
 }

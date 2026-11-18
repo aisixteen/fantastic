@@ -106,6 +106,30 @@ impl Tier {
     }
 }
 
+/// What a `docs` answer carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Part {
+    /// Each verb's text, by `tier`.
+    Docs,
+    /// Each verb's JSON schema: what a caller types its arguments by.
+    Schema,
+    /// Both (the default).
+    All,
+}
+
+impl Part {
+    /// The part as a call spells it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Part::Docs => "docs",
+            Part::Schema => "schema",
+            Part::All => "all",
+        }
+    }
+}
+
 /// How much wiring a `reflect` carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -248,7 +272,7 @@ pub mod kernel {
     #[serde(deny_unknown_fields)]
     pub struct KernelStop {}
 
-    /// HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument. Without `verb` the reply also carries the bundle's short `man` text. Pull once per bundle; `detailed` for a verb you are about to use. Gated like every kernel verb: a `can_call` grant of `docs` on the root. Returns {of, bundle, tier, verbs, man?}.
+    /// HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument. Without `verb` the reply also carries the bundle's short `man` text. Pull once per bundle; `detailed` for a verb you are about to use. `part` picks what comes back: `docs` (the text), `schema` (each verb's JSON schema, what a caller types its arguments by) or `all` (both, the default). Gated like every kernel verb: a `can_call` grant of `docs` on the root. Returns {of, bundle, tier?, verbs?, schemas?, man?}.
     #[derive(Debug, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct Docs {
@@ -259,6 +283,8 @@ pub mod kernel {
         pub tier: Option<Tier>,
         /// One verb's entry only.
         pub verb: Option<String>,
+        /// What comes back: `docs`, `schema` or `all` (default).
+        pub part: Option<Part>,
     }
 
     /// Waits for EVERY named agent to send YOU a message of type 'report' (its `state` and `result`); a report from a named agent is HELD for the one combined message, not delivered as its own turn. Returns at once {wait_id, label, ids, timeout_s}; later ONE message reaches you — {wait_id, label, done:[{id, state, result}], missing:[ids], timed_out} — when all have reported or `timeout_s` passes. Refuses a missing or empty `ids`, an id that names no agent (unknown_agent), yourself, a non-positive `timeout_s` and a non-string `label`. The wait is a row: it survives a restart.

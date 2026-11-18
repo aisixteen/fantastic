@@ -15,6 +15,10 @@ export type Handler = (
 /** verb -> its doc — what a bundle declares at registration and `docs` serves. */
 export type VerbDocs = { [verb: string]: string };
 
+/** verb -> the JSON schema of its arguments: what a caller types its call by
+ *  (`docs part=schema`, #719). */
+export type VerbSchemas = { [verb: string]: Json };
+
 export interface AgentInit {
   id: string;
   /** Names the JS view bundle (local) or a host bundle (forwarded). */

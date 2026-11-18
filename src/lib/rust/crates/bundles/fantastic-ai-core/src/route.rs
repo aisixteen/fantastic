@@ -1577,7 +1577,7 @@ async fn route_reply_gated(
         }
         // THE PARSER READ TEXT: each value takes the type the target verb's schema
         // states (a `limit` of `7` is the integer 7, a `path` of `007` stays text).
-        if let Err(refused) = crate::tool_parse::typed::payload(&kernel, target, &mut payload) {
+        if let Err(refused) = crate::tool_parse::typed::payload(&kernel, target, &mut payload).await {
             if let Some(rt) = reply_to {
                 units.push(Unit {
                     dest: rt,

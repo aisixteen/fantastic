@@ -35,3 +35,26 @@ test("a bundle registered without docs answers an empty table", async () => {
   k.setRoot(new Agent({ id: ROOT }));
   assert.deepEqual((await docs(k, "bare"))["verbs"], {});
 });
+
+test("docs part: schema answers the registered verb schemas, docs the text, all (the default) both (#719)", async () => {
+  const k = new Kernel();
+  const place = { type: "object", properties: { x: { type: "number" } }, required: ["x"] };
+  k.registerBundle("view.ts", () => null, { place: "Put a cell at x." }, { schemas: { place } });
+  k.setRoot(new Agent({ id: ROOT }));
+  k.register(new Agent({ id: "view_root", parentId: ROOT, handlerModule: "view.ts" }));
+  const ask = async (part?: string): Promise<Payload> => {
+    const p: Payload = { type: "docs", of: "view_root", verb: "place" };
+    if (part !== undefined) p["part"] = part;
+    return (await k.send([{ target: "kernel", payload: p }]))[0]!.result as Payload;
+  };
+  const schema = await ask("schema");
+  assert.deepEqual(schema["schemas"], { place });
+  assert.equal(schema["verbs"], undefined);
+  const text = await ask("docs");
+  assert.deepEqual(Object.keys(text["verbs"] as Payload), ["place"]);
+  assert.equal(text["schemas"], undefined);
+  const all = await ask();
+  assert.deepEqual(all["schemas"], { place });
+  assert.deepEqual(Object.keys(all["verbs"] as Payload), ["place"]);
+  assert.equal((await ask("most"))["reason"], "bad_arg");
+});

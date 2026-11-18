@@ -1,6 +1,6 @@
 import type { Handler, Json } from "../../lib.ts";
 import { str } from "../../lib.ts";
-import { docsOf, entry, refuse } from "../declared.ts";
+import { docsOf, schemasOf, entry, refuse } from "../declared.ts";
 import type { Declared } from "../declared.ts";
 import { bytesOf, isRefusal, readAll, readBytes, said } from "../files/file_bridge.ts";
 import type { Change, FileBridge, Refusal, WatchHub } from "../files/file_bridge.ts";
@@ -607,9 +607,9 @@ const previewHandler: Handler = async (id, payload): Promise<Json> => {
 export const previewAgent: Handler = entry("preview", PREVIEW_DECL, previewHandler);
 
 export function registerPreviewView(kernel: {
-  registerBundle(hm: string, h: Handler, verbs?: Record<string, string>): void;
+  registerBundle(hm: string, h: Handler, verbs?: Record<string, string>, opts?: { schemas?: Record<string, Json> }): void;
   setBundleReadme(hm: string, readme: string): void;
 }): void {
-  kernel.registerBundle("preview_view.ts", previewAgent, docsOf(PREVIEW_DECL));
+  kernel.registerBundle("preview_view.ts", previewAgent, docsOf(PREVIEW_DECL), { schemas: schemasOf(PREVIEW_DECL) });
   kernel.setBundleReadme("preview_view.ts", PREVIEW_MAN);
 }

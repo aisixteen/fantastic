@@ -442,7 +442,7 @@ async fn dispatch(
             Some(first) if !first.contains('=') => (first.clone(), &rest[1..]),
             _ => (DEFAULT_ROOT_ID.to_string(), rest),
         };
-        let payload = match typed_payload(&booted.kernel, &target, "reflect", kvs) {
+        let payload = match typed_payload(&booted.kernel, &target, "reflect", kvs).await {
             Ok(p) => p,
             Err(refused) => return Ok(refuse_args(&refused)),
         };
@@ -547,7 +547,7 @@ async fn dispatch(
         apply_ledger_cap(&booted, cap);
         // THE VALUES take the type the verb's declaration asks for (the kernel is up, so
         // its bundles' declared verbs are known).
-        let payload = match typed_payload(&booted.kernel, &id, &verb, &args[2..]) {
+        let payload = match typed_payload(&booted.kernel, &id, &verb, &args[2..]).await {
             Ok(p) => p,
             Err(refused) => return Ok(refuse_args(&refused)),
         };
@@ -713,7 +713,7 @@ fn refuse_args(refused: &Value) -> ExitCode {
 /// kernel's ([`fantastic_kernel::typing`]), the same code the model's `<k>v</k>` goes
 /// through; a value that is not its declared type is refused by argument name, and an
 /// agent or verb this kernel does not declare is refused by the reader.
-fn typed_payload(
+async fn typed_payload(
     kernel: &std::sync::Arc<fantastic_kernel::Kernel>,
     target: &str,
     verb: &str,
@@ -730,7 +730,7 @@ fn typed_payload(
         };
         pairs.push((k.to_string(), v.to_string()));
     }
-    fantastic_kernel::typing::operator_payload(kernel, target, verb, &pairs)
+    fantastic_kernel::typing::operator_payload(kernel, target, verb, &pairs).await
 }
 
 #[cfg(test)]
@@ -739,8 +739,8 @@ mod typed_payload_tests {
     use serde_json::json;
     use std::sync::Arc;
 
-    #[test]
-    fn a_value_for_an_undeclared_verb_stays_the_text_written() {
+    #[tokio::test]
+    async fn a_value_for_an_undeclared_verb_stays_the_text_written() {
         let kernel = Arc::new(fantastic_kernel::Kernel::new());
         let p = typed_payload(
             &kernel,
@@ -748,6 +748,7 @@ mod typed_payload_tests {
             "ping",
             &["n=42".into(), "flag=true".into(), "w=[1]".into()],
         )
+        .await
         .unwrap();
         assert_eq!(
             serde_json::Value::Object(p),
@@ -755,10 +756,11 @@ mod typed_payload_tests {
         );
     }
 
-    #[test]
-    fn an_argument_without_an_equals_sign_is_refused_not_dropped() {
+    #[tokio::test]
+    async fn an_argument_without_an_equals_sign_is_refused_not_dropped() {
         let kernel = Arc::new(fantastic_kernel::Kernel::new());
         let e = typed_payload(&kernel, "nobody", "ping", &["n=42".into(), "no_equals".into()])
+            .await
             .unwrap_err();
         assert_eq!(e["reason"], json!("bad_arg"));
         assert_eq!(e["arg"], json!("no_equals"));
