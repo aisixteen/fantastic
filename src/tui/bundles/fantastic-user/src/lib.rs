@@ -168,7 +168,7 @@ impl UserBundle {
         // A call made as text on a peer (a model's `<wait_s>30</wait_s>`) could not be typed
         // there: its target is declared only here. Its values take the type the target
         // verb's schema states, or the call is refused by argument name.
-        if let Err(refused) = fantastic_kernel::typing::payload(kernel, &target, &mut inner) {
+        if let Err(refused) = fantastic_kernel::typing::payload(kernel, &target, &mut inner).await {
             return (refused, None);
         }
         let mut item = Item::new(AgentId::from(target.as_str()), Value::Object(inner));

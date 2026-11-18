@@ -1,5 +1,5 @@
 import { Agent } from "./agent.ts";
-import type { Handler, VerbDocs } from "./agent.ts";
+import type { Handler, VerbDocs, VerbSchemas } from "./agent.ts";
 import type { Json, Payload } from "./json.ts";
 import { str } from "./json.ts";
 import { pyRepr, pyTruthy } from "./pyjson.ts";
@@ -125,6 +125,9 @@ export class Kernel {
    *  per BUNDLE, as rust's `Bundle::verb_docs` / python's `VERBS`, so a bundle is
    *  readable before any agent of it exists. */
   private readonly bundleVerbs: Map<string, VerbDocs> = new Map();
+  /** handler_module -> the JSON schema of each of the bundle's verbs, what
+   *  `docs part=schema` serves (#719): a caller on another kernel types its call by it. */
+  private readonly bundleSchemas: Map<string, VerbSchemas> = new Map();
   /** handler_module -> the bundle's capability/client readme. Surfaced by
    *  reflect readme=true when an agent of that type carries no per-record
    *  readme — the frontend's self-description, mirroring how host bundles
@@ -150,16 +153,18 @@ export class Kernel {
   }
 
   /** Register a JS view bundle by its handler_module name, with the verb docs
-   *  `docs` serves for it. `folderBundle` makes it a BASE: a folder bundle whose
-   *  `bundle.yaml` names it (`base: <its name>`) is built by it. */
+   *  `docs` serves for it and its verbs' JSON schemas (`schemas`). `folderBundle`
+   *  makes it a BASE: a folder bundle whose `bundle.yaml` names it
+   *  (`base: <its name>`) is built by it. */
   registerBundle(
     handlerModule: string,
     handler: Handler,
     verbs: VerbDocs = {},
-    opts: { folderBundle?: FolderBase } = {},
+    opts: { folderBundle?: FolderBase; schemas?: VerbSchemas } = {},
   ): void {
     this.handlers.set(handlerModule, handler);
     this.bundleVerbs.set(handlerModule, verbs);
+    this.bundleSchemas.set(handlerModule, opts.schemas ?? {});
     if (opts.folderBundle !== undefined) this.bases.set(handlerModule, opts.folderBundle);
   }
 
@@ -222,6 +227,11 @@ export class Kernel {
    *  runtime does not run (a host agent's stand-in). */
   bundleVerbDocs(handlerModule: string): VerbDocs | undefined {
     return this.bundleVerbs.get(handlerModule);
+  }
+
+  /** The verb schemas a registered bundle declared (empty when it declared none). */
+  bundleVerbSchemas(handlerModule: string): VerbSchemas {
+    return this.bundleSchemas.get(handlerModule) ?? {};
   }
 
   /** The verb docs `docs` serves for an agent: its own table when its host

@@ -1,6 +1,6 @@
 import type { Handler, Json, Payload } from "../../lib.ts";
 import { str } from "../../lib.ts";
-import { docsOf, entry, refuse } from "../declared.ts";
+import { docsOf, schemasOf, entry, refuse } from "../declared.ts";
 import type { Declared } from "../declared.ts";
 import { isRefusal, said } from "./file_bridge.ts";
 import type { Change, FileBridge, Refusal, WatchHub } from "./file_bridge.ts";
@@ -321,9 +321,9 @@ function notFound(p: string, ctl: FilesController): Json {
 }
 
 export function registerFilesView(kernel: {
-  registerBundle(hm: string, h: Handler, verbs?: Record<string, string>): void;
+  registerBundle(hm: string, h: Handler, verbs?: Record<string, string>, opts?: { schemas?: Record<string, Json> }): void;
   setBundleReadme(hm: string, readme: string): void;
 }): void {
-  kernel.registerBundle("files_view.ts", filesAgent, docsOf(FILES_DECL));
+  kernel.registerBundle("files_view.ts", filesAgent, docsOf(FILES_DECL), { schemas: schemasOf(FILES_DECL) });
   kernel.setBundleReadme("files_view.ts", FILES_MAN);
 }

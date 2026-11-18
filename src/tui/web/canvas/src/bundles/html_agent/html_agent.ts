@@ -1,7 +1,7 @@
 import { str } from "../../lib.ts";
 import { bodyText } from "../body_text.ts";
 import { htmlRefusal } from "../html_check.ts";
-import { docsOf, entry } from "../declared.ts";
+import { docsOf, schemasOf, entry } from "../declared.ts";
 import type { Declared } from "../declared.ts";
 import { PANEL_VERBS, panelRelay } from "../panel_relay.ts";
 import { grantHint } from "./grant_hint.ts";
@@ -80,5 +80,5 @@ export const htmlFolderBase: FolderBase = (name, _folder, spec) => {
 };
 
 export function registerHtmlAgent(kernel: Kernel): void {
-  kernel.registerBundle(HTML_AGENT, htmlAgent, docsOf(HTML_DECL), { folderBundle: htmlFolderBase });
+  kernel.registerBundle(HTML_AGENT, htmlAgent, docsOf(HTML_DECL), { folderBundle: htmlFolderBase, schemas: schemasOf(HTML_DECL) });
 }

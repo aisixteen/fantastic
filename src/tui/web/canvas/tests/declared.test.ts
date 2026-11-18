@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { check, docOf, docsOf, entry } from "../src/bundles/declared.ts";
+import { check, docOf, docsOf, entry, schemasOf } from "../src/bundles/declared.ts";
+import { VIEW_DECL } from "../src/bundles/canvas/canvas_agent.ts";
 import type { Declared } from "../src/bundles/declared.ts";
 import { Agent, Kernel } from "../src/lib.ts";
 import type { Payload } from "../src/lib.ts";
@@ -85,4 +86,16 @@ test("entry judges a call before the handler, names what the agent answers, and 
   assert.deepEqual(await ask({ type: "go", id: "a", path: "p" }), { ok: true });
   assert.equal((seen as unknown as Payload)["n"], 5);
   assert.deepEqual(await ask({ type: "boot" }), { ok: true });
+});
+
+test("schemasOf renders each verb's JSON schema from its declaration: what a caller on another kernel types by (#719)", () => {
+  const place = schemasOf(VIEW_DECL)["place"] as { properties: Record<string, Record<string, unknown>>; required: string[] };
+  assert.equal(place.properties["x"]!["type"], "number");
+  assert.equal(place.properties["y"]!["type"], "number");
+  assert.equal(place.properties["kind"]!["type"], "string");
+  assert.ok(Array.isArray(place.properties["kind"]!["enum"]));
+  assert.ok(place.required.includes("x"));
+  const tags = schemasOf({ v: { doc: "", args: { ids: { type: "string[]", doc: "", min: 1 }, body: { type: "bytes", doc: "" } } } })["v"] as { properties: Record<string, unknown> };
+  assert.deepEqual(tags.properties["ids"], { type: "array", items: { type: "string" }, minItems: 1 });
+  assert.deepEqual(tags.properties["body"], { type: "string" });
 });

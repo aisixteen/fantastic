@@ -6,7 +6,7 @@ import { RENDERER_CHOICES, resolveRenderer } from "../terminal_view/renderer.ts"
 import { readShell } from "../shell.ts";
 import { bodyText } from "../body_text.ts";
 import { htmlRefusal } from "../html_check.ts";
-import { docsOf, entry } from "../declared.ts";
+import { docsOf, schemasOf, entry } from "../declared.ts";
 import type { Declared } from "../declared.ts";
 import { fileGrant, isRefusal, kernelBridge, openViewAgent, said } from "../files/file_bridge.ts";
 import { agentIndex } from "../files/files_deps.ts";
@@ -563,11 +563,11 @@ function updateSelf(id: string, payload: Payload, kernel: Parameters<Handler>[2]
 
 /** Register the canvas root's bundle and the view bundle. */
 export function registerCanvas(kernel: {
-  registerBundle(hm: string, h: Handler, verbs?: Record<string, string>): void;
+  registerBundle(hm: string, h: Handler, verbs?: Record<string, string>, opts?: { schemas?: Record<string, Json> }): void;
   setBundleReadme(hm: string, readme: string): void;
 }): void {
-  kernel.registerBundle(CANVAS, canvasAgent, docsOf(CANVAS_DECL));
+  kernel.registerBundle(CANVAS, canvasAgent, docsOf(CANVAS_DECL), { schemas: schemasOf(CANVAS_DECL) });
   kernel.setBundleReadme(CANVAS, CANVAS_MAN);
-  kernel.registerBundle(VIEW, viewAgent, docsOf(VIEW_DECL));
+  kernel.registerBundle(VIEW, viewAgent, docsOf(VIEW_DECL), { schemas: schemasOf(VIEW_DECL) });
   kernel.setBundleReadme(VIEW, VIEW_MAN);
 }

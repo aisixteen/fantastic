@@ -85,12 +85,14 @@ export const KERNEL_VERB_DOCS: { [verb: string]: string } = {
     "shut down, exit. Under env:'container', the container.",
   docs:
     "args: of:str (req — an agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'), " +
-    "tier:'oneliners'|'detailed'?, verb:str?. HOW TO CALL an agent — its " +
+    "tier:'oneliners'|'detailed'?, verb:str?, part:'docs'|'schema'|'all'?. HOW TO CALL an agent — its " +
     "bundle's verbs: `oneliners` (default) is one signature line per verb, " +
     "`detailed` the full text (no `verb`: plus emits, cancel and notes). Pull " +
     "once per bundle; `detailed` for a verb you are about to use. Gated like " +
-    "every kernel verb: a `can_call` grant of `docs` on the root. " +
-    "Returns {of, bundle, tier, verbs, emits?, cancel?, notes?}.",
+    "every kernel verb: a `can_call` grant of `docs` on the root. `part` picks " +
+    "what comes back: `docs` (the text), `schema` (each verb's JSON schema, what a " +
+    "caller types its arguments by) or `all` (both, the default). " +
+    "Returns {of, bundle, tier?, verbs?, schemas?, emits?, cancel?, notes?}.",
   reload_bundle:
     "args: name:str (req). Re-read `bundles/<name>/bundle.yaml` through this " +
     "kernel's loader (a new folder loads) and restart every live instance of it, " +
@@ -127,10 +129,16 @@ export async function answerKernelVerb(
       return refusal(BAD_ARG, "docs: verb must be a verb name", { extra: { arg: "verb" } });
     }
     const vName = typeof v === "string" ? v : null;
-    if (of === "kernel") return renderDocs(of, "kernel", tier, vName, KERNEL_VERB_DOCS);
+    const partRaw = payload["part"];
+    const part = partRaw === undefined || partRaw === null ? "all" : partRaw;
+    if (part !== "docs" && part !== "schema" && part !== "all") {
+      return refusal(BAD_ARG, "docs: part must be 'docs', 'schema' or 'all'", { extra: { arg: "part" } });
+    }
+    if (of === "kernel") return renderDocs(of, "kernel", tier, part, vName, KERNEL_VERB_DOCS, {});
     const agent = k.agents.get(of);
     if (agent !== undefined) {
-      return renderDocs(of, agent.handlerModule, tier, vName, k.verbDocsOf(agent) ?? {});
+      const schemas = agent.handlerModule !== null ? k.bundleVerbSchemas(agent.handlerModule) : {};
+      return renderDocs(of, agent.handlerModule, tier, part, vName, k.verbDocsOf(agent) ?? {}, schemas);
     }
     // A BUNDLE by either name the kernel lists it under: `bundles='ids'` lists the
     // NAME (`file_bridge`), an agent record carries the handler_module
@@ -140,7 +148,7 @@ export async function answerKernelVerb(
       (b) => b.error === undefined && (b.handler_module === of || b.name === of),
     );
     if (listed !== undefined) {
-      return renderDocs(of, listed.handler_module, tier, vName, k.bundleVerbDocs(listed.handler_module) ?? {});
+      return renderDocs(of, listed.handler_module, tier, part, vName, k.bundleVerbDocs(listed.handler_module) ?? {}, k.bundleVerbSchemas(listed.handler_module));
     }
     return refusal(BAD_ARG, `docs: ${pyRepr(of)} names no agent, bundle or 'kernel'`, {
       hint: "an agent id from a reflect tree, a bundle's name or handler_module (reflect bundles='all' lists both), or 'kernel'",

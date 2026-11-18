@@ -1,6 +1,6 @@
 import { str } from "../../lib.ts";
 import { bodyText } from "../body_text.ts";
-import { docsOf, entry } from "../declared.ts";
+import { docsOf, schemasOf, entry } from "../declared.ts";
 import type { Declared } from "../declared.ts";
 import { PANEL_VERBS, panelRelay } from "../panel_relay.ts";
 import { DEFAULT_BG_SOURCE } from "./default_bg.ts";
@@ -109,9 +109,9 @@ export const backgroundAgent: Handler = entry("background", BACKGROUND_DECL, bac
 
 /** Register the background's bundle. */
 export function registerBackground(kernel: {
-  registerBundle(hm: string, h: Handler, verbs?: Record<string, string>): void;
+  registerBundle(hm: string, h: Handler, verbs?: Record<string, string>, opts?: { schemas?: Record<string, Json> }): void;
   setBundleReadme(hm: string, readme: string): void;
 }): void {
-  kernel.registerBundle(BACKGROUND, backgroundAgent, docsOf(BACKGROUND_DECL));
+  kernel.registerBundle(BACKGROUND, backgroundAgent, docsOf(BACKGROUND_DECL), { schemas: schemasOf(BACKGROUND_DECL) });
   kernel.setBundleReadme(BACKGROUND, BACKGROUND_MAN);
 }

@@ -1928,13 +1928,14 @@ No args."####,
     ),
     (
         "docs",
-        r####"args: of:string matching /^[^|]+(?:\|[^|]+)?$/ (req), tier:'oneliners'|'detailed'?, verb:string? — HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument"####,
-        r####"HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument. Without `verb` the reply also carries the bundle's short `man` text. Pull once per bundle; `detailed` for a verb you are about to use. Gated like every kernel verb: a `can_call` grant of `docs` on the root. Returns {of, bundle, tier, verbs, man?}.
+        r####"args: of:string matching /^[^|]+(?:\|[^|]+)?$/ (req), tier:'oneliners'|'detailed'?, verb:string?, part:'docs'|'schema'|'all'? — HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument"####,
+        r####"HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument. Without `verb` the reply also carries the bundle's short `man` text. Pull once per bundle; `detailed` for a verb you are about to use. `part` picks what comes back: `docs` (the text), `schema` (each verb's JSON schema, what a caller types its arguments by) or `all` (both, the default). Gated like every kernel verb: a `can_call` grant of `docs` on the root. Returns {of, bundle, tier?, verbs?, schemas?, man?}.
 
 args:
   of:string matching /^[^|]+(?:\|[^|]+)?$/ (req) — An agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'.
   tier:'oneliners'|'detailed'? — How much of each verb: `oneliners` (default) or `detailed`.
-  verb:string? — One verb's entry only."####,
+  verb:string? — One verb's entry only.
+  part:'docs'|'schema'|'all'? — What comes back: `docs`, `schema` or `all` (default)."####,
     ),
     (
         "await_set",

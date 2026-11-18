@@ -12,7 +12,7 @@
 use crate::agent::Agent;
 use crate::declared::common::Reflect;
 use crate::declared::kernel::Docs;
-use crate::declared::Tier;
+use crate::declared::{Part, Tier};
 use crate::kernel::Kernel;
 use crate::refusal::{refusal_hint, with, BAD_ARG};
 use serde_json::{json, Map, Value};
@@ -42,15 +42,32 @@ pub fn entries_of_decls(
         .collect()
 }
 
-/// The `docs` reply `{of, bundle, tier, verbs, man?}` — `man` only when no `verb`
-/// is asked for. Python `_docs.render`.
+/// Each declared verb's JSON schema, by name, in the order and with the precedence of
+/// [`entries_of_decls`]: what a caller types its arguments by.
 #[must_use]
+pub fn schemas_of_decls(
+    lists: &[&[crate::verbs::Verb]],
+    dynamic: &[crate::verbs::DynVerb],
+) -> Map<String, Value> {
+    crate::verbs::rows(lists, dynamic)
+        .iter()
+        .map(|r| (r.name.to_string(), r.schema.clone()))
+        .collect()
+}
+
+/// The `docs` reply `{of, bundle, tier?, verbs?, schemas?, man?}`: `part` `docs` gives
+/// the text (`tier`, `verbs`, and `man` when no `verb` is asked for), `schema` gives
+/// `schemas`, `all` both. Python `_docs.render`.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     of: &str,
     bundle: Value,
     tier: Tier,
+    part: Part,
     verb: Option<&str>,
     table: &[Entry],
+    schemas: &Map<String, Value>,
     man: Option<&str>,
 ) -> Value {
     if let Some(v) = verb {
@@ -76,10 +93,20 @@ pub fn render(
     let mut out = Map::new();
     out.insert("of".into(), json!(of));
     out.insert("bundle".into(), bundle);
-    out.insert("tier".into(), json!(tier.as_str()));
-    out.insert("verbs".into(), Value::Object(verbs));
-    if let (None, Some(man)) = (verb, man) {
-        out.insert("man".into(), json!(man));
+    if part != Part::Schema {
+        out.insert("tier".into(), json!(tier.as_str()));
+        out.insert("verbs".into(), Value::Object(verbs));
+        if let (None, Some(man)) = (verb, man) {
+            out.insert("man".into(), json!(man));
+        }
+    }
+    if part != Part::Docs {
+        let picked: Map<String, Value> = schemas
+            .iter()
+            .filter(|(n, _)| verb.is_none_or(|v| v == n.as_str()))
+            .map(|(n, s)| (n.clone(), s.clone()))
+            .collect();
+        out.insert("schemas".into(), Value::Object(picked));
     }
     Value::Object(out)
 }
@@ -110,6 +137,7 @@ pub async fn remote_docs_reply(kernel: &Arc<Kernel>, args: &Docs) -> Value {
         of: agent_id.to_string(),
         tier: args.tier,
         verb: args.verb.clone(),
+        part: args.part,
     };
     let Some(remote) = target.remote.as_ref() else {
         // this kernel's own guid — a LOCAL id, answered here
@@ -121,6 +149,9 @@ pub async fn remote_docs_reply(kernel: &Arc<Kernel>, args: &Docs) -> Value {
     }
     if let Some(t) = args.tier {
         ask["tier"] = json!(t.as_str());
+    }
+    if let Some(p) = args.part {
+        ask["part"] = json!(p.as_str());
     }
     let (mut out, _) = crate::peers::call_peer(remote, ask, None).await;
     if let Some(o) = out.as_object_mut() {
@@ -138,14 +169,18 @@ pub async fn remote_docs_reply(kernel: &Arc<Kernel>, args: &Docs) -> Value {
 pub fn docs_reply(kernel: &Arc<Kernel>, args: &Docs) -> Value {
     let of = args.of.as_str();
     let tier = args.tier.unwrap_or(Tier::Oneliners);
+    let part = args.part.unwrap_or(Part::All);
     let verb = args.verb.as_deref();
     if of == "kernel" {
+        let lists: &[&[crate::verbs::Verb]] = &[crate::declared::kernel::VERBS];
         return render(
             of,
             json!("kernel"),
             tier,
+            part,
             verb,
-            &entries_of_decls(&[crate::declared::kernel::VERBS], &[]),
+            &entries_of_decls(lists, &[]),
+            &schemas_of_decls(lists, &[]),
             None,
         );
     }
@@ -156,7 +191,7 @@ pub fn docs_reply(kernel: &Arc<Kernel>, args: &Docs) -> Value {
     let module = if let Some(a) = &agent {
         match a.handler_module.clone() {
             Some(hm) => hm,
-            None => return render(of, Value::Null, tier, verb, &[], None),
+            None => return render(of, Value::Null, tier, part, verb, &[], &Map::new(), None),
         }
     } else if kernel.bundles.is_folder(of) {
         // a FOLDER BUNDLE by its name — its handler_module
@@ -184,7 +219,7 @@ pub fn docs_reply(kernel: &Arc<Kernel>, args: &Docs) -> Value {
         return r;
     };
     let Some(bundle) = kernel.bundles.get(&module) else {
-        return render(of, json!(module), tier, verb, &[], None);
+        return render(of, json!(module), tier, part, verb, &[], &Map::new(), None);
     };
     // The bundle's declarations, with the verbs every agent answers.
     // The agent's own dynamic verbs too. A bundle addressed by name has no agent: it
@@ -210,7 +245,17 @@ pub fn docs_reply(kernel: &Arc<Kernel>, args: &Docs) -> Value {
     lists.push(bundle.verbs());
     lists.push(crate::declared::common::VERBS);
     let table = entries_of_decls(&lists, &dynamic);
-    render(of, json!(module), tier, verb, &table, Some(bundle.man()))
+    let schemas = schemas_of_decls(&lists, &dynamic);
+    render(
+        of,
+        json!(module),
+        tier,
+        part,
+        verb,
+        &table,
+        &schemas,
+        Some(bundle.man()),
+    )
 }
 
 // ─── reflect subtree filters ────────────────────────────────────

@@ -233,7 +233,7 @@ pub fn verb_schema(
 /// The payload of a call to `target`, its values read by the schema of the verb it
 /// names; a target or verb not declared here leaves the text as written. `Err` is the
 /// refusal naming the argument that is not what its declaration asks for.
-pub fn payload(
+pub async fn payload(
     kernel: &Arc<Kernel>,
     target: &str,
     payload: &mut Map<String, Value>,
@@ -250,7 +250,7 @@ pub fn payload(
         .filter(|(k, _)| k.as_str() != "type")
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let Some(schema) = verb_schema(kernel, target, &verb, &args) else {
+    let Some(schema) = target_verb_schema(kernel, target, &verb, &args).await else {
         return Ok(());
     };
     if let Value::Object(done) = read_value(&verb, "", &schema, &Value::Object(args))? {
@@ -259,6 +259,34 @@ pub fn payload(
         }
     }
     Ok(())
+}
+
+/// The schema of `verb` on `target`: this kernel's own declaration, or, for an agent on
+/// a CONNECTED kernel (`<guid>|<agent id>`, a page's view), the one that kernel's
+/// `docs` gives, asked before the call is sent (#719). `None` when neither declares it.
+pub async fn target_verb_schema(
+    kernel: &Arc<Kernel>,
+    target: &str,
+    verb: &str,
+    args: &Map<String, Value>,
+) -> Option<Value> {
+    if let Some(s) = verb_schema(kernel, target, verb, args) {
+        return Some(s);
+    }
+    if !target.contains('|') {
+        return None;
+    }
+    let ask = crate::declared::kernel::Docs {
+        of: target.to_string(),
+        tier: None,
+        verb: Some(verb.to_string()),
+        part: Some(crate::declared::Part::Schema),
+    };
+    crate::docs::remote_docs_reply(kernel, &ask)
+        .await
+        .get("schemas")
+        .and_then(|s| s.get(verb))
+        .cloned()
 }
 
 /// A routing field of a call (not an argument of its verb) read as `kind`
@@ -270,7 +298,7 @@ pub fn routing(name: &str, kind: &str, v: &Value) -> Result<Value, Value> {
 /// The payload of a one-shot call an OPERATOR typed as `k=v` pairs: each value is read as
 /// its argument's declaration asks ([`operator_text`]); an agent or verb not declared
 /// here leaves the text as written. `Err` names the argument that is not its type.
-pub fn operator_payload(
+pub async fn operator_payload(
     kernel: &Arc<Kernel>,
     target: &str,
     verb: &str,
@@ -280,7 +308,7 @@ pub fn operator_payload(
         .iter()
         .map(|(k, v)| (k.clone(), Value::String(v.clone())))
         .collect();
-    let schema = verb_schema(kernel, target, verb, &text);
+    let schema = target_verb_schema(kernel, target, verb, &text).await;
     let mut out = Map::new();
     out.insert("type".to_string(), Value::String(verb.to_string()));
     for (k, v) in pairs {
@@ -353,8 +381,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_kernels_own_verbs_are_typed_by_their_declarations_on_the_root() {
+    #[tokio::test]
+    async fn the_kernels_own_verbs_are_typed_by_their_declarations_on_the_root() {
         use crate::{Agent, AgentId};
         let mut kernel = Kernel::new();
         crate::test_support::register_root_loader(&mut kernel.bundles);
@@ -380,9 +408,9 @@ mod tests {
         };
         // an integer where `list_agents` declares one, text where `docs` declares text
         let p =
-            operator_payload(&kernel, "kernel", "list_agents", &pairs(&[("limit", "7")])).unwrap();
+            operator_payload(&kernel, "kernel", "list_agents", &pairs(&[("limit", "7")])).await.unwrap();
         assert_eq!(p["limit"], json!(7));
-        let p = operator_payload(&kernel, "kernel", "docs", &pairs(&[("of", "7")])).unwrap();
+        let p = operator_payload(&kernel, "kernel", "docs", &pairs(&[("of", "7")])).await.unwrap();
         assert_eq!(p["of"], json!("7"));
         // a list only where the verb declares one
         let p = operator_payload(
@@ -391,6 +419,7 @@ mod tests {
             "await_set",
             &pairs(&[("ids", r#"["a","b"]"#), ("timeout_s", "2.5")]),
         )
+        .await
         .unwrap();
         assert_eq!(p["ids"], json!(["a", "b"]));
         assert_eq!(p["timeout_s"], json!(2.5));
@@ -405,6 +434,7 @@ mod tests {
                 ("root", "12"),
             ]),
         )
+        .await
         .unwrap();
         assert_eq!(p["allow"], json!(["."]));
         assert_eq!(p["root"], json!("12"));
@@ -414,13 +444,14 @@ mod tests {
             "update_agent",
             &pairs(&[("id", "kernel_state"), ("delete_lock", "true")]),
         )
+        .await
         .unwrap();
         assert_eq!(p["delete_lock"], json!(true));
         // a verb the agent does not declare types nothing
-        let p = operator_payload(&kernel, "kernel", "make_tea", &pairs(&[("limit", "7")])).unwrap();
+        let p = operator_payload(&kernel, "kernel", "make_tea", &pairs(&[("limit", "7")])).await.unwrap();
         assert_eq!(p["limit"], json!("7"));
         let p =
-            operator_payload(&kernel, "nobody", "list_agents", &pairs(&[("limit", "7")])).unwrap();
+            operator_payload(&kernel, "nobody", "list_agents", &pairs(&[("limit", "7")])).await.unwrap();
         assert_eq!(p["limit"], json!("7"));
     }
 
