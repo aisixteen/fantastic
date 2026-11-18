@@ -22,7 +22,7 @@ import yaml
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from canvas import DESKTOP_POINTER, MAC_CHROME, Host, Page, build_bin, free_port, host_call, yaml_of  # noqa: E402
+from canvas import DESKTOP_POINTER, MAC_CHROME, TREE_AGENT, Host, Page, build_bin, cell_sel, free_port, host_call, yaml_of  # noqa: E402
 
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
@@ -30,7 +30,6 @@ from helpers import oslayer, verdict  # noqa: E402
 from helpers.chrome import Chrome  # noqa: E402
 
 SC = E2E / "tests" / "scenario" / "E21_canvas_user" / "scenario.yaml"
-FRAMES = "document.querySelectorAll('#world .agent-frame, .agent-frame').length"
 
 
 class Browser:
@@ -99,7 +98,17 @@ def members(cwd: Path, under: str = "view_root") -> list[str]:
     if under != "view_root":
         d = d / under / "agents"
     return sorted(f.parent.name for f in d.glob("*/agent.yaml")
-                  if (yaml.safe_load(oslayer.read_text(f)) or {}).get("handler_module") not in ("background.ts", "selector.ts")) if d.is_dir() else []
+                  if is_cell(yaml.safe_load(oslayer.read_text(f)) or {})) if d.is_dir() else []
+
+
+def is_cell(rec: dict) -> bool:
+    """A cell of this scenario's: not the background, a selector or the tree cell."""
+    return rec.get("handler_module") not in ("background.ts", "selector.ts") and rec.get("backend_id") != TREE_AGENT
+
+
+def frames(cwd: Path) -> str:
+    """How many cell frames the page shows, the tree cell's not counted."""
+    return f"document.querySelectorAll({json.dumps(cell_sel(cwd))}).length"
 
 
 async def wait_for(cond, timeout: float = 8.0) -> bool:
@@ -136,8 +145,8 @@ async def run(sc: dict, tmp: Path) -> bool:
                 bad.append(f"tab A never showed the canvas: {await a.js('document.body.innerText.slice(0,200)')}")
             if not await place(a, "html", 500, 300):
                 bad.append("no action popup on a dblclick in tab A")
-            if not await a.until(f"{FRAMES} === 1", 8):
-                bad.append(f"tab A shows {await a.js(FRAMES)} cells, want 1")
+            if not await a.until(f"{frames(cwd)} === 1", 8):
+                bad.append(f"tab A shows {await a.js(frames(cwd))} cells, want 1")
             if not await wait_for(lambda: len(members(cwd)) >= 1):
                 bad.append(f"no cell on disk: {members(cwd)}")
             results.append(("tab-gets-in", bad))
