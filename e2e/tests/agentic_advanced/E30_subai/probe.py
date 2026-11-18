@@ -969,10 +969,9 @@ async def run(
                     if ev.get("type") == "status" and det.get("error"):
                         print(f"\n  ** TURN FAILED: {det['error']} **\n", flush=True)
                         runaway.append(f"turn failed: {det['error']}")
-                    elif ev.get("type") == "status" and ev.get("phase") == "done":
-                        # EVERY TURN'S END, not only a failed one, so a chain that
-                        # stopped after a clean turn (`ok`, `awaiting`, `dead_turn`)
-                        # says HOW that turn ended.
+                    elif ev.get("type") == "status" and ev.get("phase") in ("done", "failed"):
+                        # EVERY CALL'S END, not only a failed one, so a chain that
+                        # stopped after a clean end says HOW it ended (#714 phases).
                         print(f"  · turn ended: {det.get('reason') or 'ok'}", flush=True)
                     if ev.get("type") == "context" and ev.get("phase") == "too_small":
                         print(f"\n  ** TOO_SMALL: {det} **\n", flush=True)

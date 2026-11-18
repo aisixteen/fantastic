@@ -321,30 +321,28 @@ async def connect(
         conn.trips.append(f"turn failed: {msg}")
 
     def _died(ev: dict, det: dict) -> bool:
-        """A turn that ENDED for any reason but `ok`.
+        """A call that ENDED for any reason but `ok` (#714 phases).
 
-        `detail.error` alone is not enough: the AI layer's own 180s per-send
-        ceiling closes a turn with `done{reason:"timeout"}` and NO error key, and
-        a cancel closes it with `done{reason:"cancelled"}`. Without this, a chain
-        that died at the ceiling and a model that chose to stop write the
-        identical transcript.
+        `failed` is an error, the per-send ceiling (`timeout`, NO error key) or
+        retries run out (`gave_up`); `done{reason:"cancelled"}` is a cancel.
+        `detail.error` alone is not enough: without this, a chain that died at the
+        ceiling and a model that chose to stop write the identical transcript.
+        Not an end: `stalled` (`dead_turn`, an empty answer the kernel REROLLS with
+        the no-call nudge — capping on it would cancel live chains) and `awaiting`
+        (the model's explicit wait: the next delivery wakes it).
         """
-        return (
-            ev.get("type") == "status"
-            and ev.get("phase") == "done"
-            # `awaiting` is the model's EXPLICIT wait (`<call name="await">`): a benign
-            # end of turn, not a failure — the next delivery wakes it.
-            # `dead_turn` is an empty answer the kernel REROLLS with the no-call
-            # nudge — the chain goes on; capping on it would cancel live chains.
-            and det.get("reason") not in (None, "ok", "awaiting", "dead_turn")
+        if ev.get("type") != "status":
+            return False
+        return ev.get("phase") == "failed" or (
+            ev.get("phase") == "done" and det.get("reason") not in (None, "ok")
         )
 
     def _ended(ev: dict) -> bool:
-        return ev.get("type") == "status" and ev.get("phase") == "done"
+        return ev.get("type") == "status" and ev.get("phase") in ("done", "failed")
 
     def _note_end(det: dict) -> None:
-        """EVERY TURN'S END, not only a failed one, so a chain that stopped after a
-        clean turn (`ok`, `awaiting`, `dead_turn`) says HOW that turn ended."""
+        """EVERY CALL'S END, not only a failed one, so a chain that stopped after a
+        clean end says HOW it ended."""
         print(f"  · turn ended: {det.get('reason') or 'ok'}", flush=True)
 
     if core is None:

@@ -101,15 +101,15 @@ def main() -> int:
         out = hk.send(AI, {"type": "send", "text": text, "client_id": "tab1"})
         end = time.monotonic() + 15
         while time.monotonic() < end and not any(
-            e.get("type") == "status" and e.get("phase") == "done" for e in list(events)
+            e.get("type") == "status" and e.get("phase") in ("done", "failed") for e in list(events)
         ):
             time.sleep(0.05)
         stop.set()
-        # the events of THIS turn: up to its first `done` — the failed turn's own
+        # the events of THIS turn: up to its first end (`done`/`failed`) — the failed turn's own
         # retry (#533) starts at once and its events are not this turn's
         seen = list(events)
         first = next((i for i, e in enumerate(seen)
-                      if e.get("type") == "status" and e.get("phase") == "done"), len(seen))
+                      if e.get("type") == "status" and e.get("phase") in ("done", "failed")), len(seen))
         idle()  # the failed turn's own retries run out (#533) before the next case
         return out, seen[: first + 1], m.turns()[before:]
 
