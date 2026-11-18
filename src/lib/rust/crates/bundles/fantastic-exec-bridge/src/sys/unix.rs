@@ -275,9 +275,16 @@ pub(crate) fn open_pty(cols: u16, rows: u16) -> std::io::Result<(PtyMaster, PtyS
     }
     // SAFETY: openpty handed us two fresh fds we now own.
     let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-    // The master stays with the kernel only: CLOEXEC so no other spawn inherits it.
-    // SAFETY: fcntl on an fd we own.
-    unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+    // Both ends CLOEXEC, so no other spawn inherits them. The master stays with the
+    // kernel only. The slave reaches its own job through `spawn`'s dup onto fds 0-2,
+    // which clears the flag on those copies. A slave copy leaked into a job spawned
+    // meanwhile would keep the terminal open after its program exits: the master
+    // never reads EOF and `job_done` never comes (#602).
+    // SAFETY: fcntl on fds we own.
+    unsafe {
+        libc::fcntl(master.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
+        libc::fcntl(slave.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
+    }
     set_nonblocking(&master)?;
     Ok((PtyMaster(AsyncFd::new(master)?), PtySlave(slave)))
 }
