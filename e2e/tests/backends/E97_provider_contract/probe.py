@@ -75,9 +75,11 @@ def _tokens(events: list) -> list:
     return [(t, e) for t, e in events if e.get("type") == "token"]
 
 
-def _done_reasons(events: list) -> list:
+def _done_reasons(events: list, phase: str = "done") -> list:
+    """The reasons of the `phase` status events (`done`: ok, cancelled; `failed`:
+    error, timeout, gave_up — #714)."""
     return [(e.get("detail") or {}).get("reason") for _, e in events
-            if e.get("type") == "status" and e.get("phase") == "done"]
+            if e.get("type") == "status" and e.get("phase") == phase]
 
 
 async def main():
@@ -151,11 +153,11 @@ async def main():
         # reply.
         # Bounded wait for it — never a pass by timeout.
         for _ in range(50):
-            if _done_reasons(events["ai_cut"]):
+            if _done_reasons(events["ai_cut"], "failed"):
                 break
             await asyncio.sleep(0.1)
-        check(checks, "ai_cut: the turn closed done/error", "error" in _done_reasons(events["ai_cut"]),
-              _done_reasons(events["ai_cut"]))
+        check(checks, "ai_cut: the turn closed failed/error", "error" in _done_reasons(events["ai_cut"], "failed"),
+              _done_reasons(events["ai_cut"], "failed"))
         cut_rows = await memory.rows_of(root, "ai_cut", conversation_only=True)
         check(checks, "ai_cut: no assistant row stored",
               not [r for r in cut_rows if r.get("role") == "assistant"],
