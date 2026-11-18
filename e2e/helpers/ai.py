@@ -615,6 +615,10 @@ async def drive(
         }
     )
     first = (await root.send([opening]))[0]["result"]
+    if via and isinstance(first, dict) and isinstance(first.get("result"), dict):
+        # THE HUMAN'S SEND SUCCEEDS as its own call; the AI's answer — a refusal
+        # included — rides inside as `{sent, result}`.
+        first = first["result"]
     if isinstance(first, dict) and first.get("error"):
         print(f"\n  ** FIRST SEND FAILED: {first['error']} **\n", flush=True)
 
