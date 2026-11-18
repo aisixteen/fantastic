@@ -120,6 +120,16 @@ async def wait_for(cond, timeout: float = 8.0) -> bool:
     return False
 
 
+async def wait_async(read, want, timeout: float = 8.0) -> bool:
+    """Wait until the awaited `read()` gives `want`."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if await read() == want:
+            return True
+        await asyncio.sleep(0.2)
+    return False
+
+
 async def run(sc: dict, tmp: Path) -> bool:
     from contextlib import AsyncExitStack
 
@@ -145,7 +155,8 @@ async def run(sc: dict, tmp: Path) -> bool:
                 bad.append(f"tab A never showed the canvas: {await a.js('document.body.innerText.slice(0,200)')}")
             if not await place(a, "html", 500, 300):
                 bad.append("no action popup on a dblclick in tab A")
-            if not await a.until(f"{frames(cwd)} === 1", 8):
+            # the tree cell's record reaches the disk a moment after the page: the count is read anew each time
+            if not await wait_async(lambda: a.js(frames(cwd)), 1):
                 bad.append(f"tab A shows {await a.js(frames(cwd))} cells, want 1")
             if not await wait_for(lambda: len(members(cwd)) >= 1):
                 bad.append(f"no cell on disk: {members(cwd)}")
