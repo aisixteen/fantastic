@@ -70,7 +70,14 @@ VERBS = {"reflect": _reflect}
 NOTES = (
     "A folder bundle `<root>/bundles/<name>/bundle.yaml` with `base: py_agent`: "
     "`sentence`, `command` (argv, cwd = the folder), `verbs` (verb → doc), optional "
-    "`emits`, `notes`, `record` (defaults under each instance). " + SECURITY + "."
+    "`emits`, `notes`, `record` (defaults under each instance). The program talks to "
+    "the kernel over the connector channel: the fd in env FANTASTIC_CTRL_FD; each frame "
+    "is [4-byte big-endian length of what follows | kind byte | body], kind T = a UTF-8 "
+    "JSON object. "
+    "The program writes {op:\"hello\", verbs:[…]} first (the verbs must equal "
+    "bundle.yaml's), then gets {op:\"call\", rid, payload} for each call (payload.type "
+    "is the verb) and writes {op:\"result\", rid, result} back (a refusal is data). "
+    + SECURITY + "."
 )
 
 
