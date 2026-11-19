@@ -16,6 +16,8 @@ that keeps working after the builder walks away".
 | `chat_memory` (E39) | the chat bot's long pre-written past folds at a small window (a fold per batch, then a fold of folds); live asks recall from it |
 | `self_managed_groups` (E124) | a master AI runs up to `MAX_GROUPS` worker groups (worker AI + editor + runner) from its prompt alone — creates, checks and deletes each; the harness builds no group. Scored on the bound, orphans, every suite green and the master's prompt staying bounded; run at 1 and 3 to compare walls |
 | `pause_resume` (E126) | FREE (no model, Python runtime): `pause` holds every message in order in the memory store, a kernel restart keeps the pause and the queue, `resume` releases the held messages in order after one resumed row, none lost or duplicated |
+| `new_tool` (E160) | the model writes a new agent (a py_agent folder bundle) for a verb no agent has, creates it, grants both halves for that verb (no `*`), calls it and answers with its value |
+| `new_tool_twin` (E159) | FREE (no model, rust runtime): the same call sequence from a scripted model — write the bundle, `reload_bundle`, `create_agent`, grant, `docs part=schema`, call, answer |
 
 **Wiring here includes granting authority.** The substrate is deny-all: creating
 an agent connects it to nothing, and a builder that only creates agents has built

@@ -1,0 +1,17 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/, so this same file runs
+# against any plug and the results stay comparable.
+id: new_tool
+group: agentic_advanced
+title: "the model writes a new agent (a py_agent folder bundle), creates and grants it, and uses its verb as a tool to answer"
+runner: probe.py
+runtimes: [rust]
+costs: turns
+# Free twin: new_tool_twin (E159) drives the same call sequence with a scripted model.
+limits:
+  idle_seconds: 60
+  max_turns: 40
+  no_progress_turns: 16
+  turn_chars: 120000
+  turn_seconds: 600
+env: {}
