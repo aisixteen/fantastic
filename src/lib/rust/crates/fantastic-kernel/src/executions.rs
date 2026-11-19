@@ -473,7 +473,8 @@ impl Kernel {
     /// named one carries a dedup contract, so it goes last) — each with its settle
     /// and ack rows, and the task/flush rows that only covered what was pruned. A
     /// DEAD LETTER that nobody acked stays: it is waiting for a person. In-flight
-    /// work is never pruned. Returns how many executions went.
+    /// work is never pruned, nor the task a call in flight was made in. Returns how
+    /// many executions went.
     pub async fn prune_executions(self: &Arc<Self>) -> usize {
         let Some(store_id) = self.store_id() else {
             return 0;
@@ -561,6 +562,15 @@ impl Kernel {
             .filter_map(|c| c.get("id").and_then(Value::as_i64))
             .filter(|id| !gone.contains(id))
             .min();
+        let in_flight_in: HashSet<i64> = calls
+            .iter()
+            .filter(|c| {
+                c.get("id")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|id| !settles.contains_key(&id))
+            })
+            .filter_map(|c| c.get("parent").and_then(Value::as_i64))
+            .collect();
         for r in &rows {
             let Some(rid) = r.get("id").and_then(Value::as_i64) else {
                 continue;
@@ -579,7 +589,11 @@ impl Kernel {
                         doomed.insert(rid);
                     }
                 }
-                Some("task") if floor.is_some_and(|f| rid < f) => {
+                // the task a call still in flight was made in stays with it: a
+                // restart's `settle_cut` reads it to tell the call's caller
+                Some("task")
+                    if floor.is_some_and(|f| rid < f) && !in_flight_in.contains(&rid) =>
+                {
                     doomed.insert(rid);
                 }
                 _ => {}

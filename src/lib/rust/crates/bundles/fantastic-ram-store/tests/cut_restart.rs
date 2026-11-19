@@ -228,3 +228,46 @@ async fn a_call_cut_by_a_restart_is_a_dead_letter_told_once_to_its_caller_and_ta
     assert!(k3.take_cut(&AgentId::from("a")).is_empty());
     assert!(k3.take_cut(&AgentId::from("b")).is_empty());
 }
+
+/// The task a call still in flight was made in stays in the store when the window
+/// prunes around it, so a restart still knows the call was its caller's own work
+/// (`take_cut`'s `task`) and not a dispatch's plumbing.
+#[tokio::test]
+async fn the_task_of_a_call_in_flight_outlives_the_window() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = first(tmp.path()).await;
+    // `a`'s task makes a call that never answers
+    let k1 = Arc::clone(&k);
+    k.spawn_task(&AgentId::from("a"), "work", async move {
+        as_agent(AgentId::from("a"), call(&k1, "b", json!({"type": "hang"}))).await;
+    });
+    let mut hung = None;
+    for _ in 0..200 {
+        hung = ledger(&k)
+            .await
+            .into_iter()
+            .find(|e| e["status"] == json!("in_flight") && e["target"] == json!("b"))
+            .and_then(|e| e["id"].as_i64());
+        if hung.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let hung = hung.expect("the hung call is in flight");
+    for _ in 0..20 {
+        let done = as_agent(AgentId::from("a"), call(&k, "b", json!({"type": "ping"}))).await;
+        assert_eq!(done.result, json!({"ok": true}));
+    }
+    // the window prunes everything settled older than the newest few: the hung call
+    // is the oldest call left, and its task is older still
+    k.flush_executions().await;
+    k.set_ledger_cap(Some(5));
+    assert!(k.prune_executions().await > 0, "the window pruned");
+
+    let k2 = second(&k, tmp.path()).await;
+    assert_eq!(k2.start(false).await["started"], json!(true));
+    let cut = k2.take_cut(&AgentId::from("a"));
+    assert_eq!(cut.len(), 1, "{cut:?}");
+    assert_eq!(cut[0].id, hung);
+    assert_eq!(cut[0].task.as_deref(), Some("work"), "{cut:?}");
+}
