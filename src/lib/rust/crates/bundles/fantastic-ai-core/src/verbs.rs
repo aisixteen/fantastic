@@ -1712,7 +1712,9 @@ pub fn inquiry_accept(
 /// rebuilding — the first call reads the head from the store and runs
 /// `context_recall`. Python `_make_boot`. The one store read: whether the agent is
 /// paused (its last `pause`/`resume` row) — a paused agent says `paused` (#714); a
-/// store that refuses that read refuses the boot.
+/// store that refuses that read refuses the boot. After a kernel restart, the calls
+/// the previous process cut that concern this agent come to it as one notice turn
+/// ([`crate::route::resume_cut`]).
 pub async fn boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     crate::state::bump_incarnation(agent_id);
     // ONE CHAIN PER AGENT (#227): a new incarnation starts with no chain. Held
@@ -1741,6 +1743,9 @@ pub async fn boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     if let Err(e) = crate::pause::announce_at_boot(agent_id, kernel).await {
         return refusal(fantastic_kernel::refusal::STORE_REFUSED, e.0);
     }
+    // A CHAIN THE RESTART CUT (#726) goes on: what the previous process left in
+    // flight is a dead letter now, and this agent is told, once.
+    crate::route::resume_cut(kernel, agent_id, &kernel.take_cut(agent_id));
     Value::Null
 }
 

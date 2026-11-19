@@ -1,0 +1,8 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: typed_peer_call
+group: canvas
+title: "a call to a page agent on another kernel is typed by the page's schema: x/y written as text reach the page as numbers, the cell sits at that rect; x='far' is refused by name (#719, #728)"
+runner: probe.py
+costs: free
+limits: {seconds: 300}
+env: {}

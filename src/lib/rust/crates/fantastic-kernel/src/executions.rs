@@ -52,6 +52,34 @@ struct Inner {
     /// How many `call` rows the store holds for the kernel (counted as flushed,
     /// re-read at every prune) — what the retention window is measured against.
     stored_calls: usize,
+    /// The calls the previous process left in flight, settled as dead letters by
+    /// `start` (`settle_cut`): each still to be told to its caller and
+    /// its target (the flags), which take them with `Kernel::take_cut`.
+    cut: Vec<(CutCall, bool, bool)>,
+}
+
+/// What a dead letter cut by a restart says: the process that ran the call stopped
+/// before it settled, so no reply will come.
+pub const CUT_BY_RESTART: &str =
+    "the kernel stopped before this call settled; it was cut by the restart, so no reply will come";
+
+/// A CALL CUT BY A RESTART: its `call` row is in the store and no `settle` row is,
+/// so it was in flight when the previous process stopped and died with it. `start`
+/// settles it `cancelled` (a dead letter, announced like any); the agents it
+/// concerns read it once with [`Kernel::take_cut`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CutCall {
+    /// The execution id: the pid its reply tag and the dead letter carry.
+    pub id: i64,
+    /// The agent it was sent to.
+    pub target: String,
+    /// Who sent it (`None` = the operator).
+    pub caller: Option<String>,
+    /// Its verb (the payload's `type`).
+    pub verb: Option<String>,
+    /// The task it was made in, by that task's name (`spawn_task`'s verb); `None`
+    /// when it was made inside a dispatch, not in a task its caller spawned.
+    pub task: Option<String>,
 }
 
 /// The kernel's flusher state. One per kernel.
@@ -185,7 +213,9 @@ impl Kernel {
     /// 3. The store must serve the operator (the kernel writes as `kernel`) —
     ///    probed now, refused now, never discovered on the first flush.
     /// 4. Start flushing: every execution row minted so far and from now on is
-    ///    written into the store and leaves RAM.
+    ///    written into the store and leaves RAM. A call the previous process left
+    ///    in flight (a `call` row with no `settle`) settles as a dead letter now
+    ///    (`settle_cut`).
     /// 5. `boot_all`: boot every other agent in registration order (AI agents
     ///    boot lazily — they read their own store on their first turn).
     ///
@@ -307,6 +337,9 @@ impl Kernel {
         });
         self.exec.lock().flusher_task = Some(tid);
         self.exec.wake.notify_one();
+        // WHAT THE PREVIOUS PROCESS LEFT IN FLIGHT becomes a dead letter now, before
+        // anyone boots: the agents read what concerns them while they boot.
+        self.settle_cut().await;
         // OPEN `await_set` WAITS come back from the store before anyone boots; the
         // ones already due are completed once the agents are up (below).
         let due_waits = crate::await_set::restore(self).await;
@@ -440,7 +473,8 @@ impl Kernel {
     /// named one carries a dedup contract, so it goes last) — each with its settle
     /// and ack rows, and the task/flush rows that only covered what was pruned. A
     /// DEAD LETTER that nobody acked stays: it is waiting for a person. In-flight
-    /// work is never pruned. Returns how many executions went.
+    /// work is never pruned, nor the task a call in flight was made in. Returns how
+    /// many executions went.
     pub async fn prune_executions(self: &Arc<Self>) -> usize {
         let Some(store_id) = self.store_id() else {
             return 0;
@@ -528,6 +562,15 @@ impl Kernel {
             .filter_map(|c| c.get("id").and_then(Value::as_i64))
             .filter(|id| !gone.contains(id))
             .min();
+        let in_flight_in: HashSet<i64> = calls
+            .iter()
+            .filter(|c| {
+                c.get("id")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|id| !settles.contains_key(&id))
+            })
+            .filter_map(|c| c.get("parent").and_then(Value::as_i64))
+            .collect();
         for r in &rows {
             let Some(rid) = r.get("id").and_then(Value::as_i64) else {
                 continue;
@@ -546,7 +589,11 @@ impl Kernel {
                         doomed.insert(rid);
                     }
                 }
-                Some("task") if floor.is_some_and(|f| rid < f) => {
+                // the task a call still in flight was made in stays with it: a
+                // restart's `settle_cut` reads it to tell the call's caller
+                Some("task")
+                    if floor.is_some_and(|f| rid < f) && !in_flight_in.contains(&rid) =>
+                {
                     doomed.insert(rid);
                 }
                 _ => {}
@@ -725,8 +772,8 @@ impl Kernel {
     /// Bring a flushed execution back into RAM before `send` launches an item that
     /// names it — a caller NAME not held in RAM, or an int id not in the ledger. A
     /// settled one comes back as a DONE entry holding its recorded outcome (dedup
-    /// survives the flush and a restart); one with no settle row was in flight when
-    /// the process stopped and rebuilds nothing — re-sending runs it.
+    /// survives the flush and a restart). A call the previous process left with no
+    /// settle row was settled as a dead letter at `start` (`settle_cut`).
     pub(crate) async fn recall_executions(self: &Arc<Self>, items: &[Item]) -> Result<(), String> {
         enum Want {
             Name(String),
@@ -789,6 +836,130 @@ impl Kernel {
             self.ledger.put_settled(cid, call, &oc, attempts);
         }
         Ok(())
+    }
+
+    /// SETTLE WHAT A RESTART CUT: every stored `call` row with no `settle` row (and
+    /// unknown to this process's ledger) was in flight when the previous process
+    /// stopped. Nothing can answer it any more, so it settles `cancelled` with
+    /// [`CUT_BY_RESTART`] — a dead letter like any: listed by `ledger`, announced
+    /// (`on_deadletter`), retired by `ack_deadletter`, prunable once acked — and is
+    /// kept for its caller and its target to read once ([`Kernel::take_cut`]). A
+    /// store that refuses the read is named in the log; the start goes on.
+    async fn settle_cut(self: &Arc<Self>) {
+        let mut q = Map::new();
+        q.insert("kinds".to_string(), json!(["call", "settle", "task"]));
+        let rows = match self.store_read(q).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("  [kernel] the calls a restart cut could not be read: {e}");
+                return;
+            }
+        };
+        let settled: HashSet<i64> = rows
+            .iter()
+            .filter(|r| kind_of(r) == Some("settle"))
+            .filter_map(|r| r.get("parent").and_then(Value::as_i64))
+            .collect();
+        let tasks: HashMap<i64, &str> = rows
+            .iter()
+            .filter(|r| kind_of(r) == Some("task"))
+            .filter_map(|r| {
+                Some((
+                    r.get("id").and_then(Value::as_i64)?,
+                    r.get("verb").and_then(Value::as_str)?,
+                ))
+            })
+            .collect();
+        let Some(root) = self.root() else { return };
+        for call in &rows {
+            if kind_of(call) != Some("call")
+                || call.get("internal").and_then(Value::as_bool) == Some(true)
+            {
+                continue;
+            }
+            let Some(id) = call.get("id").and_then(Value::as_i64) else {
+                continue;
+            };
+            // a call row always carries its attempts and retries; one without is not a call
+            let (Some(attempts), Some(_)) = (
+                call.get("attempts").and_then(Value::as_u64),
+                call.get("retries"),
+            ) else {
+                continue;
+            };
+            let Some(target) = call.get("agent").and_then(Value::as_str) else {
+                continue;
+            };
+            if settled.contains(&id) || self.ledger.has(id) {
+                continue;
+            }
+            let attempts = u32::try_from(attempts).unwrap_or(u32::MAX);
+            let named = call.get("named").and_then(Value::as_bool) == Some(true);
+            let out = Outcome::new(
+                Some(TaskId(id)),
+                Status::Cancelled,
+                json!({"error": CUT_BY_RESTART}),
+            );
+            let kept = crate::ledger::stored_outcome(&out, named, crate::jsonsafe::BodyAs::Len);
+            let mut settle = Map::new();
+            settle.insert("kind".to_string(), Value::from("settle"));
+            settle.insert("parent".to_string(), Value::from(id));
+            settle.insert("settled".to_string(), Value::from(target));
+            settle.insert("outcome".to_string(), kept.clone());
+            settle.insert("attempts".to_string(), Value::from(attempts));
+            if let Err(e) = self.rows_put(&root.id, settle) {
+                eprintln!("  [kernel] the cut call {id} could not be settled: {e}");
+                continue;
+            }
+            if let Value::Object(kept) = &kept {
+                self.ledger.put_settled(id, call, kept, attempts);
+            }
+            self.announce_deadletter(id, &out, attempts).await;
+            let caller = call
+                .get("caller")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let to_caller = caller.is_some();
+            self.exec.lock().cut.push((
+                CutCall {
+                    id,
+                    target: target.to_string(),
+                    caller,
+                    verb: call.get("verb").and_then(Value::as_str).map(str::to_string),
+                    task: call
+                        .get("parent")
+                        .and_then(Value::as_i64)
+                        .and_then(|p| tasks.get(&p))
+                        .map(|t| (*t).to_string()),
+                },
+                to_caller,
+                true,
+            ));
+        }
+    }
+
+    /// The calls a restart cut that concern `agent` — the ones it made and the ones
+    /// made to it — each handed to it ONCE: a later call (a reboot of the agent)
+    /// gets none of them again.
+    pub fn take_cut(&self, agent: &AgentId) -> Vec<CutCall> {
+        let mut st = self.exec.lock();
+        let mut out = Vec::new();
+        for (c, to_caller, to_target) in &mut st.cut {
+            let made = *to_caller && c.caller.as_deref() == Some(agent.as_str());
+            let got = *to_target && c.target == agent.0;
+            if made {
+                *to_caller = false;
+            }
+            if got {
+                *to_target = false;
+            }
+            if made || got {
+                out.push(c.clone());
+            }
+        }
+        st.cut
+            .retain(|(_, to_caller, to_target)| *to_caller || *to_target);
+        out
     }
 
     /// `on_deadletter` — an execution settled failed / timed_out / cancelled.

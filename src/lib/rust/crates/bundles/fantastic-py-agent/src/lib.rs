@@ -37,7 +37,7 @@ pub mod verbs;
 
 /// What the base is for — its one short man text; the verbs are rendered from their
 /// declarations (`docs`, `reflect`).
-const MAN: &str = "The base a folder bundle with a program extends: the kernel runs the program, and the program answers the verbs the bundle's bundle.yaml names, over the connector channel.";
+const MAN: &str = "The base a folder bundle with a program extends: the kernel runs the program, and the program answers the verbs the bundle's bundle.yaml names, over the connector channel. The channel is the fd in env FANTASTIC_CTRL_FD; each frame is [4-byte big-endian length of what follows | kind byte | body], kind T = a UTF-8 JSON object. The program writes {op:\"hello\", verbs:[…]} first (the verbs must equal bundle.yaml's), then gets {op:\"call\", rid, payload} for each call (payload.type is the verb) and writes {op:\"result\", rid, result} back (a refusal is data).";
 
 /// The base's handler module.
 pub const HANDLER_MODULE: &str = "py_agent.tools";
