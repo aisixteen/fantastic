@@ -709,8 +709,8 @@ pub fn parse_call(block: &str) -> Result<Option<ToolCall>, Malformed> {
         .filter(|t| !t.is_empty());
     if target.is_none() && !to.as_ref().is_some_and(given) {
         return Err(Malformed::new(
-            "a send names its target: `<target_id>agent id</target_id>`, or several \
-             recipients as `<to><item>id</item><item>id</item></to>`",
+            "a send names its target in `<routing>`: `<target_id>agent id</target_id>`, or \
+             several recipients as `<to><item>id</item><item>id</item></to>`",
         ));
     }
     let mut args = Map::new();
