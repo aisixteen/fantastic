@@ -27,7 +27,6 @@ futures-util = { workspace = true }
 arc-swap = { workspace = true }
 libc = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
