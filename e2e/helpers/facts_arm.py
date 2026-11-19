@@ -315,15 +315,27 @@ async def reboot_agent(root, core, bk, fb: str, aid: str, strategy: str, extra: 
     connection, `delete_agent` with `keep_memory:true` (the record goes — `keep_memory:true`
     keeps the store data, so rows, bodies and the view stay in the kernel under the same id), forget the provider, then
     `connect` again with the same record. `create_agent` fires `boot`, and a booted
-    agent with a store runs `context_recall`. Returns the new connection."""
+    agent with a store runs `context_recall`. Returns the new connection.
+
+    THE EDGES THAT NAME IT COME BACK TOO. `delete_agent` prunes the deleted id from
+    every OTHER record's `can_call` / `callable_by` (a stale key would hand its edge
+    to whoever re-creates the id), and `connect` re-opens only the halves it owns. So
+    the human's egress to the AI, the ws leg's `watch`, the kept provider's ingress
+    for its chat would all stay closed — the next task refused at the human, the
+    model never asked. The grants are read before the delete and written back,
+    key by key, before the re-create."""
     if watch_conn is not None:
         await watch_conn.close()
+    named = await _grants_naming(root, aid)
     r = await call(root, root.id, {"type": "delete_agent", "id": aid, "keep_memory": True})
     assert not (isinstance(r, dict) and r.get("error")), f"delete_agent({aid}): {r}"
     if core is not None:
         WRAPS.pop(aid, None)
         core._projection.pop(aid, None)
         core._compaction_mark.pop(aid, None)
+    # BEFORE the re-create: `connect` starts the ws watcher, whose `watch` must find
+    # the leg's grant already back (a key may name an id not created yet).
+    await _regrant(root, aid, named)
     return await connect(
         root, core, bk, agent_id=aid,
         can_call={fb: "*", "notes": "*", "cli": "*", "user": "*", aid: "*"},
@@ -332,6 +344,35 @@ async def reboot_agent(root, core, bk, fb: str, aid: str, strategy: str, extra: 
         record={"context_window": arm_window(aid), "num_ctx": arm_window(aid),
                 "context_strategy": strategy, **extra},
     )
+
+
+async def _agents(root) -> dict[str, dict]:
+    r = await call(root, "kernel", {"type": "list_agents"})
+    return {a["id"]: a for a in (r or {}).get("agents") or []}
+
+
+async def _grants_naming(root, aid: str) -> list[tuple[str, str, object]]:
+    """(holder, field, grant) for every OTHER record whose `can_call` or `callable_by`
+    names `aid`."""
+    return [(hid, field, rec[field][aid])
+            for hid, rec in (await _agents(root)).items() if hid != aid
+            for field in ("can_call", "callable_by")
+            if isinstance(rec.get(field), dict) and aid in rec[field]]
+
+
+async def _regrant(root, aid: str, named: list[tuple[str, str, object]]) -> None:
+    """Write each grant `_grants_naming` read back onto its holder — READ, add the
+    one key, write back (update replaces the field whole)."""
+    for hid, field, grant in named:
+        rec = (await _agents(root)).get(hid)
+        assert rec is not None, f"reboot_agent({aid}): {hid} is gone"
+        have = dict(rec.get(field) or {})
+        if have.get(aid) == grant:
+            continue
+        have[aid] = grant
+        out = await call(root, "kernel", {"type": "update_agent", "id": hid, field: have})
+        assert not (isinstance(out, dict) and out.get("error")), (
+            f"reboot_agent({aid}): re-grant {hid}.{field} refused: {out}")
 
 
 async def fixture(root, fb: str, *, arms=ARMS, extra_callable: tuple[str, ...] = ()):
