@@ -24,7 +24,9 @@ Checks: the files land verbatim and the folder is listed as a py_agent bundle;
 the record exists (handler_module, parent); `docs part=schema` declares the verb and
 the AI's docs reply carried it; the verb's reply carries the SHA-256 the harness
 computes; the AI's stored answer carries it; no request follows `done`; the grants
-are exact (`grant_faults`: both halves name `sha256`, nothing grants `*`).
+are exact (E160's `grant_faults`: both halves name `sha256`, no `*` was granted), and
+the same scorer flags a `*` planted on either side; E160's own `score` passes this
+run, so the model test's scoring is proven passable by a perfect actor.
 
 ```sh
 cd src/lib/python

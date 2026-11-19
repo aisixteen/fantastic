@@ -11,11 +11,13 @@ no `*` on the root. The task names none of the route.
 
 Scored (hard): a new agent of a py_agent folder bundle exists; the model called a verb
 that bundle declares, on it, and the reply carried the digest; the model's turns carry
-the digest; the grants are exact (`grant_faults`, shared with the twin: both halves of
-the gate name the verb, nothing grants `*`). Reported: `reload_bundle`, `docs` of the
-new agent before its first call (with `part`), turns.
+the digest; the grants are exact (`grant_faults`: both halves of the gate name the
+verb, nothing on the new agent grants `*`, nothing the run wrote into the AI's
+`can_call` grants `*`). Reported: `reload_bundle`, `docs` of the new agent before its
+first call (with `part`), turns.
 
-The free twin `new_tool_twin` (E159) scripts the same sequence without a model.
+The free twin `new_tool_twin` (E159) scripts the same sequence without a model and
+runs this probe's `score` on it.
 
 ```sh
 cd src/lib/python

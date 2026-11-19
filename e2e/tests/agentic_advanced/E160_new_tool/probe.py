@@ -22,11 +22,15 @@ SCORED (hard):
   2. VERB     — the model called a verb that bundle declares (beside the base's own),
                 on that agent, and its reply carried the digest the harness computes;
   3. ANSWER   — the model's own turns carry the digest;
-  4. GRANTS   — exact (`grant_faults`, shared with the twin): the new agent admits the
-                AI for that verb and the AI's `can_call` reaches it for that verb, and
-                neither side grants `*`.
+  4. GRANTS   — exact (`grant_faults`): the new agent admits the AI for that verb and
+                the AI's `can_call` reaches it for that verb; nothing on the new agent
+                grants `*` (beside its own `$self`) and nothing the run wrote into the
+                AI's `can_call` grants `*`.
 Reported, not scored: `reload_bundle`, a `docs` of the new agent before its first
 call (and with `part=schema`), turns used.
+
+`score` is the one scoring: the free twin runs it on its scripted run too, so a
+perfect actor is proven to pass it.
 """
 
 from __future__ import annotations
@@ -47,9 +51,7 @@ sys.path.insert(
 from backends import backend as _resolve_backend
 from helpers import Limits, connect, drive, verdict
 from helpers.kernel import home, open_kernel
-from tests.agentic_advanced.E159_new_tool_twin.probe import grant_faults
 
-BK = _resolve_backend()
 AID = "ai"
 BUNDLES = "bundles"
 TOKEN = "E160-" + secrets.token_hex(6)
@@ -75,9 +77,93 @@ def _calls(transcript: list[str]) -> list[tuple[str, dict]]:
     return out
 
 
+def _star(v) -> bool:
+    return v == "*" or (isinstance(v, list) and "*" in v)
+
+
+def grant_faults(before: dict, records: dict, ai: str, new: str, verb: str) -> list[str]:
+    """What is wrong with the grants between `ai` and the agent it made, `new` — []
+    when both halves of the gate name `verb` and no `*` was granted.
+
+    `before`/`records` are `list_agents` by id, before and after the run.
+    INGRESS: `new`'s `callable_by` admits `ai` (by id, or as `$parent` when `ai` is its
+    parent) with a verb list holding `verb`. EGRESS: `ai`'s `can_call` reaches `new`
+    (by id, or as `$subtree` when it is `ai`'s child) with a verb list holding `verb`.
+    A fault: any `*` on `new`'s `callable_by` but its own `$self` baseline, and any
+    `*` in `ai`'s `can_call` that was not there before the run. A `*` KEY is a
+    literal id to the kernel (it admits nobody) and is a fault on either side.
+    """
+    out: list[str] = []
+    rec, me = records.get(new) or {}, records.get(ai) or {}
+    was = (before.get(ai) or {}).get("can_call") or {}
+    child = rec.get("parent_id") == ai
+    cb = rec.get("callable_by") or {}
+    cc = me.get("can_call") or {}
+    for k, v in cb.items():
+        if k == "*" or (k != "$self" and _star(v)):
+            out.append(f"{new}.callable_by[{k!r}] = {v!r}: a '*' grant")
+    for k, v in cc.items():
+        if (k == "*" or _star(v)) and was.get(k) != v:
+            out.append(f"{ai}.can_call[{k!r}] = {v!r}: a '*' grant written in the run")
+    admits = [cb[k] for k in (ai, "$parent" if child else None) if k and k in cb]
+    if not any(isinstance(v, list) and verb in v for v in admits):
+        out.append(f"{new}.callable_by does not admit {ai} for {verb!r}: {cb!r}")
+    reach = [cc[k] for k in (new, "$subtree" if child else None) if k and k in cc]
+    if not any(isinstance(v, list) and verb in v for v in reach):
+        out.append(f"{ai}.can_call does not reach {new} for {verb!r}: {reach!r}")
+    return out
+
+
+def score(*, ai: str, digest: str, before: dict, records: dict, turns: list[str],
+          held: list[dict], catalog: list[dict], base: set, schemas: dict) -> dict:
+    """The four scored checks, from what the run left behind.
+
+    `turns` are the model's own turns; `held` the AI's rows; `catalog` the
+    `reflect bundles=all` rows; `base` py_agent's own verbs; `schemas` the verbs
+    `docs part=schema` lists for each agent the run created. The pair scored is the
+    first (agent, declared verb) the model called whose reply carried the digest —
+    else the first one called — so a failed first attempt does not hide a later one.
+    """
+    calls = _calls(turns)
+    folders = {b.get("name") for b in catalog
+               if b.get("base") == "py_agent" and "error" not in b}
+    made = [i for i, rec in records.items()
+            if i not in before and rec.get("handler_module") in folders]
+    declared = {n: sorted(set(schemas.get(n) or ()) - base) for n in made}
+    tried = list(dict.fromkeys((t, p.get("type")) for t, p in calls
+                               if t in declared and p.get("type") in declared[t]))
+
+    def carried(n: str, v: str) -> bool:
+        return any(r.get("role") == "user" and f"{n} {v}" in str(r.get("content"))
+                   and digest in str(r.get("content")) for r in held)
+
+    hit = next((nv for nv in tried if carried(*nv)), None)
+    new, verb = hit or (tried[0] if tried else ((made[0] if made else ""), ""))
+    faults = (grant_faults(before, records, ai, new, verb) if verb
+              else ["no verb of it was called"])
+    first = next((i for i, (t, p) in enumerate(calls) if t == new and p.get("type") == verb),
+                 len(calls))
+    out = {
+        "calls": calls,
+        "made": made,
+        "declared": declared,
+        "new": new,
+        "verb": verb,
+        "replied": hit is not None,
+        "answered": digest in "\n".join(turns),
+        "faults": faults,
+        "docs_first": [p for i, (t, p) in enumerate(calls)
+                       if i < first and p.get("type") == "docs" and p.get("of") == new],
+        "reloads": [p.get("name") for t, p in calls if p.get("type") == "reload_bundle"],
+    }
+    out["ok"] = bool(made) and out["replied"] and out["answered"] and not faults
+    return out
+
+
 async def main():
+    bk = _resolve_backend()
     root, core, close_kernel = await open_kernel(
-        "new_tool_", reach=[BUNDLES, AID, "kernel_store", "cli", "user"]
+        "new_tool_", reach=[BUNDLES, AID, "cli", "user"]
     )
 
     async def k(target: str, payload: dict) -> dict:
@@ -115,7 +201,7 @@ async def main():
     conn = await connect(
         root,
         core,
-        BK,
+        bk,
         agent_id=AID,
         can_call={
             root.id: ["reflect", "docs", "reload_bundle", "create_agent", "update_agent"],
@@ -125,68 +211,47 @@ async def main():
         callable_by={"user": "*"},
         limits=Limits.from_env(os.environ),
     )
-    before = {a.get("id") for a in (await k("kernel", {"type": "list_agents"})).get("agents") or []}
+
+    async def agents() -> dict:
+        r = await k("kernel", {"type": "list_agents"})
+        return {a.get("id"): a for a in r.get("agents") or []}
+
+    async def verbs_of(of: str) -> set:
+        d = await k("kernel", {"type": "docs", "of": of, "part": "schema"})
+        return set(d.get("schemas") or {})
+
+    before = await agents()
 
     capped = await drive(conn, TASK, client_id="new_tool", via="user")
-    calls = _calls(conn.proxy.transcript)
-    said = "\n".join(conn.proxy.transcript)
+    turns = list(conn.proxy.transcript)
     held = (await k(AID, {"type": "rows"})).get("rows") or []
-    records = {a.get("id"): a for a in (await k("kernel", {"type": "list_agents"})).get("agents") or []}
+    records = await agents()
     cat = await k("kernel", {"type": "reflect", "tree": "none", "bundles": "all"})
-    folders = {
-        b.get("name"): b
-        for b in cat.get("bundles") or []
-        if b.get("base") == "py_agent" and "error" not in b
-    }
-    base = set(((await k("kernel", {"type": "docs", "of": "py_agent", "part": "schema"}))
-                .get("schemas") or {}))
-
-    # the agents the run made from a py_agent folder bundle
-    made = [i for i, rec in records.items()
-            if i not in before and rec.get("handler_module") in folders]
-    best: tuple[str, str] | None = None
-    declared: dict[str, list[str]] = {}
-    for new in made:
-        d = await k("kernel", {"type": "docs", "of": new, "part": "schema"})
-        declared[new] = sorted(set(d.get("schemas") or {}) - base)
-        for t, p in calls:
-            if t == new and p.get("type") in declared[new]:
-                best = best or (new, p["type"])
+    base = await verbs_of("py_agent")
+    schemas = {i: await verbs_of(i) for i in records if i not in before}
     await conn.close()
     await close_kernel()
 
-    new, verb = best or (made[0] if made else "", "")
-    replied = bool(verb) and any(
-        r.get("role") == "user" and f"{new} {verb}" in str(r.get("content"))
-        and DIGEST in str(r.get("content"))
-        for r in held
-    )
-    answered = DIGEST in said
-    faults = grant_faults(records, AID, new, verb) if verb else ["no verb of it was called"]
-    first = next((i for i, (t, p) in enumerate(calls) if t == new and p.get("type") == verb),
-                 len(calls))
-    docs_first = [p for i, (t, p) in enumerate(calls)
-                  if i < first and p.get("type") == "docs" and p.get("of") == new]
-    reloads = [p.get("name") for t, p in calls if p.get("type") == "reload_bundle"]
-
-    print(f"\n  calls: {len(calls)} · turns: {conn.turns} · cap: {capped or 'clean'}")
-    print(f"  made from a folder bundle: {made} · declared: {declared}")
-    print(f"  reload_bundle: {reloads}")
+    s = score(ai=AID, digest=DIGEST, before=before, records=records, turns=turns,
+              held=held, catalog=cat.get("bundles") or [], base=base, schemas=schemas)
+    new, verb, faults = s["new"], s["verb"], s["faults"]
+    print(f"\n  calls: {len(s['calls'])} · turns: {conn.turns} · cap: {capped or 'clean'}")
+    print(f"  made from a folder bundle: {s['made']} · declared: {s['declared']}")
+    print(f"  reload_bundle: {s['reloads']}")
     print(f"  docs of {new or '-'} before its first call: "
-          f"{[p.get('part', 'all') for p in docs_first] or 'none'}")
+          f"{[p.get('part', 'all') for p in s['docs_first']] or 'none'}")
     print(f"  grants: {faults or 'exact'}")
-    print(f"\n  1. a new agent of a py_agent folder bundle : {'OK' if made else 'NO'}")
-    print(f"  2. its declared verb called, digest replied: {'OK' if replied else 'NO'}"
+    print(f"\n  1. a new agent of a py_agent folder bundle : {'OK' if s['made'] else 'NO'}")
+    print(f"  2. its declared verb called, digest replied: {'OK' if s['replied'] else 'NO'}"
           f" ({new or '-'}.{verb or '-'})")
-    print(f"  3. the digest in the model's answer        : {'OK' if answered else 'NO'}")
+    print(f"  3. the digest in the model's answer        : {'OK' if s['answered'] else 'NO'}")
     print(f"  4. grants exact, no '*'                    : {'OK' if not faults else 'NO'}")
-    ok = bool(made) and replied and answered and not faults
     verdict(
-        ok,
+        s["ok"],
         f"wrote {new}, called {verb}, answered the digest, grants exact"
-        if ok
-        else f"made={made} verb={verb or None} replied={replied} answered={answered} "
-        f"grants={faults[:2]}",
+        if s["ok"]
+        else f"made={s['made']} verb={verb or None} replied={s['replied']} "
+        f"answered={s['answered']} grants={faults[:2]}",
     )
 
 

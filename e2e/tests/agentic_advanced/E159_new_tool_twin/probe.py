@@ -27,8 +27,11 @@ CHECKS — each request carries the reply its answer asked for, and:
     docs reply the AI got carries that schema;
   · the verb was called and its reply carries the SHA-256 the harness computes;
   · the AI's stored answer carries the digest; no request follows `done`;
-  · the grants are exact (`grant_faults`): the new agent admits the AI for `sha256`,
-    the AI's `can_call` reaches it for `sha256`, and neither side grants `*`.
+  · the grants are exact (E160's `grant_faults`): the new agent admits the AI for
+    `sha256`, the AI's `can_call` reaches it for `sha256`, and no `*` was granted;
+    the same scorer flags a `*` planted on either side;
+  · E160's own `score` passes this run — the model test's scoring is proven passable
+    by a perfect actor, and a free run catches it drifting.
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ sys.path.insert(0, str(E2E))
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
 from helpers.verdict import verdict
 from mocks.vllm import VllmMock
+from tests.agentic_advanced.E160_new_tool.probe import grant_faults, score
 
 REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
@@ -82,40 +86,6 @@ def {VERB}(p):
 
 fa.serve({{"{VERB}": {VERB}}})
 """
-
-
-def grant_faults(records: dict, ai: str, new: str, verb: str) -> list[str]:
-    """What is wrong with the grants between `ai` and the agent it made, `new` — []
-    when both halves of the gate name `verb` and nothing grants `*`.
-
-    INGRESS: `new`'s `callable_by` admits `ai` (by id, or as `$parent` when `ai` is its
-    parent) with a verb list holding `verb`. EGRESS: `ai`'s `can_call` reaches `new`
-    (by id, or as `$subtree` when it is `ai`'s child) with a verb list holding `verb`.
-    Every grant either side holds toward the other is a list — `*` is a fault; the
-    baseline `$self` is the agent's own edge and is not one of them.
-    """
-    out: list[str] = []
-    rec, me = records.get(new) or {}, records.get(ai) or {}
-    child = rec.get("parent_id") == ai
-    cb = rec.get("callable_by") or {}
-    cc = me.get("can_call") or {}
-
-    def star(v) -> bool:
-        return v == "*" or (isinstance(v, list) and "*" in v)
-
-    for k, v in cb.items():
-        if k != "$self" and star(v):
-            out.append(f"{new}.callable_by[{k!r}] grants '*': {v!r}")
-    admits = [cb[k] for k in (ai, "$parent" if child else None, "*") if k and k in cb]
-    if not any(isinstance(v, list) and verb in v for v in admits):
-        out.append(f"{new}.callable_by does not admit {ai} for {verb!r}: {cb!r}")
-    reach = {k: cc[k] for k in (new, "$subtree" if child else None, "*") if k and k in cc}
-    for k, v in reach.items():
-        if star(v):
-            out.append(f"{ai}.can_call[{k!r}] grants '*': {v!r}")
-    if not any(isinstance(v, list) and verb in v for v in reach.values()):
-        out.append(f"{ai}.can_call does not reach {new} for {verb!r}: {reach!r}")
-    return out
 
 
 def xml(v) -> str:
@@ -227,7 +197,8 @@ def main() -> int:
                         memory_store_id="memory", can_call=can,
                         callable_by={"$self": "*", "$parent": "*", "rest": "*"})
         need(rec.get("id") == AI, f"create {AI}: {short(rec)}")
-        need(NEW not in records(), f"no agent {NEW!r} before the run")
+        before = records()
+        need(NEW not in before, f"no agent {NEW!r} before the run")
 
         m.reply(*script)
         out = hk.send(AI, {"type": "send",
@@ -269,8 +240,14 @@ def main() -> int:
         # 4 · the grant
         need("kernel update_agent" in u[4] and "<updated>true</updated>" in u[4],
              f"request 5 carries the update reply: {u[4][:200]!r}")
-        faults = grant_faults(recs, AI, NEW, VERB)
+        faults = grant_faults(before, recs, AI, NEW, VERB)
         need(not faults, f"the grants are exact, no '*': {faults}")
+        # the scorer is not vacuous: a '*' on either side is a fault
+        for side, key, what in (("callable_by", NEW, AI), ("can_call", AI, root)):
+            held = recs.get(key) or {}
+            planted = {**recs, key: {**held, side: {**(held.get(side) or {}), what: "*"}}}
+            need(bool(grant_faults(before, planted, AI, NEW, VERB)),
+                 f"grant_faults flags {key}.{side}[{what!r}] = '*'")
         # 5 · the verb is declared
         d = hk.send("kernel", {"type": "docs", "of": NEW, "part": "schema"})
         sch = (d.get("schemas") or {}).get(VERB) or {}
@@ -286,6 +263,19 @@ def main() -> int:
         need(any(r.get("role") == "assistant" and DIGEST in str(r.get("content"))
                  for r in rows),
              f"the AI's stored answer carries the digest ({len(rows)} rows)")
+        # E160's scoring, on this run
+        def verbs_of(of: str) -> set:
+            return set(hk.send("kernel", {"type": "docs", "of": of, "part": "schema"})
+                       .get("schemas") or {})
+
+        s = score(ai=AI, digest=DIGEST, before=before, records=recs,
+                  turns=[str(r.get("content")) for r in rows if r.get("role") == "assistant"],
+                  held=rows, catalog=cat.get("bundles") or [], base=verbs_of("py_agent"),
+                  schemas={i: verbs_of(i) for i in recs if i not in before})
+        need(s["ok"] and (s["new"], s["verb"]) == (NEW, VERB) and s["reloads"] == [BUNDLE]
+             and [p.get("part") for p in s["docs_first"]] == ["schema"],
+             f"E160's score passes the scripted run: "
+             f"{short({k: v for k, v in s.items() if k != 'calls'})}")
     finally:
         hk.close()
         m.stop()
