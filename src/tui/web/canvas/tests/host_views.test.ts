@@ -5,6 +5,7 @@ import { registerHtmlAgent } from "../src/bundles/html_agent/html_agent.ts";
 import type { Payload } from "../src/lib.ts";
 import { registerCanvas } from "../src/bundles/canvas/canvas_agent.ts";
 import { registerAgentView } from "../src/bundles/agent_view/agent_view.ts";
+import { prune, rectsOf, registerLayout } from "../src/bundles/canvas/layout.ts";
 import { cellGrant, onViewChange, rereflectViews, seenHere, setCanvasNode, setHostRecords, setHostReflect, sideOf, viewOf, viewRecordOf } from "../src/bundles/canvas/host_views.ts";
 
 // BACKEND-OWNED VIEWS: a host agent's record says how it is drawn; a page cell
@@ -130,6 +131,23 @@ test("a cell head names it once: the id beside the title only when they differ",
   assert.deepEqual(headTitle("tree view", "tree_42511a66"), { title: "tree view", id: "tree_42511a66" });
   // record fields are text: markup in a display name stays a string
   assert.deepEqual(headTitle("<img src=x onerror=alert(1)>", "c1"), { title: "<img src=x onerror=alert(1)>", id: "c1" });
+});
+
+test("place {backend_id} keeps its x, y, width, height under the page's refresh: the rect is written after the cell (#728)", async () => {
+  const k = new Kernel();
+  registerCanvas(k);
+  registerAgentView(k);
+  registerLayout(k);
+  k.setRoot(new Agent({ id: "canvas", handlerModule: "canvas.ts" }));
+  k.register(new Agent({ id: "view_root", parentId: "canvas", handlerModule: "view.ts" }));
+  const rec = { id: "search", handler_module: "exec_bridge.tools", view: { kind: "html", bytes: "<p>s</p>", calls: ["search"] } };
+  setHostRecords((id) => (id === "search" ? rec : undefined));
+  setHostReflect(async (id) => (id === "search" ? rec : { error: "no such agent", reason: "not_found" }) as never);
+  // the page's refresh prunes the rects of cells it does not hold yet (canvas.ts refreshView)
+  k.addStateSubscriber(() => prune(k, "view_root", new Set([...k.get("view_root")!.children.values()].map((c) => c.id))));
+  const r = (await k.send([{ target: "view_root", payload: { type: "place", backend_id: "search", id: "v1", x: 100, y: 200, width: 320, height: 180 } as Payload }]))[0]!.result as Payload;
+  assert.equal(r["placed"], "v1");
+  assert.deepEqual(rectsOf(k, "view_root", "free")["v1"], { x: 100, y: 200, width: 320, height: 180 });
 });
 
 test("the user store tile places a view of the host's user_store agent", async () => {

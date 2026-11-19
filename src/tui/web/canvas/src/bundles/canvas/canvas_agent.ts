@@ -274,8 +274,9 @@ const viewHandler: Handler = (id, payload, kernel): Json | Promise<Json> => {
           const aid = str(payload, "id") || `view_${Math.random().toString(16).slice(2, 10)}`;
           if (kernel.get(aid) !== undefined) return { error: `view: place — ${aid} already exists`, reason: "exists", arg: "id" };
           if (payload["display_name"] !== undefined) meta["display_name"] = payload["display_name"];
-          setRect(kernel, id, layoutFor(tabWidth()), aid, { width: 480, height: 320, ...geometryOf(payload) });
           kernel.register(new Agent({ id: aid, parentId: id, handlerModule: handler, meta: meta as Payload }));
+          // its rect AFTER the cell is there (as `openFile`: a refresh prunes the rect of a cell not yet held)
+          setRect(kernel, id, layoutFor(tabWidth()), aid, { width: 480, height: 320, ...geometryOf(payload) });
           return { placed: aid, shows: agent, view: viewOf(rec).kind } as Json;
         });
       }
@@ -292,14 +293,15 @@ const viewHandler: Handler = (id, payload, kernel): Json | Promise<Json> => {
       const body = bodyOf(kind, payload);
       if (typeof body === "object") return body as unknown as Json;
       if (body !== undefined) meta[kind === "gl" ? "gl_source" : "html"] = body;
-      // its rect in the layout in use (a size from birth), written before the cell
-      setRect(kernel, id, layoutFor(tabWidth()), aid, { width: 480, height: 320, ...geometryOf(payload) });
       if (backend) Object.assign(meta, { backend_id: backend, owns_backend: false });
       // the view's OWN declared grant onto the agent it shows
       if (kind === "terminal") meta["can_call"] = { ...terminalView.grants(backend) };
       // the file tree and the previewer reach the project's file bridge
       if (["files_view.ts", "preview_view.ts"].includes(hm) && meta["can_call"] === undefined) meta["can_call"] = fileGrant();
       kernel.register(new Agent({ id: aid, parentId: id, handlerModule: hm, meta: meta as Payload }));
+      // its rect in the layout in use, AFTER the cell is there: the layout's write refreshes the page,
+      // and a refresh prunes the rect of a cell it does not hold yet (as `openFile`, #148)
+      setRect(kernel, id, layoutFor(tabWidth()), aid, { width: 480, height: 320, ...geometryOf(payload) });
       // grants the body needs and the cell lacks are SAID (the panel's refused
       // call never reaches the AI)
       const grants = typeof meta["html"] === "string" ? grantHint(aid, meta["html"] as string, kernel.get(aid)?.meta["can_call"]) : {};
