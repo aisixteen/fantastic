@@ -2,8 +2,8 @@
 # through the terminal's set-up wizard for the CONFIGURED backend (the AI
 # backend is configurable; vLLM here), stores its key there, and the agent answers. Every value the
 # record gets is the operator's, from the environment: the endpoint and model
-# (VLLM_ENDPOINT, FANTASTIC_AI_MODEL), the window and output (CTX, MAX_TOKENS —
-# 262144), the KV table (VLLM_KV_SLOTS, VLLM_KV_OVERFLOW), the key
+# (VLLM_ENDPOINT, FANTASTIC_AI_MODEL), the window and output (CTX, MAX_TOKENS;
+# a frame's `{ctx}` is the same CTX), the KV table (VLLM_KV_SLOTS, VLLM_KV_OVERFLOW), the key
 # (VLLM_API_KEY / VLLM_API_KEY_FILE — typed into the page, never printed).
 # Reasoning: xhigh with a 64k thinking budget.
 
@@ -35,7 +35,8 @@ runs:
   # (`vllm-1`), URL, model, key (← → paste a new key: its value, then where keys
   # are kept — PLAIN in this throwaway home, never the real keychain), kv
   # overflow, advanced (enter opens: max_tokens, context_window, kv_slots,
-  # metrics_url, temperature, top_p, top_k, reasoning_effort, thinking budget, …)
+  # metrics_url, server_dialect, temperature, top_p, top_k, reasoning_effort,
+  # thinking budget, …)
   # → advanced closed again, CREATE & OPEN CHAT ──
   - name: write
     timeout: 300
@@ -118,6 +119,7 @@ runs:
       key down
       key down
       key down
+      key down
       key right
       key down
       key enter
@@ -139,6 +141,7 @@ runs:
       key up
       key up
       key up
+      key up
       key enter
       key down
       key enter
@@ -151,7 +154,7 @@ runs:
     frames:
       page: {contains: ["NEW AI AGENT", "1 / 2"], lacks: ["vllm    not in this build"]}
       # the key masked, PLAIN in the run's throwaway home — never the real keychain
-      filled: {contains: ["vllm-1", "262144", "xhigh", "65536", "‹ a 0600 text file (plain) ›", "‹ paste a new key ›"]}
+      filled: {contains: ["vllm-1", "{ctx}", "xhigh", "65536", "‹ a 0600 text file (plain) ›", "‹ paste a new key ›"]}
       # made, its chat open: the agent is the selected one
       written: {contains: [" · vllm-1 · "], lacks: ["✕"]}
     after_exit:

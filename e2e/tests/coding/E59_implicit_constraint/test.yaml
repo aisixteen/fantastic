@@ -6,6 +6,7 @@ title: constraints in PROSE — one positive, one negative with the forbidden st
 runner: probe.py
 runtimes: [python, rust]
 costs: turns
+hard_stop_minutes: 30  # two arms in one run: an exception to run.py's 15-min stop
 limits:
   idle_seconds: 60
   max_turns: 50

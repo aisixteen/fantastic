@@ -10,6 +10,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import Rig, verdict, answer, ask, html_cell, http_get, in_frame, say, spot, wait_quiet  # noqa: E402,F401
 
+def is_path(v: object, rel: str) -> bool:
+    """A record's path names `rel` (relative to the project, or absolute in it)."""
+    return isinstance(v, str) and (v.lstrip("./") == rel or v.endswith("/" + rel))
+
+
 def main() -> bool:
     rig = Rig(__file__)
     why = rig.plug_or_refusal()
@@ -49,7 +54,21 @@ def main() -> bool:
                 for d in re.findall(r"data:application/pdf;base64,([A-Za-z0-9+/=]+)", str(c.get("html") or "")):
                     if base64.b64decode(d) == pdf:
                         served.append(f"data:application/pdf (the bytes of docs/prd.pdf, in {c['id']})")
-            return said, await frame_urls(pg), embeds or [], srcs, served
+            # or a PREVIEW cell pinned to docs/prd.pdf (what the view's `open` makes): it frames
+            # the bytes its file agent read as `<object class="pv-pdf" data="blob:…">`
+            framed = await pg.js("""Promise.all([...document.querySelectorAll('.agent-frame object.pv-pdf')].map(async o => {
+              const cell = o.closest('.agent-frame').dataset.id || '';
+              try {
+                const b = new Uint8Array(await (await fetch(o.data)).arrayBuffer());
+                let s = ''; for (const x of b) s += String.fromCharCode(x);
+                return {cell, b64: btoa(s)};
+              } catch (e) { return {cell, error: String(e)}; }
+            }))""") or []
+            pinned = {c["id"] for c in rig.cells() if c.get("handler_module") == "preview_view.ts" and is_path(c.get("pinned"), "docs/prd.pdf")}
+            for f in framed:
+                if f.get("cell") in pinned and f.get("b64") and base64.b64decode(f["b64"]) == pdf:
+                    served.append(f"preview {f['cell']}: a pv-pdf blob of the bytes of docs/prd.pdf")
+            return said, await frame_urls(pg), [*(embeds or []), *(f"{f.get('cell')}: pv-pdf" for f in framed)], srcs, served
     try:
         said, urls, embeds, srcs, served = asyncio.run(drive())
     finally:
@@ -59,9 +78,11 @@ def main() -> bool:
     # to the page or the frame tree)
     painted = any("prd.pdf" in u for u in [*urls, *embeds])
     trusted = [c["id"] for c in rig.cells() if c.get("trusted") and "prd.pdf" in str(c.get("html"))]
-    rig.summary.update({"answer": said, "frames": urls, "embeds": embeds, "srcs": srcs, "served": served, "trusted": trusted})
-    print(f"panel srcs: {srcs} · served as PDF: {served} · visible in the frame tree: {painted} · trusted: {trusted}")
-    return verdict(*rig.finish(bool(served), f"a panel frames docs/prd.pdf at a URL serving it: {bool(served)} (trusted, so the PDF paints: {bool(trusted)})"))
+    # the file outside the leg's allow list is never opened: no cell frames or previews it
+    secret = [c["id"] for c in rig.cells() if "plan.pdf" in str(c.get("html") or "") or is_path(c.get("pinned"), "secret/plan.pdf")]
+    rig.summary.update({"answer": said, "frames": urls, "embeds": embeds, "srcs": srcs, "served": served, "trusted": trusted, "secret_opened": secret})
+    print(f"panel srcs: {srcs} · served as PDF: {served} · visible in the frame tree: {painted} · trusted: {trusted} · secret/plan.pdf opened in: {secret}")
+    return verdict(*rig.finish(bool(served) and not secret, f"a panel frames docs/prd.pdf at a URL serving it, or a preview of it holds its bytes: {bool(served)}; secret/plan.pdf opened: {secret or 'no'} (trusted, so the PDF paints: {bool(trusted)})"))
 
 
 if __name__ == "__main__":

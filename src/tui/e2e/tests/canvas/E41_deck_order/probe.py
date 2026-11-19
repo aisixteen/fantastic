@@ -3,12 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import Rig, verdict, answer, ask, html_cell, http_get, in_frame, say, spot, wait_quiet  # noqa: E402,F401
+
+def call_payload(frame: str) -> tuple[str, dict] | None:
+    """A received `call` frame's target (its id, without a page guid) and payload."""
+    try:
+        m = json.loads(frame)
+    except ValueError:
+        return None  # a binary frame (base64) or not JSON
+    if not isinstance(m, dict) or m.get("type") != "call" or not isinstance(m.get("payload"), dict):
+        return None
+    return str(m.get("target", "")).split("|")[-1], m["payload"]
+
 
 def main() -> bool:
     rig = Rig(__file__)
@@ -31,23 +44,34 @@ def main() -> bool:
         cells.append(html_cell(f"en_{n}", f"EN:{n}. {t}", *spots[7 + i], f"<h1>{n}. {t}</h1><p>slide {n}</p>"))
     rig.init(cells=cells)
 
+    # the host's log names a page call's verb, not its payload: the page's received
+    # frames (CDP, Network enabled before the page opens) carry each call whole
+    os.environ["CANVAS_WS_LOG"] = "1"
+
     async def drive():
         async with rig.page(1800, 1000) as pg:
-            return await ask(pg, 250, 300, "What is this deck? In what order do the slides go, and is anything missing?",
-                             rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"])
+            pg.ws_received = []
+            r = await ask(pg, 250, 300, "What is this deck? In what order do the slides go, and is anything missing?",
+                          rig.budget(rig.limits["total_seconds"]), rig.limits["quiet_seconds"])
+            await pg.js("1")  # read the frames still queued
+            return (*r, pg.ws_received)
     try:
-        done, said = asyncio.run(drive())
+        done, said, frames = asyncio.run(drive())
     finally:
         rig.stop()
     looks = rig.looks_since_spawn()
-    whole = any(x.startswith("web_loader call load_tree") for x in looks)  # every record at once
+    # a `reflect` of the root view with the whole tree (`tree` absent or `all`, nothing
+    # cut) lists every cell at once
+    roots = [p for p in map(call_payload, frames) if p is not None and p[0] == "view_root" and p[1].get("type") == "reflect"]
+    whole_root = any(p.get("tree", "all") == "all" and not p.get("show_subtrees") and not p.get("ignore_subtrees") for _, p in roots)
+    whole = whole_root or any(x.startswith("web_loader call load_tree") for x in looks)  # every record at once
     looked = {c.split(" ")[0] for c in looks if c.endswith(" call reflect") or c.endswith(" call get_html")}
-    rig.summary.update({"answer": said, "looks": looks})
+    rig.summary.update({"answer": said, "looks": looks, "view_root_reflects": [p for _, p in roots]})
     print(f"looks: {looks[:20]} · answer: {said[:500]}")
     gap = bool(re.search(r"(?<!\d)5(?!\d)", said))
     langs = bool(re.search(r"(?i)english|\ben\b", said)) and bool(re.search(r"(?i)ukrain|україн|\bua\b", said))
     ok = (len(looked) >= 8 or whole) and gap and langs
-    return verdict(*rig.finish(ok, f"looked: {len(looked)} cells{' + the whole tree (load_tree)' if whole else ''} · names the missing 5: {gap} · both languages: {langs}"))
+    return verdict(*rig.finish(ok, f"looked: {len(looked)} cells{' + the whole tree (' + ('view_root reflect tree=all' if whole_root else 'load_tree') + ')' if whole else ''} · names the missing 5: {gap} · both languages: {langs}"))
 
 
 if __name__ == "__main__":

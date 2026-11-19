@@ -74,10 +74,13 @@ def solver_instructions(k: int) -> str:
     )
 
 
-#: What the creator copies from `brain`'s record into each solver (a CHAT: the model,
-#: endpoint and key are its provider's, named by `provider_id`): the handler, the
-#: provider, the conversation store and the window.
-COPY = ["handler_module", "provider_id", "memory_store_id", "context_window"]
+#: What the creator copies from `brain`'s record into each solver (a CHAT: the endpoint
+#: and key are its provider's, named by `provider_id`): the handler, the model (the
+#: chat's: it names it on each `complete`; the provider uses the call's model or its
+#: `default_model` setting, never its own record's), the provider, the conversation
+#: store and the window. A backend whose record names no model copies none.
+COPY = ["handler_module", *(["model"] if "model" in P.BK.record() else []),
+        "provider_id", "memory_store_id", "context_window"]
 #: …and into each solver's PROVIDER (copied from `brain_prov`): every field the plug put there
 PROV_COPY = [*P.BK.record(), "memory_store_id"]
 

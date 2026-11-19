@@ -256,6 +256,15 @@ def rows(store: Path) -> int:
         db.close()
 
 
+def _subst(word: object, subst: dict) -> object:
+    """`word` with each run substitution applied (a frame expectation's `{ctx}`)."""
+    if not isinstance(word, str):
+        return word
+    for k, v in subst.items():
+        word = word.replace(k, v)
+    return word
+
+
 def check_frame(label: str, text: str, want: dict) -> list[str]:
     bad = []
     for word in want.get("contains", []):
@@ -413,6 +422,8 @@ def main(argv: list[str]) -> int:
                 shutil.copytree(frames_dir, Path(keep) / path.parent.name / name, dirs_exist_ok=True)
             bad = []
             for label, want in (run.get("frames") or {}).items():
+                # an expected word may name a run value (`{ctx}`): the one the script typed
+                want = {k: [_subst(w, subst) for w in v] if isinstance(v, list) else v for k, v in want.items()}
                 hits = sorted(frames_dir.glob(f"*_{label}.txt"))
                 if not hits:
                     bad.append(f"no frame {label!r}")
