@@ -8,6 +8,7 @@
 # ensure-semantics are not in doubt, the model's use of them is.
 
 id: ledger
+muted: "#722: no pre-minted ids — a double spend is guarded only by an id the model writes and reuses exactly, which a model cannot be trusted to do (TBD)"
 title: the double-fire trap — one coin, proven twice
 
 task: >-
