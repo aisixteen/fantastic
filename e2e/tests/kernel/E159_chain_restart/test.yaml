@@ -1,0 +1,12 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: scripted OpenAI-compatible servers
+# play the model of a lead and a worker (the kernel's own vllm_backend agents), driven
+# over web_rest.
+id: chain_restart
+group: kernel
+title: "a chain in flight survives a kernel KILL (#726): the lead's call to an exec agent (a 30 s job) is out and the worker's message is held on the lead's chain when the kernel process is killed; a new kernel on the same folder (its ledger on a sqlite_store) settles both cut calls as dead letters (cancelled, nothing in flight), the lead is told its call's reply will not come and the held message was cut, the worker (the held sender) is told its message died, and the lead's chain goes on: it resends the job and reads its reply"
+runner: probe.py
+runtimes: [rust]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300

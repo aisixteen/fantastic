@@ -1210,6 +1210,71 @@ pub(crate) fn chain_ended_within(
     });
 }
 
+/// A CHAIN CUT BY A RESTART (#726). Everything is records: at its start the kernel
+/// settled the calls the previous process left in flight as dead letters
+/// ([`fantastic_kernel::executions::CutCall`]); the ones this agent's own tasks made
+/// and the messages sent to it reach it here, at its boot, as ONE notice turn of a
+/// new chain. A reply it was waiting for will not come (resend or drop it); a message
+/// it held or was answering was cut, and its sender is told by its own dead letter.
+/// Never silent. A call made inside a dispatch (a pass's own store or provider call)
+/// is the pass's plumbing, not the agent's work: the cut message that ran the pass
+/// says it. Nothing cut, nothing told.
+pub(crate) fn resume_cut(
+    kernel: &Arc<Kernel>,
+    self_id: &AgentId,
+    cut: &[fantastic_kernel::executions::CutCall],
+) {
+    let me = self_id.as_str();
+    let lines: Vec<String> = cut
+        .iter()
+        .filter_map(|c| {
+            let made = c.caller.as_deref() == Some(me) && c.task.is_some();
+            let got = c.target == me && c.verb.as_deref() == Some("send");
+            if made && c.target == me {
+                Some(format!(
+                    "[your own turn \u{b7} dead letter {}] a reply or reminder on its way to \
+                     you was cut before you read it",
+                    c.id
+                ))
+            } else if made {
+                Some(format!(
+                    "[reply to {} \u{b7} {} {}] no reply will come \u{2192} dead letter {}; \
+                     resend or drop",
+                    c.id,
+                    c.target,
+                    c.verb.as_deref().unwrap_or("?"),
+                    c.id
+                ))
+            } else if got && c.caller.as_deref() != Some(me) {
+                Some(format!(
+                    "[from {} \u{b7} dead letter {}] a message to you was cut before it was \
+                     answered; its sender is told \u{2014} do not answer it",
+                    c.caller.as_deref().unwrap_or("operator"),
+                    c.id
+                ))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if lines.is_empty() {
+        return;
+    }
+    let text = format!(
+        "[restart] The kernel stopped while this work was in flight, and a new kernel \
+         started on the same records. What was in flight cannot finish; each is a dead \
+         letter now:\n{}\nGo on from here.",
+        lines.join("\n")
+    );
+    deliver_soon(
+        kernel,
+        me,
+        &text,
+        &fantastic_kernel::inquiry::default_client_id(),
+        true,
+    );
+}
+
 /// Fires the route's launch signal however the route ends.
 struct FireOnDrop(Option<Arc<fantastic_kernel::Signal>>);
 
