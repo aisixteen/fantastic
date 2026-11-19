@@ -1,5 +1,5 @@
-//! The ONE call grammar: `<call name="…">` with bare child tags, args inline,
-//! `bytes` verbatim, no JSON anywhere.
+//! The ONE call grammar: `<call name="…">` with bare child tags in `<routing>` and
+//! `<payload>`, `bytes` verbatim, no JSON anywhere.
 //!
 //! A rule-for-rule port of python's
 //! `bundled_agents/ai/ai_core/src/ai_core/tool_parse.py`, which is canonical.
@@ -9,12 +9,11 @@
 //!
 //! ```text
 //! <call name="send">
-//! <target_id>notes</target_id>
-//! <reply_to>self</reply_to>
-//! <type>patch</type>
+//! <routing><target_id>notes</target_id><reply_to>self</reply_to></routing>
+//! <payload><type>patch</type>
 //! <edits><item><path>hello.py</path><hunks>2</hunks></item></edits>
 //! <bytes>…verbatim: real newlines, real quotes, ends at the first </bytes>…
-//! </bytes>
+//! </bytes></payload>
 //! </call>
 //! ```
 //!
