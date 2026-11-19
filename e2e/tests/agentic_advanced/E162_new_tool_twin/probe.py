@@ -59,7 +59,7 @@ RUNTIME = os.environ.get("RUNTIME", "")
 AI, BUNDLES, PROV = "ai", "bundles", "ai_prov"
 BUNDLE, NEW, VERB = "sha_tool", "sha", "sha256"
 MODEL = "mock-scripted"
-TOKEN = "E159-" + secrets.token_hex(6)
+TOKEN = "E162-" + secrets.token_hex(6)
 DIGEST = hashlib.sha256(TOKEN.encode("utf-8")).hexdigest()
 HELPER = (REPO / "src/lib/python/bundled_agents/io/py_agent/src/py_agent"
           / "fantastic_agent.py")

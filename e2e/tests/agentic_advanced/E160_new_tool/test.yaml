@@ -7,7 +7,7 @@ title: "the model writes a new agent (a py_agent folder bundle), creates and gra
 runner: probe.py
 runtimes: [rust]
 costs: turns
-# Free twin: new_tool_twin (E159) drives the same call sequence with a scripted model.
+# Free twin: new_tool_twin (E162) drives the same call sequence with a scripted model.
 limits:
   idle_seconds: 60
   max_turns: 40

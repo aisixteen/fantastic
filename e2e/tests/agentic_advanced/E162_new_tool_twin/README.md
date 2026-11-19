@@ -1,4 +1,4 @@
-# `new_tool_twin` (E159) — an AI writes a new agent and uses it as a tool, scripted
+# `new_tool_twin` (E162) — an AI writes a new agent and uses it as a tool, scripted
 
 Free: no model. The twin of `new_tool` (E160, #727): the same mechanics, driven by a
 scripted model, so they are covered on every free run. A local OpenAI-compatible
@@ -31,5 +31,5 @@ run, so the model test's scoring is proven passable by a perfect actor.
 ```sh
 cd src/lib/python
 uv run python ../../../e2e/run.py --only-free --id new_tool_twin
-RUNTIME=rust uv run python ../../../e2e/tests/agentic_advanced/E159_new_tool_twin/probe.py
+RUNTIME=rust uv run python ../../../e2e/tests/agentic_advanced/E162_new_tool_twin/probe.py
 ```

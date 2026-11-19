@@ -10,7 +10,7 @@ the human (`user`). No exec, no `$subtree`, no `*` on the root. The task is the 
 need — a verb that computes a SHA-256 hex digest, which no agent has — and a token
 minted at test time, so the digest cannot be known without running code.
 
-THE ROUTE the free twin (`new_tool_twin`, E159) scripts: write a py_agent folder bundle
+THE ROUTE the free twin (`new_tool_twin`, E162) scripts: write a py_agent folder bundle
 (`bundle.yaml` with `{doc, schema}` verbs + its program) through `bundles`,
 `reload_bundle`, `create_agent`, grant both halves of the gate, `docs` the new agent
 (part=schema, #719), call the new verb, answer with its value. The model is told none

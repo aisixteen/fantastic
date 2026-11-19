@@ -16,7 +16,7 @@ verb, nothing on the new agent grants `*`, nothing the run wrote into the AI's
 `can_call` grants `*`). Reported: `reload_bundle`, `docs` of the new agent before its
 first call (with `part`), turns.
 
-The free twin `new_tool_twin` (E159) scripts the same sequence without a model and
+The free twin `new_tool_twin` (E162) scripts the same sequence without a model and
 runs this probe's `score` on it.
 
 ```sh
