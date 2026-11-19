@@ -7100,6 +7100,9 @@ mod tests_fork;
 /// The AI-to-AI send deadline, dead letter and withdrawal (#568).
 #[path = "tests_deadline.rs"]
 mod deadline;
+/// A chain in flight across a kernel restart (#726).
+#[path = "tests_restart.rs"]
+mod restart;
 
 #[path = "tests_row_attrs.rs"]
 mod row_attrs;
