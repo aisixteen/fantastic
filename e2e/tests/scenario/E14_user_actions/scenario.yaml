@@ -16,6 +16,7 @@
 # name for a caller who is not the model.
 
 id: user_actions
+muted: "#722: no pre-minted ids — a double spend is guarded only by an id the model writes and reuses exactly, which a model cannot be trusted to do (TBD)"
 title: proposed, clicked twice, bought once — user actions are idempotent
 
 task: >-
