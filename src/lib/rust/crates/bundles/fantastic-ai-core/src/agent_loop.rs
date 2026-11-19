@@ -6,9 +6,10 @@
 //! ONE PASS, and still no loop HERE — but that is not the same as "nothing
 //! happens". This module generates; [`crate::route::route_reply`] then dispatches
 //! whatever the completion named and delivers each reply to its own `reply_to`. A
-//! chain therefore advances one pass at a time, and it advances only because the
-//! model asked again: no call ends the turn, and stop is the default. Nothing
-//! iterates on the model's behalf.
+//! chain therefore advances one pass at a time, each pass woken by a delivered
+//! message. There is no loop in the kernel or in a pass: when a pass writes no
+//! call, the AI bundle may wake itself with an ordinary message to its own inbox
+//! (the nudge, `route.rs`), its own policy built from the bus.
 
 use crate::assembly::assemble_messages;
 use crate::context::estimate_tokens;
