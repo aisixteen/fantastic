@@ -4,7 +4,7 @@ import { htmlRefusal } from "../html_check.ts";
 import { docsOf, schemasOf, entry } from "../declared.ts";
 import type { Declared } from "../declared.ts";
 import { PANEL_VERBS, panelRelay } from "../panel_relay.ts";
-import { grantHint } from "./grant_hint.ts";
+import { grantHint, HTML_BRIDGE_DOC } from "./grant_hint.ts";
 import type { FolderBase, Handler, Json, Kernel } from "../../lib.ts";
 
 // html_agent — a JS view-agent holding MUTABLE HTML content. Ported from the
@@ -34,7 +34,7 @@ export function htmlBodyOf(kernel: Kernel, id: string): string {
 export const HTML_DECL: Declared = {
   get_html: { doc: "The body (its own, else its bundle's). Returns {id, html}.", args: {} },
   set_html: {
-    doc: "This cell's own body from now on; reloads the panel. Returns {ok, bytes, grants_missing?, hint?}.",
+    doc: `This cell's own body from now on; reloads the panel. Returns {ok, bytes, grants_missing?, hint?}. ${HTML_BRIDGE_DOC}`,
     args: { bytes: { type: "bytes", required: true, doc: "The html body, verbatim." } },
   },
   ...PANEL_VERBS,

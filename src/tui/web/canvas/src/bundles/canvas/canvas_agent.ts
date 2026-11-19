@@ -13,7 +13,7 @@ import { agentIndex } from "../files/files_deps.ts";
 import { isRefusalOf, resolveTarget } from "../files/drag.ts";
 import type { Look, Opened, Refusal, Target } from "../files/drag.ts";
 import { nameOf, norm, parentOf, wire } from "../files/paths.ts";
-import { grantHint } from "../html_agent/grant_hint.ts";
+import { grantHint, HTML_BRIDGE_DOC } from "../html_agent/grant_hint.ts";
 import { reflectView } from "../reflect_view/reflect_view.ts";
 import { cellGrant, hostRecordFresh, viewOf, viewRecordFresh } from "./host_views.ts";
 import type { Rec } from "./host_views.ts";
@@ -142,7 +142,7 @@ const GEOMETRY_ARGS = {
  *  runs (`declared.ts`) and `docs` is rendered from them. */
 export const VIEW_DECL: Declared = {
   place: {
-    doc: "A new cell of this view: a `kind` (or a `handler_module`), or only `backend_id` for a view of that host agent, drawn as its record says. Returns {placed, kind, grants_missing?, hint?}.",
+    doc: `A new cell of this view: a \`kind\` (or a \`handler_module\`), or only \`backend_id\` for a view of that host agent, drawn as its record says. Returns {placed, kind, grants_missing?, hint?}. An html cell: ${HTML_BRIDGE_DOC}`,
     args: {
       kind: { type: "string", enum: Object.keys(PLACEABLE), doc: "What to make." },
       handler_module: { type: "string", min: 1, doc: "The cell's own bundle (the `.ts` suffix optional), instead of a kind." },
@@ -195,7 +195,7 @@ export const VIEW_DECL: Declared = {
     args: {
       sender: { type: "string", required: true, min: 1, doc: "The agent that calls." },
       receiver: { type: "string", required: true, min: 1, doc: "The agent called." },
-      verbs: { type: "string[]", required: true, min: 1, doc: "The verbs granted." },
+      verbs: { type: "string[]", required: true, min: 1, doc: "The verbs granted: for a cell whose html calls `fantastic.emit(receiver, …)`, `emit`; for `fantastic.send(receiver, {type: verb})`, that verb; for `fantastic.watch(receiver, …)`, `watch`." },
     },
   },
   remove: {

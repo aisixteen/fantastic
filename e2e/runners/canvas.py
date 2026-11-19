@@ -238,6 +238,10 @@ class Page:
             except asyncio.TimeoutError:
                 raise TimeoutError(self.no_reply(method, params, time.time() - sent)) from None
             self.observe(m)
+            if m.get("method") == "Network.webSocketFrameReceived" and hasattr(self, "ws_received"):
+                # a probe reads what the page was sent: every received frame, whole (Network
+                # must be enabled before the page opens: CANVAS_WS_LOG)
+                self.ws_received.append(m["params"]["response"].get("payloadData", ""))
             if m.get("method") == "Runtime.exceptionThrown":
                 d = m["params"]["exceptionDetails"]
                 self.logs.append("EXC " + d.get("exception", {}).get("description", d.get("text", "")))

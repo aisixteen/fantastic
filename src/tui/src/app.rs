@@ -636,10 +636,15 @@ impl App {
             }
         }
         // The selection follows the AGENT, not the index: a new agent appearing
-        // above it must not move the human's cursor onto something else.
-        self.sel = keep
-            .and_then(|id| self.trows.iter().position(|r| r.id == id))
-            .unwrap_or_else(|| self.sel.min(self.trows.len().saturating_sub(1)));
+        // above it must not move the human's cursor onto something else. A
+        // filter that hides it lands on the best match: the exact id, else the
+        // first row, never whatever now sits at the old index.
+        let kept = keep.and_then(|id| self.trows.iter().position(|r| r.id == id));
+        self.sel = match (kept, self.filter.as_deref()) {
+            (Some(i), _) => i,
+            (None, Some(f)) => self.trows.iter().position(|r| r.id.eq_ignore_ascii_case(f)).unwrap_or(0),
+            (None, None) => self.sel.min(self.trows.len().saturating_sub(1)),
+        };
         self.dirty = true;
     }
 
@@ -1168,6 +1173,36 @@ mod tests {
             assert!(app.out.is_empty(), "{line}: nothing is sent");
             assert_eq!(app.notes.last().map(String::as_str), Some(want), "{line}");
         }
+    }
+
+    #[test]
+    fn a_filter_that_hides_the_selection_lands_on_the_exact_match_not_the_old_index() {
+        let leaf = |id: &str| TreeNode {
+            id: id.into(),
+            parent_id: None,
+            handler_module: Some("x.tools".into()),
+            display_name: None,
+            description: None,
+            children: vec![],
+        };
+        let mut app = App::new(crate::env::Paths::of("/nonexistent/.fantastic".into(), "/nonexistent".into()));
+        app.screen = ratatui::layout::Rect::new(0, 0, 120, 40);
+        let kids = ["a", "b", "c", "d", "ai_c", "ai_c_provider"].map(leaf).to_vec();
+        app.tree = Some(TreeNode { children: kids, ..leaf("root") });
+        app.reflow();
+        app.sel = app.trows.iter().position(|r| r.id.as_str() == "d").expect("the row");
+        app.filter = Some("ai_c".into());
+        app.reflow();
+        let ids: Vec<&str> = app.trows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["ai_c", "ai_c_provider"]);
+        assert_eq!(app.selected().map(String::as_str), Some("ai_c"));
+        // no exact id among the matches: the first row
+        app.filter = None;
+        app.reflow();
+        app.sel = app.trows.iter().position(|r| r.id.as_str() == "d").expect("the row");
+        app.filter = Some("ai_".into());
+        app.reflow();
+        assert_eq!(app.selected().map(String::as_str), Some("ai_c"));
     }
 
     fn record(id: &str, view: Value) -> Record {

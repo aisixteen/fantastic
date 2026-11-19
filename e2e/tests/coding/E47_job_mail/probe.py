@@ -1,11 +1,11 @@
 """coding/job_mail — the model STEERS a running job by mail mid-run. LLM-driven.
 
 Codex `unified_exec_stdin_*.rs`: interact with a live process. Our native path:
-any verb the exec_bridge does not own is MAIL delivered to the running job's
-inbox over its control fd. The probe plants a worker that blocks listening for
-one inbox message; the MODEL starts it and then sends the runner a message the
-bundle does not own — which lands as mail — and the worker writes the mailed
-token and exits. The steer file is the oracle: prose about mailing cannot forge
+a running program declares verbs of its own (`declare_verbs`, over its control fd,
+to its own agent); a call of one of them is MAIL delivered to the job's inbox. The
+probe plants a worker that declares `steer` and blocks listening for one inbox
+message; the MODEL starts it and then sends the runner `steer` — which lands as
+mail — and the worker writes the mailed token and exits. The steer file is the oracle: prose about mailing cannot forge
 it.
 """
 
@@ -31,8 +31,11 @@ FB = "mail_fb"
 INTERP = sys.executable
 DONE = 'end your run by calling done — emit <call name="done"></call>'
 
-# A minimal fantastic-aware worker: raw control-fd reader, blocks for ONE inbox
-# frame ([4-byte BE len | kind 'T' | json], op=='inbox'), writes its `token`, exits.
+# A minimal fantastic-aware worker on the raw control fd ([4-byte BE len | kind 'T' |
+# json]). Mail is only a verb the program declared (#651): it first declares `steer`
+# (token: string) to its own agent (`send` declare_verbs to FANTASTIC_SELF_ID, after
+# subscribing with `onmessage`), checks the reply, blocks for ONE `inbox` frame —
+# `{op: inbox, payload: {type: steer, token}}` — writes its `token`, and exits.
 WORKER = '''
 import os, json, struct, socket
 _s = socket.socket(fileno=int(os.environ["FANTASTIC_CTRL_FD"]))
@@ -44,20 +47,33 @@ def _rn(n):
             return None
         b += c
     return b
-_sub = b'T{"op":"onmessage"}'
-_s.sendall(struct.pack(">I", len(_sub)) + _sub)
+def _put(m):
+    body = b"T" + json.dumps(m).encode("utf-8")
+    _s.sendall(struct.pack(">I", len(body)) + body)
+def _get():
+    while True:
+        h = _rn(4)
+        if h is None:
+            return None
+        (n,) = struct.unpack(">I", h)
+        body = _rn(n)
+        if body is None:
+            return None
+        if body[:1] == b"T":
+            return json.loads(body[1:].decode("utf-8"))
+_put({"op": "onmessage"})
+_put({"op": "send", "rid": "1", "target": os.environ["FANTASTIC_SELF_ID"], "payload": {
+    "type": "declare_verbs", "verbs": [{
+        "name": "steer", "description": "steer the worker: it writes the token and exits",
+        "inputSchema": {"type": "object", "properties": {"token": {"type": "string"}}, "required": ["token"]}}]}})
 while True:
-    h = _rn(4)
-    if h is None:
+    m = _get()
+    if m is None:
         break
-    (n,) = struct.unpack(">I", h)
-    body = _rn(n)
-    if body is None:
-        break
-    if body[:1] != b"T":
-        continue
-    m = json.loads(body[1:].decode("utf-8"))
-    if m.get("op") == "inbox":
+    if m.get("op") == "reply" and m.get("rid") == "1":
+        if not (m.get("data") or {}).get("declared"):
+            raise SystemExit("declare_verbs refused: " + json.dumps(m.get("data")))
+    elif m.get("op") == "inbox":
         tok = (m.get("payload") or {}).get("token")
         if tok:
             open("steered.txt", "w").write(str(tok))
@@ -100,8 +116,8 @@ async def main():
             f"(1) start the worker — reflect `{RUNNER}` for the exact allowed "
             "command, then {type:'start', command, args}. (2) Steer it: send "
             f"`{RUNNER}` the message {{\"type\":\"steer\",\"token\":\"{token}\"}} "
-            "— the runner does not own the verb `steer`, so it is delivered to "
-            "the running worker as MAIL. The worker writes the token and exits. "
+            "— the running worker declares the verb `steer` itself, so the call is "
+            "delivered to it as MAIL. The worker writes the token and exits. "
             f"When you have sent the steer, {DONE}."
         )
         # THE HUMAN who wants the work done — the task comes FROM here.

@@ -3,6 +3,11 @@
 // never sees it. So the write that set the body SAYS which grants are missing
 // and how to add them. It only reads the body; it never writes a grant.
 
+/** What an html body's script has to reach agents (the connector, `web/page/view_relay.js`),
+ *  said where a model writes such a body: the view's `place` and the cell's `set_html`. */
+export const HTML_BRIDGE_DOC =
+  "The body's script reaches agents only through the global `fantastic`: `await fantastic.send(target, {type: verb, ...args})` returns the reply (grant `verb`); `fantastic.emit(target, payload)` has no reply and is dropped unless `emit` is granted; `const off = fantastic.watch(src, (event) => ...)` gets src's events (grant `watch`); `fantastic.onMessage((payload) => ...)` gets what is emitted to this cell; `fantastic.openCanvas(id)` shows that canvas. A grant is the cell's can_call {target: [verbs]} and the receiver's callable_by; the view's `wire` writes both.";
+
 /** `fantastic.<send|watch|emit>("<target>", …)` calls in `html`, as
  *  `{target: verbs}` — `send` contributes the `type` of its payload when it
  *  is written inline, `watch` / `emit` themselves. */

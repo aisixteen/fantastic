@@ -2,7 +2,8 @@
 
 THE MECHANICS UNDER TEST. A reflect carries no verbs; the
 kernel's `docs` verb serves them in two tiers (oneliners: one signature per verb;
-detailed: the whole text, for one verb); a reflect's tree can be cut with
+detailed: the whole text, for one verb), and by default (`part` all, #719) each
+verb's schema beside the text; a reflect's tree can be cut with
 `show_subtrees` / `ignore_subtrees`. The system prompt teaches all three — the
 task below names none of them.
 
@@ -10,15 +11,18 @@ THE FIXTURE. A ~30-agent estate: four wings, rooms below them, and one VAULT fiv
 levels down (`ai / site / south_wing / basement / archive_room / vault` — under the
 AI, which reaches it as `$subtree`; the system block names no other agent, so no id is given). The vault's
 `open` takes `code:str`; only its DETAILED docs say how the code is made from the
-`serial` its reflect shows (backwards, prefixed `V-`), so a model that never pulls
-detailed docs for `open` cannot open it. Structural rooms are sealed file legs
+`serial` its reflect shows (backwards, prefixed `V-`); since #719 a oneliners reply
+carries each verb's schema too, so the detail may reach the model without a
+`detailed` pull — the task done is the proof it did. Structural rooms are sealed file legs
 with a `description` — readable in the tree, callable by nobody.
 
 SCORED ON THE MODEL'S OWN CALLS (parsed from its turns) and on the FILE:
   1. task done        — `answer.md` on the desk holds the vault's secret;
   2. oneliners first  — a `docs` of the vault (oneliners) before its first `open`;
   3. detailed only for a used verb — every detailed pull's verb is then called (a
-                        pull naming no verb: one of that agent's verbs is);
+                        pull naming no verb: one of that agent's verbs is); no
+                        detailed pull at all holds too (the default `part` all
+                        already carries each verb's schema);
 Reported, not scored: a filtered reflect after the first look (`show_subtrees` /
 `ignore_subtrees` — optional), docs pulls by tier, reflects plain vs filtered, and the
 share of reflect + docs replies in the conversation the agent holds.
@@ -240,7 +244,8 @@ async def main():
             for t, v in used
         )
 
-    detailed_ok = bool(det) and all(_used(p) for _, p in det)
+    # no detailed pull holds: since #719 the oneliners reply carries each verb's schema
+    detailed_ok = all(_used(p) for _, p in det)
     first_reflect = reflects[0][0] if reflects else None
     filtered_after = any(
         first_reflect is not None and i > first_reflect for i, _ in filtered
