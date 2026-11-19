@@ -38,9 +38,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/aisixteen/fantastic"
 
 [workspace.dependencies]
 # Async runtime — single source of truth so every crate uses the same version.
@@ -89,16 +87,8 @@ libc = "0.2"
 # The Windows side of every crate's `sys` module (the unix side is libc). Each
 # crate names the API features it calls.
 windows-sys = "0.61"
-anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Bundle registration macro.
-proc-macro2 = "1"
-quote = "1"
-syn = { version = "2", features = ["full"] }
-
 
 # Build-time crates (proc-macros, build scripts) keep their symbols in release:
 # stripped under `MACOSX_DEPLOYMENT_TARGET=14.0` (.cargo/config.toml), a proc-macro
