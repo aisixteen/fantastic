@@ -2,7 +2,7 @@
 # model for the kernel's own ai_chat.tools chat over a vllm_backend provider, driven over web_rest.
 id: payload_routing_name
 group: kernel
-title: "a routing name in <payload> reaches its target (#528): a call in the routing form whose payload carries a `title` delivers it to the target (the kernel's create_agent, which keeps it on the new record) while the routing `title` only labels the call; the same call in the inline form delivers none"
+title: "a routing name in <payload> reaches its target (#528): a call in the routing form whose payload carries an `id` delivers it to the target (the kernel's create_agent makes the agent under that id) while the routing `id` only labels the call; the same call in the inline form is refused with a clash naming `id` and creates nothing"
 runner: probe.py
 runtimes: [rust]
 costs: free

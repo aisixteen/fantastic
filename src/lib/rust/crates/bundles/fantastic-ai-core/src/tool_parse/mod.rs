@@ -16,15 +16,15 @@
 //!
 //! There is NO agentic loop here and NO native provider tool API: the provider
 //! streams plain text, this module reads it. There is also NO JSON anywhere on
-//! this path, in either direction. ONE envelope, args inline:
+//! this path, in either direction. ONE envelope, in the routing form:
 //!
 //! ```text
 //! <call name="send">
-//! <target_id>notes</target_id>
-//! <type>patch</type>
+//! <routing><target_id>notes</target_id></routing>
+//! <payload><type>patch</type>
 //! <edits><item><path>hello.py</path><hunks>2</hunks></item></edits>
 //! <bytes>…verbatim, to the first </bytes>…
-//! </bytes>
+//! </bytes></payload>
 //! </call>
 //! ```
 //!

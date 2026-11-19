@@ -1,5 +1,5 @@
-//! The ONE call grammar: `<call name="…">` with bare child tags, args inline,
-//! `bytes` verbatim, no JSON anywhere.
+//! The ONE call grammar: `<call name="…">` with bare child tags in `<routing>` and
+//! `<payload>`, `bytes` verbatim, no JSON anywhere.
 //!
 //! A rule-for-rule port of python's
 //! `bundled_agents/ai/ai_core/src/ai_core/tool_parse.py`, which is canonical.
@@ -9,12 +9,11 @@
 //!
 //! ```text
 //! <call name="send">
-//! <target_id>notes</target_id>
-//! <reply_to>self</reply_to>
-//! <type>patch</type>
+//! <routing><target_id>notes</target_id><reply_to>self</reply_to></routing>
+//! <payload><type>patch</type>
 //! <edits><item><path>hello.py</path><hunks>2</hunks></item></edits>
 //! <bytes>…verbatim: real newlines, real quotes, ends at the first </bytes>…
-//! </bytes>
+//! </bytes></payload>
 //! </call>
 //! ```
 //!
@@ -710,8 +709,8 @@ pub fn parse_call(block: &str) -> Result<Option<ToolCall>, Malformed> {
         .filter(|t| !t.is_empty());
     if target.is_none() && !to.as_ref().is_some_and(given) {
         return Err(Malformed::new(
-            "a send names its target: `<target_id>agent id</target_id>`, or several \
-             recipients as `<to><item>id</item><item>id</item></to>`",
+            "a send names its target in `<routing>`: `<target_id>agent id</target_id>`, or \
+             several recipients as `<to><item>id</item><item>id</item></to>`",
         ));
     }
     let mut args = Map::new();
