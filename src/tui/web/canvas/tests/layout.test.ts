@@ -74,6 +74,16 @@ test("the view's place / move / update write the layout in use — never the cel
   assert.equal(k.get("a")?.meta["width"], undefined);
 });
 
+test("place keeps its x, y, width, height under the page's refresh: the rect is written after the cell, so the refresh's prune keeps it (#728)", async () => {
+  const k = page();
+  // the page's refresh runs on every state change and prunes the rects of cells it does not hold yet
+  // (canvas.ts refreshView: `prune` with the live cells)
+  k.addStateSubscriber(() => prune(k, "view_root", new Set([...k.get("view_root")!.children.values()].map((c) => c.id))));
+  const r = await call(k, { type: "place", kind: "html", id: "a", x: 100, y: 200, width: 320, height: 180, bytes: "<p>a</p>" });
+  assert.equal(r["placed"], "a");
+  assert.deepEqual(rectsOf(k, "view_root", "free")["a"], { x: 100, y: 200, width: 320, height: 180 });
+});
+
 test("the view has no `theme` verb; a 500px tab writes the column's layout (layout_mobile), a wide one layout_canvas", async () => {
   const k = page();
   const u = await call(k, { type: "theme", name: "mobile" });

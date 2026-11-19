@@ -249,6 +249,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   app's port.
 
 ### Fixed
+- The canvas view's `place` keeps the given x, y, width and height on the page (#728): it wrote the cell's rect before the cell, so the page's refresh (started by that write) pruned the rect as a removed cell's and placed the cell around the centre at 480×320; the rect is now written after the cell, as `open` does (#148).
 - The canvas read-only views (store, scheduler, credentials) no longer read again for the echo of their own reads (#507): the kernel mirrors every call to a watcher, so the first event of a scheduler started an endless list/history loop that closed the page socket.
 - A `vllm_backend` or `ollama_backend` provider reads what its record leaves to the server (model, max_tokens, context_window, kv_slots) before a `complete`, the verb an `ai_chat` uses on it (#519); before, only `send`, `inquiry` and `context_recall` did, so a chat through a record without `max_tokens` failed its turn. `anthropic_backend` already did.
 
