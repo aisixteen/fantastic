@@ -25,12 +25,13 @@
 //! whole history.
 //!
 //! A tick collects every DUE schedule, bumps `run_count`/`next_run`, persists
-//! FIRST (a crash inside the fire window cannot re-fire on reboot), then fires
-//! them all in ONE `kernel.send([...])` batch — its items concurrent, so one hung
-//! target never blocks the others. `timeout` is the schedule's own per-fire bound in
-//! seconds; absent = wait forever (the kernel never defaults it). One
-//! `{type:"schedule_fired", ...}` per outcome goes to the scheduler's OWN inbox
-//! only — the target gets the payload, which is the tick.
+//! FIRST (a crash inside the fire window cannot re-fire on reboot), then hands the
+//! fires to a task of its own and goes on to its next tick: THE LOOP NEVER WAITS ON
+//! A FIRE, so a slow target delays no other schedule. The fires run concurrently,
+//! each its own send. `timeout` is the schedule's own per-fire bound in seconds;
+//! absent = wait forever (the kernel never defaults it). One
+//! `{type:"schedule_fired", ...}` per fire is recorded when that fire settles, on
+//! the scheduler's OWN inbox only — the target gets the payload, which is the tick.
 //!
 //! There is no `shutdown` VERB: the tick loop is a kernel task, stopped by deleting
 //! the agent (`on_delete`) or by cancelling that task — the same two doors every
@@ -505,7 +506,13 @@ async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
                         fantastic_kernel::refusal::error_text(&e).unwrap_or_default()
                     ));
                 }
-                fire_many(&agent_id, &kernel, &due).await;
+                // HANDED OFF, never awaited (#722): a fire to a busy target must not
+                // hold the next tick. The task is the scheduler's own, so every
+                // fire is still the scheduler's send.
+                let (id, k) = (agent_id.clone(), Arc::clone(&kernel));
+                kernel.spawn_task(&agent_id, "fire", async move {
+                    fire_many(&id, &k, &due).await;
+                });
                 continue;
             }
         }
@@ -573,48 +580,46 @@ fn fire_outcome(status: Status, result: Value) -> (Value, Value) {
     (Value::Null, json!(format!("{status}: {detail}")))
 }
 
-/// Fire every due schedule AS THE SCHEDULER — one batch send, its items
-/// concurrent, no head-of-line blocking — then record one `schedule_fired` per
-/// outcome, and return those events in `due` order.
+/// Fire every due schedule AS THE SCHEDULER — each its own send, all concurrent,
+/// no head-of-line blocking — recording each `schedule_fired` when that fire
+/// settles, and return those events in `due` order.
 async fn fire_many(agent_id: &AgentId, kernel: &Arc<Kernel>, due: &[Value]) -> Vec<Value> {
+    futures_util::future::join_all(due.iter().map(|sch| fire_one(agent_id, kernel, sch))).await
+}
+
+/// One fire and its `schedule_fired` event, recorded and emitted once it settles.
+async fn fire_one(agent_id: &AgentId, kernel: &Arc<Kernel>, sch: &Value) -> Value {
     let ts = now_secs();
-    // AS THE SCHEDULER: this runs in its handler (`tick_now`) or in the tick
-    // loop its own `boot` spawned — identity comes from that dispatch.
-    let outcomes = kernel.send(due.iter().map(fire_item).collect()).await;
+    // AS THE SCHEDULER: this runs in its handler (`tick_now`) or in a task of the
+    // tick loop its own `boot` spawned — identity comes from that dispatch.
+    let out = kernel.send(vec![fire_item(sch)]).await.remove(0);
     let duration_ms = ((now_secs() - ts) * 1000.0) as i64;
-    let mut events = Vec::with_capacity(due.len());
-    for (sch, out) in due.iter().zip(outcomes) {
-        let target = sched_target(sch);
-        let payload = sched_payload(sch);
-        let sched_id = sch.get("id").cloned().unwrap_or(Value::Null);
-        let (result, error) = fire_outcome(out.status, out.result);
-        let event = json!({
-            "type": "schedule_fired",
-            "schedule_id": sched_id,
-            "scheduler_id": agent_id.as_str(),
-            "target": target,
-            "payload": payload,
-            "result": result,
-            "error": error,
-            "ts": ts,
-            "duration_ms": duration_ms,
-        });
-        if let Err(e) = append_history(agent_id, kernel, &event).await {
-            // python `logger.warning("scheduler %s: history persist failed: %s",
-            // sid, err.get("error"))`.
-            log_line(format!(
-                "scheduler {agent_id}: history persist failed: {}",
-                fantastic_kernel::refusal::error_text(&e).unwrap_or_default()
-            ));
-        }
-        // ONE delivery per tick (py-canonical): the payload send IS the tick; a
-        // target-echo of `schedule_fired` would double every delivery to a live
-        // program's on_message. Telemetry rides the scheduler's own inbox and
-        // schedule_events.yaml.
-        kernel.emit(agent_id, event.clone()).await;
-        events.push(event);
+    let (result, error) = fire_outcome(out.status, out.result);
+    let event = json!({
+        "type": "schedule_fired",
+        "schedule_id": sch.get("id").cloned().unwrap_or(Value::Null),
+        "scheduler_id": agent_id.as_str(),
+        "target": sched_target(sch),
+        "payload": sched_payload(sch),
+        "result": result,
+        "error": error,
+        "ts": ts,
+        "duration_ms": duration_ms,
+    });
+    if let Err(e) = append_history(agent_id, kernel, &event).await {
+        // python `logger.warning("scheduler %s: history persist failed: %s",
+        // sid, err.get("error"))`.
+        log_line(format!(
+            "scheduler {agent_id}: history persist failed: {}",
+            fantastic_kernel::refusal::error_text(&e).unwrap_or_default()
+        ));
     }
-    events
+    // ONE delivery per tick (py-canonical): the payload send IS the tick; a
+    // target-echo of `schedule_fired` would double every delivery to a live
+    // program's on_message. Telemetry rides the scheduler's own inbox and
+    // schedule_events.yaml.
+    kernel.emit(agent_id, event.clone()).await;
+    event
 }
 
 fn now_secs() -> f64 {
