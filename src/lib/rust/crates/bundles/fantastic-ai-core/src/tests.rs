@@ -962,6 +962,26 @@ async fn send_reply_carries_message_id() {
 /// not overlap any other. It takes this lock and restores what it found.
 static SEND_TIMEOUT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Holds the process-wide send ceiling at `secs` and restores what it found.
+struct Ceiling(Option<String>);
+
+impl Ceiling {
+    fn set(secs: &str) -> Self {
+        let prev = std::env::var("FANTASTIC_AI_SEND_TIMEOUT").ok();
+        std::env::set_var("FANTASTIC_AI_SEND_TIMEOUT", secs);
+        Self(prev)
+    }
+}
+
+impl Drop for Ceiling {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(v) => std::env::set_var("FANTASTIC_AI_SEND_TIMEOUT", v),
+            None => std::env::remove_var("FANTASTIC_AI_SEND_TIMEOUT"),
+        }
+    }
+}
+
 /// The ceiling is a python FLOAT: `FANTASTIC_AI_SEND_TIMEOUT=0.05` is a
 /// 50ms ceiling (rust parsed `u64`, failed, and silently used 180), the refusal
 /// spells the value with python's `repr`, and the `status(done)` detail carries
@@ -7103,6 +7123,9 @@ mod deadline;
 /// A chain in flight across a kernel restart (#726).
 #[path = "tests_restart.rs"]
 mod restart;
+/// An inquiry whose recipient's turn fails tells the asker (#722).
+#[path = "tests_inquiry_fail.rs"]
+mod inquiry_fail;
 
 #[path = "tests_row_attrs.rs"]
 mod row_attrs;
