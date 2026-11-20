@@ -304,7 +304,7 @@ mod tests {
     fn a_body_drops_the_header_the_thinking_and_the_call_arguments() {
         let row = "[from user]\nlook at it\n";
         assert_eq!(body_of(row), "look at it");
-        let turn = "<think>let me see\nhmm</think>The entry point is main.rs.\n\n\n<call name=\"send\"><arg name=\"target_id\">files</arg></call>\ndone";
+        let turn = "<think>let me see\nhmm</think>The entry point is main.rs.\n\n\n<call name=\"send\"><routing><target_id>files</target_id></routing><payload><type>read</type></payload></call>\ndone";
         assert_eq!(body_of(turn), "The entry point is main.rs.\n\n▸ send\ndone");
     }
 

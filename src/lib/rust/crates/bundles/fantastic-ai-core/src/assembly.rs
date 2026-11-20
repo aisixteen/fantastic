@@ -337,11 +337,12 @@ async fn parts(
         out.insert("store", store.clone());
     }
     if need.contains(&"howto") {
-        // TWO OPTIONAL SECTIONS, gated on the record exactly as python gates
-        // them: a title only earns its line when titles are what survives a
-        // stripped body, and the async/rows how-to only when replies arrive
-        // as rows. Teaching either unconditionally spends window on an
-        // affordance the agent does not have.
+        // OPTIONAL SECTIONS, gated on the record: a title only earns its line
+        // when titles are what survives a stripped body, the async/rows how-to
+        // only when replies arrive as rows (both exactly as python gates them),
+        // and the `line_summary` line only when the record offers the call.
+        // Teaching any unconditionally spends window on an affordance the agent
+        // does not have.
         let flag = |k: &str| meta.get(k).and_then(Value::as_bool) == Some(true);
         let mut blocks = vec![
             SEND_TO_HOWTO.to_string(),
@@ -354,6 +355,9 @@ async fn parts(
         }
         if flag("context_async") {
             blocks.push(ASYNC_HOWTO.to_string());
+        }
+        if flag(crate::line_summary::FIELD) {
+            blocks.push(crate::line_summary::HOWTO.to_string());
         }
         // LAST: the working rules are what the model reads right before the task.
         blocks.push(WORKING_HOWTO.to_string());
@@ -641,12 +645,11 @@ pub async fn assemble_messages(
             }
             None => (msg, form),
         };
-        let shown = msg.get("content").and_then(Value::as_str).unwrap_or("");
         parts.push(part_entry(
             "row",
             msg.get("id").and_then(Value::as_i64),
             Some(form),
-            shown,
+            &crate::row_attrs::model_text(&msg),
         ));
         messages.push(msg);
     }
@@ -780,18 +783,18 @@ pub(crate) fn request_parts(assembled: &[Value], sent: &[Value]) -> Vec<Value> {
         .collect();
     let last = sent.len().saturating_sub(1);
     for (i, m) in sent.iter().enumerate().skip(1) {
-        let text = m.get("content").and_then(Value::as_str).unwrap_or("");
+        let text = crate::row_attrs::model_text(m);
         let id = m.get("id").and_then(Value::as_i64);
         if i == last {
             out.push(part_entry(
                 "new_input",
                 None,
                 m.get("image_form").and_then(Value::as_str),
-                text,
+                &text,
             ));
             continue;
         }
-        let now = part_entry("row", id, Some("anchor"), text);
+        let now = part_entry("row", id, Some("anchor"), &text);
         let same = assembled.iter().find(|p| {
             p["part"] == json!("row") && p.get("ref") == now.get("ref") && p["hash"] == now["hash"]
         });

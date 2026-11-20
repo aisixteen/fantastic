@@ -448,7 +448,9 @@ pub async fn context_fold(
         // Verbatim: the body IS the given text, its first line the title.
         Some(text) => (summary_title(text), text.to_string(), true),
         None => {
-            let (title, body, degraded) = summarize_span(provider, &rows, &span).await?;
+            let line = crate::line_summary::of_span(agent_id, kernel, &rows, &span);
+            let (title, body, degraded) =
+                summarize_span(provider, &rows, &span, line.as_deref()).await?;
             (title, body, !degraded)
         }
     };

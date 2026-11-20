@@ -1337,6 +1337,10 @@ pub async fn send(
     let mut raise: Option<(&'static str, String)> = None;
     // A failed pass (not a refused record) earns its own retry turn (#533).
     let mut failed_reason: Option<String> = None;
+    // A turn that failed and is NOT retried: why, for the asker of an inquiry this
+    // chain is answering (#722). A retried pass leaves its inquiry open: the retry
+    // may still answer it, and a give-up closes it.
+    let mut turn_failed: Option<String> = None;
     let reply = match outcome {
         Ok(Ok(Generation::Dead { text: final_text })) => {
             dead_turn = true;
@@ -1381,6 +1385,7 @@ pub async fn send(
                 m
             })
             .await;
+            turn_failed = Some(e.0.clone());
             turn_refusal(fantastic_kernel::refusal::STORE_REFUSED, e.0, &client_id)
         }
         // FAIL LOUD: a system_prompt_file is set and unusable — no turn on another
@@ -1393,6 +1398,7 @@ pub async fn send(
                 m
             })
             .await;
+            turn_failed = Some(e.0.clone());
             turn_refusal(fantastic_kernel::refusal::INVALID_META, e.0, &client_id)
         }
         // FAIL LOUD: a fold's summary would not fit its budget
@@ -1405,6 +1411,7 @@ pub async fn send(
                 m
             })
             .await;
+            turn_failed = Some(e.0.clone());
             turn_refusal(fantastic_kernel::refusal::LIMIT, e.0, &client_id)
         }
         // A FOLD THAT CANNOT BE PLACED (python `member_anchor`'s `ValueError`,
@@ -1419,6 +1426,7 @@ pub async fn send(
                 m
             })
             .await;
+            turn_failed = Some(e.0.clone());
             raise = Some(("ValueError", e.0));
             Value::Null
         }
@@ -1439,6 +1447,7 @@ pub async fn send(
             // REFUSED RECORD (`ValueError`: the record cannot run) never opened a pass
             // and stores nothing, as ever.
             let message = if pe.kind == "ValueError" {
+                turn_failed = Some(pe.message.clone());
                 pe.message
             } else {
                 let stored = store_failed_turn(
@@ -1469,6 +1478,7 @@ pub async fn send(
             })
             .await;
             let message = format!("send: timeout after {}s", py_float_repr(timeout_secs));
+            turn_failed = Some(message.clone());
             // The send ceiling ends the turn with an error row too (#177).
             let stored = store_failed_turn(
                 agent_id,
@@ -1511,6 +1521,16 @@ pub async fn send(
     };
     if !retrying && (reply.get("error").is_some() || raise.is_some()) {
         crate::route::chain_ended(kernel, agent_id);
+    }
+    // AN INQUIRY WHOSE TURN FAILED tells its asker (#722): the asker must not wait
+    // on an answer that will not come.
+    if let Some(why) = turn_failed {
+        let mut body = Map::new();
+        body.insert(
+            "error".to_string(),
+            json!(format!("{}'s turn failed: {why}", agent_id.as_str())),
+        );
+        crate::route::close_inquiry(kernel, agent_id.as_str(), &client_id, body).await;
     }
 
     // ONE CHAIN PER AGENT (#227): the pass that read the held messages answers
@@ -1710,9 +1730,10 @@ pub fn inquiry_accept(
 /// `boot` — LAZY: never loads the conversation. Checks the record names a memory
 /// store (fail loud otherwise), starts a new incarnation, and marks the view for
 /// rebuilding — the first call reads the head from the store and runs
-/// `context_recall`. Python `_make_boot`. The one store read: whether the agent is
-/// paused (its last `pause`/`resume` row) — a paused agent says `paused` (#714); a
-/// store that refuses that read refuses the boot. After a kernel restart, the calls
+/// `context_recall`. Python `_make_boot`. The store reads: whether the agent is
+/// paused (its last `pause`/`resume` row) — a paused agent says `paused` (#714) — and,
+/// when its record offers `line_summary`, its last line (#709); a store that refuses
+/// either read refuses the boot. After a kernel restart, the calls
 /// the previous process cut that concern this agent come to it as one notice turn
 /// ([`crate::route::resume_cut`]).
 pub async fn boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
@@ -1741,6 +1762,10 @@ pub async fn boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         .lock()
         .expect("recall_due poisoned") = true;
     if let Err(e) = crate::pause::announce_at_boot(agent_id, kernel).await {
+        return refusal(fantastic_kernel::refusal::STORE_REFUSED, e.0);
+    }
+    // the chat's current line: the last `line_summary` its history holds (#709)
+    if let Err(e) = crate::line_summary::restore(agent_id, kernel).await {
         return refusal(fantastic_kernel::refusal::STORE_REFUSED, e.0);
     }
     // A CHAIN THE RESTART CUT (#726) goes on: what the previous process left in
@@ -1828,7 +1853,7 @@ where
 {
     use crate::declared::chat::Call;
     let reply = match call {
-        Call::Reflect(_) => reflect(),
+        Call::Reflect(_) => crate::line_summary::with_line(agent_id, kernel, reflect()),
         Call::Boot(_) => boot(agent_id, kernel).await,
         Call::Send(a) => {
             let client = safe_client(&a.client_id);

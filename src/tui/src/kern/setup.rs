@@ -127,14 +127,31 @@ pub fn check_backend(host: &Host, handler: &str) -> Result<(), Value> {
     }
 }
 
-/// The backends this build links with their schemas.
+/// The fields a set-up writes for an AI on a backend whose record schema is `backend`: the
+/// provider's own, then each field of the CHAT's record it does not declare (#632: the
+/// conversation's settings and the request knobs are the chat's; `make_ai` puts every field
+/// on its own record). `provider_id` is the write's, never the page's.
+fn set_up_schema(backend: &Value) -> Value {
+    let mut s = backend.clone();
+    let chat = fantastic_ai_core::chat_bundle::RECORD.schema();
+    if let (Some(props), Some(more)) = (s.get_mut("properties").and_then(Value::as_object_mut), chat["properties"].as_object()) {
+        for (k, v) in more {
+            if k != fantastic_ai_core::remote_provider::PROVIDER_FIELD && !props.contains_key(k) {
+                props.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    s
+}
+
+/// The backends this build links with the fields a set-up writes for each ([`set_up_schema`]).
 pub fn backends(host: &Host) -> Vec<Backend> {
     let mut v: Vec<Backend> = host
         .kernel
         .bundles
         .catalog()
         .filter(|(_, b)| is_backend(b))
-        .map(|(m, b)| Backend::from_schema(m, b.record().schema()))
+        .map(|(m, b)| Backend::from_schema(m, &set_up_schema(b.record().schema())))
         .collect();
     v.sort_by(|a, b| a.module.cmp(&b.module));
     v
@@ -206,9 +223,9 @@ pub fn typed(host: &Host, handler: &str, texts: &Map<String, Value>) -> Result<M
     Ok(fields)
 }
 
-/// A backend's DECLARED fields as one schema for the shared engine: its record's
-/// properties (the write-owned ones left out), nothing else allowed, none required
-/// (a change names only what it sets).
+/// A backend's DECLARED fields as one schema for the shared engine: the properties a set-up
+/// writes for it ([`set_up_schema`], the write-owned ones left out), nothing else allowed,
+/// none required (a change names only what it sets).
 pub fn fields_schema(host: &Host, handler: &str) -> Result<Value, String> {
     check_backend(host, handler).map_err(|r| r["error"].as_str().unwrap_or("not a backend").to_string())?;
     let (_, bundle) = host
@@ -217,7 +234,7 @@ pub fn fields_schema(host: &Host, handler: &str) -> Result<Value, String> {
         .catalog()
         .find(|(m, _)| *m == handler)
         .ok_or_else(|| format!("this build links no backend {handler:?}"))?;
-    let mut props = bundle.record().schema()["properties"].as_object().cloned().unwrap_or_default();
+    let mut props = set_up_schema(bundle.record().schema())["properties"].as_object().cloned().unwrap_or_default();
     props.retain(|k, _| !WRITE_OWNED.contains(&k.as_str()));
     Ok(json!({"type": "object", "properties": props, "additionalProperties": false}))
 }
@@ -331,6 +348,17 @@ mod tests {
         }
         // a wrongly typed value is refused, never coerced
         assert!(ok(json!({"model": 3})).is_err());
+        // the chat's fields are the set-up's too (#632): its knobs and its prompt; the
+        // provider it names is the write's
+        let both = ok(json!({"temperature": 0.4, "max_tokens": 512, "system_prompt": "be brief"})).unwrap();
+        assert_eq!((both["temperature"].clone(), both["max_tokens"].clone()), (json!(0.4), json!(512)));
+        let r = ok(json!({"provider_id": "p"})).expect_err("provider_id");
+        assert_eq!(r["arg"].as_str(), Some("provider_id"), "{r}");
+        let listed = backends(&h);
+        let names: Vec<&str> = listed[0].fields.iter().map(|f| f.name.as_str()).collect();
+        let at = |n: &str| names.iter().position(|x| *x == n).unwrap_or_else(|| panic!("{n} in {names:?}"));
+        assert!(at("kv_slots") < at("temperature") && at("temperature") < at("max_tokens"), "the provider's first, then the chat's: {names:?}");
+        assert!(!names.contains(&"provider_id"), "{names:?}");
         assert!(declared_fields(&h, "configure_ai", "nope.tools", Map::new()).is_err());
     }
 

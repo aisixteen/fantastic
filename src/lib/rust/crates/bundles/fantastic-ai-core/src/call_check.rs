@@ -27,7 +27,7 @@
 
 use crate::tool_parse::grammar::{
     elements, envelopes, envelopes_in, open_tags, parse_call, tags_outside, Envelope, Malformed,
-    OpenTag, ROUTING,
+    OpenTag, PAYLOAD_TAG, ROUTING, ROUTING_TAG,
 };
 use crate::tool_parse::{defang, CLOSE, TOOLS};
 use regex::Regex;
@@ -173,16 +173,48 @@ fn risky(args: &[(String, Value)]) -> Option<&'static str> {
     }
 }
 
+/// A call's arguments split for the form to write: a send's `<routing>` names and
+/// its `<payload>` (every argument of any other tool). What the model wrote inside
+/// `<routing>` or `<payload>` stays where it was written (a payload `<title>` or
+/// `<id>` is the target's), and an exec command inside `<payload>` is seen by
+/// [`risky`]; a name written directly in the call goes where its name says. A
+/// `<routing>`/`<payload>` value that does not read as tags stays as it is.
+fn split(name: &str, args: &[(String, Value)]) -> (Vec<(String, Value)>, Vec<(String, Value)>) {
+    if name != "send" {
+        return (Vec::new(), args.to_vec());
+    }
+    let (mut routing, mut payload) = (Vec::new(), Vec::new());
+    for (k, v) in args {
+        let kids = match v {
+            Value::String(s) if k == ROUTING_TAG || k == PAYLOAD_TAG => elements(s).ok(),
+            _ => None,
+        };
+        match kids {
+            Some(kids) if !kids.is_empty() => {
+                let side = if k == ROUTING_TAG { &mut routing } else { &mut payload };
+                side.extend(
+                    kids.into_iter()
+                        .map(|(k2, raw)| (k2, Value::String(raw.trim().to_string()))),
+                );
+            }
+            _ if ROUTING.contains(&k.as_str()) => routing.push((k.clone(), v.clone())),
+            _ => payload.push((k.clone(), v.clone())),
+        }
+    }
+    (routing, payload)
+}
+
 /// The lines for one call's rewrite: the form to write, or, for a destructive exec
 /// call, a `careful:` line with its command left out (#255).
 fn rewrite(name: &str, args: &[(String, Value)]) -> Vec<String> {
-    let what = match risky(args) {
+    let (routing, payload) = split(name, args);
+    let what = match risky(&payload) {
         None => {
-            return vec!["write it as:".to_string(), expected(name, args)];
+            return vec!["write it as:".to_string(), expected(name, &routing, &payload)];
         }
         Some(what) => what,
     };
-    let shown: Vec<(String, Value)> = args
+    let shown: Vec<(String, Value)> = payload
         .iter()
         .map(|(k, v)| {
             if k.as_str() == "command" || k.as_str() == "args" {
@@ -197,7 +229,7 @@ fn rewrite(name: &str, args: &[(String, Value)]) -> Vec<String> {
             "careful: this command runs `{what}`, which changes state outside this task (a stash, reset, clean or force-push acts on the whole repository, and every worktree shares it; rm -rf deletes for good). It is left out of the form below: if you still mean it, write the command yourself, and prefer one that touches only your own files."
         ),
         "write it as:".to_string(),
-        expected(name, &shown),
+        expected(name, &routing, &shown),
     ]
 }
 
@@ -452,11 +484,11 @@ fn json_args(masked: &str, tok: &Tok) -> Vec<(String, Value)> {
     args.into_iter().collect()
 }
 
-fn expected(name: &str, args: &[(String, Value)]) -> String {
-    if args.is_empty() {
+fn expected(name: &str, routing: &[(String, Value)], payload: &[(String, Value)]) -> String {
+    if routing.is_empty() && payload.is_empty() {
         return format!("<call name=\"{name}\"></call>");
     }
-    let tag = |k: &str, v: &Value| {
+    let tag = |(k, v): &(String, Value)| {
         let inner: String = match v {
             Value::Array(xs) => xs
                 .iter()
@@ -468,16 +500,12 @@ fn expected(name: &str, args: &[(String, Value)]) -> String {
     };
     let mut lines = vec![format!("<call name=\"{name}\">")];
     if name == "send" {
-        // the routing form: routing names in `<routing>`, the rest in `<payload>`
-        let (routing, payload): (Vec<_>, Vec<_>) = args
-            .iter()
-            .partition(|(k, _)| ROUTING.contains(&k.as_str()));
-        let r: String = routing.iter().map(|(k, v)| tag(k, v)).collect();
-        let p: String = payload.iter().map(|(k, v)| tag(k, v)).collect();
+        let r: String = routing.iter().map(tag).collect();
+        let p: String = payload.iter().map(tag).collect();
         lines.push(format!("<routing>{r}</routing>"));
         lines.push(format!("<payload>{p}</payload>"));
     } else {
-        lines.extend(args.iter().map(|(k, v)| tag(k, v)));
+        lines.extend(payload.iter().map(tag));
     }
     lines.push("</call>".to_string());
     lines.join("\n")
@@ -694,13 +722,11 @@ fn wrapper_only(answer: &str) -> Option<(OpenTag, String)> {
     let outer = open_tags(answer).into_iter().next()?;
     let at = outer.clone();
     let (line, col, quoted, caret) = place(answer, &span_tok(answer, outer.start, outer.end));
-    let example = vec![
-        (
-            "target_id".to_string(),
-            Value::String("agent id".to_string()),
-        ),
-        ("type".to_string(), Value::String("verb".to_string())),
-    ];
+    let routing = vec![(
+        "target_id".to_string(),
+        Value::String("agent id".to_string()),
+    )];
+    let payload = vec![("type".to_string(), Value::String("verb".to_string()))];
     Some((
         at,
         [
@@ -711,7 +737,7 @@ fn wrapper_only(answer: &str) -> Option<(OpenTag, String)> {
                 defang(&answer[outer.start..outer.end])
             ),
             "write it as:".to_string(),
-            expected("send", &example),
+            expected("send", &routing, &payload),
             // The done path stays open: a finished answer that only wrote a wrapper
             // still ends the chain, as the no-call reminder says.
             "If it is finished, end the chain explicitly: <call name=\"done\"></call>".to_string(),

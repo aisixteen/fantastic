@@ -22,14 +22,14 @@ pub mod verbs;
 
 /// What the bundle is for: its one short man text; how to call it is rendered from its
 /// declared verbs (`docs`, `reflect`).
-const MAN: &str = "The canvas's left column as one html view its `reflect` returns: the kernels, the agent tree with each chat's state, what waits for the person, and the project's files. It follows the kernel and publishes each change on its own inbox: tree_changed, status_changed {agent, phase}, inquiries_changed {open}, files_changed {path, change}.";
+const MAN: &str = "The canvas's left column as one html view its `reflect` returns: the kernels, the agent tree with each chat's state, what waits for the person, and the project's files. It follows the kernel and publishes each change on its own inbox: tree_changed, status_changed {agent, phase}, line_summary_changed {agent, text, ts}, inquiries_changed {open}, files_changed {path, change}.";
 
 const VIEW: &str = include_str!("sidebar_view.html");
 
 /// What the view calls: the root's reflect and listing, the person's open inquiries, the
 /// project's files (a listing, and a watch on each folder it shows, held by the files agent),
-/// and its OWN agent: its `reflect` (each chat's last phase and the files' root, the
-/// project's name) and its events (`watch`) —
+/// and its OWN agent: its `reflect` (each chat's last phase and latest line, and the files'
+/// root, the project's name) and its events (`watch`) —
 /// the one agent it watches. It reads again only on what the agent publishes, never on a
 /// timer.
 fn calls(id: &str) -> Value {
@@ -102,6 +102,7 @@ impl Handler for SidebarBundle {
                     "handler_module": HANDLER_MODULE,
                     "sentence": MAN,
                     "phases": follow::phases(kernel, agent_id),
+                    "line_summaries": follow::lines(kernel, agent_id),
                     "open": follow::open_questions(kernel),
                     "files_root": files_root(kernel).await,
                     "view": {"kind": "html", "bytes": VIEW.replace("{{agent}}", id), "calls": calls(id)},
@@ -199,6 +200,7 @@ mod tests {
             })
         );
         assert_eq!(r["phases"], json!({}), "no chat has moved");
+        assert_eq!(r["line_summaries"], json!({}), "no chat has written a line");
         assert_eq!(r["open"], json!(0));
         assert_eq!(r["files_root"], "", "no files agent: no root");
     }
@@ -246,6 +248,17 @@ mod tests {
         emit("c1", json!({"type": "status", "source": "c1", "phase": "thinking"})).await;
         assert_eq!(next(&mut rx).await, json!({"type": "status_changed", "agent": "c1", "phase": "thinking"}));
         assert_eq!(ask(json!({"type": "reflect"})).await["phases"], json!({"c1": "thinking"}));
+
+        // a chat wrote a line: passed on with the tree state, kept for the view's first read
+        emit("c1", json!({"type": "line_summary_changed", "source": "c1", "text": "reading the spec", "ts": 12.5})).await;
+        assert_eq!(
+            next(&mut rx).await,
+            json!({"type": "line_summary_changed", "agent": "c1", "text": "reading the spec", "ts": 12.5})
+        );
+        assert_eq!(
+            ask(json!({"type": "reflect"})).await["line_summaries"],
+            json!({"c1": {"text": "reading the spec", "ts": 12.5}})
+        );
 
         // an agent came (the kernel's lifecycle), a kernel connected (a leg's event)
         kernel.publish_state(&json!({"agent_id": "c2", "kind": "added", "parent_id": "kernel"}));

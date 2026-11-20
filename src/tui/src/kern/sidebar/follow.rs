@@ -10,6 +10,9 @@
 //! - `status_changed {agent, phase}` — a chat's call moved (its own `status` event). The
 //!   sidebar keeps each chat's LAST phase — a call's end (`done`, `failed`, `stalled`,
 //!   `awaiting`) and `paused` stay until the next call moves the chat; `idle` drops it;
+//! - `line_summary_changed {agent, text, ts}` — a chat wrote a new one-line summary of what
+//!   it does now (its own `line_summary_changed {text, ts}`, #709). The sidebar keeps each
+//!   chat's latest line;
 //! - `inquiries_changed {open}` — a question to the person (`user`) opened or closed;
 //!   `open` is how many are open now;
 //! - `files_changed {path, change}` — an entry of a folder the files agent watches was
@@ -28,6 +31,7 @@ use serde_json::{json, Value};
 /// The event types the sidebar publishes on its own inbox.
 pub const TREE_CHANGED: &str = "tree_changed";
 pub const STATUS_CHANGED: &str = "status_changed";
+pub const LINE_SUMMARY_CHANGED: &str = fantastic_ai_core::line_summary::EVENT;
 pub const INQUIRIES_CHANGED: &str = "inquiries_changed";
 pub const FILES_CHANGED: &str = "files_changed";
 
@@ -41,6 +45,7 @@ const PERSON: &str = "user";
 pub enum Change {
     Tree,
     Status { agent: String, phase: String },
+    Line { agent: String, text: String, ts: f64 },
     Inquiries,
     File { path: String, change: &'static str },
 }
@@ -68,6 +73,11 @@ pub fn change_of(ev: &Value) -> Option<Change> {
                     let phase = s(p, "phase").filter(|x| !x.is_empty())?;
                     (s(p, "source").as_deref() == Some(at.as_str())).then_some(Change::Status { agent: at, phase })
                 }
+                t if t == LINE_SUMMARY_CHANGED => {
+                    let text = s(p, "text")?;
+                    let ts = p.get("ts").and_then(Value::as_f64)?;
+                    (s(p, "source").as_deref() == Some(at.as_str())).then_some(Change::Line { agent: at, text, ts })
+                }
                 "inquiry_opened" | "inquiry_closed" => {
                     (at == PERSON && s(p, "holder").as_deref() == Some(PERSON)).then_some(Change::Inquiries)
                 }
@@ -87,12 +97,13 @@ pub fn change_of(ev: &Value) -> Option<Change> {
     }
 }
 
-/// Each sidebar's tap on this kernel, and the last phase of each chat it has seen moving
-/// (a chat that never moved, or went `idle`, has none).
+/// Each sidebar's tap on this kernel, the last phase of each chat it has seen moving
+/// (a chat that never moved, or went `idle`, has none), and each chat's latest line.
 #[derive(Default)]
 pub struct Follow {
     taps: Mutex<HashMap<String, SubscriberToken>>,
     phases: Mutex<HashMap<String, BTreeMap<String, String>>>,
+    lines: Mutex<HashMap<String, BTreeMap<String, Value>>>,
 }
 
 fn follow(kernel: &Kernel) -> Arc<Follow> {
@@ -104,6 +115,14 @@ fn follow(kernel: &Kernel) -> Arc<Follow> {
 pub fn phases(kernel: &Kernel, me: &AgentId) -> Value {
     let f = follow(kernel);
     let all = f.phases.lock().expect("phases poisoned");
+    json!(all.get(me.as_str()).cloned().unwrap_or_default())
+}
+
+/// The lines sidebar `me` holds now: `{chat: {text, ts}}`, each chat's latest.
+#[must_use]
+pub fn lines(kernel: &Kernel, me: &AgentId) -> Value {
+    let f = follow(kernel);
+    let all = f.lines.lock().expect("lines poisoned");
     json!(all.get(me.as_str()).cloned().unwrap_or_default())
 }
 
@@ -151,6 +170,16 @@ pub fn start(kernel: &Arc<Kernel>, me: &AgentId) {
                 drop(all);
                 json!({"type": STATUS_CHANGED, "agent": agent, "phase": phase})
             }
+            Change::Line { agent, text, ts } => {
+                let f = follow(k);
+                f.lines
+                    .lock()
+                    .expect("lines poisoned")
+                    .entry(me.as_str().to_string())
+                    .or_default()
+                    .insert(agent.clone(), json!({"text": text, "ts": ts}));
+                json!({"type": LINE_SUMMARY_CHANGED, "agent": agent, "text": text, "ts": ts})
+            }
             Change::Inquiries => json!({"type": INQUIRIES_CHANGED, "open": open_questions(k)}),
             Change::File { path, change } => json!({"type": FILES_CHANGED, "path": path, "change": change}),
         })
@@ -165,6 +194,7 @@ pub fn stop(kernel: &Arc<Kernel>, me: &AgentId) {
         kernel.remove_state_subscriber(token);
     }
     f.phases.lock().expect("phases poisoned").remove(me.as_str());
+    f.lines.lock().expect("lines poisoned").remove(me.as_str());
 }
 
 #[cfg(test)]
@@ -187,6 +217,10 @@ mod tests {
         assert_eq!(
             change_of(&emit("c1", json!({"type": "status", "source": "c1", "phase": "thinking"}))),
             Some(Change::Status { agent: "c1".into(), phase: "thinking".into() })
+        );
+        assert_eq!(
+            change_of(&emit("c1", json!({"type": LINE_SUMMARY_CHANGED, "source": "c1", "text": "reading the spec", "ts": 12.5}))),
+            Some(Change::Line { agent: "c1".into(), text: "reading the spec".into(), ts: 12.5 })
         );
         assert_eq!(
             change_of(&emit("user", json!({"type": "inquiry_opened", "re": 4, "asker": "c1", "holder": "user"}))),
@@ -238,14 +272,15 @@ mod tests {
         assert_eq!(change_of(&emit("c1", json!({"type": "status", "source": "c1"}))), None);
         // a mirror on a watcher: another agent's status, the asker's copy of a question
         assert_eq!(change_of(&emit("w", json!({"type": "status", "source": "c1", "phase": "thinking"}))), None);
+        assert_eq!(change_of(&emit("w", json!({"type": LINE_SUMMARY_CHANGED, "source": "c1", "text": "x", "ts": 1.0}))), None);
         assert_eq!(change_of(&emit("c1", json!({"type": "inquiry_opened", "re": 4, "asker": "c1", "holder": "user"}))), None);
         assert_eq!(change_of(&emit("mail", json!({"type": "inquiry_opened", "re": 4, "asker": "c1", "holder": "mail"}))), None, "another holder's");
         // the log the process writes on every call, in place
         assert_eq!(change_of(&emit("files", json!({"type": "changed", "path": "team.log", "kind": "modified"}))), None);
         assert_eq!(change_of(&emit("w", json!({"type": "changed", "path": "a", "kind": "added"}))), None, "another bridge's");
         // the sidebar's own publications
-        for t in [TREE_CHANGED, STATUS_CHANGED, INQUIRIES_CHANGED, FILES_CHANGED] {
-            assert_eq!(change_of(&emit("sidebar", json!({"type": t, "agent": "c1", "phase": "x"}))), None, "{t}");
+        for t in [TREE_CHANGED, STATUS_CHANGED, INQUIRIES_CHANGED, FILES_CHANGED, LINE_SUMMARY_CHANGED] {
+            assert_eq!(change_of(&emit("sidebar", json!({"type": t, "agent": "c1", "phase": "x", "text": "x", "ts": 1.0}))), None, "{t}");
         }
     }
 }

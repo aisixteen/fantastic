@@ -5,8 +5,9 @@ thought channel `reasoning_content`) plays the model; the kernel's own
 `ai_chat.tools` chat (ai_core), completing through a `vllm_backend` provider, on the
 PACKAGED host of `RUNTIME` (python | rust) runs the chain, every call from the test through `web_rest`. Tool calling
 is the prompt-taught `<call name>` tag grammar — the request carries no `tools`.
-Every field the backend needs is SET on the record (endpoint, model, max_tokens,
-context_window, kv_slots, kv_overflow), so nothing is read from the server.
+Every field the backend needs is SET (endpoint, model, context_window, kv_slots,
+kv_overflow on the provider; max_tokens on the chat, #632), so nothing is read from
+the server.
 
 The script, one model answer per request:
 
@@ -118,10 +119,10 @@ def main() -> int:
         ('I will write it.\n<tool_call><function=call name="send"><target_id>files'
          '</target_id><type>write</type><path>bad.txt</path></function></tool_call>'),
         # 3b · an envelope with text outside a tag
-        f'<call name="send">oops<target_id>{FILES}</target_id><type>reflect</type></call>',
+        f'<call name="send">oops<routing><target_id>{FILES}</target_id></routing><payload><type>reflect</type></payload></call>',
         # 4 · a call inside the thought only
-        (f'<think>I could run <call name="send"><target_id>{FILES}</target_id>'
-         '<type>write</type><path>think.txt</path><bytes>x</bytes></call> but I will not.'
+        (f'<think>I could run <call name="send"><routing><target_id>{FILES}</target_id></routing><payload>'
+         '<type>write</type><path>think.txt</path><bytes>x</bytes></payload></call> but I will not.'
          '</think>Thinking it over.'),
         # 5 · a plain answer, and the chain ends
         'All finished: the file is written.\n<call name="done"></call>',
@@ -139,13 +140,13 @@ def main() -> int:
         # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it:
         # a `send` to a provider is refused (#521)
         rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
-                        endpoint=m.url, model=MODEL, max_tokens=8192,
+                        endpoint=m.url, model=MODEL,
                         context_window=262144, kv_slots=4, kv_overflow="evict",
                         memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
                         callable_by={"$self": "*", "$parent": "*", AI: "*"})
         need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
-                        provider_id=PROV, model=MODEL,
+                        provider_id=PROV, model=MODEL, max_tokens=8192,
                         context_window=262144, memory_store_id="memory",
                         can_call={**can, PROV: ["complete", "watch", "reflect"]}, callable_by=by)
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:200]}")

@@ -39,8 +39,7 @@ use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
 };
 use fantastic_ai_core::declared::provider;
-use fantastic_ai_core::record::AiRecord;
-use fantastic_ai_core::{agent_loop::BackendConfig, helpers, verbs};
+use fantastic_ai_core::{agent_loop::BackendConfig, verbs};
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use schemars::JsonSchema;
 use fantastic_kernel::{AgentId, Kernel, TaskId};
@@ -97,9 +96,9 @@ impl FoundationModelsBackendBundle {
             .map(|r| ProviderError::raised(format!("{NAME}: {}", unavailable_message(r))));
         Arc::new(FoundationModelsProvider {
             engine: Arc::clone(&self.engine),
+            // the calling chat's knobs (#632); a chat that names no max_tokens gets the
+            // bounded default, never above the model's window (#495)
             temperature: meta.get("temperature").and_then(Value::as_f64),
-            // a record that names none gets the bounded default, never above the
-            // model's window (#495)
             max_tokens: Some(
                 meta.get("max_tokens")
                     .and_then(Value::as_i64)
@@ -111,11 +110,10 @@ impl FoundationModelsBackendBundle {
     }
 
     /// `reflect` — the shared base, then (in this order) whether the model can
-    /// answer and why not, its real window, and the two knobs as the record sets
-    /// them (null = the model's own). Swift `reflectExtra`.
+    /// answer and why not, and its real window. Swift `reflectExtra`; the knobs
+    /// are each chat's (#632).
     fn reflect_reply(&self, agent_id: &AgentId, kernel: &Kernel) -> Value {
         let mut out = verbs::reflect_base(agent_id, kernel, MAN, self.cfg().model_window);
-        let meta = helpers::agent_meta(agent_id, kernel);
         let a = self.engine.availability();
         out.insert("available".to_string(), json!(a.is_available()));
         out.insert(
@@ -126,12 +124,6 @@ impl FoundationModelsBackendBundle {
             "context_size".to_string(),
             json!(self.engine.context_size()),
         );
-        for key in ["temperature", "max_tokens"] {
-            out.insert(
-                key.to_string(),
-                meta.get(key).cloned().unwrap_or(Value::Null),
-            );
-        }
         Value::Object(out)
     }
 }
@@ -142,19 +134,13 @@ const MAN: &str = "The on-device Apple Foundation Models provider: it streams on
 /// The fields an on-device record carries: no endpoint, no model choice, no key.
 #[derive(Debug, JsonSchema)]
 pub struct FoundationRecord {
-    /// Sampling temperature (>= 0); unset, the on-device model's own.
-    #[schemars(range(min = 0))]
-    pub temperature: Option<f64>,
-    /// A turn's output budget (tokens); unset, the on-device model's own.
-    #[schemars(range(min = 1))]
-    pub max_tokens: Option<i64>,
     /// How the conversation is kept in the model's view.
     pub caching: Option<fantastic_ai_core::record::CachingMode>,
     /// The memory store agent that keeps this agent's settings (e.g. a ram_store).
     pub memory_store_id: String,
-    /// The fields every ai_core agent takes; `context_window` no larger than the model's.
-    #[serde(flatten)]
-    pub ai: AiRecord,
+    /// The model's window (tokens), no larger than the on-device model's.
+    #[schemars(range(min = 1))]
+    pub context_window: Option<i64>,
 }
 
 fantastic_kernel::record!(FoundationRecord);

@@ -10,9 +10,9 @@ SCRIPT, one model answer per request:
      call; `<payload>` carries `<type>create_agent</type>` and its own `<id>`. The payload
      is delivered WHOLE: the new agent `made` exists under the payload's id and the label
      appears nowhere in its record;
-  2. the same call in the INLINE form (`<target_id>`, `<id>` beside the verb's other arguments,
-     no `<payload>`): there `id` is call routing AND an argument the verb documents, so the
-     call is refused loud with a clash naming `id`, and `made2` is never created;
+  2. the same call in the INLINE form (`<target_id>` and the verb's arguments directly in the
+     call, no `<routing>`, no `<payload>`): the parser refuses it (one call form, #528), the
+     refusal shows the routing form, and `made2` is never created;
   3. a plain answer + `done`.
 """
 
@@ -106,13 +106,13 @@ def main() -> int:
                                  "callable_by": {**callable_by("memory"), AI: "*", PROV: "*"}})
         need(r.get("updated") is True, f"memory accepts the AI: {str(r)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
-                        endpoint=m.url, model=MODEL, max_tokens=8192,
+                        endpoint=m.url, model=MODEL,
                         context_window=262144, kv_slots=4, kv_overflow="evict",
                         memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
                         callable_by={"$self": "*", "$parent": "*", AI: "*"})
         need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
-                        provider_id=PROV, model=MODEL,
+                        provider_id=PROV, model=MODEL, max_tokens=8192,
                         context_window=262144, memory_store_id="memory",
                         can_call={"$self": "*", "memory": "*", **{hk.root_id: ["create_agent"]}, PROV: ["complete", "watch"]},
                         callable_by={"$self": "*", "$parent": "*", "rest": "*"})
@@ -137,9 +137,12 @@ def main() -> int:
         need(LABEL not in json.dumps(rec), "the routing id labels the call, it was not delivered")
         need(MADE in u[1] and "error" not in u[1].lower(),
              f"request 2 carries the create reply: {u[1][:300]!r}")
-        # 2 · the inline form: `id` is routing there and a documented argument: refused, nothing made
-        need("clash" in u[2] and "id" in u[2] and not record(MADE2),
-             f"the inline call is refused with a clash and creates nothing: {u[2][:300]!r} {record(MADE2)}")
+        # 2 · the inline form: refused by the parser with the routing form, nothing made
+        need("call NOT dispatched: `<target_id>` directly in the call" in u[2]
+             and "<routing><target_id>agent id</target_id></routing>" in u[2]
+             and not record(MADE2),
+             f"the inline call is refused with the routing form and creates nothing: "
+             f"{u[2][:300]!r} {record(MADE2)}")
     finally:
         hk.close()
         m.stop()

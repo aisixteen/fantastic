@@ -1,10 +1,12 @@
-//! THE RECORD an ai_core agent takes, declared once as a struct (issue #642): the
-//! fields EVERY ai_core agent carries, whatever its backend, and the shared pieces a
-//! backend's own record is built from (`#[serde(flatten)] ai: AiRecord`). The one
-//! engine ([`fantastic_kernel::verbs::check_record`]) judges the fields' names, types,
-//! ranges and patterns at `create_agent` / `update_agent`.
+//! THE RECORD an ai_core chat takes, declared once as a struct (issue #642): the
+//! fields EVERY chat carries ([`AiRecord`]), the request knobs it sends with each
+//! request ([`RequestKnobs`], #632), and the shared pieces a provider backend's own
+//! record is built from. The one engine ([`fantastic_kernel::verbs::check_record`])
+//! judges the fields' names, types, ranges and patterns at `create_agent` /
+//! `update_agent`.
 
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// How the conversation is fitted into the window.
@@ -194,16 +196,119 @@ pub struct ModelPrice {
 }
 
 /// What a provider backend's record carries beside the fields of its own server: the
-/// models it lists and what they cost. Flattened into each backend's record.
+/// models it lists, what they cost and the window it serves. Flattened into each
+/// backend's record.
 #[derive(Debug, JsonSchema)]
 pub struct ProviderRecord {
     /// The names this provider lists in `models`.
     pub models: Option<Vec<String>>,
     /// What each model costs, by model name; a model with no entry is unpriced (never $0).
     pub prices: Option<std::collections::BTreeMap<String, ModelPrice>>,
-    /// The fields every ai_core agent takes.
-    #[serde(flatten)]
-    pub ai: AiRecord,
+    /// The model's window (tokens).
+    #[schemars(range(min = 1))]
+    pub context_window: Option<i64>,
+}
+
+/// How much a reasoning model wants to think: a chat-template input (a soft steer).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    /// Low.
+    Low,
+    /// Medium.
+    Medium,
+    /// Extra high: needs a thinking_token_budget.
+    Xhigh,
+}
+
+/// THE REQUEST KNOBS (#632): what a CHAT sends with each request. They change the
+/// request body, never the provider: chats with different knobs share one provider.
+/// A knob the chat leaves out is the backend's own default; a backend whose server
+/// takes no such knob does not send it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct RequestKnobs {
+    /// Sampling temperature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    /// Nucleus sampling.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    /// Top-k sampling.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<i64>,
+    /// Min-p sampling.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_p: Option<f64>,
+    /// How much the model wants to think (xhigh needs a thinking_token_budget).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// The hard cap on thinking tokens, below max_tokens; unset, a turn sends the backend's default fitted to the call.
+    #[schemars(range(min = 1))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_token_budget: Option<i64>,
+    /// Presence penalty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f64>,
+    /// Frequency penalty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f64>,
+    /// Repetition penalty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repetition_penalty: Option<f64>,
+    /// No n-gram of this size repeats.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_repeat_ngram_size: Option<i64>,
+    /// Sampling seed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    /// Stop sequences.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop: Option<Vec<String>>,
+    /// A turn's output budget (tokens); unset, the backend's default for its server.
+    #[schemars(range(min = 1))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<i64>,
+}
+
+/// The names of the [`RequestKnobs`], in declaration order.
+pub const KNOBS: [&str; 13] = [
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "reasoning_effort",
+    "thinking_token_budget",
+    "presence_penalty",
+    "frequency_penalty",
+    "repetition_penalty",
+    "no_repeat_ngram_size",
+    "seed",
+    "stop",
+    "max_tokens",
+];
+
+/// The knobs a chat's record sets (a null is unset), as a `complete` carries them.
+#[must_use]
+pub fn knobs_of(meta: &Map<String, Value>) -> Map<String, Value> {
+    KNOBS
+        .iter()
+        .filter_map(|k| meta.get(*k).filter(|v| !v.is_null()).map(|v| ((*k).to_string(), v.clone())))
+        .collect()
+}
+
+/// A write a chat's knobs cannot honour, on the MERGED record: a thinking budget not
+/// below the output budget could never fire, and a turn would end mid-thought.
+#[must_use]
+pub fn knobs_refusal(meta: &Map<String, Value>, record: &Map<String, Value>) -> Option<String> {
+    let pick = |k: &str| meta.get(k).or_else(|| record.get(k)).and_then(Value::as_i64);
+    match (pick("thinking_token_budget"), pick("max_tokens")) {
+        (Some(b), Some(m)) if b >= m => Some(format!(
+            "thinking_token_budget={b} is not below max_tokens={m} — it could \
+             never fire, and a turn would end mid-thought with no answer; keep it \
+             below max_tokens (half is a good start)"
+        )),
+        _ => None,
+    }
 }
 
 /// The schema of a positive number of seconds, or none, with its declared `default`.

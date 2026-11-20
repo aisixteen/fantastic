@@ -1,0 +1,12 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: a scripted OpenAI-compatible server plays the
+# model for the kernel's own chat (ai_chat.tools + a vllm_backend provider) on the Rust host,
+# driven over web_rest, its events watched over the ws face.
+id: line_summary_threads
+group: memory
+title: "line_summary across threads (#709): thread A folds under its own latest line; after a context_clear thread B's stretch with no line keeps the summariser's title and its lined stretch folds under its own latest line; no fold of B holds a row of A or an A line; the chat published every line once, in order"
+runner: probe.py
+runtimes: [rust]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300

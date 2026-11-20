@@ -962,6 +962,26 @@ async fn send_reply_carries_message_id() {
 /// not overlap any other. It takes this lock and restores what it found.
 static SEND_TIMEOUT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Holds the process-wide send ceiling at `secs` and restores what it found.
+struct Ceiling(Option<String>);
+
+impl Ceiling {
+    fn set(secs: &str) -> Self {
+        let prev = std::env::var("FANTASTIC_AI_SEND_TIMEOUT").ok();
+        std::env::set_var("FANTASTIC_AI_SEND_TIMEOUT", secs);
+        Self(prev)
+    }
+}
+
+impl Drop for Ceiling {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(v) => std::env::set_var("FANTASTIC_AI_SEND_TIMEOUT", v),
+            None => std::env::remove_var("FANTASTIC_AI_SEND_TIMEOUT"),
+        }
+    }
+}
+
 /// The ceiling is a python FLOAT: `FANTASTIC_AI_SEND_TIMEOUT=0.05` is a
 /// 50ms ceiling (rust parsed `u64`, failed, and silently used 180), the refusal
 /// spells the value with python's `repr`, and the `status(done)` detail carries
@@ -1820,7 +1840,7 @@ async fn a_call_with_no_target_is_reported_not_swallowed() {
     // THE PARSER owns this refusal now: a `send` that names neither
     // `<target_id>` nor `<to>` never becomes a call at all, so what reaches the
     // model is the grammar's sentence, naming BOTH ways to address one.
-    let bad = r#"<call name="send"><reply_to>self</reply_to><type>reflect</type></call>"#;
+    let bad = r#"<call name="send"><routing><reply_to>self</reply_to></routing><payload><type>reflect</type></payload></call>"#;
     let s = script(&backend, vec![pass(bad), pass("ok")], Duration::ZERO);
     let _ = kernel
         .send(vec![Item::new(
@@ -1847,7 +1867,7 @@ async fn a_call_with_no_target_is_reported_not_swallowed() {
 async fn a_send_with_no_payload_names_what_is_missing() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_nopl").await;
-    let bad = r#"<call name="send"><target_id>totals</target_id></call>"#;
+    let bad = r#"<call name="send"><routing><target_id>totals</target_id></routing><payload></payload></call>"#;
     let s = script(&backend, vec![pass(bad), pass("ok")], Duration::ZERO);
     let _ = kernel
         .send(vec![Item::new(
@@ -1877,8 +1897,8 @@ async fn an_unparseable_call_reaches_the_model_as_an_error() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_broken").await;
     let broken = concat!(
-        r#"<call name="send"><target_id>kernel</target_id><type>create_agent"#,
-        "<path>a</path></call>"
+        r#"<call name="send"><routing><target_id>kernel</target_id></routing><payload><type>create_agent"#,
+        "<path>a</path></payload></call>"
     );
     let s = script(&backend, vec![pass(broken), pass("ok")], Duration::ZERO);
     let _ = kernel
@@ -1907,7 +1927,7 @@ async fn a_broken_call_beside_a_good_one_is_still_reported() {
         "{}{}",
         call_envelope("kernel_state", json!({"type": "list_agents"}), Some("null")),
         // TERMINATED: a block with no `</call>` is a cut, not a malformed call.
-        r#"<call name="send"><target_id>n</target_id><code>oops</call>"#
+        r#"<call name="send"><routing><target_id>n</target_id></routing><payload><code>oops</payload></call>"#
     );
     let s = script(&backend, vec![pass(text), pass("ok")], Duration::ZERO);
     let _ = kernel
@@ -2486,6 +2506,7 @@ async fn a_dead_turn_is_discarded_and_rerolled() {
     let last = incoming
         .last()
         .and_then(|m| m["content"].as_str())
+        .map(crate::row_attrs::without_head)
         .unwrap_or("")
         .to_string();
     assert!(last.starts_with("[no answer]"), "{last}");
@@ -3917,7 +3938,7 @@ async fn a_turn_whose_calls_all_reply_elsewhere_ends_the_chain() {
     let (kernel, backend) = mk_kernel(&tmp, "elsewhere").await;
     let peer = add_peer(&kernel, &tmp, &backend).await;
     let elsewhere = format!(
-        r#"<call name="send"><target_id>{peer}</target_id><type>send</type><text>hi</text><reply_to>null</reply_to></call>"#
+        r#"<call name="send"><routing><target_id>{peer}</target_id><reply_to>null</reply_to></routing><payload><type>send</type><text>hi</text></payload></call>"#
     );
     let s = script(
         &backend,
@@ -4381,8 +4402,7 @@ async fn a_to_list_fans_out_one_copy_per_recipient_carrying_the_list() {
     let (kernel, a) = mk_kernel(&tmp, "fan").await;
     let b = add_peer(&kernel, &tmp, &a).await;
     let call = format!(
-        r#"<call name="send"><to><item>{b}</item><item>{a}</item></to><re>412</re>
-<type>send</type><text>CANDIDATE 586</text><reply_to>null</reply_to></call>"#
+        r#"<call name="send"><routing><to><item>{b}</item><item>{a}</item></to><re>412</re><reply_to>null</reply_to></routing><payload><type>send</type><text>CANDIDATE 586</text></payload></call>"#
     );
     let fa = script(
         &a,
@@ -4981,7 +5001,7 @@ async fn long_head(kernel: &Arc<Kernel>, backend: &AgentId, strategy: &str) -> i
             kernel,
             backend,
             json!({"role": "assistant", "parent": prev,
-            "content": format!("Reading filler_{i}. <call name=\"send\"><target_id>notes</target_id><title>survey filler_{i}</title><type>read</type><path>filler_{i}.txt</path></call>")}),
+            "content": format!("Reading filler_{i}. <call name=\"send\"><routing><target_id>notes</target_id><title>survey filler_{i}</title></routing><payload><type>read</type><path>filler_{i}.txt</path></payload></call>")}),
         ).await;
         let pid = kernel.mint_id();
         prev = put_row(
@@ -5170,7 +5190,7 @@ async fn a_fold_projection_over_budget_writes_folds() {
             &kernel,
             &backend,
             json!({"role": "assistant", "parent": prev,
-            "content": format!("Reading filler_{i}. <call name=\"send\"><target_id>notes</target_id><title>survey filler_{i}</title><type>read</type><path>filler_{i}.txt</path></call>")}),
+            "content": format!("Reading filler_{i}. <call name=\"send\"><routing><target_id>notes</target_id><title>survey filler_{i}</title></routing><payload><type>read</type><path>filler_{i}.txt</path></payload></call>")}),
         ).await;
         let pid = kernel.mint_id();
         prev = put_row(
@@ -5348,7 +5368,7 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
             let call = put_row(
                 &kernel,
                 &backend,
-                json!({"role": "assistant", "parent": prev, "content": format!("Reading f{step}_{i}. <call name=\"send\"><target_id>notes</target_id><title>survey f{step}_{i}</title><type>read</type><path>f.txt</path></call>")}),
+                json!({"role": "assistant", "parent": prev, "content": format!("Reading f{step}_{i}. <call name=\"send\"><routing><target_id>notes</target_id><title>survey f{step}_{i}</title></routing><payload><type>read</type><path>f.txt</path></payload></call>")}),
             ).await;
             let pid = kernel.mint_id();
             prev = put_row(
@@ -5830,7 +5850,7 @@ async fn an_inquiry_is_accepted_and_answered_later_under_its_pid() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_receiver_may_work_for_several_turns_before_answering() {
     let look =
-        "<call name=\"send\"><target_id>kernel</target_id><type>docs</type><of>kernel</of></call>";
+        "<call name=\"send\"><routing><target_id>kernel</target_id></routing><payload><type>docs</type><of>kernel</of></payload></call>";
     let (_tmp, a, r) =
         inquiry_round("inq_work", vec![look.to_string(), answer_call("ship it")]).await;
     assert!(
@@ -6623,28 +6643,27 @@ fn two_batch_tokens_differ_and_are_four_hex() {
     assert!(a.iter().collect::<std::collections::HashSet<_>>().len() > 1);
 }
 
-/// The peer payload's KEY ORDER is python's. python lifts the send's inline
-/// tags into `payload` with `fields.pop("target_id")`, which keeps the
-/// survivors in source order (`type`, `text`), then `setdefault("msg", …)`
-/// appends. `serde_json::Map::remove` is `swap_remove` under `preserve_order`
-/// — it would drag `text` into the hole and read `["text","type","msg"]` where
-/// python has `["type","text","msg"]`.
+/// The peer payload's KEY ORDER is python's: `<payload>` keeps its tags in source
+/// order (`type`, `text`), then `setdefault("msg", …)` appends. A
+/// `serde_json::Map::remove` (`swap_remove` under `preserve_order`) on the way would
+/// drag `text` into a hole and read `["text","type","msg"]` where python has
+/// `["type","text","msg"]`.
 #[test]
 fn a_peer_sends_payload_keeps_pythons_key_order() {
     let calls = crate::tool_parse::extract_tool_calls(
-        "<call name=\"send\"><target_id>ai2</target_id><type>send</type>\
-         <text>CASE=noop#1 hello from ai</text></call>",
+        "<call name=\"send\"><routing><target_id>ai2</target_id></routing><payload><type>send</type>\
+         <text>CASE=noop#1 hello from ai</text></payload></call>",
     );
     assert_eq!(calls.len(), 1, "{calls:?}");
     let payload = calls[0]
         .arguments
         .get("payload")
         .and_then(Value::as_object)
-        .expect("a send lifts its inline tags into `payload`");
+        .expect("a send carries its `payload`");
     assert_eq!(
         payload.keys().collect::<Vec<_>>(),
         vec!["type", "text"],
-        "source order survives the `target_id` lift"
+        "source order survives the parse"
     );
     // `msg` is stamped LAST, as python's `setdefault` appends it.
     let stamped = crate::route::fan_out(calls, Some(732));
@@ -7089,6 +7108,9 @@ mod autofold;
 /// The model's `keep` summary of a reply that folds (#641).
 #[path = "tests_keep.rs"]
 mod keep;
+
+#[path = "tests_line_summary.rs"]
+mod line_summary;
 /// Inline agent views in a chat (#339).
 #[path = "tests_embed.rs"]
 mod tests_embed;
@@ -7103,6 +7125,9 @@ mod deadline;
 /// A chain in flight across a kernel restart (#726).
 #[path = "tests_restart.rs"]
 mod restart;
+/// An inquiry whose recipient's turn fails tells the asker (#722).
+#[path = "tests_inquiry_fail.rs"]
+mod inquiry_fail;
 
 #[path = "tests_row_attrs.rs"]
 mod row_attrs;
@@ -7119,7 +7144,8 @@ mod images;
 fn last_in(s: &MockScript, n: usize) -> String {
     s.request_messages(n)
         .last()
-        .and_then(|m| m["content"].as_str().map(str::to_string))
+        .and_then(|m| m["content"].as_str())
+        .map(|c| crate::row_attrs::without_head(c).to_string())
         .unwrap_or_default()
 }
 
@@ -7253,7 +7279,7 @@ async fn a_broken_call_is_reported_instead_of_the_no_call_reminder() {
 async fn the_good_calls_run_and_the_broken_one_comes_back_beside_them() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "cc_b").await;
-    // rendered over 5 lines, so the broken call is on line 6
+    // rendered over 7 lines, so the broken call is on line 8
     let good = call_envelope("kernel", json!({"type": "reflect", "tree": "none"}), None);
     let s = script(
         &backend,
@@ -7277,7 +7303,7 @@ async fn the_good_calls_run_and_the_broken_one_comes_back_beside_them() {
     let batch = last_content(&s, 1);
     assert!(batch.contains("kernel reflect"), "{batch}");
     assert!(
-        batch.contains("[malformed call — nothing ran] line 6, col 1:"),
+        batch.contains("[malformed call — nothing ran] line 8, col 1:"),
         "{batch}"
     );
     assert!(
@@ -7368,7 +7394,7 @@ async fn broken_only_turns_count_toward_giving_up() {
         &backend,
         // Broken, but no foreign tag: a stream-cut turn gives up sooner (#499).
         (0..cap + 5)
-            .map(|_| pass("<call name=\"send\">oops<target_id>files</target_id></call>"))
+            .map(|_| pass("<call name=\"send\">oops<routing><target_id>files</target_id></routing></call>"))
             .collect(),
         Duration::ZERO,
     );
@@ -7533,11 +7559,11 @@ async fn a_peer_cannot_mark_its_message_a_notice() {
     assert!(users[0].get("kind").is_none(), "{users:?}");
 }
 
-/// A ROUTING NAME A VERB ALSO TAKES: `title` on a call is
-/// routing, never sent to the target. A verb whose `docs` names `title` could never
-/// receive it — the call is refused, loud, and a verb without one is untouched.
+/// ONE CALL FORM (#528): a send written without `<routing>` (`title`, `type` and the
+/// verb's arguments directly in the call) is refused by the parser, with the routing
+/// form; nothing reaches the target. The send beside it, in the routing form, runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_routing_name_the_verb_documents_is_refused_loud() {
+async fn an_inline_send_is_refused_and_nothing_reaches_the_target() {
     struct Store(Arc<std::sync::Mutex<Vec<String>>>);
     // `create` takes a `title`: a name the call's routing also carries
     fantastic_kernel::stand_in_verbs!(clash_verbs {
@@ -7602,10 +7628,10 @@ async fn a_routing_name_the_verb_documents_is_refused_loud() {
     let _ = kernel
         .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "update_agent", "id": backend_id.as_str(), "can_call": {"$self": "*", "$parent": "*", "$subtree": "*", file_id.as_str(): "*", "cli": "*", MEMORY: "*", kb.as_str(): "*"}}))])
         .await;
-    let mut create = Map::new();
-    create.insert("target_id".into(), json!(kb));
-    create.insert("title".into(), json!("Notes"));
-    create.insert("payload".into(), json!({"type": "create", "body": "b"}));
+    let create = format!(
+        "<call name=\"send\"><target_id>{kb}</target_id><title>Notes</title>\
+         <type>create</type><body>b</body></call>"
+    );
     let mut ping = Map::new();
     ping.insert("target_id".into(), json!(kb));
     ping.insert("title".into(), json!("check kb"));
@@ -7614,8 +7640,7 @@ async fn a_routing_name_the_verb_documents_is_refused_loud() {
         &backend,
         vec![
             pass(format!(
-                "{}\n{}",
-                crate::tool_parse::render_call("send", &create),
+                "{create}\n{}",
                 crate::tool_parse::render_call("send", &ping)
             )),
             pass("saw it <call name=\"done\"></call>"),
@@ -7634,10 +7659,13 @@ async fn a_routing_name_the_verb_documents_is_refused_loud() {
     );
     let turn = s.request(1);
     assert!(
-        turn.contains("title on this call is call routing"),
+        turn.contains("`<target_id>` directly in the call"),
         "{turn}"
     );
-    assert!(turn.contains("documents an argument named title"), "{turn}");
+    assert!(
+        turn.contains("<routing><target_id>agent id</target_id></routing>"),
+        "the refusal shows the routing form: {turn}"
+    );
     assert_eq!(
         *got.lock().unwrap(),
         vec!["ping".to_string()],
@@ -7645,8 +7673,8 @@ async fn a_routing_name_the_verb_documents_is_refused_loud() {
     );
 }
 
-/// The same verb in the ROUTING FORM: `<payload>` is taken whole, so its `title`
-/// reaches the target, and the routing `title` still labels the call. No refusal.
+/// `<payload>` is taken whole, so its `title` reaches the target, and the routing
+/// `title` labels the call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_routing_name_in_the_payload_of_a_routed_call_is_delivered() {
     struct Store(Arc<std::sync::Mutex<Vec<Value>>>);
@@ -7723,7 +7751,7 @@ async fn a_routing_name_in_the_payload_of_a_routed_call_is_delivered() {
         .await;
     assert!(until_passes(&s, 2).await, "the reply must reach the model");
     let turn = s.request(1);
-    assert!(!turn.contains("call routing, never sent"), "{turn}");
+    assert!(!turn.contains("NOT dispatched"), "{turn}");
     assert!(turn.contains("make notes"), "the routing title labels the reply: {turn}");
     assert_eq!(
         *got.lock().unwrap(),
@@ -7779,7 +7807,7 @@ async fn a_call_that_runs_resets_the_escalation() {
         &backend,
         vec![
             pass(wrapped),
-            pass("<call name=\"send\"><target_id>kernel</target_id><type>reflect</type></call>"),
+            pass("<call name=\"send\"><routing><target_id>kernel</target_id></routing><payload><type>reflect</type></payload></call>"),
             pass(wrapped),
             pass("<call name=\"done\"></call>"),
         ],
@@ -7875,7 +7903,7 @@ async fn driver_store(
     let mut prev = ack;
     for i in 0..60 {
         let content = format!(
-            "Polling job {i}. {} <call name=\"send\"><target_id>exec</target_id><title>poll {i}</title><type>status</type><job_id>1</job_id></call>",
+            "Polling job {i}. {} <call name=\"send\"><routing><target_id>exec</target_id><title>poll {i}</title></routing><payload><type>status</type><job_id>1</job_id></payload></call>",
             "still waiting on the workers. ".repeat(120)
         );
         let a = put_row(

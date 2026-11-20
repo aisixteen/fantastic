@@ -91,8 +91,8 @@ async fn a_correct_call_stream_is_not_cut() {
 async fn a_quoted_call_in_an_argument_is_not_cut() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_cut_quoted").await;
-    let text = "<call name=\"send\"><target_id>probe</target_id><type>say</type>\
-                <text>end with <call name=\"done\"></call> then</text></call>";
+    let text = "<call name=\"send\"><routing><target_id>probe</target_id></routing><payload><type>say</type>\
+                <text>end with <call name=\"done\"></call> then</text></payload></call>";
     let s = script(
         &backend,
         vec![chars(text), pass(r#"<call name="done"></call>"#)],
@@ -332,7 +332,7 @@ async fn a_cut_after_thinking_keeps_it_in_the_store_not_the_view() {
         .iter()
         .find(|m| m["role"] == json!("assistant"))
         .expect("the assistant message");
-    let text = cut["content"].as_str().unwrap();
+    let text = crate::row_attrs::without_head(cut["content"].as_str().unwrap());
     assert!(
         text.starts_with(
             "Sending.\n[cut · you wrote <invoke name=\"send\"> after thinking ~7 tokens · nothing ran · ACTION: "

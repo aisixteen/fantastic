@@ -3,8 +3,9 @@
 //! It holds the conversation (memory, folds, history, the `<call>` parse and
 //! route, fork, watch, embed: every ai_core verb) and completes each turn through
 //! the provider agent its record names (`provider_id`), by `complete`
-//! ([`crate::remote_provider`]). It knows no provider's kind, model, endpoint or
-//! key: those live on the provider agent. A provider on a connected kernel
+//! ([`crate::remote_provider`]). It knows no provider's kind, endpoint or key:
+//! those live on the provider agent. The request knobs are the chat's own
+//! ([`crate::record::RequestKnobs`]), sent with each request (#632). A provider on a connected kernel
 //! (`<guid>|<id>`) serves it the same way. Roles and other meta bundles extend
 //! THIS bundle, never a provider.
 
@@ -68,9 +69,15 @@ pub struct ChatRecord {
     /// `true` teaches the full-async how-to: replies arrive as rows.
     #[schemars(default = "default_off")]
     pub context_async: Option<bool>,
+    /// `true` offers the `line_summary` call: the model says in one line what it is doing now; the latest line shows in the view and titles its stretch's fold.
+    #[schemars(default = "default_off")]
+    pub line_summaries: Option<bool>,
     /// The fields every ai_core agent takes.
     #[serde(flatten)]
     pub ai: AiRecord,
+    /// The knobs this chat sends with each request (#632).
+    #[serde(flatten)]
+    pub knobs: crate::record::RequestKnobs,
 }
 
 fn default_off() -> Option<bool> {
@@ -104,6 +111,14 @@ impl Handler for AiChatBundle {
 
     fn record(&self) -> &'static fantastic_kernel::RecordDecl {
         &RECORD
+    }
+
+    fn validate_meta(
+        &self,
+        meta: &serde_json::Map<String, Value>,
+        record: &serde_json::Map<String, Value>,
+    ) -> Option<String> {
+        crate::record::knobs_refusal(meta, record)
     }
 
     async fn handle(

@@ -48,6 +48,17 @@ impl Fx {
         call(&self.k, &self.id, payload).await
     }
 
+    /// Set the paired chat's request knobs (#632: they are the chat's, sent with each pass).
+    async fn chat_knobs(&self, knobs: Value) {
+        let chat = fantastic_ai_core::remote_provider::pair_chat(&self.k, &AgentId::from(self.id.as_str())).await;
+        let mut payload = json!({"type": "update_agent", "id": chat.as_str()});
+        for (key, v) in obj(knobs) {
+            payload[key] = v;
+        }
+        let r = call(&self.k, "kernel_state", payload).await;
+        assert!(r.get("error").is_none(), "{r}");
+    }
+
     async fn send(&self, text: &str, extra: Value) -> Value {
         let mut payload = json!({"type": "send", "text": text});
         for (key, v) in obj(extra) {
@@ -125,48 +136,11 @@ async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
 // ── the record schema ───────────────────────────────────────────────
 
 #[test]
-fn the_record_is_two_knobs_a_store_then_the_ai_fields() {
+fn the_record_is_a_store_and_the_window() {
     let declared = fantastic_kernel::verbs::record_fields(&RECORD);
     let fields = declared["fields"].as_array().unwrap();
     let names: Vec<&str> = fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
-    assert_eq!(
-        names,
-        [
-            "temperature",
-
-            "max_tokens",
-
-            "caching",
-
-            "memory_store_id",
-
-            "context_window",
-
-            "output_reserve",
-
-            "context_strategy",
-
-            "recent_n",
-            "cache_primer_until",
-            "transport_retries",
-            "misfire_limit",
-
-            "system_prompt",
-            "file_bridge_id",
-            "system_prompt_file",
-            "pre_system_prompt",
-            "post_system_prompt",
-            "image_max_bytes",
-            "image_max_pixels",
-            "provider_capabilities"
-        ]
-    );
-    let required: Vec<&str> = fields
-        .iter()
-        .filter(|f| f["required"] == json!(true))
-        .map(|f| f["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(required, ["memory_store_id"]);
+    assert_eq!(names, ["caching", "memory_store_id", "context_window"]);
 }
 
 /// What a write of `meta` to this bundle's record answers: the engine's refusal of a
@@ -236,22 +210,17 @@ fn an_off_device_field_is_refused_at_the_write() {
 }
 
 #[test]
-fn the_knobs_are_refused_outside_their_shape() {
+fn the_window_is_refused_outside_its_shape_and_the_knobs_are_the_chats() {
     let b = bundle(FakeEngine::new().context_size(4096));
     let check = |extra: Value| {
         let mut m = json!({"memory_store_id": "memory"});
         m.as_object_mut().unwrap().extend(obj(extra));
         at_the_write(&b, m)
     };
-    for bad in [json!({"temperature": -0.1}), json!({"temperature": "hot"}), json!({"temperature": true})] {
-        assert!(check(bad.clone()).is_some_and(|e| e.contains("temperature")), "{bad}");
+    // the request knobs are the chat's (#632): the provider's record has no such field
+    for knob in [json!({"temperature": 0.7}), json!({"max_tokens": 256})] {
+        assert!(check(knob.clone()).is_some_and(|e| e.contains("no record field")), "{knob}");
     }
-    assert_eq!(check(json!({"temperature": 0})), None);
-    assert_eq!(check(json!({"temperature": 0.7})), None);
-    for bad in [json!({"max_tokens": 0}), json!({"max_tokens": 5.5})] {
-        assert!(check(bad.clone()).is_some_and(|e| e.contains("max_tokens")), "{bad}");
-    }
-    assert_eq!(check(json!({"max_tokens": 256})), None);
     let too_big = Some(TOO_BIG_4096.to_string());
     assert_eq!(check(json!({"context_window": 8192})), too_big);
     assert!(check(json!({"context_window": 0})).is_some_and(|e| e.contains("context_window")));
@@ -290,7 +259,7 @@ async fn create_agent_refuses_an_off_device_field() {
 #[tokio::test]
 async fn reflect_shows_availability_the_window_and_the_knobs() {
     let engine = Arc::new(FakeEngine::new().context_size(4096));
-    let fx = kernel(&engine, json!({"temperature": 0.3})).await;
+    let fx = kernel(&engine, json!({})).await;
     assert_eq!(fx.created["id"], json!(fx.id), "{}", fx.created);
     let r = fx.call(json!({"type": "reflect"})).await;
     assert_eq!(r["sentence"], json!(MAN));
@@ -306,8 +275,6 @@ async fn reflect_shows_availability_the_window_and_the_knobs() {
     assert_eq!(r["available"], json!(true));
     assert!(r["unavailable_reason"].is_null());
     assert_eq!(r["context_size"], json!(4096));
-    assert_eq!(r["temperature"], json!(0.3));
-    assert!(r["max_tokens"].is_null());
     // the extras ride AFTER the shared base, in this order
     // (the substrate's own keys — grants, tree — follow the bundle's reply)
     let keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
@@ -315,16 +282,7 @@ async fn reflect_shows_availability_the_window_and_the_knobs() {
         .iter()
         .position(|k| *k == "available")
         .expect("available");
-    assert_eq!(
-        keys[i..i + 5],
-        [
-            "available",
-            "unavailable_reason",
-            "context_size",
-            "temperature",
-            "max_tokens"
-        ]
-    );
+    assert_eq!(keys[i..i + 3], ["available", "unavailable_reason", "context_size"]);
     assert!(keys.iter().position(|k| *k == "generating").unwrap() < i);
     // the verb list is rendered by the kernel from the declarations, not carried by the bundle
     assert!(!keys.contains(&"concurrency"));
@@ -562,24 +520,25 @@ async fn a_broken_bridge_delta_is_an_error_and_still_cancels_on_drop() {
 
 // ── whole turns through the kernel ──────────────────────────────────
 
-/// The `max_tokens` the engine was asked for on one turn of a record made from `meta`.
-async fn asked_max_tokens(window: i64, meta: Value) -> Option<i64> {
+/// The `max_tokens` the engine was asked for on one turn of a chat whose knobs are `knobs`.
+async fn asked_max_tokens(window: i64, knobs: Value) -> Option<i64> {
     let engine = Arc::new(
         FakeEngine::new()
             .context_size(window)
             .script(vec![vec![Step::Text("<call name=\"done\"></call>")]]),
     );
-    let fx = kernel(&engine, meta).await;
+    let fx = kernel(&engine, json!({})).await;
+    fx.chat_knobs(knobs).await;
     fx.send("hi", json!({})).await;
     engine.requests()[0].max_tokens
 }
 
 #[tokio::test]
-async fn a_record_with_no_max_tokens_asks_for_the_bounded_default() {
-    // no `max_tokens` on the record (#495): bounded, never above the model's window
+async fn a_chat_with_no_max_tokens_asks_for_the_bounded_default() {
+    // no `max_tokens` on the chat (#495): bounded, never above the model's window
     assert_eq!(asked_max_tokens(32768, json!({})).await, Some(32768));
     assert_eq!(asked_max_tokens(8192, json!({})).await, Some(8192));
-    // the record's own wins, even above the default
+    // the chat's own wins, even above the default
     assert_eq!(
         asked_max_tokens(32768, json!({"max_tokens": 20000})).await,
         Some(20000)
@@ -596,8 +555,9 @@ async fn a_send_streams_the_engines_text_and_replays_the_conversation_next_turn(
         ],
         vec![Step::Text("second <call name=\"done\"></call>")],
     ]));
-    let fx = kernel(&engine, json!({"temperature": 0.1, "max_tokens": 300})).await;
+    let fx = kernel(&engine, json!({})).await;
     assert_eq!(fx.created["id"], json!(fx.id), "{}", fx.created);
+    fx.chat_knobs(json!({"temperature": 0.1, "max_tokens": 300})).await;
     let one = fx.send("hi", json!({})).await;
     assert!(
         one["response"]
@@ -611,7 +571,16 @@ async fn a_send_streams_the_engines_text_and_replays_the_conversation_next_turn(
         "the system block is the instructions"
     );
     assert!(req0.turns.is_empty());
-    assert_eq!(req0.prompt, "hi");
+    // each message opens with its ts head: `[YYYY-MM-DD HH:MM ±HH:MM]` on its own line
+    let body = |text: &str| -> String {
+        let (head, rest) = text.split_once('\n').unwrap_or_else(|| panic!("no head: {text:?}"));
+        assert!(
+            head.len() == 25 && head.starts_with("[20") && head.ends_with(']'),
+            "{head:?}"
+        );
+        rest.to_string()
+    };
+    assert_eq!(body(&req0.prompt), "hi");
     assert_eq!((req0.temperature, req0.max_tokens), (Some(0.1), Some(300)));
     let status = fx.call(json!({"type": "context_status"})).await;
     assert_eq!(status["reported_prompt_tokens"], json!(1200), "{status}");
@@ -627,9 +596,9 @@ async fn a_send_streams_the_engines_text_and_replays_the_conversation_next_turn(
     assert_eq!(reqs.len(), 2, "{reqs:?}");
     let roles: Vec<&str> = reqs[1].turns.iter().map(|t| t.role.as_str()).collect();
     assert_eq!(roles, ["user", "assistant"]);
-    assert_eq!(reqs[1].turns[0].content, "hi");
-    assert!(reqs[1].turns[1].content.starts_with("first "));
-    assert_eq!(reqs[1].prompt, "again");
+    assert_eq!(reqs[1].turns[0].content, req0.prompt, "the stored row renders as it was sent");
+    assert!(body(&reqs[1].turns[1].content).starts_with("first "));
+    assert_eq!(body(&reqs[1].prompt), "again");
 }
 
 #[tokio::test]

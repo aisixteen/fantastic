@@ -14,6 +14,12 @@
 //!
 //! The chat's grants name the provider: `can_call` `{<provider>: [complete,
 //! watch]}`, and the provider's `callable_by` the chat.
+//!
+//! ONE PROVIDER, MANY CHATS (#632): the provider's record is its IDENTITY (endpoint,
+//! key, model, window, KV policy, timeouts); the REQUEST KNOBS are each chat's own
+//! ([`crate::record::RequestKnobs`]) and ride every `complete` it sends (`knobs`),
+//! laid over the provider's record for that pass only. Every request reads both
+//! records as they are then, so a change to either applies from the next request.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -124,9 +130,9 @@ pub fn listed_models(meta: &Map<String, Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// `complete`: one pass on the call's `model`, else the record's `default_model`.
-/// `build` makes the backend's provider from a record (the pass's `model` laid over
-/// the agent's).
+/// `complete`: one pass on the call's `model`, else the record's `default_model`, with the
+/// call's `knobs`. `build` makes the backend's provider from a record: the agent's, with the
+/// pass's `model` and the calling chat's knobs laid over it.
 pub async fn complete_verb<B>(
     agent_id: &AgentId,
     args: &Complete,
@@ -149,6 +155,13 @@ where
     over.remove("model");
     if let Some(m) = &chosen {
         over.insert("model".into(), json!(m));
+    }
+    // the request knobs are the calling chat's alone: never the provider's record
+    for k in crate::record::KNOBS {
+        over.remove(k);
+    }
+    if let Some(Value::Object(knobs)) = args.knobs.as_ref().and_then(|k| serde_json::to_value(k).ok()) {
+        over.extend(knobs);
     }
     let mut r = complete(agent_id, args, kernel, build(over)).await;
     if chosen.is_none() {
@@ -288,13 +301,17 @@ pub struct RemoteProvider {
     model: Arc<Mutex<String>>,
     /// the chat's own `model` (absent: the provider's default)
     chat_model: Option<String>,
+    /// the chat's request knobs, sent with every pass
+    knobs: Map<String, Value>,
 }
 
 impl RemoteProvider {
     /// The provider `provider` (a local id or `<guid>|<id>`) of the chat `chat`.
     #[must_use]
     pub fn new(kernel: &Arc<Kernel>, chat: &AgentId, provider: &str) -> Self {
-        let chat_model = crate::helpers::agent_meta(chat, kernel)
+        let meta = crate::helpers::agent_meta(chat, kernel);
+        let knobs = crate::record::knobs_of(&meta);
+        let chat_model = meta
             .get("model")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
@@ -302,6 +319,7 @@ impl RemoteProvider {
         let model = chat_model.clone().unwrap_or_default();
         Self {
             chat_model,
+            knobs,
             kernel: Arc::clone(kernel),
             chat: chat.clone(),
             provider: AgentId::from(provider),
@@ -398,6 +416,9 @@ impl Provider for RemoteProvider {
         }
         if let Some(m) = max_tokens {
             payload.insert("max_tokens".into(), json!(m));
+        }
+        if !self.knobs.is_empty() {
+            payload.insert("knobs".into(), Value::Object(self.knobs.clone()));
         }
         // The call runs INSIDE the chat's turn (no spawn): it is the chat's send, judged
         // by its grants, and a cancel of the turn cancels the provider's pass with it.

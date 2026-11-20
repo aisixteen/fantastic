@@ -693,6 +693,108 @@ async fn due_schedules_fire_as_one_concurrent_batch() {
 }
 
 #[tokio::test]
+async fn a_slow_fire_does_not_delay_another_due_schedule() {
+    // The loop hands each fire off and goes on (#722): while a fire to a slow
+    // target is out, another schedule that comes due fires at its own time and its
+    // `schedule_fired` is recorded when it settles, ahead of the slow one's.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch, hits) = mk_probed(&tmp, &["p_slow", "p_fast"], None, true).await;
+    let slow = schedule(&kernel, &sch, "p_slow", 1, json!({"hit": {"block": 5.0}})).await;
+    let slow_id = slow["schedule_id"].as_str().unwrap().to_string();
+    let _ = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
+        .await;
+    assert!(wait_for(|| hits.has("p_slow"), 3.0).await, "the slow probe was never hit");
+    // due one second after it is made, while the slow fire is still out
+    let fast = schedule(&kernel, &sch, "p_fast", 1, json!({})).await;
+    let fast_id = fast["schedule_id"].as_str().unwrap().to_string();
+    let made = now();
+    let fired = wait_for(|| hits.has("p_fast"), 3.0).await;
+    let history = |sid: String| {
+        let kernel = Arc::clone(&kernel);
+        let sch = sch.clone();
+        async move {
+            kernel
+                .send(vec![Item::new(
+                    sch,
+                    json!({"type": "history", "schedule_id": sid}),
+                )])
+                .await
+                .remove(0)
+                .result
+        }
+    };
+    let mut recorded = false;
+    for _ in 0..40 {
+        if history(fast_id.clone()).await["count"].as_u64().unwrap_or(0) >= 1 {
+            recorded = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let slow_history = history(slow_id).await;
+    stop_tick(&kernel, &sch).await;
+    assert!(fired, "the fast schedule waited on the slow fire");
+    let at = hits.get("p_fast").unwrap().0;
+    assert!(at - made < 2.0, "fast fired {:.3}s after it was made", at - made);
+    assert!(recorded, "the fast fire was not recorded when it settled");
+    assert_eq!(slow_history["count"], 0, "{slow_history}");
+}
+
+#[tokio::test]
+async fn each_fire_of_one_batch_is_recorded_when_it_settles() {
+    // Two schedules due in ONE tick (#722): the fast fire's `schedule_fired` is
+    // recorded when the fast fire settles, while the slow fire of the same batch is
+    // still out — not when the whole batch settles.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch, hits) = mk_probed(&tmp, &["p_slow", "p_fast"], None, true).await;
+    // both made due while paused, so the resume wakes the loop to one batch
+    let _ = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "pause"}))])
+        .await;
+    let slow = schedule(&kernel, &sch, "p_slow", 1, json!({"hit": {"block": 4.0}})).await;
+    let fast = schedule(&kernel, &sch, "p_fast", 1, json!({})).await;
+    let slow_id = slow["schedule_id"].as_str().unwrap().to_string();
+    let fast_id = fast["schedule_id"].as_str().unwrap().to_string();
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let _ = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "resume"}))])
+        .await;
+    let both = wait_for(|| hits.has("p_slow") && hits.has("p_fast"), 3.0).await;
+    let count = |sid: String| {
+        let kernel = Arc::clone(&kernel);
+        let sch = sch.clone();
+        async move {
+            kernel
+                .send(vec![Item::new(
+                    sch,
+                    json!({"type": "history", "schedule_id": sid}),
+                )])
+                .await
+                .remove(0)
+                .result["count"]
+                .as_u64()
+                .unwrap_or(0)
+        }
+    };
+    let mut recorded = false;
+    for _ in 0..30 {
+        if count(fast_id.clone()).await >= 1 {
+            recorded = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let slow_count = count(slow_id).await;
+    stop_tick(&kernel, &sch).await;
+    assert!(both, "both probes must be hit");
+    let gap = hits.get("p_fast").unwrap().0 - hits.get("p_slow").unwrap().0;
+    assert!(gap.abs() < 0.25, "not one batch: fast started {gap:.3}s after slow");
+    assert!(recorded, "the fast fire waited on the slow fire of its batch to be recorded");
+    assert_eq!(slow_count, 0, "the slow fire settled early");
+}
+
+#[tokio::test]
 async fn next_run_is_persisted_before_the_fire() {
     // The probe reads schedules.yaml the moment it is hit: the store must
     // already hold the bumped run_count/next_run (persist-BEFORE-fire).

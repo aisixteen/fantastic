@@ -59,7 +59,7 @@ def main() -> bool:
     run = rig.proj / ".fantastic" / "cli" / "canvas.yaml"
 
     def in_flight(n: int) -> subprocess.Popen:
-        p = subprocess.Popen([str(rig.binary), "send", json.dumps({"target": "ai_provider", "payload": {"type": "complete", "rid": "r562", "model": "stub", "messages": [{"role": "user", "content": "hello"}]}})],
+        p = subprocess.Popen([str(rig.binary), "send", json.dumps({"target": "ai_provider", "payload": {"type": "complete", "rid": "r562", "model": "stub", "knobs": {"max_tokens": 4096}, "messages": [{"role": "user", "content": "hello"}]}})],
                              cwd=rig.proj, env=rig.env(), stdout=open(rig.art / "send.log", "a"), stderr=subprocess.STDOUT,
                              **oslayer.group_kwargs())
         senders.append(p)
@@ -82,7 +82,7 @@ def main() -> bool:
         else:
             raise SystemExit("the host never announced the canvas")
         rig.stop()
-        rig.patch_host_agent("ai_provider", {"model": "stub", "context_window": 32768, "max_tokens": 4096, "kv_slots": 4, "kv_overflow": "evict"})
+        rig.patch_host_agent("ai_provider", {"model": "stub", "context_window": 32768, "kv_slots": 4, "kv_overflow": "evict"})
 
         # a) a clean stop with a call in flight
         rig.start()

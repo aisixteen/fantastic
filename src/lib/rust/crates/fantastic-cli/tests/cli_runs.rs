@@ -1262,7 +1262,7 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
     // a required field has no default; the counts a record leaves out are read
     // from the server before a turn — no default either
     assert!(required.iter().all(|n| fields[n].get("default").is_none()));
-    for n in ["model", "max_tokens", "kv_slots"] {
+    for n in ["model", "context_window", "kv_slots"] {
         assert!(fields[n].get("default").is_none(), "{n}");
         assert!(
             fields[n]["hint"]
@@ -1271,17 +1271,23 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
             "{n}"
         );
     }
-    // the backend declares a value for each sampling knob it leaves out, and none for the window
-    for n in ["temperature", "thinking_token_budget"] {
-        assert!(fields[n].get("default").is_some(), "{n}");
-    }
-    assert!(fields["context_window"].get("default").is_none());
     assert_eq!(
         fields["kv_overflow"]["type"],
         serde_json::json!("'evict'|'reject'")
     );
+    // the request knobs are the CHAT's (#632): declared there with no default (a backend
+    // fills its own for a knob a chat leaves out)
+    let chat: std::collections::HashMap<&str, &serde_json::Value> = by["ai_chat"]["schema"]["fields"]
+        .as_array()
+        .expect("ai_chat declares a record")
+        .iter()
+        .map(|f| (f["name"].as_str().unwrap(), f))
+        .collect();
+    for n in ["temperature", "thinking_token_budget", "max_tokens", "stop"] {
+        assert!(chat[n].get("default").is_none(), "{n}");
+    }
     assert_eq!(
-        fields["reasoning_effort"]["type"],
+        chat["reasoning_effort"]["type"],
         serde_json::json!("'low'|'medium'|'xhigh'")
     );
     // the key: optional where a server may be keyless, required where it never is
@@ -1316,8 +1322,8 @@ fn the_catalog_carries_each_backend_kinds_record_schema() {
 }
 
 /// The on-device backend is in the REAL catalog of this binary, in every tier,
-/// with its record schema: two knobs, the shared AI fields, and `context_window`
-/// defaulting to the model's own window (read from the SDK on macOS; Apple's
+/// with its record schema: the provider's own fields, and `context_window` with
+/// no default (the model's own window, read from the SDK on macOS; Apple's
 /// documented 4096 where none can be asked). Reading it runs no prompt.
 #[test]
 fn the_catalog_carries_the_on_device_backend() {
@@ -1334,39 +1340,9 @@ fn the_catalog_carries_the_on_device_backend() {
         .unwrap_or_else(|| panic!("no foundation_models_backend in {r}"));
     let fields = fm["schema"]["fields"].as_array().expect("a schema");
     let names: Vec<&str> = fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
-    assert_eq!(
-        names,
-        [
-            "temperature",
-
-            "max_tokens",
-
-            "caching",
-
-            "memory_store_id",
-
-            "context_window",
-
-            "output_reserve",
-
-            "context_strategy",
-
-            "recent_n",
-            "cache_primer_until",
-            "transport_retries",
-            "misfire_limit",
-            "system_prompt",
-            "file_bridge_id",
-            "system_prompt_file",
-            "pre_system_prompt",
-            "post_system_prompt",
-            "image_max_bytes",
-            "image_max_pixels",
-            "provider_capabilities"
-        ]
-    );
+    assert_eq!(names, ["caching", "memory_store_id", "context_window"]);
     // the window is the model's own, read at use: the record declares no default
-    assert!(fields[3].get("default").is_none(), "{}", fields[3]);
+    assert!(fields[2].get("default").is_none(), "{}", fields[2]);
 }
 
 /// Python `test_the_schema_is_what_the_write_enforces`: ONE
@@ -1405,7 +1381,7 @@ fn the_schema_is_what_the_write_enforces() {
             "model=m",
             "memory_store_id=memory",
             r#"credentials={"store": "creds", "ref": "claude"}"#,
-            "context_strategy=bogus",
+            "caching=bogus",
         ])
         .current_dir(tmp.path())
         .output()
@@ -1415,7 +1391,7 @@ fn the_schema_is_what_the_write_enforces() {
     let r: serde_json::Value = serde_json::from_slice(&out.stderr).expect("the refusal on stderr");
     assert_eq!(r["reason"], "bad_arg", "{r}");
     assert!(
-        r["error"].as_str().unwrap().contains("context_strategy"),
+        r["error"].as_str().unwrap().contains("caching"),
         "{r}"
     );
     let r = create(&[

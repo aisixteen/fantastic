@@ -109,11 +109,20 @@ fn user_rows(all: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// A request message's text past its ts head.
+fn text_of(m: &Value) -> Value {
+    json!(crate::row_attrs::without_head(m["content"].as_str().unwrap_or("")))
+}
+
 /// The message of a request that carries `text`.
 fn message<'a>(request: &'a [Value], text: &str) -> &'a Value {
     request
         .iter()
-        .find(|m| m["content"].as_str().is_some_and(|c| c.starts_with(text)))
+        .find(|m| {
+            m["content"]
+                .as_str()
+                .is_some_and(|c| crate::row_attrs::without_head(c).starts_with(text))
+        })
         .unwrap_or_else(|| panic!("no message starting {text:?} in {request:?}"))
 }
 
@@ -179,7 +188,7 @@ async fn a_model_that_sees_gets_the_image_once_then_an_anchor_and_recall_brings_
     let first = script.request_messages(0);
     let sent = message(&first, "look");
     assert_eq!(sent["images"].as_array().map(Vec::len), Some(1), "{sent}");
-    assert_eq!(sent["content"], json!("look"));
+    assert_eq!(text_of(sent), json!("look"));
     let id = user_rows(&rows(&kernel, &chat).await)[0]["id"]
         .as_i64()
         .unwrap();
@@ -190,7 +199,7 @@ async fn a_model_that_sees_gets_the_image_once_then_an_anchor_and_recall_brings_
     assert!(old.get("images").is_none(), "{old}");
     let anchor =
         format!("[image \u{b7} 64\u{d7}48 \u{b7} image/png \u{b7} ~4 tokens \u{b7} id {id}]");
-    assert_eq!(old["content"], json!(format!("look\n{anchor}")));
+    assert_eq!(text_of(old), json!(format!("look\n{anchor}")));
     // recall brings it back, once
     let back = ask(&kernel, &chat, json!({"type": "recall", "id": id})).await;
     assert!(
@@ -234,7 +243,7 @@ async fn a_model_that_cannot_see_gets_alt_text_and_never_the_bytes() {
     let m = message(&sent, "look");
     assert!(m.get("images").is_none(), "{m}");
     assert_eq!(
-        m["content"],
+        text_of(m),
         json!("look\n[image: pic.png \u{b7} 64\u{d7}48 \u{b7} not shown to this model]")
     );
     // the row still holds the part, and the store the bytes
