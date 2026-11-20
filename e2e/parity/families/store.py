@@ -44,48 +44,48 @@ CASES = {
     ],
     "f01_text_outside_tags": [
         "Let me look at the readings first.\n"
-        '<call name="send"><target_id>readings</target_id><type>list</type><path></path></call>\n'
+        '<call name="send"><routing><target_id>readings</target_id></routing><payload><type>list</type><path></path></payload></call>\n'
         "That should show every file.",
     ],
     "f02_duplicated_child": [
-        '<call name="send"><target_id>readings</target_id><type>list</type><path>a</path><path>b</path></call>',
+        '<call name="send"><routing><target_id>readings</target_id></routing><payload><type>list</type><path>a</path><path>b</path></payload></call>',
     ],
     "f03_unknown_call_name": [
-        '<call name="fetch"><target_id>readings</target_id><type>list</type><path></path></call>',
+        '<call name="fetch"><routing><target_id>readings</target_id></routing><payload><type>list</type><path></path></payload></call>',
     ],
     "f04_bad_head": [
-        '<call nam="send"><target_id>readings</target_id><type>list</type><path></path></call>',
+        '<call nam="send"><routing><target_id>readings</target_id></routing><payload><type>list</type><path></path></payload></call>',
     ],
     "f05_unclosed_bytes": [
-        '<call name="send"><target_id>totals</target_id><type>write</type><path>u.txt</path><bytes>this document never closes</call>',
+        '<call name="send"><routing><target_id>totals</target_id></routing><payload><type>write</type><path>u.txt</path><bytes>this document never closes</payload></call>',
     ],
     "f06_multi_addressee_to": [
-        '<call name="send"><to><item>readings</item><item>totals</item></to><type>reflect</type></call>',
+        '<call name="send"><routing><to><item>readings</item><item>totals</item></to></routing><payload><type>reflect</type></payload></call>',
     ],
     "f07_call_nested_in_think": [
-        '<think>I could run <call name="send"><target_id>readings</target_id><type>list</type><path></path></call> but I will not.</think>\n'
+        '<think>I could run <call name="send"><routing><target_id>readings</target_id></routing><payload><type>list</type><path></path></payload></call> but I will not.</think>\n'
         "Thinking is over.",
     ],
     "f08_empty_send": ['<call name="send"></call>'],
     "f09_non_string_target": [
-        '<call name="send"><target_id>42</target_id><type>reflect</type></call>',
+        '<call name="send"><routing><target_id>42</target_id></routing><payload><type>reflect</type></payload></call>',
     ],
     "f10_bytes_with_xml": [
-        '<call name="send"><target_id>totals</target_id><type>write</type><path>x.xml</path>'
-        '<bytes><call name="done"></call>\n<note a="1">&amp; <b>bold</b></note>\n</bytes></call>',
+        '<call name="send"><routing><target_id>totals</target_id></routing><payload><type>write</type><path>x.xml</path>'
+        '<bytes><call name="done"></call>\n<note a="1">&amp; <b>bold</b></note>\n</bytes></payload></call>',
     ],
     "f11_text_inside_call_body": [
-        '<call name="send"><target_id>readings</target_id> stray words <type>list</type><path></path></call>',
+        '<call name="send"><routing><target_id>readings</target_id></routing> stray words <payload><type>list</type><path></path></payload></call>',
     ],
     # ── the tag-argument faults ──
     "f12_execution_id_tag": [
-        '<call name="send"><target_id>readings</target_id><type>list</type><path></path><id>7</id></call>',
+        '<call name="send"><routing><target_id>readings</target_id><id>7</id></routing><payload><type>list</type><path></path></payload></call>',
     ],
     "f13_timeout_word": [
-        '<call name="send"><target_id>readings</target_id><type>list</type><path></path><timeout>soon</timeout></call>',
+        '<call name="send"><routing><target_id>readings</target_id><timeout>soon</timeout></routing><payload><type>list</type><path></path></payload></call>',
     ],
     "f14_retries_word": [
-        '<call name="send"><target_id>readings</target_id><type>list</type><path></path><retries>x</retries></call>',
+        '<call name="send"><routing><target_id>readings</target_id><retries>x</retries></routing><payload><type>list</type><path></path></payload></call>',
     ],
 }
 FAULT_CASES = [c for c in CASES if c.startswith("f")]

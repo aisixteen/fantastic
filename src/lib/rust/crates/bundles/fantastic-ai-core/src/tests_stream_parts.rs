@@ -16,8 +16,8 @@ use futures_util::StreamExt;
 use std::collections::HashMap;
 
 const CALL: &str = concat!(
-    "<call name=\"send\">\n<target_id>notes</target_id>\n<type>reflect</type>\n",
-    "<bytes>a </call> inside</bytes>\n</call>"
+    "<call name=\"send\">\n<routing><target_id>notes</target_id></routing><payload><type>reflect</type>\n",
+    "<bytes>a </call> inside</bytes>\n</payload></call>"
 );
 const DONE: &str = "<call name=\"done\"></call>";
 
@@ -86,7 +86,7 @@ fn parts_are_the_same_at_every_chunk_size() {
 
 #[test]
 fn an_open_call_when_the_pass_ends_aborts() {
-    let (ev, _) = run("<call name=\"send\"><target_id>x</target_id><type>wr", 3);
+    let (ev, _) = run("<call name=\"send\"><routing><target_id>x</target_id></routing><payload><type>wr", 3);
     assert!(shape(&ev).contains(&("abort", "call")), "{ev:?}");
 }
 
@@ -108,7 +108,7 @@ fn the_cut_marker_is_a_marker_not_a_half_answer() {
         to: None,
     };
     let m = cut_marker(
-        "said this <think>hidden</think><call name=\"send\"><target_id>x</target_id>",
+        "said this <think>hidden</think><call name=\"send\"><routing><target_id>x</target_id>",
         "model stopped generating",
         &[unsent],
     );
@@ -400,7 +400,7 @@ async fn a_model_that_stops_with_a_block_open_leaves_the_marker_on_top() {
     ram_store(&kernel, "notes").await;
     wire(&kernel, ai.as_str(), "notes", json!("*"));
     let mut rx = watcher(&kernel, "notes", "w_cut").await;
-    let open_call = "<call name=\"send\"><target_id>notes</target_id><type>refl";
+    let open_call = "<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>refl";
     let fp = slow(&ai, &[open_call, DONE], Duration::ZERO);
     call(&kernel, ai.as_str(), json!({"type": "send", "text": "go"})).await;
     until_requests(&fp, 2).await;
@@ -890,8 +890,8 @@ async fn a_message_carries_the_stream_it_was_previewed_as() {
     wire(&kernel, prod_id.as_str(), cons_id.as_str(), json!("*"));
     let mut rx = watcher(&kernel, cons_id.as_str(), "w_cons").await;
     let msg = format!(
-        "<call name=\"send\">\n<target_id>{}</target_id>\n<type>send</type>\n\
-         <text>hello consumer</text>\n</call>",
+        "<call name=\"send\">\n<routing><target_id>{}</target_id></routing><payload><type>send</type>\n\
+         <text>hello consumer</text>\n</payload></call>",
         cons_id.as_str()
     );
     let prod = slow(&prod_id, &[&msg, DONE], Duration::ZERO);
@@ -970,7 +970,7 @@ fn a_call_after_a_closed_tag_or_after_think_is_not_wrapped() {
 #[test]
 fn a_malformed_closed_call_ends_not_ok() {
     let (ev, _) = run(
-        "<call name=\"send\"><target_id>x</target_id><type>a<path>p</path></call>",
+        "<call name=\"send\"><routing><target_id>x</target_id></routing><payload><type>a<path>p</path></payload></call>",
         3,
     );
     let ok = ev
@@ -1025,8 +1025,8 @@ async fn a_cut_pass_sends_nothing_not_even_its_closed_calls() {
     let ai = make_ai(&kernel, &id_for(&tmp, "sp_all")).await;
     ram_store(&kernel, "notes").await;
     wire(&kernel, ai.as_str(), "notes", json!("*"));
-    let done_one = "<call name=\"send\"><target_id>notes</target_id><type>reflect</type></call>";
-    let open_two = "<call name=\"send\"><target_id>notes</target_id><type>refl";
+    let done_one = "<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>reflect</type></payload></call>";
+    let open_two = "<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>refl";
     let pass = format!("{done_one} then {open_two}");
     let fp = slow(&ai, &[&pass, DONE], Duration::ZERO);
     call(&kernel, ai.as_str(), json!({"type": "send", "text": "go"})).await;
@@ -1099,7 +1099,7 @@ async fn deltas_never_reach_the_state_stream() {
 #[test]
 fn a_backtick_in_a_call_argument_does_not_hide_a_wrapper_after_it() {
     let text = format!(
-        "<call name=\"send\"><target_id>a</target_id><type>run</type><cmd>echo `x</cmd></call>\n\
+        "<call name=\"send\"><routing><target_id>a</target_id></routing><payload><type>run</type><cmd>echo `x</cmd></payload></call>\n\
          <tool_call>`y` {DONE}</tool_call>"
     );
     let (ev, sp) = run(&text, 4);
@@ -1138,9 +1138,9 @@ fn stop_rows_keeps_the_partial_text() {
 
 #[test]
 fn a_whole_call_quoted_in_an_argument_is_one_call_part_at_every_chunk_size() {
-    let q = "<call name=\"send\"><target_id>x</target_id><type>y</type></call>";
+    let q = "<call name=\"send\"><routing><target_id>x</target_id></routing><payload><type>y</type></payload></call>";
     let text = format!(
-        "<call name=\"send\"><target_id>kernel</target_id><type>spawn</type><task>do {q} now</task></call>{DONE}"
+        "<call name=\"send\"><routing><target_id>kernel</target_id></routing><payload><type>spawn</type><task>do {q} now</task></payload></call>{DONE}"
     );
     for n in [1, 2, 5, text.chars().count()] {
         let (ev, sp) = run(&text, n);

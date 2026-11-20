@@ -30,7 +30,7 @@ fn the_hint_is_verbatim() {
 /// module's: `error` is the whole reply body so the wording has ONE owner.
 #[test]
 fn the_report_is_three_fields_and_one_composed_sentence() {
-    let text = r#"<call name="send"><target_id>n</target_id><path>a</path><path>b</path></call>"#;
+    let text = r#"<call name="send"><routing><target_id>n</target_id></routing><payload><path>a</path><path>b</path></payload></call>"#;
     let bad = malformed_calls(text);
     assert_eq!(bad.len(), 1);
     assert_eq!(bad[0].envelope, OPEN);
@@ -46,7 +46,7 @@ fn the_report_is_three_fields_and_one_composed_sentence() {
     // defanged — neither delimiter is part of it.
     assert_eq!(
         bad[0].your_block,
-        "name=\"send\"><target_id>n</target_id><path>a</path><path>b</path>"
+        "name=\"send\"><routing><target_id>n</target_id></routing><payload><path>a</path><path>b</path></payload>"
     );
 }
 
@@ -54,7 +54,7 @@ fn the_report_is_three_fields_and_one_composed_sentence() {
 /// direction, and a JSON-dumped refusal shows doubled backslashes.
 #[test]
 fn the_body_delivered_to_the_model_is_plain_text() {
-    let bad = malformed_calls(r#"<call name="send"><type>reflect</type></call>"#);
+    let bad = malformed_calls(r#"<call name="send"><routing><reply_to>self</reply_to></routing><payload><type>reflect</type></payload></call>"#);
     let body = bad[0].body();
     assert!(body.starts_with("call NOT dispatched: a send names its target"));
     assert!(body.contains("\n\nyour block:\n"));
@@ -66,7 +66,7 @@ fn the_body_delivered_to_the_model_is_plain_text() {
 #[test]
 fn every_broken_envelope_gets_its_own_report() {
     let text = concat!(
-        r#"<call name="send"><type>reflect</type></call>"#,
+        r#"<call name="send"><routing><reply_to>self</reply_to></routing><payload><type>reflect</type></payload></call>"#,
         "\n",
         r#"<call name="nope"><target_id>n</target_id></call>"#
     );
@@ -79,7 +79,7 @@ fn every_broken_envelope_gets_its_own_report() {
 /// A turn that parsed is silent here: nothing to report, nothing to nudge.
 #[test]
 fn a_good_turn_reports_nothing() {
-    let text = r#"<call name="send"><target_id>n</target_id><type>reflect</type></call>"#;
+    let text = r#"<call name="send"><routing><target_id>n</target_id></routing><payload><type>reflect</type></payload></call>"#;
     assert_eq!(extract_tool_calls(text).len(), 1);
     assert!(malformed_calls(text).is_empty());
 }
@@ -88,8 +88,8 @@ fn a_good_turn_reports_nothing() {
 /// before it dispatch, and the fence is no fault (#177).
 #[test]
 fn a_trailing_fence_after_the_calls_leaves_them_dispatchable() {
-    let text = "<call name=\"send\"><target_id>exec</target_id><type>tail</type>\
-                <text>go</text></call>\n\
+    let text = "<call name=\"send\"><routing><target_id>exec</target_id></routing><payload><type>tail</type>\
+                <text>go</text></payload></call>\n\
                 <call name=\"await\"></call>\n\
                 ```\n";
     let calls = extract_tool_calls(text);
@@ -108,8 +108,8 @@ fn a_trailing_fence_after_the_calls_leaves_them_dispatchable() {
 #[test]
 fn a_leading_invoke_fragment_leaves_the_valid_calls_after_it() {
     let text = "<invoke name=\"x\"></invoke>\n\
-                <call name=\"send\"><target_id>exec</target_id><type>tail</type>\
-                <text>go</text></call>\n\
+                <call name=\"send\"><routing><target_id>exec</target_id></routing><payload><type>tail</type>\
+                <text>go</text></payload></call>\n\
                 <call name=\"await\"></call>";
     let calls = extract_tool_calls(text);
     assert_eq!(calls.len(), 2, "{calls:?}");
@@ -127,8 +127,8 @@ fn a_leading_invoke_fragment_leaves_the_valid_calls_after_it() {
 #[test]
 fn a_leading_invoke_fragment_and_a_trailing_fence_together() {
     let text = "<invoke name=\"x\"></invoke>\n\
-                <call name=\"send\"><target_id>exec</target_id><type>tail</type>\
-                <text>go</text></call>\n\
+                <call name=\"send\"><routing><target_id>exec</target_id></routing><payload><type>tail</type>\
+                <text>go</text></payload></call>\n\
                 <call name=\"await\"></call>\n\
                 ```\n";
     let calls = extract_tool_calls(text);

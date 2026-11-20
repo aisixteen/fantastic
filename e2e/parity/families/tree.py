@@ -34,14 +34,14 @@ SCRIPT = [
     '<call name="send"><routing><target_id>readings</target_id></routing><payload><type>reflect</type></payload></call>\n'
     '<call name="send"><routing><target_id>readings</target_id></routing><payload><type>list</type><path></path></payload></call>\n'
     '<call name="send"><routing><target_id>ghost</target_id></routing><payload><type>reflect</type></payload></call>\n'
-    '<call name="send"><type>reflect</type></call>',
+    '<call name="send"><routing><reply_to>self</reply_to></routing><payload><type>reflect</type></payload></call>',
     "I have looked around and will think about the next step.",
     '<call name="await"></call>',
     '<call name="send"><routing><target_id>totals</target_id><title>store the total</title></routing>'
     "<payload><type>write</type><path>t.txt</path><bytes>42</bytes></payload></call>\n"
     '<call name="send"><routing><target_id>kernel_store</target_id></routing>'
     "<payload><type>read_stream</type><path>readings/a.txt</path><offset>0</offset></payload></call>\n"
-    "<call name=\"send\"><target_id>totals",
+    "<call name=\"send\"><routing><target_id>totals",
     '<call name="done"></call>',
 ]
 

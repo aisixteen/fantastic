@@ -27,7 +27,7 @@
 
 use crate::tool_parse::grammar::{
     elements, envelopes, envelopes_in, open_tags, parse_call, tags_outside, Envelope, Malformed,
-    OpenTag, ROUTING,
+    OpenTag, PAYLOAD_TAG, ROUTING, ROUTING_TAG,
 };
 use crate::tool_parse::{defang, CLOSE, TOOLS};
 use regex::Regex;
@@ -173,9 +173,32 @@ fn risky(args: &[(String, Value)]) -> Option<&'static str> {
     }
 }
 
+/// The arguments with a written `<routing>` and `<payload>` opened into their own
+/// tags (as written), so the form to write is built from what the model meant and
+/// an exec command inside `<payload>` is seen by [`risky`]. A value that does not
+/// read as tags stays as it is.
+fn spread(args: &[(String, Value)]) -> Vec<(String, Value)> {
+    let mut out = Vec::with_capacity(args.len());
+    for (k, v) in args {
+        let kids = match v {
+            Value::String(s) if k == ROUTING_TAG || k == PAYLOAD_TAG => elements(s).ok(),
+            _ => None,
+        };
+        match kids {
+            Some(kids) if !kids.is_empty() => out.extend(
+                kids.into_iter()
+                    .map(|(k2, raw)| (k2, Value::String(raw.trim().to_string()))),
+            ),
+            _ => out.push((k.clone(), v.clone())),
+        }
+    }
+    out
+}
+
 /// The lines for one call's rewrite: the form to write, or, for a destructive exec
 /// call, a `careful:` line with its command left out (#255).
 fn rewrite(name: &str, args: &[(String, Value)]) -> Vec<String> {
+    let args = &spread(args);
     let what = match risky(args) {
         None => {
             return vec!["write it as:".to_string(), expected(name, args)];

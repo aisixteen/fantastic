@@ -1240,7 +1240,7 @@ mod tests {
     fn a_line_wears_the_hue_of_what_it_is() {
         let s = store_with(vec![
             json!({"id":1,"agent":"ai","role":"user","content":"[from user]\nread it"}),
-            json!({"id":2,"agent":"ai","role":"assistant","content":"on it\n<call name=\"send\"><arg name=\"target_id\">files</arg></call>"}),
+            json!({"id":2,"agent":"ai","role":"assistant","content":"on it\n<call name=\"send\"><routing><target_id>files</target_id></routing><payload><type>read</type></payload></call>"}),
             json!({"id":3,"agent":"ai","role":"user","content":"[reply to 9 · files read_stream]\nfn main() {}"}),
         ]);
         let mut p = AiPanel::new("ai".into());

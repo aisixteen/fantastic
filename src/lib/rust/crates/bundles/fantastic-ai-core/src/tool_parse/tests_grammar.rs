@@ -1,5 +1,5 @@
-//! The ONE call grammar: `<call name="…">` with bare child tags, args inline,
-//! `bytes` verbatim, no JSON anywhere. Parse or refuse with the fault named —
+//! The ONE call grammar: `<call name="…">` with bare child tags, a send's routing in
+//! `<routing>` and its arguments in `<payload>`, `bytes` verbatim, no JSON anywhere. Parse or refuse with the fault named —
 //! never repair.
 //!
 //! Case for case the twin of python's
@@ -11,21 +11,17 @@ use super::grammar::{code_masked, envelopes_in};
 use super::{defang, extract_tool_calls, malformed_calls, render_call, ToolCall};
 
 const WRITE: &str = r#"<call name="send">
-<target_id>notes</target_id>
-<reply_to>self</reply_to>
-<title>write the report</title>
-<type>write</type>
+<routing><target_id>notes</target_id><reply_to>self</reply_to><title>write the report</title></routing><payload><type>write</type>
 <path>report.md</path>
 <bytes>PRJ-1BCA4F
 
 # Report
 - the phrase "quick brown fox", verbatim
 </bytes>
-</call>"#;
+</payload></call>"#;
 
 const PATCH: &str = r#"<call name="send">
-<target_id>notes</target_id>
-<type>patch</type>
+<routing><target_id>notes</target_id></routing><payload><type>patch</type>
 <edits><item><path>hello.py</path><hunks>2</hunks></item></edits>
 <bytes><<<<<<< SEARCH
     msg = "Hello, " + name
@@ -33,7 +29,7 @@ const PATCH: &str = r#"<call name="send">
     return f"Hello, {name}!"
 >>>>>>> REPLACE
 </bytes>
-</call>"#;
+</payload></call>"#;
 
 fn one(text: &str) -> ToolCall {
     let calls = extract_tool_calls(text);
@@ -48,7 +44,7 @@ fn payload(call: &ToolCall) -> &Map<String, Value> {
 // ── the taught shapes (the probe's fixtures, 12/12 on qwen3.8-27b) ───────────
 
 #[test]
-fn write_args_inline_routing_out_bytes_verbatim() {
+fn write_routing_and_payload_bytes_verbatim() {
     let c = one(WRITE);
     assert_eq!(c.name, "send");
     assert!(c.id.starts_with("call_"));
@@ -80,9 +76,9 @@ fn patch_nested_list_and_text_hunks() {
 #[test]
 fn json_looking_content_rides_untouched() {
     let text = concat!(
-        r#"<call name="send"><target_id>notes</target_id><type>write</type>"#,
+        r#"<call name="send"><routing><target_id>notes</target_id></routing><payload><type>write</type>"#,
         "<path>c.json</path><bytes>{\"name\": \"demo\"}\n{\"tags\": [\"a\", \"b\"]}\n",
-        "</bytes></call>"
+        "</bytes></payload></call>"
     );
     let c = one(text);
     assert_eq!(
@@ -94,15 +90,15 @@ fn json_looking_content_rides_untouched() {
 #[test]
 fn lists_are_item_children_any_count() {
     let text = concat!(
-        r#"<call name="send"><target_id>me</target_id><type>grep</type>"#,
-        "<query>marker</query><ids><item>12</item><item>15</item></ids></call>"
+        r#"<call name="send"><routing><target_id>me</target_id></routing><payload><type>grep</type>"#,
+        "<query>marker</query><ids><item>12</item><item>15</item></ids></payload></call>"
     );
     assert_eq!(payload(&one(text))["ids"], json!(["12", "15"]));
     let lone = text.replace("<item>15</item>", "");
     assert_eq!(payload(&one(&lone))["ids"], json!(["12"]));
     let allowed = concat!(
-        r#"<call name="send"><target_id>kernel</target_id><type>update_agent</type>"#,
-        r"<id>worker</id><allowed><item>python3 \S+</item></allowed></call>"
+        r#"<call name="send"><routing><target_id>kernel</target_id></routing><payload><type>update_agent</type>"#,
+        r"<id>worker</id><allowed><item>python3 \S+</item></allowed></payload></call>"
     );
     assert_eq!(payload(&one(allowed))["allowed"], json!([r"python3 \S+"]));
 }
@@ -110,8 +106,8 @@ fn lists_are_item_children_any_count() {
 #[test]
 fn object_with_one_field_is_not_a_list() {
     let text = concat!(
-        r#"<call name="send"><target_id>notes</target_id><type>patch</type>"#,
-        "<edit><path>a.py</path></edit><bytes>x</bytes></call>"
+        r#"<call name="send"><routing><target_id>notes</target_id></routing><payload><type>patch</type>"#,
+        "<edit><path>a.py</path></edit><bytes>x</bytes></payload></call>"
     );
     assert_eq!(payload(&one(text))["edit"], json!({"path": "a.py"}));
 }
@@ -119,9 +115,9 @@ fn object_with_one_field_is_not_a_list() {
 #[test]
 fn leaves_are_the_text_as_written() {
     let text = concat!(
-        r#"<call name="send"><target_id>me</target_id><type>pull</type>"#,
+        r#"<call name="send"><routing><target_id>me</target_id></routing><payload><type>pull</type>"#,
         "<offset>0</offset><length>1.5</length><checkpoint>true</checkpoint>",
-        "<why>keep</why><empty></empty></call>"
+        "<why>keep</why><empty></empty></payload></call>"
     );
     let c = one(text);
     assert_eq!(
@@ -155,9 +151,9 @@ fn await_is_a_control_call() {
 #[test]
 fn a_closing_call_tag_inside_bytes_does_not_end_the_call() {
     let text = concat!(
-        r#"<call name="send"><target_id>notes</target_id><type>write</type>"#,
+        r#"<call name="send"><routing><target_id>notes</target_id></routing><payload><type>write</type>"#,
         "<path>a.md</path><bytes>the text says </call> and goes on\n</bytes>",
-        "<checkpoint>true</checkpoint></call>"
+        "<checkpoint>true</checkpoint></payload></call>"
     );
     let c = one(text);
     assert_eq!(
@@ -170,8 +166,8 @@ fn a_closing_call_tag_inside_bytes_does_not_end_the_call() {
 #[test]
 fn bytes_is_never_trimmed_and_other_values_are() {
     let text = concat!(
-        r#"<call name="send"><target_id>notes</target_id><type>write</type>"#,
-        "<path>  a.md  </path><bytes>  two spaces \n</bytes></call>"
+        r#"<call name="send"><routing><target_id>notes</target_id></routing><payload><type>write</type>"#,
+        "<path>  a.md  </path><bytes>  two spaces \n</bytes></payload></call>"
     );
     let c = one(text);
     assert_eq!(payload(&c)["path"], json!("a.md"));
@@ -183,7 +179,7 @@ fn bytes_is_never_trimmed_and_other_values_are() {
 /// names it.
 #[test]
 fn an_unterminated_call_is_not_a_call() {
-    let text = r#"<call name="send"><target_id>notes</target_id><type>reflect</type>"#;
+    let text = r#"<call name="send"><routing><target_id>notes</target_id></routing><payload><type>reflect</type>"#;
     assert!(extract_tool_calls(text).is_empty() && malformed_calls(text).is_empty());
 }
 
@@ -229,8 +225,8 @@ fn refused(text: &str, needles: &[&str]) -> super::MalformedCall {
 #[test]
 fn bytes_closer_inside_a_document_ends_the_value_early_and_is_refused() {
     let text = concat!(
-        r#"<call name="send"><target_id>notes</target_id><type>write</type>"#,
-        "<path>a.md</path><bytes>first </bytes> no\nreal end</bytes></call>"
+        r#"<call name="send"><routing><target_id>notes</target_id></routing><payload><type>write</type>"#,
+        "<path>a.md</path><bytes>first </bytes> no\nreal end</bytes></payload></call>"
     );
     refused(text, &["text after the last tag", "no"]);
 }
@@ -239,14 +235,14 @@ fn bytes_closer_inside_a_document_ends_the_value_early_and_is_refused() {
 fn bytes_never_closed_is_a_cut_not_a_call() {
     // an open `<bytes>` swallows any `</call>`, so the envelope never closes
     let text =
-        r#"<call name="send"><target_id>notes</target_id><type>write</type><bytes>open</call>"#;
+        r#"<call name="send"><routing><target_id>notes</target_id></routing><payload><type>write</type><bytes>open</call>"#;
     assert!(extract_tool_calls(text).is_empty() && malformed_calls(text).is_empty());
 }
 
 #[test]
 fn element_never_closed() {
     refused(
-        r#"<call name="send"><target_id>notes</target_id><type>write<path>a</path></call>"#,
+        r#"<call name="send"><routing><target_id>notes</target_id></routing><payload><type>write<path>a</path></payload></call>"#,
         &["`<type>` opened and never closed"],
     );
 }
@@ -254,7 +250,7 @@ fn element_never_closed() {
 #[test]
 fn duplicate_scalar_tag() {
     refused(
-        r#"<call name="send"><target_id>n</target_id><path>a</path><path>b</path></call>"#,
+        r#"<call name="send"><routing><target_id>n</target_id></routing><payload><path>a</path><path>b</path></payload></call>"#,
         &["duplicate `<path>`", "<path><item>"],
     );
 }
@@ -262,7 +258,7 @@ fn duplicate_scalar_tag() {
 #[test]
 fn text_between_tags() {
     refused(
-        r#"<call name="send"><target_id>n</target_id> stray words <type>x</type></call>"#,
+        r#"<call name="send"><routing><target_id>n</target_id></routing> stray words <payload><type>x</type></payload></call>"#,
         &["text outside a tag"],
     );
 }
@@ -270,7 +266,7 @@ fn text_between_tags() {
 #[test]
 fn send_without_target() {
     refused(
-        r#"<call name="send"><type>reflect</type></call>"#,
+        r#"<call name="send"><routing><reply_to>self</reply_to></routing><payload><type>reflect</type></payload></call>"#,
         &["a send names its target"],
     );
 }
@@ -278,7 +274,7 @@ fn send_without_target() {
 #[test]
 fn a_send_with_neither_target_nor_to_is_refused_naming_both() {
     refused(
-        r#"<call name="send"><type>reflect</type></call>"#,
+        r#"<call name="send"><routing><title>t</title></routing><payload><type>reflect</type></payload></call>"#,
         &["<target_id>", "<to><item>"],
     );
 }
@@ -288,7 +284,7 @@ fn a_numeric_looking_target_is_the_text_written() {
     // The parser never types a value: a target of digits is the agent id written, so
     // the send parses and routing answers for an agent that does not exist.
     let c = one(
-        r#"<call name="send"><target_id>123456789012345678901234567890</target_id><type>reflect</type></call>"#,
+        r#"<call name="send"><routing><target_id>123456789012345678901234567890</target_id></routing><payload><type>reflect</type></payload></call>"#,
     );
     assert_eq!(
         c.arguments["target_id"],
@@ -330,8 +326,8 @@ fn the_broken_block_is_shown_whole() {
     let big = "x".repeat(40_000);
     let text = format!(
         concat!(
-            r#"<call name="send"><target_id>n</target_id><type>write</type><bytes>{}</bytes>"#,
-            "<path>a</path><path>b</path></call>"
+            r#"<call name="send"><routing><target_id>n</target_id></routing><payload><type>write</type><bytes>{}</bytes>"#,
+            "<path>a</path><path>b</path></payload></call>"
         ),
         big
     );
@@ -370,10 +366,10 @@ fn render_call_round_trips_the_parser_shape() {
 #[test]
 fn grant_maps_keyed_by_ids_and_relative_tokens_are_tags() {
     let text = concat!(
-        r#"<call name="send"><target_id>kernel</target_id><type>update_agent</type>"#,
+        r#"<call name="send"><routing><target_id>kernel</target_id></routing><payload><type>update_agent</type>"#,
         "<id>vault</id><callable_by><$self>*</$self><$parent>*</$parent>",
         "<ai-rev.2>*</ai-rev.2><notes><item>read</item><item>write</item></notes>",
-        "</callable_by></call>"
+        "</callable_by></payload></call>"
     );
     let c = one(text);
     let p = payload(&c).clone();
@@ -389,8 +385,8 @@ fn grant_maps_keyed_by_ids_and_relative_tokens_are_tags() {
 #[test]
 fn a_send_may_name_several_recipients_with_to() {
     let text = concat!(
-        r#"<call name="send"><to><item>solver_2</item><item>solver_3</item></to>"#,
-        "<re>412</re><type>send</type><text>CANDIDATE 586</text></call>"
+        r#"<call name="send"><routing><to><item>solver_2</item><item>solver_3</item></to>"#,
+        "<re>412</re></routing><payload><type>send</type><text>CANDIDATE 586</text></payload></call>"
     );
     let c = one(text);
     assert_eq!(c.arguments["to"], json!(["solver_2", "solver_3"]));
@@ -409,8 +405,8 @@ fn a_send_may_name_several_recipients_with_to() {
 #[test]
 fn item_beside_other_tags_is_a_field() {
     let c = one(concat!(
-        r#"<call name="send"><target_id>user</target_id><type>inquiry</type>"#,
-        "<action><payload><type>buy</type><item>rocket</item></payload></action></call>"
+        r#"<call name="send"><routing><target_id>user</target_id></routing><payload><type>inquiry</type>"#,
+        "<action><payload><type>buy</type><item>rocket</item></payload></action></payload></call>"
     ));
     assert_eq!(
         payload(&c)["action"]["payload"],
@@ -424,7 +420,7 @@ fn a_call_written_inside_bytes_is_document_not_envelope() {
     // that quotes `<call name="inquiry_answer">…</call>`. Python parses ONE `send`
     // with a `bytes` payload, and so must this: `<bytes>` is verbatim to its FIRST
     // closer, nothing inside it is an envelope.
-    let t = "<call name=\"send\">\n<target_id>editor</target_id>\n<type>write</type>\n<path>review.md</path>\n<bytes><error>you were sent an inquiry and did not answer it: emit <call name=\n\"inquiry_answer\"><answer>what you concluded</answer></call></error>\n<reason>unhandled</reason>\n<request_id></request_id>\n</bytes>\n</call>";
+    let t = "<call name=\"send\">\n<routing><target_id>editor</target_id></routing><payload><type>write</type>\n<path>review.md</path>\n<bytes><error>you were sent an inquiry and did not answer it: emit <call name=\n\"inquiry_answer\"><answer>what you concluded</answer></call></error>\n<reason>unhandled</reason>\n<request_id></request_id>\n</bytes>\n</payload></call>";
     let calls = crate::tool_parse::extract_tool_calls(t);
     assert_eq!(
         calls.len(),
@@ -450,12 +446,12 @@ fn a_call_written_inside_bytes_is_document_not_envelope() {
 #[test]
 fn a_to_of_digits_is_one_recipient_written() {
     // `<to>42</to>` is the text "42", so it is one recipient like any other text.
-    let calls = extract_tool_calls("<call name=\"send\"><to>42</to><type>reflect</type></call>");
+    let calls = extract_tool_calls("<call name=\"send\"><routing><to>42</to></routing><payload><type>reflect</type></payload></call>");
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(calls[0].arguments.get("to"), Some(&json!(["42"])));
     assert!(calls[0].arguments.get("target_id").is_none());
     // a blank one with no target is the refusal.
-    let bad = malformed_calls("<call name=\"send\"><to></to><type>reflect</type></call>");
+    let bad = malformed_calls("<call name=\"send\"><routing><to></to></routing><payload><type>reflect</type></payload></call>");
     assert_eq!(bad.len(), 1, "{bad:?}");
     assert!(
         bad[0].error.contains("a send names its target"),
@@ -468,8 +464,8 @@ fn a_to_of_digits_is_one_recipient_written() {
 fn to_items_are_their_text() {
     // Recipients are the text as written, and a structure's JSON.
     let calls = extract_tool_calls(
-        "<call name=\"send\"><to><item>true</item><item>1e20</item>\
-         <item><a>x</a></item><item><item>y</item></item></to><type>reflect</type></call>",
+        "<call name=\"send\"><routing><to><item>true</item><item>1e20</item>\
+         <item><a>x</a></item><item><item>y</item></item></to></routing><payload><type>reflect</type></payload></call>",
     );
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(
@@ -483,8 +479,8 @@ fn name_and_space_classes_follow_python() {
     // python `\w` is `_` + `str.isalnum()`. `char::is_alphanumeric` also admits
     // Other_Alphabetic, so `<k_नाम>` and `<xⒶ>` dispatched here and were `text
     // after the last tag` to python.
-    let src = "<call name=\"send\"><target_id>a</target_id><type>t</type>\
-               <k_\u{93e}>v</k_\u{93e}></call>";
+    let src = "<call name=\"send\"><routing><target_id>a</target_id></routing><payload><type>t</type>\
+               <k_\u{93e}>v</k_\u{93e}></payload></call>";
     assert!(
         extract_tool_calls(src).is_empty(),
         "U+093E is not a name character to python — this does not dispatch"
@@ -499,7 +495,7 @@ fn name_and_space_classes_follow_python() {
     // python `\s` is `str.isspace()`, which includes `\x1c`–`\x1f`: this IS an
     // envelope.
     let calls = extract_tool_calls(
-        "<call\u{1c}name=\"send\"><target_id>a</target_id><type>reflect</type></call>",
+        "<call\u{1c}name=\"send\"><routing><target_id>a</target_id></routing><payload><type>reflect</type></payload></call>",
     );
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(calls[0].arguments.get("target_id"), Some(&json!("a")));
@@ -545,7 +541,7 @@ fn a_bare_word_tag_is_not_a_wrapper() {
 fn a_backtick_in_thinking_does_not_hide_the_think_close() {
     // A span opened by a backtick in thinking would run across `</think>` to the
     // backtick after the call; raw extraction must match dispatch (#188).
-    let text = "<think>maybe `x</think>\n<call name=\"send\"><target_id>self</target_id><type>recall</type></call> then `y`";
+    let text = "<think>maybe `x</think>\n<call name=\"send\"><routing><target_id>self</target_id></routing><payload><type>recall</type></payload></call> then `y`";
     let raw = extract_tool_calls(text);
     let stripped = extract_tool_calls(&crate::think::without_thinking(text));
     assert_eq!(raw.len(), 1);
@@ -555,9 +551,8 @@ fn a_backtick_in_thinking_does_not_hide_the_think_close() {
 
 // ── the routing form: `<routing>` travels, `<payload>` is the target's, whole ──
 
-/// The measured break (battle1, #512): `pr_create` takes a `title`, and inline the
-/// parser lifts `<title>` out as routing. In the routing form the payload keeps it,
-/// and the routing `title` still labels the call.
+/// The measured break (battle1, #512): `pr_create` takes a `title`. The payload keeps
+/// it, and the routing `title` labels the call.
 #[test]
 fn the_routing_form_delivers_a_payload_title_and_keeps_the_routing_one() {
     let c = one(
@@ -628,25 +623,39 @@ fn the_routing_form_refuses_what_it_cannot_route() {
     }
 }
 
-/// Inline is unchanged: a call with no `<routing>` reads as before, a `<payload>`
-/// argument included.
+/// One call form: a send with no `<routing>` is refused, whatever is written directly
+/// in the call — a routing name or an argument — and the refusal shows the routing form.
 #[test]
-fn a_call_without_routing_reads_inline_as_before() {
-    let c = one(
-        "<call name=\"send\"><target_id>remote</target_id><title>t</title><type>forward</type>\
-         <payload><type>run</type></payload></call>",
-    );
-    assert_eq!(c.arguments["title"], json!("t"));
-    assert_eq!(
-        Value::Object(payload(&c).clone()),
-        json!({"type": "forward", "payload": {"type": "run"}})
-    );
+fn a_send_without_routing_is_refused_with_the_routing_form() {
+    for (text, says) in [
+        (
+            "<call name=\"send\"><target_id>remote</target_id><type>forward</type></call>",
+            "`<target_id>` directly in the call",
+        ),
+        (
+            "<call name=\"send\"><type>reflect</type><payload><type>run</type></payload></call>",
+            "`<type>` directly in the call",
+        ),
+        (
+            "<call name=\"send\"><payload><type>reflect</type></payload></call>",
+            "a send names its target in `<routing>`",
+        ),
+        ("<call name=\"send\"></call>", "a send names its target in `<routing>`"),
+    ] {
+        let bad = refused(text, &[says]);
+        assert!(
+            bad.error
+                .contains("<routing><target_id>agent id</target_id></routing>"),
+            "{text}: {}",
+            bad.error
+        );
+    }
 }
 
-/// A payload that carries a routing name renders in the routing form and parses back
-/// to the same call.
+/// `render_call` writes the routing form; a payload that carries a routing name
+/// parses back to the same call.
 #[test]
-fn render_call_writes_the_routing_form_when_the_payload_needs_it() {
+fn render_call_writes_the_routing_form() {
     let mut args = Map::new();
     args.insert("target_id".into(), json!("github"));
     args.insert("title".into(), json!("label"));
@@ -658,12 +667,12 @@ fn render_call_writes_the_routing_form_when_the_payload_needs_it() {
 
 // ── a quoted whole call inside an argument is text (#543) ───────────────────
 
-const QUOTED: &str = r#"<call name="send"><target_id>x</target_id><type>y</type></call>"#;
+const QUOTED: &str = r#"<call name="send"><routing><target_id>x</target_id></routing><payload><type>y</type></payload></call>"#;
 
 #[test]
 fn a_whole_call_quoted_in_a_spawn_task_is_one_call_with_that_text() {
     let text = format!(
-        "<call name=\"send\"><target_id>kernel</target_id><type>spawn</type><task>do {QUOTED} now</task></call>"
+        "<call name=\"send\"><routing><target_id>kernel</target_id></routing><payload><type>spawn</type><task>do {QUOTED} now</task></payload></call>"
     );
     let c = one(&text);
     assert_eq!(payload(&c)["task"], json!(format!("do {QUOTED} now")));

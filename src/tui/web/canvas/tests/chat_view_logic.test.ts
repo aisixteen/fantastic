@@ -51,7 +51,7 @@ const P: Pure = {
   textsOf: (r) => new Map(Object.entries(plain(Object.fromEntries(raw.textsOf(r)))).map(([k, v]) => [Number(k), v])),
 };
 
-const call = (verb: string, target = "files"): string => `<call name="c"><target_id>${target}</target_id><type>${verb}</type></call>`;
+const call = (verb: string, target = "files"): string => `<call name="c"><routing><target_id>${target}</target_id></routing><payload><type>${verb}</type></payload></call>`;
 const reply = (verb: string, target = "files"): string => `[reply to 7 · ${target} ${verb}]\n{"ok":true}`;
 
 test("consecutive tool rows fold into ONE group row: N tool calls · verbs", () => {
@@ -232,7 +232,7 @@ test("one row with several calls is several entries of ONE run; a cut-off call h
     { id: 1, role: "assistant", head: two },
     { id: 2, role: "user", head: reply("list") },
     { id: 3, role: "user", head: reply("read") },
-    { id: 4, role: "assistant", head: `<call name="c"><target_id>files</target_id><type>wri` },
+    { id: 4, role: "assistant", head: `<call name="c"><routing><target_id>files</target_id></routing><payload><type>wri` },
   ]);
   assert.deepEqual(out.map((x) => x["kind"]), ["tools"]);
   const g = out[0] as unknown as { calls: { verb: string; reply: string | null }[] };

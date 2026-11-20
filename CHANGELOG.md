@@ -5,6 +5,8 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ## [Unreleased]
 
+- AI chats: one call form (#528). A `send` written without `<routing>` (a routing name or an argument directly in the call) is refused by the parser, naming the tag and showing the routing form; nothing is lifted out of the call's direct children any more, so the router's inline-only clash refusal is gone. `render_call` always writes `<routing>` + `<payload>`; the call checker's "write it as" form opens a written `<routing>`/`<payload>` into its tags; a duplicate tag inside `<routing>` or `<payload>` is shown as that tag's list. Every Rust and page-TS test, scripted e2e turn and parity family writes the routing form.
+
 - AI chats: a reply that will fold after the answer carries a `keep` call (its id filled in) the model may use to write a short summary; when the block folds, the summary stands in the context in place of the body (over 300 tokens or none: the plain anchor, as before), and `keep` alone does not count as a turn's action (#641).
 
 - AI chats: the system block keeps the task state in general terms (no fixed template or checkmarks), and every example uses placeholders (AGENT, VERB, PATH, <title>) — no invented files, values or e2e fixture names (filler_2, "audit marker", notes.md) in the prompt.

@@ -118,10 +118,10 @@ def main() -> int:
         ('I will write it.\n<tool_call><function=call name="send"><target_id>files'
          '</target_id><type>write</type><path>bad.txt</path></function></tool_call>'),
         # 3b · an envelope with text outside a tag
-        f'<call name="send">oops<target_id>{FILES}</target_id><type>reflect</type></call>',
+        f'<call name="send">oops<routing><target_id>{FILES}</target_id></routing><payload><type>reflect</type></payload></call>',
         # 4 · a call inside the thought only
-        (f'<think>I could run <call name="send"><target_id>{FILES}</target_id>'
-         '<type>write</type><path>think.txt</path><bytes>x</bytes></call> but I will not.'
+        (f'<think>I could run <call name="send"><routing><target_id>{FILES}</target_id></routing><payload>'
+         '<type>write</type><path>think.txt</path><bytes>x</bytes></payload></call> but I will not.'
          '</think>Thinking it over.'),
         # 5 · a plain answer, and the chain ends
         'All finished: the file is written.\n<call name="done"></call>',

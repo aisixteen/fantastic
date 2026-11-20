@@ -67,8 +67,8 @@ CASES = {
     # B1.10 — a stateless `messages` send; the rows must not grow.
     "stateless_messages": [tag("kernel", "messages", ids=[1]), DONE],
     # B1.11 — `send_to` with a number and with blanks.
-    "send_to_number": ['<call name="send"><to><item>5</item></to><type>reflect</type></call>', DONE],
-    "send_to_blank": ['<call name="send"><to><item>  </item></to><type>reflect</type></call>', DONE],
+    "send_to_number": ['<call name="send"><routing><to><item>5</item></to></routing><payload><type>reflect</type></payload></call>', DONE],
+    "send_to_blank": ['<call name="send"><routing><to><item>  </item></to></routing><payload><type>reflect</type></payload></call>', DONE],
     # B1.20 — one AI calling another.
     "ai_to_ai": [tag("ai2", "send", text="CASE=noop#1 hello from ai"), DONE],
     # B1.21 — a reply whose text is a bare number.
@@ -95,9 +95,9 @@ CASES = {
     "depth9": [tag("readings", "reflect")] * 9 + [DONE],
     # C30 — tag timeouts and payload-less calls.
     "tag_timeout_word": [tag("readings", "reflect", timeout="soon"), DONE],
-    "tag_empty_id": ['<call name="send"><target_id>readings</target_id><type>reflect</type>'
-                     "<id></id></call>", DONE],
-    "tag_payloadless": ['<call name="send"><target_id>readings</target_id></call>', DONE],
+    "tag_empty_id": ['<call name="send"><routing><target_id>readings</target_id><id></id></routing>'
+                     "<payload><type>reflect</type></payload></call>", DONE],
+    "tag_payloadless": ['<call name="send"><routing><target_id>readings</target_id></routing><payload></payload></call>', DONE],
     # C31 — a real timeout on a slow verb, then the SAME exec id with a smaller one.
     "tag_timeout_short": [tag("slow", "sleep", seconds=2, timeout="0.2"), DONE],
     "tag_execution_id_reuse": [
@@ -109,11 +109,11 @@ CASES = {
     "tag_execution_id_int": [tag("readings", "reflect", id=7), DONE],
     "tag_retries_word": [tag("readings", "reflect", retries="x"), DONE],
     # B5.12 / B5.13 — `<to>` with a number, and with mixed item types.
-    "to_number": ['<call name="send"><to>42</to><type>reflect</type></call>', DONE],
-    "to_mixed_items": ['<call name="send"><to><item>true</item><item>readings</item></to>'
-                       "<type>reflect</type></call>", DONE],
+    "to_number": ['<call name="send"><routing><to>42</to></routing><payload><type>reflect</type></payload></call>', DONE],
+    "to_mixed_items": ['<call name="send"><routing><to><item>true</item><item>readings</item></to></routing><payload>'
+                       "<type>reflect</type></payload></call>", DONE],
     # B5.19 — a `<type>` that is a number.
-    "type_number": ['<call name="send"><target_id>readings</target_id><type>42</type></call>', DONE],
+    "type_number": ['<call name="send"><routing><target_id>readings</target_id></routing><payload><type>42</type></payload></call>', DONE],
     # B5.17 — a reply whose text carries CRLF.
     "crlf_reply": ["line one\r\nline two\r\n" + DONE],
     # B2.3 — a stall long enough for a `kernel cancel` to land mid-stream.

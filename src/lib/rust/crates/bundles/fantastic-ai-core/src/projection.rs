@@ -447,9 +447,9 @@ mod tests {
         // AN UNTERMINATED ENVELOPE IS NOT A CALL: dispatch
         // skips it, and the reaction reader must see the same thing dispatch saw.
         let turns = [
-            turn(r#"<call name="send"><target_id>me</target_id><type>recall</type>"#),
+            turn(r#"<call name="send"><routing><target_id>me</target_id></routing><payload><type>recall</type></payload>"#),
             turn(
-                r#"<call name="send"><target_id>notes</target_id><type>write</type><path>facts.md</path><bytes>x</bytes></call>"#,
+                r#"<call name="send"><routing><target_id>notes</target_id></routing><payload><type>write</type><path>facts.md</path><bytes>x</bytes></payload></call>"#,
             ),
         ];
         let r = reaction_from("me", &turns);
@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn a_recall_addressed_elsewhere_is_not_this_agents_reaction() {
         let turns = [turn(
-            r#"<call name="send"><target_id>other</target_id><type>recall</type></call>"#,
+            r#"<call name="send"><routing><target_id>other</target_id></routing><payload><type>recall</type></payload></call>"#,
         )];
         let r = reaction_from("me", &turns);
         assert_eq!(r["recalled"], false, "{r}");

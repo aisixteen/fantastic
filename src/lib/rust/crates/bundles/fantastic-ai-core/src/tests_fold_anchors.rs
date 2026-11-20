@@ -13,7 +13,7 @@ use fantastic_kernel::test_support::as_agent;
 use std::collections::{HashMap, HashSet};
 
 const DONE: &str = "<call name=\"done\"></call>";
-const CALL: &str = "<call name=\"send\"><target_id>notes</target_id><type>read</type></call>";
+const CALL: &str = "<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>read</type></payload></call>";
 
 fn new_render(rows: &[Value]) -> Vec<Value> {
     render(rows)

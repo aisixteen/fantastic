@@ -6,7 +6,7 @@ use crate::think::without_thinking;
 use crate::tool_parse::extract_tool_calls;
 use serde_json::json;
 
-const SEND: &str = "<call name=\"send\"><target_id>files</target_id><type>reflect</type></call>";
+const SEND: &str = "<call name=\"send\"><routing><target_id>files</target_id></routing><payload><type>reflect</type></payload></call>";
 const DROP: &str =
     "drop the wrapper: write the call at the top level, as <call name=\"…\">…</call>";
 
@@ -29,7 +29,7 @@ fn the_measured_shape_is_reported_with_the_form_to_write() {
 
 #[test]
 fn a_call_name_as_a_tag_next_to_a_good_call_says_the_good_one_ran() {
-    let answer = "<call name=\"send\"><target_id>a</target_id><type>reflect</type></call>\n\
+    let answer = "<call name=\"send\"><routing><target_id>a</target_id></routing><payload><type>reflect</type></payload></call>\n\
                   <send><target_id>b</target_id><type>read</type></send>";
     assert_eq!(
         check(answer, 1),
@@ -193,8 +193,8 @@ fn an_empty_invoke_before_good_calls_is_reported_and_the_calls_run() {
 #[test]
 fn what_a_call_envelope_holds_is_never_checked() {
     let good =
-        "<call name=\"send\"><target_id>notes</target_id><type>write</type><path>x.md</path>\
-                <bytes><send>no</send> </call> {\"name\": \"send\"}</bytes></call>";
+        "<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>write</type><path>x.md</path>\
+                <bytes><send>no</send> </call> {\"name\": \"send\"}</bytes></payload></call>";
     assert!(check(good, 1).is_empty());
     assert!(check("<call name=\"send\" target_id=\"x\"></call>", 0).is_empty());
 }
@@ -238,9 +238,9 @@ fn a_multibyte_line_keeps_the_caret_under_the_token() {
 /// over, a nested `<item>` as part of its list.
 #[test]
 fn the_verbs_own_arguments_carry_into_the_form_to_write() {
-    let broken = "call name=\"send\">\n<target_id>ai_fold</target_id>\n\
-                  <title>grep for checksum</title>\n<type>grep</type>\n\
-                  <query>checksum</query>\n<ids><item>32</item></ids>\n</call>";
+    let broken = "call name=\"send\">\n<routing><target_id>ai_fold</target_id>\n\
+                  <title>grep for checksum</title></routing>\n<payload><type>grep</type>\n\
+                  <query>checksum</query>\n<ids><item>32</item></ids></payload>\n</call>";
     let r = check(broken, 0);
     assert_eq!(r.len(), 1, "{r:?}");
     let form = r[0]
@@ -273,13 +273,14 @@ fn a_call_opener_that_lost_its_lt_is_named_as_that() {
 /// python `test_repair_gives_a_dropped_lt_back_and_nothing_else`.
 #[test]
 fn repair_gives_a_dropped_lt_back_and_nothing_else() {
-    let broken = "call name=\"send\">\n<target_id>kernel</target_id>\n<type>docs</type>\n</call>";
+    let broken = "call name=\"send\">\n<routing><target_id>kernel</target_id></routing>\n\
+                  <payload><type>docs</type></payload>\n</call>";
     assert_eq!(repair(broken), format!("<{broken}"));
     assert!(check(&repair(broken), 1).is_empty());
     for same in [
         "I will call name=\"x\"> later",
         "<call name=\"done\"></call>",
-        "call name=\"send\"><target_id>a</target_id>",
+        "call name=\"send\"><routing><target_id>a</target_id>",
         E59,
     ] {
         assert_eq!(repair(same), same);
@@ -295,7 +296,7 @@ fn a_call_inside_a_tool_call_wrapper_is_refused_with_the_bare_rewrite() {
         check(&answer, 0),
         vec![format!(
             "[malformed call — nothing ran] line 2, col 1:\n  \
-             <tool_call>‹call name=\"send\"><target_id>files</target_id><type>reflect</type>‹/call›</tool_call>\n  \
+             <tool_call>‹call name=\"send\"><routing><target_id>files</target_id></routing><payload><type>reflect</type></payload>‹/call›</tool_call>\n  \
              ^~~~~~~~~~~ {DROP}\nwrite it as:\n<call name=\"send\">\n<routing><target_id>files</target_id></routing>\n\
              <payload><type>reflect</type></payload>\n</call>\n{TAIL}"
         )]
@@ -317,7 +318,8 @@ fn a_call_inside_an_arbitrary_tag_is_refused() {
 /// A wrapped call with a fault inside is refused too, and the fault is named.
 #[test]
 fn a_malformed_call_inside_a_wrapper_names_its_fault() {
-    let answer = "<tool_call><call name=\"send\"><type>reflect</type></call></tool_call>";
+    let answer = "<tool_call><call name=\"send\"><routing><reply_to>self</reply_to></routing>\
+                  <payload><type>reflect</type></payload></call></tool_call>";
     let r = &check(answer, 0)[0];
     assert!(
         r.contains("also: the call inside does not parse — a send names its target"),
@@ -373,7 +375,7 @@ fn risky_names_each_destructive_pattern() {
 /// #255: a wrapped exec call that stashes is not rewritten ready to run.
 #[test]
 fn a_wrapped_exec_call_that_stashes_is_not_rewritten_ready_to_run() {
-    let answer = "<tool_call><call name=\"send\"><target_id>exec</target_id><type>start</type><command>sh</command><args><item>-c</item><item>cd wt && git stash && cargo test && git stash pop</item></args></call></tool_call>";
+    let answer = "<tool_call><call name=\"send\"><routing><target_id>exec</target_id></routing><payload><type>start</type><command>sh</command><args><item>-c</item><item>cd wt && git stash && cargo test && git stash pop</item></args></payload></call></tool_call>";
     let r = &check(answer, 0)[0];
     assert!(r.contains("careful: this command runs `git stash`"), "{r}");
     let form = r.split_once("write it as:\n").unwrap().1;
@@ -403,7 +405,7 @@ fn a_bare_tag_exec_call_with_rm_rf_is_shown_without_its_command() {
 /// #255: a harmless exec call is still rewritten whole, with no careful line.
 #[test]
 fn a_harmless_exec_call_is_still_rewritten_whole() {
-    let answer = "<tool_call><call name=\"send\"><target_id>exec</target_id><type>start</type><command>sh</command><args><item>-c</item><item>cargo test -p fantastic-ai-core</item></args></call></tool_call>";
+    let answer = "<tool_call><call name=\"send\"><routing><target_id>exec</target_id></routing><payload><type>start</type><command>sh</command><args><item>-c</item><item>cargo test -p fantastic-ai-core</item></args></payload></call></tool_call>";
     let r = &check(answer, 0)[0];
     assert!(!r.contains("careful:"), "{r}");
     let form = r.split_once("write it as:\n").unwrap().1;
@@ -537,7 +539,7 @@ fn a_code_span_is_not_an_open_wrapper_in_the_report() {
 #[test]
 fn a_backtick_inside_a_call_argument_does_not_hide_a_wrapper_after_it() {
     let answer = format!(
-        "<call name=\"send\"><target_id>a</target_id><type>run</type><cmd>echo `x</cmd></call>\n\
+        "<call name=\"send\"><routing><target_id>a</target_id></routing><payload><type>run</type><cmd>echo `x</cmd></payload></call>\n\
          <tool_call>`y` {SEND}</tool_call>"
     );
     assert_eq!(extract_tool_calls(&answer).len(), 1);
@@ -558,9 +560,9 @@ fn a_backtick_inside_a_call_argument_does_not_hide_a_wrapper_after_it() {
 
 #[test]
 fn a_whole_call_quoted_in_an_argument_reports_nothing() {
-    let q = "<call name=\"send\"><target_id>x</target_id><type>y</type></call>";
+    let q = "<call name=\"send\"><routing><target_id>x</target_id></routing><payload><type>y</type></payload></call>";
     let answer = format!(
-        "<call name=\"send\"><target_id>kernel</target_id><type>spawn</type><task>{q}</task></call>"
+        "<call name=\"send\"><routing><target_id>kernel</target_id></routing><payload><type>spawn</type><task>{q}</task></payload></call>"
     );
     assert!(check(&answer, 1).is_empty());
 }
@@ -611,8 +613,8 @@ fn a_correct_or_quoted_call_is_not_cut() {
     let ok = [
         SEND,
         "text then <call name=\"done\"></call>",
-        "<call name=\"send\"><target_id>a</target_id><type>say</type><text>write <call \
-         name=\"done\"></call> to end</text></call>",
+        "<call name=\"send\"><routing><target_id>a</target_id></routing><payload><type>say</type><text>write <call \
+         name=\"done\"></call> to end</text></payload></call>",
         "<call name=\"send\"><routing><target_id>a</target_id></routing><payload><type>read\
          </type></payload></call>",
         "use `<invoke name=\"x\">` never, and the word invoke is fine",
@@ -630,7 +632,7 @@ fn a_correct_or_quoted_call_is_not_cut() {
 #[test]
 fn a_bare_opener_run_is_not_cut_but_a_foreign_tag_after_it_is() {
     let text =
-        "call name=\"send\"><target_id>a</target_id></call>\nthen <invoke name=\"send\"> junk";
+        "call name=\"send\"><routing><target_id>a</target_id></routing></call>\nthen <invoke name=\"send\"> junk";
     let cut = streamed_cut(text).expect("cut at the foreign tag");
     assert!(
         text[..cut].ends_with("<invoke name=\"send\">"),
