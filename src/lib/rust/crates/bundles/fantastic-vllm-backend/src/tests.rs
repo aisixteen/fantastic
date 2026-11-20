@@ -718,25 +718,47 @@ pub(crate) fn at_the_write(meta: &Map<String, Value>, record: &Map<String, Value
 }
 
 #[test]
-fn validate_refuses_a_bad_dialect_and_a_llamacpp_budget() {
+fn validate_refuses_a_bad_dialect_and_a_llamacpp_pass_refuses_a_chats_budget() {
     let record = serde_json::Map::new();
     let meta = json!({"server_dialect": "bogus"});
     let msg = at_the_write(meta.as_object().unwrap(), &record).expect("refused");
     assert!(msg.contains("server_dialect"), "{msg}");
-
-    let meta = json!({"server_dialect": "llamacpp", "thinking_token_budget": 4000});
-    let msg = validate(meta.as_object().unwrap(), &record).expect("refused");
-    assert!(msg.contains("llama.cpp takes the reasoning budget as a server flag"));
 
     let meta = json!({
         "endpoint": "http://x/v1",
         "memory_store_id": "mem_test",
         "kv_overflow": "evict",
         "server_dialect": "strata",
-        "thinking_token_budget": 4000,
-        "max_tokens": 8000
     });
     assert!(at_the_write(meta.as_object().unwrap(), &record).is_none());
+
+    // the budget is the chat's (#632): a pass on a llamacpp server that carries one is refused
+    let pass = obj(json!({"endpoint": "http://x/v1", "model": "m", "context_window": 32768, "kv_slots": 2,
+                         "kv_overflow": "evict", "server_dialect": "llamacpp", "thinking_token_budget": 4000}));
+    let Err(e) = configure(&AgentId::from("a"), &pass, Arc::new(NoKey)) else { panic!("refused") };
+    assert!(e.message.contains("llama.cpp takes the reasoning budget as a server flag"), "{e}");
+    let mut default = pass.clone();
+    default.remove("thinking_token_budget");
+    assert!(configure(&AgentId::from("a"), &default, Arc::new(NoKey)).is_ok());
+}
+
+/// THE PASS'S KNOBS (#632): `configure` reads the sampling and the output budget from the
+/// map `complete` builds — the provider's record with the calling chat's knobs over it — and
+/// a chat that names no max_tokens gets the server's default (260000 plus its budget, never
+/// above the window).
+#[test]
+fn a_pass_takes_the_chats_knobs_and_defaults_the_rest() {
+    let base = json!({"endpoint": "http://x/v1", "model": "m", "context_window": 32768, "kv_slots": 2, "kv_overflow": "evict"});
+    let mut pass = obj(base.clone());
+    pass.extend(obj(json!({"temperature": 0.9, "top_k": 5, "seed": 11, "max_tokens": 4096})));
+    let p = configure(&AgentId::from("a"), &pass, Arc::new(NoKey)).expect("configured");
+    assert_eq!(p.max_tokens, 4096);
+    assert_eq!((p.sampling["temperature"].clone(), p.sampling["top_k"].clone()), (json!(0.9), json!(5)));
+    assert_eq!((p.sampling["top_p"].clone(), p.sampling["seed"].clone()), (json!(0.8), json!(11)), "the default, and a passthrough knob");
+    assert!(!p.explicit_budget);
+    let p = configure(&AgentId::from("a"), &obj(base), Arc::new(NoKey)).expect("configured");
+    assert_eq!(p.max_tokens, 32768, "260000 bounded by the window");
+    assert_eq!(p.sampling["temperature"], json!(0.2));
 }
 
 // ─── the KV-cache session table ─────────────────────────────────────────────
@@ -854,11 +876,6 @@ fn obj(v: Value) -> Map<String, Value> {
 fn a_write_the_backend_cannot_honour_is_refused() {
     let cases = [
         (
-            json!({"reasoning_effort": "high"}),
-            json!({}),
-            "reasoning_effort",
-        ),
-        (
             json!({"kv_overflow": "drop"}),
             json!({}),
             "kv_overflow",
@@ -869,24 +886,14 @@ fn a_write_the_backend_cannot_honour_is_refused() {
             "kv_slots",
         ),
         (
-            json!({"max_tokens": true}),
+            json!({"context_window": true}),
             json!({}),
-            "max_tokens",
+            "context_window",
         ),
         (
             json!({"kv_ttl": -1}),
             json!({}),
             "kv_ttl",
-        ),
-        (
-            json!({"thinking_token_budget": 8000}),
-            json!({"max_tokens": 8000}),
-            "not below max_tokens=8000",
-        ),
-        (
-            json!({"max_tokens": 1000}),
-            json!({"thinking_token_budget": 2000}),
-            "not below max_tokens=1000",
         ),
     ];
     for (meta, record, fragment) in cases {
@@ -901,7 +908,7 @@ fn a_record_missing_required_fields_is_refused_at_create_naming_one() {
     let meta = json!({
         "endpoint": "http://vllm.test/v1",
         "model": "qwen3.8-27b",
-        "max_tokens": 65536,
+        "context_window": 65536,
     });
     let refused = fantastic_kernel::verbs::check_record(
         "create_agent",
@@ -917,7 +924,7 @@ fn a_record_missing_required_fields_is_refused_at_create_naming_one() {
     let mut full = obj(meta);
     full.insert("kv_overflow".into(), json!("evict"));
     full.insert("memory_store_id".into(), json!("memory"));
-    assert_eq!(at_the_write(&obj(json!({"seed": 3})), &full), None);
+    assert_eq!(at_the_write(&obj(json!({"kv_slots": 3})), &full), None);
 }
 
 #[test]
@@ -925,12 +932,10 @@ fn a_consistent_write_passes() {
     let meta = json!({
         "endpoint": "http://vllm.test/v1",
         "model": "qwen3.8-27b",
-        "max_tokens": 8000,
         "context_window": 262144,
         "kv_slots": 6,
         "kv_overflow": "evict",
-        "thinking_token_budget": 4000,
-        "reasoning_effort": "xhigh",
+        "server_dialect": "strata",
         "memory_store_id": "memory",
     });
     assert_eq!(validate(&obj(meta), &Map::new()), None);
@@ -994,7 +999,7 @@ async fn the_kernel_refuses_a_bad_record_at_the_write() {
     let kernel = mk_kernel(&tmp).await;
     let r = create(
         &kernel,
-        json!({"id": unique_id(&tmp), "max_tokens": 4000, "thinking_token_budget": 4000}),
+        json!({"id": unique_id(&tmp), "kv_slots": 4}),
     )
     .await;
     // the record is checked by its own bundle's declaration first (no endpoint here)
@@ -1012,8 +1017,8 @@ async fn reflect_shows_the_effective_posture_and_the_shared_table() {
     let r = create(
         &kernel,
         json!({
-            "id": id, "endpoint": endpoint, "model": "qwen3.8-27b", "max_tokens": 8000,
-            "kv_slots": 7, "kv_overflow": "evict", "memory_store_id": "memory", "seed": 3,
+            "id": id, "endpoint": endpoint, "model": "qwen3.8-27b",
+            "kv_slots": 7, "kv_overflow": "evict", "memory_store_id": "memory",
             "context_window": 262144,
         }),
     )
@@ -1030,9 +1035,6 @@ async fn reflect_shows_the_effective_posture_and_the_shared_table() {
     assert_eq!(out["sentence"], json!(MAN));
     // WHERE its key is read: absent here, shown as null (a pointer, never a secret).
     assert_eq!(out.get("credentials"), Some(&Value::Null), "{out}");
-    assert_eq!(out["temperature"], json!(0.2));
-    assert_eq!(out["seed"], json!(3));
-    assert_eq!(out["thinking_token_budget_source"], json!("default"));
     assert_eq!(out["last_thinking_budget"], Value::Null);
     assert_eq!(out["connect_timeout"], json!(5.0));
     assert_eq!(out["read_timeout"], json!(900.0));
@@ -1138,7 +1140,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
     let r = create(
         &kernel,
         json!({"id": id, "endpoint": format!("http://{id}.test/v1"), "model": "m",
-               "max_tokens": 8000, "kv_slots": 2, "kv_overflow": "evict",
+               "kv_slots": 2, "kv_overflow": "evict",
                "memory_store_id": "memory", "context_window": 262144}),
     )
     .await;
@@ -1174,7 +1176,7 @@ async fn the_last_budget_is_per_agent_and_freed_on_delete() {
     let sib = format!("{id}_sib");
     let memory =
         fantastic_ram_store::test_support::memory_meta(&kernel, &id, json!({"cli": "*"})).await;
-    let mut meta = json!({"id": id, "endpoint": endpoint, "model": "m", "max_tokens": 8000,
+    let mut meta = json!({"id": id, "endpoint": endpoint, "model": "m",
                           "kv_slots": 4, "kv_overflow": "evict", "context_window": 262144});
     for (k, v) in memory {
         meta[k] = v;
@@ -1183,7 +1185,7 @@ async fn the_last_budget_is_per_agent_and_freed_on_delete() {
     assert_eq!(r["id"], json!(id), "{r}");
     let r = create(
         &kernel,
-        json!({"id": sib, "endpoint": endpoint, "model": "m", "max_tokens": 8000,
+        json!({"id": sib, "endpoint": endpoint, "model": "m",
                "kv_slots": 4, "kv_overflow": "evict", "memory_store_id": "memory",
                "context_window": 262144}),
     )
@@ -1357,7 +1359,7 @@ async fn the_usage_verb_shows_the_counts_reset_zeroes_them_and_delete_drops_them
         &kernel,
         json!({
             "id": id, "endpoint": format!("http://{id}.test/v1"), "model": "qwen3.8-27b",
-            "max_tokens": 8000, "kv_slots": 2, "kv_overflow": "evict",
+            "kv_slots": 2, "kv_overflow": "evict",
             "memory_store_id": "memory", "context_window": 262144,
         }),
     )

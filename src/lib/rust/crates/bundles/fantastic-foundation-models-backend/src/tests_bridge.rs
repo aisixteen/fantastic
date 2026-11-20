@@ -317,7 +317,7 @@ async fn live_kernel(id: &str) -> (std::sync::Arc<fantastic_kernel::Kernel>, tem
     let memory = fantastic_ram_store::test_support::memory_meta(&k, id, json!({"cli": "*"})).await;
     let mut create = json!({
         "type": "create_agent", "parent_id": "kernel_state",
-        "handler_module": crate::HANDLER_MODULE, "id": id, "temperature": 0,
+        "handler_module": crate::HANDLER_MODULE, "id": id,
     });
     for (key, v) in memory {
         create[key] = v;

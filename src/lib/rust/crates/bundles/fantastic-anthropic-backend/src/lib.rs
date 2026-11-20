@@ -7,8 +7,9 @@
 //!
 //! - ONE `system` string, top level — every system message joined; `messages` holds
 //!   only `user` / `assistant`, consecutive turns of one role merged.
-//! - `max_tokens` on every request (the API requires it): the record's (left out,
-//!   read from the model entry and bounded, [`server`]), or a side call's own bound.
+//! - `max_tokens` on every request (the API requires it): the calling chat's (#632;
+//!   left out, read from the model entry and bounded, [`server`]), or a side call's
+//!   own bound. `temperature` is the chat's too, sent only when it sets one.
 //! - THE THOUGHT CHANNEL: with `thinking_budget` set, `thinking_delta`s stream
 //!   before the answer, wrapped once in `<think>…</think>`.
 //! - The SSE stream ends with `message_stop`; a stream that ends without it did not
@@ -35,7 +36,7 @@ use fantastic_ai_core::provider::{
     stream_idle_of, within, Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream,
     ReportCell, Unconfigured,
 };
-use fantastic_ai_core::record::{AiRecord, Credentials};
+use fantastic_ai_core::record::Credentials;
 use fantastic_ai_core::think::ThinkWrap;
 use fantastic_ai_core::USAGE_KEYS;
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, verbs};
@@ -1515,7 +1516,7 @@ impl SseState {
         if let (true, Some(bound)) = (cut, self.main_turn_max) {
             out.push_back(Err(ProviderError::raised(format!(
                 "{NAME}: the turn was cut at max_tokens={bound} (stop_reason=max_tokens) — it \
-                 did not finish; raise max_tokens on the record, or lower thinking_budget"
+                 did not finish; raise the chat's max_tokens, or lower thinking_budget"
             ))));
         }
     }
@@ -1528,11 +1529,12 @@ fn int_of(v: Option<&Value>) -> Option<i64> {
     v.and_then(Value::as_i64)
 }
 
-fn required_int(meta: &Map<String, Value>, key: &str) -> Result<i64, ProviderError> {
-    int_of(meta.get(key)).ok_or_else(|| {
+/// The pass's output budget: the calling chat's `max_tokens`, else the one read from the API.
+fn pass_max_tokens(meta: &Map<String, Value>) -> Result<i64, ProviderError> {
+    int_of(meta.get("max_tokens")).ok_or_else(|| {
         ProviderError::value_error(format!(
-            "{NAME}: `{key}` is not on the agent record, a positive int, and was not read \
-             from the API (update_agent <id> {key}=…)"
+            "{NAME}: the chat names no `max_tokens`, a positive int, and it was not read \
+             from the API (update_agent <chat> max_tokens=…)"
         ))
     })
 }
@@ -1559,7 +1561,7 @@ fn build_provider_with(
                 .to_string(),
             model: helpers::required_meta(&meta, "model", NAME)?,
             key: Arc::new(key_reader(agent_id, kernel, NAME, false)),
-            max_tokens: required_int(&meta, "max_tokens")?,
+            max_tokens: pass_max_tokens(&meta)?,
             temperature: meta.get("temperature").and_then(Value::as_f64),
             thinking_budget: int_of(meta.get("thinking_budget")),
             effort: meta.get("effort").and_then(Value::as_str).map(String::from),
@@ -1659,18 +1661,16 @@ fn usage_reset_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel, capabilities: Value) -> Value {
     let mut out = verbs::reflect_base(agent_id, kernel, MAN, CFG.model_window);
     let meta = helpers::agent_meta(agent_id, kernel);
-    for k in ["max_tokens", "temperature", "thinking_budget"] {
-        out.insert(k.to_string(), meta.get(k).cloned().unwrap_or(Value::Null));
-    }
+    out.insert(
+        "thinking_budget".into(),
+        meta.get("thinking_budget").cloned().unwrap_or(Value::Null),
+    );
     out.insert(
         "caching".into(),
         meta.get("caching")
             .cloned()
             .unwrap_or_else(|| json!(caching::DEFAULT_MODE)),
     );
-    if let Some(row) = meta.get("cache_primer_until").filter(|v| !v.is_null()) {
-        out.insert("cache_primer_until".into(), row.clone());
-    }
     out.insert("capabilities".into(), capabilities);
     out.insert("usage".into(), usage_now(agent_id, kernel));
     out.insert(
@@ -1796,16 +1796,6 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
             "thinking_display and thinking_budget are two thinking modes — set one".to_string(),
         );
     }
-    if let Some(budget) = int_of(merged.get("thinking_budget")) {
-        if let Some(mx) = int_of(merged.get("max_tokens")) {
-            if budget >= mx {
-                return Some(format!(
-                    "thinking_budget={budget} is not below max_tokens={mx} — the API refuses \
-                     it; keep it below max_tokens"
-                ));
-            }
-        }
-    }
     let model = merged.get("model").and_then(Value::as_str).unwrap_or("");
     if has_budget && budget_thinking_refused(model) {
         return Some(format!(
@@ -1819,7 +1809,11 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
         .unwrap_or("")
         .trim()
         .to_string();
-    let left = server::missing(&merged);
+    // what the provider's record leaves to the API (a turn's max_tokens is the chat's)
+    let left: Vec<&str> = server::missing(&merged)
+        .into_iter()
+        .filter(|f| *f != "max_tokens")
+        .collect();
     if !endpoint.is_empty() && !left.is_empty() && server::models_url(&endpoint).is_none() {
         return Some(format!(
             "{} is left to the API, but the endpoint '{endpoint}' does not end in /messages, \
@@ -1865,15 +1859,10 @@ pub struct AnthropicRecord {
     pub endpoint: String,
     /// The model id (absent: the call's `model`, else `default_model`).
     pub model: Option<String>,
-    /// A turn's output budget (tokens); left out, read from the API before a turn and written here.
-    #[schemars(range(min = 1))]
-    pub max_tokens: Option<i64>,
     /// The model's input window (tokens); left out, read from the API (max_input_tokens).
     #[schemars(range(min = 1))]
     pub context_window: Option<i64>,
-    /// Sampling temperature; sent only when set.
-    pub temperature: Option<f64>,
-    /// Extended thinking per turn (tokens, at least the API's floor, below max_tokens); not for 4.7+ or 5.x models: use thinking_display and effort.
+    /// Extended thinking per turn (tokens, at least the API's floor); sent only below the turn's max_tokens; not for 4.7+ or 5.x models: use thinking_display and effort.
     #[schemars(range(min = 1024))]
     pub thinking_budget: Option<i64>,
     /// The model's effort per turn, sent as output_config.effort.
@@ -1908,9 +1897,6 @@ pub struct AnthropicRecord {
     pub models: Option<Vec<String>>,
     /// How the conversation is kept in the model's view.
     pub caching: Option<fantastic_ai_core::record::CachingMode>,
-    /// The fields every ai_core agent takes.
-    #[serde(flatten)]
-    pub ai: AiRecord,
 }
 
 fantastic_kernel::record!(AnthropicRecord);
@@ -2017,8 +2003,13 @@ impl Handler for AnthropicBundle {
                     Some(m) => Some(m.to_string()),
                     None => fantastic_ai_core::remote_provider::default_of(agent_id, kernel).await,
                 };
-                if let Some(refused) = server::resolve(agent_id, kernel, model).await {
-                    return Ok(Some(refused));
+                let chat_max = a.knobs.as_ref().and_then(|k| k.max_tokens);
+                let mut a = a;
+                match server::resolve(agent_id, kernel, model, chat_max).await {
+                    Err(refused) => return Ok(Some(refused)),
+                    // the API's budget for a chat that names none: this pass's
+                    Ok(Some(n)) => a.knobs.get_or_insert_with(Default::default).max_tokens = Some(n),
+                    Ok(None) => {}
                 }
                 let caller = caller_of(&a.rid);
                 fantastic_ai_core::remote_provider::complete_verb(agent_id, &a, kernel, |m| {

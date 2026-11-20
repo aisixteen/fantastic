@@ -221,21 +221,21 @@ def main() -> int:
                                "callable_by": {**callable_by("creds"), PROV_B: ["get"]}})
             need(r.get("updated") is True, f"creds: the ref: {str(r)[:200]}")
             rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV_A,
-                            endpoint=mA.url, model=MODEL, max_tokens=8192,
+                            endpoint=mA.url, model=MODEL,
                             context_window=262144, kv_slots=4, kv_overflow="evict",
                             memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
                             callable_by={"$self": "*", "$parent": "*", AI_A: "*"})
             need(rec.get("id") == PROV_A, f"create {PROV_A}: {str(rec)[:200]}")
             rec = hk.create(parent_id="rest", handler_module="anthropic_backend.tools", id=PROV_B,
                             endpoint=mB.url, credentials={"store": "creds", "ref": "anthropic"},
-                            model=MODEL, max_tokens=8192, context_window=262144,
+                            model=MODEL, context_window=262144,
                             memory_store_id="memory",
                             can_call={"$self": "*", "memory": "*", "creds": ["get"]},
                             callable_by={"$self": "*", "$parent": "*", AI_B: "*"})
             need(rec.get("id") == PROV_B, f"create {PROV_B}: {str(rec)[:200]}")
             for aid, prov, mode in ((AI_A, PROV_A, "none"), (AI_B, PROV_B, "provider_cache")):
                 rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
-                                provider_id=prov, model=MODEL,
+                                provider_id=prov, model=MODEL, max_tokens=8192,
                                 context_window=262144, memory_store_id="memory",
                                 caching=mode, can_call={**can, prov: ["complete", "watch", "reflect"]},
                                 callable_by=by)

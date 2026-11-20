@@ -592,7 +592,7 @@ async fn sampling_may_not_override_what_the_provider_owns() {
         r["error"],
         json!(
             "ValueError: responses_backend: `sampling` may not set model, store — those \
-             are the record's (`model`, `max_tokens`) or the provider's own"
+             are the pass's (`model`, the chat's `max_tokens`) or the provider's own"
         ),
         "{r}"
     );

@@ -133,12 +133,12 @@ def main() -> int:
             prov = f"{aid}_prov"
             rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=prov,
                             endpoint=mock.url, model=mock.model, kv_slots=4,
-                            kv_overflow="evict", max_tokens=8192, **common,
+                            kv_overflow="evict", **common,
                             can_call={"$self": "*", "memory": "*"},
                             callable_by={"$self": "*", "$parent": "*", aid: "*"})
             need(rec.get("id") == prov, f"create {prov}: {str(rec)[:200]}")
             rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
-                            provider_id=prov, model=mock.model, **common,
+                            provider_id=prov, model=mock.model, max_tokens=8192, **common,
                             can_call={**can_call, prov: ["complete", "watch", "reflect"]}, callable_by=cb)
             need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")
 

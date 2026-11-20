@@ -99,12 +99,7 @@ runs:
       handler_module: vllm_backend.tools
       endpoint: '{vllm_endpoint}'
       model: '{vllm_model}'
-      max_tokens: 262144
-      reasoning_effort: xhigh
-      thinking_token_budget: 65536
       context_window: 262144
-      no_repeat_ngram_size: 3
-      repetition_penalty: 1.05
       kv_slots: 2
       kv_overflow: evict
       memory_store_id: memory
@@ -126,6 +121,11 @@ runs:
       provider_id: ai_a_provider
       model: '{vllm_model}'
       context_window: 262144
+      max_tokens: 262144
+      reasoning_effort: xhigh
+      thinking_token_budget: 65536
+      no_repeat_ngram_size: 3
+      repetition_penalty: 1.05
       memory_store_id: memory
       callable_by:
         user: '*'
@@ -140,12 +140,7 @@ runs:
       handler_module: vllm_backend.tools
       endpoint: '{vllm_endpoint}'
       model: '{vllm_model}'
-      max_tokens: 262144
-      reasoning_effort: xhigh
-      thinking_token_budget: 65536
       context_window: 262144
-      no_repeat_ngram_size: 3
-      repetition_penalty: 1.05
       kv_slots: 2
       kv_overflow: evict
       memory_store_id: memory
@@ -167,6 +162,11 @@ runs:
       provider_id: ai_b_provider
       model: '{vllm_model}'
       context_window: 262144
+      max_tokens: 262144
+      reasoning_effort: xhigh
+      thinking_token_budget: 65536
+      no_repeat_ngram_size: 3
+      repetition_penalty: 1.05
       memory_store_id: memory
       callable_by:
         user: '*'
@@ -181,12 +181,7 @@ runs:
       handler_module: vllm_backend.tools
       endpoint: '{vllm_endpoint}'
       model: '{vllm_model}'
-      max_tokens: 262144
-      reasoning_effort: xhigh
-      thinking_token_budget: 65536
       context_window: 262144
-      no_repeat_ngram_size: 3
-      repetition_penalty: 1.05
       kv_slots: 2
       kv_overflow: evict
       memory_store_id: memory
@@ -208,6 +203,11 @@ runs:
       provider_id: ai_c_provider
       model: '{vllm_model}'
       context_window: 262144
+      max_tokens: 262144
+      reasoning_effort: xhigh
+      thinking_token_budget: 65536
+      no_repeat_ngram_size: 3
+      repetition_penalty: 1.05
       memory_store_id: memory
       callable_by:
         user: '*'

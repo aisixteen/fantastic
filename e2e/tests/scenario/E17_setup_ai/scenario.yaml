@@ -34,9 +34,11 @@ runs:
   # page 1 → vllm (the 4th provider; nothing saved) → page 2, its lines: name
   # (`vllm-1`), URL, model, key (← → paste a new key: its value, then where keys
   # are kept — PLAIN in this throwaway home, never the real keychain), kv
-  # overflow, advanced (enter opens: max_tokens, context_window, kv_slots,
-  # metrics_url, server_dialect, temperature, top_p, top_k, reasoning_effort,
-  # thinking budget, …)
+  # overflow, advanced (enter opens the provider's fields — context_window, kv_slots,
+  # metrics_url, server_dialect, … caching — then the chat's: its conversation's
+  # settings, then the request knobs, temperature … reasoning_effort (30th),
+  # thinking_token_budget, … max_tokens (39th, the last); #632: the knobs are the
+  # chat's record, the set-up writes each on its own record)
   # → advanced closed again, CREATE & OPEN CHAT ──
   - name: write
     timeout: 300
@@ -104,10 +106,6 @@ runs:
       key enter
       key down
       key enter
-      type {max_tokens}
-      key enter
-      key down
-      key enter
       type {ctx}
       key enter
       key down
@@ -120,18 +118,75 @@ runs:
       key down
       key down
       key down
-      key right
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key left
       key down
       key enter
-      key backspace
-      key backspace
-      key backspace
-      key backspace
-      key backspace
       type 65536
+      key enter
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key down
+      key enter
+      type {max_tokens}
       key enter
       wait 200
       shot filled
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
+      key up
       key up
       key up
       key up

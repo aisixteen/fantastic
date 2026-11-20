@@ -77,20 +77,30 @@ class Connected:
             t.cancel()
 
 
-# THE CHAT/PROVIDER SPLIT (#615). An AI is TWO agents: the PROVIDER (`<id>_prov`, the
-# backend record: endpoint, model, key, sampling, KV slots) completes turns and holds no
-# conversation; the CHAT (`ai_chat.tools`) holds the conversation and every grant, and
-# completes through the provider its `provider_id` names (`complete`, `watch`). Both
-# sides of that gate are opened here. `make_chat` is the ONE place the suite builds
-# the pair: `connect` uses it, and so does every probe that wires its own AI.
+# THE CHAT/PROVIDER SPLIT (#615, #632). An AI is TWO agents: the PROVIDER (`<id>_prov`, the
+# backend record: endpoint, model, key, KV slots — its identity) completes turns and holds no
+# conversation; the CHAT (`ai_chat.tools`) holds the conversation, every grant and the request
+# knobs it sends with each request (sampling, max_tokens), and completes through the provider
+# its `provider_id` names (`complete`, `watch`). Both sides of that gate are opened here.
+# `make_chat` is the ONE place the suite builds an AI: a new pair, or a chat on a provider
+# that is already there (`provider_id`): `connect` uses it, and so does every probe that
+# wires its own AI.
 CHAT_MODULE = "ai_chat.tools"
 PROVIDER_CALLS = ["complete", "watch", "reflect"]
-#: record fields the CHAT takes too (it sizes its own context; output is the provider's max_tokens)
+#: record fields the CHAT takes too (it sizes its own context)
 CHAT_SHARED = ("model", "context_window", "caching")
+#: the request knobs: the CHAT's alone, wherever a backend record or a probe puts them (#632)
+KNOBS = ("temperature", "top_p", "top_k", "min_p", "reasoning_effort", "thinking_token_budget",
+         "presence_penalty", "frequency_penalty", "repetition_penalty", "no_repeat_ngram_size",
+         "seed", "stop", "max_tokens")
+#: the fields every chat takes (ai_core's record): the CHAT's alone too
+CHAT_ONLY = KNOBS + ("output_reserve", "context_strategy", "recent_n", "cache_primer_until",
+                     "transport_retries", "misfire_limit", "system_prompt", "file_bridge_id",
+                     "system_prompt_file", "pre_system_prompt", "post_system_prompt",
+                     "image_max_bytes", "image_max_pixels")
 #: record fields that are the PROVIDER's only, wherever a probe puts them
-PROVIDER_ONLY = ("handler_module", "endpoint", "credentials", "num_ctx", "max_tokens", "kv_slots",
-                 "kv_overflow", "no_repeat_ngram_size", "repetition_penalty",
-                 "thinking_token_budget", "temperature", "top_p", "top_k")
+PROVIDER_ONLY = ("handler_module", "endpoint", "credentials", "num_ctx", "kv_slots",
+                 "kv_overflow")
 
 
 def split_record(backend_record: dict, extra: dict | None = None) -> tuple[dict, dict]:
@@ -99,6 +109,9 @@ def split_record(backend_record: dict, extra: dict | None = None) -> tuple[dict,
     for k in CHAT_SHARED:
         if k in prov:
             chat[k] = prov[k]
+    for k in CHAT_ONLY:
+        if k in prov:
+            chat[k] = prov.pop(k)
     for k, v in (extra or {}).items():
         if k == "num_ctx" and not str(prov.get("handler_module", "")).startswith("ollama"):
             continue  # the window ollama LOADS the model with; no other provider has the field
@@ -115,8 +128,9 @@ def chat_pair(backend, chat: dict, *, role: str | None = None,
               provider_id: str | None = None, parent: str) -> tuple[dict, dict]:
     """The two create_agent payloads (provider, chat) for one AI. `chat` is the payload a
     probe would write for ONE agent (id, parent_id, can_call, callable_by, memory, and any
-    record fields); backend fields in it go to the provider. Pure: a sync runner (the host
-    runner) sends them through its own wire; `make_chat` sends them through a root."""
+    record fields); backend fields in it go to the provider, the request knobs to the chat.
+    Pure: a sync runner (the host runner) sends them through its own wire; `make_chat` sends
+    them through a root."""
     chat = dict(chat)
     chat.pop("type", None)
     cid = chat["id"]
@@ -143,7 +157,10 @@ def chat_pair(backend, chat: dict, *, role: str | None = None,
 
 async def make_chat(root, backend, chat: dict, *, role: str | None = None,
                     provider_id: str | None = None) -> tuple[str, str]:
-    """Create the provider and the chat (`chat_pair`) and open the provider's store halves.
+    """Create the chat, and the provider it names. THE CALLER NAMES THE PROVIDER (#632):
+    `provider_id` is a provider that is already there — the chat is made on it, and the
+    creator (`root`) admits the chat to it (`update_agent` of its `callable_by`); none
+    given, a new provider is made from the plug (`chat_pair`) and its store halves opened.
     Returns (chat_id, provider_id)."""
     prov, payload = chat_pair(backend, chat, role=role, provider_id=provider_id,
                               parent=home(root))
@@ -151,8 +168,19 @@ async def make_chat(root, backend, chat: dict, *, role: str | None = None,
     # A REBOOTED kernel hydrates the pair from its state folder: what is already
     # there is that same pair, so only a missing half is created.
     listed = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]
-    live = {a.get("id") for a in ((listed.get("result") or {}).get("agents") or [])}
-    if pid not in live:
+    agents = (listed.get("result") or {}).get("agents") or []
+    live = {a.get("id") for a in agents}
+    if provider_id is not None:
+        if pid not in live:
+            raise SystemExit(f"make_chat: the provider {pid} it names is not there")
+        cb = dict(next(a for a in agents if a.get("id") == pid).get("callable_by") or {})
+        if cb.get(payload["id"]) != PROVIDER_CALLS:
+            cb[payload["id"]] = PROVIDER_CALLS
+            r = (await root.send([{"target": root.id, "payload": {
+                "type": "update_agent", "id": pid, "callable_by": cb}}]))[0]["result"]
+            if isinstance(r, dict) and r.get("error"):
+                raise SystemExit(f"make_chat: admitting {payload['id']} to {pid} refused: {r}")
+    elif pid not in live:
         made = (await root.send([{"target": root.id, "payload": prov}]))[0]["result"]
         if isinstance(made, dict) and made.get("error"):
             raise SystemExit(f"create_agent({pid}) refused: {made}")
