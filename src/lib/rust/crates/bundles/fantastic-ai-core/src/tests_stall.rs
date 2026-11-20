@@ -192,26 +192,6 @@ async fn a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_window_ends
 
 // ─── a failed turn settles its sender and tells its watchers (#496) ─────────
 
-/// Holds the process-wide send ceiling at `secs` and restores what it found.
-struct Ceiling(Option<String>);
-
-impl Ceiling {
-    fn set(secs: &str) -> Self {
-        let prev = std::env::var("FANTASTIC_AI_SEND_TIMEOUT").ok();
-        std::env::set_var("FANTASTIC_AI_SEND_TIMEOUT", secs);
-        Self(prev)
-    }
-}
-
-impl Drop for Ceiling {
-    fn drop(&mut self) {
-        match self.0.take() {
-            Some(v) => std::env::set_var("FANTASTIC_AI_SEND_TIMEOUT", v),
-            None => std::env::remove_var("FANTASTIC_AI_SEND_TIMEOUT"),
-        }
-    }
-}
-
 /// A send whose turn outlives the ceiling settles with the kernel's refusal shape,
 /// `reason: timeout` (a sender branching on `reason` settles on it), carrying the
 /// same text the error row holds. The agent emits `done {reason: timeout}`, and the
