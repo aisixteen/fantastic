@@ -255,13 +255,13 @@ def main() -> int:
                 rec = hk.create(parent_id="rest", handler_module="anthropic_backend.tools", id=prov,
                                 endpoint=mocks[aid].url,
                                 credentials={"store": "creds", "ref": "anthropic"},
-                                model=MODEL, max_tokens=8192, context_window=262144,
+                                model=MODEL, context_window=262144,
                                 memory_store_id="memory",
                                 can_call={"$self": "*", "memory": "*", "creds": ["get"]},
                                 callable_by={"$self": "*", "$parent": "*", aid: "*"})
             else:
                 rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=prov,
-                                endpoint=mocks[aid].url, model=MODEL, max_tokens=8192,
+                                endpoint=mocks[aid].url, model=MODEL,
                                 context_window=262144, kv_slots=4, kv_overflow="evict",
                                 memory_store_id="memory",
                                 can_call={"$self": "*", "memory": "*"},
@@ -269,7 +269,7 @@ def main() -> int:
             need(rec.get("id") == prov, f"create {prov}: {str(rec)[:200]}")
             extra = {"caching": caching} if caching else {}
             rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
-                            provider_id=prov, model=MODEL,
+                            provider_id=prov, model=MODEL, max_tokens=8192,
                             context_window=262144, memory_store_id="memory", **extra,
                             can_call={**can, prov: ["complete", "watch"]}, callable_by=by)
             need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")

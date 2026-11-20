@@ -111,6 +111,110 @@ async fn a_chat_completes_through_its_provider_agent_by_id() {
     assert_eq!(rp.model(), "echo-1", "the model the provider reported");
 }
 
+/// A provider stand-in whose reported model names the knobs its pass was built with.
+struct Knobbed;
+
+#[async_trait]
+impl Handler for Knobbed {
+    type Call = provider_verbs::Call;
+    fn name(&self) -> &str {
+        "knobbed"
+    }
+    fn man(&self) -> &'static str {
+        "A provider stand-in that reports the knobs of its pass."
+    }
+    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
+        provider_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, a: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
+        provider_verbs::dynamic_verbs(a)
+    }
+    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
+        &crate::tests_decl::any::RECORD
+    }
+    async fn handle(&self, id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
+        struct Named(String);
+        #[async_trait]
+        impl Provider for Named {
+            async fn chat(&self, _m: &[Value], _x: Option<i64>) -> Result<ProviderStream, ProviderError> {
+                Ok(Box::pin(futures_util::stream::iter(vec![Ok(ProviderEvent::Token("ok".into()))])))
+            }
+            fn model(&self) -> String {
+                self.0.clone()
+            }
+        }
+        let build = |m: Map<String, Value>| -> Arc<dyn Provider> {
+            let knob = |k: &str| m.get(k).map_or_else(|| "-".to_string(), ToString::to_string);
+            Arc::new(Named(format!("t={} m={} stop={}", knob("temperature"), knob("max_tokens"), knob("stop"))))
+        };
+        use provider_verbs::Call;
+        Ok(Some(match call {
+            Call::Complete(a) => crate::remote_provider::complete_verb(id, &a, kernel, build).await,
+            _ => json!({"id": id.as_str()}),
+        }))
+    }
+}
+
+/// ONE PROVIDER, MANY CHATS (#632): each chat's request carries its own knobs, laid over the
+/// provider's record for that pass only; a chat that names none sends none, and the
+/// provider's record never stands in for one.
+#[tokio::test]
+async fn two_chats_on_one_provider_each_send_their_own_knobs() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut k = Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        state_dir: tmp.path().join(".fantastic"),
+        work_dir: tmp.path().to_path_buf(),
+    });
+    k.bundles.register("knobbed.tools", Knobbed);
+    let k = Arc::new(k);
+    let root = fantastic_kernel::Agent::new(AgentId::from("kernel_state"), None, None, Map::new(), tmp.path().join(".fantastic"), false);
+    k.register(Arc::clone(&root));
+    k.set_root(Arc::clone(&root));
+    let made = |id: &str, handler: &str, meta: Value| {
+        k.register(fantastic_kernel::Agent::new(
+            AgentId::from(id),
+            Some(handler.into()),
+            Some(root.id.clone()),
+            meta.as_object().cloned().unwrap_or_default(),
+            tmp.path().join(id),
+            false,
+        ));
+    };
+    made("p", "knobbed.tools", json!({"temperature": 9.9, "callable_by": {"a": "*", "b": "*", "c": "*"}}));
+    let grant = json!({"p": ["complete", "watch"]});
+    made("a", "echo.tools", json!({"can_call": grant, "temperature": 0.1, "max_tokens": 64}));
+    made("b", "echo.tools", json!({"can_call": grant, "temperature": 0.7, "stop": ["END"]}));
+    made("c", "echo.tools", json!({"can_call": grant}));
+    let mut seen = Vec::new();
+    for chat in ["a", "b", "c"] {
+        let rp = RemoteProvider::new(&k, &AgentId::from(chat), "p");
+        fantastic_kernel::send::as_agent(&AgentId::from(chat), async {
+            let s = rp.chat(&[json!({"role": "user", "content": "hi"})], None).await.unwrap();
+            let _: Vec<_> = s.collect().await;
+        })
+        .await;
+        seen.push(rp.model());
+    }
+    assert_eq!(seen, ["t=0.1 m=64 stop=-", "t=0.7 m=- stop=[\"END\"]", "t=- m=- stop=-"]);
+}
+
+#[test]
+fn a_chats_budget_not_below_its_max_tokens_is_refused_on_the_merged_record() {
+    let o = |v: Value| v.as_object().cloned().unwrap();
+    let why = crate::record::knobs_refusal(&o(json!({"thinking_token_budget": 8000})), &o(json!({"max_tokens": 8000})));
+    assert!(why.is_some_and(|w| w.contains("not below max_tokens=8000")));
+    assert!(crate::record::knobs_refusal(&o(json!({"max_tokens": 9000})), &o(json!({"thinking_token_budget": 8000}))).is_none());
+    // the knobs' shapes are the chat record's: an effort vLLM refuses is refused at the write
+    let r = fantastic_kernel::verbs::check_record(
+        "update_agent",
+        "ai_chat",
+        &o(json!({"reasoning_effort": "high"})),
+        &fantastic_kernel::declared::record::RECORD,
+        &crate::chat_bundle::RECORD,
+    );
+    assert!(r.is_err_and(|e| e.to_string().contains("reasoning_effort")));
+}
+
 #[tokio::test]
 async fn a_chat_without_the_grant_is_refused_by_name() {
     let tmp = tempfile::TempDir::new().unwrap();

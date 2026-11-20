@@ -138,7 +138,7 @@ def main() -> int:
                            "callable_by": {**callable_by(root), LEAD: ["await_set"]}})
         need(r.get("updated") is True, f"the root accepts the lead's await_set: {str(r)[:200]}")
         def make(aid, mock, model, can, by):
-            fields = dict(endpoint=mock.url, model=model, max_tokens=8192,
+            fields = dict(endpoint=mock.url, model=model,
                           context_window=262144, memory_store_id="memory")
             # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it:
             # a `send` to a provider is refused (#521)
@@ -150,7 +150,7 @@ def main() -> int:
                             **fields)
             need(rec.get("id") == pv, f"create {pv}: {str(rec)[:200]}")
             rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
-                            provider_id=pv, model=model,
+                            provider_id=pv, model=model, max_tokens=8192,
                             context_window=262144, memory_store_id="memory",
                             can_call={**can, pv: ["complete", "watch", "reflect"]}, callable_by=by)
             need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")

@@ -116,40 +116,25 @@ fn rec(endpoint: &str, extra: Value) -> Map<String, Value> {
 
 // ─── the read ───────────────────────────────────────────────────────────────
 
-/// The `max_tokens` the server read gives a record made with `extra`, when the
-/// server's window is `window` (#495).
-async fn read_max_tokens(window: i64, extra: Value) -> Value {
-    let (_srv, ep) = vllm(
-        models(&[(MODEL, window)]),
-        metrics(&["1.1377245508982037"]),
-        200,
-    )
-    .await;
-    let got = server::read(&rec(&ep, extra), &NoKey).await.expect("read");
-    got.get("max_tokens").cloned().unwrap_or(Value::Null)
+/// The `max_tokens` a pass gets when the chat names none (#632: the output budget is the
+/// chat's), on a server whose window is `window` (#495), with the chat's `knobs`.
+fn default_max_tokens_of(window: i64, knobs: Value) -> i64 {
+    let mut pass = rec("http://vllm.test/v1", json!({"model": MODEL, "context_window": window, "kv_slots": 1}));
+    pass.extend(obj(knobs));
+    crate::configure(&AgentId::from("v1"), &pass, Arc::new(NoKey)).expect("configured").max_tokens
 }
 
-#[tokio::test]
-async fn a_record_with_no_max_tokens_reads_the_bounded_default() {
-    assert_eq!(read_max_tokens(65536, json!({})).await, json!(65536));
-    assert_eq!(read_max_tokens(1_000_000, json!({})).await, json!(260_000));
+#[test]
+fn a_chat_with_no_max_tokens_gets_the_bounded_default() {
+    assert_eq!(default_max_tokens_of(65536, json!({})), 65536);
+    assert_eq!(default_max_tokens_of(1_000_000, json!({})), 260_000);
     // an explicit thinking budget adds to it
-    assert_eq!(
-        read_max_tokens(1_000_000, json!({"thinking_token_budget": 2000})).await,
-        json!(2000 + 260_000)
-    );
+    assert_eq!(default_max_tokens_of(1_000_000, json!({"thinking_token_budget": 2000})), 2000 + 260_000);
     // never above the server's window
-    assert_eq!(read_max_tokens(8192, json!({})).await, json!(8192));
-    assert_eq!(
-        read_max_tokens(20000, json!({"thinking_token_budget": 8000})).await,
-        json!(20000)
-    );
-    // a record's own max_tokens is never read
-    let (_srv, ep) = default_vllm().await;
-    let got = server::read(&rec(&ep, json!({"max_tokens": 40000})), &NoKey)
-        .await
-        .expect("read");
-    assert!(got.get("max_tokens").is_none(), "{got:?}");
+    assert_eq!(default_max_tokens_of(8192, json!({})), 8192);
+    assert_eq!(default_max_tokens_of(20000, json!({"thinking_token_budget": 8000})), 20000);
+    // the chat's own is used as it names it
+    assert_eq!(default_max_tokens_of(65536, json!({"max_tokens": 40000})), 40000);
 }
 
 #[tokio::test]
@@ -160,7 +145,7 @@ async fn what_the_record_leaves_out_is_read() {
         .expect("read");
     assert_eq!(
         Value::Object(got),
-        json!({"model": MODEL, "max_tokens": 65536, "context_window": 65536, "kv_slots": 1})
+        json!({"model": MODEL, "context_window": 65536, "kv_slots": 1})
     );
     let paths: Vec<String> = seen(&srv).await.into_iter().map(|(p, _)| p).collect();
     assert!(
@@ -173,11 +158,11 @@ async fn what_the_record_leaves_out_is_read() {
 async fn a_field_the_record_sets_is_never_read() {
     let (srv, ep) = default_vllm().await;
     let full =
-        json!({"model": MODEL, "max_tokens": 8000, "context_window": 262_144, "kv_slots": 6});
+        json!({"model": MODEL, "context_window": 262_144, "kv_slots": 6});
     let got = server::read(&rec(&ep, full), &NoKey).await.expect("read");
     assert!(got.is_empty());
     assert!(seen(&srv).await.is_empty());
-    let partial = json!({"model": MODEL, "max_tokens": 8000, "context_window": 262_144});
+    let partial = json!({"model": MODEL, "context_window": 262_144});
     let got = server::read(&rec(&ep, partial), &NoKey)
         .await
         .expect("read");
@@ -232,7 +217,7 @@ async fn a_door_without_metrics_refuses_naming_kv_slots() {
     let (_srv, ep) = vllm(models(&[(MODEL, 1)]), "not found".into(), 404).await;
     let r = rec(
         &ep,
-        json!({"model": MODEL, "max_tokens": 8000, "context_window": 262_144}),
+        json!({"model": MODEL, "context_window": 262_144}),
     );
     let e = server::read(&r, &NoKey).await.unwrap_err();
     let url = ep.trim_end_matches("/v1").to_string() + "/metrics";
@@ -306,7 +291,7 @@ async fn metrics_url_on_the_record_wins_and_the_key_stays_on_the_endpoint_host()
     // the same host gets the key
     let r = rec(
         &ep,
-        json!({"model": MODEL, "max_tokens": 1, "context_window": 2}),
+        json!({"model": MODEL, "context_window": 2}),
     );
     server::read(&r, &Key).await.expect("read");
     let last = seen(&srv).await.pop().expect("a request");
@@ -451,7 +436,7 @@ async fn a_complete_reads_the_server_first_and_reflect_shows_the_values() {
     let r = create(&kernel, meta).await;
     assert_eq!(r["id"], json!("v1"), "{r}");
     let before = call(&kernel, "v1", json!({"type": "reflect"})).await;
-    assert_eq!(before["max_tokens"], Value::Null, "{before}");
+    assert_eq!(before["kv"]["slots"], Value::Null, "{before}");
     call(
         &kernel,
         "v1",
@@ -460,17 +445,12 @@ async fn a_complete_reads_the_server_first_and_reflect_shows_the_values() {
     .await;
     let rec = helpers::agent_meta(&AgentId::from("v1"), &kernel);
     assert_eq!(
-        (
-            &rec["model"],
-            &rec["max_tokens"],
-            &rec["context_window"],
-            &rec["kv_slots"]
-        ),
-        (&json!(MODEL), &json!(65536), &json!(65536), &json!(1)),
+        (&rec["model"], &rec["context_window"], &rec["kv_slots"]),
+        (&json!(MODEL), &json!(65536), &json!(1)),
         "{rec:?}"
     );
     let after = call(&kernel, "v1", json!({"type": "reflect"})).await;
-    assert_eq!(after["max_tokens"], json!(65536), "{after}");
+    assert_eq!(after["context_window"], json!(65536), "{after}");
     assert_eq!(after["kv"]["slots"], json!(1), "{after}");
 }
 
@@ -481,7 +461,7 @@ async fn a_complete_the_server_cannot_answer_is_refused_naming_the_field() {
     let (srv, ep) = vllm(models(&[(MODEL, 1)]), String::new(), 404).await;
     let mut meta = rec(
         &ep,
-        json!({"model": MODEL, "max_tokens": 8000, "context_window": 8192}),
+        json!({"model": MODEL, "context_window": 8192}),
     );
     meta.insert("id".into(), json!("v1"));
     create(&kernel, meta).await;
@@ -538,6 +518,6 @@ async fn a_key_the_store_refuses_refuses_naming_the_first_field() {
     let e = server::read(&rec(&ep, json!({"model": MODEL})), &Refused)
         .await
         .unwrap_err();
-    assert_eq!(e.field, "max_tokens");
+    assert_eq!(e.field, "context_window");
     assert_eq!(e.message, "vllm_backend: the store refused the key");
 }

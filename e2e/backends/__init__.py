@@ -128,7 +128,8 @@ def _model_or_die(name: str) -> str:
 # RUNNER (meta) params — sampling knobs, distinct from CONNECTION (endpoint/key/
 # model). They live in JSON beside this file, NOT baked here: `sampling.default.json`
 # (committed defaults) overlaid by `sampling.json` (gitignored local override). The
-# vllm plug copies the ones vllm_backend takes as RECORD fields (see `_vllm`). No
+# vllm plug copies the ones vllm_backend sends (see `_vllm`); they are request knobs,
+# so `helpers.ai.split_record` puts them on the CHAT's record (#632). No
 # model-specific values in code.
 def _runner_params() -> dict[str, Any]:
     import json
@@ -209,10 +210,11 @@ def _vllm() -> Backend:
         extra["kv_overflow"] = overflow
     # The runner knobs from the JSON beside this file: `no_repeat_ngram_size`
     # and `repetition_penalty` are the measured fix for the CoT-repetition loop
-    # (verbatim-repeat rate 48x -> 0). vllm_backend takes them as RECORD fields.
+    # (verbatim-repeat rate 48x -> 0). They are request knobs: the chat's record
+    # carries them and sends them with each request (#632).
     #
     # `thinking_token_budget` is left to the backend's own default ON PURPOSE:
-    # on the record it is EXPLICIT, and an explicit budget refuses any call it
+    # on the chat it is EXPLICIT, and an explicit budget refuses any call it
     # could not fire on — every fold summary is bounded at its budget + 1024
     # tokens, below 8000, so all folds would be refused. The default adapts per
     # call instead (min(16000, max_tokens // 2)).

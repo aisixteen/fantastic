@@ -53,11 +53,10 @@ const BACKEND: &str = "ollama_backend";
 
 pub mod server;
 
-/// Default sampling temperature sent to ollama (overridable via the record's
-/// `temperature` field). ollama's own default is 0.8 (creative) — wrong for an
+/// Default sampling temperature sent to ollama (the calling chat's `temperature`
+/// knob overrides it, #632). ollama's own default is 0.8 (creative) — wrong for an
 /// agentic backend whose output is tool-calls + code. Mirrors the python
-/// canonical default (0.3 — precise, with a touch of variety); a record
-/// `temperature` overrides it.
+/// canonical default (0.3 — precise, with a touch of variety).
 pub const DEFAULT_TEMPERATURE: f64 = 0.3;
 
 /// Per-backend config: cli round-trip routing, parallel tool dispatch.
@@ -84,9 +83,10 @@ struct OllamaProvider {
     /// leaving the model to flail. Measured: raising it costs no throughput. The
     /// record's `num_ctx` lifts it; `None` = leave ollama's default.
     num_ctx: Option<u64>,
-    /// Generation cap (`num_predict`). Unbounded, a weak model can ramble for
-    /// thousands of tokens instead of emitting one action, blowing the send
-    /// timeout. Left off the record it is `DEFAULT_TURN_TOKENS` (#495). CAUTION on a
+    /// Generation cap (`num_predict`): the calling chat's `max_tokens` (#632). Unbounded,
+    /// a weak model can ramble for thousands of tokens instead of emitting one action,
+    /// blowing the send timeout. A chat that names none gets `DEFAULT_TURN_TOKENS`
+    /// (#495). CAUTION on a
     /// THINKING model: the cap is spent on reasoning tokens first, so too small a
     /// value truncates mid-thought and yields an EMPTY completion — pair it with
     /// `think:false`, or leave it unset.
@@ -147,7 +147,7 @@ impl Provider for OllamaProvider {
         if let Some(n) = self.num_ctx {
             options.insert("num_ctx".to_string(), json!(n));
         }
-        // A SIDE CALL'S OWN BOUND (a fold summary's budget) — else the record's.
+        // A SIDE CALL'S OWN BOUND (a fold summary's budget) — else the chat's.
         if let Some(n) = max_tokens {
             options.insert("num_predict".to_string(), json!(n));
         } else if let Some(n) = self.num_predict {
@@ -404,12 +404,6 @@ pub struct OllamaRecord {
     /// The context window ollama loads the model with.
     #[schemars(range(min = 1))]
     pub num_ctx: Option<i64>,
-    /// Sampling temperature.
-    #[schemars(default = "default_temperature")]
-    pub temperature: Option<f64>,
-    /// A turn's output budget (tokens).
-    #[schemars(range(min = 1), default = "default_num_predict")]
-    pub num_predict: Option<i64>,
     /// Turn the model's thinking channel on or off.
     pub think: Option<bool>,
     /// The read clock of the answer stream.
@@ -424,14 +418,6 @@ pub struct OllamaRecord {
     /// The fields every provider takes.
     #[serde(flatten)]
     pub provider: ProviderRecord,
-}
-
-fn default_temperature() -> Option<f64> {
-    Some(DEFAULT_TEMPERATURE)
-}
-
-fn default_num_predict() -> Option<i64> {
-    Some(DEFAULT_TURN_TOKENS)
 }
 
 fantastic_kernel::record!(OllamaRecord);
@@ -529,7 +515,7 @@ fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<Strin
         model,
         temperature: temperature_of(&meta),
         num_ctx: meta.get("num_ctx").and_then(Value::as_u64),
-        // a record that names none is bounded (#495): ollama's own default is no
+        // a chat that names none is bounded (#495): ollama's own default is no
         // cap at all
         num_predict: Some(num_predict_of(&meta)),
         think: meta.get("think").and_then(Value::as_bool),
@@ -540,13 +526,13 @@ fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<Strin
 }
 
 /// `reflect` — python `_make_reflect` + `ollama_backend/tools.py`'s
-/// `_reflect_extra`: the shared base body, then the sampling knobs.
+/// `_reflect_extra`: the shared base body, then the server's own knobs (the
+/// sampling is each chat's, #632).
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
     let mut out = verbs::reflect_base(agent_id, kernel, MAN, CFG.model_window);
     let meta = helpers::agent_meta(agent_id, kernel);
     // the record's values are typed by its declaration: what is named is shown as it is
-    out.insert("temperature".to_string(), json!(temperature_of(&meta)));
-    for key in ["num_ctx", "num_predict", "think"] {
+    for key in ["num_ctx", "think"] {
         out.insert(
             key.to_string(),
             meta.get(key).cloned().unwrap_or(Value::Null),
@@ -555,20 +541,19 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
     Value::Object(out)
 }
 
-/// The sampling temperature: the record's, else the declared default.
+/// The sampling temperature: the pass's (the calling chat's knob), else [`DEFAULT_TEMPERATURE`].
 fn temperature_of(meta: &Map<String, Value>) -> f64 {
-    RECORD
-        .get(meta, "temperature")
-        .and_then(|v| v.as_f64())
-        .expect("temperature declares its default")
+    meta.get("temperature")
+        .and_then(Value::as_f64)
+        .unwrap_or(DEFAULT_TEMPERATURE)
 }
 
-/// A turn's output bound: the record's `num_predict`, else the declared default.
+/// A turn's output bound (`num_predict`): the pass's `max_tokens` (the calling chat's
+/// knob), else [`DEFAULT_TURN_TOKENS`].
 fn num_predict_of(meta: &Map<String, Value>) -> u64 {
-    RECORD
-        .get(meta, "num_predict")
-        .and_then(|v| v.as_u64())
-        .expect("num_predict declares its default")
+    meta.get("max_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_TURN_TOKENS.unsigned_abs())
 }
 
 #[cfg(test)]

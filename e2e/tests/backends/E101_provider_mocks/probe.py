@@ -5,8 +5,8 @@ One mock per provider, and on the PACKAGED host of `RUNTIME` (python |
 rust), every call through `web_rest`, one provider agent per provider (and an `ai_chat.tools` chat completing through it) whose record
 names the mock's `url` and an env-backed credential ref pinned to its host. The
 record leaves to the server what the backend reads from it (vllm: model,
-max_tokens, context_window, kv_slots; ollama: model; anthropic: max_tokens,
-context_window), so each probe path is exercised. Per provider:
+context_window, kv_slots; ollama: model; anthropic: context_window, and the turn's
+max_tokens the chat names none of), so each probe path is exercised. Per provider:
 
   1. a turn answers the mock's text, and the server-read fields land on the record;
   2. the key arrives on EVERY request, in the provider's header;
@@ -55,14 +55,13 @@ DONE = '<call name="done"></call>'
 #: fields the backend reads from the server)
 PROVIDERS = {
     "vllm": (VllmMock, "vllm_backend.tools", {"kv_overflow": "evict"},
-             {"model": "mock-vllm", "max_tokens": 260000, "context_window": 262144,
-              "kv_slots": 4}),
+             {"model": "mock-vllm", "context_window": 262144, "kv_slots": 4}),
     "ollama": (OllamaMock, "ollama_backend.tools", {"context_window": 32768},
                {"model": "mock-ollama"}),
     "responses": (ResponsesMock, "responses_backend.tools",
                   {"model": "mock-responses", "context_window": 32768}, {}),
     "anthropic": (AnthropicMock, "anthropic_backend.tools", {"model": "mock-anthropic"},
-                  {"max_tokens": 260000, "context_window": 262144}),
+                  {"context_window": 262144}),
 }
 
 

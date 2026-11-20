@@ -1,7 +1,7 @@
 //! What a record leaves out is READ FROM THE SERVER — python
 //! `vllm_backend/server.py`, text for text.
 //!
-//! `model`, `max_tokens`, `context_window` and `kv_slots` may be left off the
+//! `model`, `context_window` and `kv_slots` may be left off the
 //! record. Before `complete`, the verb that runs a turn, every one still absent
 //! is read from the server the record's `endpoint` names and WRITTEN BACK to the
 //! record — it then holds a measured value like one the operator set: reflect
@@ -10,11 +10,11 @@
 //!
 //! - `model` — the ONE model the server serves (`GET {endpoint}/models`); a server
 //!   serving several names them, and the record must pick one.
-//! - `context_window` — that model's `max_model_len` (same list). `max_tokens` —
-//!   260000, plus the record's `thinking_token_budget` when it sets one, never above
-//!   `max_model_len` (#495). A main turn whose `max_tokens` could overrun the window
-//!   sends NO `max_tokens`, so the server bounds the reply by what the prompt
-//!   leaves.
+//! - `context_window` — that model's `max_model_len` (same list). A turn's
+//!   `max_tokens` is the chat's (#632); a chat that names none gets 260000, plus its
+//!   `thinking_token_budget` when it sets one, never above the window (#495). A main
+//!   turn whose `max_tokens` could overrun the window sends NO `max_tokens`, so the
+//!   server bounds the reply by what the prompt leaves.
 //! - `kv_slots` — how many full-length conversations the server's KV cache holds:
 //!   `floor(kv_cache_max_concurrency)` of the `vllm:cache_config_info` line on the
 //!   server's Prometheus page — vLLM's own figure for requests of `max_model_len`
@@ -25,7 +25,6 @@
 //! A server that does not answer refuses the verb, naming the field, the URL and
 //! what came back. The key goes only to the endpoint's host, as on a chat request.
 
-use fantastic_ai_core::constants::default_max_tokens;
 use fantastic_ai_core::credentials::{key_reader, KeySource};
 use crate::seconds;
 use fantastic_ai_core::helpers;
@@ -36,7 +35,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// The fields a record may leave to the server, in the order they are read.
-pub const INFERRED: [&str; 4] = ["model", "max_tokens", "context_window", "kv_slots"];
+pub const INFERRED: [&str; 3] = ["model", "context_window", "kv_slots"];
 /// The verbs that run a turn of the model — the ones the server is read for.
 
 const INFO: &str = "vllm:cache_config_info";
@@ -328,19 +327,9 @@ pub async fn read(
                 entry.get("id").cloned().unwrap_or(Value::Null),
             );
         }
-        for f in ["max_tokens", "context_window"] {
-            if want.contains(&f) {
-                let window = max_model_len(&entry, &url, f)?;
-                // the window is the model's MAXIMUM; the output budget of a record
-                // that names none is bounded below it (#495)
-                let n = if f == "max_tokens" {
-                    let budget = rec.get("thinking_token_budget").and_then(Value::as_i64);
-                    default_max_tokens(budget, window)
-                } else {
-                    window
-                };
-                out.insert(f.into(), json!(n));
-            }
+        if want.contains(&"context_window") {
+            let window = max_model_len(&entry, &url, "context_window")?;
+            out.insert("context_window".into(), json!(window));
         }
     }
     if want.contains(&"kv_slots") {

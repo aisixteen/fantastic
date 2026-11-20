@@ -82,7 +82,7 @@ def admit(hk: HostKernel, target: str, who: str, verbs) -> None:
 
 def provider(hk: HostKernel, pid: str, mock: VllmMock, model: str, admits: dict) -> None:
     rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=pid,
-                    endpoint=mock.url, model=model, max_tokens=8192, context_window=262144,
+                    endpoint=mock.url, model=model, context_window=262144,
                     kv_slots=4, kv_overflow="evict", memory_store_id="memory",
                     can_call={"$self": "*", "memory": "*"},
                     callable_by={"$self": "*", "$parent": "*", **admits})
@@ -91,7 +91,7 @@ def provider(hk: HostKernel, pid: str, mock: VllmMock, model: str, admits: dict)
 
 def chat(hk: HostKernel, cid: str, provider_id: str, model: str, can_call: dict) -> None:
     rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=cid,
-                    provider_id=provider_id, model=model,
+                    provider_id=provider_id, model=model, max_tokens=8192,
                     context_window=262144, memory_store_id="memory",
                     can_call={"$self": "*", "memory": "*", **can_call},
                     callable_by={"$self": "*", "$parent": "*", "rest": "*"})

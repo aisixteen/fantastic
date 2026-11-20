@@ -51,7 +51,7 @@ pub const HANDLER_MODULE: &str = "responses_backend.tools";
 /// The name a required-field refusal carries.
 const BACKEND: &str = "responses_backend";
 
-/// Per-turn output budget (`max_output_tokens`): the declared default of the record's `max_tokens`.
+/// Per-turn output budget (`max_output_tokens`) for a chat that names no `max_tokens` (#632).
 pub const DEFAULT_MAX_TOKENS: i64 = 8192;
 
 /// EDGE TRANSPORT FAILURES. A 4xx, or any 5xx
@@ -263,7 +263,7 @@ impl Provider for ResponsesProvider {
         let mut body = Map::new();
         body.insert("model".into(), json!(self.model));
         body.insert("input".into(), json!(items));
-        // A SIDE CALL'S OWN BOUND (a fold summary's budget) — else the record's.
+        // A SIDE CALL'S OWN BOUND (a fold summary's budget) — else the chat's.
         match max_tokens.filter(|n| *n != 0) {
             Some(n) => body.insert("max_output_tokens".into(), json!(n)),
             None => body.insert("max_output_tokens".into(), json!(self.max_tokens)),
@@ -663,9 +663,6 @@ pub struct ResponsesRecord {
     /// The read clock of the answer stream.
     #[serde(flatten)]
     pub clock: fantastic_ai_core::record::StreamClock,
-    /// A turn's output budget (tokens).
-    #[schemars(range(min = 1), default = "default_max_tokens")]
-    pub max_tokens: Option<i64>,
     /// How the conversation is kept in the model's view.
     pub caching: Option<fantastic_ai_core::record::CachingMode>,
     /// Runner params merged verbatim into the request body.
@@ -679,9 +676,6 @@ pub struct ResponsesRecord {
     pub provider: ProviderRecord,
 }
 
-fn default_max_tokens() -> Option<i64> {
-    Some(DEFAULT_MAX_TOKENS)
-}
 
 fantastic_kernel::record!(ResponsesRecord);
 
@@ -763,10 +757,11 @@ fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<Strin
         (Ok(e), Ok(m)) => (e, m),
         (Err(e), _) | (_, Err(e)) => return Arc::new(Unconfigured(e)),
     };
-    let max_tokens = RECORD
-        .get(&meta, "max_tokens")
-        .and_then(|v| v.as_i64())
-        .expect("max_tokens declares its default");
+    // the calling chat's knob, else the default
+    let max_tokens = meta
+        .get("max_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(DEFAULT_MAX_TOKENS);
     let raw_sampling = meta.get("sampling").and_then(Value::as_object);
     let mut owned: Vec<&str> = raw_sampling
         .map(|m| {
@@ -779,8 +774,8 @@ fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<Strin
     if !owned.is_empty() {
         owned.sort_unstable();
         return Arc::new(Unconfigured(ProviderError::value_error(format!(
-            "responses_backend: `sampling` may not set {} — those are the record's \
-             (`model`, `max_tokens`) or the provider's own",
+            "responses_backend: `sampling` may not set {} — those are the pass's \
+             (`model`, the chat's `max_tokens`) or the provider's own",
             owned.join(", ")
         ))));
     }

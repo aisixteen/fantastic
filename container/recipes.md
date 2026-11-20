@@ -105,8 +105,9 @@ model **calls other agents as tools** and routes its own output.
 
 ```text
 HOST:      ai backend (vllm_backend | responses_backend | ollama_backend;
-             endpoint + model on the record — vllm also max_tokens, kv_slots,
-             kv_overflow)
+             endpoint + model on the record — vllm also kv_slots,
+             kv_overflow; the request knobs, max_tokens among them, are the
+             chat's)
              + ram_store (its conversation; memory_store_id=…)
 FRONTEND:  ai_view (chat panel)  ── by id ──▶ the backend
 ```
@@ -117,8 +118,8 @@ signature, so the model **routes its own result** (no `reply_to` primitive; 1:N
 falls out). Tell it the ids of an `exec_bridge` and a `file_bridge` and it calls them as
 tools. A recursion guard keeps AI→AI chains safe.
 
-**Hand to an LLM:** *"Create a `vllm_backend` (endpoint, model, max_tokens, kv_slots,
-kv_overflow on its record; its key, if the server wants one: the `vllm` ref in the
+**Hand to an LLM:** *"Create a `vllm_backend` (endpoint, model, kv_slots,
+kv_overflow on its record; max_tokens and the sampling on the chat's; its key, if the server wants one: the `vllm` ref in the
 `creds` credential_store, named in `credentials`); attach an `ai_view`. Here are the
 ids of an exec_bridge and a notes file_bridge — use them as tools."*
 

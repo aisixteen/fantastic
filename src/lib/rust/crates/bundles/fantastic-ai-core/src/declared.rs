@@ -337,8 +337,10 @@ pub struct Complete {
     pub image: Option<ImageRef>,
     /// The model of this pass; absent, this provider's default model.
     pub model: Option<String>,
-    /// This call's output bound; absent, the record's.
+    /// A side call's own output bound (a fold summary); absent, the pass is the chat's turn, bounded by its knobs' max_tokens.
     pub max_tokens: Option<i64>,
+    /// The calling chat's request knobs (temperature, top_p, …, max_tokens): this pass's request carries them; absent ones are the backend's defaults.
+    pub knobs: Option<crate::record::RequestKnobs>,
     /// Tags every token event.
     #[schemars(length(min = 1))]
     pub rid: String,

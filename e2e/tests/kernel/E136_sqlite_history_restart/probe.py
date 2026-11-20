@@ -110,13 +110,13 @@ def main() -> int:
              f"create the sqlite store from its record's path: {str(rec)[:200]}")
         # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it
         rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
-                        endpoint=m.url, model=MODEL, max_tokens=8192,
+                        endpoint=m.url, model=MODEL,
                         context_window=262144, kv_slots=4, kv_overflow="evict",
                         memory_store_id=STORE, can_call={"$self": "*", STORE: "*"},
                         callable_by={"$self": "*", "$parent": "*", AI: "*"})
         need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
-                        provider_id=PROV, model=MODEL,
+                        provider_id=PROV, model=MODEL, max_tokens=8192,
                         context_window=262144, memory_store_id=STORE,
                         can_call={"$self": "*", STORE: "*", PROV: ["complete", "watch", "reflect"]},
                         callable_by={"$self": "*", "$parent": "*", "rest": "*"})

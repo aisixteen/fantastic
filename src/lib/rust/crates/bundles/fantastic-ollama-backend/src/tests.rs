@@ -348,11 +348,24 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
     assert_eq!(rows.last().unwrap()["head"], "ack");
 }
 
+/// Set the paired chat's request knobs (#632: they are the chat's, sent with each pass).
+async fn chat_knobs(kernel: &Arc<Kernel>, backend: &AgentId, knobs: Value) {
+    let chat = fantastic_ai_core::remote_provider::pair_chat(kernel, backend).await;
+    let mut payload = json!({"type": "update_agent", "id": chat.as_str()});
+    payload.as_object_mut().unwrap().extend(knobs.as_object().cloned().unwrap_or_default());
+    let r = kernel
+        .send(vec![Item::new(AgentId::from("kernel_state"), payload)])
+        .await
+        .remove(0)
+        .result;
+    assert!(r.get("error").is_none(), "{r}");
+}
+
 #[tokio::test]
 async fn sends_temperature_default_and_override() {
     // The backend ALWAYS sends `options.temperature` to ollama (ollama's own
     // default 0.8 is wrong for an agentic backend). Default = DEFAULT_TEMPERATURE
-    // (0.3), overridable via the record's `temperature` field; reflect surfaces it.
+    // (0.3); the chat's `temperature` knob overrides it (#632).
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;
     let body = ndjson_body(&[json!({"message": {"content": "ok"}, "done": true})]);
@@ -364,57 +377,24 @@ async fn sends_temperature_default_and_override() {
     let (kernel, backend) = mk_kernel(&tmp, "temp", &server.uri()).await;
     let _rx = rebind_backend_inbox(&kernel, &backend);
 
-    // default: reflect + the actual request both carry 0.3.
-    let _ = kernel
-        .send(vec![Item::new(
-            fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
-            json!({"type":"send","text":"hi","client_id":"c"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let r = kernel
-        .send(vec![Item::new(backend.clone(), json!({"type": "reflect"}))])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r["temperature"], json!(DEFAULT_TEMPERATURE));
+    // default: the request carries 0.3.
+    let _ = send_once(&kernel, &backend, "c").await;
     let reqs = server.received_requests().await.unwrap();
     let sent: Value = serde_json::from_slice(&reqs[0].body).unwrap();
     assert_eq!(sent["options"]["temperature"], json!(DEFAULT_TEMPERATURE));
 
-    // override via the record: reflect + the next request both carry it.
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type":"update_agent","id": backend.as_str(), "temperature": 0.15}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let r2 = kernel
-        .send(vec![Item::new(backend.clone(), json!({"type": "reflect"}))])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r2["temperature"], json!(0.15));
-    let _ = kernel
-        .send(vec![Item::new(
-            fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
-            json!({"type":"send","text":"hi2","client_id":"c"}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    // the chat's knob: the next request carries it.
+    chat_knobs(&kernel, &backend, json!({"temperature": 0.15})).await;
+    let _ = send_once(&kernel, &backend, "c").await;
     let reqs = server.received_requests().await.unwrap();
     let last: Value = serde_json::from_slice(&reqs.last().unwrap().body).unwrap();
     assert_eq!(last["options"]["temperature"], json!(0.15));
 }
 
-/// The `num_predict` a request carries when the record is made with `extra` (#495).
+/// The `num_predict` a request carries when the chat's knobs are `knobs` (#495, #632).
 /// The answer ends the turn (a `done` call), so no later pass of it reaches a port
 /// that another case's server has since taken.
-async fn sent_num_predict(tag: &str, extra: Value) -> Value {
+async fn sent_num_predict(tag: &str, knobs: Value) -> Value {
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;
     let body = ndjson_body(&[
@@ -425,8 +405,9 @@ async fn sent_num_predict(tag: &str, extra: Value) -> Value {
         .respond_with(ResponseTemplate::new(200).set_body_string(body))
         .mount(&server)
         .await;
-    let (kernel, backend) = mk_kernel_with(&tmp, tag, &server.uri(), extra).await;
+    let (kernel, backend) = mk_kernel_with(&tmp, tag, &server.uri(), json!({})).await;
     let _rx = rebind_backend_inbox(&kernel, &backend);
+    chat_knobs(&kernel, &backend, knobs).await;
     send_once(&kernel, &backend, "c_np").await;
     let reqs = server.received_requests().await.unwrap();
     let sent: Value = serde_json::from_slice(&reqs[0].body).unwrap();
@@ -434,15 +415,15 @@ async fn sent_num_predict(tag: &str, extra: Value) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_record_with_no_num_predict_sends_the_bounded_default() {
+async fn a_chat_with_no_max_tokens_sends_the_bounded_num_predict() {
     assert_eq!(sent_num_predict("npd", json!({})).await, json!(260_000));
-    // the record's own wins, above or below the default
+    // the chat's own max_tokens is ollama's num_predict, above or below the default
     assert_eq!(
-        sent_num_predict("npw", json!({"num_predict": 200})).await,
+        sent_num_predict("npw", json!({"max_tokens": 200})).await,
         json!(200)
     );
     assert_eq!(
-        sent_num_predict("npx", json!({"num_predict": 40000})).await,
+        sent_num_predict("npx", json!({"max_tokens": 40000})).await,
         json!(40000)
     );
 }
@@ -662,8 +643,8 @@ async fn an_empty_model_fails_loud_in_chat() {
 
 #[tokio::test]
 async fn reflect_extras_match_python() {
-    // python `_reflect_extra`: temperature defaults to the provider's 0.3, and
-    // `num_ctx`/`num_predict`/`think` are null unless SET on the record. They
+    // python `_reflect_extra`: `num_ctx`/`think` are null unless SET on the record
+    // (the sampling is each chat's, #632). They
     // land AFTER `generating`, exactly as `out.update(extra)` does.
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;
@@ -673,7 +654,7 @@ async fn reflect_extras_match_python() {
         .await
         .remove(0)
         .result;
-    let keys: Vec<String> = r.as_object().unwrap().keys().take(13).cloned().collect();
+    let keys: Vec<String> = r.as_object().unwrap().keys().take(11).cloned().collect();
     assert_eq!(
         keys,
         vec![
@@ -686,9 +667,7 @@ async fn reflect_extras_match_python() {
             "memory_store_id",
             "credentials",
             "generating",
-            "temperature",
             "num_ctx",
-            "num_predict",
             "think",
         ]
         .into_iter()
@@ -697,9 +676,7 @@ async fn reflect_extras_match_python() {
         "{r:#?}"
     );
     assert_eq!(r["sentence"], crate::MAN);
-    assert_eq!(r["temperature"], 0.3);
     assert_eq!(r["num_ctx"], Value::Null);
-    assert_eq!(r["num_predict"], Value::Null);
     assert_eq!(r["think"], Value::Null);
 
     // Set them: what the record names is shown as it is.
@@ -707,8 +684,7 @@ async fn reflect_extras_match_python() {
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": backend.as_str(),
-                   "temperature": 0.7, "num_ctx": 4096, "num_predict": 200,
-                   "think": false}),
+                   "num_ctx": 4096, "think": false}),
         )])
         .await;
     let r = kernel
@@ -716,9 +692,7 @@ async fn reflect_extras_match_python() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r["temperature"], 0.7);
     assert_eq!(r["num_ctx"], 4096);
-    assert_eq!(r["num_predict"], 200);
     assert_eq!(r["think"], false);
 }
 
@@ -987,15 +961,16 @@ async fn every_pass_opens_its_own_connection() {
     assert_eq!(log.conns(), heads.len(), "no pooled connection is reused");
 }
 
-/// The record's `system_prompt` is refused AT THE WRITE unless it is a non-blank
+/// The chat's `system_prompt` is refused AT THE WRITE unless it is a non-blank
 /// string; null clears it. Python `ai_core/schema.py:validate`.
 #[tokio::test]
 async fn a_bad_system_prompt_is_refused_at_the_write() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "sp", "http://127.0.0.1:1").await;
+    let chat = fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await;
     let write = |v: Value| {
         let kernel = Arc::clone(&kernel);
-        let id = backend.as_str().to_string();
+        let id = chat.as_str().to_string();
         async move {
             kernel
                 .send(vec![Item::new(

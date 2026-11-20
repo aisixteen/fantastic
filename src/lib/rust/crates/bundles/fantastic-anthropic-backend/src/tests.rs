@@ -417,22 +417,15 @@ fn at_the_write(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
 #[test]
 fn a_write_the_backend_cannot_honour_is_refused() {
     for (meta, fragment) in [
-        (
-            json!({"max_tokens": 0}),
-            "max_tokens",
-        ),
         (json!({"thinking_budget": 512}), "must be int >= 1024"),
+        // the request knobs are the chat's (#632)
         (
-            json!({"thinking_budget": 4000, "max_tokens": 4000}),
-            "not below max_tokens=4000",
-        ),
-        (
-            json!({"temperature": "hot"}),
-            "temperature",
+            json!({"temperature": 0.2}),
+            "no record field 'temperature'",
         ),
         (
             json!({"endpoint": "https://api.test/v1/chat"}),
-            "max_tokens is left to the API, but the endpoint",
+            "context_window is left to the API, but the endpoint",
         ),
     ] {
         let err = at_the_write(meta.as_object().unwrap(), &rec(json!({}))).unwrap_or_default();
@@ -593,12 +586,10 @@ async fn a_send_reads_the_api_first_and_a_no_turn_verb_reads_nothing() {
         json!({"type": "complete", "messages": [{"role": "user", "content": "hi"}], "rid": "r"}),
     )
     .await;
+    // the window is the provider's, written back; a turn's output budget is the pass's
     let rec = helpers::agent_meta(&AgentId::from("a1"), &kernel);
-    assert_eq!(
-        (&rec["max_tokens"], &rec["context_window"]),
-        (&json!(64000), &json!(200_000)),
-        "{rec:?}"
-    );
+    assert_eq!(rec["context_window"], json!(200_000), "{rec:?}");
+    assert!(rec.get("max_tokens").is_none(), "{rec:?}");
 }
 
 // ─── the bounded default (#495) ─────────────────────────────────────────────
@@ -768,11 +759,9 @@ async fn a_thinking_budget_adds_to_the_default() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_record_max_tokens_wins() {
-    assert_eq!(
-        sent_max_tokens(MODEL, json!({"max_tokens": 40000}), 64000).await,
-        json!(40000)
-    );
+async fn the_chats_max_tokens_and_temperature_ride_the_request() {
+    let b = sent_body(MODEL, json!({}), 64000, json!({"max_tokens": 40000, "temperature": 0.4})).await;
+    assert_eq!((b["max_tokens"].clone(), b["temperature"].clone()), (json!(40000), json!(0.4)), "{b}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1603,24 +1592,6 @@ async fn reflect_carries_the_usage_and_the_caching_mode() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reflect_shows_cache_primer_until_only_when_set() {
-    let tmp = TempDir::new().unwrap();
-    let endpoint = "http://unused.test/v1/messages";
-    let set = mk_with(
-        &tmp,
-        endpoint,
-        json!({"caching": "provider_cache", "cache_primer_until": 3}),
-    )
-    .await;
-    let r = call(&set, "a1", json!({"type": "reflect"})).await;
-    assert_eq!(r["cache_primer_until"], json!(3), "{r}");
-    let tmp = TempDir::new().unwrap();
-    let unset = mk_with(&tmp, endpoint, json!({"caching": "provider_cache"})).await;
-    let r = call(&unset, "a1", json!({"type": "reflect"})).await;
-    assert!(r.get("cache_primer_until").is_none(), "{r}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deleting_an_agent_drops_its_counts() {
     let tmp = TempDir::new().unwrap();
     let endpoint = "http://unused.test/v1/messages";
@@ -1649,7 +1620,6 @@ fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
     let check = |meta: Value| at_the_write(meta.as_object().unwrap(), &rec(json!({})));
     assert_eq!(check(json!({"caching": "provider_cache"})), None);
     assert_eq!(check(json!({"caching": "none"})), None);
-    assert_eq!(check(json!({"cache_primer_until": 12})), None);
     assert_eq!(
         check(json!({"prices": {"m": {"input": 3, "output": 15}}})),
         None
@@ -1689,7 +1659,7 @@ fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
         .iter()
         .filter_map(|f| f["name"].as_str())
         .collect();
-    assert!(names.contains(&"caching") && names.contains(&"cache_primer_until"));
+    assert!(names.contains(&"caching"));
     assert!(names.contains(&"effort") && names.contains(&"thinking_display"));
     assert!(!names.contains(&"prompt_cache"));
     assert!(names.contains(&"prices"));
@@ -1706,7 +1676,7 @@ fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
 /// A kernel with the agent [`STALL_AGENT`] on a memory store, its record naming `endpoint` and
 /// the given extra fields — the whole turn runs through ai-core, the read clock
 /// included (#177).
-async fn mk_with_store(tmp: &TempDir, endpoint: &str, extra: Value) -> Arc<Kernel> {
+async fn mk_with_store(tmp: &TempDir, endpoint: &str, extra: Value, chat_extra: Value) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
 
     kernel.bundles.register(
@@ -1739,7 +1709,6 @@ async fn mk_with_store(tmp: &TempDir, endpoint: &str, extra: Value) -> Arc<Kerne
         "id": STALL_AGENT,
         "endpoint": endpoint,
         "model": MODEL,
-        "max_tokens": 1000,
         "context_window": 200_000,
     });
     for (k, v) in memory
@@ -1750,6 +1719,15 @@ async fn mk_with_store(tmp: &TempDir, endpoint: &str, extra: Value) -> Arc<Kerne
     }
     let r = call(&kernel, "kernel_state", payload).await;
     assert_eq!(r["id"], json!(STALL_AGENT), "{r}");
+    // the turn's output budget is the chat's (#632): named, so no model entry is read; the
+    // chat's own fields (`chat_extra`) are its record's too
+    let chat = fantastic_ai_core::remote_provider::pair_chat(&kernel, &AgentId::from(STALL_AGENT)).await;
+    let mut up = json!({"type": "update_agent", "id": chat.as_str(), "max_tokens": 1000});
+    for (k, v) in chat_extra.as_object().cloned().unwrap_or_default() {
+        up[k] = v;
+    }
+    let r = call(&kernel, "kernel_state", up).await;
+    assert!(r.get("error").is_none(), "{r}");
     kernel
 }
 
@@ -1769,7 +1747,8 @@ async fn a_stalled_api_stream_ends_the_turn_with_an_error_row() {
     let kernel = mk_with_store(
         &tmp,
         &ep,
-        json!({"stream_idle_seconds": 0.2, "misfire_limit": 2}),
+        json!({"stream_idle_seconds": 0.2}),
+        json!({"misfire_limit": 2}),
     )
     .await;
     let started = std::time::Instant::now();
@@ -2013,7 +1992,7 @@ async fn boot_disk(tmp: &TempDir) -> Arc<Kernel> {
 /// Creates agent `id` on a disk kernel, pointed at `endpoint`, and writes it down.
 async fn create_disk_agent(kernel: &Arc<Kernel>, id: &str, endpoint: &str, extra: Value) {
     let mut payload = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE, "id": id});
-    let mut record = rec(json!({"max_tokens": 8000}));
+    let mut record = rec(json!({}));
     record.extend(extra.as_object().cloned().unwrap_or_default());
     record.insert("endpoint".into(), json!(endpoint));
     for (k, v) in record {
@@ -2038,15 +2017,12 @@ fn turn_events(out: i64) -> String {
     sse(&ev)
 }
 
-/// One turn through the agent's own provider, as a send runs it, stream drained.
+/// One turn through the agent's own provider, as a send runs it (the chat's `max_tokens`
+/// laid over the record), stream drained.
 async fn turn(kernel: &Arc<Kernel>, id: &str) {
-    let p = build_provider_with(
-        &AgentId::from(id),
-        kernel,
-        helpers::agent_meta(&AgentId::from(id), kernel),
-        None,
-        Images::default(),
-    );
+    let mut pass = helpers::agent_meta(&AgentId::from(id), kernel);
+    pass.insert("max_tokens".into(), json!(8000));
+    let p = build_provider_with(&AgentId::from(id), kernel, pass, None, Images::default());
     let msgs = [json!({"role": "user", "content": "hi"})];
     let mut s = p
         .chat(&msgs, None)
@@ -2084,7 +2060,7 @@ async fn usage_survives_a_restart() {
 async fn usage_survives_a_restart_through_the_params_store() {
     let tmp = TempDir::new().unwrap();
     let (_srv, ep) = api(200, turn_events(35)).await;
-    let kernel = mk_unbounded_store(&tmp, &ep, "u_store", json!({"max_tokens": 8000})).await;
+    let kernel = mk_unbounded_store(&tmp, &ep, "u_store", json!({})).await;
     turn(&kernel, "u_store").await;
     assert!(
         !usage_file_of(&AgentId::from("u_store"), &kernel).is_some_and(|p| p.is_file()),
@@ -2542,6 +2518,7 @@ async fn complete_as(kernel: &Arc<Kernel>, provider: &str, chat: &str) {
         kernel,
         provider,
         json!({"type": "complete", "rid": format!("{chat}~1"), "model": MODEL,
+               "knobs": {"max_tokens": 8000},
                "messages": [{"role": "user", "content": "hi"}]}),
     )
     .await;

@@ -187,13 +187,13 @@ def main() -> int:
                         callable_by={"$self": "*", "$parent": "*", AI: "*"})
         need(rec.get("id") == BUNDLES, f"create {BUNDLES}: {short(rec)}")
         rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
-                        endpoint=m.url, model=MODEL, max_tokens=8192,
+                        endpoint=m.url, model=MODEL,
                         context_window=262144, kv_slots=4, kv_overflow="evict",
                         memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
                         callable_by={"$self": "*", "$parent": "*", AI: "*"})
         need(rec.get("id") == PROV, f"create {PROV}: {short(rec)}")
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
-                        provider_id=PROV, model=MODEL, context_window=262144,
+                        provider_id=PROV, model=MODEL, max_tokens=8192, context_window=262144,
                         memory_store_id="memory", can_call=can,
                         callable_by={"$self": "*", "$parent": "*", "rest": "*"})
         need(rec.get("id") == AI, f"create {AI}: {short(rec)}")

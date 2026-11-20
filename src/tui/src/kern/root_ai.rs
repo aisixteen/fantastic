@@ -81,11 +81,11 @@ impl Backend {
     /// What the server decides — cleared on a re-point, so the new server is read.
     fn from_server(&self) -> &'static [&'static str] {
         match self {
-            Backend::Vllm { .. } => &["model", "context_window", "max_tokens", "kv_slots", "metrics_url"],
+            Backend::Vllm { .. } => &["model", "context_window", "kv_slots", "metrics_url"],
             // only the model: ollama's loaded window is not in its API
             Backend::Ollama { .. } => &["model"],
             Backend::Responses { .. } => &[],
-            Backend::Anthropic { .. } => &["context_window", "max_tokens"],
+            Backend::Anthropic { .. } => &["context_window"],
         }
     }
 }
