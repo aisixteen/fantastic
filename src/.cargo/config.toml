@@ -1,5 +1,15 @@
-# The product workspace's build environment. The Apple Foundation Models
-# backend links a Swift static library that needs macOS 14 (libswift_Concurrency):
-# below that the binary aborts in dyld, so the build refuses loud.
+# The build environment of every workspace under `src`: the product workspace
+# here, the kernel workspace (`lib/rust`, whose own config adds to this one) and
+# the desktop app (`app`). Cargo reads this file from any directory below `src`.
+
+# The Apple Foundation Models backend links a Swift static library that needs
+# macOS 14 (libswift_Concurrency): below that the binary aborts in dyld, so the
+# build refuses loud.
 [env]
 MACOSX_DEPLOYMENT_TARGET = "14.0"
+
+# A dependency version is picked only once it has been published for 14 days
+# (#661, Cargo 1.100): resolving skips any newer one. A version already in a
+# lockfile is kept.
+[registry]
+global-min-publish-age = "14 days"
