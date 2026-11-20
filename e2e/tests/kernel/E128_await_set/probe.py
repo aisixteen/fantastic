@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -51,6 +52,8 @@ LEAD = "lead"
 WORKERS = ["w1", "w2", "w3"]
 LABEL = "E128"
 TOKEN = "E128-" + secrets.token_hex(4)
+# the local-time head each message opens with (#653): the request is read past it
+TS_HEAD = re.compile(r"^\[\d{4}-\d\d-\d\d \d\d:\d\d [+-]\d\d:\d\d\]\n")
 PROVS = {a: f"{a}_prov" for a in (LEAD, *WORKERS)}  # each chat's provider
 
 
@@ -208,7 +211,7 @@ def main() -> int:
              and all(d.get("state") == "done" for d in done),
              f"done holds w1..w3 in order with R1..R3: {done!r}")
         # in the last request's whole history: ONE combined message, and no report
-        hist = [m.get("content") if isinstance(m.get("content"), str) else json.dumps(m.get("content"))
+        hist = [TS_HEAD.sub("", m.get("content")) if isinstance(m.get("content"), str) else json.dumps(m.get("content"))
                 for m in ((turns[-1]["body"].get("messages") or []) if turns else []) if m.get("role") == "user"]
         need(sum(1 for t in hist if combined(t)) == 1,
              f"the lead's history holds the combined message once: {sum(1 for t in hist if combined(t))}")
