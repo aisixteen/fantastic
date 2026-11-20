@@ -112,14 +112,18 @@ impl From<crate::assembly::BlockFail> for GenFailure {
     }
 }
 
-/// Project the message list to what the model actually reads — its role and its
-/// text; every other key is stripped.
+/// Project the message list to what the model actually reads — its role, and its
+/// text under the head of its visible attributes ([`crate::row_attrs::VISIBLE`]);
+/// every other key is stripped.
 pub(crate) fn render_for_model(messages: &[Value]) -> Vec<Value> {
     messages
         .iter()
         .map(|m| {
             let role = m.get("role").cloned().unwrap_or(Value::Null);
-            let content = m.get("content").cloned().unwrap_or_else(|| json!(""));
+            let content = match m.get("content") {
+                Some(Value::String(_)) | None => json!(crate::row_attrs::model_text(m)),
+                Some(other) => other.clone(),
+            };
             let mut out = json!({"role": role, "content": content});
             // the image parts of a message whose model is to see them (#622)
             if let Some(images) = crate::images::parts_of(m) {
@@ -241,6 +245,12 @@ pub async fn run_generation(
         caching,
     )
     .await?;
+    // THE INCOMING MESSAGE IS WRITTEN NOW: the model reads this `ts` at its head, and
+    // its row keeps the same one, so the next request renders it byte for byte the same
+    let incoming_ts = json!(crate::helpers::now_secs());
+    if let Some(last) = messages.last_mut() {
+        last["attributes"]["ts"] = incoming_ts.clone();
+    }
     // KEEP (#641): a reply that will fold after the answer carries the call that keeps
     // what the model needs of it
     if caching.folds() {
@@ -507,7 +517,11 @@ pub async fn run_generation(
     let mut next_request = None;
     let new_turns = vec![
         crate::row_attrs::with_source(
-            incoming_row_of(state, user_text, in_id, in_parent),
+            {
+                let mut row = incoming_row_of(state, user_text, in_id, in_parent);
+                row["attributes"]["ts"] = incoming_ts;
+                row
+            },
             &incoming_source(state),
         ),
         // STRIPPED — the deliberation is not part of the conversation. The RAW
@@ -529,8 +543,8 @@ pub async fn run_generation(
             if let Some(m) = row.as_object_mut() {
                 m.extend(crate::think::thinking_fields(&last_text));
                 // stored in `attributes` and returned by the retrieval verbs, never
-                // rendered into a request (`render_for_model` carries role and content
-                // only)
+                // rendered into a request (`render_for_model` renders only the
+                // declared visible ones, `crate::row_attrs::VISIBLE`)
                 let mut attrs = Map::new();
                 let usage = usage_row(&provider.report());
                 // WHAT SERVED IT: the provider agent (the chat itself when it names

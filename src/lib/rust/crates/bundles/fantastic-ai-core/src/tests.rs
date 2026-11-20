@@ -2486,6 +2486,7 @@ async fn a_dead_turn_is_discarded_and_rerolled() {
     let last = incoming
         .last()
         .and_then(|m| m["content"].as_str())
+        .map(crate::row_attrs::without_head)
         .unwrap_or("")
         .to_string();
     assert!(last.starts_with("[no answer]"), "{last}");
@@ -7119,7 +7120,8 @@ mod images;
 fn last_in(s: &MockScript, n: usize) -> String {
     s.request_messages(n)
         .last()
-        .and_then(|m| m["content"].as_str().map(str::to_string))
+        .and_then(|m| m["content"].as_str())
+        .map(|c| crate::row_attrs::without_head(c).to_string())
         .unwrap_or_default()
 }
 

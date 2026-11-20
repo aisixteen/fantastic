@@ -356,6 +356,7 @@ fn last_assistant(s: &Arc<SlowScript>, n: usize) -> String {
         .rev()
         .find(|m| m["role"] == "assistant")
         .and_then(|m| m["content"].as_str())
+        .map(crate::row_attrs::without_head)
         .expect("an assistant message")
         .to_string()
 }
@@ -922,6 +923,7 @@ async fn a_message_carries_the_stream_it_was_previewed_as() {
         .request(0)
         .last()
         .and_then(|m| m["content"].as_str())
+        .map(crate::row_attrs::without_head)
         .expect("the delivered message")
         .to_string();
     let sid = start["stream_id"].as_str().unwrap();

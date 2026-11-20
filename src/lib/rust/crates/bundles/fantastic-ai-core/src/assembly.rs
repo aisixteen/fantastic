@@ -641,12 +641,11 @@ pub async fn assemble_messages(
             }
             None => (msg, form),
         };
-        let shown = msg.get("content").and_then(Value::as_str).unwrap_or("");
         parts.push(part_entry(
             "row",
             msg.get("id").and_then(Value::as_i64),
             Some(form),
-            shown,
+            &crate::row_attrs::model_text(&msg),
         ));
         messages.push(msg);
     }
@@ -780,18 +779,18 @@ pub(crate) fn request_parts(assembled: &[Value], sent: &[Value]) -> Vec<Value> {
         .collect();
     let last = sent.len().saturating_sub(1);
     for (i, m) in sent.iter().enumerate().skip(1) {
-        let text = m.get("content").and_then(Value::as_str).unwrap_or("");
+        let text = crate::row_attrs::model_text(m);
         let id = m.get("id").and_then(Value::as_i64);
         if i == last {
             out.push(part_entry(
                 "new_input",
                 None,
                 m.get("image_form").and_then(Value::as_str),
-                text,
+                &text,
             ));
             continue;
         }
-        let now = part_entry("row", id, Some("anchor"), text);
+        let now = part_entry("row", id, Some("anchor"), &text);
         let same = assembled.iter().find(|p| {
             p["part"] == json!("row") && p.get("ref") == now.get("ref") && p["hash"] == now["hash"]
         });

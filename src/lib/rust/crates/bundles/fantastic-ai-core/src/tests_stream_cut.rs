@@ -332,7 +332,7 @@ async fn a_cut_after_thinking_keeps_it_in_the_store_not_the_view() {
         .iter()
         .find(|m| m["role"] == json!("assistant"))
         .expect("the assistant message");
-    let text = cut["content"].as_str().unwrap();
+    let text = crate::row_attrs::without_head(cut["content"].as_str().unwrap());
     assert!(
         text.starts_with(
             "Sending.\n[cut · you wrote <invoke name=\"send\"> after thinking ~7 tokens · nothing ran · ACTION: "

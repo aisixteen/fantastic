@@ -611,7 +611,16 @@ async fn a_send_streams_the_engines_text_and_replays_the_conversation_next_turn(
         "the system block is the instructions"
     );
     assert!(req0.turns.is_empty());
-    assert_eq!(req0.prompt, "hi");
+    // each message opens with its ts head: `[YYYY-MM-DD HH:MM ±HH:MM]` on its own line
+    let body = |text: &str| -> String {
+        let (head, rest) = text.split_once('\n').unwrap_or_else(|| panic!("no head: {text:?}"));
+        assert!(
+            head.len() == 25 && head.starts_with("[20") && head.ends_with(']'),
+            "{head:?}"
+        );
+        rest.to_string()
+    };
+    assert_eq!(body(&req0.prompt), "hi");
     assert_eq!((req0.temperature, req0.max_tokens), (Some(0.1), Some(300)));
     let status = fx.call(json!({"type": "context_status"})).await;
     assert_eq!(status["reported_prompt_tokens"], json!(1200), "{status}");
@@ -627,9 +636,9 @@ async fn a_send_streams_the_engines_text_and_replays_the_conversation_next_turn(
     assert_eq!(reqs.len(), 2, "{reqs:?}");
     let roles: Vec<&str> = reqs[1].turns.iter().map(|t| t.role.as_str()).collect();
     assert_eq!(roles, ["user", "assistant"]);
-    assert_eq!(reqs[1].turns[0].content, "hi");
-    assert!(reqs[1].turns[1].content.starts_with("first "));
-    assert_eq!(reqs[1].prompt, "again");
+    assert_eq!(reqs[1].turns[0].content, req0.prompt, "the stored row renders as it was sent");
+    assert!(body(&reqs[1].turns[1].content).starts_with("first "));
+    assert_eq!(body(&reqs[1].prompt), "again");
 }
 
 #[tokio::test]

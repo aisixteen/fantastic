@@ -651,6 +651,7 @@ async fn folds_at_a_small_window_and_every_turn_answers() {
         let last = msgs
             .last()
             .and_then(|m| m["content"].as_str())
+            .map(crate::row_attrs::without_head)
             .unwrap_or("")
             .trim_start()
             .to_string();
