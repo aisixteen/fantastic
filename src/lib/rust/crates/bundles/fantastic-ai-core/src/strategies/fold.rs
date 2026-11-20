@@ -410,7 +410,9 @@ pub async fn append_fold(
         .unwrap_or(0);
     let id = kernel.mint_id();
     let parent = idxs.first().and_then(|&i| row_parent(&rows[i]));
-    let fr = make_fold(&ids, title, body, degraded, id, anchor, lvl, parent);
+    let mut fr = make_fold(&ids, title, body, degraded, id, anchor, lvl, parent);
+    // written now: the view this request shows carries the `ts` its row keeps
+    fr["attributes"] = json!({"ts": crate::helpers::now_secs()});
     save_history(self_id, kernel, std::slice::from_ref(&fr)).await?;
     Ok(fr)
 }

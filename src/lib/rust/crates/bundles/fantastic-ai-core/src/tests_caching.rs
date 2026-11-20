@@ -186,7 +186,7 @@ async fn turn_messages(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) -> Vec
         .find(|msgs| {
             msgs.last()
                 .and_then(|m| m["content"].as_str())
-                .is_some_and(|c| c.starts_with(text))
+                .is_some_and(|c| crate::row_attrs::without_head(c).starts_with(text))
         })
         .unwrap_or_else(|| panic!("no provider pass carried the turn {text:?}"))
 }
@@ -195,7 +195,7 @@ async fn turn_messages(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) -> Vec
 fn flagged_contents(msgs: &[Value], key: &str) -> Vec<String> {
     msgs.iter()
         .filter(|m| m.get(key) == Some(&json!(true)))
-        .map(|m| m["content"].as_str().unwrap_or("").to_string())
+        .map(|m| crate::row_attrs::without_head(m["content"].as_str().unwrap_or("")).to_string())
         .collect()
 }
 
@@ -550,9 +550,7 @@ async fn a_provider_cache_turn_marks_before_the_large_body_and_the_next_turn_kee
     let again: Vec<_> = msgs2[..=len1 - 2].iter().map(pair).collect();
     assert_eq!(cached, again, "the cached prefix bytes do not change");
     assert!(
-        msgs2[len1 - 1]["content"]
-            .as_str()
-            .unwrap()
+        crate::row_attrs::without_head(msgs2[len1 - 1]["content"].as_str().unwrap())
             .starts_with("[folded · read reply from notes"),
         "{}",
         msgs2[len1 - 1]
@@ -596,15 +594,15 @@ async fn the_request_parts_name_each_row_by_the_form_it_took() {
         for (i, row) in rows.iter().enumerate() {
             assert_eq!(row["ref"], json!(ids[i]), "{mode:?}");
             assert_eq!(row["form"], json!(forms[i]), "{mode:?}: {row}");
-            // the bytes and the hash are of the text the request carries
-            let text = msgs[i + 1]["content"].as_str().unwrap();
+            // the bytes and the hash are of the text the request carries, its head included
+            let text = crate::row_attrs::model_text(&msgs[i + 1]);
             assert_eq!(row["bytes"], json!(text.len()), "{mode:?}");
         }
     }
 }
 
 #[tokio::test]
-async fn an_attribute_of_any_key_leaves_the_request_bytes_alone() {
+async fn an_attribute_of_any_key_but_ts_leaves_the_request_bytes_alone() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "cm_any_attr").await;
     let with = |content: &str, role: &str| {
@@ -618,17 +616,21 @@ async fn an_attribute_of_any_key_leaves_the_request_bytes_alone() {
         let sent = crate::agent_loop::render_for_model(&msgs);
         let body = Value::Array(sent.clone()).to_string();
         assert!(!body.contains("any_future_key") && !body.contains("a long value"));
+        // the ts is the head the text opens with; nothing else of the map is there
+        let head = crate::row_attrs::head(&with("", "user"));
+        assert!(head.starts_with('[') && head.ends_with("]\n"), "{head:?}");
+        let next = crate::row_attrs::model_text(msgs.last().unwrap());
         assert_eq!(
             &sent[1..],
             [
-                json!({"role": "user", "content": "hello"}),
-                json!({"role": "assistant", "content": "answer"}),
-                json!({"role": "user", "content": "next"}),
+                json!({"role": "user", "content": format!("{head}hello")}),
+                json!({"role": "assistant", "content": format!("{head}answer")}),
+                json!({"role": "user", "content": next}),
             ],
             "{mode:?}"
         );
-        // and the window estimate does not count it
-        let bare = json!({"role": "user", "content": "hello"});
+        // and the window estimate counts the head alone
+        let bare = json!({"role": "user", "content": format!("{head}hello")});
         assert_eq!(
             crate::context::estimate_one(&with("hello", "user")),
             crate::context::estimate_one(&bare)

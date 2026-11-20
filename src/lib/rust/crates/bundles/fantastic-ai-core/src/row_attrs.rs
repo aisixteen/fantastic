@@ -1,9 +1,12 @@
-//! What an assistant row keeps about its own request (#618, #619), in its `attributes`
-//! map: the request's `parts` as a DELTA against the chat's previous request (a full
-//! list on a checkpoint), the running `totals`, and the `cost` of the pass.
+//! What a row keeps about itself (#618, #619), in its `attributes` map: `ts` and
+//! `source` on every row; on an assistant row the request's `parts` as a DELTA against
+//! the chat's previous request (a full list on a checkpoint), the running `totals`, and
+//! the `cost` of the pass.
 //!
-//! None of it reaches the model: the request is built from role and content only
-//! ([`crate::agent_loop::render_for_model`]).
+//! WHAT THE MODEL SEES of them is declared once, in [`VISIBLE`] (#652): only `ts`, at
+//! the head of its message (#653). Every other attribute is stored and returned to
+//! people and tools, never rendered into a request
+//! ([`crate::agent_loop::render_for_model`] carries the head and the content).
 
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
@@ -13,6 +16,139 @@ use std::sync::Arc;
 /// Every this many requests the parts are a full list again (a checkpoint), so a
 /// reader never replays more than this many deltas.
 pub(crate) const CHECKPOINT_EVERY: u64 = 50;
+
+/// An attribute the model sees: its key in `attributes`, and how its value is written
+/// at the head of the message (`None`: it cannot be said, and the head leaves it out).
+pub(crate) struct Visible {
+    /// The key in the row's `attributes`.
+    pub(crate) key: &'static str,
+    /// The value as the head writes it.
+    pub(crate) render: fn(&Value) -> Option<String>,
+}
+
+/// THE ATTRIBUTES THE MODEL SEES, declared once (#652): `ts`, when the row was written.
+/// Every key not declared here is stored and shown to people and tools, never rendered
+/// into the model's context.
+pub(crate) const VISIBLE: &[Visible] = &[Visible {
+    key: "ts",
+    render: ts_head,
+}];
+
+/// The head of `message`: each of its [`VISIBLE`] attributes as written, on one line,
+/// ended by a newline; empty when it carries none of them.
+pub(crate) fn head(message: &Value) -> String {
+    let Some(attrs) = message.get("attributes").and_then(Value::as_object) else {
+        return String::new();
+    };
+    let shown: Vec<String> = VISIBLE
+        .iter()
+        .filter_map(|v| attrs.get(v.key).and_then(v.render))
+        .collect();
+    if shown.is_empty() {
+        return String::new();
+    }
+    format!("{}\n", shown.join(" "))
+}
+
+/// The text the model reads for `message`: its [`head`], then its content.
+pub(crate) fn model_text(message: &Value) -> String {
+    let content = message.get("content").and_then(Value::as_str).unwrap_or("");
+    format!("{}{content}", head(message))
+}
+
+/// `text` past the head it opens with (`[YYYY-MM-DD HH:MM ±HH:MM]` and a newline); all
+/// of it when it opens with none.
+#[cfg(test)]
+pub(crate) fn without_head(text: &str) -> &str {
+    let shape = b"[0000-00-00 00:00 +00:00]\n";
+    let b = text.as_bytes();
+    let headed = b.len() >= shape.len()
+        && shape.iter().zip(b).all(|(s, c)| match s {
+            b'0' => c.is_ascii_digit(),
+            b'+' => *c == b'+' || *c == b'-',
+            _ => s == c,
+        });
+    if headed {
+        &text[shape.len()..]
+    } else {
+        text
+    }
+}
+
+/// `ts` (epoch seconds) as the kernel's local time with its UTC offset, to the minute
+/// (#653): `[2026-11-19 21:40 +02:00]`. The offset is the one in force at that instant,
+/// so a stored row's head never changes.
+fn ts_head(ts: &Value) -> Option<String> {
+    let t = ts.as_f64()?.floor() as i64;
+    Some(stamp(t, local_offset(t)?))
+}
+
+/// `t` (epoch seconds) read on a clock `offset` seconds ahead of UTC, to the minute.
+pub(crate) fn stamp(t: i64, offset: i64) -> String {
+    let local = t + offset;
+    let (y, m, d) = civil_from_days(local.div_euclid(86_400));
+    let tod = local.rem_euclid(86_400);
+    let sign = if offset < 0 { '-' } else { '+' };
+    let off = offset.abs() / 60;
+    format!(
+        "[{y:04}-{m:02}-{d:02} {:02}:{:02} {sign}{:02}:{:02}]",
+        tod / 3600,
+        tod % 3600 / 60,
+        off / 60,
+        off % 60
+    )
+}
+
+/// The kernel's UTC offset at the instant `t` (epoch seconds), in seconds: its local
+/// clock reading less the UTC one. `None` when the C library cannot place `t`.
+pub(crate) fn local_offset(t: i64) -> Option<i64> {
+    let secs = t as libc::time_t;
+    // SAFETY: `tm` is plain integers (and, on unix, a zone name pointer the call
+    // sets); all zeros is a valid value of it.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: both pointers are to live locals for the length of the call.
+    #[cfg(unix)]
+    let placed = !unsafe { libc::localtime_r(&secs, &mut tm) }.is_null();
+    // SAFETY: as above.
+    #[cfg(windows)]
+    let placed = unsafe { libc::localtime_s(&mut tm, &secs) } == 0;
+    if !placed {
+        return None;
+    }
+    let local = days_from_civil(
+        i64::from(tm.tm_year) + 1900,
+        i64::from(tm.tm_mon) + 1,
+        i64::from(tm.tm_mday),
+    ) * 86_400
+        + i64::from(tm.tm_hour) * 3600
+        + i64::from(tm.tm_min) * 60
+        + i64::from(tm.tm_sec);
+    Some(local - t)
+}
+
+/// Days since 1970-01-01 of a civil date (Howard Hinnant's `days_from_civil`).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// The civil date `(year, month, day)` of a day count since 1970-01-01 (Howard
+/// Hinnant's `civil_from_days`).
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { yoe + era * 400 + 1 } else { yoe + era * 400 }, m, d)
+}
 
 /// The size cap of a row's `attributes` at write, parts excluded (they are bounded by
 /// the delta / checkpoint design): an oversized map is refused.
@@ -363,4 +499,80 @@ pub(crate) fn check_cap(self_id: &AgentId, row: &Map<String, Value>) -> Result<(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 2026-11-19 19:40:00 UTC.
+    const T: i64 = 1_795_117_200;
+
+    #[test]
+    fn only_ts_is_declared_visible() {
+        let keys: Vec<&str> = VISIBLE.iter().map(|v| v.key).collect();
+        assert_eq!(keys, ["ts"]);
+    }
+
+    #[test]
+    fn every_other_attribute_stays_out_of_the_text_the_model_reads() {
+        let row = json!({"role": "assistant", "content": "done", "attributes": {
+            "ts": T, "usage": {"input": 10, "output": 2}, "cost": {"usd": 0.1},
+            "model": "m-one", "provider": "prov_a", "parts": {"full": true, "list": []},
+            "totals": {"requests": 1}, "budget": 900, "source": "lead",
+            "keep": {"3": "k"}, "any_future_key": "x"}});
+        let stamped = stamp(T, local_offset(T).unwrap());
+        assert_eq!(model_text(&row), format!("{stamped}\ndone"));
+        // without a ts the row has no head; the content is all
+        let bare = json!({"role": "user", "content": "hi", "attributes": {"source": "lead"}});
+        assert_eq!(head(&bare), "");
+        assert_eq!(model_text(&bare), "hi");
+        assert_eq!(model_text(&json!({"role": "user", "content": "hi"})), "hi");
+    }
+
+    #[test]
+    fn the_head_is_the_local_time_with_its_offset_to_the_minute() {
+        assert_eq!(stamp(T, 7200), "[2026-11-19 21:40 +02:00]");
+        assert_eq!(stamp(T, 0), "[2026-11-19 19:40 +00:00]");
+        assert_eq!(stamp(T, -5 * 3600 - 1800), "[2026-11-19 14:10 -05:30]");
+        assert_eq!(stamp(T, 5 * 3600 + 2700), "[2026-11-20 01:25 +05:45]");
+        // the seconds are dropped, never rounded up
+        assert_eq!(stamp(951_782_400 + 59, 0), "[2000-02-29 00:00 +00:00]");
+        assert_eq!(stamp(-60, 0), "[1969-12-31 23:59 +00:00]");
+        assert_eq!(stamp(1_772_323_200 - 1, 0), "[2026-02-28 23:59 +00:00]");
+        // a fractional ts is the minute it falls in
+        let row = json!({"content": "x", "attributes": {"ts": T as f64 + 59.9}});
+        assert_eq!(
+            head(&row),
+            format!("{}\n", stamp(T, local_offset(T).unwrap()))
+        );
+    }
+
+    #[test]
+    fn the_civil_date_round_trips() {
+        for days in [-719_468, -1, 0, 1, 10_957, 11_016, 20_411, 2_932_896] {
+            let (y, m, d) = civil_from_days(days);
+            assert_eq!(days_from_civil(y, m, d), days, "{y}-{m}-{d}");
+        }
+    }
+
+    /// The offset is the kernel's own: what `date +%z` says for the same moment.
+    #[cfg(unix)]
+    #[test]
+    fn the_offset_is_the_kernels_local_one() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let out = std::process::Command::new("date")
+            .arg("+%z")
+            .output()
+            .expect("date runs");
+        let z = String::from_utf8(out.stdout).unwrap();
+        let z = z.trim();
+        let sign = if z.starts_with('-') { -1 } else { 1 };
+        let h: i64 = z[1..3].parse().unwrap();
+        let m: i64 = z[3..5].parse().unwrap();
+        assert_eq!(local_offset(now), Some(sign * (h * 3600 + m * 60)), "date +%z = {z}");
+    }
 }

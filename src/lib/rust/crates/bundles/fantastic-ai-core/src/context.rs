@@ -11,14 +11,17 @@ use serde_json::{json, Map, Value};
 /// Rough token estimate for ONE message — counts the SERIALIZED form, because
 /// role + content + the JSON envelope all consume real context.
 ///
-/// A row's `attributes` are about the row, not for the model, and never count
-/// toward a window.
+/// A row's `attributes` are about the row: only the head the model reads of them
+/// ([`crate::row_attrs::VISIBLE`]) counts toward a window, as part of its text.
 pub fn estimate_one(message: &Value) -> i64 {
     let trimmed;
     let message = match message.as_object() {
         Some(m) if m.contains_key("attributes") => {
             let mut m = m.clone();
             m.shift_remove("attributes");
+            if let Some(Value::String(c)) = m.get_mut("content") {
+                *c = crate::row_attrs::model_text(message);
+            }
             trimmed = Value::Object(m);
             &trimmed
         }

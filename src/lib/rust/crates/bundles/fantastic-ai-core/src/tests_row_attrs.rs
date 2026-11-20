@@ -177,16 +177,20 @@ async fn the_parts_follow_the_request_and_the_request_is_unchanged() {
     assert_eq!(held[0]["ref"], user["id"]);
     assert_eq!(held[0]["form"], "whole");
     assert_eq!(held[1]["ref"], answer["id"]);
-    // the same text, the same hash: the first turn's new input is the user row now
+    // the same text, the same hash: the first turn's new input is the user row now,
+    // its ts head included
     assert_eq!(held[0]["hash"], part(&first, "new_input")["hash"]);
-    assert_eq!(held[0]["bytes"], json!(2));
+    let user_text = crate::row_attrs::model_text(user);
+    assert_eq!(held[0]["bytes"], json!(user_text.len()));
+    assert_eq!(user_text.len(), crate::row_attrs::head(user).len() + 2);
     for p in &second {
         let hash = p["hash"].as_str().unwrap();
         assert!(hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()));
     }
 
     // THE REQUEST: role and content (and the agent's cache mark), the system block
-    // exactly the pieces end to end, the history as the rows hold it
+    // exactly the pieces end to end, the history as the rows hold it under the head
+    // of their ts
     let sent = s.request_messages(1);
     for m in &sent {
         let keys: Vec<&String> = m.as_object().unwrap().keys().filter(|k| *k != crate::caching::CACHE_MARK).collect();
@@ -198,9 +202,107 @@ async fn the_parts_follow_the_request_and_the_request_is_unchanged() {
         .map(|n| part(&second, n)["bytes"].as_u64().unwrap() as usize)
         .sum();
     assert_eq!(system.len(), pieces + 2, "one blank line between the pieces");
-    assert_eq!(sent[1], json!({"role": "user", "content": "go"}));
-    assert_eq!(sent[2]["content"], answer["content"]);
-    assert_eq!(sent[3], json!({"role": "user", "content": "again", "cache_mark": true}), "the tail carries the mark");
+    assert_eq!(sent[1], json!({"role": "user", "content": crate::row_attrs::model_text(user)}));
+    assert_eq!(sent[2]["content"], json!(crate::row_attrs::model_text(answer)));
+    assert_eq!(
+        sent[3],
+        json!({"role": "user", "content": crate::row_attrs::model_text(&all[2]), "cache_mark": true}),
+        "the tail carries the mark"
+    );
+}
+
+/// Whether a message's text opens with a ts head.
+fn headed(text: &str) -> bool {
+    crate::row_attrs::without_head(text).len() < text.len()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_message_opens_with_its_ts_and_a_stored_row_renders_the_same_on_every_request() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, agent) = mk_kernel(&tmp, "ra_ts_head").await;
+    // each pass takes 150 ms, so a ts taken before the pass is told from one taken after
+    let s = script(&agent, passes(3), Duration::from_millis(150));
+    for text in ["go", "again", "third"] {
+        // ONE CHAIN PER AGENT (#227): a send while the last chain is still alive is held
+        // and answered by a wake turn; each turn here is its own chain
+        until_true("the chain to end", || {
+            !crate::state::state_for(&agent).chain.lock().unwrap().alive
+        })
+        .await;
+        say(&kernel, &agent, text).await;
+    }
+    let all = rows(&kernel, &agent).await;
+    let reqs: Vec<Vec<Value>> = (0..3).map(|i| s.request_messages(i)).collect();
+    let content = |m: &Value| m["content"].as_str().unwrap().to_string();
+    // the system block has no head; every message after it has its own
+    for req in &reqs {
+        assert!(!headed(&content(&req[0])), "{}", content(&req[0]));
+        for m in &req[1..] {
+            assert!(headed(&content(m)), "no head: {m}");
+        }
+    }
+    // the new input is written with the ts its row keeps: the head the model read
+    // is the stored row's
+    for (i, text) in ["go", "again", "third"].iter().enumerate() {
+        let row = all
+            .iter()
+            .find(|r| r["role"] == "user" && r["content"] == *text)
+            .unwrap();
+        let sent = content(reqs[i].last().unwrap());
+        assert_eq!(sent, crate::row_attrs::model_text(row), "request {i}");
+        assert_eq!(crate::row_attrs::without_head(&sent), *text);
+        // its ts was taken when the request was built, not when the row was saved: the
+        // answer, saved with it after the pass, is a whole pass later
+        let at = all.iter().position(|r| r == row).unwrap();
+        let answer = all[at..].iter().find(|r| r["role"] == "assistant").unwrap();
+        let ts = |r: &Value| r["attributes"]["ts"].as_f64().unwrap();
+        assert!(ts(answer) - ts(row) >= 0.15, "request {i}: {row} {answer}");
+    }
+    // A STORED ROW RENDERS THE SAME ON EVERY REQUEST: what request n sent after its
+    // system block opens request n+1 byte for byte
+    for n in 0..2 {
+        let (a, b) = (&reqs[n][1..], &reqs[n + 1][1..]);
+        let a: Vec<String> = a.iter().map(content).collect();
+        let b: Vec<String> = b[..a.len()].iter().map(content).collect();
+        assert_eq!(a, b, "request {n} → {}", n + 1);
+    }
+}
+
+/// A pass that dies keeps its incoming row with the ts the model read at its head, so
+/// the reroll's request shows that row as the dead pass's request did.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dead_turn_keeps_the_ts_its_request_showed() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, agent) = mk_kernel(&tmp, "ra_dead_ts").await;
+    // each pass takes 150 ms, so a ts taken before the pass is told from one taken after
+    let s = script(
+        &agent,
+        vec![pass("<think>hmm</think>\n\n"), pass(GO)],
+        Duration::from_millis(150),
+    );
+    let r = ask(&kernel, &agent, json!({"type": "send", "text": "go"})).await;
+    assert_eq!(r["dead_turn"], json!(true), "{r}");
+    assert!(until_passes(&s, 2).await, "the dead turn was not rerolled");
+    until_true("the chain to end", || {
+        !crate::state::state_for(&agent).chain.lock().unwrap().alive
+    })
+    .await;
+    let all = rows(&kernel, &agent).await;
+    let users: Vec<&Value> = all.iter().filter(|r| r["role"] == "user").collect();
+    assert_eq!(users.len(), 2, "{all:#?}");
+    let (go, reroll) = (users[0], users[1]);
+    assert_eq!(go["content"], "go");
+    // the dead pass's request ended with the row as it is stored now, and so does the
+    // reroll's request carry it
+    let dead = s.request_messages(0);
+    let shown = crate::row_attrs::model_text(go);
+    assert_eq!(dead.last().unwrap()["content"], json!(shown));
+    let again = s.request_messages(1);
+    assert!(again.iter().any(|m| m["content"] == json!(shown)), "{again:#?}");
+    // its ts was taken when the dead request was built, a whole pass before the
+    // reroll's own
+    let ts = |r: &Value| r["attributes"]["ts"].as_f64().unwrap();
+    assert!(ts(reroll) - ts(go) >= 0.15, "{go} {reroll}");
 }
 
 #[tokio::test]
