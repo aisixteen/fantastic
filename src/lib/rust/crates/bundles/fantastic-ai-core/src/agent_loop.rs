@@ -251,6 +251,12 @@ pub async fn run_generation(
     if let Some(last) = messages.last_mut() {
         last["attributes"]["ts"] = incoming_ts.clone();
     }
+    // the incoming row as stored, whether the pass answers or dies: the `ts` above
+    let incoming_row = |id: i64, parent: Option<i64>| {
+        let mut row = incoming_row_of(state, user_text, id, parent);
+        row["attributes"]["ts"] = incoming_ts.clone();
+        crate::row_attrs::with_source(row, &incoming_source(state))
+    };
     // KEEP (#641): a reply that will fold after the answer carries the call that keeps
     // what the model needs of it
     if caching.folds() {
@@ -464,15 +470,7 @@ pub async fn run_generation(
         // gone and the model would re-ask for them.
         let in_id = kernel.mint_id();
         let in_parent = incoming_parent(user_text);
-        save_history(
-            self_id,
-            kernel,
-            &[crate::row_attrs::with_source(
-                incoming_row_of(state, user_text, in_id, in_parent),
-                &incoming_source(state),
-            )],
-        )
-        .await?;
+        save_history(self_id, kernel, &[incoming_row(in_id, in_parent)]).await?;
         emit_status(kernel, state, self_id, client_id, "stalled", {
             let mut m = Map::new();
             m.insert("reason".to_string(), json!("dead_turn"));
@@ -516,14 +514,7 @@ pub async fn run_generation(
     // management (compaction/recall) has the FULL conversation next turn.
     let mut next_request = None;
     let new_turns = vec![
-        crate::row_attrs::with_source(
-            {
-                let mut row = incoming_row_of(state, user_text, in_id, in_parent);
-                row["attributes"]["ts"] = incoming_ts;
-                row
-            },
-            &incoming_source(state),
-        ),
+        incoming_row(in_id, in_parent),
         // STRIPPED — the deliberation is not part of the conversation. The RAW
         // text (thinking included) is what the caller receives; the router parses
         // only the answer, and durable history loses the `<think>` spans, because a
