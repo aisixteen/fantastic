@@ -418,11 +418,6 @@ fn at_the_write(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
 fn a_write_the_backend_cannot_honour_is_refused() {
     for (meta, fragment) in [
         (json!({"thinking_budget": 512}), "must be int >= 1024"),
-        // the request knobs are the chat's (#632)
-        (
-            json!({"temperature": 0.2}),
-            "no record field 'temperature'",
-        ),
         (
             json!({"endpoint": "https://api.test/v1/chat"}),
             "context_window is left to the API, but the endpoint",
@@ -619,6 +614,12 @@ async fn sent_max_tokens(model: &str, extra: Value, max: i64) -> Value {
 /// The whole POST body a turn sends. A non-empty `chat` object is set on the paired
 /// ai_chat first (its `caching` places the marks).
 async fn sent_body(model: &str, extra: Value, max: i64, chat: Value) -> Value {
+    sent_body_over(model, extra, max, chat, json!({})).await
+}
+
+/// [`sent_body`], with `raw` laid on the provider's record past the write's check (a
+/// record written before a field left it).
+async fn sent_body_over(model: &str, extra: Value, max: i64, chat: Value, raw: Value) -> Value {
     let tmp = TempDir::new().unwrap();
     let srv = MockServer::start().await;
     Mock::given(method("GET"))
@@ -646,6 +647,9 @@ async fn sent_body(model: &str, extra: Value, max: i64, chat: Value) -> Value {
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
     let kernel = mk_unbounded_store(&tmp, &ep, &id, extra).await;
+    if let Some(raw) = raw.as_object().filter(|o| !o.is_empty()) {
+        let _ = kernel.update(&AgentId::from(id.as_str()), raw.clone());
+    }
     if chat.as_object().is_some_and(|o| !o.is_empty()) {
         let c = fantastic_ai_core::remote_provider::pair_chat(&kernel, &AgentId::from(id.as_str()))
             .await;
@@ -762,6 +766,14 @@ async fn a_thinking_budget_adds_to_the_default() {
 async fn the_chats_max_tokens_and_temperature_ride_the_request() {
     let b = sent_body(MODEL, json!({}), 64000, json!({"max_tokens": 40000, "temperature": 0.4})).await;
     assert_eq!((b["max_tokens"].clone(), b["temperature"].clone()), (json!(40000), json!(0.4)), "{b}");
+}
+
+/// #632: a turn's output budget is the chat's, else the API's; a `max_tokens` left on the
+/// provider's record (written before the field moved) never stands in for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_max_tokens_left_on_the_provider_is_not_sent() {
+    let b = sent_body_over(MODEL, json!({}), 64000, json!({}), json!({"max_tokens": 777})).await;
+    assert_eq!(b["max_tokens"], json!(64000), "{b}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

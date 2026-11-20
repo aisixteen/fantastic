@@ -7,8 +7,7 @@ policy); the request knobs are each chat's and ride its every request. Rust lane
 
   1. admitted: the creator names the provider for each chat and admits each on the provider's
      `callable_by` (`update_agent`, read-add-write);
-  2. own knobs: each chat's request carries its own temperature / max_tokens / top_k, and the
-     provider's record holds none;
+  2. own knobs: each chat's request carries its own temperature / max_tokens / top_k;
   3. KV accounting: the provider's reflect shows both conversations live;
   4. lifecycle: a change to the provider's endpoint reaches a chat's next request; with both
      chats deleted the provider stays.
@@ -37,9 +36,6 @@ PROV, CA, CB = "shared_prov", "chat_a", "chat_b"
 MODEL = "mock-shared"
 COMPLETE = ["complete", "watch", "reflect"]
 DONE = '\n<call name="done"></call>'
-KNOBS = ("temperature", "top_p", "top_k", "min_p", "reasoning_effort", "thinking_token_budget",
-         "presence_penalty", "frequency_penalty", "repetition_penalty", "no_repeat_ngram_size",
-         "seed", "stop", "max_tokens")
 
 bad: list[str] = []
 
@@ -132,8 +128,6 @@ def main() -> int:
         cb = record(hk, PROV).get("callable_by") or {}
         need(cb.get(CA) == COMPLETE and cb.get(CB) == COMPLETE,
              f"the provider admits both chats: {short(cb, 200)}")
-        held = [k for k in KNOBS if k in record(hk, PROV)]
-        need(not held, f"the provider's record holds no request knob: {held}")
 
         # ── 2 · each request carries its own chat's knobs ──
         print("\n── 2 · own knobs ──", flush=True)

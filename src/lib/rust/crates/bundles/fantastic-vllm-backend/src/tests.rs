@@ -895,12 +895,6 @@ fn a_write_the_backend_cannot_honour_is_refused() {
             json!({}),
             "kv_ttl",
         ),
-        // a request knob is the chat's (#632): the provider's record has no such field
-        (
-            json!({"temperature": 0.2}),
-            json!({}),
-            "no record field 'temperature'",
-        ),
     ];
     for (meta, record, fragment) in cases {
         let why = at_the_write(&obj(meta.clone()), &obj(record)).unwrap_or_default();

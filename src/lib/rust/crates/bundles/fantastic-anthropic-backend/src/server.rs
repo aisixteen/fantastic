@@ -249,6 +249,8 @@ pub async fn resolve(
     if let Some(m) = model {
         rec.insert("model".into(), json!(m));
     }
+    // a turn's output budget is the chat's alone: never the provider's record
+    rec.remove("max_tokens");
     if let Some(m) = chat_max {
         rec.insert("max_tokens".into(), json!(m));
     }
