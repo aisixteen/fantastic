@@ -223,6 +223,12 @@ async fn every_message_opens_with_its_ts_and_a_stored_row_renders_the_same_on_ev
     // each pass takes 150 ms, so a ts taken before the pass is told from one taken after
     let s = script(&agent, passes(3), Duration::from_millis(150));
     for text in ["go", "again", "third"] {
+        // ONE CHAIN PER AGENT (#227): a send while the last chain is still alive is held
+        // and answered by a wake turn; each turn here is its own chain
+        until_true("the chain to end", || {
+            !crate::state::state_for(&agent).chain.lock().unwrap().alive
+        })
+        .await;
         say(&kernel, &agent, text).await;
     }
     let all = rows(&kernel, &agent).await;
