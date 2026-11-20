@@ -337,11 +337,12 @@ async fn parts(
         out.insert("store", store.clone());
     }
     if need.contains(&"howto") {
-        // TWO OPTIONAL SECTIONS, gated on the record exactly as python gates
-        // them: a title only earns its line when titles are what survives a
-        // stripped body, and the async/rows how-to only when replies arrive
-        // as rows. Teaching either unconditionally spends window on an
-        // affordance the agent does not have.
+        // OPTIONAL SECTIONS, gated on the record: a title only earns its line
+        // when titles are what survives a stripped body, the async/rows how-to
+        // only when replies arrive as rows (both exactly as python gates them),
+        // and the `line_summary` line only when the record offers the call.
+        // Teaching any unconditionally spends window on an affordance the agent
+        // does not have.
         let flag = |k: &str| meta.get(k).and_then(Value::as_bool) == Some(true);
         let mut blocks = vec![
             SEND_TO_HOWTO.to_string(),
@@ -354,6 +355,9 @@ async fn parts(
         }
         if flag("context_async") {
             blocks.push(ASYNC_HOWTO.to_string());
+        }
+        if flag(crate::line_summary::FIELD) {
+            blocks.push(crate::line_summary::HOWTO.to_string());
         }
         // LAST: the working rules are what the model reads right before the task.
         blocks.push(WORKING_HOWTO.to_string());

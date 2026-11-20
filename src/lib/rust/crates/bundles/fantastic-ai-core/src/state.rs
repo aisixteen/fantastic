@@ -133,6 +133,9 @@ pub struct BackendState {
     pub caps_checked: Mutex<Option<(String, String)>>,
     /// Image rows a `recall` brought back: shown whole in the next request, once.
     pub recalled_images: Mutex<Vec<i64>>,
+    /// The chat's current one-line summary `(text, ts)`: its latest `line_summary` call
+    /// ([`crate::line_summary`]), restored from its history at boot.
+    pub line_summary: Mutex<Option<(String, f64)>>,
 }
 
 /// The agent's chain: `alive` while a pass or its routing is running.
@@ -246,6 +249,7 @@ impl BackendState {
             last_send_secs: Mutex::new(None),
             caps_checked: Mutex::new(None),
             recalled_images: Mutex::new(Vec::new()),
+            line_summary: Mutex::new(None),
         })
     }
 }

@@ -213,6 +213,13 @@ function stateOf(phase, asks) {
   if (Object.prototype.hasOwnProperty.call(ENDED, phase)) return ENDED[phase];
   return { kind: "idle", label: "idle", glyph: "" };
 }
+// a chat's latest line (`line_summary {text, ts}`, `ts` in seconds) while it is recent, else ""
+// (the row then shows its call state, as without a line)
+var RECENT_SECS = 600;
+function recentLine(line, now) {
+  if (!line || typeof line.text !== "string" || typeof line.ts !== "number") return "";
+  return now - line.ts <= RECENT_SECS ? oneLine(line.text) : "";
+}
 function countKids(n) { return n && Array.isArray(n.children) ? n.children.length : 0; }
 function totalBelow(n) {
   var c = 0;
@@ -242,13 +249,16 @@ function fileRows(lists, open, path, depth) {
 // the agent tree as rows: parent order, root first, children nested in the order reflect gives them.
 // `folded` = {id: true}; a folded branch shows its child count and hides what is below it.
 // `files` = {on, lists, open}: with `on`, the project's files are rows INSIDE the tree, under the `files` agent.
-// `opts` = {ages: {id: "12m"}, tools: true}: the age of an asking agent's oldest question; with `tools`,
+// `opts` = {ages: {id: "12m"}, tools: true, lines: {id: {text, ts}}, now: secs}: the age of an asking
+// agent's oldest question; each chat's latest line, shown while recent at `now`; with `tools`,
 // the tree holds the AI agents only, each under its nearest AI ancestor, the root's row left out (every
 // other agent sits in the tools group, see toolRows; the files agent is pinned, see pinRows).
 function treeRows(root, chats, folded, status, asks, files, opts) {
   var rows = [];
   var fl = files && files.on ? files : null;
   var ages = opts && opts.ages || {};
+  var lines = opts && opts.lines || {};
+  var now = opts && typeof opts.now === "number" ? opts.now : 0;
   var grouped = {};
   var f = opts && opts.pinned ? filesNode(root) : null;
   if (f) grouped[f.id] = true;
@@ -267,7 +277,8 @@ function treeRows(root, chats, folded, status, asks, files, opts) {
       below: isFolded ? totalBelow(n) + fileKids.length : 0,
       asksBelow: isFolded ? asksUnder(n, asks) : 0,
       age: typeof ages[n.id] === "string" ? ages[n.id] : "",
-      state: isChat ? stateOf(status[n.id], !!asks[n.id]) : null
+      state: isChat ? stateOf(status[n.id], !!asks[n.id]) : null,
+      line: isChat ? recentLine(lines[n.id], now) : ""
     });
     if (isFolded) return;
     (n.children || []).forEach(function (k) { walk(k, depth + 1); });
@@ -414,7 +425,8 @@ function changedDirs(ev, lists) {
 // THE ONE AGENT THE VIEW WATCHES is its own (the sidebar agent): it follows the kernel and
 // publishes what the tree shows changed. What an event of it asks the view to do: "tree"
 // (agents came, went or changed, or a kernel connected or left: read the tree again),
-// "status" (a chat's call moved: the event carries its phase), "inquiries" (a question to the
+// "status" (a chat's call moved: the event carries its phase), "line" (a chat wrote a new line:
+// the event carries it), "inquiries" (a question to the
 // person opened or closed: read them again), "files" (an entry came or went: read its
 // folder again), or "" (nothing). A watcher also receives a COPY OF EVERY CALL made to the
 // agent — this view's own `reflect` of it, another client's — and a copy is never one of these
@@ -422,6 +434,7 @@ function heardOf(ev) {
   if (!ev || typeof ev !== "object" || typeof ev.type !== "string" || typeof ev.error === "string") return "";
   if (ev.type === "tree_changed") return "tree";
   if (ev.type === "status_changed") return typeof ev.agent === "string" && typeof ev.phase === "string" && ev.phase !== "" ? "status" : "";
+  if (ev.type === "line_summary_changed") return typeof ev.agent === "string" && typeof ev.text === "string" && typeof ev.ts === "number" ? "line" : "";
   if (ev.type === "inquiries_changed") return "inquiries";
   if (ev.type === "files_changed") return typeof ev.path === "string" && (ev.change === "added" || ev.change === "removed") ? "files" : "";
   return "";
@@ -434,10 +447,17 @@ function withPhase(phases, agent, phase) {
   if (phase !== "idle") out[agent] = phase;
   return out;
 }
+// the chats' lines after `line_summary_changed {agent, text, ts}`: each chat keeps its latest
+function withLine(lines, agent, text, ts) {
+  var out = {};
+  Object.keys(lines || {}).forEach(function (k) { if (k !== agent) out[k] = lines[k]; });
+  out[agent] = { text: text, ts: ts };
+  return out;
+}
 // end pure
 
 var SELF = "{{cell}}", ME = "{{agent}}";
-var st = { filesRoot: "", toolsOpen: false, full: false, root: null, chats: {}, status: {}, inq: [], folded: {}, selected: "", selPath: "", filesOn: false, open: {}, lists: {}, filter: "" };
+var st = { filesRoot: "", toolsOpen: false, full: false, root: null, chats: {}, status: {}, lines: {}, inq: [], folded: {}, selected: "", selPath: "", filesOn: false, open: {}, lists: {}, filter: "" };
 var watching = {};
 var $ = function (id) { return document.getElementById(id); };
 // an AI agent's face (the design's robot head, a small png inline: the view loads nothing)
@@ -518,7 +538,8 @@ function agentRow(row) {
   var active = row.state && row.state.kind !== "idle";
   if (row.chat) {
     two.appendChild(el("span", "name" + (row.depth === 0 ? " top" : ""), row.name));
-    if (active) two.appendChild(el("span", "sub " + row.state.kind, row.state.label));
+    if (row.line) { var sub = el("span", "sub line", row.line); sub.title = row.line; two.appendChild(sub); }
+    else if (active) two.appendChild(el("span", "sub " + row.state.kind, row.state.label));
   } else {
     var line = el("span", "line");
     line.appendChild(el("span", "name tool", row.name));
@@ -559,7 +580,7 @@ function paintTree() {
   var host = $("tree"); host.textContent = "";
   if (!st.tree) return;
   var searching = st.filter.trim() !== "";
-  var rows = filterRows(treeRows(st.tree, st.chats, st.folded, st.status, askers(st.inq), { on: st.filesOn, lists: st.lists, open: st.open }, { ages: askAges(st.inq, Date.now() / 1000), tools: !searching && !st.full, pinned: !searching && !st.full }), st.filter);
+  var rows = filterRows(treeRows(st.tree, st.chats, st.folded, st.status, askers(st.inq), { on: st.filesOn, lists: st.lists, open: st.open }, { ages: askAges(st.inq, Date.now() / 1000), tools: !searching && !st.full, pinned: !searching && !st.full, lines: st.lines, now: Date.now() / 1000 }), st.filter);
   var base = 0;
   rows.forEach(function (row) {
     if (row.kind === "file") host.appendChild(fileRow(row, base));
@@ -581,7 +602,7 @@ function projectRow(row) {
 function paintPins() {
   var host = $("pins"); host.textContent = "";
   var searching = st.filter.trim() !== "" || st.full;
-  var files = !searching && st.tree ? pinRows(st.tree, st.chats, st.folded, st.status, askers(st.inq), { on: st.filesOn, lists: st.lists, open: st.open }, projectName(st.filesRoot), { ages: askAges(st.inq, Date.now() / 1000) }) : [];
+  var files = !searching && st.tree ? pinRows(st.tree, st.chats, st.folded, st.status, askers(st.inq), { on: st.filesOn, lists: st.lists, open: st.open }, projectName(st.filesRoot), { ages: askAges(st.inq, Date.now() / 1000), lines: st.lines, now: Date.now() / 1000 }) : [];
   var rows = !searching && st.tree ? toolRows(st.tree, st.chats) : [];
   host.hidden = rows.length === 0 && files.length === 0;
   if (host.hidden) return;
@@ -636,11 +657,12 @@ function syncFiles() {
     call("files", { type: "unwatch_path", path: p });
   });
 }
-// the chats' call phases now, as the sidebar agent holds them
+// the chats' call phases and latest lines now, as the sidebar agent holds them
 function readPhases() {
   return call(ME, { type: "reflect" }).then(function (r) {
     if (failed(r)) return;
     if (r.phases && typeof r.phases === "object") st.status = r.phases;
+    if (r.line_summaries && typeof r.line_summaries === "object") st.lines = r.line_summaries;
     if (typeof r.files_root === "string") st.filesRoot = r.files_root;
   });
 }
@@ -664,6 +686,7 @@ var due = { tree: false, inquiries: false, dirs: {} }, reading = false;
 function heard(ev) {
   var what = heardOf(ev);
   if (what === "status") { st.status = withPhase(st.status, ev.agent, ev.phase); paintTree(); paintPins(); return; }
+  if (what === "line") { st.lines = withLine(st.lines, ev.agent, ev.text, ev.ts); paintTree(); paintPins(); return; }
   if (what === "files") changedDirs(ev, st.lists).forEach(function (p) { due.dirs[p] = true; });
   else if (what !== "") due[what] = true;
   else return;
@@ -679,7 +702,8 @@ function readDue() {
   });
 }
 function paintAll() { paintStrip(); paint(); }
-// THE CLOCK: the ages ("12m") drawn again from what the view holds; it reads nothing
+// THE CLOCK: the ages ("12m") and which lines are still recent, drawn again from what the view
+// holds; it reads nothing
 function clock() { paintWait(); paintTree(); paintPins(); }
 // the host sends what it kept of the last visit (`restore`), after this view says `ready`
 fantastic.onMessage(function (m) {

@@ -69,7 +69,7 @@ CHAT = "ai_chat.tools"
 CHAT_FIELDS = ("model", "context_window", "output_reserve", "context_strategy", "context_async",
                "context_titles", "recent_n", "caching", "cache_primer_until", "transport_retries",
                "misfire_limit", "system_prompt", "file_bridge_id", "system_prompt_file",
-               "pre_system_prompt", "post_system_prompt")
+               "pre_system_prompt", "post_system_prompt", "line_summaries")
 #: What a chat may call on its provider, and the provider admits it for.
 COMPLETE = ["complete", "watch", "reflect"]
 

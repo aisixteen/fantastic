@@ -65,18 +65,34 @@ fn cut_title(t: &str) -> String {
     t.chars().take(MAX_TITLE).collect()
 }
 
-/// The fold ask — python `FOLD_PROMPT`, `{budget}` filled in.
-pub const FOLD_PROMPT: &str =
-    "FOLD this finished piece of work in AT MOST ~{budget} tokens. First line: a \
-one-sentence title (what it was and how it ended). Then a blank line. Then these \
-sections, each one line or a few, in this order, omitting none (write `none`):\n\
+/// The sections every fold summary writes, in order, and how it merges earlier folds.
+macro_rules! fold_sections {
+    () => {
+        "sections, each one line or a few, in this order, omitting none (write `none`):\n\
 ASKED: what was asked.\n\
 DONE: what was found or decided — AND WHY.\n\
 BINDING: rules, constraints and choices that still bind.\n\
 ERRORS: every error, quoted verbatim.\n\
 OPEN: what is unfinished.\n\
 If the piece contains earlier fold summaries, MERGE them — on a conflict the newer \
-statement wins, and unfinished work is carried forward. Output only that.\n\n";
+statement wins, and unfinished work is carried forward. Output only that.\n\n"
+    };
+}
+
+/// The fold ask — python `FOLD_PROMPT`, `{budget}` filled in.
+pub const FOLD_PROMPT: &str = concat!(
+    "FOLD this finished piece of work in AT MOST ~{budget} tokens. First line: a \
+one-sentence title (what it was and how it ended). Then a blank line. Then these ",
+    fold_sections!()
+);
+
+/// The fold ask for a stretch whose title is its latest `line_summary` (#709): the
+/// summariser writes only the body.
+pub const FOLD_BODY_PROMPT: &str = concat!(
+    "FOLD this finished piece of work in AT MOST ~{budget} tokens. Its title is \
+written already: write only these ",
+    fold_sections!()
+);
 
 /// The one re-summarise for an OVERSIZED summary — python `RESUMMARIZE`.
 pub const RESUMMARIZE: &str =
@@ -90,6 +106,18 @@ pub const RESUMMARIZE_CUT: &str =
 Write it again, shorter, so it ENDS within the budget — keep the title line, the \
 reasons, the binding rules and every quoted error; drop narration. Output only \
 the summary.\n\n";
+
+/// [`RESUMMARIZE`] for a body without a title line.
+pub const RESUMMARIZE_BODY: &str =
+    "Your summary below is ~{got} tokens; the budget is {budget}. Rewrite it to fit — \
+keep the reasons, the binding rules and every quoted error; drop narration. Output \
+only the summary.\n\n";
+
+/// [`RESUMMARIZE_CUT`] for a body without a title line.
+pub const RESUMMARIZE_BODY_CUT: &str =
+    "Your summary below was CUT OFF at the budget ({budget} tokens) before it ended. \
+Write it again, shorter, so it ENDS within the budget — keep the reasons, the \
+binding rules and every quoted error; drop narration. Output only the summary.\n\n";
 
 /// The runtime's own lines — never "what the user said".
 const RUNTIME: [&str; 8] = [
@@ -262,6 +290,20 @@ pub fn summary_title(text: &str) -> String {
     }
 }
 
+/// The body of a summary written without a title line: its non-empty lines —
+/// `None` when it is no summary (empty, or still opening a think block).
+fn body_only(text: &str) -> Option<String> {
+    let lines: Vec<&str> = py_splitlines(text)
+        .into_iter()
+        .map(py_strip)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() || lines[0].starts_with("<think") {
+        return None;
+    }
+    Some(lines.join("\n"))
+}
+
 /// `(title, body, degraded)`. The model is told the budget ([`SUMMARY_BUDGET`]);
 /// the call's `max_tokens` is the budget plus [`THINK_ALLOWANCE`] (a reasoning
 /// model's thought counts against it). An answer OVER the budget, or CUT OFF by
@@ -269,16 +311,26 @@ pub fn summary_title(text: &str) -> String {
 /// times; then [`FoldSummaryError`], never a truncated summary and never a
 /// silent unfolded span. Python `_summarize`.
 ///
+/// `line`: the stretch's latest `line_summary` (#709). Given, it IS the title and
+/// the summariser writes only the body ([`FOLD_BODY_PROMPT`]); absent, the summariser
+/// writes both, as before.
+///
 /// # Errors
 /// The summary would not fit after every re-summarise.
 pub async fn summarize(
     provider: &Arc<dyn Provider>,
     rows: &[Value],
     chain: &[usize],
+    line: Option<&str>,
 ) -> Result<(String, String, bool), FoldSummaryError> {
     let degraded = || {
         let t = titles_of(rows, chain);
-        Ok((cut_title(&t), t, true))
+        Ok((line.map_or_else(|| cut_title(&t), str::to_string), t, true))
+    };
+    let (prompt, resummarize, resummarize_cut) = if line.is_some() {
+        (FOLD_BODY_PROMPT, RESUMMARIZE_BODY, RESUMMARIZE_BODY_CUT)
+    } else {
+        (FOLD_PROMPT, RESUMMARIZE, RESUMMARIZE_CUT)
     };
     let budget = SUMMARY_BUDGET;
     let ask = |content: String| async move {
@@ -292,7 +344,7 @@ pub async fn summarize(
     };
     let (mut text, mut cut) = ask(format!(
         "{}{}",
-        FOLD_PROMPT.replace("{budget}", &budget.to_string()),
+        prompt.replace("{budget}", &budget.to_string()),
         chain_text(rows, chain)
     ))
     .await;
@@ -318,9 +370,9 @@ pub async fn summarize(
         }
         retries += 1;
         let tell = if cut {
-            RESUMMARIZE_CUT.replace("{budget}", &budget.to_string())
+            resummarize_cut.replace("{budget}", &budget.to_string())
         } else {
-            RESUMMARIZE
+            resummarize
                 .replace("{got}", &got.to_string())
                 .replace("{budget}", &budget.to_string())
         };
@@ -331,9 +383,15 @@ pub async fn summarize(
         }
         got = estimate_one(&json!({"role": "user", "content": text}));
     }
-    match split(&text) {
-        None => degraded(),
-        Some((title, body)) => Ok((title, body, false)),
+    match line {
+        Some(title) => match body_only(&text) {
+            None => degraded(),
+            Some(body) => Ok((title.to_string(), body, false)),
+        },
+        None => match split(&text) {
+            None => degraded(),
+            Some((title, body)) => Ok((title, body, false)),
+        },
     }
 }
 
@@ -349,7 +407,8 @@ pub async fn write_fold(
     idxs: &[usize],
 ) -> Result<Value, FoldFail> {
     let anchor = member_anchor(rows, idxs).map_err(FoldFail::Anchor)?;
-    let (title, text, degraded) = summarize_span(ctx.provider, rows, idxs).await?;
+    let line = crate::line_summary::of_span(ctx.self_id, ctx.kernel, rows, idxs);
+    let (title, text, degraded) = summarize_span(ctx.provider, rows, idxs, line.as_deref()).await?;
     append_fold(
         ctx.self_id,
         ctx.kernel,
@@ -364,7 +423,8 @@ pub async fn write_fold(
 }
 
 /// The summarised `(title, body, degraded)` of a span, the mechanical index riding
-/// beside the summary. Shared by the automatic fold and `context_fold`.
+/// beside the summary. Shared by the automatic fold and `context_fold`. `line`: the
+/// span's latest `line_summary`, its title when given ([`summarize`]).
 ///
 /// # Errors
 /// The summary would not fit after every re-summarise.
@@ -372,10 +432,11 @@ pub async fn summarize_span(
     provider: &Arc<dyn Provider>,
     rows: &[Value],
     idxs: &[usize],
+    line: Option<&str>,
 ) -> Result<(String, String, bool), FoldFail> {
     // THE INDEX RIDES BESIDE THE SUMMARY, outside its budget.
     let index = mechanical_index(rows, idxs);
-    let (title, mut text, degraded) = summarize(provider, rows, idxs)
+    let (title, mut text, degraded) = summarize(provider, rows, idxs, line)
         .await
         .map_err(FoldFail::Summary)?;
     if !index.is_empty() {
@@ -633,7 +694,7 @@ mod tests {
         let dp: Arc<dyn Provider> = p;
         // a span big enough that a 200-char answer is inside its summary budget
         let span = "x".repeat(20_000);
-        let (title, body, degraded) = summarize(&dp, &one(&span), &[0]).await.unwrap();
+        let (title, body, degraded) = summarize(&dp, &one(&span), &[0], None).await.unwrap();
         assert!(!degraded);
         assert_eq!(title.chars().count(), MAX_TITLE, "the TITLE is cut");
         assert_eq!(body, long, "the BODY is the uncut title");
@@ -642,22 +703,22 @@ mod tests {
     #[tokio::test]
     async fn summary_lines_split_like_python_splitlines() {
         let dp: Arc<dyn Provider> = Scripted::new(&["the title\u{1c}the body"], 0);
-        let (title, body, _) = summarize(&dp, &one("x"), &[0]).await.unwrap();
+        let (title, body, _) = summarize(&dp, &one("x"), &[0], None).await.unwrap();
         assert_eq!(title, "the title");
         assert_eq!(body, "the body");
         let dp: Arc<dyn Provider> = Scripted::new(&["\r\n\"A title\"\r\n\r\nthe body\r\n"], 0);
-        let (title, body, _) = summarize(&dp, &one("x"), &[0]).await.unwrap();
+        let (title, body, _) = summarize(&dp, &one("x"), &[0], None).await.unwrap();
         assert_eq!(title, "A title");
         assert_eq!(body, "the body");
         let dp: Arc<dyn Provider> = Scripted::new(&["**\"t\"**"], 0);
-        let (title, _, _) = summarize(&dp, &one("x"), &[0]).await.unwrap();
+        let (title, _, _) = summarize(&dp, &one("x"), &[0], None).await.unwrap();
         assert_eq!(title, "\"t\"");
     }
 
     #[tokio::test]
     async fn an_empty_summary_degrades_to_titles() {
         let dp: Arc<dyn Provider> = Scripted::new(&["   \u{1d} "], 0);
-        let (_, _, degraded) = summarize(&dp, &one("x"), &[0]).await.unwrap();
+        let (_, _, degraded) = summarize(&dp, &one("x"), &[0], None).await.unwrap();
         assert!(degraded, "python strips the information separators too");
     }
 
@@ -666,7 +727,7 @@ mod tests {
         let big = format!("TITLE\n\n{}", "word ".repeat(5000));
         let p = Scripted::new(&[&big, &big, &big, &big], 0);
         let dp: Arc<dyn Provider> = p.clone();
-        let out = summarize(&dp, &rows6(), &[1, 2, 3, 4, 5]).await;
+        let out = summarize(&dp, &rows6(), &[1, 2, 3, 4, 5], None).await;
         let err = out.expect_err("over budget after every retry — a loud error");
         assert!(
             err.0
@@ -683,7 +744,9 @@ mod tests {
     async fn a_retry_that_fits_is_the_summary() {
         let big = format!("TITLE\n\n{}", "word ".repeat(5000));
         let dp: Arc<dyn Provider> = Scripted::new(&[&big, "TITLE\n\nshort summary"], 0);
-        let (title, body, degraded) = summarize(&dp, &rows6(), &[1, 2, 3, 4, 5]).await.unwrap();
+        let (title, body, degraded) = summarize(&dp, &rows6(), &[1, 2, 3, 4, 5], None)
+            .await
+            .unwrap();
         assert_eq!(title, "TITLE");
         assert_eq!(body, "short summary");
         assert!(!degraded);
@@ -701,7 +764,9 @@ mod tests {
             3,
         );
         let dp: Arc<dyn Provider> = p.clone();
-        let (_, body, _) = summarize(&dp, &rows6(), &[1, 2, 3, 4, 5]).await.unwrap();
+        let (_, body, _) = summarize(&dp, &rows6(), &[1, 2, 3, 4, 5], None)
+            .await
+            .unwrap();
         assert_eq!(body, "whole summary");
         assert_eq!(SUMMARY_BUDGET, 1024);
         let bound = SUMMARY_BUDGET + THINK_ALLOWANCE; // the thought counts against max_tokens
@@ -712,10 +777,55 @@ mod tests {
     #[tokio::test]
     async fn a_summary_cut_past_every_retry_fails_loud() {
         let dp: Arc<dyn Provider> = Scripted::new(&["TITLE\n\npartial"; 4], 4);
-        let err = summarize(&dp, &rows6(), &[1, 2, 3, 4, 5])
+        let err = summarize(&dp, &rows6(), &[1, 2, 3, 4, 5], None)
             .await
             .expect_err("loud");
         assert!(err.0.contains("cut off at its 1024-token budget"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn given_a_line_the_title_is_the_line_and_the_summariser_writes_only_the_body() {
+        let p = Scripted::new(&["ASKED: a.\n\nDONE: b."], 0);
+        let dp: Arc<dyn Provider> = p.clone();
+        let (title, body, degraded) = summarize(&dp, &rows6(), &[1, 2, 3, 4, 5], Some("LINE"))
+            .await
+            .unwrap();
+        assert_eq!(
+            (title.as_str(), body.as_str(), degraded),
+            ("LINE", "ASKED: a.\nDONE: b.", false)
+        );
+        let asked = p.asked.lock().unwrap();
+        assert!(
+            asked[0]
+                .1
+                .contains(&FOLD_BODY_PROMPT.replace("{budget}", "1024")),
+            "the body-only ask"
+        );
+        assert!(!asked[0].1.contains("First line:"));
+    }
+
+    #[tokio::test]
+    async fn given_a_line_an_oversized_body_is_resummarised_without_a_title_line() {
+        let big = "word ".repeat(5000);
+        let p = Scripted::new(&[&big, "short body"], 0);
+        let dp: Arc<dyn Provider> = p.clone();
+        let (title, body, _) = summarize(&dp, &rows6(), &[1, 2, 3, 4, 5], Some("LINE"))
+            .await
+            .unwrap();
+        assert_eq!((title.as_str(), body.as_str()), ("LINE", "short body"));
+        let asked = p.asked.lock().unwrap();
+        assert!(
+            asked[1].1.contains("keep the reasons") && !asked[1].1.contains("title line"),
+            "{}",
+            asked[1].1
+        );
+    }
+
+    #[tokio::test]
+    async fn given_a_line_an_empty_summary_degrades_and_keeps_the_line() {
+        let dp: Arc<dyn Provider> = Scripted::new(&["  "], 0);
+        let (title, _, degraded) = summarize(&dp, &one("x"), &[0], Some("LINE")).await.unwrap();
+        assert_eq!((title.as_str(), degraded), ("LINE", true));
     }
 
     #[test]

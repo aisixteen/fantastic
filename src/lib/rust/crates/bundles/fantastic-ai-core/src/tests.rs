@@ -7089,6 +7089,9 @@ mod autofold;
 /// The model's `keep` summary of a reply that folds (#641).
 #[path = "tests_keep.rs"]
 mod keep;
+
+#[path = "tests_line_summary.rs"]
+mod line_summary;
 /// Inline agent views in a chat (#339).
 #[path = "tests_embed.rs"]
 mod tests_embed;

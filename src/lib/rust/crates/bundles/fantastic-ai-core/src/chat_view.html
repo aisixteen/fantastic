@@ -243,6 +243,13 @@ function inquiryAge(ts, nowMs) {
   if (min < 1) return "just now";
   return min < 60 ? min + " min" : Math.floor(min / 60) + " h";
 }
+// the chat's latest line (`line_summary {text, ts}`, `ts` in seconds) while it is recent, else ""
+// (the head then shows the call state, as without a line)
+var RECENT_SECS = 600;
+function lineShown(line, nowMs) {
+  if (!line || typeof line.text !== "string" || typeof line.ts !== "number") return "";
+  return nowMs / 1000 - line.ts <= RECENT_SECS ? line.text.replace(/\s+/g, " ").trim() : "";
+}
 // the meta line over a message from another agent
 function metaOf(sender, name) { return sender && sender !== "user" ? sender + " to " + name : ""; }
 // `code` spans of a text, in order: [{text, code}]
@@ -441,13 +448,14 @@ function textsOf(rows) {
   var anyRunning = false; // a call of the agent runs, whoever made it (its `status` says)
   function busy() { return inflight !== null || pending.length > 0 || anyRunning; }
   function refresh() { $("stop").hidden = !busy(); }
-  var curPhase = "idle", lastReason = "", asks = 0, askTs = 0;
+  var curPhase = "idle", lastReason = "", asks = 0, askTs = 0, curLine = null;
   function phase(p, reason) {
     curPhase = p;
     if (reason !== undefined) lastReason = reason;
     drawState();
   }
-  // the header's state: the badge on the avatar and the pill by the name
+  // the header's state: the badge on the avatar and the pill by the name — the pill shows the
+  // chat's latest line while it is recent, else the call state
   function drawState() {
     var st = stateOf(curPhase, lastReason, asks);
     var badge = $("badge"), pill = $("state");
@@ -455,14 +463,16 @@ function textsOf(rows) {
     badge.dataset.state = st;
     badge.textContent = glyph;
     badge.hidden = st === "idle";
-    var label = st === "asks" ? "asks you" + (inquiryAge(askTs, Date.now()) ? " · " + inquiryAge(askTs, Date.now()) : "") : st === "working" ? phaseWord(curPhase) : st === "failed" ? "failed · " + lastReason : "";
+    var line = lineShown(curLine, Date.now());
+    var label = line !== "" ? line : st === "asks" ? "asks you" + (inquiryAge(askTs, Date.now()) ? " · " + inquiryAge(askTs, Date.now()) : "") : st === "working" ? phaseWord(curPhase) : st === "failed" ? "failed · " + lastReason : "";
     pill.dataset.state = st;
     pill.dataset.phase = curPhase;
     pill.dataset.reason = curPhase === "idle" ? lastReason : "";
     pill.textContent = label;
     pill.hidden = label === "";
   }
-  // THE CLOCK: the "asks you · N min" age drawn again from what the view holds; it reads nothing
+  // THE CLOCK: the "asks you · N min" age, and whether the line is still recent, drawn again
+  // from what the view holds; it reads nothing
   setInterval(drawState, 30000);
   function bind(sendId) {
     if (!sendId || pending.some(function (q) { return q.sendId === sendId; })) return;
@@ -583,6 +593,10 @@ function textsOf(rows) {
         break;
       case "part_abort": if (toMe(p)) settle(s(p, "stream_id"), s(p, "reason") || "aborted"); break;
       case "done": soon(); if (mine(p)) { inflight = null; refresh(); } else stale = true; break;
+      // the chat's new line (#709): the head shows it while it is recent
+      case "line_summary_changed":
+        if (s(p, "source") === AGENT && typeof p.ts === "number") { curLine = { text: s(p, "text"), ts: p.ts }; drawState(); }
+        break;
       // a question this agent asked the person opened or closed (the holder publishes it here too)
       case "inquiry_opened": case "inquiry_closed": if (s(p, "asker") === AGENT) inquiries(); break;
       case "context": {
@@ -754,6 +768,8 @@ function textsOf(rows) {
     fantastic.watch(AGENT, onEvent);
     var rf = await call({ type: "reflect" });
     title = s(rf, "display_name") || s(rf, "id") || AGENT;
+    var ln = o(rf, "line_summary");
+    if (typeof ln.text === "string" && typeof ln.ts === "number") { curLine = { text: ln.text, ts: ln.ts }; drawState(); }
     $("name").textContent = title;
     text.placeholder = "Message " + title;
     var prov = s(rf, "provider_id");
