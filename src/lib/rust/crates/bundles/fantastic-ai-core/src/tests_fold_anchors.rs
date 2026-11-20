@@ -262,8 +262,9 @@ async fn prompt(kernel: &Arc<Kernel>, agent: &AgentId) -> String {
     Value::Array(crate::agent_loop::render_for_model(&msgs)).to_string()
 }
 
-/// One projection, as a turn runs it: the message list, then the strategy over it.
-async fn project(kernel: &Arc<Kernel>, agent: &AgentId) {
+/// One projection, as a turn runs it: the message list, then the strategy over it;
+/// the messages it shapes for the request.
+async fn project(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
     script(
         agent,
         (0..40)
@@ -303,7 +304,7 @@ async fn project(kernel: &Arc<Kernel>, agent: &AgentId) {
         ),
     )
     .await
-    .expect("projection");
+    .expect("projection")
 }
 
 fn views(rows: &[Value]) -> Vec<&Value> {
@@ -404,6 +405,36 @@ async fn folds_survive_a_projection_over_the_view_array() {
         missing.is_empty(),
         "folds {missing:?} fell out of the view {shown:?}"
     );
+}
+
+/// A fold written inside a request shows there with the ts head its stored row keeps
+/// (#653), so the request that folds and every one after it render the fold the same.
+#[tokio::test]
+async fn a_fold_carries_its_rows_ts_head_in_the_request_that_writes_it() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "fts").await;
+    set(
+        &kernel,
+        &backend,
+        json!({"context_strategy": "fold", "context_window": 4000, "output_reserve": 0}),
+    )
+    .await;
+    for t in ["a", "b", "c", "d", "e", "f"] {
+        closed(&kernel, &backend, t, 2000).await;
+    }
+    let sent = project(&kernel, &backend).await;
+    let rows = store(&kernel, &backend).await;
+    let folds: Vec<&Value> = sent.iter().filter(|m| is_fold(m)).collect();
+    assert!(!folds.is_empty(), "the projection folded");
+    for f in folds {
+        let row = rows
+            .iter()
+            .find(|r| row_id(r) == row_id(f))
+            .expect("the fold is stored");
+        let head = crate::row_attrs::head(f);
+        assert!(!head.is_empty(), "no head: {f}");
+        assert_eq!(head, crate::row_attrs::head(row), "{f}");
+    }
 }
 
 #[tokio::test]

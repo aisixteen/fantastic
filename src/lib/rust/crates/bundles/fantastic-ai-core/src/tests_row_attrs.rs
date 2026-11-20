@@ -220,7 +220,8 @@ fn headed(text: &str) -> bool {
 async fn every_message_opens_with_its_ts_and_a_stored_row_renders_the_same_on_every_request() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "ra_ts_head").await;
-    let s = script(&agent, passes(3), Duration::ZERO);
+    // each pass takes 150 ms, so a ts taken before the pass is told from one taken after
+    let s = script(&agent, passes(3), Duration::from_millis(150));
     for text in ["go", "again", "third"] {
         say(&kernel, &agent, text).await;
     }
@@ -244,6 +245,12 @@ async fn every_message_opens_with_its_ts_and_a_stored_row_renders_the_same_on_ev
         let sent = content(reqs[i].last().unwrap());
         assert_eq!(sent, crate::row_attrs::model_text(row), "request {i}");
         assert_eq!(crate::row_attrs::without_head(&sent), *text);
+        // its ts was taken when the request was built, not when the row was saved: the
+        // answer, saved with it after the pass, is a whole pass later
+        let at = all.iter().position(|r| r == row).unwrap();
+        let answer = all[at..].iter().find(|r| r["role"] == "assistant").unwrap();
+        let ts = |r: &Value| r["attributes"]["ts"].as_f64().unwrap();
+        assert!(ts(answer) - ts(row) >= 0.15, "request {i}: {row} {answer}");
     }
     // A STORED ROW RENDERS THE SAME ON EVERY REQUEST: what request n sent after its
     // system block opens request n+1 byte for byte
