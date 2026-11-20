@@ -1434,8 +1434,11 @@ async fn route_reply_gated(
 
     let done_called = calls.iter().any(|c| c.name == "done");
     let await_called = calls.iter().any(|c| c.name == "await");
-    // `keep` is a note, not an action: a turn of notes alone is a turn with no call (#641)
-    let any_calls = calls.iter().any(|c| c.name != "keep");
+    // `keep` and `line_summary` are notes, not actions: a turn of notes alone is a turn
+    // with no call (#641, #709)
+    let any_calls = calls
+        .iter()
+        .any(|c| c.name != "keep" && c.name != crate::line_summary::CALL);
     // ONE TURN, ONE BATCH. Every call the model emitted is dispatched in a
     // SINGLE `kernel.send([...])` — concurrent, side-effect order across
     // calls undefined — and everything owed to one destination arrives as
@@ -1483,6 +1486,21 @@ async fn route_reply_gated(
     // reply that is not in the conversation is refused, saying so.
     for call in calls.iter().filter(|c| c.name == "keep") {
         if let Some(err) = keep_note(&kernel, &self_id, call).await {
+            units.push(Unit {
+                dest: self_id.as_str().to_string(),
+                target: "-".to_string(),
+                verb: "-".to_string(),
+                idx: None,
+                body: Some(err),
+                title: None,
+            });
+        }
+    }
+
+    // WHAT THE CHAT DOES NOW (#709): its current line, kept and published; a chat that
+    // does not offer it, or a call without a line, is told so.
+    for call in calls.iter().filter(|c| c.name == crate::line_summary::CALL) {
+        if let Some(err) = crate::line_summary::take(&kernel, &self_id, call).await {
             units.push(Unit {
                 dest: self_id.as_str().to_string(),
                 target: "-".to_string(),
@@ -2198,9 +2216,9 @@ async fn note_empty_await(
     emit_status(kernel, &st, self_id, client_id, phase, detail).await;
 }
 
-/// The calls that are not dispatches: they end, park or answer the chain, or (`keep`)
-/// note a reply for its fold.
-const CONTROL_CALLS: [&str; 4] = ["done", "await", "inquiry_answer", "keep"];
+/// The calls that are not dispatches: they end, park or answer the chain, (`keep`)
+/// note a reply for its fold, or (`line_summary`) say in one line what the chat does now.
+const CONTROL_CALLS: [&str; 5] = ["done", "await", "inquiry_answer", "keep", "line_summary"];
 
 /// Count one silent turn of the chain (a turn that ran nothing). At
 /// [`MAX_SILENT_TURNS`] in a row the chain GIVES UP — the status says so, an open

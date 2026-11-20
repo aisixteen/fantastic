@@ -61,6 +61,7 @@ export class TextNode {
   attrs: Record<string, string> = {};
   listeners: Record<string, ((e: Obj) => void)[]> = {};
   style = { setProperty(): void {} };
+  dataset: Record<string, string> = {};
   className = "";
   value = "";
   hidden = false;

@@ -1730,9 +1730,10 @@ pub fn inquiry_accept(
 /// `boot` — LAZY: never loads the conversation. Checks the record names a memory
 /// store (fail loud otherwise), starts a new incarnation, and marks the view for
 /// rebuilding — the first call reads the head from the store and runs
-/// `context_recall`. Python `_make_boot`. The one store read: whether the agent is
-/// paused (its last `pause`/`resume` row) — a paused agent says `paused` (#714); a
-/// store that refuses that read refuses the boot. After a kernel restart, the calls
+/// `context_recall`. Python `_make_boot`. The store reads: whether the agent is
+/// paused (its last `pause`/`resume` row) — a paused agent says `paused` (#714) — and,
+/// when its record offers `line_summary`, its last line (#709); a store that refuses
+/// either read refuses the boot. After a kernel restart, the calls
 /// the previous process cut that concern this agent come to it as one notice turn
 /// ([`crate::route::resume_cut`]).
 pub async fn boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
@@ -1761,6 +1762,10 @@ pub async fn boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         .lock()
         .expect("recall_due poisoned") = true;
     if let Err(e) = crate::pause::announce_at_boot(agent_id, kernel).await {
+        return refusal(fantastic_kernel::refusal::STORE_REFUSED, e.0);
+    }
+    // the chat's current line: the last `line_summary` its history holds (#709)
+    if let Err(e) = crate::line_summary::restore(agent_id, kernel).await {
         return refusal(fantastic_kernel::refusal::STORE_REFUSED, e.0);
     }
     // A CHAIN THE RESTART CUT (#726) goes on: what the previous process left in
@@ -1848,7 +1853,7 @@ where
 {
     use crate::declared::chat::Call;
     let reply = match call {
-        Call::Reflect(_) => reflect(),
+        Call::Reflect(_) => crate::line_summary::with_line(agent_id, kernel, reflect()),
         Call::Boot(_) => boot(agent_id, kernel).await,
         Call::Send(a) => {
             let client = safe_client(&a.client_id);

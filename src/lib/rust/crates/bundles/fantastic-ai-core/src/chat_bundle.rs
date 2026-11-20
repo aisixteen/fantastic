@@ -68,6 +68,9 @@ pub struct ChatRecord {
     /// `true` teaches the full-async how-to: replies arrive as rows.
     #[schemars(default = "default_off")]
     pub context_async: Option<bool>,
+    /// `true` offers the `line_summary` call: the model says in one line what it is doing now; the latest line shows in the view and titles its stretch's fold.
+    #[schemars(default = "default_off")]
+    pub line_summaries: Option<bool>,
     /// The fields every ai_core agent takes.
     #[serde(flatten)]
     pub ai: AiRecord,
