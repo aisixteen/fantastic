@@ -6622,12 +6622,11 @@ fn two_batch_tokens_differ_and_are_four_hex() {
     assert!(a.iter().collect::<std::collections::HashSet<_>>().len() > 1);
 }
 
-/// The peer payload's KEY ORDER is python's. python lifts the send's inline
-/// tags into `payload` with `fields.pop("target_id")`, which keeps the
-/// survivors in source order (`type`, `text`), then `setdefault("msg", …)`
-/// appends. `serde_json::Map::remove` is `swap_remove` under `preserve_order`
-/// — it would drag `text` into the hole and read `["text","type","msg"]` where
-/// python has `["type","text","msg"]`.
+/// The peer payload's KEY ORDER is python's: `<payload>` keeps its tags in source
+/// order (`type`, `text`), then `setdefault("msg", …)` appends. A
+/// `serde_json::Map::remove` (`swap_remove` under `preserve_order`) on the way would
+/// drag `text` into a hole and read `["text","type","msg"]` where python has
+/// `["type","text","msg"]`.
 #[test]
 fn a_peer_sends_payload_keeps_pythons_key_order() {
     let calls = crate::tool_parse::extract_tool_calls(
@@ -6639,11 +6638,11 @@ fn a_peer_sends_payload_keeps_pythons_key_order() {
         .arguments
         .get("payload")
         .and_then(Value::as_object)
-        .expect("a send lifts its inline tags into `payload`");
+        .expect("a send carries its `payload`");
     assert_eq!(
         payload.keys().collect::<Vec<_>>(),
         vec!["type", "text"],
-        "source order survives the `target_id` lift"
+        "source order survives the parse"
     );
     // `msg` is stamped LAST, as python's `setdefault` appends it.
     let stamped = crate::route::fan_out(calls, Some(732));

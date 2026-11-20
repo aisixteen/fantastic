@@ -295,7 +295,7 @@ fn a_numeric_looking_target_is_the_text_written() {
 #[test]
 fn head_with_extra_attribute() {
     refused(
-        r#"<call name="send" id="7"><target_id>n</target_id></call>"#,
+        r#"<call name="send" id="7"><routing><target_id>n</target_id></routing><payload><type>reflect</type></payload></call>"#,
         &["the call head must be exactly `name=\"<tool>\"`"],
     );
 }
