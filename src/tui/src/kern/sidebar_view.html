@@ -538,7 +538,7 @@ function agentRow(row) {
   var active = row.state && row.state.kind !== "idle";
   if (row.chat) {
     two.appendChild(el("span", "name" + (row.depth === 0 ? " top" : ""), row.name));
-    if (row.line) { var sub = el("span", "sub line", row.line); sub.title = row.line; two.appendChild(sub); }
+    if (row.line) { var sub = el("span", "sub", row.line); sub.title = row.line; two.appendChild(sub); }
     else if (active) two.appendChild(el("span", "sub " + row.state.kind, row.state.label));
   } else {
     var line = el("span", "line");

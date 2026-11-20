@@ -1,7 +1,8 @@
 //! `fold` — self-inflicted, mechanical compaction that leaves marks the model can walk.
 //!
 //! At the watermark, oldest first, one batch down to LOW:
-//!   1. FOLD closed chains — one summarizing call per chain (title + body), one
+//!   1. FOLD closed chains — one summarizing call per chain (title + body; the body
+//!      alone when the chain's latest `line_summary` is its title, #709), one
 //!      appended fold row each with `refs`; the members stay one descent away
 //!   2. still over → STRIP bodies in open chains (the `strip` strategy, unchanged)
 //!   3. still over → CUT (strip's own second stage)
