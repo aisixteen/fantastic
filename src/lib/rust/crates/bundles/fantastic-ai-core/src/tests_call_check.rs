@@ -315,6 +315,24 @@ fn a_call_inside_an_arbitrary_tag_is_refused() {
     assert!(r.contains("write it as:\n<call name=\"send\">\n<routing><target_id>files</target_id>"));
 }
 
+/// #528: the form to write keeps each tag where the model wrote it: a routing name
+/// inside `<payload>` is the target's argument and stays in `<payload>`.
+#[test]
+fn a_wrapped_call_keeps_a_payload_routing_name_in_its_payload() {
+    let answer = "<tool_call><call name=\"send\"><routing><target_id>kernel</target_id>\
+                  <title>drop worker</title></routing><payload><type>delete_agent</type>\
+                  <id>worker</id><title>old</title></payload></call></tool_call>";
+    let r = &check(answer, 0)[0];
+    assert!(
+        r.contains(
+            "write it as:\n<call name=\"send\">\n<routing><target_id>kernel</target_id>\
+             <title>drop worker</title></routing>\n<payload><type>delete_agent</type>\
+             <id>worker</id><title>old</title></payload>\n</call>"
+        ),
+        "{r}"
+    );
+}
+
 /// A wrapped call with a fault inside is refused too, and the fault is named.
 #[test]
 fn a_malformed_call_inside_a_wrapper_names_its_fault() {
