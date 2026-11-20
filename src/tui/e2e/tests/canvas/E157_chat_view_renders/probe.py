@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -22,6 +23,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import Rig, verdict, say, chat_eval, chat_rows, chat_drawn  # noqa: E402
 
 E2E = Path(__file__).resolve().parents[6] / "e2e"
+# the local-time head each message opens with (#653): the scripted model reads
+# the message past it
+TS_HEAD = re.compile(r"^\[\d{4}-\d\d-\d\d \d\d:\d\d [+-]\d\d:\d\d\]\n")
 DONE = '<call name="done"></call>'
 LIST = "<call name=\"send\"><routing><target_id>user</target_id></routing><payload><type>inquiries</type><asker>nobody</asker></payload></call>"
 ASK = ("<call name=\"send\"><routing><target_id>user</target_id></routing><payload><type>inquiry</type>"
@@ -58,7 +62,7 @@ def main() -> bool:
     def responder(req: dict, _raw: bytes):
         msgs = req.get("messages") or []
         last = msgs[-1].get("content") if msgs else ""
-        last = last if isinstance(last, str) else json.dumps(last)
+        last = TS_HEAD.sub("", last) if isinstance(last, str) else json.dumps(last)
         if last.startswith("[reply to") and "inquiry" in last.split("\n", 1)[0]:
             return "Thanks, noted. " + DONE
         if last.startswith("[reply to"):

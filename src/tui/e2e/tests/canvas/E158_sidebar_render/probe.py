@@ -12,6 +12,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import secrets
 import socket
 import sys
@@ -30,6 +31,9 @@ E2E = Path(__file__).resolve().parents[6] / "e2e"
 MOCK = Path(os.environ.get("TEAM_MOCK", "/Volumes/Warehouse/tmp/wf/s714/team/design/mock/states.html"))
 LIGHT = Path(__file__).resolve().parents[4] / "web" / "page" / "view_skins" / "light.css"
 SHOTS = Path(os.environ.get("E158_SHOTS", "")) if os.environ.get("E158_SHOTS") else None
+# the local-time head each message opens with (#653): the scripted model reads
+# the message past it
+TS_HEAD = re.compile(r"^\[\d{4}-\d\d-\d\d \d\d:\d\d [+-]\d\d:\d\d\]\n")
 DONE = '<call name="done"></call>'
 ASK = ("<call name=\"send\"><routing><target_id>user</target_id></routing><payload><type>inquiry</type>"
        "<text>Which colour?</text><kind>single</kind><options><item>red</item><item>blue</item></options></payload></call>")
@@ -43,7 +47,7 @@ def responder(req: dict, _raw: bytes):
     """The scripted model: the newest message's marker picks the answer."""
     msgs = req.get("messages") or []
     last = msgs[-1].get("content") if msgs else ""
-    last = last if isinstance(last, str) else json.dumps(last)
+    last = TS_HEAD.sub("", last) if isinstance(last, str) else json.dumps(last)
     if last.startswith("[reply to"):
         return "noted " + DONE
     if "S_SLOWB" in last:
