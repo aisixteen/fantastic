@@ -1,4 +1,4 @@
-# `shared_provider` (E163) — two chats on one provider
+# `shared_provider` (E165) — two chats on one provider
 
 Free: no model. Scripted OpenAI-compatible servers (`e2e/mocks/vllm.py`) answer for ONE
 `vllm_backend` provider; two `ai_chat.tools` chats name it (#632). Rust lane only
@@ -13,5 +13,5 @@ Free: no model. Scripted OpenAI-compatible servers (`e2e/mocks/vllm.py`) answer 
    chat on it goes there; both chats deleted, the provider stays.
 
 ```sh
-RUNTIME=rust uv run python e2e/tests/kernel/E163_shared_provider/probe.py
+RUNTIME=rust uv run python e2e/tests/kernel/E165_shared_provider/probe.py
 ```
