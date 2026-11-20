@@ -6,9 +6,9 @@ agent's id), and `id` is also a routing name (the call's label).
 
 - The routing form (`<routing>` with a label `<id>`, `<payload>` with its own `<id>`): the new
   agent exists under the payload's id, and the label is nowhere on its record.
-- The inline form of the same call: `id` there is routing and an argument `create_agent`
-  documents, so the call is refused loud with a clash naming `id` and nothing is created. (The
-  unit twin is `fantastic-ai-core` `tests.rs`
-  `a_routing_name_in_the_payload_of_a_routed_call_is_delivered`.)
+- The inline form of the same call (no `<routing>`, no `<payload>`): the parser refuses it, the
+  refusal shows the routing form, and nothing is created. (The unit twins are `fantastic-ai-core`
+  `tests.rs` `a_routing_name_in_the_payload_of_a_routed_call_is_delivered` and
+  `an_inline_send_is_refused_and_nothing_reaches_the_target`.)
 
 Run (when the owner runs e2e): `--only-free --id payload_routing_name`.

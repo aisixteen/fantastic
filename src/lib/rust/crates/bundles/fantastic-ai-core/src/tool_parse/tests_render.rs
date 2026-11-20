@@ -72,8 +72,8 @@ fn render_call_nests_tighter_than_render_reply() {
     let args = json!({"target_id": "notes", "payload": {"type": "read", "path": "a.md"}});
     assert_eq!(
         render_call("send", args.as_object().unwrap()),
-        "<call name=\"send\">\n<target_id>notes</target_id>\n<type>read</type>\n\
-         <path>a.md</path>\n</call>"
+        "<call name=\"send\">\n<routing><target_id>notes</target_id>\n</routing>\n\
+         <payload><type>read</type>\n<path>a.md</path>\n</payload>\n</call>"
     );
 }
 

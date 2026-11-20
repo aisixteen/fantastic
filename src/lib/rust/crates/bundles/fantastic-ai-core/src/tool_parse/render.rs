@@ -18,44 +18,26 @@ use serde_json::{Map, Value};
 use super::grammar::{PAYLOAD_TAG, ROUTING, ROUTING_TAG};
 
 /// A call as the ONE grammar's text. `send` arguments are the parser's own shape
-/// (`target_id`/`to` + routing + `payload`) and come back out inline, in the
-/// routing order the parser reads them in.
+/// (`target_id`/`to` + routing + `payload`) and come back out as `<routing>` (in the
+/// order the parser reads it) and `<payload>`.
 #[must_use]
 pub fn render_call(name: &str, arguments: &Map<String, Value>) -> String {
-    let mut args = arguments.clone();
-    if name == "send" {
-        let payload = match args.shift_remove("payload") {
-            Some(Value::Object(p)) => p,
-            _ => Map::new(),
-        };
-        // A payload that carries a routing name can only be written in the routing
-        // form: inline, the parser would lift that name out of it.
-        if payload
-            .keys()
-            .any(|k| ROUTING.contains(&k.as_str()) || k == ROUTING_TAG)
-        {
-            let mut routing = Map::new();
-            for key in ROUTING {
-                if let Some(v) = args.get(key) {
-                    routing.insert(key.to_string(), v.clone());
-                }
-            }
-            let body = render_field(ROUTING_TAG, &Value::Object(routing))
-                + &render_field(PAYLOAD_TAG, &Value::Object(payload));
-            return format!("<call name=\"{name}\">\n{body}</call>");
-        }
-        let mut flat = Map::new();
-        for key in ROUTING {
-            if let Some(v) = args.get(key) {
-                flat.insert(key.to_string(), v.clone());
-            }
-        }
-        for (k, v) in payload {
-            flat.insert(k, v);
-        }
-        args = flat;
+    if name != "send" {
+        let body: String = arguments.iter().map(|(k, v)| render_field(k, v)).collect();
+        return format!("<call name=\"{name}\">\n{body}</call>");
     }
-    let body: String = args.iter().map(|(k, v)| render_field(k, v)).collect();
+    let payload = match arguments.get(PAYLOAD_TAG) {
+        Some(Value::Object(p)) => p.clone(),
+        _ => Map::new(),
+    };
+    let mut routing = Map::new();
+    for key in ROUTING {
+        if let Some(v) = arguments.get(key) {
+            routing.insert(key.to_string(), v.clone());
+        }
+    }
+    let body = render_field(ROUTING_TAG, &Value::Object(routing))
+        + &render_field(PAYLOAD_TAG, &Value::Object(payload));
     format!("<call name=\"{name}\">\n{body}</call>")
 }
 

@@ -222,8 +222,7 @@ async fn an_envelope_dispatches_and_streams_verbatim() {
     // Address the backend's OWN file agent: its write is observable on disk, which
     // is proof the dispatch happened and not just that nothing crashed.
     let envelope = format!(
-        "<call name=\"send\"><target_id>ff_{backend}</target_id>\
-         <reply_to>null</reply_to><type>mkdir</type><path>routed</path></call>"
+        "<call name=\"send\"><routing><target_id>ff_{backend}</target_id><reply_to>null</reply_to></routing><payload><type>mkdir</type><path>routed</path></payload></call>"
     );
     let body = ndjson_body(&[json!({"message": {"content": envelope}, "done": true})]);
     Mock::given(method("POST"))

@@ -131,7 +131,7 @@ fn a_chain_whose_last_turn_made_a_send_is_still_open() {
             2,
             "assistant",
             Some(1),
-            r#"<call name="send"><target_id>notes</target_id><type>read</type></call>"#,
+            r#"<call name="send"><routing><target_id>notes</target_id></routing><payload><type>read</type></payload></call>"#,
         ),
     ];
     assert!(

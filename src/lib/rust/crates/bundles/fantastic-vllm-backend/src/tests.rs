@@ -1407,11 +1407,11 @@ async fn native_tool_calls_become_call_text() {
         &[
             delta(
                 None,
-                json!({"tool_calls": [{"index": 0, "function": {"name": "send", "arguments": "{\"target_id\":\"files\","}}]}),
+                json!({"tool_calls": [{"index": 0, "function": {"name": "send", "arguments": "{\"routing\":\"<target_id>files</target_id>\","}}]}),
             ),
             delta(
                 None,
-                json!({"tool_calls": [{"index": 0, "function": {"arguments": "\"type\":\"reflect\"}"}}]}),
+                json!({"tool_calls": [{"index": 0, "function": {"arguments": "\"payload\":\"<type>reflect</type>\"}"}}]}),
             ),
             delta(Some("tool_calls"), json!({})),
         ],
@@ -1421,7 +1421,8 @@ async fn native_tool_calls_become_call_text() {
     let p = provider(&endpoint);
     assert_eq!(
         drain(&p, &hi(), None).await.expect("stream"),
-        "<call name=\"send\"><target_id>files</target_id><type>reflect</type></call>"
+        "<call name=\"send\"><routing><target_id>files</target_id></routing>\
+         <payload><type>reflect</type></payload></call>"
     );
 }
 

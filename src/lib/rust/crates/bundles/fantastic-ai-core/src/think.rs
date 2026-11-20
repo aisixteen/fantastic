@@ -263,7 +263,7 @@ mod tests {
     fn a_call_written_inside_a_span_is_neither_dispatched_nor_stored() {
         // ONLY THE ANSWER ACTS: dispatch and history both read
         // the answer, so a call inside a thought does neither.
-        let envelope = r#"<call name="send"><target_id>self</target_id><type>recall</type></call>"#;
+        let envelope = r#"<call name="send"><routing><target_id>self</target_id></routing><payload><type>recall</type></payload></call>"#;
         let kept = without_thinking(&format!("<think>I should {envelope}</think>done"));
         assert_eq!(kept, "done");
         assert!(crate::tool_parse::extract_tool_calls(&kept).is_empty());

@@ -1512,7 +1512,6 @@ async fn route_reply_gated(
         }
     }
 
-    let mut doc_args: HashMap<(String, String), HashSet<String>> = HashMap::new();
     for call in calls {
         if CONTROL_CALLS.contains(&call.name.as_str()) {
             // CONTROL CALLS, not dispatches. `done` ends the chain; `await`
@@ -1705,49 +1704,6 @@ async fn route_reply_gated(
             Some(v) => crate::helpers::shown(v),
             None => "?".to_string(),
         };
-        // A ROUTING NAME THE VERB ALSO TAKES IS LOST. `title`,
-        // `timeout`, `reply_to`, … are this call's own fields — lifted out, never
-        // sent to the target. A verb that documents an argument of the same name can
-        // never receive it from a model call (a store's `create(title)` would fail on
-        // every call, and the model would blame the store). The target's `docs` names
-        // the verb's arguments; a clash refuses the call, loud.
-        if let Some(vt) = payload.get("type").and_then(Value::as_str) {
-            let used: Vec<&str> = crate::tool_parse::grammar::ROUTING
-                .iter()
-                .copied()
-                // a name the payload ALSO carries reaches the target (the routing form)
-                .filter(|k| *k != "target_id" && args.contains_key(*k) && !payload.contains_key(*k))
-                .collect();
-            if !used.is_empty() {
-                let clash = routing_clash(&kernel, target, vt, &used, &mut doc_args);
-                if !clash.is_empty() {
-                    let names = clash.join(", ");
-                    let body = json!({
-                        "error": format!(
-                            "{names} on this call {} call routing, never sent to the target \
-                             — but {target}'s `{vt}` documents an argument named {names}, \
-                             which an inline call cannot deliver; nothing was dispatched. Write \
-                             the call in the routing form, where the payload is taken whole: \
-                             <call name=\"send\"><routing><target_id>{target}</target_id>…\
-                             </routing><payload><type>{vt}</type>…</payload></call>.",
-                            if clash.len() == 1 { "is" } else { "are" }
-                        ),
-                        "target": target,
-                        "clash": clash,
-                    });
-                    units.push(Unit {
-                        dest: self_id.as_str().to_string(),
-                        target: target.to_string(),
-                        verb: verb.clone(),
-                        idx: None,
-                        body: Some(crate::tool_parse::render_reply(&body)),
-                        title: None,
-                    });
-                    continue;
-                }
-            }
-        }
-
         // THE `bytes` ARGUMENT IS RAW BYTES, NOT A JSON STRING.
         // Python's parser returns `raw.encode("utf-8")` for the one argument
         // named `bytes`, so the value that reaches a handler is TYPED — which
@@ -1783,9 +1739,8 @@ async fn route_reply_gated(
         // as a refusal the model can read.
         item = item.with_timeout(send_timeout);
         // The model may NAME the execution (dedup/join across retries) and may
-        // bound its own call; each is carried in its declared type. A verb whose
-        // payload has its own `id` (`delete_agent`, ...) clashes with it in the inline
-        // form; the routing-clash check above refuses that call.
+        // bound its own call; each is carried in its declared type. A verb's own `id`
+        // (`delete_agent`, ...) is in `<payload>` and reaches the target.
         if let Some(id) = args.get("id") {
             match serde_json::from_value::<fantastic_kernel::declared::IdOrName>(id.clone()) {
                 Ok(id) => item = item.with_id(id),
@@ -2447,37 +2402,6 @@ async fn deliver_grouped(
     }
 }
 
-/// The routing fields of this call that `target`'s `verb` also declares as
-/// arguments — read from the verb's declared schema (what `docs` renders), in
-/// process: no dispatch, no ledger row, once per (target, verb) per batch. A
-/// target this kernel cannot document (a peer's agent, an unknown verb) declares
-/// nothing here: the call goes on, and its own reply says what happened. Python
-/// `_routing_clash`.
-fn routing_clash(
-    kernel: &Arc<Kernel>,
-    target: &str,
-    verb: &str,
-    used: &[&str],
-    cache: &mut HashMap<(String, String), HashSet<String>>,
-) -> Vec<String> {
-    // the argument names the verb DECLARES (its schema), never parsed back out of text
-    let names = cache
-        .entry((target.to_string(), verb.to_string()))
-        .or_insert_with(|| {
-            fantastic_kernel::typing::verb_schema(kernel, target, verb, &serde_json::Map::new())
-                .and_then(|s| {
-                    s.get("properties")
-                        .and_then(Value::as_object)
-                        .map(|p| p.keys().cloned().collect::<HashSet<String>>())
-                })
-                .unwrap_or_default()
-        });
-    used.iter()
-        .filter(|k| names.contains(**k))
-        .map(|k| (*k).to_string())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2553,7 +2477,10 @@ mod tests {
         // `tool_parse::tests_malformed`); what this asserts is that the router
         // delivers THAT, verbatim, with nothing reworded on the way through.
         let bad =
-            crate::tool_parse::malformed_calls("<call name=\"send\"><type>reflect</type></call>");
+            crate::tool_parse::malformed_calls(
+                "<call name=\"send\"><routing><reply_to>self</reply_to></routing>\
+                 <payload><type>reflect</type></payload></call>",
+            );
         assert_eq!(bad.len(), 1, "one opened, unparseable envelope: {bad:?}");
         assert!(
             bad[0]
