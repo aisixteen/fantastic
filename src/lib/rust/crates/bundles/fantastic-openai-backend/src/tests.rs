@@ -70,3 +70,11 @@ fn the_stop_knob_is_a_string_or_a_list_of_strings() {
     assert_eq!(stop_of(&m(json!({"stop": [1]}))), None);
     assert_eq!(stop_of(&m(json!({}))), None);
 }
+
+#[test]
+fn no_temperature_is_sent_unless_the_chat_names_one() {
+    let m = |v: Value| v.as_object().unwrap().clone();
+    assert_eq!(m(json!({})).get("temperature").and_then(Value::as_f64), None);
+    assert_eq!(m(json!({"temperature": 1.0})).get("temperature").and_then(Value::as_f64), Some(1.0));
+    assert!(RECORD.get(&m(json!({})), "temperature").is_none_or(|v| v.is_null()), "no declared default");
+}
