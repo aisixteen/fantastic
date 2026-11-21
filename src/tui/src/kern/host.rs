@@ -154,6 +154,9 @@ fn registry_with(state: &std::path::Path, extras: &[crate::Extra]) -> BundleRegi
     // The Ollama backend: linked by default (feature `ollama`).
     #[cfg(feature = "ollama")]
     reg.register(fantastic_ollama_backend::HANDLER_MODULE, fantastic_ollama_backend::OllamaBackendBundle);
+    // The OpenAI-compatible backend: linked by default (feature `openai`).
+    #[cfg(feature = "openai")]
+    reg.register(fantastic_openai_backend::HANDLER_MODULE, fantastic_openai_backend::OpenAiBackendBundle);
     // The OpenAI Responses backend: linked by default (feature `responses`).
     #[cfg(feature = "responses")]
     reg.register(
@@ -445,7 +448,7 @@ impl Host {
             .operator(
                 "kernel",
                 json!({"type": "reflect", "tree": "ids", "handler_modules": [
-                    "anthropic_backend.tools", "ollama_backend.tools", "responses_backend.tools",
+                    "anthropic_backend.tools", "ollama_backend.tools", "openai_backend.tools", "responses_backend.tools",
                     "vllm_backend.tools", "foundation_models_backend.tools", "ai_chat.tools"]}),
             )
             .await
@@ -553,6 +556,7 @@ impl Host {
                     *n,
                     "anthropic_backend.tools"
                         | "ollama_backend.tools"
+                        | "openai_backend.tools"
                         | "responses_backend.tools"
                         | "vllm_backend.tools"
                         | "foundation_models_backend.tools"
@@ -953,6 +957,8 @@ mod tests {
         want.push(fantastic_anthropic_backend::HANDLER_MODULE);
         #[cfg(feature = "ollama")]
         want.push(fantastic_ollama_backend::HANDLER_MODULE);
+        #[cfg(feature = "openai")]
+        want.push(fantastic_openai_backend::HANDLER_MODULE);
         #[cfg(feature = "responses")]
         want.push(fantastic_responses_backend::HANDLER_MODULE);
         want.sort_unstable();

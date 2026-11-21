@@ -674,6 +674,7 @@ dependencies = [
  "fantastic-mail",
  "fantastic-mcp-client",
  "fantastic-ollama-backend",
+ "fantastic-openai-backend",
  "fantastic-py-agent",
  "fantastic-ram-store",
  "fantastic-responses-backend",
@@ -881,6 +882,26 @@ dependencies = [
 
 [[package]]
 name = "fantastic-ollama-backend"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-ai-core",
+ "fantastic-bundle",
+ "fantastic-file",
+ "fantastic-kernel",
+ "fantastic-ram-store",
+ "futures-util",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
+name = "fantastic-openai-backend"
 version = "0.1.0"
 dependencies = [
  "async-trait",

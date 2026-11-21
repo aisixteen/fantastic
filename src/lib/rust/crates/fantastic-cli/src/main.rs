@@ -127,6 +127,10 @@ fn register_default_bundles() -> BundleRegistry {
         "ollama_backend.tools",
         fantastic_ollama_backend::OllamaBackendBundle,
     );
+    reg.register(
+        fantastic_openai_backend::HANDLER_MODULE,
+        fantastic_openai_backend::OpenAiBackendBundle,
+    );
     // The bridge ships TWO derivations of io_bridge (mirrors py's separate
     // ws_bridge + relay_connector bundles): ws/ssh transports vs the relay-kernel router.
     reg.register("ws_bridge.tools", fantastic_bridge::WsBridgeBundle);

@@ -240,6 +240,7 @@ mod tests {
             "vllm_backend.tools",
             "responses_backend.tools",
             "ollama_backend.tools",
+            "openai_backend.tools",
             "foundation_models_backend.tools",
         ] {
             assert_eq!(PanelKind::of("x", m), PanelKind::Generic, "{m}");

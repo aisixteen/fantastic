@@ -77,6 +77,7 @@ fn holders(h: &Host) -> Vec<String> {
                             *n,
                             "anthropic_backend.tools"
                                 | "ollama_backend.tools"
+                                | "openai_backend.tools"
                                 | "responses_backend.tools"
                                 | "vllm_backend.tools"
                                 | "foundation_models_backend.tools"
