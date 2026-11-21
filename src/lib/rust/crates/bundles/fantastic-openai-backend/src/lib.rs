@@ -7,7 +7,8 @@
 //! ### HTTP
 //!
 //! `POST {endpoint}/chat/completions` with `{model, messages, stream:true,
-//! stream_options:{include_usage:true}, max_tokens, temperature}` → SSE; each
+//! stream_options:{include_usage:true}, max_tokens, temperature, stop?}` (`stop`: the
+//! chat's knob) → SSE; each
 //! `data:` line carries `{choices:[{delta:{content?, reasoning_content?}}]}`
 //! and the last one the `usage`. BOTH text channels are read (a reasoning model
 //! streams its deliberation as `reasoning_content`, some servers as
@@ -60,6 +61,8 @@ struct OpenAiProvider {
     model: String,
     temperature: f64,
     max_tokens: u64,
+    /// The chat's `stop` knob (fantastic#632): strings that end the completion, sent as is.
+    stop: Option<Value>,
     key: Arc<dyn KeySource>,
     report: ReportCell,
     stream_idle: Duration,
@@ -109,7 +112,7 @@ impl Provider for OpenAiProvider {
             .collect();
         // A SIDE CALL'S OWN BOUND (a fold summary's budget) — else the record's.
         let cap = max_tokens.map(|n| n.max(1) as u64).unwrap_or(self.max_tokens);
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "messages": messages,
             "stream": true,
@@ -117,6 +120,9 @@ impl Provider for OpenAiProvider {
             "max_tokens": cap,
             "temperature": self.temperature,
         });
+        if let (Some(stop), Some(obj)) = (&self.stop, body.as_object_mut()) {
+            obj.insert("stop".into(), stop.clone());
+        }
         let url = format!("{}/chat/completions", self.endpoint.trim_end_matches('/'));
         let key = self.key.key(&self.endpoint).await?.filter(|k| !k.is_empty());
         let mut req = reqwest::Client::new().post(&url).json(&body);
@@ -406,10 +412,21 @@ fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<Strin
             .get(&meta, "max_tokens")
             .and_then(|v| v.as_u64())
             .expect("max_tokens declares its default"),
+        stop: stop_of(&meta),
         key: Arc::new(key_reader(agent_id, kernel, BACKEND, false)),
         report: ReportCell::default(),
         stream_idle: stream_idle_of(&meta),
     })
+}
+
+/// The chat's `stop` knob, laid over the record by `complete`: a string or a list of
+/// strings; anything else (or an empty list) sends none.
+fn stop_of(meta: &Map<String, Value>) -> Option<Value> {
+    match meta.get("stop")? {
+        Value::String(s) if !s.is_empty() => Some(json!([s])),
+        Value::Array(a) if !a.is_empty() && a.iter().all(Value::is_string) => Some(Value::Array(a.clone())),
+        _ => None,
+    }
 }
 
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {

@@ -60,3 +60,13 @@ fn non_data_lines_are_skipped() {
     }
     assert!(out.is_empty());
 }
+
+#[test]
+fn the_stop_knob_is_a_string_or_a_list_of_strings() {
+    let m = |v: Value| v.as_object().unwrap().clone();
+    assert_eq!(stop_of(&m(json!({"stop": "<|x|>"}))), Some(json!(["<|x|>"])));
+    assert_eq!(stop_of(&m(json!({"stop": ["a", "b"]}))), Some(json!(["a", "b"])));
+    assert_eq!(stop_of(&m(json!({"stop": []}))), None);
+    assert_eq!(stop_of(&m(json!({"stop": [1]}))), None);
+    assert_eq!(stop_of(&m(json!({}))), None);
+}
