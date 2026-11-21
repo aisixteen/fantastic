@@ -89,6 +89,7 @@ fantastic-mcp-client = { path = "../lib/rust/crates/bundles/fantastic-mcp-client
 fantastic-ai-core = { path = "../lib/rust/crates/bundles/fantastic-ai-core" }
 fantastic-vllm-backend = { path = "../lib/rust/crates/bundles/fantastic-vllm-backend", optional = true }
 fantastic-ollama-backend = { path = "../lib/rust/crates/bundles/fantastic-ollama-backend", optional = true }
+fantastic-openai-backend = { path = "../lib/rust/crates/bundles/fantastic-openai-backend", optional = true }
 fantastic-anthropic-backend = { path = "../lib/rust/crates/bundles/fantastic-anthropic-backend", optional = true }
 # Apple's on-device model (macOS 26+ Apple Intelligence): built from the lib's
 # Swift core by its build.rs — needs the Xcode toolchain and
@@ -116,7 +117,7 @@ windows-sys = { version = "0.61", features = [
 [features]
 # The base binary reaches any model: the four AI backends are linked by default.
 # Each stays a feature, so an embedder can build lean with --no-default-features.
-default = ["vllm", "anthropic", "ollama", "responses"]
+default = ["vllm", "anthropic", "ollama", "openai", "responses"]
 # Links the OpenAI Responses backend (`responses_backend.tools`): `endpoint` (the
 # full …/v1/responses URL) and `model` are written on the set-up page — no
 # default; its key is a credential-store ref (required).
@@ -127,6 +128,8 @@ responses = ["dep:fantastic-responses-backend"]
 vllm = ["dep:fantastic-vllm-backend"]
 # Links the Ollama backend (`ollama_backend.tools`): `fantastic ai ollama -p PORT`.
 ollama = ["dep:fantastic-ollama-backend"]
+# Links the OpenAI-compatible backend (`openai_backend.tools`): llama.cpp and other /chat/completions servers, raw text.
+openai = ["dep:fantastic-openai-backend"]
 # Links the Anthropic Messages backend (`anthropic_backend.tools`): `fantastic ai anthropic --model M`.
 anthropic = ["dep:fantastic-anthropic-backend"]
 # Links Apple's on-device model (`foundation_models_backend.tools`): no endpoint,

@@ -200,6 +200,7 @@ pub fn port_kind(handler_module: Option<&str>) -> &'static str {
         hm,
         "anthropic_backend.tools"
             | "ollama_backend.tools"
+            | "openai_backend.tools"
             | "responses_backend.tools"
             | "vllm_backend.tools"
             | "foundation_models_backend.tools"
