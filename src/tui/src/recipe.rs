@@ -21,6 +21,7 @@
 //! `ai` BACKENDS (the word names the server it talks to):
 //! - `vllm -p PORT [--host H] [--kv-overflow evict|reject]` — the rest is read from the server
 //! - `ollama -p PORT [--host H]` — the rest is read from the server
+//! - `openai --model M --endpoint URL` — any OpenAI-compatible `/chat/completions` server (`openai_backend`, raw text); both named
 //! - `responses --model M [--endpoint URL]` — the endpoint is OpenAI's Responses API unless named; the key is the one stored for it
 //! - `anthropic --model M [--endpoint URL]` — the endpoint is Anthropic's Messages API unless named; a stored key is used when there is one
 //!
@@ -79,7 +80,7 @@ impl Opts {
     }
 }
 
-const USAGE: &str = "run `fantastic [canvas [--port N] [--host ADDR] | --headless [--port N] [--host ADDR]] [--statedir DIR] [--workdir DIR] [ai [vllm|ollama|responses|anthropic …]] [run COMMAND …]`, `fantastic mcp [--statedir DIR] [--workdir DIR]`, `fantastic send [--statedir DIR] <item>` or `fantastic import <path> --parent <id>`";
+const USAGE: &str = "run `fantastic [canvas [--port N] [--host ADDR] | --headless [--port N] [--host ADDR]] [--statedir DIR] [--workdir DIR] [ai [vllm|ollama|openai|responses|anthropic …]] [run COMMAND …]`, `fantastic mcp [--statedir DIR] [--workdir DIR]`, `fantastic send [--statedir DIR] <item>` or `fantastic import <path> --parent <id>`";
 
 fn port_of(v: &str, flag: &str) -> Result<u16, String> {
     v.parse::<u16>().ok().filter(|p| *p > 0).ok_or_else(|| format!("{flag} must be 1..65535, got `{v}`"))
@@ -128,12 +129,18 @@ fn backend(word: &str, f: AiFlags) -> Result<Backend, String> {
             let model = f.model.ok_or("`ai responses` needs --model <the model name>")?;
             Ok(Backend::Responses { endpoint: f.endpoint.unwrap_or_else(|| crate::kern::root_ai::RESPONSES_ENDPOINT.into()), model })
         }
+        "openai" => {
+            only(&["--model", "--endpoint"])?;
+            let model = f.model.ok_or("`ai openai` needs --model <the model name>")?;
+            let endpoint = f.endpoint.ok_or("`ai openai` needs --endpoint <the server's /v1 URL>")?;
+            Ok(Backend::OpenAi { endpoint, model })
+        }
         "anthropic" => {
             only(&["--model", "--endpoint"])?;
             let model = f.model.ok_or("`ai anthropic` needs --model <the model name>")?;
             Ok(Backend::Anthropic { endpoint: f.endpoint.unwrap_or_else(|| crate::kern::root_ai::ANTHROPIC_ENDPOINT.into()), model })
         }
-        other => Err(format!("`ai` takes vllm, ollama, responses or anthropic, got `{other}`")),
+        other => Err(format!("`ai` takes vllm, ollama, openai, responses or anthropic, got `{other}`")),
     }
 }
 
@@ -155,9 +162,9 @@ pub fn parse(args: &[String]) -> Result<Opts, String> {
             "ai" => {
                 push(&mut o.recipes, Recipe::Ai);
                 let word = match args.get(i + 1).map(String::as_str) {
-                    Some(w @ ("vllm" | "ollama" | "responses" | "anthropic")) => w.to_string(),
+                    Some(w @ ("vllm" | "ollama" | "openai" | "responses" | "anthropic")) => w.to_string(),
                     Some(w) if !w.starts_with('-') && !matches!(w, "canvas" | "run" | "ai") => {
-                        return Err(format!("`ai` takes vllm, ollama, responses or anthropic, got `{w}`"))
+                        return Err(format!("`ai` takes vllm, ollama, openai, responses or anthropic, got `{w}`"))
                     }
                     _ => {
                         i += 1;
@@ -324,6 +331,11 @@ mod tests {
             Some(Backend::Vllm { host: "h".into(), port: 1, kv_overflow: "reject".into() })
         );
         assert_eq!(p("ai ollama -p 11434").unwrap().ai, Some(Backend::Ollama { host: "127.0.0.1".into(), port: 11434 }));
+        assert_eq!(
+            p("ai openai --model m --endpoint http://h:8090/v1").unwrap().ai,
+            Some(Backend::OpenAi { endpoint: "http://h:8090/v1".into(), model: "m".into() })
+        );
+        assert!(p("ai openai --model m").unwrap_err().contains("--endpoint"));
         assert_eq!(
             p("ai responses --model m").unwrap().ai,
             Some(Backend::Responses { endpoint: crate::kern::root_ai::RESPONSES_ENDPOINT.into(), model: "m".into() })

@@ -31,6 +31,7 @@ pub enum Backend {
     Vllm { host: String, port: u16, kv_overflow: String },
     Ollama { host: String, port: u16 },
     Responses { endpoint: String, model: String },
+    OpenAi { endpoint: String, model: String },
     Anthropic { endpoint: String, model: String },
 }
 
@@ -40,6 +41,7 @@ impl Backend {
             Backend::Vllm { .. } => "vllm_backend.tools",
             Backend::Ollama { .. } => "ollama_backend.tools",
             Backend::Responses { .. } => "responses_backend.tools",
+            Backend::OpenAi { .. } => "openai_backend.tools",
             Backend::Anthropic { .. } => "anthropic_backend.tools",
         }
     }
@@ -50,6 +52,7 @@ impl Backend {
             Backend::Vllm { .. } => "vllm",
             Backend::Ollama { .. } => "ollama",
             Backend::Responses { .. } => "responses",
+            Backend::OpenAi { .. } => "openai",
             Backend::Anthropic { .. } => "anthropic",
         }
     }
@@ -58,7 +61,9 @@ impl Backend {
         match self {
             Backend::Vllm { host, port, .. } => format!("http://{host}:{port}/v1"),
             Backend::Ollama { host, port } => format!("http://{host}:{port}"),
-            Backend::Responses { endpoint, .. } | Backend::Anthropic { endpoint, .. } => endpoint.clone(),
+            Backend::Responses { endpoint, .. } | Backend::OpenAi { endpoint, .. } | Backend::Anthropic { endpoint, .. } => {
+                endpoint.clone()
+            }
         }
     }
 
@@ -71,7 +76,7 @@ impl Backend {
                 m.insert("kv_overflow".into(), json!(kv_overflow));
             }
             Backend::Ollama { .. } => {}
-            Backend::Responses { model, .. } | Backend::Anthropic { model, .. } => {
+            Backend::Responses { model, .. } | Backend::OpenAi { model, .. } | Backend::Anthropic { model, .. } => {
                 m.insert("model".into(), json!(model));
             }
         }
@@ -84,7 +89,7 @@ impl Backend {
             Backend::Vllm { .. } => &["model", "context_window", "kv_slots", "metrics_url"],
             // only the model: ollama's loaded window is not in its API
             Backend::Ollama { .. } => &["model"],
-            Backend::Responses { .. } => &[],
+            Backend::Responses { .. } | Backend::OpenAi { .. } => &[],
             Backend::Anthropic { .. } => &["context_window"],
         }
     }
