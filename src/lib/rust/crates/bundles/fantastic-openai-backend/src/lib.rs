@@ -7,7 +7,7 @@
 //! ### HTTP
 //!
 //! `POST {endpoint}/chat/completions` with `{model, messages, stream:true,
-//! stream_options:{include_usage:true}, max_tokens, temperature, stop?}` (`stop`: the
+//! stream_options:{include_usage:true}, max_tokens, temperature?, stop?}` (`stop`: the
 //! chat's knob) → SSE; each
 //! `data:` line carries `{choices:[{delta:{content?, reasoning_content?}}]}`
 //! and the last one the `usage`. BOTH text channels are read (a reasoning model
@@ -45,8 +45,6 @@ pub const HANDLER_MODULE: &str = "openai_backend.tools";
 /// The name a required-field refusal carries.
 const BACKEND: &str = "openai_backend";
 
-/// Default sampling temperature (a record `temperature` overrides it).
-pub const DEFAULT_TEMPERATURE: f64 = 0.3;
 
 const CFG: BackendConfig = BackendConfig {
     name: "openai_backend",
@@ -59,7 +57,8 @@ const CFG: BackendConfig = BackendConfig {
 struct OpenAiProvider {
     endpoint: String,
     model: String,
-    temperature: f64,
+    /// The chat's `temperature` knob; `None` sends none, so the server's own setting applies.
+    temperature: Option<f64>,
     max_tokens: u64,
     /// The chat's `stop` knob (fantastic#632): strings that end the completion, sent as is.
     stop: Option<Value>,
@@ -118,8 +117,10 @@ impl Provider for OpenAiProvider {
             "stream": true,
             "stream_options": {"include_usage": true},
             "max_tokens": cap,
-            "temperature": self.temperature,
         });
+        if let (Some(t), Some(obj)) = (self.temperature, body.as_object_mut()) {
+            obj.insert("temperature".into(), json!(t));
+        }
         if let (Some(stop), Some(obj)) = (&self.stop, body.as_object_mut()) {
             obj.insert("stop".into(), stop.clone());
         }
@@ -302,8 +303,7 @@ pub struct OpenAiRecord {
     pub endpoint: String,
     /// The model name the server serves.
     pub model: Option<String>,
-    /// Sampling temperature.
-    #[schemars(default = "default_temperature")]
+    /// Sampling temperature; left out, none is sent and the server's own setting applies.
     pub temperature: Option<f64>,
     /// A turn's output budget (tokens).
     #[schemars(range(min = 1), default = "default_max_tokens")]
@@ -320,10 +320,6 @@ pub struct OpenAiRecord {
     /// The fields every provider takes.
     #[serde(flatten)]
     pub provider: ProviderRecord,
-}
-
-fn default_temperature() -> Option<f64> {
-    Some(DEFAULT_TEMPERATURE)
 }
 
 fn default_max_tokens() -> Option<i64> {
@@ -404,10 +400,7 @@ fn build_provider_with(agent_id: &AgentId, kernel: &Arc<Kernel>, meta: Map<Strin
     Arc::new(OpenAiProvider {
         endpoint,
         model,
-        temperature: RECORD
-            .get(&meta, "temperature")
-            .and_then(|v| v.as_f64())
-            .expect("temperature declares its default"),
+        temperature: meta.get("temperature").and_then(Value::as_f64),
         max_tokens: RECORD
             .get(&meta, "max_tokens")
             .and_then(|v| v.as_u64())
