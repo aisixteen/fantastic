@@ -60,14 +60,14 @@ fn mk() -> (TempDir, Arc<Kernel>) {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(root);
     (tmp, kernel)
 }
 
 async fn call(kernel: &Arc<Kernel>, payload: Value) -> Value {
     kernel
-        .send(vec![Item::new(AgentId::from("kernel"), payload)])
+        .operator_send(vec![Item::new(AgentId::from("kernel"), payload)])
         .await
         .remove(0)
         .result
@@ -101,7 +101,7 @@ async fn children_dir_is_one_safe_segment_at_create() {
         .await;
         assert_eq!(r["reason"], "bad_arg", "{value}: {r}");
         assert_eq!(r["arg"], "children_dir", "{value}: {r}");
-        assert!(kernel.agents.get(&AgentId::from("x")).is_none());
+        assert!(kernel.resolve_target("x").is_none());
     }
     let ok = call(
         &kernel,
@@ -197,11 +197,7 @@ fn cold_walk_follows_an_inward_symlinked_entry() {
         BootstrapOptions::one_shot(work.join(".fantastic"), &work),
     )
     .unwrap();
-    let a = booted
-        .kernel
-        .agents
-        .get(&AgentId::from("a"))
-        .expect("a hydrated");
+    let a = booted.kernel.resolve_target("a").expect("a hydrated");
     assert_eq!(
         a.parent_id.as_ref().map(|p| p.0.as_str()),
         Some("kernel_state")

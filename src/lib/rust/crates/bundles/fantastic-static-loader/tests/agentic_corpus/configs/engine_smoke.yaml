@@ -1,0 +1,31 @@
+# Kernel config — the SYSTEM SHAPE only (grant model v9: `can` lines). What is
+# asserted about it lives in `specs/engine_smoke.yaml`.
+
+loaders:
+  - id: static_loader
+    file: fantastic.yaml
+    manifest:
+      agents:
+        # The persistence provider, DISCOVERED by match: a file_bridge whose
+        # root resolves to the loader's own `.fantastic` dir.
+        - id: store
+          handler_module: file_bridge.tools
+          allow: ['.']
+          root: .fantastic
+          ingress_rule: allow_all_ingress
+        # Memory is plain FILES on a data store the worker edits directly.
+        - id: memory
+          handler_module: file_bridge.tools
+          allow: ['.']
+          root: memory
+          ingress_rule: allow_all_ingress
+        - id: worker
+          handler_module: file_bridge.tools
+          allow: ['.']
+          ingress_rule: allow_all_ingress
+          can:
+            memory: {call: [write, read]}
+        - id: island
+          handler_module: file_bridge.tools
+          allow: ['.']
+          ingress_rule: allow_all_ingress

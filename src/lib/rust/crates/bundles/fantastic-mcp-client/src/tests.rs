@@ -252,7 +252,7 @@ async fn rig_on(
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     creds::set_key(&kernel, tmp.path(), "mcp", "main", host, key).await;
     let mut meta = Map::new();
@@ -260,7 +260,7 @@ async fn rig_on(
     if credentials {
         creds::add_credentials(&mut meta, "main");
     }
-    kernel.register(Agent::new(
+    fantastic_kernel::test_support::register(&kernel, Agent::new(
         AgentId::from("mcp"),
         Some(HANDLER_MODULE.to_string()),
         Some(root.id.clone()),
@@ -284,7 +284,7 @@ async fn rig() -> Rig {
 }
 
 async fn send(k: &Arc<Kernel>, target: &str, payload: Value) -> fantastic_kernel::Outcome {
-    k.send(vec![Item::new(AgentId::from(target), payload)])
+    k.operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
 }
@@ -357,10 +357,9 @@ async fn boot_lists_every_page_and_skips_what_it_cannot_serve() {
 #[tokio::test]
 async fn docs_serve_this_agents_own_table_built_from_the_schemas() {
     let r = booted().await;
-    let d = send(&r.kernel, "kernel", json!({"type": "docs", "of": "mcp"}))
+    let d = send(&r.kernel, "mcp", json!({"type": "reflect", "tier": "oneliners"}))
         .await
         .result;
-    assert_eq!(d["bundle"], HANDLER_MODULE);
     // rendered from the tool's own schema and description
     assert_eq!(
         d["verbs"]["get_weather"],
@@ -370,8 +369,8 @@ async fn docs_serve_this_agents_own_table_built_from_the_schemas() {
     assert_eq!(d["verbs"].as_object().unwrap().len(), 10, "{d}");
     let full = send(
         &r.kernel,
-        "kernel",
-        json!({"type": "docs", "of": "mcp", "tier": "detailed", "verb": "get_weather"}),
+        "mcp",
+        json!({"type": "reflect", "tier": "detailed", "verb": "get_weather"}),
     )
     .await
     .result;
@@ -379,15 +378,6 @@ async fn docs_serve_this_agents_own_table_built_from_the_schemas() {
         .as_str()
         .unwrap()
         .contains("Current weather for a city. Units default to metric."));
-    let b = send(
-        &r.kernel,
-        "kernel",
-        json!({"type": "docs", "of": "mcp_client"}),
-    )
-    .await
-    .result;
-    let verbs: Vec<&String> = b["verbs"].as_object().unwrap().keys().collect();
-    assert_eq!(verbs, ["boot", "reflect"]);
 }
 
 // ─── the wire ────────────────────────────────────────────────────────
@@ -624,7 +614,7 @@ async fn failures_are_refusals_from_the_closed_set() {
     let r2 = send(&r.kernel, "mcp", json!({"type": "nope"})).await.result;
     // the agent's own entry names what it answers (its tools included) and where the arguments are
     assert!(r2["error"].as_str().unwrap().contains("get_weather"), "{r2}");
-    assert!(r2["hint"].as_str().unwrap().contains("docs of=mcp"), "{r2}");
+    assert!(r2["hint"].as_str().unwrap().contains("reflect mcp tier=detailed"), "{r2}");
 }
 
 // ─── versions, connection, lifecycle ─────────────────────────────────
@@ -678,7 +668,7 @@ async fn a_failed_relist_keeps_the_tools_already_listed() {
     r._server.reset().await; // the server is gone: every request 404s
     let out = send(&r.kernel, "mcp", json!({"type": "boot"})).await.result;
     assert_eq!(out["reason"], "transport_error", "{out}");
-    let d = send(&r.kernel, "kernel", json!({"type": "docs", "of": "mcp"}))
+    let d = send(&r.kernel, "mcp", json!({"type": "reflect", "tier": "oneliners"}))
         .await
         .result;
     assert!(
@@ -688,25 +678,18 @@ async fn a_failed_relist_keeps_the_tools_already_listed() {
 }
 
 #[tokio::test]
-async fn a_grant_names_tools_like_verbs() {
+async fn a_line_names_tools_like_verbs() {
     let r = booted().await;
     let k = &r.kernel;
-    let mut meta = Map::new();
-    meta.insert("can_call".into(), json!({"mcp": ["get_weather"]}));
-    k.register(Agent::new(
+    fantastic_kernel::test_support::register(k, Agent::new(
         AgentId::from("caller"),
         None,
         Some(AgentId::from("kernel_state")),
-        meta,
+        Map::new(),
         std::path::PathBuf::new(),
         false,
     ));
-    let mut patch = Map::new();
-    patch.insert(
-        "callable_by".into(),
-        json!({"caller": ["get_weather", "fail"]}),
-    );
-    k.update(&AgentId::from("mcp"), patch);
+    fantastic_kernel::test_support::grant(k, "caller", "mcp", json!({"call": ["get_weather"]}));
     let (ok, no) = fantastic_kernel::test_support::as_agent("caller", async {
         (
             send(k, "mcp", json!({"type": "get_weather", "city": "Kyiv"})).await,
@@ -715,8 +698,7 @@ async fn a_grant_names_tools_like_verbs() {
     })
     .await;
     assert_eq!(ok.status, Status::Completed, "{}", ok.result);
-    assert_eq!(no.result["reason"], "unauthorized");
-    assert_eq!(no.result["side"], "egress");
+    assert_eq!(no.result["reason"], "unknown_agent", "a verb the line does not name: the unknown answer");
 }
 
 #[test]
@@ -801,6 +783,6 @@ async fn a_call_past_its_timeout_settles_timed_out() {
         json!({"type": "get_weather", "city": "x"}),
     );
     item.timeout = Some(0.5);
-    let out = r.kernel.send(vec![item]).await.remove(0);
+    let out = r.kernel.operator_send(vec![item]).await.remove(0);
     assert_eq!(out.status, Status::TimedOut, "{}", out.result);
 }

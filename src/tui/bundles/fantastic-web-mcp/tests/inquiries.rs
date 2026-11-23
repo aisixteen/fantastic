@@ -56,7 +56,7 @@ impl Handler for Asker {
             asker_verbs::Call::Ask(a) => {
                 let ask = json!({"type": "inquiry", "text": a.text, "request_id": "r1"});
                 let out = Arc::clone(k)
-                    .send(vec![Item::new(AgentId::from("mcp"), ask)])
+                    .operator_send(vec![Item::new(AgentId::from("mcp"), ask)])
                     .await
                     .remove(0);
                 Ok(Some(out.result))
@@ -74,7 +74,7 @@ impl Handler for Asker {
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     // a send outside every dispatch is the operator's
     Arc::clone(k)
-        .send(vec![Item::new(AgentId::from(target), payload)])
+        .operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -95,12 +95,12 @@ async fn setup(open: Option<Value>) -> Arc<Kernel> {
         &k,
         &root,
         json!({"type": "create_agent", "parent_id": root, "id": "asker",
-        "handler_module": "asker.tools", "can_call": {"mcp": "*"}, "callable_by": {"mcp": "*"}}),
+        "handler_module": "asker.tools", "can": {"mcp": {"call": ["*"]}}}),
     )
     .await;
     assert!(r.get("error").is_none(), "create asker: {r}");
     let mut mcp = json!({"type": "create_agent", "parent_id": root, "id": "mcp",
-        "handler_module": HANDLER_MODULE, "can_call": {"asker": "*"}, "callable_by": {"asker": "*"}});
+        "handler_module": HANDLER_MODULE, "can": {"asker": {"call": ["*"]}}});
     if let Some(o) = open {
         mcp["open_inquiries"] = o;
     }
@@ -191,8 +191,8 @@ async fn an_unanswered_inquiry_survives_a_restart() {
         .expect("an inquiry pid");
     // what the record writer persists: the open list is ON THE LEG'S RECORD
     let held = {
-        let e = a.agents.get(&AgentId::from("mcp")).expect("the leg");
-        let m = e.meta.read().expect("meta").clone();
+        let e = a.resolve_target("mcp").expect("the leg");
+        let m = e.record().meta.clone();
         m.get("open_inquiries")
             .cloned()
             .expect("the inquiry is on the record")

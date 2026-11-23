@@ -55,7 +55,7 @@ impl Handler for Sleeper {
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     // a send outside every dispatch is the operator's
     let item = Item::new(AgentId::from(target), payload);
-    Arc::clone(k).send(vec![item]).await.remove(0).result
+    Arc::clone(k).operator_send(vec![item]).await.remove(0).result
 }
 
 /// A kernel with a leg `mcp` and a `sleeper` it may call.
@@ -67,10 +67,10 @@ async fn setup() -> (Arc<Kernel>, Arc<McpCore>) {
     let root = k.root().expect("root").id.0.clone();
 
     let r = op(&k, &root, json!({"type": "create_agent", "parent_id": root, "id": "sleeper",
-        "handler_module": "sleeper.tools", "callable_by": {"mcp": "*"}})).await;
+        "handler_module": "sleeper.tools"})).await;
     assert!(r.get("error").is_none(), "create sleeper: {r}");
     let r = op(&k, &root, json!({"type": "create_agent", "parent_id": root, "id": "mcp",
-        "handler_module": HANDLER_MODULE, "can_call": {"sleeper": "*"}})).await;
+        "handler_module": HANDLER_MODULE, "can": {"sleeper": {"call": ["*"]}}})).await;
     assert!(r.get("error").is_none(), "create mcp: {r}");
 
     let core = Arc::new(McpCore::new(Arc::clone(&k), AgentId::from("mcp"), "test"));
@@ -120,5 +120,5 @@ async fn a_call_the_leg_was_not_granted_is_refused_as_is_error() {
         "arguments": {"items": [{"target": root, "payload": {"type": "delete_agent", "id": "sleeper"}}]}}});
     let reply = core.handle(&msg, |_| {}).await.expect("a reply");
     assert_eq!(reply["result"]["isError"], true, "{reply}");
-    assert!(k.agents.contains_key(&AgentId::from("sleeper")), "nothing was deleted");
+    assert!(k.exists("sleeper"), "nothing was deleted");
 }

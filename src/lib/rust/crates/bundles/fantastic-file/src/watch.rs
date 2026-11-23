@@ -452,9 +452,7 @@ fn rewatch(
             }
             // `allow` is read LIVE: a path the bridge stopped exposing after the
             // watch was armed reports nothing more.
-            let allow = k
-                .agents
-                .get(&me)
+            let allow = k.resolve_target(me.as_str())
                 .map(|a| crate::allow_list(&a.record().meta))
                 .unwrap_or_default();
             for (rel, kind) in changes {
@@ -473,8 +471,7 @@ fn rewatch(
 }
 
 /// python `tools._relay_to_views`: push one change to each VIEW caller whose watch
-/// covers it, and only where its scope on this bridge admits it (its `callable_by` entry
-/// here). The kernel's own watch would mirror every change to a watcher, so a view is
+/// covers it, and only where its scope on this bridge admits it (its own `path`). The kernel's own watch would mirror every change to a watcher, so a view is
 /// never a kernel watcher of its bridge.
 pub(crate) fn relay_to_views(
     kernel: &Arc<Kernel>,

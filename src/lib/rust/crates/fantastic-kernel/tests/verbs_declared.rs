@@ -1,6 +1,7 @@
 //! Verbs declared once (issue #642): each agent checks its own calls against its
 //! bundle's declaration (the shared entry `Call::parse`) and replies with the
-//! refusal; `reflect` and `docs` render the same declarations, builtin and dynamic.
+//! refusal; `reflect` renders the same declarations, builtin and dynamic, as one-line
+//! verbs or, with `tier`/`verb`/`part`, as verb docs.
 //! The probe bundle below is written the way every bundle is: structs, `verbs!`,
 //! `record!`, and a `handle` whose first act is the entry.
 
@@ -122,7 +123,7 @@ impl Handler for Tools {
         tools_verbs::VERBS
     }
     fn dynamic_verbs(&self, agent: &Agent) -> Vec<fantastic_kernel::DynVerb> {
-        let meta = agent.meta.read().unwrap();
+        let meta = agent.record().meta;
         meta.get("tools")
             .and_then(Value::as_array)
             .map(|tools| {
@@ -151,7 +152,7 @@ impl Handler for Tools {
         match call {
             tools_verbs::Call::Reflect(_) => Ok(Some(json!({"id": id.0, "sentence": "Tools."}))),
             tools_verbs::Call::Tools0(_) => {
-                let agent = kernel.agents.get(id).map(|e| Arc::clone(&e)).unwrap();
+                let agent = kernel.resolve_target(id.as_str()).unwrap();
                 Ok(Some(
                     json!({"tools": Handler::dynamic_verbs(self, &agent).len()}),
                 ))
@@ -260,14 +261,14 @@ fn mk() -> (TempDir, Arc<Kernel>) {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(root);
     (tmp, kernel)
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     kernel
-        .send(vec![Item::new(AgentId::from(target), payload)])
+        .operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -321,18 +322,16 @@ async fn an_unknown_verb_is_refused_with_the_list() {
 #[tokio::test]
 async fn an_unknown_type_echoes_the_raw_value_as_verb() {
     let (_t, k) = with_probe().await;
-    let agent = k
-        .agents
-        .get(&AgentId::from("p"))
-        .map(|e| Arc::clone(&e))
-        .unwrap();
+    let agent = k.resolve_target("p").unwrap();
     for (payload, shown, raw) in [
         (json!({}), "None", Value::Null),
         (json!({"type": null}), "None", Value::Null),
         (json!({"type": 5}), "5", json!(5)),
         (json!({"type": ""}), "''", json!("")),
     ] {
-        let r = k.bookkeeping(&agent, payload.clone(), None).await.result;
+        let r = fantastic_kernel::test_support::bookkeeping(&k, &agent, payload.clone())
+            .await
+            .result;
         assert_eq!(
             r["error"],
             format!("unknown verb {shown}; p answers: greet, tally, reflect"),
@@ -488,7 +487,7 @@ async fn a_record_field_unknown_to_the_bundle_is_refused_at_create_and_update() 
             .contains("word:string?, limit:int?"),
         "{r}"
     );
-    assert!(k.agents.get(&AgentId::from("q")).is_none());
+    assert!(k.resolve_target("q").is_none());
     let r = call(
         &k,
         "kernel",
@@ -500,13 +499,7 @@ async fn a_record_field_unknown_to_the_bundle_is_refused_at_create_and_update() 
         "{r}"
     );
     assert_eq!(
-        k.agents
-            .get(&AgentId::from("p"))
-            .unwrap()
-            .meta
-            .read()
-            .unwrap()
-            .get("edits"),
+        k.resolve_target("p").unwrap().record().meta.get("edits"),
         None
     );
     // a wrong type for a known field is refused by name too
@@ -558,7 +551,7 @@ async fn a_handler_that_is_not_installed_is_refused_at_create() {
         r["error"], "create_agent: handler_module 'ghost.tools' is not installed in this kernel",
         "{r}"
     );
-    assert!(k.agents.get(&AgentId::from("ghost")).is_none());
+    assert!(k.resolve_target("ghost").is_none());
 }
 
 #[tokio::test]
@@ -681,7 +674,7 @@ async fn a_nested_object_is_checked_by_its_own_declared_fields() {
 }
 
 #[tokio::test]
-async fn reflect_and_docs_render_both_kinds_of_verb_from_the_agent() {
+async fn reflect_and_its_verb_docs_render_both_kinds_of_verb_from_the_agent() {
     let (_t, k) = with_tools().await;
     let r = call(&k, "t", json!({"type": "reflect"})).await;
     let names: Vec<&str> = r["verbs"]
@@ -699,13 +692,13 @@ async fn reflect_and_docs_render_both_kinds_of_verb_from_the_agent() {
         "args: q:string (req), limit:int? — Find pages"
     );
     assert_eq!(r["verbs"]["ping"], "No args — Say pong");
-    let one = call(&k, "kernel", json!({"type": "docs", "of": "t"})).await;
+    let one = call(&k, "t", json!({"type": "reflect", "part": "docs"})).await;
     assert_eq!(one["verbs"]["search"], r["verbs"]["search"], "{one}");
     assert_eq!(one["verbs"]["ping"], "No args — Say pong", "{one}");
     let det = call(
         &k,
-        "kernel",
-        json!({"type": "docs", "of": "t", "tier": "detailed", "verb": "search"}),
+        "t",
+        json!({"type": "reflect", "tier": "detailed", "verb": "search"}),
     )
     .await;
     assert_eq!(
@@ -713,15 +706,17 @@ async fn reflect_and_docs_render_both_kinds_of_verb_from_the_agent() {
         "Find pages. Ranked.\n\nargs:\n  q:string (req) — What to find.\n  limit:int? — How many.",
         "{det}"
     );
-    // a bundle addressed by name has no agent, so no dynamic verbs
-    let bundle = call(
+    // `part: schema` carries each shown verb's schema and no text
+    let sch = call(
         &k,
-        "kernel",
-        json!({"type": "docs", "of": "tools_probe.tools"}),
+        "t",
+        json!({"type": "reflect", "verb": "search", "part": "schema"}),
     )
     .await;
-    assert!(bundle["verbs"].get("search").is_none(), "{bundle}");
-    assert!(bundle["verbs"].get("tools").is_some(), "{bundle}");
+    assert!(sch.get("verbs").is_none(), "{sch}");
+    assert!(sch.get("tier").is_none(), "{sch}");
+    assert!(sch["schemas"]["search"].is_object(), "{sch}");
+    assert_eq!(sch["schemas"].as_object().unwrap().len(), 1, "{sch}");
 }
 
 #[tokio::test]
@@ -743,10 +738,11 @@ async fn reflect_renders_the_verbs_from_the_declarations() {
 }
 
 #[tokio::test]
-async fn docs_render_both_tiers_from_the_declarations() {
+async fn verb_docs_render_both_tiers_from_the_declarations() {
     let (_t, k) = with_probe().await;
-    let one = call(&k, "kernel", json!({"type": "docs", "of": "p"})).await;
-    assert_eq!(one["bundle"], "probe.tools", "{one}");
+    let one = call(&k, "p", json!({"type": "reflect", "part": "docs"})).await;
+    assert_eq!(one["tier"], "oneliners", "{one}");
+    assert_eq!(one["man"], "A test stand-in.", "{one}");
     assert_eq!(
         one["verbs"]["greet"],
         "args: name:string (req), times:int (default 1), style:'calm'|'loud'? — Say hello to someone, a number of times",
@@ -755,8 +751,8 @@ async fn docs_render_both_tiers_from_the_declarations() {
     assert!(one["verbs"].get("reflect").is_some(), "{one}");
     let det = call(
         &k,
-        "kernel",
-        json!({"type": "docs", "of": "probe.tools", "verb": "greet", "tier": "detailed"}),
+        "p",
+        json!({"type": "reflect", "verb": "greet", "tier": "detailed"}),
     )
     .await;
     let text = det["verbs"]["greet"].as_str().expect("one verb");
@@ -776,11 +772,11 @@ async fn docs_render_both_tiers_from_the_declarations() {
     assert_eq!(det["verbs"].as_object().unwrap().len(), 1, "{det}");
     let r = call(
         &k,
-        "kernel",
-        json!({"type": "docs", "of": "p", "verb": "nope"}),
+        "p",
+        json!({"type": "reflect", "verb": "nope"}),
     )
     .await;
-    assert_eq!(r["error"], "docs: p has no verb 'nope'", "{r}");
+    assert_eq!(r["error"], "reflect: p has no verb 'nope'", "{r}");
     assert_eq!(
         r["hint"], "its verbs: greet, tally, reflect",
         "{r}"
@@ -813,7 +809,7 @@ async fn the_bundle_catalog_lists_the_declared_record() {
 #[tokio::test]
 async fn a_page_size_and_cursor_are_the_declared_types() {
     let (_t, k) = with_probe().await;
-    for verb in ["list_agents", "ps", "ledger"] {
+    for verb in ["ps", "ledger"] {
         let r = call(&k, "kernel", json!({"type": verb, "limit": 0})).await;
         assert_eq!(r["reason"], "bad_arg", "{verb}: {r}");
         assert_eq!(r["arg"], "limit", "{verb}: {r}");
@@ -828,8 +824,13 @@ async fn a_page_size_and_cursor_are_the_declared_types() {
         let r = call(&k, "kernel", json!({"type": verb, "limit": "2"})).await;
         assert_eq!(r["arg"], "limit", "{verb}: {r}");
     }
-    let page = call(&k, "kernel", json!({"type": "list_agents", "limit": 1})).await;
-    assert_eq!(page["agents"].as_array().unwrap().len(), 1, "{page}");
+    let page = call(
+        &k,
+        "kernel",
+        json!({"type": "reflect", "tree": "ids", "limit": 1}),
+    )
+    .await;
+    assert_eq!(page["tree"].as_array().unwrap().len(), 1, "{page}");
     assert!(page["next"].is_string(), "{page}");
 }
 
@@ -895,13 +896,13 @@ async fn await_set_takes_its_declared_arguments() {
 }
 
 #[tokio::test]
-async fn docs_of_a_bundle_carries_its_one_man_text_and_no_other_prose() {
+async fn verb_docs_carry_the_bundles_one_man_text_and_no_other_prose() {
     let (_t, k) = with_probe().await;
     for tier in ["oneliners", "detailed"] {
         let r = call(
             &k,
-            "kernel",
-            json!({"type": "docs", "of": "p", "tier": tier}),
+            "p",
+            json!({"type": "reflect", "tier": tier}),
         )
         .await;
         assert_eq!(r["man"], "A test stand-in.", "{tier}: {r}");
@@ -910,16 +911,16 @@ async fn docs_of_a_bundle_carries_its_one_man_text_and_no_other_prose() {
     // one verb's entry carries the verb alone
     let r = call(
         &k,
-        "kernel",
-        json!({"type": "docs", "of": "p", "verb": "tally"}),
+        "p",
+        json!({"type": "reflect", "verb": "tally"}),
     )
     .await;
     assert!(r.get("man").is_none(), "{r}");
     // the tier is the declared enum
     let r = call(
         &k,
-        "kernel",
-        json!({"type": "docs", "of": "p", "tier": "full"}),
+        "p",
+        json!({"type": "reflect", "tier": "full"}),
     )
     .await;
     assert_eq!(r["arg"], "tier", "{r}");

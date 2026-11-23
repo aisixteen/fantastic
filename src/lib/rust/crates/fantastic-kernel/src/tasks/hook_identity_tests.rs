@@ -124,7 +124,7 @@ fn mk(log: &Log) -> Arc<Kernel> {
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> crate::outcome::Outcome {
     kernel
-        .send(vec![Item::new(AgentId::from(target), payload)])
+        .operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
 }
@@ -141,8 +141,8 @@ async fn create(kernel: &Arc<Kernel>, id: &str, parent: &str) {
     assert_eq!(r["id"], json!(id), "create_agent failed: {r}");
 }
 
-/// `gc` under `mid` under the root — NOT a direct child, so the root's baseline
-/// `$subtree` does not reach it.
+/// `gc` under `mid` under the root — NOT a direct child of the root: an agent two
+/// levels down, holding no lines of its own.
 async fn grandchild(kernel: &Arc<Kernel>) -> AgentId {
     create(kernel, "mid", "kernel_state").await;
     create(kernel, "gc", "mid").await;
@@ -205,7 +205,7 @@ async fn on_cancel_runs_as_the_agent_on_the_deadline_path() {
     let gc = grandchild(&kernel).await;
     let mut inbox = kernel.ensure_inbox(&gc);
     let out = kernel
-        .send(vec![
+        .operator_send(vec![
             Item::new(gc.clone(), json!({"type": "slow"})).with_timeout(0.2)
         ])
         .await

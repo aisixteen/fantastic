@@ -20,8 +20,7 @@ fn read_call() -> String {
 }
 
 async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": text, "client_id": "probe"}),
         )])
@@ -29,8 +28,7 @@ async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
 }
 
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    let out = kernel
-        .send(vec![Item::new(agent.clone(), payload)])
+    let out = kernel.operator_send(vec![Item::new(agent.clone(), payload)])
         .await
         .remove(0);
     assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
@@ -396,7 +394,7 @@ async fn a_stretchs_latest_line_is_its_folds_title_and_the_summariser_writes_the
             .iter()
             .filter_map(Value::as_i64)
             .collect();
-        let Some(last) = answers.iter().filter(|(id, _)| refs.contains(id)).last() else {
+        let Some(last) = answers.iter().rfind(|(id, _)| refs.contains(id)) else {
             assert_eq!(f["title"], "SUMMARISER TITLE", "{f}");
             continue;
         };

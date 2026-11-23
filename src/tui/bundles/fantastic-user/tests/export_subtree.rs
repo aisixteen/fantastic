@@ -48,7 +48,7 @@ impl Handler for Echo {
 /// The shell: a send from outside every agent.
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     Arc::clone(k)
-        .send(vec![Item::new(AgentId::from(target), payload)])
+        .operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -96,14 +96,14 @@ async fn setup() -> Arc<Kernel> {
             "a",
             "user",
             "echo.tools",
-            json!({"can_call": {"memory": "*", "b": "*"}, "memory_store_id": "memory",
+            json!({"can": {"memory": {"call": ["*"]}, "b": {"call": ["*"]}}, "memory_store_id": "memory",
             "credentials": {"store": "memory", "ref": "r1", "api_key": KEY}, "history": [ROW]}),
         ),
         (
             "b",
             "a",
             "echo.tools",
-            json!({"can_call": {"exec": ["run"]}, "callable_by": {"a": "*"}, "cwd": ABS,
+            json!({"can": {"exec": {"call": ["run"]}}, "cwd": ABS,
             "rows": [{"text": ROW}], "last_reply": ROW}),
         ),
         (
@@ -167,6 +167,32 @@ async fn export_subtree_verb_writes_folder_and_reports_ports() {
         assert_eq!(mode(&d.join("blueprint.yaml")), 0o600);
     }
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// `export_subtree` acts for its asker (gm rule 7, Q39): an agent that may call it on
+/// `user` but holds nothing on the named agent gets the unknown answer, and nothing is
+/// written.
+#[tokio::test(flavor = "multi_thread")]
+async fn export_subtree_refuses_what_the_asker_does_not_hold() {
+    let k = setup().await;
+    let root = k.root().unwrap().id.0.clone();
+    for id in ["outside", "x"] {
+        let p = json!({"type": "create_agent", "parent_id": root, "id": id, "handler_module": "echo.tools"});
+        let r = op(&k, &root, p).await;
+        assert!(r.get("error").is_none(), "{r}");
+    }
+    fantastic_kernel::test_support::grant(&k, "x", "user", json!({"call": ["export_subtree"]}));
+    let d = out_dir("asker");
+    let item = Item::new(
+        AgentId::from("user"),
+        json!({"type": "export_subtree", "agent_id": "outside", "path": d.to_str().unwrap()}),
+    );
+    let r = fantastic_kernel::test_support::as_agent("x", k.send(vec![item]))
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r, fantastic_kernel::refusal::unknown_agent("outside"), "{r}");
+    assert!(!d.exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -268,7 +294,7 @@ async fn export_subtree_requires_agent_id_and_path() {
 async fn export_subtree_is_in_verbs_and_docs() {
     assert!(VERBS.iter().any(|v| v.name == "export_subtree"));
     let k = setup().await;
-    let d = op(&k, "kernel", json!({"type": "docs", "of": "user"})).await;
+    let d = op(&k, "user", json!({"type": "reflect", "tier": "oneliners"})).await;
     assert!(d["verbs"].get("export_subtree").is_some(), "{d}");
 }
 

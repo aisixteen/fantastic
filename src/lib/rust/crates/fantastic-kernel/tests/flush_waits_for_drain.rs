@@ -137,7 +137,7 @@ fn kernel_at(store: &Path, gate: &Arc<Semaphore>, entered: &Arc<Notify>) -> Arc<
         store.to_path_buf(),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     kernel
 }
@@ -155,7 +155,7 @@ async fn a_flush_waits_for_the_drain_the_writer_already_took() {
     boot_root(&kernel).await;
     wire_fake_store(&kernel, &store).await;
     kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": "kernel_state",
                    "handler_module": "readme_bundle.tools", "id": "probe"}),

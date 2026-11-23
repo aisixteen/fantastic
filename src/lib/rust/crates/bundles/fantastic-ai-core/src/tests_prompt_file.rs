@@ -20,8 +20,7 @@ fn system_of(s: &Arc<MockScript>, n: usize) -> String {
 async fn update(kernel: &Arc<Kernel>, backend: &AgentId, field: &str, v: Value) -> Value {
     let mut p = json!({"type": "update_agent", "id": backend.as_str()});
     p[field] = v;
-    kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), p)])
+    kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), p)])
         .await
         .remove(0)
         .result
@@ -38,8 +37,7 @@ async fn turn(
     for (k, v) in extra.as_object().cloned().unwrap_or_default() {
         p[k] = v;
     }
-    let _ = kernel
-        .send(vec![Item::new(backend.clone(), p)])
+    let _ = kernel.operator_send(vec![Item::new(backend.clone(), p)])
         .await
         .remove(0)
         .result;
@@ -52,8 +50,7 @@ async fn turn(
 async fn failed_turn(kernel: &Arc<Kernel>, backend: &AgentId, s: &Arc<MockScript>) -> Value {
     let mut rx = rebind_backend_inbox(kernel, backend);
     let before = s.passes_served();
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go"}),
         )])
@@ -217,8 +214,7 @@ async fn a_missing_file_fails_the_turn_until_it_appears() {
     for _ in 1..=10 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let before = s.passes_served();
-        let _ = kernel
-            .send(vec![Item::new(
+        let _ = kernel.operator_send(vec![Item::new(
                 backend.clone(),
                 json!({"type": "send", "text": "go"}),
             )])

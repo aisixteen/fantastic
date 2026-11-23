@@ -198,35 +198,17 @@ impl Runner {
                 self.got(Got::Rows { agent: agent.clone(), rows, full: *full, loaded }).await
             }
 
-            // READING A SELF-DESCRIPTION IS RENDERING, not acting, so it goes out
-            // as operator like every other read this pane does.
-            //
-            // Measured 2026-09-13: sent as `user` it is refused on INGRESS by the
-            // root, because `reflect` is not a kernel verb and the root's
-            // born-with `callable_by` then covered its direct children only
-            // (the old `$children`; `user` sat a level deeper). Granting the human `callable_by` on an agent just so
-            // the shell can draw its verb list would be a grant that exists for
-            // the renderer's convenience, which is the wrong reason to widen
-            // anybody's reach.
+            // READING A SELF-DESCRIPTION IS RENDERING: the shell is the operator,
+            // like every other read this pane does. HOW TO CALL it is in the same
+            // reflect (`tier`: its verbs' docs), which the pane lists beside the
+            // self-description.
             Cmd::Reflect { agent } => {
                 let out = self
                     .host
-                    .operator(agent, json!({"type":"reflect","tree":"none"}))
+                    .operator(agent, json!({"type":"reflect","tree":"none","tier":"detailed"}))
                     .await;
                 match Host::read(out) {
-                    Ok(mut reply) => {
-                        // HOW TO CALL it is the kernel's `docs` (a reflect no
-                        // longer carries verbs): folded in for the pane, which
-                        // lists the verbs beside the self-description
-                        let docs = self
-                            .host
-                            .operator("kernel", json!({"type":"docs","of": agent,"tier":"detailed"}))
-                            .await;
-                        if let (Ok(d), Value::Object(m)) = (Host::read(docs), &mut reply) {
-                            if let Some(v) = d.get("verbs").filter(|v| v.as_object().is_some_and(|o| !o.is_empty())) {
-                                m.insert("verbs".into(), v.clone());
-                            }
-                        }
+                    Ok(reply) => {
                         self.got(Got::Reflect {
                             agent: agent.clone(),
                             reply,
@@ -244,7 +226,7 @@ impl Runner {
                 path,
             } => {
                 let payload = json!({"type":"open_view","kind":kind,"path":path});
-                match Host::read(self.host.act(bridge, payload).await) {
+                match Host::read(self.host.operator(bridge, payload).await) {
                     Ok(reply) => {
                         // a view made just now is in the tree only once it is read again
                         if reply.get("error").is_none() {
@@ -273,7 +255,7 @@ impl Runner {
                 // is killed post-order.
                 let out = self
                     .host
-                    .act(
+                    .operator(
                         &self.host.root.clone(),
                         json!({"type":"cancel","task_id":task_id}),
                     )
@@ -334,9 +316,10 @@ impl Runner {
         self.host.kernel.remove_inbox(&w);
     }
 
-    /// One act: the call goes out as the person, and the agent's log is re-read after it.
+    /// One act: the call goes out from the shell, the operator, and the agent's log is
+    /// re-read after it.
     async fn act_send(&self, cmd: &Cmd, target: &crate::kern::model::AgentId, payload: Value) {
-        let out = self.host.act(target, payload).await;
+        let out = self.host.operator(target, payload).await;
         let failed = out.status != fantastic_kernel::Status::Completed;
         match Host::read(out) {
             Ok(reply) => {

@@ -26,7 +26,7 @@ fn mk() -> (TempDir, Arc<Kernel>) {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     (tmp, kernel)
 }
@@ -38,7 +38,7 @@ fn state(records: serde_json::Value) -> KernelState {
 #[test]
 fn a_parent_cycle_is_refused_and_nothing_is_torn_down() {
     let (_t, kernel) = mk();
-    let before: Vec<String> = kernel.agents.iter().map(|e| e.key().0.clone()).collect();
+    let before: Vec<String> = kernel.agent_ids().into_iter().map(|a| a.0).collect();
     let err = kernel
         .load(state(json!([
             {"id": "root", "parent_id": null, "meta": {}},
@@ -50,7 +50,7 @@ fn a_parent_cycle_is_refused_and_nothing_is_torn_down() {
     assert!(msg.contains("unreachable"), "{msg}");
     assert!(msg.contains('a') && msg.contains('b'), "{msg}");
     // The live tree is intact.
-    let after: Vec<String> = kernel.agents.iter().map(|e| e.key().0.clone()).collect();
+    let after: Vec<String> = kernel.agent_ids().into_iter().map(|a| a.0).collect();
     assert_eq!(before, after);
     assert!(kernel.root().is_some());
 }
@@ -67,7 +67,7 @@ fn a_reachable_tree_loads() {
         .expect("a reachable tree must load");
     for id in ["root", "a", "b"] {
         assert!(
-            kernel.agents.contains_key(&AgentId::from(id)),
+            kernel.exists(id),
             "{id} missing"
         );
     }

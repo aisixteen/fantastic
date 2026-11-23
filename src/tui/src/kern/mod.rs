@@ -8,7 +8,6 @@
 pub mod mcp_config;
 pub mod orient;
 pub mod prompt;
-pub mod reach;
 pub mod root_ai;
 pub mod backend;
 pub mod bundle_watch;

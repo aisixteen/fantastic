@@ -16,7 +16,7 @@ pub struct Boot {}
 #[serde(deny_unknown_fields)]
 pub struct Shutdown {}
 
-/// Add a recurring call: every fire runs AS THE SCHEDULER, so it reaches what the scheduler's can_call grants. Persisted THROUGH the loader; refused when no store is wired. Returns {schedule_id, schedule}.
+/// Add a recurring call: every fire runs AS THE SCHEDULER, so it reaches what the scheduler's own lines reach. Persisted THROUGH the loader; refused when no store is wired. Returns {schedule_id, schedule}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Schedule {

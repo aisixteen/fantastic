@@ -49,35 +49,26 @@ fn mk_kernel(tmp: &TempDir, register_ws: bool, register_rest: bool) -> Arc<Kerne
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     kernel
 }
 
-/// The ROOT accepts every verb from `ids` — the operator widens its
-/// `callable_by` (kernel verbs at the root take the two-sided gate too).
-async fn accept_on_root(kernel: &Arc<Kernel>, ids: &[&str]) {
-    let root = kernel.root().expect("a root");
-    let mut grant = root
-        .meta
-        .read()
-        .expect("meta")
-        .get("callable_by")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    for id in ids {
-        grant.insert((*id).to_string(), json!("*"));
+/// THE CAP (rule 6): a leg's line on a target outside the host's tree works only
+/// as far as the host's own lines give there. The host takes every line its legs
+/// hold (`$parent` names the host itself, which needs none).
+pub(super) fn host_holds_legs_lines(kernel: &Arc<Kernel>, web_id: &str) {
+    let Some(web) = kernel.resolve_target(web_id) else { return };
+    for leg in web.child_ids() {
+        let Some(a) = kernel.resolve_target(leg.as_str()) else { continue };
+        let rec = a.record();
+        let Some(lines) = rec.meta.get("can").and_then(Value::as_object) else { continue };
+        for (target, line) in lines {
+            if target != "$parent" {
+                fantastic_kernel::test_support::grant(kernel, web_id, target, line.clone());
+            }
+        }
     }
-    let r = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type": "update_agent", "id": root.id.as_str(), "callable_by": grant}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert!(r.get("error").is_none(), "accept_on_root: {r}");
 }
 
 /// Wait briefly for the bound listener to start accepting. Reduces
@@ -103,12 +94,11 @@ async fn web_alone_has_no_ws_endpoint() {
     let web_id = "web_alone";
 
     // create + boot web
-    let create_reply = kernel
-        .send(vec![Item::new(
+    let create_reply = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]},
+                "handler_module": HANDLER_MODULE,
                 "id": web_id,
                 "port": port,
             }),
@@ -120,8 +110,8 @@ async fn web_alone_has_no_ws_endpoint() {
         create_reply.get("error").is_none(),
         "create: {create_reply}"
     );
-    let boot_reply = kernel
-        .send(vec![Item::new(
+    host_holds_legs_lines(&kernel, web_id);
+    let boot_reply = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -145,8 +135,7 @@ async fn web_alone_has_no_ws_endpoint() {
     );
 
     // cleanup
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "stop"}),
         )])
@@ -166,12 +155,11 @@ async fn web_with_ws_child_serves_ws() {
     let port = free_port();
     let web_id = "web_with_ws";
 
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]},
+                "handler_module": HANDLER_MODULE,
                 "id": web_id,
                 "port": port,
             }),
@@ -179,27 +167,25 @@ async fn web_with_ws_child_serves_ws() {
         .await
         .remove(0)
         .result;
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": web_id,
-                "handler_module": "web_ws.tools", "callable_by": {"$parent": ["get_routes"]},
+                "handler_module": "web_ws.tools",
                 "id": "wws_child",
                 // A WS frame runs as the LEG, and a leg with no
                 // `ingress_rule` is SEALED. An open face says so.
                 "ingress_rule": "allow_all_ingress",
-                // A grant map is keyed by a LITERAL id or a `$token` — `"*"` is
-                // never a key, only a verb wildcard.
-                "can_call": {"$parent": ["watch"], "kernel_state": "*"},
+                // A line's target is a LITERAL id or `$parent` — `"*"` is
+                // never a target, only a verb wildcard.
+                "can": {"$parent": {"call": ["watch"]}, "kernel_state": {"call": ["*"]}},
             }),
         )])
         .await
         .remove(0)
         .result;
-    accept_on_root(&kernel, &["wws_child"]).await;
-    let boot_reply = kernel
-        .send(vec![Item::new(
+    host_holds_legs_lines(&kernel, web_id);
+    let boot_reply = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -215,7 +201,7 @@ async fn web_with_ws_child_serves_ws() {
         .await
         .expect("ws connect");
     let frame =
-        json!({"type": "call", "target": "kernel", "payload": {"type": "list_agents"}, "id": "x1"});
+        json!({"type": "call", "target": "kernel", "payload": {"type": "reflect", "tree": "ids"}, "id": "x1"});
     ws.send(TMessage::Text(frame.to_string()))
         .await
         .expect("ws send");
@@ -231,10 +217,9 @@ async fn web_with_ws_child_serves_ws() {
     let v: Value = serde_json::from_str(&text).expect("reply json");
     assert_eq!(v["type"], "reply");
     assert_eq!(v["id"], "x1");
-    assert!(v["data"]["agents"].is_array());
+    assert!(v["data"]["tree"].is_array());
 
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "stop"}),
         )])
@@ -252,12 +237,11 @@ async fn web_with_rest_child_serves_rest() {
     let web_id = "web_with_rest";
     let rest_id = "wr_child";
 
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]},
+                "handler_module": HANDLER_MODULE,
                 "id": web_id,
                 "port": port,
             }),
@@ -265,41 +249,27 @@ async fn web_with_rest_child_serves_rest() {
         .await
         .remove(0)
         .result;
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent",
                 "parent_id": web_id,
-                "handler_module": "web_rest.tools", "callable_by": {"$parent": ["get_routes"]},
+                "handler_module": "web_rest.tools",
                 "id": rest_id,
                 // Deny-all: an inbound relay dispatches browser calls into the
-                // kernel AS ITSELF — ingress_rule says WHO may call in, can_call
+                // kernel AS ITSELF — ingress_rule says WHO may call in, its `can`
                 // says WHERE into the kernel it lands. This test POSTs to `kernel_state`.
                 // The leg SEALS without an explicit rule (403 before dispatch),
                 // so open it here as a browser-facing dev leg would be.
                 "ingress_rule": "allow_all_ingress",
-                "can_call": { "kernel_state": "*" },
+                "can": {"kernel_state": {"call": ["*"]}},
             }),
         )])
         .await
         .remove(0)
         .result;
-    // Two-sided deny-all: the relay dispatches into root AS ITSELF, and the root's
-    // baseline is `$self` alone — open root's ingress for the relay (merged with
-    // that baseline).
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "update_agent", "id": "kernel_state", "callable_by": {
-                "$self": "*", "$parent": "*", "$subtree": "*", rest_id: "*",
-            }}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let boot_reply = kernel
-        .send(vec![Item::new(
+    host_holds_legs_lines(&kernel, web_id);
+    let boot_reply = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -313,16 +283,15 @@ async fn web_with_rest_child_serves_rest() {
     let resp = reqwest::Client::new()
         .post(&url)
         .header("Content-Type", "application/json")
-        .body(r#"{"type": "list_agents"}"#)
+        .body(r#"{"type": "reflect", "tree": "ids"}"#)
         .send()
         .await
         .expect("http post");
     assert!(resp.status().is_success(), "status: {}", resp.status());
     let body: Value = resp.json().await.expect("body json");
-    assert!(body["agents"].is_array(), "body: {body}");
+    assert!(body["tree"].is_array(), "body: {body}");
 
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "stop"}),
         )])
@@ -354,12 +323,11 @@ async fn stage_web_with_ws_leg(
     open_leg: bool,
 ) -> Arc<Kernel> {
     let kernel = mk_kernel(tmp, true, false);
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": "*"}, "can_call": {"$subtree": ["get_routes"]},
+                "handler_module": HANDLER_MODULE,
                 "id": web_id,
                 "port": port,
             }),
@@ -370,27 +338,23 @@ async fn stage_web_with_ws_leg(
     let mut ws_rec = json!({
         "type": "create_agent",
         "parent_id": web_id,
-        "handler_module": "web_ws.tools", "can_call": {"$parent": ["watch"]}, "callable_by": {"$parent": ["get_routes"]},
+        "handler_module": "web_ws.tools", "can": {"$parent": {"call": ["watch"]}},
         "id": format!("{web_id}_ws"),
     });
     if open_leg {
         ws_rec["ingress_rule"] = json!("allow_all_ingress");
-        // The leg is the SENDER of every frame now, so it needs an egress
-        // grant as well as an open ingress rule — the two gates are independent
-        // and both have to be wired by an operator. A grant map is keyed by a
-        // LITERAL id, never `"*"`.
-        ws_rec["can_call"] = json!({"kernel_state": "*", "$parent": "*"});
+        // The leg is the SENDER of every frame now, so it needs its own lines
+        // as well as an open ingress rule — the two gates are independent and
+        // both have to be wired by an operator. A line's target is a LITERAL id,
+        // never `"*"`.
+        ws_rec["can"] = json!({"kernel_state": {"call": ["*"]}, "$parent": {"call": ["*"]}});
     }
-    let _ = kernel
-        .send(vec![Item::new(AgentId::from("kernel"), ws_rec)])
+    let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel"), ws_rec)])
         .await
         .remove(0)
         .result;
-    if open_leg {
-        accept_on_root(&kernel, &[&format!("{web_id}_ws")]).await;
-    }
-    let r = kernel
-        .send(vec![Item::new(
+    host_holds_legs_lines(&kernel, web_id);
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -458,13 +422,11 @@ async fn round_trip(
     drain_frames(ws, 800).await
 }
 
-/// Create a file_bridge child of the root, open for reads and writes, and wire
-/// BOTH gate ends between it and the WS leg — the leg is the sender of every
-/// frame now, so `callable_by` on the bridge and `can_call` on the leg are
-/// what make a browser fetch reach disk at all.
+/// Create a file_bridge child of the root, open for reads and writes, and give
+/// the WS leg its line on it — the leg is the sender of every frame now, so its
+/// own line is what makes a browser fetch reach disk at all.
 async fn make_file_bridge(kernel: &Arc<Kernel>, id: &str, root: &std::path::Path, leg: &str) {
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent",
@@ -473,22 +435,24 @@ async fn make_file_bridge(kernel: &Arc<Kernel>, id: &str, root: &std::path::Path
                 "id": id,
                 "root": root.to_string_lossy(),
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {leg: "*"},
             }),
         )])
         .await
         .remove(0)
         .result;
     assert!(r.get("error").is_none(), "create file_bridge: {r}");
-    let g = kernel
-        .send(vec![Item::new(
+    let g = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
-            json!({"type": "update_agent", "id": leg, "can_call": {"kernel_state": "*", id: "*"}}),
+            json!({"type": "update_agent", "id": leg, "can": {"kernel_state": {"call": ["*"]}, id: {"call": ["*"]}}}),
         )])
         .await
         .remove(0)
         .result;
     assert!(g.get("error").is_none(), "grant the leg: {g}");
+    // and its host, which caps it
+    if let Some(host) = kernel.resolve_target(leg).and_then(|a| a.parent_id.clone()) {
+        host_holds_legs_lines(kernel, host.as_str());
+    }
 }
 
 /// A binary frame is an ordinary envelope plus a body at
@@ -765,14 +729,23 @@ async fn open_leg_autowatches_and_calls_run_as_the_leg() {
     let port = free_port();
     let web_id = "web_open_ws";
     let kernel = stage_web_with_ws(&tmp, port, web_id).await;
+    // The leg holds its host only: a line on the root would reach every agent of
+    // the tree, the private one included.
+    let r = kernel.operator_send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "update_agent", "id": format!("{web_id}_ws"),
+                   "can": {"$parent": {"call": ["*"]}}}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(r.get("error").is_none(), "{r}");
     // A private agent: nothing may call it.
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": "web_ws.tools", "can_call": {"$parent": ["watch"]}, "id": "private_one",
-                "callable_by": {},
+                "handler_module": "web_ws.tools", "can": {"$parent": {"call": ["watch"]}}, "id": "private_one",
             }),
         )])
         .await
@@ -812,8 +785,9 @@ async fn open_leg_autowatches_and_calls_run_as_the_leg() {
         .iter()
         .find(|f| f["id"] == "p1")
         .unwrap_or_else(|| panic!("no reply: {t:?}"));
+    // a denial is the unknown answer
     assert_eq!(
-        reply["data"]["reason"], "unauthorized",
+        reply["data"]["reason"], "unknown_agent",
         "a WS call ran with more authority than the leg: {reply}"
     );
 
@@ -903,7 +877,7 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
 
     // The file_bridge clamps its root under the kernel's running dir, which the
@@ -919,12 +893,11 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
     let fb_id = "fb_octet";
 
     // web host.
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id, "port": port,
+                "handler_module": HANDLER_MODULE, "id": web_id, "port": port,
             }),
         )])
         .await
@@ -932,36 +905,33 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
         .result;
     // file_bridge — OPEN (its own io-bridge gate) + accept the REST surface as a
     // caller (two-sided call gate: ingress side).
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel_state",
                 "handler_module": "file_bridge.tools", "allow": ["."], "id": fb_id,
                 "root": "served",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": { "$self": "*", "$parent": "*", "$subtree": "*", rest_id: "*" },
             }),
         )])
         .await
         .remove(0)
         .result;
     // web_rest child — may reach the file_bridge (egress side).
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": web_id,
-                "handler_module": "web_rest.tools", "callable_by": {"$parent": ["get_routes"]}, "id": rest_id,
+                "handler_module": "web_rest.tools", "id": rest_id,
                 "ingress_rule": "allow_all_ingress",
-                "can_call": { fb_id: "*" },
+                "can": {fb_id: {"call": ["*"]}},
             }),
         )])
         .await
         .remove(0)
         .result;
-    let boot_reply = kernel
-        .send(vec![Item::new(
+    host_holds_legs_lines(&kernel, web_id);
+    let boot_reply = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -1047,8 +1017,7 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
     let raw = resp.bytes().await.expect("octet reply body");
     assert_eq!(&raw[..], b"goodbye world\n", "read_stream body");
 
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "stop"}),
         )])
@@ -1072,38 +1041,27 @@ async fn sealed_rest_leg_answers_403_and_teaches_the_repair() {
     let web_id = "web_sealed_rest";
     let rest_id = "wr_sealed";
 
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
-                   "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id, "port": port}),
+                   "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
         )])
         .await
         .remove(0)
         .result;
-    // NO ingress_rule — the sealed-by-default leg. `can_call` is wide open, so a
+    // NO ingress_rule — the sealed-by-default leg. Its `can` is wide open, so a
     // 200 here could only mean the ingress gate never ran.
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": web_id,
-                   "handler_module": "web_rest.tools", "callable_by": {"$parent": ["get_routes"]}, "id": rest_id,
-                   "can_call": {"kernel_state": "*"}}),
+                   "handler_module": "web_rest.tools", "id": rest_id,
+                   "can": {"kernel_state": {"call": ["*"]}}}),
         )])
         .await
         .remove(0)
         .result;
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "update_agent", "id": "kernel_state", "callable_by": {
-                "$self": "*", "$parent": "*", "$subtree": "*", rest_id: "*"}}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let boot_reply = kernel
-        .send(vec![Item::new(
+    host_holds_legs_lines(&kernel, web_id);
+    let boot_reply = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -1148,8 +1106,7 @@ async fn sealed_rest_leg_answers_403_and_teaches_the_repair() {
         assert_eq!(b["reason"], "unauthorized", "{path}: {b}");
     }
 
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "stop"}),
         )])
@@ -1168,37 +1125,26 @@ async fn open_rest_leg_dispatches_including_the_reflect_routes() {
     let web_id = "web_open_rest";
     let rest_id = "wr_open";
 
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
-                   "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id, "port": port}),
+                   "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
         )])
         .await
         .remove(0)
         .result;
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": web_id,
-                   "handler_module": "web_rest.tools", "callable_by": {"$parent": ["get_routes"]}, "id": rest_id,
+                   "handler_module": "web_rest.tools", "id": rest_id,
                    "ingress_rule": "allow_all_ingress",
-                   "can_call": {"kernel_state": "*", "kernel": "*"}}),
+                   "can": {"kernel_state": {"call": ["*"]}, "kernel": {"call": ["*"]}}}),
         )])
         .await
         .remove(0)
         .result;
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "update_agent", "id": "kernel_state", "callable_by": {
-                "$self": "*", "$parent": "*", "$subtree": "*", rest_id: "*"}}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let boot_reply = kernel
-        .send(vec![Item::new(
+    host_holds_legs_lines(&kernel, web_id);
+    let boot_reply = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -1231,8 +1177,7 @@ async fn open_rest_leg_dispatches_including_the_reflect_routes() {
         .expect("http get");
     assert_eq!(resp.status().as_u16(), 200);
 
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "stop"}),
         )])
@@ -1311,7 +1256,7 @@ async fn stage_host(
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
 
     let served = tmp.path().join("served");
@@ -1323,30 +1268,24 @@ async fn stage_host(
 
     for item in [
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id, "port": port}),
+               "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
         json!({"type": "create_agent", "parent_id": "kernel_state",
                "handler_module": "file_bridge.tools", "allow": ["."], "id": fb_id, "root": "served",
-               "ingress_rule": "allow_all_ingress",
-               "callable_by": {"$self": "*", "$parent": "*", "$subtree": "*",
-                               rest_id: "*", web_id: "*"}}),
+               "ingress_rule": "allow_all_ingress"}),
         json!({"type": "create_agent", "parent_id": web_id,
-               "handler_module": "web_rest.tools", "callable_by": {"$parent": ["get_routes"]}, "id": rest_id,
+               "handler_module": "web_rest.tools", "id": rest_id,
                "ingress_rule": "allow_all_ingress",
-               "can_call": {"kernel_state": "*", "kernel": "*", fb_id: "*"}}),
-        json!({"type": "update_agent", "id": "kernel_state", "callable_by": {
-               "$self": "*", "$parent": "*", "$subtree": "*", rest_id: "*"}}),
-        json!({"type": "update_agent", "id": web_id, "can_call": {
-               "$self": "*", "$parent": "*", "$subtree": "*", fb_id: "*"}}),
+               "can": {"kernel_state": {"call": ["*"]}, "kernel": {"call": ["*"]}, fb_id: {"call": ["*"]}}}),
+        json!({"type": "update_agent", "id": web_id, "can": {"$parent": {"call": ["*"]}, fb_id: {"call": ["*"]}}}),
     ] {
-        let reply = kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), item)])
+        let reply = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
         assert!(reply.get("error").is_none(), "stage: {reply}");
     }
-    let boot = kernel
-        .send(vec![Item::new(
+    host_holds_legs_lines(&kernel, web_id);
+    let boot = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -1626,8 +1565,7 @@ async fn rest_post_accepts_bodies_over_2mb() {
 
 /// Shared teardown.
 async fn stop(kernel: &Arc<Kernel>, web_id: &str) {
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "stop"}),
         )])
@@ -1920,8 +1858,7 @@ async fn reflect_sentence_and_verbs_match_python() {
     let tmp = TempDir::new().unwrap();
     let port = free_port();
     let kernel = stage_host(&tmp, port, "web_r", "rest", "fb_r").await;
-    let reply = kernel
-        .send(vec![Item::new(
+    let reply = kernel.operator_send(vec![Item::new(
             AgentId::from("web_r"),
             json!({"type": "reflect"}),
         )])
@@ -1930,7 +1867,7 @@ async fn reflect_sentence_and_verbs_match_python() {
         .result;
     let obj = reply.as_object().expect("object");
     // The bundle's own frame, in python's key order; the kernel then appends
-    // its reflect decoration (can_call / callable_by / kernel_verbs / tree).
+    // its reflect decoration (can / kernel_verbs / tree).
     assert_eq!(
         obj.keys().map(String::as_str).take(13).collect::<Vec<_>>(),
         vec![
@@ -1955,7 +1892,7 @@ async fn reflect_sentence_and_verbs_match_python() {
     );
     assert_eq!(obj["port"], json!(port));
     assert_eq!(obj["running"], json!(true));
-    assert_eq!(obj["served_agent_count"], json!(kernel.agents.len()));
+    assert_eq!(obj["served_agent_count"], json!(kernel.agent_ids().len()));
     assert_eq!(
         obj["surfaces"],
         json!({"rest": ["/rest/{target_id}", "/rest/_reflect", "/rest/_reflect/{target_id}"]})
@@ -1983,7 +1920,7 @@ async fn reflect_sentence_and_verbs_match_python() {
     );
     let verbs = reply["verbs"].as_object().expect("a verbs block");
     // `reflect` is the common verb every agent answers: its rendered line
-    assert_eq!(verbs["reflect"], json!("args: detail:'distilled'|'full'?, tree:'all'|'ids'|'none'?, show_subtrees:list[string]?, ignore_subtrees:list[string]?, handler_modules:list[string]?, bundles:'all'|'ids'?, bundle_names:list[string]?, limit:int >= 1?, after:string? — What this agent IS: identity, sentence, state, grants — and, by flags, its subtree and the installable bundles"));
+    assert_eq!(verbs["reflect"], json!("args: detail:'distilled'|'full'?, tree:'all'|'ids'|'none'?, show_subtrees:list[string]?, ignore_subtrees:list[string]?, handler_modules:list[string]?, bundles:'all'|'ids'?, bundle_names:list[string]?, limit:int >= 1?, after:string?, tier:'oneliners'|'detailed'?, verb:string?, part:'docs'|'schema'|'all'? — What this agent IS: identity, sentence, state, grants, the verbs it answers (one line each) — and, by flags, its subtree, the installable bundles and HOW TO CALL it: `tier`, `verb` or `part` adds the verb docs, `detailed` the full text with every argument, `part` the text (`docs`), each verb's JSON schema (`schema`) or both (`all`, the default once any of the three is given); without `verb` they carry the bundle's short `man` text"));
     for name in ["boot", "stop", "mount", "unmount", "fetch_file"] {
         assert!(verbs[name].is_string(), "{name}: {verbs:?}");
     }
@@ -2028,8 +1965,7 @@ async fn a_reflect_flag_value_that_is_not_listed_is_refused_by_the_target() {
     let port = free_port();
     let kernel = stage_host(&tmp, port, "web_qr", "rest", "fb_qr").await;
     for q in ["tree=deep", "bundles=none"] {
-        let r = kernel
-            .send(vec![Item::new(
+        let r = kernel.operator_send(vec![Item::new(
                 AgentId::from("web_qr"),
                 routes::reflect_payload(q),
             )])
@@ -2049,8 +1985,8 @@ async fn boot_and_stop_replies_match_python() {
     let tmp = TempDir::new().unwrap();
     let port = free_port();
     let kernel = stage_host(&tmp, port, "web_b", "rest", "fb_b").await;
-    let boot = kernel
-        .send(vec![Item::new(
+    host_holds_legs_lines(&kernel, "web_b");
+    let boot = kernel.operator_send(vec![Item::new(
             AgentId::from("web_b"),
             json!({"type": "boot"}),
         )])
@@ -2058,8 +1994,7 @@ async fn boot_and_stop_replies_match_python() {
         .remove(0)
         .result;
     assert_eq!(boot, json!({"running": true, "surfaces": ["rest"]}));
-    let stopped = kernel
-        .send(vec![Item::new(
+    let stopped = kernel.operator_send(vec![Item::new(
             AgentId::from("web_b"),
             json!({"type": "stop"}),
         )])
@@ -2067,8 +2002,7 @@ async fn boot_and_stop_replies_match_python() {
         .remove(0)
         .result;
     assert_eq!(stopped, json!({"stopped": true}));
-    let again = kernel
-        .send(vec![Item::new(
+    let again = kernel.operator_send(vec![Item::new(
             AgentId::from("web_b"),
             json!({"type": "stop"}),
         )])
@@ -2078,17 +2012,16 @@ async fn boot_and_stop_replies_match_python() {
     assert_eq!(again, json!({"stopped": false}));
 
     // A record with no `port` RAISES — no default, no fallback.
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
-                   "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": "web_noport"}),
+                   "handler_module": HANDLER_MODULE, "id": "web_noport"}),
         )])
         .await
         .remove(0)
         .result;
-    let boot = kernel
-        .send(vec![Item::new(
+    host_holds_legs_lines(&kernel, "web_noport");
+    let boot = kernel.operator_send(vec![Item::new(
             AgentId::from("web_noport"),
             json!({"type": "boot"}),
         )])
@@ -2112,8 +2045,7 @@ async fn mount_unmount_and_unknown_verb_match_python() {
     let call = |payload: Value| {
         let kernel = Arc::clone(&kernel);
         async move {
-            kernel
-                .send(vec![Item::new(AgentId::from("web_m"), payload)])
+            kernel.operator_send(vec![Item::new(AgentId::from("web_m"), payload)])
                 .await
                 .remove(0)
                 .result
@@ -2183,8 +2115,8 @@ async fn a_reboot_replaces_a_legs_routes_and_unmount_removes_them_all() {
         first.iter().any(|p| p.starts_with("/rest_rb/")),
         "{first:?}"
     );
-    let again = kernel
-        .send(vec![Item::new(
+    host_holds_legs_lines(&kernel, "web_rb");
+    let again = kernel.operator_send(vec![Item::new(
             AgentId::from("web_rb"),
             json!({"type": "boot"}),
         )])
@@ -2193,8 +2125,7 @@ async fn a_reboot_replaces_a_legs_routes_and_unmount_removes_them_all() {
         .result;
     assert_eq!(again["running"], json!(true), "{again}");
     assert_eq!(paths(&*table.read().await), first, "the re-boot body");
-    let out = kernel
-        .send(vec![Item::new(
+    let out = kernel.operator_send(vec![Item::new(
             AgentId::from("web_rb"),
             json!({"type": "unmount", "child_id": "rest_rb"}),
         )])
@@ -2219,17 +2150,15 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
     let kernel = mk_kernel(&tmp, true, false);
     let web_id = "web_hot";
     for item in [json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id, "port": port})]
+               "handler_module": HANDLER_MODULE, "id": web_id, "port": port})]
     {
-        let _ = kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), item)])
+        let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
     }
     // Unmount before boot is refused, not silently ignored.
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "stop"}),
         )])
@@ -2237,8 +2166,7 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
         .remove(0)
         .result;
     assert_eq!(
-        kernel
-            .send(vec![Item::new(
+        kernel.operator_send(vec![Item::new(
                 AgentId::from(web_id),
                 json!({"type": "unmount", "child_id": "ws_hot"}),
             )])
@@ -2247,8 +2175,8 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
             .result,
         json!({"error": "web.unmount: not running"})
     );
-    let _ = kernel
-        .send(vec![Item::new(
+    host_holds_legs_lines(&kernel, web_id);
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -2258,11 +2186,10 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
     wait_until_port_accepts(port).await;
 
     // A child created AFTER boot is not routed until it is mounted.
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": web_id,
-                   "handler_module": "web_ws.tools", "can_call": {"$parent": ["watch"]}, "callable_by": {"$parent": ["get_routes"]}, "id": "ws_hot",
+                   "handler_module": "web_ws.tools", "can": {"$parent": {"call": ["watch"]}}, "id": "ws_hot",
                    "ingress_rule": "allow_all_ingress"}),
         )])
         .await
@@ -2278,8 +2205,7 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
     assert_eq!(resp.status().as_u16(), 404, "no auto-remount");
 
     assert_eq!(
-        kernel
-            .send(vec![Item::new(
+        kernel.operator_send(vec![Item::new(
                 AgentId::from(web_id),
                 json!({"type": "mount", "child_id": "ws_hot"}),
             )])
@@ -2294,8 +2220,7 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
     drop(sock);
 
     assert_eq!(
-        kernel
-            .send(vec![Item::new(
+        kernel.operator_send(vec![Item::new(
                 AgentId::from(web_id),
                 json!({"type": "unmount", "child_id": "ws_hot"}),
             )])
@@ -2337,26 +2262,24 @@ async fn boot_announces_say_to_cli() {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let port = free_port();
     for item in [
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": "cli_probe.tools", "id": "cli",
-               "callable_by": {"$self": "*", "$parent": "*", "$subtree": "*", "web_say": "*"}}),
+               "handler_module": "cli_probe.tools", "id": "cli"}),
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "id": "web_say", "port": port,
-               "can_call": {"$self": "*", "$parent": "*", "$subtree": "*", "cli": "*"}}),
+               "handler_module": HANDLER_MODULE, "id": "web_say", "port": port,
+               "can": {"$parent": {"call": ["*"]}, "cli": {"call": ["*"]}}}),
     ] {
-        let reply = kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), item)])
+        let reply = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
         assert!(reply.get("error").is_none(), "stage: {reply}");
     }
-    let _ = kernel
-        .send(vec![Item::new(
+    host_holds_legs_lines(&kernel, "web_say");
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("web_say"),
             json!({"type": "boot"}),
         )])
@@ -2395,27 +2318,25 @@ async fn boot_announces_the_bound_host() {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let port = free_port();
     for item in [
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": "cli_probe.tools", "id": "cli",
-               "callable_by": {"$self": "*", "$parent": "*", "$subtree": "*", "web_host": "*"}}),
+               "handler_module": "cli_probe.tools", "id": "cli"}),
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "id": "web_host", "port": port,
+               "handler_module": HANDLER_MODULE, "id": "web_host", "port": port,
                "host": "localhost",
-               "can_call": {"$self": "*", "$parent": "*", "$subtree": "*", "cli": "*"}}),
+               "can": {"$parent": {"call": ["*"]}, "cli": {"call": ["*"]}}}),
     ] {
-        let reply = kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), item)])
+        let reply = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
         assert!(reply.get("error").is_none(), "stage: {reply}");
     }
-    let _ = kernel
-        .send(vec![Item::new(
+    host_holds_legs_lines(&kernel, "web_host");
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("web_host"),
             json!({"type": "boot"}),
         )])
@@ -2488,19 +2409,18 @@ async fn client_close_is_echoed_with_its_code() {
     let web_id = "web_close";
     for item in [
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id, "port": port}),
+               "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
         json!({"type": "create_agent", "parent_id": web_id,
-               "handler_module": "web_ws.tools", "can_call": {"$parent": ["watch"]}, "callable_by": {"$parent": ["get_routes"]}, "id": "ws_close",
+               "handler_module": "web_ws.tools", "can": {"$parent": {"call": ["watch"]}}, "id": "ws_close",
                "ingress_rule": "allow_all_ingress"}),
     ] {
-        let _ = kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), item)])
+        let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
     }
-    let _ = kernel
-        .send(vec![Item::new(
+    host_holds_legs_lines(&kernel, web_id);
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])
@@ -2584,8 +2504,7 @@ async fn ws_watcher_gets_a_binary_frame_for_a_bytes_payload() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let blob: Vec<u8> = vec![0xCA, 0xFE, 0xBA, 0xBE, 0x01];
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "write_stream", "path": "x.bin"}),
         )
@@ -2826,8 +2745,7 @@ async fn gate_denial_404_carries_the_hint_but_a_missing_file_does_not() {
     assert_eq!(missing.headers()["content-length"], "0");
 
     // SEAL the leg — now the same request is a 404 that TEACHES.
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": "fb_fp", "ingress_rule": "deny_ingress"}),
         )])
@@ -2879,8 +2797,7 @@ async fn the_web_serves_only_what_the_list_exposes() {
     std::fs::write(served.join("docs/a.pdf"), b"%PDF-a").unwrap();
     std::fs::write(served.join("docs/b.pdf"), b"%PDF-b").unwrap();
     std::fs::write(served.join("secret.txt"), b"private\n").unwrap();
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": "fb_al", "allow": ["docs/a.pdf"]}),
         )])
@@ -3187,8 +3104,7 @@ async fn foreign_post_is_403_own_and_originless_pass_get_is_not_gated() {
         .unwrap();
     assert_eq!(r.status(), 200);
     // Loopback by default, and reflect names it.
-    let reflect = kernel
-        .send(vec![Item::new(
+    let reflect = kernel.operator_send(vec![Item::new(
             AgentId::from("web_og"),
             json!({"type": "reflect"}),
         )])
@@ -3216,8 +3132,7 @@ async fn foreign_websocket_upgrade_is_refused_listed_origin_passes() {
     let tmp = TempDir::new().unwrap();
     let port = free_port();
     let kernel = stage_web_with_ws(&tmp, port, "web_ow").await;
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": "web_ow",
                    "allowed_origins": ["https://ui.example"]}),
@@ -3392,27 +3307,25 @@ async fn the_file_proxy_reads_on_until_a_truthy_eof() {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     for item in [
-        json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]},
+        json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
                "id": "web_odd", "port": port,
-               "can_call": {"$self": "*", "$parent": "*", "$subtree": "*",
-                            "chunked": "*", "broken": "*"}}),
+               "can": {"$parent": {"call": ["*"]}, "chunked": {"call": ["*"]}, "broken": {"call": ["*"]}}}),
         json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "odd_source.tools",
-               "id": "chunked", "callable_by": {"web_odd": "*"}}),
+               "id": "chunked"}),
         json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "odd_source.tools",
-               "id": "broken", "callable_by": {"web_odd": "*"}}),
+               "id": "broken"}),
     ] {
-        let r = kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), item)])
+        let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
         assert!(r.get("error").is_none(), "stage: {r}");
     }
-    let boot = kernel
-        .send(vec![Item::new(
+    host_holds_legs_lines(&kernel, "web_odd");
+    let boot = kernel.operator_send(vec![Item::new(
             AgentId::from("web_odd"),
             json!({"type": "boot"}),
         )])
@@ -3468,7 +3381,7 @@ fn reflect_query_is_parsed_like_starlette() {
 async fn an_unknown_verb_echoes_the_raw_type() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(&tmp, false, false);
-    kernel.register(Agent::new(
+    fantastic_kernel::test_support::register(&kernel, Agent::new(
         AgentId::from("web_x"),
         Some(HANDLER_MODULE.into()),
         None,
@@ -3505,11 +3418,10 @@ async fn deleting_one_web_agent_frees_only_its_own_listener() {
     let tmp = TempDir::new().unwrap();
     let (pa, pb) = (free_port(), free_port());
     let kernel = stage_host(&tmp, pa, "web_s4a", "rest_s4a", "fb_s4a").await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
-                   "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": "web_s4b", "port": pb}),
+                   "handler_module": HANDLER_MODULE, "id": "web_s4b", "port": pb}),
         )])
         .await
         .remove(0)
@@ -3519,8 +3431,7 @@ async fn deleting_one_web_agent_frees_only_its_own_listener() {
     let reflect = |id: &'static str| {
         let kernel = Arc::clone(&kernel);
         async move {
-            kernel
-                .send(vec![Item::new(
+            kernel.operator_send(vec![Item::new(
                     AgentId::from(id),
                     json!({"type": "reflect"}),
                 )])
@@ -3531,8 +3442,7 @@ async fn deleting_one_web_agent_frees_only_its_own_listener() {
     };
     assert_eq!(reflect("web_s4a").await["running"], json!(true));
     assert_eq!(reflect("web_s4b").await["running"], json!(true));
-    let gone = kernel
-        .send(vec![Item::new(
+    let gone = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": "web_s4b"}),
         )])
@@ -3621,8 +3531,7 @@ async fn the_hosts_record_is_checked_by_its_declaration() {
         let mut create = json!({"type": "create_agent", "parent_id": "kernel",
                                 "handler_module": HANDLER_MODULE, "id": "web_rec"});
         create[field] = value.clone();
-        let r = kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), create)])
+        let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
             .await
             .remove(0)
             .result;
@@ -3636,8 +3545,7 @@ async fn the_hosts_record_is_checked_by_its_declaration() {
 async fn fetch_file_is_checked_by_its_declaration() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(&tmp, false, false);
-    let made = kernel
-        .send(vec![Item::new(
+    let made = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": HANDLER_MODULE, "id": "web_ff"}),
@@ -3670,8 +3578,7 @@ async fn fetch_file_is_checked_by_its_declaration() {
     ] {
         let mut payload = args;
         payload["type"] = json!("fetch_file");
-        let r = kernel
-            .send(vec![Item::new(AgentId::from("web_ff"), payload.clone())])
+        let r = kernel.operator_send(vec![Item::new(AgentId::from("web_ff"), payload.clone())])
             .await
             .remove(0)
             .result;

@@ -1,10 +1,10 @@
 //! TEST WIRING for an AI agent's memory store — the twin of python
 //! `_testkit.ensure_memory` / `memory_meta`. An AI agent keeps its conversation in
-//! the memory store its record names, and the gates between the two are EXPLICIT on
-//! both ends (no defaults). Tests compose it the way an operator would: one
-//! `ram_store` under the root, the agent granted `can_call` on it, the store's
-//! `callable_by` opened for the agent. The store keys rows by the kernel's guid,
-//! which a booted root mints; an unbooted test root gets one here.
+//! the memory store its record names, and the agent reaches it only by a line in
+//! its own `can` (no defaults). Tests compose it the way an operator would: one
+//! `ram_store` under the root, the agent holding `memory: {call: ["*"]}`. The store
+//! keys rows by the kernel's guid, which a booted root mints; an unbooted test root
+//! gets one here (the operator's `update_agent`).
 //!
 //! The caller registers [`crate::RamStoreBundle`] under [`crate::HANDLER_MODULE`].
 
@@ -26,21 +26,25 @@ pub async fn ensure_memory(kernel: &Arc<Kernel>) -> AgentId {
         .root()
         .expect("ensure_memory: the kernel has no root");
     let has_guid = root
-        .meta
-        .read()
-        .expect("root meta poisoned")
+        .record().meta
         .get("guid")
         .and_then(Value::as_str)
         .is_some_and(|g| !g.is_empty());
     if !has_guid {
-        let mut patch = Map::new();
-        patch.insert("guid".to_string(), json!("test-guid"));
-        kernel.update(&root.id, patch);
+        let r = kernel
+            .operator_send(vec![Item::new(
+                AgentId::from("kernel"),
+                json!({"type": "update_agent", "id": root.id.0, "guid": "test-guid"}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["updated"], json!(true), "ensure_memory: {r}");
     }
     let store = AgentId::from(MEMORY);
-    if !kernel.agents.contains_key(&store) {
+    if !kernel.exists(store.as_str()) {
         let r = kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 root.id.clone(),
                 json!({
                     "type": "create_agent",
@@ -57,31 +61,15 @@ pub async fn ensure_memory(kernel: &Arc<Kernel>) -> AgentId {
     store
 }
 
-/// `create_agent` meta for AI agent `ai_id`: `memory_store_id` + `can_call` on the
-/// store (merged into `can_call`). Creates the store on first use and opens its
-/// `callable_by` for `ai_id`.
-pub async fn memory_meta(kernel: &Arc<Kernel>, ai_id: &str, can_call: Value) -> Map<String, Value> {
-    let store = ensure_memory(kernel).await;
-    let mut cb = kernel
-        .agents
-        .get(&store)
-        .and_then(|a| {
-            a.meta
-                .read()
-                .expect("store meta poisoned")
-                .get("callable_by")
-                .and_then(Value::as_object)
-                .cloned()
-        })
-        .unwrap_or_default();
-    cb.insert(ai_id.to_string(), json!("*"));
-    let mut patch = Map::new();
-    patch.insert("callable_by".to_string(), Value::Object(cb));
-    kernel.update(&store, patch);
-    let mut grants = can_call.as_object().cloned().unwrap_or_default();
-    grants.insert(MEMORY.to_string(), json!("*"));
+/// `create_agent` meta for an AI agent: `memory_store_id` + a `call *` line on the
+/// store, merged into the lines of `can` (the agent's other lines). Creates the
+/// store on first use.
+pub async fn memory_meta(kernel: &Arc<Kernel>, _ai_id: &str, can: Value) -> Map<String, Value> {
+    ensure_memory(kernel).await;
+    let mut lines = can.as_object().cloned().unwrap_or_default();
+    lines.insert(MEMORY.to_string(), json!({"call": ["*"]}));
     let mut meta = Map::new();
     meta.insert("memory_store_id".to_string(), json!(MEMORY));
-    meta.insert("can_call".to_string(), Value::Object(grants));
+    meta.insert("can".to_string(), Value::Object(lines));
     meta
 }

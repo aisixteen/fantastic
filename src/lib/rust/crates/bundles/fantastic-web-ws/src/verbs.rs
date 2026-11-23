@@ -57,10 +57,14 @@ pub struct InboundWatch {
     pub reader: String,
 }
 
-/// May THIS LEG tap the kernel-wide state stream (gated on the root, verb `state_subscribe`)? Returns {subscribed: true} or the refusal; the transport then wires the tap.
+/// May THIS LEG watch the state stream of `node`'s subtree (gated as the leg, verb `watch` on `node`)? Returns {subscribed: true} or the refusal; the transport then wires the tap, cut to what the leg covers.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct InboundStateSubscribe {}
+pub struct InboundStateSubscribe {
+    /// The agent whose subtree's state is watched.
+    #[schemars(length(min = 1))]
+    pub node: String,
+}
 
 fantastic_kernel::verbs! {
     "get_routes" => GetRoutes,

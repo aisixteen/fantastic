@@ -28,32 +28,32 @@ fn kernel(dir: &Path) -> Arc<Kernel> {
     k.bundles.register(HANDLER_MODULE, SqliteStoreBundle);
     let k = Arc::new(k);
     let root = agent("kernel_state", None, None, json!({"guid": "g1"}));
-    k.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
     k.set_root(root);
-    k.register(agent(
+    fantastic_kernel::test_support::register(&k, agent(
         "alice",
         None,
         Some("kernel_state"),
-        json!({"can_call": {"mem": "*"}}),
+        json!({"can": {"mem": {"call": ["*"]}}}),
     ));
     k
 }
 
 fn add_store(k: &Arc<Kernel>, path: &str) {
-    k.register(agent(
+    fantastic_kernel::test_support::register(k, agent(
         "mem",
         Some(HANDLER_MODULE),
         Some("kernel_state"),
-        json!({"path": path, "callable_by": {"alice": "*"}}),
+        json!({"path": path}),
     ));
 }
 
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value, as_: Option<&str>) -> Value {
     let item = Item::new(AgentId::from(target), payload);
     match as_ {
-        None => k.send(vec![item]).await.remove(0).result,
+        None => k.operator_send(vec![item]).await.remove(0).result,
         Some(who) => {
-            as_agent(AgentId::from(who), k.send(vec![item]))
+            as_agent(AgentId::from(who), k.operator_send(vec![item]))
                 .await
                 .remove(0)
                 .result
@@ -322,7 +322,7 @@ async fn stored_bytes_survive_a_reopen_of_the_file() {
             json!({"type": "put_bytes", "ref": "p1", "media_type": "image/png"}),
         )
         .with_binary_key("data", vec![9, 0, 9]);
-        as_agent(AgentId::from("alice"), k.send(vec![item]))
+        as_agent(AgentId::from("alice"), k.operator_send(vec![item]))
             .await
             .remove(0)
             .result
@@ -354,11 +354,11 @@ fn query_kernel(dir: &Path, allow: Value) -> Arc<Kernel> {
     c.execute_batch("CREATE TABLE t (n INTEGER, s TEXT, b BLOB); WITH RECURSIVE x(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM x WHERE i < 30) INSERT INTO t SELECT i, 'row' || i, zeroblob(4) FROM x;").unwrap();
     drop(c);
     let k = kernel(dir);
-    k.register(agent(
+    fantastic_kernel::test_support::register(&k, agent(
         "mem",
         Some(HANDLER_MODULE),
         Some("kernel_state"),
-        json!({"path": "mem.db", "query_allow": allow, "callable_by": {"alice": "*"}}),
+        json!({"path": "mem.db", "query_allow": allow}),
     ));
     k
 }
@@ -539,7 +539,7 @@ async fn prune_inject_and_put_bytes_are_published_on_the_stores_inbox() {
     call(&k, "mem", json!({"type": "inject", "tables": one}), Some("alice")).await;
     let item = Item::new(AgentId::from("mem"), json!({"type": "put_bytes", "ref": "p1", "media_type": "image/png"}))
         .with_binary_key("data", vec![9, 0, 9]);
-    as_agent(AgentId::from("alice"), k.send(vec![item])).await;
+    as_agent(AgentId::from("alice"), k.operator_send(vec![item])).await;
     let mut got = Vec::new();
     while let Some(item) = rx.try_recv() {
         if matches!(item.payload["type"].as_str(), Some("pruned" | "injected" | "bytes_put")) {

@@ -1,5 +1,6 @@
-//! user_store — THE USER STORE (`user_store.tools`, owner 2026-10-12): what the
-//! user keeps across every fantastic they run, in the home dir:
+//! user_store — THE USER'S HOME (`user_store.tools`, the `home` agent; owner
+//! 2026-10-12, merged with the saved set-ups 2026-11-23): what the user keeps
+//! across every fantastic they run, in the home dir:
 //!
 //! ```text
 //!   <home>/
@@ -26,8 +27,9 @@
 //! existing folder's `pid` and `canvas` are set to `null`: a stopped fantastic
 //! reads as stopped from the file alone (a killed one still names its last pid).
 //!
-//! Its verbs are declared in [`verbs`] (`reflect` and `docs` render them), its record in
-//! [`record`].
+//! The saved set-ups are its [`crate::UserHomeStore`] part. Its verbs are declared in
+//! [`verbs`] (`reflect` renders them), its record in [`record`]; its `reflect` carries
+//! its html view (compiled in, no record field).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,9 +39,9 @@ use async_trait::async_trait;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::refusal::{refusal, refusal_hint, with, BAD_ARG, NOT_FOUND};
 use fantastic_kernel::{AgentId, Kernel};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
-use crate::{private, private_dirs, read_private, secrets::Secrets, saved_dir, valid_name, write_private};
+use crate::{private, private_dirs, read_private, secrets::Secrets, saved_dir, valid_name, write_private, UserHomeStore};
 
 /// The `handler_module` this bundle answers to.
 pub const HANDLER_MODULE: &str = "user_store.tools";
@@ -49,7 +51,13 @@ pub mod verbs;
 
 /// What the bundle is for: its one short man text; how to call it is rendered from its
 /// declared verbs (`docs`, `reflect`).
-const MAN: &str = "The user store: the keys and set-ups kept in the user's home, and a folder per registered fantastic that other tools read.";
+const MAN: &str = "The user's home: the saved set-ups (named agent-record blueprints the CLI applies when it creates an agent; no identity, wiring or authority), the keys, and a folder per registered fantastic that other tools read.";
+
+/// Its html view, returned by its `reflect`.
+const VIEW: &str = include_str!("home_view.html");
+
+/// The verbs its view calls.
+pub const VIEW_CALLS: [&str; 7] = ["list", SWITCH, "name_home_folder", "set_canvas", "unstore", "unstore_others", "reflect"];
 
 /// The record field holding the switch; absent or anything but `true` = off.
 pub const SWITCH: &str = "register_home_folder";
@@ -87,7 +95,7 @@ impl Me {
             .root()
             .and_then(|r| r.record().meta.get("guid").and_then(Value::as_str).map(str::to_string))
             .filter(|g| !g.is_empty());
-        let meta = kernel.agents.get(agent_id).map(|a| a.value().record().meta.clone()).unwrap_or_default();
+        let meta = kernel.resolve_target(agent_id.as_str()).map(|a| a.record().meta.clone()).unwrap_or_default();
         Self {
             guid,
             on: meta.get(SWITCH) == Some(&Value::Bool(true)),
@@ -111,12 +119,14 @@ pub struct UserStore {
     home: Result<PathBuf, String>,
     here: PathBuf,
     canvas: Mutex<Option<String>>,
+    setups: UserHomeStore,
 }
 
 impl UserStore {
     /// `home`: the resolved home dir (or why there is none); `here`: this fantastic's state folder.
     pub fn new(home: Result<PathBuf, String>, here: PathBuf) -> Self {
-        Self { home, here, canvas: Mutex::new(None) }
+        let setups = UserHomeStore::new(home.clone());
+        Self { home, here, canvas: Mutex::new(None), setups }
     }
 
     fn home(&self) -> Result<&Path, Value> {
@@ -241,9 +251,12 @@ impl UserStore {
     /// the switch or name has landed before the home is touched. A crash after it
     /// leaves a record the next boot makes the home match.
     async fn persist(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str, value: Value) {
-        let mut patch = Map::new();
-        patch.insert(key.to_string(), value);
-        kernel.update(agent_id, patch);
+        // its own field, written with `update_agent` as itself
+        let mut payload = json!({"type": "update_agent", "id": agent_id.as_str()});
+        payload[key] = value;
+        let _ = kernel
+            .send(vec![fantastic_kernel::Item::new(AgentId::from("kernel"), payload)])
+            .await;
         kernel.flush_records().await;
     }
 
@@ -406,6 +419,8 @@ impl UserStore {
         json!({
             "handler_module": HANDLER_MODULE,
             "sentence": MAN,
+            "view": {"kind": "html", "bytes": VIEW, "calls": VIEW_CALLS},
+            "dir": self.home.as_ref().map(|h| saved_dir(h).display().to_string()).ok(),
             "home": self.home.as_ref().map(|h| h.display().to_string()).ok(),
             "here": self.here.display().to_string(),
             SWITCH: me.on,
@@ -450,6 +465,10 @@ impl Handler for UserStore {
             verbs::Call::Unstore(a) => self.unstore(&me, &a.guid),
             verbs::Call::UnstoreOthers(_) => self.unstore_others(&me),
             verbs::Call::Shutdown(_) => self.shutdown(&me),
+            verbs::Call::PersistRecord(a) => self.setups.persist(a, kernel),
+            verbs::Call::ForgetRecord(a) => self.setups.forget(a),
+            verbs::Call::LoadTree(_) => self.setups.load_tree(),
+            verbs::Call::Prefer(a) => self.setups.prefer(a),
         };
         Ok(Some(out.unwrap_or_else(|r| r)))
     }
@@ -463,6 +482,7 @@ impl Handler for UserStore {
 #[cfg(test)]
 mod tests {
     use fantastic_kernel::agent::Agent;
+    use serde_json::Map;
 
     use super::*;
 
@@ -480,16 +500,21 @@ mod tests {
     fn fantastic(guid: Option<&str>, meta: Value) -> (Arc<Kernel>, AgentId) {
         let k = Arc::new(Kernel::new());
         let root = agent("kernel_state", None, None, guid.map_or(json!({}), |g| json!({"guid": g})));
-        k.register(Arc::clone(&root));
+        fantastic_kernel::test_support::register(&k, Arc::clone(&root));
         k.set_root(root);
         let id = AgentId::from("user_store");
-        k.register(agent("user_store", Some(HANDLER_MODULE), Some("kernel_state"), meta));
+        fantastic_kernel::test_support::register(&k, agent("user_store", Some(HANDLER_MODULE), Some("kernel_state"), meta));
         (k, id)
     }
 
     async fn call(s: &UserStore, k: &Arc<Kernel>, id: &AgentId, p: Value) -> Value {
-        // THE ENTRY: the call is parsed and checked against the declared verbs first
-        fantastic_kernel::Bundle::handle_binary(s, id, p, None, k).await.unwrap().0.unwrap_or(Value::Null)
+        // THE ENTRY: the call is parsed and checked against the declared verbs first, and
+        // runs as the agent, as its dispatch would (its own record writes are its own)
+        fantastic_kernel::test_support::as_agent(id.clone(), fantastic_kernel::Bundle::handle_binary(s, id, p, None, k))
+            .await
+            .unwrap()
+            .0
+            .unwrap_or(Value::Null)
     }
 
     fn info(h: &Path, folder: &str) -> Option<Value> {
@@ -504,7 +529,7 @@ mod tests {
     }
 
     fn meta(k: &Kernel, id: &AgentId) -> Map<String, Value> {
-        k.agents.get(id).unwrap().record().meta.clone()
+        k.resolve_target(id.as_str()).unwrap().record().meta.clone()
     }
 
     #[tokio::test]

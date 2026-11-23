@@ -218,10 +218,8 @@ fn boot_disk(
         )));
     };
 
-    // THE VIRGIN SEED IS THE CONSTRUCTED ROOT, not the bare literal: the record
-    // on disk then carries the structural grant baseline `Agent::new` stamps, in
-    // its order (`can_call, callable_by`), and the loader's `boot` appends
-    // `guid` after them. COLD primitive — this runs before any agent (and thus
+    // THE VIRGIN SEED IS THE CONSTRUCTED ROOT, not the bare literal: it carries
+    // no lines (nothing is stamped), and the loader's `boot` appends `guid`. COLD primitive — this runs before any agent (and thus
     // any `file_bridge` store provider) exists, so it cannot route through one.
     // Written only under the dir's lock: a lockless boot hands it back as
     // `pending_seed`, for the mode that takes the lock to write

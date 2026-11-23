@@ -12,8 +12,9 @@
 //!   tokens tagged with its `rid`. Nothing in the chat names a provider's kind,
 //!   so a provider on another kernel serves it the same way.
 //!
-//! The chat's grants name the provider: `can_call` `{<provider>: [complete,
-//! watch]}`, and the provider's `callable_by` the chat.
+//! The chat's own line names the provider: `can: {<provider>: {call: [complete,
+//! watch, capabilities]}}` (`capabilities`: what its models can do, see
+//! [`crate::images`]); the provider keeps no list of callers.
 //!
 //! ONE PROVIDER, MANY CHATS (#632): the provider's record is its IDENTITY (endpoint,
 //! key, model, window, KV policy, timeouts); the REQUEST KNOBS are each chat's own
@@ -119,7 +120,10 @@ pub async fn set_usage(agent_id: &AgentId, kernel: &Arc<Kernel>, usage: &Value) 
 }
 
 /// For a provider that cannot ask its API for its models: `provider_verbs(…, NO_LIVE)`.
-pub const NO_LIVE: Option<fn() -> std::future::Ready<Result<Vec<String>, String>>> = None;
+pub const NO_LIVE: Option<LiveModels> = None;
+
+/// A provider's live model listing, as [`handle`] takes it.
+pub type LiveModels = fn() -> std::future::Ready<Result<Vec<String>, String>>;
 
 /// The names a provider's record lists in `models`.
 #[must_use]
@@ -553,27 +557,24 @@ impl Drop for Unwatch {
 mod tests_remote_provider;
 
 /// TESTS AND TOOLS: an `ai_chat` agent completing through `provider` — `<provider>_ai`,
-/// under the same parent, on the provider's memory store (its `memory_store_id`), with
-/// both ends of the edge granted (the chat may `complete` and `watch` the provider, and
-/// call what the provider may; the provider and the store admit it). The chat holds the
-/// conversation; the provider keeps answering `complete`. Returns the chat's id. A
-/// provider's own tests drive a whole turn through it.
+/// under the same parent, on the provider's memory store (its `memory_store_id`),
+/// made by the operator. Its `can` is one line, `{<provider>: {call: [complete, watch,
+/// capabilities]}}`: the provider's own lines (its key line among them) are never copied
+/// into the chat; the chat's other lines come from its bundle's defaults. The chat
+/// holds the conversation; the provider keeps answering `complete`. Returns the
+/// chat's id. A provider's own tests drive a whole turn through it.
 pub async fn pair_chat(kernel: &Arc<Kernel>, provider: &AgentId) -> AgentId {
     let chat = AgentId::from(format!("{}_ai", provider.as_str()));
-    if kernel.agents.contains_key(&chat) {
+    if kernel.exists(chat.as_str()) {
         return chat;
     }
     let pm = crate::helpers::agent_meta(provider, kernel);
-    let parent = kernel
-        .agents
-        .get(provider)
+    let parent = kernel.resolve_target(provider.as_str())
         .and_then(|a| a.parent_id.clone())
         .map_or_else(|| "kernel".to_string(), |p| p.as_str().to_string());
-    let mut can_call = pm.get("can_call").and_then(Value::as_object).cloned().unwrap_or_default();
-    can_call.insert(provider.as_str().to_string(), json!(["complete", "watch", "reflect"]));
+    let can = json!({provider.as_str(): {"call": ["complete", "watch", "capabilities"]}});
     let mut create = json!({"type": "create_agent", "parent_id": parent, "handler_module": crate::chat_bundle::HANDLER_MODULE,
-                            "id": chat.as_str(), PROVIDER_FIELD: provider.as_str(), "can_call": can_call,
-                            "callable_by": pm.get("callable_by").cloned().unwrap_or(json!({"$self": "*"}))});
+                            "id": chat.as_str(), PROVIDER_FIELD: provider.as_str(), "can": can});
     // a provider record that names a `model` (a test's): the chat runs it, as a user's choice
     if let Some(m) = pm.get("model").filter(|m| m.as_str().is_some_and(|s| !s.is_empty())) {
         create["model"] = m.clone();
@@ -585,35 +586,15 @@ pub async fn pair_chat(kernel: &Arc<Kernel>, provider: &AgentId) -> AgentId {
     }
     if create.get("context_window").is_none() {
         // the model's own window, as the provider reports it
-        let r = kernel.send(vec![Item::new(provider.clone(), json!({"type": "reflect"}))]).await;
+        let r = kernel
+            .operator_send(vec![Item::new(provider.clone(), json!({"type": "reflect"}))])
+            .await;
         if let Some(w) = r.first().and_then(|o| o.result.get("context_window")).filter(|w| w.is_number()) {
             create["context_window"] = w.clone();
         }
     }
     let root = kernel.root().map_or_else(|| AgentId::from("kernel"), |r| r.id.clone());
-    let _ = kernel.send(vec![Item::new(root, create)]).await;
-    // the other ends: the provider admits the chat, and so does everything that admits the provider
-    let me = chat.as_str().to_string();
-    let _ = kernel.edit_callable_by(provider, |m| {
-        m.insert(me.clone(), json!(["complete", "watch", "reflect"]));
-        true
-    });
-    let all: Vec<Arc<fantastic_kernel::Agent>> = kernel.agents.iter().map(|e| Arc::clone(e.value())).collect();
-    for a in all {
-        let admits = a
-            .meta
-            .read()
-            .ok()
-            .and_then(|m| m.get("callable_by").and_then(Value::as_object).map(|c| c.get(provider.as_str()).cloned()))
-            .flatten();
-        if let Some(verbs) = admits {
-            let me = me.clone();
-            let _ = kernel.edit_callable_by(&a.id, move |m| {
-                m.insert(me, verbs);
-                true
-            });
-        }
-    }
+    let _ = kernel.operator_send(vec![Item::new(root, create)]).await;
     chat
 }
 

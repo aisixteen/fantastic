@@ -136,6 +136,7 @@ struct FakeExec;
 
 /// `start` of the fake exec agent: a command to run.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
 struct StartJob {
     /// What to run.
     command: String,
@@ -143,6 +144,7 @@ struct StartJob {
 
 /// `status` of the fake exec agent: the jobs it runs.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
 struct JobStatus {
     /// One job; absent, all.
     job_id: Option<i64>,
@@ -150,6 +152,7 @@ struct JobStatus {
 
 /// `tail` of the fake exec agent: a job's output.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
 struct TailJob {
     /// The job.
     job_id: Option<i64>,
@@ -214,8 +217,7 @@ impl Handler for FakeExec {
 }
 
 async fn create_one(kernel: &Arc<Kernel>, create: Value) {
-    let _ = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -243,12 +245,12 @@ async fn setup(tmp: &TempDir, agents: &[&str], exec: &str) -> Arc<Kernel> {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     fantastic_ram_store::test_support::ensure_memory(&kernel).await;
     for id in agents {
         let memory =
-            fantastic_ram_store::test_support::memory_meta(&kernel, id, json!({"cli": "*"})).await;
+            fantastic_ram_store::test_support::memory_meta(&kernel, id, json!({"cli": {"call": ["*"]}})).await;
         let mut create = json!({
             "type": "create_agent",
             "parent_id": "kernel",
@@ -262,7 +264,6 @@ async fn setup(tmp: &TempDir, agents: &[&str], exec: &str) -> Arc<Kernel> {
         }
         create_one(&kernel, create).await;
     }
-    let callers: Map<String, Value> = agents.iter().map(|a| (a.to_string(), json!("*"))).collect();
     create_one(
         &kernel,
         json!({
@@ -270,23 +271,18 @@ async fn setup(tmp: &TempDir, agents: &[&str], exec: &str) -> Arc<Kernel> {
             "parent_id": "kernel",
             "handler_module": EXEC,
             "id": exec,
-            "callable_by": Value::Object(callers),
         }),
     )
     .await;
-    // Each agent's `can_call` names the exec agent (update REPLACES the field, so the
-    // baseline grants ride along).
+    // Each agent holds its own line on the exec agent (update REPLACES the field, so
+    // every line rides along).
     for id in agents {
-        let _ = kernel
-            .send(vec![Item::new(
+        let _ = kernel.operator_send(vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({
                     "type": "update_agent",
                     "id": id,
-                    "can_call": {
-                        "$self": "*", "$parent": "*", "$subtree": "*",
-                        "cli": "*", fantastic_ram_store::test_support::MEMORY: "*", exec: "*",
-                    },
+                    "can": {"$parent": {"call": ["*"]}, "cli": {"call": ["*"]}, fantastic_ram_store::test_support::MEMORY: {"call": ["*"]}, exec: {"call": ["*"]}},
                 }),
             )])
             .await
@@ -297,8 +293,7 @@ async fn setup(tmp: &TempDir, agents: &[&str], exec: &str) -> Arc<Kernel> {
 }
 
 async fn send(kernel: &Arc<Kernel>, to: &str, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(AgentId::from(to), payload)])
+    kernel.operator_send(vec![Item::new(AgentId::from(to), payload)])
         .await
         .remove(0)
         .result

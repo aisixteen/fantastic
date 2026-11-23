@@ -59,14 +59,14 @@ fn mk() -> (TempDir, Arc<Kernel>) {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     (tmp, kernel)
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     kernel
-        .send(vec![Item::new(AgentId::from(target), payload)])
+        .operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -112,9 +112,8 @@ async fn update_agent_answers_updated_id_and_the_record() {
     assert_eq!(keys, vec!["updated", "id", "agent"], "{r}");
 }
 
-/// An unknown id is `unknown_agent` + `deleted:false` — a code to branch on and
-/// the LIVE id index to correct from — never a bare `{error: "no agent
-/// \"typo\""}` with nothing to act on.
+/// An unknown id is `unknown_agent` + `deleted:false` — a code to branch on —
+/// and carries no id index and no count.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_agent_on_an_unknown_id_is_the_unknown_agent_refusal() {
     let (_t, kernel) = mk();
@@ -127,15 +126,9 @@ async fn delete_agent_on_an_unknown_id_is_the_unknown_agent_refusal() {
     .await;
     assert_eq!(r["reason"], "unknown_agent", "{r}");
     assert_eq!(r["deleted"], false, "{r}");
-    // The legal values, so the caller can self-correct without a second verb.
-    let ids: Vec<&str> = r["agents"]
-        .as_array()
-        .expect("agents index")
-        .iter()
-        .filter_map(Value::as_str)
-        .collect();
-    assert!(ids.contains(&"kid"), "{r}");
-    assert!(ids.contains(&"kernel_state"), "{r}");
+    // The one shape names nothing the caller cannot already see.
+    assert!(r.get("agents").is_none(), "{r}");
+    assert!(r.get("agent_count").is_none(), "{r}");
 }
 
 /// No `id` at all is `missing_arg`, carrying the ARG — the machine field is the
@@ -202,7 +195,7 @@ async fn ledger_rows_carry_no_verb_key() {
     mk_child(&kernel, "kid").await;
     // One NAMED execution, so the row is settled and carries an outcome.
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kid"),
             json!({"type": "poke"}),
         )
@@ -228,7 +221,7 @@ async fn ledger_rows_carry_no_verb_key() {
 /// `get` is NOT a kernel verb: python has none and answers the root bundle's
 /// UNHANDLED refusal, and a reflect must not advertise one in `kernel_verbs` —
 /// a model reading it would learn a verb the reference runtime does not have.
-/// A record is read with `list_agents` or a `reflect`.
+/// A record is read with a `reflect`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_is_unhandled_not_a_kernel_verb() {
     let (_t, kernel) = mk();
@@ -239,28 +232,29 @@ async fn get_is_unhandled_not_a_kernel_verb() {
     assert!(r["id"].is_null(), "it must not answer with a record: {r}");
 }
 
-/// `list_agents` answers the registry in REGISTRATION ORDER.
+/// `reflect tree=ids` lists the tree in CREATION ORDER.
 ///
-/// Python iterates `self.ctx.agents`, a plain dict, so the root leads and every
-/// agent follows in the order it was registered. Rust's registry is a `DashMap`
-/// with no order, and the port sorted by id — which put `alpha` ahead of the
-/// root and made the walk in `PT/kernel/test_pagination.py` reassemble a
-/// different registry.
+/// Python iterates a plain dict, so the root leads and every agent follows in
+/// the order it was created. Sorting by id would put `alpha` ahead of the root
+/// and make the walk in `PT/kernel/test_pagination.py` reassemble a different
+/// tree.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn list_agents_is_registry_order() {
+async fn reflect_tree_ids_is_creation_order() {
     let (_t, kernel) = mk();
     // Deliberately NOT alphabetical: sorting would put `alpha` first.
     for id in ["zulu", "mike", "alpha"] {
         mk_child(&kernel, id).await;
     }
-    let r = call(&kernel, "kernel", json!({"type": "list_agents"})).await;
-    let ids: Vec<&str> = r["agents"]
-        .as_array()
-        .expect("agents array")
-        .iter()
-        .map(|a| a["id"].as_str().unwrap_or(""))
-        .collect();
-    assert_eq!(ids, vec!["kernel_state", "zulu", "mike", "alpha"], "{r}");
+    let ids = |r: &Value| -> Vec<String> {
+        r["tree"]
+            .as_array()
+            .expect("tree array")
+            .iter()
+            .map(|a| a.as_str().unwrap_or("").to_string())
+            .collect()
+    };
+    let r = call(&kernel, "kernel", json!({"type": "reflect", "tree": "ids"})).await;
+    assert_eq!(ids(&r), ["kernel_state", "zulu", "mike", "alpha"], "{r}");
 
     // A delete removes it from the order and leaves the rest as they were.
     let d = call(
@@ -270,29 +264,18 @@ async fn list_agents_is_registry_order() {
     )
     .await;
     assert_eq!(d["deleted"], true, "{d}");
-    let r = call(&kernel, "kernel", json!({"type": "list_agents"})).await;
-    let ids: Vec<&str> = r["agents"]
-        .as_array()
-        .expect("agents array")
-        .iter()
-        .map(|a| a["id"].as_str().unwrap_or(""))
-        .collect();
-    assert_eq!(ids, vec!["kernel_state", "zulu", "alpha"], "{r}");
+    let r = call(&kernel, "kernel", json!({"type": "reflect", "tree": "ids"})).await;
+    assert_eq!(ids(&r), ["kernel_state", "zulu", "alpha"], "{r}");
 
     // …and the cursor pages through THAT order, not a sorted one.
     let p = call(
         &kernel,
         "kernel",
-        json!({"type": "list_agents", "limit": 2}),
+        json!({"type": "reflect", "tree": "ids", "limit": 2}),
     )
     .await;
-    let ids: Vec<&str> = p["agents"]
-        .as_array()
-        .expect("agents array")
-        .iter()
-        .map(|a| a["id"].as_str().unwrap_or(""))
-        .collect();
-    assert_eq!(ids, vec!["kernel_state", "zulu"], "{p}");
+    assert_eq!(ids(&p), ["kernel_state", "zulu"], "{p}");
+    assert_eq!(p["next"], "zulu", "{p}");
 }
 
 /// A record serializes `id, handler_module?, <meta in order>, parent_id`.
@@ -317,8 +300,8 @@ async fn record_parent_id_is_last() {
         }),
     )
     .await;
-    // `can_call`/`callable_by` are the stamped `$self` baseline; they land in
-    // meta ahead of the authored keys.
+    // Nothing is stamped: the record is its authored keys between the
+    // structural ones.
     let keys: Vec<&str> = created
         .as_object()
         .expect("object record")
@@ -332,28 +315,4 @@ async fn record_parent_id_is_last() {
     let dn = keys.iter().position(|k| *k == "display_name").unwrap();
     let note = keys.iter().position(|k| *k == "note").unwrap();
     assert!(dn < note, "meta order was not preserved: {keys:?}");
-
-    // Same order off `list_agents` — one record shape, one spelling.
-    let r = call(&kernel, "kernel", json!({"type": "list_agents"})).await;
-    let kid = r["agents"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["id"] == "kid")
-        .expect("kid is registered");
-    let keys: Vec<&str> = kid
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(keys.last(), Some(&"parent_id"), "{kid}");
-    // The ROOT carries no `parent_id` at all.
-    let root = r["agents"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["id"] == "kernel_state")
-        .expect("root is registered");
-    assert!(root.get("parent_id").is_none(), "{root}");
 }

@@ -88,7 +88,7 @@ fn bootstrap_hydrates_persisted_children() {
             boot_root(&kernel).await;
             crate::test_support::wire_fake_store(&kernel, &store_root).await;
             let _ = kernel
-                .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_a"}))])
+                .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_a"}))])
                 .await.remove(0).result;
             kernel.flush_records().await;
         });
@@ -114,7 +114,7 @@ fn bootstrap_hydrates_persisted_children() {
 }
 
 #[test]
-fn edit_grants_publishes_one_updated_event_only_when_something_changed() {
+fn edit_can_publishes_one_updated_event_only_when_something_changed() {
     let kernel = Kernel::new();
     kernel.register(Agent::new(
         AgentId::from("evt"),
@@ -133,18 +133,18 @@ fn edit_grants_publishes_one_updated_event_only_when_something_changed() {
         }
     }));
     kernel
-        .edit_callable_by(&id, |cb| {
-            cb.insert("v".to_string(), json!(["*"]));
-            true
+        .edit_can(&id, None, |cb, _| {
+            cb.insert("v".to_string(), json!({"call": ["*"]}));
+            Ok(true)
         })
         .unwrap();
     {
         let evs = events.lock().unwrap();
         assert_eq!(evs.len(), 1, "{evs:?}");
         assert_eq!(evs[0]["agent_id"], "evt");
-        assert_eq!(evs[0]["changed"], json!(["callable_by"]));
+        assert_eq!(evs[0]["changed"], json!(["can"]));
     }
-    kernel.edit_callable_by(&id, |_| false).unwrap();
+    kernel.edit_can(&id, None, |_, _| Ok(false)).unwrap();
     assert_eq!(
         events.lock().unwrap().len(),
         1,
@@ -153,7 +153,7 @@ fn edit_grants_publishes_one_updated_event_only_when_something_changed() {
 }
 
 #[test]
-fn edit_grants_persists_both_keys_across_a_restart() {
+fn edit_can_persists_every_line_across_a_restart() {
     let tmp = TempDir::new().unwrap();
     let store_root = tmp.path().join(".fantastic");
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -171,18 +171,18 @@ fn edit_grants_persists_both_keys_across_a_restart() {
             boot_root(&kernel).await;
             crate::test_support::wire_fake_store(&kernel, &store_root).await;
             let _ = kernel
-                .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_m"}))])
+                .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_m"}))])
                 .await.remove(0).result;
             let id = AgentId::from("child_m");
             // settle the create's own write, so only the edits can make the record dirty again
             kernel.flush_records().await;
-            let _ = kernel.edit_callable_by(&id, |cb| {
-                cb.insert("view_a".to_string(), json!(["*"]));
-                true
+            let _ = kernel.edit_can(&id, None, |cb, _| {
+                cb.insert("view_a".to_string(), json!({"call": ["*"]}));
+                Ok(true)
             });
-            let _ = kernel.edit_callable_by(&id, |cb| {
-                cb.insert("view_b".to_string(), json!(["*"]));
-                true
+            let _ = kernel.edit_can(&id, None, |cb, _| {
+                cb.insert("view_b".to_string(), json!({"call": ["*"]}));
+                Ok(true)
             });
             kernel.flush_records().await;
             // on disk NOW, before any shutdown flush could persist it regardless
@@ -205,7 +205,7 @@ fn edit_grants_persists_both_keys_across_a_restart() {
                 .unwrap_or_default();
             assert!(
                 on_disk.contains("view_a") && on_disk.contains("view_b"),
-                "the edit alone persisted both keys: {on_disk:?}"
+                "the edit alone persisted both lines: {on_disk:?}"
             );
         });
         shutdown(&tmp.path().join(".fantastic")).unwrap();
@@ -225,16 +225,16 @@ fn edit_grants_persists_both_keys_across_a_restart() {
         .expect("child_m rehydrated")
         .record()
         .meta
-        .get("callable_by")
+        .get("can")
         .cloned()
         .unwrap_or(Value::Null);
-    assert_eq!(cb.get("view_a"), Some(&json!(["*"])), "{cb}");
-    assert_eq!(cb.get("view_b"), Some(&json!(["*"])), "{cb}");
+    assert_eq!(cb.get("view_a"), Some(&json!({"call": ["*"]})), "{cb}");
+    assert_eq!(cb.get("view_b"), Some(&json!({"call": ["*"]})), "{cb}");
     shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_edit_grants_keep_every_key() {
+async fn concurrent_edit_can_keeps_every_line() {
     let tmp = TempDir::new().unwrap();
     let mut reg = with_loader(BundleRegistry::new());
     reg.register("noop.tools", Noop);
@@ -257,15 +257,15 @@ async fn concurrent_edit_grants_keep_every_key() {
         let (a, b) = (Arc::clone(&kernel), Arc::clone(&kernel));
         let (ida, idb) = (id.clone(), id.clone());
         let ta = tokio::spawn(async move {
-            a.edit_callable_by(&ida, |cb| {
-                cb.insert("view_a".to_string(), json!(["*"]));
-                true
+            a.edit_can(&ida, None, |cb, _| {
+                cb.insert("view_a".to_string(), json!({"call": ["*"]}));
+                Ok(true)
             })
         });
         let tb = tokio::spawn(async move {
-            b.edit_callable_by(&idb, |cb| {
-                cb.insert("view_b".to_string(), json!(["*"]));
-                true
+            b.edit_can(&idb, None, |cb, _| {
+                cb.insert("view_b".to_string(), json!({"call": ["*"]}));
+                Ok(true)
             })
         });
         ta.await.unwrap().unwrap();
@@ -276,7 +276,7 @@ async fn concurrent_edit_grants_keep_every_key() {
             .expect("agent exists")
             .record()
             .meta
-            .get("callable_by")
+            .get("can")
             .cloned()
             .unwrap_or(Value::Null);
         assert!(
@@ -288,7 +288,7 @@ async fn concurrent_edit_grants_keep_every_key() {
 }
 
 #[test]
-fn concurrent_edit_grants_persist_every_key_across_a_restart() {
+fn concurrent_edit_can_persists_every_line_across_a_restart() {
     const ROUNDS: usize = 50;
     let tmp = TempDir::new().unwrap();
     let store_root = tmp.path().join(".fantastic");
@@ -312,7 +312,7 @@ fn concurrent_edit_grants_persist_every_key_across_a_restart() {
             crate::test_support::wire_fake_store(&kernel, &store_root).await;
             for round in 0..ROUNDS {
                 let _ = kernel
-                    .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":format!("child_{round}")}))])
+                    .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":format!("child_{round}")}))])
                     .await.remove(0).result;
             }
             // settle the creates' own writes, so only the edits can make the records dirty again
@@ -326,9 +326,9 @@ fn concurrent_edit_grants_persist_every_key_across_a_restart() {
                     let id = AgentId::from(format!("child_{round}").as_str());
                     handles.push(tokio::spawn(async move {
                         b.wait();
-                        k.edit_callable_by(&id, |cb| {
-                            cb.insert(key.to_string(), json!(["*"]));
-                            true
+                        k.edit_can(&id, None, |cb, _| {
+                            cb.insert(key.to_string(), json!({"call": ["*"]}));
+                            Ok(true)
                         })
                     }));
                 }
@@ -356,17 +356,17 @@ fn concurrent_edit_grants_persist_every_key_across_a_restart() {
             .expect("child rehydrated")
             .record()
             .meta
-            .get("callable_by")
+            .get("can")
             .cloned()
             .unwrap_or(Value::Null);
-        assert_eq!(cb.get("view_a"), Some(&json!(["*"])), "round {round}: {cb}");
-        assert_eq!(cb.get("view_b"), Some(&json!(["*"])), "round {round}: {cb}");
+        assert_eq!(cb.get("view_a"), Some(&json!({"call": ["*"]})), "round {round}: {cb}");
+        assert_eq!(cb.get("view_b"), Some(&json!({"call": ["*"]})), "round {round}: {cb}");
     }
     shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
 #[test]
-fn edit_callable_by_holds_the_record_lock_while_it_edits() {
+fn edit_can_holds_the_record_lock_while_it_edits() {
     let kernel = Kernel::new();
     kernel.register(Agent::new(
         AgentId::from("locked"),
@@ -382,18 +382,18 @@ fn edit_callable_by_holds_the_record_lock_while_it_edits() {
         .map(|e| Arc::clone(&e))
         .unwrap();
     let mut held = false;
-    let r = kernel.edit_callable_by(&AgentId::from("locked"), |cb| {
+    let r = kernel.edit_can(&AgentId::from("locked"), None, |cb, _| {
         // a reader or writer from outside would block here: the record is locked for the edit
         held = agent.meta.try_read().is_err();
-        cb.insert("view_a".to_string(), json!(["*"]));
-        true
+        cb.insert("view_a".to_string(), json!({"call": ["*"]}));
+        Ok(true)
     });
     assert!(r.is_ok(), "{r:?}");
     assert!(held, "the record's lock was free while the edit ran");
 }
 
 #[test]
-fn an_edit_the_write_time_checks_refuse_writes_nothing() {
+fn a_can_edit_the_write_time_checks_refuse_writes_nothing() {
     let kernel = Kernel::new();
     kernel.register(Agent::new(
         AgentId::from("guarded"),
@@ -409,11 +409,11 @@ fn an_edit_the_write_time_checks_refuse_writes_nothing() {
         .unwrap()
         .record()
         .meta
-        .get("callable_by")
+        .get("can")
         .cloned();
-    let refused = kernel.edit_callable_by(&AgentId::from("guarded"), |cb| {
+    let refused = kernel.edit_can(&AgentId::from("guarded"), None, |cb, _| {
         cb.insert("x".to_string(), json!(5));
-        true
+        Ok(true)
     });
     assert!(refused.is_err(), "{refused:?}");
     let cb = kernel
@@ -422,71 +422,9 @@ fn an_edit_the_write_time_checks_refuse_writes_nothing() {
         .unwrap()
         .record()
         .meta
-        .get("callable_by")
+        .get("can")
         .cloned();
     assert_eq!(cb, before, "a refused edit writes nothing");
-}
-
-#[test]
-fn edit_can_call_holds_the_record_lock_while_it_edits() {
-    let kernel = Kernel::new();
-    kernel.register(Agent::new(
-        AgentId::from("cc_locked"),
-        None,
-        None,
-        Map::new(),
-        std::path::PathBuf::from("/nonexistent"),
-        false,
-    ));
-    let agent = kernel
-        .agents
-        .get(&AgentId::from("cc_locked"))
-        .map(|e| Arc::clone(&e))
-        .unwrap();
-    let mut held = false;
-    let r = kernel.edit_can_call(&AgentId::from("cc_locked"), |cc| {
-        // a reader or writer from outside would block here: the record is locked for the edit
-        held = agent.meta.try_read().is_err();
-        cc.insert("view_a".to_string(), json!(["*"]));
-        true
-    });
-    assert!(r.is_ok(), "{r:?}");
-    assert!(held, "the record's lock was free while the edit ran");
-}
-
-#[test]
-fn a_refused_can_call_shape_writes_nothing() {
-    let kernel = Kernel::new();
-    kernel.register(Agent::new(
-        AgentId::from("cc_guarded"),
-        None,
-        None,
-        Map::new(),
-        std::path::PathBuf::from("/nonexistent"),
-        false,
-    ));
-    let before = kernel
-        .agents
-        .get(&AgentId::from("cc_guarded"))
-        .unwrap()
-        .record()
-        .meta
-        .get("can_call")
-        .cloned();
-    let refused = kernel.edit_can_call(&AgentId::from("cc_guarded"), |cc| {
-        cc.insert("x".to_string(), json!(5));
-        true
-    });
-    assert!(refused.is_err(), "{refused:?}");
-    let cc = kernel
-        .agents
-        .get(&AgentId::from("cc_guarded"))
-        .unwrap()
-        .record()
-        .meta
-        .get("can_call")
-        .cloned();
-    assert_eq!(cc, before, "a refused edit writes nothing");
 }
 
 #[test]
@@ -616,7 +554,7 @@ fn in_memory_boot_mints_an_ephemeral_guid() {
 
 /// A virgin dir seeds the ROOT the loader owns — id `kernel_state`,
 /// handler_module `kernel_state.tools` — and the record written is the
-/// CONSTRUCTED root, so its meta is the structural grant baseline in order.
+/// CONSTRUCTED root, which carries no lines.
 #[test]
 fn root_is_the_kernel_state_loader_and_the_seed_is_the_constructed_record() {
     let tmp = TempDir::new().unwrap();
@@ -638,21 +576,17 @@ fn root_is_the_kernel_state_loader_and_the_seed_is_the_constructed_record() {
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(
-        keys.iter()
-            .filter(|k| matches!(**k, "can_call" | "callable_by"))
-            .copied()
-            .collect::<Vec<_>>(),
-        vec!["can_call", "callable_by"],
-        "grant baseline in python's order: {keys:?}"
+    assert!(
+        !keys.contains(&"can"),
+        "nothing is stamped on the seed: {keys:?}"
     );
     shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
-/// The root's meta order is `can_call, callable_by, guid` — the guid is
-/// APPENDED by the loader's boot, after the stamped grants.
+/// The root's meta is `guid` alone — APPENDED by the loader's boot; nothing is
+/// stamped.
 #[test]
-fn root_meta_order_is_grants_then_guid() {
+fn root_meta_is_the_guid_alone() {
     let tmp = TempDir::new().unwrap();
     let store_root = tmp.path().join(".fantastic");
     let mut reg = with_loader(BundleRegistry::new());
@@ -671,7 +605,7 @@ fn root_meta_order_is_grants_then_guid() {
     });
     let meta = kernel.root().unwrap().meta.read().unwrap().clone();
     let keys: Vec<&str> = meta.keys().map(String::as_str).collect();
-    assert_eq!(keys, vec!["can_call", "callable_by", "guid"], "{keys:?}");
+    assert_eq!(keys, vec!["guid"], "{keys:?}");
     shutdown(&tmp.path().join(".fantastic")).unwrap();
 }
 
@@ -847,7 +781,7 @@ fn the_root_records_children_dir_places_the_whole_tree() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let r = kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type": "create_agent", "parent_id": "web", "id": "leaf",
                        "handler_module": "noop.tools"}),
@@ -885,7 +819,7 @@ fn daemon_keeps_lock_records_and_store_in_the_state_dir_given() {
         boot_root(&kernel).await;
         // a RELATIVE store root resolves against the workdir: `.` IS the state dir
         let _ = kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({
                     "type": "create_agent", "parent_id": "kernel",
@@ -899,7 +833,7 @@ fn daemon_keeps_lock_records_and_store_in_the_state_dir_given() {
             Some(AgentId::from("store"))
         );
         let _ = kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_a"}))])
+            .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_a"}))])
             .await;
         kernel.flush_records().await;
     });
@@ -940,65 +874,6 @@ fn the_guard_refuses_a_state_dir_that_is_the_home() {
     let proj = tmp.path().join("proj");
     refuse_home_as_state_dir(&proj.join(".fantastic"), Some(&home)).unwrap();
     refuse_home_as_state_dir(&home, None).unwrap();
-}
-
-#[test]
-fn edit_grants_refused_in_one_map_writes_neither() {
-    let kernel = Kernel::new();
-    kernel.register(Agent::new(
-        AgentId::from("both_guarded"),
-        None,
-        None,
-        Map::new(),
-        std::path::PathBuf::from("/nonexistent"),
-        false,
-    ));
-    let id = AgentId::from("both_guarded");
-    let meta = |k: &Kernel| {
-        k.agents
-            .get(&AgentId::from("both_guarded"))
-            .unwrap()
-            .record()
-            .meta
-    };
-    let updated = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let u = std::sync::Arc::clone(&updated);
-    let _tap = kernel.add_state_subscriber(std::sync::Arc::new(move |ev, _body| {
-        if ev["kind"] == "updated" {
-            u.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
-    }));
-    let before = meta(&kernel);
-    // a good can_call entry and a malformed callable_by one: the whole step is refused
-    let refused = kernel.edit_grants(&id, |cc, cb| {
-        cc.insert("peer".to_string(), json!(["*"]));
-        cb.insert("x".to_string(), json!(5));
-        (true, true)
-    });
-    assert!(refused.is_err(), "{refused:?}");
-    let m = meta(&kernel);
-    assert_eq!(
-        m.get("can_call"),
-        before.get("can_call"),
-        "the can_call edit is not written: {m:?}"
-    );
-    assert_eq!(m.get("callable_by"), before.get("callable_by"), "{m:?}");
-    assert!(m["can_call"].get("peer").is_none(), "{m:?}");
-    assert_eq!(
-        updated.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "a refused edit publishes no updated event"
-    );
-    // the same step with a good callable_by writes both
-    let ok = kernel.edit_grants(&id, |cc, cb| {
-        cc.insert("peer".to_string(), json!(["*"]));
-        cb.insert("x".to_string(), json!(["send"]));
-        (true, true)
-    });
-    assert_eq!(ok, Ok(true));
-    let m = meta(&kernel);
-    assert_eq!(m["can_call"]["peer"], json!(["*"]));
-    assert_eq!(m["callable_by"]["x"], json!(["send"]));
 }
 
 #[test]

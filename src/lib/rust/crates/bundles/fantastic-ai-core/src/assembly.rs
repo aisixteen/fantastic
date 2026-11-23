@@ -29,7 +29,7 @@ use std::sync::Arc;
 /// NO JSON ON THE MODEL PATH: a string goes through as-is, a list of scalars is
 /// comma-joined through `str()`, and anything nested is the REPLY NOTATION
 /// collapsed onto the line — never JSON: python's says `parent_id=`,
-/// `can_call=<$self>*</$self>` and `tree=kernel_state,web`.
+/// `can=<memory><call>append,read</call></memory>` and `tree=kernel_state,web`.
 fn reflect_field(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -94,16 +94,16 @@ SECOND LINE, with "quotes"
 delivered whole: `<type>` the verb, every other child an argument. A value is text as
 written (`true`, `12`, a path); a list is `<item>` children; an object is child tags
 (`<edits><item><path>PATH</path><hunks>N</hunks></item></edits>`); a map's keys are its
-tags, `$` included (`<callable_by><$self>*</$self><AGENT><item>VERB</item></AGENT></callable_by>`).
+tags, `$` included (`<can><$parent><call><item>VERB</item></call></$parent></can>`).
 A body (a file, a patch) goes in `<bytes>`…`</bytes>` VERBATIM — real newlines and quotes,
 nothing escaped, no fence; it ends at the first `</bytes>`. `<reply_to>` in `<routing>` picks where the reply
 goes: you by default (your next message), another id hands it to them, `null` discards it.
 
-## Grants — every call is DENY-ALL
-You may call only what your `can_call` (in your self block) grants: `{key: "*" | [verbs]}`,
-a key being an agent id, `$self`, `$parent`, `$subtree` (every agent below you) or `*`; the
-target must also admit you (its `callable_by`). Plan inside `can_call` — any other call is
-refused and costs a turn; never retry a refusal. `docs` is a grant too: on the root (`kernel`).
+## Lines — every call is DENY-ALL
+You reach every agent below you by position. Anything else you reach only by a line in your
+`can` (in your self block): `{target: {call: [verbs]}}`, `{update: [fields]}` or `{create: …}`,
+a target being an agent id or `$parent`. Plan inside your lines — any other call is refused
+and costs a turn; never retry a refusal.
 
 ## Turns
 Only your ANSWER acts: a `<call>` in your thinking does not run; write it in your answer,
@@ -122,14 +122,11 @@ to check. A message to an
 agent has a deadline (600 s unless set otherwise); past it you are told of a dead letter —
 resend it, or drop it with `kernel` `<type>ack_deadletter</type>`.
 
-## How to call an agent — `docs`
-`docs` is a KERNEL verb: send it to `kernel` with the agent you ask about in `<of>`
-(an agent id, a bundle by its listed name, or
-`kernel` for create_agent, update_agent, ps, …): `<payload><type>docs</type><of>AGENT</of></payload>`.
-It answers one signature per verb; add `<verb>write</verb> <tier>detailed</tier>` for one
-verb's full text. A `docs` reply folds after your next message: in that answer,
-restate only the essentials you will still need (the few fields, types, ids), never the whole
-reply; asking again costs a turn.
+## How to call an agent — `reflect` with a `tier`
+Send `reflect` to the agent you ask about (`kernel` for create_agent, update_agent, ps, …)
+with a tier: `<payload><type>reflect</type><tier>oneliners</tier></payload>`.
+It answers one signature per verb you may call; add `<verb>write</verb> <tier>detailed</tier>` for one
+verb's full text.
 
 ## Inquiries
 Look it up, or take the obvious reading and say your assumption. Send an `inquiry` only when
@@ -201,7 +198,7 @@ later result contradicts is corrected. Each turn, start from your latest state a
 about the next step. Other text outside calls: only your last message.
 Read only what the request names; no docs or reflect sweep before your first real call. Make
 the first call that changes or tests something as soon as you can — an error reply names the
-missing argument. `reflect` shows what exists and your own `reflect` what you may call (`can_call`);
+missing argument. `reflect` shows what exists and your own `reflect` what you may call (`can`);
 `docs` only for a verb you are about to call.
 One answer may hold many <call> elements; they run at once. Put in it every call that does not
 need another's reply; a call waits for a later turn only when it does.
@@ -918,7 +915,7 @@ mod tests_worknote {
         assert!(!s.contains("## Working"));
         let order = [
             "## Reaching",
-            "## Grants",
+            "## Lines",
             "## Turns",
             "## Replies",
             "## How to call",

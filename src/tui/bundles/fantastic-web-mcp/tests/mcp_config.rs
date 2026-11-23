@@ -16,13 +16,13 @@ use serde_json::{json, Value};
 
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     let item = Item::new(AgentId::from(target), payload);
-    Arc::clone(k).send(vec![item]).await.remove(0).result
+    Arc::clone(k).operator_send(vec![item]).await.remove(0).result
 }
 
 const VERBS: [&str; 2] = ["read_stream", "write"];
 
 /// A kernel running in `dir`, a bridge `cfg` over it exposing `.mcp.json`
-/// (`grant`: whether it admits the leg), and the leg `mcp` with `meta`.
+/// (`grant`: whether the leg holds its line on it), and the leg `mcp` with `meta`.
 async fn setup(dir: &std::path::Path, grant: bool, meta: Value) -> (Arc<Kernel>, Value) {
     let mut reg = BundleRegistry::new();
     reg.register(HANDLER_MODULE, WebMcpBundle);
@@ -40,13 +40,13 @@ async fn setup(dir: &std::path::Path, grant: bool, meta: Value) -> (Arc<Kernel>,
             .kernel,
     );
     let root = k.root().expect("root").id.0.clone();
-    let cb = if grant { json!({"$self": "*", "mcp": VERBS}) } else { json!({"$self": "*"}) };
     let r = op(&k, &root, json!({"type": "create_agent", "parent_id": root, "id": "cfg",
         "handler_module": fantastic_file::HANDLER_MODULE, "allow": [".mcp.json"],
-        "ingress_rule": "allow_all_ingress", "callable_by": cb})).await;
+        "ingress_rule": "allow_all_ingress"})).await;
     assert!(r.get("error").is_none(), "create cfg: {r}");
+    let can = if grant { json!({"cfg": {"call": VERBS}}) } else { json!({}) };
     let mut create = json!({"type": "create_agent", "parent_id": root, "id": "mcp",
-        "handler_module": HANDLER_MODULE, "can_call": {"$self": "*", "cfg": VERBS}});
+        "handler_module": HANDLER_MODULE, "can": can});
     for (key, v) in meta.as_object().cloned().unwrap_or_default() {
         create[key] = v;
     }

@@ -12,16 +12,16 @@
 //! the head — the same as turns.
 //!
 //! Neither verb creates, moves or deletes an agent. `embed` makes the same checks
-//! the canvas's `place {backend_id}` makes: the agent exists, it has a `view`
-//! record, and the page may call what the panel calls (`view.calls` plus `watch`,
-//! all granted to `user` in the agent's `callable_by`); it names what is missing as
-//! `not_allowed`. The Rust side cannot measure pixels: it answers with the
+//! the canvas's `place {backend_id}` makes: the agent exists and it has a `view`
+//! record. Whether the page may call what the panel calls is the page leg's own
+//! lines (grant model v9: the target keeps no list of callers), judged when it calls.
+//! The Rust side cannot measure pixels: it answers with the
 //! card's box (`width:"100%"`, `max_height`), and the chat page, which draws the
 //! panel, measures it and tells the model when it overflowed.
 
 use crate::constants::CHAT_CARD_MAX_HEIGHT;
 use crate::memory::{refresh_head, save_history, MemResult};
-use fantastic_kernel::refusal::{refusal_hint, with, BAD_ARG, NOT_ALLOWED, NOT_FOUND};
+use fantastic_kernel::refusal::{refusal_hint, with, BAD_ARG, NOT_FOUND};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -83,16 +83,7 @@ fn refused(code: &str, msg: String, hint: &str) -> Value {
 }
 
 const MAKE_HINT: &str = "create_agent a host agent with view {kind:html, bytes_file:<panel file>, \
-    calls:[get_html, watch]} and callable_by {user:[get_html, watch]}, then embed it by id";
-
-/// Does a `callable_by` grant value let `verb` through (`"*"`, or a list naming it)?
-fn allows(grant: &Value, verb: &str) -> bool {
-    grant.as_str() == Some("*")
-        || grant.as_array().is_some_and(|a| {
-            a.iter()
-                .any(|v| v.as_str() == Some(verb) || v.as_str() == Some("*"))
-        })
-}
+    calls:[get_html, watch]}, then embed it by id";
 
 /// `embed` verb: store a card row for host agent `id`. See the module doc.
 pub async fn embed(agent_id: &AgentId, id: &str, kernel: &Arc<Kernel>) -> MemResult<Value> {
@@ -104,10 +95,7 @@ pub async fn embed(agent_id: &AgentId, id: &str, kernel: &Arc<Kernel>) -> MemRes
             "embed another agent's id",
         ));
     }
-    let Some(rec) = kernel
-        .agents
-        .get(&AgentId::from(id.as_str()))
-        .map(|e| Arc::clone(&e))
+    let Some(rec) = kernel.resolve_target(id.as_str())
         .map(|a| a.record())
     else {
         return Ok(refused(
@@ -123,39 +111,6 @@ pub async fn embed(agent_id: &AgentId, id: &str, kernel: &Arc<Kernel>) -> MemRes
             MAKE_HINT,
         ));
     };
-    // the verbs the panel calls: its record's `calls`, plus `watch` (always received)
-    let mut calls: Vec<String> = view
-        .get("calls")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|c| c.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    if !calls.iter().any(|c| c == "watch") {
-        calls.push("watch".to_string());
-    }
-    let user = rec
-        .meta
-        .get("callable_by")
-        .and_then(|c| c.get("user"))
-        .cloned()
-        .unwrap_or(Value::Null);
-    let missing: Vec<&String> = calls.iter().filter(|c| !allows(&user, c)).collect();
-    if !missing.is_empty() {
-        let want: Vec<&String> = calls.iter().collect();
-        let mut r = refused(
-            NOT_ALLOWED,
-            format!("embed: {id}'s callable_by does not let the user call {missing:?}"),
-            &format!(
-                "the panel's calls will be refused. Grant them: update_agent {{id: {id}, callable_by: {{\"$self\":\"*\", \"user\": {}}}}}",
-                json!(want)
-            ),
-        );
-        r["grants_missing"] = json!({ id.clone(): missing });
-        return Ok(r);
-    }
     let live = cards(&card_rows(agent_id, kernel).await?);
     if live.contains(&id) {
         return Ok(json!({"embedded": id, "already": true, "card": card_box()}));

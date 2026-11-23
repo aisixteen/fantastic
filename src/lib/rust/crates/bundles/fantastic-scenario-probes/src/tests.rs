@@ -24,22 +24,21 @@ fn kernel() -> Arc<Kernel> {
         AgentId::from("kernel_state"),
         None,
         None,
-        json!({"callable_by": {"user_send": "*", "user_granting": "*"}})
+        json!({})
             .as_object()
             .cloned()
             .unwrap(),
         std::env::temp_dir().join("fantastic-probe-tests"),
         true,
     );
-    k.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
     k.set_root(root);
     k
 }
 
-/// Every caller may reach the agent, and the agent may reach the root.
+/// The agent may reach the root (its own line on it).
 fn wide_open(mut meta: Map<String, Value>) -> Map<String, Value> {
-    meta.insert("callable_by".to_string(), json!({"*": "*"}));
-    meta.insert("can_call".to_string(), json!({"kernel_state": "*"}));
+    meta.insert("can".to_string(), json!({"kernel_state": {"call": ["*"]}}));
     meta
 }
 
@@ -57,13 +56,12 @@ fn agent(kernel: &Arc<Kernel>, id: &str, module: &str, meta: Value) -> AgentId {
         std::env::temp_dir().join("fantastic-probe-tests"),
         true,
     );
-    kernel.register(Arc::clone(&a));
+    fantastic_kernel::test_support::register(kernel, Arc::clone(&a));
     a.id.clone()
 }
 
 async fn call(kernel: &Arc<Kernel>, id: &AgentId, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(id.clone(), payload)])
+    kernel.operator_send(vec![Item::new(id.clone(), payload)])
         .await
         .remove(0)
         .result
@@ -148,8 +146,8 @@ async fn vault_docs_teach_the_code_only_in_detail() {
     assert!(line.contains("code:string (req)"), "{line}");
     let d = call(
         &k,
-        &AgentId::from("kernel_state"),
-        json!({"type": "docs", "of": "vault", "verb": "open", "tier": "detailed"}),
+        &id,
+        json!({"type": "reflect", "verb": "open", "tier": "detailed"}),
     )
     .await;
     assert!(d.to_string().contains("BACKWARDS"), "{d}");

@@ -50,7 +50,7 @@ use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::outcome::{body_at, Blob};
 use fantastic_kernel::refusal::{missing, refusal, refusal_hint, with, BAD_ARG, EXISTS, NOT_ALLOWED, NOT_FOUND, UNHANDLED};
 use fantastic_kernel::{AgentId, Kernel};
-use fantastic_ram_store::{as_id, row_refs, stage_rows, stage_tables};
+use fantastic_ram_store::{as_id, may_copy, row_refs, stage_rows, stage_tables};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 
@@ -383,27 +383,21 @@ impl Db<'_> {
 
 fn guid(kernel: &Arc<Kernel>) -> Option<String> {
     kernel.root().and_then(|r| {
-        r.meta
-            .read()
-            .ok()
+        Some(r.record().meta)
             .and_then(|m| m.get("guid").and_then(Value::as_str).map(str::to_string))
             .filter(|g| !g.is_empty())
     })
 }
 
 fn record(kernel: &Arc<Kernel>, id: &AgentId) -> Map<String, Value> {
-    kernel
-        .agents
-        .get(id)
-        .map(|a| a.meta.read().expect("meta poisoned").clone())
+    kernel.resolve_target(id.as_str())
+        .map(|a| a.record().meta.clone())
         .unwrap_or_default()
 }
 
 /// The agent's own folder (empty when it is gone).
 fn own_root(kernel: &Arc<Kernel>, id: &AgentId) -> PathBuf {
-    kernel
-        .agents
-        .get(id)
+    kernel.resolve_target(id.as_str())
         .map(|a| a.root_path.clone())
         .unwrap_or_default()
 }
@@ -1018,6 +1012,67 @@ impl SqliteStoreBundle {
         out
     }
 
+    /// ram_store `copy`, in one transaction: the kernel's check first, then the
+    /// rows of `from` (or only `ids`) under `to`, ids and folds kept, all or none.
+    fn copy(&self, id: &AgentId, a: &verbs::CopyRows, kernel: &Arc<Kernel>) -> Value {
+        if let Err(r) = caller(kernel) {
+            return r;
+        }
+        if let Err(r) = may_copy(kernel, a) {
+            return r;
+        }
+        let g = guid(kernel).unwrap_or_default();
+        let (from, to) = (format!("{g}|{}", a.from), format!("{g}|{}", a.to));
+        self.tx(id, kernel, |db| {
+            let mut ids = db.ids(&from).map_err(db_err)?;
+            if let Some(want) = &a.ids {
+                let wanted: HashSet<i64> = want.iter().copied().collect();
+                ids.retain(|i| wanted.contains(i));
+            }
+            let batch: HashSet<i64> = ids.iter().copied().collect();
+            for rid in &ids {
+                if db.has(&to, *rid).map_err(db_err)? {
+                    let mut e = refusal(EXISTS, format!("copy: row {rid} already exists for {}", a.to));
+                    with(&mut e, "id", json!(rid));
+                    return Err(e);
+                }
+            }
+            let mut rows: Vec<Row> = Vec::with_capacity(ids.len());
+            for rid in &ids {
+                if let Some(r) = db.get(&from, *rid).map_err(db_err)? {
+                    rows.push(r);
+                }
+            }
+            for r in &rows {
+                let Some(list) = row_refs(r) else {
+                    continue;
+                };
+                let rid = r.get("id").and_then(Value::as_i64).unwrap_or(0);
+                let mut missing_refs: Vec<Value> = Vec::new();
+                for m in list {
+                    let held = match as_id(m) {
+                        Some(i) => batch.contains(&i) || db.has(&to, i).map_err(db_err)?,
+                        None => false,
+                    };
+                    if !held {
+                        missing_refs.push(m.clone());
+                    }
+                }
+                if !missing_refs.is_empty() {
+                    let mut e = refusal(
+                        NOT_FOUND,
+                        format!("copy: row {rid} refs rows that are not copied: {}", py_repr_value(&Value::Array(missing_refs))),
+                    );
+                    with(&mut e, "arg", json!("ids"));
+                    return Err(e);
+                }
+            }
+            let n = rows.len();
+            db.insert(&to, &rows).map_err(db_err)?;
+            Ok(json!({"ids": ids, "copied": n}))
+        })
+    }
+
     fn inject(&self, id: &AgentId, a: &verbs::Inject, kernel: &Arc<Kernel>) -> Value {
         let staged = match stage_tables(&a.tables) {
             Ok(s) => s,
@@ -1142,6 +1197,14 @@ impl Handler for SqliteStoreBundle {
             Call::Append(a) => {
                 let out = self.append(agent_id, &a, kernel);
                 // one `appended` event per new row; a refusal has no `ids`
+                for id in out.get("ids").and_then(Value::as_array).into_iter().flatten() {
+                    kernel.emit(agent_id, json!({"type": "appended", "table": "rows", "id": id})).await;
+                }
+                out
+            }
+            // one `appended` event per copied row, as `append` publishes
+            Call::CopyRows(a) => {
+                let out = self.copy(agent_id, &a, kernel);
                 for id in out.get("ids").and_then(Value::as_array).into_iter().flatten() {
                     kernel.emit(agent_id, json!({"type": "appended", "table": "rows", "id": id})).await;
                 }

@@ -26,7 +26,7 @@ const MAN: &str = "The canvas's left column as one html view its `reflect` retur
 
 const VIEW: &str = include_str!("sidebar_view.html");
 
-/// What the view calls: the root's reflect and listing, the person's open inquiries, the
+/// What the view calls: the root's reflect (its listing folded in), the person's open inquiries, the
 /// project's files (a listing, and a watch on each folder it shows, held by the files agent),
 /// and its OWN agent: its `reflect` (each chat's last phase and latest line, and the files'
 /// root, the project's name) and its events (`watch`) —
@@ -34,7 +34,7 @@ const VIEW: &str = include_str!("sidebar_view.html");
 /// timer.
 fn calls(id: &str) -> Value {
     json!({
-        "kernel": ["reflect", "list_agents"],
+        "kernel": ["reflect"],
         "user": ["inquiries"],
         "files": ["list", "watch_path", "unwatch_path", "open_view"],
         id: ["reflect", "watch"],
@@ -45,7 +45,7 @@ fn calls(id: &str) -> Value {
 /// there is no files agent: the view names the project from it.
 async fn files_root(kernel: &Arc<Kernel>) -> String {
     let files = AgentId::from(follow::FILES);
-    let served = kernel.agents.get(&files).is_some_and(|a| a.handler_module.is_some());
+    let served = kernel.resolve_target(files.as_str()).is_some_and(|a| a.handler_module.is_some());
     if !served {
         return String::new();
     }
@@ -131,7 +131,7 @@ mod tests {
     #[tokio::test]
     async fn the_sidebar_answers_reflect_and_refuses_the_rest_by_declaration() {
         let kernel = Arc::new(Kernel::new());
-        kernel.register(fantastic_kernel::Agent::new(
+        fantastic_kernel::test_support::register(&kernel, fantastic_kernel::Agent::new(
             AgentId::from("sidebar"),
             None,
             None,
@@ -176,6 +176,9 @@ mod tests {
                     bundle_names: None,
                     limit: None,
                     after: None,
+                    tier: None,
+                    verb: None,
+                    part: None,
                 }),
                 &kernel,
             )
@@ -193,7 +196,7 @@ mod tests {
         assert_eq!(
             view["calls"],
             json!({
-                "kernel": ["reflect", "list_agents"],
+                "kernel": ["reflect"],
                 "user": ["inquiries"],
                 "files": ["list", "watch_path", "unwatch_path", "open_view"],
                 "sidebar": ["reflect", "watch"],
@@ -206,7 +209,7 @@ mod tests {
     }
 
     fn agent(kernel: &Arc<Kernel>, id: &str) {
-        kernel.register(fantastic_kernel::Agent::new(AgentId::from(id), None, None, Default::default(), std::path::PathBuf::new(), false));
+        fantastic_kernel::test_support::register(&kernel, fantastic_kernel::Agent::new(AgentId::from(id), None, None, Default::default(), std::path::PathBuf::new(), false));
     }
 
     /// The next event the sidebar published on its own inbox: `(type, the whole event)`.

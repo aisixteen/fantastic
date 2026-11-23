@@ -105,7 +105,7 @@ fn tag() -> String {
 }
 
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Outcome {
-    k.send(vec![Item::new(AgentId::from(target), payload)])
+    k.operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
 }
@@ -133,7 +133,7 @@ async fn kernel(guid: &str, got: &Got) -> Arc<Kernel> {
     let patch = |key: &str, v: Value| {
         let mut m = Map::new();
         m.insert(key.to_string(), v);
-        k.update(&AgentId::from(root_id(&k)), m);
+        fantastic_kernel::test_support::update(&k, &AgentId::from(root_id(&k)), m);
     };
     patch("guid", json!(guid));
     create(
@@ -168,7 +168,7 @@ async fn boot_leg(k: &Arc<Kernel>, id: &str) {
 /// The forward python's tests send: `SENT` as the inner payload, its bytes at
 /// the LITERAL key `a.b` beside the nested `a` → `b`.
 async fn forward_sent(k: &Arc<Kernel>, leg: &str) -> Outcome {
-    k.send(vec![Item::new(
+    k.operator_send(vec![Item::new(
         AgentId::from(leg),
         json!({"type": "forward", "target": "echo",
                "payload": {"type": "take", "a": {"b": "kept"}, "a.b": null},
@@ -220,8 +220,7 @@ async fn a_literal_key_crosses_a_relay_forward_both_ways() {
     // the serving leg B calls `echo` AS ITSELF: echo accepts the leg
     create(
         &kb,
-        json!({"handler_module": "binpath_echo.tools", "id": "echo",
-               "callable_by": {&b_id: "*"}}),
+        json!({"handler_module": "binpath_echo.tools", "id": "echo"}),
     )
     .await;
     let mut a = json!({"handler_module": RELAY_HANDLER_MODULE, "id": a_id, "transport": "relay",
@@ -230,7 +229,7 @@ async fn a_literal_key_crosses_a_relay_forward_both_ways() {
     let mut b = json!({"handler_module": RELAY_HANDLER_MODULE, "id": b_id, "transport": "relay",
                        "relay_url": hub, "guid": rb, "partner_guid": ra,
                        "heartbeat": 0, "reconnect": 0,
-                       "ingress_rule": "allow_all_ingress", "can_call": {"echo": "*"}});
+                       "ingress_rule": "allow_all_ingress", "can": {"echo": {"call": ["*"]}}});
     let sa = crate::tests::relay_password(&ka, &a_id, &hub, "pw-a").await;
     let sb = crate::tests::relay_password(&kb, &b_id, &hub, "pw-b").await;
     crate::tests::with_relay_password(&mut a, &sa);
@@ -354,8 +353,7 @@ async fn a_literal_key_crosses_a_ws_bridge_pair_both_ways() {
     // the serving leg B calls `echo` AS ITSELF: echo accepts the leg
     create(
         &kb,
-        json!({"handler_module": "binpath_echo.tools", "id": "echo",
-               "callable_by": {&b_id: "*"}}),
+        json!({"handler_module": "binpath_echo.tools", "id": "echo"}),
     )
     .await;
     inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
@@ -369,7 +367,7 @@ async fn a_literal_key_crosses_a_ws_bridge_pair_both_ways() {
         &kb,
         json!({"handler_module": WS_HANDLER_MODULE, "id": b_id,
                "transport": "memory", "peer_id": "A",
-               "ingress_rule": "allow_all_ingress", "can_call": {"echo": "*"}}),
+               "ingress_rule": "allow_all_ingress", "can": {"echo": {"call": ["*"]}}}),
     )
     .await;
     boot_leg(&ka, &a_id).await;

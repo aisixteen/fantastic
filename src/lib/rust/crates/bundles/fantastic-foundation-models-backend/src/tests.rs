@@ -11,6 +11,23 @@ use fantastic_kernel::{Agent, Item};
 use std::time::Duration;
 use tempfile::TempDir;
 
+/// [`fantastic_ai_core::remote_provider::pair_chat`], plus the chat's line on the
+/// test memory store: in a seeded tree the chat's bundle defaults give it
+/// (`memory: {call: [append, read]}`); a test kernel loads no defaults.
+async fn pair_chat(
+    kernel: &std::sync::Arc<fantastic_kernel::Kernel>,
+    provider: &fantastic_kernel::AgentId,
+) -> fantastic_kernel::AgentId {
+    let chat = fantastic_ai_core::remote_provider::pair_chat(kernel, provider).await;
+    fantastic_kernel::test_support::grant(
+        kernel,
+        chat.as_str(),
+        fantastic_ram_store::test_support::MEMORY,
+        serde_json::json!({"call": ["*"]}),
+    );
+    chat
+}
+
 const TOO_BIG_4096: &str = "context_window must be a positive int no larger than the on-device model's window (4096 tokens)";
 const NOT_A_USER_TURN: &str = "RuntimeError: foundation_models_backend: the last message is not a user turn (role {role}) — the on-device session answers a prompt";
 
@@ -50,7 +67,7 @@ impl Fx {
 
     /// Set the paired chat's request knobs (#632: they are the chat's, sent with each pass).
     async fn chat_knobs(&self, knobs: Value) {
-        let chat = fantastic_ai_core::remote_provider::pair_chat(&self.k, &AgentId::from(self.id.as_str())).await;
+        let chat = pair_chat(&self.k, &AgentId::from(self.id.as_str())).await;
         let mut payload = json!({"type": "update_agent", "id": chat.as_str()});
         for (key, v) in obj(knobs) {
             payload[key] = v;
@@ -95,9 +112,9 @@ async fn kernel(engine: &Arc<FakeEngine>, meta: Value) -> Fx {
         tmp.path().join(".fantastic"),
         false,
     );
-    k.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
     k.set_root(root);
-    let memory = fantastic_ram_store::test_support::memory_meta(&k, &id, json!({"cli": "*"})).await;
+    let memory = fantastic_ram_store::test_support::memory_meta(&k, &id, json!({"cli": {"call": ["*"]}})).await;
     let mut create = json!({
         "type": "create_agent",
         "parent_id": "kernel_state",
@@ -123,11 +140,11 @@ async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     let to = if verb != "boot"
         && fantastic_ai_core::declared::chat::VERBS.iter().any(|v| v.name == verb)
     {
-        fantastic_ai_core::remote_provider::pair_chat(k, &AgentId::from(target)).await
+        pair_chat(k, &AgentId::from(target)).await
     } else {
         AgentId::from(target)
     };
-    k.send(vec![Item::new(to, payload)])
+    k.operator_send(vec![Item::new(to, payload)])
         .await
         .remove(0)
         .result
@@ -179,7 +196,7 @@ async fn the_catalog_carries_the_schema_with_no_agent_existing() {
         tmp.path().join(".fantastic"),
         false,
     );
-    k.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
     k.set_root(root);
     let r = call(
         &k,
@@ -608,7 +625,7 @@ async fn a_lean_system_prompt_turn_runs_in_the_real_on_device_window() {
     let engine = Arc::new(FakeEngine::new().context_size(4096));
     let fx = kernel(&engine, json!({})).await;
     // the chat's record holds the prompt: a send carries none
-    let chat = fantastic_ai_core::remote_provider::pair_chat(&fx.k, &AgentId::from(fx.id.as_str())).await;
+    let chat = pair_chat(&fx.k, &AgentId::from(fx.id.as_str())).await;
     let up = call(&fx.k, "kernel_state",
         json!({"type": "update_agent", "id": chat.as_str(), "system_prompt": "Be terse."})).await;
     assert!(up.get("error").is_none(), "{up}");
@@ -695,7 +712,7 @@ async fn a_kernel_cancel_of_the_send_cancels_the_on_device_stream() {
     let fx2 = Arc::clone(&fx);
     let join = tokio::spawn(async move { fx2.send("hi", json!({})).await });
     // wait for the generation to be in flight: the chat's turn (its provider completes it)
-    let chat = fantastic_ai_core::remote_provider::pair_chat(&fx.k, &AgentId::from(fx.id.as_str())).await;
+    let chat = pair_chat(&fx.k, &AgentId::from(fx.id.as_str())).await;
     let mut task_id = None;
     for _ in 0..200 {
         let table = call(&fx.k, "kernel", json!({"type": "ps"})).await;

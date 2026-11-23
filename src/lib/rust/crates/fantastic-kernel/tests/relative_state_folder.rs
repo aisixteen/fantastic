@@ -21,7 +21,7 @@ async fn a_relative_state_folder_finds_its_store_and_persists() {
     let kernel = booted.kernel;
     test_support::boot_root(&kernel).await;
     let made = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",

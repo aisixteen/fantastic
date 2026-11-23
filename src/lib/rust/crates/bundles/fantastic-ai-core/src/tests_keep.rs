@@ -8,8 +8,7 @@ use crate::constants::{AUTOFOLD_AT, KEEP_SUMMARY_MAX};
 const DONE: &str = "<call name=\"done\"></call>";
 
 async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": text, "client_id": "probe"}),
         )])
@@ -17,8 +16,7 @@ async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
 }
 
 async fn widen(kernel: &Arc<Kernel>, agent: &AgentId) {
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": agent.as_str(), "context_window": 1_000_000}),
         )])
@@ -157,8 +155,7 @@ async fn after_the_answer_the_summary_replaces_the_body_and_recall_returns_it_wh
     );
     assert!(!seen.contains("head line"));
     assert!(!seen.contains(&"x".repeat(1000)));
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "recall", "id": id}),
         )])

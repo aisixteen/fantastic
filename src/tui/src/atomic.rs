@@ -41,7 +41,8 @@ pub fn write_yaml(path: &Path, v: &serde_json::Value) -> Result<(), String> {
     write(path, fantastic_kernel::yaml_io::dump(v).as_bytes())
 }
 
-/// Read one YAML document the way the kernel does.
+/// Read one YAML document the way the kernel does (the tests read records back).
+#[cfg(test)]
 pub fn read_yaml(path: &Path) -> Result<serde_json::Value, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     fantastic_kernel::yaml_io::load(&text).map_err(|e| format!("{}: {e}", path.display()))

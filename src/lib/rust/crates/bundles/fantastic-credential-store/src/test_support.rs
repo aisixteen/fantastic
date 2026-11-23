@@ -3,9 +3,9 @@
 //! operator would: one FILE-backed store under the root (its file in the test's
 //! temp dir — never the user's home), the ref DECLARED by `update_agent` with its
 //! its `host`, the value stored by a MARKED `set` (which never
-//! declares a ref), and the store's `callable_by` opening for the agent. The
-//! agent's own record then names `credentials: {store, ref}` and `can_call`s the
-//! store ([`credentials_meta`]).
+//! declares a ref). The agent's own record then names `credentials: {store, ref}`
+//! and holds a `call` line on the store ([`add_credentials`]); the store keeps no
+//! list of callers.
 //!
 //! The store's keychain is an in-memory double ([`bundle`]), so no test ever
 //! reaches the real keychain.
@@ -30,16 +30,18 @@ pub fn bundle() -> CredentialStoreBundle {
 }
 
 /// The store under the root, created on first use with its file at
-/// `<dir>/creds.yaml`, and its `callable_by` opened for `reader`.
+/// `<dir>/creds.yaml`. A `reader` already live gets a `call *` line on it, as
+/// the operator would write it; a reader created later carries the line in its
+/// create payload ([`add_credentials`]).
 ///
 /// # Panics
 /// When the kernel has no root or the store cannot be created.
 pub async fn ensure_store(kernel: &Arc<Kernel>, dir: &Path, reader: &str) -> AgentId {
     let store = AgentId::from(STORE);
-    if !kernel.agents.contains_key(&store) {
+    if !kernel.exists(store.as_str()) {
         let root = kernel.root().expect("ensure_store: the kernel has no root");
         let r = kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 root.id.clone(),
                 json!({
                     "type": "create_agent",
@@ -54,11 +56,9 @@ pub async fn ensure_store(kernel: &Arc<Kernel>, dir: &Path, reader: &str) -> Age
             .result;
         assert_eq!(r["id"], json!(STORE), "ensure_store: {r}");
     }
-    let mut cb = meta_map(kernel, &store, "callable_by");
-    cb.insert(reader.to_string(), json!("*"));
-    let mut patch = Map::new();
-    patch.insert("callable_by".to_string(), Value::Object(cb));
-    kernel.update(&store, patch);
+    if kernel.exists(reader) {
+        fantastic_kernel::test_support::grant(kernel, reader, STORE, json!({"call": ["*"]}));
+    }
     store
 }
 
@@ -81,7 +81,7 @@ pub async fn set_key(
     let mut refs = meta_map(kernel, &store, "refs");
     refs.insert(ref_.to_string(), json!({"host": endpoint}));
     let declared = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": store.0, "refs": refs}),
         )])
@@ -90,7 +90,7 @@ pub async fn set_key(
         .result;
     assert_eq!(declared["updated"], json!(true), "set_key: {declared}");
     let out = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             store.clone(),
             json!({"type": "set", "ref": ref_, "fields": {"api_key": key}}),
         )])
@@ -100,30 +100,26 @@ pub async fn set_key(
 }
 
 /// What an agent's record adds to read its key from the test store, written into
-/// `meta`: `credentials: {store, ref}` and a `can_call` grant on the store
-/// (merged into the `can_call` already there).
+/// `meta`: `credentials: {store, ref}` and a `call *` line on the store (merged
+/// into the `can` already there).
 pub fn add_credentials(meta: &mut Map<String, Value>, ref_: &str) {
-    let mut grants = meta
-        .get("can_call")
+    let mut lines = meta
+        .get("can")
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    grants.insert(STORE.to_string(), json!("*"));
+    lines.insert(STORE.to_string(), json!({"call": ["*"]}));
     meta.insert(
         "credentials".to_string(),
         json!({"store": STORE, "ref": ref_}),
     );
-    meta.insert("can_call".to_string(), Value::Object(grants));
+    meta.insert("can".to_string(), Value::Object(lines));
 }
 
 fn meta_map(kernel: &Kernel, id: &AgentId, key: &str) -> Map<String, Value> {
-    kernel
-        .agents
-        .get(id)
+    kernel.resolve_target(id.as_str())
         .and_then(|a| {
-            a.meta
-                .read()
-                .expect("meta poisoned")
+            a.record().meta
                 .get(key)
                 .and_then(Value::as_object)
                 .cloned()

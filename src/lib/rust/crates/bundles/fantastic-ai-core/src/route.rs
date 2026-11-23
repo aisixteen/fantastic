@@ -1126,12 +1126,7 @@ pub async fn route_reply(
 pub(crate) fn route_deadline(kernel: &Kernel) -> f64 {
     kernel
         .root()
-        .and_then(|r| {
-            r.meta
-                .read()
-                .ok()
-                .and_then(|m| m.get("send_timeout").cloned())
-        })
+        .and_then(|r| r.record().meta.get("send_timeout").cloned())
         .and_then(|v| v.as_f64())
         .unwrap_or_else(crate::constants::send_timeout_secs)
 }

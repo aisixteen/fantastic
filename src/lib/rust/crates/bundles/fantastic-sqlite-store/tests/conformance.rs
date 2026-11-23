@@ -47,21 +47,21 @@ fn store(handler: &str, tag: &str) -> Arc<Kernel> {
     k.bundles
         .register(RAM, fantastic_ram_store::RamStoreBundle::default());
     k.bundles
-        .register(SQL, fantastic_sqlite_store::SqliteStoreBundle::default());
+        .register(SQL, fantastic_sqlite_store::SqliteStoreBundle);
     let k = Arc::new(k);
     let root = agent("kernel_state", None, None, json!({"guid": "g1"}));
-    k.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
     k.set_root(root);
     for a in ["alice", "bob", "carol"] {
-        k.register(agent(a, None, Some("kernel_state"), json!({"can_call": {"mem": "*"}})));
+        fantastic_kernel::test_support::register(&k, agent(a, None, Some("kernel_state"), json!({"can": {"mem": {"call": ["*"]}}})));
     }
-    let mut meta = json!({"callable_by": {"alice": "*", "bob": "*", "carol": "*"}});
+    let mut meta = json!({});
     if handler == SQL {
         let path = format!("stores/{tag}.db");
         let _ = std::fs::remove_file(dir.join(&path));
         meta["path"] = json!(path);
     }
-    k.register(agent("mem", Some(handler), Some("kernel_state"), meta));
+    fantastic_kernel::test_support::register(&k, agent("mem", Some(handler), Some("kernel_state"), meta));
     k
 }
 
@@ -75,8 +75,8 @@ impl T {
     async fn call(&mut self, payload: Value, as_: Option<&str>) -> Value {
         let item = Item::new(AgentId::from("mem"), payload);
         let out = match as_ {
-            None => self.k.send(vec![item]).await.remove(0).result,
-            Some(who) => as_agent(AgentId::from(who), self.k.send(vec![item])).await.remove(0).result,
+            None => self.k.operator_send(vec![item]).await.remove(0).result,
+            Some(who) => as_agent(AgentId::from(who), self.k.operator_send(vec![item])).await.remove(0).result,
         };
         self.log.push(out.clone());
         out
@@ -88,7 +88,7 @@ impl T {
         if let Some(b) = bytes {
             item = item.with_binary_key("data", b.to_vec());
         }
-        let out = as_agent(AgentId::from(who), self.k.send(vec![item])).await.remove(0);
+        let out = as_agent(AgentId::from(who), self.k.operator_send(vec![item])).await.remove(0);
         let body = out.body_bytes().map(<[u8]>::to_vec);
         self.log.push(json!([out.result.clone(), body]));
         (out.result, body)
@@ -363,13 +363,13 @@ fn wire(v: &Value) -> String {
 /// store lists differ between the two bundles (`boot` is sqlite's own).
 async fn s_unknown_type_is_coded_unhandled_with_the_raw_verb(t: &mut T) {
     let verbs = if t.h == SQL {
-        "boot, append, read, search, prune, inject, dump, put_bytes, get_bytes, query, reflect"
+        "boot, append, read, search, prune, inject, dump, put_bytes, get_bytes, copy, query, reflect"
     } else {
-        "append, read, search, prune, inject, dump, put_bytes, get_bytes, reflect"
+        "append, read, search, prune, inject, dump, put_bytes, get_bytes, copy, reflect"
     };
     for (verb, shown) in [("frob", "'frob'"), ("it's", "\\\"it's\\\"")] {
         let want = format!(
-            r#"{{"error":"unknown verb {shown}; mem answers: {verbs}","reason":"unhandled","hint":"docs of=mem lists each verb's arguments","verb":"{verb}"}}"#
+            r#"{{"error":"unknown verb {shown}; mem answers: {verbs}","reason":"unhandled","hint":"reflect mem tier=detailed lists each verb's arguments","verb":"{verb}"}}"#
         );
         assert_eq!(wire(&t.call(json!({"type": verb}), Some("alice")).await), want);
     }
@@ -420,22 +420,21 @@ conform_wire!(arg_refusals_carry_error_reason_arg_in_that_order, s_arg_refusals_
 
 async fn s_two_stores_hold_separate_tables(t: &mut T) {
     let handler = t.h;
-    let mut meta = json!({"callable_by": {"alice": "*"}});
+    let mut meta = json!({});
     if handler == SQL {
         meta["path"] = json!("stores/second.db");
     }
-    t.k.register(agent("mem2", Some(handler), Some("kernel_state"), meta));
-    t.k.update(&AgentId::from("alice"), json!({"can_call": {"mem": "*", "mem2": "*"}}).as_object().cloned().unwrap());
+    fantastic_kernel::test_support::register(&t.k, agent("mem2", Some(handler), Some("kernel_state"), meta));
+    fantastic_kernel::test_support::grant(&t.k, "alice", "mem2", json!({"call": ["*"]}));
     t.append("alice", json!([{"id": 1, "content": "in mem"}])).await;
-    let read2 = as_agent(AgentId::from("alice"), t.k.send(vec![Item::new(AgentId::from("mem2"), json!({"type": "read"}))]))
+    let read2 = as_agent(AgentId::from("alice"), t.k.operator_send(vec![Item::new(AgentId::from("mem2"), json!({"type": "read"}))]))
         .await
         .remove(0)
         .result;
     t.log.push(read2.clone());
     assert_eq!(read2["rows"], json!([]), "mem2 shares nothing with mem: {read2}");
     let gone = t
-        .k
-        .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "delete_agent", "id": "mem2"}))])
+        .k.operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "delete_agent", "id": "mem2"}))])
         .await
         .remove(0)
         .result;
@@ -524,11 +523,11 @@ async fn reflect_names_the_same_verbs_and_says_durable() {
         assert_eq!(r["rows"], json!(1));
         assert_eq!(r["optional_verbs"], json!(["search"]));
         // the verbs it answers: rendered from the declarations, in declaration order
-        let d = t.k.send(vec![Item::new(AgentId::from("kernel"), json!({"type": "docs", "of": "mem"}))]).await.remove(0).result;
+        let d = t.k.operator_send(vec![Item::new(AgentId::from("mem"), json!({"type": "reflect", "tier": "oneliners"}))]).await.remove(0).result;
         let verbs: Vec<&String> = d["verbs"].as_object().unwrap().keys().collect();
-        let mut want = vec!["append", "read", "search", "prune", "inject", "dump", "put_bytes", "get_bytes", "reflect"];
+        let mut want = vec!["append", "read", "search", "prune", "inject", "dump", "put_bytes", "get_bytes", "copy", "reflect"];
         if h == SQL {
-            want = vec!["boot", "append", "read", "search", "prune", "inject", "dump", "put_bytes", "get_bytes", "query", "reflect"];
+            want = vec!["boot", "append", "read", "search", "prune", "inject", "dump", "put_bytes", "get_bytes", "copy", "query", "reflect"];
         }
         assert_eq!(verbs, want);
     }

@@ -1,7 +1,7 @@
 //! THE TWO-WAY KERNEL BRIDGE (issue #476): kernel A's `ws_bridge` dials kernel
 //! B's `web_ws` and says `hello {guid, leg}`; from then on B calls A's agents as
-//! `<A guid>|<agent>` and watches them, gated by A's leg (its `ingress_rule`, its
-//! `can_call`, the target's `callable_by`). The twin of python
+//! `<A guid>|<agent>` and watches them, gated by A's leg (its `ingress_rule`, then
+//! its own `can` lines on A's agents). The twin of python
 //! `web_ws/tests/test_two_way.py`.
 //!
 //! Every case runs on BOTH transports: `memory` (A's leg on an in-process half
@@ -150,7 +150,7 @@ impl fantastic_kernel::Handler for CannedAi {
 
 /// A started kernel with `guid`: every leg, the memory store its rows and its AI
 /// conversations land in, the probe and the scripted AI bundles.
-async fn kernel(guid: &str, ai: &str, held: &Arc<tokio::sync::Notify>) -> Arc<Kernel> {
+async fn kernel(guid: &str, held: &Arc<tokio::sync::Notify>) -> Arc<Kernel> {
     let mut reg = BundleRegistry::new();
     register_root_loader(&mut reg);
     reg.register(
@@ -180,17 +180,16 @@ async fn kernel(guid: &str, ai: &str, held: &Arc<tokio::sync::Notify>) -> Arc<Ke
     let root = k.root().expect("root").id.clone();
     let mut m = Map::new();
     m.insert("guid".to_string(), json!(guid));
-    k.update(&root, m);
+    fantastic_kernel::test_support::update(&k, &root, m);
     let made = create(
         &k,
-        json!({"handler_module": fantastic_ram_store::HANDLER_MODULE, "id": "memory",
-               "callable_by": {ai: "*"}}),
+        json!({"handler_module": fantastic_ram_store::HANDLER_MODULE, "id": "memory"}),
     )
     .await;
     assert_eq!(made["id"], json!("memory"), "{made}");
     let mut m = Map::new();
     m.insert("memory_store_id".to_string(), json!("memory"));
-    k.update(&root, m);
+    fantastic_kernel::test_support::update(&k, &root, m);
     let out = k.start(false).await;
     assert_eq!(out["started"], json!(true), "{out}");
     k
@@ -347,30 +346,29 @@ struct Pair {
 
 /// Stage B (a web with an open `web_ws` leg) and A (`probe`, the scripted AI
 /// `ai`, a credential store `creds`, and the leg). `open` opens the leg's ingress;
-/// `granted` lets the leg call / watch every agent above and has each accept it.
+/// `granted` gives the leg its own line on every agent above.
 async fn pair(wire: Wire, open: bool, granted: bool) -> Pair {
     let held = Arc::new(tokio::sync::Notify::new());
     let t = tag();
-    let kb = kernel("B-g", &format!("{t}_ai"), &held).await;
+    let kb = kernel("B-g", &held).await;
     let (b_web, b_ws, leg) = (format!("{t}_web"), format!("{t}_ws"), format!("{t}_a"));
     let port = serve(
         &kb,
         &b_web,
         &[json!({"handler_module": "web_ws.tools", "id": b_ws,
-                 "callable_by": {"$parent": ["get_routes"]},
+
                  "ingress_rule": "allow_all_ingress",
-                 "can_call": {"$parent": ["watch"], "probe": "*"}})],
+                 "can": {"$parent": {"call": ["watch"]}, "probe": {"call": ["*"]}}})],
     )
     .await;
     let made = create(
         &kb,
-        json!({"handler_module": "two_way_probe.tools", "id": "probe",
-               "callable_by": {b_ws.as_str(): "*"}}),
+        json!({"handler_module": "two_way_probe.tools", "id": "probe"}),
     )
     .await;
     assert_eq!(made["id"], json!("probe"), "{made}");
 
-    let ka = kernel(A, &format!("{t}_ai"), &held).await;
+    let ka = kernel(A, &held).await;
     // process-wide agent state (an AI's turn table) is keyed by id: every pair
     // names its agents on A apart
     let (ai, probe, creds) = (
@@ -378,23 +376,13 @@ async fn pair(wire: Wire, open: bool, granted: bool) -> Pair {
         format!("{t}_probe"),
         format!("{t}_creds"),
     );
-    let accept = |granted: bool| {
-        if granted {
-            json!({leg.as_str(): "*"})
-        } else {
-            json!({})
-        }
-    };
     for rec in [
-        json!({"handler_module": "two_way_probe.tools", "id": probe,
-               "callable_by": accept(granted)}),
+        json!({"handler_module": "two_way_probe.tools", "id": probe}),
         json!({"handler_module": "canned_ai.tools", "id": ai, "model": "canned",
                "context_window": 32768, "memory_store_id": "memory",
-               "can_call": {"memory": "*", "cli": "*"},
-               "callable_by": accept(granted)}),
+               "can": {"memory": {"call": ["*"]}, "cli": {"call": ["*"]}}}),
         json!({"handler_module": fantastic_credential_store::HANDLER_MODULE, "id": creds,
-               "backend": "keychain", "refs": {REF: {"host": "api.example.com"}},
-               "callable_by": accept(granted)}),
+               "backend": "keychain", "refs": {REF: {"host": "api.example.com"}}}),
     ] {
         let id = rec["id"].clone();
         let made = create(&ka, rec).await;
@@ -414,7 +402,11 @@ async fn pair(wire: Wire, open: bool, granted: bool) -> Pair {
         rec["ingress_rule"] = json!("allow_all_ingress");
     }
     if granted {
-        rec["can_call"] = json!({probe.as_str(): "*", ai.as_str(): "*", creds.as_str(): "*"});
+        rec["can"] = json!({
+            probe.as_str(): {"call": ["*"]},
+            ai.as_str(): {"call": ["*"]},
+            creds.as_str(): {"call": ["*"]},
+        });
     }
     let made = create(&ka, rec).await;
     assert_eq!(made["id"], json!(leg), "{made}");
@@ -502,10 +494,16 @@ impl Pair {
         op(&self.kb, self.remote(agent).as_str(), payload).await
     }
 
+    /// Patch one of the leg's own fields (never `can`: lines go through [`Self::line`]).
     fn patch_leg(&self, key: &str, value: Value) {
         let mut m = Map::new();
         m.insert(key.to_string(), value);
-        self.ka.update(&AgentId::from(self.leg.as_str()), m);
+        fantastic_kernel::test_support::update(&self.ka, &AgentId::from(self.leg.as_str()), m);
+    }
+
+    /// The leg's own line on A's agent `agent`, set to `level`.
+    fn line(&self, agent: &str, level: Value) {
+        fantastic_kernel::test_support::grant(&self.ka, self.leg.as_str(), &self.n(agent), level);
     }
 
     async fn has_watchers(&self, agent: &str) -> bool {
@@ -649,7 +647,7 @@ async fn hello_makes_a_kernel_leg_and_a_plain_client_stays_a_client() {
 // ─── calls B → A, gated as A's leg ───────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_call_from_b_is_gated_by_the_legs_seal_and_grants() {
+async fn a_call_from_b_is_gated_by_the_legs_seal_and_lines() {
     for wire in WIRES {
         let p = pair(wire, false, false).await;
         let echo = json!({"type": "echo", "text": "x"});
@@ -661,20 +659,16 @@ async fn a_call_from_b_is_gated_by_the_legs_seal_and_grants() {
             "{wire:?}: {sealed}"
         );
         assert!(sealed.get("hint").is_some(), "{wire:?}: {sealed}");
-        // opened, but no grant: the leg may not call the probe
+        // opened, but no line: the leg may not call the probe (the unknown answer)
         p.patch_leg("ingress_rule", json!("allow_all_ingress"));
         let ungranted = p.call("probe", echo.clone()).await.result;
         assert_eq!(
             ungranted["reason"],
-            json!("unauthorized"),
+            json!("unknown_agent"),
             "{wire:?}: {ungranted}"
         );
-        assert_eq!(ungranted["side"], json!("egress"), "{wire:?}: {ungranted}");
-        // granted both ends: it runs
-        p.patch_leg("can_call", json!({p.n("probe"): "*"}));
-        let mut m = Map::new();
-        m.insert("callable_by".into(), json!({p.leg.as_str(): "*"}));
-        p.ka.update(&AgentId::from(p.n("probe")), m);
+        // the leg's own line: it runs
+        p.line("probe", json!({"call": ["*"]}));
         let ok = p.call("probe", echo.clone()).await.result;
         assert_eq!(ok, json!({"echo": "x"}), "{wire:?}");
         // sealed again: refused again, live
@@ -732,7 +726,7 @@ async fn b_watches_an_ai_on_a_and_gets_its_stream_until_unwatch_or_drop() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_watch_from_b_is_gated_by_the_legs_watch_grant() {
+async fn a_watch_from_b_is_gated_by_the_legs_watch_line() {
     for wire in WIRES {
         let p = pair(wire, true, false).await;
         let target = p.remote("ai");
@@ -751,16 +745,13 @@ async fn a_watch_from_b_is_gated_by_the_legs_watch_grant() {
         assert_eq!(refusal["src"], json!(p.n("ai")), "{wire:?}: {refusal}");
         assert_eq!(
             refusal["reason"],
-            json!("unauthorized"),
+            json!("unknown_agent"),
             "{wire:?}: {refusal}"
         );
         assert!(refusal.get("id").is_none(), "{wire:?}: {refusal}");
         assert!(p.kb.peer_watched(A).is_empty(), "{wire:?}");
         // the leg serves calls but not watches: the turn runs, nothing streams
-        p.patch_leg("can_call", json!({p.n("ai"): ["send"]}));
-        let mut m = Map::new();
-        m.insert("callable_by".into(), json!({p.leg.as_str(): "*"}));
-        p.ka.update(&AgentId::from(p.n("ai")), m);
+        p.line("ai", json!({"call": ["send"]}));
         let out = p.call("ai", turn("one")).await;
         assert_eq!(
             out.status.as_str(),
@@ -807,7 +798,7 @@ async fn a_reply_secret_from_a_is_secret_in_bs_records() {
             tap.lock().unwrap().push(ev.clone());
         }));
         let out =
-            p.kb.send(vec![Item::new(
+            p.kb.operator_send(vec![Item::new(
                 p.remote("creds"),
                 json!({"type": "get", "ref": REF}),
             )

@@ -66,12 +66,11 @@ const THREE: &str = "
 agents:
   - id: a
     handler_module: echo.tools
-    can_call: {b: '*', $self: '*'}
+    can: {b: {call: ['*']}}
     agents:
       - id: b
         handler_module: echo.tools
-        callable_by: {a: '*', $parent: '*'}
-        can_call: {'*': '*'}
+        can: {$parent: {call: [ping]}}
         agents:
           - id: c
             handler_module: echo.tools
@@ -94,7 +93,6 @@ fn plan_gives_every_agent_a_fresh_suffixed_id() {
         .collect();
     assert_eq!(order, [("a_1", "home"), ("b_1", "a_1"), ("c_1", "b_1")]);
     assert_eq!(agent(&p, "c_1").meta["notes"], "plain");
-    assert!(p.edges.is_empty());
 }
 
 #[test]
@@ -113,22 +111,10 @@ fn plan_picks_next_free_suffix_when_taken() {
 }
 
 #[test]
-fn plan_rewrites_inside_grants_on_both_ends() {
+fn plan_rewrites_inside_lines_and_keeps_parent() {
     let p = ok(THREE, json!({}));
-    assert_eq!(
-        Value::Object(
-            agent(&p, "a_1").meta["can_call"]
-                .as_object()
-                .unwrap()
-                .clone()
-        ),
-        json!({"b_1": "*", "$self": "*"})
-    );
-    assert_eq!(
-        agent(&p, "b_1").meta["callable_by"],
-        json!({"a_1": "*", "$parent": "*"})
-    );
-    assert_eq!(agent(&p, "b_1").meta["can_call"], json!({"*": "*"}));
+    assert_eq!(agent(&p, "a_1").meta["can"], json!({"b_1": {"call": ["*"]}}));
+    assert_eq!(agent(&p, "b_1").meta["can"], json!({"$parent": {"call": ["ping"]}}));
 }
 
 #[test]
@@ -137,23 +123,11 @@ fn plan_resolves_root_port() {
 agents:
   - id: a
     handler_module: echo.tools
-    can_call: {'@root': ['reflect']}
+    can: {'@root': {call: [reflect]}}
 ";
     let p = ok(y, json!({}));
-    assert_eq!(
-        agent(&p, "a_1").meta["can_call"],
-        json!({ROOT: ["reflect"]})
-    );
-    // the root grants back, and the preview shows it
-    assert_eq!(
-        p.edges,
-        [Edge {
-            agent: ROOT.into(),
-            field: "callable_by",
-            key: "a_1".into(),
-            grant: json!(["reflect"]),
-        }]
-    );
+    assert_eq!(agent(&p, "a_1").meta["can"], json!({ROOT: {"call": ["reflect"]}}));
+    // the preview shows the root it reaches
     assert_eq!(p.reaches[0]["ports"]["@root"], ROOT);
 }
 
@@ -161,8 +135,7 @@ const PORTED: &str = "
 agents:
   - id: a
     handler_module: echo.tools
-    can_call: {'@memory': '*'}
-    callable_by: {'@exec': ['emit']}
+    can: {'@memory': {call: [append, read]}, '@exec': {call: [emit]}}
     memory_store_id: '@memory'
     credentials: {store: '@memory', ref: r1}
 ports:
@@ -171,36 +144,17 @@ ports:
 ";
 
 #[test]
-fn plan_binds_ports_into_grants_and_refs() {
+fn plan_binds_ports_into_lines_and_refs() {
     let p = ok(PORTED, json!({"@memory": "memory2", "@exec": "exec"}));
     let a = agent(&p, "a_1");
-    assert_eq!(a.meta["can_call"], json!({"memory2": "*"}));
-    assert_eq!(a.meta["callable_by"], json!({"exec": ["emit"]}));
+    assert_eq!(a.meta["can"], json!({"memory2": {"call": ["append", "read"]}, "exec": {"call": ["emit"]}}));
     assert_eq!(a.meta["memory_store_id"], "memory2");
     assert_eq!(
         a.meta["credentials"],
         json!({"store": "memory2", "ref": "r1"})
     );
-    assert_eq!(
-        p.edges,
-        [
-            Edge {
-                agent: "memory2".into(),
-                field: "callable_by",
-                key: "a_1".into(),
-                grant: json!("*"),
-            },
-            Edge {
-                agent: "exec".into(),
-                field: "can_call",
-                key: "a_1".into(),
-                grant: json!(["emit"]),
-            },
-        ]
-    );
     assert_eq!(p.ports["@memory"], "memory2");
-    assert_eq!(p.reaches[0]["can_call"], json!(["memory2"]));
-    assert_eq!(p.reaches[0]["callable_by"], json!(["exec"]));
+    assert_eq!(p.reaches[0]["can"], json!(["exec", "memory2"]));
 }
 
 #[test]
@@ -272,12 +226,12 @@ fn a_connector_port_binds_to_the_kernel_address() {
 agents:
   - id: a
     handler_module: echo.tools
-    can_call: {'@connector:kernel': ['docs']}
+    can: {'@connector:kernel': {call: [reflect]}}
 ports:
-  '@connector:kernel': {kind: connector, why: agent a field can_call reaches kernel, used_by: [a]}
+  '@connector:kernel': {kind: connector, why: agent a field can reaches kernel, used_by: [a]}
 ";
     let p = ok(y, json!({"@connector:kernel": "kernel"}));
-    assert_eq!(agent(&p, "a_1").meta["can_call"], json!({ROOT: ["docs"]}));
+    assert_eq!(agent(&p, "a_1").meta["can"], json!({ROOT: {"call": ["reflect"]}}));
     // only a connector port: the kernel is no memory agent
     let e = run(PORTED, &[], json!({"@memory": "kernel", "@exec": "exec"}), false, &[]).unwrap_err();
     assert_eq!(e.reason, "bad_binding", "{}", e.message);
@@ -415,7 +369,7 @@ fn plan_refuses_two_top_agents_or_missing_agents_key() {
 
 #[test]
 fn plan_refuses_undeclared_port_and_unknown_outside_id() {
-    let y = "agents:\n  - id: a\n    handler_module: echo.tools\n    can_call: {'@model': '*'}\n";
+    let y = "agents:\n  - id: a\n    handler_module: echo.tools\n    can: {'@model': {call: ['*']}}\n";
     let e = run(y, &[], json!({}), false, &[]).unwrap_err();
     assert!(
         e.reason == "bad_arg" && e.message.contains("@model"),
@@ -423,7 +377,7 @@ fn plan_refuses_undeclared_port_and_unknown_outside_id() {
         e.message
     );
     // a literal outside id is neither the blueprint's nor a port
-    let y = "agents:\n  - id: a\n    handler_module: echo.tools\n    can_call: {memory: '*'}\n";
+    let y = "agents:\n  - id: a\n    handler_module: echo.tools\n    can: {memory: {call: ['*']}}\n";
     let e = run(y, &[], json!({}), false, &[]).unwrap_err();
     assert!(
         e.reason == "bad_arg" && e.message.contains("memory"),

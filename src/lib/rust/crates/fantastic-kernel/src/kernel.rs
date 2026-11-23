@@ -121,12 +121,12 @@ pub struct SubscriberToken(pub u64);
 pub struct Kernel {
     /// Flat global id → Agent. The only routing table — a LOOKUP table, with
     /// no order of its own.
-    pub agents: DashMap<AgentId, Arc<Agent>>,
+    pub(crate) agents: DashMap<AgentId, Arc<Agent>>,
     /// Registration order of [`Self::agents`], maintained by
     /// [`Self::register`] / [`Self::unregister`] and read through
     /// [`Self::agent_ids`].
     ///
-    /// Python's registry is a plain dict, so `list_agents`, the shutdown sweep
+    /// Python's registry is a plain dict, so the shutdown sweep
     /// and the snapshot walk it in the order agents were registered. A
     /// `DashMap` has none, so the port sorted by id at each reader and answered
     /// a registry python never answers.
@@ -206,10 +206,18 @@ pub struct Kernel {
     /// self-describing layout sets e.g. `host_agents`); [`Self::load`] reads it,
     /// default `agents`. Python `Kernel.children_dir`.
     children_dir: RwLock<String>,
+    /// The grant solver index (#754): every local agent as a Cedar entity, and
+    /// each principal's `can` lines as its own policy set. [`Self::register`] and
+    /// [`Self::unregister`] mark the entities dirty; a principal's sets follow its
+    /// live `can`. See [`crate::authz::solver`].
+    pub(crate) authz: std::sync::RwLock<crate::authz::solver::Index>,
 }
 
 /// One bound for every agent's `shutdown` dispatch. Python
 /// `Kernel.SHUTDOWN_VERB_TIMEOUT`.
+/// The verbs [`Kernel::announce`] tells an agent: its lifecycle, nothing else.
+const LIFECYCLE_VERBS: [&str; 2] = ["boot", "shutdown"];
+
 const SHUTDOWN_VERB_TIMEOUT: f64 = 30.0;
 /// How long in-flight work may take to settle before it is cancelled. Python
 /// `Kernel.QUIET_TIMEOUT`.
@@ -272,6 +280,7 @@ impl Kernel {
             peers: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             peer_watches: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             children_dir: RwLock::new(crate::declared::record::children_dir(&serde_json::Map::new())),
+            authz: std::sync::RwLock::new(crate::authz::solver::Index::new()),
         }
     }
 
@@ -310,11 +319,19 @@ impl Kernel {
     /// is merged, and the `updated` state event (the CHANGED KEYS) is what drives
     /// a loader to re-persist the record. No disk write here. `None` when no such
     /// agent.
-    pub fn update(
+    ///
+    /// KERNEL BOOKKEEPING ONLY (crate-private): no check runs. A patch carrying
+    /// `can` writes nothing and answers `None`: lines change only through
+    /// [`Self::edit_can`]. A bundle changes its own fields with `update_agent`
+    /// sent as itself.
+    pub(crate) fn update(
         &self,
         id: &AgentId,
         patch: serde_json::Map<String, Value>,
     ) -> Option<crate::agent::AgentRecord> {
+        if patch.contains_key("can") {
+            return None;
+        }
         let agent = self.agents.get(id).map(|e| Arc::clone(&e))?;
         let changed: Vec<Value> = patch.keys().map(|k| Value::String(k.clone())).collect();
         let rec = agent.update_meta(patch);
@@ -326,80 +343,52 @@ impl Kernel {
         Some(rec)
     }
 
-    /// Edit an agent's `callable_by` as ONE step under the record's lock: `edit` reads
-    /// the map as it is at the write (not as a plan read it earlier) and returns whether
-    /// it changed it. Merging one key this way keeps every other key another writer put
-    /// there, which a whole-key `update` does not. `Err` when there is no such agent or a write-time check refuses the shape; a change
-    /// publishes the `updated` event that drives the root loader's persist.
-    pub fn edit_callable_by(
+    /// Edit agent `id`'s `can`: `edit` gets the `can` map (empty when absent) and
+    /// the record, and answers whether it changed it (or refuses). The write-time
+    /// checks run on the edited `can`: its legal shape
+    /// ([`crate::lifecycle::bad_can`]), the common record's shape and the bundle's
+    /// `validate_meta`. A change publishes `updated` with `changed: ["can"]`, which
+    /// drives the root loader's persist.
+    ///
+    /// `caller` is the writer. `None` is the operator (the shell, the cold boot, a
+    /// reload's `reapply`, `test_support`): the edit runs as ONE step under the
+    /// record's lock and writes any lines. An agent writer (`Some`) must hold
+    /// `update can` on `id`, and every line the edit adds or widens must be held by
+    /// the writer's own written lines, cap included (rule 7,
+    /// [`crate::authz::glue`]). That check reads other records, so it runs on a
+    /// copy with no lock held; the copy is written only when the stored `can` is
+    /// still the one it was made from.
+    ///
+    /// `Err` when there is no such agent or a check refuses; to an agent writer,
+    /// an id it holds nothing on answers as the unknown answer's text.
+    pub(crate) fn edit_can(
         &self,
         id: &AgentId,
-        edit: impl FnOnce(&mut serde_json::Map<String, Value>) -> bool,
-    ) -> Result<bool, String> {
-        self.edit_grant(id, "callable_by", edit)
-    }
-
-    /// `can_call`, merged the same way as `edit_callable_by`.
-    pub fn edit_can_call(
-        &self,
-        id: &AgentId,
-        edit: impl FnOnce(&mut serde_json::Map<String, Value>) -> bool,
-    ) -> Result<bool, String> {
-        self.edit_grant(id, "can_call", edit)
-    }
-
-    /// One grant map of [`Kernel::edit_grants`]: `field` is the record key.
-    fn edit_grant(
-        &self,
-        id: &AgentId,
-        field: &str,
-        edit: impl FnOnce(&mut serde_json::Map<String, Value>) -> bool,
-    ) -> Result<bool, String> {
-        self.edit_grants(id, |cc, cb| {
-            if field == "can_call" {
-                (edit(cc), false)
-            } else {
-                (false, edit(cb))
-            }
-        })
-    }
-
-    /// BOTH grant maps as ONE step: `edit` gets `can_call` and `callable_by` as they are at
-    /// the write and returns which of the two it changed. One record lock, one run of the
-    /// write-time checks (the grant keys, the common record's shape, the bundle's `validate_meta`) over what changed,
-    /// one `updated` event: a shape refused in either map writes neither.
-    pub fn edit_grants(
-        &self,
-        id: &AgentId,
+        caller: Option<&AgentId>,
         edit: impl FnOnce(
             &mut serde_json::Map<String, Value>,
-            &mut serde_json::Map<String, Value>,
-        ) -> (bool, bool),
+            &serde_json::Map<String, Value>,
+        ) -> Result<bool, String>,
     ) -> Result<bool, String> {
-        let agent = self
-            .agents
-            .get(id)
-            .map(|e| Arc::clone(&e))
-            .ok_or_else(|| "no such agent".to_string())?;
+        let text = |r: &Value| crate::refusal::error_text(r).unwrap_or_default();
+        let Some(agent) = self.agents.get(id).map(|e| Arc::clone(&e)) else {
+            return Err(match caller {
+                Some(_) => text(&crate::refusal::unknown_agent(id.as_str())),
+                None => "no such agent".to_string(),
+            });
+        };
         let handler = agent.handler_module.clone();
-        let (cc_changed, cb_changed) = agent.edit_grants(|cc, cb, meta| {
-            let (cc_edited, cb_edited) = edit(cc, cb);
-            if !cc_edited && !cb_edited {
-                return Ok((false, false));
-            }
-            // the same write-time checks update_agent makes, on the edited maps
+        // the same write-time checks update_agent makes, on the edited `can`
+        let judge = |can: &serde_json::Map<String, Value>,
+                     meta: &serde_json::Map<String, Value>|
+         -> Result<(), String> {
             let mut patch = serde_json::Map::new();
-            if cc_edited {
-                patch.insert("can_call".to_string(), Value::Object(cc.clone()));
+            patch.insert("can".to_string(), Value::Object(can.clone()));
+            if let Some(why) = crate::lifecycle::bad_can(&patch) {
+                return Err(why);
             }
-            if cb_edited {
-                patch.insert("callable_by".to_string(), Value::Object(cb.clone()));
-            }
-            if let Some(why) = crate::lifecycle::bad_grant_key(&patch) {
-                return Err(why.to_string());
-            }
-            if let Err(refused) = crate::declared::bare_record::check("edit_grants", &patch) {
-                return Err(crate::refusal::error_text(&refused).unwrap_or_default());
+            if let Err(refused) = crate::declared::bare_record::check("edit_can", &patch) {
+                return Err(text(&refused));
             }
             if let Some(hm) = handler.as_deref() {
                 if let Some(bundle) = self.bundles.get(hm) {
@@ -408,23 +397,59 @@ impl Kernel {
                     }
                 }
             }
-            Ok((cc_edited, cb_edited))
-        })?;
-        if cc_changed || cb_changed {
-            let mut changed = Vec::new();
-            if cc_changed {
-                changed.push(Value::String("can_call".to_string()));
+            Ok(())
+        };
+        let changed = match caller {
+            None => agent.edit_can(|can, meta| {
+                if !edit(can, meta)? {
+                    return Ok(false);
+                }
+                judge(can, meta)?;
+                Ok(true)
+            })?,
+            Some(writer) => {
+                let (old, meta) = {
+                    let m = agent.meta.read().expect("meta lock poisoned");
+                    let old = m
+                        .get("can")
+                        .and_then(Value::as_object)
+                        .cloned()
+                        .unwrap_or_default();
+                    (old, m.clone())
+                };
+                let mut new = old.clone();
+                if !edit(&mut new, &meta)? {
+                    return Ok(false);
+                }
+                judge(&new, &meta)?;
+                crate::authz::glue::check_can_edit(
+                    self,
+                    writer,
+                    id,
+                    &Value::Object(old.clone()),
+                    &Value::Object(new.clone()),
+                )
+                .map_err(|r| text(&r))?;
+                agent.edit_can(|can, _| {
+                    if *can != old {
+                        return Err(format!(
+                            "edit_can: the can of {} changed during the edit — edit it again",
+                            fantastic_bundle::py_repr(id.as_str())
+                        ));
+                    }
+                    *can = new;
+                    Ok(true)
+                })?
             }
-            if cb_changed {
-                changed.push(Value::String("callable_by".to_string()));
-            }
+        };
+        if changed {
             let mut ev = serde_json::Map::new();
             ev.insert("agent_id".to_string(), Value::String(id.0.clone()));
             ev.insert("kind".to_string(), Value::String("updated".to_string()));
-            ev.insert("changed".to_string(), Value::Array(changed));
+            ev.insert("changed".to_string(), json!(["can"]));
             self.publish_state(&Value::Object(ev));
         }
-        Ok(cc_changed || cb_changed)
+        Ok(changed)
     }
 
     /// THE COUNTER COMES BACK WITH THE GUID: the root record's reserved bound
@@ -538,7 +563,7 @@ impl Kernel {
     /// `VERBS` table and dispatches nothing.
     ///
     /// Read STATICALLY from [`crate::bundle::Bundle::verbs`] — the same
-    /// declarations `docs` serves — never through `send`: a dispatch would mint a
+    /// declarations `reflect` renders — never through `send`: a dispatch would mint a
     /// message id and write a call row, a task row, a ledger execution and a
     /// watcher echo for a question python answers with an attribute lookup.
     ///
@@ -560,17 +585,34 @@ impl Kernel {
     }
 
     /// Tell one agent a lifecycle verb (`boot`, `shutdown`) as kernel bookkeeping,
-    /// ONLY when its bundle declares it: `None` when it does not (nothing to tell).
+    /// ONLY when its bundle declares it: `None` when it does not (nothing to tell),
+    /// and `None` for any other verb — no other verb runs as an agent from here.
     pub async fn announce(
         self: &Arc<Self>,
         agent: &Arc<Agent>,
         payload: Value,
     ) -> Option<crate::outcome::Outcome> {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or_default();
+        if !LIFECYCLE_VERBS.contains(&verb) {
+            return None;
+        }
+        self.announce_as(agent, payload, None).await
+    }
+
+    /// [`Self::announce`] with the handler's origin `origin`: the boot of an agent
+    /// another agent created runs with that creator as its origin
+    /// ([`Self::bookkeeping_as`]).
+    pub(crate) async fn announce_as(
+        self: &Arc<Self>,
+        agent: &Arc<Agent>,
+        payload: Value,
+        origin: Option<AgentId>,
+    ) -> Option<crate::outcome::Outcome> {
+        let verb = payload.get("type").and_then(Value::as_str).unwrap_or_default();
         if !self.advertises(&agent.id, verb).await {
             return None;
         }
-        Some(self.bookkeeping(agent, payload, None).await)
+        Some(self.bookkeeping_as(agent, payload, None, origin).await)
     }
 
     /// DEPTH-FIRST `on_shutdown`, children before their parent. A hook that
@@ -729,7 +771,7 @@ impl Kernel {
     /// An agent does not get a queue merely by existing: a minted queue nobody
     /// reads would let `watch` mirror into it forever. [`Self::ensure_inbox`] IS
     /// the reader registration, and every caller of it drains what it gets.
-    pub fn register(&self, agent: Arc<Agent>) {
+    pub(crate) fn register(&self, agent: Arc<Agent>) {
         // Re-registering an id keeps its place, as python's `dict[k] = v` does.
         {
             let mut order = self.agent_order.write().expect("agent order poisoned");
@@ -738,6 +780,10 @@ impl Kernel {
             }
         }
         self.agents.insert(agent.id.clone(), agent);
+        self.authz
+            .write()
+            .expect("authz index poisoned")
+            .entities_dirty = true;
     }
 
     /// Resolve a `send`-style operand end to end: `"kernel"` names the root;
@@ -784,7 +830,7 @@ impl Kernel {
     /// Every registered id, in REGISTRATION ORDER — python's registry walk.
     ///
     /// The one ordered view of [`Self::agents`]. Readers that answer a caller
-    /// (`list_agents`, the shutdown sweep, the snapshot) go through here; a
+    /// (the shutdown sweep, the snapshot) go through here; a
     /// reader that only needs membership or a lookup uses `agents` directly.
     pub fn agent_ids(&self) -> Vec<AgentId> {
         self.agent_order
@@ -801,13 +847,17 @@ impl Kernel {
 
     /// Unregister an agent + drop its inbox. Caller has already run
     /// the bundle's `on_delete` hook + rmtreed the dir.
-    pub fn unregister(&self, id: &AgentId) {
+    pub(crate) fn unregister(&self, id: &AgentId) {
         self.inboxes.remove(id);
         self.agents.remove(id);
         self.agent_order
             .write()
             .expect("agent order poisoned")
             .retain(|a| a != id);
+        let mut ix = self.authz.write().expect("authz index poisoned");
+        ix.entities_dirty = true;
+        ix.per.remove(id);
+        ix.written.remove(id);
     }
 
     /// Cheap clone of the current root pointer (`None` until
@@ -1050,9 +1100,10 @@ impl Kernel {
             let mut rec: crate::agent::AgentRecord = serde_json::from_value(Value::Object(r))
                 .map_err(|e| KernelError::InvalidSnapshot(e.to_string()))?;
             // the bundle's fields under the record's own, as at `create_agent`
-            // (`crate::inherit`): a record names its kind and what it changes
+            // (`crate::inherit`): a record names its kind and what it changes;
+            // its `can` is its own, never a bundle default
             if let Some(hm) = rec.handler_module.clone() {
-                crate::inherit::apply(&self.bundles, &hm, &mut rec.meta);
+                crate::inherit::apply_loaded(&self.bundles, &hm, &mut rec.meta);
             }
             agents.push(rec);
         }
@@ -1201,9 +1252,9 @@ impl Kernel {
     }
 
     /// Synchronous read of every loaded agent's identity + in-flight handler
-    /// count. Mirrors python's `Kernel.state_snapshot` — used by new
-    /// `state_subscribe` subscribers to bootstrap their agent view before the
-    /// first event arrives. No queue puts, no fanout.
+    /// count. Mirrors python's `Kernel.state_snapshot`. A state watcher's own
+    /// bootstrap reads it cut to what it covers
+    /// ([`Self::state_watch_snapshot`]). No queue puts, no fanout.
     ///
     /// Each entry: `{agent_id, name, backlog}`. REGISTRATION ORDER (python walks
     /// `self.agents.values()`), with each agent's real backlog.
@@ -1280,6 +1331,21 @@ pub fn validate_records(records: &[Map<String, Value>]) -> KernelResult<String> 
                 py_repr(&rid),
                 listed.join(", ")
             ));
+        }
+        // ONE GRANT FIELD. A record from before the grant model's one `can` field
+        // is refused, with no conversion: the folder is re-seeded.
+        for legacy in ["can_call", "callable_by"] {
+            if r.contains_key(legacy) {
+                return bad(format!(
+                    "record {} carries {} — grants are one field, can; re-seed the \
+                     state folder",
+                    py_repr(&rid),
+                    py_repr(legacy)
+                ));
+            }
+        }
+        if let Some(why) = crate::lifecycle::bad_can(r) {
+            return bad(format!("record {}: {why}", py_repr(&rid)));
         }
         if !ids.insert(rid.clone()) {
             return bad(format!("duplicate agent id {} in snapshot", py_repr(&rid)));

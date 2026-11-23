@@ -3,9 +3,8 @@
 //!
 //! Identity comes only from dispatch: `pump` sends its `read_stream` and
 //! `write_stream` from inside its own dispatch, so both far ends judge THE BRIDGE
-//! — its `can_call` must reach them and their `callable_by` must accept it. A
-//! caller's own grants on the ends play no part: granting `pump` on a bridge
-//! lends exactly the reach that bridge has.
+//! — its own lines must reach them. A caller's own lines on the ends play no part:
+//! a line `pump` on a bridge lends exactly the reach that bridge has.
 
 use super::*;
 use fantastic_kernel::{Agent, Item};
@@ -16,9 +15,9 @@ const DATA: &[u8] = b"G-DATA";
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value, as_: Option<&str>) -> Value {
     let item = Item::new(AgentId::from(target), payload);
     match as_ {
-        None => k.send(vec![item]).await.remove(0).result,
+        None => k.operator_send(vec![item]).await.remove(0).result,
         Some(who) => {
-            fantastic_kernel::test_support::as_agent(AgentId::from(who), k.send(vec![item]))
+            fantastic_kernel::test_support::as_agent(AgentId::from(who), k.operator_send(vec![item]))
                 .await
                 .remove(0)
                 .result
@@ -59,37 +58,27 @@ async fn wire(tmp: &tempfile::TempDir, f_reaches_g: bool) -> Arc<Kernel> {
         tmp.path().join(".fantastic"),
         false,
     );
-    k.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
     k.set_root(Arc::clone(&root));
-    let (g_cb, f_cc) = if f_reaches_g {
-        (
-            json!({"f": ["read_stream", "write_stream"]}),
-            json!({"g": ["read_stream", "write_stream"]}),
-        )
+    let f_can = if f_reaches_g {
+        json!({"g": {"call": ["read_stream", "write_stream"]}})
     } else {
-        (json!({}), json!({}))
+        json!({})
     };
-    bridge(&k, tmp, "g", json!({ "callable_by": g_cb })).await;
-    bridge(
-        &k,
-        tmp,
-        "f",
-        json!({"can_call": f_cc, "callable_by": {"c": ["pump", "read_stream"]}}),
-    )
-    .await;
-    k.register(Agent::new(
+    bridge(&k, tmp, "g", json!({})).await;
+    bridge(&k, tmp, "f", json!({"can": f_can})).await;
+    fantastic_kernel::test_support::register(&k, Agent::new(
         AgentId::from("c"),
         None,
         Some(AgentId::from("kernel_state")),
-        json!({"can_call": {"f": "*"}})
+        json!({"can": {"f": {"call": ["*"]}}})
             .as_object()
             .cloned()
             .unwrap(),
         PathBuf::new(),
         false,
     ));
-    let w = k
-        .send(vec![Item::new(
+    let w = k.operator_send(vec![Item::new(
             AgentId::from("g"),
             json!({"type": "write_stream", "path": "data.txt", "bytes": null, "truncate": true}),
         )
@@ -121,7 +110,8 @@ async fn a_pump_reads_and_writes_as_the_bridge() {
         Some("c"),
     )
     .await;
-    assert_eq!(direct["reason"], "unauthorized", "{direct}");
+    // a denial is the unknown answer
+    assert_eq!(direct["reason"], "unknown_agent", "{direct}");
     let out = pump(
         &k,
         "c",
@@ -148,7 +138,8 @@ async fn a_pump_cannot_reach_an_end_the_bridge_cannot() {
     assert_eq!(out["reason"], "transport_error", "{out}");
     let err = out["error"].as_str().unwrap();
     assert!(err.starts_with("pump: read from 'g' failed: {"), "{out}");
-    assert!(err.contains("f may not call 'read_stream' on g"), "{out}");
+    // a denial is the unknown answer
+    assert!(err.contains("no agent 'g'"), "{out}");
     assert!(
         !tmp.path().join("f").join("copy.txt").exists(),
         "nothing was copied"

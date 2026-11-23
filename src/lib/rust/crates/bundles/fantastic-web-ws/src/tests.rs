@@ -6,7 +6,7 @@ use fantastic_kernel::Agent;
 /// A kernel holding one `web_ws` leg "ws" with the given record fields.
 fn kernel_with_leg(meta: Value) -> Arc<Kernel> {
     let kernel = Arc::new(Kernel::new());
-    kernel.register(Agent::new(
+    fantastic_kernel::test_support::register(&kernel, Agent::new(
         AgentId::from("ws"),
         Some("web_ws.tools".into()),
         None,
@@ -200,3 +200,52 @@ fn the_record_declaration_refuses_a_route_of_the_wrong_type() {
     }
 }
 
+
+/// Rule 10 (gm:75): a frame handed to a leg is sent onward AS THE LEG, so it passes or
+/// fails on the leg's own lines alone. An agent that may hand frames to the leg gets no
+/// more through it than the leg holds, whatever lines it holds itself.
+#[tokio::test]
+async fn an_inbound_frame_is_decided_only_by_the_legs_lines() {
+    let mut k = Kernel::new();
+    k.bundles.register(HANDLER_MODULE, WebWsBundle);
+    let kernel = Arc::new(k);
+    let root = Agent::new(AgentId::from("kernel"), None, None, Map::new(), std::path::PathBuf::new(), false);
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
+    kernel.set_root(root);
+    for id in ["ws", "t1", "t2", "other"] {
+        fantastic_kernel::test_support::adopt(&kernel, Agent::new(
+            AgentId::from(id),
+            Some(HANDLER_MODULE.into()),
+            Some(AgentId::from("kernel")),
+            Map::new(),
+            std::path::PathBuf::new(),
+            false,
+        ));
+    }
+    fantastic_kernel::test_support::grant(&kernel, "ws", "t1", json!({"call": ["get_routes"]}));
+    fantastic_kernel::test_support::grant(&kernel, "other", "ws", json!({"call": ["inbound_call"]}));
+    fantastic_kernel::test_support::grant(&kernel, "other", "t2", json!({"call": ["get_routes"]}));
+    let frame = |target: &str| {
+        fantastic_kernel::Item::new(
+            AgentId::from("ws"),
+            json!({"type": "inbound_call", "item": {"target": target, "payload": {"type": "get_routes"}}}),
+        )
+    };
+    // the transport's hand-in: the onward call is the leg's
+    let r = kernel.operator_send(vec![frame("t1")]).await.remove(0).result;
+    assert!(r.get("error").is_none(), "the leg holds get_routes on t1: {r}");
+    let r = kernel.operator_send(vec![frame("t2")]).await.remove(0).result;
+    assert_eq!(r, fantastic_kernel::refusal::unknown_agent("t2"), "the leg holds nothing on t2");
+    // an agent handing a frame in gets only the leg's lines, not its own
+    let r = fantastic_kernel::test_support::as_agent("other", kernel.send(vec![frame("t2")]))
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r, fantastic_kernel::refusal::unknown_agent("t2"), "{r}");
+    let direct = fantastic_kernel::Item::new(AgentId::from("t2"), json!({"type": "get_routes"}));
+    let r = fantastic_kernel::test_support::as_agent("other", kernel.send(vec![direct]))
+        .await
+        .remove(0)
+        .result;
+    assert!(r.get("error").is_none(), "its own line holds on its own call: {r}");
+}

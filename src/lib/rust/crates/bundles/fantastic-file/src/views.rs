@@ -3,13 +3,13 @@
 //!
 //! A view is a record of this bundle carrying `view: file|folder`, a child of its
 //! bridge. This bundle's handler answers it before the bridge's own gate: a view is
-//! not sealed, its gate is its grant on the bridge (`GRANTS`, and the scope token its
-//! bridge entry carries). Every disk operation is a send to the bridge AS THE VIEW, for
+//! not sealed, its gate is its line on the bridge (`$parent: {call: GRANTS}`) and its
+//! own `path` field. Every disk operation is a send to the bridge AS THE VIEW, for
 //! the view's own path; a verb naming another path is refused here, before the bridge
 //! is asked. The bridge pushes a view its watch changes (`watch::relay_to_views`), so
 //! the view is never a kernel watcher of its bridge.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use fantastic_bundle::py_repr;
@@ -28,9 +28,6 @@ pub(crate) const FOLDER: &str = "folder";
 /// python `views.GRANTS` — the verbs a view may send its bridge, nothing else.
 const FILE_GRANTS: [&str; 4] = ["read", "write", "watch_path", "unwatch_path"];
 const FOLDER_GRANTS: [&str; 3] = ["list", "watch_path", "unwatch_path"];
-/// python `views.ANSWERS` — the verbs each view answers: what a caller may be granted on it.
-const FILE_ANSWERS: [&str; 4] = ["read", "write", "watch", "reflect"];
-const FOLDER_ANSWERS: [&str; 4] = ["list", "reveal", "watch", "reflect"];
 
 /// The html a view draws itself with: one page for a file and a folder, its pure header logic
 /// (`file_head.mjs`, also the canvas previewer's) spliced in with the `export` keywords dropped.
@@ -98,65 +95,6 @@ fn grants(kind: &str) -> Vec<&'static str> {
     }
 }
 
-/// python `views.scope_token`: the token a bridge's `callable_by` entry for a view
-/// carries — its kind and path, `file:<path>` or `folder:<prefix>`.
-fn scope_token(kind: &str, path: &str) -> String {
-    format!("{kind}:{path}")
-}
-
-/// The `(kind, path)` a scope token names, or None for any other grant value.
-fn scope_of_token(token: &str) -> Option<(&str, &str)> {
-    let (kind, path) = token.split_once(':')?;
-    (kind == FILE || kind == FOLDER).then_some((kind, path))
-}
-
-/// python `views.view_callers`: who may reach a view — whoever may reach its bridge, for
-/// the verbs it answers. A bridge grant of `*` is all of them; a list keeps the verbs
-/// the view answers. The bridge's `$parent` is named literally, its `$self` is skipped.
-pub(crate) fn view_callers(
-    grants: &Map<String, Value>,
-    parent: Option<&str>,
-    kind: &str,
-) -> Map<String, Value> {
-    let own: &[&str] = if kind == FILE {
-        &FILE_ANSWERS
-    } else {
-        &FOLDER_ANSWERS
-    };
-    let mut out: std::collections::BTreeMap<String, BTreeSet<String>> = Default::default();
-    for (caller, grant) in grants {
-        if caller == "$self" {
-            continue;
-        }
-        let caller = if caller == "$parent" {
-            match parent {
-                Some(p) => p.to_string(),
-                None => continue,
-            }
-        } else {
-            caller.clone()
-        };
-        let verbs: Vec<String> = if grant.as_str() == Some("*") {
-            own.iter().map(|v| v.to_string()).collect()
-        } else {
-            grant
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .filter(|v| own.contains(v))
-                .map(str::to_string)
-                .collect()
-        };
-        if !verbs.is_empty() {
-            out.entry(caller).or_default().extend(verbs);
-        }
-    }
-    out.into_iter()
-        .map(|(k, v)| (k, json!(v.into_iter().collect::<Vec<_>>())))
-        .collect()
-}
-
 /// python `views.inside`: is the bridge path `target` inside the view's own path `own`?
 /// A file is its own path only; a folder is itself and everything under it. An empty
 /// `own` is no path at all, so it admits nothing.
@@ -171,46 +109,28 @@ pub(crate) fn inside(kind: &str, own: &str, target: &str) -> bool {
 }
 
 /// python `views.caller_scope`: the `(kind, path)` a caller is scoped to on this bridge,
-/// read from the bridge's own `callable_by` entry for it (its scope token). None for a
-/// caller that is not path-scoped (an operator, or a plain agent granted on the bridge).
+/// read from the caller's OWN record: a view carries its `view` kind and `path`. None
+/// for a caller that is not a view (an operator, or a plain agent holding a line on
+/// the bridge).
 ///
-/// Fail closed: a VIEW caller whose entry has no single scope token (or two), or a view
-/// of ANOTHER bridge, is returned with an empty path, which matches nothing.
+/// Fail closed: a view of ANOTHER bridge, or one with no `path`, is returned with an
+/// empty path, which matches nothing.
 pub(crate) fn caller_scope(
     kernel: &Arc<Kernel>,
     bridge: &str,
     caller: Option<&AgentId>,
 ) -> Option<(String, String)> {
     let caller = caller?;
-    let meta = kernel.agents.get(caller)?.record().meta;
-    let grant = kernel.agents.get(&AgentId::from(bridge)).and_then(|b| {
-        b.record()
-            .meta
-            .get("callable_by")
-            .and_then(Value::as_object)
-            .and_then(|cb| cb.get(&caller.0).cloned())
-    });
-    let tokens: Vec<(&str, &str)> = grant
-        .as_ref()
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .filter_map(scope_of_token)
-        .collect();
-    let view = meta
+    let meta = kernel.resolve_target(caller.as_str())?.record().meta;
+    let kind = meta
         .get("view")
         .and_then(Value::as_str)
-        .filter(|k| *k == FILE || *k == FOLDER);
-    if let Some(kind) = view {
-        if meta.get("bridge").and_then(Value::as_str) != Some(bridge) || tokens.len() != 1 {
-            return Some((kind.to_string(), String::new()));
-        }
+        .filter(|k| *k == FILE || *k == FOLDER)?;
+    let path = meta.get("path").and_then(Value::as_str).unwrap_or("");
+    if meta.get("bridge").and_then(Value::as_str) != Some(bridge) {
+        return Some((kind.to_string(), String::new()));
     }
-    match tokens.as_slice() {
-        [(kind, path)] => Some((kind.to_string(), path.to_string())),
-        _ => None,
-    }
+    Some((kind.to_string(), path.to_string()))
 }
 
 /// python `views.bridge_path`: the bridge path a view's relative `rel` names. A file
@@ -289,7 +209,7 @@ pub(crate) async fn send_bridge(
 /// The view records the kernel holds, by kind and bridge and path.
 fn find_view(kernel: &Arc<Kernel>, bridge: &str, kind: &str, path: &str) -> Option<String> {
     kernel.agent_ids().into_iter().find_map(|id| {
-        let meta = kernel.agents.get(&id)?.record().meta;
+        let meta = kernel.resolve_target(id.as_str())?.record().meta;
         let hit = meta.get("view").and_then(Value::as_str) == Some(kind)
             && meta.get("bridge").and_then(Value::as_str) == Some(bridge)
             && meta.get("path").and_then(Value::as_str) == Some(path);
@@ -297,10 +217,10 @@ fn find_view(kernel: &Arc<Kernel>, bridge: &str, kind: &str, path: &str) -> Opti
     })
 }
 
-/// python `open_view`: reuse the view of `path` on this bridge, or make it. The
-/// bridge grants the new view exactly its grant in its `callable_by`. A reused view
-/// whose entry holds no scope token (made before the token) is stamped with it; an entry
-/// with any scope token is left as it is.
+/// python `open_view`: reuse the view of `path` on this bridge, or make it — as the
+/// asker (`current_origin()`), under the bridge. The new view's `can` is its one edge,
+/// `$parent: {call: GRANTS}`: the asker hands it out, so it must hold those verbs on
+/// the bridge by a line of its own.
 ///
 /// `chosen` is a caller-picked id for the new view. It is taken only when it is free: a
 /// `chosen` that is another agent, or a view of another path, is refused; so is a path
@@ -315,9 +235,7 @@ pub(crate) async fn open_view(
     let bid = bridge.id.0.clone();
     let existing = find_view(kernel, &bid, kind, path);
     if let Some(chosen) = chosen {
-        if let Some(held) = kernel
-            .agents
-            .get(&AgentId::from(chosen))
+        if let Some(held) = kernel.resolve_target(chosen)
             .map(|a| a.record().meta)
         {
             if !is_view_of(&held, &bid, kind, path) {
@@ -328,9 +246,6 @@ pub(crate) async fn open_view(
                     ),
                 );
                 rf::with(&mut r, "id", json!(chosen));
-                return r;
-            }
-            if let Err(r) = stamp(kernel, bridge, chosen, kind, path, true) {
                 return r;
             }
             return json!({"id": chosen, "kind": kind, "path": path, "created": false});
@@ -346,24 +261,10 @@ pub(crate) async fn open_view(
         }
     }
     if let Some(existing) = existing {
-        if let Err(r) = stamp(kernel, bridge, &existing, kind, path, true) {
-            return r;
-        }
         return json!({"id": existing, "kind": kind, "path": path, "created": false});
     }
-    let Some(root) = kernel.root() else {
-        return json!({"error": "kernel: no root agent registered"});
-    };
     let own_grants = grants(kind);
     let base = bridge_name(path);
-    let bridge_grants = bridge
-        .record()
-        .meta
-        .get("callable_by")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let bridge_parent = bridge.parent_id.as_ref().map(|p| p.0.clone());
     let mut payload = json!({
         "handler_module": super::HANDLER_MODULE,
         "parent_id": bid,
@@ -371,14 +272,16 @@ pub(crate) async fn open_view(
         "bridge": bid,
         "path": path,
         "display_name": base,
-        "can_call": {bid.clone(): own_grants.clone()},
-        "callable_by": Value::Object(view_callers(&bridge_grants, bridge_parent.as_deref(), kind)),
+        "can": {"$parent": {"call": own_grants}},
     });
     if let Some(chosen) = chosen {
         payload["id"] = json!(chosen);
     }
     let made = match serde_json::from_value::<CreateAgent>(payload) {
-        Ok(args) => create_agent(kernel, &root, args).await,
+        Ok(args) => {
+            let asker = fantastic_kernel::current_origin();
+            create_agent(kernel, asker.as_ref(), args).await
+        }
         Err(e) => return rf::bad("open_view", "id", &e.to_string()),
     };
     if made.get("error").is_some() {
@@ -389,55 +292,7 @@ pub(crate) async fn open_view(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    if let Err(r) = stamp(kernel, bridge, &vid, kind, path, false) {
-        return r;
-    }
     json!({"id": vid, "kind": kind, "path": path, "created": true})
-}
-
-/// Grant the view `vid` its grants and its scope token in the bridge's `callable_by`.
-/// With `only_unscoped`, an entry that already holds any scope token is left as it is (a
-/// view made before the token is repaired; a deliberate narrowing stands). One step under
-/// the record's lock: a key a concurrent grant adds is kept, and the change is announced
-/// on the state stream so the root loader persists it.
-fn stamp(
-    kernel: &Arc<Kernel>,
-    bridge: &Arc<Agent>,
-    vid: &str,
-    kind: &str,
-    path: &str,
-    only_unscoped: bool,
-) -> Result<(), Value> {
-    let scope = scope_token(kind, path);
-    let edited = kernel.edit_callable_by(&bridge.id, |cb| {
-        let held: Vec<String> = cb
-            .get(vid)
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect();
-        if only_unscoped && held.iter().any(|v| scope_of_token(v).is_some()) {
-            return false;
-        }
-        let mut set: BTreeSet<String> = held.into_iter().collect();
-        set.extend(grants(kind).iter().map(|s| s.to_string()));
-        set.insert(scope);
-        let next = json!(set.into_iter().collect::<Vec<_>>());
-        if cb.get(vid) == Some(&next) {
-            return false;
-        }
-        cb.insert(vid.to_string(), next);
-        true
-    });
-    edited.map(|_| ()).map_err(|e| {
-        let mut r = rf::refusal(
-            rf::INVALID_META,
-            format!("open_view: the bridge did not take the grant for {vid:?}: {e}"),
-        );
-        rf::with(&mut r, "id", json!(vid));
-        r
-    })
 }
 
 /// Is this record the view of `path` of this kind on this bridge?
@@ -604,9 +459,7 @@ pub(crate) async fn dispatch(
     call: verbs::Call,
 ) -> Value {
     use verbs::Call;
-    let meta = kernel
-        .agents
-        .get(id)
+    let meta = kernel.resolve_target(id.as_str())
         .map(|a| a.record().meta)
         .unwrap_or_default();
     let own = meta
@@ -767,7 +620,7 @@ pub(crate) async fn open_view_verb(
         return rf::bad("open_view", "path", "a file path (the root is a folder)");
     }
     let allow = super::allow_list(meta);
-    let Some(bridge) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
+    let Some(bridge) = kernel.resolve_target(agent_id.as_str()) else {
         return json!({"error": format!("no agent {agent_id}")});
     };
     let root = clamp_root(meta, kernel, &bridge.root_path);

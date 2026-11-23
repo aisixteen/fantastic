@@ -8,6 +8,23 @@ use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+/// [`fantastic_ai_core::remote_provider::pair_chat`], plus the chat's line on the
+/// test memory store: in a seeded tree the chat's bundle defaults give it
+/// (`memory: {call: [append, read]}`); a test kernel loads no defaults.
+async fn pair_chat(
+    kernel: &std::sync::Arc<fantastic_kernel::Kernel>,
+    provider: &fantastic_kernel::AgentId,
+) -> fantastic_kernel::AgentId {
+    let chat = fantastic_ai_core::remote_provider::pair_chat(kernel, provider).await;
+    fantastic_kernel::test_support::grant(
+        kernel,
+        chat.as_str(),
+        fantastic_ram_store::test_support::MEMORY,
+        serde_json::json!({"call": ["*"]}),
+    );
+    chat
+}
+
 const MODEL: &str = "claude-test-5";
 
 struct NoKey;
@@ -531,7 +548,7 @@ async fn mk_with_id(tmp: &TempDir, endpoint: &str, extra: Value, id: &str) -> Ar
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let mut payload = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE, "id": id});
     let mut record = rec(extra);
@@ -554,12 +571,11 @@ async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     let to = if verb != "boot"
         && fantastic_ai_core::declared::chat::VERBS.iter().any(|v| v.name == verb)
     {
-        fantastic_ai_core::remote_provider::pair_chat(kernel, &AgentId::from(target)).await
+        pair_chat(kernel, &AgentId::from(target)).await
     } else {
         AgentId::from(target)
     };
-    kernel
-        .send(vec![Item::new(to, payload)])
+    kernel.operator_send(vec![Item::new(to, payload)])
         .await
         .remove(0)
         .result
@@ -648,10 +664,10 @@ async fn sent_body_over(model: &str, extra: Value, max: i64, chat: Value, raw: V
     );
     let kernel = mk_unbounded_store(&tmp, &ep, &id, extra).await;
     if let Some(raw) = raw.as_object().filter(|o| !o.is_empty()) {
-        let _ = kernel.update(&AgentId::from(id.as_str()), raw.clone());
+        let _ = fantastic_kernel::test_support::update(&kernel, &AgentId::from(id.as_str()), raw.clone());
     }
     if chat.as_object().is_some_and(|o| !o.is_empty()) {
-        let c = fantastic_ai_core::remote_provider::pair_chat(&kernel, &AgentId::from(id.as_str()))
+        let c = pair_chat(&kernel, &AgentId::from(id.as_str()))
             .await;
         let mut payload = json!({"type": "update_agent", "id": c.as_str()});
         payload
@@ -701,7 +717,7 @@ async fn mk_unbounded_store(tmp: &TempDir, endpoint: &str, id: &str, extra: Valu
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let mut payload = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE, "id": id});
     let mut record = rec(extra);
@@ -1709,10 +1725,10 @@ async fn mk_with_store(tmp: &TempDir, endpoint: &str, extra: Value, chat_extra: 
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let memory =
-        fantastic_ram_store::test_support::memory_meta(&kernel, STALL_AGENT, json!({"cli": "*"}))
+        fantastic_ram_store::test_support::memory_meta(&kernel, STALL_AGENT, json!({"cli": {"call": ["*"]}}))
             .await;
     let mut payload = json!({
         "type": "create_agent",
@@ -1733,7 +1749,7 @@ async fn mk_with_store(tmp: &TempDir, endpoint: &str, extra: Value, chat_extra: 
     assert_eq!(r["id"], json!(STALL_AGENT), "{r}");
     // the turn's output budget is the chat's (#632): named, so no model entry is read; the
     // chat's own fields (`chat_extra`) are its record's too
-    let chat = fantastic_ai_core::remote_provider::pair_chat(&kernel, &AgentId::from(STALL_AGENT)).await;
+    let chat = pair_chat(&kernel, &AgentId::from(STALL_AGENT)).await;
     let mut up = json!({"type": "update_agent", "id": chat.as_str(), "max_tokens": 1000});
     for (k, v) in chat_extra.as_object().cloned().unwrap_or_default() {
         up[k] = v;
@@ -2032,17 +2048,21 @@ fn turn_events(out: i64) -> String {
 /// One turn through the agent's own provider, as a send runs it (the chat's `max_tokens`
 /// laid over the record), stream drained.
 async fn turn(kernel: &Arc<Kernel>, id: &str) {
-    let mut pass = helpers::agent_meta(&AgentId::from(id), kernel);
-    pass.insert("max_tokens".into(), json!(8000));
-    let p = build_provider_with(&AgentId::from(id), kernel, pass, None, Images::default());
-    let msgs = [json!({"role": "user", "content": "hi"})];
-    let mut s = p
-        .chat(&msgs, None)
-        .await
-        .unwrap_or_else(|e| panic!("{}", e.message));
-    while let Some(ev) = s.next().await {
-        ev.unwrap_or_else(|e| panic!("{}", e.message));
-    }
+    // the provider's pass runs in its own dispatch: what it writes is its own send
+    fantastic_kernel::test_support::as_agent(AgentId::from(id), async {
+        let mut pass = helpers::agent_meta(&AgentId::from(id), kernel);
+        pass.insert("max_tokens".into(), json!(8000));
+        let p = build_provider_with(&AgentId::from(id), kernel, pass, None, Images::default());
+        let msgs = [json!({"role": "user", "content": "hi"})];
+        let mut s = p
+            .chat(&msgs, None)
+            .await
+            .unwrap_or_else(|e| panic!("{}", e.message));
+        while let Some(ev) = s.next().await {
+            ev.unwrap_or_else(|e| panic!("{}", e.message));
+        }
+    })
+    .await;
 }
 
 fn priced() -> Value {
@@ -2455,10 +2475,11 @@ async fn two_calling_chats_count_apart_in_by_agent() {
     p.endpoint = ep2;
     p.caller = Some("chat_b".into());
     drain(&p, None).await.unwrap();
-    let u = usage.lock().unwrap();
     let book = books(json!({"prices": {
         "claude-sonnet-5-5": {"input": 3.0, "output": 15.0},
         "claude-haiku-5-5": {"input": 1.0, "output": 5.0}}}));
+    {
+    let u = usage.lock().unwrap();
     let s = u.snapshot_priced(&book);
     let (a, b) = (&s["by_agent"]["chat_a"], &s["by_agent"]["chat_b"]);
     assert_eq!(
@@ -2504,7 +2525,7 @@ async fn two_calling_chats_count_apart_in_by_agent() {
         "{bare}"
     );
     // a call with no caller counts in the totals alone
-    drop(u);
+    }
     p.caller = None;
     let (_s3, ep3) = api(200, sse(&first)).await;
     p.endpoint = ep3;
@@ -2741,6 +2762,21 @@ async fn reflect_carries_capabilities_per_model() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_capabilities_verb_answers_reflects_map_and_the_records_model() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_with(
+        &tmp,
+        "http://unused.test/v1/messages",
+        json!({"models": ["claude-opus-4-1", "mystery-1"]}),
+    )
+    .await;
+    let r = call(&kernel, "a1", json!({"type": "reflect"})).await;
+    let c = call(&kernel, "a1", json!({"type": "capabilities"})).await;
+    assert_eq!(c["capabilities"], r["capabilities"], "{c}");
+    assert_eq!(c["model"], r["model"], "{c}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_capabilities_setting_in_the_params_store_overrides_the_static_entry() {
     let tmp = TempDir::new().unwrap();
     let id = "capset1";
@@ -2751,9 +2787,8 @@ async fn a_capabilities_setting_in_the_params_store_overrides_the_static_entry()
         .to_string();
     let kept =
         json!({"claude-opus-4-1": {"images": false}, "tiny": {"images": true, "max_images": 1}});
-    let r = fantastic_kernel::send::as_agent(&AgentId::from(id), async {
-        kernel
-            .send(vec![Item::new(
+    let r = fantastic_kernel::test_support::as_agent(AgentId::from(id).clone(), async {
+        kernel.operator_send(vec![Item::new(
                 AgentId::from(store.as_str()),
                 json!({"type": "append", "rows": [{"kind": "setting", "name": "capabilities", "value": kept}]}),
             )])
@@ -2799,7 +2834,7 @@ async fn image_bytes_on_the_binary_path_reach_the_wire_as_base64() {
         json!({"type": "complete", "rid": rid, "image": {"ref": "5", "media_type": "image/png"}}),
     )
     .with_binary_key("data", vec![0xff, 0x00, 0x10]);
-    let r = kernel.send(vec![item]).await.remove(0).result;
+    let r = kernel.operator_send(vec![item]).await.remove(0).result;
     assert_eq!(r["bytes"], json!(3), "{r}");
     assert!(srv.received_requests().await.unwrap_or_default().is_empty());
     let r = call(
@@ -2852,7 +2887,7 @@ async fn send_image(kernel: &Arc<Kernel>, agent: &str, rid: &str) {
         json!({"type": "complete", "rid": rid, "image": {"ref": "5", "media_type": "image/png"}}),
     )
     .with_binary_key("data", vec![1, 2, 3]);
-    let r = kernel.send(vec![item]).await.remove(0).result;
+    let r = kernel.operator_send(vec![item]).await.remove(0).result;
     assert_eq!(r["bytes"], json!(3), "{r}");
     assert!(stashed(agent, rid));
 }
@@ -2930,8 +2965,7 @@ fn an_entry_whose_complete_never_comes_is_dropped_after_the_request_timeout() {
 async fn an_image_item_without_bytes_or_media_type_is_refused() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_with_id(&tmp, "http://unused.test/v1/messages", json!({}), "img2").await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("img2"),
             json!({"type": "complete", "rid": "c~1", "image": {"ref": "1", "media_type": "image/png"}}),
         )
@@ -2940,8 +2974,7 @@ async fn an_image_item_without_bytes_or_media_type_is_refused() {
         .remove(0)
         .result;
     assert_eq!(r["reason"], json!("missing_arg"), "{r}");
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("img2"),
             json!({"type": "complete", "rid": "c~1", "image": {"ref": "1"}}),
         )
@@ -2954,14 +2987,15 @@ async fn an_image_item_without_bytes_or_media_type_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_paired_chat_may_reflect_its_provider() {
+async fn the_paired_chat_may_ask_its_providers_capabilities() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_with_id(&tmp, "http://unused.test/v1/messages", json!({}), "pair1").await;
     let chat =
-        fantastic_ai_core::remote_provider::pair_chat(&kernel, &AgentId::from("pair1")).await;
-    let grants = helpers::agent_meta(&chat, &kernel)["can_call"]["pair1"].clone();
-    assert_eq!(grants, json!(["complete", "watch", "reflect"]));
-    let admits =
-        helpers::agent_meta(&AgentId::from("pair1"), &kernel)["callable_by"][chat.as_str()].clone();
-    assert_eq!(admits, json!(["complete", "watch", "reflect"]));
+        pair_chat(&kernel, &AgentId::from("pair1")).await;
+    let line = helpers::agent_meta(&chat, &kernel)["can"]["pair1"].clone();
+    assert_eq!(line, json!({"call": ["complete", "watch", "capabilities"]}));
+    assert!(
+        helpers::agent_meta(&AgentId::from("pair1"), &kernel).get("can").is_none(),
+        "the provider keeps no list of callers"
+    );
 }

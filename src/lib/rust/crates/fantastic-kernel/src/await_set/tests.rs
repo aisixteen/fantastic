@@ -3,7 +3,7 @@
 use super::*;
 use crate::agent::Agent;
 use crate::bundle::{BundleError, Handler, Reply};
-use crate::test_support::wire;
+use crate::test_support::grant;
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -87,10 +87,14 @@ fn mk() -> (Arc<Kernel>, Arc<Rec>) {
 }
 
 async fn mk_agent(kernel: &Arc<Kernel>, id: &str) {
+    mk_agent_under(kernel, id, "kernel").await;
+}
+
+async fn mk_agent_under(kernel: &Arc<Kernel>, id: &str, parent: &str) {
     let r = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             "kernel_state",
-            json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "rec.tools", "id": id}),
+            json!({"type": "create_agent", "parent_id": parent, "handler_module": "rec.tools", "id": id}),
         )])
         .await
         .remove(0)
@@ -98,21 +102,14 @@ async fn mk_agent(kernel: &Arc<Kernel>, id: &str) {
     assert_eq!(r["id"], json!(id), "{r}");
 }
 
-/// A lead plus workers, wired so each worker may `report` to the lead and the
-/// lead may `await_set` on the root.
+/// A lead plus its workers below it, each holding `$parent: {call: [report]}`.
+/// `await_set` and `await_cancel` need no line: the lead awaits its own tree.
 async fn fleet(workers: &[&str]) -> (Arc<Kernel>, Arc<Rec>) {
     let (kernel, rec) = mk();
     mk_agent(&kernel, "lead").await;
-    wire(
-        &kernel,
-        "lead",
-        "kernel_state",
-        json!(["await_set", "await_cancel"]),
-    );
     for w in workers {
-        mk_agent(&kernel, w).await;
-        wire(&kernel, w, "lead", json!(["report"]));
-        // the lead also talks to them, and they to a stranger below
+        mk_agent_under(&kernel, w, "lead").await;
+        grant(&kernel, w, "$parent", json!({"call": ["report"]}));
     }
     (kernel, rec)
 }
@@ -120,7 +117,7 @@ async fn fleet(workers: &[&str]) -> (Arc<Kernel>, Arc<Rec>) {
 async fn as_lead(kernel: &Arc<Kernel>, payload: Value) -> Value {
     crate::send::as_agent(
         &AgentId::from("lead"),
-        kernel.send(vec![Item::new("kernel_state", payload)]),
+        kernel.operator_send(vec![Item::new("kernel_state", payload)]),
     )
     .await
     .remove(0)
@@ -132,7 +129,7 @@ async fn report(kernel: &Arc<Kernel>, from: &str, to: &str, extra: Value) -> Val
     p.as_object_mut()
         .unwrap()
         .extend(extra.as_object().unwrap().clone());
-    crate::send::as_agent(&AgentId::from(from), kernel.send(vec![Item::new(to, p)]))
+    crate::send::as_agent(&AgentId::from(from), kernel.operator_send(vec![Item::new(to, p)]))
         .await
         .remove(0)
         .result
@@ -220,8 +217,8 @@ async fn await_set_timeout_names_the_missing() {
 async fn await_set_holds_a_report_instead_of_delivering_it() {
     let (k, rec) = fleet(&["w1", "w2"]).await;
     mk_agent(&k, "stranger").await;
-    wire(&k, "stranger", "lead", json!(["report", "note"]));
-    wire(&k, "w1", "lead", json!(["report", "note"]));
+    grant(&k, "stranger", "lead", json!({"call": ["report", "note"]}));
+    grant(&k, "w1", "$parent", json!({"call": ["report", "note"]}));
     let r = as_lead(&k, set_args(json!(["w1", "w2"]))).await;
     let wid = r["wait_id"].as_i64().unwrap();
     let held = report(&k, "w1", "lead", json!({"state": "done", "result": "x"})).await;
@@ -232,7 +229,7 @@ async fn await_set_holds_a_report_instead_of_delivering_it() {
     assert_eq!(a, json!({"ok": true}));
     let b = crate::send::as_agent(
         &AgentId::from("w1"),
-        k.send(vec![Item::new("lead", json!({"type": "note"}))]),
+        k.operator_send(vec![Item::new("lead", json!({"type": "note"}))]),
     )
     .await
     .remove(0)
@@ -281,10 +278,10 @@ async fn await_cancel_releases_held_reports_in_order() {
     let w2 = as_lead(&k, set_args(json!(["w1"]))).await["wait_id"]
         .as_i64()
         .unwrap();
-    wire(&k, "w1", "kernel_state", json!(["await_cancel"]));
+    // `await_cancel` needs no line, and reaches only the caller's own waits
     let foreign = crate::send::as_agent(
         &AgentId::from("w1"),
-        k.send(vec![Item::new(
+        k.operator_send(vec![Item::new(
             "kernel_state",
             json!({"type": "await_cancel", "wait_id": w2}),
         )]),
@@ -349,7 +346,7 @@ async fn await_set_refuses_bad_args() {
     }
     // an operator send has nobody to wake
     let op = k
-        .send(vec![Item::new("kernel_state", set_args(json!(["w1"])))])
+        .operator_send(vec![Item::new("kernel_state", set_args(json!(["w1"])))])
         .await
         .remove(0)
         .result;
@@ -361,27 +358,51 @@ async fn await_set_refuses_bad_args() {
 }
 
 #[tokio::test]
-async fn await_set_is_root_only_and_gated() {
+async fn await_set_needs_no_line_and_waits_only_for_its_caller() {
     let (k, _rec) = fleet(&["w1"]).await;
     // answered by the root alone
-    wire(&k, "lead", "w1", json!(["await_set"]));
     let r = as_lead_to(&k, "w1", set_args(json!(["w1"]))).await;
     assert_eq!(r["reason"], json!("not_here"), "{r}");
-    // a caller with no grant of the verb on the root is refused
+    // a worker with no line on the root opens a wait of its own, on its parent
     let r = crate::send::as_agent(
         &AgentId::from("w1"),
-        k.send(vec![Item::new("kernel_state", set_args(json!(["lead"])))]),
+        k.operator_send(vec![Item::new("kernel_state", set_args(json!(["lead"])))]),
     )
     .await
     .remove(0)
     .result;
-    assert_eq!(r["reason"], json!("unauthorized"), "{r}");
+    assert!(r["wait_id"].is_i64(), "{r}");
+    // the wait is w1's: the lead's own cancel does not reach it
+    let wid = r["wait_id"].clone();
+    let other = as_lead(&k, json!({"type": "await_cancel", "wait_id": wid})).await;
+    assert_eq!(other["cancelled"], json!(false), "{other}");
+}
+
+#[tokio::test]
+async fn await_set_on_a_hidden_id_answers_as_a_missing_one() {
+    let (k, _rec) = fleet(&["w1"]).await;
+    mk_agent(&k, "stranger").await;
+    let ask = |ids: Value| {
+        let k = Arc::clone(&k);
+        async move {
+            crate::send::as_agent(
+                &AgentId::from("stranger"),
+                k.operator_send(vec![Item::new("kernel_state", set_args(ids))]),
+            )
+            .await
+            .remove(0)
+            .result
+        }
+    };
+    // w1 sits under the lead: the stranger holds nothing on it
+    assert_eq!(ask(json!(["w1"])).await, crate::refusal::unknown_agent("w1"));
+    assert_eq!(ask(json!(["ghost"])).await, crate::refusal::unknown_agent("ghost"));
 }
 
 async fn as_lead_to(kernel: &Arc<Kernel>, to: &str, payload: Value) -> Value {
     crate::send::as_agent(
         &AgentId::from("lead"),
-        kernel.send(vec![Item::new(to, payload)]),
+        kernel.operator_send(vec![Item::new(to, payload)]),
     )
     .await
     .remove(0)

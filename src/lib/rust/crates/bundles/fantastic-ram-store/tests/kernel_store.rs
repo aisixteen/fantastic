@@ -71,8 +71,7 @@ impl Handler for Probe {
                 self.0.shut.lock().unwrap().push(id.0.clone());
                 // the shutdown dispatch may still use its tools: a nested send
                 // passes the drain
-                let r = kernel
-                    .send(vec![Item::new(
+                let r = kernel.operator_send(vec![Item::new(
                         AgentId::from("kernel"),
                         json!({"type": "ps"}),
                     )])
@@ -115,13 +114,13 @@ fn seeded() -> (Arc<Kernel>, Arc<ProbeState>) {
 }
 
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Outcome {
-    k.send(vec![Item::new(AgentId::from(target), payload)])
+    k.operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
 }
 
 async fn call_named(k: &Arc<Kernel>, target: &str, payload: Value, id: &str) -> Outcome {
-    k.send(vec![Item::new(AgentId::from(target), payload).with_id(id)])
+    k.operator_send(vec![Item::new(AgentId::from(target), payload).with_id(id)])
         .await
         .remove(0)
 }
@@ -136,21 +135,12 @@ async fn mk(k: &Arc<Kernel>, aid: &str, extra: Value) -> String {
         "parent_id": root_id(k),
         "id": aid,
         "handler_module": "mem_probe.tools",
-        "callable_by": {"$parent": "*", "rest": "*", "caller": "*"},
     });
     for (key, v) in extra.as_object().unwrap() {
         p[key] = v.clone();
     }
     let r = call(k, "kernel", p).await.result;
     assert_eq!(r["id"], json!(aid), "{r}");
-    // both ends explicit: every live agent the grant names accepts `aid` back
-    if let Some(cc) = extra.get("can_call").and_then(Value::as_object) {
-        for (key, verbs) in cc {
-            if !key.starts_with('$') && k.resolve_target(key).is_some() {
-                fantastic_kernel::test_support::grant(k, key, "callable_by", aid, verbs.clone());
-            }
-        }
-    }
     aid.to_string()
 }
 
@@ -169,7 +159,7 @@ async fn with_store(k: &Arc<Kernel>, start: bool) {
     assert_eq!(r["id"], json!("memory"), "{r}");
     let mut patch = Map::new();
     patch.insert("memory_store_id".to_string(), json!("memory"));
-    k.update(&AgentId::from(root_id(k)), patch);
+    fantastic_kernel::test_support::update(k, &AgentId::from(root_id(k)), patch);
     if start {
         let out = k.start(false).await;
         assert_eq!(out["started"], json!(true), "{out}");
@@ -177,7 +167,7 @@ async fn with_store(k: &Arc<Kernel>, start: bool) {
 }
 
 fn guid(k: &Arc<Kernel>) -> String {
-    k.root().unwrap().meta.read().unwrap()["guid"]
+    k.root().unwrap().record().meta["guid"]
         .as_str()
         .unwrap()
         .to_string()
@@ -274,8 +264,7 @@ async fn stored_rows_keep_none_and_reduce_bytes_to_a_length() {
     let (k, _) = seeded();
     mk(&k, "probe", json!({})).await;
     with_store(&k, true).await;
-    let out = k
-        .send(vec![Item::new(
+    let out = k.operator_send(vec![Item::new(
             AgentId::from("probe"),
             json!({"type": "work", "none": null}),
         )
@@ -396,7 +385,7 @@ async fn ledger_is_a_projection_of_store_and_ram_scoped_to_the_caller() {
     mk(
         &k,
         "caller",
-        json!({"can_call": {"probe": "*", root_id(&k): ["ledger", "ack_deadletter"]}}),
+        json!({"can": {"probe": {"call": ["*"]}, root_id(&k): {"call": ["ledger", "ack_deadletter"]}}}),
     )
     .await;
     with_store(&k, true).await;
@@ -499,7 +488,7 @@ async fn named_dedup_survives_a_restart_on_the_same_store() {
     let tables = dump(&k).await;
     // PERSIST THE TREE (python `_testkit.persist`): every record at its address.
     for id in k.agent_ids() {
-        let a = k.agents.get(&id).map(|e| Arc::clone(&e)).unwrap();
+        let a = k.resolve_target(id.as_str()).unwrap();
         fantastic_kernel::persistence::write_record_at(&a.agent_file(), &a.record()).unwrap();
     }
     let next = k.rows.next_id();
@@ -532,7 +521,7 @@ async fn a_dead_letter_is_announced_listed_and_acked() {
     mk(
         &k,
         "caller",
-        json!({"can_call": {"probe": "*", root_id(&k): ["ledger", "ack_deadletter"]}}),
+        json!({"can": {"probe": {"call": ["*"]}, root_id(&k): {"call": ["ledger", "ack_deadletter"]}}}),
     )
     .await;
     with_store(&k, true).await;
@@ -764,7 +753,7 @@ async fn a_failed_store_read_in_the_prune_prunes_nothing_and_the_flusher_lives()
     assert_eq!(r["id"], json!("memory"), "{r}");
     let mut patch = Map::new();
     patch.insert("memory_store_id".to_string(), json!("memory"));
-    k.update(&AgentId::from(root_id(&k)), patch);
+    fantastic_kernel::test_support::update(&k, &AgentId::from(root_id(&k)), patch);
     let out = k.start(false).await;
     assert_eq!(out["started"], json!(true), "{out}");
     for _ in 0..5 {
@@ -809,20 +798,20 @@ async fn the_id_counter_reserves_blocks_in_the_root_record() {
     let (k, _) = seeded();
     let root = k.root().unwrap();
     assert!(
-        !root.meta.read().unwrap().contains_key("next_id"),
+        !root.record().meta.contains_key("next_id"),
         "load never edits a record"
     );
     call(&k, &root_id(&k), json!({"type": "boot"})).await;
     with_store(&k, true).await;
     let n = k.mint_id();
-    let bound = root.meta.read().unwrap()["next_id"]
+    let bound = root.record().meta["next_id"]
         .as_i64()
         .expect("start wrote the reserved bound");
     assert!(bound > n);
     for _ in 0..fantastic_kernel::rows::ID_BLOCK {
         k.mint_id();
     }
-    let later = root.meta.read().unwrap()["next_id"].as_i64().unwrap();
+    let later = root.record().meta["next_id"].as_i64().unwrap();
     assert!(later > bound, "a started kernel persists the next block");
     // save → load resumes past the reserved block
     let snap = k.save();

@@ -11,8 +11,8 @@
 //! not carry one — the writer refuses it rather than write two truths that can
 //! disagree.
 //!
-//! `mcp` is never in the blueprint: it is added by code on the `mcp` command. The
-//! writer refuses it too, so the two can never meet.
+//! THE TREE AND ITS LINES ARE THESE RECORDS (grant model v9): every `can` line the
+//! initial tree holds is written here, and no code writes one later.
 
 use serde_json::{Map, Value};
 
@@ -23,21 +23,16 @@ use crate::env::Paths;
 /// The base tree, compiled in so the binary is self-contained.
 pub const BLUEPRINT: &str = include_str!("../../blueprint.yaml");
 
-/// Ids the blueprint may never contain. `mcp` is added by code, on its command.
-const NOT_IN_BLUEPRINT: [&str; 1] = ["mcp"];
-
-/// How a grant in the blueprint names the root. The root's id is the kernel's to
+/// How a line in the blueprint names the root. The root's id is the kernel's to
 /// choose (it changed once already, `core` → `kernel_state`), so the blueprint
 /// never spells it: the writer puts the kernel's own id in its place.
 pub const ROOT_PLACEHOLDER: &str = "@root";
 
-/// Rewrite `@root` to the kernel's root id in the two grant maps.
+/// Rewrite a `@root` target in the record's `can` to the kernel's root id.
 fn resolve_root(record: &mut Map<String, Value>) {
-    for field in ["can_call", "callable_by"] {
-        if let Some(Value::Object(g)) = record.get_mut(field) {
-            if let Some(v) = g.remove(ROOT_PLACEHOLDER) {
-                g.insert(fantastic_kernel::bootstrap::DEFAULT_ROOT_ID.to_string(), v);
-            }
+    if let Some(Value::Object(can)) = record.get_mut("can") {
+        if let Some(v) = can.remove(ROOT_PLACEHOLDER) {
+            can.insert(fantastic_kernel::bootstrap::DEFAULT_ROOT_ID.to_string(), v);
         }
     }
 }
@@ -101,11 +96,6 @@ fn write_level(dir: &std::path::Path, list: &[Value], seen: &mut Written, who: &
                 "blueprint: `{id}` names a parent_id; the directory is the parent"
             ));
         }
-        if NOT_IN_BLUEPRINT.contains(&id) {
-            return Err(format!(
-                "blueprint: `{id}` may not be in the blueprint; it is added by its own command"
-            ));
-        }
         let here = dir.join(id);
         seen.claim(id, &here, who)?;
         std::fs::create_dir_all(&here)
@@ -125,42 +115,15 @@ fn write_level(dir: &std::path::Path, list: &[Value], seen: &mut Written, who: &
     Ok(())
 }
 
-/// Stock agents CODE creates after the seed (not on disk at seed time): a
-/// parent entry naming one declares grants for it, kept until it is made (see
-/// [`crate::boot::declared`]). Each is read by the code that creates it.
-const MADE_BY_CODE: [&str; 1] = [crate::kern::keys::STORE];
-
-/// The grants a parent entry carries, `@root` resolved: only `callable_by` and
-/// `can_call`, each a map.
-fn declared_grants(obj: &Map<String, Value>, id: &str) -> Result<Map<String, Value>, String> {
-    let mut g = Map::new();
-    for f in crate::boot::declared::FIELDS {
-        match obj.get(f) {
-            None => {}
-            Some(v @ Value::Object(_)) => {
-                g.insert(f.to_string(), v.clone());
-            }
-            Some(_) => return Err(format!("blueprint: `{id}.{f}` must be a grant map")),
-        }
-    }
-    resolve_root(&mut g);
-    Ok(g)
-}
-
 /// Write one blueprint's top level. A top entry is a PARENT entry when it names
 ///
 /// - an agent an EARLIER blueprint wrote, or
-/// - the ROOT (`@root`, or the kernel's own root id), or
-/// - a stock agent code creates later ([`MADE_BY_CODE`]).
+/// - the ROOT (`@root`, or the kernel's own root id).
 ///
-/// It carries `id`, `agents:` (written beneath that agent) and the grants
-/// `callable_by` / `can_call`, which are UNIONED into the agent's grants, never
-/// removing or narrowing one. Any other field is refused. An agent written
-/// earlier has its record rewritten with the union; the root and a code-made
-/// agent have no record yet, so their grants are declared for when they are made
-/// ([`crate::boot::declared`]). A code-made agent has no children dir to place
-/// `agents:` under, so it takes grants only.
-fn write_blueprint(cli: &std::path::Path, agents_dir: &std::path::Path, list: &[Value], seen: &mut Written, who: &str) -> Result<(), String> {
+/// It carries `id` and `agents:` (written beneath that agent), nothing else: an
+/// agent's lines are in its own record, written once by whoever writes the
+/// record, and no writer adds a line to another agent's.
+fn write_blueprint(_cli: &std::path::Path, agents_dir: &std::path::Path, list: &[Value], seen: &mut Written, who: &str) -> Result<(), String> {
     let earlier: std::collections::HashSet<String> = seen.ids.keys().cloned().collect();
     let root_id = fantastic_kernel::bootstrap::DEFAULT_ROOT_ID;
     for entry in list {
@@ -168,7 +131,7 @@ fn write_blueprint(cli: &std::path::Path, agents_dir: &std::path::Path, list: &[
             .as_object()
             .and_then(|o| o.get("id"))
             .and_then(Value::as_str)
-            .filter(|id| earlier.contains(*id) || *id == ROOT_PLACEHOLDER || *id == root_id || MADE_BY_CODE.contains(id));
+            .filter(|id| earlier.contains(*id) || *id == ROOT_PLACEHOLDER || *id == root_id);
         let Some(id) = id else {
             write_level(agents_dir, std::slice::from_ref(entry), seen, who)?;
             continue;
@@ -176,33 +139,16 @@ fn write_blueprint(cli: &std::path::Path, agents_dir: &std::path::Path, list: &[
         let obj = entry.as_object().expect("an entry with an id is a map");
         let is_root = id == ROOT_PLACEHOLDER || id == root_id;
         let first = seen.ids.get(id).map_or_else(|| "the kernel".to_string(), |(_, f)| f.clone());
-        if let Some(extra) = obj.keys().find(|k| !matches!(k.as_str(), "id" | "agents" | "callable_by" | "can_call")) {
+        if let Some(extra) = obj.keys().find(|k| !matches!(k.as_str(), "id" | "agents")) {
             return Err(format!(
-                "blueprint: `{id}` in {who} is already written by {first}; as a parent it may carry only `id`, `agents`, `callable_by` and `can_call`, not `{extra}`"
+                "blueprint: `{id}` in {who} is already written by {first}; as a parent it may carry only `id` and `agents`, not `{extra}`"
             ));
-        }
-        let grants = declared_grants(obj, id)?;
-        if !grants.is_empty() {
-            match seen.ids.get(id) {
-                Some((at, _)) => {
-                    let f = at.join("agent.yaml");
-                    let Value::Object(mut rec) = crate::atomic::read_yaml(&f)? else {
-                        return Err(format!("{}: not a map", f.display()));
-                    };
-                    crate::boot::declared::union_record(&mut rec, &grants);
-                    atomic::write_yaml(&f, &Value::Object(rec))?;
-                }
-                None => crate::boot::declared::declare(cli, if is_root { root_id } else { id }, &grants)?,
-            }
         }
         let under = if is_root {
             agents_dir.to_path_buf()
         } else if let Some((at, _)) = seen.ids.get(id) {
             at.join("agents")
         } else {
-            if obj.contains_key("agents") {
-                return Err(format!("blueprint: `{id}` in {who} is made by code later; it takes grants, not `agents`"));
-            }
             continue;
         };
         match obj.get("agents") {
@@ -236,17 +182,14 @@ pub fn seed_dir(state: &std::path::Path) -> Result<bool, String> {
 }
 
 /// [`seed_dir`] plus an embedder's own blueprints, written after the stock one,
-/// in order, by the same writer and under the same rules (no `parent_id`, no
-/// `mcp`, `@root` resolved, disk position is the parent). Ids land as written.
+/// in order, by the same writer and under the same rules (no `parent_id`,
+/// `@root` resolved, disk position is the parent). Ids land as written.
 ///
-/// A top entry whose id an earlier blueprint wrote is a parent entry: `id`,
-/// `agents:` (written beneath that agent) and the grants `callable_by` /
-/// `can_call`, which are merged into the agent's as a union per key (a stock
-/// grant is never removed or narrowed; `@root` is resolved). The root (`@root`)
-/// and the stock agents code creates later (the credential store) take the same
-/// entry: their grants are kept and applied when the agent is made, and stay
-/// across later boots. Any other field on a parent entry is refused, and so is
-/// any other reuse of an earlier id, naming both writers. On a refusal the tree
+/// A top entry whose id an earlier blueprint wrote (or the root, `@root`) is a
+/// parent entry: `id` and `agents:` (written beneath that agent). Lines live in
+/// each agent's own record, so a parent entry adds none. Any other field on a
+/// parent entry is refused, and so is any other reuse of an earlier id, naming
+/// both writers. On a refusal the tree
 /// written so far stays on disk.
 pub fn seed_dir_with(state: &std::path::Path, blueprints: &[&str]) -> Result<bool, String> {
     if state.exists() {
@@ -316,7 +259,7 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         lvl1.sort();
-        assert_eq!(lvl1, vec!["kernel_memory", "sidebar", USER]);
+        assert_eq!(lvl1, vec!["kernel_memory", USER]);
 
         // Under `user`: exactly these, NESTED under it, which is what makes them
         // its children — the kernel reads the parent off the directory.
@@ -326,7 +269,10 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         inset.sort();
-        assert_eq!(inset, vec!["exec", "files", "memory", "store"]);
+        assert_eq!(
+            inset,
+            vec!["canvas_root", "credentials", "exec", "files", "home", "memory", "store", "term", "web"]
+        );
 
         assert!(
             p.store.exists(),
@@ -351,18 +297,119 @@ mod tests {
         assert_eq!(mem["admins"], json!(["kernel"]));
     }
 
+    /// Every record the writer put on disk: `id → (parent id, can)`, the parent read off
+    /// the directory it sits in (`None` for a level-one record: the kernel's root).
+    fn tree(p: &Paths) -> std::collections::BTreeMap<String, (Option<String>, Value)> {
+        fn walk(
+            dir: &std::path::Path,
+            parent: Option<&str>,
+            out: &mut std::collections::BTreeMap<String, (Option<String>, Value)>,
+        ) {
+            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            for e in rd.filter_map(Result::ok) {
+                let id = e.file_name().to_string_lossy().into_owned();
+                let r = crate::atomic::read_yaml(&e.path().join("agent.yaml")).unwrap_or_else(|e| panic!("{e}"));
+                out.insert(id.clone(), (parent.map(str::to_string), r.get("can").cloned().unwrap_or(Value::Null)));
+                walk(&e.path().join("agents"), Some(&id), out);
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(&p.store.join("agents"), None, &mut out);
+        out
+    }
+
     #[test]
-    fn the_sidebar_is_seeded_once_under_the_root_as_a_sidebar_tools_agent() {
-        let p = sandbox("sidebar");
-        assert_eq!(seed_dir(&p.store), Ok(true));
-        let r = rec(&p, "sidebar/agent.yaml");
-        assert_eq!(r["handler_module"], json!(crate::kern::sidebar::HANDLER_MODULE));
-        assert_eq!(r["callable_by"]["user"], "*");
-        assert!(r.get("view").is_none(), "the view comes from its reflect, not a record field");
-        let before = snapshot(&p.store);
-        assert_eq!(seed_dir(&p.store), Ok(false));
-        assert_eq!(snapshot(&p.store), before, "a second seed changes nothing");
+    fn the_seeded_tree_and_its_lines_are_the_initial_tree() {
+        let p = sandbox("initial");
+        write_all(&p).unwrap();
+        let star = json!({"create": {"who": ["*"], "what": "*"}});
+        let none = Value::Null;
+        let expect: Vec<(&str, Option<&str>, Value)> = vec![
+            ("kernel_memory", None, none.clone()),
+            (USER, None, json!({"credentials": {"call": ["get"]}})),
+            ("store", Some(USER), none.clone()),
+            ("prompt_file", Some("store"), json!({"$parent": {"call": ["read", "watch_path", "unwatch_path"]}})),
+            ("memory", Some(USER), none.clone()),
+            ("credentials", Some(USER), none.clone()),
+            ("files", Some(USER), none.clone()),
+            ("static_files", Some("files"), json!({"$parent": {"call": ["list", "watch_path", "unwatch_path"]}})),
+            ("exec", Some(USER), none.clone()),
+            ("home", Some(USER), none.clone()),
+            ("term", Some(USER), none.clone()),
+            (
+                "web",
+                Some(USER),
+                json!({
+                    "canvas_root": star.clone(),
+                    "files": {"call": ["read", "list", "write"]},
+                    "static_files": {"call": ["read", "list"]},
+                }),
+            ),
+            (
+                "canvas_ws",
+                Some("web"),
+                json!({"canvas_root": star.clone(), "files": {"call": ["read", "list", "write"]}}),
+            ),
+            ("canvas_page", Some("web"), json!({"static_files": {"call": ["read", "list"]}})),
+            ("mcp", Some("web"), json!({"canvas_root": star.clone()})),
+            ("mcp_config", Some("mcp"), none.clone()),
+            (
+                "canvas_root",
+                Some(USER),
+                json!({
+                    "canvas_root": {"create": {"who": ["*"], "what": {"ai_chat.tools": {"model": "*"}, "canvas.tools": {}}}},
+                    "memory": {"call": ["append", "read"]},
+                    "prompt_file": {"call": ["read"]},
+                    "credentials": {"call": ["get"]},
+                }),
+            ),
+            ("web_loader", Some("canvas_root"), none.clone()),
+            (
+                "canvas_garage",
+                Some("canvas_root"),
+                json!({
+                    "credentials": {"call": ["get"]},
+                    "memory": {"call": ["append", "read"]},
+                    "canvas_garage": {"create": {"who": ["*"], "what": {
+                        "ai_chat.tools": {"model": "*"},
+                        "exec_bridge.tools": {"allowed": "*"},
+                        "file_bridge.tools": {"root": "*"},
+                        "anthropic_backend.tools": {"can": {"credentials": {"call": ["get"]}}, "endpoint": "*", "model": "*"},
+                    }}},
+                }),
+            ),
+            ("canvas_garage_loader", Some("canvas_garage"), none.clone()),
+        ];
+        let want: std::collections::BTreeMap<String, (Option<String>, Value)> = expect
+            .into_iter()
+            .map(|(id, parent, can)| (id.to_string(), (parent.map(str::to_string), can)))
+            .collect();
+        assert_eq!(tree(&p), want);
         let _ = std::fs::remove_dir_all(&p.work);
+    }
+
+    #[test]
+    fn the_sidebar_is_not_in_the_tree() {
+        let p = sandbox("sidebar");
+        write_all(&p).unwrap();
+        assert!(!tree(&p).contains_key("sidebar"), "its bundle stays; no agent of it is seeded");
+        let _ = std::fs::remove_dir_all(&p.work);
+    }
+
+    /// The `agent.yaml` of `id`, wherever it sits.
+    fn walk_to(p: &Paths, id: &str) -> std::path::PathBuf {
+        fn find(dir: &std::path::Path, id: &str) -> Option<std::path::PathBuf> {
+            for e in std::fs::read_dir(dir).ok()?.filter_map(Result::ok) {
+                if e.file_name().to_string_lossy() == id {
+                    return Some(e.path().join("agent.yaml"));
+                }
+                if let Some(f) = find(&e.path().join("agents"), id) {
+                    return Some(f);
+                }
+            }
+            None
+        }
+        find(&p.store.join("agents"), id).unwrap_or_else(|| panic!("{id} is on disk"))
     }
 
     #[test]
@@ -380,17 +427,9 @@ mod tests {
     fn no_record_carries_a_parent_id_because_the_directory_is_the_parent() {
         let p = sandbox("noparent");
         write_all(&p).unwrap();
-        for r in [
-            "user/agent.yaml",
-            "user/agents/memory/agent.yaml",
-            "user/agents/store/agent.yaml",
-            "user/agents/exec/agent.yaml",
-            "user/agents/files/agent.yaml",
-        ] {
-            assert!(
-                rec(&p, r).get("parent_id").is_none(),
-                "{r} names a parent twice"
-            );
+        for (id, _) in tree(&p) {
+            let r = crate::atomic::read_yaml(&walk_to(&p, &id)).unwrap();
+            assert!(r.get("parent_id").is_none(), "{id} names a parent twice");
         }
         let _ = std::fs::remove_dir_all(&p.work);
     }
@@ -404,7 +443,7 @@ mod tests {
         // Both halves are needed: an unsealed leg with no `allowed` runs nothing,
         // and `allowed` on a sealed leg never gets asked.
         assert_eq!(e["ingress_rule"], "allow_all_ingress");
-        assert_eq!(e["callable_by"]["user"], "*");
+        assert!(e.get("can").is_none(), "exec holds no lines");
         let _ = std::fs::remove_dir_all(&p.work);
     }
 
@@ -415,19 +454,20 @@ mod tests {
         let f = rec(&p, "user/agents/files/agent.yaml");
         assert_eq!(f["root"], ".");
         assert_eq!(f["ingress_rule"], "allow_all_ingress");
+        // inclusion-only: no `.` entry and nothing under the state folder
+        for a in f["allow"].as_array().expect("an allow list") {
+            let a = a.as_str().unwrap();
+            assert!(a != "." && !a.starts_with(".fantastic"), "{a} exposes the state folder");
+        }
         let _ = std::fs::remove_dir_all(&p.work);
     }
 
     #[test]
-    fn the_human_is_granted_every_agent_it_must_drive() {
-        // The born-with baseline is {$self} alone: without these names the
-        // human can call nothing, not even its own children.
+    fn the_human_holds_only_the_key_line_of_the_cap_chain() {
         let p = sandbox("grants");
         write_all(&p).unwrap();
         let u = rec(&p, "user/agent.yaml");
-        for id in ["exec", "files", "memory", "sidebar", "store", ROOT_ID] {
-            assert_eq!(u["can_call"][id], "*", "the human cannot reach {id}");
-        }
+        assert_eq!(u["can"], json!({"credentials": {"call": ["get"]}}));
         let _ = std::fs::remove_dir_all(&p.work);
     }
 
@@ -436,32 +476,6 @@ mod tests {
         let p = sandbox("noroster");
         write_all(&p).unwrap();
         assert!(!p.store.join("kernel.yaml").exists(), "every agent is a record under agents/");
-        let _ = std::fs::remove_dir_all(&p.work);
-    }
-
-    #[test]
-    fn the_shipped_blueprint_never_contains_mcp() {
-        let text = BLUEPRINT;
-        let list = entries(text).unwrap();
-        fn ids(v: &[Value], out: &mut Vec<String>) {
-            for e in v {
-                out.push(e["id"].as_str().unwrap_or("").to_string());
-                if let Some(Value::Array(k)) = e.get("agents") {
-                    ids(k, out);
-                }
-            }
-        }
-        let mut all = Vec::new();
-        ids(&list, &mut all);
-        assert!(!all.iter().any(|i| i == "mcp"), "mcp is added by code, not the blueprint");
-    }
-
-    #[test]
-    fn a_blueprint_naming_mcp_is_refused() {
-        let p = sandbox("nomcp");
-        let err = write_from(&p.store, &["agents:\n  - id: mcp\n    handler_module: web_mcp.tools\n"])
-            .unwrap_err();
-        assert!(err.contains("mcp"), "{err}");
         let _ = std::fs::remove_dir_all(&p.work);
     }
 
@@ -490,12 +504,13 @@ mod tests {
     }
 
     #[test]
-    fn a_root_grant_is_written_as_the_kernels_own_root_id() {
+    fn a_root_line_is_written_as_the_kernels_own_root_id() {
         let p = sandbox("root_id");
-        write_all(&p).unwrap();
-        let u = rec(&p, "user/agent.yaml");
-        assert!(u["can_call"].get(ROOT_PLACEHOLDER).is_none(), "the placeholder never reaches disk");
-        assert_eq!(u["can_call"][ROOT_ID], "*");
+        write_from(&p.store, &["agents:\n  - id: x\n    handler_module: ram_store.tools\n    can:\n      '@root': {call: [reflect]}\n"])
+            .unwrap();
+        let x = rec(&p, "x/agent.yaml");
+        assert!(x["can"].get(ROOT_PLACEHOLDER).is_none(), "the placeholder never reaches disk");
+        assert_eq!(x["can"][ROOT_ID], json!({"call": ["reflect"]}));
         let _ = std::fs::remove_dir_all(&p.work);
     }
 
@@ -525,7 +540,7 @@ mod tests {
         write_all(&b).unwrap();
         let (sa, sb) = (snapshot(&a.store), snapshot(&b.store));
         assert_eq!(sa, sb);
-        for k in ["kernel_memory", "sidebar", "user", "user/agents/memory", "user/agents/store", "user/agents/exec", "user/agents/files"] {
+        for k in ["kernel_memory", "user", "user/agents/memory", "user/agents/store", "user/agents/exec", "user/agents/files", "user/agents/web", "user/agents/canvas_root"] {
             assert!(sa.contains_key(&format!("agents/{k}/agent.yaml")), "{k}");
         }
         assert!(!sa.contains_key("agent.yaml"), "the kernel owns the root record");
@@ -589,96 +604,31 @@ mod tests {
         write_all(&plain).unwrap();
         let (p, r) = seed_with(
             "emb_parent",
-            "agents:\n  - id: user\n    agents:\n      - id: probe2\n        handler_module: ram_store.tools\n        can_call:\n          '@root': '*'\n",
+            "agents:\n  - id: user\n    agents:\n      - id: probe2\n        handler_module: ram_store.tools\n        can:\n          '@root': {call: ['*']}\n",
         );
         assert_eq!(r, Ok(true));
         let kid = rec(&p, "user/agents/probe2/agent.yaml");
         assert_eq!(kid["id"], "probe2");
-        assert!(kid["can_call"].get(ROOT_PLACEHOLDER).is_none());
-        assert_eq!(kid["can_call"][ROOT_ID], "*");
+        assert!(kid["can"].get(ROOT_PLACEHOLDER).is_none());
+        assert_eq!(kid["can"][ROOT_ID], json!({"call": ["*"]}));
         assert_eq!(rec(&p, "user/agent.yaml"), rec(&plain, "user/agent.yaml"));
         let _ = std::fs::remove_dir_all(&p.work);
         let _ = std::fs::remove_dir_all(&plain.work);
     }
 
-    fn grants(p: &Paths) -> Value {
-        crate::atomic::read_yaml(&p.cli.join("grants.yaml")).unwrap_or_else(|e| panic!("{e}"))
-    }
-
     #[test]
-    fn a_parent_entry_unions_its_grants_into_the_stock_record() {
-        let plain = sandbox("emb_union_plain");
-        write_all(&plain).unwrap();
-        let (p, r) = seed_with(
-            "emb_union",
-            "agents:\n  - id: user\n    callable_by:\n      probe: '*'\n      exec: [run]\n      '@root': '*'\n    can_call:\n      memory: [get]\n      probe: [ping]\n",
-        );
-        assert_eq!(r, Ok(true));
-        let (was, now) = (rec(&plain, "user/agent.yaml"), rec(&p, "user/agent.yaml"));
-        // added
-        assert_eq!(now["callable_by"]["probe"], "*");
-        assert_eq!(now["callable_by"][ROOT_ID], "*");
-        assert!(now["callable_by"].get(ROOT_PLACEHOLDER).is_none());
-        assert_eq!(now["can_call"]["probe"], json!(["ping"]));
-        // never narrowed or removed: stock `"*"` stays against a verb list
-        assert_eq!(now["callable_by"]["exec"], "*");
-        assert_eq!(now["callable_by"]["files"], "*");
-        assert_eq!(now["can_call"]["memory"], "*");
-        assert_eq!(now["can_call"]["store"], was["can_call"]["store"]);
-        let _ = std::fs::remove_dir_all(&p.work);
-        let _ = std::fs::remove_dir_all(&plain.work);
-    }
-
-    #[test]
-    fn a_parent_entry_widens_a_verb_list_across_blueprints() {
-        let p = sandbox("emb_widen");
-        let first = "agents:\n  - id: probe\n    handler_module: ram_store.tools\n    callable_by:\n      user: [a]\n";
-        let second = "agents:\n  - id: probe\n    callable_by:\n      user: [b]\n    agents:\n      - id: kid\n        handler_module: ram_store.tools\n";
-        assert_eq!(seed_dir_with(&p.store, &[first, second]), Ok(true));
-        assert_eq!(rec(&p, "probe/agent.yaml")["callable_by"]["user"], json!(["a", "b"]));
-        assert_eq!(rec(&p, "probe/agent.yaml")["handler_module"], "ram_store.tools");
-        assert_eq!(rec(&p, "probe/agents/kid/agent.yaml")["id"], "kid");
-        let _ = std::fs::remove_dir_all(&p.work);
-    }
-
-    #[test]
-    fn a_root_parent_entry_declares_its_grants_and_places_children_under_the_root() {
+    fn a_parent_entry_carries_only_id_and_agents() {
         let (p, r) = seed_with(
             "emb_root",
-            "agents:\n  - id: '@root'\n    callable_by:\n      '@root': '*'\n      user: [get]\n    agents:\n      - id: probe\n        handler_module: ram_store.tools\n  - id: kernel_state\n    can_call:\n      user: '*'\n",
+            "agents:\n  - id: '@root'\n    agents:\n      - id: probe\n        handler_module: ram_store.tools\n",
         );
         assert_eq!(r, Ok(true));
         assert_eq!(rec(&p, "probe/agent.yaml")["id"], "probe");
-        let g = grants(&p);
-        assert_eq!(g[ROOT_ID]["callable_by"], json!({ROOT_ID: "*", "user": ["get"]}));
-        assert_eq!(g[ROOT_ID]["can_call"], json!({"user": "*"}));
         assert!(!p.store.join("agent.yaml").exists(), "the root record stays the kernel's");
         let _ = std::fs::remove_dir_all(&p.work);
-    }
-
-    #[test]
-    fn grants_for_the_code_made_store_are_declared_not_written_as_an_agent() {
-        let (p, r) = seed_with("emb_creds", "agents:\n  - id: credentials\n    callable_by:\n      probe: [get]\n");
-        assert_eq!(r, Ok(true));
-        assert_eq!(grants(&p)["credentials"]["callable_by"], json!({"probe": ["get"]}));
-        assert!(!p.store.join("agents/credentials").exists());
-        let _ = std::fs::remove_dir_all(&p.work);
-        for bad in [
-            "agents:\n  - id: credentials\n    handler_module: x\n",
-            "agents:\n  - id: credentials\n    agents: []\n",
-            "agents:\n  - id: user\n    callable_by: [x]\n",
-        ] {
-            let (p, r) = seed_with("emb_creds_bad", bad);
-            assert!(r.is_err(), "{bad}");
-            let _ = std::fs::remove_dir_all(&p.work);
-        }
-    }
-
-    #[test]
-    fn no_grants_declared_means_no_grants_file() {
-        let (p, r) = seed_with("emb_nogrants", "agents:\n  - id: probe\n    handler_module: ram_store.tools\n");
-        assert_eq!(r, Ok(true));
-        assert!(!p.cli.join("grants.yaml").exists());
+        // a line on a stock agent's record is that record's: no parent entry adds one
+        let (p, r) = seed_with("emb_line", "agents:\n  - id: user\n    can:\n      probe: {call: [ping]}\n");
+        assert!(r.is_err(), "{r:?}");
         let _ = std::fs::remove_dir_all(&p.work);
     }
 
@@ -725,13 +675,10 @@ mod tests {
     }
 
     #[test]
-    fn an_embedder_blueprint_naming_parent_id_or_mcp_is_refused() {
+    fn an_embedder_blueprint_naming_parent_id_is_refused() {
         let (p, r) = seed_with("emb_pid", "agents:\n  - id: x\n    parent_id: core\n");
         assert!(r.unwrap_err().contains("parent_id"));
-        let (q, r) = seed_with("emb_mcp", "agents:\n  - id: mcp\n");
-        assert!(r.unwrap_err().contains("mcp"));
         let _ = std::fs::remove_dir_all(&p.work);
-        let _ = std::fs::remove_dir_all(&q.work);
     }
 
     #[test]

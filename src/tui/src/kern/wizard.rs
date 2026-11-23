@@ -25,7 +25,7 @@ pub struct KeyIn {
 
 /// The first free agent id for `name`: itself, else `<name>-2`, `<name>-3`…
 pub fn free_id(host: &Host, name: &str) -> String {
-    let taken = |id: &str| host.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(id));
+    let taken = |id: &str| host.kernel.exists(id);
     if !taken(name) {
         return name.to_string();
     }

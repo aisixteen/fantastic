@@ -44,8 +44,8 @@ impl Fixture {
     }
 }
 
-/// python `_mk`: a kernel with a guid, four plain agents granted `creds`, and the
-/// store (file under the temp dir) whose `callable_by` names them.
+/// python `_mk`: a kernel with a guid, four plain agents each holding a line on
+/// `creds`, and the store (file under the temp dir).
 async fn mk(meta: Value) -> Fixture {
     let keychain = Arc::new(MemoryKeychain::default());
     let mut reg = BundleRegistry::new();
@@ -64,13 +64,13 @@ async fn mk(meta: Value) -> Fixture {
     let root = k.root().expect("root");
     let mut g = Map::new();
     g.insert("guid".into(), json!("g1"));
-    k.update(&root.id, g);
+    fantastic_kernel::test_support::update(&k, &root.id, g);
     for aid in ["alice", "bob", "eve", "maker"] {
-        k.register(Agent::new(
+        fantastic_kernel::test_support::register(&k, Agent::new(
             AgentId::from(aid),
             None,
             Some(root.id.clone()),
-            json!({"can_call": {"creds": "*"}})
+            json!({"can": {"creds": {"call": ["*"]}}})
                 .as_object()
                 .cloned()
                 .unwrap(),
@@ -82,14 +82,12 @@ async fn mk(meta: Value) -> Fixture {
     let mut create = json!({
         "type": "create_agent", "parent_id": root.id.0,
         "handler_module": HANDLER_MODULE, "id": "creds",
-        "callable_by": {"alice": "*", "bob": "*", "eve": "*", "maker": "*"},
         "file": tmp.path().join("creds.yaml").to_string_lossy(),
     });
     for (key, v) in meta.as_object().cloned().unwrap_or_default() {
         create[key] = v;
     }
-    let rec = k
-        .send(vec![Item::new(AgentId::from("kernel"), create)])
+    let rec = k.operator_send(vec![Item::new(AgentId::from("kernel"), create)])
         .await
         .remove(0)
         .result;
@@ -101,8 +99,8 @@ async fn mk(meta: Value) -> Fixture {
 async fn call(k: &Arc<Kernel>, payload: Value, as_: Option<&str>) -> Outcome {
     let item = Item::new(AgentId::from("creds"), payload);
     match as_ {
-        None => k.send(vec![item]).await.remove(0),
-        Some(who) => as_agent(AgentId::from(who), k.send(vec![item]))
+        None => k.operator_send(vec![item]).await.remove(0),
+        Some(who) => as_agent(AgentId::from(who), k.operator_send(vec![item]))
             .await
             .remove(0),
     }
@@ -117,7 +115,7 @@ fn store_meta(k: &Kernel, key: &str) -> Value {
 
 /// The kernel's own answer to an operator call.
 async fn op(k: &Arc<Kernel>, payload: Value) -> Value {
-    k.send(vec![Item::new(AgentId::from("kernel"), payload)])
+    k.operator_send(vec![Item::new(AgentId::from("kernel"), payload)])
         .await
         .remove(0)
         .result
@@ -501,7 +499,7 @@ async fn the_file_is_an_absolute_path_a_relative_one_is_refused() {
             r["error"].as_str().unwrap().contains("must be string matching"),
             "{rel}: {r}"
         );
-        assert!(!k.agents.contains_key(&AgentId::from("rel")));
+        assert!(!k.exists("rel"));
     }
     let abs = tmp.path().join("creds.yaml").to_string_lossy().to_string();
     let made = op(
@@ -775,7 +773,7 @@ async fn another_store_sharing_the_file_reads_nothing_for_its_host() {
     .await;
     assert_eq!(made["id"], json!("other"), "{made}");
     let out =
-        f.k.send(vec![Item::new(
+        f.k.operator_send(vec![Item::new(
             AgentId::from("other"),
             json!({"type": "get", "ref": "openai/main", "host": "blocked.invalid"}),
         )])
@@ -854,7 +852,7 @@ async fn a_bad_record_is_refused_at_the_write() {
     let f = mk(json!({})).await;
     let root = f.k.root().unwrap().id.clone();
     let r =
-        f.k.send(vec![Item::new(
+        f.k.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": root.0,
                    "handler_module": HANDLER_MODULE, "id": "bad", "backend": "vault"}),
@@ -970,7 +968,7 @@ async fn concurrent_sets_lose_no_ref() {
             )
         })
         .collect();
-    for out in f.k.send(items).await {
+    for out in f.k.operator_send(items).await {
         assert_eq!(out.result["stored"], json!(true), "{}", out.result);
     }
     assert_eq!(store_meta(&f.k, "refs").as_object().unwrap().len(), 16);
@@ -998,7 +996,7 @@ async fn a_set_and_a_get_leave_the_value_in_no_row_event_or_store() {
     assert_eq!(made["id"], json!("memory"), "{made}");
     let mut patch = Map::new();
     patch.insert("memory_store_id".to_string(), json!("memory"));
-    f.k.update(&root, patch);
+    fantastic_kernel::test_support::update(&f.k, &root, patch);
     // the flusher runs only on a started kernel
     let started = f.k.start(false).await;
     assert_eq!(started["started"], json!(true), "{started}");
@@ -1009,7 +1007,7 @@ async fn a_set_and_a_get_leave_the_value_in_no_row_event_or_store() {
     // reply's secret mark decide whether the value reaches a row.
     let got = as_agent(
         AgentId::from("alice"),
-        f.k.send(vec![Item::new(
+        f.k.operator_send(vec![Item::new(
             AgentId::from("creds"),
             json!({"type": "get", "ref": "openai/main"}),
         )
@@ -1023,8 +1021,7 @@ async fn a_set_and_a_get_leave_the_value_in_no_row_event_or_store() {
 
     // the memory store holds no value: its whole dump is free of KEY
     let dumped = f
-        .k
-        .send(vec![Item::new(AgentId::from("memory"), json!({"type": "dump"}))])
+        .k.operator_send(vec![Item::new(AgentId::from("memory"), json!({"type": "dump"}))])
         .await
         .remove(0)
         .result
@@ -1038,8 +1035,7 @@ async fn a_set_and_a_get_leave_the_value_in_no_row_event_or_store() {
     // the `ledger` verb — the kernel's own read of those rows — shows the get's
     // outcome with the mark, never the value
     let ledger = f
-        .k
-        .send(vec![Item::new(AgentId::from("kernel"), json!({"type": "ledger"}))])
+        .k.operator_send(vec![Item::new(AgentId::from("kernel"), json!({"type": "ledger"}))])
         .await
         .remove(0)
         .result
@@ -1062,8 +1058,8 @@ async fn a_gate_refused_set_leaves_no_value_in_any_row() {
     use fantastic_kernel::test_support::rows_about;
     let f = mk(json!({})).await;
     seed(&f.k).await;
-    // a registered agent with no grants: the store's callable_by does not name it
-    f.k.register(Agent::new(
+    // a registered agent with no line on the store
+    fantastic_kernel::test_support::register(&f.k, Agent::new(
         AgentId::from("stranger"),
         None,
         Some(AgentId::from(root_of(&f.k))),

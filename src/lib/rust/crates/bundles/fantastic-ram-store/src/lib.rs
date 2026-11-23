@@ -26,8 +26,11 @@
 //! ```
 //!
 //! ACCESS: a caller reads and writes ONLY its own key (append / read / search /
-//! prune). `inject` / `dump` act on the whole store; they are plain verbs, and the
-//! kernel's call gate decides who may reach this agent — and each verb — at all.
+//! prune). `copy {from, to}` moves rows between two owners only when the kernel's
+//! generic check says the caller may read `from` and holds create or update over
+//! `to` (a fork's prefix). `inject` / `dump` act on the whole store; they are plain
+//! verbs, and the kernel's call gate decides who may reach this agent — and each
+//! verb — at all.
 //!
 //! Ids are the KERNEL's: a row carries the int the kernel minted, or none and this
 //! store takes the next one from the kernel's counter — never an id of its own.
@@ -409,10 +412,11 @@ pub struct RamStoreBundle {
 
 fn guid(kernel: &Arc<Kernel>) -> Option<String> {
     kernel.root().and_then(|r| {
-        r.meta
-            .read()
-            .ok()
-            .and_then(|m| m.get("guid").and_then(Value::as_str).map(str::to_string))
+        r.record()
+            .meta
+            .get("guid")
+            .and_then(Value::as_str)
+            .map(str::to_string)
             .filter(|g| !g.is_empty())
     })
 }
@@ -432,6 +436,27 @@ fn caller(kernel: &Arc<Kernel>) -> Result<(String, String), Value> {
         None => Ok((format!("{g}|{OPERATOR}"), OPERATOR.to_string())),
         Some(origin) => Ok((format!("{g}|{}", origin.0), origin.0)),
     }
+}
+
+/// The kernel's word on a `copy`, asked as the caller: it may read `from` (it
+/// holds anything there) and holds create or update over `to`. The kernel knows
+/// agents and levels only; the rows are this store's. Each refusal is the unknown
+/// answer for the id it is about, byte-identical to a missing id. Shared with
+/// every store that answers `copy`.
+///
+/// # Errors
+/// The unknown answer for `from` or `to`.
+pub fn may_copy(kernel: &Kernel, a: &verbs::CopyRows) -> Result<(), Value> {
+    use fantastic_kernel::Held;
+    let asker = fantastic_kernel::current_origin();
+    let (from, to) = (AgentId::from(a.from.as_str()), AgentId::from(a.to.as_str()));
+    if !kernel.holds(asker.as_ref(), Held::Call, &from) {
+        return Err(fantastic_kernel::unknown_agent(from.as_str()));
+    }
+    if !kernel.holds(asker.as_ref(), Held::Update, &to) {
+        return Err(fantastic_kernel::unknown_agent(to.as_str()));
+    }
+    Ok(())
 }
 
 // ─── folds ─────────────────────────────────────────────────────────
@@ -736,6 +761,61 @@ impl RamStoreBundle {
         }
     }
 
+    fn copy(&self, id: &AgentId, a: &verbs::CopyRows, kernel: &Arc<Kernel>) -> Value {
+        if let Err(r) = caller(kernel) {
+            return r;
+        }
+        if let Err(r) = may_copy(kernel, a) {
+            return r;
+        }
+        let g = guid(kernel).unwrap_or_default();
+        let (from, to) = (format!("{g}|{}", a.from), format!("{g}|{}", a.to));
+        self.with_tables(id, |t| {
+            let mut ids = t.ids(&from);
+            if let Some(want) = &a.ids {
+                let wanted: HashSet<i64> = want.iter().copied().collect();
+                ids.retain(|i| wanted.contains(i));
+            }
+            let batch: HashSet<i64> = ids.iter().copied().collect();
+            for rid in &ids {
+                if t.has(&to, *rid) {
+                    let mut e = refusal(
+                        EXISTS,
+                        format!("copy: row {rid} already exists for {}", a.to),
+                    );
+                    with(&mut e, "id", json!(rid));
+                    return e;
+                }
+            }
+            let rows: Vec<Row> = ids.iter().filter_map(|i| t.get(&from, *i)).collect();
+            for r in &rows {
+                let Some(list) = row_refs(r) else {
+                    continue;
+                };
+                let rid = r.get("id").and_then(Value::as_i64).unwrap_or(0);
+                let missing_refs: Vec<Value> = list
+                    .iter()
+                    .filter(|m| !as_id(m).is_some_and(|i| t.has(&to, i) || batch.contains(&i)))
+                    .cloned()
+                    .collect();
+                if !missing_refs.is_empty() {
+                    let mut e = refusal(
+                        NOT_FOUND,
+                        format!(
+                            "copy: row {rid} refs rows that are not copied: {}",
+                            py_repr_value(&Value::Array(missing_refs))
+                        ),
+                    );
+                    with(&mut e, "arg", json!("ids"));
+                    return e;
+                }
+            }
+            let n = rows.len();
+            t.insert(&to, rows);
+            json!({"ids": ids, "copied": n})
+        })
+    }
+
     fn inject(&self, id: &AgentId, a: &verbs::Inject) -> Value {
         let t = match load_tables(&a.tables) {
             Ok(t) => t,
@@ -795,6 +875,24 @@ impl Handler for RamStoreBundle {
             Call::Append(a) => {
                 let out = self.append(agent_id, &a, kernel);
                 // one `appended` event per new row; a refusal has no `ids`
+                for id in out
+                    .get("ids")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    kernel
+                        .emit(
+                            agent_id,
+                            json!({"type": "appended", "table": "rows", "id": id}),
+                        )
+                        .await;
+                }
+                out
+            }
+            // one `appended` event per copied row, as `append` publishes
+            Call::CopyRows(a) => {
+                let out = self.copy(agent_id, &a, kernel);
                 for id in out
                     .get("ids")
                     .and_then(Value::as_array)

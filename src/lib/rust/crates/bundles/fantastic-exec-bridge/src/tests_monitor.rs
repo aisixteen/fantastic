@@ -87,7 +87,7 @@ fn python() -> PathBuf {
 }
 
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    k.send(vec![Item::new(AgentId::from(target), payload)])
+    k.operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -122,14 +122,13 @@ async fn setup(tmp: &TempDir) -> (Arc<Kernel>, Ear) {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let r = call(
         &kernel,
         "kernel_state",
         json!({"type": "create_agent", "parent_id": "kernel",
-        "id": ear_id, "handler_module": "monitor_listener_probe.tools",
-        "callable_by": {runner.clone(): "*"}}),
+        "id": ear_id, "handler_module": "monitor_listener_probe.tools"}),
     )
     .await;
     assert_eq!(r["id"], json!(ear_id), "{r}");
@@ -139,7 +138,7 @@ async fn setup(tmp: &TempDir) -> (Arc<Kernel>, Ear) {
         json!({"type": "create_agent", "parent_id": "kernel",
         "id": runner, "handler_module": HANDLER_MODULE, "ingress_rule": "allow_all_ingress",
         "cwd": tmp.path().to_string_lossy(), "inherit_env": ["PATH"], "allowed": [".*"],
-        "can_call": {ear_id.clone(): ["send"]}}),
+        "can": {ear_id.clone(): {"call": ["send"]}}}),
     )
     .await;
     assert_eq!(r["id"], json!(runner), "{r}");
@@ -528,7 +527,8 @@ async fn a_refused_delivery_ends_the_monitor_and_monitors_says_why() {
     let r = call(
         &k,
         "kernel_state",
-        json!({"type": "update_agent", "id": en, "callable_by": {"$self": "*"}}),
+        // the runner's line on the ear goes: its next delivery is refused
+        json!({"type": "update_agent", "id": rn, "can": {}}),
     )
     .await;
     assert_eq!(r["updated"], json!(true), "{r}");
@@ -556,7 +556,8 @@ async fn a_refused_delivery_ends_the_monitor_and_monitors_says_why() {
     assert!(
         m["error"]
             .as_str()
-            .is_some_and(|e| e.contains(&format!("{en} does not accept 'send' from {rn}"))),
+            // a denial is the unknown answer
+            .is_some_and(|e| e.contains(&format!("no agent '{en}'"))),
         "{m}"
     );
     assert_eq!(m["delivered"], json!(0), "{m}");
@@ -583,7 +584,7 @@ async fn a_refused_delivery_ends_the_monitor_and_monitors_says_why() {
         dead,
         vec![
             json!({"type": "monitor_dead", "monitor_id": mid, "job_id": jid,
-            "notify": en, "reason": "unauthorized", "error": m["error"]})
+            "notify": en, "reason": "unknown_agent", "error": m["error"]})
         ],
     );
     // ... and the warning line
@@ -599,7 +600,7 @@ async fn a_refused_delivery_ends_the_monitor_and_monitors_says_why() {
         format!("exec_bridge {rn}: monitor {mid} (job {jid}) dead — {en} refused the delivery: ");
     assert!(
         lines.iter().any(|l| l.starts_with(&want)
-            && l.contains(&format!("{en} does not accept 'send' from {rn}"))),
+            && l.contains(&format!("no agent '{en}'"))),
         "{lines:?}"
     );
     // dead stays dead: later output is not sent

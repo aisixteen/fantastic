@@ -31,7 +31,7 @@ fn seeded() -> Arc<Kernel> {
 }
 
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Outcome {
-    k.send(vec![Item::new(AgentId::from(target), payload)])
+    k.operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
 }
@@ -56,7 +56,7 @@ async fn started() -> Arc<Kernel> {
     assert_eq!(r["id"], json!("memory"), "{r}");
     let mut patch = Map::new();
     patch.insert("memory_store_id".to_string(), json!("memory"));
-    k.update(&AgentId::from(root_id(&k)), patch);
+    fantastic_kernel::test_support::update(&k, &AgentId::from(root_id(&k)), patch);
     let out = k.start(false).await;
     assert_eq!(out["started"], json!(true), "{out}");
     k
@@ -177,7 +177,7 @@ async fn an_id_block_reserved_inside_the_flush_is_quiet() {
     );
     // the bound is on the root record (the loader's writer queues it directly)
     assert_eq!(
-        k.root().unwrap().meta.read().unwrap()["next_id"],
+        k.root().unwrap().record().meta["next_id"],
         json!(k.rows.id_reserved())
     );
     k.remove_state_subscriber(token);

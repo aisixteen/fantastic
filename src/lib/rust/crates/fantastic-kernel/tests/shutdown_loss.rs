@@ -34,11 +34,11 @@ async fn root_with_store(dir: &Path) -> Arc<Kernel> {
         store.clone(),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     wire_fake_store(&kernel, &store).await;
     kernel
-        .send(vec![Item::new(root.id.clone(), json!({"type": "boot"}))])
+        .operator_send(vec![Item::new(root.id.clone(), json!({"type": "boot"}))])
         .await;
     kernel
 }
@@ -52,7 +52,7 @@ async fn a_record_updated_just_before_shutdown_always_lands() {
     let store = tmp.path().join(".fantastic");
     let kernel = root_with_store(tmp.path()).await;
     kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": "kernel_state",
@@ -62,7 +62,7 @@ async fn a_record_updated_just_before_shutdown_always_lands() {
         )])
         .await;
     kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "update_agent", "id": "sp_late",

@@ -510,7 +510,7 @@ pub fn register_root_loader(reg: &mut BundleRegistry) {
 pub async fn boot_root(kernel: &Arc<Kernel>) {
     let Some(root) = kernel.root() else { return };
     let _ = kernel
-        .send(vec![crate::outcome::Item::new(
+        .operator_send(vec![crate::outcome::Item::new(
             root.id.clone(),
             json!({"type": "boot"}),
         )])
@@ -533,7 +533,7 @@ pub fn register_fake_store(reg: &mut BundleRegistry, store_root: &Path) {
 /// it exactly as in production). The bundle must already be registered.
 pub async fn wire_fake_store(kernel: &Arc<Kernel>, store_root: &Path) {
     kernel
-        .send(vec![crate::outcome::Item::new(
+        .operator_send(vec![crate::outcome::Item::new(
             "kernel",
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -558,36 +558,80 @@ pub fn rows_about(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<crate::rows::Row
         .collect()
 }
 
-/// THE ONE GRANT HELPER for tests (minimal access model): the
-/// operator merges `key: verbs` into `holder`'s `field` (`can_call` or
-/// `callable_by`) — every other key kept. Grants are explicit; a test wires the
-/// edges it exercises, both ends, through this.
-pub fn grant(kernel: &Arc<Kernel>, holder: &str, field: &str, key: &str, verbs: Value) {
+/// Put `agent` in `kernel`'s registry, as the operator's hand-edit of the state
+/// folder would: a test driver standing up a tree by hand (the root of a test
+/// kernel, a fixture agent). Product code creates agents with `create_agent`.
+pub fn register(kernel: &Kernel, agent: Arc<crate::Agent>) {
+    kernel.register(agent);
+}
+
+/// [`register`] `agent` and attach it to its parent's children, as a record the
+/// operator placed in the state folder would load (a bare agent, a fixture).
+///
+/// # Panics
+/// When `agent`'s parent is not registered.
+pub fn adopt(kernel: &Kernel, agent: Arc<crate::Agent>) {
+    if let Some(pid) = agent.parent_id.as_ref() {
+        let parent = kernel
+            .resolve_target(pid.as_str())
+            .unwrap_or_else(|| panic!("adopt: no parent {pid}"));
+        parent.add_child(Arc::clone(&agent));
+    }
+    kernel.register(agent);
+}
+
+/// Patch agent `id`'s meta with no check, as kernel bookkeeping does: a test
+/// driver arranging a record. A patch carrying `can` writes nothing (see
+/// [`grant`]). Product code changes fields with `update_agent`.
+pub fn update(
+    kernel: &Kernel,
+    id: &AgentId,
+    patch: Map<String, Value>,
+) -> Option<crate::AgentRecord> {
+    kernel.update(id, patch)
+}
+
+/// Run one kernel bookkeeping call on `agent` (its handler, directly, origin
+/// `None`): a test driver for what the kernel itself calls.
+pub async fn bookkeeping(
+    kernel: &Arc<Kernel>,
+    agent: &Arc<crate::Agent>,
+    payload: Value,
+) -> crate::outcome::Outcome {
+    kernel.bookkeeping(agent, payload, None).await
+}
+
+/// THE ONE GRANT HELPER for tests: the operator sets `holder`'s line on `target`
+/// to `level` (`{call: [..]}`, `{update: [..]}` or `{create: {who, what}}`) —
+/// every other line kept — through [`Kernel::edit_can`]. A line lives in the
+/// caller's record only; the target keeps no list of callers.
+///
+/// # Panics
+/// When `holder` names no agent or the line is outside the legal shape.
+pub fn grant(kernel: &Arc<Kernel>, holder: &str, target: &str, level: Value) {
     let agent = kernel
         .resolve_target(holder)
         .unwrap_or_else(|| panic!("grant: no agent {holder}"));
-    let mut g = agent
-        .meta
-        .read()
-        .expect("meta lock poisoned")
-        .get(field)
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    g.insert(key.to_string(), verbs);
-    let mut patch = serde_json::Map::new();
-    patch.insert(field.to_string(), Value::Object(g));
-    kernel.update(&agent.id, patch);
+    kernel
+        .edit_can(&agent.id, None, |can, _| {
+            can.insert(target.to_string(), level);
+            Ok(true)
+        })
+        .unwrap_or_else(|e| panic!("grant: {holder} -> {target}: {e}"));
 }
 
-/// Both ends of one edge: `sender`'s `can_call` names `target` with `verbs`, and
-/// `target`'s `callable_by` names `sender` with the same.
-pub fn wire(kernel: &Arc<Kernel>, sender: &str, target: &str, verbs: Value) {
-    let t = kernel
-        .resolve_target(target)
-        .unwrap_or_else(|| panic!("wire: no agent {target}"));
-    grant(kernel, sender, "can_call", t.id.as_str(), verbs.clone());
-    grant(kernel, t.id.as_str(), "callable_by", sender, verbs);
+/// The operator drops `holder`'s line on `target` (every other line kept), through
+/// [`Kernel::edit_can`]; whether there was one.
+///
+/// # Panics
+/// When `holder` names no agent.
+pub fn revoke(kernel: &Arc<Kernel>, holder: &str, target: &str) -> bool {
+    let agent = kernel
+        .resolve_target(holder)
+        .unwrap_or_else(|| panic!("revoke: no agent {holder}"));
+    kernel
+        .edit_can(&agent.id, None, |can, _| Ok(can.remove(target).is_some()))
+        .unwrap_or_else(|e| panic!("revoke: {holder} -> {target}: {e}"))
 }
 
 /// The test standing in for `agent`'s HANDLER: the sends `work` makes are that
@@ -595,11 +639,190 @@ pub fn wire(kernel: &Arc<Kernel>, sender: &str, target: &str, verbs: Value) {
 /// identity — the only identity there is). A send made outside it is the
 /// operator's. Python `_testkit.as_agent`. A test driver, never a product path.
 pub async fn as_agent<F: std::future::Future>(agent: impl Into<AgentId>, work: F) -> F::Output {
-    crate::send::as_agent(&agent.into(), work).await
+    // a dispatch carries an origin scope; the agent's caller here is the operator
+    let origin = crate::send::origin_scope().unwrap_or(None);
+    crate::send::CURRENT_ORIGIN
+        .scope(origin, crate::send::as_agent(&agent.into(), work))
+        .await
 }
 
 /// A symlink at `link` pointing at `target`, on every OS — the fixture a test of
 /// the clamp plants (on Windows a typed link, see the kernel's `sys`).
 pub fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) -> std::io::Result<()> {
     crate::sys::symlink(target.as_ref(), link.as_ref())
+}
+
+/// The v9 initial tree (`initial-tree.md`, #754) on `kernel`, by [`crate::Agent::new`]
+/// and [`Kernel::register`]: bundle names only, no handlers, each agent holding the
+/// tree's `can` lines. It also places the Cedar prototype's test agents under
+/// `canvas_root` (`chat_b`, `team_1/{t1_tasks, t1_exec, t1_lead/{t1_w1, t1_w2}}`),
+/// the provider `prov_1` and `exec_1` in the garage, and `github` under `user` as the
+/// target outside the user space.
+pub fn v9_tree(kernel: &Kernel) {
+    let star = json!({"create": {"who": ["*"], "what": "*"}});
+    let chat_cell = |extra: Value| {
+        let mut can = json!({
+            "$parent": {"call": ["send"]},
+            "memory": {"call": ["append", "read"]},
+            "prompt_file": {"call": ["read"]},
+        });
+        if let (Some(c), Value::Object(e)) = (can.as_object_mut(), extra) {
+            c.extend(e);
+        }
+        can
+    };
+    let tree: Vec<(&str, &str, Option<&str>, Value)> = vec![
+        ("kernel_state", "kernel", None, Value::Null),
+        ("kernel_memory", "ledger", Some("kernel_state"), Value::Null),
+        (
+            "user",
+            "user",
+            Some("kernel_state"),
+            json!({"credentials": {"call": ["get"]}}),
+        ),
+        ("store", "store", Some("user"), Value::Null),
+        ("prompt_file", "file", Some("store"), Value::Null),
+        ("memory", "memory", Some("user"), Value::Null),
+        ("credentials", "credentials", Some("user"), Value::Null),
+        ("files", "file", Some("user"), Value::Null),
+        ("static_files", "file", Some("files"), Value::Null),
+        ("exec", "exec", Some("user"), Value::Null),
+        ("home", "home", Some("user"), Value::Null),
+        ("term", "term", Some("user"), Value::Null),
+        (
+            "web",
+            "web",
+            Some("user"),
+            json!({
+                "canvas_root": star.clone(),
+                "files": {"call": ["read", "list", "write"]},
+                "static_files": {"call": ["read", "list"]},
+            }),
+        ),
+        (
+            "canvas_ws",
+            "ws",
+            Some("web"),
+            json!({
+                "canvas_root": star.clone(),
+                "files": {"call": ["read", "list", "write"]},
+            }),
+        ),
+        (
+            "canvas_page",
+            "page",
+            Some("web"),
+            json!({"static_files": {"call": ["read", "list"]}}),
+        ),
+        (
+            "mcp",
+            "mcp",
+            Some("web"),
+            json!({"canvas_root": star.clone()}),
+        ),
+        ("mcp_config", "file", Some("mcp"), Value::Null),
+        (
+            "github",
+            "key_user",
+            Some("user"),
+            json!({"credentials": {"call": ["get"]}}),
+        ),
+        (
+            "canvas_root",
+            "canvas",
+            Some("user"),
+            json!({
+                "canvas_root": {"create": {"who": ["*"], "what": {"chat": {"model": "*"}, "canvas": {}}}},
+                "memory": {"call": ["append", "read"]},
+                "prompt_file": {"call": ["read"]},
+                "credentials": {"call": ["get"]},
+                "github": {"call": ["issues"]},
+            }),
+        ),
+        ("web_loader", "loader", Some("canvas_root"), Value::Null),
+        (
+            "chat_a",
+            "chat",
+            Some("canvas_root"),
+            chat_cell(json!({"prov_1": {"call": ["complete"]}})),
+        ),
+        ("chat_b", "chat", Some("canvas_root"), chat_cell(json!({}))),
+        (
+            "canvas_garage",
+            "canvas",
+            Some("canvas_root"),
+            json!({
+                "credentials": {"call": ["get"]},
+                "memory": {"call": ["append", "read"]},
+                "canvas_garage": {"create": {"who": ["*"], "what": {
+                    "chat": {"model": "*"},
+                    "exec_bridge": {"allowed": "*"},
+                    "file_bridge": {"root": "*"},
+                    "anthropic_backend": {
+                        "can": {"credentials": {"call": ["get"]}},
+                        "endpoint": "*",
+                        "model": "*",
+                    },
+                }}},
+            }),
+        ),
+        (
+            "prov_1",
+            "anthropic_backend",
+            Some("canvas_garage"),
+            json!({"credentials": {"call": ["get"]}}),
+        ),
+        ("exec_1", "exec_bridge", Some("canvas_garage"), Value::Null),
+        (
+            "team_1",
+            "team",
+            Some("canvas_root"),
+            json!({"github": {"call": ["issues"]}}),
+        ),
+        ("t1_tasks", "tasks", Some("team_1"), Value::Null),
+        ("t1_exec", "exec_bridge", Some("team_1"), Value::Null),
+        (
+            "t1_lead",
+            "lead",
+            Some("team_1"),
+            json!({
+                "github": {"call": ["issues"]},
+                "t1_lead": {"create": {"who": ["t1_w*"], "what": {"worker": {}}}},
+            }),
+        ),
+        (
+            "t1_w1",
+            "worker",
+            Some("t1_lead"),
+            json!({"$parent": {"call": ["send"]}}),
+        ),
+        (
+            "t1_w2",
+            "worker",
+            Some("t1_lead"),
+            json!({"$parent": {"call": ["send"]}}),
+        ),
+    ];
+    let mut made: std::collections::HashMap<&str, Arc<crate::Agent>> =
+        std::collections::HashMap::new();
+    for (id, bundle, parent, can) in tree {
+        let mut meta = Map::new();
+        if !can.is_null() {
+            meta.insert("can".to_string(), can);
+        }
+        let agent = crate::Agent::new(
+            AgentId::from(id),
+            Some(bundle.to_string()),
+            parent.map(AgentId::from),
+            meta,
+            PathBuf::new(),
+            true,
+        );
+        match parent {
+            Some(p) => made[p].add_child(Arc::clone(&agent)),
+            None => kernel.set_root(Arc::clone(&agent)),
+        }
+        kernel.register(Arc::clone(&agent));
+        made.insert(id, agent);
+    }
 }

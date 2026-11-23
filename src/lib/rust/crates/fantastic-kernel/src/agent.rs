@@ -83,7 +83,7 @@ pub struct Agent {
     /// Parent id; `None` for the root.
     pub parent_id: Option<AgentId>,
     /// Arbitrary metadata persisted to agent.yaml (display_name, port, root, …).
-    pub meta: std::sync::RwLock<Map<String, Value>>,
+    pub(crate) meta: std::sync::RwLock<Map<String, Value>>,
     /// Direct children, in CREATION ORDER.
     ///
     /// Python's `_children` is a plain dict, so the tree, `tree=ids` and every
@@ -123,7 +123,8 @@ pub const RESERVED_RECORD_KEYS: [&str; 3] = ["root_path", "ctx", "parent"];
 
 impl Agent {
     /// Construct a fresh agent. Caller is responsible for registering
-    /// it in the kernel's `agents` map.
+    /// it in the kernel's `agents` map. `meta` is stored as given: nothing is
+    /// stamped and nothing is inherited (grant model v9).
     ///
     /// `root_path` is the directory that holds (or will hold) this
     /// agent's `agent.yaml` + recursive `agents/` subtree.
@@ -131,29 +132,10 @@ impl Agent {
         id: AgentId,
         handler_module: Option<String>,
         parent_id: Option<AgentId>,
-        mut meta: Map<String, Value>,
+        meta: Map<String, Value>,
         root_path: PathBuf,
         ephemeral: bool,
     ) -> Arc<Self> {
-        // Structural authority baseline, stamped + MERGED on BOTH fields for EVERY
-        // agent that passes through here — the seeded root, a created child, a
-        // disk-loaded record alike (one funnel, so nothing lacks it). `can_call`
-        // (who I may call) and `callable_by` (who may call me) both start as
-        // {$self:*} (`authz::default_can_call`). It MERGES UNDER any explicit grant
-        // already in `meta` (an explicit key overrides a baseline key; idempotent on
-        // reload). Deny-all governs every edge NOT in the merged grant.
-        for (field, base) in [
-            ("can_call", crate::authz::default_can_call()),
-            ("callable_by", crate::authz::default_callable_by()),
-        ] {
-            let mut merged = base;
-            if let Some(Value::Object(explicit)) = meta.get(field).cloned() {
-                for (k, v) in explicit {
-                    merged.insert(k, v);
-                }
-            }
-            meta.insert(field.into(), Value::Object(merged));
-        }
         Arc::new(Self {
             id,
             handler_module,
@@ -169,9 +151,8 @@ impl Agent {
     }
 
     /// The target ONE send resolved `<guid>|<agent id>` to on a connected peer.
-    /// No baseline: it is nobody's parent or child here, and its `callable_by` is
-    /// python's empty map — whether it accepts a call is decided on its own
-    /// kernel.
+    /// It is nobody's parent or child here and holds no lines: whether it accepts
+    /// a call is decided on its own kernel.
     pub(crate) fn remote(qualified: AgentId, remote: crate::peers::RemoteRef) -> Arc<Self> {
         Arc::new(Self {
             id: qualified,
@@ -208,6 +189,7 @@ impl Agent {
     /// Leave a dispatch — python's `max(0, self._in_flight - 1)`, clamped so a
     /// stray drain can never take the counter negative.
     pub(crate) fn in_flight_leave(&self) {
+        #[allow(deprecated)]
         let _ = self.in_flight.fetch_update(
             std::sync::atomic::Ordering::SeqCst,
             std::sync::atomic::Ordering::SeqCst,
@@ -258,7 +240,7 @@ impl Agent {
     }
 
     /// Merge new key/value pairs into meta and return the updated record.
-    pub fn update_meta(&self, patch: Map<String, Value>) -> AgentRecord {
+    pub(crate) fn update_meta(&self, patch: Map<String, Value>) -> AgentRecord {
         {
             let mut m = self.meta.write().expect("meta lock poisoned");
             for (k, v) in patch {
@@ -268,36 +250,29 @@ impl Agent {
         self.record()
     }
 
-    /// BOTH grant maps under ONE write lock: `edit` gets `can_call`, `callable_by` and the
-    /// record, and says which of the two it changed (or refuses). Nothing is written unless
-    /// `edit` returns `Ok`; then each changed map is written.
-    pub(crate) fn edit_grants(
+    /// The `can` field under ONE write lock: `edit` gets `can` (empty when
+    /// absent) and the record, and says whether it changed it (or refuses).
+    /// Nothing is written unless `edit` returns `Ok(true)`; an emptied `can` is
+    /// removed from the record.
+    pub(crate) fn edit_can(
         &self,
-        edit: impl FnOnce(
-            &mut Map<String, Value>,
-            &mut Map<String, Value>,
-            &Map<String, Value>,
-        ) -> Result<(bool, bool), String>,
-    ) -> Result<(bool, bool), String> {
+        edit: impl FnOnce(&mut Map<String, Value>, &Map<String, Value>) -> Result<bool, String>,
+    ) -> Result<bool, String> {
         let mut m = self.meta.write().expect("meta lock poisoned");
-        let mut cc = m
-            .get("can_call")
+        let mut can = m
+            .get("can")
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
-        let mut cb = m
-            .get("callable_by")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        let (cc_changed, cb_changed) = edit(&mut cc, &mut cb, &m)?;
-        if cc_changed {
-            m.insert("can_call".to_string(), Value::Object(cc));
+        let changed = edit(&mut can, &m)?;
+        if changed {
+            if can.is_empty() {
+                m.remove("can");
+            } else {
+                m.insert("can".to_string(), Value::Object(can));
+            }
         }
-        if cb_changed {
-            m.insert("callable_by".to_string(), Value::Object(cb));
-        }
-        Ok((cc_changed, cb_changed))
+        Ok(changed)
     }
 
     /// Whether the record's `delete_lock` is TRUTHY. Substrate refuses

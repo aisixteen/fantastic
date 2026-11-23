@@ -74,7 +74,7 @@ async fn relay_kernel(tmp: &TempDir) -> (Arc<Kernel>, String, Dials, String) {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let (url, dials) = recording_relay().await;
     let leg = id_for("rl", tmp);
@@ -85,8 +85,7 @@ async fn relay_kernel(tmp: &TempDir) -> (Arc<Kernel>, String, Dials, String) {
         json!({"type": "create_agent", "parent_id": "kernel_state",
                "handler_module": fantastic_credential_store::HANDLER_MODULE, "id": "creds",
                "backend": "keychain",
-               "refs": {RELAY_REF: {"host": host}},
-               "callable_by": {leg.as_str(): ["get"]}}),
+               "refs": {RELAY_REF: {"host": host}}}),
     )
     .await;
     assert_eq!(made["id"], "creds", "{made}");
@@ -98,7 +97,7 @@ async fn mk_leg(k: &Arc<Kernel>, leg: &str, url: &str, meta: Value) -> Value {
     let mut p = json!({"type": "create_agent", "parent_id": "kernel_state",
                        "handler_module": RELAY_HANDLER_MODULE, "id": leg, "transport": "relay",
                        "relay_url": url, "guid": "A", "partner_guid": "B",
-                       "heartbeat": 0, "reconnect": 0, "can_call": {"creds": ["get"]}});
+                       "heartbeat": 0, "reconnect": 0, "can": {"creds": {"call": ["get"]}}});
     for (key, v) in meta.as_object().cloned().unwrap() {
         p[key] = v;
     }
@@ -126,7 +125,7 @@ async fn the_password_is_read_from_the_store_and_never_recorded() {
         Some(("/A".to_string(), PW.to_string()))
     );
     // no record, listing or ledger of the tree carries it
-    let rec = k.agents.get(&AgentId::from(leg.as_str())).unwrap().record();
+    let rec = k.resolve_target(leg.as_str()).unwrap().record();
     assert!(!format!("{rec:?}").contains(PW));
     let listed = ask(&k, "kernel", json!({"type": "list_agents"})).await;
     assert!(!listed.to_string().contains(PW), "{listed}");

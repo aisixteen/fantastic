@@ -174,11 +174,11 @@ impl Handler for FileBundle {
         let verb = verb_name(&call);
         let chunk = body_at(body.as_ref(), "bytes");
         // Snapshot meta so concurrent updates don't race.
-        let agent = match kernel.agents.get(agent_id) {
+        let agent = match kernel.resolve_target(agent_id.as_str()) {
             Some(e) => Arc::clone(&e),
             None => return Ok((Some(json!({"error": format!("no agent {agent_id}")})), None)),
         };
-        let meta = agent.meta.read().expect("meta poisoned").clone();
+        let meta = agent.record().meta.clone();
         // A VIEW is answered by its own verbs, before the bridge's gate (python
         // `file_bridge.tools.handler`): a view is not sealed, its gate is its grant.
         if let Some(kind) = agent
@@ -284,9 +284,7 @@ impl Handler for FileBundle {
     /// The bridge is going away — its undo slots and its disk watch go with it. A
     /// VIEW going away ends its own relay and lets go of its bridge's watch.
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
-        let is_view = kernel
-            .agents
-            .get(agent_id)
+        let is_view = kernel.resolve_target(agent_id.as_str())
             .is_some_and(|a| a.record().meta.get("view").is_some());
         if is_view {
             views::stop(kernel, &self.views, agent_id).await;
@@ -518,8 +516,8 @@ fn write_stream_reply(
 /// a `network_bridge` SOURCE pumps to a `file_bridge` SINK the same as fs→fs.
 /// BOTH ENDS RUN AS THIS BRIDGE: `read_stream` on the source and `write_stream`
 /// on the sink are sent from this bridge's own dispatch, so they are its sends —
-/// the bridge's `can_call` and each end's `callable_by` decide (its own `$self`
-/// baseline covers a pump within itself). Each end SELF-gates + SELF-clamps — the pump only coordinates, never touching bytes, so
+/// the bridge's own lines decide (its own tree it reaches by position, so a pump
+/// within itself needs no line). Each end SELF-gates + SELF-clamps — the pump only coordinates, never touching bytes, so
 /// a sealed end refuses it. A pump ONTO ITS OWN SOURCE (the sink is the source and
 /// `sink_path` names the same file) is refused. Mirrors py `_pump`.
 async fn pump_reply(agent_id: &AgentId, a: &verbs::Pump, kernel: &Arc<Kernel>) -> Value {

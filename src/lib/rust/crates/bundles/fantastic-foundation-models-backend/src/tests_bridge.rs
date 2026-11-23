@@ -312,9 +312,9 @@ async fn live_kernel(id: &str) -> (std::sync::Arc<fantastic_kernel::Kernel>, tem
         tmp.path().join(".fantastic"),
         false,
     );
-    k.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
     k.set_root(root);
-    let memory = fantastic_ram_store::test_support::memory_meta(&k, id, json!({"cli": "*"})).await;
+    let memory = fantastic_ram_store::test_support::memory_meta(&k, id, json!({"cli": {"call": ["*"]}})).await;
     let mut create = json!({
         "type": "create_agent", "parent_id": "kernel_state",
         "handler_module": crate::HANDLER_MODULE, "id": id,
@@ -322,8 +322,7 @@ async fn live_kernel(id: &str) -> (std::sync::Arc<fantastic_kernel::Kernel>, tem
     for (key, v) in memory {
         create[key] = v;
     }
-    let created = k
-        .send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let created = k.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -339,23 +338,20 @@ async fn live_kernel_turn() -> (
     use fantastic_kernel::{AgentId, Item};
     use serde_json::json;
     let (k, tmp) = live_kernel("fm_live_turn").await;
-    let _ = k
-        .send(vec![Item::new(
+    let _ = k.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": "fm_live_turn",
                    "system_prompt": "Be terse. End every turn with <call name=\"done\"></call>."}),
         )])
         .await;
-    let reply = k
-        .send(vec![Item::new(
+    let reply = k.operator_send(vec![Item::new(
             AgentId::from("fm_live_turn"),
             json!({"type": "send", "text": "Say hello, then end the chain."}),
         )])
         .await
         .remove(0)
         .result;
-    let status = k
-        .send(vec![Item::new(
+    let status = k.operator_send(vec![Item::new(
             AgentId::from("fm_live_turn"),
             json!({"type": "context_status"}),
         )])
@@ -372,8 +368,7 @@ async fn live_default_block_turn() -> (
     use fantastic_kernel::{AgentId, Item};
     use serde_json::json;
     let (k, tmp) = live_kernel("fm_live_default").await;
-    let reply = k
-        .send(vec![Item::new(
+    let reply = k.operator_send(vec![Item::new(
             AgentId::from("fm_live_default"),
             json!({"type": "send", "text": "hi"}),
         )])

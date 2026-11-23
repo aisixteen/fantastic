@@ -197,7 +197,7 @@ fn a_name_is_just_a_name_and_the_kernel_owns_every_id() {
 
 #[test]
 fn the_view_is_caller_scoped() {
-    // Unscoped, `ledger` would be a side-channel around `callable_by`: an agent
+    // Unscoped, `ledger` would be a read side-channel: an agent
     // could read result BODIES of agents it was never granted an edge to.
     let l = Ledger::default();
     let _ = l.open(

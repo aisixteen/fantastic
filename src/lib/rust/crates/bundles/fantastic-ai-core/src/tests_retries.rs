@@ -6,8 +6,7 @@ use super::*;
 /// A backend with `transport_retries` set to `retries`.
 async fn mk_retrying(tmp: &TempDir, tag: &str, retries: i64) -> (Arc<Kernel>, AgentId) {
     let (kernel, agent) = mk_kernel(tmp, tag).await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": agent.as_str(), "transport_retries": retries}),
         )])
@@ -20,8 +19,7 @@ async fn mk_retrying(tmp: &TempDir, tag: &str, retries: i64) -> (Arc<Kernel>, Ag
 
 /// One user message to the agent; the reply it gets back.
 async fn send_text(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) -> Value {
-    kernel
-        .send(vec![Item::new(
+    kernel.operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": text, "client_id": "c_retry"}),
         )])

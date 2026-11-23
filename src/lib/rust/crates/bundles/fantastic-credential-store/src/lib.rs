@@ -124,10 +124,8 @@ fn raise_fs(msg: String) -> BundleError {
 }
 
 fn record(kernel: &Kernel, id: &AgentId) -> Map<String, Value> {
-    kernel
-        .agents
-        .get(id)
-        .map(|a| a.meta.read().expect("meta poisoned").clone())
+    kernel.resolve_target(id.as_str())
+        .map(|a| a.record().meta.clone())
         .unwrap_or_default()
 }
 
@@ -561,7 +559,7 @@ pub struct CredentialStoreBundle {
     /// between, so it is atomic on its event loop. Dispatches here run on many
     /// threads, so the same read-modify-write is serialized explicitly — two
     /// rotations must not lose one another's ref.
-    writes: std::sync::Mutex<()>,
+    writes: tokio::sync::Mutex<()>,
 }
 
 impl Default for CredentialStoreBundle {
@@ -576,7 +574,7 @@ impl CredentialStoreBundle {
     pub fn with_keychain(keychain: Arc<dyn Keychain>) -> Self {
         Self {
             keychain,
-            writes: std::sync::Mutex::new(()),
+            writes: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -621,7 +619,12 @@ impl CredentialStoreBundle {
         Value::Object(out)
     }
 
-    fn set(&self, id: &AgentId, args: &verbs::Set, kernel: &Kernel) -> Result<Value, BundleError> {
+    async fn set(
+        &self,
+        id: &AgentId,
+        args: &verbs::Set,
+        kernel: &Arc<Kernel>,
+    ) -> Result<Value, BundleError> {
         // the binding is the declaration's alone: `set` declares no host argument, so
         // the entry refuses one by name
         let r = args.ref_name.as_str();
@@ -658,7 +661,10 @@ impl CredentialStoreBundle {
         refs.insert(r.to_string(), Value::Object(entry));
         let mut patch = Map::new();
         patch.insert("refs".into(), Value::Object(refs));
-        kernel.update(id, patch);
+        let written = write_own(kernel, id, patch).await;
+        if fantastic_kernel::is_refused(&written) {
+            return Ok(written);
+        }
         Ok(json!({"ref": r, "host": hosts_value(h), "fields": sorted_names, "stored": true}))
     }
 
@@ -731,7 +737,12 @@ impl CredentialStoreBundle {
         json!({"refs": out})
     }
 
-    fn forget(&self, id: &AgentId, args: &verbs::Forget, kernel: &Kernel) -> Result<Value, BundleError> {
+    async fn forget(
+        &self,
+        id: &AgentId,
+        args: &verbs::Forget,
+        kernel: &Arc<Kernel>,
+    ) -> Result<Value, BundleError> {
         let r = args.ref_name.as_str();
         let rec = record(kernel, id);
         if matches!(backend_kind(&rec)?, record::BackendKind::Env) {
@@ -755,10 +766,30 @@ impl CredentialStoreBundle {
             refs.insert(r.to_string(), Value::Object(entry));
             let mut patch = Map::new();
             patch.insert("refs".into(), Value::Object(refs));
-            kernel.update(id, patch);
+            let written = write_own(kernel, id, patch).await;
+            if fantastic_kernel::is_refused(&written) {
+                return Ok(written);
+            }
         }
         Ok(json!({"forgotten": true, "ref": r}))
     }
+}
+
+/// Write the agent's OWN fields `patch` with `update_agent` sent as itself (a
+/// bundle writes its own non-`can` fields); the reply, a refusal included.
+async fn write_own(kernel: &Arc<Kernel>, id: &AgentId, patch: Map<String, Value>) -> Value {
+    let mut payload = Map::new();
+    payload.insert("type".to_string(), json!("update_agent"));
+    payload.insert("id".to_string(), json!(id.as_str()));
+    payload.extend(patch);
+    kernel
+        .send(vec![fantastic_kernel::Item::new(
+            AgentId::from("kernel"),
+            Value::Object(payload),
+        )])
+        .await
+        .remove(0)
+        .result
 }
 
 /// A reply that may carry a value in `fields`.
@@ -849,8 +880,8 @@ impl Handler for CredentialStoreBundle {
             Call::Reflect(_) => Self::reflect(agent_id, &record(kernel, agent_id)),
             Call::Set(a) => {
                 let out = {
-                    let _one = self.writes.lock().unwrap_or_else(|p| p.into_inner());
-                    self.set(agent_id, &a, kernel)?
+                    let _one = self.writes.lock().await;
+                    self.set(agent_id, &a, kernel).await?
                 };
                 published(kernel, agent_id, "stored", &out).await;
                 out
@@ -859,8 +890,8 @@ impl Handler for CredentialStoreBundle {
             Call::List(_) => Self::list(agent_id, kernel),
             Call::Forget(a) => {
                 let out = {
-                    let _one = self.writes.lock().unwrap_or_else(|p| p.into_inner());
-                    self.forget(agent_id, &a, kernel)?
+                    let _one = self.writes.lock().await;
+                    self.forget(agent_id, &a, kernel).await?
                 };
                 published(kernel, agent_id, "forgotten", &out).await;
                 out

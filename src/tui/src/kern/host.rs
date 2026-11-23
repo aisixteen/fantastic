@@ -18,10 +18,9 @@
 //! an agent's rows is therefore a `read` on the store, made as the operator — the
 //! store's admin.
 //!
-//! IDENTITY COMES ONLY FROM DISPATCH. A send this shell makes outside every
-//! handler is the operator's (ungated); an ACT by the human goes through
-//! `user.forward`, so it is `user`'s call, gated by `user`'s grants. A send made
-//! inside a bundle's handler is that agent's.
+//! IDENTITY COMES ONLY FROM DISPATCH. THE SHELL IS THE OPERATOR: every send it
+//! makes goes through `Kernel::operator_send` (ungated). A send made inside a
+//! bundle's handler is that agent's.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -94,19 +93,12 @@ fn registry_with(state: &std::path::Path, extras: &[crate::Extra]) -> BundleRegi
     // THE HUMAN, as an agent. This is the id the terminal acts as, so every act
     // carries a ledger row naming a person instead of an operator injection.
     reg.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
-    // THE MCP LEG — a bundle from outside the kernel tree. Registered so a
-    // persisted `mcp` record hydrates into a live agent on every run; the
-    // record itself is only ever created by `fantastic mcp`, never by the
-    // blueprint.
+    // THE MCP LEG — a bundle from outside the kernel tree; its record is the
+    // blueprint's (`web/mcp`).
     reg.register(fantastic_web_mcp::HANDLER_MODULE, fantastic_web_mcp::WebMcpBundle);
-    // THE AI AGENT'S SAVED SET-UPS. Its directory is fixed here, by the binary —
-    // never by a record; who reaches it is its `callable_by` (`kern/saved`).
-    reg.register(
-        fantastic_user_home_store::HANDLER_MODULE,
-        fantastic_user_home_store::UserHomeStore::new(fantastic_user_home_store::home_dir_from_env()),
-    );
-    // THE USER STORE: the keys, set-ups and stored fantastic locations in the
-    // user's home; "here" is this fantastic's state folder, fixed by the binary (`kern/user_store`).
+    // THE USER'S HOME (`home`): the saved set-ups, keys and stored fantastic
+    // locations in the user's home. Its directory and "here" (this fantastic's
+    // state folder) are fixed here, by the binary — never by a record.
     reg.register(
         fantastic_user_home_store::user_store::HANDLER_MODULE,
         fantastic_user_home_store::user_store::UserStore::new(
@@ -115,8 +107,8 @@ fn registry_with(state: &std::path::Path, extras: &[crate::Extra]) -> BundleRegi
         ),
     );
     // THE WEB HOST (the one HTTP/WS listener: a recorded one listens in every mode, and
-    // agents add routes to it), the canvas's page and its socket leg. `fantastic canvas`
-    // creates them when missing; registered so they rehydrate.
+    // agents add routes to it), the canvas's page and its socket leg: the blueprint's
+    // records.
     reg.register(fantastic_web::HANDLER_MODULE, fantastic_web::WebBundle);
     reg.register(fantastic_canvas_page::HANDLER_MODULE, fantastic_canvas_page::CanvasPageBundle);
     reg.register(fantastic_web_ws::HANDLER_MODULE, fantastic_web_ws::WebWsBundle);
@@ -175,13 +167,13 @@ fn registry_with(state: &std::path::Path, extras: &[crate::Extra]) -> BundleRegi
 /// A value the record already holds is left alone; a refused one is a note, and
 /// the boot goes on with the recorded value.
 async fn set_web_field(kernel: &Arc<Kernel>, id: &AgentId, key: &str, flag: &str, value: Value, notes: &mut Vec<String>) {
-    let had = kernel.agents.get(id).and_then(|a| a.value().record().meta.get(key).cloned());
+    let had = kernel.resolve_target(id.as_str()).and_then(|a| a.record().meta.get(key).cloned());
     if had.as_ref() == Some(&value) {
         return;
     }
     let mut update = json!({"type": "update_agent", "id": id.0});
     update[key] = value.clone();
-    let r = kernel.send(vec![Item::new(AgentId::from("kernel"), update)]).await.remove(0).result;
+    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel"), update)]).await.remove(0).result;
     if let Some(err) = r.get("error").and_then(Value::as_str) {
         notes.push(format!("{id}: {flag} {value} not set: {err}"));
     }
@@ -196,7 +188,7 @@ async fn set_web_bind(kernel: &Arc<Kernel>, id: &AgentId, addr: &str, notes: &mu
     set_web_field(kernel, id, "bind", "--host", json!(addr), notes).await;
     if !crate::kern::web::is_wildcard(addr) {
         set_web_field(kernel, id, "host", "--host", json!(addr), notes).await;
-    } else if kernel.agents.get(id).is_some_and(|a| a.value().record().meta.contains_key("host")) {
+    } else if kernel.resolve_target(id.as_str()).is_some_and(|a| a.record().meta.contains_key("host")) {
         set_web_field(kernel, id, "host", "--host", json!("127.0.0.1"), notes).await;
     }
 }
@@ -206,9 +198,7 @@ async fn set_web_bind(kernel: &Arc<Kernel>, id: &AgentId, addr: &str, notes: &mu
 /// one it sees), then everyone else in registration order.
 pub(crate) fn boot_order(kernel: &Kernel) -> Vec<AgentId> {
     let (mut first, rest): (Vec<AgentId>, Vec<AgentId>) = kernel.agent_ids().into_iter().partition(|id| {
-        kernel
-            .agents
-            .get(id)
+        kernel.resolve_target(id.as_str())
             .is_some_and(|a| a.handler_module.as_deref() == Some(crate::kern::sidebar::HANDLER_MODULE))
     });
     first.extend(rest);
@@ -225,7 +215,7 @@ async fn boot_the_rest(kernel: &Arc<Kernel>, done: &[String], web_port: Option<u
     // the `web` hosts, by handler: one reflect of the tree
     let mut web: Vec<String> = Vec::new();
     let found = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "reflect", "tree": "ids", "handler_modules": [fantastic_web::HANDLER_MODULE]}),
         )])
@@ -244,10 +234,8 @@ async fn boot_the_rest(kernel: &Arc<Kernel>, done: &[String], web_port: Option<u
         if web.contains(&id.0) {
             // No `--port` and none recorded (a `web` seeded without one): a free port is
             // picked once and recorded, as the first `canvas` does; later runs reuse it.
-            let recorded = kernel
-                .agents
-                .get(&id)
-                .is_some_and(|a| a.value().record().meta.get("port").and_then(Value::as_u64).is_some_and(|p| p > 0));
+            let recorded = kernel.resolve_target(id.as_str())
+                .is_some_and(|a| a.record().meta.get("port").and_then(Value::as_u64).is_some_and(|p| p > 0));
             let picked = match (web_port, recorded) {
                 (None, false) => match crate::kern::web::free_port() {
                     Ok(p) => Some(p),
@@ -269,7 +257,7 @@ async fn boot_the_rest(kernel: &Arc<Kernel>, done: &[String], web_port: Option<u
             continue;
         }
         let reply = kernel
-            .send(vec![Item::new(id.clone(), json!({"type": "boot"}))])
+            .operator_send(vec![Item::new(id.clone(), json!({"type": "boot"}))])
             .await
             .remove(0)
             .result;
@@ -314,7 +302,7 @@ impl Host {
         let mut patch = serde_json::Map::new();
         {
             let r = kernel.root().expect("root checked above");
-            let meta = r.meta.read().expect("root meta poisoned");
+            let meta = r.record().meta;
             for (k, v) in crate::boot::seed::root_fields().map_err(KernelErr::Boot)? {
                 if !meta.contains_key(&k) {
                     patch.insert(k, v);
@@ -333,7 +321,7 @@ impl Host {
                 p[k] = v;
             }
             let r = kernel
-                .send(vec![Item::new(AgentId::from("kernel"), p)])
+                .operator_send(vec![Item::new(AgentId::from("kernel"), p)])
                 .await
                 .remove(0)
                 .result;
@@ -351,13 +339,6 @@ impl Host {
         }
         let done: Vec<String> = serde_json::from_value(started["booted"].clone()).unwrap_or_default();
 
-        // Grants a product declared for the root (its blueprint's `@root` parent
-        // entry): unioned in once the kernel runs, because only then does the root
-        // loader write the record to disk.
-        crate::boot::declared::apply_to_root(&kernel)
-            .await
-            .map_err(|e| KernelErr::Boot(format!("could not set the root's grants: {e}")))?;
-
         // Everyone else: the sidebars, then the rest in registration order. A failure is logged and
         // skipped: one bundle refusing must not take the shell down with it.
         let mut notes = boot_the_rest(&kernel, &done, web_port, web_bind.as_deref()).await;
@@ -367,36 +348,17 @@ impl Host {
             cfg: ClientCfg::here(),
             root,
         };
-        // GOD MODE BY GRANTS, in every mode (a strictly single-user dev tool):
-        // `user` and the other holders reach every agent, both edges, before the
-        // shell acts through `user` (`kern/reach`). The WATCH that grants each
-        // agent added later starts only once the boot's own grant writes are done
-        // (the caller's `reach::start`): two writers of one record lose entries.
-        if let Err(e) = crate::kern::reach::grant_all(&host).await {
-            notes.push(e);
-        }
-        // The saved set-up store's agent, and the human's grant onto it — re-set on
-        // every boot, whatever a record on disk says.
-        if let Err(e) = crate::kern::saved::ensure(&host).await {
-            notes.push(e);
-        }
-        if let Err(e) = crate::kern::user_store::ensure(&host).await {
-            notes.push(e);
-        }
-        // THE PROJECT'S SYSTEM BLOCK: `prompt.md`, in its bridge's folder, seeded, read by
-        // every AI through its bridge (`kern/prompt`)
+        // THE PROJECT'S SYSTEM BLOCK: `prompt.md` in the state folder, its file
+        // written when missing, read by every AI through its view (`kern/prompt`)
         match crate::kern::prompt::ensure(&host).await {
             Ok(()) => {
-                if let Err(e) = crate::kern::reach::grant_all(&host).await {
-                    notes.push(e);
-                }
                 notes.extend(crate::kern::prompt::stamp_all(&host).await);
             }
             Err(e) => notes.push(e),
         }
-        // THE PROJECT'S `.mcp.json`: kept by the `mcp` leg, through its bridge
-        // (`kern/mcp_config`) — right before any coding CLI connects
-        if let Err(e) = crate::kern::mcp_config::ensure(&host).await {
+        // THE PROJECT'S `.mcp.json`: written by the `mcp` leg's boot, through its
+        // bridge (`kern/mcp_config`) — its write error, if any
+        if let Err(e) = crate::kern::mcp_config::check(&host).await {
             notes.push(e);
         }
         // the state folder's readme, rewritten from the live values
@@ -413,7 +375,7 @@ impl Host {
         for n in notes {
             tracing::warn!("{n}");
         }
-        // The credential store, as the user's key mode says (none until chosen).
+        // The credential store's backend, as the user's key mode says (none until chosen).
         if let Err(e) = crate::kern::keys::ensure_store(&host).await {
             tracing::warn!("{e}");
         }
@@ -425,7 +387,7 @@ impl Host {
     pub fn kernel_store(&self) -> Result<String, String> {
         self.kernel
             .root()
-            .and_then(|r| r.meta.read().ok()?.get("memory_store_id")?.as_str().map(str::to_string))
+            .and_then(|r| r.record().meta.get("memory_store_id")?.as_str().map(str::to_string))
             .ok_or_else(|| "the root names no `memory_store_id`".to_string())
     }
 
@@ -434,7 +396,7 @@ impl Host {
     /// blueprint's sqlite store. Rows are keyed `<guid>|<agent>`, so agents
     /// never mix.
     pub fn ai_store(&self) -> Result<String, String> {
-        if self.kernel.agents.contains_key(&AgentId::from(AI_STORE)) {
+        if self.kernel.exists(AI_STORE) {
             Ok(AI_STORE.to_string())
         } else {
             Err(format!("the AI store `{AI_STORE}` is not in the tree"))
@@ -460,63 +422,23 @@ impl Host {
         r.get("tree").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default()
     }
 
-    /// Admit AI agent `ai` to the memory store — the store's side of the gate,
-    /// merged into its `callable_by` — and return the store's id, for the AI's
-    /// own record to name in `memory_store_id` and grant in `can_call`. Done
-    /// BEFORE the AI is created: its first boot checks the store it names.
-    pub async fn admit_to_memory(&self, ai: &str) -> Result<String, String> {
-        let store = self.ai_store()?;
-        let mut cb = self
-            .kernel
-            .agents
-            .get(&AgentId::from(store.as_str()))
-            .and_then(|a| a.value().record().meta.get("callable_by").and_then(Value::as_object).cloned())
-            .ok_or_else(|| format!("the memory store `{store}` is not in the tree"))?;
-        cb.insert(ai.into(), json!("*"));
-        // as `user`, the store's parent: grants come from above
-        let r = self
-            .act("kernel", json!({"type": "update_agent", "id": store, "callable_by": cb}))
-            .await
-            .result;
-        match r.get("error").and_then(Value::as_str) {
-            Some(e) => Err(format!("could not admit `{ai}` to `{store}`: {e}")),
-            None => Ok(store),
-        }
-    }
-
     // ── acting ───────────────────────────────────────────────────────────
 
-    /// Dispatch AS THE HUMAN: `user.forward {target, payload}` — the send is
-    /// made inside `user`'s own handler, so it is `user`'s call, gated by its
-    /// grants. The outcome is the forwarded call's reply.
-    pub async fn act(&self, target: &str, payload: Value) -> Outcome {
-        let k = Arc::clone(&self.kernel);
-        let item = Item::new(
-            AgentId::from(self.cfg.user.as_str()),
-            json!({"type": "forward", "target": target, "payload": payload}),
-        );
-        k.send(vec![item]).await.remove(0)
-    }
-
-    /// [`Host::act`] with SECRET MARKS (`secret`, paths into `payload`): the
-    /// values reach the target's handler and show as `[secret]` in every row,
-    /// event and mirror — on the forward and on `user`'s onward send.
-    pub async fn act_secret(&self, target: &str, payload: Value, secret: &[&str]) -> Outcome {
-        let k = Arc::clone(&self.kernel);
-        let item = Item::new(
-            AgentId::from(self.cfg.user.as_str()),
-            json!({"type": "forward", "target": target, "payload": payload}),
-        )
-        .with_secret(secret.iter().map(|m| format!("payload.{m}")));
-        k.send(vec![item]).await.remove(0)
-    }
-
-    /// A plain send: outside every handler it is the OPERATOR's (ungated) — the
-    /// shell's own housekeeping; inside a bundle's handler it is that agent's.
+    /// THE OPERATOR'S SEND (the shell is the operator): ungated, through
+    /// `Kernel::operator_send`. Inside a bundle's handler the sender stays that agent.
     pub async fn operator(&self, target: &str, payload: Value) -> Outcome {
         let k = Arc::clone(&self.kernel);
         let item = Item::new(AgentId::from(target), payload);
-        k.send(vec![item]).await.remove(0)
+        k.operator_send(vec![item]).await.remove(0)
+    }
+
+    /// [`Host::operator`] with SECRET MARKS (`secret`, paths into `payload`): the
+    /// values reach the target's handler and show as `[secret]` in every row,
+    /// event and mirror.
+    pub async fn operator_secret(&self, target: &str, payload: Value, secret: &[&str]) -> Outcome {
+        let k = Arc::clone(&self.kernel);
+        let item = Item::new(AgentId::from(target), payload).with_secret(secret.iter().map(|m| (*m).to_string()));
+        k.operator_send(vec![item]).await.remove(0)
     }
 
     /// An outcome as this shell reads it: the reply, or the refusal as data.
@@ -548,7 +470,7 @@ impl Host {
         // an AI agent: its record's handler, or the base of its role, is a backend or
         // `ai_chat.tools` (the root's is not: it keeps the project's rows through the
         // kernel store)
-        let handler = self.kernel.agents.get(&AgentId::from(agent)).and_then(|a| a.value().record().handler_module.clone());
+        let handler = self.kernel.resolve_target(agent).and_then(|a| a.record().handler_module.clone());
         let keeps_rows = handler.is_some_and(|h| {
             let base = self.kernel.bundles.base_of(&h);
             [h.as_str(), base.as_str()].iter().any(|n| {
@@ -630,7 +552,7 @@ impl Host {
         let mut children: Vec<TreeNode> = agent
             .child_ids()
             .into_iter()
-            .filter_map(|id| self.kernel.agents.get(&id).map(|e| self.node(e.value())))
+            .filter_map(|id| self.kernel.resolve_target(id.as_str()).map(|e| self.node(&e)))
             .collect();
         // Deterministic order, so the tree pane never reshuffles under the cursor.
         children.sort_by(|a, b| a.id.cmp(&b.id));
@@ -648,10 +570,10 @@ impl Host {
     pub fn records(&self) -> Vec<Record> {
         let mut out: Vec<Record> = self
             .kernel
-            .agents
-            .iter()
-            .filter_map(|e| {
-                let a = e.value();
+            .agent_ids()
+            .into_iter()
+            .filter_map(|aid| self.kernel.resolve_target(aid.as_str()))
+            .filter_map(|a| {
                 let mut m = a.record().meta.clone();
                 m.insert("id".into(), json!(a.id.0));
                 if let Some(h) = &a.handler_module {
@@ -719,7 +641,7 @@ async fn stop_pages(kernel: &Arc<Kernel>) {
         let k = Arc::clone(kernel);
         async move {
             let item = Item::new(AgentId::from(format!("{g}|canvas").as_str()), json!({"type": "host_stopping"}));
-            match tokio::time::timeout(PAGE_STOP_GRACE, k.send(vec![item])).await {
+            match tokio::time::timeout(PAGE_STOP_GRACE, k.operator_send(vec![item])).await {
                 Err(_) => tracing::warn!("shutdown: page {g} did not stop within {PAGE_STOP_GRACE:?}"),
                 Ok(mut out) => {
                     if let Some(e) = out.remove(0).result.get("error").and_then(Value::as_str) {
@@ -734,8 +656,7 @@ async fn stop_pages(kernel: &Arc<Kernel>) {
 
 /// THE ONE BOOT, every mode's and an embedder's: [`Host::boot`] (the stock bundles plus
 /// `extras`), then, when `canvas` asks for it, the canvas ([`crate::kern::web::ensure`], its
-/// URLs returned), then the grant watch ([`crate::kern::reach::start`]), which must follow the
-/// boot's own grant writes. With `web_port`/`web_bind` and no canvas, the folder must hold a
+/// URLs returned). Every line is in the records; nothing writes one here. With `web_port`/`web_bind` and no canvas, the folder must hold a
 /// `web` record to set them on; none is refused. A refusal after the kernel is up stops it
 /// ([`stop`]) and returns the reason. Opens no socket, never seeds.
 pub async fn boot_all(
@@ -768,10 +689,6 @@ pub async fn boot_all(
     } else {
         None
     };
-    if let Err(e) = crate::kern::reach::start(&host).await {
-        stop(&host.kernel).await;
-        return Err(e);
-    }
     Ok((host, urls))
 }
 
@@ -819,7 +736,7 @@ mod tests {
             ("sidebar", crate::kern::sidebar::HANDLER_MODULE, Some("kernel_state")),
             ("user", "user.tools", Some("kernel_state")),
         ] {
-            kernel.register(fantastic_kernel::Agent::new(
+            fantastic_kernel::test_support::register(&kernel, fantastic_kernel::Agent::new(
                 AgentId::from(id),
                 Some(hm.to_string()),
                 parent.map(AgentId::from),
@@ -840,7 +757,6 @@ mod tests {
             "file_bridge.tools",
             "sqlite_store.tools",
             "ram_store.tools",
-            "user_home_store.tools",
             "user_store.tools",
             "setup.tools",
             "canvas.tools",
@@ -942,7 +858,6 @@ mod tests {
             "sidebar.tools",
             "sqlite_store.tools",
             "user.tools",
-            "user_home_store.tools",
             "user_store.tools",
             "web.tools",
             "web_mcp.tools",
@@ -1028,12 +943,12 @@ mod tests {
         let root = k.root().expect("root").id.clone();
         let mut m = serde_json::Map::new();
         m.insert("guid".into(), json!(guid));
-        k.update(&root, m);
+        fantastic_kernel::test_support::update(&k, &root, m);
         k
     }
 
     async fn send(k: &Arc<Kernel>, to: &str, payload: Value) -> Value {
-        k.send(vec![Item::new(AgentId::from(to), payload)]).await.remove(0).result
+        k.operator_send(vec![Item::new(AgentId::from(to), payload)]).await.remove(0).result
     }
 
     fn free_port() -> u16 {
@@ -1091,11 +1006,8 @@ mod tests {
         assert!(!accepts(a).await, "stopped before the boot");
         let notes = boot_the_rest(&k, &[root], Some(b), None).await;
         assert!(notes.is_empty(), "{notes:?}");
-        let got = k
-            .agents
-            .get(&AgentId::from("web560b"))
+        let got = k.resolve_target("web560b")
             .expect("web")
-            .value()
             .record()
             .meta["port"]
             .clone();
@@ -1191,7 +1103,7 @@ mod tests {
             dir.join(".fantastic"),
             false,
         );
-        kernel.register(Arc::clone(&root));
+        fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
         kernel.set_root(root);
         for (id, handler, with_store) in
             [
@@ -1284,7 +1196,7 @@ mod tests {
             dir.join(".fantastic"),
             false,
         );
-        kernel.register(Arc::clone(&root));
+        fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
         kernel.set_root(root);
         for (id, handler) in [("w", "chat_role"), ("p", "plain_role")] {
             let made = send(
@@ -1313,12 +1225,12 @@ mod tests {
         let root_b = kb.root().expect("root").id.0.clone();
         let tag = format!("brg469_{}", std::process::id());
         let (a_id, b_id) = (format!("{tag}_a"), format!("{tag}_b"));
-        // the agent on the far side: its `callable_by` names the serving leg
+        // the agent on the far side; the serving leg holds its line on it
         let made = send(
             &kb,
             "kernel",
             json!({"type": "create_agent", "parent_id": root_b, "id": "far",
-                   "handler_module": "ram_store.tools", "callable_by": {&b_id: "*"}}),
+                   "handler_module": "ram_store.tools"}),
         )
         .await;
         assert_eq!(made["id"], "far", "{made}");
@@ -1336,7 +1248,7 @@ mod tests {
             "kernel",
             json!({"type": "create_agent", "parent_id": root_b, "id": b_id,
                    "handler_module": "ws_bridge.tools", "transport": "memory", "peer_id": "A",
-                   "ingress_rule": "allow_all_ingress", "can_call": {"far": "*"}}),
+                   "ingress_rule": "allow_all_ingress", "can": {"far": {"call": ["*"]}}}),
         )
         .await;
         assert_eq!(made["id"], json!(b_id), "{made}");
@@ -1414,12 +1326,12 @@ mod tests {
             "error": "user -> exec: not permitted",
             "reason": "unauthorized",
             "side": "egress",
-            "hint": "name exec in user.can_call",
+            "hint": "name exec in a can line",
         }));
         match Host::read(out) {
             Err(KernelErr::Refused(r)) => {
                 assert_eq!(r.side.as_deref(), Some("egress"));
-                assert!(r.line().contains("name exec in user.can_call"));
+                assert!(r.line().contains("name exec in a can line"));
             }
             other => panic!("a refusal must not read as a reply: {other:?}"),
         }
@@ -1531,7 +1443,7 @@ mod tests {
         assert_eq!(made["id"], "hang562", "{made}");
         let k2 = k.clone();
         tokio::spawn(async move {
-            k2.send(vec![Item::new("hang562", json!({"type": "hang"}))])
+            k2.operator_send(vec![Item::new("hang562", json!({"type": "hang"}))])
                 .await;
         });
         for _ in 0..250 {
@@ -1622,7 +1534,7 @@ mod set_web_field_tests {
     use crate::kern::web::canvas_tree_tests::harness;
 
     fn field_of(h: &Host, id: &str, key: &str) -> Option<Value> {
-        h.kernel.agents.get(&AgentId::from(id)).and_then(|a| a.value().record().meta.get(key).cloned())
+        h.kernel.resolve_target(id).and_then(|a| a.record().meta.get(key).cloned())
     }
 
     #[tokio::test]
@@ -1677,7 +1589,7 @@ mod set_web_bind_tests {
     use crate::kern::web::canvas_tree_tests::harness;
 
     fn field_of(h: &Host, id: &str, key: &str) -> Option<Value> {
-        h.kernel.agents.get(&AgentId::from(id)).and_then(|a| a.value().record().meta.get(key).cloned())
+        h.kernel.resolve_target(id).and_then(|a| a.record().meta.get(key).cloned())
     }
 
     #[tokio::test]

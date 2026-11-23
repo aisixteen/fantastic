@@ -264,10 +264,7 @@ impl Kernel {
             .get(&AgentId::from(sid.as_str()))
             .map(|e| Arc::clone(&e))
         else {
-            let mut r = crate::refusal::unknown_agent(
-                &sid,
-                self.agents.iter().map(|e| e.key().0.clone()).collect(),
-            );
+            let mut r = crate::refusal::unknown_agent(&sid);
             crate::refusal::with(
                 &mut r,
                 "hint",
@@ -391,10 +388,10 @@ impl Kernel {
             return json!({"flushed": 0});
         };
         let Some(store) = self.live(&store_id) else {
-            return json!({"flushed": 0, "error": crate::refusal::unknown_agent(
-                store_id.as_str(),
-                self.agents.iter().map(|e| e.key().0.clone()).collect(),
-            )});
+            return json!({
+                "flushed": 0,
+                "error": crate::refusal::unknown_agent(store_id.as_str()),
+            });
         };
         let guard = self.exec.lock.lock().await;
         let ids = self.rows.ids();

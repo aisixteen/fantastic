@@ -20,7 +20,7 @@
 //!
 //! A SCHEDULE FIRES AS THE SCHEDULER. The tick loop is a task the scheduler's own
 //! `boot` spawned, so every fire is the scheduler's send: the gate judges the
-//! scheduler's `can_call` and the target's `callable_by` for the scheduler. Every caller the gate admits
+//! scheduler's own lines. Every caller the gate admits
 //! sees, ticks, pauses, resumes and unschedules every schedule, and reads the
 //! whole history.
 //!
@@ -45,7 +45,7 @@ use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::yaml_io;
 use fantastic_kernel::{AgentId, Item, Kernel, Status, SubscriberToken};
 use futures_util::FutureExt;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -282,8 +282,8 @@ impl Handler for SchedulerBundle {
 // ── meta helpers ────────────────────────────────────────────────────
 
 fn meta_value(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<Value> {
-    let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
-    let meta = agent.meta.read().expect("meta poisoned");
+    let agent = kernel.resolve_target(agent_id.as_str())?;
+    let meta = agent.record().meta;
     meta.get(key).cloned()
 }
 
@@ -292,13 +292,21 @@ fn meta_truthy(agent_id: &AgentId, kernel: &Kernel, key: &str) -> bool {
     meta_value(agent_id, kernel, key).and_then(|v| v.as_bool()) == Some(true)
 }
 
-/// python `kernel.update(id, **{key: value})`: the meta merges and the
-/// `updated` state event names the changed key — which is what the root
-/// loader's writer turns into the persist, as for every other update.
-fn update_meta(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str, value: Value) {
-    let mut patch = Map::new();
-    patch.insert(key.to_string(), value);
-    kernel.update(agent_id, patch);
+/// The scheduler's own field, written with `update_agent` sent as itself (a
+/// bundle writes its own non-`can` fields): the `updated` state event names the
+/// changed key — which is what the root loader's writer turns into the persist,
+/// as for every other update.
+async fn update_meta(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str, value: Value) {
+    let mut payload = json!({"type": "update_agent", "id": agent_id.as_str()});
+    payload[key] = value;
+    let r = kernel
+        .send(vec![Item::new(AgentId::from("kernel"), payload)])
+        .await
+        .remove(0)
+        .result;
+    if fantastic_kernel::is_refused(&r) {
+        eprintln!("  [scheduler] {agent_id}: {key} not written: {r}");
+    }
 }
 
 // ── file-agent-routed persistence ───────────────────────────────────
@@ -467,7 +475,7 @@ fn parse_events(raw: &str) -> Vec<Value> {
 async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
     let wake = wake_of(&agent_id);
     loop {
-        if kernel.agents.get(&agent_id).is_none() {
+        if kernel.resolve_target(agent_id.as_str()).is_none() {
             return; // agent was deleted; exit cleanly
         }
         let mut delay: Option<f64> = None;
@@ -824,7 +832,7 @@ async fn set_paused(
         }
         return json!({flag_key: touched > 0, "schedule_id": sid});
     }
-    update_meta(agent_id, kernel, "paused", json!(paused));
+    update_meta(agent_id, kernel, "paused", json!(paused)).await;
     json!({flag_key: true, "scheduler_id": agent_id.as_str()})
 }
 

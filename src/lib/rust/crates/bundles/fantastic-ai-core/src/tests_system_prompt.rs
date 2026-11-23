@@ -15,8 +15,7 @@ fn system_of(s: &Arc<MockScript>, n: usize) -> String {
 }
 
 async fn set_record_prompt(kernel: &Arc<Kernel>, backend: &AgentId, v: Value) -> Value {
-    kernel
-        .send(vec![Item::new(
+    kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": backend.as_str(), "system_prompt": v}),
         )])
@@ -26,8 +25,7 @@ async fn set_record_prompt(kernel: &Arc<Kernel>, backend: &AgentId, v: Value) ->
 }
 
 async fn say(kernel: &Arc<Kernel>, backend: &AgentId, payload: Value) {
-    let _ = kernel
-        .send(vec![Item::new(backend.clone(), payload)])
+    let _ = kernel.operator_send(vec![Item::new(backend.clone(), payload)])
         .await
         .remove(0)
         .result;
@@ -64,8 +62,7 @@ async fn the_record_prompt_is_the_system_block_of_a_main_and_a_reply_woken_turn(
 async fn a_send_takes_no_system_prompt() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "sp_call").await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "system_prompt": "call role"}),
         )])
@@ -136,8 +133,7 @@ async fn recall_sizes_the_block_the_turn_uses() {
             json!({"role": "user", "content": "THE GOAL"}),
         )
         .await;
-        let r = kernel
-            .send(vec![Item::new(
+        let r = kernel.operator_send(vec![Item::new(
                 backend,
                 json!({"type": "context_recall", "dry": true}),
             )])
@@ -154,8 +150,7 @@ async fn update(kernel: &Arc<Kernel>, backend: &AgentId, fields: Value) -> Value
     for (k, v) in fields.as_object().unwrap() {
         p[k] = v.clone();
     }
-    kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), p)])
+    kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), p)])
         .await
         .remove(0)
         .result
@@ -219,26 +214,13 @@ fn an_unusable_wrap_value_is_refused_at_the_write() {
     }
 }
 
-async fn set_can_call(kernel: &Arc<Kernel>, backend: &AgentId, can_call: Value) {
-    let r = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "update_agent", "id": backend.as_str(), "can_call": can_call}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert!(r.get("error").is_none(), "{r}");
-}
-
 /// The default system block holds no tree: it is the same before and after an agent is made.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_default_block_does_not_change_when_the_tree_does() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "sp_notree").await;
     let before = assembly::default_system_content(&agent, &kernel).await;
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "handler_module": "file_bridge.tools", "parent_id": "kernel",
                    "id": "sp_new", "root": tmp.path().to_string_lossy(), "allow": ["."]}),

@@ -1,163 +1,311 @@
-//! THE CALL GATE — two-sided, deny-all, explicit grants only.
+//! THE CALL GATE — the caller's lines and the ancestor cap (grant model v9).
 //!
-//! The trust boundary is WHO ORIGINATED the send. An operator send (no dispatch
-//! running: the CLI, the cold bootstrap, a test driver, a transport handing an
-//! inbound frame to its leg) and the kernel's own bookkeeping call are the origin
-//! root of trust and never reach here. Identity comes only from dispatch: a send
-//! made inside an agent's handler, or a task it spawned, is that agent's. Every AGENT send — ANY verb, `reflect` and the kernel verbs the
-//! root answers included, nothing exempt — needs BOTH the sender's `can_call`
-//! (egress) AND the target's `callable_by` (ingress). An edge exists only if both
-//! ends grant it. GRANTS ARE THE ONLY RULE: the tree verbs
-//! take this check and nothing more.
+//! The trust boundary is WHO ORIGINATED the send. The operator (origin `None`:
+//! the in-process shell, the cold boot, kernel bookkeeping) is never checked.
+//! Identity comes only from dispatch: a send made inside an agent's handler, or a
+//! task it spawned, is that agent's. An AGENT send passes only when the CALLER's
+//! own `can` lines allow it (its own tree it reaches by position) and every
+//! ancestor of the caller whose tree does not hold the target allows it too. The
+//! target keeps no list of callers. Every denial is the unknown answer,
+//! byte-identical to a missing id.
 
 use super::*;
+use crate::authz::solver::{lines_of, Act, Slot};
+use crate::authz::{Level, What};
+use std::collections::BTreeSet;
 
-/// Read a holder's authority grant (`can_call` or `callable_by`) + its parent id
-/// for the gate. An absent agent → empty grant → deny-all (never a hole).
-fn grant_facts(holder: Option<&Agent>, field: &str) -> (Value, Option<String>) {
-    match holder {
-        Some(a) => {
-            let grant = a
-                .meta
-                .read()
-                .expect("meta lock poisoned")
-                .get(field)
-                .cloned()
-                .unwrap_or(Value::Null);
-            let parent = a.parent_id.as_ref().map(|p| p.0.clone());
-            (grant, parent)
+/// What a caller holds on a target, lowest first (for reflect, ps, watch and
+/// [`Kernel::holds`]; never for handing out lines). `Own`: the target is in the
+/// caller's tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Held {
+    /// Nothing: the target answers as an unknown agent.
+    Nothing,
+    /// Some verbs.
+    Call,
+    /// Some fields (and every verb).
+    Update,
+    /// Creating under it (and the agents it selects).
+    Create,
+    /// The caller's own tree.
+    Own,
+}
+
+/// A value no line names: a create probe with it is allowed only where every
+/// bundle is.
+pub(crate) const PROBE: &str = "\u{1}probe";
+
+/// An id a `who` pattern selects: a trailing `*` becomes a sentinel character,
+/// which only a pattern with that prefix (or `*`) matches.
+pub(crate) fn sample_id(who: &str) -> String {
+    match who.strip_suffix('*') {
+        Some(prefix) => format!("{prefix}\u{1}"),
+        None => who.to_string(),
+    }
+}
+
+/// The literals a level probe tries: the verbs, fields, bundles and `who`
+/// patterns named in a set of agents' lines, plus those agents' own bundles
+/// (proto `reflect_in`). `can` is always a field candidate and `*` always a
+/// `who` candidate.
+#[derive(Debug, Default)]
+pub(crate) struct Candidates {
+    pub(crate) verbs: BTreeSet<String>,
+    pub(crate) fields: BTreeSet<String>,
+    pub(crate) bundles: BTreeSet<String>,
+    pub(crate) whos: BTreeSet<String>,
+}
+
+impl Candidates {
+    /// Add one agent's bundle and the literals of its lines.
+    fn add(&mut self, a: &Agent) {
+        if let Some(b) = a.handler_module.as_deref() {
+            self.bundles.insert(b.to_string());
         }
-        None => (Value::Null, None),
+        let can = a
+            .meta
+            .read()
+            .expect("meta lock poisoned")
+            .get("can")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let named =
+            |v: &[String]| -> Vec<String> { v.iter().filter(|x| *x != "*").cloned().collect() };
+        for l in lines_of(&can) {
+            match &l.level {
+                Level::Call(v) => self.verbs.extend(named(v)),
+                Level::Update(f) => self.fields.extend(named(f)),
+                Level::Create { who, what } => {
+                    self.whos.extend(who.iter().cloned());
+                    if let What::Bundles(m) = what {
+                        for (b, fs) in m {
+                            if b != "*" {
+                                self.bundles.insert(b.clone());
+                            }
+                            self.fields.extend(fs.keys().filter(|f| *f != "*").cloned());
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
 impl Kernel {
-    /// Every id ABOVE `agent` — what `$subtree` matches against: a grant holder
-    /// reaches the other end when it is one of these. A peer target (no local
-    /// parent) has none.
-    pub fn ancestor_ids(&self, agent: Option<&Agent>) -> HashSet<String> {
-        let mut out = HashSet::new();
-        let mut next = agent.and_then(|a| a.parent_id.clone());
+    /// `a`'s ancestors, root-ward: its parent first, the root last. A loop in
+    /// the parent links ends the walk.
+    pub(crate) fn ancestor_chain(&self, a: &Agent) -> Vec<AgentId> {
+        let mut out: Vec<AgentId> = Vec::new();
+        let mut seen: HashSet<AgentId> = HashSet::new();
+        let mut next = a.parent_id.clone();
         while let Some(pid) = next {
-            if !out.insert(pid.0.clone()) {
+            if !seen.insert(pid.clone()) {
                 break;
             }
             next = self.agents.get(&pid).and_then(|p| p.parent_id.clone());
+            out.push(pid);
         }
         out
     }
 
-    /// May `origin` receive the outcome of the execution the ledger opened with
-    /// `payload` on `target`? Returns a denial, or None.
+    /// May `caller` do `act` on `target`? Cedar for the caller, then the cap:
+    /// Cedar for every ancestor of the caller whose tree does not hold the
+    /// target. The root holds every agent in its tree, so it is always skipped
+    /// and needs no lines. A remote target is refused for every agent caller: no
+    /// line can name one.
+    pub(crate) fn allowed(&self, caller: &AgentId, act: &Act, target: &Agent) -> bool {
+        self.capped(caller, act, target, false)
+    }
+
+    /// [`Self::allowed`] with the caller's written lines only (no position);
+    /// every capping ancestor is still checked by its whole set. The writer check
+    /// uses it: a writer hands out only what its written lines give.
+    pub(crate) fn allowed_written(&self, caller: &AgentId, act: &Act, target: &Agent) -> bool {
+        self.capped(caller, act, target, true)
+    }
+
+    /// The one cap loop of [`Self::allowed`] and [`Self::allowed_written`].
+    fn capped(&self, caller: &AgentId, act: &Act, target: &Agent, written: bool) -> bool {
+        if target.is_remote() {
+            return false;
+        }
+        let own = if written {
+            self.cedar_written(caller, act, &target.id)
+        } else {
+            self.cedar(caller, act, &target.id)
+        };
+        if !own {
+            return false;
+        }
+        let Some(c) = self.agents.get(caller).map(|e| Arc::clone(&e)) else {
+            return false;
+        };
+        self.ancestor_chain(&c)
+            .iter()
+            .all(|anc| self.in_tree(&target.id, anc) || self.cedar(anc, act, &target.id))
+    }
+
+    /// Is every value of `slot` allowed to `caller` on `target`, capped like
+    /// [`Self::allowed`]? A partial evaluation per agent in the chain; with
+    /// `written`, the caller's written lines only (no position), as in
+    /// [`Self::allowed_written`].
+    pub(crate) fn allowed_all(
+        &self,
+        caller: &AgentId,
+        slot: Slot,
+        target: &Agent,
+        written: bool,
+    ) -> bool {
+        if target.is_remote() || !self.cedar_all(caller, slot, &target.id, written) {
+            return false;
+        }
+        let Some(c) = self.agents.get(caller).map(|e| Arc::clone(&e)) else {
+            return false;
+        };
+        self.ancestor_chain(&c).iter().all(|anc| {
+            self.in_tree(&target.id, anc) || self.cedar_all(anc, slot, &target.id, false)
+        })
+    }
+
+    /// May `caller` call `verb` on `target`? The public form of
+    /// [`Self::allowed`] with a call. A missing target answers `false`.
+    pub fn may_call(&self, caller: &AgentId, verb: &str, target: &AgentId) -> bool {
+        let Some(t) = self.agents.get(target).map(|e| Arc::clone(&e)) else {
+            return false;
+        };
+        self.allowed(caller, &Act::Call(verb.to_string()), &t)
+    }
+
+    /// Does `caller` hold at least `level` on `target`? The solver's decision
+    /// ([`Self::held`]) as a plain call for bundles: it knows agents and levels
+    /// only, never what a bundle keeps for them. The operator (`None`) holds
+    /// everything; a missing or remote target holds `Nothing`.
+    pub fn holds(&self, caller: Option<&AgentId>, level: Held, target: &AgentId) -> bool {
+        match caller {
+            None => true,
+            Some(c) => self.held(c, target) >= level,
+        }
+    }
+
+    /// The probe candidates of `ids`' lines and bundles (missing ids add
+    /// nothing).
+    pub(crate) fn candidates_of(&self, ids: &[AgentId]) -> Candidates {
+        let mut c = Candidates::default();
+        c.fields.insert("can".to_string());
+        c.whos.insert("*".to_string());
+        for id in ids {
+            if let Some(a) = self.agents.get(id).map(|e| Arc::clone(&e)) {
+                c.add(&a);
+            }
+        }
+        c
+    }
+
+    /// The highest level `caller` holds on `target` (for reflect, ps and watch;
+    /// never for handing out lines). `Own` when the target is in the caller's
+    /// tree; otherwise the highest level a probe finds, the candidates being the
+    /// literals in the caller's and its ancestors' lines. A target with no entity
+    /// (a missing id, a remote id) is `Nothing`.
+    pub(crate) fn held(&self, caller: &AgentId, target: &AgentId) -> Held {
+        let cands = self.candidates_for(caller);
+        self.held_from(caller, target, &cands)
+    }
+
+    /// The probe candidates for `caller`: the literals of its own and its
+    /// ancestors' lines (proto `reflect_local`).
+    pub(crate) fn candidates_for(&self, caller: &AgentId) -> Candidates {
+        let mut ids = vec![caller.clone()];
+        if let Some(c) = self.agents.get(caller).map(|e| Arc::clone(&e)) {
+            ids.extend(self.ancestor_chain(&c));
+        }
+        self.candidates_of(&ids)
+    }
+
+    /// [`Self::held`] over a given candidate set.
+    pub(crate) fn held_from(&self, caller: &AgentId, target: &AgentId, cands: &Candidates) -> Held {
+        let Some(t) = self.agents.get(target).map(|e| Arc::clone(&e)) else {
+            return Held::Nothing;
+        };
+        if t.is_remote() {
+            return Held::Nothing;
+        }
+        if self.in_tree(target, caller) {
+            return Held::Own;
+        }
+        let creates = cands
+            .bundles
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(PROBE))
+            .any(|b| {
+                cands.whos.iter().any(|w| {
+                    self.allowed(
+                        caller,
+                        &Act::Create {
+                            bundle: b.to_string(),
+                            new_id: sample_id(w),
+                        },
+                        &t,
+                    )
+                })
+            });
+        if creates {
+            return Held::Create;
+        }
+        if self.allowed_all(caller, Slot::Field, &t, false)
+            || cands
+                .fields
+                .iter()
+                .any(|f| self.allowed(caller, &Act::Update(f.clone()), &t))
+        {
+            return Held::Update;
+        }
+        if self.allowed_all(caller, Slot::Verb, &t, false)
+            || cands
+                .verbs
+                .iter()
+                .any(|v| self.allowed(caller, &Act::Call(v.clone()), &t))
+        {
+            return Held::Call;
+        }
+        Held::Nothing
+    }
+
+    /// May `origin` receive the outcome of execution `execution_id`, joining it
+    /// on `target`? Returns a denial, or None.
     ///
-    /// Joining hands back ANOTHER caller's result verbatim, so it is equivalent
-    /// to having made that call. Asking the gate about the joiner's own payload
-    /// instead — a different verb, whose reply it never gets — authorizes the
-    /// wrong operation.
-    ///
-    /// The verb is read off the JOINED call's payload. A REHYDRATED row carries no
-    /// payload (nothing is left to re-run), so it gates as python's
-    /// `entry.get("payload") or {}` — an empty object with no verb. An OPERATOR
-    /// joiner (no origin) is ungated.
+    /// Joining hands back ANOTHER caller's result verbatim, so only the agent that
+    /// started the execution (its ledger row's originator) joins it, and the
+    /// operator (no origin) joins any. Every other joiner gets the unknown answer
+    /// for the target.
     pub(super) fn join_denial(
         self: &Arc<Self>,
         origin: &Option<AgentId>,
-        payload: &Value,
+        execution_id: i64,
         target: &Arc<Agent>,
     ) -> Option<Value> {
         let joiner = origin.as_ref()?;
-        let verb = payload
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        self.gate(joiner, &verb, target)
+        match self.ledger.originator(execution_id) {
+            Some(Some(o)) if &o == joiner => None,
+            _ => Some(crate::refusal::unknown_agent(target.id.as_str())),
+        }
     }
 
-    /// The two-sided call gate for an agent-originated send. Returns the error
-    /// `Value` if the send is refused, else `None`. Egress (the sender's
-    /// `can_call`) then ingress (the target's `callable_by`), both via the one
-    /// [`crate::authz::authorize_call`] engine. A holder with no record → empty
-    /// grant → deny-all (never a hole).
+    /// The call gate for an agent-originated send: `sender` may call `verb` on
+    /// `target` when its lines and the ancestor cap allow it
+    /// ([`Self::allowed`]). Returns the unknown answer for the target when it is
+    /// refused, else `None`. A remote target is always refused to an agent: no
+    /// line can name one.
     pub(crate) fn gate(
         self: &Arc<Self>,
         sender_id: &AgentId,
         verb: &str,
         target: &Arc<Agent>,
     ) -> Option<Value> {
-        let sender = self.agents.get(sender_id).map(|e| Arc::clone(&e));
-        let (s_can, s_parent) = grant_facts(sender.as_deref(), "can_call");
-
-        // Egress — may the SENDER call the target?
-        let d = crate::authz::authorize_call(
-            &s_can,
-            verb,
-            target.id.as_str(),
-            sender_id.as_str(),
-            s_parent.as_deref(),
-            &self.ancestor_ids(Some(target.as_ref())),
-        );
-
-        // A target on ANOTHER KERNEL: egress is the whole check here — the
-        // sender's `can_call` must name `<guid>|<agent>` or `<guid>|*`. Whether
-        // that agent accepts the call is its OWN kernel's decision (its
-        // `callable_by`, against the qualified `<this guid>|<sender>`), made where
-        // the agent lives.
-        if let Some(remote) = target.remote.as_ref() {
-            if d.allowed {
-                return None;
-            }
-            return Some(json!({
-                "error": format!(
-                    "{sender_id} may not call {} on {}",
-                    fantastic_bundle::py_repr(verb),
-                    target.id
-                ),
-                "reason": "unauthorized",
-                "hint": format!(
-                    "{} is an agent on the connected kernel {}: name it in can_call — \
-                     {{{}: [...]}} or {{'{}|*': [...]}}",
-                    target.id,
-                    remote.guid,
-                    fantastic_bundle::py_repr(target.id.as_str()),
-                    remote.guid
-                ),
-                "side": "egress",
-            }));
+        if self.allowed(sender_id, &Act::Call(verb.to_string()), target) {
+            None
+        } else {
+            Some(crate::refusal::unknown_agent(target.id.as_str()))
         }
-        if !d.allowed {
-            return Some(json!({
-                "error": format!(
-                    "{sender_id} may not call {} on {}",
-                    fantastic_bundle::py_repr(verb),
-                    target.id
-                ),
-                "reason": "unauthorized", "hint": d.hint, "side": "egress",
-            }));
-        }
-
-        // Ingress — does the TARGET accept the sender? Tokens resolve relative to
-        // the target. The root answering a kernel verb is no exception.
-        let (t_call, t_parent) = grant_facts(Some(target.as_ref()), "callable_by");
-        let di = crate::authz::authorize_call(
-            &t_call,
-            verb,
-            sender_id.as_str(),
-            target.id.as_str(),
-            t_parent.as_deref(),
-            &self.ancestor_ids(sender.as_deref()),
-        );
-        if !di.allowed {
-            return Some(json!({
-                "error": format!(
-                    "{} does not accept {} from {sender_id}",
-                    target.id,
-                    fantastic_bundle::py_repr(verb)
-                ),
-                "reason": "unauthorized", "hint": di.hint, "side": "ingress",
-            }));
-        }
-
-        None
     }
 }

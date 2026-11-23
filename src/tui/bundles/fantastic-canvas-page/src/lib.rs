@@ -234,7 +234,7 @@ mod tests {
     /// A kernel holding the agent `id` (its bundle is the one under test).
     fn kernel_with(id: &str) -> std::sync::Arc<Kernel> {
         let kernel = Arc::new(Kernel::new());
-        kernel.register(fantastic_kernel::Agent::new(
+        fantastic_kernel::test_support::register(&kernel, fantastic_kernel::Agent::new(
             AgentId::from(id),
             None,
             None,

@@ -19,4 +19,5 @@ libc = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }

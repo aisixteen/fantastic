@@ -68,10 +68,15 @@ impl HomeBundle {
             let Some(kernel) = kept.kernel.lock().expect("the link is poisoned").upgrade() else {
                 return;
             };
-            let mut patch = Map::new();
-            patch.insert("pages".into(), json!(pages));
-            patch.insert("selection".into(), json!(selection));
-            kernel.update(&AgentId::from(ID), patch);
+            // `home`'s own fields, written with `update_agent` as itself: the task
+            // carries the identity of the code that keeps them
+            let payload = json!({"type": "update_agent", "id": ID, "pages": pages,
+                                 "selection": selection});
+            fantastic_kernel::spawn_inherit(async move {
+                let _ = kernel
+                    .send(vec![fantastic_kernel::Item::new(AgentId::from("kernel"), payload)])
+                    .await;
+            });
         });
         HomeBundle {
             runner: Runner::new(os, config, emit, keep),
@@ -100,7 +105,7 @@ impl HomeBundle {
         if self.runner.polling() {
             return json!({"booted": true});
         }
-        let Some(meta) = kernel.agents.get(agent_id).map(|a| a.value().record().meta.clone()) else {
+        let Some(meta) = kernel.resolve_target(agent_id.as_str()).map(|a| a.record().meta.clone()) else {
             return not_found(format!("home: boot: no agent {agent_id:?}"), "id");
         };
         let (pages, selection) = match kept_of(&meta) {

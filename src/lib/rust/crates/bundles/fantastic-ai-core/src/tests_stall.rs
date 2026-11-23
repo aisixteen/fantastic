@@ -40,8 +40,7 @@ async fn a_failed_pass_stores_an_error_row_and_the_queue_moves_on() {
         ],
         Duration::ZERO,
     );
-    let first = kernel
-        .send(vec![Item::new(
+    let first = kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "one", "client_id": "probe"}),
         )])
@@ -124,7 +123,7 @@ async fn a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_window_ends
     let k = Arc::clone(&kernel);
     let b = backend.clone();
     let first = tokio::spawn(async move {
-        k.send(vec![Item::new(
+        k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "one", "client_id": "probe_a"}),
         )])
@@ -136,7 +135,7 @@ async fn a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_window_ends
     let k = Arc::clone(&kernel);
     let b = backend.clone();
     let second = tokio::spawn(async move {
-        k.send(vec![Item::new(
+        k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "two", "client_id": "probe_b"}),
         )])
@@ -209,8 +208,7 @@ async fn a_timed_out_turn_settles_its_sender_with_reason_timeout_and_is_not_retr
     );
     let mut rx = rebind_backend_inbox(&kernel, &backend);
     let mut seen: Vec<Value> = Vec::new();
-    let out = kernel
-        .send(vec![Item::new(
+    let out = kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )])
@@ -251,8 +249,7 @@ async fn a_failed_provider_turn_settles_its_sender_and_emits_done_error_once() {
     );
     let mut rx = rebind_backend_inbox(&kernel, &backend);
     let mut seen: Vec<Value> = Vec::new();
-    let out = kernel
-        .send(vec![Item::new(
+    let out = kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )])
@@ -300,7 +297,7 @@ async fn a_held_sender_settles_with_reason_timeout_when_the_turn_that_reads_it_t
     );
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let first = tokio::spawn(async move {
-        k.send(vec![Item::new(
+        k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "one", "client_id": "o"}),
         )])
@@ -311,7 +308,7 @@ async fn a_held_sender_settles_with_reason_timeout_when_the_turn_that_reads_it_t
     assert!(until_passes(&s, 1).await, "the first pass never started");
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let second = tokio::spawn(async move {
-        k.send(vec![Item::new(
+        k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "two", "client_id": "t"}),
         )])
@@ -364,8 +361,7 @@ async fn a_parent_awaiting_a_child_that_times_out_is_handed_the_timeout() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             parent.clone(),
             json!({"type": "send", "text": "go"}),
         )])
@@ -402,7 +398,7 @@ async fn a_held_sender_settles_with_transport_error_when_the_turn_that_reads_it_
     );
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let first = tokio::spawn(async move {
-        k.send(vec![Item::new(
+        k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "one", "client_id": "o"}),
         )])
@@ -413,7 +409,7 @@ async fn a_held_sender_settles_with_transport_error_when_the_turn_that_reads_it_
     assert!(until_passes(&s, 1).await, "the first pass never started");
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let second = tokio::spawn(async move {
-        k.send(vec![Item::new(
+        k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "two", "client_id": "t"}),
         )])
@@ -455,8 +451,7 @@ async fn a_failed_pass_is_retried_on_its_own_and_its_answer_is_stored() {
         ],
         Duration::ZERO,
     );
-    let out = kernel
-        .send(vec![Item::new(
+    let out = kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )])
@@ -477,7 +472,7 @@ async fn a_failed_pass_is_retried_on_its_own_and_its_answer_is_stored() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let at = |f: &dyn Fn(&Value) -> bool| rows.iter().position(|r| f(r));
+    let at = |f: &dyn Fn(&Value) -> bool| rows.iter().position(f);
     let incoming = at(&|r| r["content"] == json!("go")).expect("incoming row");
     let error = at(&|r| r["kind"] == json!("error")).expect("error row");
     let answer = at(&|r| {
@@ -506,8 +501,7 @@ async fn a_pass_cut_at_max_tokens_gets_the_next_turn_with_the_failure_text() {
         ],
         Duration::ZERO,
     );
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )])
@@ -535,8 +529,7 @@ async fn failures_in_a_row_end_in_gave_up_not_a_loop() {
     let s = script(&backend, passes, Duration::ZERO);
     let mut rx = rebind_backend_inbox(&kernel, &backend);
     let mut seen: Vec<Value> = Vec::new();
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )])
@@ -578,7 +571,7 @@ async fn a_cancelled_turn_is_not_retried() {
     );
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let first = tokio::spawn(async move {
-        k.send(vec![Item::new(
+        k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )])
@@ -587,8 +580,7 @@ async fn a_cancelled_turn_is_not_retried() {
         .result
     });
     assert!(until_passes(&s, 1).await, "the pass never started");
-    let _ = kernel
-        .send(vec![Item::new(backend.clone(), json!({"type": "stop"}))])
+    let _ = kernel.operator_send(vec![Item::new(backend.clone(), json!({"type": "stop"}))])
         .await;
     let _ = first.await;
     tokio::time::sleep(Duration::from_millis(900)).await;
@@ -614,7 +606,7 @@ async fn a_held_message_is_answered_by_the_retried_turn() {
     );
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let first = tokio::spawn(async move {
-        k.send(vec![Item::new(
+        k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "one", "client_id": "probe_a"}),
         )])
@@ -625,7 +617,7 @@ async fn a_held_message_is_answered_by_the_retried_turn() {
     assert!(until_passes(&s, 1).await, "the first pass never started");
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let second = tokio::spawn(async move {
-        k.send(vec![Item::new(
+        k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "two", "client_id": "probe_b"}),
         )])

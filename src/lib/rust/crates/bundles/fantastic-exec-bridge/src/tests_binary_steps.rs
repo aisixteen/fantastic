@@ -242,7 +242,7 @@ async fn a_job_round_trips_a_literal_key_through_the_kernel() {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let a = AgentId::from(agent_id_for(&tmp).as_str());
     for rec in [
@@ -250,13 +250,11 @@ async fn a_job_round_trips_a_literal_key_through_the_kernel() {
                "handler_module": HANDLER_MODULE,
                "ingress_rule": "allow_all_ingress", "allowed": [".*"],
                "cwd": tmp.path().to_string_lossy(),
-               "can_call": {"echo": "*"}}),
+               "can": {"echo": {"call": ["*"]}}}),
         json!({"type": "create_agent", "parent_id": "kernel_state", "id": "echo",
-               "handler_module": "binpath_echo.tools",
-               "callable_by": {a.as_str(): "*"}}),
+               "handler_module": "binpath_echo.tools"}),
     ] {
-        let r = kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), rec)])
+        let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), rec)])
             .await
             .remove(0)
             .result;
@@ -269,8 +267,7 @@ async fn a_job_round_trips_a_literal_key_through_the_kernel() {
         .await
         .is_none());
     let mut rx = inbox(&kernel, &a);
-    let started = kernel
-        .send(vec![Item::new(
+    let started = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(
                 &py,

@@ -22,6 +22,18 @@ pub fn apply(bundles: &BundleRegistry, handler_module: &str, meta: &mut Map<Stri
     }
 }
 
+/// [`apply`] for a record LOADED from the state folder: every default but `can`. A
+/// record is the truth on load (rule 13): the `can` part of a bundle default is a
+/// create by the creator (Q10), written into the record at `create_agent`, never laid
+/// under a loaded record (an agent whose lines were all taken keeps none).
+pub fn apply_loaded(bundles: &BundleRegistry, handler_module: &str, meta: &mut Map<String, Value>) {
+    for (k, v) in bundles.defaults(handler_module) {
+        if k != "can" {
+            meta.entry(k).or_insert(v);
+        }
+    }
+}
+
 /// What a `create_agent` makes of its arguments once the bundle's fields are under
 /// them: the handler module the agent runs and its record's fields.
 #[must_use]
@@ -86,15 +98,39 @@ pub fn reapply(kernel: &Kernel, before: &[(Arc<Agent>, Map<String, Value>)]) -> 
         if patch.is_empty() && gone.is_empty() {
             continue;
         }
-        {
+        // `can` never goes through a plain meta write: a new inherited `can` and a
+        // dropped one both go through `edit_can`, with its checks, as the operator.
+        let can_new = patch.remove("can");
+        let can_gone = gone.iter().any(|k| k == "can");
+        gone.retain(|k| k != "can");
+        if can_new.is_some() || can_gone {
+            let edited = kernel.edit_can(&a.id, None, |can, _| {
+                let next = match &can_new {
+                    Some(Value::Object(m)) => m.clone(),
+                    _ => Map::new(),
+                };
+                let changed = *can != next;
+                *can = next;
+                Ok(changed)
+            });
+            if let Err(why) = edited {
+                eprintln!("  [reload] {}: can not reapplied: {why}", a.id.0);
+            }
+        }
+        if !gone.is_empty() {
             let mut m = a.meta.write().expect("meta");
             for k in &gone {
                 m.remove(k);
             }
         }
-        kernel.update(&a.id, patch);
+        if !patch.is_empty() || !gone.is_empty() {
+            kernel.update(&a.id, patch);
+        }
         ids.push(a.id.0.clone());
     }
     ids.sort();
     ids
 }
+
+#[cfg(test)]
+mod tests;

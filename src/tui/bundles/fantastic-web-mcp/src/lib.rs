@@ -9,8 +9,9 @@
 //! - [`McpCore`] is the PROTOCOL: one JSON-RPC message in, one reply out. Every
 //!   carrier (stdio now, HTTP later) calls it, and no carrier knows what MCP
 //!   means. IDENTITY COMES ONLY FROM DISPATCH: a carrier runs outside every
-//!   dispatch, so it never sends onward itself — it hands each batch to the
-//!   leg's own `inbound_send`, whose sends are the leg's, never the operator's.
+//!   dispatch, so it never sends onward itself — the shell (the operator) hands
+//!   each batch to the leg's own `inbound_send`, whose sends are the leg's,
+//!   never the operator's.
 //!
 //! The surface is deliberately two tools, `reflect` and `send`. There is no
 //! tool per agent or per verb: a client learns what exists by reflecting, the
@@ -128,8 +129,8 @@ impl Handler for WebMcpBundle {
 // THE LEG KEEPS THE CLIENT'S ENTRY CORRECT (owner, 2026-10-08): on boot, when the
 // record names `file_bridge_id` (the file_bridge it writes through) AND
 // `mcp_config_file` (a path on it, e.g. `.mcp.json`), the leg reads that file
-// THROUGH the bridge, AS ITSELF (its `can_call` names the bridge with `read_stream`
-// and `write`, the bridge's `callable_by` names it), makes sure
+// THROUGH the bridge, AS ITSELF (the bridge is its child: it reaches it by
+// position), makes sure
 // `mcpServers.fantastic` is `{command: <this process's binary, absolute>, args:
 // ["mcp"]}`, and writes it back only when that changed — every other server and
 // key kept as they were. So a client opened in the project finds this kernel, and
@@ -200,7 +201,7 @@ pub fn with_entry(doc: &str, entry: &Value) -> Result<Option<String>, String> {
 
 /// Make the config right, as the leg. Records the outcome for reflect.
 async fn sync_config(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), String> {
-    let Some(meta) = kernel.agents.get(agent_id).map(|e| e.meta.read().expect("meta poisoned").clone()) else {
+    let Some(meta) = kernel.resolve_target(agent_id.as_str()).map(|e| e.record().meta.clone()) else {
         return Err(format!("{agent_id}: no such agent"));
     };
     let name = |k: &str| meta.get(k).and_then(Value::as_str).map(str::to_string);
@@ -408,7 +409,9 @@ impl McpCore {
             .collect();
         let hand_in = Item::new(self.leg.clone(), json!({"type": "inbound_send", "items": batch}));
         let task = self.kernel.spawn_task(&self.leg, tool, async move {
-            let _ = tx.send(k.send(vec![hand_in]).await.remove(0));
+            // the carrier is the in-process shell (the operator) handing the batch
+            // to the leg; the leg's `inbound_send` sends each item as the leg
+            let _ = tx.send(k.operator_send(vec![hand_in]).await.remove(0));
         });
         on_task(task);
 

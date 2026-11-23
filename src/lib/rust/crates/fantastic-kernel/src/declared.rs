@@ -1,7 +1,7 @@
 //! WHAT THE KERNEL DECLARES ITSELF (issue #642): its own verbs, the verbs every agent
 //! answers, and the record fields every agent carries. The same declarations as a
 //! bundle's ([`crate::verbs`]) — the kernel answers its own verbs through the same shared entry as any agent,
-//! and `reflect` / `docs` render them.
+//! and `reflect` renders them.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -85,8 +85,8 @@ fn positive_seconds(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::sche
     .expect("a number schema")
 }
 
-/// The tier of a `docs` answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+/// The tier of a reflect's verb docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
     /// One line per verb (the default).
@@ -106,8 +106,8 @@ impl Tier {
     }
 }
 
-/// What a `docs` answer carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+/// What a reflect's verb docs carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Part {
     /// Each verb's text, by `tier`.
@@ -186,7 +186,7 @@ pub mod kernel {
         pub fields: Map<String, Value>,
     }
 
-    /// EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT. Whoever holds update_agent on the root updates any agent, itself included. Every argument beyond `id` is a field of the agent's bundle's record, and a field it does not have is refused.
+    /// EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can` included: restate every line you want to keep, or the lines you omit are GONE. Each field needs an `update` (or `create`) line covering it on that agent. Every argument beyond `id` is a field of the agent's bundle's record, and a field it does not have is refused.
     #[derive(Debug, Deserialize, JsonSchema)]
     pub struct UpdateAgent {
         /// The agent to update.
@@ -197,7 +197,7 @@ pub mod kernel {
         pub fields: Map<String, Value>,
     }
 
-    /// CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`. Whoever holds delete_agent on the root deletes any agent.
+    /// CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`. Needs a `create` line selecting that agent.
     #[derive(Debug, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct DeleteAgent {
@@ -206,17 +206,6 @@ pub mod kernel {
         pub id: String,
         /// `true` leaves the persisted memory of the whole subtree alone.
         pub keep_memory: Option<bool>,
-    }
-
-    /// Every agent's record, flat. Paged.
-    #[derive(Debug, Deserialize, JsonSchema)]
-    #[serde(deny_unknown_fields)]
-    pub struct ListAgents {
-        /// A page size: absent, everything.
-        #[schemars(range(min = 1))]
-        pub limit: Option<i64>,
-        /// The cursor `next` of the previous page.
-        pub after: Option<String>,
     }
 
     /// The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}, one row per in-flight dispatch. Paged.
@@ -272,21 +261,6 @@ pub mod kernel {
     #[serde(deny_unknown_fields)]
     pub struct KernelStop {}
 
-    /// HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument. Without `verb` the reply also carries the bundle's short `man` text. Pull once per bundle; `detailed` for a verb you are about to use. `part` picks what comes back: `docs` (the text), `schema` (each verb's JSON schema, what a caller types its arguments by) or `all` (both, the default). Gated like every kernel verb: a `can_call` grant of `docs` on the root. Returns {of, bundle, tier?, verbs?, schemas?, man?}.
-    #[derive(Debug, Deserialize, JsonSchema)]
-    #[serde(deny_unknown_fields)]
-    pub struct Docs {
-        /// An agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'.
-        #[schemars(regex(pattern = "^[^|]+(?:\\|[^|]+)?$"))]
-        pub of: String,
-        /// How much of each verb: `oneliners` (default) or `detailed`.
-        pub tier: Option<Tier>,
-        /// One verb's entry only.
-        pub verb: Option<String>,
-        /// What comes back: `docs`, `schema` or `all` (default).
-        pub part: Option<Part>,
-    }
-
     /// Waits for EVERY named agent to send YOU a message of type 'report' (its `state` and `result`); a report from a named agent is HELD for the one combined message, not delivered as its own turn. Returns at once {wait_id, label, ids, timeout_s}; later ONE message reaches you — {wait_id, label, done:[{id, state, result}], missing:[ids], timed_out} — when all have reported or `timeout_s` passes. Refuses a missing or empty `ids`, an id that names no agent (unknown_agent), yourself, a non-positive `timeout_s` and a non-string `label`. The wait is a row: it survives a restart.
     #[derive(Debug, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
@@ -315,7 +289,6 @@ pub mod kernel {
         "create_agent" => CreateAgent,
         "update_agent" => UpdateAgent,
         "delete_agent" => DeleteAgent,
-        "list_agents" => ListAgents,
         "ps" => Ps,
         "ledger" => Ledger,
         "ack_deadletter" => AckDeadletter,
@@ -323,7 +296,6 @@ pub mod kernel {
         "cancel" => Cancel,
         "shutdown_agents" => ShutdownAgents,
         "kernel_stop" => KernelStop,
-        "docs" => Docs,
         "await_set" => AwaitSet,
         "await_cancel" => AwaitCancel,
     }
@@ -334,7 +306,7 @@ pub mod kernel {
 pub mod common {
     use super::*;
 
-    /// What this agent IS: identity, sentence, state, grants — and, by flags, its subtree and the installable bundles. How to CALL it is `docs`.
+    /// What this agent IS: identity, sentence, state, grants, the verbs it answers (one line each) — and, by flags, its subtree, the installable bundles and HOW TO CALL it: `tier`, `verb` or `part` adds the verb docs, `detailed` the full text with every argument, `part` the text (`docs`), each verb's JSON schema (`schema`) or both (`all`, the default once any of the three is given); without `verb` they carry the bundle's short `man` text. Only the verbs you may call are shown.
     #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     pub struct Reflect {
@@ -366,6 +338,15 @@ pub mod common {
         /// The cursor of the previous page.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub after: Option<String>,
+        /// How much of each verb: `oneliners` (default) or `detailed`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub tier: Option<Tier>,
+        /// One verb's entry only.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub verb: Option<String>,
+        /// What the verb docs carry: `docs`, `schema` or `all` (default).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub part: Option<Part>,
     }
 
     crate::verbs! {
@@ -386,14 +367,10 @@ pub mod record {
         pub display_name: Option<String>,
         /// One line saying what the agent is for; every reflect shows it.
         pub description: Option<String>,
-        /// What this agent may call: a map of target → verbs (`*` for all). Sent WHOLE.
+        /// What this agent may do outside its own tree: a map of target (an agent id or `$parent`) → one level, `{call: [verbs]}`, `{update: [fields]}` or `{create: {who: [ids], what: "*" | {bundle: {field: value | "*"}}}}`; `*` means everything in any slot. Sent WHOLE.
         #[serde(default)]
-        #[schemars(schema_with = "grant_map")]
-        pub can_call: Option<Value>,
-        /// Who may call this agent: a map of caller → verbs (`*` for all). Sent WHOLE.
-        #[serde(default)]
-        #[schemars(schema_with = "grant_map")]
-        pub callable_by: Option<Value>,
+        #[schemars(schema_with = "can_map")]
+        pub can: Option<Value>,
         /// `true` refuses a delete of this agent or an ancestor.
         pub delete_lock: Option<bool>,
         /// The folder name its children live under on disk (one safe segment: no separator, no `|`, not hidden, no `..`, not all digits).
@@ -406,18 +383,34 @@ pub mod record {
         pub memory_store_id: Option<String>,
     }
 
-    /// The schema of a grant map: each key `"*"` (every verb) or a list of verbs.
-    fn grant_map(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    /// The schema of `can`: each target holds exactly one level — `call` (a list
+    /// of verbs), `update` (a list of fields) or `create` (`who`, a list of ids,
+    /// and `what`, `"*"` or a map of bundle → field → value).
+    fn can_map(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        let names = serde_json::json!({"type": "array", "items": {"type": "string"}});
         serde_json::from_value(serde_json::json!({
             "type": ["object", "null"],
             "additionalProperties": {
-                "anyOf": [
-                    {"enum": ["*"]},
-                    {"type": "array", "items": {"type": "string"}}
+                "oneOf": [
+                    {"type": "object", "required": ["call"], "additionalProperties": false,
+                     "properties": {"call": names}},
+                    {"type": "object", "required": ["update"], "additionalProperties": false,
+                     "properties": {"update": names}},
+                    {"type": "object", "required": ["create"], "additionalProperties": false,
+                     "properties": {"create": {
+                        "type": "object", "required": ["who", "what"], "additionalProperties": false,
+                        "properties": {
+                            "who": names,
+                            "what": {"anyOf": [
+                                {"enum": ["*"]},
+                                {"type": "object", "additionalProperties": {"type": "object"}}
+                            ]}
+                        }
+                     }}}
                 ]
             }
         }))
-        .expect("a grant map schema")
+        .expect("a can map schema")
     }
 
     fn agents_dir() -> String {
@@ -470,7 +463,7 @@ pub mod bare_record {
     }
 }
 
-/// The kernel's own verbs, as `name → declaration`, for `docs of=kernel`.
+/// The kernel's own verbs, as `name → declaration`, for the root's reflect.
 #[must_use]
 pub fn kernel_verbs() -> &'static [crate::verbs::Verb] {
     kernel::VERBS

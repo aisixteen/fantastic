@@ -60,8 +60,7 @@ async fn make(kernel: &Arc<Kernel>, rec: Value) {
     for (k, v) in rec.as_object().unwrap() {
         p[k] = v.clone();
     }
-    let r = kernel
-        .send(vec![Item::new(AgentId::from("kernel"), p)])
+    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel"), p)])
         .await
         .remove(0)
         .result;
@@ -69,8 +68,7 @@ async fn make(kernel: &Arc<Kernel>, rec: Value) {
 }
 
 fn leg_rec(web_id: &str, id: &str, module: &str) -> Value {
-    json!({"parent_id": web_id, "handler_module": module, "id": id,
-           "callable_by": {"$parent": ["get_routes"]}})
+    json!({"parent_id": web_id, "handler_module": module, "id": id})
 }
 
 /// A kernel with a web host `web_id` on a free port, no children yet. `legs`
@@ -102,10 +100,10 @@ async fn host_with(
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let mut rec = json!({"parent_id": "kernel", "handler_module": HANDLER_MODULE,
-               "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]},
+
                "id": web_id});
     if port_now {
         rec["port"] = json!(port);
@@ -115,8 +113,7 @@ async fn host_with(
 }
 
 async fn give_port(kernel: &Arc<Kernel>, web_id: &str, port: u16) {
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": web_id, "port": port}),
         )])
@@ -127,8 +124,7 @@ async fn give_port(kernel: &Arc<Kernel>, web_id: &str, port: u16) {
 }
 
 async fn verb(kernel: &Arc<Kernel>, web_id: &str, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(AgentId::from(web_id), payload)])
+    kernel.operator_send(vec![Item::new(AgentId::from(web_id), payload)])
         .await
         .remove(0)
         .result

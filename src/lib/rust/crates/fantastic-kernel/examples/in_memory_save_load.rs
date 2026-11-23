@@ -96,12 +96,12 @@ async fn main() {
     banner("Step 2: create three agents (alpha, beta, gamma)");
     for id in ["alpha", "beta", "gamma"] {
         let r = kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"demo.tools","id":id,"display_name":format!("Agent {id}")}))])
+            .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"demo.tools","id":id,"display_name":format!("Agent {id}")}))])
             .await.remove(0).result;
         println!("  create_agent {id} → ok={}", r["ok"]);
     }
     assert_or_die(
-        kernel.agents.contains_key(&AgentId::from("alpha")),
+        kernel.exists("alpha"),
         "alpha in kernel.agents",
     );
     assert_or_die(
@@ -134,7 +134,7 @@ async fn main() {
     );
     for id in ["kernel_state", "alpha", "beta", "gamma"] {
         assert_or_die(
-            kernel2.agents.contains_key(&AgentId::from(id)),
+            kernel2.exists(id),
             &format!("{id} present in restored kernel"),
         );
     }
@@ -145,7 +145,7 @@ async fn main() {
 
     banner("Step 6: mutate the restored kernel + show the snapshot diff");
     let _ = kernel2
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type":"update_agent","id":"alpha","note":"tutor pipeline"}),
         )])
@@ -153,7 +153,7 @@ async fn main() {
         .remove(0)
         .result;
     let _ = kernel2
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type":"delete_agent","id":"gamma"}),
         )])
@@ -167,7 +167,7 @@ async fn main() {
         println!("    {line}");
     }
     assert_or_die(
-        !kernel2.agents.contains_key(&AgentId::from("gamma")),
+        !kernel2.exists("gamma"),
         "gamma deleted",
     );
     assert_or_die(snapshot3.contains("tutor pipeline"), "note field on alpha");
@@ -198,7 +198,7 @@ async fn main() {
 }
 
 fn agent_ids(kernel: &Kernel) -> Vec<String> {
-    let mut out: Vec<String> = kernel.agents.iter().map(|e| e.key().0.clone()).collect();
+    let mut out: Vec<String> = kernel.agent_ids().into_iter().map(|a| a.0).collect();
     out.sort();
     out
 }

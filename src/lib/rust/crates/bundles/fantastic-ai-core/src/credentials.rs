@@ -14,8 +14,7 @@
 //! backend that cannot run without one marks the field required in its record
 //! schema, and the reader refuses its absence loud as well.
 //!
-//! Wiring, by the operator: the agent's `can_call` names the store and the store's
-//! `callable_by` names the agent.
+//! Wiring: the agent's own line on the store, `can: {<store>: {call: [get]}}`.
 
 use std::sync::Arc;
 
@@ -197,7 +196,7 @@ impl KeyReader {
         let store = cred["store"].as_str().unwrap_or("").to_string();
         let r = cred["ref"].as_str().unwrap_or("").to_string();
         // THIS AGENT'S send: the read runs inside its own turn (its dispatch, or a
-        // task that dispatch spawned), so the store's `callable_by` must name it.
+        // task that dispatch spawned), so it must hold its own line on the store.
         let item = Item::new(
             AgentId::from(store.as_str()),
             json!({"type": "get", "ref": r, "host": endpoint}),

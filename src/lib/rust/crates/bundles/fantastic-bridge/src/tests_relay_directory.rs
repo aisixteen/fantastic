@@ -67,7 +67,7 @@ async fn watch_directory_re_emits_directory_events_on_the_connector_inbox() {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let leg = format!(
         "w10_leg_{}",
@@ -82,15 +82,13 @@ async fn watch_directory_re_emits_directory_events_on_the_connector_inbox() {
         let kernel = Arc::clone(&kernel);
         let leg_id = leg_id.clone();
         async move {
-            kernel
-                .send(vec![Item::new(leg_id, payload)])
+            kernel.operator_send(vec![Item::new(leg_id, payload)])
                 .await
                 .remove(0)
                 .result
         }
     };
-    let made = kernel
-        .send(vec![Item::new(
+    let made = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel_state",
                    "handler_module": RELAY_HANDLER_MODULE, "id": leg,
@@ -174,8 +172,7 @@ async fn watch_directory_re_emits_directory_events_on_the_connector_inbox() {
     settle().await;
     assert_eq!(directory_events(&mut rx), Vec::<Value>::new());
 
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": leg}),
         )])

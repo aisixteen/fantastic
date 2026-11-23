@@ -364,18 +364,18 @@ fn render_call_round_trips_the_parser_shape() {
 }
 
 #[test]
-fn grant_maps_keyed_by_ids_and_relative_tokens_are_tags() {
+fn line_maps_keyed_by_ids_and_parent_are_tags() {
     let text = concat!(
         r#"<call name="send"><routing><target_id>kernel</target_id></routing><payload><type>update_agent</type>"#,
-        "<id>vault</id><callable_by><$self>*</$self><$parent>*</$parent>",
-        "<ai-rev.2>*</ai-rev.2><notes><item>read</item><item>write</item></notes>",
-        "</callable_by></payload></call>"
+        "<id>vault</id><can><$parent><call><item>send</item></call></$parent>",
+        "<ai-rev.2><call><item>*</item></call></ai-rev.2><notes><call><item>read</item><item>write</item></call></notes>",
+        "</can></payload></call>"
     );
     let c = one(text);
     let p = payload(&c).clone();
     assert_eq!(
-        p["callable_by"],
-        json!({"$self": "*", "$parent": "*", "ai-rev.2": "*", "notes": ["read", "write"]})
+        p["can"],
+        json!({"$parent": {"call": ["send"]}, "ai-rev.2": {"call": ["*"]}, "notes": {"call": ["read", "write"]}})
     );
     let round = json!({"target_id": "k", "payload": Value::Object(p.clone())});
     let round = render_call("send", round.as_object().unwrap());

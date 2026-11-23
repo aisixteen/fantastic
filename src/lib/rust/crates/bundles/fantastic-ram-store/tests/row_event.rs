@@ -27,7 +27,7 @@ fn seeded() -> Arc<Kernel> {
 }
 
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Outcome {
-    k.send(vec![Item::new(AgentId::from(target), payload)])
+    k.operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
 }
@@ -93,7 +93,7 @@ async fn the_flush_publishes_nothing_so_idle_is_silent() {
     assert_eq!(r["id"], json!("memory"), "{r}");
     let mut patch = Map::new();
     patch.insert("memory_store_id".to_string(), json!("memory"));
-    k.update(&AgentId::from(root_id(&k)), patch);
+    fantastic_kernel::test_support::update(&k, &AgentId::from(root_id(&k)), patch);
     assert_eq!(k.start(false).await["started"], json!(true));
     tokio::time::sleep(Duration::from_millis(500)).await; // the start's rows flushed
     let (seen, token) = tap(&k);

@@ -69,7 +69,7 @@ fn register_default_bundles() -> BundleRegistry {
     // CONFIG: the record's `path` (relative to the work folder), never hardcoded.
     reg.register(
         fantastic_sqlite_store::HANDLER_MODULE,
-        fantastic_sqlite_store::SqliteStoreBundle::default(),
+        fantastic_sqlite_store::SqliteStoreBundle,
     );
     // SECRETS BY REF — every AI backend reads its key here (`credentials:
     // {store, ref}` on its record), before each request. The OS keychain is
@@ -415,12 +415,13 @@ async fn dispatch(
         let opts = BootstrapOptions::one_shot(&state_dir, &work_dir);
         let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
         apply_ledger_cap(&booted, cap);
-        // The help is the kernel's own docs, rendered from its declarations.
+        // The help is the kernel's own verb docs (its `reflect` at a tier),
+        // rendered from its declarations.
         let reply = booted
             .kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 AgentId::from("kernel"),
-                json!({"type": "docs", "of": "kernel"}),
+                json!({"type": "reflect", "tier": "oneliners", "tree": "none"}),
             )])
             .await
             .remove(0)
@@ -452,7 +453,7 @@ async fn dispatch(
         };
         let reply = booted
             .kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 AgentId::from(target.as_str()),
                 Value::Object(payload),
             )])
@@ -498,7 +499,7 @@ async fn dispatch(
         // Boot the root loader so the new record subscribes + persists.
         let _ = booted
             .kernel
-            .send(vec![Item::new(root_id.clone(), json!({"type": "boot"}))])
+            .operator_send(vec![Item::new(root_id.clone(), json!({"type": "boot"}))])
             .await;
         // `create_agent` boots the loader child → its own boot reads the
         // manifest and hydrates the roster. The kernel never parses YAML;
@@ -507,7 +508,7 @@ async fn dispatch(
         // `create_agent` refuse (the same id twice).
         let reply = booted
             .kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 root_id.clone(),
                 json!({
                     "type": "create_agent",
@@ -561,14 +562,14 @@ async fn dispatch(
         // mode does exactly this (`modes/dispatch.py`).
         let _ = booted
             .kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 booted.kernel.root().expect("root").id.clone(),
                 json!({"type": "boot"}),
             )])
             .await;
         let reply = booted
             .kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 AgentId::from(id.as_str()),
                 Value::Object(payload),
             )])
@@ -612,10 +613,8 @@ async fn dispatch(
     apply_ledger_cap(&booted, cap);
     let kernel = Arc::clone(&booted.kernel);
 
-    let has_web = kernel
-        .agents
-        .iter()
-        .any(|e| e.value().handler_module.as_deref() == Some("web.tools"));
+    let has_web = kernel.agent_ids().into_iter().filter_map(|aid| kernel.resolve_target(aid.as_str()))
+        .any(|e| e.handler_module.as_deref() == Some("web.tools"));
     if !has_web {
         // python: `if not web_agents and not has_repl: return` — silent,
         // exit 0, no lock ever taken.

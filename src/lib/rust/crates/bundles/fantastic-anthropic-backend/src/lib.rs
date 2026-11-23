@@ -909,7 +909,7 @@ async fn preload_base(agent_id: &AgentId, kernel: &Arc<Kernel>) {
 /// The agent's sidecar file, in its own dir. None for an in-memory kernel, whose
 /// agents have no dir.
 fn usage_file_of(agent_id: &AgentId, kernel: &Kernel) -> Option<std::path::PathBuf> {
-    let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
+    let agent = kernel.resolve_target(agent_id.as_str())?;
     let root = &agent.root_path;
     if root.as_os_str().is_empty() {
         return None;
@@ -1447,14 +1447,12 @@ impl SseState {
 
     /// Write the running total to the agent's params store (a provider with none keeps
     /// none). A write error does not fail the turn: it is kept in `Usage` and reported.
+    /// It runs in the provider's own dispatch (or a `spawn_inherit` task of it), so
+    /// the write is the provider's.
     async fn store_total(&self) {
         let id = AgentId::from(self.log.agent_id.as_str());
         let total = self.total().to_json();
-        let r = fantastic_kernel::send::as_agent(
-            &id,
-            fantastic_ai_core::remote_provider::set_usage(&id, &self.log.kernel, &total),
-        )
-        .await;
+        let r = fantastic_ai_core::remote_provider::set_usage(&id, &self.log.kernel, &total).await;
         if let Err(e) = r {
             self.usage.lock().expect("usage poisoned").log_error = Some(e);
         }
@@ -1729,7 +1727,7 @@ fn static_capability(model: &str) -> Value {
     json!({"images": true, "max_images": max_images, "max_bytes": max_bytes, "max_pixels": max_pixels})
 }
 
-/// `reflect`'s `capabilities`: `{<model>: {images, max_images, max_bytes, max_pixels}}`
+/// `reflect`'s and `capabilities`' map: `{<model>: {images, max_images, max_bytes, max_pixels}}`
 /// for the models the record lists, its own model and its default, and any model the
 /// `capabilities` setting in the params store names. A model's entry is the setting's
 /// when it has one, else the static one; an unknown model has `images: false`.
@@ -1917,11 +1915,12 @@ pub struct UsageResetVerb {}
 
 mod declared {
     use super::{UsageResetVerb, UsageVerb};
-    use fantastic_ai_core::declared::{Boot, Complete, Models, SetDefaultModel};
+    use fantastic_ai_core::declared::{Boot, Capabilities, Complete, Models, SetDefaultModel};
 
     fantastic_kernel::verbs! {
         "boot" => Boot,
         "complete" => Complete,
+        "capabilities" => Capabilities,
         "models" => Models,
         "set_default_model" => SetDefaultModel,
         "usage" => UsageVerb,
@@ -1981,6 +1980,15 @@ impl Handler for AnthropicBundle {
                 reflect_reply(agent_id, kernel, capabilities)
             }
             Call::Boot(_) => verbs::boot(agent_id, kernel).await,
+            // the chat's own ask: the same map `reflect` shows, with the record's model
+            Call::Capabilities(_) => {
+                let capabilities = capabilities_of(agent_id, kernel).await;
+                let model = helpers::agent_meta(agent_id, kernel)
+                    .get("model")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                json!({"capabilities": capabilities, "model": model})
+            }
             Call::UsageVerb(a) => usage_reply(agent_id, a.reset == Some(true), kernel),
             Call::UsageResetVerb(_) => {
                 let out = usage_reset_reply(agent_id, kernel);

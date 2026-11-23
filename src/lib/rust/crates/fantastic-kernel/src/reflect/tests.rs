@@ -43,7 +43,7 @@ async fn bare_reflect(kernel: &Arc<Kernel>, agent: &Arc<Agent>, payload: &Value)
         Ok(crate::declared::common::Call::Reflect(a)) => a,
         Err(refused) => return refused,
     };
-    apply_reflect_flags(kernel, agent, &args, &mut r)
+    apply_reflect_flags(kernel, None, agent, &args, &mut r)
         .await
         .expect("no roster node raised");
     r
@@ -213,7 +213,7 @@ async fn tree_ids_is_paged_and_the_cursor_walks_the_whole_tree() {
 
     // Default is UNCHANGED — everything, no cursor.
     let all = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"reflect","tree":"ids"}),
         )])
@@ -228,7 +228,7 @@ async fn tree_ids_is_paged_and_the_cursor_walks_the_whole_tree() {
 
     // Bounded, and the cursor names the last id handed over.
     let p1 = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"reflect","tree":"ids","limit":2}),
         )])
@@ -249,7 +249,7 @@ async fn tree_ids_is_paged_and_the_cursor_walks_the_whole_tree() {
     let mut cur = cursor.to_string();
     loop {
         let p = kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type":"reflect","tree":"ids","limit":2,"after":cur}),
             )])
@@ -283,25 +283,23 @@ async fn an_agent_can_read_its_own_authority() {
     kernel.set_root(Arc::clone(&root));
 
     let mut meta = Map::new();
-    meta.insert("can_call".into(), json!({"store": ["read"]}));
-    meta.insert("callable_by".into(), json!({"cli": "*"}));
+    meta.insert("can".into(), json!({"store": {"call": ["read"]}}));
     let a = mk_agent_meta("worker", Some(root.id.clone()), meta);
     kernel.register(Arc::clone(&a));
     root.add_child(Arc::clone(&a));
 
     let own = kernel
-        .send(vec![Item::new(a.id.clone(), json!({"type": "reflect"}))])
+        .operator_send(vec![Item::new(a.id.clone(), json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
-    assert_eq!(own["can_call"]["store"][0], "read");
-    assert_eq!(own["callable_by"]["cli"], "*");
+    assert_eq!(own["can"], json!({"store": {"call": ["read"]}}));
 
-    // ...and the same two keys ride every WIRING tree node (`detail:full`), so
+    // ...and the same `can` key rides every WIRING tree node (`detail:full`), so
     // the whole authorization landscape is readable from ONE root reflect. The
     // distilled roster carries purpose, not posture (python `_PURPOSE_KEYS`).
     let tree = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "reflect", "detail": "full"}),
         )])
@@ -312,8 +310,7 @@ async fn an_agent_can_read_its_own_authority() {
         .as_array()
         .and_then(|c| c.iter().find(|n| n["id"] == "worker"))
         .expect("the worker node");
-    assert_eq!(node["can_call"]["store"][0], "read");
-    assert_eq!(node["callable_by"]["cli"], "*");
+    assert_eq!(node["can"], json!({"store": {"call": ["read"]}}));
 }
 
 // ─── Children walk CREATION order ─────────────────────────
@@ -353,7 +350,7 @@ async fn tree_children_keep_creation_order() {
 
     // `tree=ids` / descendant walk — DFS, self first, children in creation order.
     assert_eq!(
-        descendant_ids(&root),
+        descendant_ids(&root, &Sight::of(&kernel, None)),
         vec!["kernel_state", "zulu", "mike", "alpha", "gamma"]
     );
 
@@ -431,12 +428,7 @@ fn roster_kernel() -> (Arc<Kernel>, Arc<Agent>) {
     reg.register_unlisted("fixture_probe.tools", RosterBundle);
     kernel.bundles = reg;
     let kernel = Arc::new(kernel);
-    let mut meta = Map::new();
-    meta.insert(
-        "callable_by".into(),
-        json!({"$self": "*", "$parent": "*", "$subtree": "*"}),
-    );
-    let root = mk_agent_meta("kernel_state", None, meta);
+    let root = mk_agent_meta("kernel_state", None, Map::new());
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     (kernel, root)
@@ -473,7 +465,7 @@ fn handler_child(
 
 async fn kernel_reflect(kernel: &Arc<Kernel>, payload: Value) -> crate::outcome::Outcome {
     kernel
-        .send(vec![Item::new(AgentId::from("kernel"), payload)])
+        .operator_send(vec![Item::new(AgentId::from("kernel"), payload)])
         .await
         .remove(0)
 }
@@ -491,7 +483,7 @@ async fn reflect_carries_the_agents_view() {
         let id = id.to_string();
         async move {
             kernel
-                .send(vec![Item::new(
+                .operator_send(vec![Item::new(
                     AgentId::from(id),
                     json!({"type": "reflect"}),
                 )])
@@ -510,7 +502,7 @@ async fn a_reply_that_built_its_own_view_keeps_it() {
     let a = probe_child(&kernel, "drawn", &root, json!({"view": {"kind": "html"}}));
     let own = json!({"kind": "html", "bytes": "own"});
     let mut reply = json!({"id": "drawn", "view": own});
-    apply_reflect_flags(&kernel, &a, &plain_reflect(), &mut reply)
+    apply_reflect_flags(&kernel, None, &a, &plain_reflect(), &mut reply)
         .await
         .expect("no roster node raised");
     assert_eq!(reply["view"], own);
@@ -521,7 +513,7 @@ async fn a_refusal_gets_no_view() {
     let (kernel, root) = roster_kernel();
     let a = probe_child(&kernel, "drawn", &root, json!({"view": {"kind": "html"}}));
     let mut reply = json!({"error": "nope"});
-    apply_reflect_flags(&kernel, &a, &plain_reflect(), &mut reply)
+    apply_reflect_flags(&kernel, None, &a, &plain_reflect(), &mut reply)
         .await
         .expect("no roster node raised");
     assert_eq!(reply, json!({"error": "nope"}));
@@ -530,14 +522,14 @@ async fn a_refusal_gets_no_view() {
 #[tokio::test]
 async fn reflect_carries_the_declared_verbs_and_no_other_docs() {
     // A reflect says what an agent IS and lists its declared verbs; emits, cancel,
-    // `more` and `kernel_verbs` are the `docs` kernel verb.
+    // `more` and `kernel_verbs` are no reflect keys.
     let (kernel, root) = roster_kernel();
     let child = probe_child(&kernel, "kid", &root, json!({}));
     let r = kernel_reflect(&kernel, json!({"type": "reflect"}))
         .await
         .result;
     let c = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             child.id.clone(),
             json!({"type": "reflect", "tree": "none"}),
         )])
@@ -555,11 +547,7 @@ async fn reflect_carries_the_declared_verbs_and_no_other_docs() {
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(
-        shown,
-        ["boom", "modeless", "ping", "reflect"],
-        "{c}"
-    );
+    assert_eq!(shown, ["boom", "modeless", "ping", "reflect"], "{c}");
     // Python order: `tree`, `next`, `bundles`.
     let r = kernel_reflect(
         &kernel,
@@ -925,7 +913,7 @@ async fn a_bad_handler_modules_is_refused_bad_arg() {
 async fn handler_modules_on_a_non_root_target() {
     let (kernel, _root) = handler_tree();
     let r = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("b"),
             json!({"type": "reflect", "tree": "ids", "handler_modules": ["roster_probe.tools"]}),
         )])
@@ -1090,7 +1078,7 @@ async fn a_probe_registered_bundle_is_absent_from_the_catalog() {
     );
     kernel.register(Arc::clone(&fixture));
     let r = kernel
-        .send(vec![Item::new(fixture.id.clone(), json!({"type": "ping"}))])
+        .operator_send(vec![Item::new(fixture.id.clone(), json!({"type": "ping"}))])
         .await
         .remove(0)
         .result;
@@ -1133,7 +1121,7 @@ async fn root_with_handler_reflects_identity() {
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let v = kernel
-        .send(vec![crate::Item::new(
+        .operator_send(vec![crate::Item::new(
             AgentId::from("kernel"),
             json!({"type": "reflect", "tree": "none"}),
         )])
@@ -1149,13 +1137,13 @@ async fn root_with_handler_reflects_identity() {
     // A NON-root agent of the same bundle does NOT short-circuit — its reflect
     // is its handler's, which the stand-in loader does not answer.
     let _ = kernel
-        .send(vec![crate::Item::new(
+        .operator_send(vec![crate::Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","parent_id":"kernel","handler_module":"kernel_state.tools","id":"session"}),
         )])
         .await;
     let v = kernel
-        .send(vec![crate::Item::new(
+        .operator_send(vec![crate::Item::new(
             AgentId::from("session"),
             json!({"type": "reflect"}),
         )])
@@ -1252,4 +1240,462 @@ async fn bundles_all_carries_a_declared_record() {
     .await
     .result;
     assert_eq!(ids["bundles"], json!(["alpha", "schemaed"]));
+}
+
+// ─── Reflect filtered by level (grant model rule 9) ─────────────
+
+/// A bundle named `self.0` whose reflect carries a sentence and two FREE keys,
+/// `model` and `tone`.
+struct Free(&'static str);
+
+crate::stand_in_verbs!(free_verbs { CompleteV "complete" {  }, PingV "ping" {  } });
+#[async_trait::async_trait]
+impl crate::bundle::Handler for Free {
+    type Call = free_verbs::Call;
+    fn man(&self) -> &'static str {
+        "A test stand-in."
+    }
+    fn name(&self) -> &str {
+        self.0
+    }
+    fn verbs(&self) -> &'static [crate::Verb] {
+        free_verbs::VERBS
+    }
+    fn dynamic_verbs(&self, agent: &crate::Agent) -> Vec<crate::DynVerb> {
+        free_verbs::dynamic_verbs(agent)
+    }
+    fn record(&self) -> &'static crate::RecordDecl {
+        crate::fixture_record!()
+    }
+    async fn handle(
+        &self,
+        agent_id: &AgentId,
+        call: Self::Call,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
+        let payload = &call.payload();
+        if payload.get("type").and_then(Value::as_str) != Some("reflect") {
+            return Ok(Some(json!({"ok": true})));
+        }
+        Ok(Some(json!({
+            "id": agent_id.as_str(),
+            "sentence": format!("{} is a {}", agent_id.as_str(), self.0),
+            "handler_module": self.0,
+            "model": "m1",
+            "tone": "dry",
+        })))
+    }
+}
+
+/// The bundles of the v9 fixture's agents that answer here, sorted.
+const V9_BUNDLES: [&str; 9] = [
+    "anthropic_backend",
+    "canvas",
+    "chat",
+    "exec_bridge",
+    "file_bridge",
+    "lead",
+    "tasks",
+    "team",
+    "worker",
+];
+
+/// The v9 fixture tree ([`crate::test_support::v9_tree`]) with [`V9_BUNDLES`]
+/// installed as [`Free`].
+fn v9_kernel() -> Arc<Kernel> {
+    let mut kernel = Kernel::new();
+    let mut reg = crate::bundle::BundleRegistry::new();
+    for b in V9_BUNDLES {
+        reg.register(b, Free(b));
+    }
+    kernel.bundles = reg;
+    crate::test_support::v9_tree(&kernel);
+    Arc::new(kernel)
+}
+
+/// `caller` sends `payload` to `target`.
+async fn reflect_as(
+    kernel: &Arc<Kernel>,
+    caller: &str,
+    target: &str,
+    payload: Value,
+) -> crate::outcome::Outcome {
+    crate::test_support::as_agent(
+        AgentId::from(caller),
+        kernel.send(vec![Item::new(AgentId::from(target), payload)]),
+    )
+    .await
+    .remove(0)
+}
+
+/// The operator sends `payload` to `target`.
+async fn reflect_op(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
+    kernel
+        .operator_send(vec![Item::new(AgentId::from(target), payload)])
+        .await
+        .remove(0)
+        .result
+}
+
+fn keys_of(v: &Value) -> Vec<String> {
+    v.as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn agent_of(kernel: &Arc<Kernel>, id: &str) -> Arc<Agent> {
+    kernel.resolve_target(id).expect("agent registered")
+}
+
+#[tokio::test]
+async fn reflect_with_nothing_held_is_byte_identical_to_an_unknown_agent() {
+    let kernel = v9_kernel();
+    // chat_b holds no line on prov_1
+    let hidden = reflect_as(&kernel, "chat_b", "prov_1", json!({"type": "reflect"})).await;
+    let missing = reflect_as(&kernel, "chat_b", "ghost_1", json!({"type": "reflect"})).await;
+    assert_eq!(hidden.result, crate::refusal::unknown_agent("prov_1"));
+    assert_eq!(missing.result, crate::refusal::unknown_agent("ghost_1"));
+    assert_eq!(hidden.status, missing.status);
+    assert_eq!(
+        serde_json::to_string(&hidden.result)
+            .unwrap()
+            .replace("prov_1", "ghost_1"),
+        serde_json::to_string(&missing.result).unwrap()
+    );
+    // the flags themselves answer the same way for a caller holding nothing
+    let prov = agent_of(&kernel, "prov_1");
+    let mut reply = reflect_identity(&prov);
+    apply_reflect_flags(
+        &kernel,
+        Some(&AgentId::from("chat_b")),
+        &prov,
+        &plain_reflect(),
+        &mut reply,
+    )
+    .await
+    .expect("no roster node raised");
+    assert_eq!(reply, crate::refusal::unknown_agent("prov_1"));
+}
+
+#[tokio::test]
+async fn reflect_at_call_level_shows_identity_view_and_held_verbs_only() {
+    // test k: chat_a holds `prov_1: {call: [complete]}`
+    let kernel = v9_kernel();
+    let view = json!({"kind": "html", "src": "p.html"});
+    let mut patch = Map::new();
+    patch.insert("view".to_string(), view.clone());
+    crate::test_support::update(&kernel, &AgentId::from("prov_1"), patch);
+    let r = reflect_as(
+        &kernel,
+        "chat_a",
+        "prov_1",
+        json!({"type": "reflect", "bundles": "all"}),
+    )
+    .await
+    .result;
+    assert_eq!(r["id"], "prov_1", "{r}");
+    assert_eq!(r["handler_module"], "anthropic_backend");
+    assert_eq!(r["view"], view);
+    assert_eq!(keys_of(&r["verbs"]), ["complete"], "{r}");
+    for k in [
+        "sentence",
+        "model",
+        "tone",
+        "can",
+        "bundles",
+        "bundles_next",
+    ] {
+        assert!(r.get(k).is_none(), "{k} shown at call level: {r}");
+    }
+    let allowed = [
+        "id",
+        "display_name",
+        "parent_id",
+        "handler_module",
+        "description",
+        "view",
+        "verbs",
+        "tree",
+    ];
+    for k in keys_of(&r) {
+        assert!(
+            allowed.contains(&k.as_str()),
+            "{k} shown at call level: {r}"
+        );
+    }
+    // the tree node is cut the same way: no sentence
+    assert_eq!(keys_of(&r["tree"]), ["id", "children"], "{r}");
+}
+
+#[tokio::test]
+async fn reflect_at_update_level_adds_held_field_values_only() {
+    let kernel = v9_kernel();
+    crate::test_support::grant(&kernel, "chat_b", "prov_1", json!({"update": ["model"]}));
+    let payload = json!({"type": "reflect", "bundles": "all", "tree": "none"});
+    let r = reflect_as(&kernel, "chat_b", "prov_1", payload.clone())
+        .await
+        .result;
+    assert_eq!(r["model"], "m1", "{r}");
+    for k in ["tone", "sentence", "can", "bundles"] {
+        assert!(r.get(k).is_none(), "{k} shown without being held: {r}");
+    }
+    // `update` includes `call` on every verb
+    let verbs = keys_of(&r["verbs"]);
+    assert!(verbs.iter().any(|v| v == "complete"), "{r}");
+    assert!(verbs.iter().any(|v| v == "ping"), "{r}");
+    // `can` only when held
+    crate::test_support::grant(
+        &kernel,
+        "chat_b",
+        "prov_1",
+        json!({"update": ["model", "can"]}),
+    );
+    let r = reflect_as(&kernel, "chat_b", "prov_1", payload)
+        .await
+        .result;
+    assert_eq!(r["can"], json!({"credentials": {"call": ["get"]}}), "{r}");
+    assert!(r.get("tone").is_none(), "{r}");
+}
+
+#[tokio::test]
+async fn reflect_at_create_level_adds_creatable_bundles_with_schemas() {
+    let kernel = v9_kernel();
+    crate::test_support::grant(
+        &kernel,
+        "chat_b",
+        "canvas_garage",
+        json!({"create": {"who": ["*"], "what": {"chat": {"model": "*"}}}}),
+    );
+    let r = reflect_as(
+        &kernel,
+        "chat_b",
+        "canvas_garage",
+        json!({"type": "reflect", "bundles": "all", "tree": "none"}),
+    )
+    .await
+    .result;
+    assert_eq!(r["id"], "canvas_garage", "{r}");
+    assert_eq!(
+        r["bundles"],
+        json!([{"name": "chat", "handler_module": "chat",
+                "schema": {"fields": [], "open": true}}]),
+        "{r}"
+    );
+    // a create line gives nothing on the target itself: no field, no verb
+    for k in ["can", "sentence", "model"] {
+        assert!(r.get(k).is_none(), "{k} shown at create level: {r}");
+    }
+    assert_eq!(r["verbs"], json!({}), "{r}");
+}
+
+#[tokio::test]
+async fn a_hidden_node_is_omitted_and_its_visible_children_lifted_with_their_real_parent() {
+    // garage/chat1/canvas1/chat2: t1_w1's create line selects the `chat` agents
+    // under the garage, and its caps (t1_lead, team_1) call `ping` there, so
+    // t1_w1 covers chat1 and chat2 but not canvas1
+    let kernel = v9_kernel();
+    let garage = agent_of(&kernel, "canvas_garage");
+    let chat1 = handler_child(&kernel, "chat1", "chat", &garage, json!({}));
+    let canvas1 = handler_child(&kernel, "canvas1", "canvas", &chat1, json!({}));
+    handler_child(&kernel, "chat2", "chat", &canvas1, json!({}));
+    crate::test_support::grant(
+        &kernel,
+        "t1_w1",
+        "canvas_garage",
+        json!({"create": {"who": ["*"], "what": {"chat": {}}}}),
+    );
+    for cap in ["t1_lead", "team_1"] {
+        crate::test_support::grant(&kernel, cap, "canvas_garage", json!({"call": ["ping"]}));
+    }
+    assert_eq!(
+        kernel.held(&AgentId::from("t1_w1"), &AgentId::from("canvas1")),
+        Held::Nothing
+    );
+
+    let ids = reflect_as(
+        &kernel,
+        "t1_w1",
+        "chat1",
+        json!({"type": "reflect", "tree": "ids"}),
+    )
+    .await
+    .result;
+    assert_eq!(ids["tree"], json!(["chat1", "chat2"]), "{ids}");
+
+    let full = reflect_as(
+        &kernel,
+        "t1_w1",
+        "chat1",
+        json!({"type": "reflect", "detail": "full"}),
+    )
+    .await
+    .result;
+    let kids = full["tree"]["children"].as_array().expect("children");
+    assert_eq!(kids.len(), 1, "{full}");
+    assert_eq!(kids[0]["id"], "chat2");
+    assert_eq!(kids[0]["parent_id"], "canvas1", "the real parent: {full}");
+    assert_eq!(kids[0]["children"], json!([]));
+
+    let distilled = reflect_as(&kernel, "t1_w1", "chat1", json!({"type": "reflect"}))
+        .await
+        .result;
+    let kids = distilled["tree"]["children"].as_array().expect("children");
+    assert_eq!(kids.len(), 1, "{distilled}");
+    assert_eq!(kids[0]["id"], "chat2");
+    assert_eq!(kids[0]["parent_id"], "canvas1", "{distilled}");
+
+    // the operator sees the whole branch
+    let op = reflect_op(
+        &kernel,
+        "chat1",
+        json!({"type": "reflect", "detail": "full"}),
+    )
+    .await;
+    assert_eq!(op["tree"]["children"][0]["id"], "canvas1", "{op}");
+
+    // a pruned stub counts the agents the caller covers
+    let stub = reflect_as(
+        &kernel,
+        "t1_w1",
+        "chat1",
+        json!({"type": "reflect", "tree": "ids", "ignore_subtrees": ["chat1"]}),
+    )
+    .await
+    .result;
+    assert_eq!(
+        stub["tree"],
+        json!([{"id": "chat1", "pruned": 2}]),
+        "{stub}"
+    );
+    let stub = reflect_op(
+        &kernel,
+        "chat1",
+        json!({"type": "reflect", "tree": "ids", "ignore_subtrees": ["chat1"]}),
+    )
+    .await;
+    assert_eq!(
+        stub["tree"],
+        json!([{"id": "chat1", "pruned": 3}]),
+        "{stub}"
+    );
+
+    // a subtree filter naming a hidden id answers as for a missing one
+    let hidden = reflect_as(
+        &kernel,
+        "t1_w1",
+        "chat1",
+        json!({"type": "reflect", "show_subtrees": ["canvas1"]}),
+    )
+    .await
+    .result;
+    let missing = reflect_as(
+        &kernel,
+        "t1_w1",
+        "chat1",
+        json!({"type": "reflect", "show_subtrees": ["ghost_9"]}),
+    )
+    .await
+    .result;
+    assert!(hidden.get("error").is_some(), "{hidden}");
+    assert_eq!(
+        serde_json::to_string(&hidden)
+            .unwrap()
+            .replace("canvas1", "ghost_9"),
+        serde_json::to_string(&missing).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn root_extras_show_to_the_operator_only() {
+    let kernel = v9_kernel();
+    let payload = json!({"type": "reflect", "tree": "none"});
+    let op = reflect_op(&kernel, "kernel", payload.clone()).await;
+    for k in ["runtime", "peers", "env", "version"] {
+        assert!(op.get(k).is_some(), "the operator sees {k}: {op}");
+    }
+    // github and its cap `user` call the root
+    for holder in ["github", "user"] {
+        crate::test_support::grant(&kernel, holder, "kernel_state", json!({"call": ["ping"]}));
+    }
+    let r = reflect_as(&kernel, "github", "kernel", payload.clone())
+        .await
+        .result;
+    assert_eq!(r["id"], "kernel_state", "{r}");
+    for k in ["runtime", "peers", "env", "version", "guid"] {
+        assert!(r.get(k).is_none(), "{k} shown to an agent: {r}");
+    }
+    // an agent with no line on the root gets the unknown answer
+    let r = reflect_as(&kernel, "chat_b", "kernel", payload)
+        .await
+        .result;
+    assert_eq!(r, crate::refusal::unknown_agent("kernel"));
+}
+
+#[tokio::test]
+async fn a_bundles_free_reflect_keys_count_as_fields() {
+    let kernel = v9_kernel();
+    let payload = json!({"type": "reflect", "tree": "none"});
+    // at call level no free key shows
+    let r = reflect_as(&kernel, "chat_a", "prov_1", payload.clone())
+        .await
+        .result;
+    assert!(r.get("model").is_none() && r.get("tone").is_none(), "{r}");
+    // a free key shows when its field is held, and only that one
+    crate::test_support::grant(&kernel, "chat_b", "prov_1", json!({"update": ["tone"]}));
+    let r = reflect_as(&kernel, "chat_b", "prov_1", payload)
+        .await
+        .result;
+    assert_eq!(r["tone"], "dry", "{r}");
+    assert!(r.get("model").is_none(), "{r}");
+    assert!(r.get("sentence").is_none(), "{r}");
+}
+
+#[tokio::test]
+async fn reflect_of_own_tree_shows_everything() {
+    let kernel = v9_kernel();
+    let payload = json!({"type": "reflect", "bundles": "ids"});
+    let own = reflect_as(&kernel, "t1_lead", "t1_w1", payload.clone())
+        .await
+        .result;
+    let op = reflect_op(&kernel, "t1_w1", payload).await;
+    assert_eq!(own, op, "the caller's own tree is the whole reply");
+    assert_eq!(own["can"], json!({"$parent": {"call": ["send"]}}), "{own}");
+    for k in ["sentence", "model", "tone"] {
+        assert!(own.get(k).is_some(), "{k}: {own}");
+    }
+    let verbs = keys_of(&own["verbs"]);
+    for v in ["complete", "ping", "reflect"] {
+        assert!(verbs.iter().any(|x| x == v), "{v}: {own}");
+    }
+    assert_eq!(own["bundles"], json!(V9_BUNDLES), "{own}");
+}
+
+#[tokio::test]
+async fn the_bundle_catalog_shows_an_agent_only_the_bundles_it_may_create() {
+    let kernel = v9_kernel();
+    let payload = json!({"type": "reflect", "bundles": "ids", "tree": "none"});
+    // the operator, and canvas_ws (`canvas_root: {create: {who: [*], what: *}}`),
+    // see every bundle
+    let op = reflect_op(&kernel, "canvas_garage", payload.clone()).await;
+    assert_eq!(op["bundles"], json!(V9_BUNDLES), "{op}");
+    let ws = reflect_as(&kernel, "canvas_ws", "canvas_garage", payload.clone())
+        .await
+        .result;
+    assert_eq!(ws["bundles"], json!(V9_BUNDLES), "{ws}");
+    // a create line naming `chat` lists `chat` only
+    crate::test_support::grant(
+        &kernel,
+        "chat_b",
+        "canvas_garage",
+        json!({"create": {"who": ["*"], "what": {"chat": {}}}}),
+    );
+    let r = reflect_as(&kernel, "chat_b", "canvas_garage", payload.clone())
+        .await
+        .result;
+    assert_eq!(r["bundles"], json!(["chat"]), "{r}");
+    // below create level no catalog shows
+    let r = reflect_as(&kernel, "chat_a", "prov_1", payload)
+        .await
+        .result;
+    assert!(r.get("bundles").is_none(), "{r}");
 }

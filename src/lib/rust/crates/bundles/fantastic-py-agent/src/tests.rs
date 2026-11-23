@@ -69,7 +69,7 @@ fn kernel_for(tmp: &TempDir) -> Arc<Kernel> {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(root);
     kernel
 }
@@ -79,8 +79,7 @@ fn load(kernel: &Arc<Kernel>, tmp: &TempDir) {
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    kernel
-        .send(vec![
+    kernel.operator_send(vec![
             Item::new(AgentId::from(target), payload).with_timeout(20.0)
         ])
         .await
@@ -167,25 +166,16 @@ async fn docs_and_the_catalog_read_bundle_yaml() {
     bundle(&tmp, "rs_documented", ECHO, VERBS);
     let kernel = kernel_for(&tmp);
     load(&kernel, &tmp);
-    // the program's verbs are the instance's dynamic verbs: `docs` of the AGENT
-    // renders them beside the declared `boot` and `shutdown`
+    // the program's verbs are the instance's dynamic verbs: the verb docs of the
+    // AGENT's reflect render them beside the declared `boot` and `shutdown`
     create(&kernel, "rs_documented", "rs_d1").await;
-    let d = call(&kernel, "kernel", json!({"type": "docs", "of": "rs_d1"})).await;
+    let d = call(&kernel, "rs_d1", json!({"type": "reflect", "tier": "oneliners"})).await;
     let echo = d["verbs"]["echo"].as_str().unwrap_or_default();
     assert!(echo.contains("Echoes the text"), "{d}");
     assert!(echo.contains("text"), "{d}");
     for verb in ["boot", "shutdown", "reflect", "die", "slow", "chatty"] {
         assert!(d["verbs"].get(verb).is_some(), "{verb}: {d}");
     }
-    // the bundle's own docs, with no agent, list the program's verbs too: the same table
-    let b = call(
-        &kernel,
-        "kernel",
-        json!({"type": "docs", "of": "rs_documented"}),
-    )
-    .await;
-    assert!(b["verbs"].get("boot").is_some(), "{b}");
-    assert_eq!(b["verbs"]["echo"], d["verbs"]["echo"], "{b}");
     delete(&kernel, "rs_d1").await;
     let r = call(
         &kernel,
@@ -271,13 +261,9 @@ async fn shutdown_without_a_reason_stops_the_program() {
     create(&kernel, "rs_noreason", "rs_n1").await;
     let first = call(&kernel, "rs_n1", json!({"type": "echo", "text": "a"})).await;
     assert_eq!(first["echo"], "a", "{first}");
-    let a = kernel
-        .agents
-        .get(&AgentId::from("rs_n1"))
-        .map(|e| Arc::clone(e.value()))
+    let a = kernel.resolve_target("rs_n1")
         .unwrap();
-    kernel
-        .bookkeeping(&a, json!({"type": "shutdown"}), None)
+    fantastic_kernel::test_support::bookkeeping(&kernel, &a, json!({"type": "shutdown"}))
         .await;
     let after = call(&kernel, "rs_n1", json!({"type": "echo", "text": "b"})).await;
     assert_eq!(after["reason"], "transport_closed", "{after}");
@@ -310,15 +296,11 @@ async fn reload_restarts_the_instance_and_answers_the_inflight_call() {
         "rs_reloaded"
     )
     .is_none());
-    let a = kernel
-        .agents
-        .get(&AgentId::from("rs_r1"))
-        .map(|e| Arc::clone(e.value()))
+    let a = kernel.resolve_target("rs_r1")
         .unwrap();
-    kernel
-        .bookkeeping(&a, json!({"type": "shutdown", "reason": "reloaded"}), None)
+    fantastic_kernel::test_support::bookkeeping(&kernel, &a, json!({"type": "shutdown", "reason": "reloaded"}))
         .await;
-    kernel.bookkeeping(&a, json!({"type": "boot"}), None).await;
+    fantastic_kernel::test_support::bookkeeping(&kernel, &a, json!({"type": "boot"})).await;
     let late = pending.await.unwrap();
     assert_eq!(late["reason"], "transport_closed", "{late}");
     assert!(

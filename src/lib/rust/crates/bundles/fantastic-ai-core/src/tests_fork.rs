@@ -12,8 +12,7 @@ use fantastic_kernel::test_support::as_agent;
 const DONE: &str = "<call name=\"done\"></call>";
 
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(agent.clone(), payload)])
+    kernel.operator_send(vec![Item::new(agent.clone(), payload)])
         .await
         .remove(0)
         .result
@@ -303,7 +302,7 @@ async fn the_fork_has_the_parents_card_and_grants() {
     patch.insert("system_prompt".into(), json!("you are the parser agent"));
     patch.insert("endpoint".into(), json!("http://127.0.0.1:1"));
     patch.insert("output_reserve".into(), json!(512));
-    kernel.update(&parent, patch);
+    fantastic_kernel::test_support::update(&kernel, &parent, patch);
     let all = three_turns(&kernel, &parent).await;
     let out = verb(&kernel, &parent, json!({"type": "fork", "at": all[1]})).await;
     let fork = AgentId::from(out["id"].as_str().unwrap());
@@ -316,21 +315,16 @@ async fn the_fork_has_the_parents_card_and_grants() {
         "memory_store_id",
         "context_window",
         "output_reserve",
-        "can_call",
+        "can",
     ] {
         assert_eq!(f.get(key), p.get(key), "{key}");
         assert!(f.get(key).is_some(), "{key} is on the card");
     }
     let (pa, fa) = (
-        kernel.agents.get(&parent).unwrap().handler_module.clone(),
-        kernel.agents.get(&fork).unwrap().handler_module.clone(),
+        kernel.resolve_target(parent.as_str()).unwrap().handler_module.clone(),
+        kernel.resolve_target(fork.as_str()).unwrap().handler_module.clone(),
     );
     assert_eq!(pa, fa, "the same handler");
-    let store_meta = agent_meta(&AgentId::from(MEMORY), &kernel);
-    assert!(
-        store_meta["callable_by"].get(fork.as_str()).is_some(),
-        "the store admits the fork: {store_meta:?}"
-    );
     // a name and an id are taken as given
     let named = verb(
         &kernel,
@@ -351,12 +345,7 @@ async fn fork_is_all_or_nothing_on_a_store_refusal() {
     let (kernel, parent) = mk_kernel(&tmp, "fk_refused").await;
     let all = three_turns(&kernel, &parent).await;
     // the store lets the parent read and prune, not append: the fork inherits that
-    kernel
-        .edit_callable_by(&AgentId::from(MEMORY), |cb| {
-            cb.insert(parent.as_str().to_string(), json!(["read", "prune"]));
-            true
-        })
-        .unwrap();
+    fantastic_kernel::test_support::grant(&kernel, parent.as_str(), MEMORY, json!({"call": ["read", "prune"]}));
     let out = verb(
         &kernel,
         &parent,
@@ -377,11 +366,6 @@ async fn fork_is_all_or_nothing_on_a_store_refusal() {
             .ends_with("fk_refused_new")),
         "the store holds none of its rows"
     );
-    let cb = agent_meta(&AgentId::from(MEMORY), &kernel)["callable_by"].clone();
-    assert!(
-        cb.get("fk_refused_new").is_none(),
-        "the grant is taken back: {cb}"
-    );
 }
 
 #[tokio::test]
@@ -395,7 +379,6 @@ async fn the_forks_prompt_equals_the_parents_for_the_same_prefix() {
         &kernel,
         &file,
         &tmp.path().join(".fantastic").join("ref"),
-        &id_for(&tmp, "fk_prompt_ref"),
     )
     .await;
     let reference = add_backend(&kernel, &id_for(&tmp, "fk_prompt_ref"), &file).await;
@@ -452,8 +435,7 @@ async fn the_forks_prompt_equals_the_parents_for_the_same_prefix() {
     };
     // one short record prompt for both: the default block names each agent's own id
     for a in [&fork, &reference] {
-        let _ = kernel
-            .send(vec![Item::new(
+        let _ = kernel.operator_send(vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "update_agent", "id": a.as_str(), "system_prompt": "sys"}),
             )])
@@ -680,6 +662,29 @@ async fn fork_from_forks_the_named_agent() {
     let tmp = TempDir::new().unwrap();
     let (kernel, parent) = mk_kernel(&tmp, "fk_from").await;
     let peer = add_peer(&kernel, &tmp, &parent).await;
+    // THE ASKER'S LINES: the fork goes under `parent` and is made as the peer, so
+    // the peer holds a create line whose tree holds `parent` (which also calls
+    // `parent`, strictly under it), and the card's lines are ones it holds itself.
+    let (ff_parent, ff_peer) = (format!("ff_{parent}"), format!("ff_{peer}"));
+    for (who, can) in [
+        (
+            parent.as_str(),
+            json!({ff_parent: {"call": ["*"]}, MEMORY: {"call": ["*"]}}),
+        ),
+        (
+            peer.as_str(),
+            json!({ff_peer: {"call": ["*"]}, MEMORY: {"call": ["*"]},
+                "kernel_state": {"create": {"who": ["*"], "what": "*"}}}),
+        ),
+    ] {
+        let r = verb(
+            &kernel,
+            &AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": who, "can": can}),
+        )
+        .await;
+        assert_eq!(r["updated"], true, "{r}");
+    }
     let all = three_turns(&kernel, &parent).await;
     let out = verb(
         &kernel,

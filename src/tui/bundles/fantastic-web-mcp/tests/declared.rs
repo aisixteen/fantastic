@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     Arc::clone(k)
-        .send(vec![Item::new(AgentId::from(target), payload)])
+        .operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -29,8 +29,7 @@ async fn setup() -> Arc<Kernel> {
     let r = op(
         &k,
         &root,
-        json!({"type": "create_agent", "parent_id": root, "id": "mcp", "handler_module": HANDLER_MODULE,
-               "can_call": {}}),
+        json!({"type": "create_agent", "parent_id": root, "id": "mcp", "handler_module": HANDLER_MODULE}),
     )
     .await;
     assert!(r.get("error").is_none(), "create mcp: {r}");
@@ -110,7 +109,7 @@ async fn reflect_and_docs_render_the_declarations_and_the_record_is_declared() {
     for v in ["inbound_send", "inquiry", "inquiries", "answer_inquiry", "boot", "reflect"] {
         assert!(r["verbs"].get(v).is_some(), "{v} in {r}");
     }
-    let d = op(&k, "kernel", json!({"type": "docs", "of": "mcp", "tier": "detailed"})).await;
+    let d = op(&k, "mcp", json!({"type": "reflect", "tier": "detailed"})).await;
     assert!(d["verbs"]["answer_inquiry"].as_str().unwrap().contains("re:int (req)"), "{d}");
     assert!(d["man"].as_str().is_some_and(|m| !m.is_empty()), "{d}");
     // the record: its three fields and no other

@@ -26,10 +26,9 @@ async fn kernel(tmp: &tempfile::TempDir, allow: Value) -> Arc<Kernel> {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(root);
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
                    "id": "fb", "root": tmp.path().join("served").display().to_string(),
@@ -43,8 +42,7 @@ async fn kernel(tmp: &tempfile::TempDir, allow: Value) -> Arc<Kernel> {
 }
 
 async fn call(kernel: &Arc<Kernel>, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(AgentId::from("fb"), payload)])
+    kernel.operator_send(vec![Item::new(AgentId::from("fb"), payload)])
         .await
         .remove(0)
         .result
@@ -190,7 +188,7 @@ async fn a_path_the_bridge_stops_exposing_reports_nothing() {
     );
     let mut patch = serde_json::Map::new();
     patch.insert("allow".into(), json!(["other.md"]));
-    k.update(&AgentId::from("fb"), patch);
+    fantastic_kernel::test_support::update(&k, &AgentId::from("fb"), patch);
     std::fs::write(served(&tmp).join("notes/a.md"), "y").unwrap();
     assert!(next_changed(&mut rx, "notes/a.md", 1).await.is_none());
 }

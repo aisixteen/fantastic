@@ -141,7 +141,7 @@ fn rm_rf(line: &str) -> bool {
 
 fn flat(v: &Value) -> String {
     match v {
-        Value::Array(xs) => xs.iter().map(|x| crate::helpers::shown(x)).collect::<Vec<_>>().join(" "),
+        Value::Array(xs) => xs.iter().map(crate::helpers::shown).collect::<Vec<_>>().join(" "),
         other => crate::helpers::shown(other),
     }
 }
@@ -179,7 +179,10 @@ fn risky(args: &[(String, Value)]) -> Option<&'static str> {
 /// `<id>` is the target's), and an exec command inside `<payload>` is seen by
 /// [`risky`]; a name written directly in the call goes where its name says. A
 /// `<routing>`/`<payload>` value that does not read as tags stays as it is.
-fn split(name: &str, args: &[(String, Value)]) -> (Vec<(String, Value)>, Vec<(String, Value)>) {
+/// A call's named arguments, in the order written.
+type Args = Vec<(String, Value)>;
+
+fn split(name: &str, args: &[(String, Value)]) -> (Args, Args) {
     if name != "send" {
         return (Vec::new(), args.to_vec());
     }

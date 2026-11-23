@@ -67,7 +67,7 @@ pub fn last_in(text: &str) -> Option<String> {
         .iter()
         .filter(|c| c.name == CALL)
         .filter_map(line_of)
-        .last()
+        .next_back()
 }
 
 /// The latest line among the assistant rows `rows[idxs]` — the title of the stretch
@@ -87,7 +87,7 @@ pub fn of_span(
         .map(|&i| &rows[i])
         .filter(|r| crate::folds::row_role(r) == "assistant")
         .filter_map(|r| last_in(crate::folds::row_content(r)))
-        .last()
+        .next_back()
 }
 
 /// The chat's current line, `{text, ts}`, or null when it has none.

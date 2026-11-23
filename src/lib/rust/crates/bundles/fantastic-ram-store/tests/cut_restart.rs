@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
 use fantastic_kernel::bundle::{BundleError, BundleRegistry, Handler, Reply};
 use fantastic_kernel::executions::{CutCall, CUT_BY_RESTART};
-use fantastic_kernel::test_support::{as_agent, register_root_loader, wire};
+use fantastic_kernel::test_support::{as_agent, register_root_loader, grant};
 use fantastic_kernel::{AgentId, Item, Kernel, Outcome};
 use fantastic_ram_store::RamStoreBundle;
 use serde_json::{json, Map, Value};
@@ -67,7 +67,7 @@ fn registry() -> BundleRegistry {
 }
 
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Outcome {
-    k.send(vec![Item::new(AgentId::from(target), payload)])
+    k.operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
 }
@@ -100,10 +100,10 @@ async fn first(dir: &std::path::Path) -> Arc<Kernel> {
         .result;
         assert_eq!(r["id"], json!(id), "{r}");
     }
-    wire(&k, "a", "b", json!("*"));
+    grant(&k, "a", "b", json!({"call": ["*"]}));
     let mut patch = Map::new();
     patch.insert("memory_store_id".to_string(), json!("memory"));
-    k.update(&AgentId::from(root_id(&k)), patch);
+    fantastic_kernel::test_support::update(&k, &AgentId::from(root_id(&k)), patch);
     assert_eq!(k.start(false).await["started"], json!(true));
     k
 }
@@ -115,7 +115,7 @@ async fn second(k: &Arc<Kernel>, dir: &std::path::Path) -> Arc<Kernel> {
     k.flush_executions().await;
     let tables = call(k, "memory", json!({"type": "dump"})).await.result["tables"].clone();
     for id in k.agent_ids() {
-        let a = k.agents.get(&id).map(|e| Arc::clone(&e)).unwrap();
+        let a = k.resolve_target(id.as_str()).unwrap();
         fantastic_kernel::persistence::write_record_at(&a.agent_file(), &a.record()).unwrap();
     }
     let k2 = bootstrap(

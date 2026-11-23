@@ -60,13 +60,12 @@ async fn rig_with(password: &str, tweak: impl FnOnce(&mut Map<String, Value>)) -
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
 
     // the login: a ref bound to the local host, holding username and password
     let store = creds::ensure_store(&kernel, tmp.path(), "mail").await;
-    let declared = kernel
-        .send(vec![Item::new(
+    let declared = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": store.0, "refs": {"main": {"host": ["127.0.0.1", "localhost"]}}}),
         )])
@@ -74,8 +73,7 @@ async fn rig_with(password: &str, tweak: impl FnOnce(&mut Map<String, Value>)) -
         .remove(0)
         .result;
     assert_eq!(declared["updated"], json!(true), "{declared}");
-    let set = kernel
-        .send(vec![Item::new(store, json!({"type": "set", "ref": "main", "fields": {"username": fake::USER, "password": password}}))])
+    let set = kernel.operator_send(vec![Item::new(store, json!({"type": "set", "ref": "main", "fields": {"username": fake::USER, "password": password}}))])
         .await
         .remove(0)
         .result;
@@ -89,7 +87,7 @@ async fn rig_with(password: &str, tweak: impl FnOnce(&mut Map<String, Value>)) -
     meta.insert("send_allow".into(), json!(["friend@example.org", "corp.test"]));
     creds::add_credentials(&mut meta, "main");
     tweak(&mut meta);
-    kernel.register(Agent::new(
+    fantastic_kernel::test_support::register(&kernel, Agent::new(
         AgentId::from("mail"),
         Some(HANDLER_MODULE.to_string()),
         Some(root.id.clone()),
@@ -101,7 +99,7 @@ async fn rig_with(password: &str, tweak: impl FnOnce(&mut Map<String, Value>)) -
 }
 
 async fn send(k: &Arc<Kernel>, payload: Value) -> Outcome {
-    k.send(vec![Item::new(AgentId::from("mail"), payload)]).await.remove(0)
+    k.operator_send(vec![Item::new(AgentId::from("mail"), payload)]).await.remove(0)
 }
 
 fn reason(o: &Outcome) -> String {
@@ -206,15 +204,16 @@ async fn send_waits_for_the_inquiry_and_sends_on_yes() {
     // the person saw recipients, subject and text
     assert!(asked.contains("friend@example.org") && asked.contains("Pat@Corp.Test"), "{asked}");
     assert!(asked.contains("Re: Lunch?") && asked.contains("Noon works."), "{asked}");
-    let st = r.smtp.lock().unwrap();
-    assert_eq!(st.mails.len(), 1);
-    let m = &st.mails[0];
-    assert_eq!(m.from, fake::USER);
-    assert_eq!(m.rcpt, vec!["friend@example.org", "Pat@Corp.Test"]);
-    assert!(m.data.contains("Subject: Re: Lunch?") && m.data.contains("Noon works."), "{}", m.data);
-    assert!(m.data.contains(&format!("Message-ID: <{id}>")), "{}", m.data);
-    assert!(m.data.contains("In-Reply-To: <m2@x>"), "{}", m.data);
-    drop(st);
+    {
+        let st = r.smtp.lock().unwrap();
+        assert_eq!(st.mails.len(), 1);
+        let m = &st.mails[0];
+        assert_eq!(m.from, fake::USER);
+        assert_eq!(m.rcpt, vec!["friend@example.org", "Pat@Corp.Test"]);
+        assert!(m.data.contains("Subject: Re: Lunch?") && m.data.contains("Noon works."), "{}", m.data);
+        assert!(m.data.contains(&format!("Message-ID: <{id}>")), "{}", m.data);
+        assert!(m.data.contains("In-Reply-To: <m2@x>"), "{}", m.data);
+    }
     // the answered question is closed, and the send is on the record's recent list
     let q = send(&r.kernel, json!({"type": "inquiries"})).await.result;
     assert_eq!(q["inquiries"], json!([]));
@@ -305,17 +304,15 @@ async fn reflect_says_how_it_is_set_up_and_carries_an_html_view() {
 #[tokio::test]
 async fn only_a_person_approves_a_send() {
     use fantastic_kernel::test_support::as_agent;
-    let r = rig_with(fake::PASS, |m| {
-        m.insert("callable_by".into(), json!({"asker": "*", "other": "*"}));
-    })
-    .await;
+    // each caller holds its own line on `mail`; the mail agent keeps no list
+    let r = rig_with(fake::PASS, |_| {}).await;
     let root = r.kernel.root().unwrap().id.clone();
     for name in ["asker", "other"] {
-        r.kernel.register(Agent::new(
+        fantastic_kernel::test_support::register(&r.kernel, Agent::new(
             AgentId::from(name),
             None,
             Some(root.clone()),
-            json!({"can_call": {"mail": "*"}}).as_object().cloned().unwrap(),
+            json!({"can": {"mail": {"call": ["*"]}}}).as_object().cloned().unwrap(),
             PathBuf::new(),
             false,
         ));

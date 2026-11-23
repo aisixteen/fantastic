@@ -205,6 +205,18 @@ pub const MAX_MARKS: usize = 20;
 /// `fork_points` reports an agent `warm` while its last send is younger than this.
 pub const CACHE_LIFETIME_SECS: f64 = 300.0;
 
+// ─── usage ───────────────────────────────────────────────────────────────────
+
+/// The four token counts a backend's usage map carries, in this order: fresh
+/// input, cache writes, cache reads, output. A writer of a usage map and a reader
+/// of one spell them from here.
+pub const USAGE_KEYS: [&str; 4] = [
+    "input_tokens",
+    "cache_write_tokens",
+    "cache_read_tokens",
+    "output_tokens",
+];
+
 #[cfg(test)]
 mod default_max_tokens_tests {
     use super::*;
@@ -219,15 +231,3 @@ mod default_max_tokens_tests {
         assert_eq!(default_max_tokens(Some(i64::MAX), i64::MAX), i64::MAX);
     }
 }
-
-// ─── usage ───────────────────────────────────────────────────────────────────
-
-/// The four token counts a backend's usage map carries, in this order: fresh
-/// input, cache writes, cache reads, output. A writer of a usage map and a reader
-/// of one spell them from here.
-pub const USAGE_KEYS: [&str; 4] = [
-    "input_tokens",
-    "cache_write_tokens",
-    "cache_read_tokens",
-    "output_tokens",
-];

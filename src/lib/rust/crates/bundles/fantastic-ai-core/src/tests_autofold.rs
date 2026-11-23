@@ -18,8 +18,7 @@ async fn rows(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
 
 /// One send to the agent.
 async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": text, "client_id": "probe"}),
         )])
@@ -28,8 +27,7 @@ async fn say(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) {
 
 /// One verb on the agent; its result.
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(agent.clone(), payload)])
+    kernel.operator_send(vec![Item::new(agent.clone(), payload)])
         .await
         .remove(0)
         .result
@@ -37,8 +35,7 @@ async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
 
 /// A window wide enough that a 16k-token reply is delivered inline.
 async fn widen(kernel: &Arc<Kernel>, agent: &AgentId) {
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": agent.as_str(), "context_window": 1_000_000}),
         )])
@@ -251,7 +248,6 @@ async fn a_reflect_reply_carrying_an_html_view_reaches_the_model_without_the_bod
         &kernel,
         &file_id,
         &tmp.path().join(".fantastic"),
-        &backend_id,
     )
     .await;
     let agent = add_backend(&kernel, &backend_id, &file_id).await;
@@ -259,7 +255,7 @@ async fn a_reflect_reply_carrying_an_html_view_reaches_the_model_without_the_bod
         &kernel,
         &AgentId::from("kernel_state"),
         json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "ai_chat.tools",
-               "id": "viewchat", "callable_by": {agent.as_str(): "*"}}),
+               "id": "viewchat"}),
     )
     .await;
     assert_eq!(made["id"], "viewchat", "{made}");
@@ -267,7 +263,7 @@ async fn a_reflect_reply_carrying_an_html_view_reaches_the_model_without_the_bod
         &kernel,
         &AgentId::from("kernel_state"),
         json!({"type": "update_agent", "id": agent.as_str(),
-               "can_call": {"$self": "*", file_id.as_str(): "*", "cli": "*", MEMORY: "*", "viewchat": "*"}}),
+               "can": {file_id.as_str(): {"call": ["*"]}, "cli": {"call": ["*"]}, MEMORY: {"call": ["*"]}, "viewchat": {"call": ["*"]}}}),
     )
     .await;
     assert!(r.get("error").is_none(), "{r}");

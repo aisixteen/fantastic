@@ -14,6 +14,23 @@ use std::time::Duration;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+/// [`fantastic_ai_core::remote_provider::pair_chat`], plus the chat's line on the
+/// test memory store: in a seeded tree the chat's bundle defaults give it
+/// (`memory: {call: [append, read]}`); a test kernel loads no defaults.
+async fn pair_chat(
+    kernel: &std::sync::Arc<fantastic_kernel::Kernel>,
+    provider: &fantastic_kernel::AgentId,
+) -> fantastic_kernel::AgentId {
+    let chat = fantastic_ai_core::remote_provider::pair_chat(kernel, provider).await;
+    fantastic_kernel::test_support::grant(
+        kernel,
+        chat.as_str(),
+        fantastic_ram_store::test_support::MEMORY,
+        serde_json::json!({"call": ["*"]}),
+    );
+    chat
+}
+
 /// The key reader a provider awaits before each request (in the kernel, the
 /// record's `credentials` read from a credential store — python's `_key`).
 struct FixedKey(&'static str);
@@ -439,7 +456,7 @@ async fn mk_kernel_with(
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let id = format!(
         "resp_{}",
@@ -450,7 +467,7 @@ async fn mk_kernel_with(
             .replace('.', "_")
     );
     let mut memory =
-        fantastic_ram_store::test_support::memory_meta(&kernel, &id, json!({"cli": "*"})).await;
+        fantastic_ram_store::test_support::memory_meta(&kernel, &id, json!({"cli": {"call": ["*"]}})).await;
     creds::ensure_store(&kernel, tmp.path(), &id).await;
     creds::add_credentials(&mut memory, KEY_REF);
     let mut create = json!({
@@ -467,8 +484,7 @@ async fn mk_kernel_with(
     {
         create[k] = v;
     }
-    let _ = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
         .await;
     (kernel, AgentId::from(id.as_str()))
 }
@@ -477,8 +493,7 @@ async fn mk_kernel_with(
 async fn reflect_sentence_is_python_verbatim() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, id) = mk_kernel(&tmp, "http://127.0.0.1:1/v1/responses").await;
-    let r = kernel
-        .send(vec![Item::new(id, json!({"type": "reflect"}))])
+    let r = kernel.operator_send(vec![Item::new(id, json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
@@ -510,12 +525,12 @@ async fn send_streams_tokens_raw_on_both_channels() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, id) = mk_kernel(&tmp, &format!("{}/v1/responses", server.uri())).await;
     set_key(&kernel, &tmp, &id, "sk-x").await;
-    let id = fantastic_ai_core::remote_provider::pair_chat(&kernel, &id).await; // the chat streams to its caller
+    let id = pair_chat(&kernel, &id).await; // the chat streams to its caller
     let mut rx = kernel.ensure_inbox(&id);
     let k2 = Arc::clone(&kernel);
     let id2 = id.clone();
     let join = tokio::spawn(async move {
-        k2.send(vec![Item::new(
+        k2.operator_send(vec![Item::new(
             id2,
             json!({"type": "send", "text": "hi", "client_id": "c"}),
         )])
@@ -555,8 +570,7 @@ async fn send_streams_tokens_raw_on_both_channels() {
 async fn a_record_without_an_endpoint_is_refused_at_the_write_naming_it() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, id) = mk_kernel(&tmp, "http://127.0.0.1:9/stub").await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": id.as_str(), "endpoint": ""}),
         )])
@@ -573,16 +587,14 @@ async fn a_record_without_an_endpoint_is_refused_at_the_write_naming_it() {
 async fn sampling_may_not_override_what_the_provider_owns() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, id) = mk_kernel(&tmp, "http://127.0.0.1:1/v1/responses").await;
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": id.as_str(),
                    "sampling": {"store": true, "temperature": 0.1, "model": "x"}}),
         )])
         .await;
-    let r = kernel
-        .send(vec![Item::new(
-            fantastic_ai_core::remote_provider::pair_chat(&kernel, &id).await,
+    let r = kernel.operator_send(vec![Item::new(
+            pair_chat(&kernel, &id).await,
             json!({"type": "send", "text": "hi", "client_id": "t"}),
         )])
         .await
@@ -716,9 +728,8 @@ fn raw_header(head: &str, name: &str) -> Option<String> {
 }
 
 async fn send_once(kernel: &Arc<Kernel>, id: &AgentId) -> Value {
-    kernel
-        .send(vec![Item::new(
-            fantastic_ai_core::remote_provider::pair_chat(&kernel, &id).await,
+    kernel.operator_send(vec![Item::new(
+            pair_chat(kernel, id).await,
             json!({"type": "send", "text": "go", "client_id": "t"}),
         )])
         .await
@@ -801,8 +812,7 @@ async fn the_key_rides_verbatim_a_rotated_key_rides_next_and_nothing_pools() {
 async fn unknown_type_wire_shape_is_byte_exact() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, id) = mk_kernel(&tmp, "http://127.0.0.1:1/v1/responses").await;
-    let r = kernel
-        .send(vec![Item::new(id, json!({"type": "frob"}))])
+    let r = kernel.operator_send(vec![Item::new(id, json!({"type": "frob"}))])
         .await
         .remove(0)
         .result;

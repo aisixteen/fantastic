@@ -1,6 +1,6 @@
 //! EXPORT A SUBTREE AS A BLUEPRINT (#268): an agent and every agent under it,
 //! written in the shape of `src/tui/blueprint.yaml` — nesting under `agents:` is
-//! the parent (no `parent_id`), grants are written by id on both ends, `@root`
+//! the parent (no `parent_id`), each agent's `can` lines are written by id, `@root`
 //! stands for the root.
 //!
 //! Two layers:
@@ -34,7 +34,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use fantastic_kernel::refusal::{refusal, BAD_ARG, EXISTS, NOT_FOUND, STORE_REFUSED};
-use fantastic_kernel::{AgentId, AgentRecord, Kernel};
+use fantastic_kernel::{AgentId, AgentRecord, Held, Kernel};
 use serde_json::{json, Map, Value};
 
 /// The blueprint's file name in the export folder.
@@ -66,8 +66,8 @@ pub const SECRET_KEYS: [&str; 4] = ["api_key", "token", "secret", "password"];
 /// Record fields that hold one agent id.
 const REF_FIELDS: [&str; 3] = ["memory_store_id", "file_bridge_id", "backend_id"];
 
-/// Record fields whose KEYS are agent ids.
-const GRANT_FIELDS: [&str; 2] = ["can_call", "callable_by"];
+/// The record field whose KEYS are agent ids: the agent's own lines.
+const LINES: &str = "can";
 
 /// The owned directive file.
 const DIRECTIVE_FIELD: &str = "system_prompt_file";
@@ -233,8 +233,8 @@ impl Ctx<'_> {
             Some(id.to_string())
         } else if id == self.root_id {
             Some(ROOT_PORT.to_string())
-        } else if id == "*" || id.starts_with('$') || id.starts_with('@') || id.contains('|') {
-            // the baseline grants (`$self`…), wildcards, ports and page grants stay
+        } else if id == "$parent" || id.starts_with('@') || id.contains('|') {
+            // `$parent`, ports and page lines stay
             Some(id.to_string())
         } else {
             None
@@ -283,11 +283,9 @@ fn rewrite(
             )
         })
     };
-    for g in GRANT_FIELDS {
-        if let Some(Value::Object(o)) = m.get(g) {
-            let out: Map<String, Value> = o.iter().map(|(k, v)| (name(g, k), v.clone())).collect();
-            m.insert(g.to_string(), Value::Object(out));
-        }
+    if let Some(Value::Object(o)) = m.get(LINES) {
+        let out: Map<String, Value> = o.iter().map(|(k, v)| (name(LINES, k), v.clone())).collect();
+        m.insert(LINES.to_string(), Value::Object(out));
     }
     for f in REF_FIELDS {
         if let Some(Value::String(t)) = m.get(f) {
@@ -310,7 +308,7 @@ fn rewrite(
     }
     let mut pport = |r: Reach| port(me, r);
     for (k, v) in &mut m {
-        if !GRANT_FIELDS.contains(&k.as_str()) {
+        if k != LINES {
             paths(v, k, ctx, &mut pport);
         }
     }
@@ -739,23 +737,26 @@ fn scan_yaml(v: &serde_yaml::Value, file: &str, hits: &mut Vec<String>) {
 
 /// Every record of the tree, depth first from the root, children in creation
 /// order (the order `seed.rs` writes them back in).
-fn records(kernel: &Kernel) -> (Vec<AgentRecord>, String) {
+/// Every record of the tree, cut to what `asker` holds on each (`None`: the
+/// operator, every record whole): an agent the asker holds nothing on is left
+/// out, so what sits under it is out of the export too.
+fn records(kernel: &Arc<Kernel>, asker: Option<&AgentId>) -> (Vec<AgentRecord>, String) {
     let Some(root) = kernel.root() else {
         return (Vec::new(), String::new());
     };
-    let mut out = Vec::new();
+    let mut ids: Vec<AgentId> = Vec::new();
     let mut stack = vec![root.id.clone()];
     while let Some(id) = stack.pop() {
-        let Some(a) = kernel.agents.get(&id).map(|a| Arc::clone(a.value())) else {
+        let Some(a) = kernel.resolve_target(id.as_str()) else {
             continue;
         };
-        if out.iter().any(|r: &AgentRecord| r.id == id.0) {
+        if ids.contains(&id) {
             continue;
         }
-        out.push(a.record());
+        ids.push(id);
         stack.extend(a.child_ids().into_iter().rev());
     }
-    (out, root.id.0.clone())
+    (kernel.records_for(asker, &ids), root.id.0.clone())
 }
 
 fn absolute(base: &Path, p: &Path) -> PathBuf {
@@ -860,6 +861,14 @@ pub async fn export_subtree(
     path: &str,
     who: &str,
 ) -> Value {
+    // the verb acts for its asker (gm rule 7, Q39): the read of `agent_id`'s
+    // subtree is the asker's, cut the way `reflect` cuts the tree
+    let asker = fantastic_kernel::current_origin();
+    if let Some(a) = asker.as_ref() {
+        if !kernel.holds(Some(a), Held::Call, &AgentId::from(agent_id)) {
+            return fantastic_kernel::refusal::unknown_agent(agent_id);
+        }
+    }
     let rel = Path::new(path);
     let base = match kernel.work_dir() {
         Ok(b) => b,
@@ -885,12 +894,10 @@ pub async fn export_subtree(
         );
     };
 
-    let (recs, root_id) = records(kernel);
+    let (recs, root_id) = records(kernel, asker.as_ref());
     let folder_of = |id: &str| {
-        kernel
-            .agents
-            .get(&AgentId::from(id))
-            .map(|a| a.value().root_path.clone())
+        kernel.resolve_target(id)
+            .map(|a| a.root_path.clone())
             .filter(|p| !p.as_os_str().is_empty())
             .map(|p| absolute(&base, &p))
     };

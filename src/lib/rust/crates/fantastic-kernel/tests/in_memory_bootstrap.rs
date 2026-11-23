@@ -71,13 +71,13 @@ async fn in_memory_boots_and_creates_agents_without_touching_disk() {
     // Create + mutate + delete an agent — all should work in
     // memory.
     let v = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"brainpipe"}))])
+        .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"brainpipe"}))])
         .await.remove(0).result;
     assert_eq!(v["id"], "brainpipe");
-    assert!(kernel.agents.contains_key(&AgentId::from("brainpipe")));
+    assert!(kernel.exists("brainpipe"));
 
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type":"update_agent","id":"brainpipe","note":"tutor"}),
         )])
@@ -89,14 +89,14 @@ async fn in_memory_boots_and_creates_agents_without_touching_disk() {
     assert_eq!(bp.meta.get("note"), Some(&json!("tutor")));
 
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type":"delete_agent","id":"brainpipe"}),
         )])
         .await
         .remove(0)
         .result;
-    assert!(!kernel.agents.contains_key(&AgentId::from("brainpipe")));
+    assert!(!kernel.exists("brainpipe"));
 
     // Critical assertion: no `.fantastic/` dir appeared anywhere
     // under the cwd guard.
@@ -118,7 +118,7 @@ async fn in_memory_save_load_roundtrips() {
     let kernel = Arc::clone(&booted.kernel);
     for id in ["a", "b", "c"] {
         let _ = kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":id}))])
+            .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":id}))])
             .await.remove(0).result;
     }
     let snapshot = kernel.save_json();
@@ -129,7 +129,7 @@ async fn in_memory_save_load_roundtrips() {
     let kernel2 = Arc::new(kernel2);
     kernel2.load_json(&snapshot).unwrap();
     for id in ["kernel_state", "a", "b", "c"] {
-        assert!(kernel2.agents.contains_key(&AgentId::from(id)));
+        assert!(kernel2.exists(id));
     }
     assert_eq!(kernel2.save_json(), snapshot);
 }

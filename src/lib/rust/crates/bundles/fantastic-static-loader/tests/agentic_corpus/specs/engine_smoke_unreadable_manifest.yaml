@@ -1,0 +1,12 @@
+# Test spec for `configs/engine_smoke_unreadable_manifest.yaml` — WHAT THIS SUITE ASSERTS.
+config: engine_smoke_unreadable_manifest.yaml
+
+name: engine_smoke_unreadable_manifest
+description: >
+  An engine fixture, not a scenario. `static_loader` checks only the SHAPE of
+  `manifest` at write time, so a missing path becomes a record; the READ happens
+  at boot, and the explicit re-boot is where it says so.
+
+expect:
+  hydration: boot_error
+  error_contains: "cannot read manifest"

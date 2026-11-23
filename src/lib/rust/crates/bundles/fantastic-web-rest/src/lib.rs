@@ -118,10 +118,8 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
     out.insert("sentence".into(), json!(MAN));
     // The REST face is a CHANNEL — surface its auth posture so a denied client
     // can find the door (discovery-through-denial).
-    let meta = kernel
-        .agents
-        .get(agent_id)
-        .map(|a| a.meta.read().expect("meta poisoned").clone())
+    let meta = kernel.resolve_target(agent_id.as_str())
+        .map(|a| a.record().meta.clone())
         .unwrap_or_default();
     if let Some(posture) = fantastic_io_bridge::authorizer::Rules::of(&meta)
         .unwrap_or_default()

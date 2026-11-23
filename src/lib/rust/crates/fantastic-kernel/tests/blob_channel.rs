@@ -148,7 +148,7 @@ fn kernel_at(store_root: &Path) -> Arc<Kernel> {
         store_root.to_path_buf(),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     kernel
 }
@@ -156,7 +156,7 @@ fn kernel_at(store_root: &Path) -> Arc<Kernel> {
 /// Wire the store + a counting agent, exactly as an operator would.
 async fn wire(kernel: &Arc<Kernel>, store_root: &Path, desk: &str) {
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -168,7 +168,7 @@ async fn wire(kernel: &Arc<Kernel>, store_root: &Path, desk: &str) {
         )])
         .await;
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -188,7 +188,7 @@ async fn a_sidecar_round_trips_and_lands_beside_the_record() {
     wire(&kernel, &store, DESK).await;
 
     let w = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "persist_blob", "agent_id": DESK,
@@ -206,7 +206,7 @@ async fn a_sidecar_round_trips_and_lands_beside_the_record() {
     assert_eq!(std::fs::read_to_string(&on_disk).unwrap(), "k: v\n");
 
     let r = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "load_blob", "agent_id": DESK, "name": "state.yaml"}),
         )])
@@ -225,7 +225,7 @@ async fn a_never_written_sidecar_reads_empty_not_error() {
     wire(&kernel, &store, DESK).await;
 
     let r = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "load_blob", "agent_id": DESK, "name": "nothing.yaml"}),
         )])
@@ -250,7 +250,7 @@ async fn an_agent_cannot_write_another_agents_namespace() {
 
     let forged = fantastic_kernel::test_support::as_agent(AgentId::from("attacker"), async {
         kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 AgentId::from("kernel"),
                 json!({
                     "type": "persist_blob", "agent_id": DESK,
@@ -263,7 +263,7 @@ async fn an_agent_cannot_write_another_agents_namespace() {
     })
     .await;
 
-    assert_eq!(forged["reason"], "unauthorized", "{forged}");
+    assert_eq!(forged, fantastic_kernel::unknown_agent("kernel"), "{forged}");
     assert!(
         !store.join("agents").join(DESK).join("state.yaml").exists(),
         "the forged sidecar was written"
@@ -290,7 +290,7 @@ async fn a_walk_that_escapes_the_root_raises_the_blob_verb() {
         json!({"type": "load_blob", "agent_id": "ghost", "name": "s.yaml"}),
     ] {
         let out = kernel
-            .send(vec![Item::new(AgentId::from("kernel"), payload)])
+            .operator_send(vec![Item::new(AgentId::from("kernel"), payload)])
             .await
             .remove(0);
         assert_eq!(out.status, Status::Failed, "{}", out.result);

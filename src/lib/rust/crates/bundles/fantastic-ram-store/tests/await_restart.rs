@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
 use fantastic_kernel::bundle::{BundleError, BundleRegistry, Handler, Reply};
-use fantastic_kernel::test_support::{as_agent, register_root_loader, wire};
+use fantastic_kernel::test_support::{as_agent, register_root_loader, grant};
 use fantastic_kernel::{AgentId, Item, Kernel, Outcome};
 use fantastic_ram_store::RamStoreBundle;
 use serde_json::{json, Map, Value};
@@ -85,7 +85,7 @@ fn registry(seen: &Arc<Seen>) -> BundleRegistry {
 }
 
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Outcome {
-    k.send(vec![Item::new(AgentId::from(target), payload)])
+    k.operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
 }
@@ -116,9 +116,9 @@ async fn first(dir: &std::path::Path) -> (Arc<Kernel>, Arc<Seen>) {
         })).await.result;
         assert_eq!(r["id"], json!(id), "{r}");
     }
-    wire(&k, "lead", &root_id(&k), json!(["await_set"]));
+    grant(&k, "lead", &root_id(&k), json!({"call": ["await_set"]}));
     for w in ["w1", "w2"] {
-        wire(&k, w, "lead", json!(["report"]));
+        grant(&k, w, "lead", json!({"call": ["report"]}));
     }
     let r = call(&k, "kernel", json!({
         "type": "create_agent", "parent_id": root_id(&k), "id": "memory", "handler_module": "ram_store.tools",
@@ -126,7 +126,7 @@ async fn first(dir: &std::path::Path) -> (Arc<Kernel>, Arc<Seen>) {
     assert_eq!(r["id"], json!("memory"), "{r}");
     let mut patch = Map::new();
     patch.insert("memory_store_id".to_string(), json!("memory"));
-    k.update(&AgentId::from(root_id(&k)), patch);
+    fantastic_kernel::test_support::update(&k, &AgentId::from(root_id(&k)), patch);
     assert_eq!(k.start(false).await["started"], json!(true));
     (k, seen)
 }
@@ -141,7 +141,7 @@ async fn restart(
     k.flush_executions().await;
     let tables = call(k, "memory", json!({"type": "dump"})).await.result["tables"].clone();
     for id in k.agent_ids() {
-        let a = k.agents.get(&id).map(|e| Arc::clone(&e)).unwrap();
+        let a = k.resolve_target(id.as_str()).unwrap();
         fantastic_kernel::persistence::write_record_at(&a.agent_file(), &a.record()).unwrap();
     }
     // the first kernel is DEAD from here: what it does next never reaches the store

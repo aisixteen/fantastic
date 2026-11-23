@@ -105,10 +105,7 @@ pub(crate) async fn store_write(
 async fn store_send(kernel: &Arc<Kernel>, item: Item) -> (Value, Option<Vec<u8>>) {
     let Some(store) = kernel.agents.get(&item.target).map(|e| Arc::clone(&e)) else {
         return (
-            crate::refusal::unknown_agent(
-                item.target.as_str(),
-                kernel.agents.iter().map(|e| e.key().0.clone()).collect(),
-            ),
+            crate::refusal::unknown_agent(item.target.as_str()),
             None,
         );
     };

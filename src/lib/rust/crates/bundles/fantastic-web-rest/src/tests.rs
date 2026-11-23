@@ -6,7 +6,7 @@ use fantastic_kernel::Agent;
 /// A kernel holding one `web_rest` leg "rest".
 fn kernel_with_leg() -> Arc<Kernel> {
     let kernel = Arc::new(Kernel::new());
-    kernel.register(Agent::new(
+    fantastic_kernel::test_support::register(&kernel, Agent::new(
         AgentId::from("rest"),
         Some("web_rest.tools".into()),
         None,

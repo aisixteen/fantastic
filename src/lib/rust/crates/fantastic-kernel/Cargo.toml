@@ -12,6 +12,8 @@ description = "Recursive Agent substrate + Kernel shared context for the fantast
 # instead of keeping a Debug-quoting copy.
 fantastic-bundle = { path = "../fantastic-bundle" }
 tokio = { workspace = true }
+# Grants are checked as Cedar policies (#754).
+cedar-policy = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 schemars = { workspace = true }

@@ -207,9 +207,8 @@ pub async fn load_blob(
             _ => {
                 return Ok(json!({
                     "error": format!(
-                        "load_blob: {} stalled at offset {offset} — the store \
-                         returned no forward progress",
-                        name = name
+                        "load_blob: {name} stalled at offset {offset} — the store \
+                         returned no forward progress"
                     ),
                     "name": name,
                     "content": Value::Null,

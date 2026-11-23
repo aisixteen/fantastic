@@ -298,10 +298,8 @@ impl FolderBundle {
         }
         // the instance's record holds what it inherits from this folder's `record`
         // (the kernel lays it under its own fields at `create_agent` and at load)
-        let record = kernel
-            .agents
-            .get(id)
-            .map(|a| a.meta.read().expect("meta").clone())
+        let record = kernel.resolve_target(id.as_str())
+            .map(|a| a.record().meta.clone())
             .unwrap_or_default();
         let env = fantastic_exec_bridge::child_env(&record);
         let cwd = self.folder.to_string_lossy().to_string();

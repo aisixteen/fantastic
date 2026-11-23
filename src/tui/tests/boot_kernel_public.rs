@@ -89,10 +89,11 @@ async fn accepts(port: u16) -> bool {
 
 /// The port the running kernel's `web` record holds.
 fn recorded_port(k: &Arc<Kernel>) -> Option<u64> {
-    k.agents.get(&AgentId::from("web"))?.value().record().meta.get("port").and_then(Value::as_u64)
+    k.resolve_target("web")?.record().meta.get("port").and_then(Value::as_u64)
 }
 
-const WEB_NO_PORT: &str = "agents:\n  - id: web\n    handler_module: web.tools\n";
+/// Nothing beside the stock tree, whose `web` carries no port.
+const STOCK: &str = "agents: []\n";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn boot_kernel_boots_and_stops_a_folder_in_process() {
@@ -103,7 +104,7 @@ async fn boot_kernel_boots_and_stops_a_folder_in_process() {
     let a = seeded("a", "agents:\n  - id: probe\n    handler_module: boot_probe.tools\n");
     std::env::set_current_dir(&a).unwrap();
     let k = boot_kernel(&a.join(".fantastic"), &a, EXTRAS, None, None).await.expect("boots");
-    assert!(k.agents.contains_key(&AgentId::from("probe")), "the extra's record is a live agent");
+    assert!(k.exists("probe"), "the extra's record is a live agent");
 
     // 4. a second boot of the same folder while the first runs is refused with the lock error
     let again = boot_kernel(&a.join(".fantastic"), &a, EXTRAS, None, None).await.err().expect("refused");
@@ -114,8 +115,8 @@ async fn boot_kernel_boots_and_stops_a_folder_in_process() {
     let k = boot_kernel(&a.join(".fantastic"), &a, EXTRAS, None, None).await.expect("boots again");
     stop_kernel(&k).await;
 
-    // 2. a recorded `web` given a port listens on it; stop releases the port
-    let b = seeded("b", WEB_NO_PORT);
+    // 2. the stock `web` given a port listens on it; stop releases the port
+    let b = seeded("b", STOCK);
     std::env::set_current_dir(&b).unwrap();
     let port = free_port();
     let k = boot_kernel(&b.join(".fantastic"), &b, &[], Some(port), None).await.expect("boots");
@@ -123,9 +124,9 @@ async fn boot_kernel_boots_and_stops_a_folder_in_process() {
     stop_kernel(&k).await;
     assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok(), "stop released the port");
 
-    // 5. a seeded port-less `web`, no port given: it listens, the record holds the port, a
+    // 5. the stock port-less `web`, no port given: it listens, the record holds the port, a
     // second boot reuses it
-    let c = seeded("c", WEB_NO_PORT);
+    let c = seeded("c", STOCK);
     std::env::set_current_dir(&c).unwrap();
     let k = boot_kernel(&c.join(".fantastic"), &c, &[], None, None).await.expect("boots");
     let picked = recorded_port(&k).expect("the record now holds a port");
@@ -136,16 +137,8 @@ async fn boot_kernel_boots_and_stops_a_folder_in_process() {
     assert!(accepts(picked as u16).await);
     stop_kernel(&k).await;
 
-    // 6. a port given and no `web` record: refused, and the folder boots again right after
-    let d = seeded("d", "agents:\n  - id: probe\n    handler_module: boot_probe.tools\n");
-    std::env::set_current_dir(&d).unwrap();
-    let refused = boot_kernel(&d.join(".fantastic"), &d, EXTRAS, Some(free_port()), None).await.err().expect("refused");
-    assert!(refused.contains("no `web` record"), "{refused}");
-    let k = boot_kernel(&d.join(".fantastic"), &d, EXTRAS, None, None).await.expect("the lock was released");
-    stop_kernel(&k).await;
-
     std::env::set_current_dir(std::env::temp_dir()).unwrap();
-    for p in [&a, &b, &c, &d, &home] {
+    for p in [&a, &b, &c, &home] {
         let _ = std::fs::remove_dir_all(p);
     }
 }

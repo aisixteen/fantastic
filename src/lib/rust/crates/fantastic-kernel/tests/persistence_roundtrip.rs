@@ -215,7 +215,7 @@ fn kernel_at(store_root: &Path) -> Arc<Kernel> {
         store_root.to_path_buf(),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     kernel
 }
@@ -225,7 +225,7 @@ fn kernel_at(store_root: &Path) -> Arc<Kernel> {
 /// populated for `find_store` exactly as in production).
 async fn wire_store(kernel: &Arc<Kernel>, store_root: &Path) {
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -253,7 +253,7 @@ async fn persist_through_provider_writes_record() {
     // Create a child of root through the real lifecycle — its record persists
     // THROUGH the discovered provider (no direct fs::write in the substrate).
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -289,7 +289,7 @@ async fn persist_with_no_provider_is_ram_noop() {
     let kernel = kernel_at(store_root); // NO store wired ⇒ find_store → None.
 
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -308,7 +308,7 @@ async fn persist_with_no_provider_is_ram_noop() {
         "no provider wired ⇒ record must stay in RAM (no direct-fs fallback)"
     );
     // But the agent IS live in RAM.
-    assert!(kernel.agents.contains_key(&AgentId::from("test_1")));
+    assert!(kernel.exists("test_1"));
 }
 
 #[tokio::test]
@@ -321,12 +321,12 @@ async fn delete_removes_record_through_provider() {
     fantastic_kernel::test_support::boot_root(&kernel).await;
     wire_store(&kernel, store_root).await;
     let _ = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "noop.tools", "id": "doomed"}))])
+        .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "noop.tools", "id": "doomed"}))])
         .await.remove(0).result;
     kernel.flush_records().await;
     assert!(store_root.join("agents/doomed/agent.yaml").exists());
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": "doomed"}),
         )])
@@ -377,10 +377,10 @@ fn boot_hydrates_registered_agents() {
     )
     .unwrap();
     let kernel = boot_staged(tmp.path());
-    assert!(kernel.agents.contains_key(&AgentId::from("known")));
-    assert!(kernel.agents.contains_key(&AgentId::from("grandchild")));
+    assert!(kernel.exists("known"));
+    assert!(kernel.exists("grandchild"));
     // Grandchild also wired into known's children map:
-    let known = kernel.agents.get(&AgentId::from("known")).unwrap().clone();
+    let known = kernel.resolve_target("known").unwrap().clone();
     assert!(known.has_child(&AgentId::from("grandchild")));
 }
 
@@ -415,9 +415,9 @@ fn boot_weak_load_skips_unknown_handler_module_and_subtree() {
 
     let kernel = boot_staged(tmp.path());
     // Only `real_1` loaded; ghost branch skipped wholesale.
-    assert!(kernel.agents.contains_key(&AgentId::from("real_1")));
-    assert!(!kernel.agents.contains_key(&AgentId::from("ghost_1")));
-    assert!(!kernel.agents.contains_key(&AgentId::from("ghost_child")));
+    assert!(kernel.exists("real_1"));
+    assert!(!kernel.exists("ghost_1"));
+    assert!(!kernel.exists("ghost_child"));
 
     // On-disk records survived untouched (Reboot under a runtime with
     // unknown.tools and ghost_1 rehydrates intact).
@@ -432,8 +432,8 @@ fn boot_tolerates_a_corrupt_child_record() {
     std::fs::create_dir_all(&bad).unwrap();
     std::fs::write(bad.join("agent.yaml"), "{NOT_JSON").unwrap();
     let kernel = boot_staged(tmp.path());
-    assert!(!kernel.agents.contains_key(&AgentId::from("broken")));
-    assert_eq!(kernel.agents.len(), 1, "only the root");
+    assert!(!kernel.exists("broken"));
+    assert_eq!(kernel.agent_ids().len(), 1, "only the root");
 }
 
 /// The record writer's DIRTY SET SURVIVES a no-store flush. Python
@@ -448,7 +448,7 @@ async fn records_created_before_the_store_persist_once_it_is_wired() {
 
     // NO store yet: the record is queued, not written, and NOT dropped.
     let _ = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"early"}))])
+        .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"early"}))])
         .await.remove(0).result;
     kernel.flush_records().await;
     assert!(!store_root.join("agents/early/agent.yaml").exists());
@@ -474,7 +474,7 @@ async fn persisted_record_bytes_are_python_yaml_dump() {
     wire_store(&kernel, store_root).await;
 
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -512,7 +512,7 @@ async fn a_record_commits_via_tmp_and_rename() {
     wire_store(&kernel, store_root).await;
 
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -679,7 +679,7 @@ async fn store_sink_merge_keeps_unknown_keys_past_one_chunk() {
         store_root.to_path_buf(),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     fantastic_kernel::test_support::boot_root(&kernel).await;
     wire_store(&kernel, store_root).await;
@@ -698,7 +698,7 @@ async fn store_sink_merge_keeps_unknown_keys_past_one_chunk() {
     .unwrap();
 
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -793,7 +793,7 @@ async fn a_record_write_lands_the_record() {
         json!({"type": "update_agent", "id": "documented", "display_name": "Documented"}),
     ] {
         let _ = kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), payload)])
+            .operator_send(vec![Item::new(AgentId::from("kernel_state"), payload)])
             .await;
         kernel.flush_records().await;
         let dir = store_root.join("agents/documented");
@@ -829,7 +829,7 @@ async fn store_calls_have_python_shape() {
     wire_store(&kernel, store_root).await;
     let seen = store_payloads(&kernel);
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": "noop.tools", "id": "shaped"}),
@@ -915,13 +915,13 @@ async fn a_refused_record_write_was_attempted() {
         store_root.to_path_buf(),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     fantastic_kernel::test_support::boot_root(&kernel).await;
     wire_store(&kernel, store_root).await;
     let seen = store_payloads(&kernel);
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": "readme_bundle.tools", "id": "doc"}),
@@ -962,7 +962,7 @@ async fn persist_kid_with_store_root(state: &Path, work: &Path, store_root: &str
     let kernel = booted.kernel;
     fantastic_kernel::test_support::boot_root(&kernel).await;
     let made = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -976,7 +976,7 @@ async fn persist_kid_with_store_root(state: &Path, work: &Path, store_root: &str
         .result;
     assert_eq!(made["id"], "store", "{made}");
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": "noop.tools", "id": "kid"}),

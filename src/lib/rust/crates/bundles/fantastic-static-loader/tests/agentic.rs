@@ -1,11 +1,17 @@
-//! THE AGENTIC RUNNER — rust's implementation over the SHARED corpus.
+//! THE AGENTIC RUNNER — rust's runner over rust's OWN corpus, in the grant model
+//! (v9, `can` lines).
 //!
-//! Reads `contract/agentic/{configs,specs}` at the repo root, the same files
-//! python's runner reads (`src/lib/python/tests/agentic/_engine.py`). A scenario is DATA; the runner is the only per-runtime part.
+//! Reads `tests/agentic_corpus/{configs,specs}` beside this file. The shared
+//! `contract/agentic` corpus is python's (its two-sided gate, `callable_by` and
+//! sealed-by-default ingress are not this runtime's model) and stays as it is
+//! until python is updated or retired. A scenario is DATA; the runner is the only
+//! per-runtime part.
 //!
-//! `$root` in a config or spec means THIS runtime's root — `kernel_state` here,
-//! `kernel_state` in python. Parity asserts the per-runtime value, never
-//! equality.
+//! `$root` in a config or spec means this runtime's root, `kernel_state`.
+//!
+//! A gate denial is the UNKNOWN answer (`reason: unknown_agent`), byte-identical
+//! to a missing id: the gate names no side and tells a refused caller nothing
+//! about the target.
 
 use fantastic_file::FileBundle;
 use fantastic_kernel::test_support::as_agent;
@@ -19,12 +25,8 @@ use std::sync::Arc;
 /// THIS runtime's root id.
 const ROOT: &str = "kernel_state";
 
-fn contract_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(6)
-        .expect("repo root above src/lib/rust/crates/bundles/<crate>")
-        .join("contract")
+fn corpus_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("agentic_corpus")
 }
 
 fn yaml_to_json(v: serde_yaml::Value) -> Value {
@@ -89,7 +91,7 @@ struct Scenario {
 const POSIX_CONFIGS: &[&str] = &["exec_shell"];
 
 fn load_scenarios() -> Vec<Scenario> {
-    let specs_dir = contract_dir().join("agentic/specs");
+    let specs_dir = corpus_dir().join("specs");
     let mut paths: Vec<_> = std::fs::read_dir(&specs_dir)
         .unwrap_or_else(|e| panic!("no corpus at {specs_dir:?}: {e}"))
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -102,7 +104,7 @@ fn load_scenarios() -> Vec<Scenario> {
             serde_yaml::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap(),
         ));
         let cfg_name = spec["config"].as_str().unwrap_or("").to_string();
-        let cfg_path = contract_dir().join("agentic/configs").join(&cfg_name);
+        let cfg_path = corpus_dir().join("configs").join(&cfg_name);
         let config = subst_root(&yaml_to_json(
             serde_yaml::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap(),
         ));
@@ -211,7 +213,7 @@ fn mk_kernel() -> Arc<Kernel> {
         std::env::current_dir().unwrap().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     kernel
 }
@@ -273,8 +275,7 @@ async fn hydrate(sc: &Scenario) -> Hydration {
                 payload[k] = v.clone();
             }
         }
-        let rec = kernel
-            .send(vec![Item::new(AgentId::from(ROOT), payload)])
+        let rec = kernel.operator_send(vec![Item::new(AgentId::from(ROOT), payload)])
             .await
             .remove(0)
             .result;
@@ -364,7 +365,7 @@ async fn dispatch_item(
                 .expect("an item id is text or an integer"),
         );
     }
-    let mut out = k.send(vec![item]).await.remove(0);
+    let mut out = k.operator_send(vec![item]).await.remove(0);
     if let Some(body) = out.body.take() {
         // the chunk, as text, at its own slot of the reply
         let text = Value::String(String::from_utf8_lossy(&body.bytes).into_owned());
@@ -374,14 +375,10 @@ async fn dispatch_item(
 }
 
 /// The ONE machine-readable question about a reply. Never `"error" in r`: a
-/// bundle error and a gate denial are different animals, and only the gate sets
-/// `reason: unauthorized`.
+/// bundle error and a gate denial are different animals. The gate answers a
+/// refused call as an unknown agent, so a denial and a missing id read the same.
 fn denied(reply: &Value) -> bool {
-    reply.get("reason").and_then(Value::as_str) == Some("unauthorized")
-}
-
-fn denial_side(reply: &Value) -> Option<&str> {
-    reply.get("side").and_then(Value::as_str)
+    reply.get("reason").and_then(Value::as_str) == Some("unknown_agent")
 }
 
 /// Resolve a dotted path, `*` meaning "every element of this list".
@@ -468,26 +465,6 @@ fn flat_text(x: &Value) -> String {
     }
 }
 
-/// The shared specs are also python's contract; this runtime refuses a near-miss rule
-/// name by the record declaration (`bad_arg`, naming the allowed values), not by a
-/// hand-written `invalid_meta` check. The spec's expectation is read in that form.
-fn declared_reason(reason: &str) -> &str {
-    if reason == "invalid_meta" {
-        "bad_arg"
-    } else {
-        reason
-    }
-}
-
-/// The same, for the text a refusal must carry.
-fn declared_text(text: &str) -> &str {
-    if text == "is not a rule this bundle implements" {
-        "must be 'allow_all_ingress'"
-    } else {
-        text
-    }
-}
-
 /// Apply one step's matchers. Panics naming the step, the matcher and the reply
 /// — a spec failure has to be readable without opening the runner. `status`
 /// lives on the OUTCOME (python `_match`'s `outcome`), which only the steps that
@@ -504,24 +481,7 @@ fn match_step(name: &str, expect: &Value, reply: &Value, status: Option<&str>) {
             fail("expected a DENIAL, the call went through".into());
         }
     }
-    match expect.get("side") {
-        // `side: null` — the refusal must carry NO side. That is what tells an
-        // io SEAL from the call gate: both answer `unauthorized`, but only the
-        // gate names a half, because only the gate is about the caller.
-        Some(Value::Null) => {
-            if let Some(got) = denial_side(reply) {
-                fail(format!("expected NO side (an io seal), got {got:?}"));
-            }
-        }
-        Some(Value::String(side)) if denial_side(reply) != Some(side.as_str()) => {
-            fail(format!(
-                "expected the {side:?} half to refuse, got {:?}",
-                denial_side(reply)
-            ));
-        }
-        _ => {}
-    }
-    if let Some(reason) = expect.get("reason").and_then(Value::as_str).map(declared_reason) {
+    if let Some(reason) = expect.get("reason").and_then(Value::as_str) {
         if reply.get("reason").and_then(Value::as_str) != Some(reason) {
             fail(format!("expected reason {reason:?}"));
         }
@@ -531,7 +491,7 @@ fn match_step(name: &str, expect: &Value, reply: &Value, status: Option<&str>) {
             fail(format!("expected status {want:?}, got {status:?}"));
         }
     }
-    if let Some(sub) = expect.get("error_contains").and_then(Value::as_str).map(declared_text) {
+    if let Some(sub) = expect.get("error_contains").and_then(Value::as_str) {
         let err = reply.get("error").and_then(Value::as_str).unwrap_or("");
         if !err.contains(sub) {
             fail(format!("error does not contain {sub:?}"));
@@ -567,39 +527,35 @@ fn match_step(name: &str, expect: &Value, reply: &Value, status: Option<&str>) {
     }
 }
 
-/// `grant`/`revoke` — sugar over an OPERATOR `update_agent`.
+/// `grant`/`revoke` — sugar over an OPERATOR `update_agent` of the agent's `can`:
+/// `grant {agent, to, line?}` writes the line on target `to` (default
+/// `{call: ["*"]}`), `revoke {agent, to}` removes it.
 ///
 /// Sugar, not a shortcut: `update_agent` REPLACES a field rather than merging it
-/// (#6), so a spec that hand-wrote the payload would restate the whole map every
-/// time and would silently drop the `$self` baseline off the live record.
+/// (#6), so a spec that hand-wrote the payload would restate every line each
+/// time and could silently drop one off the live record.
 async fn grant_step(h: &Hydration, args: &Value, remove: bool) -> Value {
     let agent_id = args["agent"].as_str().unwrap();
-    let field = args["field"].as_str().unwrap();
     let other = args["to"].as_str().unwrap();
     let agent = h
-        .kernel
-        .agents
-        .get(&AgentId::from(agent_id))
-        .map(|e| Arc::clone(&e))
+        .kernel.resolve_target(agent_id)
         .unwrap_or_else(|| panic!("grant: no agent {agent_id:?}"));
     let mut current = agent
-        .meta
-        .read()
-        .expect("meta poisoned")
-        .get(field)
+        .record().meta
+        .get("can")
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
     if remove {
         current.remove(other);
     } else {
-        let verbs = args.get("verbs").cloned().unwrap_or_else(|| json!(["*"]));
-        current.insert(other.to_string(), verbs);
+        let line = args.get("line").cloned().unwrap_or_else(|| json!({"call": ["*"]}));
+        current.insert(other.to_string(), line);
     }
     operator(
         &h.kernel,
         "kernel",
-        json!({"type": "update_agent", "id": agent_id, field: Value::Object(current)}),
+        json!({"type": "update_agent", "id": agent_id, "can": Value::Object(current)}),
     )
     .await
 }
@@ -610,7 +566,7 @@ fn dehydrate(kernel: &Arc<Kernel>) -> (Vec<String>, BTreeMap<String, Vec<String>
     let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut queue = vec![kernel.root().expect("no root").id.clone()];
     while let Some(id) = queue.pop() {
-        let Some(a) = kernel.agents.get(&id).map(|e| Arc::clone(&e)) else {
+        let Some(a) = kernel.resolve_target(id.as_str()) else {
             continue;
         };
         ids.push(id.0.clone());
@@ -620,55 +576,6 @@ fn dehydrate(kernel: &Arc<Kernel>) -> (Vec<String>, BTreeMap<String, Vec<String>
     }
     ids.sort();
     (ids, children)
-}
-
-/// The manifest entries by id — the DECLARATION, never evidence about the
-/// running system.
-fn manifest_specs(config: &Value) -> BTreeMap<String, Value> {
-    let mut out = BTreeMap::new();
-    for l in config["loaders"].as_array().cloned().unwrap_or_default() {
-        for a in l["manifest"]["agents"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
-        {
-            if let Some(id) = a["id"].as_str() {
-                out.insert(id.to_string(), a.clone());
-            }
-        }
-    }
-    out
-}
-
-/// The verbs `spec` declares for `other`. A `"*"` is REFUSED rather than
-/// interpreted: a wildcard makes the per-verb intersection unobservable, and
-/// that intersection is the whole point of the walk.
-fn declared_verbs(spec: &Value, field: &str, other: &str) -> std::collections::BTreeSet<String> {
-    match spec.get(field).and_then(|g| g.get(other)) {
-        None => Default::default(),
-        Some(Value::Array(a)) => a
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect(),
-        Some(other_v) => panic!(
-            "reconcile_grants: {field}[{other}] is {other_v}; this sweep needs \
-             explicit verb lists, a wildcard hides the intersection"
-        ),
-    }
-}
-
-fn payload_for(args: &Value, verb: &str) -> Value {
-    let mut p = json!({"type": verb});
-    if let Some(extra) = args
-        .get("payloads")
-        .and_then(|t| t.get(verb))
-        .and_then(Value::as_object)
-    {
-        for (k, v) in extra {
-            p[k] = v.clone();
-        }
-    }
-    p
 }
 
 /// Execute a spec's steps in order.
@@ -682,7 +589,7 @@ async fn run_steps(h: &Hydration, sc: &Scenario, pinned: &mut BTreeMap<String, u
         .as_array()
         .cloned()
         .unwrap_or_default();
-    for (idx, step) in steps.iter().enumerate() {
+    for step in &steps {
         // A reboot REPLACED the kernel; everything after acts on the new one.
         let h = &Hydration {
             kernel: rebooted.clone().unwrap_or_else(|| Arc::clone(&h.kernel)),
@@ -738,105 +645,6 @@ async fn run_steps(h: &Hydration, sc: &Scenario, pinned: &mut BTreeMap<String, u
             let (ids, _) = dehydrate(&h.kernel);
             let _ = a;
             json!({"ids": ids})
-        } else if let Some(a) = step.get("reconcile_grants") {
-            // For every pair either half mentions, the edge's verb set is the
-            // INTERSECTION of the two declared lists, and a verb outside it is
-            // refused by the half that omitted it — checked in order, so `side`
-            // is not symmetric bookkeeping.
-            let specs = manifest_specs(&sc.config);
-            let mut probed = 0usize;
-            for (sender, s_spec) in &specs {
-                for (target, t_spec) in &specs {
-                    if sender == target {
-                        continue;
-                    }
-                    let egress = declared_verbs(s_spec, "can_call", target);
-                    let ingress = declared_verbs(t_spec, "callable_by", sender);
-                    let mut all: Vec<&String> = egress.union(&ingress).collect();
-                    all.sort();
-                    for verb in all {
-                        probed += 1;
-                        let reply = reach(&h.kernel, sender, target, payload_for(a, verb)).await;
-                        let both = egress.contains(verb) && ingress.contains(verb);
-                        assert_ne!(
-                            denied(&reply),
-                            both,
-                            "{label}: {sender} -{verb}-> {target}: egress={egress:?} \
-                             ingress={ingress:?} — expected {}, got {reply}",
-                            if both { "reachable" } else { "refused" }
-                        );
-                        if both {
-                            continue;
-                        }
-                        let want = if !egress.contains(verb) {
-                            "egress"
-                        } else {
-                            "ingress"
-                        };
-                        assert_eq!(
-                            denial_side(&reply),
-                            Some(want),
-                            "{label}: the half that omitted {verb:?} is {want:?}: {reply}"
-                        );
-                    }
-                }
-            }
-            let floor = a.get("min_probes").and_then(Value::as_u64).unwrap_or(1) as usize;
-            assert!(
-                probed >= floor,
-                "{label}: only {probed} declared triples (min {floor})"
-            );
-            json!({"swept": true})
-        } else if let Some(a) = step.get("sweep_undeclared") {
-            // The whole roster, every ordered pair. The reachable set must be
-            // EXACTLY the baseline (`$self`, each agent to itself) plus what the
-            // spec declared open BEFORE this point — nothing rides along.
-            let (ids, _) = dehydrate(&h.kernel);
-            let universe: Vec<String> = ids.clone();
-            let structural: std::collections::BTreeSet<(String, String)> =
-                universe.iter().map(|a| (a.clone(), a.clone())).collect();
-            for verb in a["verbs"].as_array().cloned().unwrap_or_default() {
-                let verb = verb.as_str().unwrap_or("reflect");
-                let declared: std::collections::BTreeSet<(String, String)> = steps[..idx]
-                    .iter()
-                    .filter_map(|st| {
-                        let r = st.get("reach")?;
-                        (st.get("expect")?.get("allow")? == &json!(true)
-                            && r["send"]["type"].as_str() == Some(verb))
-                        .then(|| {
-                            (
-                                r["from"].as_str().unwrap_or("").to_string(),
-                                r["to"].as_str().unwrap_or("").to_string(),
-                            )
-                        })
-                    })
-                    .collect();
-                let want: std::collections::BTreeSet<_> =
-                    structural.union(&declared).cloned().collect();
-                let mut got: std::collections::BTreeSet<(String, String)> = Default::default();
-                for sender in &universe {
-                    for target in &universe {
-                        let reply = reach(&h.kernel, sender, target, payload_for(a, verb)).await;
-                        if denied(&reply) {
-                            assert!(
-                                matches!(denial_side(&reply), Some("egress") | Some("ingress")),
-                                "{label}: verb {verb:?}: a refusal named no call-gate half \
-                                 — {reply} (a sealed io leg denies with NO side, a DIFFERENT gate)"
-                            );
-                        } else {
-                            got.insert((sender.clone(), target.clone()));
-                        }
-                    }
-                }
-                assert_eq!(
-                    got,
-                    want,
-                    "{label}: verb {verb:?}: undeclared {:?}, declared-and-missing {:?}",
-                    got.difference(&want).collect::<Vec<_>>(),
-                    want.difference(&got).collect::<Vec<_>>()
-                );
-            }
-            json!({"swept": true})
         } else if let Some(a) = step.get("start") {
             // Fire WITHOUT awaiting. The cancel rows need a dispatch that is
             // still running when the next step acts on it; nothing else in the
@@ -849,8 +657,7 @@ async fn run_steps(h: &Hydration, sc: &Scenario, pinned: &mut BTreeMap<String, u
             let send = a["send"].clone();
             let handle = tokio::spawn(async move {
                 as_agent(AgentId::from(from.as_str()), async move {
-                    let out = k
-                        .send(vec![Item::new(AgentId::from(to.as_str()), send)])
+                    let out = k.operator_send(vec![Item::new(AgentId::from(to.as_str()), send)])
                         .await
                         .remove(0);
                     json!({"pid": out.pid.map(|p| p.0), "status": format!("{:?}", out.status).to_lowercase(), "result": out.result})
@@ -1040,7 +847,7 @@ fn the_hydration_verdict_matches_the_declaration(
         return;
     }
     let err = outcome_error(h, sc);
-    let contains = declared_text(sc.spec["expect"]["error_contains"].as_str().unwrap_or(""));
+    let contains = sc.spec["expect"]["error_contains"].as_str().unwrap_or("");
     check(
         pinned,
         "PC-5",
@@ -1053,7 +860,7 @@ fn the_hydration_verdict_matches_the_declaration(
             check(
                 pinned,
                 "PC-5",
-                rec.get("reason") == Some(&json!(declared_reason("invalid_meta"))),
+                rec.get("reason") == Some(&json!("bad_arg")),
                 format!("{lid}: {rec}"),
             );
             check(
@@ -1065,7 +872,7 @@ fn the_hydration_verdict_matches_the_declaration(
             check(
                 pinned,
                 "PC-5",
-                !h.kernel.agents.contains_key(&AgentId::from(lid.as_str())),
+                !h.kernel.exists(lid.as_str()),
                 format!("{lid} was refused yet exists in the roster"),
             );
         }
@@ -1094,7 +901,7 @@ fn the_hydration_verdict_matches_the_declaration(
 // ─── the suite ──────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_shared_agentic_corpus_holds_on_this_runtime() {
+async fn the_rust_agentic_corpus_holds() {
     // RUN INSIDE A TEMP DIR. The manifest is read under the state folder `<cwd>/.fantastic` (`fs`
     // is the one disk surface, and a cold bring-up read is not exempt), and the
     // discovered store roots at `<cwd>/.fantastic` — so a runner left in the

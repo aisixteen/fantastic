@@ -1,6 +1,6 @@
 //! EXPOSURE of a served directory: a file leg is DENY-ALL per path; its `allow`
 //! list (the record's — `update_agent` from above, the operator here) decides
-//! what it serves, to an agent granted `read_stream` by id on both ends, and it
+//! what it serves, to an agent holding a `read_stream` line on it, and it
 //! persists across restarts.
 
 
@@ -36,8 +36,8 @@ fn write(path: &std::path::Path, v: &Value) {
 }
 
 /// A project with a read-only, DENY-ALL file leg `docs` over `docs/` exposing
-/// only `a.txt`, the kernel's record store, and `term`, granted `read_stream` on
-/// `docs` (both ends, by id).
+/// only `a.txt`, the kernel's record store, and `term`, holding a `read_stream` line on
+/// `docs`.
 fn seed(dir: &std::path::Path) {
     let a = dir.join(".fantastic").join("agents");
     std::fs::create_dir_all(dir.join("docs")).unwrap();
@@ -56,12 +56,11 @@ fn seed(dir: &std::path::Path) {
     write(
         &a.join("docs").join("agent.yaml"),
         &json!({"id":"docs","handler_module":"file_bridge.tools","root":"docs","readonly":true,
-                "allow":["a.txt"],"ingress_rule":"allow_all_ingress",
-                "callable_by":{"term": ["read_stream"]}}),
+                "allow":["a.txt"],"ingress_rule":"allow_all_ingress"}),
     );
     write(
         &a.join("term").join("agent.yaml"),
-        &json!({"id":"term","handler_module":"user.tools","can_call":{"docs": ["read_stream"]}}),
+        &json!({"id":"term","handler_module":"user.tools","can":{"docs": {"call": ["read_stream"]}}}),
     );
 }
 
@@ -72,25 +71,24 @@ async fn boot(dir: &std::path::Path) -> std::sync::Arc<Kernel> {
     )
     .expect("boots");
     let kernel = std::sync::Arc::clone(&booted.kernel);
-    kernel
-        .send(vec![Item::new(
+    kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"update_agent","id":bootstrap::DEFAULT_ROOT_ID,"memory_store_id":"memory"}),
         )])
         .await;
     assert_eq!(kernel.start(false).await["started"], json!(true));
     for id in &booted.loaded {
-        kernel.send(vec![Item::new(id.clone(), json!({"type":"boot"}))]).await;
+        kernel.operator_send(vec![Item::new(id.clone(), json!({"type":"boot"}))]).await;
     }
     kernel
 }
 
-/// `from` calls `docs`: a `forward` on `from` (a `user.tools` agent), sent from
-/// inside its own handler — so the call carries `from`.
+/// `from` calls `docs`, as its own handler would: the call carries `from`, judged by
+/// its line on `docs`.
 async fn call(kernel: &std::sync::Arc<Kernel>, from: &str, payload: Value) -> Value {
     let k = std::sync::Arc::clone(kernel);
-    let item = Item::new(AgentId::from(from), json!({"type":"forward","target":"docs","payload":payload}));
-    k.send(vec![item]).await.remove(0).result
+    let item = Item::new(AgentId::from("docs"), payload);
+    fantastic_kernel::test_support::as_agent(AgentId::from(from), k.send(vec![item])).await.remove(0).result
 }
 
 fn refused(v: &Value) -> bool {
@@ -99,8 +97,7 @@ fn refused(v: &Value) -> bool {
 
 /// The operator sets `docs`'s allow list (the record's, written from above).
 async fn expose(kernel: &std::sync::Arc<Kernel>, allow: Value) {
-    let r = kernel
-        .send(vec![Item::new(AgentId::from("kernel"), json!({"type":"update_agent","id":"docs","allow":allow}))])
+    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel"), json!({"type":"update_agent","id":"docs","allow":allow}))])
         .await
         .remove(0)
         .result;

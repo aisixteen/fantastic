@@ -69,8 +69,8 @@
 //!
 //! IDENTITY: an inbound `call` frame is served by the read loop — a task this
 //! leg's own `boot` spawned — so it is sent AS THE LEG and gated as the leg (its
-//! `can_call`, the target's `callable_by`). Whoever called on the other kernel is
-//! that kernel's business; here the caller is the leg.
+//! own `can` lines; the target keeps no list of callers). Whoever called on the
+//! other kernel is that kernel's business; here the caller is the leg.
 
 #![deny(missing_docs)]
 
@@ -308,8 +308,8 @@ async fn set_identity_reply(
     };
     // Merge only the provided well-known keys into the record + persist (explicit
     // null retracts a field, e.g. owner_guid:null = become standalone).
-    // python `kernel.update(id, **patch)` — the `updated` state event is what
-    // the root loader's writer persists.
+    // The leg's own fields, written with `update_agent` as itself — the `updated`
+    // state event is what the root loader's writer persists.
     let mut patch = serde_json::Map::new();
     if let Some(role) = a.role {
         patch.insert("role".into(), json!(role));
@@ -321,7 +321,10 @@ async fn set_identity_reply(
         patch.insert("exposes".into(), json!(exposes));
     }
     if !patch.is_empty() {
-        kernel.update(agent_id, patch);
+        let written = write_own(kernel, agent_id, patch).await;
+        if fantastic_kernel::is_refused(&written) {
+            return written;
+        }
     }
     let attrs = identity_from_meta(agent_id, kernel);
     state.transport.set_identity(attrs).await
@@ -532,8 +535,8 @@ fn password_reader(
 // ── meta helpers ────────────────────────────────────────────────────
 
 fn meta_string(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<String> {
-    let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
-    let meta = agent.meta.read().expect("meta poisoned");
+    let agent = kernel.resolve_target(agent_id.as_str())?;
+    let meta = agent.record().meta;
     meta.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
@@ -590,18 +593,18 @@ fn meta_f64(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<f64> {
 }
 
 fn meta_value(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<Value> {
-    let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
-    let meta = agent.meta.read().expect("meta poisoned");
+    let agent = kernel.resolve_target(agent_id.as_str())?;
+    let meta = agent.record().meta;
     meta.get(key).cloned()
 }
 
 /// The leg's rules, read off the LIVE record. A record that holds what no rule is
 /// (edited past its schema) seals the leg.
 fn rules_of(agent_id: &AgentId, kernel: &Kernel) -> authorizer::Rules {
-    let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
+    let Some(agent) = kernel.resolve_target(agent_id.as_str()) else {
         return authorizer::Rules::default();
     };
-    let meta = agent.meta.read().expect("meta poisoned");
+    let meta = agent.record().meta;
     authorizer::Rules::of(&meta).unwrap_or_default()
 }
 
@@ -842,11 +845,14 @@ async fn build_relay_transport(
         Some(guid) => guid,
         None => {
             let g = mint_guid();
-            // python `kernel.update(rec["id"], guid=guid)` — persisted by the
-            // root loader's writer off the `updated` event.
+            // its own field, written with `update_agent` as itself — persisted
+            // by the root loader's writer off the `updated` event.
             let mut patch = serde_json::Map::new();
             patch.insert("guid".to_string(), Value::String(g.clone()));
-            kernel.update(agent_id, patch);
+            let written = write_own(kernel, agent_id, patch).await;
+            if fantastic_kernel::is_refused(&written) {
+                return Err(format!("relay_connector: guid not written: {written}"));
+            }
             g
         }
     };
@@ -889,7 +895,7 @@ async fn emit_bridge_down(agent_id: &AgentId, state: &Arc<BridgeState>, kernel: 
 /// This kernel's guid (the root record's), when its loader minted one.
 fn own_guid(kernel: &Kernel) -> Option<String> {
     let root = kernel.root()?;
-    let meta = root.meta.read().expect("meta poisoned");
+    let meta = root.record().meta;
     meta.get("guid")
         .and_then(Value::as_str)
         .filter(|g| !g.is_empty())
@@ -1293,8 +1299,8 @@ async fn refuse_watch(state: &Arc<BridgeState>, id: Option<Value>, src: &str, r:
 /// Serve ONE inbound `{type:"watch", src}`: the far side asks to watch the
 /// local agent `src` through this leg. The leg's INGRESS rule first (kind
 /// `watch`, read off the live record per frame), then the kernel's own gate AS
-/// THE LEG — this runs in the leg's read loop, so the leg's `can_call` must grant
-/// `watch` on `src` and `src`'s `callable_by` must accept the leg. Registered, the
+/// THE LEG — this runs in the leg's read loop, so the leg must hold `watch` on `src`
+/// (by a line, or by position). Registered, the
 /// agent's events stream back as `{type:"event", src, payload}` until `unwatch`
 /// or the link drops. A refusal, or a name that is no agent, is answered with an
 /// `error` frame and nothing is registered. Inline in the read loop, so a call
@@ -1677,6 +1683,20 @@ fn injected_for(kind: &str, agent_id: &AgentId) -> Option<Result<Arc<dyn BridgeT
     }
     let _ = (kind, agent_id);
     None
+}
+
+/// Write the agent's OWN fields `patch` with `update_agent` sent as itself (a
+/// bundle writes its own non-`can` fields); the reply, a refusal included.
+pub(crate) async fn write_own(kernel: &Arc<Kernel>, id: &AgentId, patch: Map<String, Value>) -> Value {
+    let mut payload = Map::new();
+    payload.insert("type".to_string(), json!("update_agent"));
+    payload.insert("id".to_string(), json!(id.as_str()));
+    payload.extend(patch);
+    kernel
+        .send(vec![Item::new(AgentId::from("kernel"), Value::Object(payload))])
+        .await
+        .remove(0)
+        .result
 }
 
 #[cfg(test)]

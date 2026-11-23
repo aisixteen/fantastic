@@ -32,7 +32,7 @@ async fn bridge(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(root);
     let mut cfg = json!({
         "type": "create_agent",
@@ -46,8 +46,7 @@ async fn bridge(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
     cfg.as_object_mut()
         .unwrap()
         .extend(extra.as_object().unwrap().clone());
-    let r = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), cfg)])
+    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), cfg)])
         .await
         .remove(0)
         .result;
@@ -57,7 +56,7 @@ async fn bridge(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
 
 /// A verb over the BINARY channel: the header plus the body at `bytes`.
 async fn bin(k: &Arc<Kernel>, header: Value, blob: &[u8]) -> Value {
-    k.send(vec![
+    k.operator_send(vec![
         Item::new(AgentId::from("fb"), header).with_binary_key("bytes", blob.to_vec())
     ])
     .await
@@ -67,7 +66,7 @@ async fn bin(k: &Arc<Kernel>, header: Value, blob: &[u8]) -> Value {
 
 /// The same verb over the TEXT channel.
 async fn txt(k: &Arc<Kernel>, header: Value) -> Value {
-    k.send(vec![Item::new(AgentId::from("fb"), header)])
+    k.operator_send(vec![Item::new(AgentId::from("fb"), header)])
         .await
         .remove(0)
         .result
@@ -161,8 +160,7 @@ async fn undo_outside_is_refused() {
     let k = bridge(&tmp, json!({"allow": ["sub", "other.txt"]})).await;
     let w = bin(&k, json!({"type": "write", "path": "other.txt"}), b"changed\n").await;
     assert!(w.get("error").is_none(), "{w}");
-    let r = k
-        .send(vec![Item::new(
+    let r = k.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": "fb", "allow": ["sub"]}),
         )])

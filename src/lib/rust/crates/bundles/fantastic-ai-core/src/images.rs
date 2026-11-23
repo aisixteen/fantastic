@@ -8,8 +8,8 @@
 //! and its `attributes.image` the sizes and the token estimate.
 //!
 //! The chat keeps what its provider can do in its own record, `provider_capabilities`
-//! (`{provider, model, capabilities: {<key>: …}}`), refreshed from the provider's `reflect`
-//! when it starts and whenever `provider_id` or `model` change ([`refresh`]). A part is MARKED
+//! (`{provider, model, capabilities: {<key>: …}}`), refreshed from the provider's
+//! `capabilities` verb (the chat holds `call: [complete, watch, capabilities]` on it) when it starts and whenever `provider_id` or `model` change ([`refresh`]). A part is MARKED
 //! with the capability it needs (`needs`); the context build matches it against that map and
 //! the row renders as one of the forms below. The store is never changed by it.
 
@@ -125,7 +125,7 @@ pub(crate) fn parts_of(row: &Value) -> Option<&Vec<Value>> {
 // ── the capability map ───────────────────────────────────────────────────────
 
 /// Keep the chat's `provider_capabilities` right for its provider and model: the provider
-/// is asked (`reflect`) at the first turn of an incarnation and whenever `provider_id` or
+/// is asked (`capabilities`) at the first turn of an incarnation and whenever `provider_id` or
 /// `model` changed since; the record is written only when the map is not what it holds.
 /// A provider that does not answer leaves what is there (a provider that was swapped for
 /// one that does not answer leaves an empty map).
@@ -152,7 +152,7 @@ pub(crate) async fn refresh(agent_id: &AgentId, kernel: &Arc<Kernel>, state: &Ba
     let out = kernel
         .send(vec![Item::new(
             AgentId::from(provider),
-            json!({"type": "reflect"}),
+            json!({"type": "capabilities"}),
         )])
         .await
         .into_iter()
@@ -181,21 +181,26 @@ pub(crate) async fn refresh(agent_id: &AgentId, kernel: &Arc<Kernel>, state: &Ba
     };
     let new = json!({"provider": provider, "model": model, "capabilities": capabilities});
     if held != Some(&new) {
-        let mut patch = Map::new();
-        patch.insert(FIELD.to_string(), new);
-        let _ = kernel.update(agent_id, patch);
+        let mut payload = Map::new();
+        payload.insert("type".to_string(), json!("update_agent"));
+        payload.insert("id".to_string(), json!(agent_id.as_str()));
+        payload.insert(FIELD.to_string(), new);
+        // the chat's own field, written as itself
+        let _ = kernel
+            .send(vec![Item::new(AgentId::from("kernel"), Value::Object(payload))])
+            .await;
     }
 }
 
-/// The entry of the chat's model in a provider's `reflect`: its `capabilities` map is keyed
-/// by model. The chat's own `model`, else the provider's reflected `model`, else the one
+/// The entry of the chat's model in a provider's `capabilities` answer: its `capabilities`
+/// map is keyed by model. The chat's own `model`, else the provider's `model`, else the one
 /// entry the map has; any other (an unknown model) has none: an empty entry, no capability.
-fn model_entry(reflect: &Value, model: &str) -> Value {
-    let Some(map) = reflect.get("capabilities").and_then(Value::as_object) else {
+fn model_entry(answer: &Value, model: &str) -> Value {
+    let Some(map) = answer.get("capabilities").and_then(Value::as_object) else {
         return json!({});
     };
     let named = Some(model).filter(|m| !m.is_empty()).or_else(|| {
-        reflect
+        answer
             .get("model")
             .and_then(Value::as_str)
             .filter(|m| !m.is_empty())

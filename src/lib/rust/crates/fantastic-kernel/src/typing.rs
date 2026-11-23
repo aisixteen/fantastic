@@ -263,7 +263,7 @@ pub async fn payload(
 
 /// The schema of `verb` on `target`: this kernel's own declaration, or, for an agent on
 /// a CONNECTED kernel (`<guid>|<agent id>`, a page's view), the one that kernel's
-/// `docs` gives, asked before the call is sent (#719). `None` when neither declares it.
+/// `reflect` gives with `verb` and `part: schema`, asked before the call is sent (#719). `None` when neither declares it.
 pub async fn target_verb_schema(
     kernel: &Arc<Kernel>,
     target: &str,
@@ -276,17 +276,17 @@ pub async fn target_verb_schema(
     if !target.contains('|') {
         return None;
     }
-    let ask = crate::declared::kernel::Docs {
-        of: target.to_string(),
-        tier: None,
-        verb: Some(verb.to_string()),
-        part: Some(crate::declared::Part::Schema),
-    };
-    crate::docs::remote_docs_reply(kernel, &ask)
-        .await
-        .get("schemas")
-        .and_then(|s| s.get(verb))
-        .cloned()
+    crate::docs::remote_docs(
+        kernel,
+        target,
+        None,
+        Some(verb),
+        Some(crate::declared::Part::Schema),
+    )
+    .await
+    .get("schemas")
+    .and_then(|s| s.get(verb))
+    .cloned()
 }
 
 /// A routing field of a call (not an argument of its verb) read as `kind`
@@ -406,12 +406,11 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect()
         };
-        // an integer where `list_agents` declares one, text where `docs` declares text
-        let p =
-            operator_payload(&kernel, "kernel", "list_agents", &pairs(&[("limit", "7")])).await.unwrap();
+        // an integer where `ps` declares one, text where `reflect` declares text
+        let p = operator_payload(&kernel, "kernel", "ps", &pairs(&[("limit", "7")])).await.unwrap();
         assert_eq!(p["limit"], json!(7));
-        let p = operator_payload(&kernel, "kernel", "docs", &pairs(&[("of", "7")])).await.unwrap();
-        assert_eq!(p["of"], json!("7"));
+        let p = operator_payload(&kernel, "kernel", "reflect", &pairs(&[("verb", "7")])).await.unwrap();
+        assert_eq!(p["verb"], json!("7"));
         // a list only where the verb declares one
         let p = operator_payload(
             &kernel,
@@ -450,8 +449,7 @@ mod tests {
         // a verb the agent does not declare types nothing
         let p = operator_payload(&kernel, "kernel", "make_tea", &pairs(&[("limit", "7")])).await.unwrap();
         assert_eq!(p["limit"], json!("7"));
-        let p =
-            operator_payload(&kernel, "nobody", "list_agents", &pairs(&[("limit", "7")])).await.unwrap();
+        let p = operator_payload(&kernel, "nobody", "ps", &pairs(&[("limit", "7")])).await.unwrap();
         assert_eq!(p["limit"], json!("7"));
     }
 

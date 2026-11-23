@@ -4,5 +4,4 @@
 //! writes to the directory before the key press.
 
 
-pub mod declared;
 pub mod seed;

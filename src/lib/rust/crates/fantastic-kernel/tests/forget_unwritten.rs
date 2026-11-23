@@ -122,14 +122,14 @@ fn kernel_at(store: &Path, deletes: &Arc<Mutex<Vec<String>>>) -> Arc<Kernel> {
         store.to_path_buf(),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     kernel
 }
 
 async fn kernel_verb(kernel: &Arc<Kernel>, payload: Value) {
     let out = kernel
-        .send(vec![Item::new(AgentId::from("kernel"), payload.clone())])
+        .operator_send(vec![Item::new(AgentId::from("kernel"), payload.clone())])
         .await;
     assert!(
         out[0].result.get("error").is_none(),

@@ -1,0 +1,99 @@
+# Test spec for `configs/lifecycle.yaml` — WHAT THIS SUITE ASSERTS.
+config: lifecycle.yaml
+
+name: lifecycle
+description: >
+  Work in flight and agents at their end of life. The roster declares one
+  dispatch that STAYS in flight, one agent with the lines to watch and kill it,
+  one open bundle to ask a nonsense question of, one agent to delete out from
+  under a live line, and one nobody holds a line on. A cancelled caller learns,
+  a terminal task and a deleted agent both absorb, and the failure classes stay
+  distinguishable shapes.
+
+requirements: [C14, C15, C16]
+
+expect:
+  hydration: ok
+  steps:
+    - name: the task table is readable through warden's line on the root
+      reach: {from: warden, to: $root, send: {type: ps}}
+      expect: {allow: true}
+    - name: an open bundle answers a held verb
+      reach: {from: warden, to: open_fs, send: {type: list, path: ""}}
+      expect: {allow: true}
+    - name: the doomed agent is reachable while it exists
+      reach: {from: warden, to: doomed, send: {type: list, path: ""}}
+      expect: {allow: true}
+    - name: an ingress-open agent no line names is still unreachable
+      reach: {from: warden, to: stranger, send: {type: list, path: ""}}
+      expect: {allow: false}
+    - name: being called BY warden confers no reach back onto warden
+      reach: {from: slowbot, to: warden, send: {type: list, path: ""}}
+      expect: {allow: false}
+
+    # ── C14 · cancel stops the work ───────────────────────────────
+
+    - name: a slow dispatch is launched and left IN FLIGHT
+      start: {name: job, from: warden, to: slowbot, send: {type: slow}}
+    - name: and it is really running — visible in the kernel-wide task table
+      await_task: {name: job, agent: slowbot}
+      because: C14
+
+    - name: cancel names the pid it killed
+      operator: {to: kernel, send: {type: cancel, task_id: "$job.id"}}
+      expect: {contains: {cancelled: true, killed.*: "$job.id"}}
+      because: C14
+
+    - name: the blocked caller is RESOLVED with cancelled, not raised at, and
+            never gets the handler's own reply
+      collect: {name: job}
+      expect: {status: cancelled, contains: {cancelled: true}}
+      because: C14
+
+    - name: and the killed dispatch has left the live table
+      operator: {to: kernel, send: {type: ps}}
+      expect: {not_contains: {tasks.*.verb: slow}}
+      because: C14
+
+    # ── C15 · terminal states absorb ──────────────────────────────
+
+    - name: a second cancel of a finished task is a no-op, not an error
+      operator: {to: kernel, send: {type: cancel, task_id: "$job.id"}}
+      expect: {contains: {cancelled: false}}
+      because: C15
+
+    - name: cancelling an id that never existed is the same no-op
+      operator: {to: kernel, send: {type: cancel, task_id: "slowbot:deadbeef"}}
+      expect: {contains: {cancelled: false}}
+      because: C15
+
+    - name: warden holds a standing line on `doomed` while it still exists
+      reach: {from: warden, to: doomed, send: {type: list, path: ""}}
+      expect: {allow: true}
+      because: C15
+
+    - name: the operator deletes it — the line is deliberately left standing
+      operator: {to: kernel, send: {type: delete_agent, id: doomed}}
+      expect: {contains: {deleted: true}}
+
+    - name: so the refusal is about NON-EXISTENCE, and reads as one
+      reach: {from: warden, to: doomed, send: {type: list, path: ""}}
+      expect: {reason: unknown_agent}
+      because: C15
+
+    # ── C16 · the failure classes stay distinguishable ────────────
+
+    - name: an unknown agent names the class `unknown_agent`
+      reach: {from: warden, to: no_such_agent, send: {type: list, path: ""}}
+      expect: {reason: unknown_agent}
+      because: C16
+
+    - name: an unknown verb on a REACHABLE agent is the bundle's answer, not the gate's
+      reach: {from: warden, to: open_fs, send: {type: frobnicate}}
+      expect: {allow: true, reason: unhandled}
+      because: C16
+
+    - name: a gate denial is the unknown answer, byte for byte a missing id's
+      reach: {from: slowbot, to: open_fs, send: {type: list, path: ""}}
+      expect: {allow: false, error_contains: "no agent 'open_fs'"}
+      because: C16

@@ -126,15 +126,14 @@ async fn world_named(web: &str, allow: &[String], bound_host: &str) -> Arc<Kerne
     let made = create(
         &k,
         json!({"handler_module": HANDLER_MODULE, "id": web, "port": free_port(),
-               "request_allow": allow, "can_call": {"creds": "*"}}),
+               "request_allow": allow, "can": {"creds": {"call": ["*"]}}}),
     )
     .await;
     assert_eq!(made["id"], json!(web), "{made}");
     let made = create(
         &k,
         json!({"handler_module": fantastic_credential_store::HANDLER_MODULE, "id": "creds",
-               "backend": "keychain", "refs": {"svc/main": {"host": bound_host}},
-               "callable_by": {web: ["get", "list"]}}),
+               "backend": "keychain", "refs": {"svc/main": {"host": bound_host}}}),
     )
     .await;
     assert_eq!(made["id"], json!("creds"), "{made}");

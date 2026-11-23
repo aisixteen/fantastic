@@ -30,16 +30,15 @@ async fn serve_store(kb: &Arc<Kernel>) -> (u16, String, String) {
     let port = serve(
         kb,
         &web,
-        &[json!({"handler_module": "web_ws.tools", "callable_by": {"$parent": ["get_routes"]}, "id": ws,
+        &[json!({"handler_module": "web_ws.tools", "id": ws,
                  "ingress_rule": "allow_all_ingress",
-                 "can_call": {"$parent": ["watch"], "creds": "*"}})],
+                 "can": {"$parent": {"call": ["watch"]}, "creds": {"call": ["*"]}}})],
     )
     .await;
     let made = create(
         kb,
         json!({"handler_module": fantastic_credential_store::HANDLER_MODULE, "id": "creds",
-               "backend": "keychain", "refs": {REF: {"host": "api.example.com"}},
-               "callable_by": {ws.as_str(): ["get", "set", "list"]}}),
+               "backend": "keychain", "refs": {REF: {"host": "api.example.com"}}}),
     )
     .await;
     assert_eq!(made["id"], json!("creds"), "{made}");
@@ -153,7 +152,7 @@ async fn forward_get_to_a_connected_credential_store_is_recorded_as_secret() {
     let (ka, leg, events) = connected_caller(port, &web).await;
 
     let out = ka
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from(leg.as_str()),
             json!({"type": "forward", "target": "creds",
                    "payload": {"type": "get", "ref": REF},
@@ -186,7 +185,7 @@ async fn forward_set_to_a_connected_credential_store_never_records_the_value_on_
     let (ka, leg, events) = connected_caller(port, &web).await;
 
     let out = ka
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from(leg.as_str()),
             json!({"type": "forward", "target": "creds",
                    "payload": {"type": "set", "ref": REF, "fields": {"api_key": VALUE}},

@@ -1,6 +1,5 @@
-//! The verbs the saved set-up store declares (issue #642): one struct per verb, then
-//! `verbs!` — the list the agent's own entry checks every call against, and that
-//! `reflect` and `docs` render. `reflect` is declared once, in the kernel.
+//! The saved set-up verbs of the home store (issue #642): one struct per verb. They are
+//! declared in the home store's one list ([`crate::user_store::verbs`]).
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -79,9 +78,3 @@ pub struct Prefer {
     pub name: Option<String>,
 }
 
-fantastic_kernel::verbs! {
-    "persist_record" => PersistRecord,
-    "forget_record" => ForgetRecord,
-    "load_tree" => LoadTree,
-    "prefer" => Prefer,
-}

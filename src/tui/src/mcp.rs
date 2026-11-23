@@ -17,10 +17,9 @@
 //! means lives in the `fantastic-web-mcp` crate. Each connection, stdio or
 //! channel, is served the same way ([`serve_conn`]).
 //!
-//! THE LEG. `mcp` is a persisted, first-class agent, created once by code on the
-//! first connection to a kernel that lacks it (never by the blueprint), with
-//! god-mode grants (`kern/reach`) — the human reshapes them with
-//! `update_agent`; the record is the truth after that.
+//! THE LEG. `mcp` is a persisted, first-class agent under `web`, the blueprint's
+//! record with its lines: it holds `create *` on the user space (`canvas_root`)
+//! and nothing else. No code creates it or writes a line.
 //!
 //! STDIO HYGIENE (running the kernel): stdout is the protocol. Before anything
 //! boots, the real stdout is duplicated into a private descriptor only the
@@ -49,11 +48,11 @@ use tokio::sync::{mpsc, OnceCell};
 use crate::env::Paths;
 use crate::kern::host::Host;
 
-/// The leg's id. Its parent is the root; its handler is `web_mcp.tools`.
+/// The leg's id. Its parent is `web`; its handler is `web_mcp.tools`.
 pub const LEG: &str = "mcp";
 
 /// The flags `fantastic mcp` takes: `--statedir DIR` and `--workdir DIR`, as
-/// `(statedir, workdir)`. Its grants live in the `mcp` record, not on the line.
+/// `(statedir, workdir)`. Its lines live in the `mcp` record, not on the line.
 pub(crate) fn flags(argv: &[String]) -> Result<(Option<PathBuf>, Option<PathBuf>), String> {
     let (mut statedir, mut workdir) = (None, None);
     let mut it = argv.iter();
@@ -76,7 +75,7 @@ pub fn main(argv: &[String]) -> ! {
     let (statedir, workdir) = match flags(argv) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("{e} — its grants live in the `{LEG}` record; change them with update_agent");
+            eprintln!("{e} — its lines live in the `{LEG}` record");
             std::process::exit(2);
         }
     };
@@ -229,7 +228,7 @@ async fn serve(paths: Paths, std_out: std::fs::File, err_out: &mut std::fs::File
 }
 
 /// What every connection to one kernel shares: the host, and the MCP core —
-/// made on the first connection, which is when the leg is ensured.
+/// made on the first connection, which is when the leg is checked.
 pub struct Served {
     host: Arc<Host>,
     core: OnceCell<Arc<McpCore>>,
@@ -243,7 +242,7 @@ impl Served {
     async fn core(&self) -> Result<Arc<McpCore>, String> {
         self.core
             .get_or_try_init(|| async {
-                ensure_leg(&self.host).await?;
+                check_leg(&self.host)?;
                 Ok::<_, String>(Arc::new(McpCore::new(
                     Arc::clone(&self.host.kernel),
                     fantastic_kernel::AgentId::from(LEG),
@@ -372,37 +371,13 @@ where
     let _ = tokio::time::timeout(Duration::from_secs(2), out).await;
 }
 
-/// Bind the leg, creating it the first time; then god mode (`kern/reach`).
-pub(crate) async fn ensure_leg(host: &Host) -> Result<(), String> {
-    let existing = host.kernel.agents.get(&fantastic_kernel::AgentId::from(LEG)).map(|e| e.value().handler_module.clone());
-    match existing {
-        Some(handler) => {
-            if handler.as_deref() != Some(HANDLER_MODULE) {
-                return Err(format!(
-                    "an agent `{LEG}` exists but runs {handler:?}, not {HANDLER_MODULE} — rename or delete it"
-                ));
-            }
-        }
-        None => {
-            let created = host
-                .operator(
-                    "kernel",
-                    json!({
-                        "type": "create_agent",
-                        "parent_id": host.cfg.user.as_str(),
-                        "id": LEG,
-                        "handler_module": HANDLER_MODULE,
-                    }),
-                )
-                .await;
-            if let Some(err) = created.result.get("error").and_then(Value::as_str) {
-                return Err(format!("could not create the `{LEG}` leg: {err}"));
-            }
-            let _ = host.operator(LEG, json!({"type": "boot"})).await;
-        }
+/// The leg is the blueprint's record: it must be in the tree, on its handler.
+pub(crate) fn check_leg(host: &Host) -> Result<(), String> {
+    match host.kernel.resolve_target(LEG).map(|e| e.handler_module.clone()) {
+        Some(handler) if handler.as_deref() == Some(HANDLER_MODULE) => Ok(()),
+        Some(handler) => Err(format!(
+            "an agent `{LEG}` exists but runs {handler:?}, not {HANDLER_MODULE} — rename or delete it"
+        )),
+        None => Err(format!("the `{LEG}` leg is not in the tree (the blueprint seeds it under `web`)")),
     }
-    // Both edges on every agent BEFORE the first request is served (the watch
-    // for agents added later is started by the launcher, after its own grant
-    // writes: `kern/reach`).
-    crate::kern::reach::grant_all(host).await
 }

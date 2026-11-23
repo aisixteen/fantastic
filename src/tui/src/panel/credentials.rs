@@ -1,5 +1,5 @@
-//! THE PANEL FOR `credential_store`: key NAMES, the host each is bound to, the
-//! field NAMES, and who may use the store (the reflect's `callable_by`).
+//! THE PANEL FOR `credential_store`: key NAMES, the host each is bound to, and the
+//! field NAMES. Who may use the store is in each reader's own `can`, not here.
 //!
 //! NEVER A VALUE. Only `list` is sent (never `get`), and the parser keeps three
 //! whitelisted things per ref (name, host, field names). Any other key of a reply
@@ -45,31 +45,6 @@ pub fn parse_refs(list: &[Value]) -> Vec<CredRef> {
         .collect()
 }
 
-/// caller -> verbs, from the store's own reflect.
-pub fn grants(reflect: Option<&Value>) -> Vec<(String, String)> {
-    reflect
-        .and_then(|r| r.get("callable_by"))
-        .and_then(Value::as_object)
-        .map(|m| {
-            m.iter()
-                .filter(|(k, _)| !k.starts_with('$'))
-                .map(|(k, v)| {
-                    let verbs = match v {
-                        Value::String(s) => s.clone(),
-                        Value::Array(a) => a
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        _ => String::new(),
-                    };
-                    (k.clone(), verbs)
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 pub struct CredentialsPanel {
     agent: AgentId,
     scroll: u16,
@@ -98,7 +73,7 @@ impl CredentialsPanel {
         });
     }
 
-    pub fn lines(&self, reflect: Option<&Value>) -> Vec<Line<'static>> {
+    pub fn lines(&self) -> Vec<Line<'static>> {
         let mut out = Vec::new();
         if let Some(e) = &self.refusal {
             out.push(ro::bad(format!("  refused: {e}")));
@@ -114,15 +89,6 @@ impl CredentialsPanel {
                 r.host.as_deref().unwrap_or("-")
             )));
             out.push(ro::dim(format!("      fields: {}", r.fields.join(", "))));
-        }
-        out.push(Line::from(""));
-        out.push(ro::head("GRANTS · who may use the store"));
-        let g = grants(reflect);
-        if g.is_empty() {
-            out.push(ro::dim("    nobody named".into()));
-        }
-        for (who, verbs) in g {
-            out.push(ro::plain(format!("    {who}: {verbs}")));
         }
         out
     }
@@ -192,8 +158,8 @@ impl Panel for CredentialsPanel {
         self
     }
 
-    fn render(&self, f: &mut Frame<'_>, area: Rect, cx: &Cx<'_>) {
-        ro::draw(f, area, self.lines(cx.reflect), self.scroll);
+    fn render(&self, f: &mut Frame<'_>, area: Rect, _cx: &Cx<'_>) {
+        ro::draw(f, area, self.lines(), self.scroll);
     }
 
     fn status(&self, _cx: &Cx<'_>) -> Option<String> {
@@ -206,10 +172,6 @@ mod tests {
     use super::ro::testing::*;
     use super::*;
 
-    fn reflect() -> Value {
-        json!({"callable_by":{"$self":"*","openai-key":["set","get","forget"],"exec":"*"}})
-    }
-
     #[test]
     fn refs_show_name_host_and_field_names() {
         let mut p = CredentialsPanel::new("cred".into());
@@ -217,23 +179,11 @@ mod tests {
             &json!({"refs":[{"ref":"openai","host":"api.openai.com","fields":["api_key","org"]}]}),
             &mut Vec::new(),
         );
-        let t = text(&p.lines(None));
+        let t = text(&p.lines());
         assert!(
             t.contains("openai  host api.openai.com") && t.contains("fields: api_key, org"),
             "{t}"
         );
-    }
-
-    #[test]
-    fn grants_come_from_callable_by() {
-        let p = CredentialsPanel::new("cred".into());
-        let r = reflect();
-        let t = text(&p.lines(Some(&r)));
-        assert!(
-            t.contains("openai-key: set, get, forget") && t.contains("exec: *"),
-            "{t}"
-        );
-        assert!(!t.contains("$self"), "{t}");
     }
 
     #[test]
@@ -244,7 +194,7 @@ mod tests {
                 "value":"sk-SECRET-123","len":13,"masked":"****"}],"masked":"****","len":13}),
             &mut Vec::new(),
         );
-        let t = text(&p.lines(None));
+        let t = text(&p.lines());
         for bad in ["SECRET", "sk-", "13", "****"] {
             assert!(!t.contains(bad), "{bad:?} in:\n{t}");
         }

@@ -101,12 +101,12 @@ fn err_of(r: &Value) -> Option<String> {
 }
 
 fn handler_of(h: &Host, id: &str) -> Option<String> {
-    h.kernel.agents.get(&fantastic_kernel::AgentId::from(id))?.value().record().handler_module
+    h.kernel.resolve_target(id)?.record().handler_module
 }
 
 /// The agent `id`'s record, as a `create_agent` to put it back.
 fn record_of(h: &Host, id: &str) -> Option<Map<String, Value>> {
-    let rec = h.kernel.agents.get(&fantastic_kernel::AgentId::from(id)).and_then(|a| serde_json::to_value(a.value().record()).ok())?;
+    let rec = h.kernel.resolve_target(id).and_then(|a| serde_json::to_value(a.record()).ok())?;
     let mut rec = rec.as_object().cloned()?;
     rec.insert("type".into(), json!("create_agent"));
     Some(rec)
@@ -167,7 +167,7 @@ pub async fn run(h: &Host, b: &Backend) -> Result<String, String> {
         let mut spec = b.fields();
         spec.insert("handler_module".into(), json!(b.handler()));
         let user = fantastic_kernel::AgentId::from(h.cfg.user.as_str());
-        if let Err(e) = crate::kern::backend::BackendBundle::make_ai(h, &user, ROOT_AI, spec, Map::new()).await {
+        if let Err(e) = crate::kern::backend::BackendBundle::make_ai(h, crate::kern::backend::By::Operator, &user, ROOT_AI, spec, Map::new()).await {
             // whatever the failed make left is removed, then the old pair is put back (provider first)
             for id in [ROOT_AI.to_string(), crate::kern::backend::provider_id(ROOT_AI)] {
                 if h.kernel.exists(&id) {
@@ -226,7 +226,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_repoint_updates_the_provider_and_a_failed_remake_puts_both_records_back() {
-        let (h, dir) = host("root-ai", &["ai", "ai_provider"]).await;
+        let (h, dir) = host("root-ai").await;
         assert_eq!(
             run(&h, &vllm(8000)).await.unwrap(),
             "the root AI `ai` (made, vllm_backend.tools) speaks to http://box.example:8000/v1"
@@ -263,11 +263,8 @@ mod tests {
             "and the chat"
         );
         let handler = |id: &str| {
-            h.kernel
-                .agents
-                .get(&fantastic_kernel::AgentId::from(id))
+            h.kernel.resolve_target(id)
                 .unwrap()
-                .value()
                 .record()
                 .handler_module
         };

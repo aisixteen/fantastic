@@ -2,26 +2,23 @@
 
 use std::path::{Path, PathBuf};
 
-use fantastic_kernel::AgentId;
-
 use crate::kern::host::Host;
 
 /// The folder of bridge `id` (where its file lives).
 fn folder_of(h: &Host, id: &str) -> Option<PathBuf> {
-    h.kernel.agents.get(&AgentId::from(id)).map(|a| a.value().root_path.clone())
+    h.kernel.resolve_target(id).map(|a| a.root_path.clone())
 }
 
 /// `- <id> (<handler_module>) <display name>` for each child of `parent`, sorted.
 fn children_of(h: &Host, parent: &str) -> Vec<String> {
-    let Some(p) = h.kernel.agents.get(&AgentId::from(parent)).map(|a| a.value().clone()) else {
+    let Some(p) = h.kernel.resolve_target(parent) else {
         return Vec::new();
     };
     let mut rows: Vec<String> = p
         .child_ids()
         .iter()
-        .filter_map(|id| h.kernel.agents.get(id))
+        .filter_map(|id| h.kernel.resolve_target(id.as_str()))
         .map(|a| {
-            let a = a.value();
             let handler = a.handler_module.clone().unwrap_or_default();
             let name = a.display_name().unwrap_or_default();
             format!("- `{}` ({handler}) {name}", a.id.0)
@@ -38,7 +35,8 @@ pub fn write_readme(h: &Host, state: &Path, work: &Path) -> Result<(), String> {
     let at = |bridge: &str, file: &str| {
         folder_of(h, bridge).map_or_else(|| format!("(the `{bridge}` agent is missing)"), |d| d.join(file).display().to_string())
     };
-    let prompt = at(crate::kern::prompt::BRIDGE, crate::kern::prompt::FILE);
+    // `prompt.md` is in the state folder itself: its view's `path` on the `store` bridge
+    let prompt = state.join(crate::kern::prompt::FILE).display().to_string();
     let mcp = at(crate::kern::mcp_config::BRIDGE, crate::kern::mcp_config::FILE);
     let bin = std::env::current_exe().map_or_else(|_| "fantastic".to_string(), |p| p.display().to_string());
     let mut body = format!(

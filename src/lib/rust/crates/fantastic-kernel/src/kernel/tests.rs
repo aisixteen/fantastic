@@ -332,6 +332,55 @@ fn a_reserved_key_is_refused_before_anything_is_torn_down() {
     }
 }
 
+/// A record from before the one `can` field is refused at load, with no
+/// conversion (the folder is re-seeded), and so is a `can` outside the legal
+/// shape; the live tree stays.
+#[test]
+fn a_record_with_can_call_or_callable_by_is_refused_at_load() {
+    let kernel = Kernel::new();
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        Map::new(),
+        std::path::PathBuf::new(),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    for (key, value) in [
+        ("can_call", json!({"x": "*"})),
+        ("callable_by", json!({"$self": "*"})),
+        ("can", json!({"$self": {"call": ["*"]}})),
+    ] {
+        let mut meta = Map::new();
+        meta.insert(key.to_string(), value);
+        let state = KernelState {
+            agents: vec![AgentRecord {
+                id: "kernel_state".into(),
+                handler_module: None,
+                parent_id: None,
+                meta,
+            }],
+        };
+        let err = kernel.load(state).expect_err("{key} must be refused");
+        assert!(format!("{err}").contains("kernel_state"), "{key}: {err}");
+        assert!(kernel.exists("kernel_state"), "a refused load tore the tree down");
+    }
+    // a record in the one-field shape loads
+    let mut meta = Map::new();
+    meta.insert("can".to_string(), json!({"x": {"call": ["ping"]}}));
+    let ok = KernelState {
+        agents: vec![AgentRecord {
+            id: "kernel_state".into(),
+            handler_module: None,
+            parent_id: None,
+            meta,
+        }],
+    };
+    kernel.load(ok).expect("a `can` record loads");
+}
+
 // ─── The state stream contract ────────────────────────────────
 
 #[test]
@@ -390,7 +439,7 @@ async fn state_events_are_python_shape() {
         sink.lock().expect("sink poisoned").push(ev.clone());
     }));
     let _ = kernel
-        .send(vec![crate::outcome::Item::new(
+        .operator_send(vec![crate::outcome::Item::new(
             a.id.clone(),
             json!({"type": "nope"}),
         )])
@@ -551,7 +600,7 @@ async fn hooked_tree(log: &Arc<HookLog>, raises: bool) -> Arc<Kernel> {
     kernel.set_root(Arc::clone(&root));
     for (id, parent) in [("mid", "kernel"), ("leaf", "mid")] {
         let _ = kernel
-            .send(vec![crate::Item::new(
+            .operator_send(vec![crate::Item::new(
                 AgentId::from("kernel"),
                 json!({"type":"create_agent","parent_id":parent,"handler_module":"hooked.tools","id":id}),
             )])
@@ -627,7 +676,7 @@ async fn shutdown_never_falls_back_to_on_delete() {
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let _ = kernel
-        .send(vec![crate::Item::new(
+        .operator_send(vec![crate::Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","parent_id":"kernel","handler_module":"only_delete.tools","id":"od"}),
         )])
@@ -793,7 +842,7 @@ async fn declaring_tree(shutdown: bool, calls: &Arc<AtomicUsize>) -> Arc<Kernel>
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let _ = kernel
-        .send(vec![crate::Item::new(
+        .operator_send(vec![crate::Item::new(
             AgentId::from("kernel"),
             json!({"type":"create_agent","parent_id":"kernel",
                    "handler_module":"declares.tools","id":"node"}),
