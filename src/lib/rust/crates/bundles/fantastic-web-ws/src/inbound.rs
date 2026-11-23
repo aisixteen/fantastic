@@ -6,13 +6,13 @@
 //! operator's. It never sends a frame onward itself: it hands the admitted frame to
 //! its LEG as one of these verbs (`fantastic_io_bridge::inbound::hand_in`), and the
 //! leg's handler performs the onward call here — so that call is the leg's, gated as
-//! the leg (its `can_call`, the target's `callable_by`).
+//! the leg (by the leg's own lines).
 //!
 //! The leg's `ingress_rule` has already judged the frame before the transport hands
 //! it in. These verbs are gated like any other: the transport's hand-in is the
 //! operator's (ungated); an agent calling them needs the grant on the leg like any verb.
 
-use crate::verbs::{InboundCall, InboundEmit, InboundWatch};
+use crate::verbs::{InboundCall, InboundEmit, InboundStateSubscribe, InboundWatch};
 use fantastic_kernel::{AgentId, Blob, Item, Kernel};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -77,9 +77,9 @@ pub async fn watch(a: InboundWatch, kernel: &Arc<Kernel>) -> Value {
     }
 }
 
-/// May the leg tap the kernel-wide state stream?
-pub fn state_subscribe(leg: &AgentId, kernel: &Arc<Kernel>) -> Value {
-    match kernel.authorize_state_subscribe(leg) {
+/// May the leg watch the state stream of the node's subtree?
+pub fn state_subscribe(a: InboundStateSubscribe, leg: &AgentId, kernel: &Arc<Kernel>) -> Value {
+    match kernel.authorize_state_watch(leg, &AgentId::from(a.node.as_str())) {
         Some(denial) => denial,
         None => json!({"subscribed": true}),
     }

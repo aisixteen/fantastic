@@ -46,24 +46,20 @@ async fn world(tmp: &TempDir, next_id: Option<i64>) -> (Arc<Kernel>, Ids) {
             &kernel,
             &leg,
             &tmp.path().join(".fantastic").join(a.as_str()),
-            a.as_str(),
-        )
+    )
         .await;
         add_backend(&kernel, a.as_str(), &leg).await;
     }
     for a in &all {
-        let mut can =
-            json!({"$self": "*", "$parent": "*", "$subtree": "*", "cli": "*", MEMORY: "*"});
-        let mut by = json!({"$self": "*", "$parent": "*", "$subtree": "*"});
-        can[format!("ff_{a}")] = json!("*");
+        let line = json!({"call": ["*"]});
+        let mut can = json!({"$parent": line, "cli": line, MEMORY: line});
+        can[format!("ff_{a}")] = line.clone();
         for o in all.iter().filter(|o| *o != a) {
-            can[o.as_str()] = json!("*");
-            by[o.as_str()] = json!("*");
+            can[o.as_str()] = line.clone();
         }
-        let r = kernel
-            .send(vec![Item::new(
+        let r = kernel.operator_send(vec![Item::new(
                 AgentId::from("kernel_state"),
-                json!({"type": "update_agent", "id": a.as_str(), "can_call": can, "callable_by": by}),
+                json!({"type": "update_agent", "id": a.as_str(), "can": can}),
             )])
             .await
             .remove(0)
@@ -72,7 +68,7 @@ async fn world(tmp: &TempDir, next_id: Option<i64>) -> (Arc<Kernel>, Ids) {
     }
     let mut patch = Map::new();
     patch.insert("memory_store_id".to_string(), json!(MEMORY));
-    kernel.update(&kernel.root().unwrap().id, patch);
+    fantastic_kernel::test_support::update(&kernel, &kernel.root().unwrap().id, patch);
     (kernel, ids)
 }
 
@@ -128,8 +124,7 @@ async fn first_life(tmp: &TempDir) -> (Value, i64) {
         vec![pass(send_call(ids.lead.as_str(), "question"))],
         Duration::ZERO,
     );
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             ids.lead.clone(),
             json!({"type": "send", "text": "start the work", "client_id": "o"}),
         )])
@@ -141,8 +136,7 @@ async fn first_life(tmp: &TempDir) -> (Value, i64) {
         until_passes(&ss, 1).await,
         "the lead's call never reached slow"
     );
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             ids.asker.clone(),
             json!({"type": "send", "text": "ask the lead", "client_id": "o"}),
         )])
@@ -153,8 +147,7 @@ async fn first_life(tmp: &TempDir) -> (Value, i64) {
     until_held(&ids.lead, 1).await;
     // what reached the store is all the next life has
     kernel.flush_executions().await;
-    let tables = kernel
-        .send(vec![Item::new(
+    let tables = kernel.operator_send(vec![Item::new(
             AgentId::from(MEMORY),
             json!({"type": "dump"}),
         )])
@@ -196,8 +189,7 @@ fn a_chain_cut_by_a_restart_is_told_as_dead_letters_and_goes_on() {
     rt.block_on(async {
         // THE SECOND PROCESS, on the same records
         let (kernel, ids) = world(&tmp, Some(next_id)).await;
-        let r = kernel
-            .send(vec![Item::new(
+        let r = kernel.operator_send(vec![Item::new(
                 AgentId::from(MEMORY),
                 json!({"type": "inject", "tables": tables}),
             )])
@@ -237,8 +229,7 @@ fn a_chain_cut_by_a_restart_is_told_as_dead_letters_and_goes_on() {
         assert_eq!(kernel.start(true).await["started"], json!(true));
 
         // THE LEDGER: both calls that died are dead letters, nothing is in flight
-        let entries = kernel
-            .send(vec![Item::new(
+        let entries = kernel.operator_send(vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "ledger", "limit": 1000}),
             )])
@@ -305,8 +296,7 @@ fn a_chain_cut_by_a_restart_is_told_as_dead_letters_and_goes_on() {
         // TOLD ONCE: a reboot of the lead tells it nothing again
         tokio::time::sleep(Duration::from_millis(300)).await;
         let before = sl.passes_served();
-        let r = kernel
-            .send(vec![Item::new(ids.lead.clone(), json!({"type": "boot"}))])
+        let r = kernel.operator_send(vec![Item::new(ids.lead.clone(), json!({"type": "boot"}))])
             .await
             .remove(0);
         assert!(r.result.get("error").is_none(), "{}", r.result);

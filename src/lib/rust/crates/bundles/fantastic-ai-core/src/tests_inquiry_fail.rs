@@ -28,8 +28,7 @@ fn asker_passes(target: &AgentId) -> Vec<Vec<ScriptEvent>> {
 
 /// Start the asker's run: its first pass sends the inquiry.
 async fn start(kernel: &Arc<Kernel>, asker: &AgentId) {
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             asker.clone(),
             json!({"type": "send", "text": "ask", "client_id": "probe"}),
         )])
@@ -77,12 +76,7 @@ async fn a_store_refusal_tells_the_asker() {
     let (kernel, a) = mk_kernel(&tmp, "iq_store").await;
     let fb = asker(&kernel, &tmp, &a).await;
     // the store lets the agent read, not append: the turn fails fast
-    kernel
-        .edit_callable_by(&AgentId::from(MEMORY), |cb| {
-            cb.insert(a.as_str().to_string(), json!(["read"]));
-            true
-        })
-        .unwrap();
+    fantastic_kernel::test_support::grant(&kernel, a.as_str(), MEMORY, json!({"call": ["read"]}));
     start(&kernel, &peer_of(&a)).await;
     told(&fb, &a, &format!("{a}: memory store")).await;
 }
@@ -93,8 +87,7 @@ async fn an_unusable_prompt_file_tells_the_asker() {
     let (kernel, a) = mk_kernel(&tmp, "iq_pf").await;
     let fb = asker(&kernel, &tmp, &a).await;
     // a path with no file_bridge_id: the block cannot be read
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": a.as_str(), "system_prompt_file": "prompt.md"}),
         )])
@@ -120,14 +113,11 @@ async fn a_refused_record_tells_the_asker() {
     let (kernel, a) = mk_kernel(&tmp, "iq_value").await;
     let fb = asker(&kernel, &tmp, &a).await;
     // a record the backend cannot run (`ValueError`), written past the gate
-    kernel
-        .agents
-        .get(&a)
-        .unwrap()
-        .meta
-        .write()
-        .unwrap()
-        .insert("caching".to_string(), json!("bogus"));
+    fantastic_kernel::test_support::update(
+        &kernel,
+        &AgentId::from(a.as_str()),
+        serde_json::Map::from_iter([("caching".to_string(), json!("bogus"))]),
+    );
     let s = script(&a, Vec::new(), Duration::ZERO);
     start(&kernel, &peer_of(&a)).await;
     told(&fb, &a, "caching='bogus' is not one of the legal values").await;
@@ -153,8 +143,7 @@ async fn a_provider_failure_that_gives_up_tells_the_asker() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "iq_provider").await;
     let fb = asker(&kernel, &tmp, &a).await;
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": a.as_str(), "misfire_limit": 2}),
         )])
@@ -191,8 +180,7 @@ async fn a_provider_failure_that_gives_up_tells_the_asker() {
 /// A fold-strategy agent over a small window with a goal and six closed chains:
 /// its next turn folds.
 async fn over_budget(kernel: &Arc<Kernel>, a: &AgentId) {
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": a.as_str(),
                    "context_strategy": "fold", "context_window": 4000, "output_reserve": 0}),
@@ -273,7 +261,7 @@ async fn every_asker_of_a_solver_whose_turns_fail_is_told() {
     for n in 1..=2 {
         let id = format!("{solver}_asker{n}");
         let ff = format!("ff_{id}");
-        add_file_bridge(&kernel, &ff, &tmp.path().join(".fantastic").join(&id), &id).await;
+        add_file_bridge(&kernel, &ff, &tmp.path().join(".fantastic").join(&id)).await;
         askers.push(add_backend(&kernel, &id, &ff).await);
     }
     let peers: Vec<&AgentId> = askers.iter().collect();
@@ -298,22 +286,18 @@ async fn every_asker_of_a_solver_whose_turns_fail_is_told() {
     }
 }
 
-/// Grant `holder` and each of `others` both ways (as [`add_peer`] does for one).
+/// `holder`'s lines: its parent, `cli`, the store, its file bridge and each of
+/// `others` (as [`add_peer`] does for one). Each of `others` writes its own.
 async fn wire(kernel: &Arc<Kernel>, holder: &AgentId, others: &[&AgentId]) {
-    let ff = format!("ff_{holder}");
-    let mut can_call = json!({"$self": "*", "$parent": "*", "$subtree": "*",
-                              "cli": "*", MEMORY: "*"});
-    can_call[ff] = json!("*");
-    let mut callable_by = json!({"$self": "*", "$parent": "*", "$subtree": "*"});
+    let all = json!({"call": ["*"]});
+    let mut can = json!({"$parent": all, "cli": all, MEMORY: all});
+    can[format!("ff_{holder}")] = all.clone();
     for o in others {
-        can_call[o.as_str()] = json!("*");
-        callable_by[o.as_str()] = json!("*");
+        can[o.as_str()] = all.clone();
     }
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
-            json!({"type": "update_agent", "id": holder.as_str(),
-                   "can_call": can_call, "callable_by": callable_by}),
+            json!({"type": "update_agent", "id": holder.as_str(), "can": can}),
         )])
         .await;
 }

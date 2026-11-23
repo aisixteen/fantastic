@@ -13,6 +13,23 @@ use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+/// [`fantastic_ai_core::remote_provider::pair_chat`], plus the chat's line on the
+/// test memory store: in a seeded tree the chat's bundle defaults give it
+/// (`memory: {call: [append, read]}`); a test kernel loads no defaults.
+async fn pair_chat(
+    kernel: &std::sync::Arc<fantastic_kernel::Kernel>,
+    provider: &fantastic_kernel::AgentId,
+) -> fantastic_kernel::AgentId {
+    let chat = fantastic_ai_core::remote_provider::pair_chat(kernel, provider).await;
+    fantastic_kernel::test_support::grant(
+        kernel,
+        chat.as_str(),
+        fantastic_ram_store::test_support::MEMORY,
+        serde_json::json!({"call": ["*"]}),
+    );
+    chat
+}
+
 fn backend_id_for(tmp: &TempDir, tag: &str) -> String {
     format!(
         "ob_{}_{}",
@@ -64,13 +81,12 @@ async fn mk_kernel_with(
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
 
     let backend_id = backend_id_for(tmp, tag);
     let file_id = format!("ff_{}", backend_id);
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent",
@@ -79,8 +95,6 @@ async fn mk_kernel_with(
                 "id": file_id,
                 "root": tmp.path().join(".fantastic").to_string_lossy(),
                 "ingress_rule": "allow_all_ingress",
-                // Two-sided deny-all: accept the backend that persists through it.
-                "callable_by": { backend_id.clone(): "*" },
             }),
         )])
         .await
@@ -90,7 +104,7 @@ async fn mk_kernel_with(
     let memory = fantastic_ram_store::test_support::memory_meta(
         &kernel,
         &backend_id,
-        json!({ file_id.clone(): "*", "cli": "*" }),
+        json!({ file_id.clone(): {"call": ["*"]}, "cli": {"call": ["*"]} }),
     )
     .await;
     let mut create = json!({
@@ -107,8 +121,7 @@ async fn mk_kernel_with(
     {
         create[k] = v;
     }
-    let _ = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -172,12 +185,11 @@ async fn send_streams_tokens_and_emits_done() {
 
     let (kernel, backend) = mk_kernel(&tmp, "tok", &server.uri()).await;
     // the chat holds the turn and streams to its caller; the provider completes it
-    let backend = fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await;
+    let backend = pair_chat(&kernel, &backend).await;
     let mut rx = rebind_backend_inbox(&kernel, &backend);
     let client_id = "browser_tok";
 
-    let reply = kernel
-        .send(vec![Item::new(
+    let reply = kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "hi", "client_id": client_id}),
         )])
@@ -233,9 +245,11 @@ async fn an_envelope_dispatches_and_streams_verbatim() {
         .await;
 
     let client_id = "browser_tool";
-    let reply = kernel
-        .send(vec![Item::new(
-            fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
+    // the model's calls are the chat's: the chat holds its own line on the leg
+    let chat = pair_chat(&kernel, &backend).await;
+    fantastic_kernel::test_support::grant(&kernel, chat.as_str(), &format!("ff_{backend}"), json!({"call": ["*"]}));
+    let reply = kernel.operator_send(vec![Item::new(
+            chat,
             json!({"type": "send", "text": "go", "client_id": client_id}),
         )])
         .await
@@ -323,9 +337,8 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
 
     let (kernel, backend) = mk_kernel(&tmp, "think", &server.uri()).await;
     let _rx = rebind_backend_inbox(&kernel, &backend);
-    let reply = kernel
-        .send(vec![Item::new(
-            fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
+    let reply = kernel.operator_send(vec![Item::new(
+            pair_chat(&kernel, &backend).await,
             json!({"type": "send", "text": "hi", "client_id": "c_think"}),
         )])
         .await
@@ -335,9 +348,8 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
         reply["response"],
         json!(format!("{THINK_OPEN}deliberating{THINK_CLOSE}ack"))
     );
-    let h = kernel
-        .send(vec![Item::new(
-            fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
+    let h = kernel.operator_send(vec![Item::new(
+            pair_chat(&kernel, &backend).await,
             json!({"type": "history"}),
         )])
         .await
@@ -349,11 +361,10 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
 
 /// Set the paired chat's request knobs (#632: they are the chat's, sent with each pass).
 async fn chat_knobs(kernel: &Arc<Kernel>, backend: &AgentId, knobs: Value) {
-    let chat = fantastic_ai_core::remote_provider::pair_chat(kernel, backend).await;
+    let chat = pair_chat(kernel, backend).await;
     let mut payload = json!({"type": "update_agent", "id": chat.as_str()});
     payload.as_object_mut().unwrap().extend(knobs.as_object().cloned().unwrap_or_default());
-    let r = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), payload)])
+    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), payload)])
         .await
         .remove(0)
         .result;
@@ -435,8 +446,7 @@ async fn list_models_is_unknown_type() {
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;
     let (kernel, backend) = mk_kernel(&tmp, "lm", &server.uri()).await;
-    let reply = kernel
-        .send(vec![Item::new(
+    let reply = kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "list_models"}),
         )])
@@ -452,8 +462,7 @@ async fn list_models_is_unknown_type() {
     assert_eq!(reply["reason"], json!("unhandled"));
     assert!(reply.get("models").is_none());
     // And it is gone from the verb menu the model reads.
-    let reflect = kernel
-        .send(vec![Item::new(backend, json!({"type": "reflect"}))])
+    let reflect = kernel.operator_send(vec![Item::new(backend, json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
@@ -487,12 +496,11 @@ async fn history_persists_and_round_trips() {
         .await;
 
     let (kernel, backend) = mk_kernel(&tmp, "hist", &server.uri()).await;
-    let chat_id = fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await;
+    let chat_id = pair_chat(&kernel, &backend).await;
     let mut rx = rebind_backend_inbox(&kernel, &chat_id);
     let client_id = "browser_hist";
-    let _reply = kernel
-        .send(vec![Item::new(
-            fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
+    let _reply = kernel.operator_send(vec![Item::new(
+            pair_chat(&kernel, &backend).await,
             json!({"type": "send", "text": "ping", "client_id": client_id}),
         )])
         .await
@@ -502,7 +510,7 @@ async fn history_persists_and_round_trips() {
     // then the `done` the nudge earned), so two status `done` events; each one is
     // emitted before its turn's rows are saved, so then wait for the store itself
     // to hold all four rows.
-    let chat = fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await;
+    let chat = pair_chat(&kernel, &backend).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut dones = 0;
     let mut events: Vec<Value> = Vec::new();
@@ -535,9 +543,8 @@ async fn history_persists_and_round_trips() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
-    let h = kernel
-        .send(vec![Item::new(
-            fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
+    let h = kernel.operator_send(vec![Item::new(
+            pair_chat(&kernel, &backend).await,
             json!({"type": "history"}),
         )])
         .await
@@ -578,9 +585,7 @@ async fn history_persists_and_round_trips() {
         "the backend wrote a conversation sidecar on its own leg"
     );
     assert!(
-        !kernel.agents.contains_key(&fantastic_kernel::AgentId::from(
-            format!("{backend}_chat").as_str()
-        )),
+        !kernel.exists(format!("{backend}_chat").as_str()),
         "the `<self>_chat` child must be gone"
     );
 }
@@ -648,8 +653,7 @@ async fn reflect_extras_match_python() {
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;
     let (kernel, backend) = mk_kernel(&tmp, "rx", &server.uri()).await;
-    let r = kernel
-        .send(vec![Item::new(backend.clone(), json!({"type": "reflect"}))])
+    let r = kernel.operator_send(vec![Item::new(backend.clone(), json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
@@ -679,15 +683,13 @@ async fn reflect_extras_match_python() {
     assert_eq!(r["think"], Value::Null);
 
     // Set them: what the record names is shown as it is.
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": backend.as_str(),
                    "num_ctx": 4096, "think": false}),
         )])
         .await;
-    let r = kernel
-        .send(vec![Item::new(backend, json!({"type": "reflect"}))])
+    let r = kernel.operator_send(vec![Item::new(backend, json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
@@ -706,16 +708,14 @@ async fn unknown_type_is_pythons_repr_and_shutdown_is_unknown() {
     for (verb, want) in [
         ("garbage", "unknown verb 'garbage'; "),
     ] {
-        let r = kernel
-            .send(vec![Item::new(agent.clone(), json!({"type": verb}))])
+        let r = kernel.operator_send(vec![Item::new(agent.clone(), json!({"type": verb}))])
             .await
             .remove(0)
             .result;
         assert!(r["error"].as_str().is_some_and(|e| e.starts_with(want)), "{r}");
     }
     // `shutdown` is no verb of this bundle: refused like any unknown one
-    let r = kernel
-        .send(vec![Item::new(agent.clone(), json!({"type": "shutdown"}))])
+    let r = kernel.operator_send(vec![Item::new(agent.clone(), json!({"type": "shutdown"}))])
         .await
         .remove(0)
         .result;
@@ -849,9 +849,8 @@ fn full_response(content_type: &str, body: &str) -> (Vec<u8>, bool) {
 }
 
 async fn send_once(kernel: &Arc<Kernel>, backend: &AgentId, client: &str) -> Value {
-    kernel
-        .send(vec![Item::new(
-            fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await,
+    kernel.operator_send(vec![Item::new(
+            pair_chat(kernel, backend).await,
             json!({"type": "send", "text": "hi", "client_id": client}),
         )])
         .await
@@ -922,8 +921,7 @@ async fn a_final_ndjson_line_without_a_newline_still_counts() {
 async fn unknown_type_wire_shape_is_byte_exact() {
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "unkw", "http://127.0.0.1:1").await;
-    let r = kernel
-        .send(vec![Item::new(agent, json!({"type": "frob"}))])
+    let r = kernel.operator_send(vec![Item::new(agent, json!({"type": "frob"}))])
         .await
         .remove(0)
         .result;
@@ -966,13 +964,12 @@ async fn every_pass_opens_its_own_connection() {
 async fn a_bad_system_prompt_is_refused_at_the_write() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "sp", "http://127.0.0.1:1").await;
-    let chat = fantastic_ai_core::remote_provider::pair_chat(&kernel, &backend).await;
+    let chat = pair_chat(&kernel, &backend).await;
     let write = |v: Value| {
         let kernel = Arc::clone(&kernel);
         let id = chat.as_str().to_string();
         async move {
-            kernel
-                .send(vec![Item::new(
+            kernel.operator_send(vec![Item::new(
                     AgentId::from("kernel_state"),
                     json!({"type": "update_agent", "id": id, "system_prompt": v}),
                 )])

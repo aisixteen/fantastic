@@ -16,7 +16,7 @@ async fn send_bin(
     blob: Vec<u8>,
 ) -> (Value, Option<Vec<u8>>) {
     let out = kernel
-        .send(vec![
+        .operator_send(vec![
             Item::new(target.clone(), payload).with_binary_key("bytes", blob)
         ])
         .await
@@ -75,7 +75,7 @@ async fn the_dispatch_identity_propagates_to_nested_async() {
 async fn send_to_missing_target_returns_error() {
     let kernel = Arc::new(Kernel::new());
     let v = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("nope"),
             json!({"type": "ping"}),
         )])
@@ -93,7 +93,7 @@ async fn send_kernel_alias_routes_to_root() {
     kernel.set_root(Arc::clone(&root));
     // Root has no handler_module → reflect is answered natively.
     let v = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "reflect"}),
         )])
@@ -154,11 +154,11 @@ async fn unwatch_stops_fanout() {
     );
 }
 
-/// An emit onto ANOTHER agent's inbox passes the
-/// two-sided gate under verb `emit`; a denied emit is dropped. Emitting on your
-/// own inbox is how every bundle publishes, so it stays ungated.
+/// An emit onto ANOTHER agent's inbox needs an `emit` line in the emitter's
+/// `can`; a denied emit is dropped. Emitting on your own inbox is position, so
+/// every bundle publishes with no line.
 #[tokio::test]
-async fn emit_on_another_agent_needs_both_halves() {
+async fn emit_on_another_agent_needs_an_emit_line() {
     let kernel = Arc::new(Kernel::new());
     let root = make_agent("root");
     kernel.register(Arc::clone(&root));
@@ -166,16 +166,10 @@ async fn emit_on_another_agent_needs_both_halves() {
     kernel.register(granted(
         "em_open",
         Some("root"),
-        "can_call",
-        json!({"em_target": ["emit"]}),
+        json!({"em_target": {"call": ["emit"]}}),
     ));
-    kernel.register(granted("em_closed", Some("root"), "can_call", json!({})));
-    kernel.register(granted(
-        "em_target",
-        Some("root"),
-        "callable_by",
-        json!({"em_open": ["emit"], "em_closed": ["emit"]}),
-    ));
+    kernel.register(granted("em_closed", Some("root"), json!({})));
+    kernel.register(granted("em_target", Some("root"), json!({})));
     let mut rx = kernel.ensure_inbox(&AgentId::from("em_target"));
     let target = AgentId::from("em_target");
     as_agent(AgentId::from("em_closed"), {
@@ -186,7 +180,7 @@ async fn emit_on_another_agent_needs_both_halves() {
     .await;
     assert!(
         rx.try_recv().is_none(),
-        "an emit with no egress grant must be dropped"
+        "an emit with no emit line must be dropped"
     );
     as_agent(AgentId::from("em_open"), {
         let kernel = Arc::clone(&kernel);
@@ -196,7 +190,7 @@ async fn emit_on_another_agent_needs_both_halves() {
     .await;
     let got = rx.try_recv().expect("the granted emit landed");
     assert_eq!(got.payload, json!({"type": "poke", "n": 2}));
-    // emitting on your OWN inbox — ungated
+    // emitting on your OWN inbox — position
     as_agent(AgentId::from("em_target"), {
         let kernel = Arc::clone(&kernel);
         let target = target.clone();
@@ -413,49 +407,32 @@ async fn a_binary_bundle_error_settles_raised() {
 }
 
 #[tokio::test]
-async fn list_agents_returns_records_for_every_registered() {
+async fn reflect_tree_ids_lists_every_agent_of_the_tree() {
+    // `list_agents` folded into `reflect`: the flat id index of the root's tree,
+    // in registration order, root first.
     let kernel = Arc::new(Kernel::new());
     let a = make_agent("a_1");
-    let b = make_agent("b_1");
     kernel.register(Arc::clone(&a));
+    kernel.set_root(Arc::clone(&a));
+    let b = Agent::new(
+        AgentId::from("b_1"),
+        None,
+        Some(AgentId::from("a_1")),
+        Map::new(),
+        Path::new("/tmp/nowhere").join("b_1"),
+        true,
+    );
     kernel.register(Arc::clone(&b));
-    kernel.set_root(Arc::clone(&a));
+    a.add_child(b);
     let v = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("a_1"),
-            json!({"type": "list_agents"}),
+            json!({"type": "reflect", "tree": "ids"}),
         )])
         .await
         .remove(0)
         .result;
-    let agents = v["agents"].as_array().expect("list_agents.agents array");
-    let ids: Vec<&str> = agents
-        .iter()
-        .filter_map(|x| x.get("id").and_then(Value::as_str))
-        .collect();
-    assert_eq!(ids, vec!["a_1", "b_1"]);
-}
-
-#[tokio::test]
-async fn list_agents_points_back_at_the_briefing() {
-    // Python's `_LIST_HINT` reads `<type>reflect</type>` — the TAG form,
-    // not `{type:'reflect'}` — since that is the wire grammar a caller
-    // actually sends.
-    let kernel = Arc::new(Kernel::new());
-    let a = make_agent("a_1");
-    kernel.register(Arc::clone(&a));
-    kernel.set_root(Arc::clone(&a));
-    let v = kernel
-        .send(vec![Item::new(
-            AgentId::from("a_1"),
-            json!({"type": "list_agents"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(v["more"].as_str().unwrap(), LIST_HINT);
-    assert!(v["more"].as_str().unwrap().contains("<type>reflect</type>"));
-    assert!(!v["more"].as_str().unwrap().contains("{type:'reflect'}"));
+    assert_eq!(v["tree"], json!(["a_1", "b_1"]), "{v}");
 }
 
 #[tokio::test]
@@ -478,7 +455,7 @@ async fn handler_module_not_installed_is_the_python_unhandled_shape() {
     );
     kernel.register(Arc::clone(&orphan));
     let v = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("orphan"),
             json!({"type": "reflect"}),
         )])
@@ -548,23 +525,20 @@ async fn a_handler_reads_its_caller_not_itself() {
     kernel.bundles = reg;
     let kernel = Arc::new(kernel);
 
-    // Two-sided gate: the edge exists only if BOTH ends grant it, so the agent
-    // half of this test needs real wiring — an unregistered id standing in for a
-    // handler is (correctly) deny-all.
-    let mut spy_meta = Map::new();
-    spy_meta.insert("callable_by".into(), json!({"caller": "*"}));
+    // The agent half of this test needs a line: the caller holds `call *` on the
+    // spy; the spy keeps no list of callers.
     let spy = Agent::new(
         AgentId::from("spy"),
         Some("origin_spy.tools".to_string()),
         None,
-        spy_meta,
+        Map::new(),
         Path::new("/tmp/nowhere").join("spy"),
         true,
     );
     kernel.register(Arc::clone(&spy));
 
     let mut caller_meta = Map::new();
-    caller_meta.insert("can_call".into(), json!({"spy": "*"}));
+    caller_meta.insert("can".into(), json!({"spy": {"call": ["*"]}}));
     let caller = Agent::new(
         AgentId::from("caller"),
         None,
@@ -577,7 +551,7 @@ async fn a_handler_reads_its_caller_not_itself() {
 
     // OPERATOR send: there is no caller, so there is no origin.
     let r = kernel
-        .send(vec![Item::new(spy.id.clone(), json!({"type": "poke"}))])
+        .operator_send(vec![Item::new(spy.id.clone(), json!({"type": "poke"}))])
         .await
         .remove(0)
         .result;
@@ -592,7 +566,7 @@ async fn a_handler_reads_its_caller_not_itself() {
     // AGENT send: origin names the CALLER; sender still names the callee.
     let _ = as_agent(AgentId::from("caller"), async {
         kernel
-            .send(vec![Item::new(spy.id.clone(), json!({"type": "poke"}))])
+            .operator_send(vec![Item::new(spy.id.clone(), json!({"type": "poke"}))])
             .await
             .remove(0)
             .result
@@ -617,8 +591,8 @@ async fn a_handler_reads_its_caller_not_itself() {
 async fn an_ungranted_agent_cannot_watch_another() {
     // A watcher receives its target's raw inbound payloads VERBATIM — the model
     // prompt, the document body, whatever was sent. So an ungated `watch` is a
-    // read side-channel around `callable_by`: an agent that may not CALL an
-    // agent could still read everything sent TO it.
+    // read side-channel around the lines: an agent that may not CALL an agent
+    // could still read everything sent TO it.
     let kernel = Arc::new(Kernel::new());
     let root = make_agent("kernel_state");
     kernel.register(Arc::clone(&root));
@@ -634,8 +608,11 @@ async fn an_ungranted_agent_cannot_watch_another() {
             .await
     })
     .await;
-    assert!(denial.is_some(), "an ungranted watch was allowed");
-    assert_eq!(denial.unwrap()["reason"], "unauthorized");
+    assert_eq!(
+        denial.expect("an ungranted watch was allowed"),
+        crate::refusal::unknown_agent("secret"),
+        "the unknown answer"
+    );
     // ...and nothing was registered, so no payload can ever reach it.
     assert!(!secret
         .watcher_ids
@@ -664,48 +641,163 @@ async fn an_operator_watch_stays_ungated() {
 }
 
 #[tokio::test]
-async fn the_state_stream_needs_the_roots_own_grant_too() {
-    // The broadest read the kernel offers: no agent taps it without a grant on
-    // both ends that names `state_subscribe` (or `*`) on the root.
+async fn watch_on_a_node_needs_a_watch_line() {
+    // The state stream is a `watch` on a node: no agent taps a node's stream
+    // without a line on that node naming `watch`.
     let kernel = Arc::new(Kernel::new());
     let root = make_agent("kernel_state");
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
-    let mut meta = Map::new();
-    // A wildcard on the root — deliberately generous, and still not enough.
-    meta.insert("can_call".into(), json!({"kernel_state": "*"}));
-    let leaf = Agent::new(
-        AgentId::from("leaf"),
-        None,
-        Some(root.id.clone()),
-        meta,
-        Path::new("/tmp/nowhere").join("leaf"),
-        true,
+    kernel.register(granted("canvas_root", Some("kernel_state"), json!({})));
+    let leaf = granted(
+        "leaf",
+        Some("kernel_state"),
+        json!({"canvas_root": {"call": ["ping"]}}),
     );
     kernel.register(Arc::clone(&leaf));
+    let (leaf_id, node) = (AgentId::from("leaf"), AgentId::from("canvas_root"));
 
-    let denial = crate::test_support::as_agent(AgentId::from("leaf"), async {
-        kernel.authorize_state_subscribe(&AgentId::from("leaf"))
+    let denial = crate::test_support::as_agent(leaf_id.clone(), async {
+        kernel.authorize_state_watch(&leaf_id, &node)
     })
     .await;
-    assert!(
-        denial.is_some(),
-        "a wildcard covered the whole state stream"
+    assert_eq!(
+        denial.expect("a line naming another verb covered the node's stream"),
+        crate::refusal::unknown_agent("canvas_root")
     );
-    assert_eq!(denial.unwrap()["reason"], "unauthorized");
+    crate::test_support::grant(&kernel, "leaf", "canvas_root", json!({"call": ["watch"]}));
+    let granted_tap = crate::test_support::as_agent(leaf_id.clone(), async {
+        kernel.authorize_state_watch(&leaf_id, &node)
+    })
+    .await;
+    assert!(granted_tap.is_none(), "{granted_tap:?}");
+
+    // A missing node is the same unknown answer.
+    let missing = AgentId::from("nowhere");
+    let gone = crate::test_support::as_agent(leaf_id.clone(), async {
+        kernel.authorize_state_watch(&leaf_id, &missing)
+    })
+    .await;
+    assert_eq!(gone, Some(crate::refusal::unknown_agent("nowhere")));
 
     // An OPERATOR tap is ungated.
     assert!(kernel
-        .authorize_state_subscribe(&AgentId::from("cli"))
+        .authorize_state_watch(&AgentId::from("cli"), &node)
         .is_none());
 }
 
-// ─── The gate's denial shapes are python's ────────────────
+#[test]
+fn a_watcher_of_canvas_root_gets_no_event_for_credentials_or_exec() {
+    // Q34: a watcher of a node gets the events of that node's subtree it covers,
+    // and no other event, whatever it holds outside the subtree.
+    let kernel = Kernel::new();
+    crate::test_support::v9_tree(&kernel);
+    let node = AgentId::from("canvas_root");
+    let ev = |id: &str| json!({"agent_id": id, "kind": "updated", "changed": ["description"]});
+    // the page leg, and canvas_root itself (which holds `credentials: {call: [get]}`)
+    for watcher in ["canvas_ws", "canvas_root"] {
+        let w = AgentId::from(watcher);
+        for outside in ["credentials", "exec", "user", "kernel_state"] {
+            assert_eq!(
+                kernel.state_watch_event(&w, &node, &ev(outside)),
+                None,
+                "{watcher}: {outside}"
+            );
+        }
+        assert_eq!(
+            kernel.state_watch_event(&w, &node, &ev("chat_a")),
+            Some(ev("chat_a")),
+            "{watcher}"
+        );
+        // an event naming no agent is no event of the subtree
+        assert_eq!(
+            kernel.state_watch_event(&w, &node, &json!({"kind": "drain"})),
+            None
+        );
+    }
+}
 
-/// An agent with an explicit grant, registered under `parent`.
-fn granted(id: &str, parent: Option<&str>, field: &str, grant: Value) -> Arc<Agent> {
+#[test]
+fn the_snapshot_is_cut_to_what_the_watcher_covers() {
+    // Q34: the snapshot holds the agents of the node's subtree the watcher covers:
+    // t1_w1 covers itself and (by its `$parent` line) t1_lead, not its sibling,
+    // not team_1's other agents, nothing outside team_1.
+    let kernel = Kernel::new();
+    crate::test_support::v9_tree(&kernel);
+    let ids = |snap: Vec<Value>| -> Vec<String> {
+        snap.iter()
+            .map(|e| e["agent_id"].as_str().expect("agent_id").to_string())
+            .collect()
+    };
+    assert_eq!(
+        ids(kernel.state_watch_snapshot(&AgentId::from("t1_w1"), &AgentId::from("team_1"))),
+        vec!["t1_lead", "t1_w1"]
+    );
+    // each entry keeps the snapshot's shape
+    let full = kernel.state_snapshot();
+    let cut = kernel.state_watch_snapshot(&AgentId::from("t1_w1"), &AgentId::from("team_1"));
+    for e in &cut {
+        assert!(full.contains(e), "{e}");
+    }
+    // the page leg over canvas_root: its subtree, nothing of `user`'s other agents
+    let page = ids(
+        kernel.state_watch_snapshot(&AgentId::from("canvas_ws"), &AgentId::from("canvas_root"))
+    );
+    assert!(page.contains(&"chat_a".to_string()), "{page:?}");
+    assert!(page.contains(&"t1_w1".to_string()), "{page:?}");
+    for outside in [
+        "credentials",
+        "exec",
+        "user",
+        "web",
+        "canvas_ws",
+        "kernel_state",
+    ] {
+        assert!(
+            !page.contains(&outside.to_string()),
+            "{outside} in {page:?}"
+        );
+    }
+}
+
+#[test]
+fn an_unseen_sender_carries_no_id() {
+    // Q34: a traffic `sender` the watcher cannot see shows as unknown: `null`.
+    let kernel = Kernel::new();
+    crate::test_support::v9_tree(&kernel);
+    let (w, node) = (AgentId::from("t1_w1"), AgentId::from("team_1"));
+    let traffic = |sender: Value| {
+        json!({"agent_id": "t1_lead", "kind": "send", "backlog": 0, "sender": sender,
+               "summary": "s", "payload": {"type": "send"}})
+    };
+    // a sibling and an agent outside the subtree: no id
+    for unseen in ["t1_w2", "t1_tasks", "credentials", "missing_id"] {
+        assert_eq!(
+            kernel.state_watch_event(&w, &node, &traffic(json!(unseen))),
+            Some(traffic(Value::Null)),
+            "{unseen}"
+        );
+    }
+    // a sender the watcher covers keeps its id; an operator send stays null
+    assert_eq!(
+        kernel.state_watch_event(&w, &node, &traffic(json!("t1_w1"))),
+        Some(traffic(json!("t1_w1")))
+    );
+    assert_eq!(
+        kernel.state_watch_event(&w, &node, &traffic(Value::Null)),
+        Some(traffic(Value::Null))
+    );
+    // an event on an agent the watcher does not cover is dropped whole
+    let other = json!({"agent_id": "t1_tasks", "kind": "send", "sender": "t1_w1"});
+    assert_eq!(kernel.state_watch_event(&w, &node, &other), None);
+}
+
+// ─── Every denial is the unknown answer ────────────────
+
+/// An agent holding `can`, registered under `parent`.
+fn granted(id: &str, parent: Option<&str>, can: Value) -> Arc<Agent> {
     let mut meta = Map::new();
-    meta.insert(field.into(), grant);
+    meta.insert("can".into(), can);
     Agent::new(
         AgentId::from(id),
         None,
@@ -716,15 +808,8 @@ fn granted(id: &str, parent: Option<&str>, field: &str, grant: Value) -> Arc<Age
     )
 }
 
-fn keys(v: &Value) -> Vec<&str> {
-    v.as_object().unwrap().keys().map(String::as_str).collect()
-}
-
 #[tokio::test]
-async fn gate_denial_keys_are_error_reason_hint_side() {
-    // Python builds these through `refusal(code, error, hint=…, side=…)`:
-    // `refusal` writes `error, reason`, then `hint` if truthy, then merges the
-    // extras — so `side` is LAST.
+async fn a_denial_with_nothing_held_is_the_unknown_agent_answer() {
     let kernel = Arc::new(Kernel::new());
     let root = make_agent("kernel_state");
     kernel.register(Arc::clone(&root));
@@ -734,29 +819,26 @@ async fn gate_denial_keys_are_error_reason_hint_side() {
     let totals = make_agent("totals");
     kernel.register(Arc::clone(&totals));
 
-    // Egress: the sender holds no edge to the target.
+    // the sender holds no line on the target
     let d = kernel
         .gate(&AgentId::from("totals"), "write_stream", &store)
         .expect("deny-all gate let an ungranted call through");
-    // Python's `!r` — single quotes, not rust's Debug double quotes.
-    assert_eq!(
-        d["error"],
-        "totals may not call 'write_stream' on kernel_store"
-    );
-    assert_eq!(keys(&d), ["error", "reason", "hint", "side"]);
-    assert_eq!(d["side"], "egress");
-
-    // Ingress: the sender may call out, the target does not accept it.
-    let ws = make_agent("ws");
-    kernel.register(Arc::clone(&ws));
-    let rest = granted("rest", Some("kernel_state"), "can_call", json!({"ws": "*"}));
+    // byte-identical to a send naming a missing id, with no `side`
+    let missing = kernel
+        .operator_send(vec![Item::new("ghost", json!({"type": "ping"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(d, crate::refusal::unknown_agent("kernel_store"));
+    assert_eq!(missing, crate::refusal::unknown_agent("ghost"));
+    assert!(d.get("side").is_none());
+    // a line naming another verb on the same target: the same answer
+    let rest = granted("rest", Some("kernel_state"), json!({"kernel_store": {"call": ["read"]}}));
     kernel.register(Arc::clone(&rest));
     let d = kernel
-        .gate(&AgentId::from("rest"), "reflect", &ws)
-        .expect("an unaccepted call was admitted");
-    assert_eq!(d["error"], "ws does not accept 'reflect' from rest");
-    assert_eq!(keys(&d), ["error", "reason", "hint", "side"]);
-    assert_eq!(d["side"], "ingress");
+        .gate(&AgentId::from("rest"), "write_stream", &store)
+        .expect("an unheld verb was admitted");
+    assert_eq!(d, crate::refusal::unknown_agent("kernel_store"));
 }
 
 // The verbs these tests send to the stand-in bundles below, as the stand-ins declare
@@ -834,7 +916,7 @@ fn c36_kernel() -> (Arc<Kernel>, Arc<Agent>) {
 async fn a_dispatch_writes_a_call_row_with_outcome() {
     let (kernel, worker) = c36_kernel();
     let out = kernel
-        .send(vec![
+        .operator_send(vec![
             Item::new(worker.id.clone(), json!({"type": "work"})).with_id("named-one")
         ])
         .await
@@ -887,7 +969,7 @@ async fn an_unnamed_kernel_reflect_writes_no_row() {
     // row, and the outcome's pid is None.
     let (kernel, _worker) = c36_kernel();
     let out = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "reflect"}),
         )])
@@ -912,7 +994,7 @@ async fn a_named_kernel_reflect_still_opens_the_ledger() {
     // ledger (`_agent.py:816`) — ONLY the unnamed path skips it.
     let (kernel, _worker) = c36_kernel();
     let out = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "reflect"}),
         )
@@ -939,7 +1021,7 @@ async fn a_named_kernel_reflect_still_opens_the_ledger() {
 async fn an_errored_call_row_stamps_the_python_error_and_reason() {
     let (kernel, worker) = c36_kernel();
     kernel
-        .send(vec![Item::new(worker.id.clone(), json!({"type": "nope"}))])
+        .operator_send(vec![Item::new(worker.id.clone(), json!({"type": "nope"}))])
         .await;
     let call = crate::test_support::rows_about(&kernel, &worker.id).remove(0);
     let stamp = &call["outcome"];
@@ -960,7 +1042,7 @@ async fn only_a_null_or_empty_error_settles_completed() {
     let (kernel, worker) = c36_kernel();
     for none in [json!(""), Value::Null] {
         let out = kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 worker.id.clone(),
                 json!({"type": "echo_error", "error": none}),
             )])
@@ -974,7 +1056,7 @@ async fn only_a_null_or_empty_error_settles_completed() {
     }
     for some in [json!(0), json!(false), json!([]), json!({}), json!(1), json!([1]), json!({"k": 1})] {
         let out = kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 worker.id.clone(),
                 json!({"type": "echo_error", "error": some}),
             )])
@@ -995,7 +1077,7 @@ async fn only_a_null_or_empty_error_settles_completed() {
 async fn the_settle_row_keeps_what_stored_outcome_keeps() {
     let (kernel, worker) = c36_kernel();
     kernel
-        .send(vec![Item::new(worker.id.clone(), json!({"type": "work"}))])
+        .operator_send(vec![Item::new(worker.id.clone(), json!({"type": "work"}))])
         .await;
     let settles: Vec<_> = crate::test_support::rows_about(&kernel, &AgentId::from("kernel_state"))
         .into_iter()
@@ -1032,7 +1114,7 @@ async fn a_refusal_that_opened_no_call_row_appends_no_settle() {
     // was never written down.
     let (kernel, _worker) = c36_kernel();
     kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("ghost"),
             json!({"type": "work"}),
         )])
@@ -1050,7 +1132,7 @@ async fn a_nested_send_names_its_caller_as_parent() {
     let inner = kernel.clone();
     let wid = worker.id.clone();
     let outer = kernel
-        .send(vec![Item::new(wid.clone(), json!({"type": "work"}))])
+        .operator_send(vec![Item::new(wid.clone(), json!({"type": "work"}))])
         .await
         .remove(0);
     // A send issued INSIDE that dispatch's task would carry its pid; here we
@@ -1163,7 +1245,7 @@ async fn send_fans_out_before_the_handler_runs() {
     let (kernel, agent) = peek_kernel();
     let _rx = kernel.ensure_inbox(&agent.id);
     let out = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             agent.id.clone(),
             json!({"type": "work", "n": 7}),
         )])
@@ -1184,7 +1266,7 @@ async fn send_payload_reaches_the_targets_own_registered_inbox() {
     let mut rx = kernel.ensure_inbox(&agent.id);
     // Drain what the handler's own `ensure_inbox` read is racing for.
     let _ = kernel
-        .send(vec![Item::new(agent.id.clone(), json!({"type": "work"}))])
+        .operator_send(vec![Item::new(agent.id.clone(), json!({"type": "work"}))])
         .await;
     // The handler drained it; send again with no handler read in between by
     // pointing at a bare agent (no bundle, `unhandled` reply — the fanout still
@@ -1193,7 +1275,7 @@ async fn send_payload_reaches_the_targets_own_registered_inbox() {
     kernel.register(Arc::clone(&bare));
     let mut bare_rx = kernel.ensure_inbox(&bare.id);
     let _ = kernel
-        .send(vec![Item::new(bare.id.clone(), json!({"type": "nope"}))])
+        .operator_send(vec![Item::new(bare.id.clone(), json!({"type": "nope"}))])
         .await;
     assert_eq!(
         bare_rx.try_recv().expect("the target's own inbox").payload,
@@ -1317,7 +1399,7 @@ async fn a_fork_is_rowed_before_the_dispatch_settles_and_its_body_runs_under_it(
             true,
         ));
         kernel
-            .send(vec![Item::new(mine.clone(), json!({"type": "go"}))])
+            .operator_send(vec![Item::new(mine.clone(), json!({"type": "go"}))])
             .await;
         tokio::time::timeout(std::time::Duration::from_secs(10), done.notified())
             .await
@@ -1498,7 +1580,7 @@ async fn a_binary_body_rides_at_its_payload_path() {
 
     // the caller names the slot (`data: null`) to keep python's key order
     let out = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             echo.id.clone(),
             json!({"type": "paste_image", "job_id": 1, "data": null, "mime": "image/png"}),
         )
@@ -1530,7 +1612,7 @@ async fn a_binary_body_rides_at_its_payload_path() {
 
     // a NESTED path: the slot inside the payload, the leaf gone from the header
     let out = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             echo.id.clone(),
             json!({"type": "take", "meta": {"k": 1}}),
         )
@@ -1557,7 +1639,7 @@ async fn a_binary_body_rides_at_its_payload_path() {
 
     // a path that names no slot of the payload is refused, nothing runs
     let out = kernel
-        .send(vec![Item::new(echo.id.clone(), json!({"type": "take"}))
+        .operator_send(vec![Item::new(echo.id.clone(), json!({"type": "take"}))
             .with_binary(
                 vec![Step::from("nope"), Step::from("deep")],
                 vec![1],
@@ -1636,7 +1718,7 @@ async fn a_literal_key_body_is_one_top_level_key() {
     assert!(kernel.watch(&echo.id, AgentId::from("tap")).await.is_none());
 
     let out = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             echo.id.clone(),
             json!({"type": "take", "a": {"b": "kept"}}),
         )
@@ -1673,7 +1755,7 @@ async fn a_literal_key_body_is_one_top_level_key() {
 
     // no `a` in the payload: the key is literal, so nothing is missing
     let out = kernel
-        .send(vec![
+        .operator_send(vec![
             Item::new(echo.id.clone(), json!({"type": "take"})).with_binary_key("a.b", vec![1])
         ])
         .await
@@ -1810,14 +1892,13 @@ async fn a_literal_dotted_key_summarizes_at_that_key() {
     );
 }
 
-// ─── The kernel's own verbs are DECLARED, and `docs of=kernel` renders them ─────
+// ─── The kernel's own verbs are DECLARED, and the root's reflect renders them ───
 
 /// The kernel's verbs in declaration order (python's `_SYSTEM_VERB_DOCS` order).
-const KERNEL_VERB_NAMES: [&str; 14] = [
+const KERNEL_VERB_NAMES: [&str; 12] = [
     "create_agent",
     "update_agent",
     "delete_agent",
-    "list_agents",
     "ps",
     "ledger",
     "ack_deadletter",
@@ -1825,16 +1906,15 @@ const KERNEL_VERB_NAMES: [&str; 14] = [
     "cancel",
     "shutdown_agents",
     "kernel_stop",
-    "docs",
     "await_set",
     "await_cancel",
 ];
 
-/// What `docs of=kernel` renders for EVERY kernel verb: `(verb, one-line tier, detailed
+/// What the root's reflect renders for EVERY kernel verb: `(verb, one-line tier, detailed
 /// tier)`, in declaration order. The one-line tier is the argument list, then the first
 /// sentence of the verb's doc; the detailed tier the whole doc, then each argument with
 /// its type, whether it is required (or its default) and its description.
-const KERNEL_VERB_TEXT: [(&str, &str, &str); 14] = [
+const KERNEL_VERB_TEXT: [(&str, &str, &str); 12] = [
     (
         "create_agent",
         r####"args: handler_module:string of at least 1 character(s) (req), parent_id:string of at least 1 character(s) (req), id:string matching /^[0-9]*[^/\\|.0-9](?:[^/\\|.]|\.[^/\\|.])*\.?$/? — Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level"####,
@@ -1847,8 +1927,8 @@ args:
     ),
     (
         "update_agent",
-        r####"args: id:string of at least 1 character(s) (req) — EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE"####,
-        r####"EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT. Whoever holds update_agent on the root updates any agent, itself included. Every argument beyond `id` is a field of the agent's bundle's record, and a field it does not have is refused.
+        r####"args: id:string of at least 1 character(s) (req) — EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can` included: restate every line you want to keep, or the lines you omit are GONE"####,
+        r####"EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can` included: restate every line you want to keep, or the lines you omit are GONE. Each field needs an `update` (or `create`) line covering it on that agent. Every argument beyond `id` is a field of the agent's bundle's record, and a field it does not have is refused.
 
 args:
   id:string of at least 1 character(s) (req) — The agent to update."####,
@@ -1856,20 +1936,11 @@ args:
     (
         "delete_agent",
         r####"args: id:string of at least 1 character(s) (req), keep_memory:bool? — CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`"####,
-        r####"CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`. Whoever holds delete_agent on the root deletes any agent.
+        r####"CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`. Needs a `create` line selecting that agent.
 
 args:
   id:string of at least 1 character(s) (req) — The agent to delete.
   keep_memory:bool? — `true` leaves the persisted memory of the whole subtree alone."####,
-    ),
-    (
-        "list_agents",
-        r####"args: limit:int >= 1?, after:string? — Every agent's record, flat"####,
-        r####"Every agent's record, flat. Paged.
-
-args:
-  limit:int >= 1? — A page size: absent, everything.
-  after:string? — The cursor `next` of the previous page."####,
     ),
     (
         "ps",
@@ -1927,17 +1998,6 @@ No args."####,
 No args."####,
     ),
     (
-        "docs",
-        r####"args: of:string matching /^[^|]+(?:\|[^|]+)?$/ (req), tier:'oneliners'|'detailed'?, verb:string?, part:'docs'|'schema'|'all'? — HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument"####,
-        r####"HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one line per verb (its arguments and what it does), `detailed` the full text with every argument. Without `verb` the reply also carries the bundle's short `man` text. Pull once per bundle; `detailed` for a verb you are about to use. `part` picks what comes back: `docs` (the text), `schema` (each verb's JSON schema, what a caller types its arguments by) or `all` (both, the default). Gated like every kernel verb: a `can_call` grant of `docs` on the root. Returns {of, bundle, tier?, verbs?, schemas?, man?}.
-
-args:
-  of:string matching /^[^|]+(?:\|[^|]+)?$/ (req) — An agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'.
-  tier:'oneliners'|'detailed'? — How much of each verb: `oneliners` (default) or `detailed`.
-  verb:string? — One verb's entry only.
-  part:'docs'|'schema'|'all'? — What comes back: `docs`, `schema` or `all` (default)."####,
-    ),
-    (
         "await_set",
         r####"args: ids:list[string] with at least 1 item(s) (req), timeout_s:number > 0?, label:string? — Waits for EVERY named agent to send YOU a message of type 'report' (its `state` and `result`); a report from a named agent is HELD for the one combined message, not delivered as its own turn"####,
         r####"Waits for EVERY named agent to send YOU a message of type 'report' (its `state` and `result`); a report from a named agent is HELD for the one combined message, not delivered as its own turn. Returns at once {wait_id, label, ids, timeout_s}; later ONE message reaches you — {wait_id, label, done:[{id, state, result}], missing:[ids], timed_out} — when all have reported or `timeout_s` passes. Refuses a missing or empty `ids`, an id that names no agent (unknown_agent), yourself, a non-positive `timeout_s` and a non-string `label`. The wait is a row: it survives a restart.
@@ -1974,7 +2034,7 @@ fn kernel_verbs_are_declared_in_order_and_rendered() {
 }
 
 #[tokio::test]
-async fn docs_of_kernel_serves_the_rendered_text_of_all_fourteen_verbs() {
+async fn reflect_of_the_root_serves_the_rendered_text_of_all_twelve_kernel_verbs() {
     let kernel = Arc::new(Kernel::new());
     let root = make_agent("kernel_state");
     kernel.register(Arc::clone(&root));
@@ -1983,27 +2043,52 @@ async fn docs_of_kernel_serves_the_rendered_text_of_all_fourteen_verbs() {
         let out = send_text(
             &kernel,
             "kernel",
-            json!({"type": "docs", "of": "kernel", "tier": tier}),
+            json!({"type": "reflect", "tree": "none", "tier": tier, "part": "docs"}),
         )
         .await
         .result;
+        assert_eq!(out["tier"], tier, "{out}");
         let verbs = out["verbs"].as_object().expect("verbs");
-        assert_eq!(verbs.len(), 14, "{tier}: {out}");
+        // the twelve kernel verbs, then the one every agent answers
+        let names: Vec<&str> = verbs.keys().map(String::as_str).collect();
+        assert_eq!(names[..12], KERNEL_VERB_NAMES, "{tier}: {out}");
+        assert_eq!(names[12..], ["reflect"], "{tier}: {out}");
         for entry in KERNEL_VERB_TEXT {
             let want = if pick == 1 { entry.1 } else { entry.2 };
             assert_eq!(verbs[entry.0], want, "{tier} {}", entry.0);
         }
+        assert!(out.get("schemas").is_none(), "part docs: {out}");
     }
-    // one verb, either tier
+    // one verb, either tier, with its schema
     let one = send_text(
         &kernel,
         "kernel",
-        json!({"type": "docs", "of": "kernel", "verb": "cancel", "tier": "detailed"}),
+        json!({"type": "reflect", "tree": "none", "verb": "cancel", "tier": "detailed"}),
     )
     .await
     .result;
     assert_eq!(one["verbs"].as_object().unwrap().len(), 1, "{one}");
-    assert_eq!(one["verbs"]["cancel"], KERNEL_VERB_TEXT[8].2, "{one}");
+    assert_eq!(one["verbs"]["cancel"], KERNEL_VERB_TEXT[7].2, "{one}");
+    assert_eq!(keys_of_map(&one["schemas"]), ["cancel"], "{one}");
+    // a verb it does not answer is refused, naming the verbs it does
+    let none = send_text(
+        &kernel,
+        "kernel",
+        json!({"type": "reflect", "tree": "none", "verb": "list_agents"}),
+    )
+    .await
+    .result;
+    assert_eq!(none["reason"], "bad_arg", "{none}");
+    assert_eq!(none["arg"], "verb", "{none}");
+    let hint = none["hint"].as_str().expect("a hint");
+    assert!(hint.contains("create_agent") && hint.contains("reflect"), "{none}");
+}
+
+/// The keys of a JSON object, in order.
+fn keys_of_map(v: &Value) -> Vec<&str> {
+    v.as_object()
+        .map(|o| o.keys().map(String::as_str).collect())
+        .unwrap_or_default()
 }
 
 /// The one-line tier cuts a doc at its first top-level `. ` or the end of its first
@@ -2061,7 +2146,7 @@ fn root_and_child() -> Arc<Kernel> {
 
 async fn send_text(kernel: &Arc<Kernel>, target: &str, payload: Value) -> crate::outcome::Outcome {
     kernel
-        .send(vec![Item::new(AgentId::from(target), payload)])
+        .operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
 }
@@ -2073,7 +2158,7 @@ async fn send_binary(
     blob: Vec<u8>,
 ) -> crate::outcome::Outcome {
     kernel
-        .send(vec![
+        .operator_send(vec![
             Item::new(AgentId::from(target), payload).with_binary_key("bytes", blob)
         ])
         .await
@@ -2083,7 +2168,7 @@ async fn send_binary(
 #[tokio::test]
 async fn a_binary_kernel_verb_to_a_child_is_not_here_exactly_as_text() {
     let kernel = root_and_child();
-    for verb in ["create_agent", "list_agents", "ps", "ledger"] {
+    for verb in ["create_agent", "ps", "ledger"] {
         let bin = send_binary(&kernel, "kid", json!({"type": verb}), vec![1, 2]).await;
         let txt = send_text(&kernel, "kid", json!({"type": verb})).await;
         let want = format!(
@@ -2102,14 +2187,9 @@ async fn a_binary_kernel_verb_to_a_child_is_not_here_exactly_as_text() {
 #[tokio::test]
 async fn a_binary_kernel_verb_on_the_root_is_answered_as_text() {
     let kernel = root_and_child();
-    let bin = send_binary(
-        &kernel,
-        "kernel_state",
-        json!({"type": "list_agents"}),
-        vec![9],
-    )
-    .await;
-    let txt = send_text(&kernel, "kernel_state", json!({"type": "list_agents"})).await;
+    let ask = json!({"type": "cancel", "task_id": 424_242});
+    let bin = send_binary(&kernel, "kernel_state", ask.clone(), vec![9]).await;
+    let txt = send_text(&kernel, "kernel_state", ask.clone()).await;
     assert_eq!(
         bin.status,
         crate::outcome::Status::Completed,
@@ -2120,16 +2200,10 @@ async fn a_binary_kernel_verb_on_the_root_is_answered_as_text() {
         bin.result, txt.result,
         "the root answers the kernel verb on both legs"
     );
-    let ids: Vec<&str> = bin.result["agents"]
-        .as_array()
-        .expect("agents")
-        .iter()
-        .map(|a| a["id"].as_str().unwrap())
-        .collect();
-    assert_eq!(ids, vec!["kernel_state", "kid"]);
+    assert_eq!(bin.result["cancelled"], false, "{}", bin.result);
     assert_eq!(bin.body, None, "a kernel verb returns no chunk");
     // the `kernel` alias resolves to the root on the binary leg too
-    let alias = send_binary(&kernel, "kernel", json!({"type": "list_agents"}), vec![9]).await;
+    let alias = send_binary(&kernel, "kernel", ask, vec![9]).await;
     assert_eq!(alias.result, txt.result);
 }
 
@@ -2344,7 +2418,7 @@ impl crate::bundle::Handler for Hop {
             AgentId::from(next.as_str().unwrap()),
             json!({"type": "hop", "next": rest}),
         );
-        let out = kernel.send(vec![item]).await;
+        let out = kernel.operator_send(vec![item]).await;
         let o = out.into_iter().next().unwrap();
         Ok(Some(
             json!({"via": agent_id.0, "status": format!("{:?}", o.status), "got": o.result}),
@@ -2353,7 +2427,7 @@ impl crate::bundle::Handler for Hop {
 }
 
 /// `ids` registered under `hop.tools`, each with the given explicit grants.
-fn hop_kernel(agents: &[(&str, Value, Value)]) -> (Arc<Kernel>, Arc<HopLog>) {
+fn hop_kernel(agents: &[(&str, Value)]) -> (Arc<Kernel>, Arc<HopLog>) {
     let log = Arc::new(HopLog::default());
     let mut kernel = Kernel::new();
     let mut reg = crate::bundle::BundleRegistry::new();
@@ -2363,10 +2437,9 @@ fn hop_kernel(agents: &[(&str, Value, Value)]) -> (Arc<Kernel>, Arc<HopLog>) {
     let root = make_agent("kernel_state");
     kernel.register(Arc::clone(&root));
     kernel.set_root(root);
-    for (id, can_call, callable_by) in agents {
+    for (id, can) in agents {
         let mut meta = Map::new();
-        meta.insert("can_call".into(), can_call.clone());
-        meta.insert("callable_by".into(), callable_by.clone());
+        meta.insert("can".into(), can.clone());
         kernel.register(Agent::new(
             AgentId::from(*id),
             Some("hop.tools".to_string()),
@@ -2381,10 +2454,10 @@ fn hop_kernel(agents: &[(&str, Value, Value)]) -> (Arc<Kernel>, Arc<HopLog>) {
 
 fn hop_chain() -> (Arc<Kernel>, Arc<HopLog>) {
     hop_kernel(&[
-        ("h_a", json!({"h_b": "*"}), json!({})),
-        ("h_b", json!({"h_c": "*"}), json!({"h_a": "*"})),
-        ("h_c", json!({}), json!({"h_b": "*"})),
-        ("h_d", json!({}), json!({})),
+        ("h_a", json!({"h_b": {"call": ["*"]}})),
+        ("h_b", json!({"h_c": {"call": ["*"]}})),
+        ("h_c", json!({})),
+        ("h_d", json!({})),
     ])
 }
 
@@ -2425,14 +2498,15 @@ async fn sender_is_the_callee_and_origin_the_caller_at_every_hop() {
 
 #[tokio::test]
 async fn a_handler_cannot_send_as_anyone_but_itself() {
-    // IDENTITY COMES FROM DISPATCH: h_a holds NO grant to h_d and h_d accepts
-    // nobody — a nested send from h_a's handler is h_a's, and refused. There is
+    // IDENTITY COMES FROM DISPATCH: h_a holds NO line on h_d — a nested send
+    // from h_a's handler is h_a's, and refused with the unknown answer. There is
     // no switch to make it anyone else's.
     let (kernel, log) = hop_chain();
     let out = send_text(&kernel, "h_a", json!({"type": "hop", "next": ["h_d"]})).await;
     assert_eq!(out.result["status"], "Failed", "{}", out.result);
     assert_eq!(
-        out.result["got"]["reason"], "unauthorized",
+        out.result["got"],
+        crate::refusal::unknown_agent("h_d"),
         "{}",
         out.result
     );
@@ -2462,28 +2536,28 @@ async fn kernel_bookkeeping_runs_the_handler_as_the_agent_with_no_origin() {
         vec![json!({"at": "h_d", "sender": "h_d", "origin": null, "in_task": false})]
     );
     assert_eq!(kernel.rows.all().len(), rows_before, "no call row");
-    // its nested send is h_d's own — h_d holds no grant to h_a: refused
+    // its nested send is h_d's own — h_d holds no line on h_a: refused
     log.0.lock().unwrap().clear();
     let out = kernel
         .bookkeeping(&h_d, json!({"type": "hop", "next": ["h_a"]}), None)
         .await;
     assert_eq!(
-        out.result["got"]["reason"], "unauthorized",
+        out.result["got"],
+        crate::refusal::unknown_agent("h_a"),
         "{}",
         out.result
     );
 }
 
 #[tokio::test]
-async fn a_peer_address_is_an_outbound_key_only() {
-    // A caller is always local — a call a bridge leg serves is the leg's — so a
-    // `<guid>|<agent>` key in `callable_by` could never match: refused at the
-    // write. In `can_call` it is an outbound peer address, accepted.
+async fn a_peer_target_in_can_is_refused_at_the_write() {
+    // peers are parked: no line names a `<guid>|…` target
     let (kernel, _log) = hop_chain();
     let refused = send_text(
         &kernel,
         "kernel",
-        json!({"type": "update_agent", "id": "h_d", "callable_by": {"g2|scout": "*"}}),
+        json!({"type": "update_agent", "id": "h_d",
+               "can": {"g2|scout": {"call": ["*"]}, "g3|*": {"call": ["*"]}}}),
     )
     .await;
     assert_eq!(
@@ -2491,18 +2565,6 @@ async fn a_peer_address_is_an_outbound_key_only() {
         "{}",
         refused.result
     );
-    assert_eq!(
-        refused.result["error"],
-        "callable_by['g2|scout'] is not a grant key — legal keys: an agent id, $self, \
-         $parent, $subtree"
-    );
-    let ok = send_text(
-        &kernel,
-        "kernel",
-        json!({"type": "update_agent", "id": "h_d", "can_call": {"g2|scout": "*", "g3|*": "*"}}),
-    )
-    .await;
-    assert_eq!(ok.result["updated"], true, "{}", ok.result);
 }
 
 #[tokio::test]
@@ -2512,7 +2574,7 @@ async fn while_draining_shutdown_traffic_and_live_work_pass_and_new_roots_do_not
     assert!(kernel.draining());
     // a new root — operator or agent — is refused, coded, with python's text
     for sender in [None, Some("h_a")] {
-        let fut = kernel.send(vec![Item::new(
+        let fut = kernel.operator_send(vec![Item::new(
             AgentId::from("h_b"),
             json!({"type": "hop"}),
         )]);
@@ -2532,7 +2594,7 @@ async fn while_draining_shutdown_traffic_and_live_work_pass_and_new_roots_do_not
     assert!(log.0.lock().unwrap().is_empty(), "no handler ran");
     // the kernel's own shutdown traffic passes, AND a send from inside that
     // live work (h_a → h_b → h_c) passes too
-    let out = with_shutdown(kernel.send(vec![Item::new(
+    let out = with_shutdown(kernel.operator_send(vec![Item::new(
         AgentId::from("h_a"),
         json!({"type": "hop", "next": ["h_b", "h_c"]}),
     )]))
@@ -2551,7 +2613,7 @@ async fn while_draining_shutdown_traffic_and_live_work_pass_and_new_roots_do_not
         out.result
     );
     // the root's control surface stays open
-    let out = send_text(&kernel, "kernel", json!({"type": "list_agents"})).await;
+    let out = send_text(&kernel, "kernel", json!({"type": "ps"})).await;
     assert_eq!(
         out.status,
         crate::outcome::Status::Completed,
@@ -2586,7 +2648,7 @@ async fn ack_deadletter_refusals_and_acks_are_byte_exact() {
     };
     // a FAILED execution (a raise) and a COMPLETED one, both named
     let failed = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("nr"),
             json!({"type": "raise"}),
         )
@@ -2596,7 +2658,7 @@ async fn ack_deadletter_refusals_and_acks_are_byte_exact() {
     assert_eq!(failed.status, crate::outcome::Status::Failed);
     let fid = failed.pid.expect("a failed execution has an id").0;
     let done = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("nr"),
             json!({"type": "echo"}),
         )
@@ -2700,7 +2762,7 @@ async fn a_marked_value_is_shown_never_kept() {
     }));
     let payload = json!({"type": "set", "ref": "r", "fields": {"api_key": "sk-REAL"}});
     let out = kernel
-        .send(vec![
+        .operator_send(vec![
             Item::new("sp", payload).with_secret(["fields.api_key"])
         ])
         .await
@@ -2728,7 +2790,7 @@ async fn a_marked_value_is_shown_never_kept() {
     // malformed marks are refused before anything runs
     for bad in [vec![""], vec!["a..b"], vec!["type"]] {
         let out = kernel
-            .send(vec![
+            .operator_send(vec![
                 Item::new("sp", json!({"type": "set"})).with_secret(bad.clone())
             ])
             .await
@@ -2809,7 +2871,7 @@ async fn a_bundle_names_its_own_secret_paths() {
         sink.lock().expect("sink poisoned").push(ev.clone());
     }));
     let put = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             "vp",
             json!({"type": "put", "fields": {"api_key": "sk-REAL"}}),
         )])
@@ -2817,7 +2879,7 @@ async fn a_bundle_names_its_own_secret_paths() {
         .remove(0);
     assert_eq!(put.result, json!({"seen": "sk-REAL"}));
     let take = kernel
-        .send(vec![Item::new("vp", json!({"type": "take"})).with_id("t1")])
+        .operator_send(vec![Item::new("vp", json!({"type": "take"})).with_id("t1")])
         .await
         .remove(0);
     assert_eq!(take.result["token"], json!("tk-REAL"));
@@ -2828,7 +2890,7 @@ async fn a_bundle_names_its_own_secret_paths() {
     );
     assert!(rows.contains("[secret]"));
     let ledger = kernel
-        .send(vec![Item::new("kernel", json!({"type": "ledger"}))])
+        .operator_send(vec![Item::new("kernel", json!({"type": "ledger"}))])
         .await
         .remove(0);
     assert!(
@@ -2839,7 +2901,7 @@ async fn a_bundle_names_its_own_secret_paths() {
     assert!(!events.contains("sk-REAL") && !events.contains("tk-REAL"));
     // a second take with the same id is answered from RAM, whole, to the caller
     let again = kernel
-        .send(vec![Item::new("vp", json!({"type": "take"})).with_id("t1")])
+        .operator_send(vec![Item::new("vp", json!({"type": "take"})).with_id("t1")])
         .await
         .remove(0);
     assert_eq!(again.result["token"], json!("tk-REAL"));
@@ -2900,7 +2962,7 @@ async fn a_call_error_echoing_a_secret_is_shown_in_the_row() {
         true,
     ));
     let out = kernel
-        .send(vec![Item::new("ep", json!({"type": "fail"})).with_id("f1")])
+        .operator_send(vec![Item::new("ep", json!({"type": "fail"})).with_id("f1")])
         .await
         .remove(0);
     assert!(
@@ -2977,7 +3039,7 @@ async fn a_handler_noting_reply_secret_marks_its_settle_row() {
         sink.lock().expect("sink poisoned").push(ev.clone());
     }));
     let out = kernel
-        .send(vec![Item::new("rp", json!({"type": "get"})).with_id("r1")])
+        .operator_send(vec![Item::new("rp", json!({"type": "get"})).with_id("r1")])
         .await
         .remove(0);
     assert_eq!(
@@ -3011,7 +3073,7 @@ async fn while_draining_a_fork_is_refused_and_a_keepalive_fork_is_not() {
         let k = Arc::clone(&kernel);
         let work = async move {
             let out = k
-                .send(vec![Item::new(
+                .operator_send(vec![Item::new(
                     AgentId::from("h_c"),
                     json!({"type": "hop"}),
                 )])

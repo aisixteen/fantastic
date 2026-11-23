@@ -1,5 +1,5 @@
-//! `prompt.md` and `.mcp.json` live in their bridges' own folders, and `<state>/readme.md`
-//! is rewritten at every boot (issue #563).
+//! `prompt.md` lives at the state folder's top (its view's `path` on `store`), `.mcp.json`
+//! in its bridge's own folder, and `<state>/readme.md` is rewritten at every boot (issue #563).
 //!
 //! Its own integration binary: the bundles clamp against the process cwd and the user home
 //! is an env var, both process-global; the tests take one lock.
@@ -35,32 +35,25 @@ async fn boot(name: &str) -> (PathBuf, Arc<Kernel>) {
 }
 
 fn meta(k: &Kernel, id: &str, key: &str) -> Option<Value> {
-    k.agents
-        .get(&AgentId::from(id))
-        .and_then(|a| a.value().record().meta.get(key).cloned())
+    k.resolve_target(id)
+        .and_then(|a| a.record().meta.get(key).cloned())
 }
 
-fn bridge_dir(state: &Path, id: &str) -> PathBuf {
-    state.join("agents").join("user").join("agents").join(id)
+/// The `mcp_config` bridge's own folder: under `user/web/mcp` (the blueprint's).
+fn mcp_config_dir(state: &Path) -> PathBuf {
+    state.join("agents/user/agents/web/agents/mcp/agents/mcp_config")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_prompt_file_lives_in_its_bridges_own_folder() {
+async fn the_prompt_file_is_a_view_of_the_store() {
     let _g = ONE_AT_A_TIME.lock().await;
     let (d, k) = boot("prompt").await;
     let state = d.join(".fantastic");
-    let text = std::fs::read_to_string(bridge_dir(&state, "prompt_file").join("prompt.md"))
-        .expect("seeded in the bridge's folder");
+    let text = std::fs::read_to_string(state.join("prompt.md")).expect("seeded at the state folder's top");
     assert!(text.starts_with("{self}\n\n{howto}"), "{text}");
-    assert!(
-        !state.join("prompt.md").exists(),
-        "not at the state folder's top"
-    );
-    assert_eq!(meta(&k, "prompt_file", "root"), Some(Value::from("@self")));
-    assert_eq!(
-        meta(&k, "prompt_file", "allow"),
-        Some(serde_json::json!(["prompt.md"]))
-    );
+    assert_eq!(meta(&k, "prompt_file", "view"), Some(Value::from("file")));
+    assert_eq!(meta(&k, "prompt_file", "bridge"), Some(Value::from("store")));
+    assert_eq!(meta(&k, "prompt_file", "path"), Some(Value::from("prompt.md")));
     assert_eq!(
         meta(&k, "chat", "system_prompt_file"),
         Some(Value::from("prompt.md"))
@@ -76,7 +69,7 @@ async fn mcp_json_lives_in_the_mcp_config_bridges_folder() {
     let (d, k) = boot("mcp").await;
     let state = d.join(".fantastic");
     let cfg: Value = serde_json::from_str(
-        &std::fs::read_to_string(bridge_dir(&state, "mcp_config").join(".mcp.json"))
+        &std::fs::read_to_string(mcp_config_dir(&state).join(".mcp.json"))
             .expect("written in the bridge's folder"),
     )
     .unwrap();
@@ -102,11 +95,8 @@ async fn the_readme_names_the_live_paths_and_is_rewritten_each_boot() {
     // where the temp dir is a symlink (macOS /var -> /private/var) and on Windows (a `\\?\`
     // prefix and long names the readme never carries).
     for want in [
-        bridge_dir(&state, "prompt_file")
-            .join("prompt.md")
-            .display()
-            .to_string(),
-        bridge_dir(&state, "mcp_config")
+        state.join("prompt.md").display().to_string(),
+        mcp_config_dir(&state)
             .join(".mcp.json")
             .display()
             .to_string(),
@@ -133,7 +123,7 @@ async fn the_readme_names_the_live_paths_and_is_rewritten_each_boot() {
 }
 
 async fn call(k: &Arc<Kernel>, to: &str, payload: Value) -> Value {
-    k.send(vec![Item::new(AgentId::from(to), payload)]).await.remove(0).result
+    k.operator_send(vec![Item::new(AgentId::from(to), payload)]).await.remove(0).result
 }
 
 /// State `<tmp>/s` and work `<tmp>/w`, apart: seeded and booted in-process.
@@ -167,6 +157,10 @@ async fn the_first_boot_records_the_workdir_and_the_kernel_reports_it() {
 async fn exec_and_files_resolve_against_a_workdir_far_from_the_state() {
     let _g = ONE_AT_A_TIME.lock().await;
     let (t, _state, work, k) = boot_far("workdir_far").await;
+    // the seeded bridge exposes nothing (its `allow` holds no `.` entry): the operator
+    // exposes the work folder, which here holds no state
+    let allowed = call(&k, "kernel", json!({"type": "update_agent", "id": "files", "allow": ["."]})).await;
+    assert!(allowed.get("error").is_none(), "{allowed}");
     let listed = call(&k, "files", json!({"type": "list", "path": "."})).await;
     let names: Vec<&str> = listed["files"]
         .as_array()

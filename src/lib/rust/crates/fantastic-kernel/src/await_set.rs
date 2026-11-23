@@ -113,11 +113,13 @@ pub(crate) async fn await_set(
     };
     let mut ids: Vec<String> = Vec::new();
     for s in &args.ids {
-        let Some(agent) = kernel.resolve_target(s) else {
-            return crate::refusal::unknown_agent(
-                s,
-                kernel.agents.iter().map(|e| e.key().0.clone()).collect(),
-            );
+        // NO LINE IS NEEDED to await an agent, but an id the caller holds
+        // nothing on answers exactly as a missing one.
+        let Some(agent) = kernel
+            .resolve_target(s)
+            .filter(|a| kernel.held(&caller, &a.id) != crate::send::gate::Held::Nothing)
+        else {
+            return crate::refusal::unknown_agent(s);
         };
         if agent.id == caller {
             return crate::refusal::bad(VERB, "ids", "absent — an agent cannot await itself");
@@ -203,7 +205,7 @@ pub(crate) async fn await_cancel(
     let released = w.held.len();
     if released > 0 {
         let k = Arc::clone(kernel);
-        tokio::spawn(redeliver(k, w.caller, w.held));
+        crate::tasks::spawn_inherit(redeliver(k, w.caller, w.held));
     }
     json!({"cancelled": true, "wait_id": wait_id, "released": released})
 }

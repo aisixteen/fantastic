@@ -1,8 +1,6 @@
 //! PINS — the primitive python-format helpers of `fantastic-bundle`'s `text.rs` /
 //! `str.isspace`), every expected value CPython 3.11's (`str.strip`, `str.isspace`).
 
-use serde_json::json;
-
 /// `str.isspace()` is True, so `strip()` takes it.
 const PY_SPACE: [char; 15] = [
     '\t', '\n', '\u{0b}', '\u{0c}', '\r', ' ', '\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}', '\u{85}',

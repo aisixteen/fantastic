@@ -18,4 +18,5 @@ schemars = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

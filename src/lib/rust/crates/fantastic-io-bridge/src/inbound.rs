@@ -6,7 +6,7 @@
 //! it sends is the operator's. It never sends a frame onward itself: it hands the
 //! admitted frame to its LEG as one of these verbs ([`hand_in`]), and the leg's
 //! handler performs the onward call — so that call is the leg's, gated as the leg
-//! (its `can_call`, the target's `callable_by`). Whoever is on the other end of
+//! (by the leg's own lines). Whoever is on the other end of
 //! the wire is not an identity in this kernel; the leg is.
 //!
 //! The leg's `ingress_rule` has already judged the frame (`gate_inbound`) before

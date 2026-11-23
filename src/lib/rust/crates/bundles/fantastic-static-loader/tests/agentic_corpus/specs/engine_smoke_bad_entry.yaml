@@ -1,0 +1,14 @@
+# Test spec for `configs/engine_smoke_bad_entry.yaml` — WHAT THIS SUITE ASSERTS.
+config: engine_smoke_bad_entry.yaml
+
+name: engine_smoke_bad_entry
+description: >
+  An engine fixture, not a scenario. A manifest that READS fine and names an
+  entry the child bundle refuses. `create_agent` boots the loader and swallows
+  the failure, so the create looks clean and the roster is silently partial —
+  `good` exists, everything from `bogus` on never does. Only the explicit
+  re-boot says so.
+
+expect:
+  hydration: boot_error
+  error_contains: "ingress_rule"

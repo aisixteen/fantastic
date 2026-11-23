@@ -214,8 +214,7 @@ async fn closed(kernel: &Arc<Kernel>, agent: &AgentId, tag: &str, big: usize) ->
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &AgentId, payload: Value) -> Value {
-    let out = kernel
-        .send(vec![Item::new(target.clone(), payload)])
+    let out = kernel.operator_send(vec![Item::new(target.clone(), payload)])
         .await
         .remove(0);
     assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
@@ -227,8 +226,7 @@ async fn set(kernel: &Arc<Kernel>, agent: &AgentId, fields: Value) {
     for (k, v) in fields.as_object().unwrap() {
         p[k] = v.clone();
     }
-    let _ = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), p)])
+    let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), p)])
         .await;
 }
 
@@ -595,8 +593,7 @@ async fn context_forget_include_cleared() {
     assert!(new.iter().all(|r| left.contains(r)));
     assert_eq!(out["pruned"], old.len(), "{out}");
     assert_eq!(kept["pruned"], 0, "{kept}");
-    let bad = kernel
-        .send(vec![Item::new(
+    let bad = kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "context_forget", "include_cleared": "yes"}),
         )])
@@ -615,7 +612,7 @@ async fn context_forget_waits_for_a_running_turn() {
     let k2 = Arc::clone(&kernel);
     let b2 = backend.clone();
     let turn = tokio::spawn(async move {
-        k2.send(vec![Item::new(b2, json!({"type": "send", "text": "go"}))])
+        k2.operator_send(vec![Item::new(b2, json!({"type": "send", "text": "go"}))])
             .await
     });
     for _ in 0..250 {
@@ -631,7 +628,7 @@ async fn context_forget_waits_for_a_running_turn() {
     let k3 = Arc::clone(&kernel);
     let b3 = backend.clone();
     let forget = tokio::spawn(async move {
-        k3.send(vec![Item::new(b3, json!({"type": "context_forget"}))])
+        k3.operator_send(vec![Item::new(b3, json!({"type": "context_forget"}))])
             .await
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -736,8 +733,7 @@ async fn folds_at_a_small_window_and_every_turn_answers() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             s.passes.lock().unwrap().push_back(pass(reply));
-            let _ = kernel
-                .send(vec![Item::new(
+            let _ = kernel.operator_send(vec![Item::new(
                     backend,
                     json!({"type": "send", "text": text, "client_id": "cell"}),
                 )])

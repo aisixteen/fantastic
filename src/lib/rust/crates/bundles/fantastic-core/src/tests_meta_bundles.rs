@@ -33,7 +33,7 @@ async fn create(kernel: &Arc<Kernel>, extra: serde_json::Value) -> serde_json::V
 }
 
 fn meta(kernel: &Arc<Kernel>, id: &str) -> serde_json::Map<String, serde_json::Value> {
-    kernel.agents.get(&AgentId::from(id)).unwrap().meta.read().unwrap().clone()
+    kernel.resolve_target(id).unwrap().record().meta.clone()
 }
 
 #[tokio::test]
@@ -47,11 +47,10 @@ async fn an_instance_of_a_meta_bundle_inherits_its_fields_and_runs_its_base() {
     let m = meta(&kernel, "n1");
     assert_eq!(m["root"], json!("notes"));
     assert_eq!(m["allow"], json!(["."]));
-    let rec = kernel.agents.get(&AgentId::from("n1")).unwrap().record();
+    let rec = kernel.resolve_target("n1").unwrap().record();
     assert_eq!(rec.handler_module.as_deref(), Some("notes"), "the kind stays the meta bundle");
     // the base's code answers: the file bridge reads its root
-    let read = kernel
-        .send(vec![Item::new(AgentId::from("n1"), json!({"type": "read", "path": "a.md"}))])
+    let read = kernel.operator_send(vec![Item::new(AgentId::from("n1"), json!({"type": "read", "path": "a.md"}))])
         .await
         .remove(0)
         .result;
@@ -79,7 +78,7 @@ async fn bundle_is_no_field_handler_module_is_the_one_kind() {
     let kernel = kernel_with_bundles(&tmp, &[("notes", NOTES)]).await;
     let r = create(&kernel, json!({"id": "n3", "handler_module": "file_bridge.tools", "bundle": "notes"})).await;
     assert!(r.get("error").is_some(), "a `bundle` field is refused, not honoured: {r}");
-    assert!(kernel.agents.get(&AgentId::from("n3")).is_none(), "nothing was created: {r}");
+    assert!(kernel.resolve_target("n3").is_none(), "nothing was created: {r}");
 }
 
 #[tokio::test]

@@ -737,7 +737,7 @@ fn one_shots_take_over_a_lock_whose_pid_holds_no_flock() {
     };
     stale();
     let out = Command::new(fantastic_bin())
-        .args(["kernel", "list_agents"])
+        .args(["kernel", "reflect", "tree=ids"])
         .current_dir(tmp.path())
         .output()
         .expect("run a one-shot over a stale lock");
@@ -747,7 +747,7 @@ fn one_shots_take_over_a_lock_whose_pid_holds_no_flock() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(String::from_utf8_lossy(&out.stdout).contains("\"agents\""));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("\"tree\""));
     assert!(
         !tmp.path().join(".fantastic/lock.yaml").exists(),
         "released"
@@ -1144,14 +1144,14 @@ fn a_daemon_with_a_store_stops_cleanly_and_releases_its_lock() {
             "parent_id=kernel",
             "handler_module=web.tools",
             "id=web",
+            // the host pulls its legs' routes: its own tree, by position
             &port_kv,
-            // the host pulls its legs' routes: an explicit edge, both ends
-            "can_call={\"$subtree\": [\"get_routes\"]}",
+            // and caps its legs (rule 6): it holds the line its leg holds
+            "can={\"kernel_state\": {\"call\": [\"*\"]}}",
         ],
     );
     // The relay dispatches into the kernel AS ITSELF: `ingress_rule` says who
-    // may call IN, `can_call` says where into the kernel it may land, and
-    // root's own `callable_by` must name the grandchild.
+    // may call IN, its own `can` says where into the kernel it may land.
     run_cli(
         tmp.path(),
         &[
@@ -1161,17 +1161,7 @@ fn a_daemon_with_a_store_stops_cleanly_and_releases_its_lock() {
             "handler_module=web_rest.tools",
             "id=rest",
             "ingress_rule=allow_all_ingress",
-            "can_call={\"kernel_state\": \"*\"}",
-            "callable_by={\"$parent\": [\"get_routes\"]}",
-        ],
-    );
-    run_cli(
-        tmp.path(),
-        &[
-            "kernel_state",
-            "update_agent",
-            "id=kernel_state",
-            "callable_by={\"$self\": \"*\", \"rest\": \"*\"}",
+            "can={\"kernel_state\": {\"call\": [\"*\"]}}",
         ],
     );
 
@@ -1192,10 +1182,10 @@ fn a_daemon_with_a_store_stops_cleanly_and_releases_its_lock() {
         port,
         "/rest/kernel_state",
         execution_id,
-        "{\"type\":\"list_agents\"}",
+        "{\"type\":\"reflect\",\"tree\":\"ids\"}",
     );
     assert!(
-        reply.contains("\"agents\""),
+        reply.contains("\"tree\""),
         "the live REST call must settle: {reply}"
     );
 
@@ -1497,7 +1487,6 @@ fn sqlite_store_is_in_the_headless_catalog_and_survives_a_stop() {
             "handler_module=web.tools",
             "id=web",
             &port_kv,
-            "can_call={\"$subtree\": [\"get_routes\"]}",
         ],
     );
     let mut child = sys::stoppable(&mut Command::new(fantastic_bin()))

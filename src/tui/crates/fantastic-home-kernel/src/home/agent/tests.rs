@@ -41,11 +41,11 @@ fn t_with(meta: Value, config: HomeConfig) -> T {
         w,
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(root);
     let id = AgentId::from(ID);
     let meta = meta.as_object().cloned().unwrap_or_default();
-    kernel.register(Agent::new(
+    fantastic_kernel::test_support::register(&kernel, Agent::new(
         id.clone(),
         Some(crate::home::HANDLER_MODULE.into()),
         Some(AgentId::from("kernel_state")),
@@ -453,11 +453,8 @@ async fn boot_restores_pages_and_selection_from_the_record() {
     );
     // the kept values now on the record, once they changed
     let record = t
-        .kernel
-        .agents
-        .get(&t.id)
+        .kernel.resolve_target(t.id.as_str())
         .unwrap()
-        .value()
         .record()
         .meta
         .clone();

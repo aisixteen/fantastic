@@ -42,6 +42,10 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 
 [workspace.dependencies]
+# The grant check (#754): `can` lines become Cedar policies. `partial-eval` (experimental)
+# answers a check with the target left unknown, which is how a `*` grant is told apart.
+cedar-policy = { version = "=4.14.1", features = ["partial-eval"] }
+
 # Async runtime — single source of truth so every crate uses the same version.
 tokio = { version = "1.40", features = ["full"] }
 async-trait = "0.1"

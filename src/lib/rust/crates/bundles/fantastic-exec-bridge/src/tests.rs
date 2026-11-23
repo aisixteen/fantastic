@@ -103,7 +103,7 @@ async fn mk_kernel_with(tmp: &TempDir, extra: Map<String, Value>) -> (Arc<Kernel
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let pid = agent_id_for(tmp);
     // WHERE a command runs is the record's, required — never guessed. A test that
@@ -118,8 +118,7 @@ async fn mk_kernel_with(tmp: &TempDir, extra: Map<String, Value>) -> (Arc<Kernel
     for (k, v) in extra {
         obj.insert(k, v);
     }
-    let _ = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -199,8 +198,7 @@ async fn the_record_declaration_shapes_the_fields() {
         ("ingress_rule", json!("open_sesame"), "ingress_rule"),
         ("ingress_rule", json!({"type": "allow_all_ingress"}), "ingress_rule"),
     ] {
-        let r = kernel
-            .send(vec![Item::new(
+        let r = kernel.operator_send(vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "update_agent", "id": a.as_str(), field: value.clone()}),
             )])
@@ -218,8 +216,7 @@ async fn reflect_advertises_the_allowlist_not_interpreters() {
     let mut meta = Map::new();
     meta.insert("allowed".to_string(), json!(["ls( .*)?"]));
     let (kernel, a) = mk_kernel_with(&tmp, meta).await;
-    let r = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "reflect"}))])
+    let r = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
@@ -260,7 +257,7 @@ async fn every_start_refusal_carries_a_code() {
     let ask = |p: Value| {
         let kernel = Arc::clone(&kernel);
         let a = a.clone();
-        async move { kernel.send(vec![Item::new(a, p)]).await.remove(0).result }
+        async move { kernel.operator_send(vec![Item::new(a, p)]).await.remove(0).result }
     };
 
     let r = ask(json!({"type": "start"})).await;
@@ -299,8 +296,7 @@ async fn an_unknown_job_id_is_not_found_on_every_verb() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     for verb in ["status", "stop", "interrupt"] {
-        let r = kernel
-            .send(vec![Item::new(
+        let r = kernel.operator_send(vec![Item::new(
                 a.clone(),
                 json!({"type": verb, "job_id": 999_999}),
             )])
@@ -324,8 +320,7 @@ async fn a_job_id_is_the_jobs_task_id_and_nothing_else_names_it() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(&py, "import time; time.sleep(30)", false),
         )])
@@ -335,8 +330,7 @@ async fn a_job_id_is_the_jobs_task_id_and_nothing_else_names_it() {
     let jid = r["job_id"]
         .as_i64()
         .unwrap_or_else(|| panic!("an int job_id: {r}"));
-    let ps = kernel
-        .send(vec![Item::new(
+    let ps = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "ps"}),
         )])
@@ -352,8 +346,7 @@ async fn a_job_id_is_the_jobs_task_id_and_nothing_else_names_it() {
         "the job's id must be a row of `ps`: {ps}"
     );
     for verb in ["status", "stop", "interrupt", "clear", "write", "output"] {
-        let bad_arg = kernel
-            .send(vec![Item::new(
+        let bad_arg = kernel.operator_send(vec![Item::new(
                 a.clone(),
                 json!({"type": verb, "job_id": jid.to_string()}),
             )])
@@ -366,8 +359,7 @@ async fn a_job_id_is_the_jobs_task_id_and_nothing_else_names_it() {
             "{verb}: {bad_arg}"
         );
     }
-    let snap = kernel
-        .send(vec![Item::new(
+    let snap = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "status", "job_id": jid}),
         )])
@@ -380,8 +372,7 @@ async fn a_job_id_is_the_jobs_task_id_and_nothing_else_names_it() {
         snap.get("task_id").is_none(),
         "no second copy of the id: {snap}"
     );
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "stop", "job_id": jid}),
         )])
@@ -398,8 +389,7 @@ async fn start_refuses_unlisted_command_and_sealed_leg_denies() {
     meta.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
     meta.insert("allowed".to_string(), json!(["ls( .*)?"])); // only ls
     let (kernel, a) = mk_kernel_with(&tmp, meta).await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "start", "command": "/bin/rm", "args": ["-rf", "/"]}),
         )])
@@ -411,8 +401,7 @@ async fn start_refuses_unlisted_command_and_sealed_leg_denies() {
         "an unlisted command must refuse naming the patterns: {r}"
     );
     assert!(r["job_id"].is_null(), "nothing may be spawned: {r}");
-    let st = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+    let st = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
@@ -427,7 +416,7 @@ async fn start_refuses_unlisted_command_and_sealed_leg_denies() {
     let tmp2 = TempDir::new().unwrap();
     let (k2, sealed) = mk_kernel_with(&tmp2, Map::new()).await;
     let d = k2
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             sealed.clone(),
             json!({"type": "start", "command": "ls"}),
         )])
@@ -443,7 +432,7 @@ async fn start_refuses_unlisted_command_and_sealed_leg_denies() {
         "the denial must teach how to open: {d}"
     );
     let refl = k2
-        .send(vec![Item::new(sealed.clone(), json!({"type": "reflect"}))])
+        .operator_send(vec![Item::new(sealed.clone(), json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
@@ -471,16 +460,14 @@ signal.signal(getattr(signal, "SIGBREAK", signal.SIGINT), h)
 for _ in range(300):
     time.sleep(0.1)
 "#;
-    let r = kernel
-        .send(vec![Item::new(pid.clone(), py_start(&py, code, false))])
+    let r = kernel.operator_send(vec![Item::new(pid.clone(), py_start(&py, code, false))])
         .await
         .remove(0)
         .result;
     assert!(r["job_id"].is_i64(), "start failed: {r}");
     tokio::time::sleep(Duration::from_millis(800)).await;
 
-    let n = kernel
-        .send(vec![Item::new(pid.clone(), json!({"type": "interrupt"}))])
+    let n = kernel.operator_send(vec![Item::new(pid.clone(), json!({"type": "interrupt"}))])
         .await
         .remove(0)
         .result;
@@ -510,8 +497,7 @@ async fn stop_sigkills_the_job() {
     let tmp = TempDir::new().unwrap();
     let (kernel, pid) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &pid);
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             pid.clone(),
             py_start(&py, "import time; time.sleep(30)", false),
         )])
@@ -521,8 +507,7 @@ async fn stop_sigkills_the_job() {
     assert!(r["job_id"].is_i64(), "start failed: {r}");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let n = kernel
-        .send(vec![Item::new(pid.clone(), json!({"type": "stop"}))])
+    let n = kernel.operator_send(vec![Item::new(pid.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
         .result;
@@ -531,8 +516,7 @@ async fn stop_sigkills_the_job() {
     until(&mut rx, |v| v["type"] == "job_done", 20)
         .await
         .expect("no job_done after stop");
-    let st = kernel
-        .send(vec![Item::new(pid.clone(), json!({"type": "status"}))])
+    let st = kernel.operator_send(vec![Item::new(pid.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
@@ -737,8 +721,7 @@ async fn a_bare_command_is_found_on_the_childs_path_only() {
     extra.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
     extra.insert("allowed".to_string(), json!([".*"]));
     let (kernel, a) = mk_kernel_with(&tmp, extra.clone()).await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "start", "command": "echo", "args": ["x"]}),
         )])
@@ -759,7 +742,7 @@ async fn a_bare_command_is_found_on_the_childs_path_only() {
     let (k2, b) = mk_kernel_with(&tmp2, extra).await;
     let mut rx = inbox(&k2, &b);
     let r = k2
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             b.clone(),
             json!({"type": "start", "command": "ft_only_here"}),
         )])
@@ -779,7 +762,7 @@ async fn a_bare_command_is_found_on_the_childs_path_only() {
     );
     // …and one only the kernel's PATH holds is not found.
     let r = k2
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             b.clone(),
             json!({"type": "start", "command": "echo", "args": ["x"]}),
         )])
@@ -800,8 +783,7 @@ async fn start_returns_a_job_id_immediately_and_records_the_invocation() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let t0 = std::time::Instant::now();
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(&py, "import time; time.sleep(30)", false),
         )])
@@ -811,15 +793,13 @@ async fn start_returns_a_job_id_immediately_and_records_the_invocation() {
     assert!(r["job_id"].is_i64(), "no job_id: {r}");
     assert_eq!(r["status"], "running");
     assert!(t0.elapsed() < Duration::from_secs(5), "start blocked");
-    let st = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+    let st = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
     assert_eq!(st["jobs"][0]["command"], json!(py.to_string_lossy()));
     assert_eq!(st["jobs"][0]["args"][0], json!("-u"));
-    let _ = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
         .result;
@@ -834,8 +814,7 @@ async fn progress_streams_per_line_with_a_shared_counter() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(
                 &py,
@@ -869,10 +848,9 @@ async fn the_program_can_send_to_another_agent_and_read_the_reply() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    fantastic_kernel::test_support::wire(&kernel, a.as_str(), "kernel_state", json!(["reflect"]));
+    fantastic_kernel::test_support::grant(&kernel, a.as_str(), "kernel_state", json!({"call": ["reflect"]}));
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(
                 &py,
@@ -918,14 +896,12 @@ def _on(m):
 kernel.on_message(_on)
 threading.Event().wait()
 "#;
-    let _ = kernel
-        .send(vec![Item::new(a.clone(), py_start(&py, code, true))])
+    let _ = kernel.operator_send(vec![Item::new(a.clone(), py_start(&py, code, true))])
         .await
         .remove(0)
         .result;
     wait_inbox_ready(&kernel, &a, 30).await;
-    let ack = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
+    let ack = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
         .await
         .remove(0)
         .result;
@@ -934,8 +910,7 @@ threading.Event().wait()
         .await
         .expect("program never received the message");
     assert_eq!(pong["count"], 1, "delivered more than once: {pong}");
-    let _ = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
         .result;
@@ -967,15 +942,13 @@ def _on(m):
 kernel.on_message(_on)
 threading.Event().wait()
 "#;
-    let _ = kernel
-        .send(vec![Item::new(a.clone(), py_start(&py, code, true))])
+    let _ = kernel.operator_send(vec![Item::new(a.clone(), py_start(&py, code, true))])
         .await
         .remove(0)
         .result;
     // Sent as soon as the program declared `ping`: it is still in its 2.5 s startup sleep.
     wait_declared(&a, 30).await;
-    let ack = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
+    let ack = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
         .await
         .remove(0)
         .result;
@@ -989,8 +962,7 @@ threading.Event().wait()
         until(&mut rx, |v| v["type"] == "pong", 1).await.is_none(),
         "a ping sent before on_message was delivered"
     );
-    let _ = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
         .result;
@@ -1002,8 +974,7 @@ threading.Event().wait()
 async fn an_undeclared_verb_is_refused_by_name() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
+    let r = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
         .await
         .remove(0)
         .result;
@@ -1020,8 +991,7 @@ async fn an_undeclared_verb_is_refused_by_name() {
 async fn declare_verbs_needs_a_running_job_and_a_free_name() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "declare_verbs", "verbs": [{"name": "ping", "description": "a ping", "inputSchema": {"type": "object"}}]}),
         )])
@@ -1037,8 +1007,8 @@ async fn declare_verbs_needs_a_running_job_and_a_free_name() {
 }
 
 /// PARITY WITH PYTHON: a program's sends carry the RUNNER's identity and are
-/// gated by its grants. A sibling the runner holds no `can_call` for must refuse
-/// (`unauthorized`) — a relay forwarding with NO sender would be the operator,
+/// gated by its lines. A sibling the runner holds no line on must refuse (the
+/// unknown answer) — a relay forwarding with NO sender would be the operator,
 /// ungated, and a spawned program could reach any agent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
@@ -1047,27 +1017,27 @@ async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    // the root: an explicit edge, both ends
-    fantastic_kernel::test_support::wire(&kernel, a.as_str(), "kernel_state", json!(["reflect"]));
-    // a SIBLING runner under the root — no edge from `a` to it
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel_state"),
-            json!({"type": "create_agent", "parent_id": "kernel_state", "id": "sib",
-                   "handler_module": "exec_bridge.tools",
-                   "ingress_rule": "allow_all_ingress"}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    // two SIBLING runners under the root: `a` holds a line on `ok_sib` only (a line
+    // on the root would reach both — a line reaches the target's whole tree)
+    for id in ["sib", "ok_sib"] {
+        let _ = kernel.operator_send(vec![Item::new(
+                AgentId::from("kernel_state"),
+                json!({"type": "create_agent", "parent_id": "kernel_state", "id": id,
+                       "handler_module": "exec_bridge.tools",
+                       "ingress_rule": "allow_all_ingress"}),
+            )])
+            .await
+            .remove(0)
+            .result;
+    }
+    fantastic_kernel::test_support::grant(&kernel, a.as_str(), "ok_sib", json!({"call": ["reflect"]}));
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(
                 &py,
                 "r = kernel.send('sib', {'type': 'reflect'})\nprint('SIB', r.get('reason'))\n\
-                 r2 = kernel.send('kernel_state', {'type': 'reflect'})\nprint('CORE', r2.get('id'))\n",
+                 r2 = kernel.send('ok_sib', {'type': 'reflect'})\nprint('CORE', r2.get('id'))\n",
                 true,
             ),
         )])
@@ -1080,12 +1050,12 @@ async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
     let out = crate::jobs::printed(&a, &done, "stdout");
     let out = out.as_str();
     assert!(
-        out.contains("SIB unauthorized"),
+        out.contains("SIB unknown_agent"),
         "the sibling must refuse: {done}"
     );
     assert!(
-        out.contains("CORE kernel_state"),
-        "the root (an explicit edge) still answers: {done}"
+        out.contains("CORE ok_sib"),
+        "the sibling it holds a line on still answers: {done}"
     );
 }
 
@@ -1095,8 +1065,7 @@ async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
 async fn the_connector_verb_hands_over_the_reference_client() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "connector"}))])
+    let r = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "connector"}))])
         .await
         .remove(0)
         .result;
@@ -1201,34 +1170,30 @@ async fn a_stream_chunk_crosses_the_wire_raw() {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let a = AgentId::from(agent_id_for(&tmp).as_str());
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "id": a.as_str(),
                    "handler_module": HANDLER_MODULE,
                    "ingress_rule": "allow_all_ingress", "allowed": [".*"],
                    "cwd": tmp.path().to_string_lossy(),
-                   "can_call": {"blob": "*"}}),
+                   "can": {"blob": {"call": ["*"]}}}),
         )])
         .await
         .remove(0)
         .result;
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel_state", "id": "blob",
-                   "handler_module": "blob.tools",
-                   "callable_by": {a.as_str(): "*"}}),
+                   "handler_module": "blob.tools"}),
         )])
         .await
         .remove(0)
         .result;
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(
                 &py,
@@ -1278,7 +1243,7 @@ async fn a_text_sends_bytes_reply_comes_back_raw() {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let a = AgentId::from(agent_id_for(&tmp).as_str());
     for rec in [
@@ -1286,21 +1251,18 @@ async fn a_text_sends_bytes_reply_comes_back_raw() {
                "handler_module": HANDLER_MODULE,
                "ingress_rule": "allow_all_ingress", "allowed": [".*"],
                "cwd": tmp.path().to_string_lossy(),
-               "can_call": {"blob": "*"}}),
+               "can": {"blob": {"call": ["*"]}}}),
         json!({"type": "create_agent", "parent_id": "kernel_state", "id": "blob",
-               "handler_module": "blob.tools",
-               "callable_by": {a.as_str(): "*"}}),
+               "handler_module": "blob.tools"}),
     ] {
-        let r = kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), rec)])
+        let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), rec)])
             .await
             .remove(0)
             .result;
         assert!(r.get("error").is_none(), "{r}");
     }
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(
                 &py,
@@ -1352,7 +1314,7 @@ async fn a_text_read_stream_is_answered_by_one_binary_frame() {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let served = tmp.path().join("served");
     std::fs::create_dir_all(&served).unwrap();
@@ -1365,20 +1327,18 @@ async fn a_text_read_stream_is_answered_by_one_binary_frame() {
                    "handler_module": HANDLER_MODULE,
                    "ingress_rule": "allow_all_ingress",
                    "cwd": tmp.path().to_string_lossy(),
-                   "can_call": {"fb": "*"}}),
+                   "can": {"fb": {"call": ["*"]}}}),
             a.as_str(),
         ),
         (
             json!({"type": "create_agent", "parent_id": "kernel_state", "id": "fb",
                    "handler_module": "file_bridge.tools", "allow": ["."],
                    "ingress_rule": "allow_all_ingress",
-                   "root": served.to_string_lossy(),
-                   "callable_by": {a.as_str(): "*"}}),
+                   "root": served.to_string_lossy()}),
             "fb",
         ),
     ] {
-        let r = kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), rec)])
+        let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), rec)])
             .await
             .remove(0)
             .result;
@@ -1489,8 +1449,7 @@ async fn a_denied_watch_reaches_the_program_and_registers_nothing() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     // A sibling the runner holds no edge to: watch must refuse.
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "id": "secret",
                    "handler_module": HANDLER_MODULE, "ingress_rule": "allow_all_ingress"}),
@@ -1502,7 +1461,8 @@ async fn a_denied_watch_reaches_the_program_and_registers_nothing() {
     let ev = wire_read(&mut child).await;
     assert_eq!(ev["op"], "event", "{ev}");
     assert_eq!(ev["src"], "secret", "{ev}");
-    assert_eq!(ev["payload"]["reason"], "unauthorized", "{ev}");
+    // a denial is the unknown answer
+    assert_eq!(ev["payload"]["reason"], "unknown_agent", "{ev}");
 
     // …and NOTHING was registered. No proxy inbox row — and no WATCHER row on the
     // source either, which an emit proves from outside the crate: register the
@@ -1532,7 +1492,7 @@ async fn stopping_a_watching_program_leaves_no_proxy_or_watcher() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let (mut child, stop, relay) = wire(&kernel, &a, 9002);
-    // `$self` is a baseline edge, so both of these are permitted.
+    // the runner's own record is in its own tree, so both of these are permitted.
     wire_write(&mut child, &json!({"op": "watch", "src": a.as_str()})).await;
     wire_write(&mut child, &json!({"op": "onmessage"})).await;
 
@@ -1594,7 +1554,7 @@ async fn a_sealed_leg_refuses_mail_and_relays_nothing() {
             json!({"type": "update_agent", "id": a.as_str(), "ingress_rule": r}),
         )
     };
-    let up = kernel.send(vec![rule("deny_ingress")]).await.remove(0);
+    let up = kernel.operator_send(vec![rule("deny_ingress")]).await.remove(0);
     assert_eq!(up.result["updated"], true, "{}", up.result);
     for p in [
         json!({"type": "status"}),
@@ -1602,16 +1562,14 @@ async fn a_sealed_leg_refuses_mail_and_relays_nothing() {
         json!({"type": "probe_mail", "x": "TEST-VALUE-MAIL"}),
         json!({"type": "probe_mail", "x": "TEST-VALUE-MAIL-2"}),
     ] {
-        let out = kernel
-            .send(vec![Item::new(a.clone(), p.clone())])
+        let out = kernel.operator_send(vec![Item::new(a.clone(), p.clone())])
             .await
             .remove(0)
             .result;
         assert_eq!(out["reason"], "unauthorized", "{p} → {out}");
     }
-    kernel.send(vec![rule("allow_all_ingress")]).await;
-    kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "after"}))])
+    kernel.operator_send(vec![rule("allow_all_ingress")]).await;
+    kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "after"}))])
         .await;
     // the first frame down the fd is the mail sent AFTER the reopen
     assert_eq!(
@@ -1639,8 +1597,7 @@ fn manual_owner_inbox(
 }
 
 async fn set_rule(kernel: &Arc<Kernel>, owner: &AgentId, r: &str) {
-    let up = kernel
-        .send(vec![Item::new(
+    let up = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "update_agent", "id": owner.as_str(), "ingress_rule": r}),
         )])
@@ -1650,8 +1607,7 @@ async fn set_rule(kernel: &Arc<Kernel>, owner: &AgentId, r: &str) {
 }
 
 async fn send_to(kernel: &Arc<Kernel>, owner: &AgentId, p: Value) -> Value {
-    kernel
-        .send(vec![Item::new(owner.clone(), p)])
+    kernel.operator_send(vec![Item::new(owner.clone(), p)])
         .await
         .remove(0)
         .result
@@ -1823,7 +1779,7 @@ async fn the_inbox_hands_the_program_only_its_declared_mail() {
         json!({"type": "write", "job_id": 9008, "data": "own"}),
         json!({"type": "mail", "n": 1}),
     ] {
-        kernel.send(vec![Item::new(a.clone(), p)]).await;
+        kernel.operator_send(vec![Item::new(a.clone(), p)]).await;
     }
     // the one frame down the fd: the declared mail
     for want in [json!({"type": "mail", "n": 1})] {
@@ -1907,8 +1863,7 @@ async fn a_cancelled_job_finalises_to_stopped_and_clear_removes_it() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(&py, "import time; time.sleep(30)", false),
         )])
@@ -1918,8 +1873,7 @@ async fn a_cancelled_job_finalises_to_stopped_and_clear_removes_it() {
     // The job's id IS its task id: `cancel` takes it as it is.
     let job_id = TaskId(r["job_id"].as_i64().expect("job_id"));
     let task_id = job_id.get();
-    let c = kernel
-        .send(vec![Item::new(
+    let c = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "cancel", "task_id": task_id}),
         )])
@@ -1939,14 +1893,12 @@ async fn a_cancelled_job_finalises_to_stopped_and_clear_removes_it() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let cleared = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "clear"}))])
+    let cleared = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "clear"}))])
         .await
         .remove(0)
         .result;
     assert!(cleared["cleared"].as_u64().unwrap_or(0) >= 1, "{cleared}");
-    let st = kernel
-        .send(vec![Item::new(a, json!({"type": "status"}))])
+    let st = kernel.operator_send(vec![Item::new(a, json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
@@ -1970,8 +1922,7 @@ async fn stop_releases_the_proxies_a_real_job_held() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(
                 &py,
@@ -2000,8 +1951,7 @@ async fn stop_releases_the_proxies_a_real_job_held() {
         assert!(kernel.inboxes.contains_key(p), "{p} was never registered");
     }
 
-    let _ = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while tokio::time::Instant::now() < deadline
@@ -2042,7 +1992,7 @@ fn reflect_reports_egress_posture() {
         false,
     );
     let kernel = Arc::new(kernel);
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     let r = reflect_reply(&id, &kernel);
     let keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(
@@ -2091,8 +2041,7 @@ async fn reflect_reports_the_record_as_written() {
 async fn shutdown_is_answered_by_the_shared_entry() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "shutdown"}))])
+    let r = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "shutdown"}))])
         .await
         .remove(0)
         .result;
@@ -2109,8 +2058,7 @@ async fn refusal_texts_use_python_repr() {
     assert_eq!(r["reason"], "unhandled", "{r}");
     assert_eq!(r["verb"], Value::Null, "{r}");
     // `no job {jid!r}`.
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "status", "job_id": 424_242}),
         )])
@@ -2181,8 +2129,7 @@ fn allowed_accepts_python_regex_syntax() {
 async fn job_id_is_an_int_or_absent() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "status", "job_id": null}),
         )])
@@ -2191,8 +2138,7 @@ async fn job_id_is_an_int_or_absent() {
         .result;
     assert_eq!(r["jobs"], json!([]), "null job_id means ALL: {r}");
     for not_int in [json!(""), json!([]), json!("7"), json!(7.5), json!(true)] {
-        let r = kernel
-            .send(vec![Item::new(
+        let r = kernel.operator_send(vec![Item::new(
                 a.clone(),
                 json!({"type": "status", "job_id": not_int}),
             )])
@@ -2213,14 +2159,12 @@ async fn job_id_is_an_int_or_absent() {
         "job_id".to_string(),
         fantastic_kernel::test_support::non_finite("Infinity"),
     );
-    let r = kernel
-        .send(vec![Item::new(a.clone(), Value::Object(inf))])
+    let r = kernel.operator_send(vec![Item::new(a.clone(), Value::Object(inf))])
         .await
         .remove(0)
         .result;
     assert_eq!(r["reason"], json!("bad_arg"), "{r}");
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "status", "job_id": 0}),
         )])
@@ -2228,8 +2172,7 @@ async fn job_id_is_an_int_or_absent() {
         .remove(0)
         .result;
     assert_eq!(r["reason"], "not_found", "0 is an id, not ALL: {r}");
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "stop", "job_id": 7}),
         )])
@@ -2248,7 +2191,7 @@ async fn start_checks_its_arguments_and_coerces_none() {
     let call = |p: Value| {
         let kernel = Arc::clone(&kernel);
         let a = a.clone();
-        async move { kernel.send(vec![Item::new(a, p)]).await.remove(0).result }
+        async move { kernel.operator_send(vec![Item::new(a, p)]).await.remove(0).result }
     };
     // A command of nothing but whitespace does not match the declared pattern: refused,
     // not a spawn of "".
@@ -2313,8 +2256,7 @@ async fn status_lists_jobs_in_start_order() {
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut started = Vec::new();
     for _ in 0..3 {
-        let r = kernel
-            .send(vec![Item::new(
+        let r = kernel.operator_send(vec![Item::new(
                 a.clone(),
                 py_start(&py, "import time; time.sleep(30)", false),
             )])
@@ -2323,8 +2265,7 @@ async fn status_lists_jobs_in_start_order() {
             .result;
         started.push(r["job_id"].as_i64().expect("job_id"));
     }
-    let st = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+    let st = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
@@ -2335,8 +2276,7 @@ async fn status_lists_jobs_in_start_order() {
         .filter_map(|j| j["job_id"].as_i64())
         .collect();
     assert_eq!(listed, started, "status must list jobs in start order");
-    let _ = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
         .result;
@@ -2351,16 +2291,14 @@ async fn status_job_id_is_the_integer_task_id() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(&py, "import time; time.sleep(30)", false),
         )])
         .await
         .remove(0)
         .result;
-    let st = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+    let st = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
@@ -2368,8 +2306,7 @@ async fn status_job_id_is_the_integer_task_id() {
         st["jobs"][0]["job_id"].is_i64(),
         "job_id must be an int: {st}"
     );
-    let _ = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
         .result;
@@ -2386,8 +2323,7 @@ async fn a_named_clear_refuses_a_running_job() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(&py, "import time; time.sleep(30)", false),
         )])
@@ -2396,8 +2332,7 @@ async fn a_named_clear_refuses_a_running_job() {
         .result;
     let jid = r["job_id"].as_i64().expect("job_id");
     let clear = || async {
-        kernel
-            .send(vec![Item::new(
+        kernel.operator_send(vec![Item::new(
                 a.clone(),
                 json!({"type": "clear", "job_id": jid}),
             )])
@@ -2406,8 +2341,7 @@ async fn a_named_clear_refuses_a_running_job() {
             .result
     };
     // A BARE clear leaves it — it is running.
-    let bare = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "clear"}))])
+    let bare = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "clear"}))])
         .await
         .remove(0)
         .result;
@@ -2424,8 +2358,7 @@ async fn a_named_clear_refuses_a_running_job() {
         jobs::jobs().contains_key(&(a.clone(), TaskId(jid))),
         "the row stays"
     );
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "stop", "job_id": jid}),
         )])
@@ -2442,8 +2375,7 @@ async fn a_named_clear_refuses_a_running_job() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(clear().await, json!({"cleared": 1}));
-    let st = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+    let st = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
@@ -2461,8 +2393,7 @@ async fn output_is_collected_raw_like_python() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(
                 &py,
@@ -2495,8 +2426,7 @@ async fn an_overlong_line_is_read_whole() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(&py, "print('x' * 200000)\n", false),
         )])
@@ -2530,8 +2460,7 @@ async fn a_killed_job_reports_negative_signal_exit_code() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(&py, "import time; time.sleep(30)", false),
         )])
@@ -2539,8 +2468,7 @@ async fn a_killed_job_reports_negative_signal_exit_code() {
         .remove(0)
         .result;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let _ = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
         .result;
@@ -2561,8 +2489,7 @@ async fn liveness_is_process_exit_not_pipe_eof() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(
                 &py,
@@ -2581,20 +2508,17 @@ async fn liveness_is_process_exit_not_pipe_eof() {
         "reflect counts a live process whose pipes are closed"
     );
     crate::mail::declare_for_test(&a, &["ping"]);
-    let mail = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
+    let mail = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
         .await
         .remove(0)
         .result;
     assert_eq!(mail["queued"], true, "mail must reach a live job: {mail}");
-    let st = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+    let st = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
     assert_eq!(st["jobs"][0]["exit_code"], json!(null), "{st}");
-    let _ = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+    let _ = kernel.operator_send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
         .remove(0)
         .result;
@@ -2605,8 +2529,7 @@ async fn liveness_is_process_exit_not_pipe_eof() {
 async fn spawn_failure_text_matches_python() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "start", "command": "nope"}),
         )])
@@ -2632,8 +2555,7 @@ async fn a_missing_cwd_is_named_not_the_command() {
     extra.insert("allowed".to_string(), json!([".*"]));
     extra.insert("cwd".to_string(), json!(gone.to_string_lossy()));
     let (kernel, a) = mk_kernel_with(&tmp, extra).await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "start", "command": "/bin/echo", "args": ["x"]}),
         )])
@@ -2674,8 +2596,7 @@ async fn caller_env_cannot_override_the_control_vars() {
     );
     let (kernel, a) = mk_kernel_with(&tmp, meta).await;
     let mut rx = inbox(&kernel, &a);
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({
                 "type": "start",
@@ -2856,7 +2777,7 @@ fn paste_names_are_pythons_token_hex_4_and_random() {
 }
 
 /// python `_serve_ctrl` relays a program's `send` UNTOUCHED — one
-/// `kernel.send([{target, payload}])`: no `_call_stack` tag, no cycle/depth
+/// `kernel.operator_send([{target, payload}])`: no `_call_stack` tag, no cycle/depth
 /// refusal of its own. A kind-B frame is the SAME batch item carrying its body:
 /// a pid and a call row like any other execution.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2922,7 +2843,7 @@ async fn the_relay_forwards_a_send_untouched_and_a_binary_one_through_the_batch(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn arg_refusals_are_byte_exact_in_key_order() {
     let ask = |k: Arc<Kernel>, a: AgentId, p: Value| async move {
-        let r = k.send(vec![Item::new(a, p)]).await.remove(0).result;
+        let r = k.operator_send(vec![Item::new(a, p)]).await.remove(0).result;
         serde_json::to_string(&r).unwrap()
     };
     let open = || {
@@ -3001,8 +2922,7 @@ async fn tail_and_grep_read_a_running_job() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &a);
-    let started = kernel
-        .send(vec![Item::new(
+    let started = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(
                 &py,
@@ -3022,7 +2942,7 @@ async fn tail_and_grep_read_a_running_job() {
     let ask = |p: Value| {
         let k = Arc::clone(&kernel);
         let a = a.clone();
-        async move { k.send(vec![Item::new(a, p)]).await.remove(0).result }
+        async move { k.operator_send(vec![Item::new(a, p)]).await.remove(0).result }
     };
     let t = ask(json!({"type": "tail", "job_id": jid, "lines": 2, "stream": "stdout"})).await;
     assert_eq!(t["status"], "running", "{t}");
@@ -3054,8 +2974,7 @@ async fn status_wait_returns_when_the_job_ends() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let started = kernel
-        .send(vec![Item::new(
+    let started = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(&py, "import time; time.sleep(0.5)", false),
         )])
@@ -3064,8 +2983,7 @@ async fn status_wait_returns_when_the_job_ends() {
         .result;
     let jid = started["job_id"].as_i64().expect("job_id");
     let t0 = std::time::Instant::now();
-    let st = kernel
-        .send(vec![Item::new(
+    let st = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "status", "job_id": jid, "wait_s": 10}),
         )])
@@ -3086,8 +3004,7 @@ async fn status_wait_gives_up_at_the_deadline() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let started = kernel
-        .send(vec![Item::new(
+    let started = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(&py, "import time; time.sleep(30)", false),
         )])
@@ -3096,8 +3013,7 @@ async fn status_wait_gives_up_at_the_deadline() {
         .result;
     let jid = started["job_id"].as_i64().expect("job_id");
     let t0 = std::time::Instant::now();
-    let st = kernel
-        .send(vec![Item::new(
+    let st = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "status", "job_id": jid, "wait_s": 0.5}),
         )])
@@ -3107,8 +3023,7 @@ async fn status_wait_gives_up_at_the_deadline() {
     let took = t0.elapsed();
     assert_eq!(st["jobs"][0]["status"], "running", "{st}");
     assert!(took < std::time::Duration::from_secs(3), "took {took:?}");
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "stop", "job_id": jid}),
         )])
@@ -3124,8 +3039,7 @@ async fn status_of_an_unknown_job_answers_at_once() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let t0 = std::time::Instant::now();
-    let st = kernel
-        .send(vec![Item::new(
+    let st = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "status", "job_id": 999_999, "wait_s": 60}),
         )])
@@ -3146,8 +3060,7 @@ async fn a_wait_ends_when_the_job_is_reaped() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let started = kernel
-        .send(vec![Item::new(
+    let started = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(&py, "import time; time.sleep(0.2)", false),
         )])
@@ -3156,16 +3069,14 @@ async fn a_wait_ends_when_the_job_is_reaped() {
         .result;
     let jid = started["job_id"].as_i64().expect("job_id");
     // Wait for it to end, then reap it.
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "status", "job_id": jid, "wait_s": 10}),
         )])
         .await
         .remove(0)
         .result;
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "clear", "job_id": jid}),
         )])
@@ -3173,8 +3084,7 @@ async fn a_wait_ends_when_the_job_is_reaped() {
         .remove(0)
         .result;
     let t0 = std::time::Instant::now();
-    let st = kernel
-        .send(vec![Item::new(
+    let st = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "status", "job_id": jid, "wait_s": 60}),
         )])
@@ -3195,8 +3105,7 @@ async fn a_wait_on_a_running_job_still_waits_up_to_wait_s() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let started = kernel
-        .send(vec![Item::new(
+    let started = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(&py, "import time; time.sleep(30)", false),
         )])
@@ -3205,8 +3114,7 @@ async fn a_wait_on_a_running_job_still_waits_up_to_wait_s() {
         .result;
     let jid = started["job_id"].as_i64().expect("job_id");
     let t0 = std::time::Instant::now();
-    let st = kernel
-        .send(vec![Item::new(
+    let st = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "status", "job_id": jid, "wait_s": 1}),
         )])
@@ -3220,8 +3128,7 @@ async fn a_wait_on_a_running_job_still_waits_up_to_wait_s() {
         "took {took:?}"
     );
     assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "stop", "job_id": jid}),
         )])
@@ -3239,8 +3146,7 @@ async fn status_wait_refuses_a_bad_value() {
     let (kernel, a) = mk_kernel(&tmp).await;
     // a real job, so the range and type checks are what refuse — not the
     // missing job_id
-    let started = kernel
-        .send(vec![Item::new(
+    let started = kernel.operator_send(vec![Item::new(
             a.clone(),
             py_start(&py, "import time; time.sleep(30)", false),
         )])
@@ -3249,8 +3155,7 @@ async fn status_wait_refuses_a_bad_value() {
         .result;
     let jid = started["job_id"].as_i64().expect("job_id");
     for bad in [json!(-1), json!(500), json!("x")] {
-        let r = kernel
-            .send(vec![Item::new(
+        let r = kernel.operator_send(vec![Item::new(
                 a.clone(),
                 json!({"type": "status", "job_id": jid, "wait_s": bad}),
             )])
@@ -3260,8 +3165,7 @@ async fn status_wait_refuses_a_bad_value() {
         assert_eq!(r["reason"], "bad_arg", "{r}");
         assert_eq!(r["arg"], "wait_s", "{r}");
     }
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "status", "wait_s": 1}),
         )])
@@ -3270,8 +3174,7 @@ async fn status_wait_refuses_a_bad_value() {
         .result;
     assert_eq!(r["reason"], "bad_arg", "{r}");
     assert_eq!(r["arg"], "wait_s", "{r}");
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "stop", "job_id": jid}),
         )])
@@ -3298,8 +3201,7 @@ async fn run_returns_the_output_in_one_reply() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let program = format!("{LF_STDIO}import sys; print(\"hello\"); sys.exit(3)");
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({
                 "type": "run",
@@ -3323,8 +3225,7 @@ async fn run_returns_the_output_in_one_reply() {
             .unwrap_or(false),
         "{r}"
     );
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "clear", "job_id": jid}),
         )])
@@ -3342,8 +3243,7 @@ async fn run_returns_running_at_the_deadline() {
     let (kernel, a) = mk_kernel(&tmp).await;
     let program = format!("{LF_STDIO}import time; time.sleep(30)");
     let t0 = std::time::Instant::now();
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({
                 "type": "run",
@@ -3359,8 +3259,7 @@ async fn run_returns_running_at_the_deadline() {
     let jid = r["job_id"].as_i64().expect("job_id");
     assert_eq!(r["status"], "running", "{r}");
     assert!(took < Duration::from_secs(3), "took {took:?}");
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "stop", "job_id": jid}),
         )])
@@ -3390,8 +3289,7 @@ async fn run_refuses_bad_arguments() {
             .as_object_mut()
             .unwrap()
             .insert(arg.to_string(), bad);
-        let r = kernel
-            .send(vec![Item::new(a.clone(), payload)])
+        let r = kernel.operator_send(vec![Item::new(a.clone(), payload)])
             .await
             .remove(0)
             .result;

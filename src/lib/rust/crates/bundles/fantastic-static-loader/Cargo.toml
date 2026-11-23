@@ -21,13 +21,13 @@ async-trait = { workspace = true }
 [dev-dependencies]
 fantastic-credential-store = { path = "../fantastic-credential-store", features = ["test-support"] }
 fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
-# The shared agentic corpus is TEST data (`contract/`), read by the agentic
+# The agentic corpus is TEST data (`tests/agentic_corpus/`), read by the agentic
 # runner — not a manifest, so it needs no PyYAML semantics.
 serde_yaml = "0.9"
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
-# The agentic runner (tests/agentic.rs) boots the same rosters the shared corpus
-# at `contract/agentic/` declares, so it needs the bundles those manifests name.
+# The agentic runner (tests/agentic.rs) boots the rosters its corpus at
+# `tests/agentic_corpus/` declares, so it needs the bundles those manifests name.
 fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }
 # `credential_store.yaml` declares a credential store (CRED-1..5); its keychain is
 # the in-memory double, so the runner never reaches the real one.

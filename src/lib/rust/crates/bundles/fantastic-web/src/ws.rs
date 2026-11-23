@@ -9,7 +9,9 @@
 //!                                               of steps, `fantastic_kernel::secret`)
 //! C→S {type:"emit",  target, payload}         → kernel.emit (no reply)
 //! C→S {type:"watch"|"unwatch", src}           → (un)register a watcher
-//! C→S {type:"state_subscribe"|"state_unsubscribe"}
+//! C→S {type:"state_subscribe", src}         → watch the state stream of `src`'s
+//!                                               subtree, cut to what the leg covers
+//! C→S {type:"state_unsubscribe"}
 //! C→S {type:"hello", guid, leg?}              → the page kernel (or, with `leg`,
 //!                                               a kernel's dialing leg) becomes
 //!                                               the host's peer `<guid>|<agent>`
@@ -180,8 +182,8 @@ struct Verbed {
 /// payload's `type`, otherwise the verb IS the kind (python `gate_inbound`).
 /// The credential rides the frame ENVELOPE (`auth_token`), never the payload.
 fn gate_leg(kernel: &Arc<Kernel>, leg: &AgentId, kind: &str, env: &Envelope) -> Decision {
-    let rules = match kernel.agents.get(leg).map(|e| Arc::clone(&e)) {
-        Some(a) => Rules::of(&a.meta.read().expect("meta poisoned")).unwrap_or_default(),
+    let rules = match kernel.resolve_target(leg.as_str()) {
+        Some(a) => Rules::of(&a.record().meta).unwrap_or_default(),
         None => Rules::default(),
     };
     let verb = if kind == "call" {
@@ -458,7 +460,7 @@ pub(crate) async fn ws_loop(
         });
 
     // Outbound forwarder: one single-consumer sink for every frame kind.
-    let send_task = tokio::spawn(async move {
+    let send_task = fantastic_kernel::spawn_inherit(async move {
         while let Some(out) = out_rx.recv().await {
             let msg = match out {
                 Out::Text(line) => Message::Text(line),
@@ -745,16 +747,17 @@ pub(crate) async fn ws_loop(
                 ) {
                     continue;
                 }
-                // The state stream is a KERNEL-WIDE read: every send's sender,
-                // target, verb and payload summary, for every agent in the
-                // tree. So it is gated on the ROOT — an ingress rule answers
-                // "may this client reach this leg", never "what may it READ".
+                // The state stream is a `watch` on a NODE (`src`): the leg
+                // needs a `watch` line there, and it reads only the events of
+                // that node's subtree it covers. An ingress rule answers "may
+                // this client reach this leg", never "what may it READ".
                 // HANDED TO THE LEG (`inbound_state_subscribe`): the tap is
-                // gated as the leg, on the root.
+                // gated as the leg, on the node.
+                let node = AgentId::from(env.src.as_deref().unwrap_or(""));
                 let asked = fantastic_io_bridge::inbound::hand_in(
                     &kernel,
                     &leg,
-                    json!({"type": "inbound_state_subscribe"}),
+                    json!({"type": "inbound_state_subscribe", "node": node.as_str()}),
                     None,
                 )
                 .await
@@ -768,19 +771,29 @@ pub(crate) async fn ws_loop(
                         .await;
                     continue;
                 }
-                // python parity: first a `state_snapshot` carrying every
-                // agent's identity so a state-watching view can bootstrap
-                // before the first event, THEN the `state_event` stream.
-                let snapshot = json!({"type": "state_snapshot", "agents": kernel.state_snapshot()});
+                // First a `state_snapshot` carrying the identity of every agent
+                // of the node's subtree the leg covers, so a state-watching view
+                // can bootstrap before the first event, THEN the `state_event`
+                // stream, cut the same way.
+                let snapshot = json!({
+                    "type": "state_snapshot",
+                    "agents": kernel.state_watch_snapshot(&leg, &node),
+                });
                 let _ = out_tx.send(Out::Text(encode_frame(&snapshot))).await;
                 let out_for_cb = out_tx.clone();
                 let kernel_for_cb = Arc::clone(&kernel);
+                let leg_for_cb = leg.clone();
                 // Conversation rows are not on this stream — an AI agent
                 // announces its own rows to its watchers (`watch` on that agent,
                 // gated there).
                 let token = kernel.add_state_subscriber(Arc::new(
                     move |event: &Value, body: Option<&fantastic_kernel::Blob>| {
-                        let Value::Object(ev) = event else {
+                        // THE PER-WATCHER CUT: only the events of the node's
+                        // subtree the leg covers, a sender it cannot see as
+                        // `null`.
+                        let Some(Value::Object(ev)) =
+                            kernel_for_cb.state_watch_event(&leg_for_cb, &node, event)
+                        else {
                             return;
                         };
                         // `type` FIRST, then the event's own keys — python's
@@ -789,7 +802,7 @@ pub(crate) async fn ws_loop(
                         let mut frame = serde_json::Map::new();
                         frame.insert("type".to_string(), Value::String("state_event".into()));
                         for (k, v) in ev {
-                            frame.insert(k.clone(), v.clone());
+                            frame.insert(k, v);
                         }
                         // Lazy `name` fill — python derives it from the agent
                         // record when the event lacks one, so the browser always
@@ -799,13 +812,9 @@ pub(crate) async fn ws_loop(
                         // by truthiness.
                         if !frame.contains_key("name") {
                             if let Some(aid) = frame.get("agent_id").and_then(Value::as_str) {
-                                let name = kernel_for_cb
-                                    .agents
-                                    .get(&AgentId::from(aid))
+                                let name = kernel_for_cb.resolve_target(aid)
                                     .and_then(|a| {
-                                        a.meta
-                                            .read()
-                                            .expect("meta lock poisoned")
+                                        a.record().meta
                                             .get("display_name")
                                             .and_then(Value::as_str)
                                             .filter(|s| !s.is_empty())

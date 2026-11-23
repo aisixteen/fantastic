@@ -2,10 +2,10 @@
 //!
 //! Mirror of the python canonical `static_loader.tools`. A `fantastic.yaml`
 //! manifest declares the agents; on `boot` this loader reads it and hydrates
-//! them as KERNEL BOOKKEEPING — the root's `create_agent` / `update_agent` run
-//! directly ([`Kernel::bookkeeping`], no gate) — as its own children, each
-//! carrying the `$self` baseline grant plus any explicit grant the manifest
-//! names. The kernel knows nothing about YAML; this bundle owns the format.
+//! them — the root's `create_agent` / `update_agent` sent for its asker
+//! ([`Kernel::send_as_caller`]), the operator — as its own children, each carrying
+//! the `can` the manifest names (nothing is stamped). The kernel knows nothing
+//! about YAML; this bundle owns the format.
 //!
 //! The pass runs ONLY on the kernel's own boot — origin none: the cold boot, or
 //! `create_agent` booting the loader it just made. An agent-sent `boot` is
@@ -75,10 +75,7 @@ pub struct StaticLoaderBundle;
 
 /// The raw `manifest` value off the record — reflect shows it as written.
 fn manifest_meta(agent: &Agent) -> Value {
-    agent
-        .meta
-        .read()
-        .ok()
+    Some(agent.record().meta)
         .and_then(|g| g.get(MANIFEST_FIELD).cloned())
         .unwrap_or(Value::Null)
 }
@@ -131,20 +128,26 @@ fn load_manifest(agent: &Agent, base: &std::path::Path) -> Result<Vec<Value>, St
     }
 }
 
-/// One tree verb of the hydration, run on the ROOT as kernel bookkeeping — the
-/// loader building the roster it was told to build, never through a gated send.
+/// One tree verb of the hydration (`create_agent`/`update_agent`), sent to the ROOT
+/// for the loader's asker ([`Kernel::send_as_caller`]): the boot below runs only
+/// for the operator (origin `None`), so the verb is the operator's.
 async fn tree_verb(kernel: &Arc<Kernel>, payload: Value) -> Value {
-    let Some(root) = kernel.root() else {
-        return json!({"error": "static_loader: the kernel has no root"});
-    };
-    kernel.bookkeeping(&root, payload, None).await.result
+    kernel
+        .send_as_caller(vec![fantastic_kernel::Item::new(
+            fantastic_kernel::AgentId::from("kernel"),
+            payload,
+        )])
+        .await
+        .remove(0)
+        .result
 }
 
 async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
-    // The pass below is kernel bookkeeping (ungated), so the one who asks for it
-    // must be the kernel or the operator: the cold boot, `create_agent` booting
-    // this loader, the CLI. A caller's boot is not that — refused before the
-    // manifest is read.
+    // The pass below creates and updates as the asker, so the one who asks for it
+    // must be the kernel or the operator: the cold boot, an operator's
+    // `create_agent` booting this loader, the CLI. An agent's boot (an
+    // agent-created loader boots with its creator as its origin) is not that —
+    // refused before the manifest is read.
     if fantastic_kernel::current_origin().is_some() {
         return refusal_hint(UNAUTHORIZED, BOOT_REFUSED, BOOT_REFUSED_HINT);
     }
@@ -191,7 +194,19 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
                 "booted": false,
             });
         };
-        if let Some(live) = kernel.agents.get(&AgentId::from(id)) {
+        if let Some(live) = kernel.resolve_target(id) {
+            // Only the loader's OWN children are its roster: an id that lives
+            // anywhere else is another agent's, never re-applied from here.
+            if live.parent_id.as_ref() != Some(&agent.id) {
+                return json!({
+                    "error": format!(
+                        "static_loader: {} exists outside this loader — a manifest \
+                         re-applies only the agents it placed",
+                        py_repr(id)
+                    ),
+                    "booted": false,
+                });
+            }
             // THE MANIFEST IS TRUTH; a store is only a MEDIUM (disk, RAM,
             // cloud, an API). So an id that already exists is RE-APPLIED
             // from the manifest, never skipped: an edited grant in the yaml
@@ -218,24 +233,6 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
             patch.shift_remove("id");
             patch.shift_remove("handler_module");
             patch.shift_remove("parent_id");
-            // `update_agent` REPLACES a named field, so a bare re-apply of
-            // `can_call` would delete the `$self` baseline the kernel stamps at
-            // create. Merge over the baseline, as `create_agent` does.
-            for (field, base) in [
-                ("can_call", fantastic_kernel::authz::default_can_call()),
-                (
-                    "callable_by",
-                    fantastic_kernel::authz::default_callable_by(),
-                ),
-            ] {
-                if let Some(Value::Object(declared)) = patch.get(field).cloned() {
-                    let mut merged = base;
-                    for (k, v) in declared {
-                        merged.insert(k, v);
-                    }
-                    patch.insert(field.to_string(), Value::Object(merged));
-                }
-            }
             if !patch.is_empty() {
                 // the verb is set AFTER the declared fields: a declared `type` key can
                 // never change which verb is called.
@@ -262,10 +259,10 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
         }
         // The declared agent becomes THIS loader's child ($parent = the loader),
         // but placement is stated by `parent_id`, not by who is addressed:
-        // `create_agent` is kernel-owned and answered by the ROOT alone. Baseline
-        // grant is stamped + the manifest's explicit `can_call` merges on top;
-        // the child boots inside create_agent. Kernel bookkeeping: the loader
-        // hydrating the roster it was told to build.
+        // `create_agent` is kernel-owned and answered by the ROOT alone. The
+        // manifest's `can` rides as written; the child boots inside create_agent.
+        // Sent for the loader's asker, the operator: the loader hydrating the
+        // roster it was told to build.
         // The verb and `parent_id` land AFTER the spread: an entry cannot change the
         // verb, and one naming its own parent cannot place the agent outside the
         // loader's subtree.
@@ -355,7 +352,7 @@ impl Handler for StaticLoaderBundle {
         call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
+        let Some(agent) = kernel.resolve_target(agent_id.as_str()) else {
             return Ok(Some(json!({ "error": format!("no agent {agent_id}") })));
         };
         let reply = match call {

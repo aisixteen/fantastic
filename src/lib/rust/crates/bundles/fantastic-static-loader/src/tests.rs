@@ -70,8 +70,8 @@ agents:
     mode: mem
   - id: worker
     handler_module: mock.tools
-    can_call:
-      memory: [set, read]
+    can:
+      memory: {call: [set, read]}
 "#;
 
 /// The kernel's state folder, `<cwd>/.fantastic` (git-ignored). Idempotent, so
@@ -100,7 +100,7 @@ fn mk_kernel() -> Arc<Kernel> {
         state(),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     kernel
 }
@@ -138,8 +138,7 @@ async fn boot_with_manifest(text: &str) -> (Arc<Kernel>, tempfile::TempDir) {
     let (fixture, path) = write_manifest(text);
     // Operator send (top-level → ungated); create_agent auto-boots the loader,
     // which hydrates the roster.
-    let rec = kernel
-        .send(vec![Item::new(
+    let rec = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -156,14 +155,14 @@ async fn boot_with_manifest(text: &str) -> (Arc<Kernel>, tempfile::TempDir) {
 }
 
 fn record(kernel: &Arc<Kernel>, id: &str) -> AgentRecord {
-    kernel.agents.get(&AgentId::from(id)).unwrap().record()
+    kernel.resolve_target(id).unwrap().record()
 }
 
 #[tokio::test]
 async fn roster_is_hydrated_as_children_of_the_loader() {
     let (kernel, _fixture) = boot_with_manifest(MANIFEST).await;
-    assert!(kernel.agents.contains_key(&AgentId::from("memory")));
-    assert!(kernel.agents.contains_key(&AgentId::from("worker")));
+    assert!(kernel.exists("memory"));
+    assert!(kernel.exists("worker"));
     for id in ["memory", "worker"] {
         assert_eq!(
             record(&kernel, id).parent_id.as_deref(),
@@ -173,21 +172,14 @@ async fn roster_is_hydrated_as_children_of_the_loader() {
 }
 
 #[tokio::test]
-async fn declared_agents_carry_baseline_plus_explicit_grants() {
+async fn declared_agents_carry_exactly_the_manifests_lines() {
     let (kernel, _fixture) = boot_with_manifest(MANIFEST).await;
-    let can = record(&kernel, "worker").meta["can_call"].clone();
-    // the baseline is `$self` alone — every other edge is explicit
-    assert_eq!(can["$self"], json!("*"));
-    assert!(
-        can.get("$parent").is_none() && can.get("$subtree").is_none(),
-        "{can}"
-    );
-    assert_eq!(can["memory"], json!(["set", "read"]));
-    // memory got the baseline with no explicit can_call in the manifest.
+    // nothing is stamped: the record's `can` is the manifest's
     assert_eq!(
-        record(&kernel, "memory").meta["can_call"]["$self"],
-        json!("*")
+        record(&kernel, "worker").meta["can"],
+        json!({"memory": {"call": ["set", "read"]}})
     );
+    assert!(record(&kernel, "memory").meta.get("can").is_none());
 }
 
 #[tokio::test]
@@ -195,7 +187,7 @@ async fn roster_is_closed_a_child_cannot_create_more() {
     let (kernel, _fixture) = boot_with_manifest(MANIFEST).await;
     let r = as_agent(
         AgentId::from("worker"),
-        kernel.send(vec![Item::new(
+        kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "mock.tools"}),
         )]),
@@ -203,15 +195,15 @@ async fn roster_is_closed_a_child_cannot_create_more() {
     .await
     .remove(0)
     .result;
-    assert_eq!(r["reason"], json!("unauthorized"), "{r}");
+    // a denial is the unknown answer
+    assert_eq!(r["reason"], json!("unknown_agent"), "{r}");
 }
 
 #[tokio::test]
 async fn boot_is_idempotent_by_id() {
     let (kernel, _fixture) = boot_with_manifest(MANIFEST).await;
-    let before = kernel.agents.len();
-    let r = kernel
-        .send(vec![Item::new(
+    let before = kernel.agent_ids().len();
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "boot"}),
         )])
@@ -227,13 +219,12 @@ async fn boot_is_idempotent_by_id() {
         .collect();
     assert!(reapplied.contains(&"memory".to_string()) && reapplied.contains(&"worker".to_string()));
     assert_eq!(r["created"], json!([]));
-    assert_eq!(kernel.agents.len(), before);
+    assert_eq!(kernel.agent_ids().len(), before);
 }
 
 /// Create a static_loader under the root with `manifest`; returns the create reply.
 async fn create_loader(kernel: &Arc<Kernel>, id: &str, manifest: Value) -> Value {
-    kernel
-        .send(vec![Item::new(
+    kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
@@ -246,8 +237,7 @@ async fn create_loader(kernel: &Arc<Kernel>, id: &str, manifest: Value) -> Value
 }
 
 async fn boot_loader(kernel: &Arc<Kernel>, id: &str) -> Value {
-    kernel
-        .send(vec![Item::new(AgentId::from(id), json!({"type": "boot"}))])
+    kernel.operator_send(vec![Item::new(AgentId::from(id), json!({"type": "boot"}))])
         .await
         .remove(0)
         .result
@@ -277,7 +267,7 @@ async fn the_manifest_shape_is_judged_at_write_time() {
             assert_eq!(rec["arg"], "manifest", "{bad}: {rec}");
         }
         assert!(
-            !kernel.agents.contains_key(&AgentId::from(id.as_str())),
+            !kernel.exists(id.as_str()),
             "a refused create must leave no agent behind"
         );
     }
@@ -328,9 +318,8 @@ async fn a_roster_entry_without_an_id_is_refused_loud() {
     // agent the LAST boot minted: every reboot created ANOTHER one beside it and
     // the flush persisted them all, with no word to the operator.
     let (kernel, _fixture) = boot_with_manifest("agents:\n  - handler_module: mock.tools\n").await;
-    let before = kernel.agents.len();
-    let r = kernel
-        .send(vec![Item::new(
+    let before = kernel.agent_ids().len();
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "boot"}),
         )])
@@ -342,7 +331,7 @@ async fn a_roster_entry_without_an_id_is_refused_loud() {
     assert!(err.contains("explicit id"), "{err}");
     assert!(err.contains("mock.tools"), "the entry is named: {err}");
     // NOTHING was created — not on this boot, and not by the create-time boot.
-    assert_eq!(kernel.agents.len(), before);
+    assert_eq!(kernel.agent_ids().len(), before);
     assert_eq!(before, 2, "just the root + the loader itself");
 }
 
@@ -353,8 +342,7 @@ async fn an_id_less_entry_is_refused_before_the_valid_ones_hydrate() {
         "agents:\n  - handler_module: mock.tools\n  - id: memory\n    handler_module: mock.tools\n",
     )
     .await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "boot"}),
         )])
@@ -362,7 +350,7 @@ async fn an_id_less_entry_is_refused_before_the_valid_ones_hydrate() {
         .remove(0)
         .result;
     assert_eq!(r["booted"], json!(false), "{r}");
-    assert!(!kernel.agents.contains_key(&AgentId::from("memory")));
+    assert!(!kernel.exists("memory"));
 }
 
 // ─── the py-parity sweep (plan A8) ───────────────────────────────────
@@ -393,8 +381,7 @@ fn meta_of(pairs: &[(&str, Value)]) -> Map<String, Value> {
 async fn an_unknown_verb_is_a_coded_refusal() {
     // `shutdown` is not a verb of this bundle either.
     let (kernel, _fixture) = boot_with_manifest(MANIFEST).await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "frobnicate"}),
         )])
@@ -404,8 +391,7 @@ async fn an_unknown_verb_is_a_coded_refusal() {
     assert_eq!(r["reason"], json!("unhandled"), "{r}");
     assert_eq!(r["verb"], json!("frobnicate"), "{r}");
     // `shutdown` is declared by none: refused like any unknown verb
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "shutdown"}),
         )])
@@ -420,8 +406,7 @@ async fn a_record_without_a_manifest_boots_with_pythons_text() {
     // A loader may exist before its roster does; `boot` says so in
     // python's words rather than the record being unwritable.
     let kernel = mk_kernel();
-    let rec = kernel
-        .send(vec![Item::new(
+    let rec = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
@@ -432,8 +417,7 @@ async fn a_record_without_a_manifest_boots_with_pythons_text() {
         .remove(0)
         .result;
     assert_eq!(rec["id"], json!("sl4"), "{rec}");
-    let b = kernel
-        .send(vec![Item::new(
+    let b = kernel.operator_send(vec![Item::new(
             AgentId::from("sl4"),
             json!({"type": "boot"}),
         )])
@@ -546,8 +530,7 @@ fn a_falsy_yaml_document_boots_empty() {
 #[tokio::test]
 async fn a_roster_entry_without_a_handler_module_is_refused_and_a_bad_one_is_judged_by_create() {
     let (kernel, _fixture) = boot_with_manifest("agents:\n  - id: a\n").await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "boot"}),
         )])
@@ -563,8 +546,7 @@ async fn a_roster_entry_without_a_handler_module_is_refused_and_a_bad_one_is_jud
     for value in ["''", "0", "5"] {
         let (kernel, _fixture) =
             boot_with_manifest(&format!("agents:\n  - id: a\n    handler_module: {value}\n")).await;
-        let r = kernel
-            .send(vec![Item::new(
+        let r = kernel.operator_send(vec![Item::new(
                 AgentId::from("static_loader"),
                 json!({"type": "boot"}),
             )])
@@ -589,8 +571,7 @@ async fn a_spec_type_key_cannot_change_the_create_verb() {
         "agents:\n  - id: a\n    handler_module: mock.tools\n    type: reflect\n",
     )
     .await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "boot"}),
         )])
@@ -598,7 +579,7 @@ async fn a_spec_type_key_cannot_change_the_create_verb() {
         .remove(0)
         .result;
     assert_eq!(r["booted"], json!(true), "{r}");
-    assert!(kernel.agents.contains_key(&AgentId::from("a")), "{r}");
+    assert!(kernel.exists("a"), "{r}");
 }
 
 #[test]
@@ -634,8 +615,7 @@ async fn a_manifest_that_reassigns_a_handler_module_fails_loud() {
     drop(fixture);
     let (fixture, path) =
         write_manifest("agents:\n  - id: memory\n    handler_module: static_loader.tools\n");
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": "static_loader", "manifest": path}),
         )])
@@ -643,8 +623,7 @@ async fn a_manifest_that_reassigns_a_handler_module_fails_loud() {
         .remove(0)
         .result;
     assert_eq!(r["updated"], json!(true), "{r}");
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "boot"}),
         )])
@@ -663,17 +642,25 @@ async fn a_manifest_that_reassigns_a_handler_module_fails_loud() {
     drop(fixture);
 }
 
+/// A manifest re-applies only the agents its loader placed: an id that lives outside
+/// the loader (a sibling, `user`, the root) is refused and left as it is.
 #[tokio::test]
-async fn a_refused_re_apply_names_the_agent_and_forwards_the_error() {
-    // Only a TRUTHY error is a failure, and the tail is `str(error)`.
-    // (The kernel's own refusal text is pinned by C19/C26/C27, not here.)
+async fn a_manifest_never_re_applies_an_agent_outside_its_loader() {
     let (kernel, fixture) = boot_with_manifest(MANIFEST).await;
     drop(fixture);
+    let made = kernel.operator_send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "create_agent", "parent_id": "kernel", "id": "outsider",
+                   "handler_module": "mock.tools"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(made["id"], json!("outsider"), "{made}");
     let (_fixture, path) = write_manifest(
-        "agents:\n  - id: memory\n    handler_module: mock.tools\n    handler_module_x: 1\n    id_2: 2\n    display_name: ''\n    callable_by: 5\n",
+        "agents:\n  - id: outsider\n    handler_module: mock.tools\n    display_name: taken\n",
     );
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "update_agent", "id": "static_loader", "manifest": path}),
         )])
@@ -681,8 +668,39 @@ async fn a_refused_re_apply_names_the_agent_and_forwards_the_error() {
         .remove(0)
         .result;
     assert_eq!(r["updated"], json!(true), "{r}");
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
+            AgentId::from("static_loader"),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["booted"], json!(false), "{r}");
+    assert!(
+        r["error"].as_str().unwrap().contains("'outsider' exists outside this loader"),
+        "{r}"
+    );
+    assert!(record(&kernel, "outsider").meta.get("display_name").is_none());
+}
+
+#[tokio::test]
+async fn a_refused_re_apply_names_the_agent_and_forwards_the_error() {
+    // Only a TRUTHY error is a failure, and the tail is `str(error)`.
+    // (The kernel's own refusal text is pinned by C19/C26/C27, not here.)
+    let (kernel, fixture) = boot_with_manifest(MANIFEST).await;
+    drop(fixture);
+    let (_fixture, path) = write_manifest(
+        "agents:\n  - id: memory\n    handler_module: mock.tools\n    handler_module_x: 1\n    id_2: 2\n    display_name: ''\n    can: 5\n",
+    );
+    let r = kernel.operator_send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "update_agent", "id": "static_loader", "manifest": path}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["updated"], json!(true), "{r}");
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "boot"}),
         )])
@@ -728,8 +746,7 @@ fn an_unhashable_mapping_key_is_invalid_yaml() {
 #[tokio::test]
 async fn unknown_type_wire_shape_is_byte_exact() {
     let (kernel, _fixture) = boot_with_manifest(MANIFEST).await;
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "frob"}),
         )])
@@ -741,8 +758,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
     assert_eq!(r["verb"], json!("frob"), "{r}");
     assert!(r["error"].as_str().is_some_and(|e| e.contains("boot")), "{r}");
     // a call with no verb at all is refused the same way
-    let r = kernel
-        .send(vec![Item::new(AgentId::from("static_loader"), json!({}))])
+    let r = kernel.operator_send(vec![Item::new(AgentId::from("static_loader"), json!({}))])
         .await
         .remove(0)
         .result;
@@ -760,16 +776,15 @@ async fn an_agent_sent_boot_is_refused_and_re_runs_nothing() {
     let kernel = mk_kernel();
     let (_fixture, path) = write_manifest(
         "agents:\n  - id: memory\n    handler_module: mock.tools\n  - id: worker\n    \
-         handler_module: mock.tools\n    can_call:\n      memory: [set, read]\n      \
-         static_loader: [boot]\n",
+         handler_module: mock.tools\n    can:\n      memory: {call: [set, read]}\n      \
+         static_loader: {call: [boot]}\n",
     );
-    let rec = kernel
-        .send(vec![Item::new(
+    let rec = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": HANDLER_MODULE, "id": "static_loader",
-                "manifest": path, "callable_by": {"worker": ["boot"]},
+                "manifest": path,
             }),
         )])
         .await
@@ -778,12 +793,10 @@ async fn an_agent_sent_boot_is_refused_and_re_runs_nothing() {
     assert_eq!(rec["id"], json!("static_loader"), "{rec}");
     // The operator revokes worker's lateral edge and deletes `memory`.
     for p in [
-        json!({"type": "update_agent", "id": "worker", "can_call": {
-            "$self": "*", "$parent": "*", "$subtree": "*", "static_loader": ["boot"]}}),
+        json!({"type": "update_agent", "id": "worker", "can": {"static_loader": {"call": ["boot"]}}}),
         json!({"type": "delete_agent", "id": "memory"}),
     ] {
-        let r = kernel
-            .send(vec![Item::new(AgentId::from("kernel"), p)])
+        let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel"), p)])
             .await
             .remove(0)
             .result;
@@ -791,7 +804,7 @@ async fn an_agent_sent_boot_is_refused_and_re_runs_nothing() {
     }
     let r = as_agent(
         AgentId::from("worker"),
-        kernel.send(vec![Item::new(
+        kernel.operator_send(vec![Item::new(
             AgentId::from("static_loader"),
             json!({"type": "boot"}),
         )]),
@@ -810,8 +823,8 @@ async fn an_agent_sent_boot_is_refused_and_re_runs_nothing() {
                      it); the operator re-boots the loader",
         })
     );
-    assert!(!kernel.agents.contains_key(&AgentId::from("memory")));
-    assert!(record(&kernel, "worker").meta["can_call"]
+    assert!(!kernel.exists("memory"));
+    assert!(record(&kernel, "worker").meta["can"]
         .get("memory")
         .is_none());
     // The operator's boot is the kernel's own: it re-runs the manifest.

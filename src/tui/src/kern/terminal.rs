@@ -1,16 +1,17 @@
 //! THE IN-APP TERMINAL, as an agent. `t` in the tree opens it and `t` again
 //! closes it.
 //!
-//! It is an `exec_bridge` agent `term` under `user`, running ONE PTY
-//! job: the human's `$SHELL`. It sits in the tree like everything else, and a
-//! coder run inside it reaches the kernel the same way any other client does.
+//! It is an `exec_bridge` agent `term` under `user` (the blueprint's record),
+//! running ONE PTY job: the human's `$SHELL`. It sits in the tree like everything
+//! else, and a coder run inside it reaches the kernel the same way any other
+//! client does.
 //!
-//! Opening is a `create_agent` (its record allows exactly the shell line, runs
-//! in the project dir, inherits this process's environment), then a MERGE of the
-//! new id into the human's `can_call` (so `user → term` passes the gate).
-//! Attaching is CLIENT-SIDE, because `boot` starts nothing: `status` finds a live
-//! PTY job and re-attaches to it (its `output` ring is the replay), or `start`s
-//! the shell as the human. Closing is a `delete_agent`; the job dies with it.
+//! Opening sets its `allowed` to exactly the line it runs (it runs in the project
+//! dir and inherits this process's environment); a `term` closed earlier is made
+//! again by `create_agent`. The shell drives it as the operator. Attaching is
+//! CLIENT-SIDE, because `boot` starts nothing: `status` finds a live PTY job and
+//! re-attaches to it (its `output` ring is the replay), or `start`s the shell.
+//! Closing is a `delete_agent`; the job dies with it.
 //!
 //! `fantastic run COMMAND [ARGS…]` (`recipe.rs`): `term` runs exactly that argv
 //! instead of the shell — the user's own program from `$PATH`, as is, at their
@@ -123,8 +124,8 @@ fn shlex_split(line: &str) -> Option<Vec<String>> {
 /// The argv `term`'s record names (`run`), if any: its ONE allowed line
 /// ([`line_record`]), unwrapped and split.
 fn recorded(host: &Host, id: &str) -> Option<Vec<String>> {
-    let a = host.kernel.agents.get(&fantastic_kernel::AgentId::from(id))?;
-    let meta = a.value().record().meta.clone();
+    let a = host.kernel.resolve_target(id)?;
+    let meta = a.record().meta.clone();
     argv_of(meta.get("allowed")?)
 }
 
@@ -140,7 +141,7 @@ fn argv_of(allowed: &Value) -> Option<Vec<String>> {
 /// attaches as for `t` ([`open`] starts the recorded argv).
 pub async fn prepare_run(host: &Host, argv: &[String]) -> Result<(), String> {
     let id = fantastic_kernel::AgentId::from(TERM_ID);
-    if host.kernel.agents.contains_key(&id) {
+    if host.kernel.exists(id.as_str()) {
         if recorded(host, TERM_ID).as_deref() == Some(argv) {
             return Ok(());
         }
@@ -149,16 +150,26 @@ pub async fn prepare_run(host: &Host, argv: &[String]) -> Result<(), String> {
     create(host, argv).await
 }
 
-/// Create `term` running exactly `argv`, and merge it into the human's
-/// `can_call` (so `user → term` passes the gate).
+/// Make `term` run exactly `argv`: a seeded `term` that names no line yet gets
+/// its `allowed` set; a missing one is created. It holds no lines.
 async fn create(host: &Host, argv: &[String]) -> Result<(), String> {
+    if host.kernel.exists(TERM_ID) {
+        let mut update = json!({"type": "update_agent", "id": TERM_ID});
+        if let (Some(u), Value::Object(f)) = (update.as_object_mut(), line_record(argv)) {
+            u.extend(f);
+        }
+        let r = host.operator("kernel", update).await;
+        return match r.result.get("error").and_then(Value::as_str) {
+            Some(e) => Err(format!("could not set `{TERM_ID}`'s line: {e}")),
+            None => Ok(()),
+        };
+    }
     let mut create = json!({
         "type": "create_agent",
         "parent_id": host.cfg.user.as_str(),
         "id": TERM_ID,
         "handler_module": fantastic_exec_bridge::HANDLER_MODULE,
         "ingress_rule": "allow_all_ingress",
-        "callable_by": {host.cfg.user.as_str(): "*"},
     });
     if let (Some(c), Value::Object(f)) = (create.as_object_mut(), line_record(argv)) {
         c.extend(f);
@@ -166,22 +177,6 @@ async fn create(host: &Host, argv: &[String]) -> Result<(), String> {
     let r = host.operator("kernel", create).await;
     if let Some(e) = r.result.get("error").and_then(Value::as_str) {
         return Err(format!("could not create `{TERM_ID}`: {e}"));
-    }
-    // The human's authority must name the terminal, or every keystroke is
-    // refused. MERGED into what is there, never replacing it.
-    let user = host.cfg.user.clone();
-    let mut cc = host
-        .kernel
-        .agents
-        .get(&fantastic_kernel::AgentId::from(user.as_str()))
-        .and_then(|a| a.value().record().meta.get("can_call").and_then(Value::as_object).cloned())
-        .unwrap_or_default();
-    cc.insert(TERM_ID.into(), json!("*"));
-    let r = host
-        .operator("kernel", json!({"type": "update_agent", "id": user, "can_call": cc}))
-        .await;
-    if let Some(e) = r.result.get("error").and_then(Value::as_str) {
-        return Err(format!("could not grant `{user}` → `{TERM_ID}`: {e}"));
     }
     Ok(())
 }
@@ -209,7 +204,6 @@ pub async fn canvas_cell(host: &Host, argv: &[String]) -> Result<Option<String>,
     if let Some(e) = r.result.get("error").and_then(Value::as_str) {
         return Err(format!("could not create `{exec}`: {e}"));
     }
-    crate::kern::reach::granted(host, &exec).await?;
     let mut rec = serde_json::Map::new();
     for (k, v) in [
         ("id", json!(cell)),
@@ -223,8 +217,7 @@ pub async fn canvas_cell(host: &Host, argv: &[String]) -> Result<Option<String>,
         ("y", json!(0)),
         ("width", json!(720)),
         ("height", json!(420)),
-        ("can_call", json!({exec.clone(): ["watch", "status", "start", "write", "ack", "resize", "output", "paste_image"]})),
-        ("callable_by", json!({"$self": "*"})),
+        ("can", json!({exec.clone(): {"call": ["watch", "status", "start", "write", "ack", "resize", "output", "paste_image"]}})),
     ] {
         rec.insert(k.into(), v);
     }
@@ -232,26 +225,25 @@ pub async fn canvas_cell(host: &Host, argv: &[String]) -> Result<Option<String>,
     Ok(Some(cell))
 }
 
-/// Create `term` if it is missing, then attach to its live PTY job or start one
+/// Make `term` run its program (created if it is missing), then attach to its live PTY job or start one
 /// at `cols`×`rows`.
 pub async fn open(host: &Host, cols: u16, rows: u16) -> Result<Attach, String> {
-    let id = fantastic_kernel::AgentId::from(TERM_ID);
     // the program: the argv `run` recorded, else the human's shell
     let argv = match recorded(host, TERM_ID) {
         Some(a) if !a.is_empty() => a,
         _ => vec![shell()?],
     };
-    if !host.kernel.agents.contains_key(&id) {
+    if recorded(host, TERM_ID).as_deref() != Some(argv.as_slice()) {
         create(host, &argv).await?;
     }
 
     // A live PTY job is re-attached, never doubled.
-    let st = host.act(TERM_ID, json!({"type": "status"})).await;
+    let st = host.operator(TERM_ID, json!({"type": "status"})).await;
     if let Some(e) = st.result.get("error").and_then(Value::as_str) {
         return Err(format!("`{TERM_ID}` status: {e}"));
     }
     if let Some(job_id) = live_pty(&st.result) {
-        let r = host.act(TERM_ID, json!({"type": "output", "job_id": job_id})).await;
+        let r = host.operator(TERM_ID, json!({"type": "output", "job_id": job_id})).await;
         if let Some(e) = r.result.get("error").and_then(Value::as_str) {
             return Err(format!("`{TERM_ID}` output: {e}"));
         }
@@ -260,7 +252,7 @@ pub async fn open(host: &Host, cols: u16, rows: u16) -> Result<Attach, String> {
     }
 
     let r = host
-        .act(
+        .operator(
             TERM_ID,
             json!({"type": "start", "command": argv[0], "args": &argv[1..], "pty": {"cols": cols, "rows": rows}}),
         )
@@ -284,9 +276,7 @@ fn live_pty(status: &Value) -> Option<i64> {
     })
 }
 
-/// Delete `term`; its PTY job dies with it. The human's `can_call` entry is left:
-/// a grant to an id that does not exist reaches nothing, and the next `t`
-/// reuses it.
+/// Delete `term`; its PTY job dies with it. The next `t` makes it again.
 pub async fn close(host: &Host) -> Result<(), String> {
     let r = host
         .operator("kernel", json!({"type": "delete_agent", "id": TERM_ID}))

@@ -1,15 +1,15 @@
 //! The on-disk YAML format — twins of python's `kernel_state/tests/test_yaml_format.py`,
-//! pinned BYTE FOR BYTE by the python-written fixture `fixtures/agent.yaml` (a
-//! record): the same input built here must dump to the fixture bytes, and load →
-//! dump must be the identity on the file. There is no message tape any more.
+//! pinned BYTE FOR BYTE by the fixture `yaml_io/fixtures/agent.yaml` (a record in the
+//! `can` shape; python's own fixture keeps the shape python writes): the same input
+//! built here must dump to the fixture bytes, and load → dump must be the identity on
+//! the file. There is no message tape any more.
 
 use super::*;
 use serde_json::json;
 
 fn fixture(name: &str) -> String {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
-        "../../../python/bundled_agents/loader/kernel_state/tests/fixtures/{name}"
-    ));
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("src/yaml_io/fixtures/{name}"));
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
@@ -49,10 +49,13 @@ fn record() -> Value {
         ("tab", json!("a\tb")),
         ("long", json!("word ".repeat(30))),
         (
-            "can_call",
-            json!({"$self": "*", "$parent": "*", "kernel_store": ["read", "write"]}),
+            "can",
+            json!({
+                "$parent": {"call": ["*"]},
+                "kernel_store": {"call": ["read", "write"]},
+                "t1_lead": {"create": {"who": ["t1_w*"], "what": {"worker": {"model": "*"}}}},
+            }),
         ),
-        ("callable_by", json!({"$parent": "*", "$subtree": "*"})),
         (
             "nested",
             json!({"list": [1, "two", {"three": []}], "map": {}, "deep": {"x": [[]]}}),

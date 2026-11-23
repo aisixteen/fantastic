@@ -351,6 +351,11 @@ pub struct Complete {
 #[serde(deny_unknown_fields)]
 pub struct Models {}
 
+/// What this provider's models can do: {capabilities: {<model>: {images, max_images, max_bytes, max_pixels}}, model}. A chat asks it at its first turn and whenever its provider or model changes.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Capabilities {}
+
 /// Set this provider's default model (one of `models` when the list is known); a chat that names no model completes on it. Returns {default}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

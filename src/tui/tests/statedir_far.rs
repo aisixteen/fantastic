@@ -58,11 +58,12 @@ fn a_far_state_folder_is_served_found_and_kept_apart_from_the_work_folder() {
         .expect("the host starts");
     wait_for(&state.join("cli").join("mcp.yaml"));
 
-    // a client in another directory finds the kernel by --statedir alone
+    // a client in another directory finds the kernel by --statedir alone; it sends as
+    // the `mcp` leg, which holds no line on the root and reflects its own record
     let sent = Command::new(bin())
         .args(["send", "--statedir"])
         .arg(&state)
-        .arg(r#"{"target":"kernel","payload":{"type":"reflect","tree":"none"}}"#)
+        .arg(r#"{"target":"mcp","payload":{"type":"reflect","tree":"none"}}"#)
         .current_dir(&elsewhere)
         .env("FANTASTIC_HOME", &home)
         .output()

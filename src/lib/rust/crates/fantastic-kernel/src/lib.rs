@@ -33,7 +33,6 @@ pub mod declared;
 pub mod docs;
 pub mod errors;
 pub mod executions;
-pub mod grants;
 pub mod inbox;
 pub mod inherit;
 pub mod inquiry;
@@ -64,7 +63,6 @@ pub mod yaml_io;
 pub mod test_support;
 
 pub use agent::{Agent, AgentId, AgentRecord, RESERVED_RECORD_KEYS};
-pub use authz::{authorize_call, default_callable_by, default_can_call, Decision, FROM_ABOVE};
 pub use bundle::{Bundle, BundleError, BundleRegistry, Handler, Reply};
 pub use errors::{KernelError, KernelResult};
 pub use kernel::{
@@ -78,7 +76,8 @@ pub use refusal::{error_text, is_refused, not_here, refusal, refusal_hint, unkno
 pub use rows::{Row, RowStore, RowTail};
 pub use secret::{current_secret, note_reply_secret};
 pub use send::{current_origin, current_sender, Signal, ON_BATCH_LAUNCHED};
+pub use send::gate::Held;
 pub use state::KernelState;
 pub use storage::StorageMode;
-pub use tasks::{current_killed, current_task, spawn_inherit, TaskId, TaskTable, CURRENT_TASK};
+pub use tasks::{current_killed, current_task, spawn_inherit, Inherited, TaskId, TaskTable, CURRENT_TASK};
 pub use verbs::{DynRegistry, DynVerb, Parse, RecordDecl, Verb};

@@ -152,10 +152,9 @@ pub struct Record {
     /// A `file_bridge`'s clamp.
     #[serde(default)]
     pub root: Option<String>,
+    /// Its own lines (grant model v9).
     #[serde(default)]
-    pub can_call: Option<Value>,
-    #[serde(default)]
-    pub callable_by: Option<Value>,
+    pub can: Option<Value>,
     /// Everything else, rendered verbatim by the Generic panel.
     #[serde(flatten)]
     pub meta: Map<String, Value>,
@@ -344,7 +343,7 @@ mod tests {
     fn refusal_line_shows_the_kernels_own_hint() {
         let r: Refusal = serde_json::from_str(
             r#"{"error":"unauthorized: user -> exec start","reason":"unauthorized",
-                "hint":"name the verb in can_call","side":"egress"}"#,
+                "hint":"name the verb in its can line"}"#,
         )
         .unwrap();
         assert!(r.line().contains("name the verb"));

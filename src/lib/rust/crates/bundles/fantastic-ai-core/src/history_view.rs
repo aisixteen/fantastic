@@ -344,7 +344,7 @@ fn fold_limit(verb: &str) -> usize {
 /// ([`AUTOFOLD_AT`] tokens; [`REFERENCE_FOLD_AT`] for `docs`; a `reflect` never folds).
 #[must_use]
 pub fn will_fold(content: &str) -> bool {
-    parse_reply_tag(content).is_some() && reply_blocks(content).into_iter().any(|b| block_folds(b))
+    parse_reply_tag(content).is_some() && reply_blocks(content).into_iter().any(block_folds)
 }
 
 /// Whether one reply block folds once answered: a recall reply, or a body over its
@@ -790,7 +790,8 @@ mod tests {
         assert!(!will_fold(&big));
         let kept = [row(7, "user", &big), row(8, "assistant", "ok")];
         assert_eq!(autofold(&kept, 0, &kept[0], None).1, "whole");
-        for verb in ["docs"] {
+        {
+            let verb = "docs";
             let tag = format!("[reply to 3 \u{b7} ai {verb}]\n");
             assert!(will_fold(&format!("{tag}{over}")), "{verb}");
             assert!(!will_fold(&format!("{tag}{at}")), "{verb}");

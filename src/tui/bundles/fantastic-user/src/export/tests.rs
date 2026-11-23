@@ -105,9 +105,9 @@ fn three_level_subtree_nests_without_parent_id() {
 #[test]
 fn round_trip_reparse_gives_same_records_and_grants() {
     let recs = tree(
-        json!({"display_name": "A", "can_call": {"b": "*", "$self": "*"}, "callable_by": {"b": ["send"]}}),
-        json!({"model": "m1", "can_call": {"a": ["send"], "c": "*"}, "callable_by": {"a": "*"}}),
-        json!({"n": 3, "callable_by": {"b": "*"}}),
+        json!({"display_name": "A", "can": {"b": {"call": ["*"]}}}),
+        json!({"model": "m1", "can": {"a": {"call": ["send"]}, "c": {"call": ["*"]}}}),
+        json!({"n": 3}),
     );
     let ex = export(&recs);
     let mut flat = Vec::new();
@@ -132,27 +132,26 @@ fn round_trip_reparse_gives_same_records_and_grants() {
 #[test]
 fn inside_grant_stays_an_id() {
     let ex = export(&tree(
-        json!({"can_call": {"b": "*"}}),
-        json!({"callable_by": {"a": "*"}}),
+        json!({"can": {"b": {"call": ["*"]}}}),
+        json!({}),
         json!({}),
     ));
     let d = doc(&ex);
-    assert_eq!(find(&d, "a").unwrap()["can_call"]["b"], "*");
-    assert_eq!(find(&d, "b").unwrap()["callable_by"]["a"], "*");
+    assert_eq!(find(&d, "a").unwrap()["can"]["b"], json!({"call": ["*"]}));
     assert!(ex.ports.is_empty(), "{:?}", ex.ports);
 }
 
 #[test]
 fn outside_grant_becomes_a_port() {
     let ex = export(&tree(
-        json!({"can_call": {"memory": "*"}, "memory_store_id": "memory"}),
+        json!({"can": {"memory": {"call": ["*"]}}, "memory_store_id": "memory"}),
         json!({}),
         json!({}),
     ));
     let d = doc(&ex);
     let a = find(&d, "a").unwrap();
-    assert_eq!(a["can_call"]["@memory"], "*", "{}", ex.yaml);
-    assert!(a["can_call"].get("memory").is_none());
+    assert_eq!(a["can"]["@memory"], json!({"call": ["*"]}), "{}", ex.yaml);
+    assert!(a["can"].get("memory").is_none());
     assert_eq!(a["memory_store_id"], "@memory");
     assert_eq!(d["ports"]["@memory"]["kind"], "memory");
     assert_eq!(d["ports"]["@memory"]["used_by"], json!(["a"]));
@@ -165,7 +164,7 @@ fn outside_grant_becomes_a_port() {
 #[test]
 fn outside_backend_becomes_model_port() {
     let ex = export(&tree(
-        json!({"backend_id": "model", "can_call": {"model": "*"}}),
+        json!({"backend_id": "model", "can": {"model": {"call": ["*"]}}}),
         json!({}),
         json!({}),
     ));
@@ -214,13 +213,13 @@ fn a_target_outside_the_records_is_a_connector() {
 fn outside_exec_becomes_exec_port() {
     let ex = export(&tree(
         json!({}),
-        json!({"can_call": {"exec": ["run"], "files": "*"}}),
+        json!({"can": {"exec": {"call": ["run"]}, "files": {"call": ["*"]}}}),
         json!({}),
     ));
     let d = doc(&ex);
     let b = find(&d, "b").unwrap();
-    assert_eq!(b["can_call"]["@exec"], json!(["run"]));
-    assert_eq!(b["can_call"]["@files"], "*");
+    assert_eq!(b["can"]["@exec"], json!({"call": ["run"]}));
+    assert_eq!(b["can"]["@files"], json!({"call": ["*"]}));
     assert_eq!(d["ports"]["@exec"]["kind"], "exec");
     assert_eq!(d["ports"]["@files"]["kind"], "files");
 }
@@ -228,15 +227,15 @@ fn outside_exec_becomes_exec_port() {
 #[test]
 fn outside_unknown_becomes_connector_port() {
     let ex = export(&tree(
-        json!({"can_call": {"mcp_x": "*", "ghost": "*"}}),
+        json!({"can": {"mcp_x": {"call": ["*"]}, "ghost": {"call": ["*"]}}}),
         json!({}),
         json!({}),
     ));
     let d = doc(&ex);
     let a = find(&d, "a").unwrap();
-    assert_eq!(a["can_call"]["@connector:mcp_x"], "*");
+    assert_eq!(a["can"]["@connector:mcp_x"], json!({"call": ["*"]}));
     assert_eq!(
-        a["can_call"]["@connector:ghost"], "*",
+        a["can"]["@connector:ghost"], json!({"call": ["*"]}),
         "an id nowhere in the tree"
     );
     assert_eq!(d["ports"]["@connector:mcp_x"]["kind"], "connector");
@@ -265,16 +264,16 @@ fn two_outside_stores_get_distinct_ports() {
 }
 
 #[test]
-fn root_grant_is_written_as_at_root() {
+fn root_line_is_written_as_at_root() {
     let ex = export(&tree(
-        json!({"can_call": {ROOT: "*"}, "callable_by": {"$parent": "*"}}),
+        json!({"can": {ROOT: {"call": ["*"]}, "$parent": {"call": ["send"]}}}),
         json!({}),
         json!({}),
     ));
     let d = doc(&ex);
     let a = find(&d, "a").unwrap();
-    assert_eq!(a["can_call"]["@root"], "*");
-    assert_eq!(a["callable_by"]["$parent"], "*", "baseline grants stay");
+    assert_eq!(a["can"]["@root"], json!({"call": ["*"]}));
+    assert_eq!(a["can"]["$parent"], json!({"call": ["send"]}), "`$parent` stays");
     assert!(!ex.yaml.contains(ROOT), "{}", ex.yaml);
     assert!(ex.ports.is_empty());
 }

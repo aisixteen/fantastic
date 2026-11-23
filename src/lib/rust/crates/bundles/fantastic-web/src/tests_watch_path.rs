@@ -11,10 +11,10 @@ use super::*;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message as TMessage;
 
-/// The watched agent, id `files`. `grant` wires both gate ends between it and
-/// the WS leg; without it the leg's watch is refused.
+/// The watched agent, id `files`. `grant` gives the WS leg its own line on it;
+/// without it the leg's watch is refused.
 async fn watched_agent(kernel: &Arc<Kernel>, tmp: &TempDir, leg: &str, grant: bool) {
-    let mut rec = json!({
+    let rec = json!({
         "type": "create_agent",
         "parent_id": "kernel",
         "handler_module": "file_bridge.tools", "allow": ["."],
@@ -22,9 +22,6 @@ async fn watched_agent(kernel: &Arc<Kernel>, tmp: &TempDir, leg: &str, grant: bo
         "root": tmp.path().join("served").to_string_lossy(),
         "ingress_rule": "allow_all_ingress",
     });
-    if grant {
-        rec["callable_by"] = json!({leg: "*"});
-    }
     let r = call(kernel, "kernel", rec).await;
     assert_eq!(r["id"], json!("files"), "{r}");
     if grant {
@@ -32,16 +29,19 @@ async fn watched_agent(kernel: &Arc<Kernel>, tmp: &TempDir, leg: &str, grant: bo
             kernel,
             "kernel",
             json!({"type": "update_agent", "id": leg,
-                   "can_call": {"kernel_state": "*", "files": "*"}}),
+                   "can": {"kernel_state": {"call": ["*"]}, "files": {"call": ["*"]}}}),
         )
         .await;
         assert!(g.get("error").is_none(), "grant the leg: {g}");
+        // and its host, which caps it
+        if let Some(host) = kernel.resolve_target(leg).and_then(|a| a.parent_id.clone()) {
+            super::host_holds_legs_lines(kernel, host.as_str());
+        }
     }
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(AgentId::from(target), payload)])
+    kernel.operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -97,13 +97,22 @@ async fn a_refused_auto_watch_is_an_error_frame_not_silence() {
     let web_id = "web_refused_watch";
     let leg = format!("{web_id}_ws");
     let kernel = stage_web_with_ws(&tmp, port, web_id).await;
+    // the leg holds its host only: a line on the root would reach `files` too
+    let r = call(
+        &kernel,
+        "kernel",
+        json!({"type": "update_agent", "id": leg, "can": {"$parent": {"call": ["*"]}}}),
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
     watched_agent(&kernel, &tmp, &leg, false).await;
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/files/ws"))
         .await
         .expect("ws connect");
     let first = next_text(&mut ws).await;
     assert_eq!(first["type"], "error", "{first}");
-    assert_eq!(first["reason"], "unauthorized", "{first}");
+    // a denial is the unknown answer
+    assert_eq!(first["reason"], "unknown_agent", "{first}");
     // NOT REGISTERED: the agent's events reach nobody on this socket.
     kernel
         .emit(

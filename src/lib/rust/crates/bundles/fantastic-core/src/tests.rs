@@ -68,8 +68,7 @@ fn booted(tmp: &TempDir) -> Arc<Kernel> {
 
 async fn root_reflect(kernel: &Arc<Kernel>, payload: serde_json::Value) -> serde_json::Value {
     let root = kernel.root().expect("root").id.clone();
-    kernel
-        .send(vec![Item::new(root, payload)])
+    kernel.operator_send(vec![Item::new(root, payload)])
         .await
         .remove(0)
         .result
@@ -93,7 +92,6 @@ async fn root_with_handler_reflects_identity() {
     let verbs = v["verbs"].as_object().expect("a verbs block");
     for name in [
         "create_agent",
-        "docs",
         "persist_record",
         "export_subtree",
         "reflect",
@@ -167,8 +165,7 @@ async fn load_tree_persist_record_round_trip() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);
     let root = kernel.root().expect("root").id.clone();
-    let wrote = kernel
-        .send(vec![Item::new(
+    let wrote = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "persist_record", "record": {
                 "id": "noted", "handler_module": "file_bridge.tools", "parent_id": "kernel_state"
@@ -183,8 +180,7 @@ async fn load_tree_persist_record_round_trip() {
         .join(".fantastic/agents/noted/agent.yaml")
         .exists());
 
-    let tree = kernel
-        .send(vec![Item::new(root.clone(), json!({"type": "load_tree"}))])
+    let tree = kernel.operator_send(vec![Item::new(root.clone(), json!({"type": "load_tree"}))])
         .await
         .remove(0)
         .result;
@@ -195,8 +191,7 @@ async fn load_tree_persist_record_round_trip() {
         .any(|r| r["id"] == json!("noted") && r["parent_id"] == json!("kernel_state")));
 
     // `forget_record` removes the dir again.
-    let gone = kernel
-        .send(vec![Item::new(
+    let gone = kernel.operator_send(vec![Item::new(
             root,
             json!({"type": "forget_record", "id": "noted"}),
         )])
@@ -215,24 +210,16 @@ async fn the_root_loader_refuses_record_verbs_from_an_agent() {
     let kernel = booted(&tmp);
     let root = kernel.root().expect("root").id.clone();
     // NAMED grants, so the LOADER's own guard is what answers, not the gate.
-    let made = kernel
-        .send(vec![Item::new(
+    let made = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "create_agent", "parent_id": root.0, "id": "someone",
                    "handler_module": "file_bridge.tools",
-                   "can_call": {root.0.clone(): ["persist_record", "forget_record"]}}),
+                   "can": {root.0.clone(): {"call": ["persist_record", "forget_record"]}}}),
         )])
         .await
         .remove(0)
         .result;
     assert_eq!(made["id"], json!("someone"), "{made}");
-    fantastic_kernel::test_support::grant(
-        &kernel,
-        root.as_str(),
-        "callable_by",
-        "someone",
-        json!(["persist_record", "forget_record"]),
-    );
     for payload in [
         json!({"type": "persist_record", "record": {"id": "noted", "parent_id": "kernel_state"}}),
         json!({"type": "forget_record", "id": "noted"}),
@@ -241,8 +228,7 @@ async fn the_root_loader_refuses_record_verbs_from_an_agent() {
             let kernel = Arc::clone(&kernel);
             let root = root.clone();
             async move {
-                kernel
-                    .send(vec![Item::new(root, payload)])
+                kernel.operator_send(vec![Item::new(root, payload)])
                     .await
                     .remove(0)
                     .result
@@ -268,8 +254,7 @@ async fn blob_verbs_are_the_loaders_and_refuse_like_python() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);
     let root = kernel.root().expect("root").id.clone();
-    let v = kernel
-        .send(vec![Item::new(
+    let v = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "persist_blob", "name": "x.yaml", "content": "a"}),
         )])
@@ -284,8 +269,7 @@ async fn blob_verbs_are_the_loaders_and_refuse_like_python() {
     assert_eq!(v["reason"], json!("missing_arg"), "{v}");
     assert_eq!(v["arg"], json!("agent_id"), "{v}");
 
-    let v = kernel
-        .send(vec![Item::new(
+    let v = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "persist_blob", "agent_id": "kernel_state", "name": "agent.yaml", "content": "a"}),
         )])
@@ -297,8 +281,7 @@ async fn blob_verbs_are_the_loaders_and_refuse_like_python() {
         json!("persist_blob: name must be a name other than a kernel-managed file")
     );
 
-    let v = kernel
-        .send(vec![Item::new(
+    let v = kernel.operator_send(vec![Item::new(
             root,
             json!({"type": "load_blob", "agent_id": "kernel_state", "name": "x.yaml"}),
         )])
@@ -335,14 +318,12 @@ async fn open_session(kernel: &Arc<Kernel>, sess_root: &std::path::Path) {
         for (k, v) in extra.as_object().unwrap() {
             payload[k] = v.clone();
         }
-        let r = kernel
-            .send(vec![Item::new(root.clone(), payload)])
+        let r = kernel.operator_send(vec![Item::new(root.clone(), payload)])
             .await
             .remove(0)
             .result;
         assert_eq!(r["id"], json!(id), "{r}");
-        kernel
-            .send(vec![Item::new(AgentId::from(id), json!({"type": "boot"}))])
+        kernel.operator_send(vec![Item::new(AgentId::from(id), json!({"type": "boot"}))])
             .await;
     }
 }
@@ -364,8 +345,7 @@ async fn a_session_loader_persists_a_canvas_that_survives_a_restart() {
         "the session's record lives in the host tree only"
     );
     for (id, parent) in [("canvas", "sess"), ("term1", "canvas")] {
-        let r = kernel
-            .send(vec![Item::new(
+        let r = kernel.operator_send(vec![Item::new(
                 AgentId::from("sess"),
                 json!({"type": "persist_record", "record": {
                     "id": id, "handler_module": "canvas.tools", "parent_id": parent,
@@ -395,8 +375,7 @@ async fn a_session_loader_persists_a_canvas_that_survives_a_restart() {
     // ── life 2: a fresh kernel, the session re-opened on the same root ────
     let kernel = booted(&tmp);
     open_session(&kernel, &sess_root).await;
-    let tree = kernel
-        .send(vec![Item::new(
+    let tree = kernel.operator_send(vec![Item::new(
             AgentId::from("sess"),
             json!({"type": "load_tree"}),
         )])
@@ -450,8 +429,7 @@ async fn make_store(kernel: &Arc<Kernel>, extra: serde_json::Value) {
 
 async fn boot_root(kernel: &Arc<Kernel>) {
     let root = kernel.root().expect("root").id.clone();
-    kernel
-        .send(vec![Item::new(root, json!({"type": "boot"}))])
+    kernel.operator_send(vec![Item::new(root, json!({"type": "boot"}))])
         .await;
 }
 
@@ -503,7 +481,7 @@ async fn a_refused_write_is_loud_and_clears_when_writes_land() {
     // lands and the error clears
     let mut patch = Map::new();
     patch.insert("readonly".to_string(), json!(false));
-    kernel.update(&AgentId::from("store"), patch);
+    fantastic_kernel::test_support::update(&kernel, &AgentId::from("store"), patch);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert_eq!(persistence_of(&kernel).await, json!({"provider": "store"}));
     assert!(tmp
@@ -525,8 +503,7 @@ async fn loader_record_verbs_are_clamped_to_the_running_dir() {
     let kernel = booted(&tmp);
     let root = kernel.root().expect("root").id.clone();
     let out_root = outside.path().to_string_lossy().into_owned();
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "create_agent", "parent_id": root.0, "id": "far",
                    "handler_module": HANDLER_MODULE, "watch": false, "root": out_root}),
@@ -544,8 +521,7 @@ async fn loader_record_verbs_are_clamped_to_the_running_dir() {
         json!({"type": "persist_record", "record": {"id": "ghost", "parent_id": "far"}}),
         json!({"type": "forget_record", "id": "ghost"}),
     ] {
-        let out = kernel
-            .send(vec![Item::new(AgentId::from("far"), payload.clone())])
+        let out = kernel.operator_send(vec![Item::new(AgentId::from("far"), payload.clone())])
             .await
             .remove(0);
         assert_eq!(
@@ -561,8 +537,7 @@ async fn loader_record_verbs_are_clamped_to_the_running_dir() {
     );
 
     // A RELATIVE root resolves under the running dir.
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "create_agent", "parent_id": root.0, "id": "near",
                    "handler_module": HANDLER_MODULE, "watch": false, "root": ".fantastic/near"}),
@@ -571,8 +546,7 @@ async fn loader_record_verbs_are_clamped_to_the_running_dir() {
         .remove(0)
         .result;
     assert_eq!(r["id"], "near", "{r}");
-    let out = kernel
-        .send(vec![Item::new(
+    let out = kernel.operator_send(vec![Item::new(
             AgentId::from("near"),
             json!({"type": "boot"}),
         )])
@@ -581,8 +555,7 @@ async fn loader_record_verbs_are_clamped_to_the_running_dir() {
     assert_ne!(out.status, fantastic_kernel::Status::Failed, "{out:?}");
     assert!(!tmp.path().join(".fantastic/near/agent.yaml").exists());
     // python's reflect reports `str(_root(agent))` — the root as written.
-    let reflect = kernel
-        .send(vec![Item::new(
+    let reflect = kernel.operator_send(vec![Item::new(
             AgentId::from("near"),
             json!({"type": "reflect"}),
         )])
@@ -598,8 +571,7 @@ async fn persist_record_writes_the_record_and_raises_on_a_failed_write() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);
     let root = kernel.root().expect("root").id.clone();
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "persist_record", "record": {
                 "id": "seeded", "handler_module": HANDLER_MODULE, "parent_id": "kernel_state"
@@ -614,8 +586,7 @@ async fn persist_record_writes_the_record_and_raises_on_a_failed_write() {
 
     // `agent.yaml` is a DIRECTORY: the atomic rename onto it fails — raised.
     std::fs::create_dir_all(tmp.path().join(".fantastic/agents/blocked/agent.yaml/x")).unwrap();
-    let out = kernel
-        .send(vec![Item::new(
+    let out = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "persist_record", "record": {"id": "blocked", "parent_id": "kernel_state"}}),
         )])
@@ -640,8 +611,7 @@ async fn load_tree_is_rooted_at_the_live_session_record() {
     std::fs::create_dir_all(sess.join("agents/canvas")).unwrap();
     std::fs::write(sess.join("agents/canvas/agent.yaml"), "id: canvas\n").unwrap();
     std::fs::write(sess.join("agent.yaml"), "id: stale\n").unwrap();
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "create_agent", "parent_id": root.0, "id": "s9",
                    "handler_module": HANDLER_MODULE, "watch": false,
@@ -651,8 +621,7 @@ async fn load_tree_is_rooted_at_the_live_session_record() {
         .remove(0)
         .result;
     assert_eq!(r["id"], "s9", "{r}");
-    let tree = kernel
-        .send(vec![Item::new(
+    let tree = kernel.operator_send(vec![Item::new(
             AgentId::from("s9"),
             json!({"type": "load_tree"}),
         )])
@@ -708,8 +677,7 @@ async fn loader_verbs_refuse_non_string_ids_like_python() {
         ),
         (json!({"type": "forget_record", "id": 5}), "id"),
     ] {
-        let r = kernel
-            .send(vec![Item::new(root.clone(), payload.clone())])
+        let r = kernel.operator_send(vec![Item::new(root.clone(), payload.clone())])
             .await
             .remove(0)
             .result;
@@ -741,8 +709,7 @@ async fn loader_verbs_refuse_a_missing_id_by_their_declaration() {
         (json!({"type": "export_subtree", "agent_id": "a"}), "path"),
         (json!({"type": "reload_bundle"}), "name"),
     ] {
-        let r = kernel
-            .send(vec![Item::new(root.clone(), payload.clone())])
+        let r = kernel.operator_send(vec![Item::new(root.clone(), payload.clone())])
             .await
             .remove(0)
             .result;
@@ -750,8 +717,7 @@ async fn loader_verbs_refuse_a_missing_id_by_their_declaration() {
         assert_eq!(r["arg"], arg, "{payload}: {r}");
     }
     // a wrongly typed argument is refused, never typed on the caller's behalf
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "read_bundles", "name": 7}),
         )])
@@ -779,8 +745,7 @@ async fn a_session_loader_never_writes_through_the_roots_store() {
     boot_root(&kernel).await;
     make_store(&kernel, json!({})).await;
     let root = kernel.root().expect("root").id.clone();
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "create_agent", "parent_id": root.0, "id": "sess",
                    "handler_module": HANDLER_MODULE, "root": ".fantastic/web/s1"}),
@@ -789,8 +754,7 @@ async fn a_session_loader_never_writes_through_the_roots_store() {
         .remove(0)
         .result;
     assert_eq!(r["id"], "sess", "{r}");
-    kernel
-        .send(vec![Item::new(
+    kernel.operator_send(vec![Item::new(
             AgentId::from("sess"),
             json!({"type": "boot"}),
         )])
@@ -798,8 +762,7 @@ async fn a_session_loader_never_writes_through_the_roots_store() {
     // The blob verbs: the session loader has no store; the root has one.
     let blob =
         json!({"type": "persist_blob", "agent_id": "sess", "name": "n.yaml", "content": "x"});
-    let r = kernel
-        .send(vec![Item::new(AgentId::from("sess"), blob.clone())])
+    let r = kernel.operator_send(vec![Item::new(AgentId::from("sess"), blob.clone())])
         .await
         .remove(0)
         .result;
@@ -807,8 +770,7 @@ async fn a_session_loader_never_writes_through_the_roots_store() {
         r["error"], "persist_blob: no store wired — persistence not available",
         "{r}"
     );
-    let r = kernel
-        .send(vec![Item::new(root.clone(), blob)])
+    let r = kernel.operator_send(vec![Item::new(root.clone(), blob)])
         .await
         .remove(0)
         .result;
@@ -823,8 +785,7 @@ async fn a_session_loader_never_writes_through_the_roots_store() {
             sink.lock().unwrap().push(ev["payload"].clone());
         }
     }));
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "create_agent", "parent_id": root.0, "id": "plain",
                    "handler_module": "file_bridge.tools"}),
@@ -855,8 +816,7 @@ async fn a_loader_without_a_root_reflects_its_relative_address() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);
     let root = kernel.root().expect("root").id.clone();
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "create_agent", "parent_id": root.0, "id": "inner",
                    "handler_module": HANDLER_MODULE, "watch": false}),
@@ -865,8 +825,7 @@ async fn a_loader_without_a_root_reflects_its_relative_address() {
         .remove(0)
         .result;
     assert_eq!(r["id"], "inner", "{r}");
-    let reflect = kernel
-        .send(vec![Item::new(
+    let reflect = kernel.operator_send(vec![Item::new(
             AgentId::from("inner"),
             json!({"type": "reflect"}),
         )])
@@ -886,8 +845,7 @@ async fn a_loader_with_an_absolute_root_meta_reflects_it_as_given() {
     let root = kernel.root().expect("root").id.clone();
     let base = tmp.path().to_string_lossy().into_owned();
     let given = format!("{base}/./.fantastic//abs/");
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "create_agent", "parent_id": root.0, "id": "abs",
                    "handler_module": HANDLER_MODULE, "watch": false, "root": given}),
@@ -896,8 +854,7 @@ async fn a_loader_with_an_absolute_root_meta_reflects_it_as_given() {
         .remove(0)
         .result;
     assert_eq!(r["id"], "abs", "{r}");
-    let reflect = kernel
-        .send(vec![Item::new(
+    let reflect = kernel.operator_send(vec![Item::new(
             AgentId::from("abs"),
             json!({"type": "reflect"}),
         )])
@@ -919,8 +876,7 @@ async fn a_loader_without_a_root_in_a_kernel_with_no_running_dir_raises() {
         .expect("boot")
         .kernel;
     let root = kernel.root().expect("root").id.clone();
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "create_agent", "parent_id": root.0, "id": "inner",
                    "handler_module": HANDLER_MODULE, "watch": false}),
@@ -929,8 +885,7 @@ async fn a_loader_without_a_root_in_a_kernel_with_no_running_dir_raises() {
         .remove(0)
         .result;
     assert_eq!(r["id"], "inner", "{r}");
-    let out = kernel
-        .send(vec![Item::new(
+    let out = kernel.operator_send(vec![Item::new(
             AgentId::from("inner"),
             json!({"type": "reflect"}),
         )])
@@ -944,8 +899,7 @@ async fn a_loader_without_a_root_in_a_kernel_with_no_running_dir_raises() {
     );
 
     // A `root` meta needs no running dir: it is reported as given.
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "create_agent", "parent_id": root.0, "id": "absmem",
                    "handler_module": HANDLER_MODULE, "watch": false, "root": "/srv/state"}),
@@ -954,8 +908,7 @@ async fn a_loader_without_a_root_in_a_kernel_with_no_running_dir_raises() {
         .remove(0)
         .result;
     assert_eq!(r["id"], "absmem", "{r}");
-    let reflect = kernel
-        .send(vec![Item::new(
+    let reflect = kernel.operator_send(vec![Item::new(
             AgentId::from("absmem"),
             json!({"type": "reflect"}),
         )])
@@ -979,7 +932,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
             "error": format!("unknown verb {}; kernel_state answers: {answers}",
                 fantastic_bundle::py_repr(verb)),
             "reason": "unhandled",
-            "hint": "docs of=kernel_state lists each verb's arguments",
+            "hint": "reflect kernel_state tier=detailed lists each verb's arguments",
             "verb": verb,
         });
         assert_eq!(
@@ -994,8 +947,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
 }
 
 async fn ask(kernel: &Arc<Kernel>, target: &str, payload: serde_json::Value) -> serde_json::Value {
-    kernel
-        .send(vec![Item::new(AgentId::from(target), payload)])
+    kernel.operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -1067,8 +1019,7 @@ async fn read_bundles_refuses_what_is_no_folder() {
 
 async fn mk(kernel: &Arc<Kernel>, id: &str, parent: &str) {
     let root = kernel.root().expect("root").id.clone();
-    let made = kernel
-        .send(vec![Item::new(
+    let made = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "create_agent", "parent_id": parent, "id": id,
                    "handler_module": "noop.tools", "note": id}),
@@ -1195,13 +1146,46 @@ async fn root_export_subtree_refuses_the_root_id_and_unknown_id_and_bad_args() {
     }
 }
 
+/// `export_subtree` acts for its asker (gm rule 7, Q39): an agent's export is cut the
+/// way `reflect` cuts the tree. Its `call` line on the root reaches the subtree at call
+/// level, so the records carry identity only, no field values.
+#[tokio::test]
+async fn root_export_subtree_is_cut_to_what_the_asker_holds() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = booted(&tmp);
+    let root = kernel.root().unwrap().id.0.clone();
+    mk(&kernel, "a", &root).await;
+    mk(&kernel, "b", "a").await;
+    mk(&kernel, "x", &root).await;
+    fantastic_kernel::test_support::grant(&kernel, "x", &root, json!({"call": ["export_subtree"]}));
+    let item = Item::new(
+        kernel.root().unwrap().id.clone(),
+        json!({"type": "export_subtree", "agent_id": "a", "path": "o"}),
+    );
+    let r = fantastic_kernel::test_support::as_agent("x", kernel.send(vec![item]))
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["exported"], json!(2), "{r}");
+    let text = std::fs::read_to_string(tmp.path().join("o/blueprint.yaml")).unwrap();
+    assert!(!text.contains("note"), "a call line shows no field values: {text}");
+    // the operator's export carries the fields
+    let r = root_reflect(
+        &kernel,
+        json!({"type": "export_subtree", "agent_id": "a", "path": "o_op"}),
+    )
+    .await;
+    assert_eq!(r["exported"], json!(2), "{r}");
+    let text = std::fs::read_to_string(tmp.path().join("o_op/blueprint.yaml")).unwrap();
+    assert!(text.contains("note"), "{text}");
+}
+
 #[tokio::test]
 async fn non_root_loader_refuses_export_subtree() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);
     let root = kernel.root().unwrap().id.0.clone();
-    let made = kernel
-        .send(vec![Item::new(
+    let made = kernel.operator_send(vec![Item::new(
             kernel.root().unwrap().id.clone(),
             json!({"type": "create_agent", "parent_id": root, "id": "inner",
                    "handler_module": HANDLER_MODULE}),
@@ -1210,8 +1194,7 @@ async fn non_root_loader_refuses_export_subtree() {
         .remove(0)
         .result;
     assert_eq!(made["id"], json!("inner"), "{made}");
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("inner"),
             json!({"type": "export_subtree", "agent_id": "inner", "path": "o"}),
         )])
@@ -1259,8 +1242,7 @@ async fn a_page_loader_at_state_web_writes_under_the_state_folder() {
         .expect("boot")
         .kernel;
     let root = kernel.root().expect("root").id.clone();
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "create_agent", "parent_id": root.0, "id": "page",
                    "handler_module": HANDLER_MODULE, "watch": false, "root": "@state/web"}),
@@ -1269,8 +1251,7 @@ async fn a_page_loader_at_state_web_writes_under_the_state_folder() {
         .remove(0)
         .result;
     assert_eq!(r["id"], "page", "{r}");
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("page"),
             json!({"type": "persist_record", "record": {
                 "id": "canvas", "handler_module": "canvas.tools", "parent_id": "page",
@@ -1293,8 +1274,7 @@ async fn a_loader_root_outside_the_state_folder_is_refused() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);
     let root = kernel.root().expect("root").id.clone();
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             root.clone(),
             json!({"type": "create_agent", "parent_id": root.0, "id": "out",
                    "handler_module": HANDLER_MODULE, "watch": false, "root": "../out"}),
@@ -1303,8 +1283,7 @@ async fn a_loader_root_outside_the_state_folder_is_refused() {
         .remove(0)
         .result;
     assert_eq!(r["id"], "out", "{r}");
-    let out = kernel
-        .send(vec![Item::new(
+    let out = kernel.operator_send(vec![Item::new(
             AgentId::from("out"),
             json!({"type": "load_tree"}),
         )])

@@ -62,7 +62,7 @@ fn web_root(tmp: &TempDir) -> std::path::PathBuf {
 }
 
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    k.send(vec![Item::new(AgentId::from(target), payload)])
+    k.operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -71,7 +71,7 @@ async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
 async fn call_as(k: &Arc<Kernel>, who: &str, target: &str, payload: Value) -> Value {
     as_agent(
         AgentId::from(who),
-        k.send(vec![Item::new(AgentId::from(target), payload)]),
+        k.operator_send(vec![Item::new(AgentId::from(target), payload)]),
     )
     .await
     .remove(0)
@@ -83,15 +83,13 @@ async fn call_as(k: &Arc<Kernel>, who: &str, target: &str, payload: Value) -> Va
 async fn setup(k: &Arc<Kernel>, tmp: &TempDir) {
     let root = k.root().expect("root").id.0.clone();
     for rec in [
-        // the baseline is `$self` alone: the owning leg names the loader's verbs
+        // the loader is the owning leg's child (by position); the line names its verbs
         json!({"id": "wws", "handler_module": LEG, "parent_id": root,
-               "can_call": {"web_loader": ["persist_record", "forget_record", "load_tree"]}}),
+               "can": {"web_loader": {"call": ["persist_record", "forget_record", "load_tree"]}}}),
         json!({"id": "rest_leg", "handler_module": LEG, "parent_id": root,
-               "can_call": {"web_loader": "*"}}),
+               "can": {"web_loader": {"call": ["*"]}}}),
         json!({"id": "web_loader", "handler_module": HANDLER_MODULE, "parent_id": "wws",
-               "root": web_root(tmp).to_string_lossy(), "watch": false,
-               "callable_by": {"rest_leg": "*",
-                               "wws": ["persist_record", "forget_record", "load_tree"]}}),
+               "root": web_root(tmp).to_string_lossy(), "watch": false}),
     ] {
         let mut p = json!({"type": "create_agent"});
         for (key, v) in rec.as_object().unwrap() {

@@ -25,8 +25,7 @@ fn png(w: u32, h: u32) -> Vec<u8> {
 }
 
 async fn ask(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(agent.clone(), payload)])
+    kernel.operator_send(vec![Item::new(agent.clone(), payload)])
         .await
         .remove(0)
         .result
@@ -93,7 +92,7 @@ async fn say(kernel: &Arc<Kernel>, chat: &AgentId, text: &str, images: Value) ->
 
 /// The bytes the chat's store holds under `image_ref`.
 async fn stored(kernel: &Arc<Kernel>, chat: &AgentId, image_ref: &str) -> Option<Vec<u8>> {
-    fantastic_kernel::send::as_agent(chat, async {
+    fantastic_kernel::test_support::as_agent(chat.clone(), async {
         crate::memory::get_bytes(chat, kernel, image_ref)
             .await
             .ok()
@@ -385,8 +384,8 @@ async fn an_image_larger_than_the_model_takes_is_scaled_down_and_the_original_si
 
 // ── the capability map ────────────────────────────────────────────────────────
 
-/// A provider that answers `reflect` with the `reflect` of its record (counting the asks)
-/// and keeps the images that reach it on the binary path.
+/// A provider that answers `capabilities` with the `capabilities_reply` of its record and
+/// keeps the images that reach it on the binary path.
 struct Pics;
 
 type Seen = std::sync::Mutex<Vec<(String, String, Vec<u8>)>>;
@@ -397,8 +396,8 @@ fn seen() -> &'static Seen {
 }
 
 mod pics_verbs {
-    use crate::declared::Complete;
-    fantastic_kernel::verbs! { "complete" => Complete }
+    use crate::declared::{Capabilities, Complete};
+    fantastic_kernel::verbs! { "complete" => Complete, "capabilities" => Capabilities }
 }
 
 #[async_trait]
@@ -426,12 +425,13 @@ impl Handler for Pics {
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         match call {
-            pics_verbs::Call::Reflect(_) => {
+            pics_verbs::Call::Reflect(_) => Ok(Some(json!({"id": id.as_str()}))),
+            pics_verbs::Call::Capabilities(_) => {
                 let meta = helpers::agent_meta(id, kernel);
-                match meta.get("reflect_refuses") {
+                match meta.get("capabilities_refuses") {
                     Some(_) => Ok(Some(json!({"error": "refused", "reason": "unauthorized"}))),
                     None => Ok(Some(
-                        meta.get("reflect_reply").cloned().unwrap_or(json!({})),
+                        meta.get("capabilities_reply").cloned().unwrap_or(json!({})),
                     )),
                 }
             }
@@ -471,30 +471,30 @@ async fn chat_with_provider(
     let kernel = base_kernel(tmp, |k| k.bundles.register("pics.tools", Pics)).await;
     let id = id_for(tmp, tag);
     let file_id = format!("ff_{id}");
-    add_file_bridge(&kernel, &file_id, &tmp.path().join(".fantastic"), &id).await;
+    add_file_bridge(&kernel, &file_id, &tmp.path().join(".fantastic")).await;
     let chat = add_backend(&kernel, &id, &file_id).await;
     let root = kernel.root().unwrap();
     let provider = format!("capp_{tag}");
-    kernel.register(Agent::new(
+    fantastic_kernel::test_support::register(&kernel, Agent::new(
         AgentId::from(provider.as_str()),
         Some("pics.tools".into()),
         Some(root.id.clone()),
-        json!({"callable_by": {id.as_str(): "*"}, "reflect_reply": reply})
+        json!({"capabilities_reply": reply})
             .as_object()
             .unwrap()
             .clone(),
         tmp.path().join("capp"),
         false,
     ));
-    let mut can_call = helpers::agent_meta(&chat, &kernel)["can_call"]
+    let mut can = helpers::agent_meta(&chat, &kernel)["can"]
         .as_object()
-        .unwrap()
-        .clone();
-    can_call.insert(provider.clone(), json!("*"));
+        .cloned()
+        .unwrap_or_default();
+    can.insert(provider.clone(), json!({"call": ["complete", "watch", "capabilities"]}));
     update(
         &kernel,
         &chat,
-        json!({"provider_id": provider, "can_call": can_call, "file_bridge_id": file_id}),
+        json!({"provider_id": provider, "can": can, "file_bridge_id": file_id}),
     )
     .await;
     script(&chat, (0..12).map(|_| pass(GO)).collect(), Duration::ZERO);
@@ -544,7 +544,7 @@ async fn the_chat_keeps_its_providers_capabilities_and_asks_again_only_on_a_chan
     );
     // the provider now says something else, but nothing the chat is set to has changed: not asked
     let other = json!({"capabilities": {"test-model": e2, "small-model": e2}});
-    update(&kernel, &provider_id, json!({"reflect_reply": other})).await;
+    update(&kernel, &provider_id, json!({"capabilities_reply": other})).await;
     say(&kernel, &chat, "again", json!(null)).await;
     assert_eq!(held(&kernel, &chat)["capabilities"], e1);
     assert_eq!(written(), 1, "an unchanged turn writes no record");
@@ -583,7 +583,7 @@ async fn a_new_incarnation_asks_again_and_keeps_the_map_when_the_provider_does_n
     update(
         &kernel,
         &provider_id,
-        json!({"reflect_reply": {"capabilities": {"test-model": e2}}}),
+        json!({"capabilities_reply": {"capabilities": {"test-model": e2}}}),
     )
     .await;
     ask(&kernel, &chat, json!({"type": "boot"})).await;
@@ -591,7 +591,7 @@ async fn a_new_incarnation_asks_again_and_keeps_the_map_when_the_provider_does_n
     let second = held(&kernel, &chat);
     assert_eq!(second["capabilities"], e2);
     // a provider that refuses leaves the hydrated map as it was, and images work from it
-    update(&kernel, &provider_id, json!({"reflect_refuses": true})).await;
+    update(&kernel, &provider_id, json!({"capabilities_refuses": true})).await;
     ask(&kernel, &chat, json!({"type": "boot"})).await;
     put_file(&tmp, "pic.png", &png(32, 32));
     say(&kernel, &chat, "look", json!([{"path": "pic.png"}])).await;
@@ -611,8 +611,8 @@ async fn the_images_of_a_request_reach_the_provider_on_the_binary_path_before_th
     let k = base_kernel(&tmp, |k| k.bundles.register("pics.tools", Pics)).await;
     let root = k.root().unwrap();
     let meta =
-        fantastic_ram_store::test_support::memory_meta(&k, "chat", json!({"pics": "*"})).await;
-    k.register(Agent::new(
+        fantastic_ram_store::test_support::memory_meta(&k, "chat", json!({"pics": {"call": ["*"]}})).await;
+    fantastic_kernel::test_support::register(&k, Agent::new(
         AgentId::from("chat"),
         None,
         Some(root.id.clone()),
@@ -620,11 +620,11 @@ async fn the_images_of_a_request_reach_the_provider_on_the_binary_path_before_th
         tmp.path().join("chat"),
         false,
     ));
-    k.register(Agent::new(
+    fantastic_kernel::test_support::register(&k, Agent::new(
         AgentId::from("pics"),
         Some("pics.tools".into()),
         Some(root.id.clone()),
-        json!({"callable_by": {"chat": "*"}})
+        json!({})
             .as_object()
             .unwrap()
             .clone(),
@@ -636,7 +636,7 @@ async fn the_images_of_a_request_reach_the_provider_on_the_binary_path_before_th
     let part = json!({"type": "image", "needs": "images", "ref": "img-7", "media_type": "image/png",
                       "width": 16, "height": 16, "bytes": raw.len(), "hash": "x"});
     let rp = crate::remote_provider::RemoteProvider::new(&k, &chat, "pics");
-    let sent = fantastic_kernel::send::as_agent(&chat, async {
+    let sent = fantastic_kernel::test_support::as_agent(chat.clone(), async {
         crate::memory::put_bytes(&chat, &k, "img-7", "image/png", raw.clone())
             .await
             .unwrap();

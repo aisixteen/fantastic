@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use fantastic_kernel::agent::Agent;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::test_support::as_agent;
@@ -66,27 +67,26 @@ fn agent(id: &str, hm: Option<&str>, parent: Option<&str>, meta: Value) -> Arc<A
 
 fn kernel(home: &Path) -> Arc<Kernel> {
     let mut k = Kernel::new();
-    k.bundles.register(HANDLER_MODULE, UserHomeStore::new(Ok(home.to_path_buf())));
+    k.bundles.register(
+        user_store::HANDLER_MODULE,
+        user_store::UserStore::new(Ok(home.to_path_buf()), home.with_file_name("project")),
+    );
     k.bundles.register("demo_backend.tools", NeedsModel);
     let k = Arc::new(k);
     let root = agent("kernel_state", None, None, json!({"guid": "g1"}));
-    k.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
     k.set_root(root);
+    // `user` reaches `home` by position (its child); `ai` holds no line on it
     for a in ["user", "ai"] {
-        k.register(agent(a, None, Some("kernel_state"), json!({"can_call": {"home": "*"}})));
+        fantastic_kernel::test_support::register(&k, agent(a, None, Some("kernel_state"), json!({})));
     }
-    k.register(agent(
-        "home",
-        Some(HANDLER_MODULE),
-        Some("kernel_state"),
-        json!({"callable_by": {"user": "*"}}),
-    ));
+    fantastic_kernel::test_support::register(&k, agent("home", Some(user_store::HANDLER_MODULE), Some("user"), json!({})));
     k
 }
 
 async fn call(k: &Arc<Kernel>, from: &str, p: Value) -> Value {
     let item = Item::new(AgentId::from("home"), p);
-    as_agent(AgentId::from(from), k.send(vec![item])).await.remove(0).result
+    as_agent(AgentId::from(from), k.operator_send(vec![item])).await.remove(0).result
 }
 
 fn err(v: &Value) -> &str {
@@ -121,7 +121,7 @@ async fn a_saved_setup_carries_no_identity_wiring_or_grants_and_passes_its_bundl
     let td = tempfile::tempdir().unwrap();
     let home = td.path().join("home"); // created by the store, 0700
     let k = kernel(&home);
-    for (field, v) in [("id", json!("x")), ("memory_store_id", json!("memory")), ("can_call", json!({"exec": "*"}))] {
+    for (field, v) in [("id", json!("x")), ("memory_store_id", json!("memory")), ("can", json!({"exec": {"call": ["run"]}}))] {
         let mut rec = json!({"handler_module": "demo_backend.tools", "model": "m"});
         rec[field] = v;
         let r = call(&k, "user", json!({"type": "persist_record", "name": "t", "record": rec})).await;
@@ -137,14 +137,14 @@ async fn a_saved_setup_carries_no_identity_wiring_or_grants_and_passes_its_bundl
 }
 
 #[tokio::test]
-async fn the_grants_decide_who_is_served() {
+async fn the_lines_decide_who_is_served() {
     let td = tempfile::tempdir().unwrap();
     let home = td.path().join("home"); // created by the store, 0700
     let k = kernel(&home);
     // a read creates nothing on the user's disk
     assert!(call(&k, "user", json!({"type": "load_tree"})).await["saved"].as_array().unwrap().is_empty());
     assert!(!home.exists(), "listing an empty store must not create the home dir");
-    // `home`'s record does not admit `ai`: the kernel refuses it.
+    // `ai` holds no line on `home`: the kernel refuses it.
     let r = call(&k, "ai", json!({"type": "load_tree"})).await;
     assert!(!err(&r).is_empty(), "{r}");
     assert!(call(&k, "user", json!({"type": "load_tree"})).await.get("saved").is_some());
@@ -188,10 +188,10 @@ async fn every_verb_is_checked_by_its_declaration() {
     let k = kernel(&td.path().join("home"));
     let r = call(&k, "user", json!({"type": "zzz_nope"})).await;
     assert_eq!(r["reason"], "unhandled", "{r}");
-    for v in verbs::VERBS.iter().map(|v| v.name).chain(["reflect"]) {
+    for v in user_store::verbs::VERBS.iter().map(|v| v.name).chain(["reflect"]) {
         assert!(err(&r).contains(v), "{v} in {r}");
     }
-    for v in verbs::VERBS {
+    for v in user_store::verbs::VERBS {
         let r = call(&k, "user", json!({"type": v.name, "zzz_unknown": 1})).await;
         assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("zzz_unknown")), "{}: {r}", v.name);
     }
@@ -222,5 +222,5 @@ async fn every_verb_is_checked_by_its_declaration() {
     assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("model")), "{r}");
     // reflect renders the declared verbs
     let r = call(&k, "user", json!({"type": "reflect"})).await;
-    assert_eq!(r["handler_module"], HANDLER_MODULE, "{r}");
+    assert_eq!(r["handler_module"], user_store::HANDLER_MODULE, "{r}");
 }

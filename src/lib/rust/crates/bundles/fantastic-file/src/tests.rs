@@ -328,7 +328,7 @@ async fn mk_kernel_with(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let mut create = json!({
         "type": "create_agent", "parent_id": "kernel",
@@ -338,8 +338,7 @@ async fn mk_kernel_with(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
     for (k, v) in extra.as_object().expect("extra is an object") {
         create[k] = v.clone();
     }
-    let r = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -348,8 +347,7 @@ async fn mk_kernel_with(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
 }
 
 async fn call(kernel: &Arc<Kernel>, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(AgentId::from("fb"), payload)])
+    kernel.operator_send(vec![Item::new(AgentId::from("fb"), payload)])
         .await
         .remove(0)
         .result
@@ -357,8 +355,7 @@ async fn call(kernel: &Arc<Kernel>, payload: Value) -> Value {
 
 /// A call to the kernel itself (`update_agent`, …).
 async fn call_root(kernel: &Arc<Kernel>, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), payload)])
+    kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), payload)])
         .await
         .remove(0)
         .result
@@ -821,7 +818,7 @@ async fn reflect_key_order_matches_python() {
     let kernel = mk_kernel(&tmp).await;
     let r = call(&kernel, json!({"type": "reflect"})).await;
     // The BUNDLE's keys, in python's order; the kernel appends its own frame
-    // (can_call/callable_by/…) after them.
+    // (can/…) after them.
     let keys: Vec<&str> = r
         .as_object()
         .unwrap()
@@ -1030,8 +1027,7 @@ async fn text_write_stream_with_a_json_bytes_is_an_unknown_argument() {
     }
     // THE RAW CHUNK, on the binary channel: this is the path a model's
     // `<bytes>` document takes, and it writes.
-    let out = kernel
-        .send(vec![Item::new(
+    let out = kernel.operator_send(vec![Item::new(
             AgentId::from("fb"),
             json!({"type": "write_stream", "path": "a.txt", "truncate": true}),
         )
@@ -1044,8 +1040,7 @@ async fn text_write_stream_with_a_json_bytes_is_an_unknown_argument() {
 
     // …and it comes back as a CHUNK, in the reply body, with the reply's own
     // `bytes` key nulled in place.
-    let back = kernel
-        .send(vec![Item::new(
+    let back = kernel.operator_send(vec![Item::new(
             AgentId::from("fb"),
             json!({"type": "read_stream", "path": "a.txt", "offset": 0}),
         )
@@ -1382,8 +1377,7 @@ async fn a_readonly_leg_refuses_a_binary_write_before_judging_the_chunk() {
         json!({"type": "write_stream", "path": "a.txt", "bytes": "x"}),
         json!({"type": "write_stream", "path": "a.txt"}),
     ] {
-        let out = kernel
-            .send(vec![Item::new(AgentId::from("fb"), header.clone())
+        let out = kernel.operator_send(vec![Item::new(AgentId::from("fb"), header.clone())
                 .with_binary_key("bytes", b"data".to_vec())])
             .await
             .remove(0)
@@ -1467,8 +1461,7 @@ async fn both(
     blob: &[u8],
 ) -> (String, String, Option<Vec<u8>>) {
     let txt = call(kernel, header.clone()).await;
-    let bin = kernel
-        .send(vec![
+    let bin = kernel.operator_send(vec![
             Item::new(AgentId::from("fb"), header).with_binary_key("bytes", blob.to_vec())
         ])
         .await

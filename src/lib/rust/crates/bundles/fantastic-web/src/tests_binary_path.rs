@@ -109,35 +109,32 @@ async fn stage(tmp: &TempDir, port: u16, web: &str) -> Arc<Kernel> {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
-    let callers = json!({"$self": "*", "$parent": "*", "$subtree": "*",
-                         ws_leg.as_str(): "*", rest_leg.as_str(): "*"});
     for item in [
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web, "port": port}),
-        json!({"type": "create_agent", "parent_id": web, "handler_module": "web_ws.tools", "callable_by": {"$parent": ["get_routes"]},
+               "handler_module": HANDLER_MODULE, "id": web, "port": port}),
+        json!({"type": "create_agent", "parent_id": web, "handler_module": "web_ws.tools",
                "id": ws_leg, "ingress_rule": "allow_all_ingress",
-               "can_call": {"$parent": ["watch"], "term": "*", "cap": "*"}}),
-        json!({"type": "create_agent", "parent_id": web, "handler_module": "web_rest.tools", "callable_by": {"$parent": ["get_routes"]},
+               "can": {"$parent": {"call": ["watch"]}, "term": {"call": ["*"]}, "cap": {"call": ["*"]}}}),
+        json!({"type": "create_agent", "parent_id": web, "handler_module": "web_rest.tools",
                "id": rest_leg, "ingress_rule": "allow_all_ingress",
-               "can_call": {"term": "*", "cap": "*"}}),
+               "can": {"term": {"call": ["*"]}, "cap": {"call": ["*"]}}}),
         json!({"type": "create_agent", "parent_id": "kernel",
                "handler_module": fantastic_exec_bridge::HANDLER_MODULE, "id": "term",
                "ingress_rule": "allow_all_ingress", "cwd": tmp.path().to_string_lossy(),
-               "allowed": [".*"], "callable_by": callers}),
+               "allowed": [".*"]}),
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": "capture.tools", "id": "cap", "callable_by": callers}),
+               "handler_module": "capture.tools", "id": "cap"}),
     ] {
-        let r = kernel
-            .send(vec![Item::new(AgentId::from("kernel"), item)])
+        let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel"), item)])
             .await
             .remove(0)
             .result;
         assert!(r.get("error").is_none(), "stage: {r}");
     }
-    let boot = kernel
-        .send(vec![Item::new(AgentId::from(web), json!({"type": "boot"}))])
+    super::host_holds_legs_lines(&kernel, web);
+    let boot = kernel.operator_send(vec![Item::new(AgentId::from(web), json!({"type": "boot"}))])
         .await
         .remove(0)
         .result;
@@ -200,7 +197,7 @@ async fn paste_image_reads_its_body_at_data_over_ws_and_rest() {
         async move {
             let started = fantastic_kernel::test_support::as_agent(
                 AgentId::from(leg.as_str()),
-                k.send(vec![Item::new(
+                k.operator_send(vec![Item::new(
                     AgentId::from("term"),
                     json!({"type": "start", "command": waiter,
                            "pty": {"cols": 80, "rows": 24}}),
@@ -278,8 +275,7 @@ async fn paste_image_reads_its_body_at_data_over_ws_and_rest() {
         rest_png
     );
 
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("term"),
             json!({"type": "stop"}),
         )])

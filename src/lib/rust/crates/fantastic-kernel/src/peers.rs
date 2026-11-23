@@ -15,7 +15,7 @@
 //! call to `<guid>|x` goes to all of them and settles with the first reply.
 //!
 //! WATCHING A PEER'S AGENT: `watch(<guid>|<agent>, watcher)` is gated like a
-//! send (the watcher's `can_call` must grant `watch` on the qualified id) and
+//! send (an agent watcher is refused: no line names a peer target) and
 //! asks the peer's routes that carry watches (a peer KERNEL's leg, not a page
 //! tab) to stream that agent's events here; each one the transport hands back
 //! ([`Kernel::peer_event`]) lands in every watcher's inbox. The subscription is
@@ -399,7 +399,7 @@ pub(crate) async fn call_peer(remote: &RemoteRef, payload: Value, body: Option<B
 }
 
 /// An emit to a remote target: hand it to EVERY live route of the peer (each tab
-/// of one identity). GATED LIKE A SEND when an agent emits: its `can_call` must
+/// of one identity). GATED LIKE A SEND when an agent emits: its lines must
 /// grant `emit` on `<guid>|<agent>` (egress; the peer gates its own agents). A
 /// refused emit is dropped — an emit has no reply. Python `Agent._emit_remote`.
 pub(crate) async fn emit_peer(
@@ -428,10 +428,9 @@ pub(crate) async fn emit_peer(
     }
 }
 
-/// A remote target's meta — python's `{"callable_by": {}}`: it accepts nothing
-/// HERE. Whether it accepts a call is its own kernel's decision.
+/// A remote target's meta: empty. It holds no lines here, and whether it
+/// accepts a call is its own kernel's decision.
 pub(crate) fn remote_meta() -> Map<String, Value> {
-    let mut m = Map::new();
-    m.insert("callable_by".to_string(), json!({}));
-    m
+    Map::new()
 }
+

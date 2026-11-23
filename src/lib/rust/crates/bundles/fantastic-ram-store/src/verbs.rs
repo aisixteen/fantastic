@@ -173,6 +173,21 @@ pub struct GetBytes {
     pub ref_name: String,
 }
 
+/// Copy the rows owned by `from` to `to`, ids and folds kept, all or none: only when the kernel says the caller may read `from` and holds create or update over `to`. `ids` copies only those rows (a fold's members must come with it). Returns {ids:[int], copied:int}.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CopyRows {
+    /// The agent whose rows are copied.
+    #[schemars(length(min = 1))]
+    pub from: String,
+    /// The agent the rows are copied to.
+    #[schemars(length(min = 1))]
+    pub to: String,
+    /// Only these row ids; absent, every row of `from`.
+    #[schemars(length(min = 1))]
+    pub ids: Option<Vec<i64>>,
+}
+
 fantastic_kernel::verbs! {
     "append" => Append,
     "read" => Read,
@@ -182,4 +197,5 @@ fantastic_kernel::verbs! {
     "dump" => Dump,
     "put_bytes" => PutBytes,
     "get_bytes" => GetBytes,
+    "copy" => CopyRows,
 }

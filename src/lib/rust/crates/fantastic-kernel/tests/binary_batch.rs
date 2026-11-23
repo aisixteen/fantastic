@@ -89,10 +89,10 @@ async fn mk() -> (TempDir, Arc<Kernel>, Arc<Mutex<Vec<u8>>>) {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": "kernel_state", "id": "sink",
                    "handler_module": "sink.tools"}),
@@ -106,7 +106,7 @@ async fn a_binary_item_reaches_the_binary_channel_with_a_real_pid() {
     let (_t, kernel, seen) = mk().await;
     let payload: Vec<u8> = (0u8..=255).collect(); // non-utf8: proves it is raw
     let out = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("sink"),
             json!({"type": "write_stream", "path": "blob.bin"}),
         )
@@ -125,7 +125,7 @@ async fn a_named_binary_item_dedups_like_any_other() {
     let (_t, kernel, seen) = mk().await;
     let first: Vec<u8> = vec![1, 2, 3];
     let out = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("sink"),
             json!({"type": "write_stream", "path": "a"}),
         )
@@ -139,7 +139,7 @@ async fn a_named_binary_item_dedups_like_any_other() {
 
     // The SAME id re-sent returns the recorded outcome and runs nothing.
     let again = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("sink"),
             json!({"type": "write_stream", "path": "a"}),
         )
@@ -169,7 +169,7 @@ async fn a_timed_binary_item_still_reaches_the_binary_channel() {
     let (_t, kernel, seen) = mk().await;
     let payload = b"42\n".to_vec();
     let out = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("sink"),
             json!({"type": "write_stream", "path": "answer"}),
         )
@@ -209,7 +209,7 @@ async fn a_plain_read_is_a_plain_call_on_the_row_and_to_watchers() {
         .await
         .is_none());
     let out = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("sink"),
             json!({"type": "read_stream", "path": "a", "offset": 0}),
         )])
@@ -247,7 +247,7 @@ async fn a_write_keeps_the_bytes_slot_where_python_holds_it() {
         .await
         .is_none());
     let out = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("sink"),
             json!({"type": "write_stream", "path": "a", "bytes": null, "truncate": true}),
         )

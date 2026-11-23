@@ -1,17 +1,15 @@
-//! THE PROJECT'S SYSTEM BLOCK: `prompt.md`, in the folder of its own bridge,
-//! `<state>/agents/user/agents/prompt_file/` (owner 2026-10-08:
+//! THE PROJECT'S SYSTEM BLOCK: `prompt.md`, in the state folder (owner 2026-10-08:
 //! "bundled default, seeded, then replace if defined, no appends").
 //!
 //! - SEEDED when missing, at every boot, with [`DEFAULT`] — ai_core's own block
 //!   written in its placeholders (`{self}\n\n{howto}`, ai_core's
 //!   default), then the CLI's building rules — until the human edits it. A
 //!   human, or a coding CLI reading the folder, sees and changes it.
-//! - Every backend agent READS it, as itself, through [`BRIDGE`] (a read-only
-//!   file_bridge exposing only that file): its record names `file_bridge_id:
+//! - Every backend agent READS it, as itself, through [`BRIDGE`] (a file view of
+//!   the `store` bridge, the blueprint's record): its record names `file_bridge_id:
 //!   prompt_file` and `system_prompt_file: prompt.md` — stamped on
-//!   every backend agent that names neither,
-//!   at boot and as each is made (`kern/reach` hands every AI the bridge's
-//!   verbs, both edges). The lib watches the file (`watch_path`): a save is the
+//!   every backend agent that names neither, at boot and as each is made. A chat
+//!   reads it by its own `prompt_file` line. The lib watches the file (`watch_path`): a save is the
 //!   block from the next turn on, no restart — the KV cache rebuilds once, on
 //!   the human's own act. An AI's own `system_prompt` beats the file; nothing is
 //!   appended. A missing or EMPTY file FAILS the turn loud (the lib: no fallback
@@ -21,9 +19,9 @@ use serde_json::{json, Value};
 
 use crate::kern::host::Host;
 
-/// The file, in the bridge's own folder (the bridge's root is `@self`).
+/// The file, in the state folder (the `store` bridge's root), the view's own `path`.
 pub const FILE: &str = "prompt.md";
-/// The read-only bridge every AI reads it through.
+/// The file view every AI reads it through.
 pub const BRIDGE: &str = "prompt_file";
 /// What a fresh project's file holds: ai_core's default block, as placeholders,
 /// then the CLI's building rules (owner 2026-10-16: agents through `create_agent`,
@@ -34,25 +32,12 @@ fn err_of(r: &Value) -> Option<String> {
     r.get("error").and_then(Value::as_str).map(str::to_string)
 }
 
-/// Make (and boot) the bridge when missing, then seed the file in its folder when missing.
+/// Seed the file in the state folder when missing.
 pub async fn ensure(h: &Host) -> Result<(), String> {
     if !h.kernel.exists(BRIDGE) {
-        let r = h
-            .operator("kernel", json!({"type": "create_agent", "parent_id": crate::env::HUMAN, "id": BRIDGE,
-                "handler_module": "file_bridge.tools", "root": "@self", "readonly": true,
-                "allow": [FILE], "ingress_rule": "allow_all_ingress"}))
-            .await
-            .result;
-        if let Some(e) = err_of(&r) {
-            return Err(format!("the prompt bridge `{BRIDGE}`: {e}"));
-        }
+        return Err(format!("the prompt view `{BRIDGE}` is not in the tree"));
     }
-    let dir = h
-        .kernel
-        .agents
-        .get(&fantastic_kernel::AgentId::from(BRIDGE))
-        .map(|a| a.value().root_path.clone())
-        .ok_or_else(|| format!("the prompt bridge `{BRIDGE}` is missing"))?;
+    let dir = h.kernel.state_dir()?;
     let f = dir.join(FILE);
     if !f.exists() {
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -68,8 +53,8 @@ pub async fn stamp(h: &Host, id: &str) -> Result<(), String> {
         return Ok(());
     }
     // None: not a chat (or gone): nothing to stamp. Some(own): names a file or bridge already.
-    let own = h.kernel.agents.get(&fantastic_kernel::AgentId::from(id)).and_then(|a| {
-        let r = a.value().record();
+    let own = h.kernel.resolve_target(id).and_then(|a| {
+        let r = a.record();
         (r.handler_module.as_deref() == Some(fantastic_ai_core::chat_bundle::HANDLER_MODULE)).then(|| ["system_prompt_file", "file_bridge_id"].iter().any(|k| r.meta.get(*k).is_some_and(|v| !v.is_null())))
     });
     if own != Some(false) {
@@ -84,7 +69,7 @@ pub async fn stamp(h: &Host, id: &str) -> Result<(), String> {
 
 /// [`stamp`] every AI agent now.
 pub async fn stamp_all(h: &Host) -> Vec<String> {
-    let ids: Vec<String> = h.kernel.agents.iter().map(|a| a.key().0.clone()).collect();
+    let ids: Vec<String> = h.kernel.agent_ids().into_iter().filter_map(|aid| h.kernel.resolve_target(aid.as_str())).map(|a| a.id.0.clone()).collect();
     let mut notes = Vec::new();
     for id in ids {
         if let Err(e) = stamp(h, &id).await {
@@ -120,10 +105,10 @@ mod tests {
             dir.join(".fantastic"),
             false,
         );
-        kernel.register(Arc::clone(&root));
+        fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
         kernel.set_root(root);
         let put = |id: &str, handler: &str, meta: Value| {
-            kernel.register(Agent::new(
+            fantastic_kernel::test_support::register(&kernel, Agent::new(
                 AgentId::from(id),
                 Some(handler.to_string()),
                 Some(AgentId::from("kernel")),
@@ -141,10 +126,10 @@ mod tests {
             stamp(&h, id).await.unwrap();
         }
         let file = |id: &str| {
-            h.kernel.agents.get(&AgentId::from(id)).unwrap().value().record().meta.get("system_prompt_file").cloned()
+            h.kernel.resolve_target(id).unwrap().record().meta.get("system_prompt_file").cloned()
         };
         assert_eq!(file("chat"), Some(json!(FILE)));
-        assert_eq!(h.kernel.agents.get(&AgentId::from("chat")).unwrap().value().record().meta["file_bridge_id"], json!(BRIDGE));
+        assert_eq!(h.kernel.resolve_target("chat").unwrap().record().meta["file_bridge_id"], json!(BRIDGE));
         assert_eq!(file("backend"), None, "a provider holds no prompt file: it is the chat's field");
         assert_eq!(file("py"), None, "a plain handler with a store field is not stamped");
     }

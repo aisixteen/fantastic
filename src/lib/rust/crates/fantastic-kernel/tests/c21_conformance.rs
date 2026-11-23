@@ -108,6 +108,14 @@ fn subset(expected: &Value, actual: &Value) -> bool {
     }
 }
 
+/// Cases this kernel does not answer, and WHY. Each name is a deliberate,
+/// defended difference; anything not named must pass.
+const SKIP: &[(&str, &str)] = &[(
+    "list-agents-limited",
+    "this kernel has no `list_agents`: it folded into `reflect`, whose `tree=ids` \
+     index pages with `limit`/`after` (grant model v9, gm:102)",
+)];
+
 async fn wired() -> Arc<Kernel> {
     let mut kernel = Kernel::new();
     kernel.bundles.register("c21_echo.tools", C21Probe);
@@ -120,10 +128,10 @@ async fn wired() -> Arc<Kernel> {
         std::env::temp_dir().join("c21-rust"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from(ROOT_ID),
             json!({
                 "type": "create_agent",
@@ -148,10 +156,14 @@ async fn the_shared_c21_corpus_holds_on_this_runtime() {
     let mut checked = 0usize;
     for c in cases {
         let name = c["name"].as_str().unwrap_or("<unnamed>");
+        if let Some((_, why)) = SKIP.iter().find(|(n, _)| *n == name) {
+            eprintln!("skip {name}: {why}");
+            continue;
+        }
         let target = c["target"].as_str().expect("case has no target");
         let payload = c["payload"].clone();
         let item = Item::new(AgentId::from(target), payload);
-        let reply = kernel.send(vec![item]).await.remove(0).result;
+        let reply = kernel.operator_send(vec![item]).await.remove(0).result;
 
         if let Some(expect) = c.get("expect") {
             let want = subst_root(expect);
@@ -173,5 +185,5 @@ async fn the_shared_c21_corpus_holds_on_this_runtime() {
         }
         checked += 1;
     }
-    assert_eq!(checked, cases.len(), "not every case was replayed");
+    assert_eq!(checked + SKIP.len(), cases.len(), "not every case was replayed");
 }

@@ -24,8 +24,7 @@ async fn leg(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, String, Arc<dyn BridgeTr
         &kernel,
         "kernel_state",
         json!({"type": "create_agent", "parent_id": bid, "handler_module": "file_bridge.tools",
-               "id": format!("notes_{bid}"), "root": tmp.path().to_string_lossy(),
-               "callable_by": {"$parent": "*"}}),
+               "id": format!("notes_{bid}"), "root": tmp.path().to_string_lossy()}),
     )
     .await;
     assert!(notes.get("error").is_none(), "{notes}");
@@ -220,7 +219,7 @@ async fn a_restarted_sender_never_joins_a_settled_execution() {
         "kernel_state",
         json!({"type": "create_agent", "parent_id": b_id, "handler_module": "file_bridge.tools",
                "id": doc, "allow": ["."], "root": tb.path().to_string_lossy(),
-               "ingress_rule": "allow_all_ingress", "callable_by": {"$parent": "*"}}),
+               "ingress_rule": "allow_all_ingress"}),
     )
     .await;
     assert!(made.get("error").is_none(), "{made}");
@@ -336,7 +335,7 @@ async fn a_drop_mid_turn_releases_the_called_agent() {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let bid = id_for("brg_dropturn", &tmp);
     create_bridge(&kernel, &bid, "stand_in", "memory").await;
@@ -344,7 +343,7 @@ async fn a_drop_mid_turn_releases_the_called_agent() {
         &kernel,
         "kernel_state",
         json!({"type": "create_agent", "parent_id": bid, "handler_module": "turn_probe.tools",
-               "id": format!("turner_{bid}"), "callable_by": {"$parent": "*"}}),
+               "id": format!("turner_{bid}")}),
     )
     .await;
     assert!(agent.get("error").is_none(), "{agent}");

@@ -10,7 +10,7 @@
 
 use super::*;
 use crate::stream_parts::{cut_marker, Part, PartEvent, PartKind, PartSplitter};
-use fantastic_kernel::test_support::{as_agent, wire};
+use fantastic_kernel::test_support::{as_agent, grant};
 use fantastic_kernel::Status;
 use futures_util::StreamExt;
 use std::collections::HashMap;
@@ -264,7 +264,7 @@ async fn make_ai(kernel: &Arc<Kernel>, id: &str) -> AgentId {
 /// [`make_ai`] over the bundle `module` names.
 async fn make_ai_as(kernel: &Arc<Kernel>, id: &str, module: &str) -> AgentId {
     let memory =
-        fantastic_ram_store::test_support::memory_meta(kernel, id, json!({"cli": "*"})).await;
+        fantastic_ram_store::test_support::memory_meta(kernel, id, json!({"cli": {"call": ["*"]}})).await;
     let mut create = json!({
         "type": "create_agent",
         "parent_id": "kernel",
@@ -297,8 +297,7 @@ async fn ram_store(kernel: &Arc<Kernel>, id: &str) {
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(AgentId::from(target), payload)])
+    kernel.operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -367,7 +366,7 @@ async fn a_call_part_streams_to_its_addressee() {
     let kernel = slow_kernel(&tmp).await;
     let ai = make_ai(&kernel, &id_for(&tmp, "sp_ai")).await;
     ram_store(&kernel, "notes").await;
-    wire(&kernel, ai.as_str(), "notes", json!("*"));
+    grant(&kernel, ai.as_str(), "notes", json!({"call": ["*"]}));
     let mut rx = watcher(&kernel, "notes", "w_notes").await;
     let fp = slow(&ai, &[CALL, DONE], Duration::ZERO);
     call(&kernel, ai.as_str(), json!({"type": "send", "text": "go"})).await;
@@ -399,7 +398,7 @@ async fn a_model_that_stops_with_a_block_open_leaves_the_marker_on_top() {
     let kernel = slow_kernel(&tmp).await;
     let ai = make_ai(&kernel, &id_for(&tmp, "sp_cut")).await;
     ram_store(&kernel, "notes").await;
-    wire(&kernel, ai.as_str(), "notes", json!("*"));
+    grant(&kernel, ai.as_str(), "notes", json!({"call": ["*"]}));
     let mut rx = watcher(&kernel, "notes", "w_cut").await;
     let open_call = "<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>refl";
     let fp = slow(&ai, &[open_call, DONE], Duration::ZERO);
@@ -442,13 +441,13 @@ async fn stop_during_a_stalled_stream_clears_generating() {
     let kernel = slow_kernel(&tmp).await;
     let ai = make_ai(&kernel, &id_for(&tmp, "sp_stall")).await;
     ram_store(&kernel, "rx").await;
-    wire(&kernel, "rx", ai.as_str(), json!("*"));
+    grant(&kernel, "rx", ai.as_str(), json!({"call": ["*"]}));
     // the first chunk never comes: the stream is stalled until the stop
     let fp = slow(&ai, &["never"], Duration::from_secs(600));
     let k = Arc::clone(&kernel);
     let target = ai.clone();
     let turn = tokio::spawn(async move {
-        k.send(vec![Item::new(
+        k.operator_send(vec![Item::new(
             target,
             json!({"type": "send", "text": "go", "client_id": "tab"}),
         )])
@@ -458,7 +457,7 @@ async fn stop_during_a_stalled_stream_clears_generating() {
     until_requests(&fp, 1).await;
     let before = as_agent(
         "rx",
-        kernel.send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
+        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
     )
     .await
     .remove(0)
@@ -466,14 +465,14 @@ async fn stop_during_a_stalled_stream_clears_generating() {
     assert_eq!(before["generating"], json!(true), "{before}");
     let out = as_agent(
         "rx",
-        kernel.send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
+        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
     )
     .await
     .remove(0);
     assert_eq!(out.result, json!({"stopped": true}), "{:?}", out.result);
     let after = as_agent(
         "rx",
-        kernel.send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
+        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
     )
     .await
     .remove(0)
@@ -533,12 +532,12 @@ async fn stop_closes_a_stalled_turn_the_kernel_cancel_did_not_reach() {
     let kernel = base_kernel(&tmp, |k| k.bundles.register(SLOW_DEAF, DeafBundle)).await;
     let ai = make_ai_as(&kernel, &id_for(&tmp, "sp_deaf"), SLOW_DEAF).await;
     ram_store(&kernel, "rx").await;
-    wire(&kernel, "rx", ai.as_str(), json!("*"));
+    grant(&kernel, "rx", ai.as_str(), json!({"call": ["*"]}));
     let fp = slow(&ai, &["never"], Duration::from_secs(600));
     let k = Arc::clone(&kernel);
     let target = ai.clone();
     let turn = tokio::spawn(async move {
-        k.send(vec![Item::new(
+        k.operator_send(vec![Item::new(
             target,
             json!({"type": "send", "text": "go", "client_id": "tab"}),
         )])
@@ -548,14 +547,14 @@ async fn stop_closes_a_stalled_turn_the_kernel_cancel_did_not_reach() {
     until_requests(&fp, 1).await;
     let out = as_agent(
         "rx",
-        kernel.send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
+        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
     )
     .await
     .remove(0);
     assert_eq!(out.result, json!({"stopped": true}), "{:?}", out.result);
     let after = as_agent(
         "rx",
-        kernel.send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
+        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
     )
     .await
     .remove(0)
@@ -573,7 +572,7 @@ async fn stop_closes_a_stalled_turn_the_kernel_cancel_did_not_reach() {
     *fp.step.lock().unwrap() = Duration::ZERO;
     let next = as_agent(
         "rx",
-        kernel.send(vec![Item::new(
+        kernel.operator_send(vec![Item::new(
             ai.clone(),
             json!({"type": "send", "text": "after", "client_id": "tab"}),
         )]),
@@ -600,34 +599,38 @@ async fn stop_reaches_a_reply_woken_turn() {
     let kernel = slow_kernel(&tmp).await;
     let ai = make_ai(&kernel, &id_for(&tmp, "sp_reply")).await;
     ram_store(&kernel, "rx").await;
-    wire(&kernel, "rx", ai.as_str(), json!("*"));
+    grant(&kernel, "rx", ai.as_str(), json!({"call": ["*"]}));
     let fp = slow(&ai, &["never"], Duration::from_secs(600));
     let k = Arc::clone(&kernel);
     let target = ai.clone();
     let born = crate::state::incarnation(&ai);
-    kernel.spawn_task(&ai, "deliver_reply", async move {
-        crate::route::deliver(
-            &k,
-            target.as_str(),
-            "tool reply",
-            "tab",
-            born,
-            false,
-            String::new(),
-        )
-        .await;
-    });
+    // the delivery is the agent's own task, spawned in its dispatch
+    as_agent(ai.clone(), async {
+        kernel.spawn_task(&ai, "deliver_reply", async move {
+            crate::route::deliver(
+                &k,
+                target.as_str(),
+                "tool reply",
+                "tab",
+                born,
+                false,
+                String::new(),
+            )
+            .await;
+        });
+    })
+    .await;
     until_requests(&fp, 1).await;
     let out = as_agent(
         "rx",
-        kernel.send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
+        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
     )
     .await
     .remove(0);
     assert_eq!(out.result, json!({"stopped": true}), "{:?}", out.result);
     let after = as_agent(
         "rx",
-        kernel.send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
+        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
     )
     .await
     .remove(0)
@@ -644,7 +647,7 @@ async fn stop_reaches_a_reply_woken_turn() {
     *fp.step.lock().unwrap() = Duration::ZERO;
     let next = as_agent(
         "rx",
-        kernel.send(vec![Item::new(
+        kernel.operator_send(vec![Item::new(
             ai.clone(),
             json!({"type": "send", "text": "after", "client_id": "tab"}),
         )]),
@@ -669,12 +672,12 @@ async fn stop_aborts_a_send_the_kernel_cancel_does_not_find() {
     let kernel = slow_kernel(&tmp).await;
     let ai = make_ai(&kernel, &id_for(&tmp, "sp_abort_arm")).await;
     ram_store(&kernel, "rx").await;
-    wire(&kernel, "rx", ai.as_str(), json!("*"));
+    grant(&kernel, "rx", ai.as_str(), json!({"call": ["*"]}));
     let fp = slow(&ai, &["never"], Duration::from_secs(600));
     let k = Arc::clone(&kernel);
     let target = ai.clone();
     let turn = tokio::spawn(async move {
-        k.send(vec![Item::new(
+        k.operator_send(vec![Item::new(
             target,
             json!({"type": "send", "text": "go", "client_id": "tab"}),
         )])
@@ -691,7 +694,7 @@ async fn stop_aborts_a_send_the_kernel_cancel_does_not_find() {
     }
     let out = as_agent(
         "rx",
-        kernel.send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
+        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
     )
     .await
     .remove(0);
@@ -706,7 +709,7 @@ async fn stop_aborts_a_send_the_kernel_cancel_does_not_find() {
     );
     let after = as_agent(
         "rx",
-        kernel.send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
+        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
     )
     .await
     .remove(0)
@@ -723,7 +726,7 @@ async fn stop_aborts_a_send_the_kernel_cancel_does_not_find() {
     *fp.step.lock().unwrap() = Duration::ZERO;
     let next = as_agent(
         "rx",
-        kernel.send(vec![Item::new(
+        kernel.operator_send(vec![Item::new(
             ai.clone(),
             json!({"type": "send", "text": "after", "client_id": "tab"}),
         )]),
@@ -742,7 +745,7 @@ async fn a_receiver_stops_the_stream_and_the_turn_keeps_a_marker() {
     let kernel = slow_kernel(&tmp).await;
     let ai = make_ai(&kernel, &id_for(&tmp, "sp_stop")).await;
     ram_store(&kernel, "rx").await;
-    wire(&kernel, "rx", ai.as_str(), json!("*"));
+    grant(&kernel, "rx", ai.as_str(), json!({"call": ["*"]}));
     let mut w = watcher(&kernel, ai.as_str(), "w_stop").await;
     let long = "partial words ".repeat(200);
     let fp = slow(&ai, &[&long, DONE], Duration::from_millis(10));
@@ -750,7 +753,7 @@ async fn a_receiver_stops_the_stream_and_the_turn_keeps_a_marker() {
     let k = Arc::clone(&kernel);
     let target = ai.clone();
     let turn = tokio::spawn(async move {
-        k.send(vec![Item::new(
+        k.operator_send(vec![Item::new(
             target,
             json!({"type": "send", "text": "go", "client_id": "tab"}),
         )])
@@ -761,7 +764,7 @@ async fn a_receiver_stops_the_stream_and_the_turn_keeps_a_marker() {
     tokio::time::sleep(Duration::from_millis(200)).await; // some text has streamed
     let out = as_agent(
         "rx",
-        kernel.send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
+        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
     )
     .await
     .remove(0);
@@ -812,12 +815,12 @@ async fn rows_is_a_view_of_what_the_agent_holds() {
     let kernel = slow_kernel(&tmp).await;
     let ai = make_ai(&kernel, &id_for(&tmp, "sp_rows")).await;
     ram_store(&kernel, "viewer").await;
-    wire(&kernel, "viewer", ai.as_str(), json!(["rows"]));
+    grant(&kernel, "viewer", ai.as_str(), json!({"call": ["rows"]}));
     let rows = |payload: Value| {
         let k = Arc::clone(&kernel);
         let target = ai.clone();
         async move {
-            as_agent("viewer", k.send(vec![Item::new(target, payload)]))
+            as_agent("viewer", k.operator_send(vec![Item::new(target, payload)]))
                 .await
                 .remove(0)
                 .result
@@ -860,17 +863,17 @@ async fn rows_is_a_view_of_what_the_agent_holds() {
     let n = |v: &Value| v["rows"].as_array().map_or(0, Vec::len) as u64;
     assert_eq!(n(&page) + n(&rest), total, "{page} {rest}");
     assert_eq!(rest["next"], Value::Null, "{rest}");
-    // an ungranted caller is refused by the gate
+    // an ungranted caller is refused by the gate: the unknown answer
     ram_store(&kernel, "stranger").await;
     let out = as_agent(
         "stranger",
-        kernel.send(vec![Item::new(ai.clone(), json!({"type": "rows"}))]),
+        kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "rows"}))]),
     )
     .await
     .remove(0);
     assert_eq!(
-        out.result["reason"],
-        json!("unauthorized"),
+        out.result,
+        fantastic_kernel::refusal::unknown_agent(ai.as_str()),
         "{:?}",
         out.result
     );
@@ -888,7 +891,7 @@ async fn a_message_carries_the_stream_it_was_previewed_as() {
     let kernel = slow_kernel(&tmp).await;
     let prod_id = make_ai(&kernel, &id_for(&tmp, "sp_prod")).await;
     let cons_id = make_ai(&kernel, &id_for(&tmp, "sp_cons")).await;
-    wire(&kernel, prod_id.as_str(), cons_id.as_str(), json!("*"));
+    grant(&kernel, prod_id.as_str(), cons_id.as_str(), json!({"call": ["*"]}));
     let mut rx = watcher(&kernel, cons_id.as_str(), "w_cons").await;
     let msg = format!(
         "<call name=\"send\">\n<routing><target_id>{}</target_id></routing><payload><type>send</type>\n\
@@ -997,7 +1000,7 @@ async fn status_during_a_stream_is_json() {
     let k = Arc::clone(&kernel);
     let target = ai.clone();
     let turn = tokio::spawn(async move {
-        k.send(vec![Item::new(
+        k.operator_send(vec![Item::new(
             target,
             json!({"type": "send", "text": "go"}),
         )])
@@ -1026,7 +1029,7 @@ async fn a_cut_pass_sends_nothing_not_even_its_closed_calls() {
     let kernel = slow_kernel(&tmp).await;
     let ai = make_ai(&kernel, &id_for(&tmp, "sp_all")).await;
     ram_store(&kernel, "notes").await;
-    wire(&kernel, ai.as_str(), "notes", json!("*"));
+    grant(&kernel, ai.as_str(), "notes", json!({"call": ["*"]}));
     let done_one = "<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>reflect</type></payload></call>";
     let open_two = "<call name=\"send\"><routing><target_id>notes</target_id></routing><payload><type>refl";
     let pass = format!("{done_one} then {open_two}");
@@ -1058,7 +1061,7 @@ async fn deltas_never_reach_the_state_stream() {
     let kernel = slow_kernel(&tmp).await;
     let ai = make_ai(&kernel, &id_for(&tmp, "sp_q")).await;
     ram_store(&kernel, "notes").await;
-    wire(&kernel, ai.as_str(), "notes", json!("*"));
+    grant(&kernel, ai.as_str(), "notes", json!({"call": ["*"]}));
     let mut rx = watcher(&kernel, "notes", "w_q").await;
     let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
     let tap = Arc::clone(&seen);

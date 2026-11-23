@@ -208,6 +208,35 @@ impl Ledger {
             .copied()
     }
 
+    /// The execution a caller's NAME refers to, when `caller` started it: the
+    /// operator (`None`) resolves every name, an agent only the names of the
+    /// executions it originated. Any other name answers as unresolved.
+    #[must_use]
+    pub fn resolve_own_name(&self, name: &str, caller: Option<&AgentId>) -> Option<i64> {
+        let g = self.inner.lock().expect("ledger poisoned");
+        let id = *g.names.get(name)?;
+        match caller {
+            None => Some(id),
+            Some(c) => g
+                .rows
+                .get(&id)
+                .is_some_and(|r| r.caller.as_ref() == Some(c))
+                .then_some(id),
+        }
+    }
+
+    /// WHO ORIGINATED the execution under `execution_id`: `Some(None)` for the
+    /// operator, `None` when no row is there.
+    #[must_use]
+    pub(crate) fn originator(&self, execution_id: i64) -> Option<Option<AgentId>> {
+        self.inner
+            .lock()
+            .expect("ledger poisoned")
+            .rows
+            .get(&execution_id)
+            .map(|r| r.caller.clone())
+    }
+
     /// Whether a row exists under `execution_id` (named or not, settled or not).
     #[must_use]
     pub fn has(&self, execution_id: i64) -> bool {

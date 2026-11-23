@@ -504,8 +504,8 @@ fn gate(meta: &Map<String, Value>, agent_id: &AgentId, verb: &str) -> Option<Val
 /// Snapshot the agent record's meta map. Returns an empty map if the
 /// agent has been deleted concurrently.
 fn snapshot_meta(agent_id: &AgentId, kernel: &Kernel) -> Map<String, Value> {
-    match kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) {
-        Some(a) => a.meta.read().expect("meta poisoned").clone(),
+    match kernel.resolve_target(agent_id.as_str()) {
+        Some(a) => a.record().meta.clone(),
         None => Map::new(),
     }
 }
@@ -668,9 +668,7 @@ fn stop_reply(agent_id: &AgentId, want: Option<&JobRef>) -> Value {
 
 /// The agent's own folder (empty when it is gone).
 fn agent_own_root(kernel: &Kernel, id: &AgentId) -> std::path::PathBuf {
-    kernel
-        .agents
-        .get(id)
+    kernel.resolve_target(id.as_str())
         .map(|a| a.root_path.clone())
         .unwrap_or_default()
 }
@@ -896,7 +894,7 @@ async fn start_job(
     // dispatch identity into the relay. A `tokio::spawn` inherits no task-local,
     // so the relay would forward frames with NO sender, i.e. as the OPERATOR,
     // ungated, and a spawned program could reach any agent. The runner's
-    // `can_call` bounds its programs.
+    // `can` lines bound its programs.
     // The relay's stop signal, held on the job row. `teardown` raises it instead of
     // aborting this task, so the relay leaves by its own read loop and the proxy
     // release after that loop actually runs.

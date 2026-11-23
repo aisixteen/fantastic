@@ -51,7 +51,7 @@ fn kernel(tmp: &TempDir) -> Arc<Kernel> {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     kernel
 }
@@ -70,8 +70,7 @@ async fn mk(kernel: &Arc<Kernel>, tmp: &TempDir, id: &str, extra: Value) -> Valu
 }
 
 async fn call(kernel: &Arc<Kernel>, id: &str, p: Value) -> Value {
-    kernel
-        .send(vec![Item::new(AgentId::from(id), p)])
+    kernel.operator_send(vec![Item::new(AgentId::from(id), p)])
         .await
         .remove(0)
         .result

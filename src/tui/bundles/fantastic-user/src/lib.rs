@@ -1,12 +1,11 @@
 //! `user` — THE ONE HUMAN, as an agent (`user.tools`; owner, 2026-10-03/04: one
-//! user, the root of everything that is the human's). Every call the terminal
-//! and the canvas make goes OUT THROUGH IT, so it is the sender: its grants are
-//! checked and replies route back to it.
+//! user, the root of everything that is the human's). The shell itself is the
+//! operator; `user` is the person's place in the tree, the parent of the user
+//! space and the system helpers.
 //!
-//! Its verbs are declared in [`verbs`] (`reflect` and `docs` render them), its record
-//! in [`record`]: `forward` (a call made AS the human, the reply verbatim, no default
-//! timeout), `around` (the cells of a page view near a point, from the page records,
-//! judged by the CALLER's own page grants), `path` (the human's programs, scanned at
+//! Its verbs are declared in [`verbs`] (`reflect` renders them), its record in
+//! [`record`]: `around` (the cells of a page view near a point, from the page records,
+//! judged by the CALLER's own page lines), `path` (the human's programs, scanned at
 //! boot), `export_subtree` / `import_subtree` (a subtree as a blueprint folder and back,
 //! `export.rs` / `import.rs`), and the person's inquiries (the kernel's `inquiry` module). A
 //! page loader serves record verbs inside its caller's subtree; the canvas's loader sits
@@ -24,7 +23,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
-use fantastic_kernel::{AgentId, Blob, Item, Kernel, Status, Step};
+use fantastic_kernel::{AgentId, Blob, Item, Kernel, Status};
 use serde_json::{json, Value};
 
 /// The handler.
@@ -32,16 +31,7 @@ pub const HANDLER_MODULE: &str = "user.tools";
 
 /// What the bundle is for: its one short man text; how to call it is rendered from its
 /// declared verbs (`docs`, `reflect`).
-const MAN: &str = "The one human, as an agent: every call the terminal and the canvas make goes out through it, so it is the sender and its grants are checked. It also holds the questions agents ask the person, answers a page's `around` queries, and keeps the human's program list.";
-
-/// What a page's leg may call on `user`: every declared verb but `boot`, then `reflect`.
-#[must_use]
-pub fn page_verbs() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> =
-        verbs::VERBS.iter().map(|v| v.name).filter(|n| *n != "boot").collect();
-    names.push("reflect");
-    names
-}
+const MAN: &str = "The one human, as an agent: the parent of the user space and the system helpers. It holds the questions agents ask the person, answers a page's `around` queries, and keeps the human's program list.";
 
 /// A view's children that are not cells: its background (drawn behind them),
 /// its layouts, a double click's selector, the backgrounds agent.
@@ -91,8 +81,8 @@ pub struct UserBundle {
 
 impl UserBundle {
     fn page_loader(kernel: &Kernel, gw: &AgentId) -> Option<String> {
-        kernel.agents.get(gw).and_then(|a| {
-            a.value()
+        kernel.resolve_target(gw.as_str()).and_then(|a| {
+            a
                 .record()
                 .meta
                 .get("page_loader")
@@ -103,15 +93,13 @@ impl UserBundle {
 
     /// A canvas node's page loader: its `kernel_state` child.
     fn loader_of(kernel: &Kernel, canvas: &str) -> Option<String> {
-        kernel
-            .agents
-            .iter()
+        kernel.agent_ids().into_iter().filter_map(|aid| kernel.resolve_target(aid.as_str()))
             .find(|a| {
-                let r = a.value().record();
+                let r = a.record();
                 r.parent_id.as_deref() == Some(canvas)
                     && r.handler_module.as_deref() == Some("kernel_state.tools")
             })
-            .map(|a| a.key().0.clone())
+            .map(|a| a.id.0.clone())
     }
 
     /// One item, sent from inside this handler: its sender is `user`.
@@ -120,7 +108,7 @@ impl UserBundle {
         let mut out = k.send(vec![item]).await;
         let o = out.remove(0);
         let result = match o.status {
-            Status::TimedOut if o.result.is_null() => refuse("timed_out", "user.forward: timeout"),
+            Status::TimedOut if o.result.is_null() => refuse("timed_out", "user: timeout"),
             _ => o.result,
         };
         (result, o.body)
@@ -162,36 +150,6 @@ impl UserBundle {
         up
     }
 
-    /// `forward` — `user` calls `target`.
-    async fn forward(a: verbs::Forward, body: Option<Blob>, kernel: &Arc<Kernel>) -> (Value, Option<Blob>) {
-        let (target, mut inner, timeout) = (a.target, a.payload, a.timeout);
-        // A call made as text on a peer (a model's `<wait_s>30</wait_s>`) could not be typed
-        // there: its target is declared only here. Its values take the type the target
-        // verb's schema states, or the call is refused by argument name.
-        if let Err(refused) = fantastic_kernel::typing::payload(kernel, &target, &mut inner).await {
-            return (refused, None);
-        }
-        let mut item = Item::new(AgentId::from(target.as_str()), Value::Object(inner));
-        item.timeout = timeout;
-        if let Some(b) = body {
-            // the body's slot is under this call's `payload`: one step less on the far item
-            let mut path = b.path;
-            if path.first() == Some(&Step::Key("payload".into())) {
-                path.remove(0);
-            }
-            item = item.with_binary(path, b.bytes);
-        }
-        // the forward's secret marks under `payload` mark the onward send the same way
-        let marks: Vec<String> = fantastic_kernel::current_secret()
-            .into_iter()
-            .filter_map(|m| m.strip_prefix("payload.").map(str::to_string))
-            .collect();
-        if !marks.is_empty() {
-            item = item.with_secret(marks);
-        }
-        Self::send_as(kernel, item).await
-    }
-
     /// `around {view?, x, y, radius}` from the page records.
     async fn around(me: &AgentId, a: verbs::Around, kernel: &Arc<Kernel>) -> Value {
         let loader = match a.canvas.as_deref() {
@@ -212,8 +170,8 @@ impl UserBundle {
             },
         };
         let (x, y, radius) = (a.x, a.y, a.radius);
-        // whose page grants judge it: `None` = the shell, sees everything; any
-        // other caller by its own page grants (the canvas leg holds `*|*`)
+        // whose page lines judge it: `None` = the shell, sees everything; any
+        // other caller by its own page lines
         let judge = fantastic_kernel::current_origin();
         let (recs, guid) = Self::tree(kernel, &loader).await;
         let view = a.view;
@@ -237,7 +195,7 @@ impl UserBundle {
         let sees = |id: &str| match &judge {
             None => true,
             Some(u) => grants::sees(&grants::page_verbs(
-                &grants::can_call(kernel, u),
+                &grants::lines(kernel, u),
                 &guid,
                 id,
                 &up,
@@ -327,18 +285,6 @@ impl Handler for UserBundle {
         call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        Ok(self.handle_binary(agent_id, call, None, kernel).await?.0)
-    }
-
-    /// Every call lands here (the kernel's binary path): `forward` carries the body of the
-    /// call onward and answers the body of the reply.
-    async fn handle_binary(
-        &self,
-        agent_id: &AgentId,
-        call: Self::Call,
-        body: Option<Blob>,
-        kernel: &Arc<Kernel>,
-    ) -> Result<(Reply, Option<Blob>), BundleError> {
         let reply = match call {
             verbs::Call::Boot(_) => {
                 // the scan starts with `user`, off the boot's path
@@ -349,11 +295,7 @@ impl Handler for UserBundle {
                         *h = Some(path::scan().await);
                     }
                 });
-                return Ok((None, None));
-            }
-            verbs::Call::Forward(a) => {
-                let (r, b) = Self::forward(a, body, kernel).await;
-                return Ok((Some(r), b));
+                return Ok(None);
             }
             verbs::Call::Reflect(_) => self.reflect(agent_id, kernel),
             verbs::Call::Path(a) => self.path(&a).await,
@@ -377,6 +319,6 @@ impl Handler for UserBundle {
             verbs::Call::Inquiries(a) => fantastic_kernel::inquiry::list(agent_id, &a, kernel),
             verbs::Call::AnswerInquiry(a) => fantastic_kernel::inquiry::answer(agent_id, a, kernel).await,
         };
-        Ok((Some(reply), None))
+        Ok(Some(reply))
     }
 }

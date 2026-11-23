@@ -20,7 +20,7 @@ use fantastic_kernel::bundle::{BundleError, BundleRegistry, Handler, Reply};
 use fantastic_kernel::test_support::{register_fake_store, register_root_loader, wire_fake_store};
 use fantastic_kernel::test_support::as_agent;
 use fantastic_kernel::{AgentId, Item, Kernel, Outcome};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 // ── a probe: counts per process, fails on purpose ─────────────────────────────
 
@@ -126,7 +126,7 @@ fn registry(dir: &Path) -> BundleRegistry {
     let mut reg = BundleRegistry::new();
     register_root_loader(&mut reg);
     register_fake_store(&mut reg, &dir.join(".fantastic"));
-    reg.register(fantastic_sqlite_store::HANDLER_MODULE, fantastic_sqlite_store::SqliteStoreBundle::default());
+    reg.register(fantastic_sqlite_store::HANDLER_MODULE, fantastic_sqlite_store::SqliteStoreBundle);
     reg.register("sql_probe.tools", Probe::default());
     reg.register("ai_chat.tools", fantastic_ai_core::chat_bundle::AiChatBundle);
     reg.register("canned_provider.tools", CannedProvider);
@@ -143,18 +143,18 @@ fn boot(dir: &Path) -> Arc<Kernel> {
 }
 
 async fn call(k: &Arc<Kernel>, target: &str, payload: Value) -> Outcome {
-    k.send(vec![Item::new(AgentId::from(target), payload)]).await.remove(0)
+    k.operator_send(vec![Item::new(AgentId::from(target), payload)]).await.remove(0)
 }
 
 async fn call_as(k: &Arc<Kernel>, who: &str, target: &str, payload: Value) -> Value {
-    as_agent(AgentId::from(who), k.send(vec![Item::new(AgentId::from(target), payload)]))
+    as_agent(AgentId::from(who), k.operator_send(vec![Item::new(AgentId::from(target), payload)]))
         .await
         .remove(0)
         .result
 }
 
 async fn call_named(k: &Arc<Kernel>, target: &str, payload: Value, name: &str) -> Outcome {
-    k.send(vec![Item::new(AgentId::from(target), payload).with_id(name)]).await.remove(0)
+    k.operator_send(vec![Item::new(AgentId::from(target), payload).with_id(name)]).await.remove(0)
 }
 
 fn root_id(k: &Arc<Kernel>) -> String {
@@ -162,7 +162,7 @@ fn root_id(k: &Arc<Kernel>) -> String {
 }
 
 fn guid(k: &Arc<Kernel>) -> String {
-    k.root().unwrap().meta.read().unwrap()["guid"].as_str().unwrap().to_string()
+    k.root().unwrap().record().meta["guid"].as_str().unwrap().to_string()
 }
 
 async fn create(k: &Arc<Kernel>, fields: Value) {
@@ -180,14 +180,10 @@ async fn create(k: &Arc<Kernel>, fields: Value) {
 async fn wire(k: &Arc<Kernel>, dir: &Path, probes: &[&str]) {
     fantastic_kernel::test_support::boot_root(k).await; // mints the guid
     wire_fake_store(k, &dir.join(".fantastic")).await;
-    let mut readers = Map::new();
-    readers.insert("ai".into(), json!("*"));
-    for p in probes {
-        readers.insert((*p).into(), json!("*"));
-    }
+    // the store keeps no list of readers: each holds its own line on it
     create(k, json!({
         "id": "memory", "handler_module": fantastic_sqlite_store::HANDLER_MODULE,
-        "path": "mem.db", "callable_by": readers,
+        "path": "mem.db",
     }))
     .await;
     let r = call(k, "kernel", json!({"type": "update_agent", "id": root_id(k), "memory_store_id": "memory"})).await;
@@ -195,20 +191,18 @@ async fn wire(k: &Arc<Kernel>, dir: &Path, probes: &[&str]) {
     for p in probes {
         create(k, json!({
             "id": p, "handler_module": "sql_probe.tools",
-            "callable_by": {"rest": "*", "ai": "*", "$parent": "*"},
-            "can_call": {"memory": "*"},
+            "can": {"memory": {"call": ["*"]}},
         }))
         .await;
     }
     create(k, json!({
         "id": "canned_p", "handler_module": "canned_provider.tools",
-        "callable_by": {"ai": "*"},
     }))
     .await;
     create(k, json!({
         "id": "ai", "handler_module": "ai_chat.tools", "provider_id": "canned_p", "model": "canned",
         "context_window": 32768, "memory_store_id": "memory",
-        "can_call": {"memory": "*", "cli": "*", "canned_p": ["complete", "watch"]},
+        "can": {"memory": {"call": ["*"]}, "cli": {"call": ["*"]}, "canned_p": {"call": ["complete", "watch"]}},
     }))
     .await;
     let out = k.start(false).await;
@@ -462,10 +456,10 @@ async fn a_stop_keeps_the_file_and_delete_agent_removes_it() {
     // a second store, so the kernel keeps its own while this one is deleted
     create(&k, json!({
         "id": "notes", "handler_module": fantastic_sqlite_store::HANDLER_MODULE,
-        "path": "notes.db", "callable_by": {"alice": "*"},
+        "path": "notes.db",
     }))
     .await;
-    let r = call(&k, "kernel", json!({"type": "update_agent", "id": "alice", "can_call": {"memory": "*", "notes": "*"}})).await;
+    let r = call(&k, "kernel", json!({"type": "update_agent", "id": "alice", "can": {"memory": {"call": ["*"]}, "notes": {"call": ["*"]}}})).await;
     assert!(r.result.get("error").is_none(), "{}", r.result);
     let row = k.mint_id();
     let r = call_as(&k, "alice", "notes", json!({"type": "append", "rows": [{"id": row, "content": "keep me"}]})).await;

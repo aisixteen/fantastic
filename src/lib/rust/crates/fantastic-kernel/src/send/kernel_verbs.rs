@@ -28,46 +28,21 @@ pub(super) async fn handle_kernel_verb(
         Err(refused) => return Ok(refused),
     };
     Ok(match call {
-        K::Docs(args) => {
-            if args.of.contains('|') {
-                crate::docs::remote_docs_reply(kernel, &args).await
-            } else {
-                crate::docs::docs_reply(kernel, &args)
-            }
+        K::CreateAgent(args) => {
+            let caller = crate::send::current_origin();
+            crate::lifecycle::create_agent(kernel, caller.as_ref(), args).await
         }
-        K::ListAgents(args) => {
-            // REGISTRATION ORDER — python iterates `self.ctx.agents`, a plain
-            // dict, and the root comes first because it registered first. The
-            // port sorted by id, which put every alphabetically-earlier agent
-            // ahead of the root.
-            let mut out: Vec<Value> = Vec::new();
-            for id in kernel.agent_ids() {
-                if let Some(a) = kernel.agents.get(&id) {
-                    out.push(crate::jsonsafe::record_value(&a.record()));
-                }
-            }
-            // PAGED. Absent `limit` ⇒ everything and `next: null`, so a caller
-            // that never learned about paging is unaffected; the cursor is the
-            // last id handed over, never an offset.
-            let (out, next) = crate::paging::page(out, args.limit, args.after.as_deref(), |r| {
-                crate::paging::id_text(r.get("id"))
-            });
-            // `more` is not decoration (py-canonical): a model that opens with
-            // `list_agents` gets bare records and never learns that authoring a
-            // script agent is the mechanism, while one that opens with `reflect`
-            // gets `self_extension`. This verb rides every reflect's
-            // `system_verbs`, so it needs a signpost back to the briefing.
-            json!({ "agents": out, "next": next, "more": LIST_HINT })
+        K::DeleteAgent(args) => {
+            let caller = crate::send::current_origin();
+            crate::lifecycle::delete_agent(kernel, caller.as_ref(), &args).await
         }
-        K::CreateAgent(args) => crate::lifecycle::create_agent(kernel, target, args).await,
-        K::DeleteAgent(args) => crate::lifecycle::delete_agent(kernel, target, &args).await,
         K::UpdateAgent(args) => update_agent(kernel, target, args).await,
         // The EXECUTION LEDGER — a PROJECTION, not a table: the executions still
         // in RAM (in flight, or settled and not yet flushed) merged with the
         // `call`/`settle`/`ack` rows the kernel flushed into its memory store —
         // each call paired with its settle. CALLER-SCOPED: an agent sees what IT
-        // originated, the operator sees all. Unscoped this would be a side-channel
-        // around `callable_by`.
+        // originated, the operator sees all. It needs no line: unscoped it would be
+        // a read of every caller's executions.
         K::Ledger(args) => {
             let viewer = crate::send::current_origin();
             let entries = match kernel.ledger_entries().await {
@@ -97,21 +72,20 @@ pub(super) async fn handle_kernel_verb(
         K::AwaitCancel(args) => {
             crate::await_set::await_cancel(kernel, crate::send::current_origin(), &args).await
         }
-        // The live TASK TABLE, kernel-wide (like `list_agents`), not per-agent:
-        // one row per in-flight dispatch, `parent` chaining them into the send
-        // tree. `ps` shows its own row too — it IS a dispatch. The table is honest.
+        // The live TASK TABLE: one row per in-flight dispatch, `parent` chaining
+        // them into the send tree. `ps` shows its own row too — it IS a dispatch.
+        // It needs no line. The operator sees every row; an agent sees the rows of
+        // the agents in its own tree, with a `parent` task of an agent outside it
+        // shown as `null`. Kernel service tasks are the operator's alone.
         K::Ps(args) => {
-            // PAGED like `list_agents` — same cursor law: the id of the last row
-            // handed over. Over a LIVE table a cursor may miss a row that
-            // finished mid-walk; this is a kernel, not a snapshot store.
-            let (rows, next) = crate::paging::page(
-                kernel.tasks.rows(),
-                args.limit,
-                args.after.as_deref(),
-                |r| {
-                    crate::paging::id_text(r.get("id"))
-                },
-            );
+            let viewer = crate::send::current_origin();
+            let rows = visible_tasks(kernel, viewer.as_ref());
+            // PAGED — the cursor is the id of the last row handed over. Over a
+            // LIVE table a cursor may miss a row that finished mid-walk; this is
+            // a kernel, not a snapshot store.
+            let (rows, next) = crate::paging::page(rows, args.limit, args.after.as_deref(), |r| {
+                crate::paging::id_text(r.get("id"))
+            });
             json!({ "tasks": rows, "next": next })
         }
         // Kill a task AND ITS SUBTREE (children first, like killing a process
@@ -123,41 +97,49 @@ pub(super) async fn handle_kernel_verb(
         // read as a number. Either resolving to nothing is an honest
         // `{cancelled:false}`, not a refusal: python does not pretend to know whether
         // a stranger's id ever existed.
+        //
+        // OWN ONLY: an agent cancels the tasks of the agents in its own tree, and
+        // resolves only the names of executions it started; anything else answers
+        // as unresolved. A kernel service task stays the operator's.
         K::Cancel(args) => {
+            let viewer = crate::send::current_origin();
             let resolved = match args.task_id {
                 IdOrName::Id(n) => Some(n),
-                IdOrName::Name(name) => kernel.ledger.resolve_name(&name),
+                IdOrName::Name(name) => kernel.ledger.resolve_own_name(&name, viewer.as_ref()),
+            };
+            let reachable = |n: i64| match &viewer {
+                None => true,
+                Some(v) => {
+                    let t = TaskId(n);
+                    !kernel.is_service_task(&t)
+                        && kernel
+                            .tasks
+                            .agent_of(&t)
+                            .is_some_and(|a| kernel.in_tree(&a, v))
+                }
             };
             match resolved {
-                Some(n) => kernel.cancel_task(&TaskId(n)).await,
-                None => json!({"cancelled": false, "killed": []}),
+                Some(n) if reachable(n) => kernel.cancel_task(&TaskId(n)).await,
+                _ => json!({"cancelled": false, "killed": []}),
             }
+        }
+        // THE PROCESS VERBS are the in-process operator's alone: an agent caller
+        // (a remote operator through a leg included) is refused before anything
+        // runs. Kernel verbs are answered on the root only (a kernel verb sent to
+        // any other agent is answered `not_here` before it reaches here).
+        K::KernelStart(_) | K::ShutdownAgents(_) | K::KernelStop(_)
+            if crate::send::current_origin().is_some() =>
+        {
+            let verb = verb_of(payload);
+            crate::refusal::refusal(
+                crate::refusal::NOT_ALLOWED,
+                format!("{verb}: operator only"),
+            )
         }
         // THE START SEQUENCE — see `Kernel::start`. Idempotent.
         K::KernelStart(_) => kernel.start(true).await,
-        K::ShutdownAgents(_) => {
-            // Root control surface only, gated on rootness like
-            // `kernel_stop` so it holds whether the verb was addressed to
-            // the literal root id or via the reserved `kernel` address.
-            if target.parent_id.is_some() {
-                return Ok(json!({
-                    "error": "shutdown_agents: root control surface only; \
-                              address the kernel root ('kernel')"
-                }));
-            }
-            kernel.shutdown_agents().await
-        }
+        K::ShutdownAgents(_) => kernel.shutdown_agents().await,
         K::KernelStop(_) => {
-            // Root control surface only. Gate on rootness
-            // (parent_id is None) so it holds whether the verb was
-            // addressed to the literal root id or via the reserved `kernel` address —
-            // never an arbitrary child agent.
-            if target.parent_id.is_some() {
-                return Ok(json!({
-                    "error": "kernel_stop: root control surface only; \
-                              address the kernel root ('kernel')"
-                }));
-            }
             // Order: (1) ack and let it flush; (2) AFTER the reply is on the wire,
             // trigger the daemon's graceful path — drain, every call settles
             // (done, or cancelled into the dead letters), the last execution rows
@@ -176,9 +158,91 @@ pub(super) async fn handle_kernel_verb(
     })
 }
 
+/// The `ps` rows `viewer` sees: every row for the operator (`None`); for an
+/// agent, the rows whose `agent` is in its own tree, kernel service tasks left
+/// out, and a `parent` task whose agent is outside that set shown as `null`.
+fn visible_tasks(kernel: &Arc<Kernel>, viewer: Option<&AgentId>) -> Vec<Value> {
+    let rows = kernel.tasks.rows();
+    let Some(v) = viewer else {
+        return rows;
+    };
+    let shown = |row: &Value| -> bool {
+        let Some(n) = row.get("id").and_then(Value::as_i64) else {
+            return false;
+        };
+        !kernel.is_service_task(&TaskId(n))
+            && row
+                .get("agent")
+                .and_then(Value::as_str)
+                .is_some_and(|a| kernel.in_tree(&AgentId::from(a), v))
+    };
+    let ids: std::collections::HashSet<i64> = rows
+        .iter()
+        .filter(|r| shown(r))
+        .filter_map(|r| r.get("id").and_then(Value::as_i64))
+        .collect();
+    rows.into_iter()
+        .filter(|r| r.get("id").and_then(Value::as_i64).is_some_and(|n| ids.contains(&n)))
+        .map(|mut r| {
+            let hidden = r
+                .get("parent")
+                .and_then(Value::as_i64)
+                .is_some_and(|p| !ids.contains(&p));
+            if hidden {
+                r["parent"] = Value::Null;
+            }
+            r
+        })
+        .collect()
+}
+
+/// Is field `key` of `target` FORCED by a live agent's create line: a line whose
+/// target's tree strictly holds `target`, whose `who` matches its id and whose
+/// `what[bundle][key]` is a value (not `"*"`)? Only the operator changes a forced
+/// field. A scan of the live lines at update time.
+fn forced_field(kernel: &Arc<Kernel>, target: &Agent, key: &str) -> bool {
+    let bundle = target.handler_module.as_deref().unwrap_or("");
+    kernel.agent_ids().iter().any(|holder| {
+        let Some(h) = kernel.agents.get(holder).map(|e| Arc::clone(&e)) else {
+            return false;
+        };
+        let can = h
+            .meta
+            .read()
+            .expect("meta lock poisoned")
+            .get("can")
+            .cloned()
+            .unwrap_or(Value::Null);
+        crate::authz::solver::lines_of(&can).into_iter().any(|l| {
+            let (crate::authz::Target::Id(t), crate::authz::Level::Create { who, what }) =
+                (l.target, l.level)
+            else {
+                return false;
+            };
+            let t = AgentId::from(t.as_str());
+            t != target.id
+                && kernel.in_tree(&target.id, &t)
+                && crate::lifecycle::who_matches(&who, target.id.as_str())
+                && matches!(
+                    crate::lifecycle::field_rule(&what, bundle, key),
+                    crate::lifecycle::FieldRule::Forced(_)
+                )
+        })
+    })
+}
+
+/// `update_agent`, answered by the ROOT (`root`): the agent named by `id` is the
+/// operand. The CALLER is `current_origin()`: the operator (`None`) changes any
+/// field; an agent changes field K of agent X only when its lines (capped) allow
+/// `update K` on X, except that it writes every non-`can` field of its OWN record
+/// (a bundle's own fields). `can` on its own record stays refused (never upward),
+/// and a field a create line forces is the operator's alone. Any refused key
+/// answers the unknown answer for the target, as a missing id does. A `can` an
+/// agent writes holds only lines its own written lines hold (rule 7,
+/// [`crate::authz::glue::check_can_edit`]).
 async fn update_agent(
     kernel: &Arc<Kernel>,
-    caller: &Arc<Agent>,
+    root: &Arc<Agent>,
     args: crate::declared::kernel::UpdateAgent,
 ) -> Value {
     let id = AgentId::from(args.id.as_str());
@@ -188,17 +252,26 @@ async fn update_agent(
     let patch: Map<String, Value> = args.fields;
     let changed: Vec<String> = patch.keys().cloned().collect();
     let Some(target) = kernel.agents.get(&id).map(|e| Arc::clone(&e)) else {
-        return crate::refusal::unknown_agent(
-            id.as_str(),
-            kernel.agents.iter().map(|e| e.key().to_string()).collect(),
-        );
+        return crate::refusal::unknown_agent(id.as_str());
     };
-    // Grant-map KEYS, judged here at write time — the gate only judges edges. The
-    // maps' shape is the record declaration's, judged by the target's own entry below.
-    if let Some(why) = crate::lifecycle::bad_grant_key(&patch) {
-        let mut r = crate::refusal::refusal(crate::refusal::INVALID_META, &why);
-        crate::refusal::with(&mut r, "id", json!(id));
-        return r;
+    let origin = crate::send::current_origin();
+    if let Some(caller) = &origin {
+        let own = *caller == target.id;
+        let refused = patch.keys().any(|k| {
+            let by_line = if own {
+                k != "can"
+            } else {
+                kernel.allowed(
+                    caller,
+                    &crate::authz::solver::Act::Update(k.clone()),
+                    &target,
+                )
+            };
+            !by_line || forced_field(kernel, &target, k)
+        });
+        if refused {
+            return crate::refusal::unknown_agent(id.as_str());
+        }
     }
     // WRITE-TIME VALIDATION: the target's own entry judges the patch before anything
     // changes (a bundle's shared record entry and its `validate_meta`; a bare agent's
@@ -215,6 +288,24 @@ async fn update_agent(
     if let Err(refused) = judged {
         return refused;
     }
+    // `can` LINES, judged at write time against the legal shape (their declared
+    // shape was the entry's, above).
+    if let Some(why) = crate::lifecycle::bad_can(&patch) {
+        let mut r = crate::refusal::refusal(crate::refusal::INVALID_META, &why);
+        crate::refusal::with(&mut r, "id", json!(id));
+        return r;
+    }
+    // RULE 7: an agent hands out only what its own written lines hold, cap
+    // included; only the lines added or widened against the stored `can` are
+    // checked, so narrowing is always allowed.
+    if let (Some(caller), Some(new)) = (&origin, patch.get("can")) {
+        let old = current.get("can").cloned().unwrap_or(Value::Null);
+        if let Err(refused) =
+            crate::authz::glue::check_can_edit(kernel, caller, &target.id, &old, new)
+        {
+            return refused;
+        }
+    }
     let rec = target.update_meta(patch);
     // NO INLINE PERSIST: the `updated` event published below is what the root
     // loader's `persist_writer` turns into the merge-write.
@@ -229,12 +320,12 @@ async fn update_agent(
         "changed": changed.clone(),
     });
     kernel.publish_state(&event);
-    // Emit `agent_updated` on the caller's inbox so watchers (canvas
+    // Emit `agent_updated` on the root's inbox so watchers (canvas
     // frame chrome, telemetry panels) refresh without polling. Mirrors
     // Python's `await self.emit(self.id, {type:"agent_updated", ...})`.
     kernel
         .emit(
-            &caller.id,
+            &root.id,
             crate::jsonsafe::obj([
                 ("type", Value::from("agent_updated")),
                 ("id", Value::from(rec.id.clone())),

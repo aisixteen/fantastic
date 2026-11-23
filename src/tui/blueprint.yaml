@@ -1,32 +1,43 @@
-# THE BASE TREE a fresh store gets. Applied ONCE, at init, and only when the
-# human presses a key on the intro screen or runs `fantastic mcp`. Every later
-# run rehydrates what is on disk and never reads this file again; editing it
-# does not touch a store that already exists.
+# THE BASE TREE a fresh store gets: the v9 initial tree (grant model v9,
+# `initial-tree.md`). Applied ONCE, at init, and only when the human presses a key
+# on the intro screen or runs `fantastic mcp`. Every later run rehydrates what is
+# on disk and never reads this file again; editing it does not touch a store that
+# already exists.
 #
 # DISK POSITION IS THE PARENT: nesting under `agents:` is what makes an agent a
 # child. No entry carries `parent_id` — the writer refuses one.
 #
 # The root is not here: the kernel creates its own root, with its own id and
-# guid. A grant that names the root writes `@root`, and the writer substitutes the
-# kernel's own root id (`bootstrap::DEFAULT_ROOT_ID`) — the id is the kernel's to
-# choose, so the blueprint never spells it.
+# guid. A line that names the root writes `@root`, and the writer substitutes the
+# kernel's own root id (`bootstrap::DEFAULT_ROOT_ID`).
 #
-# `mcp`, `web`, `credentials` and `user_home` are not here either: code adds
-# them under `user` (the `mcp` command, `fantastic canvas`, the key and saved set-up
-# stores).
+# EVERY LINE IS HERE. No code writes a `can` line: the tree and its lines are
+# these records. Every agent reaches its own tree by position, which is never
+# written into a record; each line below is ONE line in the holder's own `can`.
 #
-#   <root>                     (the kernel's own; named @root in grants)
-#   ├── kernel_memory            ram_store — the KERNEL'S store: its execution rows, in RAM
-#   ├── sidebar                  sidebar.tools — the canvas's left column (its reflect returns the html view)
-#   └── user                     the human's own face: the ONE user, everything under it
-#       ├── memory               sqlite_store at @state/memory.db — THE AI store (every AI agent's rows)
-#       ├── store                file_bridge over @state, allow: ['.'] — the kernel's provider
-#       ├── exec                 exec_bridge, allowed: ['.*'], cwd: '.', inherit_env: ["*"]
-#       └── files                file_bridge, root: '.', allow: ['.']
+#   <root>                       (the kernel's own)
+#   ├── kernel_memory              ram_store — the KERNEL'S store, RAM only
+#   └── user                       the person's agent
+#       ├── store                  file_bridge over @state — the kernel's provider
+#       │   └── prompt_file        file view: prompt.md (every AI's system block)
+#       ├── memory                 sqlite_store — THE AI store
+#       ├── credentials            credential_store — keys, outside the user space
+#       ├── files                  file_bridge over the work folder
+#       │   └── static_files       folder view, read-only
+#       ├── exec                   exec_bridge — operator power
+#       ├── home                   the user's home store (~/.fantastic)
+#       ├── term                   exec_bridge — the in-app PTY
+#       ├── web                    web host; holds every line its legs hold (the cap)
+#       │   ├── canvas_ws          the page's leg: the person through the page
+#       │   ├── canvas_page        the canvas page
+#       │   └── mcp                the coding CLI's leg
+#       │       └── mcp_config     file_bridge for .mcp.json
+#       └── canvas_root            ===== THE USER SPACE =====
+#           ├── web_loader         the main canvas's page records
+#           └── canvas_garage      an open sub-canvas: the garage
+#               └── canvas_garage_loader
 #
-# EXPLICIT GRANTS ONLY: every agent is born with {$self: "*"} and nothing else,
-# so every edge below is written on both ends, by id. `exec` and `files` are
-# sealed by default: `ingress_rule: allow_all_ingress` opens them.
+# A `create` line's `what` names bundles as `handler_module` shows them.
 
 # THE ROOT'S OWN FIELDS. The root record is the kernel's (it mints the id and
 # the guid), so these are not written at init: the shell sets each one on the
@@ -48,50 +59,70 @@ agents:
   - id: kernel_memory
     handler_module: ram_store.tools
     admins: [kernel]
-    callable_by: {user: "*"}
-
-  # THE SIDEBAR: the canvas's left column. Its `reflect` returns the html view; the human
-  # reads it through the canvas. From its boot it follows the kernel and publishes each change
-  # its tree shows on its own inbox; its view watches it alone.
-  - id: sidebar
-    handler_module: sidebar.tools
-    callable_by: {user: "*"}
 
   - id: user
     handler_module: user.tools
-    can_call:
-      sidebar: "*"
-      memory: "*"
-      store: "*"
-      exec: "*"
-      files: "*"
-      "@root": "*"
-    callable_by: {exec: "*", files: "*"}
+    # the main canvas's page records
+    page_loader: web_loader
+    # the cap chain for `get`: `credentials` is in its own tree as well
+    can:
+      credentials: {call: [get]}
     agents:
-      # THE AI STORE — ONE shared SQLite file for EVERY AI agent (owner
-      # 2026-10-09): chats, folds, recall and shared rows survive restarts. Rows
-      # are keyed `<guid>|<agent>`, so agents never mix. Every AI agent is granted
-      # onto it when it is created (both ends: its `can_call[memory]`, this
-      # store's `callable_by[<ai>]`); the shell reads any owner's rows as its
-      # admin (`kernel`). The kernel's own rows are NOT here (`kernel_memory`).
-      - id: memory
-        handler_module: sqlite_store.tools
-        path: "@state/memory.db"
-        admins: [kernel]
-        callable_by: {user: "*"}
-
-      # THE STORE. The kernel persists its records (YAML) only
-      # through a file_bridge whose root is the store dir itself; without one it
-      # says "no store wired — messages stay in RAM" and nothing survives a
-      # restart. It is found by position (anywhere under the root) and must exist
-      # before the root boots — which is why it is here, in the blueprint.
+      # THE STORE. The kernel persists its records (YAML) only through a
+      # file_bridge whose root is the store dir itself; without one it says "no
+      # store wired — messages stay in RAM" and nothing survives a restart. It is
+      # found by position and must exist before the root boots.
       - id: store
         handler_module: file_bridge.tools
         root: "@state"
         # the whole store dir: without it record persistence stops at the first write
         allow: ["."]
         ingress_rule: allow_all_ingress
-        callable_by: {user: "*"}
+        agents:
+          # THE PROJECT'S SYSTEM BLOCK: `<state>/prompt.md`, read by every AI
+          # through this view (`kern/prompt`). A view reaches its bridge by its
+          # one line on it.
+          - id: prompt_file
+            handler_module: file_bridge.tools
+            view: file
+            bridge: store
+            path: prompt.md
+            display_name: prompt.md
+            can:
+              $parent: {call: [read, watch_path, unwatch_path]}
+
+      # THE AI STORE — ONE shared SQLite file for EVERY AI agent (owner
+      # 2026-10-09). Rows are keyed `<guid>|<agent>`, so agents never mix. The
+      # shell reads any owner's rows as its admin (`kernel`).
+      - id: memory
+        handler_module: sqlite_store.tools
+        path: "@state/memory.db"
+        admins: [kernel]
+
+      # THE CREDENTIAL STORE. Its backend is the user's key mode, set at boot
+      # from the user's home (`kern/keys`); it holds no lines, its readers hold
+      # theirs.
+      - id: credentials
+        handler_module: credential_store.tools
+
+      # THE WORK FOLDER. Its `allow` is inclusion-only and never exposes
+      # `.fantastic/`: no `.` entry and no path under the state folder, so no
+      # leg writes records, bundles or a loader manifest through it.
+      - id: files
+        handler_module: file_bridge.tools
+        root: "."
+        allow: []
+        ingress_rule: allow_all_ingress
+        agents:
+          # THE STATIC FILES every view's cells load: a read-only folder view.
+          - id: static_files
+            handler_module: file_bridge.tools
+            view: folder
+            bridge: files
+            path: "."
+            display_name: static_files
+            can:
+              $parent: {call: [list, watch_path, unwatch_path]}
 
       - id: exec
         handler_module: exec_bridge.tools
@@ -101,15 +132,97 @@ agents:
         # a bare command is found on the CHILD's PATH only, never the kernel's
         inherit_env: ["*"]
         ingress_rule: allow_all_ingress
-        callable_by: {user: "*"}
-        can_call: {files: "*", user: "*"}
 
-      - id: files
-        handler_module: file_bridge.tools
-        root: "."
-        # a bridge is DENY-ALL at the path level: this one is the human's
-        # browser over the project, so it exposes the whole root
-        allow: ["."]
+      # THE USER'S HOME: saved set-ups, keys and stored fantastic locations
+      # (`user_store.tools`, its folder fixed by the binary).
+      - id: home
+        handler_module: user_store.tools
+        display_name: home
+
+      # THE IN-APP TERMINAL: one PTY job; its `allowed` line is set when it
+      # opens (`kern/terminal`).
+      - id: term
+        handler_module: exec_bridge.tools
+        cwd: "."
+        inherit_env: ["*"]
         ingress_rule: allow_all_ingress
-        callable_by: {user: "*", exec: "*"}
-        can_call: {user: "*"}
+
+      # THE WEB HOST: the one HTTP/WS listener. No port here: the first boot
+      # picks a free one and records it (`kern/host`). It holds every line its
+      # legs hold: it is their cap.
+      - id: web
+        handler_module: web.tools
+        can:
+          canvas_root: {create: {who: ["*"], what: "*"}}
+          files: {call: [read, list, write]}
+          static_files: {call: [read, list]}
+        agents:
+          # THE PAGE'S LEG: the person through the page.
+          - id: canvas_ws
+            handler_module: web_ws.tools
+            ingress_rule: allow_all_ingress
+            can:
+              canvas_root: {create: {who: ["*"], what: "*"}}
+              files: {call: [read, list, write]}
+
+          # THE CANVAS PAGE, embedded in the binary.
+          - id: canvas_page
+            handler_module: canvas_page.tools
+            verbs: {read_stream: {}}
+            can:
+              static_files: {call: [read, list]}
+
+          # THE CODING CLI'S LEG (`fantastic mcp`).
+          - id: mcp
+            handler_module: web_mcp.tools
+            file_bridge_id: mcp_config
+            mcp_config_file: .mcp.json
+            can:
+              canvas_root: {create: {who: ["*"], what: "*"}}
+            agents:
+              # THE PROJECT'S `.mcp.json`, in this bridge's own folder; the leg
+              # reaches it by position.
+              - id: mcp_config
+                handler_module: file_bridge.tools
+                root: "@self"
+                readonly: false
+                allow: [.mcp.json]
+                ingress_rule: allow_all_ingress
+
+      # ===== THE USER SPACE: canvas_root's subtree =====
+      - id: canvas_root
+        handler_module: canvas.tools
+        main: true
+        can:
+          # the main canvas: chats and sub-canvases
+          canvas_root: {create: {who: ["*"], what: {ai_chat.tools: {model: "*"}, canvas.tools: {}}}}
+          memory: {call: [append, read]}
+          prompt_file: {call: [read]}
+          # cap chain for the garage's key users
+          credentials: {call: [get]}
+        agents:
+          - id: web_loader
+            handler_module: kernel_state.tools
+            root: "@state/web"
+            watch: false
+
+          # THE GARAGE: a sub-canvas made open, as `new_canvas` makes one.
+          - id: canvas_garage
+            handler_module: canvas.tools
+            main: false
+            can:
+              credentials: {call: [get]}
+              memory: {call: [append, read]}
+              canvas_garage:
+                create:
+                  who: ["*"]
+                  what:
+                    ai_chat.tools: {model: "*"}
+                    exec_bridge.tools: {allowed: "*"}
+                    file_bridge.tools: {root: "*"}
+                    anthropic_backend.tools: {can: {credentials: {call: [get]}}, endpoint: "*", model: "*"}
+            agents:
+              - id: canvas_garage_loader
+                handler_module: kernel_state.tools
+                root: "@state/web/canvas_garage"
+                watch: false

@@ -62,14 +62,14 @@ fn mk() -> (TempDir, Arc<Kernel>) {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     (tmp, kernel)
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     kernel
-        .send(vec![Item::new(AgentId::from(target), payload)])
+        .operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -95,8 +95,8 @@ async fn delete_agent_refuses_the_root() {
     assert_eq!(r["arg"], "id", "{r}");
     assert_eq!(r["deleted"], false, "{r}");
     // The tree is intact.
-    assert!(kernel.agents.contains_key(&AgentId::from("kernel_state")));
-    assert!(kernel.agents.contains_key(&AgentId::from("child")));
+    assert!(kernel.exists("kernel_state"));
+    assert!(kernel.exists("child"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -122,7 +122,7 @@ async fn update_agent_refuses_handler_module_and_reserved_keys() {
         assert_eq!(r["arg"], key, "{key}: {r}");
     }
     // handler_module unchanged.
-    let rec = kernel.agents.get(&AgentId::from("upd")).unwrap();
+    let rec = kernel.resolve_target("upd").unwrap();
     assert_eq!(rec.handler_module.as_deref(), Some("noop.tools"));
 }
 
@@ -138,7 +138,7 @@ async fn create_agent_refuses_reserved_keys() {
     .await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
     assert_eq!(r["arg"], "root_path", "{r}");
-    assert!(!kernel.agents.contains_key(&AgentId::from("reserved")));
+    assert!(!kernel.exists("reserved"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -166,7 +166,7 @@ async fn a_refusal_is_not_decorated_into_a_reflect() {
     .await;
     assert_eq!(refused["reason"], "bad_arg", "{refused}");
     assert_eq!(refused["arg"], "handler_module", "{refused}");
-    assert!(kernel.agents.get(&AgentId::from("foreign")).is_none());
+    assert!(kernel.resolve_target("foreign").is_none());
     let foreign = Agent::new(
         AgentId::from("foreign"),
         Some("frontend_view.tools".to_string()),
@@ -175,7 +175,7 @@ async fn a_refusal_is_not_decorated_into_a_reflect() {
         std::path::PathBuf::from("/nowhere/foreign"),
         true,
     );
-    kernel.register(foreign);
+    fantastic_kernel::test_support::register(&kernel, foreign);
     let r = call(&kernel, "foreign", json!({"type": "reflect"})).await;
     assert_eq!(r["reason"], "unhandled", "{r}");
     assert_eq!(r["verb"], "reflect", "{r}");
@@ -184,30 +184,32 @@ async fn a_refusal_is_not_decorated_into_a_reflect() {
     }
 }
 
-/// `persist_blob`/`load_blob` LEFT the kernel-verb set, so they no longer
-/// bypass root ingress. A grandchild granted exactly `kernel_state:[persist_blob]`
-/// is refused by the ROOT's `callable_by` — python's `namespacing` contract
-/// step, which expects `{allow: false, side: "ingress"}`.
+/// `persist_blob`/`load_blob` are not kernel verbs, so they take the gate like
+/// any verb. A grandchild holding exactly `kernel_state: {call: [persist_blob]}`
+/// is refused when its parent holds no such line: the line is outside the
+/// parent's tree, so the parent caps it.
 #[tokio::test]
-async fn blob_verbs_pass_root_ingress() {
+async fn a_grandchilds_line_on_the_root_is_capped_by_its_parent() {
     let (_tmp, kernel) = mk();
-    // A direct child, then a grandchild under it — the root's `callable_by` names
-    // neither, so the only edge the grandchild could have is the explicit one.
-    for (id, parent) in [("mid", "kernel"), ("leaf", "mid")] {
+    // A direct child with no line, then a grandchild under it holding the line.
+    for (id, parent, can) in [
+        ("mid", "kernel", Value::Null),
+        ("leaf", "mid", json!({"kernel_state": {"call": ["persist_blob"]}})),
+    ] {
+        let mut p = json!({
+            "type": "create_agent", "parent_id": parent,
+            "handler_module": "noop.tools", "id": id,
+        });
+        if !can.is_null() {
+            p["can"] = can;
+        }
         let _ = kernel
-            .send(vec![Item::new(
-                AgentId::from("kernel"),
-                json!({
-                    "type": "create_agent", "parent_id": parent,
-                    "handler_module": "noop.tools", "id": id,
-                    "can_call": {"kernel_state": ["persist_blob"]},
-                }),
-            )])
+            .operator_send(vec![Item::new(AgentId::from("kernel"), p)])
             .await;
     }
     let denial = fantastic_kernel::test_support::as_agent(AgentId::from("leaf"), async {
         kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type": "persist_blob", "agent_id": "leaf", "name": "s.yaml", "content": "x"}),
             )])
@@ -216,6 +218,5 @@ async fn blob_verbs_pass_root_ingress() {
             .result
     })
     .await;
-    assert_eq!(denial["reason"], json!("unauthorized"), "{denial}");
-    assert_eq!(denial["side"], json!("ingress"), "{denial}");
+    assert_eq!(denial, fantastic_kernel::unknown_agent("kernel"), "{denial}");
 }

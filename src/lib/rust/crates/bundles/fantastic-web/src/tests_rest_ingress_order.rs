@@ -30,8 +30,8 @@ async fn host(
 ) -> Arc<Kernel> {
     let kernel = mk_kernel(tmp, false, true);
     let mut rest = json!({"type": "create_agent", "parent_id": web_id,
-                          "handler_module": "web_rest.tools", "callable_by": {"$parent": ["get_routes"]}, "id": leg,
-                          "can_call": {"kernel_state": "*"}});
+                          "handler_module": "web_rest.tools", "id": leg,
+                          "can": {"kernel_state": {"call": ["*"]}}});
     if let Some(rule) = ingress {
         if rule == json!("password_ingress") {
             rest["token_env"] = json!(TOKEN_ENV);
@@ -40,20 +40,17 @@ async fn host(
     }
     for item in [
         json!({"type": "create_agent", "parent_id": "kernel",
-               "handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id, "port": port}),
+               "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
         rest,
-        json!({"type": "update_agent", "id": "kernel_state", "callable_by": {
-               "$self": "*", "$parent": "*", "$subtree": "*", leg: "*"}}),
     ] {
-        let r = kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), item)])
+        let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), item)])
             .await
             .remove(0)
             .result;
         assert!(r.get("error").is_none(), "stage: {r}");
     }
-    let boot = kernel
-        .send(vec![Item::new(
+    super::host_holds_legs_lines(&kernel, web_id);
+    let boot = kernel.operator_send(vec![Item::new(
             AgentId::from(web_id),
             json!({"type": "boot"}),
         )])

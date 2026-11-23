@@ -9,10 +9,9 @@
 //! validates at the create — one truth — and its refusal names every missing
 //! field with its hint.
 //!
-//! The record is written AS `user`, its parent (grants come from above): the
-//! human may call it, it may call each target it names and the memory store
-//! (the root's `memory_store_id`, which admits it); `user`'s own side and each
-//! target's `callable_by` are `kern/reach`'s — an AI agent is a holder.
+//! The record is written by the shell, the operator: it holds its own lines on
+//! each target it names and on the memory store. The person reaches it by
+//! position (it is under `user`); no target keeps a list of callers.
 
 use std::sync::Arc;
 
@@ -252,27 +251,27 @@ pub fn declared_fields(host: &Host, verb: &str, handler: &str, fields: Map<Strin
 /// Create, grant and boot. Returns where the record was written.
 pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
     let id = rec.id.as_str();
-    if host.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(id)) {
+    if host.kernel.exists(id) {
         return Err(format!("`{id}` already exists"));
     }
     for t in &rec.may_call {
-        if !host.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(t.as_str())) {
+        if !host.kernel.exists(t.as_str()) {
             return Err(format!("may call: no agent `{t}`"));
         }
     }
     // the pair: the provider (the backend, its fields and key) and the chat `id` naming it, on the
-    // kernel's memory store; the targets the page names are the chat's to call. Both are made
-    // under `user` by `make_ai`; `user`'s own side and each target's `callable_by` are `kern/reach`'s
-    let peer: Map<String, Value> = rec.may_call.iter().map(|t| (t.clone(), json!("*"))).collect();
+    // kernel's memory store; the targets the page names are the chat's to call: one line each.
+    // Both are made under `user` by `make_ai`
+    let peer: Map<String, Value> = rec.may_call.iter().map(|t| (t.clone(), json!({"call": ["*"]}))).collect();
     let mut spec = rec.fields.clone();
     spec.insert("handler_module".into(), json!(rec.handler));
-    crate::kern::backend::BackendBundle::make_ai(host, &fantastic_kernel::AgentId::from(PARENT), id, spec, peer).await?;
+    crate::kern::backend::BackendBundle::make_ai(host, crate::kern::backend::By::Operator, &fantastic_kernel::AgentId::from(PARENT), id, spec, peer).await?;
     for agent in [crate::kern::backend::provider_id(id), id.to_string()] {
         // only an agent whose bundle declares `boot` is sent it
         if !host.kernel.advertises(&fantastic_kernel::AgentId::from(agent.as_str()), "boot").await {
             continue;
         }
-        let r = host.act(&agent, json!({"type": "boot"})).await;
+        let r = host.operator(&agent, json!({"type": "boot"})).await;
         if let Some(e) = err_of(&r) {
             return Err(format!("`{agent}` was written but did not boot: {e}"));
         }
@@ -364,22 +363,10 @@ mod tests {
 
     #[tokio::test]
     async fn write_makes_the_provider_and_the_chat_naming_it_both_booted() {
-        let (h, dir) = host("setup-write", &["mine", "mine_provider"]).await;
+        let (h, dir) = host("setup-write").await;
         let mut fields = Map::new();
         fields.insert("endpoint".into(), json!("http://box.example:8000/v1"));
         fields.insert("model".into(), json!("m1"));
-        // what `kern/reach` does at each new agent: `user` is granted it (the boot is `user`'s call)
-        let weak = std::sync::Arc::downgrade(&h.kernel);
-        let cfg = h.cfg.clone();
-        h.kernel.add_state_subscriber(std::sync::Arc::new(move |v: &Value, _b: Option<&fantastic_kernel::Blob>| {
-            if v.get("kind").and_then(Value::as_str) != Some("added") {
-                return;
-            }
-            if let Some(kernel) = weak.upgrade() {
-                let host = Host { kernel, cfg: cfg.clone(), root: "kernel".to_string() };
-                let _ = futures_util::FutureExt::now_or_never(crate::kern::reach::grant_all(&host));
-            }
-        }));
         let rec = Record {
             id: "mine".into(),
             handler: "vllm_backend.tools".into(),
@@ -391,9 +378,7 @@ mod tests {
         assert!(at.starts_with(&h.kernel.state_dir().unwrap().display().to_string()), "{at}");
         for id in ["mine", "mine_provider"] {
             assert!(
-                h.kernel
-                    .agents
-                    .contains_key(&fantastic_kernel::AgentId::from(id)),
+                h.kernel.exists(id),
                 "{id} is written"
             );
         }

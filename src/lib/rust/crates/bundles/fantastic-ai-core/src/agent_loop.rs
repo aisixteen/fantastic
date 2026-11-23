@@ -667,6 +667,24 @@ pub(crate) fn incoming_parent(text: &str) -> Option<i64> {
     tok.parse::<i64>().ok()
 }
 
+/// Where the answer received so far must be cut (#499): the byte length of the raw
+/// text to keep, just past its first foreign call tag, or `None`. The check reads the
+/// answer without its thinking ([`without_thinking`]); the cut is mapped back to the
+/// raw text by its tail, which the last delta wrote.
+fn stream_cut(raw: &str) -> Option<usize> {
+    let stripped = without_thinking(raw);
+    let end = crate::call_check::foreign_cut(&stripped)?;
+    let tail = &stripped[end..];
+    let body = raw.trim_end();
+    Some(if tail.is_empty() {
+        body.len()
+    } else if body.ends_with(tail) {
+        body.len() - tail.len()
+    } else {
+        raw.len()
+    })
+}
+
 #[cfg(test)]
 mod usage_tests {
     use super::usage_detail;
@@ -696,22 +714,4 @@ mod usage_tests {
         assert_eq!(d["completion_tokens_estimated"], json!(true));
         assert!(d["prompt_tokens"].as_i64().is_some_and(|n| n > 0));
     }
-}
-
-/// Where the answer received so far must be cut (#499): the byte length of the raw
-/// text to keep, just past its first foreign call tag, or `None`. The check reads the
-/// answer without its thinking ([`without_thinking`]); the cut is mapped back to the
-/// raw text by its tail, which the last delta wrote.
-fn stream_cut(raw: &str) -> Option<usize> {
-    let stripped = without_thinking(raw);
-    let end = crate::call_check::foreign_cut(&stripped)?;
-    let tail = &stripped[end..];
-    let body = raw.trim_end();
-    Some(if tail.is_empty() {
-        body.len()
-    } else if body.ends_with(tail) {
-        body.len() - tail.len()
-    } else {
-        raw.len()
-    })
 }

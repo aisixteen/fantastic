@@ -74,66 +74,289 @@ pub fn mint_guid() -> String {
     hex(&b)
 }
 
-/// The KEYS of a grant map, judged at WRITE time — the gate only judges edges. The
-/// shape (`{key: "*" | [verbs]}`) is the record declaration's; a key is one of
-/// [`crate::authz::legal_keys`], which depends on the field, so a record can never
-/// carry a grant the gate would have to guess on.
-pub fn bad_grant_key(meta: &Map<String, Value>) -> Option<String> {
-    for field in ["can_call", "callable_by"] {
-        let Some(map) = meta.get(field).and_then(Value::as_object) else {
-            continue;
-        };
-        for k in map.keys() {
-            if !crate::authz::is_grant_key(field, k) {
-                return Some(format!(
-                    "{field}[{}] is not a grant key — legal keys: {}",
-                    fantastic_bundle::py_repr(k),
-                    crate::authz::legal_keys(field)
-                ));
+/// The `can` lines of a record, judged at WRITE time against the legal shape
+/// ([`crate::authz::parse_can`]). An absent `can` holds no line.
+pub fn bad_can(meta: &Map<String, Value>) -> Option<String> {
+    meta.get("can").and_then(|v| crate::authz::parse_can(v).err())
+}
+
+/// Does `id` match one of the `who` patterns (each with at most one trailing `*`;
+/// a bare `*` matches every id)?
+pub(crate) fn who_matches(who: &[String], id: &str) -> bool {
+    who.iter().any(|w| match w.strip_suffix('*') {
+        Some(prefix) => id.starts_with(prefix),
+        None => w == id,
+    })
+}
+
+/// What one `create` line's `what` says of field `field` of `bundle`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FieldRule {
+    /// `"*"`: the creator sets it, or a line below narrows it.
+    Free,
+    /// A value: the field is set to it, whatever the creator or the bundle says.
+    Forced(Value),
+    /// The line does not name it.
+    Unnamed,
+}
+
+/// Does `what` select `bundle` (by name, by a `"*"` key, or `what: "*"`)?
+pub(crate) fn what_selects(what: &crate::authz::What, bundle: &str) -> bool {
+    match what {
+        crate::authz::What::All => true,
+        crate::authz::What::Bundles(m) => m.contains_key(bundle) || m.contains_key("*"),
+    }
+}
+
+/// The rule `what` gives `field` of `bundle`: the bundle's own entry first, then
+/// the `"*"` bundle entry; within each, the field's own key, then the `"*"` key.
+pub(crate) fn field_rule(what: &crate::authz::What, bundle: &str, field: &str) -> FieldRule {
+    let crate::authz::What::Bundles(m) = what else {
+        return FieldRule::Free;
+    };
+    for b in [bundle, "*"] {
+        let Some(fields) = m.get(b) else { continue };
+        for f in [field, "*"] {
+            if let Some(v) = fields.get(f) {
+                return if v.as_str() == Some("*") || f == "*" {
+                    FieldRule::Free
+                } else {
+                    FieldRule::Forced(v.clone())
+                };
             }
         }
     }
-    None
+    FieldRule::Unnamed
 }
 
-/// The `create_agent` body, for a bundle that makes a child as bookkeeping — python's
-/// `Agent.create` (a view of a file bridge is made this way). NOT a gated send: the
-/// caller already holds the verb that asked for it. `args` are the declared, typed
-/// arguments of `create_agent`; any field beyond them is a field of the new agent's
-/// record, which its bundle's shared entry checks.
+/// The `create` lines of `holder` that cover creating `new_id` of `bundle` under
+/// `parent`: a line on T covers every agent of T's tree, T included.
+pub(crate) fn matching_create_lines(
+    kernel: &Kernel,
+    holder: &AgentId,
+    parent: &AgentId,
+    bundle: &str,
+    new_id: &str,
+) -> Vec<(Vec<String>, crate::authz::What)> {
+    let Some(a) = kernel.agents.get(holder).map(|e| Arc::clone(&e)) else {
+        return Vec::new();
+    };
+    let can = a
+        .meta
+        .read()
+        .expect("meta lock poisoned")
+        .get("can")
+        .cloned()
+        .unwrap_or(Value::Null);
+    crate::authz::solver::lines_of(&can)
+        .into_iter()
+        .filter_map(|l| match (l.target, l.level) {
+            (crate::authz::Target::Id(t), crate::authz::Level::Create { who, what })
+                if kernel.in_tree(parent, &AgentId::from(t.as_str()))
+                    && who_matches(&who, new_id)
+                    && what_selects(&what, bundle) =>
+            {
+                Some((who, what))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The id a create mints for `caller` under `parent`: when the first of the
+/// caller's create lines covering the parent with `bundle` in `what` has a `who`
+/// entry other than `*`, that entry's prefix plus `<hex6>` (`gbr_*` →
+/// `gbr_<hex6>`; an entry with no `*` is the id itself); otherwise
+/// [`mint_id`]. Either way the id is then checked against `who`.
+fn mint_for(kernel: &Kernel, caller: &AgentId, parent: &AgentId, bundle: &str) -> String {
+    let Some(a) = kernel.agents.get(caller).map(|e| Arc::clone(&e)) else {
+        return mint_id(bundle);
+    };
+    let can = a
+        .meta
+        .read()
+        .expect("meta lock poisoned")
+        .get("can")
+        .cloned()
+        .unwrap_or(Value::Null);
+    for l in crate::authz::solver::lines_of(&can) {
+        let (crate::authz::Target::Id(t), crate::authz::Level::Create { who, what }) =
+            (l.target, l.level)
+        else {
+            continue;
+        };
+        if !kernel.in_tree(parent, &AgentId::from(t.as_str())) || !what_selects(&what, bundle) {
+            continue;
+        }
+        if let Some(w) = who.iter().find(|w| w.as_str() != "*") {
+            return match w.strip_suffix('*') {
+                Some(prefix) => format!("{prefix}{}", hex(&os_random(3))),
+                None => w.clone(),
+            };
+        }
+        return mint_id(bundle);
+    }
+    mint_id(bundle)
+}
+
+/// Rule 8 at a create by `caller`: every key of `meta` (bundle defaults included)
+/// must be named by a matching line of the caller AND of every capping ancestor
+/// (each ancestor whose tree does not hold `parent`), or be `can`. The values
+/// those lines force are written over `meta`; two forced values that differ
+/// refuse. Answers whether a line forced `can` (a forced `can` was checked when
+/// its create line was written, so the create does not check it again), or the
+/// refusal.
+fn apply_create_lines(
+    kernel: &Kernel,
+    caller: &AgentId,
+    parent: &AgentId,
+    bundle: &str,
+    new_id: &str,
+    meta: &mut Map<String, Value>,
+) -> Result<bool, Value> {
+    let bad_field = |field: &str, why: String| {
+        let mut r = crate::refusal::refusal(crate::refusal::BAD_ARG, why);
+        crate::refusal::with(&mut r, "arg", json!(field));
+        r
+    };
+    let mut holders = vec![caller.clone()];
+    if let Some(c) = kernel.agents.get(caller).map(|e| Arc::clone(&e)) {
+        holders.extend(
+            kernel
+                .ancestor_chain(&c)
+                .into_iter()
+                .filter(|a| !kernel.in_tree(parent, a)),
+        );
+    }
+    let per: Vec<Vec<(Vec<String>, crate::authz::What)>> = holders
+        .iter()
+        .map(|h| matching_create_lines(kernel, h, parent, bundle, new_id))
+        .collect();
+    // forced values: from every matching line of the caller and the cap
+    let mut forced: Map<String, Value> = Map::new();
+    for lines in &per {
+        for (_, what) in lines {
+            let crate::authz::What::Bundles(m) = what else {
+                continue;
+            };
+            for b in [bundle, "*"] {
+                let Some(fields) = m.get(b) else { continue };
+                for f in fields.keys().filter(|f| f.as_str() != "*") {
+                    let FieldRule::Forced(v) = field_rule(what, bundle, f) else {
+                        continue;
+                    };
+                    match forced.get(f) {
+                        Some(have) if *have != v => {
+                            return Err(bad_field(
+                                f,
+                                format!(
+                                    "create_agent: two lines force different values on {}",
+                                    fantastic_bundle::py_repr(f)
+                                ),
+                            ));
+                        }
+                        Some(_) => {}
+                        None => {
+                            forced.insert(f.clone(), v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let can_forced = forced.contains_key("can");
+    for (k, v) in forced {
+        meta.insert(k, v);
+    }
+    // no field, no set: every key named by the caller's lines and the cap's
+    for k in meta.keys() {
+        if k == "can" {
+            continue;
+        }
+        let named = per.iter().all(|lines| {
+            lines
+                .iter()
+                .any(|(_, what)| field_rule(what, bundle, k) != FieldRule::Unnamed)
+        });
+        if !named {
+            return Err(bad_field(
+                k,
+                format!(
+                    "create_agent: no create line names field {} of {}",
+                    fantastic_bundle::py_repr(k),
+                    fantastic_bundle::py_repr(bundle)
+                ),
+            ));
+        }
+    }
+    Ok(can_forced)
+}
+
+/// The `create_agent` body, for the kernel verb and for a bundle that makes a
+/// child for its asker (a file bridge's view, `fork`, `import_subtree`): such a
+/// bundle passes `current_origin()`, so the create is checked as the agent that
+/// asked for it. `caller` is the creator: `None` for the operator, which no line
+/// limits. `args` are the declared, typed arguments of `create_agent`; any field
+/// beyond them is a field of the new agent's record, which its bundle's shared
+/// entry checks.
+///
+/// With an agent caller, in order: the parent must exist; the id is minted (from
+/// the caller's matching `who`, else the bundle's name) or taken as supplied;
+/// `allowed(caller, create{bundle, id}, parent)` must hold, or the answer is the
+/// same unknown answer as a missing parent; then the bundle must be installed;
+/// then the lines' forced values are written over the bundle's and the
+/// creator's, and every key that ends up set must be named by a matching line
+/// of the caller and of every capping ancestor (rule 8); then every line of the
+/// new `can` (the bundle's default lines included) must be held by the caller's
+/// own written lines (rule 7), unless a line forced it.
 pub async fn create_agent(
     kernel: &Arc<Kernel>,
-    root: &Arc<Agent>,
+    caller: Option<&AgentId>,
     args: crate::declared::kernel::CreateAgent,
 ) -> Value {
     let pid = args.parent_id.clone();
     let supplied_id = args.id.clone();
     // THE BUNDLE'S FIELDS go under the arguments' (`crate::inherit`).
-    let (hm, meta) = crate::inherit::create_args(&kernel.bundles, args);
+    let (hm, mut meta) = crate::inherit::create_args(&kernel.bundles, args);
     let hm = hm.as_str();
     let pid = pid.as_str();
 
     // `parent_id` NAMES THE OWNER. It is a real, REQUIRED argument — resolved
     // like a send target (the reserved `kernel` address included), never defaulted.
-    // Resolved the same way `send` does: `kernel` special-cased to the root,
-    // then a literal id.
-    let parent: Arc<Agent> = if pid == "kernel" {
-        Arc::clone(root)
-    } else {
-        match kernel.resolve_target(pid) {
-            Some(e) => e,
-            None => {
-                return crate::refusal::unknown_agent(
-                    pid,
-                    kernel.agents.iter().map(|e| e.key().0.clone()).collect(),
-                )
-            }
-        }
+    let Some(parent) = kernel.resolve_target(pid) else {
+        return crate::refusal::unknown_agent(pid);
     };
     let parent = &parent;
+
+    // A supplied id — even "" — is the caller's choice and is validated as one
+    // by the declaration; only an ABSENT id is minted (python parity).
+    let id = match supplied_id {
+        Some(v) => v,
+        None => match caller {
+            Some(c) => mint_for(kernel, c, &parent.id, hm),
+            None => mint_id(hm),
+        },
+    };
+
+    // THE CREATE LINE. An agent creates only what a line in its `can` (capped by
+    // every ancestor) allows; anything else answers exactly as a missing parent.
+    // A bare agent (no handler) is the operator's alone: the declaration requires a
+    // handler, and no line covers bundle "".
+    if let Some(c) = caller {
+        let act = crate::authz::solver::Act::Create {
+            bundle: hm.to_string(),
+            new_id: id.clone(),
+        };
+        if hm.is_empty() || !kernel.allowed(c, &act, parent) {
+            return crate::refusal::unknown_agent(pid);
+        }
+    }
+
     // THE HANDLER MUST BE INSTALLED (issue #642): an agent of a bundle this kernel
-    // does not run would be created, and fail only when called. The LOAD path still
-    // skips a record whose bundle is another runtime's (weak-load semantics).
+    // does not run would be created, and fail only when called. Checked after the
+    // create line, so a bundle the caller may not create and one that is not
+    // installed answer the same. The LOAD path still skips a record whose bundle
+    // is another runtime's (weak-load semantics).
     let Some(bundle) = kernel.bundles.get(hm) else {
         let mut r = crate::refusal::refusal_hint(
             crate::refusal::BAD_ARG,
@@ -147,31 +370,43 @@ pub async fn create_agent(
         return r;
     };
 
-    // The structural authority baseline ({$self:*} on both
-    // `can_call` and `callable_by`) is stamped + merged uniformly in `Agent::new`
-    // for EVERY agent — so it is NOT re-stamped here; an explicit grant in the
-    // payload rides in `meta` and merges over the baseline at construction.
+    // NO FIELD, NO SET (rule 8): the lines' forced values over the bundle's and the
+    // creator's, and every key named by the caller's lines and the cap's.
+    let mut can_forced = false;
+    if let Some(c) = caller {
+        match apply_create_lines(kernel, c, &parent.id, hm, &id, &mut meta) {
+            Ok(forced) => can_forced = forced,
+            Err(refused) => return refused,
+        }
+    }
 
     // WRITE-TIME VALIDATION, same gate as `update_agent` (py-canonical), so a
     // field has one answer at create and at update. Record is empty
-    // at create: the merged view IS the patch.
-    if let Some(why) = bad_grant_key(&meta) {
-        return crate::refusal::refusal(crate::refusal::INVALID_META, &why);
-    }
-    // THE RECORD'S FIELDS and the bundle's own check: the target's bundle judges them
-    // through its shared entry; the kernel only routes the refusal.
+    // at create: the merged view IS the patch. THE RECORD'S FIELDS and the
+    // bundle's own check first: the target's bundle judges them through its
+    // shared entry (the declared shape of `can` included); the kernel only routes
+    // the refusal. Then the `can` lines against the legal shape.
     if let Err(refused) = bundle.check_write("create_agent", &meta, &Map::new(), None) {
         return refused;
     }
+    if let Some(why) = bad_can(&meta) {
+        return crate::refusal::refusal(crate::refusal::INVALID_META, &why);
+    }
+    // RULE 7: the new agent's first `can` (the creator's and the bundle's default
+    // lines alike) holds only what the creator's own written lines hold, cap
+    // included. A `can` a create line forces was checked when that line was
+    // written, and is not checked again.
+    if let (Some(c), false) = (caller, can_forced) {
+        if let Some(can) = meta.get("can") {
+            let recipient = crate::authz::glue::Recipient::Pending { parent: &parent.id };
+            for line in crate::authz::solver::lines_of(can) {
+                if let Err(refused) = crate::authz::glue::can_write(kernel, c, recipient, &line) {
+                    return refused;
+                }
+            }
+        }
+    }
 
-    // A supplied id — even "" — is the caller's choice and is validated as one
-    // by the declaration; only an ABSENT id is minted (python parity). Minted
-    // AFTER every refusal above (python's `parent.create()` runs last, inside
-    // `rec = parent.create(...)`).
-    let id = match supplied_id {
-        None => mint_id(hm),
-        Some(v) => v,
-    };
     // An id BECOMES A DIRECTORY, so it must be one safe segment. Enforced at
     // the mint, so every consumer inherits it rather than each remembering.
     // The id's shape is the declaration's (`CreateAgent.id`); `kernel` is the operator's.
@@ -240,14 +475,17 @@ pub async fn create_agent(
     let rec_value = crate::jsonsafe::record_value(&new_agent.record());
     // BOOT — kernel bookkeeping: the kernel initializing the child it was told to
     // make, not the parent reaching out. The child's handler runs directly
-    // ([`Kernel::bookkeeping`]), as the child, with no origin — never through a
-    // gated send, never against the parent's own grant. Failures are logged but
-    // don't abort the create — matches Python.
+    // ([`Kernel::bookkeeping_as`]), as the child, never through a gated send.
+    // Its ORIGIN is the creator: an agent-created child boots with that agent as
+    // its origin, so every create its boot hook makes for its asker is checked as
+    // that creator; an operator create (and the cold boot) boots with origin
+    // `None`. Failures are logged but don't abort the create — matches Python.
     //
     // Wrap in Box::pin because boot may call create_agent recursively (a boot
     // hook may create a child agent); the resulting async future is recursive
     // and Rust requires explicit indirection.
-    let boot = Box::pin(kernel.announce(&new_agent, json!({"type": "boot"}))).await;
+    let boot = Box::pin(kernel.announce_as(&new_agent, json!({"type": "boot"}), caller.cloned()))
+        .await;
     let new_id = new_agent.id.clone();
     // BRANCH ON THE OUTCOME STATUS, not on the reply shape. A handler that
     // RAISED settles `failed` and is the one case python prints — on stdout,
@@ -316,26 +554,34 @@ pub fn keep_memory(kernel: &Kernel, id: &AgentId) -> bool {
         .contains(id)
 }
 
-/// Implementation of the `delete_agent` system verb.
-pub(crate) async fn delete_agent(
+/// Implementation of the `delete_agent` system verb. `caller` is the deleter:
+/// `None` for the operator. An agent deletes an agent only when its lines
+/// (capped) allow `delete` on that agent — a `create` line selecting it; the
+/// agent's whole subtree goes with it. A bare agent is deleted by the operator
+/// only (no line covers bundle ""). Refused, the answer is the unknown answer with
+/// `deleted:false`, the same bytes as a missing id.
+pub async fn delete_agent(
     kernel: &Arc<Kernel>,
-    caller: &Arc<Agent>,
+    caller: Option<&AgentId>,
     args: &crate::declared::kernel::DeleteAgent,
 ) -> Value {
     let id_str = args.id.as_str();
     let id = AgentId::from(id_str);
-    let Some(target) = kernel.agents.get(&id).map(|e| Arc::clone(&e)) else {
-        // THE ONE REFUSAL SHAPE, py-canonical: a code to branch on, the LIVE id
-        // index to self-correct from, and `deleted:false` so a caller reading
-        // that field is not told a typo succeeded. A bare `{error}` is a fact
-        // with nothing to act on.
-        let mut r = crate::refusal::unknown_agent(
-            id_str,
-            kernel.agents.iter().map(|e| e.key().to_string()).collect(),
-        );
+    // THE ONE REFUSAL SHAPE, py-canonical: a code to branch on and `deleted:false`
+    // so a caller reading that field is not told a typo succeeded.
+    let unknown = || {
+        let mut r = crate::refusal::unknown_agent(id_str);
         crate::refusal::with(&mut r, "deleted", json!(false));
-        return r;
+        r
     };
+    let Some(target) = kernel.agents.get(&id).map(|e| Arc::clone(&e)) else {
+        return unknown();
+    };
+    if let Some(c) = caller {
+        if !kernel.allowed(c, &crate::authz::solver::Act::Delete, &target) {
+            return unknown();
+        }
+    }
     // THE ROOT IS NOT DELETABLE. It owns the persistence surface and answers
     // every kernel verb, so cascading it empties the kernel and leaves a process
     // with no control surface at all — `{"deleted": true}` and an empty tree.
@@ -399,13 +645,16 @@ pub(crate) async fn delete_agent(
             set.remove(g);
         }
     }
-    prune_grants(kernel, &gone);
-    // Emit `agent_deleted` on the caller's inbox so watchers refresh
+    // The deleted ids' lines stay: other agents' lines on an id reach whoever is
+    // created under it next (ids may be reused).
+    // Emit `agent_deleted` on the root's inbox so watchers refresh
     // (canvas frame chrome, etc.). Mirrors Python's
     // `await self.emit(self.id, {type:"agent_deleted", id})`.
-    kernel
-        .emit(&caller.id, json!({"type": "agent_deleted", "id": id.0}))
-        .await;
+    if let Some(root) = kernel.root() {
+        kernel
+            .emit(&root.id, json!({"type": "agent_deleted", "id": id.0}))
+            .await;
+    }
     json!({ "deleted": true, "id": id.0 })
 }
 
@@ -418,42 +667,10 @@ fn subtree_ids(kernel: &Arc<Kernel>, agent: &Arc<Agent>, out: &mut Vec<AgentId>)
     }
 }
 
-/// A deleted id leaves every grant that named it — python `_prune_grants`. Grant
-/// keys are literal ids, so a stale one would hand its edge to whoever
-/// re-creates that id. Each changed record is re-persisted by
-/// its `updated` event ([`Kernel::update`]).
-fn prune_grants(kernel: &Arc<Kernel>, gone: &[AgentId]) {
-    let agents: Vec<Arc<Agent>> = kernel
-        .agents
-        .iter()
-        .map(|e| Arc::clone(e.value()))
-        .collect();
-    for a in agents {
-        let rec = a.record();
-        let mut patch = Map::new();
-        for field in ["can_call", "callable_by"] {
-            let Some(Value::Object(grants)) = rec.meta.get(field) else {
-                continue;
-            };
-            if gone.iter().any(|g| grants.contains_key(&g.0)) {
-                let kept: Map<String, Value> = grants
-                    .iter()
-                    .filter(|(k, _)| !gone.iter().any(|g| &g.0 == *k))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                patch.insert(field.to_string(), Value::Object(kept));
-            }
-        }
-        if !patch.is_empty() {
-            kernel.update(&a.id, patch);
-        }
-    }
-}
-
 /// Depth-first delete: each leaf's `on_delete` hook fires before its
 /// parent's; the agent unregisters from `kernel.agents` and parent's
 /// `children` map only AFTER its hook completes successfully.
-pub async fn cascade_delete(kernel: &Arc<Kernel>, target: &Arc<Agent>) {
+pub(crate) async fn cascade_delete(kernel: &Arc<Kernel>, target: &Arc<Agent>) {
     // Snapshot children first (since we mutate during iteration).
     let child_ids = target.child_ids();
     for cid in child_ids {

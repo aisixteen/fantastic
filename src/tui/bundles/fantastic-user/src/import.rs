@@ -4,12 +4,12 @@
 //!
 //! Two layers:
 //! - [`plan`] is PURE: the blueprint text, the folder's files and what the
-//!   kernel holds in; the agents to create (fresh ids, grants re-wired, ports
-//!   bound), the grant edges to add on the bound agents, and what the team will
-//!   reach out; or the refusal. Nothing is created before it is whole.
+//!   kernel holds in; the agents to create (fresh ids, `can` lines re-wired,
+//!   ports bound) and what the team will reach out; or the refusal. Nothing is
+//!   created before it is whole.
 //! - [`import_subtree`] is the verb on `user`: it reads the folder, plans, and
-//!   — only with `approve: true` — creates the agents depth first and writes the
-//!   other end of every bound edge; a failure deletes what it made.
+//!   — only with `approve: true` — creates the agents depth first, as the asker;
+//!   only the new agents' own `can` is written. A failure deletes what it made.
 //!
 //! The rules, in the order they are checked:
 //! - one top entry under `agents:`; nesting is the parent (`parent_id` is
@@ -21,8 +21,7 @@
 //!   of the port's kind; `@path:*` ports are not bindable yet;
 //! - FRESH IDS: every id gets the same suffix `_<k>`, the smallest `k` for
 //!   which no new id is taken (a second import under the same parent gets
-//!   `_2`); `@root` becomes the root's id; `$self`, `$parent`, `$subtree`, `*`
-//!   and page grants stay;
+//!   `_2`); `@root` becomes the root's id; `$parent` and page lines stay;
 //! - CODE: a handler that is not a registered bundle, or a file other than
 //!   `blueprint.yaml` and `<agent id>/directive.md`, is code — refused unless
 //!   `allow_code: true`.
@@ -45,8 +44,8 @@ use crate::refuse;
 /// Record fields that hold one agent id.
 const REF_FIELDS: [&str; 3] = ["memory_store_id", "file_bridge_id", "backend_id"];
 
-/// Record fields whose KEYS are agent ids.
-const GRANT_FIELDS: [&str; 2] = ["can_call", "callable_by"];
+/// The record field whose KEYS are agent ids: the agent's own lines.
+const LINES: &str = "can";
 
 /// The largest file the import reads from a blueprint folder.
 pub const MAX_FILE: u64 = 1 << 20;
@@ -85,19 +84,6 @@ pub struct Planned {
     pub meta: Map<String, Value>,
 }
 
-/// The other end of a bound edge: `agent`'s `field` gains `key` (a new id).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Edge {
-    /// The existing agent (a bound port, or the root).
-    pub agent: String,
-    /// `callable_by` (the new agent calls it) or `can_call` (it calls the new agent).
-    pub field: &'static str,
-    /// The new agent's id.
-    pub key: String,
-    /// The grant, as the blueprint wrote it.
-    pub grant: Value,
-}
-
 /// What [`plan`] makes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
@@ -105,9 +91,7 @@ pub struct Plan {
     pub agents: Vec<Planned>,
     /// Blueprint id → fresh id.
     pub ids: BTreeMap<String, String>,
-    /// The grants to add on existing agents.
-    pub edges: Vec<Edge>,
-    /// Per new agent: what it can call, what can call it, its ports.
+    /// Per new agent: the targets of its lines, its ports.
     pub reaches: Vec<Value>,
     /// The code it carries (handlers and files), one line each.
     pub code: Vec<String>,
@@ -229,16 +213,14 @@ fn path_ports(v: &Value, out: &mut BTreeSet<String>) {
 
 /// A name that stays as it is: a baseline token, a wildcard, a page grant.
 fn is_kept(name: &str) -> bool {
-    name == "*" || name.starts_with('$') || name.contains('|')
+    name == "$parent" || name.contains('|')
 }
 
 /// Every id-holding place of a record: `(field, the name there)`.
 fn names_in(meta: &Map<String, Value>) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for g in GRANT_FIELDS {
-        if let Some(Value::Object(o)) = meta.get(g) {
-            out.extend(o.keys().map(|k| (g.to_string(), k.clone())));
-        }
+    if let Some(Value::Object(o)) = meta.get(LINES) {
+        out.extend(o.keys().map(|k| (LINES.to_string(), k.clone())));
     }
     for f in REF_FIELDS {
         if let Some(Value::String(t)) = meta.get(f) {
@@ -451,39 +433,26 @@ pub fn plan(yaml: &str, files: &BTreeMap<String, String>, w: &World) -> Result<P
     };
     let outside = |name: &str| !inside.contains(name) && !is_kept(name);
     let mut agents = Vec::new();
-    let mut edges = Vec::new();
     let mut reaches = Vec::new();
     for e in &entries {
         let new_id = ids[&e.id].clone();
         let mut meta = e.meta.clone();
         let mut reach = Map::new();
         let mut used = BTreeMap::new();
-        for g in GRANT_FIELDS {
-            if let Some(Value::Object(o)) = meta.get(g).cloned() {
-                let mut out = Map::new();
-                for (key, grant) in o {
-                    let to = resolve(&e.id, g, &key)?;
-                    // f. BOTH ENDS: the bound agent (or the root) grants back
-                    if outside(&key) {
-                        edges.push(Edge {
-                            agent: to.clone(),
-                            field: if g == "can_call" {
-                                "callable_by"
-                            } else {
-                                "can_call"
-                            },
-                            key: new_id.clone(),
-                            grant: grant.clone(),
-                        });
-                        used.insert(key.clone(), json!(to));
-                    }
-                    out.insert(to, grant);
+        // f. ONE END: a line lives in its holder's record; the target keeps no list
+        if let Some(Value::Object(o)) = meta.get(LINES).cloned() {
+            let mut out = Map::new();
+            for (key, line) in o {
+                let to = resolve(&e.id, LINES, &key)?;
+                if outside(&key) {
+                    used.insert(key.clone(), json!(to));
                 }
-                let mut keys: Vec<&String> = out.keys().collect();
-                keys.sort();
-                reach.insert(g.to_string(), json!(keys));
-                meta.insert(g.to_string(), Value::Object(out));
+                out.insert(to, line);
             }
+            let mut keys: Vec<&String> = out.keys().collect();
+            keys.sort();
+            reach.insert(LINES.to_string(), json!(keys));
+            meta.insert(LINES.to_string(), Value::Object(out));
         }
         for f in REF_FIELDS {
             if let Some(Value::String(t)) = meta.get(f).cloned() {
@@ -548,7 +517,6 @@ pub fn plan(yaml: &str, files: &BTreeMap<String, String>, w: &World) -> Result<P
     Ok(Plan {
         agents,
         ids,
-        edges,
         reaches,
         code,
         ports,
@@ -594,27 +562,15 @@ fn read_folder(dir: &Path) -> Result<BTreeMap<String, String>, String> {
     Ok(out)
 }
 
-/// Delete what an import made (the top agent, cascading) and take back the
-/// edges it wrote.
-async fn roll_back(kernel: &Arc<Kernel>, top: Option<&str>, edges: &[Edge]) {
-    for e in edges {
-        let _ = kernel.edit_grants(&AgentId::from(e.agent.as_str()), |cc, cb| {
-            let m = if e.field == "can_call" { cc } else { cb };
-            let changed = m.remove(&e.key).is_some();
-            (
-                e.field == "can_call" && changed,
-                e.field == "callable_by" && changed,
-            )
-        });
-    }
+/// Delete what an import made (the top agent, cascading), as the asker: the
+/// asker's create line that made it covers its delete.
+async fn roll_back(kernel: &Arc<Kernel>, asker: Option<&AgentId>, top: Option<&str>) {
     if let Some(top) = top {
-        if let Some(a) = kernel
-            .agents
-            .get(&AgentId::from(top))
-            .map(|a| Arc::clone(a.value()))
-        {
-            fantastic_kernel::lifecycle::cascade_delete(kernel, &a).await;
-        }
+        let del = fantastic_kernel::declared::kernel::DeleteAgent {
+            id: top.to_string(),
+            keep_memory: None,
+        };
+        let _ = fantastic_kernel::lifecycle::delete_agent(kernel, asker, &del).await;
     }
 }
 
@@ -630,7 +586,7 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, args: crate::verbs::ImportSubt
     let Some(root) = kernel.root() else {
         return refuse("failed", "user.import_subtree: the kernel has no root");
     };
-    if !kernel.agents.contains_key(&AgentId::from(parent_id)) {
+    if !kernel.exists(parent_id) {
         return refuse(
             "not_found",
             format!("user.import_subtree: no agent {parent_id:?} to import under"),
@@ -656,10 +612,8 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, args: crate::verbs::ImportSubt
     // the plan in its own scope: the lookups it takes are not held across an await
     let planned = {
         let agent = |id: &str| {
-            kernel
-                .agents
-                .get(&AgentId::from(id))
-                .map(|a| a.value().handler_module.clone().unwrap_or_default())
+            kernel.resolve_target(id)
+                .map(|a| a.handler_module.clone().unwrap_or_default())
         };
         let known = |hm: &str| kernel.bundles.get(hm).is_some();
         let world = World {
@@ -690,14 +644,17 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, args: crate::verbs::ImportSubt
         });
     }
 
-    // APPROVED: depth first, then the other end of every bound edge
+    // APPROVED: depth first, AS THE ASKER — each create is checked as whoever asked
+    // for the import. Only the new agents' own `can` is written (it rides in their
+    // records); no line is written on any other agent.
+    let asker = fantastic_kernel::current_origin();
     let top = plan.agents.first().map(|a| a.new_id.clone());
     for a in &plan.agents {
         // the declared arguments of `create_agent`; the rest of the record rides as its fields
         let fields = a.meta.clone();
         let r = fantastic_kernel::lifecycle::create_agent(
             kernel,
-            &root,
+            asker.as_ref(),
             fantastic_kernel::declared::kernel::CreateAgent {
                 handler_module: a.handler_module.clone(),
                 parent_id: a.parent.clone(),
@@ -707,10 +664,8 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, args: crate::verbs::ImportSubt
         )
         .await;
         if let Some(e) = r.get("error") {
-            let made = kernel
-                .agents
-                .contains_key(&AgentId::from(top.as_deref().unwrap_or("")));
-            roll_back(kernel, made.then_some(top.as_deref()).flatten(), &[]).await;
+            let made = kernel.exists(top.as_deref().unwrap_or(""));
+            roll_back(kernel, asker.as_ref(), made.then_some(top.as_deref()).flatten()).await;
             return refuse(
                 "failed",
                 format!(
@@ -720,27 +675,6 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, args: crate::verbs::ImportSubt
                     e.as_str().map_or_else(|| e.to_string(), str::to_string)
                 ),
             );
-        }
-    }
-    let mut done: Vec<Edge> = Vec::new();
-    for e in &plan.edges {
-        let r = kernel.edit_grants(&AgentId::from(e.agent.as_str()), |cc, cb| {
-            let m = if e.field == "can_call" { cc } else { cb };
-            m.insert(e.key.clone(), e.grant.clone());
-            (e.field == "can_call", e.field == "callable_by")
-        });
-        match r {
-            Ok(_) => done.push(e.clone()),
-            Err(why) => {
-                roll_back(kernel, top.as_deref(), &done).await;
-                return refuse(
-                    "failed",
-                    format!(
-                        "user.import_subtree: the grant {}[{}] on {} was refused — {why}; nothing was kept",
-                        e.field, e.key, e.agent
-                    ),
-                );
-            }
         }
     }
     json!({

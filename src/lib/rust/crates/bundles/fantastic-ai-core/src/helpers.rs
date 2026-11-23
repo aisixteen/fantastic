@@ -4,13 +4,12 @@
 use fantastic_bundle::{is_alnum, py_strip};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::Value;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Read a string meta field off the agent record.
 pub fn meta_string(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<String> {
-    let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
-    let meta = agent.meta.read().expect("meta poisoned");
+    let agent = kernel.resolve_target(agent_id.as_str())?;
+    let meta = agent.record().meta;
     meta.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
@@ -38,8 +37,8 @@ pub fn required_meta(
 /// if the agent is gone. Used by the context-budget functions, mirroring
 /// the Python reference's `rec` dict.
 pub fn agent_meta(agent_id: &AgentId, kernel: &Kernel) -> serde_json::Map<String, Value> {
-    match kernel.agents.get(agent_id) {
-        Some(e) => e.meta.read().expect("meta poisoned").clone(),
+    match kernel.resolve_target(agent_id.as_str()) {
+        Some(e) => e.record().meta.clone(),
         None => serde_json::Map::new(),
     }
 }

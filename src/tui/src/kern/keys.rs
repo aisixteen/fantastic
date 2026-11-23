@@ -1,21 +1,20 @@
 //! PROVIDER KEYS — in the kernel's CREDENTIAL STORE, never the environment
 //! (owner, 2026-10-01: keys only through `credential_store`; no restarts).
 //!
-//! - ONE store agent, `credentials`, under the root. Its BACKEND is the user's
-//!   key mode (`fantastic_user_home_store::secrets`): plain → one 0600 file in
-//!   the user's home, secure → the keychain. No mode chosen = no store, and a
-//!   key cannot be stored until one is.
+//! - ONE store agent, `credentials`, under `user` (the blueprint's record, outside
+//!   the user space). Its BACKEND is the user's key mode
+//!   (`fantastic_user_home_store::secrets`): plain → one 0600 file in the user's
+//!   home, secure → the keychain, set on the record at boot. No mode chosen = no
+//!   backend, and a key cannot be stored until one is.
 //! - A key is a REF, `<provider>/<host>` (`responses/api.openai.com`), bound to
 //!   the endpoint's host: the store refuses to hand it out for any other host.
 //!   The ref is DECLARED on the store's record (`update_agent` on its `refs`),
-//!   then its value written through `user.forward`, marked `secret` on the
-//!   forward and on `user`'s onward `set`: every row, event and mirror of
-//!   either call shows it as `[secret]`.
+//!   then its value written by the shell, the operator, marked `secret`: every
+//!   row, event and mirror of the call shows it as `[secret]`.
 //! - An AI agent NAMES its ref on its record (`credentials: {store, ref}`) and
 //!   its backend reads it before every request: a stored or rotated key is live
-//!   on the next call, with no restart. Reading it takes two grants: its own
-//!   `can_call` [get] on the store, written at create ([`grant_on_create`]), and
-//!   the store's `callable_by` naming it, written by [`wire`].
+//!   on the next call, with no restart. Reading it takes the agent's own line
+//!   `credentials: {call: [get]}` — in the garage, the line its `create` line forces.
 //! - The refs (metadata only — host, field names) are also remembered in the
 //!   user's home, so every project's store knows the keys already stored there.
 
@@ -57,16 +56,16 @@ pub fn ref_for(module: &str, endpoint: &str) -> Result<String, String> {
 }
 
 fn store_meta(h: &Host) -> Option<Map<String, Value>> {
-    h.kernel.agents.get(&fantastic_kernel::AgentId::from(STORE)).map(|a| a.value().record().meta.clone())
+    h.kernel.resolve_target(STORE).map(|a| a.record().meta.clone())
 }
 
 fn refs_of(meta: &Map<String, Value>) -> Map<String, Value> {
     meta.get("refs").and_then(Value::as_object).cloned().unwrap_or_default()
 }
 
-/// The store, as the user's key mode says: created when missing, its backend
-/// set to the mode's, and every ref the user's home remembers made known to
-/// it. With no mode chosen there is nothing to keep, and no store.
+/// The store's record, as the user's key mode says: its backend set to the
+/// mode's, and every ref the user's home remembers made known to it. With no
+/// mode chosen there is nothing to set. The store itself is the blueprint's.
 pub async fn ensure_store(h: &Host) -> Result<(), String> {
     let s = secrets();
     let Some(m) = s.mode()? else { return Ok(()) };
@@ -82,41 +81,16 @@ pub async fn ensure_store(h: &Host) -> Result<(), String> {
         }
     }
     fields.insert("refs".into(), Value::Object(refs));
-    let cli = h.kernel.state_dir().ok().map(|d| d.join("cli"));
-    let declared = match (&cli, store_meta(h).is_some()) {
-        (Some(c), false) => crate::boot::declared::pending(c, STORE)?,
-        _ => None,
-    };
-    let payload = if store_meta(h).is_some() {
-        let mut p = json!({"type": "update_agent", "id": STORE});
-        p.as_object_mut().expect("an object").extend(fields);
-        p
-    } else {
-        create_payload(fields, declared.as_ref())
-    };
-    // as `user`, the store's parent: grants and refs come from above
-    let r = h.act("kernel", payload).await.result;
+    if store_meta(h).is_none() {
+        return Err(format!("the credential store `{STORE}` is not in the tree"));
+    }
+    let mut payload = json!({"type": "update_agent", "id": STORE});
+    payload.as_object_mut().expect("an object").extend(fields);
+    let r = h.operator("kernel", payload).await.result;
     match r.get("error").and_then(Value::as_str) {
         Some(e) => Err(format!("the credential store: {e}")),
-        None => match (declared, cli) {
-            // the store carries its declared grants now: forget the declaration
-            (Some(_), Some(c)) => crate::boot::declared::done(&c, STORE),
-            _ => Ok(()),
-        },
+        None => Ok(()),
     }
-}
-
-/// The store's `create_agent`: its fields, plus any grants a product declared
-/// for it, carried by the create itself. The update path never writes
-/// `callable_by`/`can_call`, so they stay across later boots.
-fn create_payload(fields: Map<String, Value>, declared: Option<&Map<String, Value>>) -> Value {
-    let mut p = json!({"type": "create_agent", "parent_id": crate::env::HUMAN, "id": STORE, "handler_module": fantastic_credential_store::HANDLER_MODULE});
-    let o = p.as_object_mut().expect("an object");
-    o.extend(fields);
-    if let Some(g) = declared {
-        crate::boot::declared::union_record(o, g);
-    }
-    p
 }
 
 /// Choose (or change) where keys are kept. Refused while keys are stored in
@@ -139,7 +113,7 @@ pub async fn set_mode(h: &Host, m: Mode) -> Result<String, String> {
 }
 
 /// Declare ref `r` bound to `host` on the store's record, keeping every other
-/// ref: `refs` is written whole, as `user` (the store's parent).
+/// ref: `refs` is written whole, by the operator.
 async fn declare(h: &Host, r: &str, host: &str) -> Result<(), String> {
     let mut refs = store_meta(h).map(|m| refs_of(&m)).unwrap_or_default();
     let e = refs.entry(r.to_string()).or_insert_with(|| json!({}));
@@ -147,7 +121,7 @@ async fn declare(h: &Host, r: &str, host: &str) -> Result<(), String> {
         o.insert("host".into(), json!(host));
         o.entry("fields").or_insert(json!([FIELD]));
     }
-    let out = h.act("kernel", json!({"type": "update_agent", "id": STORE, "refs": refs})).await.result;
+    let out = h.operator("kernel", json!({"type": "update_agent", "id": STORE, "refs": refs})).await.result;
     match out.get("error").and_then(Value::as_str) {
         Some(e) => Err(format!("the key's ref {r} could not be declared: {e}")),
         None => Ok(()),
@@ -162,12 +136,7 @@ pub async fn store(h: &Host, module: &str, endpoint: &str, secret: &str) -> Resu
     ensure_store(h).await?;
     // the ref is DECLARED first, on the store's record (`set` never creates one)
     declare(h, &r, &host_of(endpoint).unwrap_or_default()).await?;
-    // `set` goes through `user`, whose grant on a store made a moment ago (the
-    // first key, its mode just chosen) is written by the reach watch when the
-    // state stream reports it — awaited, or a loaded machine refused the key
-    // (`user may not call 'set' on credentials`)
-    crate::kern::reach::granted(h, STORE).await?;
-    let out = h.act_secret(STORE, json!({"type": "set", "ref": r, "fields": {FIELD: secret}}), &["fields.api_key"]).await.result;
+    let out = h.operator_secret(STORE, json!({"type": "set", "ref": r, "fields": {FIELD: secret}}), &["fields.api_key"]).await.result;
     if let Some(e) = out.get("error").and_then(Value::as_str) {
         return Err(format!("the key was not stored: {e}"));
     }
@@ -223,22 +192,8 @@ pub fn has(h: &Host, r: &str) -> bool {
     store_meta(h).is_some_and(|m| refs_of(&m).contains_key(r))
 }
 
-/// An AI agent reads ITS key with `get` on the store: its OWN side is written on
-/// its record at create ([`grant_on_create`]); the store's side — `callable_by`
-/// naming it — is written here, as `user` (the store's parent). Merged.
-pub async fn wire(h: &Host, ai: &str) -> Result<(), String> {
-    let meta = store_meta(h).ok_or("no credential store — choose where keys are kept first")?;
-    let mut cb = meta.get("callable_by").and_then(Value::as_object).cloned().unwrap_or_default();
-    cb.insert(ai.into(), json!(["get"]));
-    let r = h.act("kernel", json!({"type": "update_agent", "id": STORE, "callable_by": cb})).await.result;
-    match r.get("error").and_then(Value::as_str) {
-        Some(e) => Err(format!("could not grant {ai} its key: {e}")),
-        None => Ok(()),
-    }
-}
-
-/// A create spec naming a key in this store: its `can_call` gains `get` on the
-/// store (the AI's own side of reading its key).
+/// A create spec naming a key in this store: its `can` gains the line
+/// `credentials: {call: [get]}` (the agent's own line to read its key).
 pub fn grant_on_create(spec: &mut Map<String, Value>) {
     let named = spec
         .get("credentials")
@@ -247,18 +202,9 @@ pub fn grant_on_create(spec: &mut Map<String, Value>) {
     if !named {
         return;
     }
-    if let Some(Value::Object(cc)) = spec.get_mut("can_call") {
-        cc.insert(STORE.into(), json!(["get"]));
+    if let Some(Value::Object(can)) = spec.get_mut("can") {
+        can.insert(STORE.into(), json!({"call": ["get"]}));
     }
-}
-
-/// [`wire`], when `record` names a key in this store.
-pub async fn wire_record(h: &Host, ai: &str, record: &Map<String, Value>) -> Result<(), String> {
-    let Some(c) = record.get("credentials").and_then(Value::as_object) else { return Ok(()) };
-    if c.get("store").and_then(Value::as_str) != Some(STORE) {
-        return Ok(());
-    }
-    wire(h, ai).await
 }
 
 #[cfg(test)]
@@ -272,16 +218,5 @@ mod tests {
         assert!(ref_for("vllm_backend.tools", "").is_err(), "no endpoint, no host, no ref");
         assert_eq!(ref_for("mcp_client.tools", "http://127.0.0.1:9000/mcp").unwrap(), "mcp_client/127.0.0.1:9000", "an MCP server's key: its bundle name and the url's host");
         assert_eq!(host_of("http://u:p@h.example/x"), Some("h.example".into()));
-    }
-
-    #[test]
-    fn the_stores_create_carries_the_grants_a_product_declared_for_it() {
-        let g = json!({"callable_by": {"probe": ["get"]}, "can_call": {"probe": "*"}});
-        let p = create_payload(Map::new(), g.as_object());
-        assert_eq!(p["id"], STORE);
-        assert_eq!(p["callable_by"], json!({"probe": ["get"]}));
-        assert_eq!(p["can_call"], json!({"probe": "*"}));
-        let bare = create_payload(Map::new(), None);
-        assert!(bare.get("callable_by").is_none() && bare.get("can_call").is_none());
     }
 }

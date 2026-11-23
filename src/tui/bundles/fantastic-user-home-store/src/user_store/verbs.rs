@@ -5,6 +5,8 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+pub use crate::verbs::{ForgetRecord, LoadTree, PersistRecord, Prefer};
+
 /// The kernel starts the store. With the switch on, this fantastic's folder is written again (a home that cannot be written answers its refusal); off, a folder of this guid left behind is removed. Answers {stored} | {unstored:true} | nothing.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -72,4 +74,8 @@ fantastic_kernel::verbs! {
     "set_canvas" => SetCanvas,
     "unstore" => Unstore,
     "unstore_others" => UnstoreOthers,
+    "persist_record" => PersistRecord,
+    "forget_record" => ForgetRecord,
+    "load_tree" => LoadTree,
+    "prefer" => Prefer,
 }

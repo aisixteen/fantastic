@@ -56,7 +56,7 @@ fn mk() -> (TempDir, Arc<Kernel>) {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     (tmp, kernel)
 }
@@ -70,7 +70,7 @@ async fn create(kernel: &Arc<Kernel>, id: &str, extra: Value) -> Value {
         }
     }
     kernel
-        .send(vec![Item::new(AgentId::from("kernel"), p)])
+        .operator_send(vec![Item::new(AgentId::from("kernel"), p)])
         .await
         .remove(0)
         .result
@@ -83,7 +83,7 @@ async fn missing_type_is_missing_arg_before_gate() {
     create(&kernel, "b", json!({})).await; // no edge a→b: the gate WOULD refuse
     let out = fantastic_kernel::test_support::as_agent(AgentId::from("a"), async {
         kernel
-            .send(vec![Item::new(AgentId::from("b"), json!({}))])
+            .operator_send(vec![Item::new(AgentId::from("b"), json!({}))])
             .await
             .remove(0)
     })
@@ -112,7 +112,7 @@ async fn non_string_type_is_bad_arg() {
         (json!(null), "NoneType"),
     ] {
         let out = kernel
-            .send(vec![Item::new(AgentId::from("a"), json!({"type": bad}))])
+            .operator_send(vec![Item::new(AgentId::from("a"), json!({"type": bad}))])
             .await
             .remove(0);
         assert_eq!(out.result["reason"], "bad_arg", "{bad}: {}", out.result);
@@ -134,7 +134,7 @@ async fn a_body_sent_as_type_is_refused_by_its_type() {
     create(&kernel, "a", json!({})).await;
     for payload in [json!({"type": null}), json!({})] {
         let out = kernel
-            .send(vec![
+            .operator_send(vec![
                 Item::new(AgentId::from("a"), payload).with_binary_key("type", vec![0u8; 4096])
             ])
             .await
@@ -152,7 +152,7 @@ async fn empty_id_is_refused_bad_arg() {
     let (_t, kernel) = mk();
     create(&kernel, "a", json!({})).await;
     let out = kernel
-        .send(vec![
+        .operator_send(vec![
             Item::new(AgentId::from("a"), json!({"type": "poke"})).with_id("")
         ])
         .await
@@ -164,7 +164,7 @@ async fn empty_id_is_refused_bad_arg() {
     // any more: a caller supplies a NAME, the kernel supplies every id, so a
     // name that happens to look like an old pid runs like any other.
     let out = kernel
-        .send(vec![
+        .operator_send(vec![
             Item::new(AgentId::from("a"), json!({"type": "poke"})).with_id("a:deadbeef")
         ])
         .await
@@ -179,7 +179,7 @@ async fn empty_target_is_missing_arg() {
     // corrections against). Also true for a binary item.
     let (_t, kernel) = mk();
     let out = kernel
-        .send(vec![Item::new(AgentId::from(""), json!({"type": "poke"}))])
+        .operator_send(vec![Item::new(AgentId::from(""), json!({"type": "poke"}))])
         .await
         .remove(0);
     assert!(out.pid.is_none(), "{out:?}");
@@ -188,7 +188,7 @@ async fn empty_target_is_missing_arg() {
     assert_eq!(out.result["error"], "send: target required");
 
     let out = kernel
-        .send(vec![Item::new(AgentId::from(""), json!({"type": "poke"}))
+        .operator_send(vec![Item::new(AgentId::from(""), json!({"type": "poke"}))
             .with_binary_key("bytes", vec![1, 2, 3])])
         .await
         .remove(0);
@@ -207,7 +207,7 @@ async fn draining_refuses_before_resolving_the_target() {
     let _ = kernel.shutdown_agents().await;
     assert!(kernel.draining());
     let out = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("no-such-agent"),
             json!({"type": "poke"}),
         )])
@@ -226,7 +226,7 @@ async fn a_send_from_a_killed_task_does_not_dispatch() {
     let out = fantastic_kernel::tasks::CURRENT_KILLED
         .scope(killed, async {
             kernel
-                .send(vec![Item::new(AgentId::from("a"), json!({"type": "poke"}))])
+                .operator_send(vec![Item::new(AgentId::from("a"), json!({"type": "poke"}))])
                 .await
                 .remove(0)
         })
@@ -242,9 +242,9 @@ async fn a_send_from_a_killed_task_does_not_dispatch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_agent_with_empty_id_is_refused() {
     let (_t, kernel) = mk();
-    let before = kernel.agents.len();
+    let before = kernel.agent_ids().len();
     let r = create(&kernel, "", json!({})).await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
     assert_eq!(r["arg"], "id");
-    assert_eq!(kernel.agents.len(), before, "no agent minted for \"\"");
+    assert_eq!(kernel.agent_ids().len(), before, "no agent minted for \"\"");
 }

@@ -111,18 +111,8 @@ pub fn render(reply: &Value) -> String {
             ids.join(", ")
         );
         for r in reply["reaches"].as_array().into_iter().flatten() {
-            let mut parts = Vec::new();
-            for (field, word) in [("can_call", "calls"), ("callable_by", "called by")] {
-                let n = names(&r[field]);
-                if !n.is_empty() {
-                    parts.push(format!("{word} {n}"));
-                }
-            }
-            let reaches = if parts.is_empty() {
-                "nothing outside".into()
-            } else {
-                parts.join("; ")
-            };
+            let n = names(&r["can"]);
+            let reaches = if n.is_empty() { "nothing outside".to_string() } else { format!("calls {n}") };
             out += &format!(
                 "  {} (from {}): reaches {reaches}\n",
                 r["id"].as_str().unwrap_or("?"),
@@ -293,7 +283,7 @@ mod tests {
     fn render_preview_lists_ids_reaches_ports_code_and_the_hint() {
         let r = json!({"approval_required": true, "agents": 2,
             "new_ids": {"a": "a_1", "b": "b_1"},
-            "reaches": [{"id": "a_1", "from": "a", "can_call": ["m1"], "callable_by": [], "ports": {"@memory": "m1"}},
+            "reaches": [{"id": "a_1", "from": "a", "can": ["m1"], "ports": {"@memory": "m1"}},
                         {"id": "b_1", "from": "b"}],
             "ports": {"@memory": "m1"}, "code": ["b_1: exec_bridge.tools"],
             "hint": "nothing was created: call again with approve: true to import"});

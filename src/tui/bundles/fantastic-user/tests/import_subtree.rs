@@ -49,7 +49,7 @@ impl Handler for Echo {
 /// The shell: a send from outside every agent.
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     Arc::clone(k)
-        .send(vec![Item::new(AgentId::from(target), payload)])
+        .operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -66,22 +66,22 @@ async fn call(k: &Arc<Kernel>, agent: &str, target: &str, verb: &str) -> Value {
 }
 
 fn meta(k: &Kernel, id: &str) -> Map<String, Value> {
-    k.agents
-        .get(&AgentId::from(id))
+    k.resolve_target(id)
         .unwrap_or_else(|| panic!("no agent {id}"))
-        .value()
         .record()
         .meta
 }
 
 fn parent(k: &Kernel, id: &str) -> Option<String> {
-    k.agents
-        .get(&AgentId::from(id))
-        .and_then(|a| a.value().record().parent_id)
+    k.resolve_target(id)
+        .and_then(|a| a.record().parent_id)
 }
 
 /// root ─ user {memory, memory2 (stores), exec, other} · a {b {c}}: a and c
-/// reach memory, b reaches exec, memory grants a and c back.
+/// reach memory, b reaches exec; each line is in its holder's record. Every
+/// ancestor's lines cap the lines below it: `a` holds the exec line its child `b`
+/// uses, `b` the store line its child `c` uses, and `other`, where the imports
+/// go, the bound ports' lines.
 async fn setup() -> Arc<Kernel> {
     let mut reg = BundleRegistry::new();
     reg.register(HANDLER_MODULE, UserBundle::default());
@@ -116,34 +116,39 @@ async fn setup() -> Arc<Kernel> {
             "memory",
             "user",
             "sqlite_store.tools",
-            json!({"callable_by": {"a": "*", "c": "*"}}),
+            json!({}),
         ),
         ("memory2", "user", "sqlite_store.tools", json!({})),
         (
             "exec",
             "user",
             "exec_bridge.tools",
-            json!({"callable_by": {"b": ["run"]}}),
+            json!({}),
         ),
-        ("other", "user", "echo.tools", json!({})),
+        (
+            "other",
+            "user",
+            "echo.tools",
+            json!({"can": {"memory2": {"call": ["*"]}, "exec": {"call": ["run"]}}}),
+        ),
         (
             "a",
             "user",
             "echo.tools",
-            json!({"can_call": {"memory": "*", "b": "*"}, "memory_store_id": "memory",
+            json!({"can": {"memory": {"call": ["*"]}, "b": {"call": ["*"]}, "exec": {"call": ["run"]}}, "memory_store_id": "memory",
             "credentials": {"store": "memory", "ref": "r1"}, "notes": "top"}),
         ),
         (
             "b",
             "a",
             "echo.tools",
-            json!({"can_call": {"exec": ["run"]}, "callable_by": {"a": "*"}, "cwd": "."}),
+            json!({"can": {"exec": {"call": ["run"]}, "memory": {"call": ["*"]}}, "cwd": "."}),
         ),
         (
             "c",
             "b",
             "echo.tools",
-            json!({"can_call": {"memory": "*"}, "notes": "plain"}),
+            json!({"can": {"memory": {"call": ["*"]}}, "notes": "plain"}),
         ),
     ] {
         let mut p =
@@ -199,7 +204,7 @@ async fn import(k: &Arc<Kernel>, d: &std::path::Path, extra: Value) -> Value {
     op(k, "user", p).await
 }
 
-/// `v` with every grant key and id field renamed by `ids`.
+/// `v` with every line target and id field renamed by `ids`.
 fn renamed(m: &Map<String, Value>, ids: &[(&str, &str)]) -> Map<String, Value> {
     let r = |s: &str| {
         ids.iter()
@@ -207,13 +212,11 @@ fn renamed(m: &Map<String, Value>, ids: &[(&str, &str)]) -> Map<String, Value> {
             .map_or_else(|| s.to_string(), |(_, b)| (*b).to_string())
     };
     let mut out = m.clone();
-    for g in ["can_call", "callable_by"] {
-        if let Some(Value::Object(o)) = m.get(g) {
-            out.insert(
-                g.into(),
-                Value::Object(o.iter().map(|(k, v)| (r(k), v.clone())).collect()),
-            );
-        }
+    if let Some(Value::Object(o)) = m.get("can") {
+        out.insert(
+            "can".into(),
+            Value::Object(o.iter().map(|(k, v)| (r(k), v.clone())).collect()),
+        );
     }
     if let Some(Value::String(t)) = m.get("memory_store_id") {
         out.insert("memory_store_id".into(), json!(r(t)));
@@ -228,7 +231,7 @@ fn renamed(m: &Map<String, Value>, ids: &[(&str, &str)]) -> Map<String, Value> {
 async fn import_without_approve_creates_nothing_and_shows_reaches() {
     let k = setup().await;
     let d = exported(&k, "preview").await;
-    let n = k.agents.len();
+    let n = k.agent_ids().len();
     let r = import(&k, &d, json!({})).await;
     assert_eq!(r["approval_required"], true, "{r}");
     assert_eq!(r["agents"], 3, "{r}");
@@ -246,13 +249,8 @@ async fn import_without_approve_creates_nothing_and_shows_reaches() {
     let reaches = r["reaches"].as_array().unwrap();
     assert_eq!(reaches.len(), 3);
     assert_eq!(reaches[1]["id"], "b_1");
-    assert_eq!(reaches[1]["ports"], json!({"@exec": "exec"}), "{r}");
-    assert_eq!(k.agents.len(), n, "nothing created");
-    assert!(meta(&k, "memory2")
-        .get("callable_by")
-        .unwrap()
-        .get("a_1")
-        .is_none());
+    assert_eq!(reaches[1]["ports"], json!({"@exec": "exec", "@memory": "memory2"}), "{r}");
+    assert_eq!(k.agent_ids().len(), n, "nothing created");
     let _ = std::fs::remove_dir_all(d);
 }
 
@@ -279,12 +277,12 @@ async fn export_then_import_round_trips_with_fresh_ids() {
             "{old} → {new}"
         );
     }
-    // the bound agents granted the new ids back
-    assert_eq!(meta(&k, "memory2")["callable_by"]["a_1"], "*");
-    assert_eq!(meta(&k, "memory2")["callable_by"]["c_1"], "*");
-    assert_eq!(meta(&k, "exec")["callable_by"]["b_1"], json!(["run"]));
+    // the new agents hold their lines on the bound agents; the bound agents keep no list
+    assert_eq!(meta(&k, "a_1")["can"]["memory2"], json!({"call": ["*"]}));
+    assert_eq!(meta(&k, "b_1")["can"]["exec"], json!({"call": ["run"]}));
+    assert!(meta(&k, "memory2").get("can").is_none());
     // the originals are as they were
-    assert_eq!(meta(&k, "a")["can_call"]["b"], "*");
+    assert_eq!(meta(&k, "a")["can"]["b"], json!({"call": ["*"]}));
     let _ = std::fs::remove_dir_all(d);
 }
 
@@ -307,7 +305,7 @@ async fn import_twice_under_same_parent_gives_two_independent_copies() {
             assert!(!text.contains(first), "{id} names {first}: {text}");
         }
     }
-    assert_eq!(meta(&k, "a_2")["can_call"]["b_2"], "*");
+    assert_eq!(meta(&k, "a_2")["can"]["b_2"], json!({"call": ["*"]}));
     // change one copy, delete it: the other stays as it was
     let root = k.root().unwrap().id.0.clone();
     let r = op(
@@ -324,7 +322,6 @@ async fn import_twice_under_same_parent_gives_two_independent_copies() {
         assert!(parent(&k, id).is_none(), "{id} gone");
     }
     assert_eq!(parent(&k, "c_2").as_deref(), Some("b_2"));
-    assert_eq!(meta(&k, "memory2")["callable_by"]["a_2"], "*");
     assert_eq!(
         from(&k, "c_2", "memory2").await["echo"]["type"],
         "ping",
@@ -336,7 +333,7 @@ async fn import_twice_under_same_parent_gives_two_independent_copies() {
 #[tokio::test(flavor = "multi_thread")]
 async fn import_refuses_missing_binding_secret_and_code_with_messages_that_name_the_fix() {
     let k = setup().await;
-    let n = k.agents.len();
+    let n = k.agent_ids().len();
     let d = exported(&k, "refuse").await;
     let r = op(
         &k,
@@ -381,7 +378,7 @@ async fn import_refuses_missing_binding_secret_and_code_with_messages_that_name_
             && msg.contains("allow_code: true"),
         "{msg}"
     );
-    assert_eq!(k.agents.len(), n, "nothing created");
+    assert_eq!(k.agent_ids().len(), n, "nothing created");
     // allowed, a handler this kernel does not run is still refused when the agent is
     // made (`create_agent` needs an installed bundle), and nothing is kept
     let r = import(
@@ -398,7 +395,7 @@ async fn import_refuses_missing_binding_secret_and_code_with_messages_that_name_
             .contains("handler_module 'py_ab12.tools' is not installed"),
         "{r}"
     );
-    assert_eq!(k.agents.len(), n, "nothing kept");
+    assert_eq!(k.agent_ids().len(), n, "nothing kept");
     // allowed, with the handler installed, the code comes in
     let ok = written(
         "code-ok",
@@ -440,14 +437,13 @@ async fn imported_agents_call_only_what_they_were_granted_and_what_ports_were_bo
     let r = from(&k, "a_1", "b").await;
     assert!(r.get("error").is_some(), "{r}");
     assert_eq!(from(&k, "a_1", "b_1").await["echo"]["type"], "ping");
-    assert_eq!(meta(&k, "memory2")["callable_by"]["c_1"], "*");
     let _ = std::fs::remove_dir_all(d);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn import_failure_rolls_back() {
     let k = setup().await;
-    let n = k.agents.len();
+    let n = k.agent_ids().len();
     let d = written(
         "rollback",
         "agents:
@@ -459,7 +455,7 @@ async fn import_failure_rolls_back() {
         agents:
           - id: c
             handler_module: echo.tools
-            can_call: {$self: 5}
+            can: {$parent: {call: 5}}
 ",
         &[],
     );
@@ -469,7 +465,7 @@ async fn import_failure_rolls_back() {
         r["error"].as_str().unwrap().contains("agent c (c_1)"),
         "{r}"
     );
-    assert_eq!(k.agents.len(), n, "no half team stays");
+    assert_eq!(k.agent_ids().len(), n, "no half team stays");
     assert!(parent(&k, "a_1").is_none());
     let _ = std::fs::remove_dir_all(d);
 }
@@ -477,11 +473,11 @@ async fn import_failure_rolls_back() {
 #[tokio::test(flavor = "multi_thread")]
 async fn import_takes_only_a_boolean_for_approve_and_allow_code() {
     let k = setup().await;
-    let n = k.agents.len();
+    let n = k.agent_ids().len();
     let d = exported(&k, "literal").await;
     let r = import(&k, &d, json!({"approve": "true"})).await;
     assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("approve")), "{r}");
-    assert_eq!(k.agents.len(), n);
+    assert_eq!(k.agent_ids().len(), n);
     let c = written(
         "literal-code",
         "agents:\n  - id: s\n    handler_module: py_ab12.tools\n",
@@ -496,7 +492,7 @@ async fn import_takes_only_a_boolean_for_approve_and_allow_code() {
     assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("allow_code")), "{r}");
     let r = import(&k, &c, json!({"approve": true, "bind": {}})).await;
     assert_eq!(r["reason"], "code_not_allowed", "{r}");
-    assert_eq!(k.agents.len(), n);
+    assert_eq!(k.agent_ids().len(), n);
     for x in [d, c] {
         let _ = std::fs::remove_dir_all(x);
     }
@@ -522,28 +518,28 @@ async fn import_subtree_args_and_docs() {
     )
     .await;
     assert_eq!(r["reason"], "not_found", "{r}");
-    let d = op(&k, "kernel", json!({"type": "docs", "of": "user"})).await;
+    let d = op(&k, "user", json!({"type": "reflect", "tier": "oneliners"})).await;
     assert!(d["verbs"].get("import_subtree").is_some(), "{d}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_empty_bind_target_is_refused_by_the_shared_engine() {
     let k = setup().await;
-    let n = k.agents.len();
+    let n = k.agent_ids().len();
     for bind in [json!({"@memory": ""}), json!({"@memory": 3})] {
         let p = json!({"type": "import_subtree", "path": "x", "parent_id": "other", "bind": bind});
         let r = op(&k, "user", p.clone()).await;
         assert_eq!(r["reason"], "bad_arg", "{p}: {r}");
         assert!(r["error"].as_str().is_some_and(|e| e.contains("bind")), "{r}");
     }
-    assert_eq!(k.agents.len(), n, "nothing created");
+    assert_eq!(k.agent_ids().len(), n, "nothing created");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn import_refuses_bind_to_a_missing_agent_naming_the_port() {
     let k = setup().await;
     let d = exported(&k, "ghost").await;
-    let n = k.agents.len();
+    let n = k.agent_ids().len();
     for extra in [
         json!({"approve": true, "bind": {"@memory": "ghost", "@exec": "exec"}}),
         json!({"bind": {"@memory": "ghost", "@exec": "exec"}}),
@@ -555,7 +551,7 @@ async fn import_refuses_bind_to_a_missing_agent_naming_the_port() {
             msg.contains("@memory") && msg.contains("ghost") && msg.contains("no agent"),
             "{msg}"
         );
-        assert_eq!(k.agents.len(), n, "nothing created");
+        assert_eq!(k.agent_ids().len(), n, "nothing created");
     }
     // a bind key that names no port is refused naming that key
     let r = import(
@@ -566,6 +562,6 @@ async fn import_refuses_bind_to_a_missing_agent_naming_the_port() {
     .await;
     assert_eq!(r["reason"], "bad_binding", "{r}");
     assert!(r["error"].as_str().unwrap().contains("@nope"), "{r}");
-    assert_eq!(k.agents.len(), n, "nothing created");
+    assert_eq!(k.agent_ids().len(), n, "nothing created");
     let _ = std::fs::remove_dir_all(d);
 }

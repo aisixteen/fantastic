@@ -141,7 +141,7 @@ impl Handler for Relay {
 /// The shell: a send from outside every agent (ungated).
 async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     Arc::clone(k)
-        .send(vec![Item::new(AgentId::from(target), payload)])
+        .operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -228,27 +228,27 @@ async fn setup() -> Arc<Kernel> {
             "leg",
             &root,
             "relay.tools",
-            json!({"can_call": {"user": "*", "*|*": ["*"]}}),
+            json!({"can": {"user": {"call": ["*"]}}}),
         ),
         mk(
             "echo",
             &root,
             "echo.tools",
-            json!({"callable_by": {"user": "*"}}),
+            json!({}),
         ),
         mk(
             "user",
             &root,
             HANDLER_MODULE,
-            json!({"page_loader": "loader", "callable_by": {"leg": "*"},
-            "can_call": {"echo": "*", "loader": "*", "*|*": ["*"]}}),
+            // its page loader is its child: reached by position
+            json!({"page_loader": "loader", "can": {"echo": {"call": ["*"]}}}),
         ),
         // the page loader sits under `user` (the tree): its record verbs serve its parent
         mk(
             "loader",
             "user",
             "loader.tools",
-            json!({"callable_by": {"user": "*"}}),
+            json!({}),
         ),
     ] {
         let r = op(&k, &root, p.clone()).await;
@@ -303,60 +303,36 @@ async fn the_path_verb_names_the_running_fantastic_as_fantastic() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_tab_forwards_through_user() {
-    let k = setup().await;
-    let r = tab(
-        &k,
-        json!({"type": "forward", "target": "echo", "payload": {"type": "ping"}}),
-    )
-    .await;
-    assert_eq!(r["echo"]["type"], "ping", "only `user` may call echo: {r}");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_forwarded_call_written_as_text_takes_its_target_verbs_types() {
-    let k = setup().await;
-    let r = tab(
-        &k,
-        json!({"type": "forward", "target": "echo", "payload": {"type": "wait", "wait_s": "30"}}),
-    )
-    .await;
-    assert_eq!(r["echo"]["wait_s"].as_f64(), Some(30.0), "the text `30` is the number 30 here: {r}");
-    let r = tab(
-        &k,
-        json!({"type": "forward", "target": "echo", "payload": {"type": "wait", "wait_s": "soon"}}),
-    )
-    .await;
-    assert_eq!(r["reason"], "bad_arg", "a value that is not a number is refused by name: {r}");
-    assert!(r.to_string().contains("wait_s"), "the refusal names the argument: {r}");
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn the_page_loader_under_user_is_reached_whole_and_writable() {
     let k = setup().await;
-    let r = tab(
-        &k,
-        json!({"type": "forward", "target": "loader", "payload": {"type": "load_tree"}}),
-    )
-    .await;
+    // `user` reaches its child loader by position: no line is written
+    let as_user = |p: Value| {
+        let k = Arc::clone(&k);
+        async move {
+            fantastic_kernel::test_support::as_agent(
+                AgentId::from("user"),
+                k.send(vec![Item::new(AgentId::from("loader"), p)]),
+            )
+            .await
+            .remove(0)
+            .result
+        }
+    };
+    let r = as_user(json!({"type": "load_tree"})).await;
     assert_eq!(
         ids(&r),
         vec!["c1", "canvas", "cv1", "cv2", "layout_canvas", "view_root"],
         "{r}"
     );
-    let r = tab(
-        &k,
-        json!({"type": "forward", "target": "loader",
-        "payload": {"type": "persist_record", "record": {"id": "c9", "parent_id": "cv2"}}}),
-    )
-    .await;
+    let r = as_user(json!({"type": "persist_record", "record": {"id": "c9", "parent_id": "cv2"}})).await;
     assert_eq!(r["ok"], true, "{r}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn around_answers_from_the_page_records_by_the_callers_page_grants() {
+#[ignore = "page lines (`<guid>|<id>`) are parked with the peers (grant model v9, Q5)"]
+async fn around_answers_from_the_page_records_by_the_callers_page_lines() {
     let k = setup().await;
-    // a tab is judged by the leg's page grants (`*|*`: every page agent): the root's cells, nearest first
+    // a tab is judged by the leg's page lines (`*|*`: every page agent): the root's cells, nearest first
     let r = tab(
         &k,
         json!({"type": "around", "x": 50, "y": 25, "radius": 10}),
@@ -385,26 +361,10 @@ async fn around_answers_from_the_page_records_by_the_callers_page_grants() {
     assert_eq!((r["reason"].as_str(), r["arg"].as_str()), (Some("bad_arg"), Some("theme")), "an unknown argument is refused: {r}");
     let r = tab(&k, json!({"type": "around", "x": "a", "y": 0, "radius": 5})).await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
-    // a cell's AI: judged by its own page grants (cv2 only)
+    // a cell's AI: judged by its own page lines (cv2 only)
     let root = k.root().unwrap().id.0.clone();
     op(&k, &root, json!({"type": "create_agent", "parent_id": root, "id": "ai_1", "handler_module": "relay.tools",
-        "can_call": {"user": ["around"], format!("{G}|cv2"): ["reflect"]}})).await;
-    let mut cb = k
-        .agents
-        .get(&AgentId::from("user"))
-        .unwrap()
-        .record()
-        .meta
-        .get("callable_by")
-        .cloned()
-        .unwrap();
-    cb["ai_1"] = json!(["around"]);
-    op(
-        &k,
-        "kernel",
-        json!({"type": "update_agent", "id": "user", "callable_by": cb}),
-    )
-    .await;
+        "can": {"user": {"call": ["around"]}, format!("{G}|cv2"): {"call": ["reflect"]}}})).await;
     let r = as_agent(
         &k,
         "ai_1",
@@ -421,29 +381,16 @@ async fn around_answers_from_the_page_records_by_the_callers_page_grants() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_shell_forwards_and_user_answers_its_own_verbs() {
+async fn the_shell_reaches_user_and_user_answers_its_own_verbs() {
     let k = setup().await;
-    // the shell (no origin)
-    let r = op(
-        &k,
-        "user",
-        json!({"type": "forward", "target": "echo", "payload": {"type": "ping"}}),
-    )
-    .await;
-    assert_eq!(r["echo"]["type"], "ping", "{r}");
-    // its inquiries and its reflect
+    // the shell (no origin): its inquiries and its reflect
     let r = op(&k, "user", json!({"type": "inquiries"})).await;
     assert!(r.get("inquiries").is_some(), "{r}");
     let r = op(&k, "user", json!({"type": "reflect"})).await;
     assert_eq!(r["handler_module"], HANDLER_MODULE, "{r}");
-    assert!(r["verbs"].get("forward").is_some(), "a reflect renders the declared verbs: {r}");
-    // HOW TO CALL it: the kernel's `docs`, rendered from the declared verbs
-    let d = op(&k, "kernel", json!({"type": "docs", "of": "user"})).await;
     assert!(
-        d["verbs"].get("forward").is_some()
-            && d["verbs"].get("around").is_some()
-            && d["verbs"].get("inquiry").is_some(),
-        "{d}"
+        r["verbs"].get("around").is_some() && r["verbs"].get("inquiry").is_some(),
+        "a reflect renders the declared verbs: {r}"
     );
 }
 
@@ -479,8 +426,6 @@ async fn every_verb_of_user_is_checked_by_its_declaration() {
     }
     // wrongly typed, never coerced
     for (p, arg) in [
-        (json!({"type": "forward", "target": "echo", "payload": "x"}), "payload"),
-        (json!({"type": "forward", "target": "echo", "payload": {}, "timeout": "5"}), "timeout"),
         (json!({"type": "around", "x": 1, "y": 2, "radius": 0}), "radius"),
         (json!({"type": "around", "x": 1, "y": 2, "radius": 5, "view": 3}), "view"),
         (json!({"type": "path", "rescan": "yes"}), "rescan"),

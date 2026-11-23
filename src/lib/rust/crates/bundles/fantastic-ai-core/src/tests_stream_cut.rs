@@ -30,8 +30,7 @@ async fn answers(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<String> {
 }
 
 async fn send_go(kernel: &Arc<Kernel>, backend: &AgentId) {
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
         )])
@@ -162,8 +161,7 @@ async fn nine_cut_turns_in_a_row_give_up() {
     );
     let s = script(&a, (0..12).map(|_| pass(FOREIGN)).collect(), Duration::ZERO);
     let mut rx = rebind_backend_inbox(&kernel, &a);
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "go", "client_id": "tab1", "send_to": b.as_str()}),
         )])
@@ -216,8 +214,7 @@ async fn a_cut_give_up_is_told_to_the_asker() {
         Duration::ZERO,
     );
     let s = script(&a, (0..12).map(|_| pass(FOREIGN)).collect(), Duration::ZERO);
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             b.clone(),
             json!({"type": "send", "text": "ask", "client_id": "probe"}),
         )])
@@ -238,8 +235,7 @@ async fn gave_up_after(
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, tag).await;
     if let Some(n) = misfire_limit {
-        let _ = kernel
-            .send(vec![Item::new(
+        let _ = kernel.operator_send(vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "update_agent", "id": a.as_str(), "misfire_limit": n}),
             )])
@@ -250,8 +246,7 @@ async fn gave_up_after(
     let total = passes.len();
     let s = script(&a, passes, Duration::ZERO);
     let mut rx = rebind_backend_inbox(&kernel, &a);
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "send", "text": "go", "client_id": "tab1"}),
         )])

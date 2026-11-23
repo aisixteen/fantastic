@@ -125,6 +125,10 @@ pub(crate) struct AppState {
     pub kernel: Arc<Kernel>,
     /// This web agent's id — the host the file route hands each fetch to.
     pub web_agent_id: AgentId,
+    /// The identity of the dispatch that started the server: every request runs
+    /// with it, so its hand-ins are that dispatch's sends (the per-connection
+    /// tasks the server spawns carry no task-locals of their own).
+    pub inherited: fantastic_kernel::Inherited,
 }
 
 /// The HTTP host bundle.
@@ -256,7 +260,7 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         json!(origin::reflect_origins(&rec)),
     );
     out.insert("running".into(), json!(running));
-    out.insert("served_agent_count".into(), json!(kernel.agents.len()));
+    out.insert("served_agent_count".into(), json!(kernel.agent_ids().len()));
     out.insert("surfaces".into(), Value::Object(surface_map));
     // The PROPERTY, computed — not a description of it. `ingress_rule=allow_all_ingress`
     // reads like "open" while the call gate still refuses, so config never
@@ -293,29 +297,27 @@ const REQUEST_VIEW: &str = include_str!("request_view.html");
 pub const VIEW_CALLS: [&str; 2] = ["reflect", "watch"];
 
 /// python `_browser_reachable` — which agents a browser could actually fetch
-/// through this host, RIGHT NOW. Asks the REAL gates (the same `authorize_call`
-/// `Agent.send` uses, plus the io leg's own resolved ingress rule) rather than
-/// re-deriving them: a reimplementation here would be a second truth that
-/// silently drifts, which is the exact bug this field exists to expose.
+/// through this host, RIGHT NOW. Asks the REAL gates (the kernel's own check of
+/// `read_stream` for the reader the file proxy sends as, plus the io leg's own
+/// resolved ingress rule) rather than re-deriving them: a reimplementation here
+/// would be a second truth that silently drifts, which is the exact bug this field
+/// exists to expose.
 fn browser_reachable(web_id: &AgentId, kernel: &Kernel) -> Vec<String> {
-    use fantastic_kernel::authz::authorize_call;
-    let Some(web) = kernel.agents.get(web_id).map(|e| Arc::clone(&e)) else {
+    if !kernel.exists(web_id.as_str()) {
         return Vec::new();
-    };
-    let web_meta = web.meta.read().expect("meta poisoned").clone();
-    let web_ancestors = kernel.ancestor_ids(Some(web.as_ref()));
+    }
     let mut out: Vec<String> = Vec::new();
     // Snapshot first: the gates below must not run under a live map iteration.
     let agents: Vec<Arc<fantastic_kernel::Agent>> = kernel
-        .agents
-        .iter()
-        .map(|e| Arc::clone(e.value()))
+        .agent_ids()
+        .into_iter()
+        .filter_map(|aid| kernel.resolve_target(aid.as_str()))
         .collect();
     for agent in &agents {
         if agent.id == *web_id {
             continue;
         }
-        let meta = agent.meta.read().expect("meta poisoned").clone();
+        let meta = agent.record().meta;
         // An agent that cannot answer the SOURCE verb is not a file server at all.
         let declares = meta
             .get("verbs")
@@ -330,26 +332,7 @@ fn browser_reachable(web_id: &AgentId, kernel: &Kernel) -> Vec<String> {
         if !servable {
             continue;
         }
-        let egress = authorize_call(
-            web_meta.get("can_call").unwrap_or(&Value::Null),
-            "read_stream",
-            agent.id.as_str(),
-            web_id.as_str(),
-            web.parent_id.as_ref().map(|p| p.0.as_str()),
-            &kernel.ancestor_ids(Some(agent.as_ref())),
-        );
-        if !egress.allowed {
-            continue;
-        }
-        let ingress = authorize_call(
-            meta.get("callable_by").unwrap_or(&Value::Null),
-            "read_stream",
-            web_id.as_str(),
-            agent.id.as_str(),
-            agent.parent_id.as_ref().map(|p| p.0.as_str()),
-            &web_ancestors,
-        );
-        if !ingress.allowed {
+        if !kernel.may_call(web_id, "read_stream", &agent.id) {
             continue;
         }
         if leg_admits(&meta, agent.id.as_str(), "read_stream") {
@@ -409,11 +392,10 @@ Set port on create_agent or via update_agent."
     let state = AppState {
         kernel: Arc::clone(kernel),
         web_agent_id: agent_id.clone(),
+        inherited: fantastic_kernel::Inherited::capture(),
     };
     // Mount all child surfaces BEFORE the listener starts accepting.
-    let children: Vec<AgentId> = kernel
-        .agents
-        .get(agent_id)
+    let children: Vec<AgentId> = kernel.resolve_target(agent_id.as_str())
         .map(|e| e.child_ids())
         .unwrap_or_default();
     for cid in children {
@@ -478,7 +460,7 @@ async fn start_serving(
     };
     let serve = axum::serve(listener, dynamic.into_make_service());
     let failed_id = agent_id.clone();
-    let task = tokio::spawn(async move {
+    let task = fantastic_kernel::spawn_inherit(async move {
         if let Err(e) = serve.await {
             // Same python line — `_safe_serve`'s `except Exception` wraps the
             // whole `server.serve()`, not just the bind.
@@ -507,7 +489,7 @@ async fn stop_reply(agent_id: &AgentId) -> Value {
 /// python `_mount` — pull `get_routes` from the named child and (re)mount it.
 /// python `_fetch_file` — one `read_stream` chunk of `path` on `agent_id`, sent
 /// from this host's own dispatch, so the read is THE HOST's: the served agent's
-/// `callable_by` and its io leg judge `web`. The reply comes back whole, its raw
+/// `web`'s own lines and the served agent's io leg judge it. The reply comes back whole, its raw
 /// chunk at its slot.
 async fn fetch_file_reply(
     a: verbs::FetchFile,
@@ -579,17 +561,15 @@ async fn mount_surface(
 
 /// The record's `port` (declared `u16`, at least 1); absent means not set.
 fn read_port(agent_id: &AgentId, kernel: &Kernel) -> Option<u16> {
-    let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
-    let meta = agent.meta.read().expect("meta poisoned");
+    let agent = kernel.resolve_target(agent_id.as_str())?;
+    let meta = agent.record().meta;
     meta.get("port")?.as_u64().and_then(|n| u16::try_from(n).ok())
 }
 
 /// The agent's record meta (python `kernel.get(id) or {}`).
 pub(crate) fn read_rec(agent_id: &AgentId, kernel: &Kernel) -> Map<String, Value> {
-    kernel
-        .agents
-        .get(agent_id)
-        .map(|e| e.meta.read().expect("meta poisoned").clone())
+    kernel.resolve_target(agent_id.as_str())
+        .map(|e| e.record().meta.clone())
         .unwrap_or_default()
 }
 
@@ -643,13 +623,18 @@ impl tower::Service<Request<Body>> for DynamicRouter {
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let state = self.state.clone();
         let table = Arc::clone(&self.table);
+        let inherited = state.inherited.clone();
         Box::pin(async move {
-            // python `_OriginGuard`: in front of EVERY route, the record read per request.
-            let rec = read_rec(&state.web_agent_id, &state.kernel);
-            if let Some(refused) = origin::guard(state.web_agent_id.as_str(), &rec, &req) {
-                return Ok(refused);
-            }
-            Ok(handlers::dispatch(state, table, req).await)
+            inherited
+                .scope(async move {
+                    // python `_OriginGuard`: in front of EVERY route, the record read per request.
+                    let rec = read_rec(&state.web_agent_id, &state.kernel);
+                    if let Some(refused) = origin::guard(state.web_agent_id.as_str(), &rec, &req) {
+                        return Ok(refused);
+                    }
+                    Ok(handlers::dispatch(state, table, req).await)
+                })
+                .await
         })
     }
 }

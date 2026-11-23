@@ -5,8 +5,8 @@
 //! `ai_core/prompt_file.py`, text for text.
 //!
 //! The agent reads the file through that bridge, AS ITSELF — every read and watch
-//! is its own gated send, so its `can_call` names the bridge (`read_stream`,
-//! `watch_path`, `unwatch_path`, `watch`) and the bridge's `callable_by` names it.
+//! is its own gated send, so its own `can` holds a line on the bridge (`read_stream`,
+//! `watch_path`, `unwatch_path`, `watch`).
 //! It holds the path under the bridge's disk watcher (`watch_path`) and watches the
 //! bridge through a private inbox: a `changed` event for the path marks the text
 //! STALE, and the next turn reads it again — no restart, and no read on a turn

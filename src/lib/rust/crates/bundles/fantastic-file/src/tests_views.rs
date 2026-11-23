@@ -3,11 +3,10 @@
 //! view reads, writes and refuses another path; a folder view lists inside itself and
 //! refuses an escape; `reveal` shows the way down; a view's watch relays its changes.
 
-use super::views::{deliver, relay_event, relay_inbox, FILE, FOLDER};
+use super::views::{relay_event, FILE, FOLDER};
 use super::*;
 use fantastic_kernel::{Agent, Item};
 use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 async fn kernel(tmp: &tempfile::TempDir) -> Arc<Kernel> {
@@ -28,10 +27,9 @@ async fn kernel(tmp: &tempfile::TempDir) -> Arc<Kernel> {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(root);
-    let r = kernel
-        .send(vec![Item::new(
+    let r = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
                    "id": "fb", "root": tmp.path().join("served").display().to_string(),
@@ -45,8 +43,7 @@ async fn kernel(tmp: &tempfile::TempDir) -> Arc<Kernel> {
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(AgentId::from(target), payload)])
+    kernel.operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -75,27 +72,20 @@ async fn open_view_makes_one_view_per_path() {
     let again = open(&k, "file", "notes.md").await;
     assert_eq!(again["id"], first["id"]);
     assert_eq!(again["created"], false);
-    let rec = k
-        .agents
-        .get(&AgentId::from(first["id"].as_str().unwrap()))
+    let rec = k.resolve_target(first["id"].as_str().unwrap())
         .unwrap()
         .record();
     assert_eq!(rec.meta["view"], "file");
     assert_eq!(rec.meta["bridge"], "fb");
     assert_eq!(rec.meta["path"], "notes.md");
     assert_eq!(rec.handler_module.as_deref(), Some(HANDLER_MODULE));
-    // the bridge admits the view for exactly its grant
-    let fb = k.agents.get(&AgentId::from("fb")).unwrap().record();
+    // the view's one line: its grant on its bridge, its parent; the bridge keeps
+    // no list of callers
     assert_eq!(
-        fb.meta["callable_by"][first["id"].as_str().unwrap()],
-        json!([
-            "file:notes.md",
-            "read",
-            "unwatch_path",
-            "watch_path",
-            "write"
-        ])
+        rec.meta["can"],
+        json!({"$parent": {"call": ["read", "write", "watch_path", "unwatch_path"]}})
     );
+    assert!(k.resolve_target("fb").unwrap().record().meta.get("can").is_none());
 }
 
 #[tokio::test]
@@ -216,39 +206,6 @@ async fn a_file_view_relays_its_changes_to_its_watchers() {
 // python `test_views_units.py` — who may reach a view: the bridge's callers, for the
 // verbs the view answers.
 
-#[test]
-fn a_view_admits_whoever_reaches_its_bridge_for_the_verbs_it_answers() {
-    let grants = json!({"$self": "*", "$parent": "*", "user": ["read", "list", "edit", "pump"]});
-    let g = grants.as_object().unwrap();
-    let file = crate::views::view_callers(g, Some("rest"), crate::views::FILE);
-    assert_eq!(
-        Value::Object(file),
-        json!({"rest": ["read", "reflect", "watch", "write"], "user": ["read"]})
-    );
-    let folder = crate::views::view_callers(g, Some("rest"), crate::views::FOLDER);
-    assert_eq!(
-        Value::Object(folder),
-        json!({"rest": ["list", "reflect", "reveal", "watch"], "user": ["list"]})
-    );
-}
-
-#[test]
-fn the_bridges_self_is_no_caller_and_its_parent_is_named_literally() {
-    let g = json!({"$self": "*", "$parent": ["read"]});
-    let got = crate::views::view_callers(g.as_object().unwrap(), Some("rest"), crate::views::FILE);
-    assert_eq!(Value::Object(got), json!({"rest": ["read"]}));
-    let orphan = json!({"$parent": "*"});
-    let got = crate::views::view_callers(orphan.as_object().unwrap(), None, crate::views::FILE);
-    assert_eq!(Value::Object(got), json!({}), "no parent, no caller named");
-}
-
-#[test]
-fn a_caller_with_no_verb_the_view_answers_is_not_admitted() {
-    let g = json!({"ai": ["edit", "pump"]});
-    let got = crate::views::view_callers(g.as_object().unwrap(), None, crate::views::FILE);
-    assert_eq!(Value::Object(got), json!({}));
-}
-
 /// Every event a watcher's inbox holds within `secs` (the full window: a count is the point).
 async fn events_for(rx: &mut fantastic_kernel::inbox::InboxReceiver, secs: u64) -> Vec<Value> {
     let mut out = Vec::new();
@@ -259,12 +216,11 @@ async fn events_for(rx: &mut fantastic_kernel::inbox::InboxReceiver, secs: u64) 
     out
 }
 
-/// The verbs `docs of=<agent>` names, sorted.
+/// The verbs the verb docs of `of`'s reflect name, sorted.
 async fn docs_verbs(k: &Arc<Kernel>, of: &str) -> Vec<String> {
-    let r = k
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type": "docs", "of": of}),
+    let r = k.operator_send(vec![Item::new(
+            AgentId::from(of),
+            json!({"type": "reflect", "tier": "oneliners"}),
         )])
         .await
         .remove(0)
@@ -378,8 +334,7 @@ async fn deleting_a_view_ends_its_relay() {
         before.iter().any(|e| e["type"] == "changed"),
         "the bridge sees the change while the view watches: {before:?}"
     );
-    let del = k
-        .send(vec![Item::new(
+    let del = k.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": v}),
         )])
@@ -406,8 +361,7 @@ async fn open_view_refuses_a_path_the_bridge_does_not_expose() {
     std::fs::create_dir_all(served(&tmp).join("secret")).unwrap();
     std::fs::write(served(&tmp).join("secret/s.txt"), "s").unwrap();
     // a second bridge exposing only `docs`
-    let made = k
-        .send(vec![Item::new(
+    let made = k.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
                    "id": "fb_docs", "root": served(&tmp).display().to_string(),
@@ -578,7 +532,7 @@ async fn a_view_caller_is_held_to_its_path_at_the_bridge() {
     assert!(view_scope(&k, &fb, Some(&fv), "read", &read("a.txt")).is_none());
     let watch = "dir";
     assert_eq!(
-        view_scope(&k, &fb, Some(&fv), "watch_path", &watch).unwrap()["reason"],
+        view_scope(&k, &fb, Some(&fv), "watch_path", watch).unwrap()["reason"],
         "unauthorized"
     );
     let refused = view_scope(&k, &fb, Some(&dv), "read", &read("a.txt")).expect("refused");
@@ -602,7 +556,7 @@ async fn binary_as(
 ) -> (Value, Option<Vec<u8>>) {
     let out = fantastic_kernel::test_support::as_agent(
         caller.clone(),
-        k.send(vec![
+        k.operator_send(vec![
             Item::new(AgentId::from("fb"), header).with_binary_key("bytes", blob.to_vec())
         ]),
     )
@@ -663,239 +617,6 @@ fn a_relay_event_without_a_known_kind_is_dropped() {
     );
 }
 
-/// Replace one caller's entry in the bridge's `callable_by` (the scope a view is held to).
-fn set_callable_by(k: &Arc<Kernel>, bridge: &str, caller: &str, entry: Value) {
-    k.edit_callable_by(&AgentId::from(bridge), |cb| {
-        cb.insert(caller.to_string(), entry);
-        true
-    })
-    .unwrap();
-}
-
-#[tokio::test]
-async fn the_bridge_holds_a_view_to_the_scope_in_its_callable_by() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let k = kernel(&tmp).await;
-    std::fs::create_dir_all(served(&tmp).join("dir/sub")).unwrap();
-    std::fs::write(served(&tmp).join("dir/x.txt"), "x\n").unwrap();
-    let dv = open(&k, "folder", "dir").await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let fb = AgentId::from("fb");
-    let read = |p: &str| p.to_string();
-    assert!(view_scope(
-        &k,
-        &fb,
-        Some(&AgentId::from(dv.as_str())),
-        "read",
-        &read("dir/x.txt")
-    )
-    .is_none());
-    // the bridge's entry narrows the view to `dir/sub`: `dir/x.txt` is refused at the
-    // bridge, although the view's own record still says `dir`
-    set_callable_by(
-        &k,
-        "fb",
-        &dv,
-        json!(["folder:dir/sub", "list", "watch_path", "unwatch_path"]),
-    );
-    let dv_id = AgentId::from(dv.as_str());
-    let refused = view_scope(&k, &fb, Some(&dv_id), "read", &read("dir/x.txt")).expect("refused");
-    assert_eq!(refused["reason"], "unauthorized", "{refused}");
-    assert!(view_scope(&k, &fb, Some(&dv_id), "list", "dir/sub").is_none());
-    // an entry with no single scope token is a view refused in full
-    set_callable_by(&k, "fb", &dv, json!(["list", "watch_path", "unwatch_path"]));
-    let refused =
-        view_scope(&k, &fb, Some(&dv_id), "list", "dir/sub").expect("refused");
-    assert_eq!(refused["reason"], "unauthorized", "{refused}");
-}
-
-#[tokio::test]
-async fn the_bridge_relays_a_view_only_the_changes_in_its_scope() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let k = kernel(&tmp).await;
-    std::fs::create_dir(served(&tmp).join("dir")).unwrap();
-    std::fs::write(served(&tmp).join("other.txt"), "o\n").unwrap();
-    let dv = open(&k, "folder", "dir").await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let fb = AgentId::from("fb");
-    // the view's relay inbox, and the holder of `dir` the bridge pushes to
-    let mut rx = k.ensure_inbox(&relay_inbox(&dv));
-    let holders: BTreeMap<String, BTreeSet<String>> =
-        BTreeMap::from([("dir".to_string(), BTreeSet::from([dv.clone()]))]);
-    let none = |rx: &mut fantastic_kernel::inbox::InboxReceiver| rx.try_recv().is_none();
-    crate::watch::relay_to_views(&k, &fb, &holders, "dir/a.md", "added");
-    let got = rx.try_recv().expect("in scope").payload;
-    assert_eq!(
-        got,
-        json!({"type": "changed", "path": "dir/a.md", "kind": "added"})
-    );
-    crate::watch::relay_to_views(&k, &fb, &holders, "other.txt", "modified");
-    assert!(none(&mut rx), "outside the view's folder");
-    // the entry narrows the view to `dir/sub`: `dir/a.md` is no longer relayed
-    set_callable_by(
-        &k,
-        "fb",
-        &dv,
-        json!(["folder:dir/sub", "list", "watch_path"]),
-    );
-    crate::watch::relay_to_views(&k, &fb, &holders, "dir/a.md", "added");
-    assert!(none(&mut rx), "narrowed scope");
-    // no single scope token: fail closed, nothing relayed
-    set_callable_by(&k, "fb", &dv, json!(["list", "watch_path"]));
-    crate::watch::relay_to_views(&k, &fb, &holders, "dir/a.md", "added");
-    assert!(none(&mut rx), "no scope token");
-    // a view with no relay inbox gets nothing, and the drop is reported
-    assert!(!deliver(&k, "gone", json!({"type": "changed"})));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn open_view_keeps_keys_a_concurrent_callable_by_edit_adds() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let k = kernel(&tmp).await;
-    for round in 0..20 {
-        std::fs::write(served(&tmp).join(format!("n{round}.md")), "x").unwrap();
-    }
-    let barrier = Arc::new(std::sync::Barrier::new(2));
-    let (k2, b2) = (Arc::clone(&k), Arc::clone(&barrier));
-    // the competing writer adds 50 distinct keys while open_view runs
-    let writer = std::thread::spawn(move || {
-        b2.wait();
-        for n in 0..50 {
-            k2.edit_callable_by(&AgentId::from("fb"), |cb| {
-                cb.insert(format!("viewer{n}"), json!(["*"]));
-                true
-            })
-            .unwrap();
-            std::thread::yield_now();
-        }
-    });
-    barrier.wait();
-    let mut ids = Vec::new();
-    for round in 0..20 {
-        let r = open(&k, "file", &format!("n{round}.md")).await;
-        ids.push(r["id"].as_str().expect("a view id").to_string());
-    }
-    writer.join().unwrap();
-    let cb = k.agents.get(&AgentId::from("fb")).unwrap().record().meta["callable_by"].clone();
-    for id in &ids {
-        assert!(cb.get(id).is_some(), "the view {id} lost its entry: {cb}");
-    }
-    for n in 0..50 {
-        assert_eq!(
-            cb.get(format!("viewer{n}")),
-            Some(&json!(["*"])),
-            "viewer{n}: {cb}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn open_view_publishes_an_updated_event_for_the_bridge_callable_by() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let k = kernel(&tmp).await;
-    std::fs::write(served(&tmp).join("a.md"), "x").unwrap();
-    let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
-    let sink = Arc::clone(&seen);
-    k.add_state_subscriber(Arc::new(
-        move |v: &Value, _b: Option<&fantastic_kernel::Blob>| {
-            sink.lock().unwrap().push(v.clone());
-        },
-    ));
-    open(&k, "file", "a.md").await;
-    let seen = seen.lock().unwrap();
-    assert!(
-        seen.iter().any(|v| v["kind"] == "updated"
-            && v["agent_id"] == "fb"
-            && v["changed"] == json!(["callable_by"])),
-        "{seen:?}"
-    );
-}
-
-#[tokio::test]
-async fn open_view_leaves_a_stamped_entry_untouched() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let k = kernel(&tmp).await;
-    std::fs::write(served(&tmp).join("a.md"), "x").unwrap();
-    let dv = open(&k, "file", "a.md").await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let before = entry_of(&k, &dv);
-    let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
-    let sink = Arc::clone(&seen);
-    k.add_state_subscriber(Arc::new(
-        move |v: &Value, _b: Option<&fantastic_kernel::Blob>| {
-            sink.lock().unwrap().push(v.clone());
-        },
-    ));
-    assert_eq!(open(&k, "file", "a.md").await["created"], false);
-    assert_eq!(
-        open_with(&k, "file", "a.md", json!(dv)).await["created"],
-        false
-    );
-    assert_eq!(entry_of(&k, &dv), before);
-    let seen = seen.lock().unwrap();
-    assert!(
-        !seen
-            .iter()
-            .any(|v| v["kind"] == "updated" && v["agent_id"] == "fb"),
-        "a healthy view's reopen published an update: {seen:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn open_view_restamp_keeps_keys_a_concurrent_edit_adds() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let k = kernel(&tmp).await;
-    let mut ids = Vec::new();
-    for round in 0..20 {
-        std::fs::write(served(&tmp).join(format!("n{round}.md")), "x").unwrap();
-        let id = open(&k, "file", &format!("n{round}.md")).await["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        set_callable_by(&k, "fb", &id, json!(OLD_FILE_ENTRY));
-        ids.push(id);
-    }
-    let barrier = Arc::new(std::sync::Barrier::new(2));
-    let (k2, b2) = (Arc::clone(&k), Arc::clone(&barrier));
-    let writer = std::thread::spawn(move || {
-        b2.wait();
-        for n in 0..50 {
-            k2.edit_callable_by(&AgentId::from("fb"), |cb| {
-                cb.insert(format!("viewer{n}"), json!(["*"]));
-                true
-            })
-            .unwrap();
-            std::thread::yield_now();
-        }
-    });
-    barrier.wait();
-    for round in 0..20 {
-        let r = open(&k, "file", &format!("n{round}.md")).await;
-        assert_eq!(r["created"], false, "{r}");
-    }
-    writer.join().unwrap();
-    let cb = k.agents.get(&AgentId::from("fb")).unwrap().record().meta["callable_by"].clone();
-    for (round, id) in ids.iter().enumerate() {
-        let token = format!("file:n{round}.md");
-        assert!(
-            cb[id].as_array().unwrap().contains(&json!(token)),
-            "the view {id} was not re-stamped: {cb}"
-        );
-    }
-    for n in 0..50 {
-        assert_eq!(
-            cb.get(format!("viewer{n}")),
-            Some(&json!(["*"])),
-            "viewer{n}: {cb}"
-        );
-    }
-}
 
 /// The events of `type: changed` a watcher's inbox holds within `secs`, as (path, kind).
 async fn changed_for(
@@ -941,102 +662,9 @@ async fn a_view_gets_one_relayed_event_per_edit_with_stamp_kinds() {
     assert_eq!(changed_for(&mut rx, 2).await, live("added"));
 }
 
-const OLD_FILE_ENTRY: [&str; 4] = ["read", "write", "watch_path", "unwatch_path"];
 
-fn entry_of(k: &Arc<Kernel>, caller: &str) -> Value {
-    k.agents.get(&AgentId::from("fb")).unwrap().record().meta["callable_by"][caller].clone()
-}
 
-fn refused_read(k: &Arc<Kernel>, dv: &str, path: &str) -> bool {
-    view_scope(
-        k,
-        &AgentId::from("fb"),
-        Some(&AgentId::from(dv)),
-        "read",
-        path,
-    )
-    .is_some()
-}
 
-async fn file_view_made_before_the_token(tmp: &tempfile::TempDir) -> (Arc<Kernel>, String) {
-    let k = kernel(tmp).await;
-    std::fs::write(served(tmp).join("a.txt"), "x\n").unwrap();
-    let dv = open(&k, "file", "a.txt").await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    set_callable_by(&k, "fb", &dv, json!(OLD_FILE_ENTRY));
-    (k, dv)
-}
-
-#[tokio::test]
-async fn open_view_restamps_a_view_made_before_the_scope_token() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let (k, dv) = file_view_made_before_the_token(&tmp).await;
-    assert!(refused_read(&k, &dv, "a.txt"));
-    let again = open(&k, "file", "a.txt").await;
-    assert_eq!(
-        again,
-        json!({"id": dv, "kind": "file", "path": "a.txt", "created": false})
-    );
-    assert_eq!(
-        entry_of(&k, &dv),
-        json!(["file:a.txt", "read", "unwatch_path", "watch_path", "write"])
-    );
-    assert!(!refused_read(&k, &dv, "a.txt"));
-}
-
-#[tokio::test]
-async fn open_view_restamp_covers_the_chosen_id_path() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let (k, dv) = file_view_made_before_the_token(&tmp).await;
-    let again = open_with(&k, "file", "a.txt", json!(dv)).await;
-    assert_eq!(again["created"], false, "{again}");
-    assert_eq!(again["id"], json!(dv));
-    assert_eq!(
-        entry_of(&k, &dv),
-        json!(["file:a.txt", "read", "unwatch_path", "watch_path", "write"])
-    );
-    assert!(!refused_read(&k, &dv, "a.txt"));
-}
-
-#[tokio::test]
-async fn open_view_leaves_a_narrowed_entry_alone() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let k = kernel(&tmp).await;
-    std::fs::create_dir_all(served(&tmp).join("dir/sub")).unwrap();
-    let dv = open(&k, "folder", "dir").await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let narrowed = json!(["folder:dir/sub", "list", "watch_path", "unwatch_path"]);
-    set_callable_by(&k, "fb", &dv, narrowed.clone());
-    assert_eq!(open(&k, "folder", "dir").await["created"], false);
-    assert_eq!(entry_of(&k, &dv), narrowed);
-    assert_eq!(
-        open_with(&k, "folder", "dir", json!(dv)).await["created"],
-        false
-    );
-    assert_eq!(entry_of(&k, &dv), narrowed);
-}
-
-#[tokio::test]
-async fn open_view_leaves_a_two_token_entry_alone() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let (k, dv) = file_view_made_before_the_token(&tmp).await;
-    let two = json!([
-        "file:a.txt",
-        "file:b.txt",
-        "read",
-        "write",
-        "watch_path",
-        "unwatch_path"
-    ]);
-    set_callable_by(&k, "fb", &dv, two.clone());
-    assert_eq!(open(&k, "file", "a.txt").await["created"], false);
-    assert_eq!(entry_of(&k, &dv), two);
-    assert!(refused_read(&k, &dv, "a.txt"));
-}
 
 #[tokio::test]
 async fn a_view_reflects_the_html_that_draws_it() {
@@ -1051,7 +679,7 @@ async fn a_view_reflects_the_html_that_draws_it() {
     assert_eq!(view["kind"], "html", "{r}");
     assert_eq!(view["calls"], json!({f.as_str(): ["read", "watch"], "kernel": ["reflect"]}));
     let bytes = view["bytes"].as_str().unwrap();
-    assert!(bytes.contains(&format!("PATH = \"a.txt\"")), "the path is in the page");
+    assert!(bytes.contains("PATH = \"a.txt\""), "the path is in the page");
     assert!(bytes.contains("KIND = \"file\""));
     assert!(bytes.contains(&format!("AGENT = \"{f}\"")));
     assert!(bytes.contains("function trail("), "the shared header logic is spliced in");

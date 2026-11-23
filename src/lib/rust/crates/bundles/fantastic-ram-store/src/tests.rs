@@ -27,22 +27,21 @@ fn store() -> Arc<Kernel> {
         .register(HANDLER_MODULE, RamStoreBundle::default());
     let k = Arc::new(k);
     let root = agent("kernel_state", None, None, json!({"guid": "g1"}));
-    k.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
     k.set_root(root);
     for a in ["alice", "bob", "carol", "leg"] {
-        k.register(agent(
+        fantastic_kernel::test_support::register(&k, agent(
             a,
             None,
             Some("kernel_state"),
-            json!({"can_call": {"mem": "*"}}),
+            json!({"can": {"mem": {"call": ["*"]}}}),
         ));
     }
-    k.register(agent(
+    fantastic_kernel::test_support::register(&k, agent(
         "mem",
         Some(HANDLER_MODULE),
         Some("kernel_state"),
         json!({
-            "callable_by": {"alice": "*", "bob": "*", "carol": "*", "leg": "*"},
         }),
     ));
     k
@@ -51,9 +50,9 @@ fn store() -> Arc<Kernel> {
 async fn call(k: &Arc<Kernel>, payload: Value, as_: Option<&str>) -> Value {
     let item = Item::new(AgentId::from("mem"), payload);
     match as_ {
-        None => k.send(vec![item]).await.remove(0).result,
+        None => k.operator_send(vec![item]).await.remove(0).result,
         Some(who) => {
-            as_agent(AgentId::from(who), k.send(vec![item]))
+            as_agent(AgentId::from(who), k.operator_send(vec![item]))
                 .await
                 .remove(0)
                 .result
@@ -72,10 +71,6 @@ fn ids(v: &Value) -> Vec<i64> {
         .iter()
         .map(|r| r["id"].as_i64().unwrap())
         .collect()
-}
-
-fn update(k: &Arc<Kernel>, id: &str, patch: Value) {
-    k.update(&AgentId::from(id), patch.as_object().unwrap().clone());
 }
 
 #[tokio::test]
@@ -102,6 +97,51 @@ async fn rows_are_keyed_by_caller() {
     assert_eq!(dup["reason"], json!("exists"));
     let a = call(&k, json!({"type": "read"}), Some("alice")).await;
     assert_eq!(a["rows"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn copy_moves_rows_between_owners_only_as_the_kernel_allows() {
+    let k = store();
+    // alice's own child: alice holds her own tree by position
+    fantastic_kernel::test_support::register(&k, agent(
+        "alice_kid",
+        None,
+        Some("alice"),
+        json!({"can": {"mem": {"call": ["*"]}}}),
+    ));
+    append(
+        &k,
+        "alice",
+        json!([{"id": 1, "content": "a"}, {"id": 2, "content": "b"}, {"id": 3, "refs": [1, 2]}]),
+    )
+    .await;
+    // to an agent alice holds nothing on: the unknown answer for it, nothing written
+    let out = call(&k, json!({"type": "copy", "from": "alice", "to": "bob"}), Some("alice")).await;
+    assert_eq!(out, fantastic_kernel::unknown_agent("bob"), "{out}");
+    // from an agent bob holds nothing on: the same, for it
+    let out = call(&k, json!({"type": "copy", "from": "alice", "to": "bob"}), Some("bob")).await;
+    assert_eq!(out, fantastic_kernel::unknown_agent("alice"), "{out}");
+    assert!(ids(&call(&k, json!({"type": "read"}), Some("bob")).await).is_empty());
+    // a fold without its members is refused whole
+    let out = call(
+        &k,
+        json!({"type": "copy", "from": "alice", "to": "alice_kid", "ids": [3]}),
+        Some("alice"),
+    )
+    .await;
+    assert_eq!(out["reason"], "not_found", "{out}");
+    assert_eq!(out["arg"], "ids", "{out}");
+    // into her own child: ids, fields and folds kept, under the child's key
+    let out = call(&k, json!({"type": "copy", "from": "alice", "to": "alice_kid"}), Some("alice")).await;
+    assert_eq!(out, json!({"ids": [1, 2, 3], "copied": 3}));
+    let theirs = call(&k, json!({"type": "read"}), Some("alice_kid")).await;
+    assert_eq!(theirs["rows"], call(&k, json!({"type": "read"}), Some("alice")).await["rows"]);
+    // a second copy finds the rows there and writes nothing
+    let out = call(&k, json!({"type": "copy", "from": "alice", "to": "alice_kid"}), Some("alice")).await;
+    assert_eq!(out["reason"], "exists", "{out}");
+    // the operator is never checked
+    let out = call(&k, json!({"type": "copy", "from": "alice", "to": "carol", "ids": [1]}), None).await;
+    assert_eq!(out, json!({"ids": [1], "copied": 1}));
 }
 
 #[tokio::test]
@@ -356,6 +396,7 @@ async fn reflect_names_the_posture_and_the_verbs() {
             "dump",
             "put_bytes",
             "get_bytes",
+            "copy",
             "reflect"
         ]
     );
@@ -490,11 +531,11 @@ async fn unknown_type_is_coded_unhandled_with_the_raw_verb_in_order() {
     for (verb, want) in [
         (
             json!("frob"),
-            r#"{"error":"unknown verb 'frob'; mem answers: append, read, search, prune, inject, dump, put_bytes, get_bytes, reflect","reason":"unhandled","hint":"docs of=mem lists each verb's arguments","verb":"frob"}"#,
+            r#"{"error":"unknown verb 'frob'; mem answers: append, read, search, prune, inject, dump, put_bytes, get_bytes, copy, reflect","reason":"unhandled","hint":"reflect mem tier=detailed lists each verb's arguments","verb":"frob"}"#,
         ),
         (
             json!("it's"),
-            r#"{"error":"unknown verb \"it's\"; mem answers: append, read, search, prune, inject, dump, put_bytes, get_bytes, reflect","reason":"unhandled","hint":"docs of=mem lists each verb's arguments","verb":"it's"}"#,
+            r#"{"error":"unknown verb \"it's\"; mem answers: append, read, search, prune, inject, dump, put_bytes, get_bytes, copy, reflect","reason":"unhandled","hint":"reflect mem tier=detailed lists each verb's arguments","verb":"it's"}"#,
         ),
     ] {
         assert_eq!(
@@ -586,17 +627,17 @@ async fn two_stores_hold_separate_tables_and_delete_frees_one() {
     // per-agent state: a second store of the same kind starts empty, and its
     // own delete does not touch the first's rows.
     let k = store();
-    k.register(agent(
+    fantastic_kernel::test_support::register(&k, agent(
         "mem2",
         Some(HANDLER_MODULE),
         Some("kernel_state"),
-        json!({"callable_by": {"alice": "*"}}),
+        json!({}),
     ));
-    update(&k, "alice", json!({"can_call": {"mem": "*", "mem2": "*"}}));
+    fantastic_kernel::test_support::grant(&k, "alice", "mem2", json!({"call": ["*"]}));
     append(&k, "alice", json!([{"id": 1, "content": "in mem"}])).await;
     let read2 = as_agent(
         AgentId::from("alice"),
-        k.send(vec![Item::new(
+        k.operator_send(vec![Item::new(
             AgentId::from("mem2"),
             json!({"type": "read"}),
         )]),
@@ -609,8 +650,7 @@ async fn two_stores_hold_separate_tables_and_delete_frees_one() {
         json!([]),
         "mem2 shares nothing with mem: {read2}"
     );
-    let gone = k
-        .send(vec![Item::new(
+    let gone = k.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": "mem2"}),
         )])
@@ -700,7 +740,7 @@ async fn call_bytes(
     if let Some(b) = bytes {
         item = item.with_binary_key("data", b.to_vec());
     }
-    let out = as_agent(AgentId::from(as_), k.send(vec![item]))
+    let out = as_agent(AgentId::from(as_), k.operator_send(vec![item]))
         .await
         .remove(0);
     let body = out.body_bytes().map(<[u8]>::to_vec);

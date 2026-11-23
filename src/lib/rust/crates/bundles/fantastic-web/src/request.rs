@@ -112,13 +112,11 @@ fn netloc(url: &Url) -> String {
 // ─── the credential ─────────────────────────────────────────────────
 
 fn store_ids(kernel: &Kernel) -> Vec<AgentId> {
-    let mut ids: Vec<AgentId> = kernel
-        .agents
-        .iter()
+    let mut ids: Vec<AgentId> = kernel.agent_ids().into_iter().filter_map(|aid| kernel.resolve_target(aid.as_str()))
         .filter(|e| {
-            e.value().handler_module.as_deref() == Some(fantastic_credential_store::HANDLER_MODULE)
+            e.handler_module.as_deref() == Some(fantastic_credential_store::HANDLER_MODULE)
         })
-        .map(|e| e.key().clone())
+        .map(|e| e.id.clone())
         .collect();
     ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     ids
@@ -126,7 +124,7 @@ fn store_ids(kernel: &Kernel) -> Vec<AgentId> {
 
 /// The `(store, ref)` bound to `netloc` that holds an `api_key`: stores in id
 /// order, refs in the store's order, the first match. A store that refuses the
-/// `list` (this agent is not in its `callable_by`) is passed over.
+/// `list` (this agent holds no line on it) is passed over.
 async fn find_ref(kernel: &Arc<Kernel>, netloc: &str) -> Option<(String, String)> {
     for store in store_ids(kernel) {
         let out = kernel

@@ -403,9 +403,9 @@ async fn the_page_socket_reaches_only_its_grants() {
         .await
         .expect("kernel reflect");
     assert!(reflect["guid"].as_str().is_some_and(|g| !g.is_empty()));
-    ask("kernel", json!({"type": "docs", "of": "home"}))
+    ask("home", json!({"type": "reflect", "tier": "oneliners"}))
         .await
-        .expect("kernel docs");
+        .expect("home verb docs");
     ask("web_loader", json!({"type": "load_tree"}))
         .await
         .expect("web_loader load_tree");

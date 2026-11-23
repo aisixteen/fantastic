@@ -8,13 +8,12 @@ use fantastic_kernel::test_support::as_agent;
 const DONE: &str = "<call name=\"done\"></call>";
 
 fn set_root_timeout(kernel: &Arc<Kernel>, v: Value) {
-    kernel
-        .root()
-        .unwrap()
-        .meta
-        .write()
-        .unwrap()
-        .insert("send_timeout".into(), v);
+    let root = kernel.root().unwrap().id.clone();
+    fantastic_kernel::test_support::update(
+        kernel,
+        &root,
+        serde_json::Map::from_iter([("send_timeout".to_string(), v)]),
+    );
 }
 
 /// Sets `FANTASTIC_AI_SEND_TIMEOUT` and restores what it found on drop.
@@ -67,7 +66,7 @@ fn spawn_send(
         if let Some(s) = timeout {
             item = item.with_timeout(s);
         }
-        k.send(vec![item]).await.remove(0)
+        k.operator_send(vec![item]).await.remove(0)
     })
 }
 
@@ -154,7 +153,7 @@ async fn status_counts_held_messages_and_names_their_senders() {
     );
     let (k, b) = (Arc::clone(&kernel), backend.clone());
     let _first = tokio::spawn(async move {
-        k.send(vec![Item::new(
+        k.operator_send(vec![Item::new(
             b,
             json!({"type": "send", "text": "one", "client_id": "o"}),
         )])
@@ -165,7 +164,7 @@ async fn status_counts_held_messages_and_names_their_senders() {
     let _held = tokio::spawn(async move {
         as_agent(
             p,
-            k.send(vec![Item::new(
+            k.operator_send(vec![Item::new(
                 b,
                 json!({"type": "send", "text": "two", "client_id": "pc"}),
             )]),
@@ -174,8 +173,7 @@ async fn status_counts_held_messages_and_names_their_senders() {
     });
     until_held(&backend, 1).await;
     let t = std::time::Instant::now();
-    let bare = kernel
-        .send(vec![Item::new(backend.clone(), json!({"type": "status"}))])
+    let bare = kernel.operator_send(vec![Item::new(backend.clone(), json!({"type": "status"}))])
         .await
         .remove(0)
         .result;
@@ -187,8 +185,7 @@ async fn status_counts_held_messages_and_names_their_senders() {
     assert_eq!(bare["generating"], json!(true), "{bare}");
     assert_eq!(bare["others_pending"], json!(1), "{bare}");
     assert_eq!(bare["pending_from"], json!([peer.as_str()]), "{bare}");
-    let mine = kernel
-        .send(vec![Item::new(
+    let mine = kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "status", "client_id": "pc"}),
         )])
@@ -258,8 +255,7 @@ async fn a_send_reply_states_its_deadline_and_a_per_call_timeout_overrides_it() 
         ],
         Duration::ZERO,
     );
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "o"}),
         )])
@@ -285,12 +281,10 @@ async fn a_send_past_its_deadline_tells_the_sender_its_dead_letter_and_can_be_re
         Duration::from_millis(1500),
     );
     // Grants: the backend may ack its own dead letters at the root.
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "update_agent", "id": "kernel_state",
-                "callable_by": {backend.as_str(): ["ack_deadletter"]},
             }),
         )])
         .await;
@@ -301,8 +295,7 @@ async fn a_send_past_its_deadline_tells_the_sender_its_dead_letter_and_can_be_re
         vec![pass(send_call(peer.as_str(), "ping", None)), pass(DONE)],
         Duration::ZERO,
     );
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "o"}),
         )])
@@ -325,7 +318,7 @@ async fn a_send_past_its_deadline_tells_the_sender_its_dead_letter_and_can_be_re
     );
     let acked = as_agent(
         backend.clone(),
-        kernel.send(vec![Item::new(
+        kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "ack_deadletter", "id": pid.parse::<i64>().unwrap()}),
         )]),
@@ -342,7 +335,7 @@ async fn a_send_past_its_deadline_tells_the_sender_its_dead_letter_and_can_be_re
     .await;
     let resent = as_agent(
         backend.clone(),
-        kernel.send(vec![Item::new(
+        kernel.operator_send(vec![Item::new(
             peer.clone(),
             json!({"type": "send", "text": "ping", "client_id": "r"}),
         )
@@ -355,8 +348,7 @@ async fn a_send_past_its_deadline_tells_the_sender_its_dead_letter_and_can_be_re
 }
 
 async fn status_reply(kernel: &Arc<Kernel>, to: &AgentId, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(to.clone(), payload)])
+    kernel.operator_send(vec![Item::new(to.clone(), payload)])
         .await
         .remove(0)
         .result
@@ -369,8 +361,8 @@ async fn ask_inquiry(kernel: &Arc<Kernel>, to: &AgentId, from: Option<&AgentId>)
         json!({"type": "inquiry", "text": "ship?"}),
     )];
     let out = match from {
-        Some(f) => as_agent(f.clone(), kernel.send(item)).await,
-        None => kernel.send(item).await,
+        Some(f) => as_agent(f.clone(), kernel.operator_send(item)).await,
+        None => kernel.operator_send(item).await,
     };
     assert_eq!(
         out[0].result["accepted"],

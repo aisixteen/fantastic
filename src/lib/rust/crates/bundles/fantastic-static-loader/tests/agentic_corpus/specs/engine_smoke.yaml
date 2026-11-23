@@ -1,0 +1,34 @@
+# Test spec for `configs/engine_smoke.yaml` — WHAT THIS SUITE ASSERTS.
+config: engine_smoke.yaml
+
+name: engine_smoke
+description: >
+  An engine fixture, not a scenario. A healthy roster with one `can` line, so
+  that the line, the position rule and a refusal each show at least once —
+  enough shape, reachability and reboot surface to keep hydrate/dehydrate/reach
+  honest on their own.
+
+expect:
+  hydration: ok
+  steps:
+    - name: the worker's line on memory is usable
+      reach: {from: worker, to: memory, send: {type: write, path: probe.txt, bytes_utf8: "1"}}
+      expect: {allow: true}
+    - name: a loader reaches its own child by position, with no line
+      reach: {from: static_loader, to: memory, send: {type: reflect}}
+      expect: {allow: true, contains: {id: memory}}
+    - name: a verb outside the line is refused
+      reach: {from: worker, to: memory, send: {type: append, path: probe.txt, bytes_utf8: x}}
+      expect: {allow: false}
+    - name: a sibling no line names is refused
+      reach: {from: worker, to: island, send: {type: list, path: ""}}
+      expect: {allow: false}
+    - name: a line is one-way — the target holds none back
+      reach: {from: memory, to: worker, send: {type: list, path: ""}}
+      expect: {allow: false}
+    - name: a child does not reach its parent without a line
+      reach: {from: worker, to: static_loader, send: {type: reflect}}
+      expect: {allow: false}
+    - name: a refusal is the unknown answer, byte for byte a missing id's
+      reach: {from: worker, to: island, send: {type: list, path: ""}}
+      expect: {reason: unknown_agent, error_contains: "no agent 'island'"}

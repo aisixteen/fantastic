@@ -49,45 +49,17 @@ fn not_here_points_at_the_root() {
 }
 
 #[test]
-fn unknown_agent_carries_the_live_index() {
-    let v = unknown_agent(
-        "typo",
-        vec![
-            "kernel_state".into(),
-            "cli".into(),
-            "file_bridge_ab12".into(),
-        ],
-    );
+fn unknown_agent_carries_no_index() {
+    // The one shape is also the no-level answer: it names no live id and no
+    // count, so a caller learns nothing it cannot already see.
+    let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    let v = unknown_agent("typo");
     assert_eq!(v["reason"], "unknown_agent");
-    assert_eq!(v["agent_count"], 3);
-    // sorted, so a caller reading them gets a stable list
-    assert_eq!(v["agents"][0], "cli");
-    assert_eq!(v["agents"][1], "file_bridge_ab12");
-    assert_eq!(v["agents"][2], "kernel_state");
-    assert!(
-        v.get("hint").is_none(),
-        "a real id needs no placeholder hint"
-    );
-}
-
-#[test]
-fn a_placeholder_id_is_named_as_one() {
-    // A model that copies `<id>` out of an example and receives the same bare
-    // refusal repeats it without correcting.
-    let v = unknown_agent("<id>", vec!["kernel_state".into()]);
-    let hint = v["hint"].as_str().unwrap();
-    assert!(hint.contains("PLACEHOLDER"));
-    assert!(hint.contains("agents"));
-}
-
-#[test]
-fn the_id_index_is_bounded() {
-    let ids: Vec<String> = (0..200).map(|i| format!("agent_{i:03}")).collect();
-    let v = unknown_agent("nope", ids);
-    // The count is honest even though the list is clipped — one typo must not
-    // turn into a context dump.
-    assert_eq!(v["agent_count"], 200);
-    assert_eq!(v["agents"].as_array().unwrap().len(), UNKNOWN_AGENT_IDS_MAX);
+    assert_eq!(keys(&v), ["error", "reason"]);
+    // A placeholder id adds the hint, and only the hint.
+    let p = unknown_agent("<id>");
+    assert_eq!(keys(&p), ["error", "reason", "hint"]);
+    assert!(p["hint"].as_str().unwrap().contains("PLACEHOLDER"));
 }
 
 #[test]
@@ -119,14 +91,11 @@ fn py_repr_matches_python() {
 fn unknown_agent_error_is_python_repr() {
     // `no agent 'ghost'` (python's repr quoting) — never Debug's `no agent
     // "ghost"`.
-    let v = unknown_agent("ghost", vec!["kernel_state".into()]);
+    let v = unknown_agent("ghost");
     assert_eq!(v["error"], "no agent 'ghost'");
     // Same helper behind the placeholder hint.
-    let p = unknown_agent("<id>", vec!["kernel_state".into()]);
-    assert_eq!(
-        p["hint"],
-        "'<id>' is a PLACEHOLDER from an example, not an id — substitute one of `agents`."
-    );
+    let p = unknown_agent("<id>");
+    assert_eq!(p["hint"], "'<id>' is a PLACEHOLDER from an example, not an id.");
 }
 
 #[test]
@@ -178,12 +147,12 @@ fn every_builder_serializes_in_pythons_key_order() {
         r#"{"error":"e","reason":"bad_arg","hint":"h","arg":"a"}"#
     );
     assert_eq!(
-        s(unknown_agent("ghost", vec!["b".into(), "a".into()])),
-        r#"{"error":"no agent 'ghost'","reason":"unknown_agent","agent_count":2,"agents":["a","b"]}"#
+        s(unknown_agent("ghost")),
+        r#"{"error":"no agent 'ghost'","reason":"unknown_agent"}"#
     );
     assert_eq!(
-        s(unknown_agent("<id>", vec![])),
-        r#"{"error":"no agent '<id>'","reason":"unknown_agent","agent_count":0,"agents":[],"hint":"'<id>' is a PLACEHOLDER from an example, not an id — substitute one of `agents`."}"#
+        s(unknown_agent("<id>")),
+        r#"{"error":"no agent '<id>'","reason":"unknown_agent","hint":"'<id>' is a PLACEHOLDER from an example, not an id."}"#
     );
 }
 

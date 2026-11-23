@@ -261,6 +261,8 @@ pub(crate) fn open_pty(cols: u16, rows: u16) -> std::io::Result<(PtyMaster, PtyS
         ws_ypixel: 0,
     };
     // SAFETY: valid out-pointers; a null name/termios is allowed.
+    // `winp` is `*mut` on Apple targets and `*const` on Linux: one call for both
+    #[allow(clippy::unnecessary_mut_passed)]
     let rc = unsafe {
         libc::openpty(
             &mut master,

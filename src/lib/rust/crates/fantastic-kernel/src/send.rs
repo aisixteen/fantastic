@@ -11,7 +11,7 @@
 //! ### System verbs vs bundle verbs
 //!
 //! Substrate-native verbs (`create_agent`, `delete_agent`,
-//! `update_agent`, `list_agents`, `reflect`) are
+//! `update_agent`, `reflect`) are
 //! resolved on the target agent itself without consulting its bundle.
 //! Everything else routes to the bundle whose `handler_module` matches
 //! the agent's record. Unknown bundle → `{"error": "no bundle for
@@ -66,7 +66,7 @@ pub fn current_sender() -> Option<AgentId> {
 /// it runs an agent's own code; a bundle that creates an agent as bookkeeping
 /// (`fork`) and must write that agent's first rows under ITS key uses it for that
 /// one step.
-pub async fn as_agent<F, T>(agent: &AgentId, hook: F) -> T
+pub(crate) async fn as_agent<F, T>(agent: &AgentId, hook: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
@@ -93,6 +93,15 @@ task_local! {
 /// and duplicating it here would be a second truth.
 pub fn current_origin() -> Option<AgentId> {
     CURRENT_ORIGIN.try_with(|s| s.clone()).ok().flatten()
+}
+
+/// The origin scope as it stands: `Some(origin)` inside a dispatch, an operator
+/// send ([`Kernel::operator_send`]), the cold boot or kernel bookkeeping (with
+/// `Some(None)` for the operator), and `None` when no scope is set at all (a bare
+/// `tokio::spawn`). The operator is origin `None` set explicitly, never the
+/// absence of an origin.
+pub(crate) fn origin_scope() -> Option<Option<AgentId>> {
+    CURRENT_ORIGIN.try_with(Clone::clone).ok()
 }
 
 tokio::task_local! {
@@ -338,6 +347,9 @@ struct FastReflect {
     target: Arc<Agent>,
     payload: Value,
     timeout: Option<Deadline>,
+    /// The caller, as the gate judged it: the reflect is cut to what it holds
+    /// (`None`: the operator, who sees everything).
+    caller: Option<AgentId>,
 }
 
 /// One item that passed the gate and is on its way to a handler.
@@ -423,8 +435,19 @@ impl Kernel {
     /// get its answers spread over the next N replies and re-ask in between. The
     /// industry shape is the same — all results of one batch return together.
     pub async fn send(self: &Arc<Self>, items: Vec<Item>) -> Vec<Outcome> {
+        // NO ORIGIN SCOPE, NO SEND. Work spawned with a bare `tokio::spawn` carries
+        // no identity at all, and is never taken for the operator: every item gets
+        // the unknown answer for its target. The operator sends through
+        // [`Self::operator_send`]; spawned work keeps its identity through
+        // `spawn_inherit`.
+        if origin_scope().is_none() {
+            return items
+                .iter()
+                .map(|it| Outcome::refused(crate::refusal::unknown_agent(it.target.as_str())))
+                .collect();
+        }
         // THE CALLER: the agent whose dispatch makes this send, or `None` — the
-        // operator (no dispatch running). Read once; every item is judged as it.
+        // operator. Read once; every item is judged as it.
         let caller = current_sender();
         // NAMED EXECUTIONS OUTLIVE RAM. Once flushed, a settled execution is only in
         // the kernel's store; an item naming one is looked up there FIRST, so the
@@ -510,6 +533,30 @@ impl Kernel {
         };
         out.extend(settled);
         out
+    }
+
+    /// THE OPERATOR'S SEND: [`Self::send`] with the origin scoped to `None` (the
+    /// operator, set explicitly). Only the in-process shell, and a test acting as
+    /// the operator, call it. The sender is still the running dispatch's when there
+    /// is one, so a call made inside an agent's code stays that agent's.
+    pub async fn operator_send(self: &Arc<Self>, items: Vec<Item>) -> Vec<Outcome> {
+        CURRENT_ORIGIN.scope(None, self.send(items)).await
+    }
+
+    /// THE ASKER'S SEND: [`Self::send`] with sender and origin both the
+    /// `current_origin()` of the running dispatch — the agent that asked for the
+    /// verb now running (the operator when that is `None`). A verb that acts for
+    /// an asker (`fork`, `import_subtree`, the canvas `create`, `export_subtree`)
+    /// sends through it, so it is checked as the asker and cannot name another
+    /// identity. With no origin scope at all every item gets the unknown answer,
+    /// as from [`Self::send`].
+    pub async fn send_as_caller(self: &Arc<Self>, items: Vec<Item>) -> Vec<Outcome> {
+        let Some(asker) = origin_scope() else {
+            return self.send(items).await;
+        };
+        CURRENT_ORIGIN
+            .scope(asker.clone(), CURRENT_SENDER.scope(asker, self.send(items)))
+            .await
     }
 
     /// `id` resolution: a NAME opens-or-joins by name; a number JOINS an existing
@@ -723,7 +770,6 @@ impl Kernel {
         else {
             return Launched::Settled(Outcome::refused(crate::refusal::unknown_agent(
                 item.target.as_str(),
-                self.agents.iter().map(|e| e.key().0.clone()).collect(),
             )));
         };
 
@@ -733,15 +779,30 @@ impl Kernel {
         // stream and every mirror show them as `[secret]` whoever sent the call.
         let marks = self.with_bundle_marks(&target, &item.payload, marks);
 
-        // 10. ── CALL GATE — two-sided, deny-all, explicit grants ──────
-        // Trust boundary = who ORIGINATED the send. An operator send (no
-        // dispatch running: the CLI, the cold bootstrap, a test driver, a
-        // transport handing an inbound frame to its leg) is ungated. Every AGENT send — ANY verb, `reflect` included,
-        // nothing exempt — needs BOTH the sender's `can_call` (egress) AND the
-        // target's `callable_by` (ingress) to grant the edge.
+        // 10. ── CALL GATE — the caller's lines and the ancestor cap ──────
+        // The operator (origin `None`) is ungated. Every AGENT send is judged on
+        // the CALLER's side alone, by verb:
+        // - a kernel verb sent to the root is not gated here: each checks itself
+        //   (create/update/delete on the operand, `ps`/`cancel`/`ledger`/… own
+        //   only, the process verbs operator only);
+        // - a kernel verb sent to any other agent takes the gate like any verb;
+        //   when it passes, dispatch answers `not_here`;
+        // - `reflect` passes when the caller holds anything on the target;
+        // - every other verb takes the gate.
+        // Every denial is the unknown answer, byte-identical to a missing id.
         if let Some(orig) = caller.as_ref() {
-            if let Some(denial) = self.gate(orig, &verb, &target) {
-                return Launched::Settled(Outcome::refused(denial));
+            let on_root = self.root().is_some_and(|r| r.id == target.id);
+            let denied = if is_kernel_verb(&verb) && on_root {
+                false
+            } else if verb == "reflect" {
+                self.held(orig, &target.id) == gate::Held::Nothing
+            } else {
+                self.gate(orig, &verb, &target).is_some()
+            };
+            if denied {
+                return Launched::Settled(Outcome::refused(crate::refusal::unknown_agent(
+                    item.target.as_str(),
+                )));
             }
         }
 
@@ -759,6 +820,7 @@ impl Kernel {
                 target,
                 payload: item.payload,
                 timeout,
+                caller,
             }));
         }
 
@@ -789,24 +851,22 @@ impl Kernel {
             // ALREADY SETTLED — the recorded outcome IS the answer, and the
             // handler must not run a second time. This is idempotency and
             // once-only execution in one field.
-            crate::ledger::Opened::Settled(o, orig_payload) => {
+            crate::ledger::Opened::Settled(o, _) => {
                 self.tasks.forget(&task_id);
-                // AUTHORIZED AGAINST THE EXECUTION IT JOINS. The recorded
-                // outcome belongs to whoever ran it, so handing it back is
-                // equivalent to having made THAT call — the gate must be asked
-                // that question, not about the verb this caller happened to
-                // send — or a caller granted only a harmless verb could reuse
-                // another's id and get its secret verbatim.
-                if let Some(d) = self.join_denial(&caller, &orig_payload, &target) {
+                // ONLY ITS ORIGINATOR JOINS. The recorded outcome belongs to
+                // whoever ran it, so handing it back is equivalent to having made
+                // THAT call — a caller reusing another's id must not get its
+                // secret verbatim.
+                if let Some(d) = self.join_denial(&caller, execution_id, &target) {
                     return Launched::Settled(Outcome::refused(d));
                 }
                 return Launched::Settled(*o);
             }
             // IN FLIGHT — join it. A joiner's own `timeout` bounds only ITS
             // wait: it does not own the execution and must not kill it.
-            crate::ledger::Opened::Join(rx, orig_payload) => {
+            crate::ledger::Opened::Join(rx, _) => {
                 self.tasks.forget(&task_id);
-                if let Some(d) = self.join_denial(&caller, &orig_payload, &target) {
+                if let Some(d) = self.join_denial(&caller, execution_id, &target) {
                     return Launched::Settled(Outcome::refused(d));
                 }
                 return Launched::Joining(Box::new(Joiner {
@@ -901,6 +961,7 @@ impl Kernel {
                     target,
                     payload,
                     timeout,
+                    caller,
                 } = *fr;
                 let read = async {
                     // the kernel IS the agent here (the fast path answers `reflect`
@@ -910,8 +971,14 @@ impl Kernel {
                         Err(refused) => return (refused, Status::Completed),
                     };
                     let mut reply = crate::reflect::reflect_identity(&target);
-                    match crate::reflect::apply_reflect_flags(self, &target, &args, &mut reply)
-                        .await
+                    match crate::reflect::apply_reflect_flags(
+                        self,
+                        caller.as_ref(),
+                        &target,
+                        &args,
+                        &mut reply,
+                    )
+                    .await
                     {
                         Ok(()) => (reply, Status::Completed),
                         Err(raised) => (raised, Status::Failed),
@@ -986,8 +1053,14 @@ impl Kernel {
                 let (reply, status) = match kernel_reflect_args(&target, &payload) {
                     Err(refused) => (refused, Status::Errored),
                     Ok(args) => {
-                        match crate::reflect::apply_reflect_flags(self, &target, &args, &mut reply)
-                            .await
+                        match crate::reflect::apply_reflect_flags(
+                            self,
+                            caller.as_ref(),
+                            &target,
+                            &args,
+                            &mut reply,
+                        )
+                        .await
                         {
                             Ok(()) if error_shaped(&reply) => (reply, Status::Errored),
                             Ok(()) => (reply, Status::Completed),
@@ -1043,9 +1116,14 @@ impl Kernel {
                         status = Status::Errored;
                     }
                     Ok(args) => {
-                        if let Err(raised) =
-                            crate::reflect::apply_reflect_flags(self, &target, &args, &mut reply)
-                                .await
+                        if let Err(raised) = crate::reflect::apply_reflect_flags(
+                            self,
+                            caller.as_ref(),
+                            &target,
+                            &args,
+                            &mut reply,
+                        )
+                        .await
                         {
                             reply = raised;
                             status = Status::Failed;
@@ -1147,17 +1225,31 @@ impl Kernel {
     /// A plain call, not a send — no gate, no task row, no call row, no ledger —
     /// so it is the same whoever's dispatch asked for it (the operator, or the
     /// root answering a kernel verb). The handler runs AS `agent` (its sends and
-    /// the tasks it spawns are its own) with NO origin: the kernel asked. Like
+    /// the tasks it spawns are its own) with origin `None`: the kernel asked. Like
     /// any dispatch it bumps the agent's in-flight count and fans the payload out
     /// first. `body` is a raw request body at its payload path.
     ///
     /// Answers the outcome a caller branches on: a raise (or a panic) is
     /// `failed`, a refusal `errored`, anything else `completed`; `pid` is `None`.
-    pub async fn bookkeeping(
+    pub(crate) async fn bookkeeping(
         self: &Arc<Self>,
         agent: &Arc<Agent>,
         payload: Value,
         body: Option<crate::outcome::Blob>,
+    ) -> Outcome {
+        self.bookkeeping_as(agent, payload, body, None).await
+    }
+
+    /// [`Self::bookkeeping`] with the handler's origin `origin`: the boot of an
+    /// agent another agent created runs with that creator as its origin, so a
+    /// create the boot hook makes for its asker is checked as that creator. The
+    /// sender stays `agent`.
+    pub(crate) async fn bookkeeping_as(
+        self: &Arc<Self>,
+        agent: &Arc<Agent>,
+        payload: Value,
+        body: Option<crate::outcome::Blob>,
+        origin: Option<AgentId>,
     ) -> Outcome {
         use futures_util::FutureExt;
         let _in_flight = InFlightGuard::enter(self, agent);
@@ -1178,7 +1270,7 @@ impl Kernel {
         let run = crate::secret::CURRENT_SECRET.scope(
             Arc::new(Vec::new()),
             CURRENT_ORIGIN.scope(
-                None,
+                origin,
                 CURRENT_SENDER.scope(
                     Some(agent.id.clone()),
                     dispatch(Arc::clone(self), Arc::clone(agent), for_handler, body),
@@ -1597,10 +1689,9 @@ impl Kernel {
     /// bridge re-emits from a remote watch, which must reach a local watcher
     /// WHOLE. Same no-op rule for a non-agent id.
     ///
-    /// GATED LIKE A SEND when the emitter is another agent: the emitter's
-    /// `can_call` and the target's `callable_by` must both
-    /// allow verb `emit`. An emit to self is the baseline. A denied emit is
-    /// dropped; an emit has no reply.
+    /// GATED LIKE A SEND when the emitter is an agent: its lines (and the ancestor
+    /// cap) must allow verb `emit` on the target. Its own tree, itself included,
+    /// it reaches by position. A denied emit is dropped; an emit has no reply.
     ///
     /// A QUALIFIED `<guid>|<agent>` OF A CONNECTED PEER goes to every live route
     /// of that guid ([`crate::peers::emit_peer`]) — every tab of one identity.
@@ -1634,7 +1725,7 @@ impl Kernel {
         };
         let sender = current_sender();
         if let Some(orig) = sender.as_ref() {
-            if orig != target_id && self.gate(orig, "emit", &target).is_some() {
+            if self.gate(orig, "emit", &target).is_some() {
                 return;
             }
         }
@@ -1651,8 +1742,9 @@ impl Kernel {
     /// GATED LIKE A SEND, because it IS a read of the target. A watcher receives
     /// src's raw inbound payloads VERBATIM — the model prompt, the document
     /// body, whatever was sent — so an ungated `watch` is a read side-channel
-    /// around `callable_by`: an agent that may not CALL an agent could still
-    /// read everything sent TO it.
+    /// around the caller's lines: an agent that may not CALL an agent could still
+    /// read everything sent TO it. The watcher needs a `watch` line on the source
+    /// (or the source in its own tree).
     ///
     /// Ungated, a browser leg granted exactly `assistant:[send]` could mirror ANY
     /// agent's inbox in its session and read the packed confidential context out
@@ -1706,20 +1798,76 @@ impl Kernel {
         Some(r)
     }
 
-    /// May `watcher_id` tap the kernel-wide STATE STREAM? Refusal, or `None`.
+    /// May `watcher` watch the STATE STREAM of `node`'s subtree? Refusal, or
+    /// `None`.
     ///
-    /// The stream carries every send's sender, target, verb and payload summary
-    /// for every agent in the tree, so subscribing is the broadest read the
-    /// kernel offers. It is gated on the ROOT like any send: both the watcher's
-    /// `can_call` and the root's `callable_by` must grant `state_subscribe`.
+    /// The state stream is a `watch` on a node (grant model v9): the watcher's
+    /// lines and the ancestor cap must allow `watch` on `node`, as for any send.
+    /// What it then receives is cut per watcher ([`Self::state_watch_event`],
+    /// [`Self::state_watch_snapshot`]). An OPERATOR tap is the origin root of
+    /// trust and stays ungated, as with send and watch.
     ///
     /// An ingress rule answers "may this client reach this leg"; it says nothing
     /// about what the client may then READ.
-    pub fn authorize_state_subscribe(self: &Arc<Self>, watcher_id: &AgentId) -> Option<Value> {
-        // An OPERATOR tap is the origin root of trust, as with send and watch.
+    pub fn authorize_state_watch(&self, watcher: &AgentId, node: &AgentId) -> Option<Value> {
         current_sender()?;
-        let root = self.root()?;
-        self.gate(watcher_id, "state_subscribe", &root)
+        let Some(n) = self.agents.get(node).map(|e| Arc::clone(&e)) else {
+            return Some(crate::refusal::unknown_agent(node.as_str()));
+        };
+        let watch = crate::authz::solver::Act::Call("watch".to_string());
+        if self.allowed(watcher, &watch, &n) {
+            None
+        } else {
+            Some(crate::refusal::unknown_agent(node.as_str()))
+        }
+    }
+
+    /// Does `watcher`, watching `node`, cover agent `id`: `id` is in `node`'s
+    /// subtree and the watcher holds anything on it?
+    fn state_watch_covers(&self, watcher: &AgentId, node: &AgentId, id: &AgentId) -> bool {
+        self.in_tree(id, node) && self.held(watcher, id) != gate::Held::Nothing
+    }
+
+    /// One state event as `watcher`, watching `node`, sees it, or `None` when
+    /// it gets none: only an event whose `agent_id` is in `node`'s subtree and
+    /// covered by the watcher passes, and a `sender` the watcher cannot see
+    /// carries no id (its value becomes `null`).
+    ///
+    /// For the watcher path of a transport; an in-process bookkeeping
+    /// subscriber ([`Self::add_state_subscriber`]) reads the stream unfiltered.
+    pub fn state_watch_event(
+        &self,
+        watcher: &AgentId,
+        node: &AgentId,
+        event: &Value,
+    ) -> Option<Value> {
+        let Value::Object(ev) = event else {
+            return None;
+        };
+        let id = AgentId::from(ev.get("agent_id").and_then(Value::as_str)?);
+        if !self.state_watch_covers(watcher, node, &id) {
+            return None;
+        }
+        let mut ev = ev.clone();
+        if let Some(sender) = ev.get("sender").and_then(Value::as_str).map(AgentId::from) {
+            if self.held(watcher, &sender) == gate::Held::Nothing {
+                ev.insert("sender".to_string(), Value::Null);
+            }
+        }
+        Some(Value::Object(ev))
+    }
+
+    /// [`Self::state_snapshot`] cut to the agents of `node`'s subtree that
+    /// `watcher` covers.
+    pub fn state_watch_snapshot(&self, watcher: &AgentId, node: &AgentId) -> Vec<Value> {
+        self.state_snapshot()
+            .into_iter()
+            .filter(|e| {
+                e.get("agent_id").and_then(Value::as_str).is_some_and(|id| {
+                    self.state_watch_covers(watcher, node, &AgentId::from(id))
+                })
+            })
+            .collect()
     }
 
     /// Detach a previously-registered watcher.
@@ -2097,13 +2245,7 @@ fn taped_payload(value: &Value, body: Option<&crate::outcome::Blob>) -> Value {
     out
 }
 
-/// Substrate verbs answered natively on every agent — explicitly
-/// `list_agents`' pointer back to the briefing — py-canonical `_LIST_HINT`.
-const LIST_HINT: &str = "Raw records — how agents are WIRED, not what they are FOR, \
-and no manual. <type>reflect</type> on the root is the briefing: each agent's purpose. Reflect \
-the root before building anything.";
-
-mod gate;
+pub(crate) mod gate;
 mod kernel_verbs;
 use kernel_verbs::{handle_kernel_verb, is_kernel_verb};
 

@@ -8,8 +8,8 @@
 //! An AI agent's conversation lives in the MEMORY STORE its record names
 //! (`memory_store_id`) — a separate agent (`ram_store`, or a durable one) that keys
 //! every row by WHO WROTE IT. So this agent reads and writes ITS OWN rows only, by
-//! plain gated sends: the creator wires `can_call` to the store and the store's
-//! `callable_by` to this agent, explicitly. No store named ⇒ the agent fails loud
+//! plain gated sends: the creator writes this agent's line on the store in its own
+//! `can`, explicitly. No store named ⇒ the agent fails loud
 //! at boot and at its first turn; a store that refuses or is unreachable mid-turn ⇒
 //! the turn fails fast. Nothing falls back to RAM.
 //!
@@ -93,8 +93,8 @@ pub fn store_of(self_id: &AgentId, kernel: &Kernel) -> MemResult<AgentId> {
         _ => Err(MemoryStoreError(format!(
             "{self_id}: no `memory_store_id` — an AI agent keeps its conversation in a \
              memory store and runs without none. Create one (e.g. a ram_store), set \
-             memory_store_id on {self_id}, and grant {self_id} can_call on it AND the store \
-             callable_by for it"
+             memory_store_id on {self_id}, and give {self_id} a line on it \
+             (can: {{<store>: {{call: [append, read]}}}})"
         ))),
     }
 }

@@ -76,11 +76,10 @@ async fn two_folder_kernel(tmp: &tempfile::TempDir, roots: &[(&str, &str)]) -> A
         s,
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(root);
     for (name, root) in roots {
-        let r = kernel
-            .send(vec![Item::new(
+        let r = kernel.operator_send(vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({"type": "create_agent", "parent_id": "kernel",
                        "handler_module": HANDLER_MODULE, "id": name, "root": root,
@@ -95,8 +94,7 @@ async fn two_folder_kernel(tmp: &tempfile::TempDir, roots: &[(&str, &str)]) -> A
 }
 
 async fn ask(kernel: &Arc<Kernel>, to: &str, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(AgentId::from(to), payload)])
+    kernel.operator_send(vec![Item::new(AgentId::from(to), payload)])
         .await
         .remove(0)
         .result
@@ -116,9 +114,7 @@ async fn state_self_and_work_roots_resolve_by_the_rule() {
     .await;
     std::fs::write(tmp.path().join("s/a.txt"), "state side\n").unwrap();
     std::fs::write(tmp.path().join("w/b.txt"), "work side\n").unwrap();
-    let own = kernel
-        .agents
-        .get(&AgentId::from("mine"))
+    let own = kernel.resolve_target("mine")
         .unwrap()
         .root_path
         .clone();

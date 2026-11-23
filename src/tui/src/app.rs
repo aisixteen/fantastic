@@ -900,7 +900,7 @@ impl App {
         self.dirty = true;
     }
 
-    fn on_refusal(&mut self, what: What, err: KernelErr) {
+    fn on_refusal(&mut self, _what: What, err: KernelErr) {
         // The pane that asked shows the answer. A refusal IS the answer, and the
         // statusline can only hold one truncated line of it.
         if let KernelErr::Refused(r) = &err {
@@ -915,22 +915,8 @@ impl App {
                 }
             }
         }
-        // The kernel ships a `hint` on an authorization refusal, and it names the
-        // exact grant that is missing — discovery through denial. Show it
-        // verbatim; this shell must never paraphrase the kernel's own advice.
-        let extra = match (&what, &err) {
-            (What::Send, KernelErr::Refused(r)) if r.side.as_deref() == Some("egress") => format!(
-                " Grant it: the target in {}'s can_call (update_agent).",
-                self.cfg.user
-            ),
-            (What::Send, KernelErr::Refused(r)) if r.side.as_deref() == Some("ingress") => {
-                " The target does not accept this sender: name it in that agent's \
-                 callable_by (update_agent)."
-                    .to_string()
-            }
-            _ => String::new(),
-        };
-        self.note(format!("{err}{extra}"));
+        // The kernel's own words, verbatim: this shell never paraphrases them.
+        self.note(format!("{err}"));
     }
 
     // ── the clock ────────────────────────────────────────────────────────

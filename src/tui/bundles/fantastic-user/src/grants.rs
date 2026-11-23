@@ -1,24 +1,23 @@
-//! What an agent's page grants let it see. Read from records, never from the call.
+//! What an agent's page lines let it see. Read from records, never from the call.
 //!
-//! An agent's page rights are `can_call` entries `<tree guid>|<id>` (or
-//! `<tree guid>|*`; `*|*` for every tree); one covers that page agent and
-//! everything under it, and seeing takes any verb.
+//! An agent's page rights are `can` lines `<tree guid>|<id>` (or `<tree guid>|*`;
+//! `*|*` for every tree); one covers that page agent and everything under it, and
+//! seeing takes any verb. Peer lines are parked (grant model v9, Q5): the kernel
+//! refuses a `|` target, so only the shell sees until they are designed.
 
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{Map, Value};
 
 fn meta(kernel: &Kernel, id: &str) -> Option<Map<String, Value>> {
-    kernel
-        .agents
-        .get(&AgentId::from(id))
-        .map(|a| a.value().record().meta)
+    kernel.resolve_target(id)
+        .map(|a| a.record().meta)
 }
 
-/// The user's `can_call`.
+/// The agent's `can` lines.
 #[must_use]
-pub fn can_call(kernel: &Kernel, user: &AgentId) -> Map<String, Value> {
+pub fn lines(kernel: &Kernel, user: &AgentId) -> Map<String, Value> {
     meta(kernel, &user.0)
-        .and_then(|m| m.get("can_call").and_then(Value::as_object).cloned())
+        .and_then(|m| m.get("can").and_then(Value::as_object).cloned())
         .unwrap_or_default()
 }
 
@@ -30,7 +29,7 @@ fn verbs(v: &Value) -> Vec<String> {
             .filter_map(Value::as_str)
             .map(str::to_string)
             .collect(),
-        Value::Object(o) => o.get("verbs").map(verbs).unwrap_or_default(),
+        Value::Object(o) => o.get("call").map(verbs).unwrap_or_default(),
         _ => Vec::new(),
     }
 }

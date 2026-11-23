@@ -126,7 +126,7 @@ pub(super) fn tag() -> String {
 }
 
 pub(super) async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Outcome {
-    k.send(vec![Item::new(AgentId::from(target), payload)])
+    k.operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
 }
@@ -138,7 +138,7 @@ fn root_id(k: &Arc<Kernel>) -> String {
 fn patch_root(k: &Arc<Kernel>, key: &str, value: Value) {
     let mut m = Map::new();
     m.insert(key.to_string(), value);
-    k.update(&AgentId::from(root_id(k)), m);
+    fantastic_kernel::test_support::update(k, &AgentId::from(root_id(k)), m);
 }
 
 /// `create_agent` under the root (or `parent_id` when the record names one).
@@ -197,7 +197,7 @@ pub(super) async fn serve(k: &Arc<Kernel>, web_id: &str, legs: &[Value]) -> u16 
     let port = free_port();
     let made = create(
         k,
-        json!({"handler_module": HANDLER_MODULE, "callable_by": {"$subtree": ["watch"]}, "can_call": {"$subtree": ["get_routes"]}, "id": web_id, "port": port}),
+        json!({"handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
     )
     .await;
     assert_eq!(made["id"], json!(web_id), "{made}");
@@ -207,6 +207,7 @@ pub(super) async fn serve(k: &Arc<Kernel>, web_id: &str, legs: &[Value]) -> u16 
         let made = create(k, rec).await;
         assert!(made.get("error").is_none(), "{made}");
     }
+    super::host_holds_legs_lines(k, web_id);
     let r = op(k, web_id, json!({"type": "boot"})).await.result;
     assert_eq!(r["running"], true, "boot: {r}");
     wait_until_port_accepts(port).await;
@@ -302,14 +303,13 @@ async fn a_literal_key_crosses_a_ws_bridge_forward_both_ways() {
     let port = serve(
         &kb,
         &b_web,
-        &[json!({"handler_module": "web_ws.tools", "callable_by": {"$parent": ["get_routes"]}, "id": b_ws,
-                 "ingress_rule": "allow_all_ingress", "can_call": {"$parent": ["watch"], "echo": "*"}})],
+        &[json!({"handler_module": "web_ws.tools", "id": b_ws,
+                 "ingress_rule": "allow_all_ingress", "can": {"$parent": {"call": ["watch"]}, "echo": {"call": ["*"]}}})],
     )
     .await;
     let made = create(
         &kb,
-        json!({"handler_module": "binpath_echo.tools", "id": "echo",
-               "callable_by": {b_ws.as_str(): "*"}}),
+        json!({"handler_module": "binpath_echo.tools", "id": "echo"}),
     )
     .await;
     assert_eq!(made["id"], json!("echo"), "{made}");
@@ -326,7 +326,7 @@ async fn a_literal_key_crosses_a_ws_bridge_forward_both_ways() {
     let heads = ws_end(port, &b_web, half).await;
 
     let out = ka
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from(a_leg.as_str()),
             json!({"type": "forward", "target": "echo",
                    "payload": {"type": "take", "a": {"b": "kept"}, "a.b": null},
@@ -369,6 +369,7 @@ async fn a_literal_key_crosses_a_ws_bridge_forward_both_ways() {
 /// reply's bytes at `x.y` come back the same way and out as the octet body,
 /// `X-Fantastic-Bytes-Field` naming THAT key (python `_first_bytes_field`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "peers parked: the follow-up issue to #754 designs peer lines"]
 async fn web_rest_literal_binding_stays_literal_across_a_bridge() {
     let got: Got = Arc::default();
     let kh = kernel("H-g", &got).await;
@@ -384,10 +385,10 @@ async fn web_rest_literal_binding_stays_literal_across_a_bridge() {
         &kh,
         &h_web,
         &[
-            json!({"handler_module": "web_ws.tools", "can_call": {"$parent": ["watch"]}, "callable_by": {"$parent": ["get_routes"]}, "id": h_ws,
+            json!({"handler_module": "web_ws.tools", "can": {"$parent": {"call": ["watch"]}}, "id": h_ws,
                    "ingress_rule": "allow_all_ingress"}),
-            json!({"handler_module": "web_rest.tools", "callable_by": {"$parent": ["get_routes"]}, "id": h_rest,
-                   "ingress_rule": "allow_all_ingress", "can_call": {"P-g|echo": "*"}}),
+            json!({"handler_module": "web_rest.tools", "id": h_rest,
+                   "ingress_rule": "allow_all_ingress", "can": {"P-g|echo": {"call": ["*"]}}}),
         ],
     )
     .await;
@@ -395,15 +396,14 @@ async fn web_rest_literal_binding_stays_literal_across_a_bridge() {
         &kp,
         json!({"handler_module": fantastic_bridge::WS_HANDLER_MODULE, "id": p_leg,
                "transport": "memory", "peer_id": h_web,
-               "ingress_rule": "allow_all_ingress", "can_call": {"echo": "*"}}),
+               "ingress_rule": "allow_all_ingress", "can": {"echo": {"call": ["*"]}}}),
     )
     .await;
     assert_eq!(made["id"], json!(p_leg), "{made}");
     // P's leg serves H's call AS ITSELF: the target accepts the leg
     let made = create(
         &kp,
-        json!({"handler_module": "binpath_echo.tools", "id": "echo",
-               "callable_by": {p_leg.as_str(): "*"}}),
+        json!({"handler_module": "binpath_echo.tools", "id": "echo"}),
     )
     .await;
     assert_eq!(made["id"], json!("echo"), "{made}");

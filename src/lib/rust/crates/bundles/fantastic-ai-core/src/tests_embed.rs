@@ -5,15 +5,14 @@
 use super::*;
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(AgentId::from(target), payload)])
+    kernel.operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
 }
 
-/// A host agent with a panel: a `view` record and the user's grants on it.
-async fn panel(kernel: &Arc<Kernel>, id: &str, callable_by: Value) -> Value {
+/// A host agent with a panel: a `view` record. It keeps no list of callers.
+async fn panel(kernel: &Arc<Kernel>, id: &str) -> Value {
     call(
         kernel,
         "kernel_state",
@@ -21,14 +20,9 @@ async fn panel(kernel: &Arc<Kernel>, id: &str, callable_by: Value) -> Value {
             "type": "create_agent", "parent_id": "kernel", "id": id,
             "handler_module": fantastic_ram_store::HANDLER_MODULE,
             "view": {"kind": "html", "bytes_file": "panel.html", "calls": ["get_html", "watch"]},
-            "callable_by": callable_by,
         }),
     )
     .await
-}
-
-fn good_grants() -> Value {
-    json!({"user": ["get_html", "watch"]})
 }
 
 async fn digests(kernel: &Arc<Kernel>, backend: &AgentId) -> Vec<Value> {
@@ -37,10 +31,7 @@ async fn digests(kernel: &Arc<Kernel>, backend: &AgentId) -> Vec<Value> {
 }
 
 fn rec_of(kernel: &Arc<Kernel>, id: &str) -> Value {
-    let a = kernel
-        .agents
-        .get(&AgentId::from(id))
-        .map(|e| Arc::clone(&e));
+    let a = kernel.resolve_target(id);
     serde_json::to_value(a.expect("a live agent").record()).unwrap()
 }
 
@@ -58,7 +49,7 @@ async fn embed_stores_a_row_and_history_replays_it() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "emb_row").await;
     let id = id_for(&tmp, "panel");
-    let made = panel(&kernel, &id, good_grants()).await;
+    let made = panel(&kernel, &id).await;
     assert!(made.get("error").is_none(), "{made}");
 
     let r = call(
@@ -126,22 +117,6 @@ async fn embed_refuses_missing_view_missing_agent_and_missing_grants() {
     .await;
     assert_eq!(nv["reason"], json!("bad_arg"), "{nv}");
 
-    // a view whose callable_by lacks get_html for the user
-    let weak = id_for(&tmp, "weak");
-    panel(&kernel, &weak, json!({"user": ["watch"]})).await;
-    let gm = call(
-        &kernel,
-        backend.as_str(),
-        json!({"type": "embed", "id": weak}),
-    )
-    .await;
-    assert_eq!(gm["reason"], json!("not_allowed"), "{gm}");
-    assert_eq!(
-        gm["grants_missing"],
-        json!({ weak.clone(): ["get_html"] }),
-        "{gm}"
-    );
-
     let me = call(
         &kernel,
         backend.as_str(),
@@ -159,7 +134,7 @@ async fn unembed_removes_card_live_and_deleted_and_leaves_agent() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "emb_un").await;
     let id = id_for(&tmp, "panel");
-    panel(&kernel, &id, good_grants()).await;
+    panel(&kernel, &id).await;
     call(
         &kernel,
         backend.as_str(),
@@ -215,7 +190,7 @@ async fn embed_rows_never_reach_the_prompt() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "emb_prompt").await;
     let id = id_for(&tmp, "panel");
-    panel(&kernel, &id, good_grants()).await;
+    panel(&kernel, &id).await;
     let state = crate::state::state_for(&backend);
     let assemble = || async {
         fantastic_kernel::test_support::as_agent(

@@ -122,10 +122,8 @@ impl Drop for SlotGuard {
 }
 
 fn meta(kernel: &Kernel, id: &AgentId) -> Map<String, Value> {
-    kernel
-        .agents
-        .get(id)
-        .map(|e| e.meta.read().expect("meta poisoned").clone())
+    kernel.resolve_target(id.as_str())
+        .map(|e| e.record().meta.clone())
         .unwrap_or_default()
 }
 
@@ -214,13 +212,28 @@ fn is_open(kernel: &Arc<Kernel>, id: &AgentId, re: i64) -> bool {
 }
 
 /// Take inquiry `re` off the agent's open list.
-fn drop_open(kernel: &Arc<Kernel>, id: &AgentId, re: i64) {
+async fn drop_open(kernel: &Arc<Kernel>, id: &AgentId, re: i64) {
     let mut open = meta(kernel, id).remove(inquiry::OPEN_FIELD).and_then(|v| v.as_array().cloned()).unwrap_or_default();
     open.retain(|q| q["re"] != json!(re));
     let mut patch = Map::new();
     patch.insert(inquiry::OPEN_FIELD.to_string(), Value::Array(open));
-    kernel.update(id, patch);
+    let _ = write_own(kernel, id, patch).await;
 }
+
+/// Write the agent's OWN fields `patch` with `update_agent` sent as itself (a
+/// bundle writes its own non-`can` fields); the reply, a refusal included.
+pub(crate) async fn write_own(kernel: &Arc<Kernel>, id: &AgentId, patch: Map<String, Value>) -> Value {
+    let mut payload = Map::new();
+    payload.insert("type".to_string(), json!("update_agent"));
+    payload.insert("id".to_string(), json!(id.as_str()));
+    payload.extend(patch);
+    kernel
+        .send(vec![fantastic_kernel::Item::new(AgentId::from("kernel"), Value::Object(payload))])
+        .await
+        .remove(0)
+        .result
+}
+
 
 impl MailBundle {
     async fn read(&self, id: &AgentId, kernel: &Arc<Kernel>, op: Read) -> Result<Value, Value> {
@@ -357,7 +370,7 @@ impl MailBundle {
         // The person has answered: the waiting send goes on even when the asker could
         // not be told (the question is then closed here).
         if is_open(kernel, id, re) {
-            drop_open(kernel, id, re);
+            drop_open(kernel, id, re).await;
         }
         let d = Decision { yes };
         let mut slots = self.slots.lock().expect("slots poisoned");

@@ -21,9 +21,9 @@
 //! kernel never seed. A folder that is not fresh is left alone (no-op), and the
 //! fantastic home folder is refused inside [`seed_dir_with`]. The blueprints are
 //! written after the stock one, ids as written, and every later run rehydrates
-//! from disk. A blueprint entry naming a stock agent (or the root, `@root`) may
-//! add `callable_by` / `can_call` grants to it: merged as a union, never
-//! narrowing a stock grant.
+//! from disk. A blueprint entry naming a stock agent (or the root, `@root`) is a
+//! parent entry: it places children under that agent and adds no line to its
+//! record (every line lives in its holder's own record).
 //!
 //! A HOST THAT BOOTS ITS OWN KERNEL (a window shell, its unit tests) seeds with
 //! [`seed_dir_with`], then calls [`boot_kernel`] and, at the end, [`stop_kernel`]: the one

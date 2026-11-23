@@ -363,9 +363,7 @@ impl UserProbe {
         a: verbs::user::Inquiry,
         kernel: &Arc<Kernel>,
     ) -> Value {
-        let answer = kernel
-            .agents
-            .get(agent_id)
+        let answer = kernel.resolve_target(agent_id.as_str())
             .and_then(|ag| ag.record().meta.get("answer").cloned())
             .and_then(|v| v.as_str().map(str::to_string))
             .filter(|s| !s.is_empty());
@@ -383,9 +381,7 @@ impl UserProbe {
         // over: saying "granted" over a door that never opened sends the sender back
         // to an unchanged wall.
         let mut applied = 0u64;
-        if let Some(gs) = kernel
-            .agents
-            .get(agent_id)
+        if let Some(gs) = kernel.resolve_target(agent_id.as_str())
             .and_then(|ag| ag.record().meta.get("grants").cloned())
             .and_then(|v| v.as_array().cloned())
         {
@@ -551,9 +547,7 @@ impl Handler for OracleProbe {
             Call::Ask(a) => {
                 let q = a.question;
                 {
-                    let lines: Vec<String> = kernel
-                        .agents
-                        .get(agent_id)
+                    let lines: Vec<String> = kernel.resolve_target(agent_id.as_str())
                         .and_then(|ag| ag.record().meta.get("lines").cloned())
                         .and_then(|v| v.as_array().cloned())
                         // python renders every ledger line through `str(ln)`,
@@ -725,9 +719,7 @@ impl Handler for VaultProbe {
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         use verbs::vault::Call;
-        let meta = kernel
-            .agents
-            .get(agent_id)
+        let meta = kernel.resolve_target(agent_id.as_str())
             .map(|a| a.record().meta)
             .unwrap_or_default();
         let reply = match call {

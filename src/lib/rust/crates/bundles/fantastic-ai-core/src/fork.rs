@@ -5,8 +5,10 @@
 //! compares bytes, not storage, so the fork re-appends the parent's rows under its
 //! OWN key with their original ids and hits the parent's cache. The new agent is the
 //! parent's card (handler, model, endpoint, system prompt, `memory_store_id`,
-//! context settings, `can_call`) with the store's `callable_by` opened for it. The
-//! store only serves a caller its own key, so the copy is written AS the fork.
+//! context settings, `can`), made under the parent as its child and checked as the
+//! asker. The store keys a row by its writer, so the parent asks the store to
+//! `copy` its rows to the fork's key; the store asks the kernel's generic check
+//! first (the kernel knows no rows).
 //!
 //! A FORK POINT IS ALWAYS A TURN BOUNDARY OUTSIDE A FOLD. `fork {at}` refuses an
 //! `at` that names no row (`not_found`), cuts a turn or a fold (`bad_arg`), and a parent
@@ -209,8 +211,8 @@ pub async fn fork(
         Ok(c) => c,
         Err(no) => return Ok(refuse(verb, no.code, &no.why, no.hint, Some(at))),
     };
-    let store = store_of(agent_id, kernel)?;
-    let Some(parent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
+    store_of(agent_id, kernel)?;
+    let Some(parent) = kernel.resolve_target(agent_id.as_str()) else {
         return Ok(refuse(
             verb,
             UNKNOWN_AGENT,
@@ -219,11 +221,10 @@ pub async fn fork(
             Some(at),
         ));
     };
-    // THE CARD: the parent's record, minus what is the parent's alone.
+    // THE CARD: the parent's record, minus what is the parent's alone. Its `can`
+    // rides along: written by the asker's create, checked as the asker's write.
     let mut meta = agent_meta(agent_id, kernel);
-    for k in ["callable_by", "delete_lock"] {
-        meta.remove(k);
-    }
+    meta.remove("delete_lock");
     let shown = parent.name_or_id();
     meta.insert(
         "display_name".to_string(),
@@ -238,63 +239,49 @@ pub async fn fork(
             Some(at),
         ));
     };
+    // THE PLACE: under the forker itself, as its child — so the asker needs a create
+    // line covering the forker's children, and no line on its parent.
     let create = fantastic_kernel::declared::kernel::CreateAgent {
         handler_module,
-        parent_id: parent
-            .parent_id
-            .as_ref()
-            .map_or("kernel", |p| p.as_str())
-            .to_string(),
+        parent_id: parent.id.0.clone(),
         id: want_id,
         fields: meta,
     };
-    let Some(root) = kernel.root() else {
-        return Ok(refuse(
-            verb,
-            "no_root",
-            "the kernel has no root",
-            "",
-            Some(at),
-        ));
-    };
-    let made = fantastic_kernel::lifecycle::create_agent(kernel, &root, create).await;
+    // THE ASKER: the create (and its rollback) is checked as whoever asked for the fork.
+    let asker = fantastic_kernel::current_origin();
+    let made = fantastic_kernel::lifecycle::create_agent(kernel, asker.as_ref(), create).await;
     if made.get("error").is_some_and(|e| !e.is_null()) {
         let mut m = made;
         m["at"] = Value::from(at);
         return Ok(m);
     }
     let new_id = AgentId::from(made.get("id").and_then(Value::as_str).unwrap_or_default());
-    // THE GRANT: the store admits the fork the way it admits the parent.
-    let _ = kernel.edit_callable_by(&store, |cb| {
-        let mode = cb
-            .get(agent_id.as_str())
-            .cloned()
-            .unwrap_or_else(|| json!("*"));
-        cb.insert(new_id.0.clone(), mode);
-        true
-    });
-    // THE COPY: ONE `append`, as the fork (the store keys a row by its writer), ids
-    // kept, all or nothing.
+    // THE COPY: ONE `copy` on the store, sent as this agent, of the planned rows
+    // from this agent's key to the fork's, ids kept, all or nothing. The store asks
+    // the kernel whether the caller may read this agent and holds create or update
+    // over the fork (its child: it does). A refusal deletes the half-made agent,
+    // as the asker, and the fork is refused.
     let n = copy.len();
-    let wrote = fantastic_kernel::send::as_agent(
-        &new_id,
-        store_call(&new_id, kernel, json!({"type": "append", "rows": copy})),
+    let ids: Vec<i64> = copy.iter().filter_map(row_id).collect();
+    let wrote = store_call(
+        agent_id,
+        kernel,
+        json!({"type": "copy", "from": agent_id.as_str(), "to": new_id.as_str(), "ids": ids}),
     )
     .await;
     if let Err(e) = wrote {
-        // The half-made agent is deleted, its grant taken back; the store keeps none of it.
-        if let Some(agent) = kernel.agents.get(&new_id).map(|a| Arc::clone(&a)) {
-            fantastic_kernel::lifecycle::cascade_delete(kernel, &agent).await;
-        }
-        let _ = kernel.edit_callable_by(&store, |cb| cb.remove(new_id.as_str()).is_some());
-        let v = refuse(
+        let del = fantastic_kernel::declared::kernel::DeleteAgent {
+            id: new_id.0.clone(),
+            keep_memory: None,
+        };
+        let _ = fantastic_kernel::lifecycle::delete_agent(kernel, asker.as_ref(), &del).await;
+        return Ok(refuse(
             verb,
             "store_refused",
             &format!("the memory store refused the copy: {e}"),
-            "the store must let the fork `append` and `read` as it lets this agent",
+            "this agent must hold `copy` on its memory store",
             Some(at),
-        );
-        return Ok(v);
+        ));
     }
     Ok(json!({"id": new_id.0, "copied": n, "at": at}))
 }

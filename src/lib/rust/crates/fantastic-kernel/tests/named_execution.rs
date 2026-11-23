@@ -66,14 +66,14 @@ fn mk() -> (TempDir, Arc<Kernel>) {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     (tmp, kernel)
 }
 
 async fn seed(kernel: &Arc<Kernel>, id: &str) {
     kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": "kernel_state", "id": id,
                    "handler_module": "slow.tools"}),
@@ -87,7 +87,7 @@ async fn a_named_execution_is_registered_under_its_own_id() {
     seed(&kernel, "w").await;
     let k = Arc::clone(&kernel);
     let running = tokio::spawn(async move {
-        k.send(vec![
+        k.operator_send(vec![
             Item::new(AgentId::from("w"), json!({"type": "work"})).with_id("job-1")
         ])
         .await
@@ -96,7 +96,7 @@ async fn a_named_execution_is_registered_under_its_own_id() {
     // Let it register.
     tokio::time::sleep(Duration::from_millis(150)).await;
     let ps = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "ps"}),
         )])
@@ -119,7 +119,7 @@ async fn a_named_execution_is_registered_under_its_own_id() {
 
     // …and CANCEL by that same id reaches it.
     let c = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "cancel", "task_id": "job-1"}),
         )])
@@ -145,7 +145,7 @@ async fn an_unnamed_execution_still_mints_a_pid() {
     let (_t, kernel) = mk();
     seed(&kernel, "w").await;
     let out = kernel
-        .send(vec![Item::new(AgentId::from("w"), json!({"type": "ping"}))])
+        .operator_send(vec![Item::new(AgentId::from("w"), json!({"type": "ping"}))])
         .await
         .remove(0);
     let pid = out.pid.expect("an unnamed item still gets a minted pid");

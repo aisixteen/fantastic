@@ -139,7 +139,7 @@ fn keep_phase(mine: &mut BTreeMap<String, String>, agent: &str, phase: &str) {
 /// How many questions to the person are open now (0 when `user` holds none or is absent).
 #[must_use]
 pub fn open_questions(kernel: &Arc<Kernel>) -> u64 {
-    if !kernel.agents.contains_key(&AgentId::from(PERSON)) {
+    if !kernel.exists(PERSON) {
         return 0;
     }
     fantastic_kernel::inquiry::open_count(kernel, &AgentId::from(PERSON))

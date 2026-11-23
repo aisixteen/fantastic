@@ -17,6 +17,8 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 schemars = { workspace = true }
 async-trait = { workspace = true }
+# the write lock held across the `update_agent` of `refs`
+tokio = { workspace = true, features = ["sync"] }
 
 # `sys::unix` — getpwuid_r / getpwnam_r: `~` expansion.
 [target.'cfg(unix)'.dependencies]
@@ -32,7 +34,7 @@ keyring = { version = "3", features = ["apple-native", "windows-native"] }
 
 [features]
 # the test fixtures a dependent crate's tests build on; nothing ships them
-test-support = []
+test-support = ["fantastic-kernel/test-support"]
 
 [dev-dependencies]
 fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }

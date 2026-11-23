@@ -28,7 +28,7 @@ async fn mk(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let mut create = json!({
         "type": "create_agent", "parent_id": "kernel",
@@ -43,8 +43,7 @@ async fn mk(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
             create[k] = v.clone();
         }
     }
-    let r = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -53,7 +52,7 @@ async fn mk(tmp: &tempfile::TempDir, extra: Value) -> Arc<Kernel> {
 }
 
 async fn call(k: &Arc<Kernel>, payload: Value) -> Value {
-    k.send(vec![Item::new(AgentId::from("fb"), payload)])
+    k.operator_send(vec![Item::new(AgentId::from("fb"), payload)])
         .await
         .remove(0)
         .result
@@ -61,7 +60,7 @@ async fn call(k: &Arc<Kernel>, payload: Value) -> Value {
 
 /// On the BINARY channel: the blob IS the `bytes` argument.
 async fn call_bin(k: &Arc<Kernel>, payload: Value, blob: &[u8]) -> Value {
-    k.send(vec![
+    k.operator_send(vec![
         Item::new(AgentId::from("fb"), payload).with_binary_key("bytes", blob.to_vec())
     ])
     .await
@@ -848,8 +847,7 @@ async fn deleting_the_bridge_drops_its_slots() {
     let tmp = tempfile::TempDir::new().unwrap();
     let k = mk(&tmp, json!({})).await;
     seed(&k, "s.txt", "x\n").await;
-    let del = k
-        .send(vec![Item::new(
+    let del = k.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "delete_agent", "id": "fb"}),
         )])

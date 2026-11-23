@@ -14,8 +14,7 @@ fn passes(n: usize) -> Vec<Vec<ScriptEvent>> {
 }
 
 async fn ask(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(agent.clone(), payload)])
+    kernel.operator_send(vec![Item::new(agent.clone(), payload)])
         .await
         .remove(0)
         .result

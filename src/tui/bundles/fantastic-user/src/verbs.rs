@@ -6,7 +6,6 @@
 use schemars::JsonSchema;
 use fantastic_kernel::inquiry::{AnswerInquiry, Inquiries, Inquiry};
 use serde::Deserialize;
-use serde_json::{Map, Value};
 
 pub use fantastic_core::verbs::ExportSubtree;
 
@@ -15,20 +14,7 @@ pub use fantastic_core::verbs::ExportSubtree;
 #[serde(deny_unknown_fields)]
 pub struct Boot {}
 
-/// `user` sends `payload` to `target`; the reply comes back verbatim. No default timeout: the call lasts as long as the target takes. No secret marks: values travel and are recorded as they are.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Forward {
-    /// The agent the call goes to.
-    #[schemars(length(min = 1))]
-    pub target: String,
-    /// The call: an object whose `type` is the verb the target answers, with that verb's arguments.
-    pub payload: Map<String, Value>,
-    /// Seconds; none by default.
-    pub timeout: Option<f64>,
-}
-
-/// The cells of a page view within `radius` of a point, nearest first, from the page records. Judged by the caller's own page grants: the shell sees everything; any other caller by its own `can_call` (`<tree guid>|<id>`). Returns {view, members:[{id, kind, title, rect:{x,y,w,h}, distance, backend_id?}]}.
+/// The cells of a page view within `radius` of a point, nearest first, from the page records. Judged by the caller's own page lines: the shell sees everything; any other caller by its own `can` (`<tree guid>|<id>`, parked with the peers). Returns {view, members:[{id, kind, title, rect:{x,y,w,h}, distance, backend_id?}]}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Around {
@@ -84,7 +70,7 @@ fn agent_ids(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Sch
     .expect("a map schema")
 }
 
-/// The other half of `export_subtree`: the blueprint folder at `path` becomes agents under `parent_id`, every id fresh (one `_<k>` suffix), every port bound on both ends. Without `approve: true` it only shows what the team will reach and the code it carries ({approval_required, agents, new_ids, reaches, ports, code}) and nothing is created; with it, the agents are made and the bound agents granted back ({imported, ids, parent_id, ports}). Refused: unbound_ports, bad_binding, secret_found, code_not_allowed.
+/// The other half of `export_subtree`: the blueprint folder at `path` becomes agents under `parent_id`, every id fresh (one `_<k>` suffix), every port bound. Without `approve: true` it only shows what the team will reach and the code it carries ({approval_required, agents, new_ids, reaches, ports, code}) and nothing is created; with it, the agents are made as the asker, each holding its own lines ({imported, ids, parent_id, ports}). Refused: unbound_ports, bad_binding, secret_found, code_not_allowed.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImportSubtree {
@@ -106,7 +92,6 @@ pub struct ImportSubtree {
 
 fantastic_kernel::verbs! {
     "boot" => Boot,
-    "forward" => Forward,
     "around" => Around,
     "path" => Path,
     "inquiry" => Inquiry,

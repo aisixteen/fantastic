@@ -7,8 +7,8 @@
 //! happens.
 //!
 //! What it proves, in order: the tree is the specified shape; a call to its own
-//! child is authorized by the seeded grants; the command actually ran; and a call the grants
-//! do not cover is REFUSED as data rather than succeeding.
+//! child is authorized by position; the command actually ran; and a call the target
+//! does not answer is REFUSED as data rather than succeeding.
 
 mod sys;
 
@@ -43,51 +43,46 @@ fn write(path: &std::path::Path, v: &Value) {
     std::fs::write(path, fantastic_kernel::yaml_io::dump(v)).unwrap();
 }
 
-/// The records `boot::seed::write_all` writes, duplicated here as the CONTRACT
-/// this test pins. If the seed changes shape, this fails and says so.
+/// A part of the records `boot::seed::write_all` writes (`user`, `memory`, `exec`,
+/// `files`), none holding a line: `user` reaches them by position.
 fn seed(dir: &std::path::Path) {
     let a = dir.join(".fantastic").join("agents");
     let under = a.join("user").join("agents");
     write(
         &a.join("user").join("agent.yaml"),
         &json!({
-            "id":"user","handler_module":"user.tools",
-            "can_call":{"memory":"*","exec":"*","files":"*",bootstrap::DEFAULT_ROOT_ID:"*"},
-            "callable_by":{"exec":"*","files":"*"}
+            "id":"user","handler_module":"user.tools"
         }),
     );
     write(
         &under.join("memory").join("agent.yaml"),
         &json!({
             "id":"memory","handler_module":"sqlite_store.tools",
-            "path":".fantastic/memory.db","operator":true,"admins":["kernel"],
-            "callable_by":{"user":"*"}
+            "path":".fantastic/memory.db","operator":true,"admins":["kernel"]
         }),
     );
     write(
         &under.join("exec").join("agent.yaml"),
         &json!({
             "id":"exec","handler_module":"exec_bridge.tools",
-            "allowed":[".*"],"cwd":dir.to_string_lossy(),"inherit_env":["PATH","HOME","LANG"],"ingress_rule":"allow_all_ingress",
-            "callable_by":{"user":"*"},"can_call":{"files":"*","user":"*"}
+            "allowed":[".*"],"cwd":dir.to_string_lossy(),"inherit_env":["PATH","HOME","LANG"],"ingress_rule":"allow_all_ingress"
         }),
     );
     write(
         &under.join("files").join("agent.yaml"),
         &json!({
             "id":"files","handler_module":"file_bridge.tools","root":".","allow":["."],
-            "ingress_rule":"allow_all_ingress",
-            "callable_by":{"user":"*","exec":"*"},"can_call":{"user":"*"}
+            "ingress_rule":"allow_all_ingress"
         }),
     );
 }
 
-/// Dispatch as the human, exactly as the shell does: `user.forward` — the send
-/// is made from inside `user`'s own handler, so it carries `user`.
+/// Dispatch as `user`, as its own handler would: the send carries `user`, which
+/// reaches its own tree by position.
 async fn act(kernel: &std::sync::Arc<Kernel>, target: &str, payload: Value) -> Value {
     let k = std::sync::Arc::clone(kernel);
-    let item = Item::new(AgentId::from("user"), json!({"type":"forward","target":target,"payload":payload}));
-    k.send(vec![item]).await.remove(0).result
+    let item = Item::new(AgentId::from(target), payload);
+    fantastic_kernel::test_support::as_agent(AgentId::from("user"), k.send(vec![item])).await.remove(0).result
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -107,8 +102,7 @@ async fn the_human_drives_the_specified_set_in_process() {
     let kernel = std::sync::Arc::clone(&booted.kernel);
     // The shell's start: the root names the store, the KERNEL starts (root,
     // store, flusher), then everyone else boots.
-    kernel
-        .send(vec![Item::new(
+    kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"update_agent","id":bootstrap::DEFAULT_ROOT_ID,"memory_store_id":"memory"}),
         )])
@@ -119,8 +113,7 @@ async fn the_human_drives_the_specified_set_in_process() {
         if out["booted"].as_array().unwrap().contains(&json!(id.0)) {
             continue;
         }
-        kernel
-            .send(vec![Item::new(id.clone(), json!({"type":"boot"}))])
+        kernel.operator_send(vec![Item::new(id.clone(), json!({"type":"boot"}))])
             .await;
     }
 
@@ -134,14 +127,13 @@ async fn the_human_drives_the_specified_set_in_process() {
     let lvl1: Vec<String> = root.child_ids().into_iter().map(|i| i.0).collect();
     assert_eq!(lvl1, vec!["user"], "level one: the one user");
 
-    let user = kernel.agents.get(&AgentId::from("user")).expect("the user loaded");
+    let user = kernel.resolve_target("user").expect("the user loaded");
     let mut under: Vec<String> = user.child_ids().into_iter().map(|i| i.0).collect();
     under.sort();
     assert_eq!(under, vec!["exec", "files", "memory"], "under the user");
 
-    // ── a call to its own child is authorized by the seeded grants ───────
-    // The born-with baseline is {$self} alone, so `user` reaching `exec` is the
-    // explicit grants on both ends working.
+    // ── a call to its own child is authorized by position ────────────────
+    // No line is written: `user` reaches `exec` because `exec` is in its tree.
     // A UNIQUE MARKER, not `pwd`: a status reply echoes the job's own `cwd`, so
     // matching a path would pass on metadata without the command ever running.
     const MARKER: &str = "FC-MARKER-8f3a1c";
@@ -177,7 +169,7 @@ async fn the_human_drives_the_specified_set_in_process() {
         "the marker never reached the job output, so `echo` did not actually run: {last}"
     );
 
-    // ── a call the grants do not cover is REFUSED, as data ───────────────
+    // ── a call the target does not answer is REFUSED, as data ────────────
     // Ask the AI store to do something it does not own: an
     // unknown verb comes back as a refusal object, not a panic and not a success.
     let bad = act(
@@ -193,8 +185,7 @@ async fn the_human_drives_the_specified_set_in_process() {
 
     // ── the execution rows land in the memory store's file ───────────────
     kernel.flush_executions().await;
-    let settles = kernel
-        .send(vec![Item::new(
+    let settles = kernel.operator_send(vec![Item::new(
             AgentId::from("memory"),
             json!({"type":"read","kinds":["settle"]}),
         )])

@@ -13,8 +13,7 @@ const DONE: &str = "<call name=\"done\"></call>";
 
 /// One verb sent to the agent; its result.
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(agent.clone(), payload)])
+    kernel.operator_send(vec![Item::new(agent.clone(), payload)])
         .await
         .remove(0)
         .result
@@ -459,7 +458,7 @@ async fn a_turn_running_for_the_agent_refuses_the_fold() {
     let k2 = Arc::clone(&kernel);
     let b2 = backend.clone();
     let turn = tokio::spawn(async move {
-        k2.send(vec![Item::new(b2, json!({"type": "send", "text": "go"}))])
+        k2.operator_send(vec![Item::new(b2, json!({"type": "send", "text": "go"}))])
             .await
     });
     for _ in 0..250 {

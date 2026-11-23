@@ -9,10 +9,9 @@
 //! NOT RUN BY DEFAULT. The canvas spawns this agent under the leg as the cell's
 //! backend (the view/backend pair) and deletes it with the cell; `Host::boot`
 //! deletes any left behind, so it is never hydrated (the cell then shows its
-//! backend lost; ⟳ respawns it). While it exists it does, AS THE HUMAN, exactly
-//! what the terminal's page does (`kern/setup`, `kern/keys`, `kern/saved`)
-//! — the saved set-up store serves only the human, and the cell reaches it through
-//! this agent, never directly.
+//! backend lost; ⟳ respawns it). While it exists it does, as the shell (the
+//! operator), exactly what the terminal's page does (`kern/setup`, `kern/keys`,
+//! `kern/saved`) — the cell reaches the home store through this agent, never directly.
 
 use std::sync::Arc;
 
@@ -82,7 +81,7 @@ impl SetupBundle {
             },
             // change a live AI agent's fields (same backend): live on its next
             // turn — the backend reads its record per call. The key for its
-            // endpoint, when one is stored, is named and granted.
+            // endpoint, when one is stored, is named, with its line `get`.
             Call::ConfigureAi(a) => {
                 let id = a.id;
                 let (handler, meta) = match ai_record(host, &id) {
@@ -98,12 +97,9 @@ impl SetupBundle {
                     if let Ok(r) = crate::kern::keys::ref_for(&handler, &endpoint) {
                         if crate::kern::keys::has(host, &r) {
                             upd.insert("credentials".into(), json!({"store": crate::kern::keys::STORE, "ref": r}));
-                            let mut cc = meta.get("can_call").and_then(Value::as_object).cloned().unwrap_or_default();
-                            cc.insert(crate::kern::keys::STORE.into(), json!(["get"]));
-                            upd.insert("can_call".into(), Value::Object(cc));
-                            if let Err(e) = crate::kern::keys::wire(host, &id).await {
-                                return fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("configure_ai: {e}"));
-                            }
+                            let mut can = meta.get("can").and_then(Value::as_object).cloned().unwrap_or_default();
+                            can.insert(crate::kern::keys::STORE.into(), json!({"call": ["get"]}));
+                            upd.insert("can".into(), Value::Object(can));
                         }
                     }
                 }
@@ -111,7 +107,7 @@ impl SetupBundle {
                 upd.insert("type".into(), json!("update_agent"));
                 upd.insert("id".into(), json!(id));
                 let payload = Value::Object(upd);
-                let r = host.act("kernel", payload).await.result;
+                let r = host.operator("kernel", payload).await.result;
                 match r.get("error").and_then(Value::as_str) {
                     Some(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("configure_ai: {e}")),
                     None => json!({"configured": id, "note": "live on its next turn"}),
@@ -181,7 +177,7 @@ impl SetupBundle {
             }
             Call::Forget(a) => {
                 let r = host
-                    .act(crate::kern::saved::HOME_ID, json!({"type": "forget_record", "name": a.name}))
+                    .operator(crate::kern::saved::HOME_ID, json!({"type": "forget_record", "name": a.name}))
                     .await
                     .result;
                 if r.get("error").is_some() {
@@ -241,8 +237,8 @@ impl Handler for SetupBundle {
 
 /// An AI agent's handler and record fields — refused for any other agent.
 fn ai_record(host: &Host, id: &str) -> Result<(String, serde_json::Map<String, Value>), String> {
-    let a = host.kernel.agents.get(&AgentId::from(id)).ok_or_else(|| format!("no agent {id:?}"))?;
-    let rec = a.value().record();
+    let a = host.kernel.resolve_target(id).ok_or_else(|| format!("no agent {id:?}"))?;
+    let rec = a.record();
     let handler = rec.handler_module.clone().ok_or_else(|| format!("{id:?} has no handler"))?;
     if !crate::kern::setup::backends(host).iter().any(|b| b.module == handler) {
         return Err(format!("{id:?} is not an AI agent ({handler})"));
@@ -255,10 +251,11 @@ fn ai_record(host: &Host, id: &str) -> Result<(String, serde_json::Map<String, V
 pub async fn sweep(host: &Host) {
     let stale: Vec<String> = host
         .kernel
-        .agents
-        .iter()
-        .filter(|e| e.value().record().handler_module.as_deref() == Some(HANDLER_MODULE))
-        .map(|e| e.key().0.clone())
+        .agent_ids()
+        .into_iter()
+        .filter_map(|aid| host.kernel.resolve_target(aid.as_str()))
+        .filter(|e| e.record().handler_module.as_deref() == Some(HANDLER_MODULE))
+        .map(|e| e.id.0.clone())
         .collect();
     for id in stale {
         let _ = host.operator("kernel", json!({"type": "delete_agent", "id": id})).await;
@@ -273,7 +270,7 @@ mod tests {
     /// check it before any handler runs.
     async fn ask(payload: Value) -> Value {
         let kernel = Arc::new(Kernel::new());
-        kernel.register(fantastic_kernel::Agent::new(
+        fantastic_kernel::test_support::register(&kernel, fantastic_kernel::Agent::new(
             AgentId::from("setup"),
             None,
             None,

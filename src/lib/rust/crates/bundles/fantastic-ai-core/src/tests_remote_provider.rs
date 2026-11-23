@@ -80,7 +80,7 @@ fn agent(k: &Arc<Kernel>, root: &Arc<fantastic_kernel::Agent>, id: &str, meta: V
         dir.join(id),
         false,
     );
-    k.register(a);
+    fantastic_kernel::test_support::register(k, a);
 }
 
 #[tokio::test]
@@ -93,12 +93,12 @@ async fn a_chat_completes_through_its_provider_agent_by_id() {
     k.bundles.register("echo.tools", Echo);
     let k = Arc::new(k);
     let root = fantastic_kernel::Agent::new(AgentId::from("kernel_state"), None, None, Map::new(), tmp.path().join(".fantastic"), false);
-    k.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
     k.set_root(Arc::clone(&root));
-    agent(&k, &root, "p", json!({"callable_by": {"chat": "*"}}), tmp.path());
-    agent(&k, &root, "chat", json!({"can_call": {"p": ["complete", "watch"]}}), tmp.path());
+    agent(&k, &root, "p", json!({}), tmp.path());
+    agent(&k, &root, "chat", json!({"can": {"p": {"call": ["complete", "watch"]}}}), tmp.path());
     let rp = RemoteProvider::new(&k, &AgentId::from("chat"), "p");
-    let text: Vec<String> = fantastic_kernel::send::as_agent(&AgentId::from("chat"), async {
+    let text: Vec<String> = fantastic_kernel::test_support::as_agent(AgentId::from("chat").clone(), async {
         let s = rp.chat(&[json!({"role": "user", "content": "hi"})], None).await.unwrap();
         s.map(|e| match e.unwrap() {
             ProviderEvent::Token(t) => t,
@@ -168,10 +168,10 @@ async fn two_chats_on_one_provider_each_send_their_own_knobs() {
     k.bundles.register("knobbed.tools", Knobbed);
     let k = Arc::new(k);
     let root = fantastic_kernel::Agent::new(AgentId::from("kernel_state"), None, None, Map::new(), tmp.path().join(".fantastic"), false);
-    k.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
     k.set_root(Arc::clone(&root));
     let made = |id: &str, handler: &str, meta: Value| {
-        k.register(fantastic_kernel::Agent::new(
+        fantastic_kernel::test_support::register(&k, fantastic_kernel::Agent::new(
             AgentId::from(id),
             Some(handler.into()),
             Some(root.id.clone()),
@@ -180,15 +180,15 @@ async fn two_chats_on_one_provider_each_send_their_own_knobs() {
             false,
         ));
     };
-    made("p", "knobbed.tools", json!({"temperature": 9.9, "callable_by": {"a": "*", "b": "*", "c": "*"}}));
-    let grant = json!({"p": ["complete", "watch"]});
-    made("a", "echo.tools", json!({"can_call": grant, "temperature": 0.1, "max_tokens": 64}));
-    made("b", "echo.tools", json!({"can_call": grant, "temperature": 0.7, "stop": ["END"]}));
-    made("c", "echo.tools", json!({"can_call": grant}));
+    made("p", "knobbed.tools", json!({"temperature": 9.9}));
+    let line = json!({"p": {"call": ["complete", "watch"]}});
+    made("a", "echo.tools", json!({"can": line, "temperature": 0.1, "max_tokens": 64}));
+    made("b", "echo.tools", json!({"can": line, "temperature": 0.7, "stop": ["END"]}));
+    made("c", "echo.tools", json!({"can": line}));
     let mut seen = Vec::new();
     for chat in ["a", "b", "c"] {
         let rp = RemoteProvider::new(&k, &AgentId::from(chat), "p");
-        fantastic_kernel::send::as_agent(&AgentId::from(chat), async {
+        fantastic_kernel::test_support::as_agent(AgentId::from(chat).clone(), async {
             let s = rp.chat(&[json!({"role": "user", "content": "hi"})], None).await.unwrap();
             let _: Vec<_> = s.collect().await;
         })
@@ -225,12 +225,12 @@ async fn a_chat_without_the_grant_is_refused_by_name() {
     k.bundles.register("echo.tools", Echo);
     let k = Arc::new(k);
     let root = fantastic_kernel::Agent::new(AgentId::from("kernel_state"), None, None, Map::new(), tmp.path().join(".fantastic"), false);
-    k.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
     k.set_root(Arc::clone(&root));
     agent(&k, &root, "p", json!({}), tmp.path());
     agent(&k, &root, "chat", json!({}), tmp.path());
     let rp = RemoteProvider::new(&k, &AgentId::from("chat"), "p");
-    let r = fantastic_kernel::send::as_agent(&AgentId::from("chat"), async {
+    let r = fantastic_kernel::test_support::as_agent(AgentId::from("chat").clone(), async {
         match rp.chat(&[json!({"role": "user", "content": "hi"})], None).await {
             Err(e) => e.message,
             Ok(_) => String::new(),
@@ -250,7 +250,7 @@ async fn kernel_with_provider(tmp: &tempfile::TempDir, with_store: bool) -> Arc<
     k.bundles.register(fantastic_ram_store::HANDLER_MODULE, fantastic_ram_store::RamStoreBundle::default());
     let k = Arc::new(k);
     let root = fantastic_kernel::Agent::new(AgentId::from("kernel_state"), None, None, Map::new(), tmp.path().join(".fantastic"), false);
-    k.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
     k.set_root(Arc::clone(&root));
     let meta = if with_store {
         Value::Object(fantastic_ram_store::test_support::memory_meta(&k, "p", json!({})).await)
@@ -266,7 +266,7 @@ async fn a_providers_usage_is_kept_in_its_store_and_the_newest_wins() {
     let tmp = tempfile::TempDir::new().unwrap();
     let k = kernel_with_provider(&tmp, true).await;
     let p = AgentId::from("p");
-    fantastic_kernel::send::as_agent(&p, async {
+    fantastic_kernel::test_support::as_agent(p.clone(), async {
         assert_eq!(usage_of(&p, &k).await, None, "nothing kept yet");
         let first = json!({"total": {"requests": 1}, "by_model": {}, "by_agent": {}});
         set_usage(&p, &k, &first).await.unwrap();
@@ -298,14 +298,14 @@ async fn a_remote_providers_cache_counts_reach_the_chats_report_and_absent_ones_
     k.bundles.register("echo.tools", Echo);
     let k = Arc::new(k);
     let root = fantastic_kernel::Agent::new(AgentId::from("kernel_state"), None, None, Map::new(), tmp.path().join(".fantastic"), false);
-    k.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
     k.set_root(Arc::clone(&root));
-    agent(&k, &root, "p", json!({"callable_by": {"chat": "*"}, "cache_read": 600, "cache_write": 300}), tmp.path());
-    agent(&k, &root, "q", json!({"callable_by": {"chat": "*"}}), tmp.path());
-    agent(&k, &root, "chat", json!({"can_call": {"p": ["complete", "watch"], "q": ["complete", "watch"]}}), tmp.path());
+    agent(&k, &root, "p", json!({"cache_read": 600, "cache_write": 300}), tmp.path());
+    agent(&k, &root, "q", json!({}), tmp.path());
+    agent(&k, &root, "chat", json!({"can": {"p": {"call": ["complete", "watch"]}, "q": {"call": ["complete", "watch"]}}}), tmp.path());
     for (provider, cache) in [("p", (Some(600), Some(300))), ("q", (None, None))] {
         let rp = RemoteProvider::new(&k, &AgentId::from("chat"), provider);
-        let _: Vec<_> = fantastic_kernel::send::as_agent(&AgentId::from("chat"), async {
+        let _: Vec<_> = fantastic_kernel::test_support::as_agent(AgentId::from("chat").clone(), async {
             let s = rp.chat(&[json!({"role": "user", "content": "hi"})], None).await.unwrap();
             s.collect().await
         })

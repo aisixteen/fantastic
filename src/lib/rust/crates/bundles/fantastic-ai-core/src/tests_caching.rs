@@ -11,8 +11,7 @@ use fantastic_kernel::test_support::as_agent;
 
 /// One verb sent to the agent; its result.
 async fn verb(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(agent.clone(), payload)])
+    kernel.operator_send(vec![Item::new(agent.clone(), payload)])
         .await
         .remove(0)
         .result
@@ -25,8 +24,7 @@ async fn set(kernel: &Arc<Kernel>, agent: &AgentId, fields: Value) {
         .as_object_mut()
         .expect("object")
         .extend(fields.as_object().expect("object").clone());
-    let r = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), payload)])
+    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), payload)])
         .await
         .remove(0)
         .result;
@@ -107,14 +105,6 @@ fn big() -> String {
     "the same long listing, line after line, ".repeat(14)
 }
 
-/// A docs reply the model has answered: the body names its verb in `<verbs>`.
-fn docs(pid: i64) -> String {
-    format!(
-        "[reply to {pid} · kernel docs]\n<of>runner</of>\n<bundle>exec_bridge.tools</bundle>\
-         \n<tier>oneliners</tier>\n<verbs>\n<start>args: command:str</start>\n</verbs>"
-    )
-}
-
 /// The `[fold …]` row's id, the fold a `context_fold` made.
 async fn fold(kernel: &Arc<Kernel>, agent: &AgentId, from: i64, to: i64, summary: &str) -> i64 {
     let out = verb(
@@ -150,7 +140,6 @@ async fn mk_caching_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
         &kernel,
         &file_id,
         &tmp.path().join(".fantastic"),
-        &backend_id,
     )
     .await;
     let backend = add_backend_on(&kernel, &backend_id, &file_id, CACHING_MODULE).await;
@@ -168,8 +157,7 @@ async fn turn_messages(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) -> Vec
         Duration::ZERO,
     );
     let _rx = rebind_backend_inbox(kernel, agent);
-    let reply = kernel
-        .send(vec![Item::new(
+    let reply = kernel.operator_send(vec![Item::new(
             agent.clone(),
             json!({"type": "send", "text": text, "client_id": "c"}),
         )])

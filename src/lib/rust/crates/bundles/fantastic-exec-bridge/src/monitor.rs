@@ -10,8 +10,8 @@
 //! something waits. An idle monitor wakes never. `tail` caps the lines in one
 //! delivery to the newest N.
 //!
-//! Each delivery is a call made by this bridge AS ITSELF (its `can_call` must name
-//! `notify`, and `notify`'s `callable_by` this bridge), fire-and-forget as its own
+//! Each delivery is a call made by this bridge AS ITSELF (it must hold a line on
+//! `notify`, or reach it by position), fire-and-forget as its own
 //! task. A monitor IS a kernel task (its id is the `monitor_id`): `ps` lists it, kernel
 //! `cancel` (or `unmonitor`) ends it, and it ends with its job: ONE last delivery,
 //! headed `job ended`, carries what still waited (the header alone when nothing did).
@@ -383,7 +383,7 @@ pub(crate) async fn monitor_reply(
     }
     let job_id = jid.id;
     let notify = a.notify.clone();
-    if kernel.agents.get(&AgentId::from(notify.as_str())).is_none() {
+    if kernel.resolve_target(notify.as_str()).is_none() {
         let mut r = refusal(
             NOT_FOUND,
             format!(

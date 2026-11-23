@@ -10,11 +10,10 @@
 //! conversation and no files; what it has is a reflect, and this shows it.
 //!
 //! THE DEFAULT VIEW (design decision): what the agent IS and WHO IT TALKS TO —
-//! header (id, open or sealed, its sentence), the last call, EGRESS (`can_call`,
-//! `egress_rule`), INGRESS (`callable_by`, `ingress_rule`, or "sealed" when
-//! absent), its verbs, and its rows. The structural baseline every agent is born
-//! with (`$self`, `$parent`, `$subtree`) is folded into one dim line: on every
-//! agent it's noise, but it's never hidden completely.
+//! header (id, open or sealed, its sentence), the last call, its LINES (`can`:
+//! one line per target, as the kernel wrote it; its own tree it reaches by
+//! position, never written), its `ingress_rule` (or "sealed"), its verbs, and its
+//! rows.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -131,50 +130,39 @@ impl GenericPanel {
             out.push(Line::from(""));
         }
 
-        // EGRESS and INGRESS — a refusal you can predict is a refusal you do not
-        // have to earn. The kernel's own grant maps, verbatim, one per line.
-        for (title, key, rule) in [
-            ("EGRESS · may call", "can_call", "egress_rule"),
-            ("INGRESS · callable by", "callable_by", "ingress_rule"),
-        ] {
-            out.push(label(title));
-            let m = r.get(key).and_then(Value::as_object);
-            let (base, named): (Vec<_>, Vec<_>) = m
-                .map(|m| m.iter().partition(|(k, _)| k.starts_with('$')))
-                .unwrap_or_default();
-            if named.is_empty() {
-                out.push(Line::from(Span::styled("    nobody named", Style::default().fg(theme::DIM))));
-            }
-            for (k, v) in named {
-                out.push(Line::from(vec![
-                    Span::styled(format!("    {k:<14}"), Style::default().fg(theme::FG)),
-                    Span::styled(compact(v), Style::default().fg(theme::DIM)),
-                ]));
-            }
-            if !base.is_empty() {
-                let names: Vec<&str> = base.iter().map(|(k, _)| k.as_str()).collect();
-                out.push(Line::from(Span::styled(
-                    format!("    baseline: {}", names.join(" ")),
-                    Style::default().fg(theme::DIM),
-                )));
-            }
-            if let Some(v) = r.get(rule).and_then(Value::as_str) {
-                out.push(Line::from(Span::styled(
-                    format!("    {rule}  {v}"),
-                    Style::default().fg(theme::DIM),
-                )));
-            }
-            // SEALED is the agent's own word (its reflect says so), never an
-            // inference from a missing rule: sealed-by-default is a property of
-            // IO legs, not of every agent.
-            if key == "callable_by" && sealed {
-                out.push(Line::from(Span::styled(
-                    "    sealed — only reflect and boot answer until a rule opens it",
-                    Style::default().fg(theme::DIM),
-                )));
-            }
-            out.push(Line::from(""));
+        // ITS LINES — a refusal you can predict is a refusal you do not have to
+        // earn. The kernel's own `can`, verbatim, one line per target.
+        out.push(label("LINES · may reach"));
+        let lines = r.get("can").and_then(Value::as_object);
+        if lines.is_none_or(serde_json::Map::is_empty) {
+            out.push(Line::from(Span::styled("    no line (its own tree only)", Style::default().fg(theme::DIM))));
         }
+        for (target, level) in lines.into_iter().flatten() {
+            let shown = level
+                .as_object()
+                .and_then(|l| l.iter().next())
+                .map_or_else(|| compact(level), |(lvl, v)| format!("{lvl}: {}", compact(v)));
+            out.push(Line::from(vec![
+                Span::styled(format!("    {target:<14}"), Style::default().fg(theme::FG)),
+                Span::styled(shown, Style::default().fg(theme::DIM)),
+            ]));
+        }
+        if let Some(v) = r.get("ingress_rule").and_then(Value::as_str) {
+            out.push(Line::from(Span::styled(
+                format!("    ingress_rule  {v}"),
+                Style::default().fg(theme::DIM),
+            )));
+        }
+        // SEALED is the agent's own word (its reflect says so), never an
+        // inference from a missing rule: sealed-by-default is a property of
+        // IO legs, not of every agent.
+        if sealed {
+            out.push(Line::from(Span::styled(
+                "    sealed — only reflect and boot answer until a rule opens it",
+                Style::default().fg(theme::DIM),
+            )));
+        }
+        out.push(Line::from(""));
 
         let verbs = Self::verbs(Some(r));
         if verbs.is_empty() {
@@ -374,8 +362,7 @@ mod tests {
     fn the_default_view_shows_who_it_is_and_who_it_talks_to() {
         let r = json!({
             "sentence": "reads and writes files under a root",
-            "can_call": {"$self": "*", "$parent": "*", "user": "*"},
-            "callable_by": {"$self": "*", "$subtree": "*", "user": "*", "exec": ["read_stream"]},
+            "can": {"exec": {"call": ["read_stream"]}, "memory": {"call": ["append", "read"]}},
             "ingress_rule": "allow_all_ingress",
             "verbs": {"read_stream": "args: path", "list": "args: path?"},
         });
@@ -385,18 +372,17 @@ mod tests {
         let a: AgentId = "files".into();
         let cx = Cx { agent: &a, store: &store, tasks: &[], seen: &seen, reflect: Some(&r) };
         let t = text(&p.lines(&cx));
-        for want in ["files  ● open", "EGRESS · may call", "INGRESS · callable by", "ingress_rule  allow_all_ingress", "read_stream", "VERBS"] {
+        for want in ["files  ● open", "LINES · may reach", "ingress_rule  allow_all_ingress", "read_stream", "VERBS"] {
             assert!(t.contains(want), "default view lacks {want:?}:\n{t}");
         }
-        assert!(t.contains("exec          read_stream"), "a narrow grant shows its verbs:\n{t}");
-        assert!(t.contains("baseline: $self $parent"), "the baseline is folded, not listed:\n{t}");
-        assert!(!t.contains("    $self"), "the baseline is never a grant line:\n{t}");
+        assert!(t.contains("exec          call: read_stream"), "a line shows its level and verbs:\n{t}");
+        assert!(t.contains("memory        call: append, read"), "{t}");
         assert!(!t.contains("sealed —"), "an open agent is never called sealed:\n{t}");
     }
 
     #[test]
     fn a_sealed_agent_says_so_from_its_own_reflect() {
-        let r = json!({"ingress_rule": "deny_ingress", "callable_by": {}, "can_call": {}});
+        let r = json!({"ingress_rule": "deny_ingress", "can": {}});
         let p = GenericPanel::new("leg".into());
         let store = crate::store::Store::default();
         let seen = std::collections::HashSet::new();

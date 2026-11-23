@@ -1,0 +1,39 @@
+# Kernel config — the SYSTEM SHAPE only. What is asserted about it lives in
+# `specs/namespacing.yaml`. Each wing reaches its own roster by position; no
+# line names anything across the wings.
+
+loaders:
+  - id: wing_a
+    file: wing_a.yaml
+    manifest:
+      agents:
+        - id: store
+          handler_module: file_bridge.tools
+          allow: ['.']
+          root: .fantastic
+          ingress_rule: allow_all_ingress
+        - id: notes_a
+          handler_module: file_bridge.tools
+          allow: ['.']
+          root: notes/a
+          ingress_rule: allow_all_ingress
+        - id: space_a
+          handler_module: file_bridge.tools
+          allow: ['.']
+          root: rooms/a
+          ingress_rule: allow_all_ingress
+
+  - id: wing_b
+    file: wing_b.yaml
+    manifest:
+      agents:
+        - id: notes_b
+          handler_module: file_bridge.tools
+          allow: ['.']
+          root: notes/b
+          ingress_rule: allow_all_ingress
+        - id: space_b
+          handler_module: file_bridge.tools
+          allow: ['.']
+          root: rooms/b
+          ingress_rule: allow_all_ingress

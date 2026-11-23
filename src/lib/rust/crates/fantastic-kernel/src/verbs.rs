@@ -16,7 +16,7 @@
 //! is known, present when required and of its type — ONE engine, the JSON schema
 //! ([`validate`]), no coercion: a wrongly typed value is refused by name and the
 //! refusal is the agent's reply. A record field is known to the bundle's own record
-//! declaration ([`check_record`]). `reflect` and `docs` render the same
+//! declaration ([`check_record`]). `reflect` renders the same
 //! declarations ([`line`], [`detail`]).
 
 use serde_json::{json, Map, Value};
@@ -400,7 +400,7 @@ macro_rules! verbs {
         [$($variant:tt)*] [$($arm:tt)*]
         $($name:literal => $ty:ident),+) => {
         /// Every verb this bundle declares: the list its entry validates a call
-        /// against and `reflect` and `docs` render.
+        /// against and `reflect` renders.
         pub static VERBS: &[$crate::verbs::Verb] = &__DECLARED_VERBS;
 
         #[doc(hidden)]
@@ -491,7 +491,7 @@ pub fn call(verb: &str, args: Value) -> Value {
 /// As [`call`]: `record` is not an object or names a `type` of its own.
 pub async fn create_agent(kernel: &std::sync::Arc<crate::Kernel>, record: Value) -> Value {
     let item = crate::Item::new(crate::AgentId::from("kernel"), call("create_agent", record));
-    std::sync::Arc::clone(kernel).send(vec![item]).await.remove(0).result
+    std::sync::Arc::clone(kernel).operator_send(vec![item]).await.remove(0).result
 }
 
 /// The payload without its `type`: the arguments alone.
@@ -617,7 +617,7 @@ fn alternatives_names(groups: &[Vec<&str>]) -> String {
         .join(" | ")
 }
 
-/// The constraint as `reflect` and `docs` show it, when the schema has one.
+/// The constraint as `reflect` shows it, when the schema has one.
 fn alternatives_text(schema: &Value) -> Option<String> {
     let (key, groups) = required_alternatives(schema)?;
     let how = if key == "oneOf" {
@@ -779,7 +779,7 @@ fn first_sentence(doc: &str) -> String {
     line.trim_end_matches('.').to_string()
 }
 
-/// One verb as `reflect` and `docs` show it: its name and the schema of its
+/// One verb as `reflect` shows it: its name and the schema of its
 /// arguments — a builtin's (from `verbs!`) or a dynamic one's, rendered alike.
 #[derive(Debug, Clone, Copy)]
 pub struct Row<'a> {
@@ -1042,21 +1042,90 @@ fn is_missing(value: Option<&Value>) -> bool {
     value.is_none()
 }
 
+/// Is this schema an object with declared properties, required fields or a map
+/// value (so its fields are checked by name, not just "is an object")?
+fn is_described_object(s: &Value) -> bool {
+    let object = match s.get("type") {
+        Some(Value::String(t)) => t == "object",
+        Some(Value::Array(ts)) => ts.iter().any(|t| t.as_str() == Some("object")),
+        _ => false,
+    };
+    object
+        && (s.get("properties").is_some() || s.get("required").is_some() || map_value(s).is_some())
+}
+
+/// The object SHAPES a schema offers as alternatives (`anyOf`/`oneOf` with two or
+/// more described objects, as a `can` line's `call`/`update`/`create`): the key and
+/// the shapes. One object beside `null` is an optional object, not alternatives.
+fn object_alternatives(schema: &Value) -> Option<(&'static str, Vec<&Value>)> {
+    ["anyOf", "oneOf"].into_iter().find_map(|key| {
+        let alts: Vec<&Value> = schema
+            .get(key)
+            .and_then(Value::as_array)?
+            .iter()
+            .filter(|a| is_described_object(a))
+            .collect();
+        (alts.len() > 1).then_some((key, alts))
+    })
+}
+
+/// An object value against alternative shapes: `oneOf` takes exactly one, `anyOf`
+/// at least one. When none fits, the refusal (`bad_arg`) is the one of the shape
+/// whose required fields the value gives (the shape it meant), else of the first.
+fn check_alternatives(
+    name: &str,
+    path: &str,
+    key: &str,
+    alts: &[&Value],
+    inner: &Map<String, Value>,
+    top: &Value,
+) -> Result<(), Value> {
+    let mut fits = 0;
+    let mut meant = None;
+    let mut first = None;
+    for alt in alts {
+        match check_object(name, path, alt, inner, top) {
+            Ok(()) => fits += 1,
+            Err(e) => {
+                let gives = alt
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .is_some_and(|r| r.iter().filter_map(Value::as_str).all(|f| inner.contains_key(f)));
+                if gives && meant.is_none() {
+                    meant = Some(e);
+                } else if first.is_none() {
+                    first = Some(e);
+                }
+            }
+        }
+    }
+    if fits == 1 || (key == "anyOf" && fits > 1) {
+        return Ok(());
+    }
+    if fits > 1 {
+        return Err(refuse_arg(
+            name,
+            BAD_ARG,
+            path,
+            format!(
+                "argument {} must match exactly one shape, got {}",
+                fantastic_bundle::py_repr(path),
+                fantastic_bundle::py_type_name(&Value::Object(inner.clone()))
+            ),
+            top,
+        ));
+    }
+    // a value that fits no shape is a bad argument, even when the shape it meant
+    // lacks a field
+    let mut e = meant.or(first).expect("two or more alternatives");
+    e["reason"] = Value::from(BAD_ARG);
+    Err(e)
+}
+
 /// Does the schema describe an object with declared properties (so its fields are
 /// checked by name, not just "is an object")?
 fn described_object(schema: &Value) -> Option<&Value> {
-    let is = |s: &Value| {
-        let object = match s.get("type") {
-            Some(Value::String(t)) => t == "object",
-            Some(Value::Array(ts)) => ts.iter().any(|t| t.as_str() == Some("object")),
-            _ => false,
-        };
-        object
-            && (s.get("properties").is_some()
-                || s.get("required").is_some()
-                || map_value(s).is_some())
-    };
-    if is(schema) {
+    if is_described_object(schema) {
         return Some(schema);
     }
     // an optional object: `anyOf` the object and null
@@ -1064,7 +1133,7 @@ fn described_object(schema: &Value) -> Option<&Value> {
         .iter()
         .filter_map(|k| schema.get(*k).and_then(Value::as_array))
         .flatten()
-        .find(|alt| is(alt))
+        .find(|alt| is_described_object(alt))
 }
 
 /// The array part of a schema (itself, or the array alternative of an optional one).
@@ -1106,6 +1175,9 @@ fn check_value(
     v: &Value,
     top: &Value,
 ) -> Result<(), Value> {
+    if let (Some((key, alts)), Value::Object(inner)) = (object_alternatives(schema), v) {
+        return check_alternatives(name, path, key, &alts, inner, top);
+    }
     if let (Some(obj), Value::Object(inner)) = (described_object(schema), v) {
         return check_object(name, path, obj, inner, top);
     }
@@ -1238,7 +1310,7 @@ pub fn unparsed(verb: &str, why: &str) -> Value {
     refusal_hint(
         BAD_ARG,
         format!("{verb}: the arguments do not parse ({why})"),
-        format!("docs of=<agent> detailed verb={verb} lists the arguments"),
+        format!("reflect tier=detailed verb={verb} lists the arguments"),
     )
 }
 
@@ -1254,7 +1326,7 @@ pub fn unknown_verb(agent: &str, verb: &Value, answers: &[&str]) -> Value {
             fantastic_bundle::py_repr_value(verb),
             answers.join(", ")
         ),
-        format!("docs of={agent} lists each verb's arguments"),
+        format!("reflect {agent} tier=detailed lists each verb's arguments"),
     );
     with(&mut r, "verb", verb.clone());
     r

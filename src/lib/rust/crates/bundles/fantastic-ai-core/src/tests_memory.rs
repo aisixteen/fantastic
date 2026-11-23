@@ -11,8 +11,7 @@ use crate::provider::ProviderReport;
 use fantastic_kernel::test_support::as_agent;
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(AgentId::from(target), payload)])
+    kernel.operator_send(vec![Item::new(AgentId::from(target), payload)])
         .await
         .remove(0)
         .result
@@ -21,7 +20,7 @@ async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
 async fn call_as(kernel: &Arc<Kernel>, sender: &AgentId, target: &str, payload: Value) -> Value {
     as_agent(
         sender.clone(),
-        kernel.send(vec![Item::new(AgentId::from(target), payload)]),
+        kernel.operator_send(vec![Item::new(AgentId::from(target), payload)]),
     )
     .await
     .remove(0)
@@ -87,7 +86,7 @@ async fn the_endpoints_count_calibrates_the_estimate() {
     ];
     let provider: Arc<dyn Provider> = Arc::new(Reporting(0));
     // under the trigger by our own estimate (~1000 of a ~12k budget)
-    let out = crate::projection::project_context(
+    let out = as_agent(ai.clone(), crate::projection::project_context(
         &provider,
         &ai,
         &state,
@@ -97,7 +96,7 @@ async fn the_endpoints_count_calibrates_the_estimate() {
         crate::constants::DEFAULT_CONTEXT_WINDOW,
         msgs.clone(),
         1,
-    )
+    ))
     .await
     .expect("projection");
     assert_eq!(out, msgs);
@@ -105,7 +104,7 @@ async fn the_endpoints_count_calibrates_the_estimate() {
     assert_eq!(proj["fired"], json!(false), "{proj}");
     // the endpoint said the same prompt was TEN times bigger — the budget shrinks
     *state.calib.lock().unwrap() = Some(10.0);
-    let out = crate::projection::project_context(
+    let out = as_agent(ai.clone(), crate::projection::project_context(
         &provider,
         &ai,
         &state,
@@ -115,7 +114,7 @@ async fn the_endpoints_count_calibrates_the_estimate() {
         crate::constants::DEFAULT_CONTEXT_WINDOW,
         msgs.clone(),
         1,
-    )
+    ))
     .await;
     assert!(out.is_ok(), "{out:?}");
     let proj = state.projection.lock().unwrap().clone().unwrap();
@@ -134,13 +133,13 @@ async fn a_turn_records_what_the_endpoint_reported() {
     )
     .await;
     let provider: Arc<dyn Provider> = Arc::new(Reporting(777));
-    let out = crate::verbs::send(
+    let out = as_agent(ai.clone(), crate::verbs::send(
         provider,
         &ai,
         &serde_json::from_value(json!({"text": "hello"})).expect("a send"),
         &kernel,
         CFG,
-    )
+    ))
     .await
     .expect("send");
     assert!(out.get("error").is_none(), "{out}");
@@ -250,13 +249,13 @@ async fn a_turns_rows_are_minted_when_appended_so_id_order_is_append_order() {
         kernel: Arc::clone(&kernel),
         agent: ai.clone(),
     });
-    let out = crate::verbs::send(
+    let out = as_agent(ai.clone(), crate::verbs::send(
         provider,
         &ai,
         &serde_json::from_value(json!({"text": "hello"})).expect("a send"),
         &kernel,
         CFG,
-    )
+    ))
     .await
     .expect("send");
     assert!(out.get("error").is_none(), "{out}");
@@ -343,8 +342,7 @@ async fn an_agent_without_a_memory_store_fails_loud() {
     let boot = call(&kernel, ai.as_str(), json!({"type": "boot"})).await;
     assert_eq!(boot["reason"], json!("missing_arg"), "{boot}");
     assert_eq!(boot["arg"], json!("memory_store_id"), "{boot}");
-    let out = kernel
-        .send(vec![Item::new(ai.clone(), json!({"type": "history"}))])
+    let out = kernel.operator_send(vec![Item::new(ai.clone(), json!({"type": "history"}))])
         .await
         .remove(0);
     assert!(

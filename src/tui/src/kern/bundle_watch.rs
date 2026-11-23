@@ -75,10 +75,11 @@ pub async fn refresh_views(h: &Host, name: &str, dir: &Path) -> Result<(), Strin
     };
     let instances: Vec<String> = h
         .kernel
-        .agents
-        .iter()
-        .filter(|a| a.value().record().handler_module.as_deref() == Some(name))
-        .map(|a| a.key().0.clone())
+        .agent_ids()
+        .into_iter()
+        .filter_map(|aid| h.kernel.resolve_target(aid.as_str()))
+        .filter(|a| a.record().handler_module.as_deref() == Some(name))
+        .map(|a| a.id.0.clone())
         .collect();
     for id in instances {
         // the instance's view, with the BUNDLE's declared fields (kind, calls,
@@ -86,11 +87,9 @@ pub async fn refresh_views(h: &Host, name: &str, dir: &Path) -> Result<(), Strin
         // instance (an instance's own stale `calls` used to win, and a panel
         // calling a new verb was refused)
         let own = h
-            .kernel
-            .agents
-            .get(&fantastic_kernel::AgentId::from(id.as_str()))
+            .kernel.resolve_target(id.as_str())
             .and_then(|a| {
-                a.value()
+                a
                     .record()
                     .meta
                     .get("view")
@@ -427,7 +426,7 @@ mod tests {
             dir.join(".fantastic"),
             false,
         );
-        kernel.register(Arc::clone(&root));
+        fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
         kernel.set_root(root);
         let h = Host {
             kernel,
@@ -453,10 +452,8 @@ mod tests {
     }
 
     fn view_of(h: &Host) -> Value {
-        h.kernel
-            .agents
-            .get(&fantastic_kernel::AgentId::from("board_1"))
-            .and_then(|a| a.value().record().meta.get("view").cloned())
+        h.kernel.resolve_target("board_1")
+            .and_then(|a| a.record().meta.get("view").cloned())
             .unwrap_or(Value::Null)
     }
 

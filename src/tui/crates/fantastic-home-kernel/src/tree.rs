@@ -75,10 +75,8 @@ pub fn grants() -> Vec<(&'static str, Value, Value)> {
 
 /// `id`'s record meta (empty when there is no such agent).
 pub fn meta(kernel: &Kernel, id: &str) -> Map<String, Value> {
-    kernel
-        .agents
-        .get(&AgentId::from(id))
-        .map(|a| a.value().record().meta.clone())
+    kernel.resolve_target(id)
+        .map(|a| a.record().meta.clone())
         .unwrap_or_default()
 }
 

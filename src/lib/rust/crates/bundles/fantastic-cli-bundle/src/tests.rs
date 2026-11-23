@@ -19,24 +19,23 @@ async fn rig() -> Arc<Kernel> {
         std::path::PathBuf::new(),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(root);
     let cli = fantastic_kernel::Agent::new(
         AgentId::from("cli"),
         Some(HANDLER_MODULE.to_string()),
         Some(AgentId::from("kernel_state")),
-        json!({"callable_by": {"*": "*"}}).as_object().cloned().unwrap(),
+        json!({}).as_object().cloned().unwrap(),
         std::path::PathBuf::new(),
         false,
     );
-    kernel.register(cli);
+    fantastic_kernel::test_support::register(&kernel, cli);
     kernel
 }
 
 async fn dispatch(payload: Value) -> Value {
     let kernel = rig().await;
-    kernel
-        .send(vec![Item::new(AgentId::from("cli"), payload)])
+    kernel.operator_send(vec![Item::new(AgentId::from("cli"), payload)])
         .await
         .remove(0)
         .result

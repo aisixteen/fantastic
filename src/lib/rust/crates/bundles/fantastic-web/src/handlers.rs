@@ -161,13 +161,13 @@ async fn run(
 /// python `agent_file` — any agent answering `read_stream{path,offset,length}`
 /// becomes an HTTP file server. The request is handed to the web host
 /// (`fetch_file` — this route is the transport, the operator) and the HOST reads
-/// each chunk AS ITSELF, so the served agent's `callable_by` AND its io leg
-/// judge `web`; anything that does not answer with a chunk is a 404, and only an
+/// each chunk AS ITSELF, so `web`'s own lines AND the served agent's io leg
+/// judge it; anything that does not answer with a chunk is a 404, and only an
 /// `unauthorized` denial carries a body (a missing file must not leak its
 /// absence).
 async fn file_proxy(state: AppState, agent_id: String, path: String) -> Response {
     let target = AgentId::from(agent_id.as_str());
-    if !state.kernel.agents.contains_key(&target) {
+    if !state.kernel.exists(target.as_str()) {
         return routes::respond(StatusCode::NOT_FOUND, &[], None, Vec::new());
     }
     let web = state.web_agent_id.clone();
@@ -203,12 +203,17 @@ async fn file_proxy(state: AppState, agent_id: String, path: String) -> Response
     // zero size sends NO content-length and the body is chunked.
     let size = meta.get("size").and_then(Value::as_u64).filter(|n| *n != 0);
     let kernel = Arc::clone(&state.kernel);
+    // hyper polls the body after this handler returned, outside its scope: each
+    // later read runs with the server's identity again
+    let inherited = state.inherited.clone();
     // python's generator: yield the chunk; stop on a TRUTHY `eof`; else read on
     // at `chunk["next_offset"]` — a chunk without one raises KeyError, which
     // aborts the body mid-stream.
     let stream = futures_util::stream::unfold(
         (Some(Step::Yield(meta, first)), kernel, target, path, web),
-        move |(step, kernel, target, path, web)| async move {
+        move |(step, kernel, target, path, web)| {
+            let inherited = inherited.clone();
+            async move {
             match step? {
                 Step::Yield(m, buf) => Some((
                     Ok::<Vec<u8>, std::io::Error>(buf),
@@ -226,10 +231,13 @@ async fn file_proxy(state: AppState, agent_id: String, path: String) -> Response
                     };
                     // Every chunk is handed to the host the same way; python
                     // breaks on anything that is not a chunk.
-                    let (m2, body) = read_chunk(&kernel, &web, &target, &path, n).await;
+                    let (m2, body) = inherited
+                        .scope(read_chunk(&kernel, &web, &target, &path, n))
+                        .await;
                     let body = body?;
                     Some((Ok(body), (Some(Step::Next(m2)), kernel, target, path, web)))
                 }
+            }
             }
         },
     );
@@ -246,7 +254,7 @@ enum Step {
 /// ONE file-proxy chunk, THROUGH THE BATCH (C37/C40): python `_fetch` hands
 /// `fetch_file` to the web host — this route is the transport, so the hand-in
 /// is the operator's — and the host's handler sends `read_stream` as itself, so
-/// the served agent's `callable_by` AND its io leg judge `web`. The chunk comes
+/// `web`'s own lines AND the served agent's io leg judge it. The chunk comes
 /// back raw.
 async fn read_chunk(
     kernel: &Arc<fantastic_kernel::Kernel>,
@@ -686,8 +694,8 @@ fn rest_gate(
 ) -> Option<Response> {
     use fantastic_io_bridge::authorizer::{ingress, Action, Decision, Rules};
 
-    let rules = match state.kernel.agents.get(owner).map(|e| Arc::clone(&e)) {
-        Some(a) => Rules::of(&a.meta.read().expect("meta poisoned")).unwrap_or_default(),
+    let rules = match state.kernel.resolve_target(owner.as_str()) {
+        Some(a) => Rules::of(&a.record().meta).unwrap_or_default(),
         // No record for the mounting leg ⇒ nothing granted it anything. Sealed.
         None => Rules::default(),
     };
@@ -777,7 +785,7 @@ async fn ws_upgrade(
         .get(header::SEC_WEBSOCKET_KEY)
         .map(|k| tokio_tungstenite::tungstenite::handshake::derive_accept_key(k.as_bytes()));
     let params = negotiated.as_ref().map(|(_, p)| *p);
-    tokio::spawn(async move {
+    fantastic_kernel::spawn_inherit(async move {
         let Ok(upgraded) = on_upgrade.await else {
             return;
         };

@@ -76,7 +76,7 @@ async fn save_is_pure_in_ram_no_state_json_on_disk() {
     fantastic_kernel::test_support::boot_root(&kernel).await;
     fantastic_kernel::test_support::wire_fake_store(&kernel, &store_root).await;
     let _ = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"alpha"}))])
+        .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"alpha"}))])
         .await.remove(0).result;
     kernel.flush_records().await;
 
@@ -111,7 +111,7 @@ async fn save_json_is_byte_deterministic() {
 
     for id in ["b", "a", "c"] {
         let _ = kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":id}))])
+            .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":id}))])
             .await.remove(0).result;
     }
     let first = kernel.save_json();
@@ -135,7 +135,7 @@ async fn save_and_load_round_trips_disk_to_memory() {
     let disk_kernel = Arc::clone(&booted.kernel);
     for id in ["alpha", "beta"] {
         let _ = disk_kernel
-            .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":id}))])
+            .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":id}))])
             .await.remove(0).result;
     }
     let snapshot_json = disk_kernel.save_json();
@@ -146,7 +146,7 @@ async fn save_and_load_round_trips_disk_to_memory() {
     let mem_kernel = Arc::new(mem_kernel);
     mem_kernel.load_json(&snapshot_json).unwrap();
     for id in ["kernel_state", "alpha", "beta"] {
-        assert!(mem_kernel.agents.contains_key(&AgentId::from(id)));
+        assert!(mem_kernel.exists(id));
     }
     assert_eq!(mem_kernel.save_json(), snapshot_json);
 
@@ -169,10 +169,10 @@ async fn load_weak_loads_unknown_handler_modules() {
     let kernel = Arc::new(kernel);
     kernel.load_json(&snapshot).unwrap();
 
-    assert!(kernel.agents.contains_key(&AgentId::from("kernel_state")));
-    assert!(kernel.agents.contains_key(&AgentId::from("alive")));
+    assert!(kernel.exists("kernel_state"));
+    assert!(kernel.exists("alive"));
     assert!(
-        !kernel.agents.contains_key(&AgentId::from("ghost")),
+        !kernel.exists("ghost"),
         "ghost dropped — bundle unknown"
     );
 }
@@ -230,7 +230,7 @@ async fn persist_merge_preserves_extra_fields_on_disk() {
 
     // Create the agent normally.
     let _ = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"merge_test","port":8080}))])
+        .operator_send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"merge_test","port":8080}))])
         .await.remove(0).result;
     kernel.flush_records().await;
     let agent_json = tmp.path().join(".fantastic/agents/merge_test/agent.yaml");
@@ -249,7 +249,7 @@ async fn persist_merge_preserves_extra_fields_on_disk() {
 
     // Update something else via the kernel — should merge, not overwrite.
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type":"update_agent","id":"merge_test","port":9090}),
         )])

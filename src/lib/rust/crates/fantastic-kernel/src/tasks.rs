@@ -119,13 +119,53 @@ where
     F: std::future::Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    let sender = crate::send::current_sender();
-    let origin = crate::send::current_origin();
-    let quiet = crate::send::state_quiet();
-    tokio::spawn(crate::send::STATE_QUIET.scope(
-        quiet,
-        crate::send::CURRENT_SENDER.scope(sender, crate::send::CURRENT_ORIGIN.scope(origin, work)),
-    ))
+    tokio::spawn(Inherited::capture().scope(work))
+}
+
+/// The identity of the running code — its sender, its origin scope and its
+/// quiet flag — CAPTURED, to be re-entered where task-locals do not reach: the
+/// per-connection tasks a server library spawns with a bare `tokio::spawn`.
+/// [`spawn_inherit`] is `tokio::spawn` of a captured scope.
+#[derive(Clone, Debug)]
+pub struct Inherited {
+    sender: Option<AgentId>,
+    origin: Option<Option<AgentId>>,
+    quiet: bool,
+}
+
+impl Inherited {
+    /// The identity of the code running now.
+    #[must_use]
+    pub fn capture() -> Self {
+        Self {
+            sender: crate::send::current_sender(),
+            origin: crate::send::origin_scope(),
+            quiet: crate::send::state_quiet(),
+        }
+    }
+
+    /// `work`, run with the captured identity. THE ORIGIN SCOPE IS CARRIED AS IT
+    /// IS: captured from no scope at all, the work has none either, and its sends
+    /// are refused — never the operator's.
+    pub async fn scope<F: std::future::Future>(self, work: F) -> F::Output {
+        let sender = self.sender;
+        match self.origin {
+            Some(origin) => {
+                crate::send::STATE_QUIET
+                    .scope(
+                        self.quiet,
+                        crate::send::CURRENT_SENDER
+                            .scope(sender, crate::send::CURRENT_ORIGIN.scope(origin, work)),
+                    )
+                    .await
+            }
+            None => {
+                crate::send::STATE_QUIET
+                    .scope(self.quiet, crate::send::CURRENT_SENDER.scope(sender, work))
+                    .await
+            }
+        }
+    }
 }
 
 /// Seconds since the epoch — the `started_at` clock (Python's `time.time()`).
@@ -613,8 +653,10 @@ impl Kernel {
         // that agent's. `tokio::spawn` inherits no task-locals, so the identity
         // the gate reads would be dropped at the spawn and every send the fork
         // made would arrive as OPERATOR — ungated, and attributed to nobody.
+        // The origin scope is carried as it is: work spawned from no scope at all
+        // has none either, and its sends are refused.
         let sender = crate::send::current_sender();
-        let origin = crate::send::current_origin();
+        let origin = crate::send::origin_scope();
         // A fork started inside the kernel's own ledger flush is silent too
         // (python copies `_state_quiet` into every task).
         let quiet = crate::send::state_quiet();
@@ -629,21 +671,31 @@ impl Kernel {
                 tid,
                 CURRENT_KILLED.scope(
                     killed,
-                    crate::send::CURRENT_SENDER.scope(
-                        sender,
-                        crate::send::CURRENT_ORIGIN.scope(origin, async move {
+                    crate::send::CURRENT_SENDER.scope(sender, async move {
+                        let body = async move {
                             tokio::select! {
                                 biased;
                                 _ = cancel.notified() => {}
                                 _ = work => {}
                             }
-                        }),
-                    ),
+                        };
+                        match origin {
+                            Some(o) => crate::send::CURRENT_ORIGIN.scope(o, body).await,
+                            None => body.await,
+                        }
+                    }),
                 ),
             );
             crate::send::STATE_QUIET.scope(quiet, scoped).await;
         });
         task_id
+    }
+
+    /// Is `id` a KERNEL SERVICE TASK (a keepalive loop the root owns)? `ps` shows
+    /// one to the operator only, and only the operator's `cancel` reaches it.
+    pub(crate) fn is_service_task(&self, id: &TaskId) -> bool {
+        self.root()
+            .is_some_and(|r| self.tasks.service_verb(id, &r.id).is_some())
     }
 
     /// Kill a task AND ITS SUBTREE — children first, like killing a process

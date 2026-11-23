@@ -1,0 +1,27 @@
+# Kernel config — the SYSTEM SHAPE only. What is asserted about it lives in
+# `specs/docs.yaml`.
+
+loaders:
+  - id: docs_loader
+    file: docs.yaml
+    meta:
+      # THE CAP: the root is outside the loader's tree, so a line a member holds
+      # on it holds only as far as the loader's own line does.
+      can:
+        $root: {call: [reflect]}
+    manifest:
+      agents:
+        - id: asker
+          handler_module: file_bridge.tools
+          allow: ['.']
+          ingress_rule: allow_all_ingress
+
+        - id: reader
+          handler_module: file_bridge.tools
+          allow: ['.']
+          ingress_rule: allow_all_ingress
+
+        - id: shelf
+          handler_module: file_bridge.tools
+          allow: ['.']
+          ingress_rule: allow_all_ingress

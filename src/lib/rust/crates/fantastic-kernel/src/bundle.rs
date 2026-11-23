@@ -238,10 +238,7 @@ impl<T: Handler> Bundle for T {
         // the call never reaches it.
         let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
             return Ok((
-                Some(crate::refusal::unknown_agent(
-                    agent_id.as_str(),
-                    kernel.agents.iter().map(|e| e.key().0.clone()).collect(),
-                )),
+                Some(crate::refusal::unknown_agent(agent_id.as_str())),
                 None,
             ));
         };
@@ -316,7 +313,7 @@ pub trait Handler: Send + Sync + 'static {
 
     /// ONE SHORT GENERIC TEXT in code saying what the bundle is for. The only prose a
     /// bundle carries: how to call it is rendered from its declared verbs
-    /// (`docs`, `reflect`), never written by hand.
+    /// (`reflect`), never written by hand.
     fn man(&self) -> &'static str;
 
     /// Answer one checked call. `call` is the typed form of the payload — its verb
@@ -388,12 +385,12 @@ pub trait Handler: Send + Sync + 'static {
 
     /// THE VERBS this bundle's agents answer, DECLARED (`verbs!{}` in its `verbs.rs`): the
     /// list the agent's own entry checks every call against — verb known, arguments
-    /// known, present and typed — and `reflect` and `docs` render. Required.
+    /// known, present and typed — and `reflect` renders. Required.
     fn verbs(&self) -> &'static [crate::verbs::Verb];
 
     /// THE VERBS THIS AGENT carries beside the builtin ones: built at runtime for the
     /// agent instance (an MCP client's tools), the same schema shape as a builtin
-    /// verb's and checked by the same engine. `reflect` and `docs` render them with
+    /// verb's and checked by the same engine. `reflect` renders them with
     /// the builtin ones. Required: a bundle with none returns the explicit empty
     /// list its `verbs!` generates (`verbs::dynamic_verbs`).
     fn dynamic_verbs(&self, agent: &crate::agent::Agent) -> Vec<crate::verbs::DynVerb>;

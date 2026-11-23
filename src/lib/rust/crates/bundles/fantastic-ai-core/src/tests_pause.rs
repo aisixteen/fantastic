@@ -175,13 +175,13 @@ async fn setup_with(tmp: &TempDir, tag: &str, extra: Value) -> (Arc<Kernel>, Age
         tmp.path().join(".fantastic"),
         false,
     );
-    kernel.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&kernel, Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     fantastic_ram_store::test_support::ensure_memory(&kernel).await;
 
     let id = format!("pause_{tag}");
     let memory =
-        fantastic_ram_store::test_support::memory_meta(&kernel, &id, json!({"cli": "*"})).await;
+        fantastic_ram_store::test_support::memory_meta(&kernel, &id, json!({"cli": {"call": ["*"]}})).await;
     let mut create = json!({
         "type": "create_agent",
         "parent_id": "kernel",
@@ -196,8 +196,7 @@ async fn setup_with(tmp: &TempDir, tag: &str, extra: Value) -> (Arc<Kernel>, Age
     for (k, v) in extra.as_object().unwrap() {
         create[k.as_str()] = v.clone();
     }
-    let _ = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), create)])
+    let _ = kernel.operator_send(vec![Item::new(AgentId::from("kernel_state"), create)])
         .await
         .remove(0)
         .result;
@@ -206,8 +205,7 @@ async fn setup_with(tmp: &TempDir, tag: &str, extra: Value) -> (Arc<Kernel>, Age
 }
 
 async fn send(kernel: &Arc<Kernel>, to: &AgentId, payload: Value) -> Value {
-    kernel
-        .send(vec![Item::new(to.clone(), payload)])
+    kernel.operator_send(vec![Item::new(to.clone(), payload)])
         .await
         .remove(0)
         .result
@@ -329,8 +327,7 @@ fn pause_and_resume_are_declared_like_every_other_verb() {
 async fn resume_has_no_registry_gate() {
     let tmp = TempDir::new().unwrap();
     let (kernel, id) = setup_with(&tmp, "nogate", json!({"spawned_by": "reg_nogate"})).await;
-    let _ = kernel
-        .send(vec![Item::new(
+    let _ = kernel.operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({"type": "create_agent", "parent_id": "kernel",
                    "handler_module": "limit_registry.tools", "id": "reg_nogate"}),

@@ -21,13 +21,12 @@ const PAGE: &str = "g1";
 async fn open(tmp: &TempDir, web_id: &str, open_leg: bool) -> (Arc<Kernel>, TestWs, String) {
     let port = free_port();
     let kernel = stage_web_with_ws_leg(tmp, port, web_id, open_leg).await;
-    kernel
-        .root()
-        .expect("root")
-        .meta
-        .write()
-        .unwrap()
-        .insert("guid".to_string(), json!(HOST));
+    let root = kernel.root().expect("root").id.clone();
+    fantastic_kernel::test_support::update(
+        &kernel,
+        &root,
+        serde_json::Map::from_iter([("guid".to_string(), json!(HOST))]),
+    );
     let ws = connect(port, web_id).await;
     (kernel, ws, format!("{web_id}_ws"))
 }
@@ -79,7 +78,7 @@ fn send_to_page(kernel: &Arc<Kernel>, payload: Value) -> tokio::task::JoinHandle
 
 fn send_item(kernel: &Arc<Kernel>, item: Item) -> tokio::task::JoinHandle<Outcome> {
     let k = Arc::clone(kernel);
-    tokio::spawn(async move { k.send(vec![item]).await.remove(0) })
+    tokio::spawn(async move { k.operator_send(vec![item]).await.remove(0) })
 }
 
 async fn settled(h: tokio::task::JoinHandle<Outcome>) -> Outcome {
@@ -187,10 +186,8 @@ async fn one_guid_per_connection() {
 async fn two_tabs_of_one_identity_are_one_principal() {
     let tmp = TempDir::new().unwrap();
     let (kernel, mut ws, leg) = open(&tmp, "web_peer_tabs", true).await;
-    let port = kernel
-        .agents
-        .get(&AgentId::from("web_peer_tabs"))
-        .and_then(|a| a.meta.read().unwrap().get("port").and_then(Value::as_u64))
+    let port = kernel.resolve_target("web_peer_tabs")
+        .and_then(|a| a.record().meta.get("port").and_then(Value::as_u64))
         .expect("port") as u16;
     let mut ws2 = connect(port, "web_peer_tabs").await;
     push(&mut ws, json!({"type": "hello", "guid": PAGE})).await;
@@ -241,10 +238,8 @@ async fn two_tabs_of_one_identity_are_one_principal() {
 /// Two tabs of one identity on the web agent `web_id`'s server, both said hello.
 async fn two_tabs(tmp: &TempDir, web_id: &str) -> (Arc<Kernel>, TestWs, TestWs, String) {
     let (kernel, mut ws, leg) = open(tmp, web_id, true).await;
-    let port = kernel
-        .agents
-        .get(&AgentId::from(web_id))
-        .and_then(|a| a.meta.read().unwrap().get("port").and_then(Value::as_u64))
+    let port = kernel.resolve_target(web_id)
+        .and_then(|a| a.record().meta.get("port").and_then(Value::as_u64))
         .expect("port") as u16;
     let mut ws2 = connect(port, web_id).await;
     push(&mut ws, json!({"type": "hello", "guid": PAGE})).await;
@@ -257,8 +252,8 @@ async fn two_tabs(tmp: &TempDir, web_id: &str) -> (Arc<Kernel>, TestWs, TestWs, 
 }
 
 /// An emit to `<guid>|<agent>` reaches EVERY live tab of the
-/// guid as `{type:"emit", target, payload}` — from an operator, or from an agent
-/// granted `emit` on the peer; no caller rides either way.
+/// guid as `{type:"emit", target, payload}` — from an operator; no caller rides.
+/// (An agent's emit onto the peer takes a peer line, parked with the peers, Q5.)
 #[tokio::test]
 async fn an_emit_to_the_identity_reaches_every_tab() {
     let tmp = TempDir::new().unwrap();
@@ -272,28 +267,8 @@ async fn an_emit_to_the_identity_reaches_every_tab() {
             json!({"type": "emit", "target": "canvas", "payload": {"type": "ping", "n": 1}})
         );
     }
-    kernel
-        .agents
-        .get(&AgentId::from(leg.as_str()))
-        .unwrap()
-        .meta
-        .write()
-        .unwrap()
-        .insert(
-            "can_call".to_string(),
-            json!({format!("{PAGE}|*"): ["emit"]}),
-        );
-    fantastic_kernel::test_support::as_agent(AgentId::from(leg.as_str()), async {
-        kernel.emit(&target, json!({"type": "ping", "n": 2})).await;
-    })
-    .await;
-    for tab in [&mut ws, &mut ws2] {
-        let e = next_of(tab, "emit").await;
-        assert_eq!(
-            e,
-            json!({"type": "emit", "target": "canvas", "payload": {"type": "ping", "n": 2}})
-        );
-    }
+    // an agent's emit onto the peer takes a peer line: parked with the peers (Q5)
+    let _ = leg;
     stop(&kernel, "web_peer_emit").await;
 }
 

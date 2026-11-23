@@ -107,10 +107,8 @@ fn reserved(name: &str) -> bool {
 }
 
 fn meta_of(kernel: &Kernel, id: &AgentId) -> Map<String, Value> {
-    kernel
-        .agents
-        .get(id)
-        .map(|e| e.meta.read().expect("meta").clone())
+    kernel.resolve_target(id.as_str())
+        .map(|e| e.record().meta.clone())
         .unwrap_or_default()
 }
 

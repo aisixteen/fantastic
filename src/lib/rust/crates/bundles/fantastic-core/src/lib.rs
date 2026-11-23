@@ -76,7 +76,7 @@ fn loader_root(kernel: &Kernel, agent: &Arc<Agent>) -> Result<PathBuf, BundleErr
 /// python `_root`'s override: the loader's `root` meta when it is a non-empty
 /// string (`isinstance(r, str) and r`).
 fn root_meta(agent: &Agent) -> Option<String> {
-    agent.meta.read().ok().and_then(|m| {
+    Some(agent.record().meta).and_then(|m| {
         m.get("root")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
@@ -303,7 +303,7 @@ impl KernelStateBundle {
         let id = record.get("id").and_then(Value::as_str).unwrap_or("");
         let parent = record.get("parent_id").and_then(Value::as_str);
         let mut at = Places::new(agent, kernel);
-        let path = match kernel.agents.get(&AgentId::from(id)) {
+        let path = match kernel.resolve_target(id) {
             Some(a) => a.root_path.clone(),
             None => at.resolve(id, parent)?,
         };
@@ -323,7 +323,7 @@ impl KernelStateBundle {
         let target = args.id.as_str();
         let parent = args.parent_id.as_deref();
         let mut at = Places::new(agent, kernel);
-        let path = match kernel.agents.get(&AgentId::from(target)) {
+        let path = match kernel.resolve_target(target) {
             Some(a) => a.root_path.clone(),
             None => at.resolve(target, parent)?,
         };
@@ -380,7 +380,7 @@ impl<'a> Places<'a> {
 
     /// `(known, parent)` for one id.
     fn locate(&mut self, node: &str) -> Result<(bool, Option<String>), BundleError> {
-        if let Some(live) = self.kernel.agents.get(&AgentId::from(node)) {
+        if let Some(live) = self.kernel.resolve_target(node) {
             return Ok((true, live.parent_id.as_ref().map(|p| p.0.clone())));
         }
         if self.disk.is_none() {
@@ -490,11 +490,8 @@ impl Handler for KernelStateBundle {
         call: Self::Call,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
-            return Ok(Some(fantastic_kernel::unknown_agent(
-                agent_id.as_str(),
-                kernel.agents.iter().map(|e| e.key().0.clone()).collect(),
-            )));
+        let Some(agent) = kernel.resolve_target(agent_id.as_str()) else {
+            return Ok(Some(fantastic_kernel::unknown_agent(agent_id.as_str())));
         };
         let reply = match call {
             verbs::Call::Reflect(_) => json!({
@@ -539,10 +536,7 @@ impl Handler for KernelStateBundle {
         out.insert("persistence".to_string(), persistence);
         out.insert(
             "guid".to_string(),
-            agent
-                .meta
-                .read()
-                .ok()
+            Some(agent.record().meta)
                 .and_then(|m| m.get("guid").cloned())
                 .unwrap_or(Value::Null),
         );
@@ -634,11 +628,9 @@ async fn reload_bundle(
         // its next call or turn
         return Ok(json!({"reloaded": name, "instances": changed}));
     }
-    let mut live: Vec<Arc<Agent>> = kernel
-        .agents
-        .iter()
-        .filter(|e| e.value().handler_module.as_deref() == Some(name))
-        .map(|e| Arc::clone(e.value()))
+    let mut live: Vec<Arc<Agent>> = kernel.agent_ids().into_iter().filter_map(|aid| kernel.resolve_target(aid.as_str()))
+        .filter(|e| e.handler_module.as_deref() == Some(name))
+        .map(|e| Arc::clone(&e))
         .collect();
     live.sort_by(|a, b| a.id.0.cmp(&b.id.0));
     for a in &live {

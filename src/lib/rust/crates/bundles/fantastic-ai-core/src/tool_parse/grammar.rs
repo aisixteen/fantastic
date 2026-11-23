@@ -104,8 +104,8 @@ pub fn opens_call(rest: &str) -> Option<bool> {
 
 /// Byte index of the `</call>` closing a call whose body starts at `start`,
 /// skipping any `</call>` inside a `<bytes>` value and pairing each nested
-/// `<call name…>` with its own `</call>` (a quoted whole call is text); `None`
-/// if unterminated.
+/// `<call name…>` (a quoted whole call is text) and each bare `<call>` (the `call`
+/// level of a `can` line, a key) with its own `</call>`; `None` if unterminated.
 pub fn find_close(text: &str, start: usize) -> Option<usize> {
     let mut i = start;
     let mut depth = 1usize;
@@ -127,7 +127,7 @@ pub fn find_close(text: &str, start: usize) -> Option<usize> {
             i = e + BYTES_CLOSE.len();
         } else {
             let after = next + OPEN.len();
-            if opens_call(&text[after..]) == Some(true) {
+            if opens_call(&text[after..]) == Some(true) || text[after..].starts_with('>') {
                 depth += 1;
             }
             i = after;
@@ -419,9 +419,9 @@ pub fn open_tags(text: &str) -> Vec<OpenTag> {
 
 /// The next `<name>` open tag at or after `from`: `(tag_start, body_start, name)`.
 ///
-/// A tag name is a KEY, not an XML name: grant maps are keyed by agent ids and
-/// the relative tokens (`$self`, `$parent`, `$subtree`), and the model writes
-/// those as tags (`<$self>*</$self>`) — so `$`, `-` and `.` are letters here.
+/// A tag name is a KEY, not an XML name: `can` lines are keyed by agent ids and
+/// the relative token `$parent`, and the model writes those as tags
+/// (`<$parent>…</$parent>`) — so `$`, `-` and `.` are letters here.
 /// Mirrors python's
 /// `<([A-Za-z_$][\w$.\-]*)>`.
 fn next_tag(body: &str, from: usize) -> Option<(usize, usize, String)> {

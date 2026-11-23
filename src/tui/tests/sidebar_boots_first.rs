@@ -18,24 +18,22 @@ use serde_json::{json, Value};
 const CHAT: &str = "c714";
 
 /// A chat on a provider whose model nobody serves: pause and resume never call the model.
+/// The stock tree seeds no sidebar (its bundle stays): this blueprint places one at the root.
 const BLUEPRINT: &str = "\
 agents:
+  - id: sidebar
+    handler_module: sidebar.tools
   - id: c714
     handler_module: ai_chat.tools
     provider_id: p714
     memory_store_id: memory
-    can_call:
-      memory: \"*\"
-      p714: \"*\"
+    can:
+      memory: {call: [append, read]}
+      p714: {call: [\"*\"]}
   - id: p714
     handler_module: vllm_backend.tools
     endpoint: http://127.0.0.1:9/v1
     model: stub
-    callable_by:
-      c714: \"*\"
-  - id: memory
-    callable_by:
-      c714: \"*\"
 ";
 
 fn folder(name: &str) -> PathBuf {
@@ -46,7 +44,7 @@ fn folder(name: &str) -> PathBuf {
 }
 
 async fn call(k: &Arc<Kernel>, to: &str, payload: Value) -> Value {
-    k.send(vec![Item::new(AgentId::from(to), payload)]).await.remove(0).result
+    k.operator_send(vec![Item::new(AgentId::from(to), payload)]).await.remove(0).result
 }
 
 /// The phases the sidebar holds once it holds one for `CHAT` (the tap publishes off the call

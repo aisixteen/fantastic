@@ -167,7 +167,7 @@ impl Handler for SlowBundle {
             "chain" => {
                 let next = AgentId::from(payload.get("next").and_then(Value::as_str).unwrap_or(""));
                 kernel
-                    .send(vec![Item::new(next, json!({"type": "slow"}))])
+                    .operator_send(vec![Item::new(next, json!({"type": "slow"}))])
                     .await
                     .remove(0)
                     .result
@@ -189,7 +189,7 @@ impl Handler for SlowBundle {
             "chain_fork" => {
                 let next = AgentId::from(payload.get("next").and_then(Value::as_str).unwrap_or(""));
                 let r = kernel
-                    .send(vec![Item::new(next, json!({"type": "fork"}))])
+                    .operator_send(vec![Item::new(next, json!({"type": "fork"}))])
                     .await
                     .remove(0)
                     .result;
@@ -201,7 +201,7 @@ impl Handler for SlowBundle {
             "kill" => {
                 let victim = payload.get("victim").and_then(Value::as_str).unwrap_or("");
                 let table = kernel
-                    .send(vec![Item::new(
+                    .operator_send(vec![Item::new(
                         AgentId::from("kernel"),
                         json!({"type": "ps"}),
                     )])
@@ -220,7 +220,7 @@ impl Handler for SlowBundle {
                     None => json!({"error": "no victim task"}),
                     Some(task_id) => {
                         kernel
-                            .send(vec![Item::new(
+                            .operator_send(vec![Item::new(
                                 AgentId::from("kernel"),
                                 json!({"type": "cancel", "task_id": task_id}),
                             )])
@@ -290,41 +290,16 @@ pub(crate) async fn mk_agent(kernel: &Arc<Kernel>, id: &str) -> AgentId {
     mk_agent_grant(kernel, id, Value::Null).await
 }
 
-/// Create a slow agent with an explicit `can_call` grant. Two-sided deny-all: a
-/// `chain` send to a SIBLING is lateral egress, so the chain tests grant that edge.
-/// A slow agent whose `can_call` is `can_call` — and, both ends being explicit,
-/// every live agent that grant names accepts it back (its `callable_by` names
-/// `id` with the same verbs).
-pub(crate) async fn mk_agent_grant(kernel: &Arc<Kernel>, id: &str, can_call: Value) -> AgentId {
+/// Create a slow agent holding `can` (the line shape: `{target: {call: [..]}}`, …).
+/// A `chain` send to a SIBLING needs a line, so the chain tests give one; the
+/// target keeps no list of callers.
+pub(crate) async fn mk_agent_grant(kernel: &Arc<Kernel>, id: &str, can: Value) -> AgentId {
     let mut payload = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "slow.tools", "id": id});
-    if !can_call.is_null() {
-        payload["can_call"] = can_call.clone();
+    if !can.is_null() {
+        payload["can"] = can;
     }
     let r = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), payload)])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r["id"], json!(id), "create_agent failed: {r}");
-    if let Some(map) = can_call.as_object() {
-        for (k, v) in map {
-            if !k.starts_with('$') && kernel.resolve_target(k).is_some() {
-                crate::test_support::grant(kernel, k, "callable_by", id, v.clone());
-            }
-        }
-    }
-    AgentId::from(id)
-}
-
-/// Create a slow agent that ACCEPTS a lateral caller (its `callable_by`) — the
-/// ingress half a chain target needs under two-sided deny-all.
-async fn mk_agent_accept(kernel: &Arc<Kernel>, id: &str, callable_by: Value) -> AgentId {
-    let payload = json!({
-        "type": "create_agent", "parent_id": "kernel", "handler_module": "slow.tools", "id": id,
-        "callable_by": callable_by,
-    });
-    let r = kernel
-        .send(vec![Item::new(AgentId::from("kernel_state"), payload)])
+        .operator_send(vec![Item::new(AgentId::from("kernel_state"), payload)])
         .await
         .remove(0)
         .result;
@@ -335,7 +310,7 @@ async fn mk_agent_accept(kernel: &Arc<Kernel>, id: &str, callable_by: Value) -> 
 /// The `ps` reply rows — through the VERB, like any caller.
 async fn rows(kernel: &Arc<Kernel>) -> Vec<Value> {
     let r = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "ps"}),
         )])
@@ -354,7 +329,7 @@ async fn row_for(kernel: &Arc<Kernel>, agent: &AgentId, verb: &str) -> Option<Va
 
 async fn cancel(kernel: &Arc<Kernel>, task_id: i64) -> Value {
     kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "cancel", "task_id": task_id}),
         )])
@@ -393,14 +368,14 @@ async fn ps_shows_the_tree_of_a_nested_send() {
     // shows both rows with the parent link, so a caller sees who spawned what.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
-    let a = mk_agent_grant(&kernel, "slow_a", json!({"slow_b": "*"})).await;
-    let b = mk_agent_accept(&kernel, "slow_b", json!({"slow_a": "*"})).await;
+    let a = mk_agent_grant(&kernel, "slow_a", json!({"slow_b": {"call": ["*"]}})).await;
+    let b = mk_agent(&kernel, "slow_b").await;
 
     let caller = tokio::spawn({
         let k = Arc::clone(&kernel);
         let a = a.clone();
         async move {
-            k.send(vec![Item::new(
+            k.operator_send(vec![Item::new(
                 a,
                 json!({"type": "chain", "next": "slow_b"}),
             )])
@@ -451,14 +426,14 @@ async fn cancel_kills_the_whole_subtree() {
     // to {"cancelled": true}; it never raises.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
-    let a = mk_agent_grant(&kernel, "slow_a", json!({"slow_b": "*"})).await;
-    let b = mk_agent_accept(&kernel, "slow_b", json!({"slow_a": "*"})).await;
+    let a = mk_agent_grant(&kernel, "slow_a", json!({"slow_b": {"call": ["*"]}})).await;
+    let b = mk_agent(&kernel, "slow_b").await;
 
     let caller = tokio::spawn({
         let k = Arc::clone(&kernel);
         let a = a.clone();
         async move {
-            k.send(vec![Item::new(
+            k.operator_send(vec![Item::new(
                 a,
                 json!({"type": "chain", "next": "slow_b"}),
             )])
@@ -525,7 +500,7 @@ async fn cancel_unknown_or_finished_task_is_honest() {
         let k = Arc::clone(&kernel);
         let a = a.clone();
         async move {
-            k.send(vec![Item::new(a, json!({"type": "slow"}))])
+            k.operator_send(vec![Item::new(a, json!({"type": "slow"}))])
                 .await
                 .remove(0)
                 .result
@@ -545,7 +520,7 @@ async fn cancel_unknown_or_finished_task_is_honest() {
 
     // A malformed call fails LOUD; it does not report a phantom success.
     let bad = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "cancel"}),
         )])
@@ -559,7 +534,7 @@ async fn cancel_unknown_or_finished_task_is_honest() {
     // naming the argument), never an honest {cancelled:false}.
     for f in [json!(3.5), json!(3.0)] {
         let r = kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type": "cancel", "task_id": f}),
             )])
@@ -571,44 +546,70 @@ async fn cancel_unknown_or_finished_task_is_honest() {
     }
 }
 
-// ─── the emergent one: an AGENT cancels another agent's work ───
+// ─── ps and cancel: no line, own tasks and those below ───
 
-#[tokio::test]
-async fn agent_cancels_another_agents_task() {
-    // An agent wields `cancel`: the killer agent's own handler discovers the
-    // victim's task through `ps` and sends `cancel`. The baseline (`$self`) does
-    // not reach the root, so the killer holds a grant that names them there.
-    let sh = Arc::new(Shared::default());
-    let kernel = mk_kernel(Arc::clone(&sh));
-    let victim = mk_agent(&kernel, "slow_victim").await;
-    let killer = mk_agent_grant(
-        &kernel,
-        "slow_killer",
-        json!({"kernel_state": ["ps", "cancel"]}),
-    )
-    .await;
+/// A slow agent created by the operator under `parent`.
+async fn mk_child(kernel: &Arc<Kernel>, id: &str, parent: &str) -> AgentId {
+    let r = kernel
+        .operator_send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "parent_id": parent,
+                   "handler_module": "slow.tools", "id": id}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], json!(id), "create_agent failed: {r}");
+    AgentId::from(id)
+}
 
+/// Send `payload` to the kernel as `agent`.
+async fn kernel_as(kernel: &Arc<Kernel>, agent: &AgentId, payload: Value) -> Value {
+    let k = Arc::clone(kernel);
+    crate::test_support::as_agent(agent.clone(), async move {
+        k.operator_send(vec![Item::new(AgentId::from("kernel"), payload)])
+            .await
+            .remove(0)
+            .result
+    })
+    .await
+}
+
+/// Start a `slow` dispatch on `agent` as the operator, and wait for its task.
+async fn start_slow(kernel: &Arc<Kernel>, agent: &AgentId) -> (tokio::task::JoinHandle<Value>, i64) {
     let caller = tokio::spawn({
-        let k = Arc::clone(&kernel);
-        let v = victim.clone();
+        let k = Arc::clone(kernel);
+        let v = agent.clone();
         async move {
-            k.send(vec![Item::new(v, json!({"type": "slow"}))])
+            k.operator_send(vec![Item::new(v, json!({"type": "slow"}))])
                 .await
                 .remove(0)
                 .result
         }
     });
-    let victim_task = wait_for_task(&kernel, &victim, "slow").await;
+    let task = wait_for_task(kernel, agent, "slow").await;
+    (caller, task)
+}
+
+#[tokio::test]
+async fn ps_and_cancel_reach_own_tasks_and_those_below() {
+    // An agent wields `ps` and `cancel` with no line: the killer's own handler
+    // finds its child's task through `ps` and cancels it.
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    let killer = mk_agent(&kernel, "slow_killer").await;
+    let victim = mk_child(&kernel, "slow_victim", "slow_killer").await;
+    let (caller, victim_task) = start_slow(&kernel, &victim).await;
 
     let r = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             killer,
             json!({"type": "kill", "victim": victim.0}),
         )])
         .await
         .remove(0)
         .result;
-    assert_eq!(r["cancelled"], json!(true));
+    assert_eq!(r["cancelled"], json!(true), "{r}");
     assert_eq!(r["killed"], json!([victim_task]));
 
     let live: HashSet<i64> = rows(&kernel)
@@ -622,6 +623,118 @@ async fn agent_cancels_another_agents_task() {
         .expect("caller must resolve")
         .expect("caller must not panic");
     assert_eq!(reply, json!({"cancelled": true}));
+}
+
+#[tokio::test]
+async fn ps_lists_no_task_outside_the_callers_tree() {
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    let killer = mk_agent(&kernel, "slow_killer").await;
+    let stranger = mk_agent(&kernel, "slow_stranger").await;
+    let (caller, task) = start_slow(&kernel, &stranger).await;
+
+    // its `ps` does not show a sibling's task, so its kill finds nothing
+    let table = kernel_as(&kernel, &killer, json!({"type": "ps"})).await;
+    let rows_seen = table["tasks"].as_array().cloned().expect("ps answers");
+    assert!(
+        rows_seen.iter().all(|t| t["agent"] == json!(killer.0)),
+        "{rows_seen:?}"
+    );
+    // a cancel by id of a task outside its tree answers as an unknown one
+    let r = kernel_as(&kernel, &killer, json!({"type": "cancel", "task_id": task})).await;
+    assert_eq!(r, json!({"cancelled": false, "killed": []}));
+    assert!(rows(&kernel).await.iter().any(|t| t["id"] == json!(task)));
+    caller.abort();
+}
+
+#[tokio::test]
+async fn ps_nulls_a_parent_task_of_a_hidden_agent() {
+    // slow_a (outside the viewer's tree) chains into slow_b (below the viewer):
+    // the viewer sees b's task, and its parent — a's task — as null.
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    let viewer = mk_agent(&kernel, "slow_viewer").await;
+    let b = mk_child(&kernel, "slow_b", "slow_viewer").await;
+    let a = mk_agent_grant(&kernel, "slow_a", json!({"slow_b": {"call": ["*"]}})).await;
+    let caller = tokio::spawn({
+        let k = Arc::clone(&kernel);
+        let a = a.clone();
+        async move {
+            k.operator_send(vec![Item::new(a, json!({"type": "chain", "next": "slow_b"}))])
+                .await
+                .remove(0)
+                .result
+        }
+    });
+    wait_for_task(&kernel, &b, "slow").await;
+    let operator_row = row_for(&kernel, &b, "slow").await.expect("b's slow row");
+    assert!(operator_row["parent"].is_i64(), "the operator sees the parent");
+    let table = kernel_as(&kernel, &viewer, json!({"type": "ps"})).await;
+    let seen = table["tasks"].as_array().cloned().expect("ps answers");
+    let row = seen
+        .iter()
+        .find(|t| t["agent"] == json!(b.0) && t["verb"] == json!("slow"))
+        .unwrap_or_else(|| panic!("the viewer sees its child's task: {seen:?}"));
+    assert_eq!(row["parent"], Value::Null, "{row}");
+    assert!(seen.iter().all(|t| t["agent"] != json!(a.0)), "{seen:?}");
+    caller.abort();
+}
+
+#[tokio::test]
+async fn service_tasks_show_to_the_operator_only() {
+    let kernel = mk_kernel(Arc::new(Shared::default()));
+    let agent = mk_agent(&kernel, "slow_a").await;
+    let live = kernel.spawn_keepalive_task(
+        &AgentId::from("kernel_state"),
+        "persist_writer",
+        std::future::pending::<()>(),
+    );
+    assert!(rows(&kernel).await.iter().any(|t| t["id"] == json!(live.0)));
+    // an agent's ps never lists it, and its cancel never reaches it
+    let table = kernel_as(&kernel, &agent, json!({"type": "ps"})).await;
+    assert!(
+        table["tasks"]
+            .as_array()
+            .expect("ps answers")
+            .iter()
+            .all(|t| t["id"] != json!(live.0)),
+        "{table}"
+    );
+    let r = kernel_as(&kernel, &agent, json!({"type": "cancel", "task_id": live.0})).await;
+    assert_eq!(r, json!({"cancelled": false, "killed": []}));
+    assert!(kernel.tasks.contains(&live));
+}
+
+#[tokio::test]
+async fn cancel_by_name_resolves_only_names_the_caller_started() {
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    let owner = mk_agent(&kernel, "slow_owner").await;
+    let other = mk_agent(&kernel, "slow_other").await;
+    let target = mk_child(&kernel, "slow_target", "slow_other").await;
+    // slow_other starts a named execution on its own child
+    let started = tokio::spawn({
+        let k = Arc::clone(&kernel);
+        let other = other.clone();
+        let t = target.clone();
+        async move {
+            crate::test_support::as_agent(other, async move {
+                k.operator_send(vec![Item::new(t, json!({"type": "slow"})).with_id("job-x")])
+                    .await
+                    .remove(0)
+                    .result
+            })
+            .await
+        }
+    });
+    wait_for_task(&kernel, &target, "slow").await;
+    // the owner (who did not start it) names it: unresolved
+    let r = kernel_as(&kernel, &owner, json!({"type": "cancel", "task_id": "job-x"})).await;
+    assert_eq!(r, json!({"cancelled": false, "killed": []}));
+    // its originator resolves it and cancels its own child's work
+    let r = kernel_as(&kernel, &other, json!({"type": "cancel", "task_id": "job-x"})).await;
+    assert_eq!(r["cancelled"], json!(true), "{r}");
+    let _ = tokio::time::timeout(Duration::from_secs(2), started).await;
 }
 
 // ─── on_cancel: the reliability hook ───────────────────────────
@@ -639,7 +752,7 @@ async fn on_cancel_hook_runs_and_releases_its_resource() {
         let k = Arc::clone(&kernel);
         let a = a.clone();
         async move {
-            k.send(vec![Item::new(a, json!({"type": "slow"}))])
+            k.operator_send(vec![Item::new(a, json!({"type": "slow"}))])
                 .await
                 .remove(0)
                 .result
@@ -683,7 +796,7 @@ async fn on_cancel_failure_prints_python_line() {
         let k = Arc::clone(&kernel);
         let a = a.clone();
         async move {
-            k.send(vec![Item::new(a, json!({"type": "slow"}))])
+            k.operator_send(vec![Item::new(a, json!({"type": "slow"}))])
                 .await
                 .remove(0)
                 .result
@@ -718,14 +831,14 @@ async fn forked_work_outlives_its_dispatch_and_is_adopted_by_its_grandparent() {
     // message" also kill the jobs that message spawned.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
-    let a = mk_agent_grant(&kernel, "slow_a", json!({"slow_b": "*"})).await;
-    let b = mk_agent_accept(&kernel, "slow_b", json!({"slow_a": "*"})).await;
+    let a = mk_agent_grant(&kernel, "slow_a", json!({"slow_b": {"call": ["*"]}})).await;
+    let b = mk_agent(&kernel, "slow_b").await;
 
     let caller = tokio::spawn({
         let k = Arc::clone(&kernel);
         let a = a.clone();
         async move {
-            k.send(vec![Item::new(
+            k.operator_send(vec![Item::new(
                 a,
                 json!({"type": "chain_fork", "next": "slow_b"}),
             )])
@@ -765,33 +878,40 @@ async fn forked_work_outlives_its_dispatch_and_is_adopted_by_its_grandparent() {
     assert_eq!(reply, json!({"cancelled": true}));
 }
 
-// ─── the substrate's own verbs: `docs of=kernel`, never a reflect ──────
+// ─── the substrate's own verbs: the root's verb docs, never a bundle's ──────
 
 #[tokio::test]
-async fn kernel_verbs_are_docs_not_reflect() {
+async fn kernel_verbs_are_the_roots_verb_docs_only() {
     // `ps`/`cancel` and the tree verbs belong to no bundle — they are the
-    // SUBSTRATE's own, answered by the root alone, and READ with `docs
-    // of=kernel` (a reflect carries no verbs).
+    // SUBSTRATE's own, answered by the root alone, and READ as the root's verb
+    // docs (`reflect` with `tier`/`verb`/`part`); no reflect carries a
+    // `kernel_verbs` key, and an agent below the root lists none of them.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "slow_a").await;
     for target in [AgentId::from("kernel"), a.clone()] {
         let r = kernel
-            .send(vec![Item::new(target.clone(), json!({"type": "reflect"}))])
+            .operator_send(vec![Item::new(target.clone(), json!({"type": "reflect"}))])
             .await
             .remove(0)
             .result;
         assert!(r.get("kernel_verbs").is_none(), "{target}: {r}");
     }
+    let below = kernel
+        .operator_send(vec![Item::new(a.clone(), json!({"type": "reflect", "part": "docs"}))])
+        .await
+        .remove(0)
+        .result;
+    assert!(below["verbs"].get("cancel").is_none(), "{below}");
     let one = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
-            json!({"type": "docs", "of": "kernel"}),
+            json!({"type": "reflect", "part": "docs"}),
         )])
         .await
         .remove(0)
         .result;
-    assert_eq!(one["bundle"], json!("kernel"));
+    assert_eq!(one["tier"], json!("oneliners"), "{one}");
     assert!(
         one["verbs"]["cancel"]
             .as_str()
@@ -804,9 +924,9 @@ async fn kernel_verbs_are_docs_not_reflect() {
         "`get` is not a kernel verb"
     );
     let detailed = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
-            json!({"type": "docs", "of": "kernel", "verb": "cancel", "tier": "detailed"}),
+            json!({"type": "reflect", "verb": "cancel", "tier": "detailed"}),
         )])
         .await
         .remove(0)
@@ -844,7 +964,7 @@ async fn shutdown_agents_tells_every_agent_and_then_refuses_new_roots() {
     let peer = mk_agent(&kernel, "sd_peer").await;
     let out = crate::test_support::as_agent(
         AgentId::from("kernel_state"),
-        kernel.send(vec![Item::new(peer, json!({"type": "chain"}))]),
+        kernel.operator_send(vec![Item::new(peer, json!({"type": "chain"}))]),
     )
     .await
     .remove(0);
@@ -867,7 +987,7 @@ async fn the_shutdown_agents_verb_tells_a_grandchild() {
     let kernel = mk_kernel(Arc::new(Shared::default()));
     let p = mk_agent(&kernel, "sd_parent").await;
     let r = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "create_agent", "parent_id": p.as_str(),
                    "handler_module": "slow.tools", "id": "sd_grandchild"}),
@@ -877,7 +997,7 @@ async fn the_shutdown_agents_verb_tells_a_grandchild() {
         .result;
     assert_eq!(r["id"], "sd_grandchild", "{r}");
     let out = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "shutdown_agents"}),
         )])
@@ -907,14 +1027,14 @@ async fn a_second_shutdown_agents_answers_the_same_and_shuts_nothing_new() {
 }
 
 #[tokio::test]
-async fn shutdown_agents_is_the_roots_control_surface_only() {
-    // A CHILD MAY NOT STOP THE TREE. The verb is addressed to the kernel root
-    // (or the reserved `kernel` address); anything else answers with an error rather than
-    // quietly draining the whole process on one agent's say-so.
+async fn operator_only_verbs_refuse_every_agent_caller() {
+    // A CHILD MAY NOT STOP THE TREE. Sent to any agent but the root, a kernel verb
+    // is `not_here`; sent to the root by an agent, a process verb is refused before
+    // anything runs: they are the in-process operator's alone.
     let kernel = mk_kernel(Arc::new(Shared::default()));
     let child = AgentId::from("sd_child");
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel_state",
@@ -923,23 +1043,42 @@ async fn shutdown_agents_is_the_roots_control_surface_only() {
         )])
         .await;
     let out = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             child.clone(),
             json!({"type": "shutdown_agents"}),
         )])
         .await
         .remove(0)
         .result;
-    // THE ROUTER REFUSES IT FIRST, and more usefully than the handler's own
-    // guard would: a coded `not_here` naming the verb and where to send it.
-    // The guard inside the handler stays as the second line, for a target that
-    // resolves to a non-root agent.
+    // THE ROUTER REFUSES IT FIRST: a coded `not_here` naming the verb and where
+    // to send it.
     assert_eq!(
         out.get("reason").and_then(Value::as_str),
         Some("not_here"),
         "a child must be refused: {out}"
     );
+    for verb in ["kernel_start", "shutdown_agents", "kernel_stop"] {
+        let r = kernel_as(&kernel, &child, json!({"type": verb})).await;
+        assert_eq!(
+            r,
+            crate::refusal::refusal(crate::refusal::NOT_ALLOWED, format!("{verb}: operator only")),
+            "{verb}"
+        );
+    }
     assert!(!kernel.draining(), "a refused call drains nothing");
+}
+
+#[tokio::test]
+async fn a_stop_through_a_leg_is_refused() {
+    // A remote operator's stop arrives through a leg, which sends it as itself: an
+    // agent caller, refused the same way.
+    let kernel = mk_kernel(Arc::new(Shared::default()));
+    let leg = mk_agent(&kernel, "slow_leg").await;
+    for verb in ["kernel_stop", "shutdown_agents"] {
+        let r = kernel_as(&kernel, &leg, json!({"type": verb})).await;
+        assert_eq!(r["reason"], json!("not_allowed"), "{verb}: {r}");
+    }
+    assert!(!kernel.draining());
 }
 
 #[tokio::test]
@@ -1021,7 +1160,7 @@ async fn the_quiet_phase_still_waits_for_a_real_in_flight_dispatch() {
     let a = mk_agent(&kernel, "sd_hold").await;
     let k = Arc::clone(&kernel);
     let running = tokio::spawn(async move {
-        k.send(vec![Item::new(a, json!({"type": "slow", "hold_ms": 400}))])
+        k.operator_send(vec![Item::new(a, json!({"type": "slow", "hold_ms": 400}))])
             .await
             .remove(0)
     });
@@ -1056,7 +1195,7 @@ async fn spawn_task_writes_a_task_row() {
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "forker").await;
     let r = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "fork"}))])
+        .operator_send(vec![Item::new(a.clone(), json!({"type": "fork"}))])
         .await
         .remove(0);
     let forked = r.result["task_id"].as_i64().expect("a forked task id");
@@ -1141,9 +1280,10 @@ mod per_instance_verbs {
 /// DYNAMIC VERBS — python
 /// `test_docs_of_an_agent_read_its_own_table_when_its_bundle_names_one`: a bundle
 /// whose agents serve different verbs declares them per agent instance
-/// (`dynamic_verbs`); `docs` and `reflect` render them beside the builtin ones.
+/// (`dynamic_verbs`); the verb docs of its `reflect` render them beside the builtin
+/// ones.
 #[tokio::test]
-async fn docs_of_an_agent_render_its_dynamic_verbs_beside_the_bundles_own() {
+async fn verb_docs_of_an_agent_render_its_dynamic_verbs_beside_the_bundles_own() {
     struct PerInstance;
     #[async_trait]
     impl Handler for PerInstance {
@@ -1210,18 +1350,18 @@ async fn docs_of_an_agent_render_its_dynamic_verbs_beside_the_bundles_own() {
     let send = |target: &'static str, p: Value| {
         let k = Arc::clone(&kernel);
         async move {
-            k.send(vec![Item::new(AgentId::from(target), p)])
+            k.operator_send(vec![Item::new(AgentId::from(target), p)])
                 .await
                 .remove(0)
                 .result
         }
     };
     let docs = |of: &'static str, extra: Value| {
-        let mut p = json!({"type": "docs", "of": of});
+        let mut p = json!({"type": "reflect", "tree": "none", "part": "docs"});
         for (k, v) in extra.as_object().cloned().unwrap_or_default() {
             p[k] = v;
         }
-        send("kernel", p)
+        send(of, p)
     };
     // an agent with a dynamic verb: the bundle's verb, the common ones, then its own
     let a1 = docs("a1", json!({})).await;
@@ -1267,7 +1407,7 @@ async fn docs_of_an_agent_render_its_dynamic_verbs_beside_the_bundles_own() {
     let gone = docs("a1", json!({"verb": "own_a2"})).await;
     assert_eq!(gone["reason"], "bad_arg", "{gone}");
     assert!(gone["hint"].as_str().unwrap().contains("own_a1"), "{gone}");
-    // `reflect` renders the same rows as `docs`
+    // a plain `reflect` renders the same one-line rows
     let r = send("a2", json!({"type": "reflect"})).await;
     assert_eq!(r["verbs"]["own_a2"], "args: x:int (req) — Only mine", "{r}");
     // the agent's own entry checks a call to a dynamic verb with the shared engine

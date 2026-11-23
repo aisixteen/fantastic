@@ -18,7 +18,7 @@ type K = Arc<crate::kernel::Kernel>;
 
 async fn ledger_rows(kernel: &K) -> Vec<serde_json::Value> {
     kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "ledger"}),
         )])
@@ -39,7 +39,7 @@ async fn a_named_id_runs_the_handler_exactly_once() {
     let a = mk_agent(&kernel, "l_once").await;
 
     let first = kernel
-        .send(vec![
+        .operator_send(vec![
             Item::new(a.clone(), json!({"type": "count"})).with_id("job-1")
         ])
         .await
@@ -50,7 +50,7 @@ async fn a_named_id_runs_the_handler_exactly_once() {
 
     for _ in 0..4 {
         let again = kernel
-            .send(vec![
+            .operator_send(vec![
                 Item::new(a.clone(), json!({"type": "count"})).with_id("job-1")
             ])
             .await
@@ -70,10 +70,10 @@ async fn concurrent_sends_of_one_id_join_and_run_the_body_once() {
     let a = mk_agent(&kernel, "l_conc").await;
 
     let (l, r) = tokio::join!(
-        kernel.send(vec![
+        kernel.operator_send(vec![
             Item::new(a.clone(), json!({"type": "count"})).with_id("click-7")
         ]),
-        kernel.send(vec![
+        kernel.operator_send(vec![
             Item::new(a.clone(), json!({"type": "count"})).with_id("click-7")
         ]),
     );
@@ -90,7 +90,7 @@ async fn an_unnamed_execution_is_ledgered_under_its_pid() {
     let a = mk_agent(&kernel, "l_unnamed").await;
 
     let out = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "count"}))])
+        .operator_send(vec![Item::new(a.clone(), json!({"type": "count"}))])
         .await
         .remove(0);
     let pid = out.pid.expect("a dispatched item has a pid");
@@ -121,7 +121,7 @@ async fn ledger_row_key_order_matches_python() {
     let a = mk_agent(&kernel, "l_key_order").await;
 
     let _ = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "count"}))])
+        .operator_send(vec![Item::new(a.clone(), json!({"type": "count"}))])
         .await
         .remove(0);
     // `mk_agent` itself issues a `create_agent` (+ its `boot` side effect),
@@ -143,7 +143,7 @@ async fn ledger_row_key_order_matches_python() {
     );
 
     let _ = kernel
-        .send(vec![
+        .operator_send(vec![
             Item::new(a.clone(), json!({"type": "count"})).with_id("named-1")
         ])
         .await
@@ -170,7 +170,7 @@ async fn a_retry_budget_re_dispatches_under_the_same_id() {
     let a = mk_agent(&kernel, "l_retry").await;
 
     let out = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "flaky", "succeed_on": 3}),
         )
@@ -194,7 +194,7 @@ async fn a_spent_budget_parks_a_dead_letter_that_never_re_arms() {
     let a = mk_agent(&kernel, "l_dead").await;
 
     let out = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "flaky", "succeed_on": 99}),
         )
@@ -218,7 +218,7 @@ async fn a_spent_budget_parks_a_dead_letter_that_never_re_arms() {
     // Re-sending the same id — even with a bigger budget — returns the recorded
     // failure. Nothing is retried silently.
     let again = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             a.clone(),
             json!({"type": "flaky", "succeed_on": 1}),
         )
@@ -241,7 +241,7 @@ async fn a_joiner_timeout_bounds_only_its_own_wait() {
     let k = Arc::clone(&kernel);
     let peer = a.clone();
     let owner = tokio::spawn(async move {
-        k.send(vec![
+        k.operator_send(vec![
             Item::new(peer, json!({"type": "slow"})).with_id("long-1")
         ])
         .await
@@ -249,7 +249,7 @@ async fn a_joiner_timeout_bounds_only_its_own_wait() {
     tokio::time::sleep(Duration::from_millis(120)).await;
 
     let joined = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "slow"}))
+        .operator_send(vec![Item::new(a.clone(), json!({"type": "slow"}))
             .with_id("long-1")
             .with_timeout(0.2)])
         .await
@@ -280,21 +280,15 @@ async fn a_joiner_timeout_bounds_only_its_own_wait() {
 
 #[tokio::test]
 async fn the_ledger_verb_is_scoped_to_what_you_originated() {
-    // Unscoped this is a read side-channel around `callable_by`: an agent could
-    // read the result BODIES of agents it holds no edge to.
+    // Unscoped this is a read side-channel: an agent could read the result BODIES
+    // of agents it holds no line on. `ledger` needs no line: it is own only.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
-    // the baseline (`$self`) does not reach the root, so `ledger` is named.
-    let a = crate::tasks::tests::mk_agent_grant(
-        &kernel,
-        "l_scope",
-        json!({"kernel_state": ["ledger"]}),
-    )
-    .await;
+    let a = crate::tasks::tests::mk_agent(&kernel, "l_scope").await;
 
     // An OPERATOR execution (no origin).
     let _ = kernel
-        .send(vec![
+        .operator_send(vec![
             Item::new(a.clone(), json!({"type": "count"})).with_id("operator-job")
         ])
         .await;
@@ -311,7 +305,7 @@ async fn the_ledger_verb_is_scoped_to_what_you_originated() {
     // An AGENT reading the ledger sees only its own origins — not this one.
     let seen = crate::test_support::as_agent(AgentId::from("l_scope"), async {
         kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type": "ledger"}),
             )])
@@ -339,13 +333,13 @@ async fn the_ledger_verb_is_paged_like_every_other_listing() {
     let a = mk_agent(&kernel, "l_page").await;
     for i in 0..4 {
         let _ = kernel
-            .send(vec![
+            .operator_send(vec![
                 Item::new(a.clone(), json!({"type": "count"})).with_id(format!("p{i}"))
             ])
             .await;
     }
     let page = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "ledger", "limit": 2}),
         )])
@@ -367,7 +361,7 @@ async fn a_cancelled_execution_stays_cancelled() {
     let k = Arc::clone(&kernel);
     let peer = a.clone();
     let batch = tokio::spawn(async move {
-        k.send(vec![Item::new(peer, json!({"type": "slow"}))
+        k.operator_send(vec![Item::new(peer, json!({"type": "slow"}))
             .with_id("kill-1")
             .with_retries(5)])
             .await
@@ -377,7 +371,7 @@ async fn a_cancelled_execution_stays_cancelled() {
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(20)).await;
         let ps = kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 AgentId::from("kernel"),
                 json!({"type": "ps"}),
             )])
@@ -396,7 +390,7 @@ async fn a_cancelled_execution_stays_cancelled() {
     }
     let victim = victim.expect("the slow row never appeared");
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type": "cancel", "task_id": victim}),
         )])
@@ -407,41 +401,39 @@ async fn a_cancelled_execution_stays_cancelled() {
     assert_eq!(out.attempts, 1, "cancel must not spend the budget");
 }
 
-/// Joining is authorized against the verb THAT EXECUTION RAN — never the
-/// joiner's own payload verb, since the JOIN hands back the ORIGINAL call's
-/// outcome: otherwise a caller granted only a harmless verb could reuse
-/// another's id and receive its secret verbatim. Dedup is correct; the RESULT
-/// must not cross an authorization boundary.
+/// Joining is allowed only to the execution's ORIGINATOR (and the operator): the
+/// JOIN hands back the ORIGINAL call's outcome, so another caller reusing the
+/// id — even one holding a verb on the same target — would receive its secret
+/// verbatim. Dedup is correct; the RESULT must not cross to another caller.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn joining_is_gated_on_the_verb_that_execution_ran() {
+async fn only_the_originator_joins_its_execution() {
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
-    for (who, grant) in [("alice", "work"), ("bob", "ping")] {
+    for (who, verb) in [("alice", "work"), ("bob", "ping")] {
         let _ = kernel
-            .send(vec![Item::new(
+            .operator_send(vec![Item::new(
                 AgentId::from("kernel_state"),
                 json!({
                     "type": "create_agent", "parent_id": "kernel",
                     "handler_module": "slow.tools", "id": who,
-                    "can_call": {"vault": [grant]},
+                    "can": {"vault": {"call": [verb]}},
                 }),
             )])
             .await;
     }
     let _ = kernel
-        .send(vec![Item::new(
+        .operator_send(vec![Item::new(
             AgentId::from("kernel_state"),
             json!({
                 "type": "create_agent", "parent_id": "kernel",
                 "handler_module": "slow.tools", "id": "vault",
-                "callable_by": {"alice": ["work"], "bob": ["ping"]},
             }),
         )])
         .await;
 
     let k = Arc::clone(&kernel);
     let a = as_agent(AgentId::from("alice"), async move {
-        k.send(vec![Item {
+        k.operator_send(vec![Item {
             target: AgentId::from("vault"),
             payload: json!({"type": "work"}),
             id: Some("job1".into()),
@@ -461,7 +453,7 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
 
     let k = Arc::clone(&kernel);
     let b = as_agent(AgentId::from("bob"), async move {
-        k.send(vec![Item {
+        k.operator_send(vec![Item {
             target: AgentId::from("vault"),
             payload: json!({"type": "ping"}),
             id: Some("job1".into()),
@@ -475,14 +467,15 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
     })
     .await;
     assert_eq!(
-        b.result["reason"], "unauthorized",
-        "bob joined an execution it may not run: {b:?}"
+        b.result,
+        crate::refusal::unknown_agent("vault"),
+        "bob joined an execution it did not start: {b:?}"
     );
 
     // An AUTHORIZED re-sender still dedups — the fix must not cost ensure-semantics.
     let k = Arc::clone(&kernel);
     let again = as_agent(AgentId::from("alice"), async move {
-        k.send(vec![Item {
+        k.operator_send(vec![Item {
             target: AgentId::from("vault"),
             payload: json!({"type": "work"}),
             id: Some("job1".into()),
@@ -511,7 +504,7 @@ async fn an_errored_execution_is_visible_in_the_ledger() {
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "l_err").await;
     let out = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "nope_unknown"}))])
+        .operator_send(vec![Item::new(a.clone(), json!({"type": "nope_unknown"}))])
         .await
         .remove(0);
     assert_eq!(out.status, Status::Errored, "{out:?}");
@@ -536,23 +529,15 @@ async fn a_send_issued_from_a_spawned_fork_is_in_the_operators_ledger() {
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let b = mk_agent(&kernel, "l_peer").await;
-    // GRANT THE EDGE: a refused send never reaches the ledger at all.
-    let a = mk_agent_grant(&kernel, "l_forker", json!({"l_peer": "*"})).await;
-    // TWO-SIDED DENY-ALL: the callee must ACCEPT the caller, or the send is
-    // refused at ingress and never reaches the ledger at all.
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type": "update_agent", "id": "l_peer", "callable_by": {"l_forker": "*"}}),
-        )])
-        .await;
+    // A LINE FOR THE EDGE: a refused send never reaches the ledger at all.
+    let a = mk_agent_grant(&kernel, "l_forker", json!({"l_peer": {"call": ["*"]}})).await;
 
     // The fork acts as `a`, the way route_reply acts as its agent.
     let k = Arc::clone(&kernel);
     let peer = b.clone();
     let tid = as_agent(a.clone(), async {
         kernel.spawn_task(&a, "route_reply", async move {
-            let _ = k.send(vec![Item::new(peer, json!({"type": "fast"}))]).await;
+            let _ = k.operator_send(vec![Item::new(peer, json!({"type": "fast"}))]).await;
         })
     })
     .await;
@@ -583,20 +568,12 @@ async fn the_ledger_view_is_caller_scoped() {
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let b = mk_agent(&kernel, "l_theirs").await;
-    let a = mk_agent_grant(&kernel, "l_mine", json!({"l_theirs": "*"})).await;
-    // TWO-SIDED DENY-ALL: the callee must ACCEPT the caller, or the send is
-    // refused at ingress and never reaches the ledger at all.
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({"type": "update_agent", "id": "l_theirs", "callable_by": {"l_mine": "*"}}),
-        )])
-        .await;
+    let a = mk_agent_grant(&kernel, "l_mine", json!({"l_theirs": {"call": ["*"]}})).await;
 
     let k = Arc::clone(&kernel);
     let peer = b.clone();
     as_agent(a.clone(), async move {
-        let _ = k.send(vec![Item::new(peer, json!({"type": "fast"}))]).await;
+        let _ = k.operator_send(vec![Item::new(peer, json!({"type": "fast"}))]).await;
     })
     .await;
 
@@ -627,17 +604,20 @@ async fn the_ledger_view_is_caller_scoped() {
     assert!(seen_by(Some(&a)), "the originator lost its own row");
 }
 
-/// The ledger row stores the execution's ORIGINAL PAYLOAD, and the join
-/// denial gates the JOINED call's verb — not the verb the joiner happened to send.
-/// A joiner granted only `ps` must not be handed the record a `create_agent` made.
+/// A joiner other than the originator is never handed the record a
+/// `create_agent` made, whatever verb it sends under the same id.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_joiner_is_gated_with_the_executions_original_payload() {
+async fn a_joiner_other_than_the_originator_gets_the_unknown_answer() {
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
-    // alice may `create_agent` on the root; bob only `ps`.
-    for (who, verb) in [("alice", "create_agent"), ("bob", "ps")] {
-        crate::tasks::tests::mk_agent_grant(&kernel, who, json!({"kernel_state": [verb]})).await;
-    }
+    // alice creates under herself; bob holds nothing (`ps` needs no line).
+    crate::tasks::tests::mk_agent_grant(
+        &kernel,
+        "alice",
+        json!({"alice": {"create": {"who": ["*"], "what": {"slow.tools": {}}}}}),
+    )
+    .await;
+    crate::tasks::tests::mk_agent(&kernel, "bob").await;
     let payload = json!({
         "type": "create_agent", "parent_id": "alice",
         "handler_module": "slow.tools", "id": "planted",
@@ -645,7 +625,7 @@ async fn a_joiner_is_gated_with_the_executions_original_payload() {
     let k = Arc::clone(&kernel);
     let p = payload.clone();
     let made = as_agent(AgentId::from("alice"), async move {
-        k.send(vec![Item {
+        k.operator_send(vec![Item {
             target: AgentId::from("kernel_state"),
             payload: p,
             id: Some("plant-1".into()),
@@ -664,7 +644,7 @@ async fn a_joiner_is_gated_with_the_executions_original_payload() {
     // call he would be handed — alice's `create_agent` — and refuses.
     let k = Arc::clone(&kernel);
     let joined = as_agent(AgentId::from("bob"), async move {
-        k.send(vec![Item {
+        k.operator_send(vec![Item {
             target: AgentId::from("kernel_state"),
             payload: json!({"type": "ps"}),
             id: Some("plant-1".into()),
@@ -678,12 +658,63 @@ async fn a_joiner_is_gated_with_the_executions_original_payload() {
     })
     .await;
     assert_eq!(joined.status, Status::Failed, "{joined:?}");
-    assert_eq!(joined.result["reason"], json!("unauthorized"), "{joined:?}");
-    assert!(
-        joined.result["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("bob may not call 'create_agent' on kernel_state"),
-        "the denial must name the JOINED call's verb: {joined:?}"
+    assert_eq!(
+        joined.result,
+        crate::refusal::unknown_agent("kernel_state"),
+        "{joined:?}"
     );
+}
+
+/// `ledger` and `ack_deadletter` need no line: an agent reads and acks only the
+/// executions it originated; another's is not found.
+#[tokio::test]
+async fn ledger_and_ack_deadletter_need_no_line_and_see_own_only() {
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    let mine = crate::tasks::tests::mk_agent(&kernel, "l_owner").await;
+    let other = crate::tasks::tests::mk_agent(&kernel, "l_other").await;
+    // l_owner's own failed execution (a handler panic), on itself
+    let k = Arc::clone(&kernel);
+    let m = mine.clone();
+    let failed = as_agent(mine.clone(), async move {
+        k.operator_send(vec![Item::new(m, json!({"type": "boom"})).with_id("boom-1")])
+            .await
+            .remove(0)
+    })
+    .await;
+    assert_eq!(failed.status, Status::Failed, "{failed:?}");
+    let ask = |who: AgentId, payload: serde_json::Value| {
+        let k = Arc::clone(&kernel);
+        async move {
+            as_agent(who, async move {
+                k.operator_send(vec![Item::new(AgentId::from("kernel"), payload)])
+                    .await
+                    .remove(0)
+                    .result
+            })
+            .await
+        }
+    };
+    let own = ask(mine.clone(), json!({"type": "ledger"})).await;
+    assert!(
+        own["executions"]
+            .as_array()
+            .expect("ledger answers with no line")
+            .iter()
+            .any(|r| r["name"] == "boom-1"),
+        "{own}"
+    );
+    let theirs = ask(other.clone(), json!({"type": "ledger"})).await;
+    assert!(
+        theirs["executions"]
+            .as_array()
+            .expect("ledger answers with no line")
+            .iter()
+            .all(|r| r["name"] != "boom-1"),
+        "{theirs}"
+    );
+    let r = ask(other, json!({"type": "ack_deadletter", "id": "boom-1"})).await;
+    assert_eq!(r["reason"], "not_found", "{r}");
+    let r = ask(mine, json!({"type": "ack_deadletter", "id": "boom-1"})).await;
+    assert_eq!(r["acked"], true, "{r}");
 }

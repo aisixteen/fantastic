@@ -63,8 +63,8 @@ async fn serve(
         }
         verbs::Call::InboundEmit(a) => (Some(inbound::emit(a, body, kernel).await), None),
         verbs::Call::InboundWatch(a) => (Some(inbound::watch(a, kernel).await), None),
-        verbs::Call::InboundStateSubscribe(_) => {
-            (Some(inbound::state_subscribe(agent_id, kernel)), None)
+        verbs::Call::InboundStateSubscribe(a) => {
+            (Some(inbound::state_subscribe(a, agent_id, kernel)), None)
         }
     }
 }
@@ -118,8 +118,8 @@ impl Handler for WebWsBundle {
 /// The record's optional `route` — a literal mount path (its type and non-emptiness
 /// are the record declaration's).
 fn route_of(agent_id: &AgentId, kernel: &Kernel) -> Option<String> {
-    let a = kernel.agents.get(agent_id)?;
-    let meta = a.meta.read().expect("meta poisoned");
+    let a = kernel.resolve_target(agent_id.as_str())?;
+    let meta = a.record().meta;
     meta.get("route")
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -138,10 +138,8 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
     out.insert("sentence".into(), json!(MAN));
     // The leg is a CHANNEL — surface its auth posture so discovery-through-denial
     // has something to discover (the door + the pointer to how to open it).
-    let meta = kernel
-        .agents
-        .get(agent_id)
-        .map(|a| a.meta.read().expect("meta poisoned").clone())
+    let meta = kernel.resolve_target(agent_id.as_str())
+        .map(|a| a.record().meta.clone())
         .unwrap_or_default();
     if let Some(posture) = fantastic_io_bridge::authorizer::Rules::of(&meta)
         .unwrap_or_default()

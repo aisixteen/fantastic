@@ -37,9 +37,7 @@ async fn embedder_agents_hydrate_under_their_written_ids_and_disk_parents() {
         .expect("boots over the seeded dir");
     let kernel = std::sync::Arc::clone(&booted.kernel);
     let parent_of = |id: &str| {
-        kernel
-            .agents
-            .get(&fantastic_kernel::AgentId::from(id))
+        kernel.resolve_target(id)
             .unwrap_or_else(|| panic!("`{id}` hydrated under its written id"))
             .parent_id
             .as_ref()

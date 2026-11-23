@@ -300,7 +300,25 @@ pub async fn resolve(
         read_budgets().lock().expect("budgets poisoned").insert(kept_key, n);
     }
     if !values.is_empty() {
-        kernel.update(agent_id, values);
+        let written = write_own(kernel, agent_id, values).await;
+        if fantastic_kernel::is_refused(&written) {
+            return Err(written);
+        }
     }
     Ok(read_max.or(pass_max))
 }
+
+/// Write the agent's OWN fields `patch` with `update_agent` sent as itself (a
+/// bundle writes its own non-`can` fields); the reply, a refusal included.
+pub(crate) async fn write_own(kernel: &Arc<Kernel>, id: &AgentId, patch: Map<String, Value>) -> Value {
+    let mut payload = Map::new();
+    payload.insert("type".to_string(), json!("update_agent"));
+    payload.insert("id".to_string(), json!(id.as_str()));
+    payload.extend(patch);
+    kernel
+        .send(vec![fantastic_kernel::Item::new(AgentId::from("kernel"), Value::Object(payload))])
+        .await
+        .remove(0)
+        .result
+}
+

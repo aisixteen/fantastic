@@ -138,10 +138,6 @@ pub const CODES: [&str; 28] = [
     NOT_IN_SUBTREE,
 ];
 
-/// How many live ids an `unknown_agent` refusal carries. Enough to name the
-/// legal values, bounded so a big tree cannot turn one typo into a context dump.
-pub const UNKNOWN_AGENT_IDS_MAX: usize = 40;
-
 /// Build the one refusal shape.
 ///
 /// `code` must be one of [`CODES`] — an unknown code is a programming error and
@@ -240,27 +236,17 @@ pub fn not_here(verb: &str, id: &str) -> Value {
     v
 }
 
-/// The reply for an id that names no agent — carrying the LIVE id index.
+/// The reply for an id that names no agent — `error` and `reason`, no id index.
 ///
-/// Reading the flat agents index costs nothing (it is already maintained, so
-/// this is a map walk, not a reflect), and a bare `no agent 'x'` teaches the
-/// caller nothing it can act on. Same principle the ingress rules already
-/// follow: a denial names the legal values.
+/// The one shape is also the answer for a missing level and for a verb, field
+/// or level the caller cannot see, so it names nothing the caller could not
+/// already see: it carries no live ids and no count.
 ///
 /// This is NOT a repair and NOT a fallback — the call still fails, exactly once,
-/// by the one path. It just says what the legal ids are on the way out.
+/// by the one path.
 #[must_use]
-pub fn unknown_agent(agent_id: &str, mut live_ids: Vec<String>) -> Value {
-    live_ids.sort();
-    let count = live_ids.len();
-    live_ids.truncate(UNKNOWN_AGENT_IDS_MAX);
+pub fn unknown_agent(agent_id: &str) -> Value {
     let mut v = refusal(UNKNOWN_AGENT, format!("no agent {}", py_repr(agent_id)));
-    with(&mut v, "agent_count", Value::from(count));
-    with(
-        &mut v,
-        "agents",
-        Value::Array(live_ids.into_iter().map(Value::String).collect()),
-    );
     // An id wrapped in angle brackets is structurally a SLOT, not a name — no id
     // this kernel mints can contain them (`{bundle}_{hex6}` or a bundle name), so
     // this costs no guessing.
@@ -269,8 +255,7 @@ pub fn unknown_agent(agent_id: &str, mut live_ids: Vec<String>) -> Value {
             &mut v,
             "hint",
             Value::String(format!(
-                "{} is a PLACEHOLDER from an example, not an id — \
-                 substitute one of `agents`.",
+                "{} is a PLACEHOLDER from an example, not an id.",
                 py_repr(agent_id)
             )),
         );

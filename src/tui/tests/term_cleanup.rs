@@ -39,51 +39,46 @@ fn write(path: &std::path::Path, v: &Value) {
     std::fs::write(path, fantastic_kernel::yaml_io::dump(v)).unwrap();
 }
 
-/// The records `boot::seed::write_all` writes, duplicated here as the CONTRACT
-/// this test pins. If the seed changes shape, this fails and says so.
+/// A part of the records `boot::seed::write_all` writes (`user`, `memory`, `exec`,
+/// `files`), none holding a line: `user` reaches them by position.
 fn seed(dir: &std::path::Path) {
     let a = dir.join(".fantastic").join("agents");
     let under = a.join("user").join("agents");
     write(
         &a.join("user").join("agent.yaml"),
         &json!({
-            "id":"user","handler_module":"user.tools",
-            "can_call":{"memory":"*","exec":"*","files":"*",bootstrap::DEFAULT_ROOT_ID:"*"},
-            "callable_by":{"exec":"*","files":"*"}
+            "id":"user","handler_module":"user.tools"
         }),
     );
     write(
         &under.join("memory").join("agent.yaml"),
         &json!({
             "id":"memory","handler_module":"sqlite_store.tools",
-            "path":".fantastic/memory.db","operator":true,"admins":["kernel"],
-            "callable_by":{"user":"*"}
+            "path":".fantastic/memory.db","operator":true,"admins":["kernel"]
         }),
     );
     write(
         &under.join("exec").join("agent.yaml"),
         &json!({
             "id":"exec","handler_module":"exec_bridge.tools",
-            "allowed":[".*"],"cwd":dir.to_string_lossy(),"inherit_env":["PATH","HOME","LANG"],"ingress_rule":"allow_all_ingress",
-            "callable_by":{"user":"*"},"can_call":{"files":"*","user":"*"}
+            "allowed":[".*"],"cwd":dir.to_string_lossy(),"inherit_env":["PATH","HOME","LANG"],"ingress_rule":"allow_all_ingress"
         }),
     );
     write(
         &under.join("files").join("agent.yaml"),
         &json!({
             "id":"files","handler_module":"file_bridge.tools","root":".","allow":["."],
-            "ingress_rule":"allow_all_ingress",
-            "callable_by":{"user":"*","exec":"*"},"can_call":{"user":"*"}
+            "ingress_rule":"allow_all_ingress"
         }),
     );
 }
 
-/// Dispatch as the human, exactly as the shell does: `user.forward` — the send
-/// is made from inside `user`'s own handler, so it carries `user`.
+/// Dispatch as `user`, as its own handler would: the send carries `user`, which
+/// reaches its own tree by position.
 async fn act(kernel: &std::sync::Arc<Kernel>, target: &str, payload: Value) -> Value {
     let k = std::sync::Arc::clone(kernel);
-    let item = Item::new(AgentId::from("user"), json!({"type":"forward","target":target,"payload":payload}));
-    k.send(vec![item]).await.remove(0).result
+    let item = Item::new(AgentId::from(target), payload);
+    fantastic_kernel::test_support::as_agent(AgentId::from("user"), k.send(vec![item])).await.remove(0).result
 }
 
 
@@ -108,15 +103,14 @@ async fn shell_with_children(tag: &str) -> (std::sync::Arc<Kernel>, std::path::P
     )
     .expect("boots");
     let kernel = std::sync::Arc::clone(&booted.kernel);
-    kernel
-        .send(vec![Item::new(
+    kernel.operator_send(vec![Item::new(
             AgentId::from("kernel"),
             json!({"type":"update_agent","id":bootstrap::DEFAULT_ROOT_ID,"memory_store_id":"memory"}),
         )])
         .await;
     assert_eq!(kernel.start(false).await["started"], json!(true));
     for id in &booted.loaded {
-        kernel.send(vec![Item::new(id.clone(), json!({"type":"boot"}))]).await;
+        kernel.operator_send(vec![Item::new(id.clone(), json!({"type":"boot"}))]).await;
     }
     let sh = std::env::var("SHELL").expect("SHELL is set");
     let started = act(&kernel, "exec", json!({"type":"start","command":sh,"pty":{"cols":80,"rows":24}})).await;
@@ -159,8 +153,7 @@ async fn survivors(m: &[String; 3]) -> Vec<String> {
 async fn no_process_outlives_its_terminal() {
     // Closing the terminal (`t` again, a canvas frame's close): `delete_agent`.
     let (kernel, _dir, m) = shell_with_children("close").await;
-    let r = kernel
-        .send(vec![Item::new(AgentId::from("kernel"), json!({"type":"delete_agent","id":"exec"}))])
+    let r = kernel.operator_send(vec![Item::new(AgentId::from("kernel"), json!({"type":"delete_agent","id":"exec"}))])
         .await
         .remove(0)
         .result;

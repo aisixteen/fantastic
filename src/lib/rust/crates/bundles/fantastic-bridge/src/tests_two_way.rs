@@ -110,8 +110,7 @@ async fn an_inbound_watch_is_gated_then_streams_until_unwatch() {
     patch(&kernel, &bid, "ingress_rule", json!("allow_all_ingress"));
     peer.send_frame(watch.clone()).await.unwrap();
     let ungranted = next(&peer).await;
-    assert_eq!(ungranted["reason"], "unauthorized", "{ungranted}");
-    assert_eq!(ungranted["side"], "egress", "{ungranted}");
+    assert_eq!(ungranted["reason"], "unknown_agent", "the unknown answer: {ungranted}");
     // a name that is no agent
     peer.send_frame(json!({"type": "watch", "src": "nobody"}))
         .await
@@ -121,8 +120,7 @@ async fn an_inbound_watch_is_gated_then_streams_until_unwatch() {
     assert!(!kernel.has_watchers(&AgentId::from(notes.as_str())).await);
 
     // granted both ends: every event of the agent streams back, stamped `src`
-    patch(&kernel, &bid, "can_call", json!({notes.as_str(): "*"}));
-    patch(&kernel, &notes, "callable_by", json!({bid.as_str(): "*"}));
+    fantastic_kernel::test_support::grant(&kernel, &bid, &notes, json!({"call": ["*"]}));
     peer.send_frame(watch.clone()).await.unwrap();
     let end = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     while !kernel.has_watchers(&AgentId::from(notes.as_str())).await {
@@ -176,8 +174,7 @@ async fn a_reply_follows_the_events_its_call_produced() {
     let tmp = TempDir::new().unwrap();
     let (kernel, bid, notes, peer) = sealed_leg(&tmp, "tw_order").await;
     patch(&kernel, &bid, "ingress_rule", json!("allow_all_ingress"));
-    patch(&kernel, &bid, "can_call", json!({notes.as_str(): "*"}));
-    patch(&kernel, &notes, "callable_by", json!({bid.as_str(): "*"}));
+    fantastic_kernel::test_support::grant(&kernel, &bid, &notes, json!({"call": ["*"]}));
     peer.send_frame(json!({"type": "watch", "src": notes}))
         .await
         .unwrap();

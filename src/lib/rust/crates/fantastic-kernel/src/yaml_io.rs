@@ -4,8 +4,8 @@
 //! `bundled_agents/loader/kernel_state/src/kernel_state/yaml_io.py`, which is
 //! canonical — and BYTE-FOR-BYTE with it (the acceptance harness diffs files). The
 //! python module's docstring is the FORMAT CONTRACT; the rules are restated here
-//! where the code implements them, and pinned by the python-written fixture
-//! `kernel_state/tests/fixtures/agent.yaml` (see `tests.rs`).
+//! where the code implements them, and pinned by the fixture
+//! `yaml_io/fixtures/agent.yaml` (see `tests.rs`).
 //!
 //! Everything the kernel writes under `.fantastic` goes through [`dump`]: the
 //! records (`agent.yaml`), `lock.yaml`, the scheduler's sidecars

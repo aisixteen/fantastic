@@ -47,21 +47,21 @@ fn store(handler: &str, tag: &str) -> Arc<Kernel> {
     k.bundles
         .register(RAM, fantastic_ram_store::RamStoreBundle::default());
     k.bundles
-        .register(SQL, fantastic_sqlite_store::SqliteStoreBundle::default());
+        .register(SQL, fantastic_sqlite_store::SqliteStoreBundle);
     let k = Arc::new(k);
     let root = agent("kernel_state", None, json!({"guid": "g1"}));
-    k.register(Arc::clone(&root));
+    fantastic_kernel::test_support::register(&k, Arc::clone(&root));
     k.set_root(root);
     for a in ["alice", "bob"] {
-        k.register(agent(a, None, json!({"can_call": {"mem": "*"}})));
+        fantastic_kernel::test_support::register(&k, agent(a, None, json!({"can": {"mem": {"call": ["*"]}}})));
     }
-    let mut meta = json!({"callable_by": {"alice": "*", "bob": "*"}});
+    let mut meta = json!({});
     if handler == SQL {
         let path = format!("stores/{tag}.db");
         let _ = std::fs::remove_file(dir.join(&path));
         meta["path"] = json!(path);
     }
-    k.register(agent("mem", Some(handler), meta));
+    fantastic_kernel::test_support::register(&k, agent("mem", Some(handler), meta));
     k
 }
 
@@ -72,8 +72,8 @@ async fn replay(handler: &str, scenario: &Value) -> Vec<Value> {
     for (n, step) in scenario["steps"].as_array().unwrap().iter().enumerate() {
         let item = Item::new(AgentId::from("mem"), step["send"].clone());
         let reply = match step["as"].as_str() {
-            None => k.send(vec![item]).await.remove(0).result,
-            Some(who) => as_agent(AgentId::from(who), k.send(vec![item])).await.remove(0).result,
+            None => k.operator_send(vec![item]).await.remove(0).result,
+            Some(who) => as_agent(AgentId::from(who), k.operator_send(vec![item])).await.remove(0).result,
         };
         for (key, want) in step["expect"].as_object().unwrap() {
             assert_eq!(

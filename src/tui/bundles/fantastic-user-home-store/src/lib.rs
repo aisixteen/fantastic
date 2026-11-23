@@ -1,4 +1,6 @@
-//! user_home_store — the user's SAVED SET-UP store (`user_home_store.tools`).
+//! user_home_store — THE USER'S HOME: one agent, `home` (`user_store.tools`,
+//! [`user_store`]), keeps the saved set-ups, the keys and the stored fantastic
+//! locations. This module is its SAVED SET-UP part ([`UserHomeStore`]).
 //!
 //! Named agent-record blueprints in the user's home dir, one plain-text file
 //! per name:
@@ -17,8 +19,8 @@
 //! THE BINARY OWNS IT. Its directory is fixed when the CLI registers it
 //! ([`UserHomeStore::new`]); nothing on a record can move it. A project record
 //! naming this module — a cloned tree, an AI's `create_agent` — gets the same
-//! store, so it cannot read another location. WHO reaches it is the record's
-//! grants (`callable_by`), as for every agent. (The lib session's analysis,
+//! store, so it cannot read another location. WHO reaches it is the callers'
+//! own `can` lines, as for every agent. (The lib session's analysis,
 //! 2026-09-30: a file_bridge rooted in home, even operator-set, would let a
 //! hydrated project record rewrite the owner's prefs.)
 //!
@@ -39,37 +41,26 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use fantastic_kernel::refusal::{
     refusal, refusal_hint, with, BAD_ARG, INVALID_META, NOT_FOUND, UNAUTHORIZED,
 };
-use fantastic_kernel::{AgentId, Kernel};
+use fantastic_kernel::Kernel;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-/// The `handler_module` this bundle answers to.
-pub const HANDLER_MODULE: &str = "user_home_store.tools";
-
-/// What the bundle is for: its one short man text; how to call it is rendered from its
-/// declared verbs (`docs`, `reflect`).
-const MAN: &str = "The user's saved set-ups: named agent-record blueprints kept in the user's home dir, applied by the CLI when it creates an agent. A saved set-up carries no identity, wiring or authority; the creator adds those.";
-
-pub mod record;
 pub mod verbs;
 
 /// The environment variable that names the home dir; unset → `~/.fantastic`.
 pub const HOME_VAR: &str = "FANTASTIC_HOME";
 
 /// Fields a saved set-up may never carry: identity, per-project wiring, authority.
-pub const NOT_SAVED: [&str; 10] = [
+pub const NOT_SAVED: [&str; 9] = [
     "id",
     "parent_id",
     "guid",
     "agents",
     "memory_store_id",
-    "can_call",
-    "callable_by",
+    "can",
     "ingress_rule",
     "egress_rule",
     "auth",
@@ -145,7 +136,7 @@ pub fn home_dir_from_env() -> Result<PathBuf, String> {
     }
 }
 
-/// The store. Construct it with its dir.
+/// The saved set-up part of the home store. Construct it with its dir.
 pub struct UserHomeStore {
     home: Result<PathBuf, String>,
 }
@@ -199,7 +190,7 @@ fn version(bytes: &[u8]) -> String {
 /// Is `n` a name `forget_record` would take: its declared `name` (one pattern, in the
 /// verb's declaration) read by the shared engine, for a name found on disk.
 pub(crate) fn valid_name(n: &str) -> bool {
-    let verb = verbs::VERBS.iter().find(|v| v.name == "forget_record").expect("forget_record is declared");
+    let verb = user_store::verbs::VERBS.iter().find(|v| v.name == "forget_record").expect("forget_record is declared");
     fantastic_kernel::verbs::validate("forget_record", verb.schema(), &json!({"name": n})).is_ok()
 }
 
@@ -234,7 +225,7 @@ fn stale(verb: &str, name: &str, want: &str, have: Option<&str>) -> Value {
 }
 
 impl UserHomeStore {
-    fn persist(&self, a: verbs::PersistRecord, kernel: &Arc<Kernel>) -> Result<Value, Value> {
+    pub(crate) fn persist(&self, a: verbs::PersistRecord, kernel: &Arc<Kernel>) -> Result<Value, Value> {
         let name = a.name;
         let hm = a.record.handler_module.as_str();
         let Some(bundle) = kernel.bundles.get(hm) else {
@@ -263,7 +254,7 @@ impl UserHomeStore {
         Ok(json!({"name": name, "version": version(text.as_bytes()), "path": path.display().to_string()}))
     }
 
-    fn forget(&self, a: verbs::ForgetRecord) -> Result<Value, Value> {
+    pub(crate) fn forget(&self, a: verbs::ForgetRecord) -> Result<Value, Value> {
         let name = a.name;
         let Some(dir) = self.saved_if_any()? else {
             return Err(refusal(NOT_FOUND, format!("forget_record: no saved set-up {name}")));
@@ -291,7 +282,7 @@ impl UserHomeStore {
             .filter(|s| !s.is_empty()))
     }
 
-    fn load_tree(&self) -> Result<Value, Value> {
+    pub(crate) fn load_tree(&self) -> Result<Value, Value> {
         let shown = self.home.as_ref().map(|h| saved_dir(h).display().to_string()).unwrap_or_default();
         let Some(dir) = self.saved_if_any()? else {
             return Ok(json!({"saved": [], "preferred": null, "dir": shown}));
@@ -314,7 +305,7 @@ impl UserHomeStore {
         Ok(json!({"saved": out, "preferred": self.preferred(&dir)?, "dir": dir.display().to_string()}))
     }
 
-    fn prefer(&self, a: verbs::Prefer) -> Result<Value, Value> {
+    pub(crate) fn prefer(&self, a: verbs::Prefer) -> Result<Value, Value> {
         let Some(dir) = self.saved_if_any()? else {
             return match a.name {
                 None => Ok(json!({"preferred": null})),
@@ -339,55 +330,6 @@ impl UserHomeStore {
         }
     }
 
-    fn reflect(&self) -> Value {
-        json!({
-            "handler_module": HANDLER_MODULE,
-            "sentence": MAN,
-            "dir": self.home.as_ref().map(|h| saved_dir(h).display().to_string()).ok(),
-        })
-    }
-}
-
-#[async_trait]
-impl Handler for UserHomeStore {
-    type Call = verbs::Call;
-
-    fn name(&self) -> &str {
-        HANDLER_MODULE
-    }
-
-    fn man(&self) -> &'static str {
-        MAN
-    }
-
-    fn verbs(&self) -> &'static [fantastic_kernel::Verb] {
-        verbs::VERBS
-    }
-
-    fn dynamic_verbs(&self, agent: &fantastic_kernel::Agent) -> Vec<fantastic_kernel::DynVerb> {
-        verbs::dynamic_verbs(agent)
-    }
-
-    fn record(&self) -> &'static fantastic_kernel::RecordDecl {
-        &record::RECORD
-    }
-
-    async fn handle(&self, _agent_id: &AgentId, call: Self::Call, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
-        let out = match call {
-            verbs::Call::Reflect(_) => return Ok(Some(self.reflect())),
-            verbs::Call::PersistRecord(a) => self.persist(a, kernel),
-            verbs::Call::ForgetRecord(a) => self.forget(a),
-            verbs::Call::LoadTree(_) => self.load_tree(),
-            verbs::Call::Prefer(a) => self.prefer(a),
-        };
-        Ok(Some(out.unwrap_or_else(|r| r)))
-    }
-
-    /// Deleting the agent never deletes the owner's saved set-ups: they belong to the
-    /// user, not to this project.
-    async fn on_delete(&self, _agent_id: &AgentId, _kernel: &Arc<Kernel>) -> Result<(), BundleError> {
-        Ok(())
-    }
 }
 
 pub mod secrets;
