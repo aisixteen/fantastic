@@ -36,7 +36,7 @@ roster:
 # The AI's toolset. Deny-all is the posture, so this is not decoration: it is
 # the difference between a graph and a pile of agents.
 grants:
-  ai_can_call: [cli, yaml_store]
+  ai_can: [cli, yaml_store]
 
 # FALSIFIABLE. Scored against the store's contents, never the model's prose —
 # a model that says ANSWER STORED without calling anything cannot pass.

@@ -3,13 +3,13 @@
 The kernel keeps no conversation: an AI agent's rows live in the MEMORY STORE its
 record names (`memory_store_id`), and the kernel's own execution rows live in the
 store the ROOT names. Every e2e kernel gets one shared `ram_store` — `memory` —
-under the root, named by the root, and every AI agent the harness creates is wired
-to it: `memory_store_id`, `can_call` on the store, the store's `callable_by` for
-the agent. Explicit on both ends, as the design requires; nothing is defaulted.
+under the leg, named by the root, and every AI agent the harness creates is wired
+to it: `memory_store_id` and its own `memory` line in `can`. The store keeps no
+list of callers; reach is the readers' `memory` lines. Nothing is defaulted.
 
 A caller reads and appends only under its OWN key, so the harness reads another
 agent's rows from the store's `dump` (the whole tables), and plants them in process
-AS that agent (`_as_self`) and over the wire through `dump` → add → `inject`.
+over the wire through `dump` → add → `inject`.
 
 A ram_store dies with its process. A restart test carries the tables across:
 `dump` before the stop, `inject` after the new kernel is up — what a durable store
@@ -25,20 +25,19 @@ from typing import Any
 MEMORY = "memory"
 
 #: The store verbs an AI agent uses on its own store (its conversation + sharing).
-AI_STORE_VERBS = "*"
+AI_STORE_VERBS = ["*"]
 
 #: Rows in an agent's store that are not conversation.
 BOOKKEEPING = ("view",)
 
 
-def store_record(parent_id: str, *, callable_by: dict) -> dict:
+def store_record(parent_id: str) -> dict:
     """The `memory` ram_store record. Its rows are keyed by WHO writes them (the kernel
-    writes its own as bookkeeping); who may reach it at all is its `callable_by`."""
+    writes its own as bookkeeping); reach is the readers' `memory` lines."""
     return {
         "id": MEMORY,
         "handler_module": "ram_store.tools",
         "parent_id": parent_id,
-        "callable_by": callable_by,
     }
 
 
@@ -48,17 +47,13 @@ async def _store(root: Any, payload: dict) -> dict:
     return r if isinstance(r, dict) else {}
 
 
-async def _grant_forensics(root: Any) -> str:
-    """What the store's gate looked like when a read was refused, and every call
-    THIS driver made that touched the store — so a grant that vanished mid-run
-    leaves evidence instead of a bare refusal."""
+async def _grant_forensics(root: Any, reader: str) -> str:
+    """The refused reader's `can` when a read was refused, and every call THIS
+    driver made that touched the store (`ledger` shows only `rest`'s own
+    executions) — so a line that vanished mid-run leaves evidence instead of a
+    bare refusal."""
     lines = []
-    r = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]
-    rec = next(
-        (a for a in ((r.get("result") or {}).get("agents") or []) if a.get("id") == MEMORY),
-        None,
-    )
-    lines.append(f"  memory record now: callable_by={(rec or {}).get('callable_by')!r}")
+    lines.append(f"  {reader} can now: {root.record(reader).get('can')!r}")
     led = (await root.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0]
     for e in ((led.get("result") or {}).get("executions") or []):
         if MEMORY in repr(e.get("outcome")) or e.get("target") == MEMORY and e.get("status") != "completed":
@@ -133,10 +128,12 @@ async def plant(
         minted = r.get("ids") if isinstance(r.get("ids"), list) else []
         if len(minted) != need:
             raise AssertionError(f"memory plant({aid}): minting {need} ids refused: {r}")
-    out = await root.send([{"target": "kernel", "payload": {"type": "reflect", "tree": "none"}}])
-    guid = (out[0].get("result") or {}).get("guid")
+    # The guid is a root field, operator only: a leg's reflect of the root never
+    # shows it, so it is read from the state folder (harness-owned, the trust root),
+    # as `WireCtx.next_id` reads the counter.
+    guid = _guid(root)
     if not isinstance(guid, str) or not guid:
-        raise AssertionError(f"memory plant({aid}): the root reflect carries no guid: {out}")
+        raise AssertionError(f"memory plant({aid}): the root record carries no guid")
     tables = await dump(root)
     leg_key, owner = f"{guid}|{getattr(root, 'leg_id', None)}", f"{guid}|{aid}"
     gone = set(minted)
@@ -162,6 +159,21 @@ async def plant(
     return ids
 
 
+def _guid(root: Any) -> str | None:
+    """The kernel's guid from its root record on disk (`.fantastic/agent.yaml`)."""
+    import time
+
+    import yaml
+
+    path = root.k.workdir / ".fantastic" / "agent.yaml"
+    for _ in range(50):  # the root's persist writer lands the minted guid shortly after boot
+        guid = (yaml.safe_load(path.read_text()) or {}).get("guid") if path.exists() else None
+        if isinstance(guid, str) and guid:
+            return guid
+        time.sleep(0.1)
+    return None
+
+
 async def dump(root: Any) -> dict:
     r = await _store(root, {"type": "dump"})
     if "tables" not in r:
@@ -181,58 +193,17 @@ async def latest_view(root: Any, aid: str) -> dict | None:
     return views[-1] if views and isinstance(views[-1].get("ids"), list) else None
 
 
-async def open_ingress(root: Any, target: str, caller: str) -> None:
-    """Add `caller` to `target`'s `callable_by` — READ, add one key, write back
-    (update replaces the field whole)."""
-    r = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0][
-        "result"
-    ]
-    rec = next((a for a in (r or {}).get("agents") or [] if a.get("id") == target), None)
-    if rec is None:
-        raise AssertionError(f"open_ingress: no agent {target!r}")
-    cb = dict(rec.get("callable_by") or {})
-    if cb.get(caller) == "*":
-        return
-    cb[caller] = "*"
-    out = (
-        await root.send(
-            [
-                {
-                    "target": "kernel",
-                    "payload": {"type": "update_agent", "id": target, "callable_by": cb},
-                }
-            ]
-        )
-    )[0]["result"]
-    if isinstance(out, dict) and out.get("error"):
-        raise AssertionError(f"open_ingress({target} ← {caller}) refused: {out}")
-
-
-def ai_memory_meta(can_call: dict) -> dict:
+def ai_memory_meta(can: dict) -> dict:
     """The create_agent fields an AI agent needs for its memory: the store's id and
-    egress on it (merged into `can_call`). The store's ingress is opened separately
-    (`open_ingress`), once the agent exists."""
-    return {"memory_store_id": MEMORY, "can_call": {**can_call, MEMORY: AI_STORE_VERBS}}
-
-
-async def wire_in_process(root: Any) -> None:
-    """In-process kernel: create `memory` under the root, name it, START the kernel
-    (the store first, then the flusher)."""
-    ctx = root.ctx
-    if MEMORY not in ctx.agents:
-        rec = root.create("ram_store.tools", id=MEMORY)
-        assert rec.get("id") == MEMORY, rec
-    ctx.update(root.id, memory_store_id=MEMORY)
-    out = await ctx.start(boot_all=False)
-    if not out.get("started"):
-        raise SystemExit(f"kernel_start refused: {out}")
+    its own line on it (merged into `can`). The store keeps no list of callers."""
+    return {"memory_store_id": MEMORY, "can": {**can, MEMORY: {"call": AI_STORE_VERBS}}}
 
 
 async def watch_store_writers(port: int, root_id: str) -> None:
-    """Print WHO rewrites `memory`'s grants, and to what — every `update_agent`
-    naming the store, read off the kernel's state stream with its `sender` (the
-    poll in `watch_store_grants` says WHEN a grant changed, not by whom). Run as a
-    background task; cancel to stop."""
+    """Print WHO writes a `memory` line, and to what — every `update_agent` whose
+    `can` names the store, read off the kernel's state stream (the agents under
+    `rest`) with its `sender` (the poll in `watch_store_grants` says WHEN a line
+    changed, not by whom). Run as a background task; cancel to stop."""
     import time
 
     from helpers.host.ws import StateWatcher
@@ -243,19 +214,18 @@ async def watch_store_writers(port: int, root_id: str) -> None:
         await w.connect()
         async for ev in w.state_events():
             p = ev.get("payload") or {}
+            can = p.get("can") if isinstance(p, dict) else None
             if (
                 ev.get("kind") == "send"
-                and isinstance(p, dict)
                 and p.get("type") == "update_agent"
-                and p.get("id") == MEMORY
+                and isinstance(can, dict)
+                and MEMORY in can
             ):
-                cb = p.get("callable_by")
-                keys = sorted(cb) if isinstance(cb, dict) else cb
                 print(
-                    f"  [grants] t={time.monotonic() - t0:6.1f}s update_agent memory "
+                    f"  [grants] t={time.monotonic() - t0:6.1f}s update_agent {p.get('id')!r} "
                     f"from sender={ev.get('sender')!r} via {ev.get('agent_id')!r}: "
                     f"fields={sorted(k for k in p if k not in ('type', 'id'))} "
-                    f"callable_by={keys}",
+                    f"can.memory={can.get(MEMORY)!r}",
                     flush=True,
                 )
     except Exception as e:  # noqa: BLE001 — a forensic probe must not kill the run
@@ -264,10 +234,11 @@ async def watch_store_writers(port: int, root_id: str) -> None:
         await w.close()
 
 
-async def watch_store_grants(root: Any, *, every: float = 5.0) -> None:
-    """Print `memory`'s callable_by every time it CHANGES, with the elapsed time —
-    run as a background task for the length of a run, so a grant that disappears
-    is pinned to the moment (and the transcript turn) it went. Cancel to stop."""
+async def watch_store_grants(root: Any, readers: list[str], *, every: float = 5.0) -> None:
+    """Print the named readers' line targets every time they CHANGE, with the elapsed
+    time — run as a background task for the length of a run, so a line that
+    disappears is pinned to the moment (and the transcript turn) it went. Cancel
+    to stop."""
     import asyncio
     import time
 
@@ -275,15 +246,15 @@ async def watch_store_grants(root: Any, *, every: float = 5.0) -> None:
     last = None
     while True:
         try:
-            r = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]
-            rec = next(
-                (a for a in ((r.get("result") or {}).get("agents") or []) if a.get("id") == MEMORY),
-                None,
-            )
-            cb = sorted(((rec or {}).get("callable_by") or {}).keys())
-            if cb != last:
-                print(f"  [grants] t={time.monotonic() - t0:6.1f}s memory.callable_by = {cb}", flush=True)
-                last = cb
+            now = {
+                aid: sorted(
+                    (await asyncio.to_thread(root.record, aid)).get("can") or {}
+                )
+                for aid in readers
+            }
+            if now != last:
+                print(f"  [grants] t={time.monotonic() - t0:6.1f}s can targets = {now}", flush=True)
+                last = now
         except Exception as e:  # noqa: BLE001 — a forensic probe must not kill the run
             print(f"  [grants] watch error: {e}", flush=True)
         await asyncio.sleep(every)

@@ -3,16 +3,18 @@
 Every id shape, every two-fault precedence pair, every grant map with a token
 key, the blob verbs with and without a grant — all of it driven.
 
-The leg's grants are EXACT here (a seed override), because half these cases are about
-authority and a leg granted `"*"` on everything cannot show a refusal:
-  * `limited` is granted `['reflect']` and nothing else — C21.
+The legs' lines are EXACT here (a seed override), because half these cases are about
+authority and a leg holding `call *` on everything cannot show a refusal:
+  * `limited` is SEEDED at the root (outside the legs' trees), and the legs and `web`
+    (their cap) hold `{limited: {call: [reflect]}}` and nothing else on it — C21:
+    `reflect` passes, `say` is the unknown answer.
 """
 
 from __future__ import annotations
 
 import time
 
-from families import BASE, MEMORY, OPEN, call, save_kernel_log
+from families import ALL, MEMORY, OPEN, call, line_call, save_kernel_log
 
 NAME = "kernel_verbs"
 
@@ -21,32 +23,32 @@ def run(ctx) -> None:  # noqa: C901
     rec, ports = ctx.rec, ctx.ports
 
     def seed_extra(k, w, port):
-        """Narrow the legs: `limited` gets ONE verb, by name."""
+        """`limited` at the root, by the seed; the legs get ONE verb on it, by name."""
         from spec import read_rec, write_rec
 
+        (w / "agents/limited").mkdir(parents=True, exist_ok=True)
+        write_rec(w / "agents/limited/agent.yaml",
+                  {"id": "limited", "handler_module": "cli.tools",
+                   "parent_id": k.root_id, **OPEN})
         for p in ("agents/web/agent.yaml", "agents/web/agents/ws/agent.yaml",
                   "agents/web/agents/rest/agent.yaml"):
             r = read_rec(w / p)
-            r["can_call"]["limited"] = ["reflect"]
+            r["can"]["limited"] = line_call("reflect")
             write_rec(w / p, r)
 
     reach = ["files", "readings", "totals", "limited", "joiner",
              "blobber", "ghost", "web", "rest", "ws", "kernel_store"]
     k = ctx.boot(reach=reach, port=ports.take("main"), seed_extra=seed_extra)
-    cb = {**BASE, "rest": "*", "web": "*", "ws": "*"}
     try:
         (ctx.work / "a.txt").write_text("a\n")
         rec.json("setup/files", k.create(parent_id=k.home, id="files",
-                                         handler_module="file_bridge.tools", allow=["."], root=".", **OPEN,
-                                         callable_by=cb))
+                                         handler_module="file_bridge.tools", allow=["."], root=".", **OPEN))
         rec.json("setup/readings", k.create(parent_id=k.home, id="readings",
-                                            handler_module="file_bridge.tools", allow=["."], root=".", **OPEN,
-                                            callable_by=cb))
-        rec.json("setup/limited", k.create(parent_id=k.home, id="limited",
-                                           handler_module="cli.tools", **OPEN, callable_by=cb))
+                                            handler_module="file_bridge.tools", allow=["."], root=".", **OPEN))
+        rec.json("setup/limited", call(k, "limited", {"type": "reflect"}))
         rec.json("setup/kernel_store", k.create(parent_id=k.home, id="kernel_store",
                                                 handler_module="file_bridge.tools", allow=["."],
-                                                root=".fantastic", **OPEN, callable_by=cb))
+                                                root=".fantastic", **OPEN))
         time.sleep(0.8)
 
         # ── C13 — persist_blob / load_blob ──
@@ -86,24 +88,24 @@ def run(ctx) -> None:  # noqa: C901
                  call(k, k.root_id, {"type": "create_agent", "id": "../x",
                                      "handler_module": "cli.tools", "parent_id": k.home}))
         rec.json("C19/frob_on_root", call(k, k.root_id, {"type": "frob"}))
-        rec.json("C19/can_call_int_value",
+        rec.json("C19/can_int_value",
                  call(k, k.root_id, {"type": "create_agent", "id": "c19a",
                                      "handler_module": "cli.tools", "parent_id": k.home,
-                                     "can_call": {"readings": 5}}))
-        # ── C20 — a grant whose KEY is a token, and one whose key is `$x` ──
+                                     "can": {"readings": 5}}))
+        # ── C20 — a line whose TARGET is a token, and one whose target is `*` ──
         rec.json("C20/read_without_grant", call(k, "kernel_store", {"type": "list", "path": ""}))
         for key, tag in (("$x", "unknown_token"), ("$loader", "loader_token"), ("*", "star_key")):
-            rec.json(f"C20/create_can_call_{tag}",
+            rec.json(f"C20/create_can_{tag}",
                      call(k, k.root_id, {"type": "create_agent", "id": f"c20_{tag}",
                                          "handler_module": "cli.tools", "parent_id": k.home,
-                                         "can_call": {key: "*"}}))
-        # ── C21 — an empty verb LIST is not `"*"` ──
+                                         "can": {key: ALL}}))
+        # ── C21 — an empty verb LIST is not `*`: only `reflect` (any hold) passes ──
         rec.json("C21/limited_reflect", call(k, "limited", {"type": "reflect"}))
         rec.json("C21/limited_say", call(k, "limited", {"type": "say", "text": "x"}))
-        rec.json("C21/create_can_call_empty_list",
+        rec.json("C21/create_can_empty_call",
                  call(k, k.root_id, {"type": "create_agent", "id": "c21a",
                                      "handler_module": "cli.tools", "parent_id": k.home,
-                                     "can_call": {"limited": []}}))
+                                     "can": {"limited": {"call": []}}}))
         # ── C22 — the same execution id, a different parent ──
         for n, parent in ((1, k.root_id), (2, "files")):
             before = len(k.http)
@@ -127,7 +129,7 @@ def run(ctx) -> None:  # noqa: C901
                                  "handler_module": "cli.tools", "parent_id": ""}),
             ("non_map_grant", {"type": "create_agent", "id": "c26d",
                                "handler_module": "cli.tools", "parent_id": k.home,
-                               "can_call": ["files"]}),
+                               "can": ["files"]}),
             ("two_faults_id_and_parent", {"type": "create_agent", "id": "",
                                           "handler_module": "cli.tools", "parent_id": ""}),
             ("two_faults_dup_and_handler", {"type": "create_agent", "id": "files",
@@ -161,7 +163,6 @@ def run(ctx) -> None:  # noqa: C901
                                                                 "id": "locked_child"}))
         # ── C32 — a probe asked a kernel verb ──
         rec.json("C32/readings_shutdown_agents", call(k, "readings", {"type": "shutdown_agents"}))
-        rec.json("C32/readings_list_agents", call(k, "readings", {"type": "list_agents"}))
         # ── C34 is driven in `wire` (it needs the raw octet leg) ──
         # ── C39 — a control character as a memory-store owner ──
         for raw, tag in (("\n", "newline"), ("\x1c", "fs"), ("", "empty")):
@@ -170,10 +171,10 @@ def run(ctx) -> None:  # noqa: C901
                      call(k, MEMORY, {"type": "append", "owner": raw,
                                         "rows": [{"role": "user", "content": "x"}]}))
         # ── the shape of every kernel verb's refusal when it is asked nothing ──
-        for verb in ("create_agent", "update_agent", "delete_agent", "list_agents", "ps", "ledger",
+        for verb in ("create_agent", "update_agent", "delete_agent", "ps", "ledger",
                      "cancel", "shutdown_agents", "nope"):
             rec.json(f"bare/{verb}", call(k, "kernel", {"type": verb}))
-        rec.json("final/kernel_list_agents", call(k, "kernel", {"type": "list_agents"}))
+        rec.json("final/kernel_reflect_tree", call(k, "kernel", {"type": "reflect", "tree": "all"}))
         rec.json("final/kernel_ledger", call(k, "kernel", {"type": "ledger"}))
     finally:
         rec.http("http", k.http)

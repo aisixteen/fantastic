@@ -22,6 +22,7 @@ import threading
 import time
 from pathlib import Path
 
+from helpers import lines
 from helpers.host.driver import HostKernel
 from helpers.host.ws import WSWatcher
 from mocks.vllm import VllmMock
@@ -140,26 +141,19 @@ class Rig:
     # ── wiring ────────────────────────────────────────────────────────────────
     def wire(self) -> None:
         hk = self.hk
-        r = hk.send("kernel", {"type": "list_agents"})
-        mem = next(a for a in r.get("agents") or [] if a.get("id") == "memory")
-        r = hk.send(hk.root_id, {"type": "update_agent", "id": "memory",
-                                 "callable_by": {**dict(mem.get("callable_by") or {}),
-                                                 AI: "*", PROV: "*"}})
-        self.need(r.get("updated") is True, f"memory accepts the chat: {str(r)[:200]}")
-        by = {"$self": "*", "$parent": "*", "rest": "*", "ws": "*", "web": "*"}
+        # Each holds its own lines; the store and the provider keep no list. The legs
+        # reach both by position (`rest`) or by the `ws` line on `rest`.
         rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
                         endpoint=self.mock.url, model=MODEL,
                         context_window=262144, kv_slots=4, kv_overflow="evict",
-                        memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
-                        callable_by={"$self": "*", "$parent": "*", AI: "*"})
+                        memory_store_id="memory", can={"memory": lines.ALL})
         self.need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
                         provider_id=PROV, model=MODEL, max_tokens=8192, context_window=WINDOW,
                         output_reserve=RESERVE, context_strategy="fold",
                         line_summaries=True, system_prompt="You are a test chat.",
                         memory_store_id="memory",
-                        can_call={"$self": "*", "memory": "*", PROV: ["complete", "watch"]},
-                        callable_by=by)
+                        can={"memory": lines.ALL, PROV: lines.PROVIDER})
         self.need(rec.get("id") == AI, f"create {AI}: {str(rec)[:200]}")
         self.chat_ev = Watch(hk.port, AI)
         self.chat_ev.ready.wait(10)

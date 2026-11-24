@@ -44,11 +44,11 @@ TASK = (
 
 
 async def main():
-    root, core, close = await open_kernel(prefix="coding_grep_", reach=[FB, "notes", "ai_recency", "ai_fold", "cli", "user"])
+    root, core, close = await open_kernel(prefix="coding_grep_", reach=[FB, "notes", "ai_recency", "ai_fold", "user"])
     try:
         token = secrets.token_hex(4); hit = 3
         plant_fillers(N, marker_in=hit, marker=token)
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         recency, fold = await both_arms(root, core, BK, FB, TASK, "report.md", arms=FOLD_ARMS)
         want = f"marker: filler_{hit}.txt {token}"
         report((recency, fold), lambda a: f"FOUND={want in a['body']}  greps={a['greps']}  folds_opened={a['folds_opened']}")

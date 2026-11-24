@@ -3,7 +3,7 @@
 A send item may carry `secret: ["<dotted path>", …]` (paths into its payload).
 The HANDLER gets the payload as sent; everything the kernel keeps or shows of the
 call carries it AS SHOWN — each marked value `[secret]`. On the PACKAGED host of
-`RUNTIME` (python | rust), every call through the wire faces:
+`RUNTIME` (rust), every call through the wire faces:
 
   1. REST `X-Fantastic-Secret: bytes` on a `file_bridge` write → the file on disk
      and a read-back hold the CLEAR value (the handler got it);
@@ -35,6 +35,8 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+import yaml
 
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
@@ -116,7 +118,7 @@ class WSCaller(WSWatcher):
 class Taps:
     """The state stream and an inbox watch of `FB`, collected on a loop thread."""
 
-    def __init__(self, port: int):
+    def __init__(self, port: int, root: str):
         self.port = port
         self.state: list[dict] = []
         self.inbox: list[dict] = []
@@ -126,6 +128,8 @@ class Taps:
         self.th = threading.Thread(target=self.loop.run_forever, daemon=True)
         self.th.start()
         self.sw = StateWatcher(port, "state")
+        # on the root: update_agent is a kernel verb, so its send event is the root's
+        self.sw.node = root
         self.ww = WSWatcher(port, FB)
         self.tasks = [
             asyncio.run_coroutine_threadsafe(self._state(), self.loop),
@@ -192,7 +196,10 @@ def main() -> int:
     work = Path(tempfile.mkdtemp(prefix="e2e-secret-marks-"))
     served = work / "served"
     served.mkdir()
-    hk = HostKernel(spec, work, reach=[FB, EB]).boot()
+    # FB and EB live under `rest` (position); `ws` reaches them by its seeded
+    # `rest` line, so the legs need no reach. The state stream is watched on the
+    # root, so `ws` holds `watch` there.
+    hk = HostKernel(spec, work, watch_root=True).boot()
     root = hk.root_id
     port = hk.port
     bad: list[str] = []
@@ -222,13 +229,11 @@ def main() -> int:
             root=str(served),
             allow=["."],
             ingress_rule="allow_all_ingress",
-            callable_by={"$self": "*", "$parent": "*", "ws": "*"},
         )
         need(rec.get("id") == FB, f"create {FB}: {str(rec)[:200]}")
-        rec = hk.create(parent_id="rest", handler_module="exec_bridge.tools", id=EB,
-                        callable_by={"$self": "*", "$parent": "*"})
+        rec = hk.create(parent_id="rest", handler_module="exec_bridge.tools", id=EB)
         need(rec.get("id") == EB, f"create {EB}: {str(rec)[:200]}")
-        taps = Taps(port)
+        taps = Taps(port, root)
         # Both taps are live once a probe call shows up on each (no sleep-as-sync).
         warm = poll(
             lambda: (hk.send(FB, {"type": "list", "path": ""}) is not None)
@@ -259,8 +264,13 @@ def main() -> int:
                               "env": {"x": S_NEST, "y": "plain"}},
                  {"X-Fantastic-Secret": "env.x"})
         need("error" not in r, f"marked update_agent accepted: {str(r)[:200]}")
-        la = hk.send(root, {"type": "list_agents"})
-        fbrec = next((a for a in la.get("agents") or [] if a.get("id") == EB), {})
+        # THE RECORD: the exec_bridge's own reflect reply carries no `env`, and the
+        # verb that listed records is gone, so the record is read where the kernel
+        # keeps it (the state folder, harness-owned), once the write has landed.
+        eb_yaml = work / ".fantastic/agents/web/agents/rest/agents" / EB / "agent.yaml"
+        fbrec = poll(lambda: (lambda d: d if (d.get("env") or {}).get("x") else None)(
+            yaml.safe_load(eb_yaml.read_text()) or {} if eb_yaml.exists() else {}),
+            "eb record") or {}
         need(fbrec.get("env") == {"x": S_NEST, "y": "plain"},
              f"the record holds env.x CLEAR, env.y as sent: {fbrec.get('env')!r}")
 

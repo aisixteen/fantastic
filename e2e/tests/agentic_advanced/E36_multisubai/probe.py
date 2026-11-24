@@ -39,8 +39,9 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend  # noqa: E402
-from helpers import memory
+from helpers import add_lines, lines, memory, probe_agent, relay
 from helpers import verdict  # noqa: E402
+from helpers.lines import is_unknown  # noqa: E402
 from helpers.ai import IDLE_END, QuietWatch, make_chat  # noqa: E402
 from helpers.kernel import home, open_kernel  # noqa: E402
 
@@ -143,33 +144,23 @@ def kickoff(k: int) -> str:
     )
 
 
-def _ai_record(agent_id: str, root, store, *, oracle: str, peers: list[str], description: str) -> dict:
+def _ai_record(agent_id: str, root, store, *, oracle: str, description: str) -> dict:
     meta: dict = {
         "type": "create_agent",
         "parent_id": home(root),
         "id": agent_id,
         "description": description,
         "context_window": CTX,
-        "can_call": {
-            "$self": "*",
-            "$parent": "*",
-            "$subtree": "*",
-            oracle: "*",
-            "notes": "*",
-            store["id"]: "*",
-            memory.MEMORY: "*",
-            **{p: "*" for p in peers},
+        # its OWN oracle only; the peers' lines are written once every solver exists
+        # (`peer_lines`): a line naming a missing id is refused
+        "can": {
+            oracle: lines.ALL,
+            "notes": lines.ALL,
+            store["id"]: lines.ALL,
+            memory.MEMORY: lines.ALL,
         },
         # ITS MEMORY: the conversation lives in the kernel's `memory` store.
         "memory_store_id": memory.MEMORY,
-        "callable_by": {
-            "$self": "*",
-            "$parent": "*",
-            "$subtree": "*",
-            "rest": "*",
-            "web": "*",
-            **{p: "*" for p in peers},
-        },
     }
     # The chat's payload only: `make_chat` adds the provider from the plug (e2e/backends).
     return meta
@@ -186,7 +177,6 @@ async def build(root):
                         "parent_id": home(root),
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "kernel_store",
-                        "callable_by": {**{s: "*" for s in SOLVERS}, "rest": "*", "web": "*"},
                         "ingress_rule": "allow_all_ingress",
                         "root": ".fantastic",
                     },
@@ -206,7 +196,6 @@ async def build(root):
                 # a DATA store — the records under `.fantastic` stay the loader's
                 "root": ".fantastic/data",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {**{s: "*" for s in SOLVERS}, "rest": "*", "web": "*"},
                 "description": "Shared text documents. The team's answer goes to `answer.txt`.",
             },
         },
@@ -222,7 +211,6 @@ async def build(root):
                     "id": oid,
                     "lines": LEDGERS[k],
                     "description": f"Oracle {k + 1}: the {LEDGER_NAMES[k]} ledger; answers `ask`. Knows only its own ledger.",
-                    "callable_by": {SOLVERS[k]: "*", "rest": "*", "web": "*"},
                 },
             }
         )
@@ -237,13 +225,29 @@ async def build(root):
                 root,
                 store,
                 oracle=ORACLES[k],
-                peers=[s for s in SOLVERS if s != sid],
                 description=f"Solver {k + 1} of three: holds the {LEDGER_NAMES[k]} ledger through {ORACLES[k]}.",
             ),
         )
-    for sid in SOLVERS:  # the store's half of each memory wire
-        await memory.open_ingress(root, memory.MEMORY, sid)
+    await peer_lines(root)
     return store
+
+
+async def peer_lines(root) -> None:
+    """Every solver's lines on its two peers, now that all three exist; then the
+    wall between them (harness, before the model): a hand holding solver_1's exact
+    lines reaches its own oracle and NOT a peer's — the unknown answer."""
+    for sid in SOLVERS:
+        await add_lines(root, sid, {p: lines.ALL for p in SOLVERS if p != sid})
+    can = (await asyncio.to_thread(root.record, SOLVERS[0])).get("can") or {}
+    await probe_agent(root, "solver_hand", can=can)
+    own = await relay(root, "solver_hand", ORACLES[0], {"type": "ask", "question": "clue"})
+    assert not is_unknown(own, ORACLES[0]) and not own.get("relay"), (
+        f"solver_1's lines must reach its own oracle: {str(own)[:200]}")
+    for oid in ORACLES[1:]:
+        r = await relay(root, "solver_hand", oid, {"type": "ask", "question": "clue"})
+        assert is_unknown(r, oid), f"solver_1's lines reached {oid}: {str(r)[:200]}"
+    gone = (await root.send([{"target": root.id, "payload": {"type": "delete_agent", "id": "solver_hand"}}]))[0]["result"]
+    assert not gone.get("error"), f"delete solver_hand: {gone}"
 
 
 async def _rows(root, aid):

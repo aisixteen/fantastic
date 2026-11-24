@@ -1,7 +1,8 @@
 """kernel/exec_jobs — exec_bridge jobs over REST, end to end. NO MODEL.
 
-The kernel's own `exec_bridge` on the PACKAGED host of `RUNTIME` (python |
-rust), every call through `web_rest`, its events watched over the `ws` face:
+The kernel's own `exec_bridge` on the PACKAGED rust host, every call through
+`web_rest`, its events watched over the `ws` face (`ws` reaches `ex` by its
+seeded `rest` line; `ex` keeps no list of callers):
 
   1. the allowlist: an allow-listed command runs as a job; a line that matches no
      pattern is refused `unauthorized` and starts nothing; a record whose only
@@ -53,7 +54,6 @@ PY = sys.executable
 PY_LINE = re.escape(shlex.quote(PY))
 ALLOWED = [PY_LINE + r" -c .*"]
 ENV = oslayer.child_env()
-GRANTS = {"$self": "*", "$parent": "*", "ws": "*"}
 # 20000 lines of 32 chars: 33 ring bytes each (line + 1) → 7943 fit in 256 KiB.
 BIG_N, BIG_W = 20000, 32
 RING = 256 * 1024
@@ -119,9 +119,9 @@ def main() -> int:
     (broken / "agent.yaml").write_text(yaml.safe_dump({
         "id": "ex_broken", "handler_module": "exec_bridge.tools", "parent_id": "rest",
         "ingress_rule": "allow_all_ingress", "cwd": str(run_dir), "env": ENV,
-        "allowed": [PY_LINE + " -c (.*"], "callable_by": GRANTS,
+        "allowed": [PY_LINE + " -c (.*"],
     }, sort_keys=False))
-    hk = HostKernel(spec, work, reach=["ex", "ex_broken"]).boot()
+    hk = HostKernel(spec, work).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -149,7 +149,7 @@ def main() -> int:
     try:
         rec = hk.create(parent_id="rest", handler_module="exec_bridge.tools", id="ex",
                         ingress_rule="allow_all_ingress", cwd=str(run_dir), env=ENV,
-                        allowed=ALLOWED, callable_by=GRANTS)
+                        allowed=ALLOWED)
         need(rec.get("id") == "ex", f"create ex: {str(rec)[:200]}")
         seen = watch(hk.port, "ex")
 

@@ -43,10 +43,10 @@ TASK_B = ("TASK B (separate from anything else you are doing): read `filler_4.tx
 
 
 async def main():
-    root, core, close = await open_kernel(prefix="coding_roots_", reach=[FB, "notes", "ai_recency", "ai_fold", "cli", "user"])
+    root, core, close = await open_kernel(prefix="coding_roots_", reach=[FB, "notes", "ai_recency", "ai_fold", "user"])
     try:
         plant_fillers(8)
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         results = []
         for aid, strategy, extra in FOLD_ARMS:
             from helpers.facts_arm import run_arm

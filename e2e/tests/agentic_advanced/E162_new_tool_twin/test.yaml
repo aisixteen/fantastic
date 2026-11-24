@@ -2,7 +2,7 @@
 # server plays the model for the kernel's own ai_chat.tools chat (free twin of E160).
 id: new_tool_twin
 group: agentic_advanced
-title: "a scripted AI writes a py_agent bundle through a file agent, reloads it, creates an instance, grants both halves for its one verb (no '*'), reads its schema with docs, calls the new verb and answers with the value"
+title: "a scripted AI writes a py_agent bundle through a file agent, reloads it, creates an instance under itself (no line written), is refused widening its own can, reads its schema with reflect part=schema, calls the new verb and answers with the value"
 runner: probe.py
 runtimes: [rust]
 costs: free

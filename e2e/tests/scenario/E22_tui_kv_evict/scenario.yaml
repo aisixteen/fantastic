@@ -41,40 +41,27 @@ runs:
     exit_code: 0
     lock_released: true
 - name: evict
+  # THE LINES ARE THE HOLDERS' OWN (`can`): a chat its store and its provider,
+  # and the system block it reads; a provider its store and the key; the user
+  # the blueprint's key store (its cap chain). The chats are the user's children: it reaches them
+  # by position. No record keeps a list of callers.
   seed:
   - path: .fantastic/agents/user/agent.yaml
     record:
       id: user
       handler_module: user.tools
-      can_call:
-        memory: '*'
-        fs_loader: '*'
-        store: '*'
-        exec: '*'
-        files: '*'
-        kernel_state: '*'
-        ai_a: '*'
-        ai_b: '*'
-        ai_c: '*'
-      callable_by:
-        exec: '*'
-        files: '*'
-        ai_a: '*'
-        ai_b: '*'
-        ai_c: '*'
+      page_loader: web_loader
+      can:
+        credentials:
+          call:
+          - get
   - path: .fantastic/agents/user/agents/memory/agent.yaml
     record:
       id: memory
       handler_module: sqlite_store.tools
       path: .fantastic/memory.db
-      callable_by:
-        user: '*'
-        ai_a: '*'
-        ai_b: '*'
-        ai_c: '*'
-        ai_a_provider: '*'
-        ai_b_provider: '*'
-        ai_c_provider: '*'
+  # the scenario's OWN key store, env-backed: the blueprint's `credentials` takes its
+  # backend from the user's key mode at boot (`kern/keys`)
   - path: .fantastic/agents/user/agents/creds/agent.yaml
     record:
       id: creds
@@ -85,14 +72,6 @@ runs:
           host: '{vllm_endpoint}'
           env:
             api_key: VLLM_API_KEY
-      callable_by:
-        user: '*'
-        ai_a_provider:
-        - get
-        ai_b_provider:
-        - get
-        ai_c_provider:
-        - get
   - path: .fantastic/agents/user/agents/ai_a_provider/agent.yaml
     record:
       id: ai_a_provider
@@ -106,14 +85,14 @@ runs:
       credentials:
         store: creds
         ref: vllm
-      callable_by:
-        ai_a:
-        - complete
-        - watch
-      can_call:
-        memory: '*'
+      can:
+        memory:
+          call:
+          - append
+          - read
         creds:
-        - get
+          call:
+          - get
   - path: .fantastic/agents/user/agents/ai_a/agent.yaml
     record:
       id: ai_a
@@ -127,13 +106,19 @@ runs:
       no_repeat_ngram_size: 3
       repetition_penalty: 1.05
       memory_store_id: memory
-      callable_by:
-        user: '*'
-      can_call:
-        memory: '*'
+      can:
+        memory:
+          call:
+          - append
+          - read
         ai_a_provider:
-        - complete
-        - watch
+          call:
+          - complete
+          - watch
+          - capabilities
+        prompt_file:
+          call:
+          - read
   - path: .fantastic/agents/user/agents/ai_b_provider/agent.yaml
     record:
       id: ai_b_provider
@@ -147,14 +132,14 @@ runs:
       credentials:
         store: creds
         ref: vllm
-      callable_by:
-        ai_b:
-        - complete
-        - watch
-      can_call:
-        memory: '*'
+      can:
+        memory:
+          call:
+          - append
+          - read
         creds:
-        - get
+          call:
+          - get
   - path: .fantastic/agents/user/agents/ai_b/agent.yaml
     record:
       id: ai_b
@@ -168,13 +153,19 @@ runs:
       no_repeat_ngram_size: 3
       repetition_penalty: 1.05
       memory_store_id: memory
-      callable_by:
-        user: '*'
-      can_call:
-        memory: '*'
+      can:
+        memory:
+          call:
+          - append
+          - read
         ai_b_provider:
-        - complete
-        - watch
+          call:
+          - complete
+          - watch
+          - capabilities
+        prompt_file:
+          call:
+          - read
   - path: .fantastic/agents/user/agents/ai_c_provider/agent.yaml
     record:
       id: ai_c_provider
@@ -188,14 +179,14 @@ runs:
       credentials:
         store: creds
         ref: vllm
-      callable_by:
-        ai_c:
-        - complete
-        - watch
-      can_call:
-        memory: '*'
+      can:
+        memory:
+          call:
+          - append
+          - read
         creds:
-        - get
+          call:
+          - get
   - path: .fantastic/agents/user/agents/ai_c/agent.yaml
     record:
       id: ai_c
@@ -209,13 +200,19 @@ runs:
       no_repeat_ngram_size: 3
       repetition_penalty: 1.05
       memory_store_id: memory
-      callable_by:
-        user: '*'
-      can_call:
-        memory: '*'
+      can:
+        memory:
+          call:
+          - append
+          - read
         ai_c_provider:
-        - complete
-        - watch
+          call:
+          - complete
+          - watch
+          - capabilities
+        prompt_file:
+          call:
+          - read
   timeout: 420
   script: |
     wait 2500

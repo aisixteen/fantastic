@@ -50,11 +50,11 @@ def _reply(mint, pid, parent, title, size, path):
 
 
 async def main():
-    root, core, close = await open_kernel(prefix="coding_synth_", reach=[FB, "notes", "ai_recency", AID, "cli", "user"])
+    root, core, close = await open_kernel(prefix="coding_synth_", reach=[FB, "notes", "ai_recency", AID, "user"])
     try:
         rule_tok, fact_tok, marker = secrets.token_hex(4), secrets.token_hex(4), secrets.token_hex(4)
         plant_fillers(12, marker_in=5, marker=marker, pad_to=3000)
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         # ── the planted history ──────────────────────────────────────────────
         mint = root.ctx.mint_id  # ids come from the kernel's one counter, planted or not
         goal = {"role": "user", "id": mint(), "parent": None,

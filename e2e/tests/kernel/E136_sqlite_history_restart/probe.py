@@ -1,8 +1,8 @@
 """kernel/sqlite_history_restart — an agent's history survives a kernel restart. NO MODEL.
 
 A local OpenAI-compatible server (`e2e/mocks/vllm.py`) plays the model; the agent is the
-kernel's own `vllm_backend` agent (ai_core) on the PACKAGED host of `RUNTIME` (python |
-rust), every call from the test through `web_rest`. The agent's `memory_store_id` is a
+kernel's own `vllm_backend` agent (ai_core) on the PACKAGED rust host, every call from
+the test through `web_rest`. The agent's `memory_store_id` is a
 `sqlite_store` agent `hist` whose file is its record's `path` (`stores/hist.db`).
 
 SCRIPT:
@@ -37,6 +37,7 @@ from pathlib import Path
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 
+from helpers.lines import ALL, PROVIDER
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
 from helpers.verdict import verdict
 from mocks.vllm import VllmMock
@@ -76,7 +77,7 @@ def main() -> int:
     m = VllmMock(model=MODEL).start()
     m.responder = recall_only
     work = Path(tempfile.mkdtemp(prefix="e2e-sqlite-history-"))
-    hk = HostKernel(spec, work, reach=[AI, STORE, PROV]).boot()
+    hk = HostKernel(spec, work).boot()
     bad: list[str] = []
 
     def need(cond: bool, what: str) -> None:
@@ -105,21 +106,19 @@ def main() -> int:
 
     try:
         rec = hk.create(parent_id="rest", handler_module="sqlite_store.tools", id=STORE,
-                        path=DB, callable_by={AI: "*", PROV: "*", "$parent": "*"})
+                        path=DB)
         need(rec.get("id") == STORE and not rec.get("error"),
              f"create the sqlite store from its record's path: {str(rec)[:200]}")
         # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it
         rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
                         endpoint=m.url, model=MODEL,
                         context_window=262144, kv_slots=4, kv_overflow="evict",
-                        memory_store_id=STORE, can_call={"$self": "*", STORE: "*"},
-                        callable_by={"$self": "*", "$parent": "*", AI: "*"})
+                        memory_store_id=STORE, can={STORE: ALL})
         need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
                         provider_id=PROV, model=MODEL, max_tokens=8192,
                         context_window=262144, memory_store_id=STORE,
-                        can_call={"$self": "*", STORE: "*", PROV: ["complete", "watch", "reflect"]},
-                        callable_by={"$self": "*", "$parent": "*", "rest": "*"})
+                        can={STORE: ALL, PROV: PROVIDER})
         need(rec.get("id") == AI, f"create the agent on that store: {str(rec)[:200]}")
 
         # ── turn one ─────────────────────────────────────────────────────────

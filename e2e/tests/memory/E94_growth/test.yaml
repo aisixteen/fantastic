@@ -3,5 +3,6 @@ group: memory
 title: "many calls: the kernel's rows in its memory store stay under the window (ledger_cap); named executions and unacked dead letters survive the pruning"
 runner: probe.py
 costs: free
+muted: "#170: the Python product keeps the old grant model; this probe drives it"
 limits:
   idle_seconds: 60

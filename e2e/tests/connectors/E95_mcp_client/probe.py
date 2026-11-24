@@ -3,11 +3,11 @@
 A scripted fake MCP server (protocol 2026-07-28, Streamable HTTP — it enforces what
 the spec makes a server enforce: headers mirror the body, `_meta` on every request,
 the Bearer key) and the kernel's own `mcp_client` agent, on the PACKAGED host of
-`RUNTIME` (python | rust), every call through `web_rest`:
+`RUNTIME` (rust), every call through `web_rest`:
 
   1. boot: `server/discover`, then `tools/list` page by page (by cursor) → the
      agent's verbs; tools it cannot serve are skipped and named;
-  2. `docs of=mcp` is the agent's OWN table, built from each tool's schema;
+  2. `reflect mcp part=docs` is the agent's OWN table, built from each tool's schema;
   3. a tool call: arguments → `tools/call`, `Mcp-Name`, `Mcp-Param-Region`;
   4. every result mapping: text, `isError` → error, `structuredContent` →
      `structured`, image base64 → raw bytes (one body per reply, a later one
@@ -16,8 +16,10 @@ the Bearer key) and the kernel's own `mcp_client` agent, on the PACKAGED host of
      -32602 → bad_arg, an unknown tool → unhandled;
   5. THE KEY: an env-backed credential ref (the key in a variable the STORE
      reads, never on a record) → `Authorization: Bearer <key>` on EVERY request;
-     the key never in the ledger; a record without `credentials` sends none and
-     the server's 401 is `unauthorized`;
+     the key never in the ledger nor in any file of the state folder; a record
+     without `credentials` sends none and the server's 401 is `unauthorized`;
+  6. LINES: `mcp` holds `creds: get` in its own `can`; an agent holding no line
+     gets the unknown answer from `creds` and from `mcp`.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.lines import GET, is_unknown
 from helpers.verdict import verdict
 
 REPO = E2E.parent
@@ -45,6 +48,8 @@ KEY = "mcp-e2e-" + secrets.token_hex(12)
 KEY_VAR = "E2E_MCP_KEY"
 PNG = b"\x89PNG\r\n\x1a\n\x00\x01raw"
 PROTOCOL = "2026-07-28"
+#: A `user_probe` under `rest` holding no line: what it relays is gated as itself.
+STRANGER = "stranger"
 
 TOOLS = [
     {
@@ -338,9 +343,7 @@ def main() -> int:
     fake = Fake()
     os.environ[KEY_VAR] = KEY  # the STORE reads it (env backend), never a record
     work = Path(tempfile.mkdtemp(prefix="e2e-mcp-client-"))
-    hk = HostKernel(
-        spec, work, reach=["mcp", "mcp_keyless", "creds"]
-    ).boot()
+    hk = HostKernel(spec, work).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -348,6 +351,13 @@ def main() -> int:
         print(f"  {'ok ' if cond else 'BAD'} {what}", flush=True)
         if not cond:
             bad.append(what)
+
+    def via(src: str, target: str, payload: dict) -> dict:
+        """`src` sends `payload` to `target` AS ITSELF; the onward result."""
+        r = hk.send(src, {"type": "send", "target": target, "payload": payload})
+        if "sent" not in r:
+            return {"error": f"relay {src} refused: {str(r)[:200]}", "relay": True}
+        return r.get("result") or {}
 
     try:
         # the ref: the key's variable, pinned to the fake's host:port
@@ -362,11 +372,6 @@ def main() -> int:
                         "env": {"api_key": KEY_VAR},
                     },
                 },
-                "callable_by": {
-                    "$self": "*",
-                    "$parent": "*",
-                    "mcp": ["get"],
-                },
             },
         )
         need(
@@ -379,10 +384,19 @@ def main() -> int:
             id="mcp",
             url=fake.url,
             credentials={"store": "creds", "ref": "mcp"},
-            can_call={"$self": "*", "creds": ["get"]},
-            callable_by={"$self": "*", "$parent": "*"},
+            can={"creds": GET},
         )
         need(rec.get("id") == "mcp", f"create mcp: {str(rec)[:200]}")
+
+        # 6 · lines: an agent holding none reaches neither the key nor the connector
+        rec = hk.create(parent_id="rest", handler_module="user_probe.tools", id=STRANGER)
+        need(rec.get("id") == STRANGER and not hk.send(STRANGER, {"type": "reflect"}).get("can"),
+             f"create {STRANGER} (no line): {str(rec)[:200]}")
+        got = via(STRANGER, "creds", {"type": "get", "ref": "mcp"})
+        need(is_unknown(got, "creds") and KEY not in json.dumps(got, default=str),
+             f"no `creds` line: the store answers unknown: {str(got)[:200]}")
+        got = via(STRANGER, "mcp", {"type": "boot"})
+        need(is_unknown(got, "mcp"), f"no `mcp` line: the connector answers unknown: {str(got)[:200]}")
 
         # 1 · boot = discover + every page of tools/list
         boot = hk.send("mcp", {"type": "boot"})
@@ -402,11 +416,12 @@ def main() -> int:
         cursors = [b["params"].get("cursor") for _, b in fake.calls("tools/list")][-4:]
         need(cursors == [None, "3", "6", "9"], f"tools/list paged by cursor: {cursors}")
 
-        # 2 · docs: the agent's own table
-        d = hk.send("kernel", {"type": "docs", "of": "mcp"})
-        verbs = d.get("verbs") or {}
+        # 2 · docs: the agent's own table (`reflect` with `part`)
+        d = hk.send("mcp", {"type": "reflect", "part": "docs"})
+        verbs = d.get("verbs") if isinstance(d.get("verbs"), dict) else {}
         need(
-            set(verbs) == {"reflect", "boot", *SERVED}, f"docs of=mcp: {sorted(verbs)}"
+            set(verbs) == {"reflect", "boot", *SERVED},
+            f"reflect mcp part=docs: {sorted(verbs)} ({str(d)[:200] if not verbs else ''})",
         )
         need(
             verbs.get("get_weather")
@@ -499,13 +514,14 @@ def main() -> int:
             "the key never lands in the ledger",
         )
         before = len(fake.seen)
-        hk.create(
+        rec = hk.create(
             parent_id="rest",
             handler_module="mcp_client.tools",
             id="mcp_keyless",
             url=fake.url,
-            callable_by={"$self": "*", "$parent": "*"},
         )
+        need(rec.get("id") == "mcp_keyless" and not rec.get("can"),
+             f"create mcp_keyless (no credentials, no line): {str(rec)[:200]}")
         kl = hk.send("mcp_keyless", {"type": "boot"})
         need(
             kl.get("reason") == "unauthorized" and kl.get("http_status") == 401,
@@ -523,6 +539,15 @@ def main() -> int:
             not fake.calls("initialize"),
             f"the client never sends initialize: {md}",
         )
+
+        # the key in no file of the state folder (records, store tables, the message
+        # log) — that covers `mcp`'s own `get` rows, which `rest`'s ledger does not show
+        code = hk.stop()
+        print(f"  kernel stopped (exit {code})", flush=True)
+        files = [f for f in (work / ".fantastic").rglob("*") if f.is_file()]
+        held = [str(f.relative_to(work)) for f in files if KEY.encode() in f.read_bytes()]
+        need(bool(files) and not held,
+             f"the key is in no file of the state folder ({len(files)} files): {held}")
     finally:
         hk.close()
         fake.srv.shutdown()

@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-from families import BASE, OPEN, VLLM, ai, ai_pair, call, save_kernel_log, vllm
+from families import ALL, OPEN, VLLM, ai, ai_pair, call, save_kernel_log, vllm
 
 NAME = "bundle_verbs"
 
@@ -53,7 +53,7 @@ def fixtures(work: Path, interp: str) -> list:
         ("term_shell", "exec_bridge.tools", dict(cwd=".", env={"SHELL": "/bin/sh"}, shell=True)),
         ("term_noshell", "exec_bridge.tools", dict(cwd=".", shell=True)),
         # ── scheduler ──
-        ("sched", "scheduler.tools", dict(can_call={**BASE, "files": "*"})),
+        ("sched", "scheduler.tools", dict(can={"files": ALL})),
         # ── static_loader ──
         ("sload", "static_loader.tools", dict(root=".")),
         # ── cli ──
@@ -292,14 +292,14 @@ def run(ctx) -> None:
 
     interp = sys.executable
     fx = fixtures(w, interp)
-    reach = [a[0] for a in fx] + ["m_ok", "m_yn", "m_typed", "web", "rest", "ws"]
+    # ids OUTSIDE `rest`'s tree the legs call; the fixtures live under `rest`
+    reach = ["m_ok", "m_yn", "m_typed", "web", "rest", "ws"]
     k = ctx.boot(reach=reach, port=ports.take("main"))
     try:
-        cb = {**BASE, "rest": "*", "web": "*", "ws": "*", "editor": "*", "sched": "*", "runner": "*"}
         for aid, hm, meta in fx:
             rec.json(f"create/{aid}", k.create(
                 **{"parent_id": k.home, "handler_module": hm, "id": aid,
-                   **OPEN, "callable_by": cb, **meta}))
+                   **OPEN, **meta}))
         time.sleep(1.0)
 
         groups = [
@@ -326,7 +326,7 @@ def run(ctx) -> None:
         from families import disk_walk
 
         rec.json("disk_after", disk_walk(w))
-        rec.json("kernel_list_agents_after", call(k, "kernel", {"type": "list_agents"}))
+        rec.json("kernel_reflect_tree_after", call(k, "kernel", {"type": "reflect", "tree": "all"}))
         rec.json("kernel_ps_after", call(k, "kernel", {"type": "ps"}))
     finally:
         os.chmod(w / "unreadable.yaml", 0o644)

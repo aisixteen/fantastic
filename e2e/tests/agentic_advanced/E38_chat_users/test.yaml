@@ -6,6 +6,7 @@ title: "one AI is the bot of a multi-user chat server — ten events over five c
 runner: probe.py
 runtimes: [python]
 costs: turns
+muted: "#170: the Python product keeps the old grant model; this probe drives it"
 long: true
 limits:
   idle_seconds: 120

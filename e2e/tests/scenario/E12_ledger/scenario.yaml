@@ -37,7 +37,7 @@ roster:
     id: cli
 
 grants:
-  ai_can_call: [cli, yaml_store, dispenser]
+  ai_can: [cli, yaml_store, dispenser]
 
 # Scored on the DISPENSER's own count, not on the model's prose: `side_effects`
 # asks the runner how many times the side effect actually ran.

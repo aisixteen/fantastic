@@ -46,11 +46,11 @@ def task(i):
 
 
 async def main():
-    root, core, close = await open_kernel(prefix="coding_flat_", reach=[FB, "notes", "ai_recency", "ai_fold", "cli", "user"])
+    root, core, close = await open_kernel(prefix="coding_flat_", reach=[FB, "notes", "ai_recency", "ai_fold", "user"])
     try:
         toks = {i: secrets.token_hex(4) for i in range(N)}
         plant_fillers(N, extra={i: f">> checksum: {toks[i]}" for i in range(N)}, pad_to=2500)
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         final = (f"FINAL: write `final.md` through `notes` with one line per task, `task <i>: <checksum>`, for "
                  f"ALL {N} tasks you did. Then {DONE}.")
         results = []

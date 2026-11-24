@@ -1,11 +1,12 @@
 """kernel/reboot_continuity — the tree a kernel built comes back whole on the
 next boot of the same directory. NO MODEL.
 
-The PACKAGED host of `RUNTIME` (python | rust), every call over `web_rest`:
+The PACKAGED rust host, every call over `web_rest`:
 
   1. BUILD: a three-level chain of agents under the leg (`top` → `mid` → `leaf`),
      records carrying extra fields (str, int, float, bool, list, nested map,
-     unicode), explicit grants on both ends (`can_call` / `callable_by`); a
+     unicode), a `can` line on the caller (`top` → `ghost`, written after
+     `ghost` exists; the target keeps no list); a
      `files` file_bridge with sixteen text files, a nested one and a binary one
      (raw bytes over the octet leg); an `update_agent` of a field; an agent and
      a file DELETED before the stop;
@@ -14,7 +15,8 @@ The PACKAGED host of `RUNTIME` (python | rust), every call over `web_rest`:
      re-created on the same id — its rows are still in the store; `files`
      deleted and re-created on the same root — every file still lists;
   3. STOP (SIGTERM) and BOOT the same directory: every id with its parent,
-     every field, every grant, the update, both deletes, the guid; every file
+     every field, the `can` line, the update, both deletes, the guid (read
+     from the state folder: root fields are operator only); every file
      lists and reads back byte for byte; the agents answer; the id counter
      never repeats an id;
   4. A SECOND stop + boot with nothing changed in between: the same tree again.
@@ -23,9 +25,11 @@ The PACKAGED host of `RUNTIME` (python | rust), every call over `web_rest`:
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
@@ -33,17 +37,21 @@ sys.path.insert(0, str(E2E))
 
 import asyncio
 
+import yaml
+
 from helpers import memory
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
 from helpers.host.wire import WireRoot
+from helpers.lines import call, is_unknown
 from helpers.verdict import verdict
 
 REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
 N = 16
 BIN = bytes(range(256)) * 3 + b"\x00tail\xff"
-CB = {"$self": "*", "$parent": "*"}
-REACH = ["top", "mid", "leaf", "files", "ghost", "gone"]
+#: Every id the probe creates. All live under `rest`, which reaches them by
+#: position, so the seed gives the legs no line on any of them.
+IDS = ["top", "mid", "leaf", "files", "ghost", "gone"]
 
 #: The fields `top` carries, every JSON type the record format has to round-trip.
 EXTRA = {
@@ -55,9 +63,8 @@ EXTRA = {
     "nested": {"k": [1, {"deep": "yes"}], "empty": {}},
     "label": "Київ — ✓",
 }
-#: Grants on both ends: `top` may call `leaf` (two verbs), `leaf` accepts `top`.
-TOP_CAN = {"$self": "*", "leaf": ["work", "started"]}
-LEAF_CB = {"$self": "*", "$parent": "*", "top": ["work"]}
+#: `top`'s own line: two verbs on its sibling `ghost`. The target keeps no list.
+TOP_CAN = {"ghost": call("work", "started")}
 
 
 def file_body(i: int) -> str:
@@ -77,7 +84,7 @@ def main() -> int:
             bad.append(what)
 
     def boot() -> HostKernel:
-        hk = HostKernel(spec, work, reach=REACH).boot()
+        hk = HostKernel(spec, work).boot()
         kernels.append(hk)
         return hk
 
@@ -86,8 +93,32 @@ def main() -> int:
         need(hk.proc.returncode is not None, f"the kernel exited (code {hk.proc.returncode})")
 
     def records(hk: HostKernel) -> dict[str, dict]:
-        r = hk.send("kernel", {"type": "list_agents"})
-        return {a["id"]: a for a in r.get("agents") or []}
+        # The LIVE records: the root's `reflect tree=all detail=full`, whose nodes
+        # carry each record whole inside `rest`'s tree (an agent's own reflect is
+        # its bundle's reply, which leaves record fields out). A missing id is in
+        # no node, and its own reflect gives the unknown answer.
+        out: dict[str, dict] = {}
+        rf = hk.send("kernel", {"type": "reflect", "tree": "all", "detail": "full"})
+        todo = [rf.get("tree")] if isinstance(rf, dict) else []
+        while todo:
+            n = todo.pop()
+            if not isinstance(n, dict):
+                continue
+            if n.get("id") in IDS:
+                out[n["id"]] = {k: v for k, v in n.items() if k != "children"}
+            todo.extend(n.get("children") or [])
+        for aid in IDS:
+            if aid not in out:
+                r = hk.send(aid, {"type": "reflect"})
+                need(is_unknown(r, aid), f"{aid}: in no tree node, and its reflect is the unknown answer: {str(r)[:160]}")
+        return out
+
+    def disk_guid() -> str | None:
+        # The root's guid, from the state folder with the daemon down: root
+        # fields are operator only, so `rest` never reads it.
+        root = yaml.safe_load((work / ".fantastic" / "agent.yaml").read_text()) or {}
+        g = root.get("guid")
+        return g if isinstance(g, str) and g else None
 
     def listed(hk: HostKernel) -> set[str]:
         out: set[str] = set()
@@ -114,12 +145,12 @@ def main() -> int:
 
     def create_files(hk: HostKernel) -> None:
         create(hk, parent_id="rest", handler_module="file_bridge.tools", id="files",
-               root=".", allow=["data"], ingress_rule="allow_all_ingress", callable_by=CB)
+               root=".", allow=["data"], ingress_rule="allow_all_ingress")
 
     want_files = {f"data/f_{i:02d}.txt" for i in range(N) if i != 3} | {
         "data/sub/deep.txt", "data/blob.bin"}
 
-    def check_tree(hk: HostKernel, tag: str, guid: str, ids_before: int) -> None:
+    def check_tree(hk: HostKernel, tag: str, ids_before: int) -> None:
         recs = records(hk)
         for aid, parent in (("top", "rest"), ("mid", "top"), ("leaf", "mid"),
                             ("files", "rest"), ("ghost", "rest")):
@@ -127,20 +158,31 @@ def main() -> int:
             need(got == parent, f"{tag}: {aid} is back under {parent} (got {got!r})")
         need("gone" not in recs, f"{tag}: the agent deleted before the stop stays deleted")
         top = recs.get("top") or {}
-        want = {**EXTRA, "note": "second"}
-        diff = {k: (top.get(k), v) for k, v in want.items() if top.get(k) != v}
+        # THE LIVE FIELDS. No wire read shows a record's free fields whole (a tree
+        # node carries the posture keys and `can`; top's reflect is its bundle's
+        # reply), so the live record is made to show itself: one new field written
+        # now, and the kernel persists the WHOLE record it holds in memory. The
+        # stored record then carries every field only if the reboot hydrated it.
+        touch = f"{tag}-{secrets.token_hex(3)}"
+        r = hk.send(hk.root_id, {"type": "update_agent", "id": "top", "touch": touch})
+        need(r.get("updated") is True, f"{tag}: update top's touch: {str(r)[:160]}")
+        end = time.monotonic() + 10
+        stored = hk.stored("top")
+        while time.monotonic() < end and stored.get("touch") != touch:
+            time.sleep(0.1)
+            stored = hk.stored("top")
+        want = {**EXTRA, "note": "second", "touch": touch}
+        diff = {k: (stored.get(k), v) for k, v in want.items() if stored.get(k) != v}
         need(not diff, f"{tag}: every field of top round-trips, the update kept: {diff or 'all equal'}")
-        need(top.get("can_call") == TOP_CAN, f"{tag}: top's can_call: {top.get('can_call')}")
-        need(top.get("callable_by") == CB, f"{tag}: top's callable_by: {top.get('callable_by')}")
-        leaf = recs.get("leaf") or {}
-        need(leaf.get("callable_by") == LEAF_CB, f"{tag}: leaf's callable_by: {leaf.get('callable_by')}")
+        need(top.get("can") == TOP_CAN, f"{tag}: top's can: {top.get('can')}")
         fb = recs.get("files") or {}
         need(fb.get("root") == "." and fb.get("allow") == ["data"]
              and fb.get("ingress_rule") == "allow_all_ingress",
              f"{tag}: the file_bridge record (root, allow, ingress_rule): "
              f"{ {k: fb.get(k) for k in ('root', 'allow', 'ingress_rule')} }")
         rf = hk.send("kernel", {"type": "reflect", "tree": "none"})
-        need(rf.get("guid") == guid, f"{tag}: the root's guid is the same ({rf.get('guid')} vs {guid})")
+        need(isinstance(rf, dict) and rf.get("id") == hk.root_id and "guid" not in rf,
+             f"{tag}: rest's root reflect carries no guid (operator only): {str(rf)[:200]}")
         got = listed(hk)
         need(got == want_files, f"{tag}: {len(got & want_files)}/{len(want_files)} files listed"
              + (f", missing {sorted(want_files - got)}, extra {sorted(got - want_files)}"
@@ -168,17 +210,16 @@ def main() -> int:
 
     try:
         hk = boot()
-        guid = hk.send("kernel", {"type": "reflect", "tree": "none"}).get("guid")
-        need(isinstance(guid, str) and bool(guid), f"the root has a guid: {guid!r}")
 
         # 1 · build
-        create(hk, parent_id="rest", handler_module="slow_probe.tools", id="top",
-               can_call=TOP_CAN, callable_by=CB, **EXTRA)
-        create(hk, parent_id="top", handler_module="slow_probe.tools", id="mid", callable_by=CB)
-        create(hk, parent_id="mid", handler_module="slow_probe.tools", id="leaf",
-               callable_by=LEAF_CB)
-        create(hk, parent_id="rest", handler_module="slow_probe.tools", id="gone", callable_by=CB)
-        create(hk, parent_id="rest", handler_module="slow_probe.tools", id="ghost", callable_by=CB)
+        create(hk, parent_id="rest", handler_module="slow_probe.tools", id="top", **EXTRA)
+        create(hk, parent_id="top", handler_module="slow_probe.tools", id="mid")
+        create(hk, parent_id="mid", handler_module="slow_probe.tools", id="leaf")
+        create(hk, parent_id="rest", handler_module="slow_probe.tools", id="gone")
+        create(hk, parent_id="rest", handler_module="slow_probe.tools", id="ghost")
+        # the line names `ghost`, so it is written once `ghost` exists
+        r = hk.send(hk.root_id, {"type": "update_agent", "id": "top", "can": TOP_CAN})
+        need(r.get("updated") is True, f"update_agent top can=TOP_CAN: {str(r)[:200]}")
         create_files(hk)
         for i in range(N):
             r = hk.send("files", {"type": "write", "path": f"data/f_{i:02d}.txt", "bytes": file_body(i)})
@@ -208,7 +249,7 @@ def main() -> int:
         kept = asyncio.run(ghost_rows(hk))
         need([x.get("id") for x in kept] == planted,
              f"after delete_agent ghost: {len(kept)}/{N} rows still in the store")
-        create(hk, parent_id="rest", handler_module="slow_probe.tools", id="ghost", callable_by=CB)
+        create(hk, parent_id="rest", handler_module="slow_probe.tools", id="ghost")
         again = asyncio.run(ghost_rows(hk))
         need([x.get("id") for x in again] == planted
              and [x.get("content") for x in again] == [x.get("content") for x in before],
@@ -229,15 +270,22 @@ def main() -> int:
         on_disk = {p.parent.name for p in (work / ".fantastic").rglob("agent.yaml")}
         need({"top", "mid", "leaf", "files", "ghost"} <= on_disk and "gone" not in on_disk,
              f"records on disk after the stop: {sorted(on_disk)}")
+        guid = disk_guid()
+        need(guid is not None, f"the root has a guid in its state folder: {guid!r}")
         hk = boot()
-        check_tree(hk, "reboot 1", guid, ids_before)
+        check_tree(hk, "reboot 1", ids_before)
 
         # 4 · again, nothing changed in between
         led = hk.send("kernel", {"type": "ledger"}).get("executions") or []
         ids_before = max((e["id"] for e in led if isinstance(e.get("id"), int)), default=0)
         stop(hk)
+        g = disk_guid()
+        need(g == guid, f"reboot 1: the root's guid is the same ({g} vs {guid})")
         hk = boot()
-        check_tree(hk, "reboot 2", guid, ids_before)
+        check_tree(hk, "reboot 2", ids_before)
+        stop(hk)
+        g = disk_guid()
+        need(g == guid, f"reboot 2: the root's guid is the same ({g} vs {guid})")
     finally:
         for k in kernels:
             k.close()

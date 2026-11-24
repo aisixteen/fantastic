@@ -2,9 +2,9 @@
 # host runtime, spawned on one directory several times, driven over web_rest.
 id: drain_lock
 group: kernel
-title: "one kernel per dir (a second exits naming the owner; a stale lock — dead pid or a live pid holding no lock — does not block); a drain over REST refuses new work, keeps the control surface, settles the call in flight into a dead letter; kernel_stop acks, exits 0, frees the port and the lock"
+title: "one kernel per dir (a second exits naming the owner; a stale lock — dead pid or a live pid holding no lock — does not block); shutdown_agents and kernel_stop over REST are operator only; the SIGTERM stop drains (new work refused, control surface up), settles the call in flight, exits 0, frees the port and the lock; a cancelled call is an ackable dead letter"
 runner: probe.py
-runtimes: [python, rust]
+runtimes: [rust]
 costs: free
 limits:
   idle_seconds: 120

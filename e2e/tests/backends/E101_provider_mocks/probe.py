@@ -1,8 +1,8 @@
 """backends/provider_mocks — the reusable provider mocks (`e2e/mocks`), proven
 against the kernel's own backends. NO MODEL.
 
-One mock per provider, and on the PACKAGED host of `RUNTIME` (python |
-rust), every call through `web_rest`, one provider agent per provider (and an `ai_chat.tools` chat completing through it) whose record
+One mock per provider, and on the PACKAGED host of `RUNTIME`
+(rust), every call through `web_rest`, one provider agent per provider (and an `ai_chat.tools` chat completing through it) whose record
 names the mock's `url` and an env-backed credential ref pinned to its host. The
 record leaves to the server what the backend reads from it (vllm: model,
 context_window, kv_slots; ollama: model; anthropic: context_window, and the turn's
@@ -12,10 +12,15 @@ max_tokens the chat names none of), so each probe path is exercised. Per provide
   2. the key arrives on EVERY request, in the provider's header;
   3. an HTTP 500 → the turn fails loud, naming the status; the next turn works;
   4. a refused key (the mock's 401) → the turn fails loud;
-  5. the key never lands in the ledger;
+  5. the key never lands in the ledger, nor in any file of the state folder
+     (records, store tables, the message log);
   6. the turn's `status` `done` carries the usage the mock reported —
      `prompt_tokens`, `completion_tokens` (not estimated), `gen_seconds`,
      `context_window` — watched over the ws face.
+
+Every line is the caller's own `can`: a provider holds `memory` and `creds: get`,
+a chat `memory` and its provider line. A sibling with no line reaches neither the
+key store nor a provider (the unknown answer).
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
 from helpers.host.ws import WSWatcher
+from helpers.lines import ALL, GET, PROVIDER, is_unknown
 from helpers.verdict import verdict
 from mocks.anthropic import AnthropicMock
 from mocks.ollama import OllamaMock
@@ -50,6 +56,9 @@ KEY_VAR = "E2E_MOCK_KEY"
 # dispatched" reminder turn, which keeps the chain alive and HOLDS the probe's next send
 # (its answer is then the chain's, not the turn's own). `done` ends the chain at once.
 DONE = '<call name="done"></call>'
+#: A sibling of the providers and chats under `rest`, holding no line: what it
+#: relays (`send`) is gated as itself.
+KEYLESS = "keyless"
 
 #: provider → (mock class, handler module, record fields beyond endpoint/credentials,
 #: fields the backend reads from the server)
@@ -102,9 +111,7 @@ def main() -> int:
     os.environ[KEY_VAR] = KEY  # the STORE reads it (env backend), never a record
     mocks = {p: PROVIDERS[p][0](model=f"mock-{p}").start() for p in PROVIDERS}
     work = Path(tempfile.mkdtemp(prefix="e2e-provider-mocks-"))
-    ids = [f"ai_{p}" for p in PROVIDERS]
-    chats = [f"chat_{p}" for p in PROVIDERS]
-    hk = HostKernel(spec, work, reach=ids + chats).boot()
+    hk = HostKernel(spec, work).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -116,22 +123,29 @@ def main() -> int:
     def update(aid: str, **fields) -> dict:
         return hk.send(root, {"type": "update_agent", "id": aid, **fields})
 
-    def callable_by(aid: str) -> dict:
-        r = hk.send("kernel", {"type": "list_agents"})
-        rec = next(a for a in r.get("agents") or [] if a.get("id") == aid)
-        return dict(rec.get("callable_by") or {})
-
     def record(aid: str) -> dict:
-        r = hk.send("kernel", {"type": "list_agents"})
-        return next((a for a in r.get("agents") or [] if a.get("id") == aid), {})
+        """`aid`'s record as `rest` sees it (reflect; whole inside rest's tree)."""
+        r = hk.send(aid, {"type": "reflect"})
+        return r if isinstance(r, dict) else {}
+
+    def via(src: str, target: str, payload: dict) -> dict:
+        """`src` sends `payload` to `target` AS ITSELF; the onward result."""
+        r = hk.send(src, {"type": "send", "target": target, "payload": payload})
+        if "sent" not in r:
+            return {"error": f"relay {src} refused: {str(r)[:200]}", "relay": True}
+        return r.get("result") or {}
 
     try:
         r = update("creds",
-                   refs={p: {"host": m.host, "env": {"api_key": KEY_VAR}} for p, m in mocks.items()},
-                   callable_by={**callable_by("creds"), **{a: ["get"] for a in ids}})
+                   refs={p: {"host": m.host, "env": {"api_key": KEY_VAR}} for p, m in mocks.items()})
         need(r.get("updated") is True, f"creds: one ref per mock: {str(r)[:200]}")
-        r = update("memory", callable_by={**callable_by("memory"), **{a: "*" for a in ids + chats}})
-        need(r.get("updated") is True, f"memory accepts the AIs: {str(r)[:200]}")
+        # the sibling with no line: sealed by default
+        rec = hk.create(parent_id="rest", handler_module="user_probe.tools", id=KEYLESS)
+        need(rec.get("id") == KEYLESS and not record(KEYLESS).get("can"),
+             f"create {KEYLESS} (no line): {str(rec)[:200]}")
+        got = via(KEYLESS, "creds", {"type": "get", "ref": next(iter(PROVIDERS))})
+        need(is_unknown(got, "creds") and KEY not in json.dumps(got, default=str),
+             f"{KEYLESS} holds no `creds` line: the store answers it unknown: {str(got)[:200]}")
 
         for p, (_cls, module, fields, read) in PROVIDERS.items():
             m, pid, aid = mocks[p], f"ai_{p}", f"chat_{p}"
@@ -142,19 +156,17 @@ def main() -> int:
             rec = hk.create(parent_id="rest", handler_module=module, id=pid,
                             endpoint=m.url, credentials={"store": "creds", "ref": p},
                             memory_store_id="memory",
-                            can_call={"$self": "*", "memory": "*", "creds": ["get"],
-                                      root: ["reflect"]},
-                            callable_by={"$self": "*", "$parent": "*",
-                                         aid: ["complete", "watch"]},
+                            can={"memory": ALL, "creds": GET},
                             **fields)
             need(rec.get("id") == pid, f"{p}: create provider: {str(rec)[:200]}")
+            got = via(KEYLESS, pid, {"type": "complete", "messages": [{"role": "user", "content": "hi"}]})
+            need(is_unknown(got, pid),
+                 f"{p}: {KEYLESS} holds no line on the provider: unknown: {str(got)[:200]}")
             rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
                             provider_id=pid, model=f"mock-{p}",
                             context_window=read.get("context_window", fields.get("context_window", 32768)),
                             memory_store_id="memory",
-                            can_call={"$self": "*", "memory": "*", pid: ["complete", "watch"],
-                                      root: ["reflect"]},
-                            callable_by={"$self": "*", "$parent": "*", "rest": "*", "ws": "*"})
+                            can={"memory": ALL, pid: PROVIDER})
             need(rec.get("id") == aid, f"{p}: create chat: {str(rec)[:200]}")
 
             # 1 · a turn answers the mock's text; the server-read fields land
@@ -174,7 +186,13 @@ def main() -> int:
             stop.set()
             need(word in str(out.get("response")) and not out.get("error"),
                  f"{p}: the turn answers the mock's text: {str(out)[:200]}")
-            got = record(pid)
+            # THE RECORD as stored: a backend's own reflect reply does not carry every
+            # record field (kv_slots), and the read fields land on the record's next save
+            end = time.monotonic() + 10
+            got = hk.stored(pid)
+            while time.monotonic() < end and not all(got.get(k) == v for k, v in read.items()):
+                time.sleep(0.1)
+                got = hk.stored(pid)
             need(all(got.get(k) == v for k, v in read.items()),
                  f"{p}: read from the server: {({k: got.get(k) for k in read})}")
             done = [
@@ -236,9 +254,18 @@ def main() -> int:
                  f"{p}: a refused key (401) → the turn fails: {str(out)[:240]}")
             m.require_key(KEY)
 
-        # 5 · the key never in the ledger
+        # 5 · the key never in the ledger (`rest`'s own executions), nor in any file of
+        #     the state folder — that covers the providers' own `get` rows, which `rest`'s
+        #     ledger does not show
         ledger = hk.send("kernel", {"type": "ledger"})
         need(KEY not in json.dumps(ledger, default=str), "the key never lands in the ledger")
+        code = hk.stop()
+        print(f"     kernel stopped (exit {code})", flush=True)
+        state = work / ".fantastic"
+        files = [f for f in state.rglob("*") if f.is_file()]
+        held = [str(f.relative_to(work)) for f in files if KEY.encode() in f.read_bytes()]
+        need(bool(files) and not held,
+             f"the key is in no file of the state folder ({len(files)} files): {held}")
     finally:
         hk.close()
         for m in mocks.values():

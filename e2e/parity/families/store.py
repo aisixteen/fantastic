@@ -24,8 +24,8 @@ import threading
 import time
 from pathlib import Path
 
-from families import (BASE, MEMORY, OPEN, ROOT_ID, VLLM, ai, ai_pair, call, disk_walk, page_walk, quiesce,
-                      save_kernel_log, vllm)
+from families import (ALL, MEMORY, OPEN, ROOT_ID, VLLM, ai, ai_pair, call, cursor_of, disk_walk, line_call,
+                      page_walk, quiesce, save_kernel_log, vllm)
 from spec import CTX_RESERVE, CTX_WINDOW
 from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub
 
@@ -92,12 +92,14 @@ FAULT_CASES = [c for c in CASES if c.startswith("f")]
 CTX_RECALL_ANSWER = '{"expand": [], "why": "stub: keep the mechanical fit"}'
 
 
-def roster(stub_url: str, cb: dict, interp: str) -> list:
+def roster(stub_url: str, interp: str) -> list:
+    """Every agent, created in order under `rest`: the AI pair LAST, so each line it
+    holds names an id that already exists. Nothing keeps a list of callers."""
     return [
         ("runner", "exec_bridge.tools", dict(cwd=".", allowed=[rf"{re.escape(interp)} \S+"])),
         ("readings", "file_bridge.tools",
          dict(allow=["."], root="readings", description="Sensor readings — one integer per file.")),
-        ("kernel_store", "file_bridge.tools", dict(allow=["."], root=".", callable_by=cb)),
+        ("kernel_store", "file_bridge.tools", dict(allow=["."], root=".")),
         ("totals", "file_bridge.tools", dict(allow=["."], root=".")),
         ("sched", "scheduler.tools", {}),
         ("wsb", "ws_bridge.tools", dict(url="ws://127.0.0.1:9/nowhere")),
@@ -114,8 +116,8 @@ def roster(stub_url: str, cb: dict, interp: str) -> list:
         *ai_pair("ai", VLLM,
                  ai(**vllm(stub_url, context_window=CTX_WINDOW), sampling={"x": 1, "y": None},
               context_async=True, output_reserve=CTX_RESERVE,
-              can_call={"readings": "*", "totals": "*", "runner": "*",
-                        "kernel_store": "*", ROOT_ID: "*"})),
+              can={"readings": ALL, "totals": ALL, "runner": ALL,
+                   "kernel_store": ALL, ROOT_ID: line_call("reflect")})),
     ]
 
 
@@ -303,19 +305,18 @@ def run(ctx) -> None:
     stub.start(OpenAIHandler)
     stub.set_cases(CASES)
 
-    cb = {"rest": "*", "web": "*", "ws": "*", "ai": "*"}
-    agents = roster(stub.base_url(), cb, sys.executable)
-    reach = ["store"] + [a[0] for a in agents] + ["web", "rest", "ws", "ghost"]
-    k = ctx.boot(reach=reach, port=ports.take("main"))
+    agents = roster(stub.base_url(), sys.executable)
+    # ids OUTSIDE `rest`'s tree the legs call; the store and the roster live under `rest`
+    k = ctx.boot(reach=["web", "rest", "ws", "ghost"], port=ports.take("main"))
     try:
         # ══ s1 — the store first, then the roster ══
         rec.json("s1/create_store", k.create(
             parent_id=k.home, handler_module="file_bridge.tools", allow=["."], id="store", **OPEN,
-            root=".fantastic", callable_by={**BASE, **cb}))
+            root=".fantastic"))
         for aid, hm, meta in agents:
             rec.json(f"s1/create_{aid}", k.create(
                 **{"parent_id": k.home, "handler_module": hm, "id": aid,
-                   **OPEN, "callable_by": cb, **meta}))
+                   **OPEN, **meta}))
         rec.json("s1/sched_schedule", call(k, "sched", {
             "type": "schedule", "target": "readings", "payload": {"type": "list", "path": ""},
             "interval_seconds": 3600}))
@@ -325,16 +326,23 @@ def run(ctx) -> None:
         rec.json("s1/sched_history_timeout5", call(k, "sched", {"type": "history", "timeout": 5}))
         time.sleep(3.0)
 
-        la = call(k, "kernel", {"type": "list_agents"})
-        rec.json("s1/kernel_list_agents", la)
-        all_ids = [a.get("id") for a in (la.get("agents") or [])
-                   if isinstance(a, dict) and isinstance(a.get("id"), str)] \
-            if isinstance(la, dict) else []
+        # THE ID INDEX: the root's flat `reflect tree=ids`, every page (`next`).
+        pages, payload = [], {"type": "reflect", "tree": "ids"}
+        for _ in range(60):
+            la = call(k, "kernel", payload)
+            pages.append(la)
+            _key, cur = cursor_of(la, "next")
+            if cur is None:
+                break
+            payload = {"type": "reflect", "tree": "ids", "after": cur}
+        rec.json("s1/kernel_reflect_ids", pages)
+        all_ids = [x for pg in pages if isinstance(pg, dict)
+                   for x in (pg.get("tree") or []) if isinstance(x, str)]
         if not all_ids:
             # NO SUBSTITUTE DATA. Round 2 filled in a guessed id list here
             # (`parity_capture_store.py:485-487`) and every readme below was then
             # taken against the harness's imagination.
-            raise RuntimeError(f"list_agents returned no ids: {la!r}")
+            raise RuntimeError(f"reflect tree=ids returned no ids: {pages!r}")
         rec.json("s1/agent_ids_seen", all_ids)
         for aid in all_ids:
             if aid == MEMORY:
@@ -370,9 +378,10 @@ def run(ctx) -> None:
             rec.json(f"{base}/detail_full_tree_ids",
                      call(k, aid, {"type": "reflect", "detail": "full", "tree": "ids"}))
         # `after` with three TYPES on every walkable verb — the coercion item.
-        for verb, payload in (("list_agents", {}), ("ps", {}), ("ledger", {})):
+        for verb, payload in (("reflect", {"tree": "ids"}), ("ps", {}), ("ledger", {})):
+            label = "reflect_ids" if verb == "reflect" else verb
             for val, tag in ((1, "int"), ("1", "str"), (True, "bool")):
-                rec.json(f"s2/after_{verb}_{tag}",
+                rec.json(f"s2/after_{label}_{tag}",
                          call(k, "kernel", {"type": verb, "limit": 2, "after": val, **payload}))
 
         # ══ s3 — the messages digest ══
@@ -492,7 +501,8 @@ def run(ctx) -> None:
         rec.json("s4/rows_read_ai_final", call(k, MEMORY, {"type": "read", "owner": "ai"}))
 
         time.sleep(3.0)
-        for verb in ("list_agents", "ps", "ledger"):
+        rec.json("final/kernel_reflect_tree", call(k, "kernel", {"type": "reflect", "tree": "all"}))
+        for verb in ("ps", "ledger"):
             rec.json(f"final/kernel_{verb}", call(k, "kernel", {"type": verb}))
         snapshot(ctx, k, "final")
     finally:

@@ -1,6 +1,6 @@
 """kernel/recall_scale — a FRESH execution name vs the stored-call count. NO MODEL. Run SOLO.
 
-On the PACKAGED host of `RUNTIME` (python | rust), every call through
+On the PACKAGED rust host, every call through
 `web_rest`:
 
   1. FILL the kernel's memory store with `call` rows: `reflect tree=none` on a small
@@ -73,11 +73,10 @@ def main() -> int:
             bad.append(what)
 
     work = Path(tempfile.mkdtemp(prefix="e2e-recall-scale-"))
-    hk = HostKernel(spec, work, reach=[PAD])
+    hk = HostKernel(spec, work)
     hk.boot()
     try:
-        rec = hk.create(parent_id="rest", handler_module="ram_store.tools", id=PAD,
-                        callable_by={"$self": "*", "$parent": "*"})
+        rec = hk.create(parent_id="rest", handler_module="ram_store.tools", id=PAD)
         need(rec.get("id") == PAD, f"create {PAD}: {str(rec)[:160]}")
 
         local = threading.local()

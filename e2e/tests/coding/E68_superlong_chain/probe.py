@@ -47,10 +47,10 @@ TASK = (f"Read `filler_0.txt` … `filler_{N - 1}.txt` ({N} files) through `note
 
 
 async def main():
-    root, core, close = await open_kernel(prefix="coding_long_", reach=[FB, "notes", "ai_recency", "ai_fold", "cli", "user"])
+    root, core, close = await open_kernel(prefix="coding_long_", reach=[FB, "notes", "ai_recency", "ai_fold", "user"])
     try:
         plant_fillers(N, pad_to=4000)
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         reads = file_reads([f"filler_{i}.txt" for i in range(N)])
         recency, fold = await both_planted(root, core, BK, FB, TASK, reads, "report.md", arms=FOLD_ARMS, band=FIT_MANY)
         covered = {r for m in fold["msgs"] if m.get("kind") == "fold" for r in (m.get("refs") or [])}

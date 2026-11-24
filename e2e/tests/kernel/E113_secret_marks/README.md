@@ -13,6 +13,6 @@ is `bad_arg` `secret` and the refused write never runs. The checks are listed in
 
 ```sh
 cd src/lib/python
-uv run python ../../../e2e/run.py --only-free --id secret_marks       # all three
+uv run python ../../../e2e/run.py --only-free --id secret_marks
 RUNTIME=rust uv run python ../../../e2e/tests/kernel/E113_secret_marks/probe.py
 ```

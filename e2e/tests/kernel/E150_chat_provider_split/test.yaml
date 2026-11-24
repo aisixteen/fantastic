@@ -3,7 +3,7 @@
 # second Rust kernel for the provider across a ws_bridge), driven over web_rest.
 id: chat_provider_split
 group: kernel
-title: "a chat and its provider apart: the chat answers send and holds the transcript, the provider none; the chat's provider_id swapped to another provider keeps the rows; a chat without complete/watch on its provider, and a provider that does not admit the chat, are refused by name; the provider on another kernel across the bridge"
+title: "a chat and its provider apart: the chat answers send and holds the transcript, the provider none; the chat's provider_id swapped to another provider keeps the rows; a chat with no line on its provider, and one whose ancestor caps the line, are refused by name; a chat holding the line completes and the provider's record is unchanged; the provider on another kernel across the bridge (muted, #763)"
 runner: probe.py
 runtimes: [rust]
 costs: free

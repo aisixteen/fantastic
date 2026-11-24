@@ -1,22 +1,26 @@
-"""kernel/drain_lock — one kernel per directory, and a graceful stop over REST.
+"""kernel/drain_lock — one kernel per directory, and the operator's graceful stop.
 NO MODEL.
 
-The PACKAGED host of `RUNTIME` (python | rust), every call over `web_rest`:
+The PACKAGED rust host, every call over `web_rest`:
 
   1. THE LOCK: `.fantastic/lock.yaml` names the serving kernel's pid; a second
      kernel started in the same directory exits non-zero naming that pid, and the
      first keeps serving;
-  2. THE DRAIN (`shutdown_agents`) with a call in flight: new work is refused
-     `{reason:"draining"}`, the root's control surface (`ps`, `reflect`, `ledger`)
-     still answers, the call in flight is cancelled after the quiet window and its
-     REST caller gets the settlement, the ledger holds it as a dead letter that
-     `ack_deadletter` retires; work stays refused after the drain;
-  3. `kernel_stop`: acked `{type:kernel_stop, ok:true}`, the process exits 0, the
-     port closes, the lock releases (the next boot of the directory serves);
+  2. THE PROCESS VERBS ARE THE OPERATOR'S: `shutdown_agents` and `kernel_stop`
+     over REST (the `rest` leg is an agent) are each answered
+     `{reason: not_allowed, error: "<verb>: operator only"}`, and the kernel
+     keeps serving;
+  3. THE OPERATOR'S STOP (SIGTERM: drain, then a graceful shutdown) with a call
+     in flight: new work is refused `{reason:"draining"}` while the process
+     drains, the control surface (`ps`, `reflect`) still answers and `ps` lists
+     the call, the call is cancelled after the quiet window and its REST caller
+     gets the settlement, the process exits 0, the port closes, the lock
+     releases (the next boot of the directory serves);
   4. A STALE LOCK — a `lock.yaml` naming a DEAD pid — does not block a boot, nor
      does one naming a LIVE pid that holds no lock (this probe's own);
-  5. `kernel_stop` with a call in flight and no drain before it: the call's REST
-     caller still gets its settlement, and the process exits 0.
+  5. A call cancelled in flight is an unacked dead letter in its originator's
+     `ledger`, and `ack_deadletter` retires it; then the SIGTERM stop with a call
+     in flight again settles its caller and exits 0.
 """
 
 from __future__ import annotations
@@ -42,7 +46,6 @@ from helpers.verdict import verdict
 
 REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
-CB = {"$self": "*", "$parent": "*"}
 #: A drain waits out the kernel's quiet window (10 s in python) before it
 #: cancels; every wait below is bounded well past it.
 BOUND = 60.0
@@ -111,9 +114,9 @@ def main() -> int:
             bad.append(what)
 
     def boot(tag: str) -> HostKernel:
-        hk = HostKernel(spec, work, reach=["slow", "w"]).boot()
+        hk = HostKernel(spec, work).boot()
         kernels.append(hk)
-        need(hk.send("kernel", {"type": "reflect", "tree": "none"}).get("guid") is not None,
+        need(hk.send("rest", {"type": "reflect"}).get("id") == "rest",
              f"{tag}: the kernel boots and answers")
         return hk
 
@@ -125,6 +128,29 @@ def main() -> int:
         tasks = hk.send("kernel", {"type": "ps"}).get("tasks") or []
         tid = next((t["id"] for t in tasks if t.get("agent") == "slow" and t.get("verb") == "slow"), None)
         return bg, tid
+
+    def sigterm_with_call(hk: HostKernel, tag: str) -> None:
+        """The operator's stop with a call in flight: SIGTERM, watched through
+        the drain until the process exits."""
+        bg, tid = in_flight(hk)
+        need(tid is not None, f"{tag}: a slow call is in flight (task {tid})")
+        oslayer.stop_group(hk.proc.pid)
+        refused = poll(lambda: hk.proc.poll() is None
+                       and hk.send("w", {"type": "work"}, timeout=5).get("reason") == "draining",
+                       bound=BOUND)
+        need(bool(refused), f"{tag}: while draining, new work is refused {{reason: draining}}")
+        if refused and hk.proc.poll() is None:
+            ps = hk.send("kernel", {"type": "ps"}, timeout=5).get("tasks") or []
+            need(any(t.get("id") == tid for t in ps),
+                 f"{tag}: while draining, `ps` answers and lists the call in flight ({len(ps)} tasks)")
+            # the root's control surface: `rest` holds `reflect` on the root (the guid
+            # is the operator's, so the answer is checked by its id)
+            rf = hk.send("kernel", {"type": "reflect", "tree": "none"}, timeout=5)
+            need(rf.get("id") == hk.root_id,
+                 f"{tag}: while draining, the root's reflect answers: {str(rf)[:120]}")
+        out = bg.join()
+        need(out == {"cancelled": True}, f"{tag}: the in-flight call's REST caller gets the settlement: {out}")
+        stopped(hk, tag)
 
     def stopped(hk: HostKernel, tag: str) -> None:
         try:
@@ -138,7 +164,7 @@ def main() -> int:
         # 1 · the lock
         hk = boot("first boot")
         for aid in ("slow", "w"):
-            hk.create(parent_id="rest", handler_module="slow_probe.tools", id=aid, callable_by=CB)
+            hk.create(parent_id="rest", handler_module="slow_probe.tools", id=aid)
         need(lock_pid(work) == hk.pid, f"lock.yaml names the serving pid ({lock_pid(work)} vs {hk.pid})")
         log = work.parent / f"{work.name}-second.out"
         with log.open("wb") as f:
@@ -156,34 +182,18 @@ def main() -> int:
         need(hk.send("w", {"type": "work"}).get("runs") == 1, "the first kernel still serves")
         need(lock_pid(work) == hk.pid, "lock.yaml still names the first kernel")
 
-        # 2 · the drain, with a call in flight
-        bg, tid = in_flight(hk)
-        need(tid is not None, f"a slow call is in flight (task {tid})")
-        drain = Bg(hk, "kernel", {"type": "shutdown_agents"})
-        refused = poll(lambda: hk.send("w", {"type": "work"}).get("reason") == "draining")
-        need(bool(refused), "while draining, new work is refused {reason: draining}")
-        ps = hk.send("kernel", {"type": "ps"}).get("tasks") or []
-        need(any(t.get("id") == tid for t in ps), f"while draining, `ps` answers and lists the call in flight ({len(ps)} tasks)")
-        rf = hk.send("kernel", {"type": "reflect", "tree": "none"})
-        need(rf.get("guid") is not None, f"while draining, the root's reflect answers: {str(rf)[:120]}")
-        d = drain.join()
-        need(isinstance(d, dict) and d.get("drained") is True and tid in (d.get("cancelled") or []),
-             f"shutdown_agents → drained, the call in flight cancelled: {d}")
-        out = bg.join()
-        need(out == {"cancelled": True}, f"the in-flight call's REST caller gets the settlement: {out}")
-        after = hk.send("w", {"type": "work"})
-        need(after.get("reason") == "draining", f"after the drain, work is still refused: {str(after)[:160]}")
-        led = hk.send("kernel", {"type": "ledger"}).get("executions") or []
-        dl = next((e for e in led if e.get("target") == "slow" and e.get("status") == "cancelled"), None)
-        need(dl is not None and not dl.get("acked"), f"the ledger holds it as an unacked dead letter: {dl}")
-        if dl is not None:
-            a = hk.send("kernel", {"type": "ack_deadletter", "id": dl["id"]})
-            need(a.get("acked") is True, f"ack_deadletter retires it, draining or not: {a}")
+        # 2 · the process verbs are the operator's: refused over REST
+        for verb in ("shutdown_agents", "kernel_stop"):
+            r = hk.send("kernel", {"type": verb})
+            need(r == {"reason": "not_allowed", "error": f"{verb}: operator only"},
+                 f"{verb} over REST is refused, operator only: {r}")
+        need(hk.send("rest", {"type": "reflect"}).get("id") == "rest",
+             "after both refusals the kernel still answers reflect")
+        w = hk.send("w", {"type": "work"})
+        need(isinstance(w.get("runs"), int), f"after both refusals new work still runs (not draining): {w}")
 
-        # 3 · kernel_stop
-        st = hk.send("kernel", {"type": "kernel_stop"})
-        need(st == {"type": "kernel_stop", "ok": True}, f"kernel_stop is acked: {st}")
-        stopped(hk, "kernel_stop after the drain")
+        # 3 · the operator's stop (SIGTERM), with a call in flight
+        sigterm_with_call(hk, "SIGTERM with a call in flight")
         need(lock_pid(work) != hk.pid, f"the lock no longer names the stopped pid ({lock_pid(work)})")
 
         # 4 · stale locks
@@ -192,14 +202,20 @@ def main() -> int:
         hk = boot(f"a lock naming a dead pid ({gone})")
         need(lock_pid(work) == hk.pid, f"the new kernel takes the lock ({lock_pid(work)})")
         need(hk.send("w", {"type": "work"}).get("runs") == 1, "it serves new work")
-        # 5 · kernel_stop with a call in flight, no drain before it
+        # 5 · a call cancelled in flight is its originator's dead letter
         bg, tid = in_flight(hk)
         need(tid is not None, f"a slow call is in flight (task {tid})")
-        st = hk.send("kernel", {"type": "kernel_stop"})
-        need(st == {"type": "kernel_stop", "ok": True}, f"kernel_stop is acked with a call in flight: {st}")
+        c = hk.send("kernel", {"type": "cancel", "task_id": tid})
+        need(c.get("cancelled") is True, f"rest cancels its own call in flight: {c}")
         out = bg.join()
-        need(out == {"cancelled": True}, f"the in-flight call's REST caller gets the settlement: {out}")
-        stopped(hk, "kernel_stop with a call in flight")
+        need(out == {"cancelled": True}, f"the cancelled call's REST caller gets the settlement: {out}")
+        led = hk.send("kernel", {"type": "ledger"}).get("executions") or []
+        dl = next((e for e in led if e.get("target") == "slow" and e.get("status") == "cancelled"), None)
+        need(dl is not None and not dl.get("acked"), f"rest's ledger holds it as an unacked dead letter: {dl}")
+        if dl is not None:
+            a = hk.send("kernel", {"type": "ack_deadletter", "id": dl["id"]})
+            need(a.get("acked") is True, f"ack_deadletter retires it: {a}")
+        sigterm_with_call(hk, "SIGTERM with a call in flight, again")
 
         (work / ".fantastic" / "lock.yaml").write_text(yaml.safe_dump({"pid": os.getpid()}))
         hk = boot(f"a lock naming a live pid that holds no lock ({os.getpid()})")

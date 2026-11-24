@@ -3,8 +3,10 @@
 Four local OpenAI-compatible servers (`e2e/mocks/vllm.py`) play the model of a lead
 and of three workers; the kernel's own AI agents (on both runtimes:
 `ai_chat.tools` chats each naming its own `vllm_backend` provider, `provider_id`, #521) run on
-the PACKAGED host of `RUNTIME` (python | rust), every call from the test through
-`web_rest`. Tool calling is the prompt-taught `<call name>` tag grammar.
+the PACKAGED rust host, every call from the test through `web_rest`. Tool calling
+is the prompt-taught `<call name>` tag grammar. Each AI's own `can` lines are its
+only reach: `await_set` needs no line, the workers hold `report` on the lead, the
+lead holds every worker.
 
 The lead's script, one model answer per request:
 
@@ -43,6 +45,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.lines import ALL, PROVIDER, call
 from helpers.verdict import verdict
 from mocks.vllm import VllmMock
 
@@ -87,7 +90,7 @@ def main() -> int:
     lead_m = VllmMock(model="mock-lead").start()
     work_m = {w: VllmMock(model=f"mock-{w}").start() for w in WORKERS}
     work = Path(tempfile.mkdtemp(prefix="e2e-await-set-"))
-    hk = HostKernel(spec, work, reach=[LEAD, *WORKERS, *PROVS.values()]).boot()
+    hk = HostKernel(spec, work).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -95,11 +98,6 @@ def main() -> int:
         print(f"  {'ok ' if cond else 'BAD'} {what}", flush=True)
         if not cond:
             bad.append(what)
-
-    def callable_by(aid: str) -> dict:
-        r = hk.send("kernel", {"type": "list_agents"})
-        rec = next(a for a in r.get("agents") or [] if a.get("id") == aid)
-        return dict(rec.get("callable_by") or {})
 
     def turns_at_least(m: VllmMock, n: int, bound: float = 60) -> list[dict]:
         end = time.monotonic() + bound
@@ -132,15 +130,7 @@ def main() -> int:
         'All three have reported.\n<call name="done"></call>',
     ]
     try:
-        mem = callable_by("memory")
-        r = hk.send(root, {"type": "update_agent", "id": "memory",
-                           "callable_by": {**mem, LEAD: "*", **{w: "*" for w in WORKERS},
-                                           **{p: "*" for p in PROVS.values()}}})
-        need(r.get("updated") is True, f"memory accepts the AIs: {str(r)[:200]}")
-        r = hk.send(root, {"type": "update_agent", "id": root,
-                           "callable_by": {**callable_by(root), LEAD: ["await_set"]}})
-        need(r.get("updated") is True, f"the root accepts the lead's await_set: {str(r)[:200]}")
-        def make(aid, mock, model, can, by):
+        def make(aid, mock, model, can):
             fields = dict(endpoint=mock.url, model=model,
                           context_window=262144, memory_store_id="memory")
             # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it:
@@ -148,26 +138,23 @@ def main() -> int:
             pv = PROVS[aid]
             rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=pv,
                             kv_slots=4, kv_overflow="evict",
-                            can_call={"$self": "*", "memory": "*"},
-                            callable_by={"$self": "*", "$parent": "*", aid: "*"},
+                            can={"memory": ALL},
                             **fields)
             need(rec.get("id") == pv, f"create {pv}: {str(rec)[:200]}")
             rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
                             provider_id=pv, model=model, max_tokens=8192,
                             context_window=262144, memory_store_id="memory",
-                            can_call={**can, pv: ["complete", "watch", "reflect"]}, callable_by=by)
+                            can={**can, pv: PROVIDER})
             need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")
 
+        # the lead first: the workers' lines name it
+        make(LEAD, lead_m, "mock-lead", {"memory": ALL})
         for w in WORKERS:
-            make(w, work_m[w], f"mock-{w}",
-                 {"$self": "*", "memory": "*", LEAD: ["report"]},
-                 {"$self": "*", "$parent": "*", "rest": "*"})
-        make(LEAD, lead_m, "mock-lead",
-             {"$self": "*", "memory": "*", root: ["await_set"], **{w: "*" for w in WORKERS}},
-             {"$self": "*", "$parent": "*", "rest": "*", **{w: ["report"] for w in WORKERS}})
-        for w in WORKERS:  # the lead may call each worker: both ends say yes
-            cb = callable_by(w)
-            hk.send(root, {"type": "update_agent", "id": w, "callable_by": {**cb, LEAD: "*"}})
+            make(w, work_m[w], f"mock-{w}", {"memory": ALL, LEAD: call("report")})
+        # then the lead's lines on every worker, now that they exist
+        r = hk.send(root, {"type": "update_agent", "id": LEAD, "can": {
+            "memory": ALL, **{w: ALL for w in WORKERS}, PROVS[LEAD]: PROVIDER}})
+        need(r.get("updated") is True, f"the lead's lines on the workers: {str(r)[:200]}")
 
         lead_m.reply(*lead_script)
         for i, w in enumerate(WORKERS):

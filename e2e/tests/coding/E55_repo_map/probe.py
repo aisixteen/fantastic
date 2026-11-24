@@ -28,7 +28,7 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, e2e_root, human, verdict
+from helpers import Limits, connect, drive, e2e_root, human, human_line, lines, verdict
 from helpers.kernel import open_kernel, home
 
 BK = _resolve_backend()
@@ -45,7 +45,7 @@ TASK = (
     "`repo/aider/coders/` that defines a class, write one line "
     "`<filename>: <first class name defined in it>` (the class that appears "
     "first in the file; skip files defining no class). Build the map with the "
-    "searcher `searcher` (`grep`/`find` — reflect it; start a job with "
+    "searcher `searcher` (`grep`/`find` — reflect it: its description names what it may run; start a job with "
     "{type:'start', command, args}, poll {type:'status', job_id}) and write "
     "the finished map as `map.md` through the editor `notes`, one line per "
     "file, nothing else. Then end your run by calling done — emit <call name=\"done\"></call>."
@@ -76,7 +76,7 @@ def _plant() -> tuple[dict[str, str], str]:
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_rm_", reach=[XID, FB, "notes", "ai", "cli", "user"]
+        prefix="coding_rm_", reach=[XID, FB, "notes", "ai", "user"]
     )
     try:
         truth, synth_name = _plant()
@@ -88,7 +88,6 @@ async def main():
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent",
@@ -96,7 +95,6 @@ async def main():
                 "id": "notes",
                 "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent",
@@ -107,7 +105,7 @@ async def main():
                 "inherit_env": ["PATH", "HOME"],
                 "ingress_rule": "allow_all_ingress",
                 "allowed": ["grep .*", "find .*"],
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
+                "description": lines.runs(["grep .*", "find .*"]),
             },
         ):
             r = await _call(root, root.id, payload)
@@ -115,17 +113,17 @@ async def main():
 
         # THE HUMAN who wants the work done — the task comes FROM here.
 
-        await human(root)
+        await human(root, ai=[])
 
         conn = await connect(
             root,
             core,
             BK,
-            can_call={XID: "*", "notes": "*", "cli": "*", "user": "*"},
-            callable_by={"user": "*"},
+            can={XID: lines.ALL, "notes": lines.ALL, "user": lines.ALL},
             limits=Limits.from_env(os.environ),
             record={"file_bridge_id": FB},
         )
+        await human_line(root, conn.id)
         await drive(conn, TASK, client_id="rm", via="user")
         transcript = "".join(conn.proxy.transcript)
         await conn.close()

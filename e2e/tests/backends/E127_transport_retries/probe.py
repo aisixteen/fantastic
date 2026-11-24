@@ -1,7 +1,7 @@
 """backends/transport_retries — a dropped link is retried visibly, then the turn works. NO MODEL.
 
 The vllm mock (`e2e/mocks/vllm.py`) answers HTTP 503, and the kernel's own `vllm_backend`
-agent on the PACKAGED host of `RUNTIME` (python), every call through `web_rest`, retries:
+agent on the PACKAGED host of `RUNTIME` (rust), every call through `web_rest`, retries:
 
   A. one 503, then an answer: two requests, the second carries the `[retry 1/2]` notice
      row, a `retrying` status (attempt 1 of 2, the error naming 503) is emitted, the
@@ -12,6 +12,8 @@ agent on the PACKAGED host of `RUNTIME` (python), every call through `web_rest`,
      status;
   C. a 400 (a model-side refusal) and `transport_retries: 0` on a 503: two requests each
      (the failed turn and its own retry), no `retrying` status.
+
+Lines: the provider holds `memory`, the chat `memory` and its provider line.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
 from helpers.host.ws import WSWatcher
+from helpers.lines import ALL, PROVIDER
 from helpers.verdict import verdict
 from mocks.vllm import VllmMock
 
@@ -77,7 +80,7 @@ def main() -> int:
     spec = ensure_runtime(REPO, name)
     m = VllmMock(model=MODEL).start()
     work = Path(tempfile.mkdtemp(prefix="e2e-transport-retries-"))
-    hk = HostKernel(spec, work, reach=[AI, PROV]).boot()
+    hk = HostKernel(spec, work).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -85,11 +88,6 @@ def main() -> int:
         print(f"  {'ok ' if cond else 'BAD'} {what}", flush=True)
         if not cond:
             bad.append(what)
-
-    def callable_by(aid: str) -> dict:
-        r = hk.send("kernel", {"type": "list_agents"})
-        rec = next(a for a in r.get("agents") or [] if a.get("id") == aid)
-        return dict(rec.get("callable_by") or {})
 
     def retrying(events: list) -> list[dict]:
         return [e for e in list(events) if e.get("type") == "status" and e.get("phase") == "retrying"]
@@ -130,22 +128,17 @@ def main() -> int:
                 and "[retry " in str(r.get("head") or r.get("content"))]
 
     try:
-        r = hk.send(root, {"type": "update_agent", "id": "memory",
-                           "callable_by": {**callable_by("memory"), AI: "*", PROV: "*"}})
-        need(r.get("updated") is True, f"memory accepts the AI: {str(r)[:200]}")
         # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it
         rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
                         endpoint=m.url, model=MODEL,
                         context_window=262144, kv_slots=4, kv_overflow="evict",
-                        memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
-                        callable_by={"$self": "*", "$parent": "*", AI: "*"})
+                        memory_store_id="memory", can={"memory": ALL})
         need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
                         provider_id=PROV, model=MODEL, max_tokens=8192,
                         context_window=262144, memory_store_id="memory",
                         transport_retries=2, misfire_limit=2,
-                        can_call={"$self": "*", "memory": "*", PROV: ["complete", "watch", "reflect"]},
-                        callable_by={"$self": "*", "$parent": "*", "rest": "*", "ws": "*"})
+                        can={"memory": ALL, PROV: PROVIDER})
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:200]}")
 
         # A · one 503, then an answer

@@ -36,12 +36,12 @@ MANIFEST = """agents:
     handler_module: file_bridge.tools
     allow: ['.']
     root: notes
-    can_call:
-      memory: [read]
+    can:
+      memory: {call: [read]}
 """
 
 #: `SCR/rpm_run.py` S1–S7 — malformed and mis-parented trees, hydrated by a
-#: one-shot `kernel list_agents`. Each is a question about what a kernel does
+#: one-shot `kernel reflect tree=all` (the operator). Each is a question about what a kernel does
 #: with a tree it did not write.
 def rpm_tree(root_id: str, shape: str, F: Path) -> None:
     def w(p: Path, s: str) -> None:
@@ -380,7 +380,7 @@ def run(ctx) -> None:  # noqa: C901 - a case list is a list
         d = Daemon(cli, wd, use_pty=True)
         time.sleep(4)
         typed = []
-        for line in ("list", "@kernel list_agents", "@kernel reflect tree=none", "@ghost reflect",
+        for line in ("list", "@kernel reflect tree=all", "@kernel reflect tree=none", "@ghost reflect",
                      "bogus", "exit"):
             ent = {"harness": {"t": round(time.time() - d.t0, 2)}, "line": line,
                    "process_alive": d.p.poll() is None}
@@ -407,17 +407,17 @@ def run(ctx) -> None:  # noqa: C901 - a case list is a list
         simple("reflect_kv_only", ["reflect", "tree=none", "bundles=ids"])
         simple("reflect_readme", ["reflect", "readme=true", "tree=none"])
         simple("reflect_seeded_twice", ["reflect", "kernel", "tree=ids"], pre=seed_root)
-        simple("kernel_list_agents", ["kernel", "list_agents"])
+        simple("kernel_reflect_tree", ["kernel", "reflect", "tree=all"])
         simple("call_create_coerce_no_parent", ["kernel", "create_agent", *COERCE],
-               steps_after=[["reflect", "coerced"], ["kernel", "list_agents"]])
+               steps_after=[["reflect", "coerced"], ["kernel", "reflect", "tree=all"]])
         for parent in ("kernel", "kernel_state", "core"):
             simple(f"call_create_coerce_parent_{parent}",
                    ["kernel", "create_agent", f"parent_id={parent}", *COERCE],
-                   steps_after=[["reflect", "coerced"], ["kernel", "list_agents"]])
+                   steps_after=[["reflect", "coerced"], ["kernel", "reflect", "tree=all"]])
         simple("call_reflect_kv", ["kernel", "reflect", "tree=none", "bundles=none", "readme=false"])
         simple("call_verb_only", ["kernel_state", "reflect"])
         simple("init_static_loader", ["init", "static_loader", "x.yaml"], pre=write_manifest,
-               steps_after=[["kernel", "list_agents"], ["reflect", "static_loader"],
+               steps_after=[["kernel", "reflect", "tree=all"], ["reflect", "static_loader"],
                             ["init", "static_loader", "x.yaml"]])
         simple("init_usage", ["init", "static_loader"])
         simple("init_no_args", ["init"])
@@ -431,7 +431,7 @@ def run(ctx) -> None:  # noqa: C901 - a case list is a list
         simple("unknown_agent_verb", ["ghost", "reflect"])
         simple("unknown_agent_verb_kv", ["ghost", "frobnicate", "k=v"])
         simple("known_agent_unknown_verb", ["kernel", "frobnicate"])
-        simple("ledger_cap_flag", ["--ledger-cap", "5", "kernel", "list_agents"])
+        simple("ledger_cap_flag", ["--ledger-cap", "5", "kernel", "reflect", "tree=all"])
 
         def stale_lock(wd: Path) -> dict:
             (wd / ".fantastic").mkdir()
@@ -477,15 +477,15 @@ def run(ctx) -> None:  # noqa: C901 - a case list is a list
                        "parent_id": log["root_id"], "description": "hydrated by hand"})
             return {"seed_root_id": log["root_id"]}
 
-        simple("stale_lock_call", ["kernel", "list_agents"], pre=stale_lock)
-        simple("zero_lock_call", ["kernel", "list_agents"], pre=zero_lock)
+        simple("stale_lock_call", ["kernel", "reflect", "tree=all"], pre=stale_lock)
+        simple("zero_lock_call", ["kernel", "reflect", "tree=all"], pre=zero_lock)
         simple("dotenv_reflect", ["reflect", "tree=none"], pre=dotenv)
-        simple("corrupt_root_list", ["kernel", "list_agents"], pre=corrupt_root)
-        simple("corrupt_child_list", ["kernel", "list_agents"], pre=corrupt_child)
-        simple("nope_bundle_list", ["kernel", "list_agents"], pre=nope_bundle,
+        simple("corrupt_root_list", ["kernel", "reflect", "tree=all"], pre=corrupt_root)
+        simple("corrupt_child_list", ["kernel", "reflect", "tree=all"], pre=corrupt_child)
+        simple("nope_bundle_list", ["kernel", "reflect", "tree=all"], pre=nope_bundle,
                steps_after=[["reflect", "nope"]])
         simple("memo_hydrated_reflect", ["reflect", "memo"], pre=memo_tree,
-               steps_after=[["kernel", "list_agents"]])
+               steps_after=[["kernel", "reflect", "tree=all"]])
 
         # ── the rpm trees: a tree the kernel did not write ──
         for shape in ("S1", "S2", "S3", "S4", "S5", "S6", "S7"):
@@ -496,7 +496,7 @@ def run(ctx) -> None:  # noqa: C901 - a case list is a list
                 return {"shape": shape, "files": sorted(
                     str(p.relative_to(wd)) for p in (wd / ".fantastic").rglob("*") if p.is_file())}
 
-            simple(f"rpm_{shape}_list_agents", ["kernel", "list_agents"], pre=build)
+            simple(f"rpm_{shape}_reflect_tree", ["kernel", "reflect", "tree=all"], pre=build)
 
         # `SCR/rpm_daemon.py`: a hand-written store+sload tree, booted as a DAEMON,
         # so the hydration runs in the kernel's own boot rather than a one-shot.
@@ -539,7 +539,7 @@ def run(ctx) -> None:  # noqa: C901 - a case list is a list
         time.sleep(2)
         running = snapshot(wd)
         steps = []
-        for a in (["kernel", "list_agents"],
+        for a in (["kernel", "reflect", "tree=all"],
                   ["kernel", "create_agent", "handler_module=file_bridge.tools", "id=late"],
                   ["init", "static_loader", "x.yaml"], ["reflect", "kernel", "tree=ids"],
                   ["reflect"], []):

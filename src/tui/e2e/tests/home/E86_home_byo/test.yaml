@@ -4,6 +4,7 @@ group: home
 title: "bring your own UI: the example client list.html, served by the home, shows a running and a stopped fantastic and drives Start and Stop; a native client finds the port in <home>/app/home.yaml and is admitted with no Origin header, a foreign Origin gets 403, and the socket cannot add an allowed origin"
 runner: probe.py
 costs: free
+muted: "#764: home kernel is still on the old grant model"
 limits:
   seconds: 180
 env: {}

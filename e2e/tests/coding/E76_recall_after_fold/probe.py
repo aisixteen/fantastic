@@ -39,11 +39,11 @@ N = 16
 
 
 async def main():
-    root, core, close = await open_kernel(prefix="coding_raf_", reach=[FB, "notes", "ai_recency", AID, "cli", "user"])
+    root, core, close = await open_kernel(prefix="coding_raf_", reach=[FB, "notes", "ai_recency", AID, "user"])
     try:
         marker = secrets.token_hex(4)
         plant_fillers(N, marker_in=1, marker=marker)
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         task = (f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN, noting anything unusual. Then "
                 f"write `report.md` through `notes`: list every file, and add `marker: <filename> <value>` for the one "
                 f"file that carried an audit marker (grep for it if it is no longer in view). Then {DONE}.")

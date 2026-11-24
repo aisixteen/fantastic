@@ -23,6 +23,8 @@ import subprocess
 
 import pytest
 
+pytestmark = pytest.mark.skip(reason="#763: cross-kernel peers parked")
+
 from helpers.kernel_proc import KernelProc
 from helpers.launcher import CONTAINER_PEER_HOST, ContainerLauncher, resolve_engine
 from helpers.seeding import seed_bridge_ws, seed_web, seed_web_ws

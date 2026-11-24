@@ -49,7 +49,7 @@ SQUEEZED = 9000  # the floor: below it the system block alone trips `too_small`
 
 
 async def main():
-    root, core, close = await open_kernel(prefix="coding_ufold_", reach=[FB, "notes", "ai_recency", "ai_fold", "cli", "user"])
+    root, core, close = await open_kernel(prefix="coding_ufold_", reach=[FB, "notes", "ai_recency", "ai_fold", "user"])
     try:
         tok = {k: secrets.token_hex(4) for k in (*KEYS, "first", "last")}
         rules = rules_for(tok, KEYS)
@@ -57,7 +57,7 @@ async def main():
         plant_fillers(N, pad_to=3000)
         task = (f"Read `rules.md`, then `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN. Then write "
                 f"`report.md` through `notes` listing every filler, obeying every rule. Then {DONE}.")
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         results = []
         reads = file_reads(["rules.md"] + [f"filler_{i}.txt" for i in range(N)])
         for aid, strategy, extra in FOLD_ARMS:

@@ -2,7 +2,7 @@
 (#533). NO MODEL.
 
 A scripted OpenAI-compatible server fails the way a provider does, for the kernel's
-own `vllm_backend` agent (ai_core) on the PACKAGED host of RUNTIME (python | rust):
+own `vllm_backend` agent (ai_core) on the PACKAGED rust host:
 
   1. an HTTP 500 error reply, then a plain `done`: request 2 is the agent's own next
      turn, its last user turn carries `[turn failed]` and the error; the history
@@ -27,6 +27,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.lines import ALL, PROVIDER
 from helpers.verdict import verdict
 from mocks import DONE
 from mocks.vllm import VllmMock
@@ -74,7 +75,7 @@ def main() -> int:
     spec = ensure_runtime(REPO, name)
     m = CuttingVllm(model=MODEL).start()
     work = Path(tempfile.mkdtemp(prefix="e2e-failed-turn-"))
-    hk = HostKernel(spec, work, reach=[AI, PROV]).boot()
+    hk = HostKernel(spec, work).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -82,11 +83,6 @@ def main() -> int:
         print(f"  {'ok ' if cond else 'BAD'} {what}", flush=True)
         if not cond:
             bad.append(what)
-
-    def callable_by(aid: str) -> dict:
-        r = hk.send("kernel", {"type": "list_agents"})
-        rec = next(a for a in r.get("agents") or [] if a.get("id") == aid)
-        return dict(rec.get("callable_by") or {})
 
     def turns_at_least(n: int, bound: float = 60) -> list[dict]:
         end = time.monotonic() + bound
@@ -115,21 +111,16 @@ def main() -> int:
         need("chat's verb" not in str(out), f"the send reached the chat: {str(out)[:160]}")
 
     try:
-        r = hk.send(root, {"type": "update_agent", "id": "memory",
-                           "callable_by": {**callable_by("memory"), AI: "*", PROV: "*"}})
-        need(r.get("updated") is True, f"memory accepts the AI: {str(r)[:200]}")
         # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it
         rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
                         endpoint=m.url, model=MODEL,
                         context_window=262144, kv_slots=4, kv_overflow="evict",
-                        memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
-                        callable_by={"$self": "*", "$parent": "*", AI: "*"})
+                        memory_store_id="memory", can={"memory": ALL})
         need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
                         provider_id=PROV, model=MODEL, max_tokens=8192,
                         context_window=262144, memory_store_id="memory",
-                        can_call={"$self": "*", "memory": "*", PROV: ["complete", "watch", "reflect"]},
-                        callable_by={"$self": "*", "$parent": "*", "rest": "*"})
+                        can={"memory": ALL, PROV: PROVIDER})
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:200]}")
 
         # ── 1 · an error reply ────────────────────────────────────────────

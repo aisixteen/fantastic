@@ -31,6 +31,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.lines import ALL, PROVIDER, create, is_unknown
 from helpers.verdict import verdict
 from mocks.vllm import VllmMock
 
@@ -57,7 +58,7 @@ def main() -> int:
     spec = ensure_runtime(REPO, name)
     work = Path(tempfile.mkdtemp(prefix="e2e-payload-routing-"))
     m = VllmMock(model=MODEL).start()
-    hk = HostKernel(spec, work, reach=[AI, PROV]).boot()
+    hk = HostKernel(spec, work).boot()
     bad: list[str] = []
 
     def need(cond: bool, what: str) -> None:
@@ -83,14 +84,10 @@ def main() -> int:
             time.sleep(0.05)
         return False
 
-    def callable_by(aid: str) -> dict:
-        r = hk.send("kernel", {"type": "list_agents"})
-        rec = next(a for a in r.get("agents") or [] if a.get("id") == aid)
-        return dict(rec.get("callable_by") or {})
-
     def record(aid: str) -> dict:
-        r = hk.send("kernel", {"type": "list_agents"})
-        return next((a for a in r.get("agents") or [] if a.get("id") == aid), {})
+        """`aid`'s record (reflect); `{}` on the unknown answer (a missing id)."""
+        r = hk.send(aid, {"type": "reflect"})
+        return {} if not isinstance(r, dict) or is_unknown(r, aid) else r
 
     def made(aid: str, extra: str) -> str:
         return (f"<type>create_agent</type><handler_module>ram_store.tools</handler_module>"
@@ -102,20 +99,18 @@ def main() -> int:
               f"{made(MADE2, '')}</call>")
     script = [routed, inline, f"Saw both. {DONE}"]
     try:
-        r = hk.send(hk.root_id, {"type": "update_agent", "id": "memory",
-                                 "callable_by": {**callable_by("memory"), AI: "*", PROV: "*"}})
-        need(r.get("updated") is True, f"memory accepts the AI: {str(r)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
                         endpoint=m.url, model=MODEL,
                         context_window=262144, kv_slots=4, kv_overflow="evict",
-                        memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
-                        callable_by={"$self": "*", "$parent": "*", AI: "*"})
+                        memory_store_id="memory", can={"memory": ALL})
         need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
                         provider_id=PROV, model=MODEL, max_tokens=8192,
                         context_window=262144, memory_store_id="memory",
-                        can_call={"$self": "*", "memory": "*", **{hk.root_id: ["create_agent"]}, PROV: ["complete", "watch"]},
-                        callable_by={"$self": "*", "$parent": "*", "rest": "*"})
+                        # the AI may create exactly these two ids under `rest`, as ram stores;
+                        # `rest` hands the line out from its own `create *` on itself
+                        can={"rest": create((MADE, MADE2), {"ram_store.tools": {"*": "*"}}),
+                             "memory": ALL, PROV: PROVIDER})
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:200]}")
 
         m.reply(*script)

@@ -2,10 +2,11 @@
 
 A scripted Responses endpoint (`runners/_responses_stub.py`: every turn answers
 `done`, every request body recorded — the system block is its `instructions`) and,
-on the PACKAGED host of `RUNTIME` (python | rust), every call through
+on the PACKAGED host of `RUNTIME` (rust), every call through
 `web_rest`: a `file_bridge` exposing `prompt.md` and an AI agent whose record names
 `file_bridge_id` + `system_prompt_file` (a path on it). The agent reads the file
-THROUGH the bridge, as itself (both grant halves explicit), and watches it with
+THROUGH the bridge, as itself (its own `pf` line; the bridge keeps no list of
+callers), and watches it with
 `watch_path`. Not set → nothing looked up, the default block; set and unusable →
 the turn FAILS loud (`reason: invalid_meta`), the model is never called:
 
@@ -19,11 +20,17 @@ the turn FAILS loud (`reason: invalid_meta`), the model is never called:
   6. the file deleted → the turn fails naming the path (and reflect's
      `system_prompt_file_error` says it); written again → the file once more, the
      error gone;
-  7. a bridge that does not admit the agent → the turn fails naming the refused
-     verb, nothing of the file reaches the model;
+  7. a bridge the agent holds no line on → the turn fails with the unknown answer
+     for the bridge, nothing of the file reaches the model; the line written into
+     the agent's `can` → the file reads (the bridge cannot block it);
   8. a path with no `file_bridge_id` → the turn fails; `file_bridge_id` alone →
      the default block;
   9. a malformed value is refused at the write.
+
+Lines: the provider holds `memory` and `creds: get`, the chat `memory`, its `pf`
+line and its provider line. A sibling `user_probe` holding only a `pf` line gets
+the unknown answer from `creds`, and its `reflect` of `pf` lists only the verbs
+its line names.
 """
 
 from __future__ import annotations
@@ -40,6 +47,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, free_port, runtime
+from helpers.lines import ALL, GET, PROVIDER, call, is_unknown
 from helpers.verdict import verdict
 from runners._responses_stub import ResponsesStub
 
@@ -49,6 +57,8 @@ KEY = "spf-e2e-" + secrets.token_hex(12)
 KEY_VAR = "E2E_SPF_KEY"
 FILE_VERBS = ["read_stream", "watch_path", "unwatch_path", "watch"]
 PATH = "prompt.md"
+#: A sibling `user_probe` under `rest` holding only a `pf` line.
+READER = "pf_reader"
 
 
 def main() -> int:
@@ -59,9 +69,11 @@ def main() -> int:
     os.environ[KEY_VAR] = KEY  # the STORE reads it (env backend), never a record
     work = Path(tempfile.mkdtemp(prefix="e2e-system-prompt-file-"))
     prompt = work / "prompt.md"
-    hk = HostKernel(spec, work, reach=["ai", "ai_provider", "pf", "pf_sealed"]).boot()
+    hk = HostKernel(spec, work).boot()
     root = hk.root_id
     bad: list[str] = []
+    #: the chat's lines: its store, the prompt bridge (read + watch), its provider
+    AI_CAN = {"memory": ALL, "pf": call(*FILE_VERBS), "ai_provider": PROVIDER}
 
     def need(cond: bool, what: str) -> None:
         print(f"  {'ok ' if cond else 'BAD'} {what}", flush=True)
@@ -71,10 +83,12 @@ def main() -> int:
     def update(aid: str, **fields) -> dict:
         return hk.send(root, {"type": "update_agent", "id": aid, **fields})
 
-    def callable_by(aid: str) -> dict:
-        r = hk.send("kernel", {"type": "list_agents"})
-        rec = next(a for a in r.get("agents") or [] if a.get("id") == aid)
-        return dict(rec.get("callable_by") or {})
+    def via(src: str, target: str, payload: dict) -> dict:
+        """`src` sends `payload` to `target` AS ITSELF; the onward result."""
+        r = hk.send(src, {"type": "send", "target": target, "payload": payload})
+        if "sent" not in r:
+            return {"error": f"relay {src} refused: {str(r)[:200]}", "relay": True}
+        return r.get("result") or {}
 
     def turn() -> str:
         """One `send`; the system block the model got for it."""
@@ -131,18 +145,14 @@ def main() -> int:
         return hk.send("ai", {"type": "reflect"}).get("system_prompt_file_error")
 
     try:
-        # the key's ref, pinned to the stub's host; creds and memory accept the provider (the key
-        # is its), memory accepts the chat too
+        # the key's ref, pinned to the stub's host; the provider holds the `creds` line
         r = update(
             "creds",
             refs={"stub": {"host": f"127.0.0.1:{stub.port}", "env": {"api_key": KEY_VAR}}},
-            callable_by={**callable_by("creds"), "ai_provider": ["get"]},
         )
-        need(r.get("updated") is True, f"creds: the stub ref + ai_provider: {str(r)[:200]}")
-        r = update("memory", callable_by={**callable_by("memory"), "ai": "*", "ai_provider": "*"})
-        need(r.get("updated") is True, f"memory accepts ai: {str(r)[:200]}")
+        need(r.get("updated") is True, f"creds: the stub ref: {str(r)[:200]}")
 
-        # the bridge: exposes prompt.md, admits the AI for the read + watch verbs
+        # the bridge: exposes prompt.md; it keeps no list of callers
         prompt.write_text("ROLE-ONE store={store} {nope}\n")
         rec = hk.create(
             parent_id="rest",
@@ -150,9 +160,23 @@ def main() -> int:
             id="pf",
             allow=["prompt.md"],
             ingress_rule="allow_all_ingress",
-            callable_by={"$self": "*", "$parent": "*", "ai": FILE_VERBS},
         )
         need(rec.get("id") == "pf", f"create pf: {str(rec)[:200]}")
+        # a sibling holding only a `pf` line (written after pf exists): no line on the key store
+        rec = hk.create(parent_id="rest", handler_module="user_probe.tools", id=READER,
+                        can={"pf": call(*FILE_VERBS)})
+        need(rec.get("id") == READER, f"create {READER}: {str(rec)[:200]}")
+        got = via(READER, "creds", {"type": "get", "ref": "stub"})
+        need(is_unknown(got, "creds") and KEY not in str(got),
+             f"{READER} holds no `creds` line: the store answers it unknown: {str(got)[:200]}")
+        # its reflect of pf lists only the verbs its line names
+        got = via(READER, "pf", {"type": "reflect", "part": "docs"})
+        shown = got.get("verbs") if isinstance(got.get("verbs"), dict) else {}
+        # `watch` (the event subscription) is gated as a verb but is no declared
+        # verb of the bridge, so the docs list the other three
+        need(set(shown) == set(FILE_VERBS) - {"watch"},
+             f"{READER}'s reflect of pf lists only its line's verbs: {sorted(shown)} "
+             f"({str(got)[:200] if not shown else ''})")
         # the provider (endpoint, key) and the chat `ai` naming it: the file and its bridge are the chat's
         rec = hk.create(
             parent_id="rest",
@@ -162,8 +186,7 @@ def main() -> int:
             model="stub-model",
             credentials={"store": "creds", "ref": "stub"},
             memory_store_id="memory",
-            can_call={"$self": "*", "memory": "*", "creds": ["get"]},
-            callable_by={"$self": "*", "$parent": "*", "ai": ["complete", "watch", "reflect"]},
+            can={"memory": ALL, "creds": GET},
         )
         need(rec.get("id") == "ai_provider", f"create ai_provider: {str(rec)[:200]}")
         rec = hk.create(
@@ -173,16 +196,12 @@ def main() -> int:
             provider_id="ai_provider",
             model="stub-model",
             memory_store_id="memory",
-            can_call={
-                "$self": "*",
-                "memory": "*",
-                root: ["reflect"],
-                "pf": FILE_VERBS,
-                "ai_provider": ["complete", "watch", "reflect"],
-            },
-            callable_by={"$self": "*", "$parent": "*", "rest": "*"},
+            can=AI_CAN,
         )
         need(rec.get("id") == "ai", f"create ai: {str(rec)[:200]}")
+        held = hk.send("ai", {"type": "reflect"}).get("can") or {}
+        need(held.get("pf") == call(*FILE_VERBS),
+             f"ai's record holds exactly its pf line: {held.get('pf')!r}")
 
         # 9 · a malformed value is refused at the write
         for field, v in (
@@ -270,26 +289,32 @@ def main() -> int:
         need(b == "AGAIN\n", f"written again: the file once more: {b[:80]!r}")
         need(reflect_error() is None, "the error is gone once a read succeeds")
 
-        # 7 · a bridge that does not admit the AI: nothing of the file is read
+        # 7 · a bridge the AI holds no line on: nothing of the file is read
         (work / "sealed.md").write_text("SECRET-ROLE\n")
-        hk.create(
+        rec = hk.create(
             parent_id="rest",
             handler_module="file_bridge.tools",
             id="pf_sealed",
             allow=["sealed.md"],
             ingress_rule="allow_all_ingress",
-            callable_by={"$self": "*", "$parent": "*"},
         )
-        cc = {"$self": "*", "memory": "*", root: ["reflect"], "ai_provider": ["complete", "watch", "reflect"],
-              "pf": FILE_VERBS, "pf_sealed": FILE_VERBS}
-        update("ai", can_call=cc, file_bridge_id="pf_sealed", system_prompt_file="sealed.md")
+        need(rec.get("id") == "pf_sealed", f"create pf_sealed: {str(rec)[:200]}")
+        need("pf_sealed" not in (hk.send("ai", {"type": "reflect"}).get("can") or {}),
+             "ai holds no line on pf_sealed")
+        r = update("ai", file_bridge_id="pf_sealed", system_prompt_file="sealed.md")
+        need(r.get("updated") is True, f"ai names pf_sealed: {str(r)[:200]}")
         r = failed_turn()
         need(
             r.get("reason") == "invalid_meta"
-            and "watch_path" in str(r.get("error"))
+            and "no agent 'pf_sealed'" in str(r.get("error"))
             and "SECRET-ROLE" not in str(r),
-            f"an ungranted bridge: the turn fails naming the refused verb: {str(r)[:200]}",
+            f"no line on the bridge: the turn fails with the unknown answer: {str(r)[:200]}",
         )
+        # the line written into the AI's own `can`: the file reads (the bridge cannot block)
+        r = update("ai", can={**AI_CAN, "pf_sealed": call(*FILE_VERBS)})
+        need(r.get("updated") is True, f"ai's can gains the pf_sealed line: {str(r)[:200]}")
+        b = turn_until(lambda s: s == "SECRET-ROLE\n")
+        need(b == "SECRET-ROLE\n", f"with the line, the sealed file is the block: {b[:80]!r}")
     finally:
         hk.close()
         stub.stop()

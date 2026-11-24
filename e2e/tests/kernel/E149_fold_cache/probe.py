@@ -16,11 +16,17 @@ caching.rs:182-219, Python ai_core/caching.py:117-149, set only when `caching.ma
 anthropic_backend/provider.py `to_wire`/`body`): a marked row's last block carries
 cache_control {"type":"ephemeral"}, a marked system message becomes `system: [{…, cache_control}]`.
 The vllm and ollama plugs strip the flag from the wire (#669), so Part B runs the marked chat
-on `anthropic_backend` and the Anthropic mock, in both runtimes (the key is a mock key in the
-creds store's env backend); Rust: `ai_chat.tools` + that provider, Python: the backend itself.
+(`ai_chat.tools`) on an `anthropic_backend` provider and the Anthropic mock (the key is a mock
+key in the creds store's env backend; only that provider holds a `get` line on `creds`).
 
 A test-only folder bundle `bigdoc` (written at runtime, as E117) supplies one verb doc over
-64,000 chars; no stock docs reply is that large.
+64,000 chars, read by `reflect bigdoc_1 part=docs tier=detailed` on an instance (no stock docs
+reply is that large). A `reflect` reply never folds (history_view.rs `block_folds`: whole
+state, superseded instead): it stays whole in every later request, while the read reply and
+the recall reply fold.
+
+The AIs reach `files`, `memory` and `bigdoc_1` by their own `can` lines; an AI with no
+line on `creds` gets the unknown answer from it.
 """
 
 from __future__ import annotations
@@ -40,6 +46,7 @@ sys.path.insert(0, str(E2E))
 
 import yaml
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.lines import ALL, GET, PROVIDER, call as line_call
 from helpers.verdict import verdict
 from mocks.anthropic import AnthropicMock
 from mocks.vllm import VllmMock
@@ -49,12 +56,13 @@ RUNTIME = os.environ.get("RUNTIME", "")
 HELPER = (REPO / "src/lib/python/bundled_agents/io/py_agent/src/py_agent"
           / "fantastic_agent.py")
 AI_A, AI_B, FILES = "ai_a", "ai_b", "files"
-PROV_A, PROV_B = "prov_a", "prov_b"  # rust only
+PROV_A, PROV_B = "prov_a", "prov_b"
 MODEL = "mock-scripted"
 TOKEN = "E149-" + secrets.token_hex(4)
 NEEDLE = f"NEEDLE-{TOKEN}"
 DOCWORD = f"DOCWORD-{TOKEN}"
 BUNDLE, VERB = "bigdoc", "survey"
+BIGDOC = f"{BUNDLE}_1"  # the instance whose docs the AIs reflect
 DONE = '<call name="done"></call>'
 KEY = "mock-e2e-" + secrets.token_hex(12)
 KEY_VAR = "E2E_MOCK_KEY"
@@ -134,8 +142,7 @@ def main() -> int:
     (work / "files" / "big.txt").write_text("".join(lines))
     write_bundle(work)
     os.environ[KEY_VAR] = KEY  # the creds store reads it at boot (env backend)
-    hk = HostKernel(spec, work,
-                    reach=[AI_A, AI_B, FILES, PROV_A, PROV_B, "creds", "memory"]).boot()
+    hk = HostKernel(spec, work).boot()
     root = hk.root_id
     mA = VllmMock(model=MODEL).start()
     mB = AnthropicMock(model=MODEL).start()  # the marked chat: the anthropic wire shows cache_control
@@ -145,11 +152,6 @@ def main() -> int:
         print(f"  {'ok ' if cond else 'BAD'} {what}", flush=True)
         if not cond:
             bad.append(what)
-
-    def callable_by(aid: str) -> dict:
-        r = hk.send("kernel", {"type": "list_agents"})
-        rec = next(a for a in r.get("agents") or [] if a.get("id") == aid)
-        return dict(rec.get("callable_by") or {})
 
     def turns_at_least(m, n: int, bound: float = 90) -> list[dict]:
         end = time.monotonic() + bound
@@ -191,74 +193,54 @@ def main() -> int:
         return (f'<call name="send"><routing><target_id>{target}</target_id></routing>'
                 f'<payload>{payload}</payload></call>')
 
-    # the TEXT of the docs (`part` docs): a docs reply's fold is what is measured; the
-    # default `all` also carries every verb's schema (#719)
-    docs = call("kernel", f"<type>docs</type><of>{BUNDLE}</of><part>docs</part>")
-    docs_detailed = call("kernel", f"<type>docs</type><of>{BUNDLE}</of><tier>detailed</tier><part>docs</part>")
+    # the TEXT of the docs (`part` docs) of the bigdoc instance; the default `all` also
+    # carries every verb's schema (#719)
+    docs_detailed = call(BIGDOC, "<type>reflect</type><tier>detailed</tier><part>docs</part>")
     read = call(FILES, "<type>read</type><path>big.txt</path>")
     allb: list[dict] = []
     anchors: list[tuple[str, str, int]] = []  # (label, anchor, index in allb of first sight)
     try:
         # ── wiring ────────────────────────────────────────────────────────────
-        r = hk.send(root, {"type": "update_agent", "id": "memory",
-                           "callable_by": {**callable_by("memory"), AI_A: "*", AI_B: "*",
-                                           PROV_A: "*", PROV_B: "*"}})
-        need(r.get("updated") is True, f"memory accepts the AIs: {str(r)[:200]}")
-        r = hk.send(root, {"type": "update_agent", "id": root,
-                           "callable_by": {**callable_by(root), AI_A: ["docs"], AI_B: ["docs"]}})
-        need(r.get("updated") is True, f"the root accepts the AIs' docs: {str(r)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="file_bridge.tools", id=FILES,
-                        root="files", allow=["."], ingress_rule="allow_all_ingress",
-                        callable_by={"$self": "*", "$parent": "*", AI_A: "*", AI_B: "*"})
+                        root="files", allow=["."], ingress_rule="allow_all_ingress")
         need(rec.get("id") == FILES, f"create {FILES}: {str(rec)[:200]}")
-        can = {"$self": "*", "memory": "*", FILES: "*", root: ["docs"]}
-        by = {"$self": "*", "$parent": "*", "rest": "*"}
-        if RUNTIME == "rust":
-            mB.require_key(KEY)
-            r = hk.send(root, {"type": "update_agent", "id": "creds",
-                               "refs": {"anthropic": {"host": mB.host,
-                                                      "env": {"api_key": KEY_VAR}}},
-                               "callable_by": {**callable_by("creds"), PROV_B: ["get"]}})
-            need(r.get("updated") is True, f"creds: the ref: {str(r)[:200]}")
-            rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV_A,
-                            endpoint=mA.url, model=MODEL,
-                            context_window=262144, kv_slots=4, kv_overflow="evict",
-                            memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
-                            callable_by={"$self": "*", "$parent": "*", AI_A: "*"})
-            need(rec.get("id") == PROV_A, f"create {PROV_A}: {str(rec)[:200]}")
-            rec = hk.create(parent_id="rest", handler_module="anthropic_backend.tools", id=PROV_B,
-                            endpoint=mB.url, credentials={"store": "creds", "ref": "anthropic"},
-                            model=MODEL, context_window=262144,
-                            memory_store_id="memory",
-                            can_call={"$self": "*", "memory": "*", "creds": ["get"]},
-                            callable_by={"$self": "*", "$parent": "*", AI_B: "*"})
-            need(rec.get("id") == PROV_B, f"create {PROV_B}: {str(rec)[:200]}")
-            for aid, prov, mode in ((AI_A, PROV_A, "none"), (AI_B, PROV_B, "provider_cache")):
-                rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
-                                provider_id=prov, model=MODEL, max_tokens=8192,
-                                context_window=262144, memory_store_id="memory",
-                                caching=mode, can_call={**can, prov: ["complete", "watch", "reflect"]},
-                                callable_by=by)
-                need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")
-        else:
-            rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=AI_A,
-                            endpoint=mA.url, model=MODEL, max_tokens=8192,
-                            context_window=262144, kv_slots=4, kv_overflow="evict",
-                            memory_store_id="memory", caching="none",
-                            can_call=can, callable_by=by)
-            need(rec.get("id") == AI_A, f"create {AI_A}: {str(rec)[:200]}")
-            mB.require_key(KEY)
-            r = hk.send(root, {"type": "update_agent", "id": "creds",
-                               "refs": {"anthropic": {"host": mB.host,
-                                                      "env": {"api_key": KEY_VAR}}},
-                               "callable_by": {**callable_by("creds"), AI_B: ["get"]}})
-            need(r.get("updated") is True, f"creds: the ref: {str(r)[:200]}")
-            rec = hk.create(parent_id="rest", handler_module="anthropic_backend.tools", id=AI_B,
-                            endpoint=mB.url, credentials={"store": "creds", "ref": "anthropic"},
-                            model=MODEL, max_tokens=8192, context_window=262144,
-                            memory_store_id="memory", caching="provider_cache",
-                            can_call={**can, "creds": ["get"]}, callable_by=by)
-            need(rec.get("id") == AI_B, f"create {AI_B}: {str(rec)[:200]}")
+        rec = hk.create(parent_id="rest", handler_module=BUNDLE, id=BIGDOC)
+        need(rec.get("id") == BIGDOC, f"create {BIGDOC} (the bigdoc bundle): {str(rec)[:200]}")
+        # a call line on `survey`: a reflect documents only the verbs its caller holds,
+        # and `reflect` passes on any hold
+        can = {"memory": ALL, FILES: ALL, BIGDOC: line_call(VERB)}
+        mB.require_key(KEY)
+        r = hk.send(root, {"type": "update_agent", "id": "creds",
+                           "refs": {"anthropic": {"host": mB.host,
+                                                  "env": {"api_key": KEY_VAR}}}})
+        need(r.get("updated") is True, f"creds: the ref: {str(r)[:200]}")
+        rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV_A,
+                        endpoint=mA.url, model=MODEL,
+                        context_window=262144, kv_slots=4, kv_overflow="evict",
+                        memory_store_id="memory", can={"memory": ALL})
+        need(rec.get("id") == PROV_A, f"create {PROV_A}: {str(rec)[:200]}")
+        rec = hk.create(parent_id="rest", handler_module="anthropic_backend.tools", id=PROV_B,
+                        endpoint=mB.url, credentials={"store": "creds", "ref": "anthropic"},
+                        model=MODEL, context_window=262144,
+                        memory_store_id="memory", can={"memory": ALL, "creds": GET})
+        need(rec.get("id") == PROV_B, f"create {PROV_B}: {str(rec)[:200]}")
+        for aid, prov, mode in ((AI_A, PROV_A, "none"), (AI_B, PROV_B, "provider_cache")):
+            rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
+                            provider_id=prov, model=MODEL, max_tokens=8192,
+                            context_window=262144, memory_store_id="memory",
+                            caching=mode, can={**can, prov: PROVIDER})
+            need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")
+
+        # ══ A0 · a key read with no line on the store: the unknown answer ═══════
+        mA.reply(call("creds", "<type>get</type><ref>anthropic</ref>"), f"Noted.\n{DONE}")
+        turns = run(mA, AI_A, "A0", "read the key", 2)
+        reply = last_user(turns[1]) if len(turns) > 1 else ""
+        # the reply as the model reads it: one tag per field (tool_parse/render.rs)
+        need(" creds get" in reply and "<error>no agent 'creds'</error>" in reply
+             and "<reason>unknown_agent</reason>" in reply
+             and not any(f"<{k}>" in reply for k in ("side", "hint", "ids"))
+             and KEY not in reply,
+             f"A0: {AI_A} (no line on creds) gets the unknown answer, never the key: {reply[:300]!r}")
 
         # ══ PART B · caching: provider_cache ══════════════════════════════════
         def collect(turns: list[dict]) -> None:
@@ -299,14 +281,15 @@ def main() -> int:
             turns, base)
         need(bool(turns) and "L100 " not in full(turns[0]), "B1b: the read reply is folded")
         last = last_user(turns[1]) if len(turns) > 1 else ""
-        need(f"<of>{BUNDLE}</of>" in last and "<tier>detailed</tier>" in last and "S090 " in last,
-             f"B1b: request 2 carries the whole docs reply: {last[:200]!r}")
+        need(f" {BIGDOC} reflect" in last and "<tier>detailed</tier>" in last and "S090 " in last,
+             f"B1b: request 2 carries the whole reflect part=docs reply of {BIGDOC}: {last[:200]!r}")
         big = [r for r in big_rows(AI_B) if r["id"] != b]
         need(len(big) == 1, f"B1b: one new large user row: {[r.get('bytes') for r in history(AI_B)]}")
         if not big:
             raise SystemExit(verdict(False, f"{RUNTIME}: no docs row to fold"))
         d = big[0]["id"]
-        whole_marks.append(("B1b req2", base + 1))
+        # a reflect never folds, so nothing in this request will fold: the last is marked
+        plain_marks.append(("B1b req2", base + 1))
 
         # B2 · recall by row id gives the docs body back
         mB.clear()
@@ -314,10 +297,8 @@ def main() -> int:
         turns = run(mB, AI_B, "B2", "recall", 2)
         base = len(allb)
         collect(turns)
-        anchor_docs = first_seen(
-            "B2", r'\[folded · docs reply from kernel · ~\d+ tokens · docs again for the current state\]',
-            turns, base)
-        need(bool(turns) and "S090 " not in full(turns[0]), "B2: the docs reply is folded")
+        need(bool(turns) and "S090 " in full(turns[0]) and f"get: {d}]" not in full(turns[0]),
+             "B2: the reflect reply stays whole (a reflect never folds)")
         last = last_user(turns[1]) if len(turns) > 1 else ""
         need(f" {AI_B} recall" in last and "S090 " in last,
              f"B2: request 2 carries the recalled row whole: {last[:200]!r}")
@@ -331,7 +312,8 @@ def main() -> int:
         collect(turns)
         first_seen("B3", rf"\[folded · recall reply from {AI_B} · id {d} · ~\d+ tokens · get: \d+\]",
                    turns, base)
-        need(bool(turns) and "S090 " not in full(turns[0]), "B3: the recall reply refolds")
+        need(bool(turns) and full(turns[0]).count("S090 ") == 1,
+             "B3: the recall reply refolds (only the whole reflect reply still carries the body)")
         need(any(r.get("id") == d and int(r.get("bytes") or 0) > 64000 for r in history(AI_B)),
              "B3: the store row is still whole")
         last = last_user(turns[1]) if len(turns) > 1 else ""

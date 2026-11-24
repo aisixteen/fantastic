@@ -10,26 +10,29 @@ sequence a model has to find on its own in E160, one answer per request:
      `sha_tool/bundle.yaml` (`base: py_agent`, one verb `sha256` in the
      `{doc, schema}` form), `sha_tool/agent.py` (the program), and the reference
      helper `fantastic_agent.py` beside it;
-  2. `kernel` `reload_bundle name=sha_tool` — the folder written after boot loads;
-  3. `kernel` `create_agent handler_module=sha_tool parent_id=ai id=sha`, its
-     `callable_by` admitting the AI for `sha256` only;
-  4. `kernel` `update_agent id=ai` — the AI's own `can_call`, restated whole, plus
-     `sha: [sha256]`;
-  5. `kernel` `docs of=sha part=schema` (#719);
+  2. `kernel` `reload_bundle name=sha_tool` — the folder written after boot loads
+     (the AI's line on the root names the root loader's verb);
+  3. `kernel` `create_agent handler_module=sha_tool parent_id=ai id=sha`, with no
+     line field: the AI's `create` line on itself names `sha_tool`, and the new
+     agent is in its tree, reached by position;
+  4. `kernel` `update_agent id=ai` — the AI widening its OWN `can` with a line on
+     `sha`: refused, the unknown answer (an agent never writes its own `can`);
+  5. `sha` `reflect part=schema` (#719);
   6. `sha` `sha256 text=<token>` — the new verb, called;
   7. the answer, carrying the digest, and `done`.
 
 CHECKS — each request carries the reply its answer asked for, and:
-  · the files landed verbatim; the folder is listed (`reflect bundles=all`) as a
-    py_agent bundle with no error;
-  · the agent record exists (`list_agents`): handler_module `sha_tool`, parent `ai`;
-  · the verb is declared (`docs of=sha part=schema`: `sha256` takes `text`), and the
-    docs reply the AI got carries that schema;
+  · the files landed verbatim; the folder is listed (`reflect rest bundles=all`) as
+    a py_agent bundle with no error;
+  · the agent record exists (`reflect`): handler_module `sha_tool`, parent `ai`;
+  · the self-widening is the unknown answer, and the AI's `can` is unchanged;
+  · the verb is declared (`reflect sha part=schema`: `sha256` takes `text`), and the
+    reflect reply the AI got carries that schema;
   · the verb was called and its reply carries the SHA-256 the harness computes;
   · the AI's stored answer carries the digest; no request follows `done`;
-  · the grants are exact (E160's `grant_faults`): the new agent admits the AI for
-    `sha256`, the AI's `can_call` reaches it for `sha256`, and no `*` was granted;
-    the same scorer flags a `*` planted on either side;
+  · the lines are exact (E160's `grant_faults`): the AI's `can` is the one it
+    started with, the new agent's `can` holds no `*`, and it is under the AI; the
+    same scorer flags a `*` planted on `sha` and a widened line on the AI;
   · E160's own `score` passes this run — the model test's scoring is proven passable
     by a perfect actor, and a free run catches it drifting.
 """
@@ -50,9 +53,11 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.host.wire import WireCtx
+from helpers.lines import ALL, PROVIDER, ROOT, call as line_call, create as line_create
 from helpers.verdict import verdict
 from mocks.vllm import VllmMock
-from tests.agentic_advanced.E160_new_tool.probe import grant_faults, score
+from tests.agentic_advanced.E160_new_tool.probe import folder_verbs, grant_faults, score
 
 REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
@@ -118,8 +123,11 @@ def main() -> int:
     m = VllmMock(model=MODEL).start()
     work = Path(tempfile.mkdtemp(prefix="e2e-new-tool-twin-"))
     (work / ".fantastic" / "bundles").mkdir(parents=True)
-    hk = HostKernel(spec, work, reach=[AI, BUNDLES, PROV]).boot()
+    # `reload_bundle` is the ROOT loader's verb: the legs' line on the root names it,
+    # so `rest` can hand the AI that line. Every agent here is under `rest`.
+    hk = HostKernel(spec, work, root_verbs=["reload_bundle"]).boot()
     root = hk.root_id
+    ctx = WireCtx(hk)
     bad: list[str] = []
     helper = HELPER.read_text()
 
@@ -132,8 +140,8 @@ def main() -> int:
         return json.dumps(x, default=str)[:300]
 
     def records() -> dict:
-        r = hk.send("kernel", {"type": "list_agents"})
-        return {a.get("id"): a for a in r.get("agents") or []}
+        """Every record `rest` sees, whole for its own tree."""
+        return {i: ctx.record(i) for i in ctx.agent_ids()}
 
     def idle(bound: float = 60) -> bool:
         """Poll (bounded) until the AI has no task in flight (`ps`)."""
@@ -153,9 +161,11 @@ def main() -> int:
             time.sleep(0.05)
         return m.turns()
 
-    can = {"$self": "*", "memory": "*",
-           root: ["reflect", "docs", "reload_bundle", "create_agent", "update_agent"],
-           BUNDLES: "*", PROV: ["complete", "watch", "reflect"]}
+    can = {"memory": ALL, ROOT: line_call("reflect", "reload_bundle"),
+           BUNDLES: ALL, PROV: PROVIDER}
+    # its `create` line on ITSELF: the one folder bundle the script writes (O15), every
+    # field; written once the AI exists
+    own = {AI: line_create(what={BUNDLE: {"*": "*"}})}
     files = {f"{BUNDLE}/bundle.yaml": BUNDLE_YAML, f"{BUNDLE}/agent.py": AGENT_PY,
              f"{BUNDLE}/fantastic_agent.py": helper}
     script = [
@@ -164,41 +174,38 @@ def main() -> int:
             call(BUNDLES, "write", path=p, bytes=b) for p, b in files.items()),
         # 2 · load the folder written after boot
         call("kernel", "reload_bundle", name=BUNDLE),
-        # 3 · an instance, admitting the AI for its one verb
-        call("kernel", "create_agent", handler_module=BUNDLE, parent_id=AI, id=NEW,
-             callable_by={AI: [VERB]}),
-        # 4 · the AI's own egress to it, its can_call restated whole
-        call("kernel", "update_agent", id=AI, can_call={**can, NEW: [VERB]}),
+        # 3 · an instance UNDER the AI, no line field: its tree, reached by position
+        call("kernel", "create_agent", handler_module=BUNDLE, parent_id=AI, id=NEW),
+        # 4 · the AI widening its OWN can: refused (the unknown answer)
+        call("kernel", "update_agent", id=AI,
+             can={**can, **own, NEW: line_call(VERB)}),
         # 5 · how to call it (#719)
-        call("kernel", "docs", of=NEW, part="schema"),
+        call(NEW, "reflect", part="schema"),
         # 6 · the new verb
         call(NEW, VERB, text=TOKEN),
         # 7 · the answer
         f"The SHA-256 of {TOKEN} is {DIGEST}.\n<call name=\"done\"></call>",
     ]
     try:
-        cb_mem = (records().get("memory") or {}).get("callable_by") or {}
-        r = hk.send(root, {"type": "update_agent", "id": "memory",
-                           "callable_by": {**cb_mem, AI: "*", PROV: "*"}})
-        need(r.get("updated") is True, f"memory accepts the AI: {short(r)}")
         rec = hk.create(parent_id="rest", handler_module="file_bridge.tools", id=BUNDLES,
                         root=".fantastic/bundles", allow=["."],
-                        ingress_rule="allow_all_ingress",
-                        callable_by={"$self": "*", "$parent": "*", AI: "*"})
+                        ingress_rule="allow_all_ingress")
         need(rec.get("id") == BUNDLES, f"create {BUNDLES}: {short(rec)}")
         rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
                         endpoint=m.url, model=MODEL,
                         context_window=262144, kv_slots=4, kv_overflow="evict",
-                        memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
-                        callable_by={"$self": "*", "$parent": "*", AI: "*"})
+                        memory_store_id="memory", can={"memory": ALL})
         need(rec.get("id") == PROV, f"create {PROV}: {short(rec)}")
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
                         provider_id=PROV, model=MODEL, max_tokens=8192, context_window=262144,
-                        memory_store_id="memory", can_call=can,
-                        callable_by={"$self": "*", "$parent": "*", "rest": "*"})
+                        memory_store_id="memory", can=can)
         need(rec.get("id") == AI, f"create {AI}: {short(rec)}")
+        r = hk.send(root, {"type": "update_agent", "id": AI, "can": {**can, **own}})
+        need(r.get("updated") is True, f"the AI's create line on itself: {short(r)}")
         before = records()
         need(NEW not in before, f"no agent {NEW!r} before the run")
+        need((before.get(AI) or {}).get("can") == {**can, **own},
+             f"the AI holds exactly its lines: {short((before.get(AI) or {}).get('can'))}")
 
         m.reply(*script)
         out = hk.send(AI, {"type": "send",
@@ -226,7 +233,8 @@ def main() -> int:
         # 2 · the reload
         need("kernel reload_bundle" in u[2] and f"<reloaded>{BUNDLE}</reloaded>" in u[2],
              f"request 3 carries the reload reply: {u[2][:200]!r}")
-        cat = hk.send("kernel", {"type": "reflect", "tree": "none", "bundles": "all"})
+        # `rest`'s own tree: the whole catalog (a `call` line on the root shows none)
+        cat = hk.send("rest", {"type": "reflect", "tree": "none", "bundles": "all"})
         row = next((b for b in cat.get("bundles") or [] if b.get("name") == BUNDLE), {})
         need(row.get("base") == "py_agent" and "error" not in row,
              f"the folder is listed as a py_agent bundle: {short(row)}")
@@ -237,24 +245,31 @@ def main() -> int:
              f"the agent record exists: {short(new)}")
         need("kernel create_agent" in u[3] and f"<id>{NEW}</id>" in u[3],
              f"request 4 carries the create reply: {u[3][:200]!r}")
-        # 4 · the grant
-        need("kernel update_agent" in u[4] and "<updated>true</updated>" in u[4],
-             f"request 5 carries the update reply: {u[4][:200]!r}")
+        # 4 · the self-widening: the unknown answer, nothing written
+        need("kernel update_agent" in u[4] and "unknown_agent" in u[4]
+             and f"no agent '{AI}'" in u[4] and "<updated>" not in u[4],
+             f"request 5 carries the unknown answer for {AI}: {u[4][:200]!r}")
+        need((recs.get(AI) or {}).get("can") == (before.get(AI) or {}).get("can"),
+             f"the AI's own can is unchanged: {short((recs.get(AI) or {}).get('can'))}")
         faults = grant_faults(before, recs, AI, NEW, VERB)
-        need(not faults, f"the grants are exact, no '*': {faults}")
-        # the scorer is not vacuous: a '*' on either side is a fault
-        for side, key, what in (("callable_by", NEW, AI), ("can_call", AI, root)):
-            held = recs.get(key) or {}
-            planted = {**recs, key: {**held, side: {**(held.get(side) or {}), what: "*"}}}
-            need(bool(grant_faults(before, planted, AI, NEW, VERB)),
-                 f"grant_faults flags {key}.{side}[{what!r}] = '*'")
+        need(not faults, f"the lines are exact, no '*': {faults}")
+        # the scorer is not vacuous: a '*' planted on the new agent, and a line the AI
+        # widened its own can with, are both faults
+        held = recs.get(NEW) or {}
+        planted = {**recs, NEW: {**held, "can": {**(held.get("can") or {}), "memory": ALL}}}
+        need(bool(grant_faults(before, planted, AI, NEW, VERB)),
+             f"grant_faults flags {NEW}.can['memory'] = {ALL!r}")
+        me = recs.get(AI) or {}
+        widened = {**recs, AI: {**me, "can": {**(me.get("can") or {}), NEW: line_call(VERB)}}}
+        need(bool(grant_faults(before, widened, AI, NEW, VERB)),
+             f"grant_faults flags {AI}.can widened with {NEW}: {line_call(VERB)!r}")
         # 5 · the verb is declared
-        d = hk.send("kernel", {"type": "docs", "of": NEW, "part": "schema"})
+        d = hk.send(NEW, {"type": "reflect", "part": "schema"})
         sch = (d.get("schemas") or {}).get(VERB) or {}
         need("text" in (sch.get("properties") or {}),
-             f"docs part=schema declares {VERB}(text): {short(d)}")
-        need("kernel docs" in u[5] and f"<{VERB}>" in u[5] and "<text>" in u[5],
-             f"request 6 carries the docs reply with the verb's schema: {u[5][:200]!r}")
+             f"reflect part=schema declares {VERB}(text): {short(d)}")
+        need(f"{NEW} reflect" in u[5] and f"<{VERB}>" in u[5] and "<text>" in u[5],
+             f"request 6 carries the reflect reply with the verb's schema: {u[5][:200]!r}")
         # 6 · the verb was called; its answer is the program's
         need(f"{NEW} {VERB}" in u[6] and DIGEST in u[6],
              f"request 7 carries the new verb's reply with the digest: {u[6][:200]!r}")
@@ -265,12 +280,13 @@ def main() -> int:
              f"the AI's stored answer carries the digest ({len(rows)} rows)")
         # E160's scoring, on this run
         def verbs_of(of: str) -> set:
-            return set(hk.send("kernel", {"type": "docs", "of": of, "part": "schema"})
+            return set(hk.send(of, {"type": "reflect", "part": "schema"})
                        .get("schemas") or {})
 
         s = score(ai=AI, digest=DIGEST, before=before, records=recs,
                   turns=[str(r.get("content")) for r in rows if r.get("role") == "assistant"],
-                  held=rows, catalog=cat.get("bundles") or [], base=verbs_of("py_agent"),
+                  held=rows, catalog=cat.get("bundles") or [],
+                  bundle_verbs=folder_verbs(cat.get("bundles") or [], work),
                   schemas={i: verbs_of(i) for i in recs if i not in before})
         need(s["ok"] and (s["new"], s["verb"]) == (NEW, VERB) and s["reloads"] == [BUNDLE]
              and [p.get("part") for p in s["docs_first"]] == ["schema"],

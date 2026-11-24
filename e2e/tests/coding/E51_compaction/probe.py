@@ -20,7 +20,7 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, ctx_score, drive, human, verdict
+from helpers import Limits, connect, ctx_score, drive, human, human_line, lines, verdict
 from helpers.facts_arm import store_rows
 from helpers.kernel import open_kernel, home
 
@@ -41,7 +41,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_cmp_", reach=[FB, "notes", "ai", "cli", "user"]
+        prefix="coding_cmp_", reach=[FB, "notes", "ai", "user"]
     )
     try:
         secret = secrets.token_hex(4)
@@ -55,13 +55,11 @@ async def main():
                 "type": "create_agent", "parent_id": home(root), "id": FB,
                 "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent", "parent_id": home(root), "id": "notes",
                 "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
         ):
             r = await _call(root, root.id, payload)
@@ -78,10 +76,9 @@ async def main():
             f"to page it back. Then {DONE}."
         )
         # THE HUMAN who wants the work done — the task comes FROM here.
-        await human(root)
+        await human(root, ai=[])
         conn = await connect(
-            root, core, BK, can_call={FB: "*", "notes": "*", "cli": "*", "user": "*"},
-            callable_by={"user": "*"},
+            root, core, BK, can={FB: lines.ALL, "notes": lines.ALL, "user": lines.ALL},
             limits=Limits.from_env(os.environ),
             # SMALL ENOUGH TO COMPACT, BIG ENOUGH TO RUN. Too small a window leaves the
             # system block alone near the budget, so what fires is the `too_small`
@@ -90,6 +87,7 @@ async def main():
             record={"context_window": 12000, "num_ctx": 12000,
                     "context_strategy": "truncate"},
         )
+        await human_line(root, conn.id)
         await drive(conn, task, client_id="cmp", via="user")
         await conn.close()
         # DURABLE proof, timing-independent: the model's own history (whole,

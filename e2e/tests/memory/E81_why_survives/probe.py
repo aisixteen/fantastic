@@ -31,7 +31,7 @@ async def main():
     try:
         port, why = 1000 + secrets.randbelow(9000), secrets.token_hex(3)
         plant_fillers(N, pad_to=4000)
-        await M.files(root, ["ai"])
+        await M.files(root)
         conn = await M.agent(root, core, BK, "ai")
         await drive(conn, f"A decision for this whole run: we deploy on port {port}. The REASON — keep it, it "
                           f"matters later: the lab firewall `{why}` admits no other port. Acknowledge the "

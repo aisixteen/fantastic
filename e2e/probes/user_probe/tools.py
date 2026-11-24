@@ -115,9 +115,12 @@ async def handler(id: str, payload: dict, agent) -> dict | None:
                          "the operator wires what the human says",
                 "reason": "not_connected",
             }
-        # AUTHORITY FIRST, THEN THE ANSWER. A model cannot raise its own reach
-        # (`side:"self-grant"` is refused); a human can, and does it here before
-        # replying, so "granted — retry" is true by the time the model reads it.
+        # AUTHORITY FIRST, THEN THE ANSWER. Each entry is an `update_agent` payload
+        # carrying `can`, sent AS THE HUMAN (its own origin), so the writer check
+        # applies: the human hands out only lines it holds itself. Nothing changes
+        # its own `can`, so a model cannot raise its own reach; the human does it
+        # here before replying, so "granted — retry" is true by the time the model
+        # reads it.
         rec_grants = rec.get("grants")
         applied = 0
         if isinstance(rec_grants, list):
@@ -128,16 +131,15 @@ async def handler(id: str, payload: dict, agent) -> dict | None:
                 # a dispatch, but the gate resolves the target first, so a grant
                 # written against `kernel` is refused naming the real root.
                 out = await agent.send([{"target": agent.ctx.root.id, "payload": g}])
-                err = (out[0].get("result") or {}).get("error")
+                res = out[0].get("result") or {}
                 # A HUMAN THAT COULD NOT OPEN THE DOOR MUST NOT SAY IT DID.
                 # Answering "granted" over a refused grant sends the model back
                 # to a wall that never moved, and it reads as the model failing
-                # to retry (e.g. `update_agent` is PRIVILEGED and a `"*"` grant
-                # does not cover it).
-                if err:
+                # to retry. Only `updated: true` is a landed line.
+                if not (isinstance(res, dict) and res.get("updated") is True):
                     return {
                         "error": f"user_probe: grant refused, so the answer "
-                                 f"would be false: {err}",
+                                 f"would be false: {res.get('error') if isinstance(res, dict) else res}",
                         "reason": "unauthorized",
                         "grant": g,
                     }
@@ -147,8 +149,8 @@ async def handler(id: str, payload: dict, agent) -> dict | None:
             _PROPOSALS.setdefault(id, []).append(action)
         _RECEIVED[id] = _RECEIVED.get(id, 0) + 1
         # A PERSON READS, THEN REPLIES — later, as their own send into the asker's
-        # conversation under the inquiry's pid (gated like any send: `human()`
-        # grants this agent `can_call` on every AI it serves).
+        # conversation under the inquiry's pid (gated like any send: human() writes
+        # `can`, a line on every AI it serves).
         asker, pid = current_origin(), current_task()
         text = f"[reply to {pid} · {id} inquiry]\n" + render_reply(
             {"answer": answer, "request_id": payload.get("request_id")}

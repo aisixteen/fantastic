@@ -5,8 +5,10 @@ Scripted OpenAI-compatible servers (`e2e/mocks/vllm.py`) play the model behind o
 policy); the request knobs are each chat's and ride its every request. Rust lane
 (`runtimes: [rust]`), driven over `web_rest` on the packaged host.
 
-  1. admitted: the creator names the provider for each chat and admits each on the provider's
-     `callable_by` (`update_agent`, read-add-write);
+  1. lines: the creator names the provider for each chat and writes the chat's own line on it
+     (`can: {provider: call [complete, watch, capabilities]}`); the provider's record is
+     unchanged by either create; a writer holding `update: [can]` on a chat but no line on the
+     provider cannot hand the chat a line on it;
   2. own knobs: each chat's request carries its own temperature / max_tokens / top_k;
   3. KV accounting: the provider's reflect shows both conversations live;
   4. lifecycle: a change to the provider's endpoint reaches a chat's next request; with both
@@ -27,14 +29,15 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.lines import ALL, PROVIDER, is_unknown
 from helpers.verdict import verdict
 from mocks.vllm import VllmMock
 
 REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
-PROV, CA, CB = "shared_prov", "chat_a", "chat_b"
+PROV, CA, CB, WRITER = "shared_prov", "chat_a", "chat_b", "w"
 MODEL = "mock-shared"
-COMPLETE = ["complete", "watch", "reflect"]
+COMPLETE = PROVIDER
 DONE = '\n<call name="done"></call>'
 
 bad: list[str] = []
@@ -52,26 +55,18 @@ def short(v, n: int = 240) -> str:
 
 
 def record(hk: HostKernel, aid: str) -> dict:
-    r = hk.send("kernel", {"type": "list_agents"})
-    return next((a for a in r.get("agents") or [] if a.get("id") == aid), {})
-
-
-def admit(hk: HostKernel, target: str, who: str, verbs) -> None:
-    """The creator's side of the gate: read the target's `callable_by`, add `who`, write it whole."""
-    cb = dict(record(hk, target).get("callable_by") or {})
-    r = hk.send(hk.root_id, {"type": "update_agent", "id": target, "callable_by": {**cb, who: verbs}})
-    need(r.get("updated") is True, f"{target} admits {who}: {short(r, 160)}")
+    """`aid`'s record as `rest` sees it (reflect; whole inside rest's tree), `{}` if unknown."""
+    r = hk.send(aid, {"type": "reflect"})
+    return {} if not isinstance(r, dict) or is_unknown(r, aid) else r
 
 
 def chat(hk: HostKernel, cid: str, knobs: dict) -> None:
-    """A chat on the provider the creator names, with its own knobs; then the creator admits it."""
+    """A chat on the provider the creator names, with its own knobs and its own line on it."""
     rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=cid,
                     provider_id=PROV, model=MODEL, context_window=262144,
                     memory_store_id="memory", **knobs,
-                    can_call={"$self": "*", "memory": "*", PROV: COMPLETE},
-                    callable_by={"$self": "*", "$parent": "*", "rest": "*"})
+                    can={"memory": ALL, PROV: COMPLETE})
     need(rec.get("id") == cid, f"create chat {cid} on {PROV}: {short(rec, 160)}")
-    admit(hk, PROV, cid, COMPLETE)
 
 
 def idle(hk: HostKernel, aid: str, bound: float = 60) -> bool:
@@ -110,24 +105,38 @@ def main() -> int:
     spec = ensure_runtime(REPO, name)
     m, m2 = VllmMock(model=MODEL).start(), VllmMock(model=MODEL).start()
     work = Path(tempfile.mkdtemp(prefix="e2e-shared-provider-"))
-    hk = HostKernel(spec, work, reach=[PROV, CA, CB]).boot()
+    hk = HostKernel(spec, work).boot()
     try:
-        for who in (PROV, CA, CB):
-            admit(hk, "memory", who, "*")
         rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
                         endpoint=m.url, model=MODEL, context_window=262144, kv_slots=4,
                         kv_overflow="evict", memory_store_id="memory",
-                        can_call={"$self": "*", "memory": "*"},
-                        callable_by={"$self": "*", "$parent": "*"})
+                        can={"memory": ALL})
         need(rec.get("id") == PROV, f"create provider {PROV}: {short(rec, 160)}")
 
-        # ── 1 · two chats named on it, each admitted by its creator ──
-        print("\n── 1 · admitted ──", flush=True)
+        # ── 1 · two chats named on it, each holding its own line ──
+        print("\n── 1 · lines ──", flush=True)
+        prov_before = json.dumps(record(hk, PROV), sort_keys=True)
         chat(hk, CA, {"temperature": 0.3, "max_tokens": 8192})
         chat(hk, CB, {"temperature": 0.9, "max_tokens": 4096, "top_k": 7})
-        cb = record(hk, PROV).get("callable_by") or {}
-        need(cb.get(CA) == COMPLETE and cb.get(CB) == COMPLETE,
-             f"the provider admits both chats: {short(cb, 200)}")
+        need(all((record(hk, c).get("can") or {}).get(PROV) == COMPLETE for c in (CA, CB)),
+             f"each chat holds its own line on the provider: "
+             f"{[(record(hk, c).get('can') or {}).get(PROV) for c in (CA, CB)]}")
+        need(json.dumps(record(hk, PROV), sort_keys=True) == prov_before,
+             "the provider's record is unchanged by either chat's create (it keeps no list)")
+        # the writer subset: `w` may write CB's `can` but holds no line on the provider
+        rec = hk.create(parent_id="rest", handler_module="user_probe.tools", id=WRITER,
+                        can={CB: {"update": ["can"]}})
+        need(rec.get("id") == WRITER, f"create {WRITER} (update: [can] on {CB}): {short(rec, 160)}")
+        # A line kept or narrowed is no hand-out (the writer subset checks only what
+        # is new), so `w` tries to WIDEN CB's line on the provider: a line it lacks.
+        cb_can = record(hk, CB).get("can") or {}
+        sent = hk.send(WRITER, {"type": "send", "target": "kernel", "payload": {
+            "type": "update_agent", "id": CB, "can": {**cb_can, PROV: ALL}}})
+        wr = sent.get("result") or {}
+        need((wr.get("reason") == "not_allowed" and wr.get("arg") == "can") or is_unknown(wr, PROV),
+             f"{WRITER} cannot hand out a line it does not hold: {short(wr, 200)}")
+        need((record(hk, CB).get("can") or {}) == cb_can,
+             f"{CB}'s can is unchanged by the refused write: {record(hk, CB).get('can')!r}")
 
         # ── 2 · each request carries its own chat's knobs ──
         print("\n── 2 · own knobs ──", flush=True)

@@ -250,7 +250,7 @@ def _posts(window=None, channel=None):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="chat_memory_", reach=[GW, USERS, AI, "cli", "kernel", "user"]
+        prefix="chat_memory_", reach=[GW, USERS, AI, "kernel", "user"]
     )
     from kernel import register_unlisted
 

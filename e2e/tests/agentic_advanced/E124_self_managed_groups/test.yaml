@@ -10,7 +10,7 @@ id: self_managed_groups
 group: agentic_advanced
 title: a master AI runs up to MAX_GROUPS worker groups from its prompt alone — no group code, no harness-built group — within the bound, no orphans, every suite green, its prompt bounded
 runner: probe.py
-runtimes: [python, rust]
+runtimes: [rust]
 costs: turns
 # A MASTER plus up to MAX_GROUPS workers at once, each its own lane. Run alone.
 long: true

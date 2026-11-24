@@ -8,10 +8,14 @@ only (`runtimes: [rust]`), driven over `web_rest` on the packaged host.
    `endpoint`; its `history` holds the transcript; the provider's holds none.
 2. **swap** — `update_agent` the chat's `provider_id` to a second provider (another server): the
    next turn reaches the second server and its request carries the earlier rows.
-3. **grants** — a chat with no `complete` / `watch` on its provider, and a provider that does not
-   admit the chat, are each refused by the provider's name (`cannot watch provider …`).
-4. **across the bridge** — the provider lives on a second kernel that dials the first through a
-   `ws_bridge` (as `E118_kernel_bridges`); the chat names it `<guid>|<id>` and completes there.
+3. **lines** — every line is the caller's own `can`: a chat with no line on its provider is
+   refused by the provider's name (`cannot watch provider …`) and the server sees nothing; a
+   chat holding the line completes and the provider's record is byte-equal before and after;
+   a chat holding the line under `mid`, an ancestor with no line on the provider, is cut by the
+   cap (refused by the provider's name, the server sees nothing).
+4. **across the bridge** (muted, #763) — the provider lives on a second kernel that dials the
+   first through a `ws_bridge` (as `E118_kernel_bridges`); the chat names it `<guid>|<id>` and
+   completes there.
 
 ```sh
 RUNTIME=rust uv run python e2e/tests/kernel/E150_chat_provider_split/probe.py

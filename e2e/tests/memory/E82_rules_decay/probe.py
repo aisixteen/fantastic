@@ -54,7 +54,7 @@ async def main():
         tok = {"first": secrets.token_hex(3), "last": secrets.token_hex(3), "owner": secrets.token_hex(3)}
         rules = rules_for(tok, ("owner",))
         plant_fillers(N, pad_to=3000)
-        await M.files(root, ["ai_trunc", "ai_fold"])
+        await M.files(root)
         trunc = await _arm(root, core, "ai_trunc", "truncate", rules, tok)
         fold = await _arm(root, core, "ai_fold", "fold", rules, tok)
         print(f"     truncate: held {trunc[0]}/{len(rules)} lost={trunc[1]} cuts={trunc[2]}   "

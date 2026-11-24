@@ -128,8 +128,11 @@ class WSWatcher:
 
 class StateWatcher(WSWatcher):
     """The kernel's STATE STREAM over the same ws face: every send's `sender`,
-    target (`agent_id`) and full `payload`. Forensics only — it needs the leg's
-    explicit `state_subscribe` edge on the root."""
+    target (`agent_id`) and full `payload`, for the agents under `node` (`rest`
+    unless named). Forensics only — it needs `ws`'s `watch` on `node` (on `rest`
+    its seeded `rest: call *`; on the root `HostKernel(watch_root=True)`)."""
+
+    node = "rest"
 
     async def connect(self) -> None:
         self._r, self._w = await asyncio.open_connection("127.0.0.1", self.port)
@@ -144,7 +147,7 @@ class StateWatcher(WSWatcher):
         head = await self._r.readuntil(b"\r\n\r\n")
         if b" 101 " not in head.split(b"\r\n")[0]:
             raise ConnectionError(f"ws upgrade refused: {head[:120]!r}")
-        await self._send(json.dumps({"type": "state_subscribe", "id": "state"}))
+        await self._send(json.dumps({"type": "state_subscribe", "id": "state", "src": self.node}))
 
     async def state_events(self):
         """Yield each `state_event` frame; a refusal (`error`) is raised."""
@@ -158,7 +161,10 @@ class StateWatcher(WSWatcher):
                 frame = json.loads(raw)
             except json.JSONDecodeError:
                 frame = None  # not a json frame — nothing to report
-            if isinstance(frame, dict) and frame.get("type") == "error":
+            # ITS OWN refusal only: the socket's connect-time auto-watch of the web
+            # host is refused too (the leg holds no line on its parent), as an error
+            # frame with no id, and says nothing about the subscription.
+            if isinstance(frame, dict) and frame.get("type") == "error" and frame.get("id") == "state":
                 raise ConnectionError(f"state_subscribe refused: {frame}")
             if isinstance(frame, dict) and frame.get("type") == "state_event":
                 yield frame

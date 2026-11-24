@@ -25,7 +25,7 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, human, verdict
+from helpers import Limits, connect, drive, human, human_line, lines, verdict
 from helpers.facts_arm import (
     FOLD_ARMS,
     WINDOW,
@@ -48,32 +48,32 @@ async def _fixture(root, ids):
     # provider (records, ledger and now the message log). Created BEFORE the root boots.
     r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": FB,
                                     "handler_module": "file_bridge.tools", "allow": ["."], "root": ".fantastic",
-                                    "ingress_rule": "allow_all_ingress",
-                                    "callable_by": {**{i: "*" for i in ids}, "rest": "*", "web": "*"}})
+                                    "ingress_rule": "allow_all_ingress"})
     assert not r.get("error"), f"create {FB}: {r}"
     # the editor the agents read through (its own bridge over the run dir)
     r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": "work_fb",
                                     "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-                                    "ingress_rule": "allow_all_ingress",
-                                    "callable_by": {"rest": "*", "web": "*"}})
+                                    "ingress_rule": "allow_all_ingress"})
     assert not r.get("error"), f"create work_fb: {r}"
     r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": "notes",
                                     "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-                                    "ingress_rule": "allow_all_ingress",
-                                    "callable_by": {**{i: "*" for i in ids}, "rest": "*", "web": "*"}})
+                                    "ingress_rule": "allow_all_ingress"})
     assert not r.get("error"), f"create notes: {r}"
     # THE ORDER: hydrated (boot_root did it, cold) → the root boots and the pump
     # subscribes → only now the agents that will talk.
     await call(root, root.id, {"type": "boot"})
-    await human(root, ai=list(ids))
+    # the human's line on each agent is written once that agent exists
+    await human(root, ai=[])
 
 
 async def _connect(root, core, aid):
-    return await connect(root, core, BK, agent_id=aid,
-                         can_call={FB: "*", "notes": "*", "cli": "*", "user": "*", aid: "*"},
-                         callable_by={"user": "*"}, limits=Limits.from_env(os.environ),
+    conn = await connect(root, core, BK, agent_id=aid,
+                         can={FB: lines.ALL, "notes": lines.ALL, "user": lines.ALL},
+                         limits=Limits.from_env(os.environ),
                          record={"context_window": WINDOW, "num_ctx": WINDOW,
                                  "context_strategy": STRATEGY, **EXTRA})
+    await human_line(root, aid)
+    return conn
 
 
 async def _ask(root, aid: str, text: str, *, timeout: float = 240.0) -> None:
@@ -105,7 +105,7 @@ def _hydrated(before: list[dict], after: list[dict]) -> bool:
 
 
 async def main():
-    root, core, close = await open_kernel(prefix="coding_restart_", reach=[FB, "work_fb", "notes", "ai_a", "ai_b", "cli", "user"])
+    root, core, close = await open_kernel(prefix="coding_restart_", reach=[FB, "work_fb", "notes", "ai_a", "ai_b", "user"])
     try:
         marker = secrets.token_hex(4)
         plant_fillers(N, marker_in=3, marker=marker, pad_to=6800)
@@ -148,7 +148,9 @@ async def main():
               f"life2: a={len(rows_a2)} b={len(rows_b2)} next_id={top2} view_b={len((view_b or {}).get('ids') or [])} origin_stubs_b={len(stubs_b2)}  "
               f"stop={ {k: (v if k != 'cancelled' else len(v)) for k, v in (stop or {}).items()} }")
         checks = [
-            ("the agent half of the stop ran", (stop or {}).get("drained") is True),
+            # the stop is the operator's SIGTERM (process verbs over REST are operator
+            # only): a graceful shutdown, every agent drained, exits 0
+            ("the kernel stopped gracefully", stop == {"exit": 0}),
             ("the counter continues above every id of the first life", top2 >= top1),
             # THE CARRIED ROWS ARE THE PREFIX, byte for byte; anything past them may only
             # be the rebooted agent's own `[recall …]` row.

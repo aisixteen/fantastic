@@ -15,9 +15,11 @@ import sys
 from pathlib import Path
 
 __all__ = [
-    "BASELINE",
     "HUMAN_ANSWER",
     "Connected",
+    "add_lines",
+    "probe_agent",
+    "relay",
     "Limits",
     "ProxyReader",
     "Watch",
@@ -28,6 +30,8 @@ __all__ = [
     "drive",
     "e2e_root",
     "human",
+    "human_line",
+    "lines",
     "repo_root",
     "verdict",
 ]
@@ -72,11 +76,14 @@ _LAZY = {
     "ProxyReader": "helpers.proxy",
     "box": "helpers.proxy",
     "distinct_calls": "helpers.proxy",
-    "BASELINE": "helpers.ai",
     "Connected": "helpers.ai",
     "connect": "helpers.ai",
     "drive": "helpers.ai",
     "human": "helpers.ai",
+    "human_line": "helpers.ai",
+    "add_lines": "helpers.ai",
+    "probe_agent": "helpers.ai",
+    "relay": "helpers.ai",
     "HUMAN_ANSWER": "helpers.ai",
 }
 
@@ -86,6 +93,7 @@ _LAZY = {
 # otherwise — `from helpers import verdict` would mean two different things
 # depending on import order. It has no heavy dependencies, so it is just bound.
 from helpers.verdict import verdict
+from helpers import lines  # noqa: E402  (the `can` line constants; no dependencies)
 
 
 def __getattr__(name: str):

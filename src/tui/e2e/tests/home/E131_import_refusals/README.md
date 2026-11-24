@@ -8,5 +8,7 @@ folders written by hand under the project:
 3. a folder with a code file next to a built-in handler is refused the same way, and with `allow_code: true, approve: true` it imports (the gate is the refusal, not the folder);
 4. `approve` or `allow_code` given as the string `"true"` is not a yes: the first only previews, the second is still refused;
 5. a folder with no `blueprint.yaml` is `not_found`, naming the file.
+6. a lead holding a line on `credentials` (bound through a port), which the importing `mcp` leg does not hold, is refused: its create names the line the leg lacks (`'mcp' holds no call 'get' on 'credentials'`: the leg's `user` line shows `credentials`, and a writer hands out only what it holds) and nothing is kept.
+7. an import aimed outside `canvas_root` (under `files`) is refused: the import is checked as the `mcp` leg, whose create line is on `canvas_root` only, so the create gets the unknown answer for `files` and nothing is kept.
 
-Every refusal leaves the agent count as it was. Scripted (no model, no key); needs no browser.
+Every refusal leaves the agent count as it was; for 7, which the leg cannot see, the saved agent records on disk (the project's `.fantastic` and the home) are compared too. Scripted (no model, no key); needs no browser.

@@ -270,3 +270,19 @@ residuals:
     note: >
       uvicorn/websockets defaults python gets for free: `server: uvicorn` on
       every response, permessage-deflate, 20s ping / 20s pong.
+
+  # ── #170: the grant model split ──
+  - id: R-G170-1
+    decision: G170
+    state: accepted   # the owner: Python keeps the old grant model until #170
+    runtimes: [rust]
+    file_glob: "**/*"
+    anchor: 'callable_by|can_call|"can"|unknown_agent|reflect.*tree'
+    allowed_tail_regex: ".*"
+    items: []
+    note: >
+      grant model split: Rust on `can`, Python on `callable_by` (#170). The
+      families seed and create on the `can` model (grant model v9), so every
+      grant-bearing record, every gate denial (the unknown answer) and every id
+      read (`reflect` in place of `list_agents`) differs from a Python capture.
+      Parity runs as a Rust self-diff until Python is updated or retired.

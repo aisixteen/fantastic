@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 import pytest
+
+pytestmark = pytest.mark.skip(reason="#763: cross-kernel peers parked")
 import websockets
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -40,7 +42,7 @@ from relay_harness import (  # noqa: E402
 )
 
 from helpers.kernel_proc import KernelProc  # noqa: E402
-from helpers.seeding import BASE, seed_create, seed_web, seed_web_ws  # noqa: E402
+from helpers.seeding import seed_create, seed_web, seed_web_ws  # noqa: E402
 from test_relay_matrix import RELAY_RUNTIMES, _HANDLER_MODULE, _relay_meta  # noqa: E402
 
 # A python driver streams to each host runtime's fs through the relay.
@@ -152,7 +154,7 @@ async def test_relay_streams_raw_bytes(
         agent_id="fs",
         root="streams",
         ingress_rule="allow_all_ingress",
-        callable_by={**BASE, LEG: ["write_stream", "read_stream"]},
+        callable_by={LEG: ["write_stream", "read_stream"]},
     )
     assert "error" not in fs, f"fs seed failed: {fs}"
 

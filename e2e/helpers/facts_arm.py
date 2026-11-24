@@ -18,7 +18,7 @@ import os
 import re
 from pathlib import Path
 
-from helpers import Limits, connect, ctx_score, drive, human, memory
+from helpers import Limits, connect, ctx_score, drive, human, human_line, lines, memory
 from helpers.ai import Connected  # noqa: F401  (re-exported for probes)
 from helpers.kernel import WRAPS, home
 
@@ -298,16 +298,24 @@ async def read_view(core, root, aid: str) -> dict | None:
     return await memory.latest_view(root, aid)
 
 
+def arm_can(fb: str) -> dict:
+    """The arm's own lines — one place for them: both file agents and the human. Its
+    own tree it reaches by position. A spawned kernel carries no `cli` agent, and a
+    line on a missing id is refused, so none names it."""
+    return {fb: lines.ALL, "notes": lines.ALL, "user": lines.ALL}
+
+
 async def connect_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict):
-    """`connect` with the arm's standard record — one place for the grant set."""
-    return await connect(
+    """`connect` with the arm's standard record, then the human's line on it."""
+    conn = await connect(
         root, core, bk, agent_id=aid,
-        can_call={fb: "*", "notes": "*", "cli": "*", "user": "*", aid: "*"},
-        callable_by={"user": "*"},
+        can=arm_can(fb),
         limits=Limits.from_env(os.environ),
         record={"context_window": arm_window(aid), "num_ctx": arm_window(aid),
                 "context_strategy": strategy, **extra},
     )
+    await human_line(root, aid)
+    return conn
 
 
 async def reboot_agent(root, core, bk, fb: str, aid: str, strategy: str, extra: dict, *, watch_conn=None):
@@ -317,84 +325,54 @@ async def reboot_agent(root, core, bk, fb: str, aid: str, strategy: str, extra: 
     `connect` again with the same record. `create_agent` fires `boot`, and a booted
     agent with a store runs `context_recall`. Returns the new connection.
 
-    THE EDGES THAT NAME IT COME BACK TOO. `delete_agent` prunes the deleted id from
-    every OTHER record's `can_call` / `callable_by` (a stale key would hand its edge
-    to whoever re-creates the id), and `connect` re-opens only the halves it owns. So
-    the human's egress to the AI, the ws leg's `watch`, the kept provider's ingress
-    for its chat would all stay closed — the next task refused at the human, the
-    model never asked. The grants are read before the delete and written back,
-    key by key, before the re-create."""
+    THE LINES THAT NAME IT SURVIVE. Ids are reusable and a delete prunes nothing
+    (`prune_grants` is gone): the human's line on the arm stays in the human's own
+    record, so the re-created agent answers the human, the ws leg (by its `rest`
+    line) and its provider with NO re-grant. Asserted here: before the delete no
+    other record's `can` names the arm but the human's; after it the human's line
+    still does."""
     if watch_conn is not None:
         await watch_conn.close()
-    named = await _grants_naming(root, aid)
+    named = sorted(hid for hid in root.agent_ids()
+                   if hid != aid and aid in (root.record(hid).get("can") or {}))
+    assert named == ["user"], f"reboot_agent({aid}): lines naming it: {named}, want ['user']"
     r = await call(root, root.id, {"type": "delete_agent", "id": aid, "keep_memory": True})
     assert not (isinstance(r, dict) and r.get("error")), f"delete_agent({aid}): {r}"
     if core is not None:
         WRAPS.pop(aid, None)
         core._projection.pop(aid, None)
         core._compaction_mark.pop(aid, None)
-    # BEFORE the re-create: `connect` starts the ws watcher, whose `watch` must find
-    # the leg's grant already back (a key may name an id not created yet).
-    await _regrant(root, aid, named)
+    kept = root.record("user").get("can") or {}
+    assert kept.get(aid) == lines.ALL, (
+        f"reboot_agent({aid}): the human's line did not survive the delete: {kept}")
     return await connect(
         root, core, bk, agent_id=aid,
-        can_call={fb: "*", "notes": "*", "cli": "*", "user": "*", aid: "*"},
-        callable_by={"user": "*"},
+        can=arm_can(fb),
         limits=Limits.from_env(os.environ),
         record={"context_window": arm_window(aid), "num_ctx": arm_window(aid),
                 "context_strategy": strategy, **extra},
     )
 
 
-async def _agents(root) -> dict[str, dict]:
-    r = await call(root, "kernel", {"type": "list_agents"})
-    return {a["id"]: a for a in (r or {}).get("agents") or []}
-
-
-async def _grants_naming(root, aid: str) -> list[tuple[str, str, object]]:
-    """(holder, field, grant) for every OTHER record whose `can_call` or `callable_by`
-    names `aid`."""
-    return [(hid, field, rec[field][aid])
-            for hid, rec in (await _agents(root)).items() if hid != aid
-            for field in ("can_call", "callable_by")
-            if isinstance(rec.get(field), dict) and aid in rec[field]]
-
-
-async def _regrant(root, aid: str, named: list[tuple[str, str, object]]) -> None:
-    """Write each grant `_grants_naming` read back onto its holder — READ, add the
-    one key, write back (update replaces the field whole)."""
-    for hid, field, grant in named:
-        rec = (await _agents(root)).get(hid)
-        assert rec is not None, f"reboot_agent({aid}): {hid} is gone"
-        have = dict(rec.get(field) or {})
-        if have.get(aid) == grant:
-            continue
-        have[aid] = grant
-        out = await call(root, "kernel", {"type": "update_agent", "id": hid, field: have})
-        assert not (isinstance(out, dict) and out.get("error")), (
-            f"reboot_agent({aid}): re-grant {hid}.{field} refused: {out}")
-
-
-async def fixture(root, fb: str, *, arms=ARMS, extra_callable: tuple[str, ...] = ()):
-    """The two file agents (`fb`, `notes`), both arms granted at CREATE time, then the human."""
-    ids = [a for a, _, _ in arms] + list(extra_callable)
+async def fixture(root, fb: str):
+    """The two file agents (`fb`, `notes`), then the human. They keep no list of
+    callers: each arm reaches them by its own lines (`arm_can`). The human gets its
+    line on each arm once that arm exists (`human_line`)."""
     for payload in (
         {
             "type": "create_agent", "parent_id": home(root), "id": fb,
             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
             "ingress_rule": "allow_all_ingress",
-            "callable_by": {**{i: "*" for i in ids}, "rest": "*", "web": "*"},
         },
         {
             "type": "create_agent", "parent_id": home(root), "id": "notes",
             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
             "ingress_rule": "allow_all_ingress",
-            "callable_by": {**{i: "*" for i in ids}, "rest": "*", "web": "*"},
         },
     ):
         r = await call(root, root.id, payload)
         assert not r.get("error"), f"create {payload['id']}: {r}"
-    await human(root, ai=[a for a, _, _ in arms])
+    await human(root, ai=[])
 
 
 async def run_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
@@ -403,12 +381,12 @@ async def run_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
     window = window or arm_window(aid)
     conn = await connect(
         root, core, bk, agent_id=aid,
-        can_call={fb: "*", "notes": "*", "cli": "*", "user": "*", aid: "*"},
-        callable_by={"user": "*"},
+        can=arm_can(fb),
         limits=Limits.from_env(os.environ),
         record={"context_window": window, "num_ctx": window,
                 "context_strategy": strategy, **extra},
     )
+    await human_line(root, aid)
     try:
         await drive(conn, task, client_id=aid, via=via)
     finally:

@@ -37,7 +37,8 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, verdict
+from helpers import Limits, connect, drive, human_line, lines, relay, verdict
+from helpers.lines import is_unknown
 from helpers.kernel import open_kernel, home
 
 BK = _resolve_backend()
@@ -65,7 +66,7 @@ async def _arm(name: str, answer: str):
     behind arm 1's dead lock and the chain reads as ended with zero turns."""
     aid = f"ai_{name}"
     root, core, close_kernel = await open_kernel(
-        f"ask_{name}_", reach=["prefs", "kernel_store", aid, "cli", "user"]
+        f"ask_{name}_", reach=["prefs", "kernel_store", aid, "user"]
     )
     for payload in (
         {
@@ -75,22 +76,19 @@ async def _arm(name: str, answer: str):
             "id": "kernel_store",
             "root": ".",
             "ingress_rule": "allow_all_ingress",
-            "callable_by": {aid: "*", "rest": "*", "web": "*"},
         },
         {
             # THE HUMAN. `answer` is the whole policy — one bundle serves both
             # arms, and a test chooses what the person says by writing a record.
-            # Its `callable_by` is the ingress half of the gate: without it the
-            # model's question is REFUSED, which is the correct behaviour for a
-            # human nobody wired.
+            # The AI's question reaches it by the AI's own `user` line; without it
+            # the question is REFUSED, which is the correct behaviour for a human
+            # nobody wired. Its own line on the AI is written once the AI exists.
             "type": "create_agent",
             "parent_id": home(root),
             "handler_module": "user_probe.tools",
             "id": "user",
             "answer": answer,
             "description": "The human this kernel belongs to.",
-            "can_call": {aid: "*"},
-            "callable_by": {aid: "*", "rest": "*", "web": "*"},
         },
         {
             "type": "create_agent",
@@ -100,7 +98,6 @@ async def _arm(name: str, answer: str):
             "root": ".",
             "ingress_rule": "allow_all_ingress",
             "description": "The user's preference files.",
-            "callable_by": {aid: "*", "rest": "*", "web": "*"},
         },
     ):
         r = (await root.send([{"target": root.id, "payload": payload}]))[0]["result"]
@@ -111,13 +108,16 @@ async def _arm(name: str, answer: str):
         core,
         BK,
         agent_id=aid,
-        can_call={"prefs": "*", "cli": "*", "kernel_store": "*", "user": "*"},
-        # THE OTHER HALF OF THE WIRE. The gate is two-sided and these two are
-        # SIBLINGS, so there is no baseline edge: without this the human's task
-        # is refused at the AI's ingress and the chain never starts at all.
-        callable_by={"user": "*"},
+        can={"prefs": lines.ALL, "kernel_store": lines.ALL, "user": lines.ALL},
         limits=Limits.from_env(os.environ),
     )
+    # SIBLINGS: until the human holds its own line on the AI, it does not reach it
+    # — the unknown answer, the same as for an id that does not exist.
+    r = await relay(root, "user", aid, {"type": "reflect"})
+    assert is_unknown(r, aid), f"the human reached {aid} with no line: {r}"
+    # THE OTHER HALF OF THE WIRE: without it the human's task is refused and the
+    # chain never starts at all.
+    await human_line(root, aid)
     # THE TASK COMES FROM THE HUMAN, not from the harness.
     capped = await drive(conn, TASK, client_id=name, via="user")
     # DID AN INQUIRY ACTUALLY REACH IT? The HUMAN'S OWN TALLY, which only a real call can

@@ -48,7 +48,7 @@ TASK = (
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_spread_", reach=[FB, "notes", "ai_recency", "ai_fold", "cli", "user"]
+        prefix="coding_spread_", reach=[FB, "notes", "ai_recency", "ai_fold", "user"]
     )
     try:
         t = {k: secrets.token_hex(4) for k in ("first", "owner", "build", "rev", "lane", "last")}
@@ -68,7 +68,7 @@ async def main():
         for i in range(N):
             Path(f"filler_{i}.txt").write_text(f"chunk {i}: {LOREM}\n")
         assert not any(v in TASK for v in t.values())
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         recency, facts = await both_arms(root, core, BK, FB, TASK, "report.md", arms=FOLD_ARMS)
 
         def score(a):

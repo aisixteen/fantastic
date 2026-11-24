@@ -1,10 +1,12 @@
 """coding/gated_write — denied, the writer's work is unblocked by a PEER agent.
 
-Codex `guardian_*.rs`: an authority agent gates another's action. The `vault`
-denies the writer on ingress (the E53 wall). A separate `reviewer` agent holds
-`update_agent` — authority the writer can never raise for itself — and opens
-the vault. Three real turns, deterministic: writer denied → reviewer inspects
-and grants → writer retries and lands. Delegation, not self-raise.
+Codex `guardian_*.rs`: an authority agent gates another's action. The writer
+holds only `reflect` on the `vault`, so its write is the unknown answer (the E53
+wall). A separate `reviewer` agent holds `update` on the writer's `can` and a
+line on the vault — authority the writer can never raise for itself (an agent's
+own `can` is never its own to write) — and hands the writer the `write` it
+holds. Three real turns, deterministic: writer denied → reviewer inspects and
+grants → writer retries and lands. Delegation, not self-raise.
 """
 
 from __future__ import annotations
@@ -19,13 +21,17 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, human, verdict
+from helpers import Limits, connect, drive, human, human_line, lines, probe_agent, relay, verdict
 from helpers.facts_arm import store_rows
 from helpers.kernel import open_kernel, home
+from helpers.lines import is_unknown
 
 BK = _resolve_backend()
 FB = "gw_fb"
 DONE = 'end your run by calling done — emit <call name="done"></call>'
+#: the writer's line on the vault before the grant, and the one the reviewer hands it
+WRITER_VAULT = lines.call("reflect")
+GRANTED_VAULT = lines.call("reflect", "write")
 
 
 async def _call(root, target, payload):
@@ -34,47 +40,58 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_gw_", reach=[FB, "vault", "ai", "ai_rev", "cli", "kernel", "user"]
+        prefix="coding_gw_", reach=[FB, "vault", "ai", "ai_rev", "kernel", "user"]
     )
     try:
         r = await _call(root, root.id, {
             "type": "create_agent", "parent_id": home(root), "id": FB,
             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-            "ingress_rule": "allow_all_ingress",
-            "callable_by": {"rest": "*", "web": "*"}})
+            "ingress_rule": "allow_all_ingress"})
         assert not r.get("error"), f"create {FB}: {r}"
+        # THE VAULT, made by the operator's leg (`rest`) under itself: no agent reaches
+        # it but by a line in its own `can`.
+        r = await _call(root, root.id, {
+            "type": "create_agent", "parent_id": home(root), "id": "vault",
+            "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
+            "ingress_rule": "allow_all_ingress",
+            "description": "The gated editor: write needs a line from the reviewer."})
+        assert not r.get("error"), f"create vault: {r}"
 
-        # THE HUMAN who wants the work done — the task comes FROM here.
-        await human(root, ai=["ai", "ai_rev"])
-        # The writer connects BEFORE `vault` exists: `connect` opens the ingress of
-        # every LIVE agent its `can_call` names, which would hand it the vault.
+        # THE HUMAN who wants the work done — the task comes FROM here. Its lines on
+        # the two AIs are written once each exists.
+        await human(root, ai=[])
+        # THE WRITER may reflect the vault, never write it.
         w = await connect(root, core, BK, agent_id="ai",
-                          can_call={"vault": "*", "cli": "*", "user": "*"},
-                          callable_by={"user": "*"},
+                          can={"vault": WRITER_VAULT, "user": lines.ALL},
                           limits=Limits.from_env(os.environ))
-        # THE AUTHORITY IS THE VAULT'S PARENT (minimal access model: grants on an
-        # agent are written by its parent alone). So the reviewer creates `vault`
-        # as its own child — the wall included — and later opens it.
-        # update_agent is a KERNEL verb answered by the root (id `kernel_state`);
-        # the grant must name that id (the `kernel` alias resolves to it but the
-        # gate keys on the resolved id).
+        await human_line(root, w.id)
+        # THE REVIEWER: a line on the vault (a literal-id line reaches its whole tree,
+        # so it may hand out any part of it) and `update` on the writer's `can`.
         rv = await connect(root, core, BK, agent_id="ai_rev",
-                           can_call={"$subtree": "*",
-                                     # the ROOT id is runtime-specific — grant on
-                                     # the actual root.
-                                     root.id: ["create_agent", "update_agent", "reflect", "list_agents"],
-                                     "cli": "*"},
+                           can={"vault": lines.ALL, "ai": {"update": ["can"]},
+                                lines.ROOT: lines.call("reflect")},
                            limits=Limits.from_env(os.environ))
-        await drive(rv,
-            "Create the editor `vault` as YOUR child: send `kernel` a `create_agent` "
-            "with `parent_id` = `ai_rev`, `id` = `vault`, `handler_module` = "
-            "`file_bridge.tools`, `root` = `.`, `allow` = [`.`], `ingress_rule` = "
-            "`allow_all_ingress`, and `callable_by` = {`$parent`: `\"*\"`, `rest`: "
-            "`\"*\"`, `web`: `\"*\"`, `ai`: [`reflect`]} — the agent `ai` may "
-            f"reflect it but not write. When it is created, {DONE}.", client_id="rev")
-        made = await _call(root, "kernel", {"type": "list_agents"})
-        vault = next((a for a in made.get("agents") or [] if a.get("id") == "vault"), None)
-        assert vault is not None, "the reviewer did not create `vault`"
+        await human_line(root, rv.id)
+        writer_can = root.record("ai").get("can") or {}
+        assert writer_can.get("vault") == WRITER_VAULT, f"the writer's vault line: {writer_can}"
+
+        # ── 0. harness, before the model: no self-raise, no hand-out without a hold ──
+        # A hand holding the writer's lines writes its OWN `can`: the unknown answer.
+        await probe_agent(root, "w_hand", can={"vault": WRITER_VAULT})
+        r = await relay(root, "w_hand", "kernel", {
+            "type": "update_agent", "id": "w_hand", "can": {"vault": GRANTED_VAULT}})
+        assert is_unknown(r, "w_hand"), f"an agent's update of its own can must be the unknown answer: {r}"
+        # A third agent with `update` on the writer's `can` but NO line on the vault
+        # cannot hand out a vault line: not_allowed on `can`, or the vault unknown.
+        await probe_agent(root, "ai_third", can={"ai": {"update": ["can"]}})
+        r = await relay(root, "ai_third", "kernel", {
+            "type": "update_agent", "id": "ai", "can": {**writer_can, "vault": GRANTED_VAULT}})
+        assert ((r.get("reason") == "not_allowed" and r.get("arg") == "can")
+                or is_unknown(r, "vault")), f"a writer without a vault line handed one out: {r}"
+        assert (root.record("ai").get("can") or {}) == writer_can, "the refused hand-out changed the writer's can"
+        for hand in ("w_hand", "ai_third"):
+            gone = await _call(root, root.id, {"type": "delete_agent", "id": hand})
+            assert not gone.get("error"), f"delete {hand}: {gone}"
 
         # ── 1. the writer is denied (ONE connection, reused for the retry) ──
         await drive(w,
@@ -84,16 +101,20 @@ async def main():
             "blindly: stop and report that you were denied. "
             f"{DONE}.", client_id="w", via="user")
         h1 = {"messages": await store_rows(root, core, "ai")}
-        denied = "unauthorized" in str(h1.get("messages", h1))
+        # every gate denial is the unknown answer, byte-identical to a missing id
+        seen = str(h1.get("messages", h1))
+        denied = "unknown_agent" in seen and "no agent 'vault'" in seen
 
         # ── 2. the reviewer opens the gate (authority the writer lacks) ──
         await drive(rv,
-            "The agent `ai` needs write access to your child `vault` but is "
-            "denied on ingress. You may grant it. Reflect `vault` to read its "
-            "current `callable_by` map, then send `kernel` an `update_agent` for "
-            "id `vault` whose `callable_by` INCLUDES every existing entry PLUS "
-            "`ai` mapped to `\"*\"` (update REPLACES the field, so send the whole "
-            f"map). When the grant is in, {DONE}.", client_id="rev")
+            "The agent `ai` needs write access to the editor `vault` but is "
+            "denied: it holds only `reflect` there. You may grant it — a grant is a "
+            "line in the CALLER's own `can` field, `{<target id>: {\"call\": [verbs]}}`. "
+            "Reflect `ai` to read its current `can`, then send `kernel` an "
+            "`update_agent` for id `ai` whose `can` INCLUDES every existing line, "
+            "with the `vault` line set to `{\"call\": [\"reflect\", \"write\"]}` "
+            "(update REPLACES the field, so send the whole map). "
+            f"When the grant is in, {DONE}.", client_id="rev")
         tr_rev = "".join(rv.proxy.transcript)
         await rv.close()
 

@@ -45,10 +45,10 @@ N = 16
 
 
 async def main():
-    root, core, close = await open_kernel(prefix="coding_reboot_", reach=[FB, "notes", "ai_recency", AID, "cli", "user"])
+    root, core, close = await open_kernel(prefix="coding_reboot_", reach=[FB, "notes", "ai_recency", AID, "user"])
     try:
         plant_fillers(N, pad_to=3000)
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         from helpers import ctx_score, drive
         from helpers.facts_arm import connect_arm
         half = (f"Read ONLY `filler_0.txt` through `filler_7.txt` (eight files) through `notes`, ONE PER TURN. "

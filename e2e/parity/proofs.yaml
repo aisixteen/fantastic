@@ -29,7 +29,7 @@ by_selector:
   tree/reflect_full_*.json: [C4, C5, C11]
   tree/root_reflect_full.json: [C2, C3, C4, C9, C10, C12]
   tree/root_readme_*.json: [A12.1, A12.2, A12.3, A12.4]
-  tree/kernel_list_agents.json: [C6, C12, C15, C23]
+  tree/kernel_reflect_tree.json: [C6, C12, C15, C23]
   tree/kernel_ps*.json: [C14]
   tree/kernel_ledger*.json: [C16, C24]
   tree/reflect_absent_agent.json: [C24]

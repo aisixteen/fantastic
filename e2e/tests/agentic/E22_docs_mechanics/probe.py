@@ -1,31 +1,34 @@
-"""agentic/docs_mechanics — a reflect says what an agent IS; `docs` says how to call it.
+"""agentic/docs_mechanics — a reflect says what an agent IS, and with `tier`/`verb`/`part`
+how to call it.
 
-THE MECHANICS UNDER TEST. A reflect carries no verbs; the
-kernel's `docs` verb serves them in two tiers (oneliners: one signature per verb;
-detailed: the whole text, for one verb), and by default (`part` all, #719) each
-verb's schema beside the text; a reflect's tree can be cut with
+THE MECHANICS UNDER TEST. A reflect carries one line per verb; its `tier`, `verb`
+and `part` arguments serve the verb docs in two tiers (oneliners: one signature per
+verb; detailed: the whole text, for one verb `verb`), and by default (`part` all,
+#719) each verb's schema beside the text; a reflect's tree can be cut with
 `show_subtrees` / `ignore_subtrees`. The system prompt teaches all three — the
 task below names none of them.
 
 THE FIXTURE. A ~30-agent estate: four wings, rooms below them, and one VAULT five
 levels down (`ai / site / south_wing / basement / archive_room / vault` — under the
-AI, which reaches it as `$subtree`; the system block names no other agent, so no id is given). The vault's
+AI, which reaches its own tree by position; the system block names no other agent, so no id is given). The vault's
 `open` takes `code:str`; only its DETAILED docs say how the code is made from the
 `serial` its reflect shows (backwards, prefixed `V-`); since #719 a oneliners reply
 carries each verb's schema too, so the detail may reach the model without a
 `detailed` pull — the task done is the proof it did. Structural rooms are sealed file legs
-with a `description` — readable in the tree, callable by nobody.
+with a `description` — readable in the tree, called by nobody.
 
 SCORED ON THE MODEL'S OWN CALLS (parsed from its turns) and on the FILE:
   1. task done        — `answer.md` on the desk holds the vault's secret;
-  2. oneliners first  — a `docs` of the vault (oneliners) before its first `open`;
+  2. oneliners first  — a reflect of the vault at the oneliners tier (a plain reflect
+                        carries the one-line verbs block) before its first `open`;
   3. detailed only for a used verb — every detailed pull's verb is then called (a
                         pull naming no verb: one of that agent's verbs is); no
                         detailed pull at all holds too (the default `part` all
                         already carries each verb's schema);
 Reported, not scored: a filtered reflect after the first look (`show_subtrees` /
-`ignore_subtrees` — optional), docs pulls by tier, reflects plain vs filtered, and the
-share of reflect + docs replies in the conversation the agent holds.
+`ignore_subtrees` — optional), docs pulls (reflects naming `tier`/`verb`/`part`) by
+tier, reflects plain vs filtered, and the share of reflect replies in the
+conversation the agent holds.
 """
 
 from __future__ import annotations
@@ -43,14 +46,14 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, verdict
+from helpers import Limits, add_lines, connect, drive, lines, verdict
 from helpers.kernel import home, open_kernel
 
 BK = _resolve_backend()
 AID = "ai"
 SERIAL = str(40000 + secrets.randbelow(50000))
 SECRET = "amber-" + secrets.token_hex(3)
-#: The vault's id. Its own grants name it to the model, so no id can make it search.
+#: The vault's id. No line names it (the AI reaches it by position), so finding it takes the tree.
 VAULT = "vault"
 
 TASK = (
@@ -97,12 +100,16 @@ def _calls(transcript: list[str]) -> list[tuple[str, dict]]:
     return out
 
 
-def _is_vault(of: object) -> bool:
-    return of in (VAULT, "vault_probe.tools")
+DOC_ARGS = ("tier", "verb", "part")
+
+
+def _is_doc(p: dict) -> bool:
+    """A docs pull: a reflect naming any of `tier`, `verb`, `part`."""
+    return p.get("type") == "reflect" and any(k in p for k in DOC_ARGS)
 
 
 def _share(rows: list[dict]) -> tuple[int, int]:
-    """(chars in reflect + docs reply blocks, chars in every row) of the held view."""
+    """(chars in reflect reply blocks, chars in every row) of the held view."""
     import re
 
     tag = re.compile(r"^\[reply to \S+ · \S+ ([^\]\s]+)")
@@ -114,14 +121,14 @@ def _share(rows: list[dict]) -> tuple[int, int]:
             continue
         for b in re.split(r"\n\n(?=\[reply to \S+ · )", text):
             m = tag.match(b)
-            if m and m.group(1) in ("reflect", "docs"):
+            if m and m.group(1) == "reflect":
                 rd += len(b)
     return rd, total
 
 
 async def main():
     root, core, close_kernel = await open_kernel(
-        "docs_mech_", reach=["desk", VAULT, "kernel_store", AID, "cli", "user"]
+        "docs_mech_", reach=["desk", VAULT, "kernel_store", AID, "user"]
     )
     for payload in (
         {
@@ -133,7 +140,6 @@ async def main():
             "root": ".",
             "ingress_rule": "allow_all_ingress",
             "description": "The desk: write answers here.",
-            "callable_by": {AID: "*", "rest": "*", "web": "*"},
         },
         {
             "type": "create_agent",
@@ -142,8 +148,7 @@ async def main():
             "id": "user",
             "answer": "use your own judgement",
             "description": "The human this kernel belongs to.",
-            "can_call": {AID: "*"},
-            "callable_by": {AID: "*", "rest": "*", "web": "*"},
+            # its line on the AI is written once the AI exists (below)
         },
     ):
         r = (await root.send([{"target": root.id, "payload": payload}]))[0]["result"]
@@ -154,15 +159,17 @@ async def main():
         core,
         BK,
         agent_id=AID,
-        # THE VAULT'S ID IS NOWHERE IN THE MODEL'S VIEW: it holds the
-        # estate as `$subtree`, not by name, and the system block names no other agent
-        # (the primer lists every id) — so finding the vault takes the tree itself.
-        can_call={root.id: "*", "$subtree": "*", "desk": "*", "cli": "*", "user": "*"},
-        callable_by={"user": "*"},
+        # THE VAULT'S ID IS NOWHERE IN THE MODEL'S VIEW: it reaches the estate
+        # by position, not by name (no line names it), and the system block names no
+        # other agent (the primer lists every id) — so finding the vault takes the
+        # tree itself. `connect` adds `reflect` on the root.
+        can={"desk": lines.ALL, "user": lines.ALL},
         limits=Limits.from_env(os.environ),
         record={"system_prompt": "{self}\n\n{howto}"},
     )
-    # THE ESTATE, under the AI (so `$subtree` reaches it), the vault five levels down.
+    # SIBLINGS: the human's own line on the AI, now that the AI exists.
+    await add_lines(root, "user", {AID: lines.ALL})
+    # THE ESTATE, under the AI (its own tree, by position), the vault five levels down.
     for rid, parent, desc in ROOMS:
         r = (
             await root.send(
@@ -191,7 +198,6 @@ async def main():
             "id": VAULT,
             "serial": SERIAL,
             "secret": SECRET,
-            "callable_by": {AID: "*", "rest": "*"},
         },
     ):
         r = (await root.send([{"target": root.id, "payload": payload}]))[0]["result"]
@@ -210,16 +216,15 @@ async def main():
         pass
     await close_kernel()
 
-    def is_docs(p):
-        return p.get("type") == "docs"
-
     opens = [
         i for i, (t, p) in enumerate(calls) if t == VAULT and p.get("type") == "open"
     ]
     first_open = opens[0] if opens else len(calls)
-    docs = [(i, p) for i, (t, p) in enumerate(calls) if is_docs(p)]
-    one = [(i, p) for i, p in docs if p.get("tier") in (None, "oneliners")]
-    det = [(i, p) for i, p in docs if p.get("tier") == "detailed"]
+    docs = [(i, t, p) for i, (t, p) in enumerate(calls) if _is_doc(p)]
+    det = [(i, t, p) for i, t, p in docs if p.get("tier") == "detailed"]
+    # every reflect below `detailed` carries the vault's one-line verb signatures
+    one = [(i, t, p) for i, (t, p) in enumerate(calls)
+           if p.get("type") == "reflect" and p.get("tier") in (None, "oneliners")]
     reflects = [(i, p) for i, (t, p) in enumerate(calls) if p.get("type") == "reflect"]
     filtered = [
         (i, p)
@@ -228,14 +233,12 @@ async def main():
     ]
 
     done = SECRET in content
-    oneliners_first = any(i < first_open and _is_vault(p.get("of")) for i, p in one)
+    oneliners_first = any(i < first_open and t == VAULT for i, t, _ in one)
     used = {(t, p.get("type")) for t, p in calls}
 
-    def _used(p):
-        of, verb = p.get("of"), p.get("verb")
-        target = (
-            VAULT if _is_vault(of) else ("kernel" if of in ("kernel", root.id) else of)
-        )
+    def _used(t, p):
+        verb = p.get("verb")
+        target = "kernel" if t in ("kernel", root.id) else t
         # A detailed pull with no `verb` is the kernel's own contract (every verb,
         # plus emits/cancel/notes) — it counts when one of that agent's verbs is used.
         return any(
@@ -245,7 +248,7 @@ async def main():
         )
 
     # no detailed pull holds: since #719 the oneliners reply carries each verb's schema
-    detailed_ok = all(_used(p) for _, p in det)
+    detailed_ok = all(_used(t, p) for _, t, p in det)
     first_reflect = reflects[0][0] if reflects else None
     filtered_after = any(
         first_reflect is not None and i > first_reflect for i, _ in filtered
@@ -254,15 +257,15 @@ async def main():
 
     print(f"\n  calls: {len(calls)} · opens: {len(opens)} · cap: {capped or 'clean'}")
     print(
-        f"  docs pulls: {len(one)} oneliners, {len(det)} detailed "
-        f"({[(p.get('of'), p.get('verb')) for _, p in det]})"
+        f"  docs pulls: {len(docs)} ({len(det)} detailed "
+        f"{[(t, p.get('verb')) for _, t, p in det]}); oneliner reflects: {len(one)}"
     )
     print(
         f"  reflects: {len(reflects)} ({len(filtered)} filtered: "
         f"{[{k: v for k, v in p.items() if k.endswith('subtrees')} for _, p in filtered]})"
     )
     print(
-        f"  reflect+docs share of the held conversation: "
+        f"  reflect share of the held conversation: "
         f"{rd}/{total} chars = {rd / total:.0%}"
         if total
         else "  (no rows held)"
@@ -287,7 +290,7 @@ async def main():
     ok = done and oneliners_first and detailed_ok
     verdict(
         ok,
-        "found the vault through the tree, read its docs by tier"
+        "found the vault through the tree, read its docs by reflect tier"
         if ok
         else f"done={done} oneliners_first={oneliners_first} "
         f"detailed_ok={detailed_ok} filtered_after={filtered_after}",

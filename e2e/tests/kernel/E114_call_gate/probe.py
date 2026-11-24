@@ -1,28 +1,36 @@
-"""kernel/call_gate — the two-sided deny-all CALL GATE, over the wire. NO MODEL.
+"""kernel/call_gate — the CALL GATE on `can` lines, over the wire. NO MODEL.
 
-An AGENT send passes only when the SENDER's `can_call` grants `(target, verb)`
-(egress) AND the TARGET's `callable_by` grants `(sender, verb)` (ingress); a
-denial is `reason: unauthorized` naming the `side`, egress first. On the PACKAGED
-host of `RUNTIME` (python | rust), driven over `web_rest` — the agents
-under test are `user_probe` agents whose `send` dispatches AS THEMSELVES, so the
-sender is a real agent, not the REST leg:
+A call passes only when the CALLER's own `can` holds a line covering
+`(target, verb)` — or the target is in the caller's own tree (position, `call`
+only) — AND every ancestor of the caller whose tree does not hold the target
+allows it too (the cap; the root never caps). The target keeps no list: it can
+neither widen nor block a call. Every denial is the UNKNOWN ANSWER, byte for byte
+the answer for a missing id (no side, no hint, no ids). On the PACKAGED rust
+host, driven over `web_rest` — the agents under test are `user_probe` agents
+whose `send` dispatches AS THEMSELVES, so the caller is a real agent, not the
+REST leg:
 
-  1. `$self` is the baseline; neither half → egress; the caller's half alone →
-     ingress; both halves → the edge exists; it is one-way;
-  2. VERB-LEVEL grants: `["reflect"]` admits reflect only — another verb dies on
-     whichever half lacks it; `"*"` covers every verb;
-  3. TOKENS resolve relative to the holder: `$parent` (only the holder's own
-     parent), `$subtree` (every agent below the holder, never a sibling);
-  4. the REST leg itself is gated: a target outside its `can_call` → egress;
-  5. an agent cannot raise its own authority: `update_agent` widening its own
-     `can_call` is refused and the record is unchanged;
-  6. a grant map's shape is checked at the write — `invalid_meta`;
-  7. `delete_agent` prunes the deleted ids (the whole subtree) from every other
-     agent's grants, so a re-created id does not inherit a stale edge.
+  1. one line on the caller: none → unknown, the same as a missing id; a line →
+     passes, the target's record unchanged; one-way;
+  2. LEVELS: `call: [reflect]` admits reflect only; `call: [*]` every verb;
+     `update` includes `call` on every verb;
+  3. POSITION (own tree, no line), `$parent` (the parent needs a written line),
+     siblings need a line, a line reaches the target's tree, THE WRITER SUBSET
+     (`rest` hands out only what its written lines hold), and THE CAP (an
+     ancestor that does not hold the target cuts the call);
+  4. the REST leg is an agent too: a target it holds no covering line on → the
+     unknown answer, a create on the root it holds no `create` line on → unknown;
+  5. NEVER UPWARD: an agent cannot write its own `can`, nor its parent's record;
+  6. a line's shape is checked at the write (`invalid_meta`); a line naming a
+     missing id, written by an agent, is the unknown answer for that id;
+  7. IDS ARE REUSABLE: a line survives its target's delete, a new line on an
+     absent id is refused, a re-created id is reached by the surviving line with
+     no write, and a delete takes the whole subtree.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -33,20 +41,23 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.lines import ALL, call, is_unknown
 from helpers.verdict import verdict
 
 REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
 USER = "user_probe.tools"
-SELF = {"$self": "*"}
-FROM_ABOVE = "grants come from above"
+#: The OUTSIDER: the seeded record store at the root, outside `rest`'s tree.
+#: `rest` holds only `reflect` on it (through its line on the root).
+OUTSIDER = "records"
+MISSING = "no_such_id"
 
 
 def main() -> int:
     name, _ = runtime(REPO, RUNTIME)
     spec = ensure_runtime(REPO, name)
     work = Path(tempfile.mkdtemp(prefix="e2e-call-gate-"))
-    hk = HostKernel(spec, work, reach=["a", "b", "c"]).boot()
+    hk = HostKernel(spec, work).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -56,16 +67,20 @@ def main() -> int:
             bad.append(what)
 
     def rec(aid: str) -> dict:
-        la = hk.send(root, {"type": "list_agents"})
-        return next((a for a in la.get("agents") or [] if a.get("id") == aid), {})
+        """`aid`'s record as `rest` sees it: whole inside `rest`'s tree; `{}` on
+        the unknown answer."""
+        r = hk.send(aid, {"type": "reflect"})
+        return {} if not isinstance(r, dict) or is_unknown(r, aid) else r
 
-    def setg(aid: str, field: str, grants: dict) -> None:
-        """The operator (the REST leg, holding update_agent on the root) writes a
-        WHOLE grant field — update_agent replaces it."""
-        r = hk.send(root, {"type": "update_agent", "id": aid, field: grants})
+    def write_can(aid: str, can: dict) -> dict:
+        """`rest` writes `aid`'s WHOLE `can` (update_agent replaces the field)."""
+        return hk.send(root, {"type": "update_agent", "id": aid, "can": can})
+
+    def setg(aid: str, can: dict) -> None:
+        r = write_can(aid, can)
         if r.get("updated") is not True:
-            bad.append(f"setup: update_agent {aid}.{field}={grants}: {str(r)[:200]}")
-            print(f"  BAD setup {aid}.{field}: {str(r)[:200]}", flush=True)
+            bad.append(f"setup: update_agent {aid}.can={can}: {str(r)[:200]}")
+            print(f"  BAD setup {aid}.can: {str(r)[:200]}", flush=True)
 
     def via(src: str, target: str, payload: dict) -> dict:
         """`src` sends `payload` to `target` AS ITSELF; the onward result."""
@@ -74,131 +89,138 @@ def main() -> int:
             return {"error": f"relay {src} refused: {str(r)[:200]}", "relay": True}
         return r.get("result") or {}
 
-    def refused(r: dict, side: str | None) -> bool:
-        return (
-            r.get("reason") == "unauthorized"
-            and (side is None or r.get("side") == side)
-            and not r.get("relay")
-        )
+    def refused(r: dict, target: str) -> bool:
+        return is_unknown(r, target) and not r.get("relay")
 
     def allowed(r: dict) -> bool:
         return "error" not in r and "reason" not in r
 
+    def same_as_missing(src: str, target: str, payload: dict) -> None:
+        got = via(src, target, payload)
+        miss = via(src, MISSING, payload)
+        if isinstance(miss.get("error"), str):
+            miss = {**miss, "error": miss["error"].replace(repr(MISSING), repr(target))}
+        need(got == miss, f"{src}→{target} denial is byte-identical to a missing id: {got} vs {miss}")
+
+    def dumps(r: dict) -> str:
+        return json.dumps(r, sort_keys=True)
+
     try:
-        for aid, parent, cb in (
-            ("a", "rest", {**SELF, "$parent": "*"}),
-            ("b", "rest", {**SELF, "$parent": "*"}),
-            # c is a's child; the REST leg (its grandparent) drives it by name
-            ("c", "a", {**SELF, "rest": ["send"]}),
-        ):
-            r = hk.create(parent_id=parent, handler_module=USER, id=aid, callable_by=cb)
+        for aid, parent in (("a", "rest"), ("b", "rest"), ("c", "a")):
+            r = hk.create(parent_id=parent, handler_module=USER, id=aid)
             need(r.get("id") == aid, f"create {aid} under {parent}: {str(r)[:160]}")
-        # an agent OUTSIDE the REST leg's reach: under the root, never declared
-        r = hk.send(root, {"type": "create_agent", "parent_id": root, "id": "outsider",
-                           "handler_module": USER, "callable_by": {**SELF, "rest": "*"}})
-        need(r.get("id") == "outsider", f"create outsider under the root: {str(r)[:160]}")
+            need(not rec(aid).get("can"), f"a new agent holds no lines: {aid}.can={rec(aid).get('can')!r}")
 
-        # 1 · the two halves
+        # 1 · one line, on the caller
         r = via("a", "a", {"type": "reflect"})
-        need(allowed(r) and r.get("id") == "a", f"$self baseline: a→a reflect passes: {str(r)[:120]}")
+        need(allowed(r) and r.get("id") == "a", f"own tree: a→a reflect passes: {str(r)[:120]}")
         r = via("a", "b", {"type": "reflect"})
-        need(refused(r, "egress"), f"neither half → refused, side egress: {str(r)[:200]}")
-        need(FROM_ABOVE in (r.get("hint") or ""), f"the denial carries the from-above hint: {r.get('hint')!r}")
-        setg("a", "can_call", {**SELF, "b": ["reflect"]})
+        need(refused(r, "b"), f"no line → the unknown answer: {str(r)[:200]}")
+        same_as_missing("a", "b", {"type": "reflect"})
+        b_before = dumps(rec("b"))
+        setg("a", {"b": call("reflect")})
         r = via("a", "b", {"type": "reflect"})
-        need(refused(r, "ingress"), f"caller's half only → refused, side ingress: {str(r)[:200]}")
-        setg("b", "callable_by", {**SELF, "$parent": "*", "a": ["reflect"]})
-        r = via("a", "b", {"type": "reflect"})
-        need(allowed(r) and r.get("id") == "b", f"both halves → a→b reflect passes: {str(r)[:120]}")
+        need(allowed(r) and r.get("id") == "b", f"a's line → a→b reflect passes: {str(r)[:120]}")
+        need(dumps(rec("b")) == b_before,
+             "the target's record is byte-equal before and after (it can neither widen nor block)")
         r = via("b", "a", {"type": "reflect"})
-        need(refused(r, "egress"), f"the edge is one-way: b→a refused, side egress: {str(r)[:200]}")
+        need(refused(r, "a"), f"the line is one-way: b→a refused: {str(r)[:200]}")
 
-        # 2 · verb-level grants
+        # 2 · levels
         r = via("a", "b", {"type": "inquiries"})
-        need(refused(r, "egress"), f"verb not in a's can_call list → egress: {str(r)[:200]}")
-        setg("a", "can_call", {**SELF, "b": "*"})
+        need(refused(r, "b"), f"call: [reflect] does not cover inquiries: {str(r)[:200]}")
+        setg("a", {"b": ALL})
         r = via("a", "b", {"type": "inquiries"})
-        need(refused(r, "ingress"), f"a holds '*', b accepts reflect only → ingress: {str(r)[:200]}")
-        r = via("a", "b", {"type": "reflect"})
-        need(allowed(r), f"the verb both halves name still crosses: {str(r)[:120]}")
-        setg("b", "callable_by", {**SELF, "$parent": "*", "a": "*"})
+        need(allowed(r) and "inquiries" in r, f"call: [*] covers every verb: {str(r)[:120]}")
+        setg("a", {"b": {"update": []}})
         r = via("a", "b", {"type": "inquiries"})
-        need(allowed(r) and "inquiries" in r, f"'*' on both halves covers every verb: {str(r)[:120]}")
+        need(allowed(r) and "inquiries" in r, f"update includes call on every verb: {str(r)[:120]}")
 
-        # 3 · tokens, relative to the holder
-        setg("a", "can_call", {**SELF, "b": "*", "$subtree": ["reflect"]})
-        setg("c", "callable_by", {**SELF, "rest": ["send"], "$parent": ["reflect"]})
-        r = via("a", "c", {"type": "reflect"})
-        need(allowed(r) and r.get("id") == "c",
-             f"a.$subtree + c.$parent → a→c reflect passes: {str(r)[:120]}")
+        # 3 · position, $parent, siblings, the cap
+        setg("a", {})
         r = via("a", "c", {"type": "inquiries"})
-        need(refused(r, "egress"), f"$subtree granted reflect only → inquiries egress: {str(r)[:200]}")
-        setg("b", "can_call", {**SELF, "c": ["reflect"]})
-        r = via("b", "c", {"type": "reflect"})
-        need(refused(r, "ingress"),
-             f"c.$parent admits its parent only — b→c refused, side ingress: {str(r)[:200]}")
-        setg("b", "can_call", {**SELF, "$subtree": "*"})
-        r = via("b", "a", {"type": "reflect"})
-        need(refused(r, "egress"), f"b.$subtree never reaches a sibling (a) → egress: {str(r)[:200]}")
-        setg("c", "can_call", {**SELF, "$parent": ["inquiries"]})
-        setg("a", "callable_by", {**SELF, "$parent": "*", "$subtree": ["inquiries"]})
+        need(allowed(r) and "inquiries" in r, f"position: a→c (its child) passes with no line: {str(r)[:120]}")
         r = via("c", "a", {"type": "inquiries"})
-        need(allowed(r) and "inquiries" in r,
-             f"c.$parent + a.$subtree → c→a inquiries passes: {str(r)[:120]}")
-        setg("b", "can_call", {**SELF, "a": ["inquiries"], "c": ["reflect"]})
-        r = via("b", "a", {"type": "inquiries"})
-        need(refused(r, "ingress"),
-             f"a.$subtree does not admit a sibling (b) → ingress: {str(r)[:200]}")
+        need(refused(r, "a"), f"the parent is not reached by position: c→a refused: {str(r)[:200]}")
+        setg("c", {"$parent": call("inquiries")})
+        r = via("c", "a", {"type": "inquiries"})
+        need(allowed(r) and "inquiries" in r, f"c's $parent line → c→a inquiries passes: {str(r)[:120]}")
+        r = via("c", "a", {"type": "reflect"})
+        need(allowed(r) and r.get("id") == "a", f"reflect passes on any hold: c→a reflect: {str(r)[:120]}")
+        r = via("b", "c", {"type": "reflect"})
+        need(refused(r, "c"), f"a sibling's child is not reached: b→c refused: {str(r)[:200]}")
+        setg("b", {"a": call("reflect")})
+        r = via("b", "c", {"type": "reflect"})
+        need(allowed(r) and r.get("id") == "c", f"a line reaches the target's tree: b→c reflect: {str(r)[:120]}")
+        r = write_can("c", {OUTSIDER: ALL})
+        need(r.get("reason") == "not_allowed" and r.get("arg") == "can",
+             f"the writer subset: rest holds only reflect on {OUTSIDER}, so it cannot hand out "
+             f"call: [*] there: {str(r)[:200]}")
+        r = write_can("c", {OUTSIDER: call("reflect")})
+        need(r.get("updated") is True,
+             f"rest hands c reflect on {OUTSIDER} (it holds it through the root line): {str(r)[:200]}")
+        r = via("c", OUTSIDER, {"type": "reflect"})
+        need(refused(r, OUTSIDER), f"the cap: a holds no line on {OUTSIDER}, so c's call is cut: {str(r)[:200]}")
+        setg("a", {OUTSIDER: call("reflect")})
+        r = via("c", OUTSIDER, {"type": "reflect"})
+        need(allowed(r) and r.get("id") == OUTSIDER, f"once a holds it too, c→{OUTSIDER} passes: {str(r)[:120]}")
 
         # 4 · the REST leg is an agent too
-        r = hk.send("outsider", {"type": "reflect"})
-        need(refused(r, "egress"), f"REST → an undeclared agent → refused, side egress: {str(r)[:200]}")
+        r = hk.send(OUTSIDER, {"type": "list"})
+        need(is_unknown(r, OUTSIDER), f"REST → {OUTSIDER} list (reflect line only) → unknown: {str(r)[:200]}")
+        r = hk.send("kernel", {"type": "create_agent", "parent_id": root, "id": "x",
+                               "handler_module": USER})
+        need(is_unknown(r, root), f"REST creates on the root with no create line there → unknown: {str(r)[:200]}")
 
-        # 5 · no self-raise
-        before = rec("a").get("can_call")
-        r = via("a", root, {"type": "update_agent", "id": "a",
-                            "can_call": {**SELF, "outsider": "*"}})
-        need(refused(r, None), f"a's update_agent on itself (via the root) is refused: {str(r)[:200]}")
-        r2 = via("a", "a", {"type": "update_agent", "id": "a",
-                            "can_call": {**SELF, "outsider": "*"}})
-        need("error" in r2 and r2.get("updated") is not True,
-             f"a's update_agent sent to itself is refused: {str(r2)[:200]}")
-        need(rec("a").get("can_call") == before, f"a's can_call is unchanged: {rec('a').get('can_call')!r}")
-        r = via("a", "outsider", {"type": "reflect"})
-        need(refused(r, "egress"), f"and the edge it tried to open stays shut: {str(r)[:160]}")
+        # 5 · never upward
+        before = rec("a").get("can")
+        r = via("a", "kernel", {"type": "update_agent", "id": "a", "can": {OUTSIDER: ALL}})
+        need(refused(r, "a"), f"a's update_agent of its own can (via the root) → unknown: {str(r)[:200]}")
+        r2 = via("a", "a", {"type": "update_agent", "id": "a", "can": {OUTSIDER: ALL}})
+        need(r2.get("reason") == "not_here" and r2.get("updated") is not True,
+             f"a's update_agent sent to itself is refused not_here: {str(r2)[:200]}")
+        need(rec("a").get("can") == before, f"a's can is unchanged: {rec('a').get('can')!r}")
+        r = via("a", OUTSIDER, {"type": "list"})
+        need(refused(r, OUTSIDER), f"and the line it tried to write stays absent: {str(r)[:160]}")
+        r = via("a", "kernel", {"type": "update_agent", "id": "rest", "description": "x"})
+        need(refused(r, "rest"), f"a cannot write its parent's record: {str(r)[:200]}")
 
-        # 6 · grant shape, checked at the write
-        for field, grants, what, reason in (
-            ("can_call", {"$bogus": "*"}, "an unknown $token", "invalid_meta"),
-            ("callable_by", {"g1|x": "*"}, "a peer address in callable_by", "invalid_meta"),
-            ("can_call", {"b": 5}, "a value that is neither '*' nor a verb list", "bad_arg"),
+        # 6 · a line's shape, checked at the write
+        # a line the verb's schema cannot parse is `bad_arg` (the argument check);
+        # a well-formed line the model does not allow is `invalid_meta`
+        for can, what, text, reason in (
+            ({"$bogus": ALL}, "an unknown $ key", None, "invalid_meta"),
+            ({"*": ALL}, "a wildcard target", None, "invalid_meta"),
+            ({"b2": 5}, "a level that is not a map", None, "bad_arg"),
+            ({"a": {"call": "x"}}, "a call level that is not a list", None, "bad_arg"),
+            ({"a": {"call": ["x"], "update": []}}, "two levels on one target", None, "bad_arg"),
+            ({"$parent": {"update": []}}, "$parent at a level other than call", None, "invalid_meta"),
+            ({"g1|x": ALL}, "a peer target", "peer target", "invalid_meta"),
         ):
-            r = hk.send(root, {"type": "update_agent", "id": "b", field: grants})
-            need(r.get("reason") == reason, f"{field} {what} → {reason}: {str(r)[:200]}")
-        r = hk.send(root, {"type": "update_agent", "id": "b",
-                           "can_call": {**SELF, "a": ["inquiries"], "c": ["reflect"], "g1|x": "*"}})
-        need(r.get("updated") is True, f"can_call takes a <guid>|<agent> key: {str(r)[:160]}")
+            before_b = rec("b").get("can")
+            r = write_can("b", can)
+            need(r.get("reason") == reason and (text is None or text in str(r.get("error")))
+                 and rec("b").get("can") == before_b,
+                 f"can {what} → {reason}, b's can unchanged: {str(r)[:200]}")
+        r = write_can("b", {"nobody_here": ALL})
+        need(is_unknown(r, "nobody_here"),
+             f"a line naming a missing id, written by an agent → unknown for that id: {str(r)[:200]}")
 
-        # 7 · delete prunes grants
-        need("b" in (rec("a").get("can_call") or {}), "before: a.can_call names b")
+        # 7 · ids are reusable
+        setg("a", {"b": call("reflect")})
         r = hk.send(root, {"type": "delete_agent", "id": "b"})
         need(r.get("deleted") is True, f"delete b: {str(r)[:160]}")
-        a_can = rec("a").get("can_call") or {}
-        need("b" not in a_can, f"b is pruned from a.can_call: {a_can!r}")
-        r = hk.create(parent_id="rest", handler_module=USER, id="b",
-                      callable_by={**SELF, "$parent": "*", "a": "*"})
-        need(r.get("id") == "b", f"re-create b: {str(r)[:120]}")
+        need("b" in (rec("a").get("can") or {}), f"a's line on b survives b's delete: {rec('a').get('can')!r}")
+        r = write_can("c", {"b": ALL})
+        need(is_unknown(r, "b"), f"a new line on the absent b is refused, unknown: {str(r)[:200]}")
+        r = hk.create(parent_id="rest", handler_module=USER, id="b")
+        need(r.get("id") == "b", f"re-create b (no grant): {str(r)[:120]}")
         r = via("a", "b", {"type": "reflect"})
-        need(refused(r, "egress"), f"the re-created b inherits no stale edge from a: {str(r)[:200]}")
-        setg("b", "can_call", {**SELF, "a": ["reflect"], "c": ["reflect"]})
+        need(allowed(r) and r.get("id") == "b",
+             f"the re-created b is reached by a's surviving line, with no write: {str(r)[:120]}")
         r = hk.send(root, {"type": "delete_agent", "id": "a"})
         need(r.get("deleted") is True, f"delete a (and its child c): {str(r)[:160]}")
-        need(not rec("c"), "c went with its parent")
-        b_can = rec("b").get("can_call") or {}
-        need("a" not in b_can and "c" not in b_can,
-             f"the whole deleted subtree is pruned from b.can_call: {b_can!r}")
-        o_cb = rec("outsider").get("callable_by") or {}
-        need(o_cb == {**SELF, "rest": "*"}, f"an unrelated grant map is untouched: {o_cb!r}")
+        need(rec("c") == {}, "c went with its parent")
     finally:
         hk.close()
         shutil.rmtree(work, ignore_errors=True)

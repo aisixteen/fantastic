@@ -33,7 +33,7 @@ async def main():
     root, core, close = await open_kernel(prefix="mem_resume_", reach=["work_fb", "notes", "ai", "cli", "user"])
     try:
         plant_fillers(N, pad_to=3000)
-        await M.files(root, ["ai"])
+        await M.files(root)
         conn = await M.agent(root, core, BK, "ai")
         conn.limits = _replace(conn.limits, max_turns=6)
         task = (f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN, in order. Then write "

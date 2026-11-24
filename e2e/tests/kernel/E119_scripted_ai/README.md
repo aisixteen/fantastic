@@ -8,8 +8,11 @@ needs is set explicitly (`endpoint`, `model`, `context_window`, `kv_slots`,
 `kv_overflow` on the provider; `max_tokens` on the chat, #632), so nothing is read
 from the server.
 
-The script: a `reflect` call (its reply, with the root's guid, is the next
-request's user turn) → a `file_bridge` `write` (the bytes land verbatim) → calls
+The AI's own `can` lines reach `memory`, `files`, its provider and `reflect` on
+the root; nothing is written on a target.
+
+The script: a `reflect` call on the root (its reply, the root's id and none of
+its guid, is the next request's user turn) → a `file_bridge` `write` (the bytes land verbatim) → calls
 written wrong, cut at its first foreign tag (#499: the compiler-style report comes
 back, nothing after the tag is stored; nothing runs) → an envelope with text outside
 a tag (its fault comes back) → a call only inside the thought (not dispatched; the
@@ -19,6 +22,6 @@ autofold anchors (`[cut · …]`, `[thought ~N tokens · id N]`, #556). The chec
 
 ```sh
 cd src/lib/python
-uv run python ../../../e2e/run.py --only-free --id scripted_ai --lanes 3      # all three
+uv run python ../../../e2e/run.py --only-free --id scripted_ai --lanes 3
 RUNTIME=rust uv run python ../../../e2e/tests/kernel/E119_scripted_ai/probe.py
 ```

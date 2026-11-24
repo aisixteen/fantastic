@@ -1,9 +1,10 @@
 # `file_agents` (E123) — file and folder agents over a file_bridge
 
 Free: no model. The kernel's own `file_bridge` (root `box/`, `allow: [docs, top.txt]`) on
-the packaged host of `RUNTIME`, every call over `web_rest`, the live events over the `ws`
+the packaged rust host, every call over `web_rest`, the live events over the `ws`
 face. A file or a folder is a VIEW AGENT of the bridge, made by `open_view` under an id
-the harness chooses and declares at boot (so the ws leg may watch it).
+the harness chooses; it lives under `fb` in `rest`'s tree, so the ws leg watches it by
+its seeded `rest` line.
 
 What it proves (details in `probe.py`'s docstring):
 
@@ -24,5 +25,5 @@ probe pins the kernel contract they stand on.
 
 ```sh
 cd src/lib/python
-uv run python ../../../e2e/run.py --only-free --id file_agents --lanes 3   # all three
+uv run python ../../../e2e/run.py --only-free --id file_agents --lanes 3
 ```

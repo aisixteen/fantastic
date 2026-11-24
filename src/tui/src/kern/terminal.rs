@@ -1,14 +1,14 @@
 //! THE IN-APP TERMINAL, as an agent. `t` in the tree opens it and `t` again
 //! closes it.
 //!
-//! It is an `exec_bridge` agent `term` under `user` (the blueprint's record),
+//! It is an `exec_bridge` agent `term` under `user`, which no blueprint seeds,
 //! running ONE PTY job: the human's `$SHELL`. It sits in the tree like everything
 //! else, and a coder run inside it reaches the kernel the same way any other
 //! client does.
 //!
 //! Opening sets its `allowed` to exactly the line it runs (it runs in the project
-//! dir and inherits this process's environment); a `term` closed earlier is made
-//! again by `create_agent`. The shell drives it as the operator. Attaching is
+//! dir and inherits this process's environment): `t` makes `term` with
+//! `create_agent`. The shell drives it as the operator. Attaching is
 //! CLIENT-SIDE, because `boot` starts nothing: `status` finds a live PTY job and
 //! re-attaches to it (its `output` ring is the replay), or `start`s the shell.
 //! Closing is a `delete_agent`; the job dies with it.
@@ -150,20 +150,8 @@ pub async fn prepare_run(host: &Host, argv: &[String]) -> Result<(), String> {
     create(host, argv).await
 }
 
-/// Make `term` run exactly `argv`: a seeded `term` that names no line yet gets
-/// its `allowed` set; a missing one is created. It holds no lines.
+/// Create `term` under `user`, running exactly `argv`. It holds no lines.
 async fn create(host: &Host, argv: &[String]) -> Result<(), String> {
-    if host.kernel.exists(TERM_ID) {
-        let mut update = json!({"type": "update_agent", "id": TERM_ID});
-        if let (Some(u), Value::Object(f)) = (update.as_object_mut(), line_record(argv)) {
-            u.extend(f);
-        }
-        let r = host.operator("kernel", update).await;
-        return match r.result.get("error").and_then(Value::as_str) {
-            Some(e) => Err(format!("could not set `{TERM_ID}`'s line: {e}")),
-            None => Ok(()),
-        };
-    }
     let mut create = json!({
         "type": "create_agent",
         "parent_id": host.cfg.user.as_str(),
@@ -225,17 +213,16 @@ pub async fn canvas_cell(host: &Host, argv: &[String]) -> Result<Option<String>,
     Ok(Some(cell))
 }
 
-/// Make `term` run its program (created if it is missing), then attach to its live PTY job or start one
-/// at `cols`×`rows`.
+/// Make `term` (created running the human's shell when it is missing), then
+/// attach to its live PTY job or start one at `cols`×`rows`.
 pub async fn open(host: &Host, cols: u16, rows: u16) -> Result<Attach, String> {
-    // the program: the argv `run` recorded, else the human's shell
-    let argv = match recorded(host, TERM_ID) {
-        Some(a) if !a.is_empty() => a,
-        _ => vec![shell()?],
-    };
-    if recorded(host, TERM_ID).as_deref() != Some(argv.as_slice()) {
-        create(host, &argv).await?;
+    if !host.kernel.exists(TERM_ID) {
+        create(host, &[shell()?]).await?;
     }
+    // the program: the argv its one line names (the shell, or what `run` gave)
+    let Some(argv) = recorded(host, TERM_ID).filter(|a| !a.is_empty()) else {
+        return Err(format!("`{TERM_ID}` names no one allowed line to run"));
+    };
 
     // A live PTY job is re-attached, never doubled.
     let st = host.operator(TERM_ID, json!({"type": "status"})).await;

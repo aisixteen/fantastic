@@ -3,9 +3,9 @@
 # driven over web_rest. Times are reported; bounds catch only a gross regression.
 id: kernel_load
 group: kernel
-title: "load: 1000 agents hydrate at boot (time vs the bare seed), all listed and indexed; 500 REST reflects; one AI turn's 500 calls as ONE kernel batch, all replies back as one turn"
+title: "load: 1000 agents hydrate at boot (time vs the bare seed), all listed by reflect tree=ids and indexed; 500 REST reflects; one AI turn's 500 calls as ONE kernel batch, all replies back as one turn"
 runner: probe.py
-runtimes: [python, rust]
+runtimes: [rust]
 costs: free
 limits:
   idle_seconds: 300

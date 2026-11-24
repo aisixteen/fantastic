@@ -2,20 +2,23 @@
 kicks it off, walks away — and is WOKEN by the team when it concludes, validates
 the answer, DELETES the fleet, and stops.
 
-E36 measures the swarm with a harness-built team. This one measures the CREATOR:
-create three AI agents as its children, give each exactly one oracle (both sides of
-the edge), let every pair talk (both sides), point them at `notes`, start all three
-in ONE batch with replies DISCARDED, call `done`. Then, when the solvers have
+E36 measures the swarm with a harness-built team. This one measures the CREATOR: the
+operator leaves three empty solver shells under it (a line naming a missing id is
+refused, and a creator cannot hand out lines on agents only its `create` line
+reaches — so the shells exist first and the creator holds a `send` line on each);
+the creator makes each solver's provider under it, fills each solver's record with
+exactly one oracle line and a line on each peer, points them at `notes`, starts all
+three in ONE batch with replies DISCARDED, calls `done`. Then, when the solvers have
 agreed and written the code, the writer must message the creator; the creator's
 turn wakes, reads `answer.txt` on `notes`, confirms the code the solvers report is
-the code on disk, tells the human, deletes its three solvers (its own children —
-baseline authority) and ends with `done`. That last leg — a sleeping mind woken by
+the code on disk, tells the human, deletes its three solvers (its `create` line
+covers them) and ends with `done`. That last leg — a sleeping mind woken by
 its own creation, validating, cleaning up and stopping — is the point of the test.
 Acceptance: the reported answer AND the deletion of the sub-agents.
 
 A creator left to work it out is not stuck but SLOW: turns of reflecting, a probe
-program, one `update_agent` per grant. So the task
-here is as detailed as a spec — the record shape to copy, the exact grant maps
+program, one `update_agent` per line. So the task
+here is as detailed as a spec — the record fields to copy, the exact `can` lines
 (and that `update_agent` REPLACES a named field whole), the solver instructions
 verbatim, the batch kickoff with `<reply_to>null</reply_to>`, and `done`. What is
 left to the creator is doing it, correctly, in few turns.
@@ -39,26 +42,21 @@ sys.path.insert(
     ),
 )
 from helpers.kernel import home
-from helpers import creds, memory, verdict  # noqa: E402
+from helpers import add_lines, creds, lines, memory, probe_agent, relay, verdict  # noqa: E402
+from helpers.ai import CHAT_MODULE  # noqa: E402
+from helpers.lines import is_unknown  # noqa: E402
 from helpers.ai import IDLE_END, QuietWatch  # noqa: E402
 from tests.agentic_advanced.E30_subai import probe as P  # noqa: E402
 from tests.agentic_advanced.E36_multisubai import probe as S  # noqa: E402
 
 CREATOR = "ai"
 ORACLES, SOLVERS, LEDGER_NAMES, N = S.ORACLES, S.SOLVERS, S.LEDGER_NAMES, S.N
-# EVERY ID THE BUILDER'S RECORD NAMES is declared here, `cli` included: over the
-# wire the probe is the `rest` agent, and a creator may delegate only what it
-# holds — a `can_call` on an id the driver never reached is refused as
-# `cannot delegate '*' on cli` (python's rule is the same; it never fires in
-# process, where the probe is the operator).
-# EVERYTHING E30'S SHARED BUILDER RECORD NAMES, plus this probe's own. Over the
-# wire the probe is the `rest` agent and a creator delegates only what it
-# holds, so every id `_ai_meta` puts on `can_call` (cli, clock, readings,
-# totals, runner, …) must be declared here or the create is refused
-# `cannot delegate '*' on <id>` — python's rule too; it never fires in process
-# where the probe is the operator. E30's own set is the authority, not a
-# hand-listed one.
+# The ids the FIXTURE builds (E30's set, plus this probe's own): what the model did
+# not make. The solver shells are the operator's too, but they are the TEAM the
+# creator fills, so they are scored as its work.
 MINE = {*P.MINE, "kernel_store", "notes", "user", CREATOR, *ORACLES}
+#: the oracles' records before the run: no agent writes on a callee (`doors_ok`)
+ORACLE_BEFORE: dict[str, dict] = {}
 UNATTENDED = S.UNATTENDED
 
 
@@ -92,40 +90,39 @@ TASK = (
     f"`{ORACLES[1]}` (the ROOMS ledger), `{ORACLES[2]}` (the OWNERSHIP ledger) — each "
     "answers `ask` with a `question` and knows ONLY its own ledger. Together they hide "
     "a 3-digit SAFE CODE. There is also `notes` (a file agent; verbs write/"
-    "read, args `path` and `bytes`) and `brain`, an AI agent whose RECORD is your "
-    "template. Do NOT solve the puzzle yourself and do NOT relay facts between "
+    "read, args `path` and `bytes`) and `brain`, an AI agent whose record is your "
+    "template (its fields and `brain_prov`'s are spelled at the end). Do NOT solve "
+    "the puzzle yourself and do NOT relay facts between "
     "solvers. Build the team, start it, walk away, and come back only when it calls "
     "you.\n\n"
+    "HOW REACH WORKS: an agent reaches only its own tree (the agents below it); every "
+    "other call needs a LINE in the CALLER's own `can` field, "
+    "`{<target id>: {\"call\": [<verbs>]}}` (`[\"*\"]` for every verb). You may hand "
+    "on only lines you hold yourself.\n\n"
     "DO EXACTLY THIS, in as few turns as you can — every step is spelled out so you "
-    "need no exploration beyond one `list_agents`:\n\n"
-    f"STEP 1 — CREATE THREE SOLVERS as YOUR OWN CHILDREN, ids `{SOLVERS[0]}`, "
-    f"`{SOLVERS[1]}`, `{SOLVERS[2]}`. Each solver is a PAIR: a provider `<solver_k>_prov` "
-    "and the chat `<solver_k>` that completes through it. Send them in ONE batch of six "
-    "`create_agent` calls to `kernel`, the three providers first. Send `kernel` "
-    "`<type>list_agents</type>` once. Copy from the `brain_prov` record these fields "
-    "verbatim into each provider: "
+    "need no exploration:\n\n"
+    f"STEP 1 — FILL THE THREE SOLVERS. They already exist as YOUR OWN CHILDREN, empty "
+    f"chats with ids `{SOLVERS[0]}`, `{SOLVERS[1]}`, `{SOLVERS[2]}`. Each solver is a "
+    "PAIR: a provider `<solver_k>_prov` and the chat `<solver_k>` that completes "
+    "through it. First send ONE batch of three `create_agent` calls to `kernel`, one "
+    "provider per solver, each with `parent_id` = `<solver_k>` (UNDER its solver, so "
+    "the solver reaches it with no line), these fields copied from the `brain_prov` "
+    "fields below: "
     + ", ".join(f"`{f}`" for f in PROV_COPY)
-    + f", with its `can_call` and `callable_by` maps as `{P.BRAIN_PROV}` has them, except that "
-    "`callable_by` names `<solver_k>` instead of `brain`. Copy from the "
-    "`brain` record these fields verbatim into each chat, with `provider_id` set to "
-    "`<solver_k>_prov`: "
+    + ", and `can` exactly `{\"creds\": {\"call\": [\"get\"]}}` (the key store line "
+    "your right to create it forces). Then send ONE batch of three `update_agent` "
+    "calls to `kernel`, one per solver (`id` = `<solver_k>`), with these fields copied "
+    "from the `brain` fields below, `provider_id` set to `<solver_k>_prov`: "
     + ", ".join(f"`{f}`" for f in COPY)
-    + ". Set "
-    "`parent_id` to YOUR id on all six. Set `description` to what the solver is for "
-    f"(solver k holds the ledger of `oracle_k`). Give each solver these grant maps "
-    "(a map is a tag whose children are keyed by agent id or a relative token):\n"
-    f"  `<can_call>`: `<$self>*</$self> <$parent>*</$parent> <$subtree>*</$subtree> "
-    f"<oracle_k>*</oracle_k> <notes>*</notes> <memory>*</memory>"
-    + " <solver_k_prov>complete watch reflect</solver_k_prov>"
-    + "` (`memory` is the store their conversation lives in, "
-    "`<solver_k>_prov` is the provider their completions come from — the doors of "
-    "`memory` and the model key are already open for the providers) and one "
-    "`<solver_j>*</solver_j>` for EACH of the two other solvers.\n"
-    "  `<callable_by>`: `<$self>*</$self> <$parent>*</$parent> <$subtree>*</$subtree>` "
-    "and one `<solver_j>*</solver_j>` for EACH of the two other solvers.\n"
-    "That is: solver k reaches its own oracle and both peers, and accepts both peers. "
-    "You are their parent, so they can reach you and you them without more grants.\n\n"
-    "The oracles' and `notes`' doors are already open for the solvers.\n\n"
+    + ". Set `description` to what the solver is for "
+    "(solver k holds the ledger of `oracle_k`). Give each solver this `can`:\n"
+    "  `{\"<oracle_k>\": {\"call\": [\"*\"]}, \"notes\": {\"call\": [\"*\"]}, "
+    "\"memory\": {\"call\": [\"*\"]}, \"<solver_j>\": {\"call\": [\"send\"]}, "
+    "\"<solver_i>\": {\"call\": [\"send\"]}}` — its own oracle only, `notes`, the store "
+    "its conversation lives in (`memory`), and `send` on EACH of the two other "
+    "solvers.\n"
+    "That is: solver k reaches its own oracle and both peers; its provider is below "
+    "it. You are their parent, so you reach them with no line.\n\n"
     "STEP 2 — KICK OFF ALL THREE AT ONCE: one batch of three `send` calls, one per "
     "solver, each with `<type>send</type>`, `<client_id>` = the solver's id, "
     "`<reply_to>null</reply_to>` (their first turns are NOT yours to read), and "
@@ -139,10 +136,11 @@ TASK = (
     "STEP 5 — CLEAN UP THE FLEET: the team's work is over. Send `kernel` ONE batch of "
     f"six `delete_agent` calls, the three solvers `{SOLVERS[0]}`, `{SOLVERS[1]}`, "
     f"`{SOLVERS[2]}` and their providers `<solver_k>_prov` (they are your children, so "
-    "this needs no extra grant), "
+    "this needs no extra line), "
     "confirm to me that the six are gone, and call `done`. Nothing else.\n\n"
     "THE SOLVERS' INSTRUCTIONS (send each block verbatim as that solver's `<text>`):\n\n"
     + "\n\n".join(f"=== {SOLVERS[k]} ===\n{solver_instructions(k)}" for k in range(N))
+    + "\n\n{template}"
 )
 
 
@@ -158,9 +156,6 @@ async def fixture(root, *, interpreter=None):
                         "parent_id": home(root),
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "kernel_store",
-                        # `notes` is the one that actually reads/writes here (the solvers
-                        # and the creator go THROUGH it) — without it every write fails.
-                        "callable_by": {CREATOR: "*", "brain": "*", "rest": "*", "web": "*"},
                         "ingress_rule": "allow_all_ingress",
                         "root": ".fantastic",
                     },
@@ -179,9 +174,6 @@ async def fixture(root, *, interpreter=None):
                 # a DATA store — the records under `.fantastic` stay the loader's
                 "root": ".fantastic/data",
                 "ingress_rule": "allow_all_ingress",
-                # The solvers' door is the fixture's to open: `notes` is not the
-                # creator's child, so the creator may not write its record.
-                "callable_by": {CREATOR: "*", "rest": "*", "web": "*", **{sid: "*" for sid in SOLVERS}},
                 "description": "Shared text documents. The team's answer goes to `answer.txt`.",
             },
         },
@@ -194,8 +186,6 @@ async def fixture(root, *, interpreter=None):
                 "id": "user",
                 "answer": "do your best judgement",
                 "description": "The human this kernel belongs to.",
-                "can_call": {CREATOR: "*"},
-                "callable_by": {CREATOR: "*", "rest": "*", "web": "*"},
             },
         },
     ]
@@ -210,25 +200,52 @@ async def fixture(root, *, interpreter=None):
                     "id": oid,
                     "lines": S.LEDGERS[k],
                     "description": f"Oracle {k + 1}: the {LEDGER_NAMES[k]} ledger; answers `ask`. Knows only its own ledger.",
-                    # its solver's door, opened here — the oracle is not the
-                    # creator's child, so the creator may not write its record
-                    "callable_by": {CREATOR: "*", "rest": "*", "web": "*", SOLVERS[k]: "*"},
                 },
             }
         )
     for out in await root.send(batch):
         assert not (out.get("result") or {}).get("error"), out
-    # THE MEMORY STORE'S DOOR, opened by the operator for the solvers the creator will
-    # build (their ids are known): a solver the model creates names `memory` and may
-    # call it; the store's own ingress is the fixture's to grant.
-    for sid in SOLVERS:
-        await memory.open_ingress(root, memory.MEMORY, sid)
-        await memory.open_ingress(root, memory.MEMORY, f"{sid}_prov")
-        if P.BK.key_ref:
-            # The STORE's half only: the provider does not exist yet, and its own
-            # `can_call` is its creator's to write.
-            await creds.open_store(root, f"{sid}_prov")
     return store
+
+
+def creator_create(aid: str) -> dict:
+    """The creator's `create` line on ITSELF: the solvers and their providers, of the
+    chat and provider bundles; a provider holds the key line only as forced here."""
+    prov = P.BK.record().get("handler_module")
+    return {aid: lines.create(
+        who=(*SOLVERS, *[f"{sid}_prov" for sid in SOLVERS]),
+        what={CHAT_MODULE: {"*": "*"}, prov: {"*": "*", **creds.creator_line(prov)}})}
+
+
+async def wire_builder(root, aid: str) -> None:
+    """The operator's half, once the creator exists (O11): its `create` line, the three
+    empty solver shells under it, and the creator's literal `send` line on each (a
+    `create` line with a narrower `who` does not let it hand out lines on the agents
+    it reaches; a literal line does). Then, before the model, the writer-subset wall:
+    a hand holding the creator's lines may not put a line it lacks into a solver."""
+    await add_lines(root, aid, creator_create(aid))
+    for k, sid in enumerate(SOLVERS):
+        r = (await root.send([{"target": root.id, "payload": {
+            "type": "create_agent", "parent_id": aid, "id": sid,
+            "handler_module": CHAT_MODULE,
+            "description": f"Solver {k + 1} of three (to be filled by its creator)."}}]))[0]["result"]
+        assert not (isinstance(r, dict) and r.get("error")), f"create shell {sid}: {r}"
+    await add_lines(root, aid, {sid: lines.call("send") for sid in SOLVERS})
+    for oid in ORACLES:
+        ORACLE_BEFORE[oid] = await asyncio.to_thread(root.record, oid)
+    # A hand with the creator's exact lines (and so the same `create` line) fills a
+    # shell with a line on the key store, which it holds nothing on: refused, and the
+    # shell is unchanged.
+    can = (await asyncio.to_thread(root.record, aid)).get("can") or {}
+    await probe_agent(root, "creator_hand", can=can)
+    r = await relay(root, "creator_hand", "kernel", {
+        "type": "update_agent", "id": SOLVERS[0], "can": {creds.CREDS: creds.GET}})
+    assert ((r.get("reason") == "not_allowed" and r.get("arg") == "can")
+            or is_unknown(r, creds.CREDS)), f"a line the writer lacks was handed out: {r}"
+    shell = await asyncio.to_thread(root.record, SOLVERS[0])
+    assert not shell.get("can"), f"the refused fill changed {SOLVERS[0]}: {shell.get('can')}"
+    gone = (await root.send([{"target": root.id, "payload": {"type": "delete_agent", "id": "creator_hand"}}]))[0]["result"]
+    assert not gone.get("error"), f"delete creator_hand: {gone}"
 
 
 async def _rows(root, aid):
@@ -243,27 +260,24 @@ async def score(root, store_id, total, new_total, transcript):
     _ = (store_id, total, new_total, transcript)
     print("\n" + "=" * (P.W + 4))
     print(f"  puzzle seed={S.PUZZLE_SEED} code={S.CODE}")
-    listing = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]["result"]
-    records = {a["id"]: a for a in (listing.get("agents") or [])}
+    records = await P.records_of(root)
     ai_module = P.bundle(records.get("brain", {}))
-    solvers = [a["id"] for a in records.values() if a["id"] not in MINE and P.bundle(a) == ai_module]
+    solvers = [aid for aid, a in records.items() if aid not in MINE and P.bundle(a) == ai_module]
 
     # ── 1. STRUCTURE: three solvers, the creator's children, one oracle each, pairs both ways ──
-    def cc(aid):
-        return records.get(aid, {}).get("can_call") or {}
+    def can(aid):
+        return records.get(aid, {}).get("can") or {}
 
-    def cb(aid):
-        return records.get(aid, {}).get("callable_by") or {}
-
-    per = {s: {o for o in ORACLES if o in cc(s)} for s in solvers}
+    per = {s: {o for o in ORACLES if o in can(s)} for s in solvers}
     oracle_ok = len(solvers) == N and all(len(v) == 1 for v in per.values()) and len(set().union(*per.values())) == N if per else False
-    doors_ok = all(any(s in cb(o) for s in solvers) for o in ORACLES)
-    pairs_ok = all(t in cc(s) and s in cb(t) for s in solvers for t in solvers if s != t) if solvers else False
+    # no agent writes on a callee: the oracles' records are as the fixture made them
+    doors_ok = bool(ORACLE_BEFORE) and all(records.get(o) == ORACLE_BEFORE.get(o) for o in ORACLES)
+    pairs_ok = all(t in can(s) for s in solvers for t in solvers if s != t) if solvers else False
     children_ok = all(records.get(s, {}).get("parent_id") == CREATOR for s in solvers)
     c1 = oracle_ok and doors_ok and pairs_ok and children_ok
     print(
         f"    1. team built and wired             {'OK' if c1 else 'NO'} solvers={per} "
-        f"oracle_doors={doors_ok} pairs_both_ways={pairs_ok} children={children_ok}"
+        f"oracles_untouched={doors_ok} pairs_both_ways={pairs_ok} children={children_ok}"
     )
 
     # ── 2. ONE-BATCH KICKOFF with replies discarded, then `done` ──
@@ -316,8 +330,7 @@ async def score(root, store_id, total, new_total, transcript):
                 woke = True
                 after = " ".join(str(r.get("content") or "") for r in rows[idx:] if r.get("role") == "assistant")
                 validated = bool(re.search(r"<target_id>\s*notes\s*</target_id>", after)) and bool(re.search(r"VALIDATED\s+" + S.CODE, after))
-                live = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]["result"]
-                ids = {a["id"] for a in (live.get("agents") or [])}
+                ids = set(await asyncio.to_thread(root.agent_ids))
                 deleted = validated and not any(s in ids for s in solvers)
                 stopped = 'name="done"' in after and deleted
             if not stopped and await watch.quiet():
@@ -334,7 +347,7 @@ async def score(root, store_id, total, new_total, transcript):
     # ── THE EVIDENCE, always: the records the creator wrote, the exchange, the errors ──
     print("\n  ── solver records (as the creator wrote them) ──")
     for s_ in solvers:
-        rec = {k: v for k, v in records.get(s_, {}).items() if k not in ("can_call", "callable_by", "description")}
+        rec = {k: v for k, v in records.get(s_, {}).items() if k not in ("can", "description")}
         print(f"  {s_}: {rec}")
     print("\n  ── the exchange (peer messages, in send order) ──")
     sent: list[tuple[float, str, str, str]] = []
@@ -383,9 +396,10 @@ async def main() -> None:
         fixture=fixture,
         scorer=score,
         mine=MINE,
-        extra_reach={o: "*" for o in ORACLES} | {"notes": "*"},
+        extra_reach={o: lines.ALL for o in ORACLES} | {"notes": lines.ALL},
         prefix="multisubai_build_",
         sub_ais=list(SOLVERS),
+        wire_builder=wire_builder,
     )
     sys.exit(0 if ok else 1)
 

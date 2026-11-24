@@ -43,6 +43,7 @@ sys.path.insert(0, str(E2E))
 
 from helpers import oslayer
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.lines import ALL, PROVIDER
 from helpers.verdict import verdict
 from mocks.vllm import VllmMock
 
@@ -79,7 +80,7 @@ def main() -> int:
     lead_m = VllmMock(model="mock-lead").start()
     work_m = VllmMock(model="mock-worker").start()
     work = Path(tempfile.mkdtemp(prefix="e2e-chain-restart-"))
-    hk = HostKernel(spec, work, reach=[LEAD, WORKER, EX, f"{LEAD}_prov", f"{WORKER}_prov", "memory"]).boot()
+    hk = HostKernel(spec, work).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -87,11 +88,6 @@ def main() -> int:
         print(f"  {'ok ' if cond else 'BAD'} {what}", flush=True)
         if not cond:
             bad.append(what)
-
-    def callable_by(aid: str) -> dict:
-        r = hk.send("kernel", {"type": "list_agents"})
-        rec = next(a for a in r.get("agents") or [] if a.get("id") == aid)
-        return dict(rec.get("callable_by") or {})
 
     def asked(m: VllmMock, needle: str, bound: float = 90) -> str:
         """The last user message of the first request carrying `needle`, waited for."""
@@ -119,33 +115,27 @@ def main() -> int:
             if t.get("agent") in (LEAD, WORKER, EX)], bound)
 
     try:
-        r = hk.send(root, {"type": "update_agent", "id": "memory",
-                           "callable_by": {**callable_by("memory"), LEAD: "*", WORKER: "*",
-                                           f"{LEAD}_prov": "*", f"{WORKER}_prov": "*"}})
-        need(r.get("updated") is True, f"memory accepts the AIs: {str(r)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="exec_bridge.tools", id=EX,
                         ingress_rule="allow_all_ingress", cwd=str(work), env=oslayer.child_env(),
-                        allowed=ALLOWED, callable_by={"$self": "*", "$parent": "*", LEAD: "*"})
+                        allowed=ALLOWED)
         need(rec.get("id") == EX, f"create {EX}: {str(rec)[:200]}")
 
-        def make_ai(aid: str, mock: VllmMock, can_call: dict, cb: dict) -> None:
+        def make_ai(aid: str, mock: VllmMock, can: dict) -> None:
             common = dict(context_window=262144, memory_store_id="memory")
             prov = f"{aid}_prov"
             rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=prov,
                             endpoint=mock.url, model=mock.model, kv_slots=4,
                             kv_overflow="evict", **common,
-                            can_call={"$self": "*", "memory": "*"},
-                            callable_by={"$self": "*", "$parent": "*", aid: "*"})
+                            can={"memory": ALL})
             need(rec.get("id") == prov, f"create {prov}: {str(rec)[:200]}")
             rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
                             provider_id=prov, model=mock.model, max_tokens=8192, **common,
-                            can_call={**can_call, prov: ["complete", "watch", "reflect"]}, callable_by=cb)
+                            can={**can, prov: PROVIDER})
             need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")
 
-        make_ai(LEAD, lead_m, {"$self": "*", "memory": "*", EX: "*"},
-                {"$self": "*", "$parent": "*", "rest": "*", WORKER: "*"})
-        make_ai(WORKER, work_m, {"$self": "*", "memory": "*", LEAD: "*"},
-                {"$self": "*", "$parent": "*", "rest": "*"})
+        # every line is the caller's own; the worker's names the lead, so it comes second
+        make_ai(LEAD, lead_m, {"memory": ALL, EX: ALL})
+        make_ai(WORKER, work_m, {"memory": ALL, LEAD: ALL})
 
         # the kernel's ledger and the AIs' rows go to a durable store
         hk.close()

@@ -20,7 +20,8 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, human, verdict
+from helpers import Limits, connect, drive, human, human_line, lines, probe_agent, relay, verdict
+from helpers.lines import is_unknown
 from helpers.kernel import open_kernel, home
 
 BK = _resolve_backend()
@@ -34,7 +35,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_dist_", reach=[FB, "notes", "ai", "ai_cold", "cli", "user"]
+        prefix="coding_dist_", reach=[FB, "notes", "ai", "ai_cold", "user"]
     )
     try:
         fact = secrets.token_hex(4)
@@ -44,13 +45,11 @@ async def main():
                 "type": "create_agent", "parent_id": home(root), "id": FB,
                 "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent", "parent_id": home(root), "id": "notes",
                 "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
         ):
             r = await _call(root, root.id, payload)
@@ -63,14 +62,15 @@ async def main():
             "it into `memory.md` as a clear line a later reader will understand. "
             f"Then {DONE}."
         )
-        # THE HUMAN who wants the work done — both sessions are tasked FROM here.
-        await human(root, ai=["ai", "ai_cold"])
+        # THE HUMAN who wants the work done — both sessions are tasked FROM here;
+        # its line on each is written once that session exists.
+        await human(root, ai=[])
         conn = await connect(
             root, core, BK,
-            can_call={FB: "*", "notes": "*", "cli": "*", "user": "*"},
-            callable_by={"user": "*"},
+            can={FB: lines.ALL, "notes": lines.ALL, "user": lines.ALL},
             limits=Limits.from_env(os.environ), record={"file_bridge_id": FB},
         )
+        await human_line(root, conn.id)
         await drive(conn, warm, client_id="warm", via="user")
         await conn.close()
 
@@ -83,19 +83,21 @@ async def main():
             "editor `notes` and write the deploy token it records to "
             f"`recovered.md`, nothing else. Then {DONE}."
         )
+        # SEALED BY DEFAULT (harness, before the cold session): an agent with no
+        # line on the leg does not reach it — the unknown answer. Only the lines
+        # in the cold session's own `can` (below) open it; nothing is written on
+        # the leg or the editor.
+        await probe_agent(root, "ai_cold_probe")
+        r = await relay(root, "ai_cold_probe", FB, {"type": "read", "path": "memory.md"})
+        assert is_unknown(r, FB), f"an agent with no line reached {FB}: {r}"
+        gone = await _call(root, root.id, {"type": "delete_agent", "id": "ai_cold_probe"})
+        assert not gone.get("error"), f"delete ai_cold_probe: {gone}"
         conn2 = await connect(
             root, core, BK, agent_id="ai_cold",
-            can_call={FB: "*", "notes": "*", "cli": "*", "user": "*"},
-            callable_by={"user": "*"},
+            can={FB: lines.ALL, "notes": lines.ALL, "user": lines.ALL},
             limits=Limits.from_env(os.environ), record={"file_bridge_id": FB},
         )
-        # the cold agent must be accepted by the leg/editor
-        await _call(root, root.id, {"type": "update_agent", "id": FB,
-                                    "callable_by": {"ai": "*", "ai_cold": "*",
-                                                    "rest": "*", "web": "*", "notes": "*"}})
-        await _call(root, root.id, {"type": "update_agent", "id": "notes",
-                                    "callable_by": {"ai": "*", "ai_cold": "*",
-                                                    "rest": "*", "web": "*"}})
+        await human_line(root, conn2.id)
         await drive(conn2, cold_task, client_id="cold", via="user")
         await conn2.close()
 

@@ -25,7 +25,7 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, human, verdict
+from helpers import Limits, connect, drive, human, human_line, lines, verdict
 from helpers.kernel import open_kernel, home
 
 BK = _resolve_backend()
@@ -37,8 +37,8 @@ TEST = "from prog import inc\n\n\ndef test_inc():\n    assert inc(1) == 2\n"
 
 TASK = (
     "This run's working dir holds `prog.py` and `test_prog.py`. The command "
-    "runner `runner` runs the test suite (reflect it for the exact allowed "
-    "command; start a job, poll {type:'status', job_id}, read its output with "
+    "runner `runner` runs the test suite (reflect it: its description names the exact "
+    "allowed command; start a job, poll {type:'status', job_id}, read its output with "
     "{type:'tail', job_id}). The suite "
     "currently FAILS. Run it, read the failure, then fix the bug IN `prog.py` "
     "— never touch `test_prog.py` — using the editor agent `editor`'s "
@@ -53,7 +53,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_pytest_", reach=[RUNNER, FB, "editor", "ai", "cli", "user"]
+        prefix="coding_pytest_", reach=[RUNNER, FB, "editor", "ai", "user"]
     )
     try:
         Path("prog.py").write_text(PROG_BUGGY)
@@ -67,7 +67,6 @@ async def main():
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent",
@@ -76,7 +75,6 @@ async def main():
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent",
@@ -87,7 +85,7 @@ async def main():
                 "inherit_env": ["PATH", "HOME"],
                 "ingress_rule": "allow_all_ingress",
                 "allowed": [re.escape(INTERP) + r" -m pytest .*"],
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
+                "description": lines.runs([re.escape(INTERP) + r" -m pytest .*"]),
             },
         ):
             r = await _call(root, root.id, payload)
@@ -95,17 +93,17 @@ async def main():
 
         # THE HUMAN who wants the work done — the task comes FROM here.
 
-        await human(root)
+        await human(root, ai=[])
 
         conn = await connect(
             root,
             core,
             BK,
-            can_call={RUNNER: "*", FB: "*", "editor": "*", "cli": "*", "user": "*"},
-            callable_by={"user": "*"},
+            can={RUNNER: lines.ALL, FB: lines.ALL, "editor": lines.ALL, "user": lines.ALL},
             limits=Limits.from_env(os.environ),
             record={"file_bridge_id": FB},
         )
+        await human_line(root, conn.id)
         await drive(conn, TASK, client_id="fix", via="user")
         transcript = "".join(conn.proxy.transcript)
         await conn.close()

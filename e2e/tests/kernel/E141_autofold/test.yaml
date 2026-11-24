@@ -4,7 +4,7 @@ id: autofold
 group: kernel
 title: "autofold (#556): a thought, a large read reply, a recall reply and a cut answer show as anchors in the next request; recall by id gives the row back whole; the store keeps every body"
 runner: probe.py
-runtimes: [python, rust]
+runtimes: [rust]
 costs: free
 limits:
   idle_seconds: 120

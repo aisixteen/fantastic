@@ -28,7 +28,7 @@ sys.path.insert(
 )
 
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, human, verdict
+from helpers import Limits, connect, drive, human, human_line, lines, verdict
 from helpers.facts_arm import FOLD_ARMS, WINDOW, call, plant_fillers
 from helpers import memory
 from helpers.kernel import open_kernel, restart, home
@@ -52,29 +52,29 @@ PAD = 4000
 async def _fixture(root):
     r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": FB,
                                     "handler_module": "file_bridge.tools", "allow": ["."], "root": ".fantastic",
-                                    "ingress_rule": "allow_all_ingress",
-                                    "callable_by": {AI: "*", "rest": "*", "web": "*"}})
+                                    "ingress_rule": "allow_all_ingress"})
     assert not r.get("error"), f"create {FB}: {r}"
     r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": "work_fb",
                                     "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-                                    "ingress_rule": "allow_all_ingress",
-                                    "callable_by": {"rest": "*", "web": "*"}})
+                                    "ingress_rule": "allow_all_ingress"})
     assert not r.get("error"), f"create work_fb: {r}"
     r = await call(root, root.id, {"type": "create_agent", "parent_id": home(root), "id": "notes",
                                     "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-                                    "ingress_rule": "allow_all_ingress",
-                                    "callable_by": {AI: "*", "rest": "*", "web": "*"}})
+                                    "ingress_rule": "allow_all_ingress"})
     assert not r.get("error"), f"create notes: {r}"
     await call(root, root.id, {"type": "boot"})
-    await human(root, ai=[AI])
+    # the human's line on the agent is written once the agent exists
+    await human(root, ai=[])
 
 
 async def _connect(root, core):
-    return await connect(root, core, BK, agent_id=AI,
-                         can_call={FB: "*", "notes": "*", "cli": "*", "user": "*", AI: "*"},
-                         callable_by={"user": "*"}, limits=Limits.from_env(os.environ),
+    conn = await connect(root, core, BK, agent_id=AI,
+                         can={FB: lines.ALL, "notes": lines.ALL, "user": lines.ALL},
+                         limits=Limits.from_env(os.environ),
                          record={"context_window": WINDOW, "num_ctx": WINDOW,
                                  "context_strategy": STRATEGY, **EXTRA})
+    await human_line(root, AI)
+    return conn
 
 
 async def _ask(root, text: str, *, timeout: float = 240.0) -> None:
@@ -133,7 +133,7 @@ ASK = ("From THIS conversation only — do NOT call grep, history, recall, read 
 
 
 async def main():
-    root, core, close = await open_kernel(prefix="coding_clear_", reach=[FB, "work_fb", "notes", AI, "cli", "user"])
+    root, core, close = await open_kernel(prefix="coding_clear_", reach=[FB, "work_fb", "notes", AI, "user"])
     try:
         code1, marker = secrets.token_hex(4), secrets.token_hex(4)
         plant_fillers(N, marker_in=3, marker=marker, pad_to=PAD)

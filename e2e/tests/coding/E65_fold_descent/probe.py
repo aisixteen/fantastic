@@ -47,11 +47,11 @@ TASK = (
 
 
 async def main():
-    root, core, close = await open_kernel(prefix="coding_descent_", reach=[FB, "notes", "ai_recency", "ai_fold", "cli", "user"])
+    root, core, close = await open_kernel(prefix="coding_descent_", reach=[FB, "notes", "ai_recency", "ai_fold", "user"])
     try:
         token = secrets.token_hex(4); hit = 1
         plant_fillers(N, marker_in=hit, marker=token)
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         reads = file_reads([f"filler_{i}.txt" for i in range(N)])
         recency, fold = await both_planted(root, core, BK, FB, TASK, reads, "report.md", arms=FOLD_ARMS)
         want = f"marker: filler_{hit}.txt {token}"

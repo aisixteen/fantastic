@@ -2,7 +2,7 @@
 
 A local OpenAI-compatible server plays the model; the kernel's own AI agent (on both runtimes: an
 `ai_chat.tools` chat naming a `vllm_backend` provider) on
-the PACKAGED host of `RUNTIME` (python | rust) runs the chains, driven through `web_rest`,
+the PACKAGED rust host runs the chains, driven through `web_rest`,
 next to a `file_bridge` agent (`files`) holding an 80 kB file.
 
   P1. the AI reads the file (thought, then a `read` call); the reply is whole in the
@@ -30,6 +30,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.lines import ALL, PROVIDER
 from helpers.verdict import verdict
 from mocks.vllm import ThinkingVllmMock
 
@@ -75,7 +76,7 @@ def main() -> int:
     # 100 lines of 800 characters: the `read` reply (default 200 lines) is over 64,000.
     (work / "files" / "big.txt").write_text(
         "".join(f"L{n:03d} " + "x" * 795 + "\n" for n in range(1, 101)))
-    hk = HostKernel(spec, work, reach=[AI, FILES, PROV]).boot()
+    hk = HostKernel(spec, work).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -83,11 +84,6 @@ def main() -> int:
         print(f"  {'ok ' if cond else 'BAD'} {what}", flush=True)
         if not cond:
             bad.append(what)
-
-    def callable_by(aid: str) -> dict:
-        r = hk.send("kernel", {"type": "list_agents"})
-        rec = next(a for a in r.get("agents") or [] if a.get("id") == aid)
-        return dict(rec.get("callable_by") or {})
 
     def turns_at_least(n: int, bound: float = 90) -> list[dict]:
         end = time.monotonic() + bound
@@ -124,27 +120,21 @@ def main() -> int:
     read = (f'<call name="send"><routing><target_id>{FILES}</target_id></routing>'
             '<payload><type>read</type><path>big.txt</path></payload></call>')
     try:
-        r = hk.send(root, {"type": "update_agent", "id": "memory",
-                           "callable_by": {**callable_by("memory"), AI: "*", PROV: "*"}})
-        need(r.get("updated") is True, f"memory accepts the AI: {str(r)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="file_bridge.tools", id=FILES,
-                        root="files", allow=["."], ingress_rule="allow_all_ingress",
-                        callable_by={"$self": "*", "$parent": "*", AI: "*"})
+                        root="files", allow=["."], ingress_rule="allow_all_ingress")
         need(rec.get("id") == FILES, f"create {FILES}: {str(rec)[:200]}")
-        can = {"$self": "*", "memory": "*", FILES: "*"}
-        by = {"$self": "*", "$parent": "*", "rest": "*"}
+        can = {"memory": ALL, FILES: ALL}
         # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it:
         # a `send` to a provider is refused (#521)
         rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
                         endpoint=m.url, model=MODEL,
                         context_window=262144, kv_slots=4, kv_overflow="evict",
-                        memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
-                        callable_by={"$self": "*", "$parent": "*", AI: "*"})
+                        memory_store_id="memory", can={"memory": ALL})
         need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
                         provider_id=PROV, model=MODEL, max_tokens=8192,
                         context_window=262144, memory_store_id="memory",
-                        can_call={**can, PROV: ["complete", "watch", "reflect"]}, callable_by=by)
+                        can={**can, PROV: PROVIDER})
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:200]}")
 
         # ── P1 · the read reply is whole the turn it arrives ──────────────────

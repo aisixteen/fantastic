@@ -10,8 +10,15 @@
 # Runs are sequential processes over ONE temp directory, so the second run
 # proves rehydration of what the first one left behind.
 #
-# Placeholders the runner fills: $NONCE (fresh per run), $ROOT (the kernel's
-# own root id, discovered from the first reflect — never spelled here).
+# Placeholders the runner fills: $NONCE (fresh per run).
+#
+# THE LEG'S LINES (the blueprint's `mcp`): one `create` line on `canvas_root`, the
+# user space, and `user: {call: [import_subtree]}`. That line shows the system
+# agents `files` and `exec` at call level (identity, no field, no verb of theirs),
+# so a read or a run there is the unknown answer, the same as for an id that does
+# not exist.
+# Its work goes through a file bridge and a command runner it makes UNDER
+# `canvas_root` itself (`e15_files`, `e15_exec`), which its line reaches.
 
 id: mcp
 title: fantastic mcp — the stdio leg, scripted end to end
@@ -24,7 +31,7 @@ fixture:
   work-e15/w.txt: "in the work folder $NONCE\n"
 
 runs:
-  # ── 1 · a fresh directory: init from the blueprint, create the leg ─────────
+  # ── 1 · a fresh directory: init from the blueprint (the leg is seeded) ─────
   - name: create
     argv: []
     steps:
@@ -43,38 +50,71 @@ runs:
       - call: tools/list
         expect:
           tool_names: [reflect, send]
-      # the zero-arg reflect is the kernel's own primer
+      # the zero-arg reflect names the root; the leg holds no line on it, so it is
+      # the unknown answer (kernel-spec answer 31: the root frame is operator only)
       - tool: reflect
         args: {}
         expect:
-          is_error: false
-          body_has_keys: [tree, bundles]
-          capture_root: true
+          is_error: true
+          body_unknown: kernel
+      # the leg's one line on `user` (`import_subtree`: the import goes through the
+      # legs) covers user's tree at call level, `files` included: its identity
+      # and the tree, no field, and none of its verbs (the leg holds none there)
       - tool: reflect
         args: {target: files}
         expect:
           is_error: false
-          body_has_keys: [sentence]
-      # HOW TO CALL it is the kernel's `docs` (a reflect carries no verbs)
+          body_has_keys: [id, handler_module, tree]
+          body_keys_within: [id, display_name, parent_id, handler_module, description, view, verbs, tree]
+          body_verbs: []
+      # its own bridge over the work folder, and its own runner, UNDER canvas_root
       - tool: send
-        args: {items: [{target: kernel, payload: {type: docs, of: files}}]}
+        args: {items: [{target: kernel, payload: {type: create_agent, parent_id: canvas_root, id: e15_files, handler_module: file_bridge.tools, root: ".", allow: [note.txt], ingress_rule: allow_all_ingress}}]}
+        expect:
+          is_error: false
+          item0.status: completed
+      - tool: send
+        args: {items: [{target: kernel, payload: {type: create_agent, parent_id: canvas_root, id: e15_exec, handler_module: exec_bridge.tools, allowed: [".*"], cwd: ".", inherit_env: ["*"], ingress_rule: allow_all_ingress}}]}
+        expect:
+          is_error: false
+          item0.status: completed
+      - tool: reflect
+        args: {target: e15_files}
+        expect:
+          is_error: false
+          body_has_keys: [sentence]
+      # HOW TO CALL it is a reflect with `part` (a plain reflect carries one line per verb)
+      - tool: send
+        args: {items: [{target: e15_files, payload: {type: reflect, part: docs}}]}
         expect:
           is_error: false
           item0.status: completed
           item0_verbs_include: [read_stream, list]
-      # a real read, through a real agent, as the leg
+      # a read through the system `files`: the unknown answer
       - tool: send
         args: {items: [{target: files, payload: {type: read_stream, path: note.txt}}]}
+        expect:
+          is_error: true
+          item0_unknown: files
+      # a real read, through the leg's own bridge
+      - tool: send
+        args: {items: [{target: e15_files, payload: {type: read_stream, path: note.txt}}]}
         expect:
           is_error: false
           item0.status: completed
           text_contains: "hello from E15 $NONCE"
-      # god mode: the leg holds every verb, privileged ones included
+      # `ps` needs no line: the leg's own tree
       - tool: send
         args: {items: [{target: kernel, payload: {type: ps}}]}
         expect:
           is_error: false
           item0.status: completed
+      # the leg may not delete a system agent: the unknown answer
+      - tool: send
+        args: {items: [{target: kernel, payload: {type: delete_agent, id: files}}]}
+        expect:
+          is_error: true
+          item0_unknown: files
       # a shape error is the client's, and says how to fix it
       - tool: send
         args: {items: [{target: files, payload: {verb: read_stream}}]}
@@ -87,18 +127,18 @@ runs:
     after_exit:
       exit_code: 0
       lock_released: true
-      files_exist: [.fantastic/agents/user/agents/mcp/agent.yaml, .fantastic/memory.db]
+      files_exist: [.fantastic/agents/user/agents/web/agents/mcp/agent.yaml, .fantastic/memory.db]
       # no tape, no ledger, no JSON/XML — and the kernel's execution rows stay
       # in RAM (`kernel_memory`): memory.db holds AI rows only
       files_absent: [.fantastic/messages.yaml, .fantastic/ledger.json, .fantastic/messages.xml, .fantastic/agent.json]
       no_kernel_rows: true
       record:
-        .fantastic/agents/user/agents/mcp/agent.yaml:
+        .fantastic/agents/user/agents/web/agents/mcp/agent.yaml:
           handler_module: web_mcp.tools
-          can_call_has: [files, exec, user, kernel]
+          can_keys: [canvas_root, user]
+        # the callee keeps no list of callers: nothing the run did names the leg there
         .fantastic/agents/user/agents/files/agent.yaml:
-          callable_by_has: [mcp, user, exec]
-      blueprint_never_names: mcp
+          can_lacks: [mcp]
 
   # ── 2 · same directory: bind to the leg, rehydrate ─────────────────────────
   - name: rehydrate
@@ -109,7 +149,7 @@ runs:
         expect: {result.protocolVersion: "2025-11-25"}
       - notify: notifications/initialized
       - tool: send
-        args: {items: [{target: files, payload: {type: read_stream, path: note.txt}}]}
+        args: {items: [{target: e15_files, payload: {type: read_stream, path: note.txt}}]}
         expect:
           item0.status: completed
           text_contains: "hello from E15 $NONCE"
@@ -138,7 +178,7 @@ runs:
         expect: {result.protocolVersion: "2025-11-25", result.serverInfo.name: fantastic}
       - notify: notifications/initialized
       - tool: send
-        args: {items: [{target: files, payload: {type: read_stream, path: note.txt}}]}
+        args: {items: [{target: e15_files, payload: {type: read_stream, path: note.txt}}]}
         expect:
           item0.status: completed
           text_contains: "hello from E15 $NONCE"
@@ -152,7 +192,8 @@ runs:
 
   # ── 5 · a state folder far from the work folder (a path too long for a unix
   #       socket address): the headless host takes both flags, `fantastic mcp`
-  #       attaches with --statedir alone, and files and exec work in the WORK folder ─
+  #       attaches with --statedir alone, and the leg's own bridge and runner work
+  #       in the WORK folder (a new state folder: made again here) ─
   - name: far_state
     statedir: far/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/state
     host_argv: [--headless, --statedir, far/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/state, --workdir, work-e15]
@@ -166,12 +207,33 @@ runs:
         expect: {result.protocolVersion: "2025-11-25", result.serverInfo.name: fantastic}
       - notify: notifications/initialized
       - tool: send
+        args: {items: [{target: kernel, payload: {type: create_agent, parent_id: canvas_root, id: e15_files, handler_module: file_bridge.tools, root: ".", allow: [w.txt], ingress_rule: allow_all_ingress}}]}
+        expect:
+          is_error: false
+          item0.status: completed
+      - tool: send
+        args: {items: [{target: kernel, payload: {type: create_agent, parent_id: canvas_root, id: e15_exec, handler_module: exec_bridge.tools, allowed: [".*"], cwd: ".", inherit_env: ["*"], ingress_rule: allow_all_ingress}}]}
+        expect:
+          is_error: false
+          item0.status: completed
+      # the system `files` and `exec`: the unknown answer
+      - tool: send
         args: {items: [{target: files, payload: {type: read_stream, path: w.txt}}]}
+        expect:
+          is_error: true
+          item0_unknown: files
+      - tool: send
+        args: {items: [{target: exec, payload: {type: run, command: "{pwd_cmd}", args: "{pwd_args}", wait_s: 30}}]}
+        expect:
+          is_error: true
+          item0_unknown: exec
+      - tool: send
+        args: {items: [{target: e15_files, payload: {type: read_stream, path: w.txt}}]}
         expect:
           item0.status: completed
           text_contains: "in the work folder $NONCE"
       - tool: send
-        args: {items: [{target: exec, payload: {type: run, command: "{pwd_cmd}", args: "{pwd_args}", wait_s: 30}}]}
+        args: {items: [{target: e15_exec, payload: {type: run, command: "{pwd_cmd}", args: "{pwd_args}", wait_s: 30}}]}
         expect:
           item0.status: completed
           text_contains: "work-e15"

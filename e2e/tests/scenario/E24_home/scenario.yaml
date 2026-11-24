@@ -9,6 +9,7 @@ id: home
 title: the home kernel — list, open, stop, start, an outside fantastic, remove, pages kept, canvases left running
 runtimes: [home]
 costs: free
+muted: "#764: home kernel is still on the old grant model"
 
 runs:
   # the host serves the Home page and writes its run file; nothing is listed yet

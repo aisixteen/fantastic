@@ -440,6 +440,52 @@ async fn imported_agents_call_only_what_they_were_granted_and_what_ports_were_bo
     let _ = std::fs::remove_dir_all(d);
 }
 
+/// THE ASKER'S CREATES (Q39): `leg` holds `import_subtree` on `user` and a `create`
+/// line on `other` only. Each create of its import is checked as `leg`, never as
+/// `user`: aimed at `other` it lands; aimed anywhere else (a helper beside it, its
+/// own ancestor) every create gets the unknown answer and nothing is kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_import_is_checked_as_the_asker_and_refused_outside_its_create_line() {
+    let k = setup().await;
+    let root = k.root().unwrap().id.0.clone();
+    let made = op(
+        &k,
+        &root,
+        json!({"type": "create_agent", "parent_id": "user", "id": "leg", "handler_module": "echo.tools",
+            "can": {"user": {"call": ["import_subtree"]}, "other": {"create": {"who": ["*"], "what": "*"}}}}),
+    )
+    .await;
+    assert!(made.get("error").is_none(), "{made}");
+    let d = written("asker", "agents:\n  - id: x\n    handler_module: echo.tools\n", &[]);
+    let by_leg = |parent: &'static str| {
+        let k = Arc::clone(&k);
+        let path = d.to_str().unwrap().to_string();
+        async move {
+            fantastic_kernel::test_support::as_agent(
+                "leg",
+                op(&k, "user", json!({"type": "import_subtree", "path": path, "parent_id": parent, "approve": true})),
+            )
+            .await
+        }
+    };
+    let n = k.agent_ids().len();
+    for outside in ["exec", "user"] {
+        let r = by_leg(outside).await;
+        let msg = r["error"].as_str().unwrap_or_default();
+        assert_eq!(r["reason"], "failed", "{outside}: {r}");
+        assert!(
+            msg.contains("was not created") && msg.contains(&format!("no agent '{outside}'")) && msg.contains("nothing was kept"),
+            "{outside}: {r}"
+        );
+        assert!(r.get("imported").is_none(), "{outside}: {r}");
+        assert_eq!(k.agent_ids().len(), n, "{outside}: nothing was created");
+    }
+    let r = by_leg("other").await;
+    assert_eq!(r["imported"], 1, "{r}");
+    assert_eq!(parent(&k, "x_1").as_deref(), Some("other"));
+    let _ = std::fs::remove_dir_all(d);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn import_failure_rolls_back() {
     let k = setup().await;

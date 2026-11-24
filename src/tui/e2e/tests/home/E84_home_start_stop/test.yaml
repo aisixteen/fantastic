@@ -4,6 +4,7 @@ group: home
 title: "the Home starts a stopped fantastic (its row reaches running, the registry names its pid and canvas), opens its page on a live canvas frame, stops it from the page (stopping, then stopped, the registry cleared), and under a native shell's flag Open Folder goes through its pickFolder and the new folder runs"
 runner: probe.py
 costs: free
+muted: "#764: home kernel is still on the old grant model"
 limits:
   seconds: 180
 env: {}

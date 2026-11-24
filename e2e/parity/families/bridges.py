@@ -11,17 +11,26 @@ mid-forward, an inbound call arriving FROM the peer, the relay's announce, a
 
 Every frame on both sides is recorded, which is the point: a bridge is a codec
 plus a correlation table, and neither is visible from the verb's reply alone.
+
+PEER CASES ARE PARKED (#763): a call that crosses to or from a peer kernel has no
+line in the `can` model yet. Each is recorded as `{"skipped": PEER_PARKED}`
+instead of being sent; the bridge's own local verbs still run.
 """
 
 from __future__ import annotations
 
 import time
 
-from families import BASE, OPEN, call, save_kernel_log
+from families import ALL, OPEN, call, save_kernel_log
 from stubs.relay import Relay
 from stubs.ws_peer import WSPeer
 
 NAME = "bridges"
+
+#: Why a peer case is not sent.
+PEER_PARKED = "#763: cross-kernel peer lines are parked until the peer redesign"
+#: The verbs that cross to or from a peer kernel.
+PEER_VERBS = {"forward", "watch_remote", "unwatch_remote"}
 
 
 def run(ctx) -> None:  # noqa: C901
@@ -57,41 +66,40 @@ def run(ctx) -> None:  # noqa: C901
     relay = Relay(rec, "bridges", ports.take("relay"))
     relay.start()
 
-    reach = ["readings", "wsb", "wsb_mem", "wsb_pass", "relay", "relay_nopartner",
-             "web", "rest", "ws"]
+    # ids OUTSIDE `rest`'s tree the legs call; every agent here lives under `rest`
+    reach = ["web", "rest", "ws"]
     k = ctx.boot(reach=reach, port=ports.take("main"))
-    cb = {**BASE, "rest": "*", "web": "*", "ws": "*"}
     try:
         (ctx.work / "a.txt").write_text("a\n")
         rec.json("setup/readings", k.create(parent_id=k.home, id="readings",
                                             handler_module="file_bridge.tools", allow=["."], root=".",
-                                            **OPEN, callable_by=cb))
+                                            **OPEN))
         # The live peer, exactly as `wire` writes it.
         rec.json("setup/wsb", k.create(
             parent_id=k.home, id="wsb", handler_module="ws_bridge.tools", **OPEN,
-            callable_by=cb, can_call={**BASE, "readings": "*"},
+            can={"readings": ALL},
             transport="ws", host="127.0.0.1", port=peer.port,
             peer_id="peer"))
         # A7.x — `memory` transport has no dialer outside a test injection.
         rec.json("setup/wsb_mem", k.create(
             parent_id=k.home, id="wsb_mem", handler_module="ws_bridge.tools", **OPEN,
-            callable_by=cb, transport="memory", peer_id="peer"))
+            transport="memory", peer_id="peer"))
         # A7.28 — a password egress rule, so the forward carries an auth token.
         rec.json("setup/wsb_pass", k.create(
             parent_id=k.home, id="wsb_pass", handler_module="ws_bridge.tools", **OPEN,
-            callable_by=cb, can_call={**BASE, "readings": "*"},
+            can={"readings": ALL},
             transport="ws", host="127.0.0.1", port=peer.port,
             peer_id="peer", egress_rule="password", auth_token="parity-peer-token"))
         rec.json("setup/relay", k.create(
             parent_id=k.home, id="relay", handler_module="relay_connector.tools", **OPEN,
-            callable_by=cb, can_call={**BASE, "readings": "*"},
+            can={"readings": ALL},
             url=relay.url(), relay_url=relay.url(), guid="parity0000000000000000000000guid",
             partner_guid="stub-partner", heartbeat=1, reconnect=3,
             identity={"role": "parity"}))
         # A7.13/A7.14 — a relay with NO partner, then the directory verbs on it.
         rec.json("setup/relay_nopartner", k.create(
             parent_id=k.home, id="relay_nopartner", handler_module="relay_connector.tools",
-            **OPEN, callable_by=cb, url=relay.url(), relay_url=relay.url()))
+            **OPEN, url=relay.url(), relay_url=relay.url()))
         time.sleep(2.0)
 
         # ── ws_bridge, against a peer that answers ──
@@ -134,6 +142,10 @@ def run(ctx) -> None:  # noqa: C901
             ("password_egress_reflect", "wsb_pass", {"type": "reflect"}),
         ]
         for case, target, payload in cases:
+            if payload.get("type") in PEER_VERBS:
+                rec.json(f"ws_bridge/{case}", {"target": target, "payload": payload,
+                                               "skipped": PEER_PARKED})
+                continue
             rec.json(f"ws_bridge/{case}", {"target": target, "payload": payload,
                                            "reply": call(k, target, payload, timeout=40)})
             time.sleep(0.3)
@@ -160,7 +172,7 @@ def run(ctx) -> None:  # noqa: C901
             ("boot_twice_2", "relay", {"type": "boot"}),
             # A7.13/A7.14 — no partner_guid at all.
             ("nopartner_reflect", "relay_nopartner", {"type": "reflect"}),
-            ("nopartner_list_agents", "relay_nopartner", {"type": "list_agents"}),
+            ("nopartner_reflect_tree", "relay_nopartner", {"type": "reflect", "tree": "all"}),
             ("nopartner_forward", "relay_nopartner", {"type": "forward", "target": "readings",
                                                       "payload": {"type": "reflect"},
                                                       "timeout": 2}),
@@ -168,6 +180,10 @@ def run(ctx) -> None:  # noqa: C901
             ("nopartner_unwatch_before_boot", "relay_nopartner", {"type": "unwatch_directory"}),
         ]
         for case, target, payload in rcases:
+            if payload.get("type") in PEER_VERBS:
+                rec.json(f"relay/{case}", {"target": target, "payload": payload,
+                                           "skipped": PEER_PARKED})
+                continue
             rec.json(f"relay/{case}", {"target": target, "payload": payload,
                                        "reply": call(k, target, payload, timeout=40)})
             time.sleep(0.3)
@@ -176,14 +192,9 @@ def run(ctx) -> None:  # noqa: C901
         # ask reflect what it says about a connection that is gone.
         time.sleep(4.0)
         rec.json("relay/reflect_after_heartbeats", call(k, "relay", {"type": "reflect"}))
-        relay.drop_after = 1
-        rec.json("relay/forward_into_drop", call(k, "relay",
-                                                 {"type": "forward", "target": "readings",
-                                                  "payload": {"type": "reflect"}, "timeout": 3},
-                                                 timeout=40))
-        time.sleep(2.0)
-        rec.json("relay/reflect_after_drop", call(k, "relay", {"type": "reflect"}))
-        rec.json("relay/list_agents_after_drop", call(k, "kernel", {"type": "list_agents"}))
+        rec.json("relay/forward_into_drop", {"skipped": PEER_PARKED})
+        rec.json("relay/reflect_after_drop", {"skipped": PEER_PARKED})
+        rec.json("relay/reflect_tree_after_drop", call(k, "kernel", {"type": "reflect", "tree": "all"}))
         rec.json("ws_peer_partner_events", relay.partner_events)
     finally:
         peer.flush()

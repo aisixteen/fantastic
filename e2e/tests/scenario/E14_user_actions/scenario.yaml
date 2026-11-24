@@ -55,7 +55,7 @@ roster:
 # NOTE the asymmetry: `purchase` is deliberately ABSENT. The AI must not be able
 # to buy — that it holds no grant on the desk is half the measurement.
 grants:
-  ai_can_call: [cli, yaml_store, user]
+  ai_can: [cli, yaml_store, user]
 
 # The person presses the button twice with the model's own id, then the desk is
 # checked for exactly one sale. The proposal is read off the HUMAN — a call it

@@ -6,8 +6,8 @@ The blueprints are written by hand, the way a person edits an exported one: nest
 is the parent, `@memory` is a port (an outside reference the importer binds).
 
     rig = Rig(__file__, live=False); rig.build(); rig.make_home(None); rig.start()
-    world(rig)                      # `team_home` (the parent) and `memory2` (a store to bind)
-    write_team(rig, "bp")           # squad > lead, scout  (lead reaches `@memory`)
+    world(rig)                      # `team_home` (the parent) and `memory2` (a store to bind), under `canvas_root`
+    write_team(rig, "bp")           # squad > lead, scout  (lead holds lines on scout and `@memory`)
     reply = importing(rig, "bp", "team_home", {"@memory": "memory2"}, approve=True)
 """
 
@@ -27,14 +27,15 @@ agents:
   - id: squad
     handler_module: ram_store.tools
     agents:
+      # scout before lead: a line names an id that already exists (an agent's
+      # write of a line on a missing id is the unknown answer)
+      - id: scout
+        handler_module: ram_store.tools
       - id: lead
         handler_module: ram_store.tools
         description: first
-        can_call: {scout: '*', '@memory': '*'}
+        can: {scout: {call: ['*']}, '@memory': {call: [append, read]}}
         memory_store_id: '@memory'
-      - id: scout
-        handler_module: ram_store.tools
-        callable_by: {lead: '*'}
 ports:
   '@memory': {kind: memory, why: the notes it keeps, used_by: [lead]}
 """
@@ -45,12 +46,12 @@ agents:
   - id: crew
     handler_module: ram_store.tools
     agents:
+      - id: deckhand
+        handler_module: ram_store.tools
       - id: mate
         handler_module: ram_store.tools
         description: first
-      - id: deckhand
-        handler_module: ram_store.tools
-        callable_by: {mate: '*'}
+        can: {deckhand: {call: ['*']}}
 """
 
 
@@ -64,16 +65,43 @@ def send(rig, target: str, payload: dict, timeout: float = 60) -> dict:
         return {"error": (r.stdout + r.stderr)[-400:]}
 
 
+#: the main canvas: the `mcp` leg (`fantastic send`) holds `create` on its tree
+WHERE = "canvas_root"
+
+
 def agent_ids(rig) -> list[str]:
-    """Every agent the kernel holds."""
-    return sorted(a["id"] for a in send(rig, "kernel_state", {"type": "list_agents"}).get("agents", []))
+    """Every agent of the import's landing subtree (`PARENT` and all under it), as
+    the leg sees it (`reflect tree=ids`, following `next`)."""
+    ids: list[str] = []
+    after = None
+    while True:
+        page = send(rig, PARENT, {"type": "reflect", "tree": "ids", **({"after": after} if after else {})})
+        ids += [x if isinstance(x, str) else x.get("id") for x in page.get("tree") or []
+                if isinstance(x, str) or (isinstance(x, dict) and x.get("id"))]
+        after = page.get("next")
+        if not after:
+            return sorted(ids)
+
+
+def record_ids(rig) -> list[str]:
+    """Every agent record the kernel has saved, read from disk (the project's
+    `.fantastic` and the home), not through the leg: the whole tree, also where
+    the leg's `reflect` gets the unknown answer."""
+    return sorted(f.parent.name for root in (rig.proj / ".fantastic", rig.home) for f in root.rglob("agent.yaml"))
+
+
+def exists(rig, agent_id: str) -> bool:
+    """Whether the leg reaches `agent_id`: its `reflect` is not the unknown answer."""
+    r = send(rig, agent_id, {"type": "reflect"})
+    return bool(r) and not (r.get("reason") == "unknown_agent" and r.get("error") == f"no agent {agent_id!r}")
 
 
 def world(rig) -> None:
-    """The parent every import goes under, and a second memory store to bind."""
-    for made in (send(rig, "kernel_state", {"type": "create_agent", "handler_module": "ram_store.tools", "id": PARENT, "parent_id": "kernel_state"}),
+    """The parent every import goes under, and a second memory store to bind; both
+    under the main canvas, where the leg's `create` line reaches."""
+    for made in (send(rig, "kernel_state", {"type": "create_agent", "handler_module": "ram_store.tools", "id": PARENT, "parent_id": WHERE}),
                  send(rig, "kernel_state", {"type": "create_agent", "handler_module": "sqlite_store.tools", "id": STORE,
-                                            "parent_id": "kernel_state", "path": f"{STORE}.db"})):
+                                            "parent_id": WHERE, "path": f"{STORE}.db"})):
         assert "error" not in made, f"world: create refused: {made}"
 
 

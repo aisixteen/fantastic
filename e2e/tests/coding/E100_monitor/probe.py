@@ -39,8 +39,8 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, human, verdict
-from helpers.kernel import home, open_kernel
+from helpers import Limits, connect, drive, human, human_line, lines, verdict
+from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
 RUNNER = "runner"
@@ -196,31 +196,34 @@ async def _settle(sampler: Sampler) -> str:
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_monitor_", reach=[RUNNER, AI, "cli", "kernel", "user"]
+        prefix="coding_monitor_", reach=[RUNNER, AI, "kernel", "user"]
     )
     sampler = None
     sampling = None
     try:
         Path("worker.py").write_text(WORKER)
+        await human(root, ai=[])
+        conn = await connect(
+            root, core, BK,
+            # `ps` and `cancel` need no line, and each answers the caller's OWN tree:
+            # the runner is made UNDER the AI (below), reached by position;
+            # `docs` is `reflect` on the root
+            can={"user": lines.ALL, lines.ROOT: lines.call("reflect")},
+            limits=Limits.from_env(os.environ),
+        )
+        await human_line(root, conn.id)
+        # a monitor's message is THIS runner's send: its own line on the AI, its
+        # parent (position reaches only the agents below)
         r = await _call(root, root.id, {
-            "type": "create_agent", "parent_id": home(root), "id": RUNNER,
+            "type": "create_agent", "parent_id": conn.id, "id": RUNNER,
             "handler_module": "exec_bridge.tools", "cwd": os.getcwd(),
             "inherit_env": ["PATH", "HOME"], "ingress_rule": "allow_all_ingress",
             "allowed": [re.escape(INTERP) + " .*"],
-            # a monitor's message is THIS runner's send: it may tell the AI
-            "can_call": {AI: "*", RUNNER: "*"},
-            "callable_by": {AI: "*", RUNNER: "*", "rest": "*", "web": "*"},
-            "description": f"Runs `{INTERP} <script> [args…]` in the test's directory.",
+            "can": {AI: lines.call("send")},
+            "description": f"Runs `{INTERP} <script> [args…]` in the test's directory. "
+                           + lines.runs([re.escape(INTERP) + " .*"]),
         })
         assert not r.get("error"), f"create {RUNNER}: {r}"
-        await human(root)
-        conn = await connect(
-            root, core, BK,
-            can_call={RUNNER: "*", "cli": "*", "user": "*",
-                      root.id: ["ps", "cancel", "reflect", "docs"]},
-            callable_by={"user": "*", RUNNER: "*"},
-            limits=Limits.from_env(os.environ),
-        )
         sampler = Sampler(root)
         sampling = asyncio.ensure_future(sampler.run())
         cut = await drive(conn, _task(), client_id="monitor", via="user")
