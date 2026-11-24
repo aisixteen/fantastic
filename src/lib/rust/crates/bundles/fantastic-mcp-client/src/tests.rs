@@ -566,7 +566,7 @@ async fn an_sse_answer_settles_and_its_notes_reach_the_watchers() {
     let r = booted().await;
     let watcher = AgentId::from("_t_watch");
     let mut rx = r.kernel.ensure_inbox(&watcher);
-    r.kernel.watch(&AgentId::from("mcp"), watcher).await;
+    fantastic_kernel::send::as_operator(r.kernel.watch(&AgentId::from("mcp"), watcher)).await;
     let out = send(&r.kernel, "mcp", json!({"type": "stream"}))
         .await
         .result;

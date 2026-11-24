@@ -68,6 +68,26 @@ fn update_meta_merges_and_persists() {
 }
 
 #[test]
+fn update_meta_if_can_writes_only_while_the_stored_can_is_the_checked_one() {
+    let a = make();
+    let line = |t: &str| {
+        let mut p = Map::new();
+        p.insert("can".to_string(), json!({t: {"call": ["read"]}}));
+        p
+    };
+    // no `can` stored: the checked value is Null
+    assert!(a.update_meta_if_can(line("files"), &Value::Null).is_some());
+    // another write changed it since the check: nothing is written
+    assert!(a.update_meta_if_can(line("memory"), &Value::Null).is_none());
+    assert_eq!(a.record().meta["can"], json!({"files": {"call": ["read"]}}));
+    // the checked value matches: written
+    let rec = a
+        .update_meta_if_can(line("memory"), &json!({"files": {"call": ["read"]}}))
+        .expect("the stored can is the checked one");
+    assert_eq!(rec.meta["can"], json!({"memory": {"call": ["read"]}}));
+}
+
+#[test]
 fn delete_lock_flag() {
     let a = make();
     assert!(!a.is_delete_locked());

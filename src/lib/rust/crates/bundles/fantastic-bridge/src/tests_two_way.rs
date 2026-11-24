@@ -127,11 +127,11 @@ async fn an_inbound_watch_is_gated_then_streams_until_unwatch() {
         assert!(tokio::time::Instant::now() < end, "never watched");
         tokio::task::yield_now().await;
     }
-    kernel
+    fantastic_kernel::send::as_operator(kernel
         .emit(
             &AgentId::from(notes.as_str()),
             json!({"type": "ping", "n": 1}),
-        )
+        ))
         .await;
     assert_eq!(
         next(&peer).await,
@@ -151,11 +151,11 @@ async fn an_inbound_watch_is_gated_then_streams_until_unwatch() {
     let reply = next(&peer).await;
     assert_eq!(reply["type"], "reply", "{reply}");
     assert!(!kernel.has_watchers(&AgentId::from(notes.as_str())).await);
-    kernel
+    fantastic_kernel::send::as_operator(kernel
         .emit(
             &AgentId::from(notes.as_str()),
             json!({"type": "ping", "n": 2}),
-        )
+        ))
         .await;
     peer.send_frame(json!({"type": "call", "id": "after-ping", "target": notes,
                            "payload": {"type": "reflect"}}))

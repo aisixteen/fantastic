@@ -251,12 +251,10 @@ impl UserStore {
     /// the switch or name has landed before the home is touched. A crash after it
     /// leaves a record the next boot makes the home match.
     async fn persist(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str, value: Value) {
-        // its own field, written with `update_agent` as itself
-        let mut payload = json!({"type": "update_agent", "id": agent_id.as_str()});
-        payload[key] = value;
-        let _ = kernel
-            .send(vec![fantastic_kernel::Item::new(AgentId::from("kernel"), payload)])
-            .await;
+        // its own field, written as itself
+        let mut patch = serde_json::Map::new();
+        patch.insert(key.to_string(), value);
+        let _ = kernel.write_own(agent_id, patch).await;
         kernel.flush_records().await;
     }
 

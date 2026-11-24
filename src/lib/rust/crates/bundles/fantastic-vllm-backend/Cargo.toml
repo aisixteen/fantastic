@@ -21,6 +21,7 @@ sha2 = "0.10"
 tracing = { workspace = true }
 
 [dev-dependencies]
+fantastic-ai-core = { path = "../fantastic-ai-core", features = ["test-support"] }
 fantastic-ram-store = { path = "../fantastic-ram-store", features = ["test-support"] }
 fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 # Every AI agent keeps its conversation in a memory store; the tests wire one.

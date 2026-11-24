@@ -692,7 +692,11 @@ async fn b_watches_an_ai_on_a_and_gets_its_stream_until_unwatch_or_drop() {
         let target = p.remote("ai");
         let w = AgentId::from("watcher");
         let mut rx = p.kb.ensure_inbox(&w);
-        assert_eq!(p.kb.watch(&target, w.clone()).await, None, "{wire:?}");
+        assert_eq!(
+            fantastic_kernel::send::as_operator(p.kb.watch(&target, w.clone())).await,
+            None,
+            "{wire:?}"
+        );
         p.until_watched("ai", true).await;
 
         let out = p.call("ai", turn("one")).await;
@@ -714,7 +718,11 @@ async fn b_watches_an_ai_on_a_and_gets_its_stream_until_unwatch_or_drop() {
         assert_eq!(drain(&mut rx), Vec::<Value>::new(), "{wire:?}");
 
         // watched again, then the link drops: A gives the watch back
-        assert_eq!(p.kb.watch(&target, w.clone()).await, None, "{wire:?}");
+        assert_eq!(
+            fantastic_kernel::send::as_operator(p.kb.watch(&target, w.clone())).await,
+            None,
+            "{wire:?}"
+        );
         p.until_watched("ai", true).await;
         p.cut().await;
         p.until_watched("ai", false).await;
@@ -733,7 +741,11 @@ async fn a_watch_from_b_is_gated_by_the_legs_watch_line() {
         let w = AgentId::from("watcher");
         let mut rx = p.kb.ensure_inbox(&w);
         // B's own side takes it (B's operator); A's leg holds no `watch` on `ai`
-        assert_eq!(p.kb.watch(&target, w.clone()).await, None, "{wire:?}");
+        assert_eq!(
+            fantastic_kernel::send::as_operator(p.kb.watch(&target, w.clone())).await,
+            None,
+            "{wire:?}"
+        );
         // A's leg refuses it: the refusal reaches the watcher, named, and B
         // forgets the watch it never got
         let refusal = tokio::time::timeout(Duration::from_secs(3), rx.recv())
@@ -830,7 +842,11 @@ async fn a_dropped_link_fails_calls_fast_and_a_redial_resumes_the_watch() {
         let target = p.remote("ai");
         let w = AgentId::from("watcher");
         let mut rx = p.kb.ensure_inbox(&w);
-        assert_eq!(p.kb.watch(&target, w.clone()).await, None, "{wire:?}");
+        assert_eq!(
+            fantastic_kernel::send::as_operator(p.kb.watch(&target, w.clone())).await,
+            None,
+            "{wire:?}"
+        );
         p.until_watched("ai", true).await;
 
         // a call in flight when the link drops fails at once, `bridge_down`

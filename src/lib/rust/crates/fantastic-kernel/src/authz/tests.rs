@@ -276,7 +276,7 @@ fn legal_can_lines_parse() {
 
 // ---------------------------------------------------------------- the solver index (U4)
 
-use super::solver::{generic, line_policies, lines_of, Act, Slot};
+use super::solver::{generic, line_policies, lines_of, Act, Basis, Slot};
 use crate::agent::{Agent, AgentId};
 use crate::kernel::Kernel;
 use std::collections::HashMap;
@@ -472,7 +472,7 @@ fn a_create_line_gives_nothing_on_its_own_target() {
         assert!(!ok(&k, "canvas_ws", &upd(field), "canvas_root"), "{field}");
     }
     assert!(!ok(&k, "canvas_ws", &Act::Delete, "canvas_root"));
-    assert!(!k.cedar_all(&aid("canvas_ws"), Slot::Verb, &aid("canvas_root"), false));
+    assert!(!k.cedar_all(&aid("canvas_ws"), Slot::Verb, &aid("canvas_root"), Basis::Whole));
     // below it, the line reaches
     assert!(ok(&k, "canvas_ws", &call("send"), "chat_a"));
 }
@@ -618,7 +618,7 @@ fn star_detection_by_partial_eval_matches_a_full_verb_probe() {
         ("t1_tasks", "missing_id", false),
     ];
     for (p, r, star) in cases {
-        let all = k.cedar_all(&aid(p), Slot::Verb, &aid(r), false);
+        let all = k.cedar_all(&aid(p), Slot::Verb, &aid(r), Basis::Whole);
         assert_eq!(all, ok(&k, p, &call(PROBE), r), "{p} -> {r}");
         assert_eq!(all, star, "{p} -> {r}");
     }
@@ -631,8 +631,8 @@ fn the_written_set_holds_no_position() {
     assert!(k.cedar(&team, &call("send"), &w1));
     assert!(!k.cedar_written(&team, &call("send"), &w1));
     assert!(!k.cedar_written(&team, &call("send"), &team));
-    assert!(k.cedar_all(&team, Slot::Verb, &w1, false));
-    assert!(!k.cedar_all(&team, Slot::Verb, &w1, true));
+    assert!(k.cedar_all(&team, Slot::Verb, &w1, Basis::Whole));
+    assert!(!k.cedar_all(&team, Slot::Verb, &w1, Basis::Written));
     // written lines are held
     assert!(k.cedar_written(&team, &call("issues"), &aid("github")));
     assert!(k.cedar_written(&aid("chat_a"), &call("send"), &aid("canvas_root")));
@@ -646,6 +646,49 @@ fn the_written_set_holds_no_position() {
     // the forbids stay
     set_can(&k, "chat_a", json!({"chat_a": {"update": ["can"]}}));
     assert!(!k.cedar_written(&aid("chat_a"), &upd("can"), &aid("chat_a")));
+}
+
+/// The wide set (review of #761, H2): only lines that reach a target's whole tree.
+/// A `$parent` line names one node, and a create line that selects some ids or
+/// some bundles holds single agents, never a tree.
+#[test]
+fn the_wide_set_holds_only_tree_wide_lines() {
+    let k = v9();
+    let wide = |p: &str, act: &Act, r: &str| k.cedar_on(&aid(p), act, &aid(r), Basis::Wide);
+    // `$parent`: written, not wide
+    assert!(k.cedar_written(&aid("t1_w1"), &call("send"), &aid("t1_lead")));
+    assert!(!wide("t1_w1", &call("send"), "t1_lead"));
+    assert!(k.cedar_written(&aid("chat_a"), &call("send"), &aid("canvas_root")));
+    assert!(!wide("chat_a", &call("send"), "canvas_root"));
+    // a create line selecting `t1_w*` and `worker`: written, not wide
+    assert!(k.cedar_written(&aid("t1_lead"), &call("send"), &aid("t1_w1")));
+    assert!(!wide("t1_lead", &call("send"), "t1_w1"));
+    // a create line selecting some bundles (who `*`): written, not wide
+    assert!(k.cedar_written(&aid("canvas_garage"), &call("complete"), &aid("prov_1")));
+    assert!(!wide("canvas_garage", &call("complete"), "prov_1"));
+    assert!(!k.cedar_all(&aid("canvas_garage"), Slot::Verb, &aid("prov_1"), Basis::Wide));
+    // a call line on a literal id is wide, for its verbs only
+    assert!(wide("chat_a", &call("append"), "memory"));
+    assert!(!wide("chat_a", &call("write"), "memory"));
+    assert!(wide("t1_lead", &call("issues"), "github"));
+    // `who: *` and every bundle: wide below the target, never on it (Q51)
+    assert!(wide("canvas_ws", &call("send"), "chat_a"));
+    assert!(wide("canvas_ws", &upd("model"), "chat_a"));
+    assert!(k.cedar_all(&aid("canvas_ws"), Slot::Verb, &aid("prov_1"), Basis::Wide));
+    assert!(!wide("canvas_ws", &call("send"), "canvas_root"));
+    // a `*` bundle key is wide for the `*` bundle's freed fields only
+    set_can(&k, "github", json!({"canvas_root": {"create": {"who": ["*"], "what": {
+        "*": {"description": "*"},
+        "chat": {"model": "*"},
+    }}}}));
+    assert!(wide("github", &call("send"), "chat_a"));
+    assert!(wide("github", &upd("description"), "chat_a"));
+    assert!(!wide("github", &upd("model"), "chat_a"));
+    assert!(k.cedar_written(&aid("github"), &upd("model"), &aid("chat_a")));
+    // an update line on a literal id is wide, with every verb
+    set_can(&k, "github", json!({"exec": {"update": []}}));
+    assert!(k.cedar_all(&aid("github"), Slot::Verb, &aid("exec"), Basis::Wide));
+    assert!(!wide("github", &upd("description"), "exec"));
 }
 
 #[test]
@@ -855,6 +898,57 @@ fn reflect_candidates_from_own_and_ancestor_lines_equal_the_whole_model() {
     for p in &ids {
         for r in &ids {
             assert_eq!(k.held(p, r), k.held_from(p, r, &whole), "{p:?} on {r:?}");
+        }
+    }
+}
+
+/// Q1 (perf): `held`'s probe candidates are built once per caller and reused
+/// while no `can` on its chain changes; a changed `can` (its own or an
+/// ancestor's) and a register rebuild them, and the answers stay those of a fresh
+/// build.
+#[test]
+fn held_candidates_are_cached_per_caller_and_rebuilt_on_a_can_change() {
+    let k = v9();
+    let first = k.candidates_for(&aid("canvas_ws"));
+    let again = k.candidates_for(&aid("canvas_ws"));
+    assert!(std::sync::Arc::ptr_eq(&first, &again), "unchanged: the same candidates");
+    // another caller's cache is its own
+    let other = k.candidates_for(&aid("chat_a"));
+    assert!(!std::sync::Arc::ptr_eq(&first, &other));
+    // the caller's own `can` changes: rebuilt, with the new literals
+    assert_eq!(held(&k, "canvas_ws", "credentials"), Held::Nothing);
+    set_can(&k, "canvas_ws", json!({"credentials": {"call": ["get"]}}));
+    let mine = k.candidates_for(&aid("canvas_ws"));
+    assert!(!std::sync::Arc::ptr_eq(&first, &mine), "its own can changed");
+    assert!(mine.verbs.contains("get"));
+    // `web` caps it: its tree does not hold `credentials`, and it holds no line there
+    assert_eq!(held(&k, "canvas_ws", "credentials"), Held::Nothing);
+    // an ancestor's `can` changes: rebuilt too
+    let parent = k
+        .agents
+        .get(&aid("canvas_ws"))
+        .and_then(|a| a.parent_id.clone())
+        .expect("canvas_ws has a parent");
+    set_can(&k, parent.as_str(), json!({"credentials": {"call": ["get", "list_refs"]}}));
+    let capped = k.candidates_for(&aid("canvas_ws"));
+    assert!(!std::sync::Arc::ptr_eq(&mine, &capped), "an ancestor's can changed");
+    assert!(capped.verbs.contains("list_refs"));
+    assert_eq!(held(&k, "canvas_ws", "credentials"), Held::Call);
+    // a register clears every cached set
+    let before = k.candidates_for(&aid("chat_a"));
+    let extra = Agent::new(aid("extra_1"), Some("x.tools".into()), Some(aid("canvas_root")), Map::new(), std::path::PathBuf::from("/tmp/extra_1"), false);
+    k.register(extra);
+    assert!(!std::sync::Arc::ptr_eq(&before, &k.candidates_for(&aid("chat_a"))));
+    // every answer equals a fresh, uncached build
+    let ids = k.agent_ids();
+    for p in &ids {
+        let mut fresh = vec![p.clone()];
+        if let Some(a) = k.agents.get(p).map(|e| std::sync::Arc::clone(&e)) {
+            fresh.extend(k.ancestor_chain(&a));
+        }
+        let fresh = k.candidates_of(&fresh);
+        for r in &ids {
+            assert_eq!(k.held(p, r), k.held_from(p, r, &fresh), "{p:?} on {r:?}");
         }
     }
 }

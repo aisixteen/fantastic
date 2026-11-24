@@ -50,7 +50,7 @@ async fn call(kernel: &Arc<Kernel>, payload: Value) -> Value {
 async fn inbox(kernel: &Arc<Kernel>) -> fantastic_kernel::inbox::InboxReceiver {
     let w = AgentId::from("_t_watch_missing");
     let rx = kernel.ensure_inbox(&w);
-    assert!(kernel.watch(&AgentId::from("fb"), w).await.is_none());
+    assert!(fantastic_kernel::send::as_operator(kernel.watch(&AgentId::from("fb"), w)).await.is_none());
     rx
 }
 

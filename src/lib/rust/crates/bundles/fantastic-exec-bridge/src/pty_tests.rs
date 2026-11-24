@@ -770,7 +770,7 @@ async fn watch_as_viewer(
 ) -> fantastic_kernel::inbox::InboxReceiver {
     let viewer = AgentId::from(viewer);
     let rx = kernel.ensure_inbox(&viewer);
-    assert!(kernel.watch(&AgentId::from(owner), viewer).await.is_none());
+    assert!(fantastic_kernel::send::as_operator(kernel.watch(&AgentId::from(owner), viewer)).await.is_none());
     rx
 }
 

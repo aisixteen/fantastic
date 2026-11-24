@@ -243,11 +243,11 @@ async fn a_web_ws_route_leg_beside_a_catch_all_leg_gets_its_own_url() {
     let reply = text.iter().find(|v| v["id"] == "r1").expect("a reply");
     assert_eq!(reply["data"]["id"], "z_page_ws", "{reply}");
     // the host label is the URL's first segment, as the catch-all would capture
-    kernel
+    fantastic_kernel::send::as_operator(kernel
         .emit(
             &AgentId::from("z_page_ws"),
             json!({"type": "output", "data": "hi"}),
-        )
+        ))
         .await;
     let (text, _) = drain_frames(&mut ws, 600).await;
     assert!(

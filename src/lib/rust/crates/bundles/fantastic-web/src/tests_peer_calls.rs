@@ -259,7 +259,7 @@ async fn an_emit_to_the_identity_reaches_every_tab() {
     let tmp = TempDir::new().unwrap();
     let (kernel, mut ws, mut ws2, leg) = two_tabs(&tmp, "web_peer_emit").await;
     let target = AgentId::from(format!("{PAGE}|canvas"));
-    kernel.emit(&target, json!({"type": "ping", "n": 1})).await;
+    fantastic_kernel::send::as_operator(kernel.emit(&target, json!({"type": "ping", "n": 1}))).await;
     for tab in [&mut ws, &mut ws2] {
         let e = next_of(tab, "emit").await;
         assert_eq!(
@@ -309,8 +309,8 @@ async fn a_pages_agent_cannot_be_watched() {
     until("peer registered", || !kernel.peer_routes(PAGE).is_empty()).await;
     let w = AgentId::from("w");
     let _rx = kernel.ensure_inbox(&w);
-    let refused = kernel
-        .watch(&AgentId::from(format!("{PAGE}|canvas")), w)
+    let refused = fantastic_kernel::send::as_operator(kernel
+        .watch(&AgentId::from(format!("{PAGE}|canvas")), w))
         .await
         .expect("a refusal");
     assert_eq!(refused["reason"], "unhandled", "{refused}");

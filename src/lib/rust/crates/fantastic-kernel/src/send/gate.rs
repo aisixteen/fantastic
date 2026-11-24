@@ -10,7 +10,7 @@
 //! byte-identical to a missing id.
 
 use super::*;
-use crate::authz::solver::{lines_of, Act, Slot};
+use crate::authz::solver::{lines_of, Act, Basis, Slot};
 use crate::authz::{Level, What};
 use std::collections::BTreeSet;
 
@@ -114,57 +114,70 @@ impl Kernel {
     /// and needs no lines. A remote target is refused for every agent caller: no
     /// line can name one.
     pub(crate) fn allowed(&self, caller: &AgentId, act: &Act, target: &Agent) -> bool {
-        self.capped(caller, act, target, false)
+        self.capped_on(caller, act, target, Basis::Whole)
     }
 
     /// [`Self::allowed`] with the caller's written lines only (no position);
     /// every capping ancestor is still checked by its whole set. The writer check
     /// uses it: a writer hands out only what its written lines give.
     pub(crate) fn allowed_written(&self, caller: &AgentId, act: &Act, target: &Agent) -> bool {
-        self.capped(caller, act, target, true)
+        self.capped_on(caller, act, target, Basis::Written)
     }
 
-    /// The one cap loop of [`Self::allowed`] and [`Self::allowed_written`].
-    fn capped(&self, caller: &AgentId, act: &Act, target: &Agent, written: bool) -> bool {
-        if target.is_remote() {
-            return false;
+    /// The basis a capping ancestor is checked on when the caller is checked on
+    /// `basis`: its whole set, or its tree-wide lines for [`Basis::Wide`].
+    fn cap_basis(basis: Basis) -> Basis {
+        match basis {
+            Basis::Wide => Basis::Wide,
+            Basis::Whole | Basis::Written => Basis::Whole,
         }
-        let own = if written {
-            self.cedar_written(caller, act, &target.id)
-        } else {
-            self.cedar(caller, act, &target.id)
-        };
-        if !own {
+    }
+
+    /// The one cap loop: Cedar for `caller` on `basis`, then for every ancestor
+    /// of it whose tree does not hold `target` ([`Self::cap_basis`]).
+    /// [`Basis::Wide`] is the writer check's for a `call`/`update` line on a
+    /// literal id: that line reaches the target's whole tree, so a hold on the
+    /// target node alone (`$parent`, a create line's selection) never covers it,
+    /// for the writer or for a capping ancestor.
+    pub(crate) fn capped_on(
+        &self,
+        caller: &AgentId,
+        act: &Act,
+        target: &Agent,
+        basis: Basis,
+    ) -> bool {
+        if target.is_remote() || !self.cedar_on(caller, act, &target.id, basis) {
             return false;
         }
         let Some(c) = self.agents.get(caller).map(|e| Arc::clone(&e)) else {
             return false;
         };
+        let cap = Self::cap_basis(basis);
         self.ancestor_chain(&c)
             .iter()
-            .all(|anc| self.in_tree(&target.id, anc) || self.cedar(anc, act, &target.id))
+            .all(|anc| self.in_tree(&target.id, anc) || self.cedar_on(anc, act, &target.id, cap))
     }
 
     /// Is every value of `slot` allowed to `caller` on `target`, capped like
-    /// [`Self::allowed`]? A partial evaluation per agent in the chain; with
-    /// `written`, the caller's written lines only (no position), as in
-    /// [`Self::allowed_written`].
+    /// [`Self::allowed`]? A partial evaluation per agent in the chain, the
+    /// caller on `basis` and each capping ancestor as in [`Self::capped_on`].
     pub(crate) fn allowed_all(
         &self,
         caller: &AgentId,
         slot: Slot,
         target: &Agent,
-        written: bool,
+        basis: Basis,
     ) -> bool {
-        if target.is_remote() || !self.cedar_all(caller, slot, &target.id, written) {
+        if target.is_remote() || !self.cedar_all(caller, slot, &target.id, basis) {
             return false;
         }
         let Some(c) = self.agents.get(caller).map(|e| Arc::clone(&e)) else {
             return false;
         };
-        self.ancestor_chain(&c).iter().all(|anc| {
-            self.in_tree(&target.id, anc) || self.cedar_all(anc, slot, &target.id, false)
-        })
+        let cap = Self::cap_basis(basis);
+        self.ancestor_chain(&c)
+            .iter()
+            .all(|anc| self.in_tree(&target.id, anc) || self.cedar_all(anc, slot, &target.id, cap))
     }
 
     /// May `caller` call `verb` on `target`? The public form of
@@ -212,13 +225,47 @@ impl Kernel {
     }
 
     /// The probe candidates for `caller`: the literals of its own and its
-    /// ancestors' lines (proto `reflect_local`).
-    pub(crate) fn candidates_for(&self, caller: &AgentId) -> Candidates {
+    /// ancestors' lines (proto `reflect_local`). CACHED PER CALLER in the solver
+    /// index: built once, and reused while the caller's chain is the same and
+    /// every `can` on it is the one they were built from (compared, never parsed);
+    /// a changed `can` rebuilds them, and every register or unregister clears
+    /// them all.
+    pub(crate) fn candidates_for(&self, caller: &AgentId) -> Arc<Candidates> {
         let mut ids = vec![caller.clone()];
         if let Some(c) = self.agents.get(caller).map(|e| Arc::clone(&e)) {
             ids.extend(self.ancestor_chain(&c));
         }
-        self.candidates_of(&ids)
+        let live_can = |id: &AgentId, built: &Value| -> bool {
+            self.agents.get(id).is_some_and(|a| {
+                a.meta.read().expect("meta lock poisoned").get("can").unwrap_or(&Value::Null) == built
+            })
+        };
+        {
+            let ix = self.authz.read().expect("authz index poisoned");
+            if let Some(e) = ix.cands.get(caller) {
+                let same = e.chain.len() == ids.len()
+                    && e.chain.iter().zip(&ids).all(|((id, built), live)| id == live && live_can(id, built));
+                if same {
+                    return Arc::clone(&e.cands);
+                }
+            }
+        }
+        let chain: Vec<(AgentId, Value)> = ids
+            .iter()
+            .filter_map(|id| {
+                let a = self.agents.get(id).map(|e| Arc::clone(&e))?;
+                let can = a.meta.read().expect("meta lock poisoned").get("can").cloned().unwrap_or(Value::Null);
+                Some((id.clone(), can))
+            })
+            .collect();
+        let cands = Arc::new(self.candidates_of(&ids));
+        if chain.len() == ids.len() {
+            self.authz.write().expect("authz index poisoned").cands.insert(
+                caller.clone(),
+                crate::authz::solver::CandEntry { chain, cands: Arc::clone(&cands) },
+            );
+        }
+        cands
     }
 
     /// [`Self::held`] over a given candidate set.
@@ -252,7 +299,7 @@ impl Kernel {
         if creates {
             return Held::Create;
         }
-        if self.allowed_all(caller, Slot::Field, &t, false)
+        if self.allowed_all(caller, Slot::Field, &t, Basis::Whole)
             || cands
                 .fields
                 .iter()
@@ -260,7 +307,7 @@ impl Kernel {
         {
             return Held::Update;
         }
-        if self.allowed_all(caller, Slot::Verb, &t, false)
+        if self.allowed_all(caller, Slot::Verb, &t, Basis::Whole)
             || cands
                 .verbs
                 .iter()

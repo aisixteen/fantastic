@@ -74,11 +74,11 @@ async fn a_socket_opened_on_an_agent_receives_its_events() {
         .expect("ws connect");
     // Let the auto-watch land before the traffic it must mirror.
     tokio::time::sleep(Duration::from_millis(150)).await;
-    kernel
+    fantastic_kernel::send::as_operator(kernel
         .emit(
             &AgentId::from("files"),
             json!({"type": "job_done", "data": "v-42"}),
-        )
+        ))
         .await;
     let (t, _) = drain_frames(&mut ws, 600).await;
     assert!(
@@ -114,11 +114,11 @@ async fn a_refused_auto_watch_is_an_error_frame_not_silence() {
     // a denial is the unknown answer
     assert_eq!(first["reason"], "unknown_agent", "{first}");
     // NOT REGISTERED: the agent's events reach nobody on this socket.
-    kernel
+    fantastic_kernel::send::as_operator(kernel
         .emit(
             &AgentId::from("files"),
             json!({"type": "job_done", "data": "leak"}),
-        )
+        ))
         .await;
     let (t, _) = drain_frames(&mut ws, 400).await;
     assert!(

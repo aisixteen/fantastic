@@ -130,8 +130,8 @@ async fn an_instance_runs_its_program_and_answers_the_bundles_verbs() {
     assert_eq!(r["id"], "rs_e1", "{r}");
     let watcher = AgentId::from("_t_watch");
     let mut rx = kernel.ensure_inbox(&watcher);
-    assert!(kernel
-        .watch(&AgentId::from("rs_e1"), watcher)
+    assert!(fantastic_kernel::send::as_operator(kernel
+        .watch(&AgentId::from("rs_e1"), watcher))
         .await
         .is_none());
     let out = call(&kernel, "rs_e1", json!({"type": "echo", "text": "hi"})).await;

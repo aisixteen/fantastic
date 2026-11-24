@@ -458,7 +458,7 @@ async fn each_request_served_is_published_on_the_agents_inbox() {
     let port = server().await;
     let k = world_named("w_pub", &[base(port)], &format!("127.0.0.1:{port}")).await;
     let mut rx = k.ensure_inbox(&AgentId::from("w_view"));
-    assert!(k.watch(&AgentId::from("w_pub"), AgentId::from("w_view")).await.is_none());
+    assert!(fantastic_kernel::send::as_operator(k.watch(&AgentId::from("w_pub"), AgentId::from("w_view"))).await.is_none());
     request_as(&k, "w_pub", json!({"method": "GET", "url": format!("{}/text", base(port))})).await;
     request_as(&k, "w_pub", json!({"method": "GET", "url": format!("{}/slow", base(port)), "timeout": 0.3})).await;
     let mut got = Vec::new();

@@ -110,7 +110,7 @@ pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Option<Value> 
         Ok(model) => {
             let mut patch = Map::new();
             patch.insert("model".into(), json!(model));
-            let written = write_own(kernel, agent_id, patch).await;
+            let written = kernel.write_own(agent_id, patch).await;
             fantastic_kernel::is_refused(&written).then_some(written)
         }
         Err(e) => {
@@ -121,16 +121,3 @@ pub async fn resolve(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Option<Value> 
     }
 }
 
-/// Write the agent's OWN fields `patch` with `update_agent` sent as itself (a
-/// bundle writes its own non-`can` fields); the reply, a refusal included.
-pub(crate) async fn write_own(kernel: &Arc<Kernel>, id: &AgentId, patch: Map<String, Value>) -> Value {
-    let mut payload = Map::new();
-    payload.insert("type".to_string(), json!("update_agent"));
-    payload.insert("id".to_string(), json!(id.as_str()));
-    payload.extend(patch);
-    kernel
-        .send(vec![fantastic_kernel::Item::new(AgentId::from("kernel"), Value::Object(payload))])
-        .await
-        .remove(0)
-        .result
-}

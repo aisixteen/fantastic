@@ -288,7 +288,8 @@ impl Runner {
         let w = self.watcher_of(agent);
         let mut rx = k.ensure_inbox(&w);
         let src = fantastic_kernel::AgentId::from(agent.as_str());
-        if let Some(refusal) = k.watch(&src, w.clone()).await {
+        // the shell is the in-process operator
+        if let Some(refusal) = fantastic_kernel::send::as_operator(k.watch(&src, w.clone())).await {
             k.remove_inbox(&w);
             self.note(format!("{agent}: watch refused: {refusal}")).await;
             return;

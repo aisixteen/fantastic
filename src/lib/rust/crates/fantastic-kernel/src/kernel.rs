@@ -584,9 +584,35 @@ impl Kernel {
             || bundle.dynamic_verbs(&agent).iter().any(|v| v.name == verb)
     }
 
-    /// Tell one agent a lifecycle verb (`boot`, `shutdown`) as kernel bookkeeping,
-    /// ONLY when its bundle declares it: `None` when it does not (nothing to tell),
-    /// and `None` for any other verb — no other verb runs as an agent from here.
+    /// Write agent `id`'s fields `patch` with an ordinary `update_agent` send from
+    /// the current origin: in an agent's own handler that is the agent itself, so
+    /// this is the one path for a bundle's own writes (self-writes are uniform: its
+    /// ordinary fields only, exactly as an `update_agent` call it makes). The reply,
+    /// a refusal included.
+    pub async fn write_own(self: &Arc<Self>, id: &AgentId, patch: Map<String, Value>) -> Value {
+        let mut payload = Map::new();
+        payload.insert("type".to_string(), json!("update_agent"));
+        payload.insert("id".to_string(), json!(id.as_str()));
+        payload.extend(patch);
+        self.send(vec![crate::outcome::Item::new(
+            AgentId::from("kernel"),
+            Value::Object(payload),
+        )])
+        .await
+        .remove(0)
+        .result
+    }
+
+    /// Tell one LOADED agent a lifecycle verb (`boot`, `shutdown`) as kernel
+    /// bookkeeping, ONLY when its bundle declares it: `None` when it does not
+    /// (nothing to tell), and `None` for any other verb — no other verb runs as an
+    /// agent from here.
+    ///
+    /// ONCE LOADED, A BUNDLE IS AN AGENT LIKE ANY OTHER: its handler runs with the
+    /// agent ITSELF as its origin, never the operator and never its creator — the
+    /// boot inside `create_agent`, the boots at `kernel_start` (the root and its
+    /// store included), after a restart and after a bundle reload are one path, so
+    /// a hook has the same authority whenever it runs: the agent's own lines.
     pub async fn announce(
         self: &Arc<Self>,
         agent: &Arc<Agent>,
@@ -596,23 +622,13 @@ impl Kernel {
         if !LIFECYCLE_VERBS.contains(&verb) {
             return None;
         }
-        self.announce_as(agent, payload, None).await
-    }
-
-    /// [`Self::announce`] with the handler's origin `origin`: the boot of an agent
-    /// another agent created runs with that creator as its origin
-    /// ([`Self::bookkeeping_as`]).
-    pub(crate) async fn announce_as(
-        self: &Arc<Self>,
-        agent: &Arc<Agent>,
-        payload: Value,
-        origin: Option<AgentId>,
-    ) -> Option<crate::outcome::Outcome> {
-        let verb = payload.get("type").and_then(Value::as_str).unwrap_or_default();
         if !self.advertises(&agent.id, verb).await {
             return None;
         }
-        Some(self.bookkeeping_as(agent, payload, None, origin).await)
+        Some(
+            self.bookkeeping_as(agent, payload, None, Some(agent.id.clone()))
+                .await,
+        )
     }
 
     /// DEPTH-FIRST `on_shutdown`, children before their parent. A hook that
@@ -780,10 +796,9 @@ impl Kernel {
             }
         }
         self.agents.insert(agent.id.clone(), agent);
-        self.authz
-            .write()
-            .expect("authz index poisoned")
-            .entities_dirty = true;
+        let mut ix = self.authz.write().expect("authz index poisoned");
+        ix.entities_dirty = true;
+        ix.cands.clear();
     }
 
     /// Resolve a `send`-style operand end to end: `"kernel"` names the root;
@@ -856,8 +871,10 @@ impl Kernel {
             .retain(|a| a != id);
         let mut ix = self.authz.write().expect("authz index poisoned");
         ix.entities_dirty = true;
+        ix.cands.clear();
         ix.per.remove(id);
         ix.written.remove(id);
+        ix.wide.remove(id);
     }
 
     /// Cheap clone of the current root pointer (`None` until
@@ -976,14 +993,21 @@ impl Kernel {
             }
         }));
         let weak = Arc::downgrade(self);
-        tokio::spawn(async move {
+        // The task is `me`'s: it emits on its own inbox as itself (sender and
+        // origin `me`), never as the operator.
+        let who = me.clone();
+        let work = async move {
             while let Some(c) = rx.recv().await {
                 let Some(k) = weak.upgrade() else { return };
                 if let Some(ev) = publish(&k, c) {
                     k.emit(&me, ev).await;
                 }
             }
-        });
+        };
+        tokio::spawn(crate::send::CURRENT_ORIGIN.scope(
+            Some(who.clone()),
+            crate::send::CURRENT_SENDER.scope(Some(who), work),
+        ));
         token
     }
 
@@ -1080,6 +1104,11 @@ impl Kernel {
     /// - [`KernelError::InvalidSnapshot`] if the snapshot has no root, or if any
     ///   record's `parent_id` doesn't point at a record in the
     ///   snapshot.
+    ///
+    /// TESTS ONLY (`test-support`): the tree it builds carries every record's `can`
+    /// unchecked, so no shipped crate replaces the tree through it; the kernel's
+    /// own bring-up loads through [`crate::bootstrap`].
+    #[cfg(any(test, feature = "test-support"))]
     pub fn load(&self, state: KernelState) -> KernelResult<()> {
         let records: Vec<Map<String, Value>> = state
             .agents
@@ -1093,7 +1122,11 @@ impl Kernel {
     /// `Kernel.load(records)`: [`validate_records`] FIRST (a bad document is a
     /// no-op, the live tree untouched), then the children-dir name off the root
     /// record, then the tree rebuilt.
-    pub fn load_records(&self, records: Vec<Map<String, Value>>) -> KernelResult<()> {
+    ///
+    /// Crate-private: the tree it builds carries every record's `can` unchecked,
+    /// so only the kernel's own bring-up ([`crate::bootstrap`]) and the tests'
+    /// `load` call it.
+    pub(crate) fn load_records(&self, records: Vec<Map<String, Value>>) -> KernelResult<()> {
         validate_records(&records)?;
         let mut agents: Vec<crate::agent::AgentRecord> = Vec::with_capacity(records.len());
         for r in records {
@@ -1243,8 +1276,9 @@ impl Kernel {
         Ok(())
     }
 
-    /// JSON-string form of [`Self::load`]. Parses then loads. Used by
-    /// the embedding API and the Disk-mode boot path.
+    /// JSON-string form of [`Self::load`]. Parses then loads. Tests only, as
+    /// [`Self::load`].
+    #[cfg(any(test, feature = "test-support"))]
     pub fn load_json(&self, json: &str) -> KernelResult<()> {
         let state: KernelState = serde_json::from_str(json)
             .map_err(|e| KernelError::InvalidSnapshot(format!("parse: {e}")))?;

@@ -20,6 +20,7 @@ futures-util = { workspace = true }
 base64 = "0.22"
 
 [dev-dependencies]
+fantastic-ai-core = { path = "../fantastic-ai-core", features = ["test-support"] }
 fantastic-ram-store = { path = "../fantastic-ram-store", features = ["test-support"] }
 fantastic-kernel = { path = "../../fantastic-kernel", features = ["test-support"] }
 tempfile = "3"

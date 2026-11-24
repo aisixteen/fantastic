@@ -275,6 +275,16 @@ async fn hydrate(sc: &Scenario) -> Hydration {
                 payload[k] = v.clone();
             }
         }
+        // The roster pass is the loader's own sends, checked as its own lines: the
+        // operator gives it a create line on itself (beside the config's lines).
+        if let Some(can) = payload
+            .as_object_mut()
+            .map(|p| p.entry("can").or_insert_with(|| json!({})))
+            .and_then(Value::as_object_mut)
+        {
+            can.entry(lid.clone())
+                .or_insert_with(|| json!({"create": {"who": ["*"], "what": "*"}}));
+        }
         let rec = kernel.operator_send(vec![Item::new(AgentId::from(ROOT), payload)])
             .await
             .remove(0)

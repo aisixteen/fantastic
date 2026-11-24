@@ -57,7 +57,7 @@ fn initial_tree() -> BTreeMap<String, (Option<String>, Value)> {
             Some("user"),
             json!({
                 "canvas_root": {"create": {"who": ["*"], "what": {"ai_chat.tools": {"model": "*"}, "canvas.tools": {}}}},
-                "memory": {"call": ["append", "read"]},
+                "memory": {"call": ["append", "read", "copy"]},
                 "prompt_file": {"call": ["read"]},
                 "credentials": {"call": ["get"]},
             }),
@@ -68,7 +68,7 @@ fn initial_tree() -> BTreeMap<String, (Option<String>, Value)> {
             Some("canvas_root"),
             json!({
                 "credentials": {"call": ["get"]},
-                "memory": {"call": ["append", "read"]},
+                "memory": {"call": ["append", "read", "copy"]},
                 "canvas_garage": {"create": {"who": ["*"], "what": {
                     "ai_chat.tools": {"model": "*"},
                     "exec_bridge.tools": {"allowed": "*"},

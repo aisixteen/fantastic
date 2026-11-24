@@ -204,10 +204,11 @@ async fn a_plain_read_is_a_plain_call_on_the_row_and_to_watchers() {
     let (_t, kernel, _seen) = mk().await;
     let tap = AgentId::from("tap_read");
     let mut rx = kernel.ensure_inbox(&tap);
-    assert!(kernel
-        .watch(&AgentId::from("sink"), tap.clone())
-        .await
-        .is_none());
+    assert!(
+        fantastic_kernel::send::as_operator(kernel.watch(&AgentId::from("sink"), tap.clone()))
+            .await
+            .is_none()
+    );
     let out = kernel
         .operator_send(vec![Item::new(
             AgentId::from("sink"),
@@ -242,10 +243,11 @@ async fn a_write_keeps_the_bytes_slot_where_python_holds_it() {
     let (_t, kernel, seen) = mk().await;
     let tap = AgentId::from("tap_write");
     let mut rx = kernel.ensure_inbox(&tap);
-    assert!(kernel
-        .watch(&AgentId::from("sink"), tap.clone())
-        .await
-        .is_none());
+    assert!(
+        fantastic_kernel::send::as_operator(kernel.watch(&AgentId::from("sink"), tap.clone()))
+            .await
+            .is_none()
+    );
     let out = kernel
         .operator_send(vec![Item::new(
             AgentId::from("sink"),

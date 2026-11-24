@@ -18,7 +18,9 @@
 //!   caps).
 //! - **The writer holds what it hands out.** An agent writes a `can` line only
 //!   when its own written lines (never its position) hold that line, cap
-//!   included ([`glue`]); narrowing is always allowed.
+//!   included ([`glue`]); narrowing is always allowed. A `call`/`update` line
+//!   on a literal id reaches a whole tree, so only tree-wide holds count for
+//!   it, and an `update` line needs every verb held as well.
 //! - **Cedar.** Each agent is a Cedar entity and each principal's lines its own
 //!   policy set ([`solver`]); the gate (`send::gate`) asks Cedar per agent in the
 //!   chain. The operator (origin `None`) is never checked.

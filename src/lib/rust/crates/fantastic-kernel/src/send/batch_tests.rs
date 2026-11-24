@@ -541,10 +541,11 @@ async fn a_named_kernel_reflect_is_ledgered_but_not_dispatched() {
     let kernel = mk_kernel(Arc::clone(&sh));
     let tap = AgentId::from("tap_named_reflect");
     let mut rx = kernel.ensure_inbox(&tap);
-    assert!(kernel
-        .watch(&AgentId::from("kernel_state"), tap.clone())
-        .await
-        .is_none());
+    assert!(
+        crate::send::as_operator(kernel.watch(&AgentId::from("kernel_state"), tap.clone()))
+            .await
+            .is_none()
+    );
     let seen: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Arc::default();
     let sink = Arc::clone(&seen);
     let _t = kernel.add_state_subscriber(Arc::new(move |ev, _| {
@@ -616,10 +617,11 @@ async fn a_dead_letter_of_a_departed_caller_is_announced_on_the_root() {
     assert_eq!(r["id"], "dl_child", "{r}");
     let tap = AgentId::from("tap_deadletter");
     let mut rx = kernel.ensure_inbox(&tap);
-    assert!(kernel
-        .watch(&AgentId::from("kernel_state"), tap.clone())
-        .await
-        .is_none());
+    assert!(
+        crate::send::as_operator(kernel.watch(&AgentId::from("kernel_state"), tap.clone()))
+            .await
+            .is_none()
+    );
     let k = Arc::clone(&kernel);
     let call = tokio::spawn(crate::test_support::as_agent(a.clone(), async move {
         k.operator_send(vec![Item::new(

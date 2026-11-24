@@ -33,7 +33,7 @@
 use crate::constants::MAX_CUT_TURNS;
 use crate::events::emit_status;
 use crate::helpers::mint_batch_token;
-use crate::history_view::{docs_head, example_verb, point_to_docs};
+use crate::history_view::point_to_docs;
 use crate::state::state_for;
 use crate::tool_parse::{malformed_calls, terminated_calls};
 use fantastic_bundle::{py_repr, py_repr_value, py_strip};
@@ -1886,19 +1886,6 @@ async fn route_reply_gated(
                     let pointed = point_to_docs(&u.target, &u.verb, &shown);
                     let mut body =
                         crate::tool_parse::render_reply(pointed.as_ref().unwrap_or(&shown));
-                    // Only docs bodies are cut later, so only they carry the notice, and
-                    // are HELD under their pid for the model's own `grep`. A reflect is
-                    // MUTABLE state and stays whole; a newer
-                    // reflect of the same agent supersedes it (dedupe).
-                    let docs_body = u.verb == "docs" && shown.get("of").is_some();
-                    if let (true, Some(p), Some(verb)) = (
-                        docs_body,
-                        out.pid,
-                        example_verb(&body).filter(|_| docs_body),
-                    ) {
-                        crate::memory::store_reply(&self_id, &kernel, p.0, &body);
-                        body = docs_head(p.0, &verb) + &body;
-                    }
                     // FULL ASYNC. A reply is DATA, not a question — the model
                     // needs to be able to SEE it, not be forced to swallow it
                     // whole as its next turn. Anything over the inline cap is

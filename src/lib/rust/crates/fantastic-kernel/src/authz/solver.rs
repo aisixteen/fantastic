@@ -7,6 +7,9 @@
 //! - A principal's set is the GENERIC policies (position, never upward, structure)
 //!   followed by the policies its lines generate. The `written` set is the same
 //!   without the position permit: what its record holds, for the writer check.
+//!   The `wide` set keeps only the written lines that reach a target's whole
+//!   tree: a handed-out `call`/`update` line on a literal id reaches that id's
+//!   whole tree, so only such a hold may justify it.
 //! - The index follows the tree by itself: `Kernel::register` and
 //!   `Kernel::unregister` mark the entities dirty, and a principal's sets are
 //!   rebuilt when its live `meta["can"]` differs from the value they were built
@@ -66,6 +69,20 @@ pub(crate) enum Act {
     Delete,
 }
 
+/// Which of a principal's sets a check reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Basis {
+    /// GENERIC + its lines: what a call is checked against.
+    Whole,
+    /// Its lines without position: what a writer holds.
+    Written,
+    /// Its written lines that reach a target's whole tree: no `$parent` line,
+    /// and a `create` line only when its `who` is `*` and its bundles are
+    /// unconstrained (on bundle `*` only, for `update`). What a writer holds
+    /// for handing out a `call` or `update` line on a literal id.
+    Wide,
+}
+
 /// The slot a partial evaluation leaves unknown: `cedar_all` answers whether every
 /// value of it is allowed (a `*` slot).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +104,14 @@ pub(crate) struct Index {
     /// Per principal: the same lines without the position permit (the writer
     /// check holds only what is written).
     pub(crate) written: HashMap<AgentId, (Value, PolicySet)>,
+    /// Per principal: the written lines that reach a whole tree ([`Basis::Wide`]).
+    pub(crate) wide: HashMap<AgentId, (Value, PolicySet)>,
+    /// Per caller: the probe candidates of [`Kernel::held`] (the literals of its
+    /// own and its ancestors' lines), with the chain and the `can` of each agent
+    /// on it they were built from. Reused while every `can` on the chain is the
+    /// one it was built from; cleared at every register or unregister (a new
+    /// chain, a new bundle).
+    pub(crate) cands: HashMap<AgentId, CandEntry>,
     /// GENERIC only: the set of a principal with no lines.
     pub(crate) base: PolicySet,
     /// The Cedar authorizer.
@@ -97,6 +122,15 @@ pub(crate) struct Index {
     agent_type: EntityTypeName,
     /// `Action::"call"`, `"update"`, `"create"`, `"delete"`.
     actions: [EntityUid; 4],
+}
+
+/// One caller's cached probe candidates ([`Index::cands`]).
+pub(crate) struct CandEntry {
+    /// The caller and its ancestors, root-ward, each with the `can` the
+    /// candidates were built from.
+    pub(crate) chain: Vec<(AgentId, Value)>,
+    /// The candidates.
+    pub(crate) cands: Arc<crate::send::gate::Candidates>,
 }
 
 /// A Cedar string literal: `\`, `"` and control characters escaped.
@@ -202,6 +236,40 @@ pub(crate) fn line_policies(principal: &str, lines: &[Line]) -> String {
             }
             (Target::Id(t), Level::Create { who, what }) => {
                 s += &create_policies(principal, t, who, what);
+            }
+        }
+    }
+    s
+}
+
+/// The policies of `principal`'s lines that reach a target's whole tree
+/// ([`Basis::Wide`]; GENERIC not included).
+///
+/// - `call`/`update` on a literal id: as [`line_policies`];
+/// - `$parent`: none (it names one node);
+/// - `create`: only with `who` `*`, and then for every bundle (`what: "*"` or a
+///   `*` bundle key; only the `*` bundle's freed fields for `update`). A line
+///   selecting some ids or some bundles holds single agents, never a tree.
+pub(crate) fn wide_policies(principal: &str, lines: &[Line]) -> String {
+    let mut s = String::new();
+    for l in lines {
+        match (&l.target, &l.level) {
+            (Target::Parent, _) => {}
+            (Target::Id(_), Level::Call(_) | Level::Update(_)) => {
+                s += &line_policies(principal, std::slice::from_ref(l));
+            }
+            (Target::Id(t), Level::Create { who, what }) => {
+                if !who.iter().any(|w| w == "*") {
+                    continue;
+                }
+                let every = match what {
+                    What::All => what.clone(),
+                    What::Bundles(m) => match m.get("*") {
+                        Some(fs) => What::Bundles([("*".to_string(), fs.clone())].into()),
+                        None => continue,
+                    },
+                };
+                s += &create_policies(principal, t, &["*".to_string()], &every);
             }
         }
     }
@@ -324,6 +392,8 @@ impl Index {
             entities_dirty: true,
             per: HashMap::new(),
             written: HashMap::new(),
+            wide: HashMap::new(),
+            cands: HashMap::new(),
             base: parse_set(&generic()),
             authorizer: Authorizer::new(),
             schema,
@@ -382,17 +452,23 @@ impl Index {
             parse_set(&format!("{}{text}", generic()))
         };
         let written = parse_set(&format!("{FORBIDS}{text}"));
+        let wide = parse_set(&format!(
+            "{FORBIDS}{}",
+            wide_policies(principal.as_str(), &lines)
+        ));
         self.per.insert(principal.clone(), (can.clone(), per));
-        self.written.insert(principal.clone(), (can, written));
+        self.written
+            .insert(principal.clone(), (can.clone(), written));
+        self.wide.insert(principal.clone(), (can, wide));
     }
 
-    /// The set `principal` is checked against: its own, or the base when it has
-    /// none.
-    pub(crate) fn set_of(&self, principal: &AgentId, written: bool) -> Option<&PolicySet> {
-        if written {
-            self.written.get(principal).map(|(_, ps)| ps)
-        } else {
-            Some(self.per.get(principal).map_or(&self.base, |(_, ps)| ps))
+    /// The set `principal` is checked against on `basis`: for [`Basis::Whole`]
+    /// its own, or the base when it has none.
+    pub(crate) fn set_of(&self, principal: &AgentId, basis: Basis) -> Option<&PolicySet> {
+        match basis {
+            Basis::Whole => Some(self.per.get(principal).map_or(&self.base, |(_, ps)| ps)),
+            Basis::Written => self.written.get(principal).map(|(_, ps)| ps),
+            Basis::Wide => self.wide.get(principal).map(|(_, ps)| ps),
         }
     }
 
@@ -524,35 +600,47 @@ impl Kernel {
     /// Does `principal`'s own set (GENERIC + its lines) allow `act` on `resource`?
     /// No ancestor cap: that is the gate's. A principal or resource with no entity
     /// (a missing id, a remote id) answers `false`.
+    #[cfg(test)]
     pub(crate) fn cedar(&self, principal: &AgentId, act: &Act, resource: &AgentId) -> bool {
-        self.refresh_authz(Some(principal));
-        let ix = self.authz.read().expect("authz index poisoned");
-        ix.set_of(principal, false)
-            .is_some_and(|ps| ix.decide(ps, principal, act, resource))
+        self.cedar_on(principal, act, resource, Basis::Whole)
     }
 
     /// [`Self::cedar`] against `principal`'s written set: its lines only, no
     /// position.
+    #[cfg(test)]
     pub(crate) fn cedar_written(&self, principal: &AgentId, act: &Act, resource: &AgentId) -> bool {
+        self.cedar_on(principal, act, resource, Basis::Written)
+    }
+
+    /// Does `principal`'s set on `basis` allow `act` on `resource`? No ancestor
+    /// cap: that is the gate's. A principal or resource with no entity (a missing
+    /// id, a remote id) answers `false`.
+    pub(crate) fn cedar_on(
+        &self,
+        principal: &AgentId,
+        act: &Act,
+        resource: &AgentId,
+        basis: Basis,
+    ) -> bool {
         self.refresh_authz(Some(principal));
         let ix = self.authz.read().expect("authz index poisoned");
-        ix.set_of(principal, true)
+        ix.set_of(principal, basis)
             .is_some_and(|ps| ix.decide(ps, principal, act, resource))
     }
 
     /// Is every value of `slot` allowed to `principal` on `resource` (a `*` slot)?
     /// A partial evaluation with the verb or the field unknown, against the
-    /// principal's set, or its written set when `written`.
+    /// principal's set on `basis`.
     pub(crate) fn cedar_all(
         &self,
         principal: &AgentId,
         slot: Slot,
         resource: &AgentId,
-        written: bool,
+        basis: Basis,
     ) -> bool {
         self.refresh_authz(Some(principal));
         let ix = self.authz.read().expect("authz index poisoned");
-        ix.set_of(principal, written)
+        ix.set_of(principal, basis)
             .is_some_and(|ps| ix.decide_all(ps, principal, slot, resource))
     }
 

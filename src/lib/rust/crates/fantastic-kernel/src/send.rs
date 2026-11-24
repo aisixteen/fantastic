@@ -96,12 +96,23 @@ pub fn current_origin() -> Option<AgentId> {
 }
 
 /// The origin scope as it stands: `Some(origin)` inside a dispatch, an operator
-/// send ([`Kernel::operator_send`]), the cold boot or kernel bookkeeping (with
-/// `Some(None)` for the operator), and `None` when no scope is set at all (a bare
-/// `tokio::spawn`). The operator is origin `None` set explicitly, never the
-/// absence of an origin.
-pub(crate) fn origin_scope() -> Option<Option<AgentId>> {
+/// send ([`Kernel::operator_send`]), the shell's [`as_operator`] or kernel
+/// bookkeeping (with `Some(None)` for the operator), and `None` when no scope is
+/// set at all (a bare `tokio::spawn`). The operator is origin `None` set
+/// explicitly, never the absence of an origin: code that acts for "whoever asked"
+/// reads this, and refuses on `None`.
+pub fn origin_scope() -> Option<Option<AgentId>> {
     CURRENT_ORIGIN.try_with(Clone::clone).ok()
+}
+
+/// THE IN-PROCESS SHELL'S SCOPE: `work` runs with origin none set explicitly, so
+/// what it does outside any dispatch (a send, an emit, a watch) is the
+/// operator's. Only the in-process shell, and a test acting as the operator, call
+/// it; [`Kernel::operator_send`] is this around one send. The sender is still the
+/// running dispatch's when there is one, so code running inside an agent stays
+/// that agent's.
+pub async fn as_operator<F: std::future::Future>(work: F) -> F::Output {
+    CURRENT_ORIGIN.scope(None, work).await
 }
 
 tokio::task_local! {
@@ -540,7 +551,7 @@ impl Kernel {
     /// the operator, call it. The sender is still the running dispatch's when there
     /// is one, so a call made inside an agent's code stays that agent's.
     pub async fn operator_send(self: &Arc<Self>, items: Vec<Item>) -> Vec<Outcome> {
-        CURRENT_ORIGIN.scope(None, self.send(items)).await
+        as_operator(self.send(items)).await
     }
 
     /// THE ASKER'S SEND: [`Self::send`] with sender and origin both the
@@ -1240,10 +1251,9 @@ impl Kernel {
         self.bookkeeping_as(agent, payload, body, None).await
     }
 
-    /// [`Self::bookkeeping`] with the handler's origin `origin`: the boot of an
-    /// agent another agent created runs with that creator as its origin, so a
-    /// create the boot hook makes for its asker is checked as that creator. The
-    /// sender stays `agent`.
+    /// [`Self::bookkeeping`] with the handler's origin `origin`: a lifecycle verb
+    /// ([`Self::announce`]) runs with the agent itself as its origin. The sender
+    /// stays `agent`.
     pub(crate) async fn bookkeeping_as(
         self: &Arc<Self>,
         agent: &Arc<Agent>,
@@ -1692,6 +1702,8 @@ impl Kernel {
     /// GATED LIKE A SEND when the emitter is an agent: its lines (and the ancestor
     /// cap) must allow verb `emit` on the target. Its own tree, itself included,
     /// it reaches by position. A denied emit is dropped; an emit has no reply.
+    /// NO ORIGIN SCOPE, NO EMIT, as with [`Self::send`]: work spawned with a bare
+    /// `tokio::spawn` is never the operator, and its emit is dropped.
     ///
     /// A QUALIFIED `<guid>|<agent>` OF A CONNECTED PEER goes to every live route
     /// of that guid ([`crate::peers::emit_peer`]) — every tab of one identity.
@@ -1714,6 +1726,9 @@ impl Kernel {
         item: crate::inbox::InboxItem,
         publish: bool,
     ) {
+        if origin_scope().is_none() {
+            return;
+        }
         let Some(target) = self.agents.get(target_id).map(|e| Arc::clone(&e)) else {
             if let Some(remote) = self
                 .qualified_target(target_id.as_str())
@@ -1750,12 +1765,17 @@ impl Kernel {
     /// agent's inbox in its session and read the packed confidential context out
     /// of the model's prompt.
     ///
-    /// An OPERATOR watch (`current_sender()` is `None`) is the origin root of
-    /// trust and stays ungated, as with send.
+    /// An OPERATOR watch (`current_sender()` is `None` inside an origin scope) is
+    /// the origin root of trust and stays ungated, as with send. With NO ORIGIN
+    /// SCOPE at all (a bare `tokio::spawn`) the watch is refused with the unknown
+    /// answer: the absence of an identity is never the operator.
     ///
     /// A QUALIFIED `<guid>|<agent>` OF A CONNECTED PEER watches that agent on its
     /// kernel ([`crate::peers`]): the same gate, the same reader rule.
     pub async fn watch(self: &Arc<Self>, src_id: &AgentId, watcher_id: AgentId) -> Option<Value> {
+        if origin_scope().is_none() {
+            return Some(crate::refusal::unknown_agent(src_id.as_str()));
+        }
         let Some(src) = self.agents.get(src_id).map(|e| Arc::clone(&e)) else {
             let remote = self
                 .qualified_target(src_id.as_str())
@@ -1804,12 +1824,16 @@ impl Kernel {
     /// The state stream is a `watch` on a node (grant model v9): the watcher's
     /// lines and the ancestor cap must allow `watch` on `node`, as for any send.
     /// What it then receives is cut per watcher ([`Self::state_watch_event`],
-    /// [`Self::state_watch_snapshot`]). An OPERATOR tap is the origin root of
-    /// trust and stays ungated, as with send and watch.
+    /// [`Self::state_watch_snapshot`]). An OPERATOR tap (no sender inside an
+    /// origin scope) is the origin root of trust and stays ungated, as with send
+    /// and watch; with no origin scope at all it is refused.
     ///
     /// An ingress rule answers "may this client reach this leg"; it says nothing
     /// about what the client may then READ.
     pub fn authorize_state_watch(&self, watcher: &AgentId, node: &AgentId) -> Option<Value> {
+        if origin_scope().is_none() {
+            return Some(crate::refusal::unknown_agent(node.as_str()));
+        }
         current_sender()?;
         let Some(n) = self.agents.get(node).map(|e| Arc::clone(&e)) else {
             return Some(crate::refusal::unknown_agent(node.as_str()));
@@ -1912,6 +1936,54 @@ impl Kernel {
         sender: Option<&AgentId>,
     ) {
         self.fanout_with(target, kind, item, sender, true).await;
+    }
+
+    /// [`Self::fanout`] of an item each receiver gets its OWN copy of: the
+    /// target and each watcher that is an agent get `item_for(Some(id))`; a
+    /// watcher that is no agent and the state stream get `item_for(None)`. A
+    /// receiver whose `item_for` answers `None` gets nothing (for kernel
+    /// bookkeeping that carries a record, cut per receiver).
+    pub(crate) async fn fanout_each(
+        &self,
+        target: &Arc<Agent>,
+        kind: &str,
+        item_for: impl Fn(Option<&AgentId>) -> Option<crate::inbox::InboxItem>,
+        sender: Option<&AgentId>,
+    ) {
+        if state_quiet() {
+            return;
+        }
+        let public = item_for(None);
+        if let Some(item) = item_for(Some(&target.id)) {
+            if let Some(tx) = self.inboxes.get(&target.id) {
+                tx.send(item);
+            }
+        }
+        if let Some(item) = &public {
+            let summary = summarize_payload(&item.payload, item.body.as_ref());
+            self.publish_state_with_body(
+                &traffic_event(&target.id, kind, target.in_flight(), sender, &summary, item),
+                item.body.as_ref(),
+            );
+        }
+        let watchers: Vec<AgentId> = target.watcher_ids.read().await.iter().cloned().collect();
+        for w in watchers {
+            let Some(tx) = self.inboxes.get(&w).map(|e| e.clone()) else {
+                continue;
+            };
+            let wa = self.agents.get(&w).map(|e| Arc::clone(&e));
+            let mine = if wa.is_some() { item_for(Some(&w)) } else { public.clone() };
+            if let Some(item) = mine {
+                tx.send(item);
+            }
+            if let (Some(wa), Some(item)) = (wa, &public) {
+                let summary = summarize_payload(&item.payload, item.body.as_ref());
+                self.publish_state_with_body(
+                    &traffic_event(&w, kind, wa.in_flight(), sender, &summary, item),
+                    item.body.as_ref(),
+                );
+            }
+        }
     }
 
     /// [`Self::fanout`]; `publish: false` delivers to the inboxes and publishes

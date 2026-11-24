@@ -358,7 +358,7 @@ mod tests {
                 Some(USER),
                 json!({
                     "canvas_root": {"create": {"who": ["*"], "what": {"ai_chat.tools": {"model": "*"}, "canvas.tools": {}}}},
-                    "memory": {"call": ["append", "read"]},
+                    "memory": {"call": ["append", "read", "copy"]},
                     "prompt_file": {"call": ["read"]},
                     "credentials": {"call": ["get"]},
                 }),
@@ -369,7 +369,7 @@ mod tests {
                 Some("canvas_root"),
                 json!({
                     "credentials": {"call": ["get"]},
-                    "memory": {"call": ["append", "read"]},
+                    "memory": {"call": ["append", "read", "copy"]},
                     "canvas_garage": {"create": {"who": ["*"], "what": {
                         "ai_chat.tools": {"model": "*"},
                         "exec_bridge.tools": {"allowed": "*"},

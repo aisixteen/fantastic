@@ -241,15 +241,19 @@ pub async fn fork(
     };
     // THE PLACE: under the forker itself, as its child — so the asker needs a create
     // line covering the forker's children, and no line on its parent.
-    let create = fantastic_kernel::declared::kernel::CreateAgent {
-        handler_module,
-        parent_id: parent.id.0.clone(),
-        id: want_id,
-        fields: meta,
+    // The record's fields first, then the verb and its arguments: a field can
+    // never change which verb is called or where the fork goes.
+    let mut create = meta;
+    create.insert("type".to_string(), json!("create_agent"));
+    create.insert("handler_module".to_string(), json!(handler_module));
+    create.insert("parent_id".to_string(), json!(parent.id.0));
+    match want_id {
+        Some(id) => create.insert("id".to_string(), json!(id)),
+        None => create.shift_remove("id"),
     };
-    // THE ASKER: the create (and its rollback) is checked as whoever asked for the fork.
-    let asker = fantastic_kernel::current_origin();
-    let made = fantastic_kernel::lifecycle::create_agent(kernel, asker.as_ref(), create).await;
+    // THE ASKER: the create (and its rollback) is sent for whoever asked for the
+    // fork ([`Kernel::send_as_caller`]), and checked as that asker.
+    let made = as_asker(kernel, Value::Object(create)).await;
     if made.get("error").is_some_and(|e| !e.is_null()) {
         let mut m = made;
         m["at"] = Value::from(at);
@@ -270,11 +274,7 @@ pub async fn fork(
     )
     .await;
     if let Err(e) = wrote {
-        let del = fantastic_kernel::declared::kernel::DeleteAgent {
-            id: new_id.0.clone(),
-            keep_memory: None,
-        };
-        let _ = fantastic_kernel::lifecycle::delete_agent(kernel, asker.as_ref(), &del).await;
+        let _ = as_asker(kernel, json!({"type": "delete_agent", "id": new_id.0})).await;
         return Ok(refuse(
             verb,
             "store_refused",
@@ -284,6 +284,17 @@ pub async fn fork(
         ));
     }
     Ok(json!({"id": new_id.0, "copied": n, "at": at}))
+}
+
+/// One kernel tree verb sent to the root for the asker of the running verb
+/// ([`Kernel::send_as_caller`]): checked as that asker, and refused for work that
+/// carries no origin at all.
+async fn as_asker(kernel: &Arc<Kernel>, payload: Value) -> Value {
+    kernel
+        .send_as_caller(vec![Item::new(AgentId::from("kernel"), payload)])
+        .await
+        .remove(0)
+        .result
 }
 
 fn parent_mid_turn(agent_id: &AgentId, at: i64) -> Value {

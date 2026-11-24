@@ -25,9 +25,9 @@ static BOOTS: Mutex<Vec<(String, Option<String>)>> = Mutex::new(Vec::new());
 
 /// Answers `{ok: <id>, verb}` for any of its verbs. A leg's `inbound_call` is sent
 /// onward as the leg. At `boot`, a record carrying `boot_create` sends that
-/// `create_agent` for its asker ([`Kernel::send_as_caller`]); a record carrying
-/// `hydrate` refuses to boot for an agent origin (the static loader's guard) and
-/// otherwise creates `<id>_hydrated` under itself.
+/// `create_agent` for its asker ([`Kernel::send_as_caller`]: at a boot, the agent
+/// itself); a record carrying `hydrate` creates `<id>_hydrated` under itself, as
+/// itself (the static loader's roster pass).
 struct Probe;
 
 fantastic_kernel::stand_in_verbs!(probe_verbs {
@@ -41,6 +41,7 @@ fantastic_kernel::stand_in_verbs!(probe_verbs {
     AppendV "append" {  },
     ShutdownV "shutdown" {  },
     InboundCallV "inbound_call" { item: serde_json::Value, sender: Option<String> },
+    WriteOwnV "write_own" { fields: serde_json::Value },
 });
 #[async_trait]
 impl Handler for Probe {
@@ -80,12 +81,9 @@ impl Handler for Probe {
                     .map(|a| a.record().meta)
                     .unwrap_or_default();
                 if meta.contains_key("hydrate") {
-                    if origin.is_some() {
-                        return Ok(Some(json!({"error": "boot: an agent may not hydrate"})));
-                    }
                     let kid = format!("{}_hydrated", id.0);
                     let _ = kernel
-                        .send_as_caller(vec![Item::new(
+                        .send(vec![Item::new(
                             "kernel",
                             json!({"type": "create_agent", "parent_id": id.0,
                                    "handler_module": MOD, "id": kid}),
@@ -100,6 +98,15 @@ impl Handler for Probe {
                 None
             }
             "shutdown" => None,
+            // the bundle's own code writing its own record: an `update_agent` it
+            // sends as itself, exactly what a model's or a page's call would send
+            "write_own" => {
+                let mut p = json!({"type": "update_agent", "id": id.as_str()});
+                for (k, v) in payload["fields"].as_object().cloned().unwrap_or_default() {
+                    p[k] = v;
+                }
+                Some(kernel.send(vec![Item::new("kernel", p)]).await.remove(0).result)
+            }
             "inbound_call" => {
                 // the frame's `sender` is never an identity: the leg sends as itself
                 let item = &payload["item"];
@@ -742,6 +749,43 @@ async fn the_page_leg_creates_in_the_user_space_under_webs_cap() {
     assert!(!k.exists("cell_4"));
 }
 
+/// Review of #761, H1, in the shipped tree: a page leg (`canvas_ws`, `mcp`) holds
+/// `create *` on `canvas_root`, which writes the `can` of what it creates there.
+/// An `update` line includes calling every verb, so an empty `update` on a system
+/// helper would hand out `credentials.get` or `memory.read` the leg never holds.
+#[tokio::test]
+async fn a_leg_cannot_hand_out_call_all_through_an_empty_update_line() {
+    let k = mk_v9();
+    for leg in ["canvas_ws", "mcp"] {
+        for helper in ["credentials", "memory"] {
+            let line = json!({helper: {"update": []}});
+            // at create
+            let id = format!("x_{leg}_{helper}");
+            let r = as_agent(&k, leg, "kernel", json!({"type": "create_agent",
+                "parent_id": "canvas_root", "handler_module": "chat", "id": id,
+                "can": line.clone()}))
+            .await
+            .result;
+            assert_eq!(r, unknown(helper), "{leg} creates with {line}");
+            assert!(!k.exists(&id), "{id}");
+            // on an agent it may already write the `can` of
+            let cell = format!("cell_{leg}_{helper}");
+            let r = create_as(&k, leg, "canvas_root", &cell, "chat").await;
+            assert_eq!(r["id"], json!(cell), "{r}");
+            let r = as_agent(&k, leg, "kernel",
+                json!({"type": "update_agent", "id": cell, "can": line.clone()}))
+            .await
+            .result;
+            assert_eq!(r, unknown(helper), "{leg} gives {cell} {line}");
+            let rec = k.resolve_target(&cell).unwrap().record().meta;
+            assert!(rec.get("can").is_none(), "{cell}: {rec:?}");
+            for verb in ["get", "read", "append"] {
+                assert!(!k.may_call(&AgentId::from(cell.as_str()), verb, &AgentId::from(helper)));
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_create_line_deletes_only_selected_agents() {
     let k = mk_v9();
@@ -807,8 +851,15 @@ async fn a_bare_agent_is_created_and_deleted_by_the_operator_only() {
     assert_eq!(r["deleted"], true, "{r}");
 }
 
+/// ONCE LOADED, A BUNDLE IS AN AGENT LIKE ANY OTHER (owner, 2026-11-24): every boot
+/// runs with the agent ITSELF as its origin — inside `create_agent`, whoever the
+/// creator, and after a restart ([`Kernel::announce`], as `kernel_start` and the
+/// shell boot) — so a hook has the same authority whenever it runs: the agent's own
+/// lines. A loader with no create line on itself builds nothing, even when the
+/// operator made it; one whose record holds the line builds its roster at create
+/// and again after load.
 #[tokio::test]
-async fn an_agent_created_static_loader_hydrates_nothing() {
+async fn every_boot_runs_as_the_agent_itself() {
     let k = mk_v9();
     grant(
         &k,
@@ -826,13 +877,7 @@ async fn an_agent_created_static_loader_hydrates_nothing() {
     .await
     .result;
     assert_eq!(r["id"], "sl_1", "{r}");
-    // its boot ran with the creator as its origin, and refused
-    assert!(BOOTS
-        .lock()
-        .unwrap()
-        .contains(&("sl_1".to_string(), Some("canvas_root".to_string()))));
-    assert!(!k.exists("sl_1_hydrated"));
-    // the operator's create hydrates
+    // the operator's create: no more power to its boot than its record holds
     let r = op(
         &k,
         "kernel",
@@ -841,22 +886,47 @@ async fn an_agent_created_static_loader_hydrates_nothing() {
     )
     .await;
     assert_eq!(r["id"], "sl_2", "{r}");
-    assert!(k.exists("sl_2_hydrated"));
+    // a record holding a create line on itself
+    let r = op(
+        &k,
+        "kernel",
+        json!({"type": "create_agent", "parent_id": "canvas_root",
+               "handler_module": "static_probe", "id": "sl_3", "hydrate": true,
+               "can": {"sl_3": {"create": {"who": ["*"], "what": "*"}}}}),
+    )
+    .await;
+    assert_eq!(r["id"], "sl_3", "{r}");
+    for id in ["sl_1", "sl_2", "sl_3"] {
+        assert!(BOOTS.lock().unwrap().contains(&(id.to_string(), Some(id.to_string()))), "{id}");
+    }
+    assert!(!k.exists("sl_1_hydrated"));
+    assert!(!k.exists("sl_2_hydrated"));
+    assert!(k.exists("sl_3_hydrated"));
+    // after load: the same pass
+    let r = op(&k, "kernel", json!({"type": "delete_agent", "id": "sl_3_hydrated"})).await;
+    assert_eq!(r["deleted"], true, "{r}");
+    for id in ["sl_1", "sl_2", "sl_3"] {
+        let a = k.resolve_target(id).expect(id);
+        k.announce(&a, json!({"type": "boot"})).await.expect("boot declared");
+    }
+    assert!(!k.exists("sl_1_hydrated"));
+    assert!(!k.exists("sl_2_hydrated"));
+    assert!(k.exists("sl_3_hydrated"));
 }
 
 #[tokio::test]
-async fn a_create_inside_a_boot_hook_is_checked_as_the_outer_creator() {
+async fn a_create_inside_a_boot_hook_is_checked_as_the_agent_itself() {
     let k = mk_v9();
     grant(
         &k,
         "canvas_root",
         "canvas_root",
-        json!({"create": {"who": ["*"], "what": {"boot_maker": {"boot_create": "*"}}}}),
+        json!({"create": {"who": ["*"], "what": {"boot_maker": {"boot_create": "*"}, "worker": {}}}}),
     );
     let inner = |parent: &str, id: &str| {
         json!({"type": "create_agent", "parent_id": parent, "handler_module": "worker", "id": id})
     };
-    // canvas_root may create a boot_maker but no worker: the boot's create is its
+    // canvas_root may create a worker there, yet the boot's create is bm_1's own
     let r = as_agent(
         &k,
         "canvas_root",
@@ -867,8 +937,8 @@ async fn a_create_inside_a_boot_hook_is_checked_as_the_outer_creator() {
     .await
     .result;
     assert_eq!(r["id"], "bm_1", "{r}");
-    assert!(!k.exists("bm_1_kid"), "the boot hook created as the outer creator");
-    // the operator's create: its boot creates as the operator
+    assert!(!k.exists("bm_1_kid"), "the boot hook created with its creator's lines");
+    // the operator's create: the same
     let r = op(
         &k,
         "kernel",
@@ -877,7 +947,18 @@ async fn a_create_inside_a_boot_hook_is_checked_as_the_outer_creator() {
     )
     .await;
     assert_eq!(r["id"], "bm_2", "{r}");
-    assert!(k.exists("bm_2_kid"));
+    assert!(!k.exists("bm_2_kid"), "the boot hook created as the operator");
+    // its own line: created
+    let r = op(
+        &k,
+        "kernel",
+        json!({"type": "create_agent", "parent_id": "canvas_root", "handler_module": "boot_maker",
+               "id": "bm_3", "boot_create": inner("bm_3", "bm_3_kid"),
+               "can": {"bm_3": {"create": {"who": ["*"], "what": {"worker": {}}}}}}),
+    )
+    .await;
+    assert_eq!(r["id"], "bm_3", "{r}");
+    assert!(k.exists("bm_3_kid"));
 }
 
 #[tokio::test]
@@ -936,4 +1017,138 @@ async fn nothing_is_inherited_from_a_parents_can() {
         as_agent(&k, "kid", "memory", json!({"type": "append"})).await.result,
         unknown("memory")
     );
+}
+
+/// SELF-WRITES ARE UNIFORM (owner, 2026-11-24): an agent's own code and an
+/// `update_agent` call it sends meet one rule. Its ordinary fields pass; `can`,
+/// a forced value, `handler_module` and `parent_id` are refused, both ways alike.
+#[tokio::test]
+async fn self_writes_are_one_rule_for_code_and_verb() {
+    let (_t, k) = mk();
+    // a live create line on the root forces `mode` on every agent of MOD below it
+    create(
+        &k,
+        "kernel_state",
+        "forcer",
+        json!({"can": {"kernel_state": {"create": {"who": ["*"], "what": {MOD: {"mode": "fixed", "*": "*"}}}}}}),
+    )
+    .await;
+    create(&k, "kernel_state", "a", json!({"description": "d0"})).await;
+    let cases = [
+        (json!({"description": "d1"}), true),
+        (json!({"note": "n1"}), true),
+        (json!({"can": {"kernel_state": {"call": ["ping"]}}}), false),
+        (json!({"mode": "other"}), false),
+        (json!({"handler_module": "chat"}), false),
+        (json!({"parent_id": "forcer"}), false),
+    ];
+    for (fields, ok) in cases {
+        let before = k.resolve_target("a").unwrap().record();
+        // by verb: the agent sends update_agent on itself
+        let mut p = json!({"type": "update_agent", "id": "a"});
+        for (key, v) in fields.as_object().cloned().unwrap() {
+            p[key] = v;
+        }
+        let by_verb = as_agent(&k, "a", "kernel", p).await.result;
+        // by code: its handler sends the same write as itself
+        let by_code = op(&k, "a", json!({"type": "write_own", "fields": fields.clone()})).await;
+        if ok {
+            assert_eq!(by_verb["updated"], true, "{fields}: {by_verb}");
+            assert_eq!(by_code["updated"], true, "{fields}: {by_code}");
+            let meta = k.resolve_target("a").unwrap().record().meta;
+            for (key, v) in fields.as_object().unwrap() {
+                assert_eq!(&meta[key], v, "{fields}");
+            }
+        } else {
+            assert!(fantastic_kernel::is_refused(&by_verb), "{fields}: {by_verb}");
+            if fields.get("can").is_some() || fields.get("mode").is_some() {
+                assert_eq!(by_verb, unknown("a"), "{fields}");
+            }
+            assert_eq!(by_code, by_verb, "{fields}: one rule both ways");
+            assert_eq!(k.resolve_target("a").unwrap().record(), before, "{fields}: nothing written");
+        }
+    }
+}
+
+/// Review of #761, M4: the `update_agent` reply carries the record cut to what the
+/// caller holds on it (rule 9). A caller holding `update: [description]` reads the
+/// identity and `description`, never the other fields or `can`; the operator and
+/// the agent itself read it whole.
+#[tokio::test]
+async fn an_update_reply_carries_only_what_the_caller_holds() {
+    let (_t, k) = mk();
+    create(
+        &k,
+        "kernel_state",
+        "t",
+        json!({"description": "d", "note": "hidden", "can": {"kernel_state": {"call": ["ping"]}}}),
+    )
+    .await;
+    create(&k, "kernel_state", "w", json!({})).await;
+    grant(&k, "w", "t", json!({"update": ["description"]}));
+    let upd = |d: &str| json!({"type": "update_agent", "id": "t", "description": d});
+    let r = as_agent(&k, "w", "kernel", upd("d2")).await.result;
+    assert_eq!(r["updated"], true, "{r}");
+    let seen = r["agent"].as_object().unwrap();
+    assert_eq!(seen["id"], "t", "{r}");
+    assert_eq!(seen["description"], "d2", "{r}");
+    assert!(seen.get("note").is_none(), "{r}");
+    assert!(seen.get("can").is_none(), "{r}");
+    // the operator reads it whole
+    let r = op(&k, "kernel", upd("d3")).await;
+    assert_eq!(r["agent"]["note"], "hidden", "{r}");
+    assert!(r["agent"].get("can").is_some(), "{r}");
+    // the agent itself reads its own record whole
+    let r = as_agent(&k, "t", "kernel", upd("d4")).await.result;
+    assert_eq!(r["agent"]["note"], "hidden", "{r}");
+    assert!(r["agent"].get("can").is_some(), "{r}");
+}
+
+/// The payload's `agent` of the first `agent_created` in `rx`.
+fn created_record(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Option<Value> {
+    while let Some(item) = rx.try_recv() {
+        if item.payload["type"] == "agent_created" {
+            return Some(item.payload["agent"].clone());
+        }
+    }
+    None
+}
+
+/// Review of #761, M4: `agent_created` reaches each receiver cut to what it holds
+/// on the new agent (the reflect cut). The parent reads it whole; a watcher with
+/// `call: [watch]` on the parent its identity; one with `update: [note]` its
+/// identity and `note`; a watcher that is no agent the identity keys only.
+#[tokio::test]
+async fn agent_created_carries_to_each_receiver_only_what_it_holds() {
+    let (_t, k) = mk();
+    create(&k, "kernel_state", "p", json!({})).await;
+    create(&k, "kernel_state", "w", json!({"can": {"p": {"call": ["watch"]}}})).await;
+    create(&k, "kernel_state", "u", json!({"can": {"p": {"update": ["note"]}}})).await;
+    let id = |s: &str| AgentId::from(s);
+    let mut p_rx = k.ensure_inbox(&id("p"));
+    let mut w_rx = k.ensure_inbox(&id("w"));
+    let mut u_rx = k.ensure_inbox(&id("u"));
+    let mut b_rx = k.ensure_inbox(&id("browser_1"));
+    for who in ["w", "u"] {
+        let kk = Arc::clone(&k);
+        let r = fantastic_kernel::test_support::as_agent(id(who), async move {
+            kk.watch(&AgentId::from("p"), AgentId::from(who)).await
+        })
+        .await;
+        assert!(r.is_none(), "{who}: {r:?}");
+    }
+    let r = fantastic_kernel::send::as_operator(k.watch(&id("p"), id("browser_1"))).await;
+    assert!(r.is_none(), "{r:?}");
+    create(&k, "p", "c", json!({"description": "d", "note": "n", "secret": "s"})).await;
+    let whole = created_record(&mut p_rx).expect("the parent gets it");
+    assert_eq!((whole["note"].clone(), whole["secret"].clone()), (json!("n"), json!("s")), "{whole}");
+    let w = created_record(&mut w_rx).expect("a watcher with a line gets it");
+    assert_eq!((w["id"].clone(), w["description"].clone()), (json!("c"), json!("d")), "{w}");
+    assert!(w.get("note").is_none() && w.get("secret").is_none(), "{w}");
+    let u = created_record(&mut u_rx).expect("an update watcher gets it");
+    assert_eq!(u["note"], "n", "{u}");
+    assert!(u.get("secret").is_none(), "{u}");
+    let b = created_record(&mut b_rx).expect("a watcher that is no agent gets it");
+    assert_eq!(b["description"], "d", "{b}");
+    assert!(b.get("note").is_none() && b.get("secret").is_none(), "{b}");
 }

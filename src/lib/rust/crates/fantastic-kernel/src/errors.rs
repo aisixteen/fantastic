@@ -84,7 +84,7 @@ pub enum KernelError {
     #[error("agent {0:?} carries delete_lock")]
     DeleteLocked(String),
 
-    /// A [`crate::Kernel::load`] or [`crate::Kernel::load_json`] call
+    /// A `Kernel::load` or `Kernel::load_json` call (tests) or a bring-up load
     /// received a snapshot that couldn't be parsed, was missing a
     /// root, or had a duplicate id.
     #[error("invalid kernel snapshot: {0}")]

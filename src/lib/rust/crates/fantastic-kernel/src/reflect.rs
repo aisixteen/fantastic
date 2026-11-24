@@ -67,7 +67,7 @@ const WALK_KEYS: [&str; 2] = ["children", "pruned"];
 /// ([`Kernel::held_from`]), its probe candidates computed once per reflect.
 pub(crate) struct Sight {
     kernel: Arc<Kernel>,
-    viewer: Option<(AgentId, Candidates)>,
+    viewer: Option<(AgentId, Arc<Candidates>)>,
 }
 
 impl Sight {
@@ -108,11 +108,16 @@ impl Sight {
     /// `None` when the viewer holds nothing on it, else its record with only the
     /// keys the viewer may see.
     fn cut_record(&self, a: &Agent) -> Option<crate::agent::AgentRecord> {
+        self.cut(a, a.record())
+    }
+
+    /// Cut `rec`, a record of `a`, to what the viewer holds on `a`: `None` when
+    /// it holds nothing there.
+    fn cut(&self, a: &Agent, mut rec: crate::agent::AgentRecord) -> Option<crate::agent::AgentRecord> {
         let held = self.held(&a.id);
         if held == Held::Nothing {
             return None;
         }
-        let mut rec = a.record();
         rec.meta.retain(|k, _| self.shows_key(a, held, k));
         Some(rec)
     }
@@ -265,6 +270,26 @@ impl Kernel {
             .filter_map(|id| self.agents.get(id).map(|e| Arc::clone(&e)))
             .filter_map(|a| sight.cut_record(&a))
             .collect()
+    }
+
+    /// `rec`, a record of `a`, cut to what `viewer` holds on `a` (rule 9, as
+    /// [`Self::records_for`] cuts): `None` when the viewer holds nothing there.
+    /// The operator (`None`) gets it whole. For a reply or an event that carries
+    /// a record to someone other than the agent itself.
+    pub(crate) fn record_cut_for(
+        self: &Arc<Self>,
+        viewer: Option<&AgentId>,
+        a: &Agent,
+        rec: crate::agent::AgentRecord,
+    ) -> Option<crate::agent::AgentRecord> {
+        Sight::of(self, viewer).cut(a, rec)
+    }
+
+    /// `rec` with its identity keys only: what a receiver the kernel cannot place
+    /// (a watcher that is no agent, the state stream) may see of it.
+    pub(crate) fn identity_record(mut rec: crate::agent::AgentRecord) -> crate::agent::AgentRecord {
+        rec.meta.retain(|k, _| IDENTITY_KEYS.contains(&k.as_str()));
+        rec
     }
 }
 

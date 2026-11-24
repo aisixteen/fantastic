@@ -203,7 +203,8 @@ pub fn spawn(h: Arc<Host>, store_dir: PathBuf) {
         };
         let inbox = fantastic_kernel::AgentId::from(INBOX);
         let mut rx = h.kernel.ensure_inbox(&inbox);
-        if let Some(denial) = h.kernel.watch(&store, inbox.clone()).await {
+        // the shell is the in-process operator
+        if let Some(denial) = fantastic_kernel::send::as_operator(h.kernel.watch(&store, inbox.clone())).await {
             tracing::warn!("bundle watch: {denial}");
             return;
         }

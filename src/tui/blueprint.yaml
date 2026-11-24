@@ -196,7 +196,8 @@ agents:
         can:
           # the main canvas: chats and sub-canvases
           canvas_root: {create: {who: ["*"], what: {ai_chat.tools: {model: "*"}, canvas.tools: {}}}}
-          memory: {call: [append, read]}
+          # a chat's store line: its rows, and `copy` of them to a fork it makes
+          memory: {call: [append, read, copy]}
           prompt_file: {call: [read]}
           # cap chain for the garage's key users
           credentials: {call: [get]}
@@ -212,7 +213,7 @@ agents:
             main: false
             can:
               credentials: {call: [get]}
-              memory: {call: [append, read]}
+              memory: {call: [append, read, copy]}
               canvas_garage:
                 create:
                   who: ["*"]

@@ -180,7 +180,7 @@ async fn a_file_view_relays_its_changes_to_its_watchers() {
         .to_string();
     let w = AgentId::from("_t_view");
     let mut rx = k.ensure_inbox(&w);
-    assert!(k.watch(&AgentId::from(v.as_str()), w).await.is_none());
+    assert!(fantastic_kernel::send::as_operator(k.watch(&AgentId::from(v.as_str()), w)).await.is_none());
     let r = call(&k, &v, json!({"type": "watch"})).await;
     assert_eq!(r["watching"], "live.txt", "{r}");
     assert_eq!(r["relayed"], false);
@@ -241,7 +241,7 @@ async fn a_folder_view_relays_added_changed_removed() {
         .to_string();
     let w = AgentId::from("_t_folder");
     let mut rx = k.ensure_inbox(&w);
-    assert!(k.watch(&AgentId::from(v.as_str()), w).await.is_none());
+    assert!(fantastic_kernel::send::as_operator(k.watch(&AgentId::from(v.as_str()), w)).await.is_none());
     call(&k, &v, json!({"type": "watch"})).await;
     tokio::time::sleep(Duration::from_millis(300)).await; // the disk watcher is up
     std::fs::write(served(&tmp).join("box/n.md"), "n").unwrap();
@@ -287,7 +287,7 @@ async fn two_opens_of_one_file_share_one_relay() {
         .to_string();
     let w = AgentId::from("_t_shared");
     let mut rx = k.ensure_inbox(&w);
-    assert!(k.watch(&AgentId::from(v.as_str()), w).await.is_none());
+    assert!(fantastic_kernel::send::as_operator(k.watch(&AgentId::from(v.as_str()), w)).await.is_none());
     let reflect = call(&k, &v, json!({"type": "reflect"})).await;
     assert_eq!(reflect["watching"], false, "{reflect}");
     let first = call(&k, &v, json!({"type": "watch"})).await;
@@ -325,7 +325,7 @@ async fn deleting_a_view_ends_its_relay() {
     // the bridge's own watcher: it sees a change while a view holds the path
     let w = AgentId::from("_t_bridge_watch");
     let mut rx = k.ensure_inbox(&w);
-    assert!(k.watch(&AgentId::from("fb"), w).await.is_none());
+    assert!(fantastic_kernel::send::as_operator(k.watch(&AgentId::from("fb"), w)).await.is_none());
     call(&k, &v, json!({"type": "watch"})).await;
     tokio::time::sleep(Duration::from_millis(300)).await; // the disk watcher is up
     std::fs::write(served(&tmp).join("gone.txt"), "h\n").unwrap();
@@ -648,7 +648,7 @@ async fn a_view_gets_one_relayed_event_per_edit_with_stamp_kinds() {
         .to_string();
     let w = AgentId::from("_t_stamp");
     let mut rx = k.ensure_inbox(&w);
-    assert!(k.watch(&AgentId::from(v.as_str()), w).await.is_none());
+    assert!(fantastic_kernel::send::as_operator(k.watch(&AgentId::from(v.as_str()), w)).await.is_none());
     call(&k, &v, json!({"type": "watch"})).await;
     tokio::time::sleep(Duration::from_millis(500)).await; // the disk watcher is up
     let live = |kind: &str| vec![("live.txt".to_string(), kind.to_string())];

@@ -144,6 +144,56 @@ async fn copy_moves_rows_between_owners_only_as_the_kernel_allows() {
     assert_eq!(out, json!({"ids": [1], "copied": 1}));
 }
 
+/// M1: a line on `from` is never a read of its rows. Dave holds a call line on
+/// alice (any verb) and copies alice's rows to himself: refused with the unknown
+/// answer for alice, nothing written. `from` must be in the asker's own tree.
+#[tokio::test]
+async fn a_call_line_on_from_is_not_enough_to_copy_its_rows() {
+    let k = store();
+    fantastic_kernel::test_support::register(&k, agent(
+        "dave",
+        None,
+        Some("kernel_state"),
+        json!({"can": {"mem": {"call": ["*"]}, "alice": {"call": ["send"]}}}),
+    ));
+    append(&k, "alice", json!([{"id": 1, "content": "secret"}])).await;
+    let out = call(&k, json!({"type": "copy", "from": "alice", "to": "dave"}), Some("dave")).await;
+    assert_eq!(out, fantastic_kernel::unknown_agent("alice"), "{out}");
+    assert!(ids(&call(&k, json!({"type": "read"}), Some("dave")).await).is_empty());
+    // dave copies his own rows into his own child: from is his own
+    append(&k, "dave", json!([{"id": 7, "content": "mine"}])).await;
+    fantastic_kernel::test_support::register(&k, agent(
+        "dave_kid",
+        None,
+        Some("dave"),
+        json!({"can": {"mem": {"call": ["*"]}}}),
+    ));
+    let out = call(&k, json!({"type": "copy", "from": "dave", "to": "dave_kid"}), Some("dave")).await;
+    assert_eq!(out, json!({"ids": [7], "copied": 1}), "{out}");
+}
+
+/// M2: the copy check run with NO ORIGIN SCOPE (work spawned with a bare
+/// `tokio::spawn`) is nobody, never the operator: the unknown answer for `from`.
+#[tokio::test]
+async fn a_copy_check_with_no_origin_scope_is_refused() {
+    let k = store();
+    let a = verbs::CopyRows {
+        from: "alice".to_string(),
+        to: "carol".to_string(),
+        ids: None,
+    };
+    let kk = Arc::clone(&k);
+    let bare = tokio::spawn(async move { may_copy(&kk, &a) }).await.unwrap();
+    assert_eq!(bare, Err(fantastic_kernel::unknown_agent("alice")));
+    let a = verbs::CopyRows {
+        from: "alice".to_string(),
+        to: "carol".to_string(),
+        ids: None,
+    };
+    let shell = fantastic_kernel::send::as_operator(async { may_copy(&k, &a) }).await;
+    assert_eq!(shell, Ok(()));
+}
+
 #[tokio::test]
 async fn owner_is_never_a_writable_field() {
     let k = store();

@@ -238,8 +238,8 @@ async fn opening_and_closing_an_inquiry_is_published_on_the_holder_and_the_asker
     let k = setup(None).await;
     let (mut on_mcp, mut on_asker) = (k.ensure_inbox(&AgentId::from("w_mcp")), k.ensure_inbox(&AgentId::from("w_asker")));
     // operator watches (outside every dispatch): the watchers stand in for two views
-    assert!(k.watch(&AgentId::from("mcp"), AgentId::from("w_mcp")).await.is_none());
-    assert!(k.watch(&AgentId::from("asker"), AgentId::from("w_asker")).await.is_none());
+    assert!(fantastic_kernel::send::as_operator(k.watch(&AgentId::from("mcp"), AgentId::from("w_mcp"))).await.is_none());
+    assert!(fantastic_kernel::send::as_operator(k.watch(&AgentId::from("asker"), AgentId::from("w_asker"))).await.is_none());
     let re = ask(&k, "ship?").await["re"].as_u64().expect("an inquiry pid");
     let r = op(&k, "mcp", json!({"type": "answer_inquiry", "re": re, "answer": "yes"})).await;
     assert_eq!(r["answered"].as_u64(), Some(re), "{r}");

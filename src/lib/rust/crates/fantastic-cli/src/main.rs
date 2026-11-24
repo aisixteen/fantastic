@@ -505,7 +505,9 @@ async fn dispatch(
         // manifest and hydrates the roster. The kernel never parses YAML;
         // the loader does. No duplicate-init guard: a store-less kernel
         // creates again on every run; only a persisted record makes
-        // `create_agent` refuse (the same id twice).
+        // `create_agent` refuse (the same id twice). Once loaded the loader is
+        // an agent like any other: its roster pass is its own sends, so the
+        // operator gives it a create line on itself.
         let reply = booted
             .kernel
             .operator_send(vec![Item::new(
@@ -518,6 +520,7 @@ async fn dispatch(
                     "handler_module": format!("{loader_name}.tools"),
                     "id": loader_name,
                     "manifest": manifest,
+                    "can": {loader_name.as_str(): {"create": {"who": ["*"], "what": "*"}}},
                 }),
             )])
             .await

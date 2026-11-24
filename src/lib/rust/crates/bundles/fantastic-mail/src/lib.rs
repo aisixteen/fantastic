@@ -217,22 +217,9 @@ async fn drop_open(kernel: &Arc<Kernel>, id: &AgentId, re: i64) {
     open.retain(|q| q["re"] != json!(re));
     let mut patch = Map::new();
     patch.insert(inquiry::OPEN_FIELD.to_string(), Value::Array(open));
-    let _ = write_own(kernel, id, patch).await;
+    let _ = kernel.write_own(id, patch).await;
 }
 
-/// Write the agent's OWN fields `patch` with `update_agent` sent as itself (a
-/// bundle writes its own non-`can` fields); the reply, a refusal included.
-pub(crate) async fn write_own(kernel: &Arc<Kernel>, id: &AgentId, patch: Map<String, Value>) -> Value {
-    let mut payload = Map::new();
-    payload.insert("type".to_string(), json!("update_agent"));
-    payload.insert("id".to_string(), json!(id.as_str()));
-    payload.extend(patch);
-    kernel
-        .send(vec![fantastic_kernel::Item::new(AgentId::from("kernel"), Value::Object(payload))])
-        .await
-        .remove(0)
-        .result
-}
 
 
 impl MailBundle {

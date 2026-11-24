@@ -1470,8 +1470,8 @@ async fn a_denied_watch_reaches_the_program_and_registers_nothing() {
     let proxy = AgentId::from("_xbw_9001_secret");
     assert!(!kernel.inboxes.contains_key(&proxy), "proxy inbox leaked");
     let mut spy = inbox(&kernel, &proxy);
-    kernel
-        .emit(&AgentId::from("secret"), json!({"type": "ping"}))
+    fantastic_kernel::send::as_operator(kernel
+        .emit(&AgentId::from("secret"), json!({"type": "ping"})))
         .await;
     assert!(spy.try_recv().is_none(), "the watcher row leaked");
 
@@ -1522,7 +1522,7 @@ async fn stopping_a_watching_program_leaves_no_proxy_or_watcher() {
     // The WATCHER rows went too: re-register both proxy inboxes and emit on the
     // owner — a leaked watcher would fan the payload straight into them.
     let mut spies: Vec<_> = proxies.iter().map(|p| inbox(&kernel, p)).collect();
-    kernel.emit(&a, json!({"type": "ping"})).await;
+    fantastic_kernel::send::as_operator(kernel.emit(&a, json!({"type": "ping"}))).await;
     for (p, spy) in proxies.iter().zip(spies.iter_mut()) {
         assert!(spy.try_recv().is_none(), "{p} left a watcher row");
     }
@@ -1622,7 +1622,7 @@ async fn a_refused_mail_is_dropped_even_if_the_leg_reopens_before_the_drain_runs
     crate::mail::declare_for_test(&a, &["probe_mail", "after"]);
     let mut rx = manual_owner_inbox(&kernel, &a, 9101);
     let proxy = AgentId::from("_xbself_9101");
-    assert!(kernel.watch(&a, proxy).await.is_none());
+    assert!(fantastic_kernel::send::as_operator(kernel.watch(&a, proxy)).await.is_none());
     set_rule(&kernel, &a, "deny_ingress").await;
     let out = send_to(&kernel, &a, json!({"type": "probe_mail"})).await;
     assert_eq!(out["reason"], "unauthorized", "{out}");
@@ -1649,8 +1649,8 @@ async fn a_refused_mail_entry_is_consumed_once() {
     let (kernel, a) = mk_kernel(&tmp).await;
     crate::mail::declare_for_test(&a, &["probe_mail"]);
     let mut rx = manual_owner_inbox(&kernel, &a, 9102);
-    assert!(kernel
-        .watch(&a, AgentId::from("_xbself_9102"))
+    assert!(fantastic_kernel::send::as_operator(kernel
+        .watch(&a, AgentId::from("_xbself_9102")))
         .await
         .is_none());
     let mail = json!({"type": "probe_mail", "x": 1});
@@ -1695,8 +1695,8 @@ async fn a_builtin_verb_is_never_mail() {
     let (kernel, a) = mk_kernel(&tmp).await;
     crate::mail::declare_for_test(&a, &["probe_mail"]);
     let mut rx = manual_owner_inbox(&kernel, &a, 9104);
-    assert!(kernel
-        .watch(&a, AgentId::from("_xbself_9104"))
+    assert!(fantastic_kernel::send::as_operator(kernel
+        .watch(&a, AgentId::from("_xbself_9104")))
         .await
         .is_none());
     let w = json!({"type": "write", "job_id": 1, "data": "keys\n"});
@@ -2787,7 +2787,7 @@ async fn the_relay_forwards_a_send_untouched_and_a_binary_one_through_the_batch(
     let (kernel, a) = mk_kernel(&tmp).await;
     let tap = AgentId::from("tap_relay");
     let mut tap_rx = kernel.ensure_inbox(&tap);
-    assert!(kernel.watch(&a, tap.clone()).await.is_none());
+    assert!(fantastic_kernel::send::as_operator(kernel.watch(&a, tap.clone())).await.is_none());
     let (mut child, stop, relay) = wire(&kernel, &a, 9006);
 
     // A program calling its OWN runner — a "cycle" by the ai_core guard's

@@ -1551,6 +1551,133 @@ async fn a_handed_out_parent_line_resolves_to_the_recipients_parent() {
     assert!(meta_of(&k, "r2").get("can").is_none());
 }
 
+/// Review of #761, H1: `update` includes calling every verb, so an `update` line
+/// (an empty field list included) is handed out only by a writer holding every
+/// verb on the target in writing.
+#[tokio::test]
+async fn an_update_line_needs_every_verb_held_even_with_no_fields() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    // no line on svc: the unknown answer
+    let k = writer_kernel(&tmp, json!({"can": "*"}), Value::Null).await;
+    for can in [json!({"svc": {"update": []}}), json!({"svc": {"update": ["description"]}})] {
+        let r = send_as(&k, "w", "kernel", give(can.clone())).await;
+        assert_eq!(r, crate::refusal::unknown_agent("svc"), "{can}");
+        assert!(meta_of(&k, "r").get("can").is_none(), "{can}");
+        assert!(!k.may_call(&AgentId::from("r"), "zap", &AgentId::from("svc")));
+    }
+    // some verbs: not every verb (the line also frees the fields `chatlike` sets)
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = writer_kernel(&tmp, json!({"can": "*", "model": "*", "temperature": "*"}),
+        json!({"svc": {"call": ["ping"]}})).await;
+    let r = send_as(&k, "w", "kernel", give(json!({"svc": {"update": []}}))).await;
+    assert_eq!(r["reason"], "not_allowed", "{r}");
+    assert!(meta_of(&k, "r").get("can").is_none());
+    // the same through a create's `can`
+    let r = send_as(&k, "w", "kernel", json!({"type": "create_agent", "parent_id": "hub",
+        "handler_module": "chatlike", "id": "r2", "can": {"svc": {"update": []}}})).await;
+    assert_eq!(r["reason"], "not_allowed", "{r}");
+    assert!(!k.exists("r2"));
+    // every verb held: the empty update goes, a field it does not hold does not
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = writer_kernel(&tmp, json!({"can": "*"}), json!({"svc": {"call": ["*"]}})).await;
+    let r = send_as(&k, "w", "kernel", give(json!({"svc": {"update": []}}))).await;
+    assert_eq!(r["updated"], true, "{r}");
+    let r = send_as(&k, "w", "kernel", give(json!({"svc": {"update": ["description"]}}))).await;
+    assert_eq!(r["reason"], "not_allowed", "{r}");
+    assert_eq!(meta_of(&k, "r")["can"], json!({"svc": {"update": []}}));
+}
+
+/// Review of #761, H2: a `$parent` line holds one node, so it never justifies a
+/// line on that node's id, which reaches its whole tree.
+#[tokio::test]
+async fn a_parent_line_never_justifies_a_line_on_the_parents_id() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk_v9_kernel(&tmp);
+    let chats = create_line(json!(["*"]), json!({"chatlike": {"can": "*"}}));
+    op_create(&k, "kernel", "hub", "counting.tools", Value::Null).await;
+    op_create(&k, "kernel", "p", "counting.tools", json!({"hub": chats.clone()})).await;
+    op_create(&k, "p", "pk", "counting.tools", Value::Null).await;
+    op_create(&k, "p", "w", "counting.tools", json!({
+        "hub": chats,
+        "$parent": {"call": ["send"]},
+    }))
+    .await;
+    op_create(&k, "hub", "r", "chatlike", Value::Null).await;
+    assert!(k.may_call(&AgentId::from("w"), "send", &AgentId::from("p")));
+    assert!(!k.may_call(&AgentId::from("w"), "send", &AgentId::from("pk")));
+    for can in [
+        json!({"p": {"call": ["send"]}}),
+        json!({"p": {"call": ["*"]}}),
+        json!({"p": {"update": []}}),
+    ] {
+        let r = send_as(&k, "w", "kernel", give(can.clone())).await;
+        assert_eq!(r["reason"], "not_allowed", "{can}: {r}");
+        assert!(meta_of(&k, "r").get("can").is_none(), "{can}");
+    }
+    assert!(!k.may_call(&AgentId::from("r"), "send", &AgentId::from("pk")));
+    // a written line on p's tree holds it
+    let w = AgentId::from("w");
+    let added = k.edit_can(&w, None, |c, _| {
+        c.insert("p".to_string(), json!({"call": ["send"]}));
+        Ok(true)
+    });
+    assert_eq!(added, Ok(true));
+    let r = send_as(&k, "w", "kernel", give(json!({"p": {"call": ["send"]}}))).await;
+    assert_eq!(r["updated"], true, "{r}");
+}
+
+/// Review of #761, H2: a create line that selects some ids or some bundles holds
+/// the agents it selects, one by one, so it never justifies a `call`/`update` line
+/// on one of them, which reaches that agent's whole tree. A create line with
+/// `who: *` on every bundle holds the whole tree below its target.
+#[tokio::test]
+async fn a_selecting_create_line_never_justifies_a_line_on_a_selected_agent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk_v9_kernel(&tmp);
+    op_create(&k, "kernel", "hub", "counting.tools", Value::Null).await;
+    op_create(&k, "hub", "c_1", "chatlike", Value::Null).await;
+    // under the selected c_1: an id and a bundle the line does not select
+    op_create(&k, "c_1", "x_9", "counting.tools", Value::Null).await;
+    op_create(&k, "hub", "c_r", "chatlike", Value::Null).await;
+    op_create(&k, "kernel", "w", "counting.tools", json!({
+        "hub": create_line(json!(["c_*"]), json!({"chatlike": {"can": "*", "model": "*"}})),
+    }))
+    .await;
+    let give_cr = |can: Value| json!({"type": "update_agent", "id": "c_r", "can": can});
+    assert!(k.may_call(&AgentId::from("w"), "ping", &AgentId::from("c_1")));
+    assert!(!k.may_call(&AgentId::from("w"), "ping", &AgentId::from("x_9")));
+    for can in [
+        json!({"c_1": {"call": ["ping"]}}),
+        json!({"c_1": {"call": ["*"]}}),
+        json!({"c_1": {"update": ["model"]}}),
+    ] {
+        let r = send_as(&k, "w", "kernel", give_cr(can.clone())).await;
+        assert_eq!(r["reason"], "not_allowed", "{can}: {r}");
+        assert!(meta_of(&k, "c_r").get("can").is_none(), "{can}");
+    }
+    assert!(!k.may_call(&AgentId::from("c_r"), "ping", &AgentId::from("x_9")));
+    // the same with `who: *` on some bundles
+    let w = AgentId::from("w");
+    let set = |line: Value| {
+        k.edit_can(&w, None, move |c, _| {
+            c.insert("hub".to_string(), line);
+            Ok(true)
+        })
+    };
+    assert_eq!(
+        set(create_line(json!(["*"]), json!({"chatlike": {"can": "*", "model": "*"}}))),
+        Ok(true)
+    );
+    let r = send_as(&k, "w", "kernel", give_cr(json!({"c_1": {"call": ["ping"]}}))).await;
+    assert_eq!(r["reason"], "not_allowed", "{r}");
+    // `who: *` on every bundle: the whole tree below hub is held
+    assert_eq!(set(create_line(json!(["*"]), json!({"*": {"can": "*", "model": "*"}}))), Ok(true));
+    let r = send_as(&k, "w", "kernel", give_cr(json!({"c_1": {"call": ["ping"]}}))).await;
+    assert_eq!(r["updated"], true, "{r}");
+    let r = send_as(&k, "w", "kernel", give_cr(json!({"c_1": {"update": ["model"]}}))).await;
+    assert_eq!(r["updated"], true, "{r}");
+}
+
 #[tokio::test]
 async fn a_handed_out_create_line_keeps_every_forced_value() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1664,6 +1791,45 @@ async fn a_forced_can_in_what_is_checked_as_grant_lines_once_when_written() {
         "handler_module": "chatlike", "id": "c1"})).await;
     assert_eq!(r["id"], "c1", "{r}");
     assert_eq!(meta_of(&k, "c1")["can"], json!({"svc": {"call": ["get"]}}));
+}
+
+/// H2 (review of #761): a `$parent` line inside a forced `can` resolves to whichever
+/// node of the create target's tree the child is made under, so the writer must hold
+/// it tree-wide on that target; its own `$parent` line names one node only.
+#[tokio::test]
+async fn a_forced_parent_line_is_held_tree_wide_on_the_create_target() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk_v9_kernel(&tmp);
+    let free = || create_line(json!(["*"]), json!({"chatlike": {"can": "*", "model": "*", "temperature": "*"}}));
+    op_create(&k, "kernel", "pp", "counting.tools", Value::Null).await;
+    op_create(&k, "pp", "q", "counting.tools", Value::Null).await;
+    op_create(&k, "q", "deep", "counting.tools", Value::Null).await;
+    // w: `$parent` (pp, one node) and a create line on pp
+    op_create(&k, "pp", "w", "counting.tools", json!({
+        "$parent": {"call": ["send"]}, "pp": free(),
+    }))
+    .await;
+    // w2: a literal call line on pp (its whole tree) and a create line on q
+    op_create(&k, "pp", "w2", "counting.tools", json!({
+        "pp": {"call": ["send"]}, "q": free(),
+    }))
+    .await;
+    // r: selected by both create lines, so both hold `update can` on it
+    op_create(&k, "q", "r", "chatlike", Value::Null).await;
+    let forcing = |target: &str| json!({target: create_line(json!(["*"]),
+        json!({"chatlike": {"can": {"$parent": {"call": ["send"]}}, "model": "*", "temperature": "*"}}))});
+    // a child made under any node of pp's tree would get `send` there: w holds it on pp alone
+    let r = send_as(&k, "w", "kernel", give(forcing("pp"))).await;
+    assert!(r.get("error").is_some(), "{r}");
+    assert!(meta_of(&k, "r").get("can").is_none());
+    // w2 holds `send` on pp's whole tree, so on q's
+    let r = send_as(&k, "w2", "kernel", give(forcing("q"))).await;
+    assert_eq!(r["updated"], true, "{r}");
+    // and the child r makes under a deeper node gets `send` on that node, which w2 holds
+    let r2 = send_as(&k, "r", "kernel", json!({"type": "create_agent", "parent_id": "deep",
+        "handler_module": "chatlike", "id": "c_deep"})).await;
+    assert_eq!(r2["id"], "c_deep", "{r2}");
+    assert_eq!(meta_of(&k, "c_deep")["can"], json!({"$parent": {"call": ["send"]}}));
 }
 
 #[tokio::test]
@@ -1795,4 +1961,130 @@ async fn bundle_defaults_can_lines_are_checked_as_the_creators_write() {
     let r = send_as(&k, "keeper", "kernel", mk("keeper", "k2")).await;
     assert_eq!(r["id"], "k2", "{r}");
     assert_eq!(meta_of(&k, "k2")["can"], json!({"svc": {"call": ["get"]}}));
+}
+
+/// M2/M3: a create sent for "whoever asked" ([`Kernel::send_as_caller`], the one
+/// entry a bundle has) from work with NO ORIGIN SCOPE (a bare `tokio::spawn`) is
+/// nobody's: the unknown answer, and nothing is created. In the in-process
+/// shell's scope it is the operator's.
+#[tokio::test]
+async fn an_asker_create_with_no_origin_scope_creates_nothing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk_v9_kernel(&tmp);
+    let create = || {
+        Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "create_agent", "parent_id": "kernel_state",
+                   "handler_module": "counting.tools", "id": "orphan"}),
+        )
+    };
+    let kk = Arc::clone(&k);
+    let item = create();
+    let r = tokio::spawn(async move { kk.send_as_caller(vec![item]).await.remove(0).result })
+        .await
+        .unwrap();
+    assert_eq!(r, crate::refusal::unknown_agent("kernel"));
+    assert!(!k.exists("orphan"));
+    let r = crate::send::as_operator(k.send_as_caller(vec![create()]))
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["id"], "orphan", "{r}");
+}
+
+// ─── rule 7 / Q39: a verb that creates for its asker is ALSO checked as the asker ───
+
+/// `kernel.check_asker_create(parent, record)` inside a dispatch of `me` asked for by
+/// `asker` (`None`: the operator).
+async fn asker_check(
+    kernel: &Arc<Kernel>,
+    asker: Option<&str>,
+    me: &str,
+    parent: &str,
+    record: Value,
+) -> Result<AskerCreate, Value> {
+    let rec = record.as_object().cloned().unwrap_or_default();
+    let k = Arc::clone(kernel);
+    let p = AgentId::from(parent);
+    crate::send::CURRENT_ORIGIN
+        .scope(
+            asker.map(AgentId::from),
+            crate::send::as_agent(&AgentId::from(me), async move { k.check_asker_create(&p, &rec) }),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn the_asker_check_holds_the_asker_to_its_own_lines_beside_the_creators() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let kernel = mk_rooted(&tmp);
+    for id in ["canvas", "open", "forcing", "asker", "narrow", "insists", "keys"] {
+        let r = kernel
+            .operator_send(vec![Item::new(
+                AgentId::from("kernel"),
+                json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "counting.tools", "id": id}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert!(r.get("error").is_none(), "{r}");
+    }
+    let g = |holder: &str, target: &str, level: Value| crate::test_support::grant(&kernel, holder, target, level);
+    // the creators: `canvas` forces a `can`, `open` frees `can`, `forcing` forces `note`
+    g("canvas", "canvas", json!({"create": {"who": ["*"], "what": {"counting.tools": {"note": "*", "can": {"keys": {"call": ["get"]}}}}}}));
+    g("canvas", "keys", json!({"call": ["get"]}));
+    g("open", "open", json!({"create": {"who": ["*"], "what": {"counting.tools": {"note": "*", "can": "*"}}}}));
+    g("open", "keys", json!({"call": ["get"]}));
+    g("forcing", "forcing", json!({"create": {"who": ["*"], "what": {"counting.tools": {"note": "fixed"}}}}));
+    // the askers: `asker` may create anything there; `narrow` only `n_*` with no field;
+    // `insists` forces another `note`
+    for t in ["canvas", "open", "forcing"] {
+        g("asker", t, json!({"create": {"who": ["*"], "what": "*"}}));
+        g("narrow", t, json!({"create": {"who": ["n_*"], "what": {"counting.tools": {}}}}));
+        g("insists", t, json!({"create": {"who": ["*"], "what": {"counting.tools": {"note": "mine"}}}}));
+    }
+    let rec = |v: Value| {
+        let mut m = json!({"handler_module": "counting.tools"});
+        m.as_object_mut().unwrap().extend(v.as_object().cloned().unwrap_or_default());
+        m
+    };
+
+    // both allow it: the id as asked, nothing forced by the asker
+    let ok = asker_check(&kernel, Some("asker"), "canvas", "canvas", rec(json!({"id": "x1", "note": "hi"}))).await.expect("allowed");
+    assert_eq!(ok, AskerCreate { id: "x1".into(), forced: Map::new() });
+
+    // a `can` line the asker supplies must be held by the asker, though the creator holds it
+    let r = asker_check(&kernel, Some("asker"), "open", "open", rec(json!({"id": "x2", "can": {"keys": {"call": ["get"]}}}))).await;
+    assert!(r.is_err(), "the asker holds nothing on keys: {r:?}");
+    // a `can` the creator's line forces is the line's: the asker's is not checked
+    let r = asker_check(&kernel, Some("asker"), "canvas", "canvas", rec(json!({"id": "x3", "can": {"keys": {"call": ["get"]}}}))).await;
+    assert!(r.is_ok(), "{r:?}");
+
+    // the asker's `who`: an id outside it is the unknown answer; no id mints from it
+    let r = asker_check(&kernel, Some("narrow"), "canvas", "canvas", rec(json!({"id": "x4"}))).await.expect_err("outside who");
+    assert_eq!(r, crate::refusal::unknown_agent("canvas"));
+    let minted = asker_check(&kernel, Some("narrow"), "canvas", "canvas", rec(json!({}))).await.expect("minted");
+    assert!(minted.id.starts_with("n_"), "{minted:?}");
+    // a field the asker's line does not name is refused, though the creator frees it
+    let r = asker_check(&kernel, Some("narrow"), "canvas", "canvas", rec(json!({"id": "n_1", "note": "x"}))).await;
+    assert!(r.is_err(), "{r:?}");
+    // ...unless the creator's line forces it: the line's value, handed out by its writer
+    let r = asker_check(&kernel, Some("narrow"), "forcing", "forcing", rec(json!({"id": "n_2", "note": "x"}))).await;
+    assert!(r.is_ok(), "{r:?}");
+    // the asker's forced values come back, for the create to carry
+    let forced = asker_check(&kernel, Some("insists"), "open", "open", rec(json!({"id": "x5"}))).await.expect("forced");
+    assert_eq!(forced.forced.get("note"), Some(&json!("mine")));
+    // two lines that force different values: no child satisfies both
+    let r = asker_check(&kernel, Some("insists"), "forcing", "forcing", rec(json!({"id": "x6"}))).await;
+    assert!(r.is_err(), "{r:?}");
+
+    // the operator asking passes; no origin scope at all is refused
+    let op = asker_check(&kernel, None, "canvas", "canvas", rec(json!({"id": "x7", "can": {"keys": {"call": ["get"]}}}))).await;
+    assert!(op.is_ok(), "{op:?}");
+    let bare = kernel.check_asker_create(&AgentId::from("canvas"), rec(json!({"id": "x8"})).as_object().unwrap());
+    assert_eq!(bare.expect_err("no scope"), crate::refusal::unknown_agent("canvas"));
+    // nothing was created by a check
+    for id in ["x1", "x2", "x3", "n_1", "n_2", "x5", "x7"] {
+        assert!(!kernel.exists(id), "{id}");
+    }
 }

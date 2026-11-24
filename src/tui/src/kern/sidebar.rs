@@ -244,7 +244,7 @@ mod tests {
         let emit = |at: &str, p: Value| {
             let kernel = Arc::clone(&kernel);
             let at = AgentId::from(at);
-            async move { kernel.emit(&at, p).await }
+            async move { fantastic_kernel::send::as_operator(kernel.emit(&at, p)).await }
         };
 
         // a chat's call moved: its phase, kept for the view's first read
