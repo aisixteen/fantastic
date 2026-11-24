@@ -217,7 +217,8 @@ impl Kernel {
     ///    in flight (a `call` row with no `settle`) settles as a dead letter now
     ///    (`settle_cut`).
     /// 5. `boot_all`: boot every other agent in registration order (AI agents
-    ///    boot lazily — they read their own store on their first turn).
+    ///    boot lazily — they read their own store on their first turn), each
+    ///    as ITSELF ([`Kernel::announce`]): a loaded agent is never the operator.
     ///
     /// Idempotent: a second call reports the store it is already writing to.
     pub async fn start(self: &Arc<Self>, boot_all: bool) -> Value {
@@ -273,6 +274,10 @@ impl Kernel {
             return r;
         };
         let mut booted: Vec<String> = Vec::new();
+        // Once loaded, a bundle is an agent like any other: the root and its store
+        // boot as THEMSELVES, as every other agent does (step 5). The kernel's own
+        // rows go through kernel bookkeeping (the probe below, the flusher), never
+        // through a boot origin.
         for a in [&root, &store] {
             let Some(out) = self.announce(a, json!({"type": "boot"})).await else {
                 continue;

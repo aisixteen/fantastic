@@ -14,15 +14,6 @@ loaders:
         - id: slowbot
           handler_module: lifecycle_probe.tools
 
-        - id: warden
-          handler_module: file_bridge.tools
-          allow: ['.']
-          can:
-            $root: {call: [ps, cancel]}
-            slowbot: {call: [slow]}
-            open_fs: {call: ["*"]}
-            doomed: {call: [list]}
-
         - id: open_fs
           handler_module: file_bridge.tools
           allow: ['.']
@@ -32,6 +23,15 @@ loaders:
           handler_module: file_bridge.tools
           allow: ['.']
           ingress_rule: allow_all_ingress
+
+        - id: warden
+          handler_module: file_bridge.tools
+          allow: ['.']
+          can:
+            $root: {call: [ps, cancel]}
+            slowbot: {call: [slow]}
+            open_fs: {call: ["*"]}
+            doomed: {call: [list]}
 
         - id: stranger
           handler_module: file_bridge.tools

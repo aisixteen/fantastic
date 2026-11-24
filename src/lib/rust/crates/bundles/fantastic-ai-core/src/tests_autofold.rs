@@ -202,7 +202,6 @@ async fn a_recall_reply_refolds_after_the_next_answer() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reflect_reply_never_folds() {
-    use crate::constants::REFERENCE_FOLD_AT;
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "af_reflect").await;
     widen(&kernel, &agent).await;
@@ -213,7 +212,7 @@ async fn a_reflect_reply_never_folds() {
     );
     let text = format!(
         "[reply to 9 · notes reflect]\nhead line\n{}",
-        "x".repeat(REFERENCE_FOLD_AT * 4 + 4)
+        "x".repeat(crate::constants::AUTOFOLD_AT * 4 + 4)
     );
     say(&kernel, &agent, &text).await;
     assert!(until_passes(&s, 1).await);

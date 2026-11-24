@@ -250,6 +250,27 @@ impl Agent {
         self.record()
     }
 
+    /// [`Self::update_meta`] as a compare-and-set on `can`: under ONE write lock,
+    /// merge `patch` only when the stored `can` (`Null` when absent) is still
+    /// `expected`. `None` when another write changed it in between, and nothing
+    /// is written.
+    pub(crate) fn update_meta_if_can(
+        &self,
+        patch: Map<String, Value>,
+        expected: &Value,
+    ) -> Option<AgentRecord> {
+        {
+            let mut m = self.meta.write().expect("meta lock poisoned");
+            if m.get("can").unwrap_or(&Value::Null) != expected {
+                return None;
+            }
+            for (k, v) in patch {
+                m.insert(k, v);
+            }
+        }
+        Some(self.record())
+    }
+
     /// The `can` field under ONE write lock: `edit` gets `can` (empty when
     /// absent) and the record, and says whether it changed it (or refuses).
     /// Nothing is written unless `edit` returns `Ok(true)`; an emptied `can` is

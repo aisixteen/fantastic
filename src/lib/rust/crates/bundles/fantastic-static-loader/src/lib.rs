@@ -2,16 +2,15 @@
 //!
 //! Mirror of the python canonical `static_loader.tools`. A `fantastic.yaml`
 //! manifest declares the agents; on `boot` this loader reads it and hydrates
-//! them — the root's `create_agent` / `update_agent` sent for its asker
-//! ([`Kernel::send_as_caller`]), the operator — as its own children, each carrying
-//! the `can` the manifest names (nothing is stamped). The kernel knows nothing
-//! about YAML; this bundle owns the format.
+//! them — the root's `create_agent` / `update_agent`, sent AS THE LOADER — as its
+//! own children, each carrying the `can` the manifest names (nothing is stamped).
+//! The kernel knows nothing about YAML; this bundle owns the format.
 //!
-//! The pass runs ONLY on the kernel's own boot — origin none: the cold boot, or
-//! `create_agent` booting the loader it just made. An agent-sent `boot` is
-//! refused: any agent granted `boot` on the loader could
-//! otherwise re-run the manifest ungated — restore a revoked grant, re-create a
-//! deleted agent.
+//! ONCE LOADED, A BUNDLE IS AN AGENT LIKE ANY OTHER: the pass is the loader's own
+//! sends, checked against its own lines, whoever booted it (its create, a restart,
+//! a `boot` verb). So a loader builds only what its record's `can` allows — a
+//! create line on itself for its roster, and in writing every line the manifest
+//! hands out — and an agent-created loader holds only what its creator could give.
 //!
 //! After boot the roster is CLOSED: deny-all means a roster agent cannot
 //! `create_agent`, so the manifest IS the roster. Idempotent by id (a reboot
@@ -26,7 +25,6 @@ use fantastic_file::fs;
 use fantastic_kernel::bundle::{BundleError, Handler, Reply};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use fantastic_kernel::refusal::{refusal_hint, UNAUTHORIZED};
 use fantastic_kernel::{yaml_io, Agent, AgentId, Kernel};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -59,16 +57,6 @@ const MAN: &str = "A declarative roster loader: at boot it reads the YAML manife
 
 /// Record field naming the manifest path.
 const MANIFEST_FIELD: &str = "manifest";
-
-/// The one text an agent-sent `boot` is refused with — python `BOOT_REFUSED`,
-/// byte for byte.
-pub const BOOT_REFUSED: &str = "static_loader: an agent-sent boot is refused — hydrating \
-                                the roster is the kernel's own bookkeeping, so only the \
-                                kernel's own boot (cold boot, create_agent) runs it";
-
-/// Its hint — python `BOOT_REFUSED_HINT`.
-pub const BOOT_REFUSED_HINT: &str = "change an agent's record with update_agent (its \
-                                     parent writes it); the operator re-boots the loader";
 
 /// The declarative roster loader bundle.
 pub struct StaticLoaderBundle;
@@ -129,11 +117,10 @@ fn load_manifest(agent: &Agent, base: &std::path::Path) -> Result<Vec<Value>, St
 }
 
 /// One tree verb of the hydration (`create_agent`/`update_agent`), sent to the ROOT
-/// for the loader's asker ([`Kernel::send_as_caller`]): the boot below runs only
-/// for the operator (origin `None`), so the verb is the operator's.
+/// as the loader itself: checked against its own lines.
 async fn tree_verb(kernel: &Arc<Kernel>, payload: Value) -> Value {
     kernel
-        .send_as_caller(vec![fantastic_kernel::Item::new(
+        .send(vec![fantastic_kernel::Item::new(
             fantastic_kernel::AgentId::from("kernel"),
             payload,
         )])
@@ -143,14 +130,6 @@ async fn tree_verb(kernel: &Arc<Kernel>, payload: Value) -> Value {
 }
 
 async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
-    // The pass below creates and updates as the asker, so the one who asks for it
-    // must be the kernel or the operator: the cold boot, an operator's
-    // `create_agent` booting this loader, the CLI. An agent's boot (an
-    // agent-created loader boots with its creator as its origin) is not that —
-    // refused before the manifest is read.
-    if fantastic_kernel::current_origin().is_some() {
-        return refusal_hint(UNAUTHORIZED, BOOT_REFUSED, BOOT_REFUSED_HINT);
-    }
     let agents = match kernel
         .state_dir()
         .and_then(|base| load_manifest(agent, &base))
@@ -260,9 +239,8 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
         // The declared agent becomes THIS loader's child ($parent = the loader),
         // but placement is stated by `parent_id`, not by who is addressed:
         // `create_agent` is kernel-owned and answered by the ROOT alone. The
-        // manifest's `can` rides as written; the child boots inside create_agent.
-        // Sent for the loader's asker, the operator: the loader hydrating the
-        // roster it was told to build.
+        // manifest's `can` rides as written (checked as lines the loader hands
+        // out); the child boots inside create_agent.
         // The verb and `parent_id` land AFTER the spread: an entry cannot change the
         // verb, and one naming its own parent cannot place the agent outside the
         // loader's subtree.

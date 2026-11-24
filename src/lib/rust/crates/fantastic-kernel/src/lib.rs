@@ -65,6 +65,7 @@ pub mod test_support;
 pub use agent::{Agent, AgentId, AgentRecord, RESERVED_RECORD_KEYS};
 pub use bundle::{Bundle, BundleError, BundleRegistry, Handler, Reply};
 pub use errors::{KernelError, KernelResult};
+pub use lifecycle::AskerCreate;
 pub use kernel::{
     Kernel, StateSubscriber, SubscriberToken, DEFAULT_INBOX_BOUND, SELF_PLACEHOLDER,
     STATE_PLACEHOLDER,

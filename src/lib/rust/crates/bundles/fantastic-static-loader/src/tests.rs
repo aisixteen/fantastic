@@ -131,6 +131,12 @@ fn write_manifest(text: &str) -> (tempfile::TempDir, String) {
     (dir, rel)
 }
 
+/// The `can` the operator gives a loader: a create line on itself, so its roster pass
+/// (its own sends) may build the manifest's agents under it.
+fn roster_line(id: &str) -> Value {
+    json!({id: {"create": {"who": ["*"], "what": "*"}}})
+}
+
 /// Returns the TempDir guard alongside the kernel: the fixture is deleted when
 /// the caller drops it, so a test run leaves the tree exactly as it found it.
 async fn boot_with_manifest(text: &str) -> (Arc<Kernel>, tempfile::TempDir) {
@@ -145,6 +151,7 @@ async fn boot_with_manifest(text: &str) -> (Arc<Kernel>, tempfile::TempDir) {
                 "handler_module": HANDLER_MODULE,
                 "id": "static_loader",
                 "manifest": path,
+                "can": roster_line("static_loader"),
             }),
         )])
         .await
@@ -228,7 +235,7 @@ async fn create_loader(kernel: &Arc<Kernel>, id: &str, manifest: Value) -> Value
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
-                "id": id, "manifest": manifest,
+                "id": id, "manifest": manifest, "can": roster_line(id),
             }),
         )])
         .await
@@ -765,33 +772,18 @@ async fn unknown_type_wire_shape_is_byte_exact() {
     assert_eq!(r["reason"], json!("missing_arg"), "{r}");
 }
 
-/// The roster pass is kernel bookkeeping (ungated), so only the kernel's own
-/// boot (origin none) may start it. A roster agent whose grant the operator
-/// revoked sent `boot` to its loader and got the grant back; a deleted roster
-/// agent came back. The edge is NAMED on both ends, so the refusal is the
-/// loader's own, whatever the gate makes of `boot`. Python
-/// `test_an_agent_sent_boot_is_refused_and_re_runs_nothing`.
+/// ONCE LOADED, THE LOADER IS AN AGENT LIKE ANY OTHER: its roster pass is its own
+/// sends, checked against its own lines, whoever sends `boot` (an agent holding a
+/// `boot` line on it, the operator) — the same pass either way. A deleted roster
+/// agent comes back and a changed line is re-applied: the manifest is truth, within
+/// what the loader holds.
 #[tokio::test]
-async fn an_agent_sent_boot_is_refused_and_re_runs_nothing() {
-    let kernel = mk_kernel();
-    let (_fixture, path) = write_manifest(
+async fn a_boot_is_the_loaders_own_whoever_sends_it() {
+    let (kernel, _fixture) = boot_with_manifest(
         "agents:\n  - id: memory\n    handler_module: mock.tools\n  - id: worker\n    \
-         handler_module: mock.tools\n    can:\n      memory: {call: [set, read]}\n      \
-         static_loader: {call: [boot]}\n",
-    );
-    let rec = kernel.operator_send(vec![Item::new(
-            AgentId::from("kernel"),
-            json!({
-                "type": "create_agent", "parent_id": "kernel",
-                "handler_module": HANDLER_MODULE, "id": "static_loader",
-                "manifest": path,
-            }),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(rec["id"], json!("static_loader"), "{rec}");
-    // The operator revokes worker's lateral edge and deletes `memory`.
+         handler_module: mock.tools\n    can:\n      memory: {call: [set, read]}\n",
+    )
+    .await;
     for p in [
         json!({"type": "update_agent", "id": "worker", "can": {"static_loader": {"call": ["boot"]}}}),
         json!({"type": "delete_agent", "id": "memory"}),
@@ -812,24 +804,58 @@ async fn an_agent_sent_boot_is_refused_and_re_runs_nothing() {
     .await
     .remove(0)
     .result;
-    assert_eq!(
-        r,
-        json!({
-            "error": "static_loader: an agent-sent boot is refused — hydrating the \
-                      roster is the kernel's own bookkeeping, so only the kernel's own \
-                      boot (cold boot, create_agent) runs it",
-            "reason": "unauthorized",
-            "hint": "change an agent's record with update_agent (its parent writes \
-                     it); the operator re-boots the loader",
-        })
-    );
+    assert_eq!(r, json!({"booted": true, "created": ["memory"], "reapplied": ["worker"]}), "{r}");
+    assert_eq!(record(&kernel, "worker").meta["can"], json!({"memory": {"call": ["set", "read"]}}));
+}
+
+/// The boot the kernel gives a loader after a restart ([`Kernel::announce`], as
+/// `kernel_start`'s `boot_all` and the shell do) is the same pass as at its create:
+/// the loader's own, so the manifest is re-applied.
+#[tokio::test]
+async fn the_boot_after_load_is_the_same_pass_as_at_create() {
+    let (kernel, _fixture) = boot_with_manifest(
+        "agents:\n  - id: memory\n    handler_module: mock.tools\n",
+    )
+    .await;
+    assert!(kernel.exists("memory"));
+    let r = kernel
+        .operator_send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "delete_agent", "id": "memory"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["deleted"], json!(true), "{r}");
+    let loader = kernel.resolve_target("static_loader").expect("loader");
+    let out = kernel
+        .announce(&loader, json!({"type": "boot"}))
+        .await
+        .expect("the loader declares boot");
+    assert_eq!(out.result, json!({"booted": true, "created": ["memory"], "reapplied": []}), "{}", out.result);
+    assert!(kernel.exists("memory"));
+}
+
+/// A loader whose record holds no create line on itself builds nothing, whoever made
+/// it: its sends are checked as its own lines.
+#[tokio::test]
+async fn a_loader_without_a_create_line_builds_nothing() {
+    let kernel = mk_kernel();
+    let (_fixture, path) = write_manifest("agents:\n  - id: memory\n    handler_module: mock.tools\n");
+    let rec = kernel.operator_send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({
+                "type": "create_agent", "parent_id": "kernel",
+                "handler_module": HANDLER_MODULE, "id": "static_loader",
+                "manifest": path,
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(rec["id"], json!("static_loader"), "{rec}");
     assert!(!kernel.exists("memory"));
-    assert!(record(&kernel, "worker").meta["can"]
-        .get("memory")
-        .is_none());
-    // The operator's boot is the kernel's own: it re-runs the manifest.
-    assert_eq!(
-        boot_loader(&kernel, "static_loader").await,
-        json!({"booted": true, "created": ["memory"], "reapplied": ["worker"]})
-    );
+    let r = boot_loader(&kernel, "static_loader").await;
+    assert_eq!(r["booted"], json!(false), "{r}");
+    assert!(!kernel.exists("memory"));
 }

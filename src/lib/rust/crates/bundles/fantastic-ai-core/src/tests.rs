@@ -4486,12 +4486,13 @@ async fn per_client_events_are_emitted_on_the_agent_not_a_client_named_inbox() {
     let client_id = AgentId::from(client);
     let mut client_rx = kernel.ensure_inbox(&client_id);
 
-    crate::events::to_caller(
+    // the operator's emit: a bare test task has no origin scope, and its emit drops
+    fantastic_kernel::send::as_operator(crate::events::to_caller(
         &kernel,
         &backend,
         client,
         json!({"type": "token", "delta": "x"}),
-    )
+    ))
     .await;
 
     let mut seen = Vec::new();

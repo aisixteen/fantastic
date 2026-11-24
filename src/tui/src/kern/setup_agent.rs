@@ -107,7 +107,8 @@ impl SetupBundle {
                 upd.insert("type".into(), json!("update_agent"));
                 upd.insert("id".into(), json!(id));
                 let payload = Value::Object(upd);
-                let r = host.operator("kernel", payload).await.result;
+                // the update is the ASKER's (gm rule 7): this handler acts for whoever asked
+                let r = host.asker_send("kernel", payload).await.result;
                 match r.get("error").and_then(Value::as_str) {
                     Some(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, format!("configure_ai: {e}")),
                     None => json!({"configured": id, "note": "live on its next turn"}),

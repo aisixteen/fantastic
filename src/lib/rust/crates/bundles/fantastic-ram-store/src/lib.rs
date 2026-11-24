@@ -432,14 +432,22 @@ fn caller(kernel: &Arc<Kernel>) -> Result<(String, String), Value> {
             "boot the kernel root first (it mints the guid)",
         ));
     };
-    match fantastic_kernel::current_origin() {
-        None => Ok((format!("{g}|{OPERATOR}"), OPERATOR.to_string())),
-        Some(origin) => Ok((format!("{g}|{}", origin.0), origin.0)),
+    // NO ORIGIN SCOPE (work spawned with a bare `tokio::spawn`) is nobody, never
+    // the operator: refused before any row is keyed.
+    match fantastic_kernel::send::origin_scope() {
+        None => Err(refusal_hint(
+            NOT_FOUND,
+            "ram_store: a call with no origin is refused — work that lost its identity is never the operator",
+            "spawn work with spawn_inherit or spawn_task so it keeps its identity",
+        )),
+        Some(None) => Ok((format!("{g}|{OPERATOR}"), OPERATOR.to_string())),
+        Some(Some(origin)) => Ok((format!("{g}|{}", origin.0), origin.0)),
     }
 }
 
-/// The kernel's word on a `copy`, asked as the caller: it may read `from` (it
-/// holds anything there) and holds create or update over `to`. The kernel knows
+/// The kernel's word on a `copy`, asked as the caller: `from` is in its own tree
+/// (a line on `from`, any verb, is never a read of its rows) and it holds create
+/// or update over `to`. The kernel knows
 /// agents and levels only; the rows are this store's. Each refusal is the unknown
 /// answer for the id it is about, byte-identical to a missing id. Shared with
 /// every store that answers `copy`.
@@ -448,9 +456,12 @@ fn caller(kernel: &Arc<Kernel>) -> Result<(String, String), Value> {
 /// The unknown answer for `from` or `to`.
 pub fn may_copy(kernel: &Kernel, a: &verbs::CopyRows) -> Result<(), Value> {
     use fantastic_kernel::Held;
-    let asker = fantastic_kernel::current_origin();
     let (from, to) = (AgentId::from(a.from.as_str()), AgentId::from(a.to.as_str()));
-    if !kernel.holds(asker.as_ref(), Held::Call, &from) {
+    // no origin scope is nobody, never the operator
+    let Some(asker) = fantastic_kernel::send::origin_scope() else {
+        return Err(fantastic_kernel::unknown_agent(from.as_str()));
+    };
+    if !kernel.holds(asker.as_ref(), Held::Own, &from) {
         return Err(fantastic_kernel::unknown_agent(from.as_str()));
     }
     if !kernel.holds(asker.as_ref(), Held::Update, &to) {

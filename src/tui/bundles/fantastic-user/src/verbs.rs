@@ -14,7 +14,7 @@ pub use fantastic_core::verbs::ExportSubtree;
 #[serde(deny_unknown_fields)]
 pub struct Boot {}
 
-/// The cells of a page view within `radius` of a point, nearest first, from the page records. Judged by the caller's own page lines: the shell sees everything; any other caller by its own `can` (`<tree guid>|<id>`, parked with the peers). Returns {view, members:[{id, kind, title, rect:{x,y,w,h}, distance, backend_id?}]}.
+/// The cells of a page view within `radius` of a point, nearest first, from the page records. Only the shell sees them: page lines are parked with the peers, so an agent caller gets no members. Returns {view, members:[{id, kind, title, rect:{x,y,w,h}, distance, backend_id?}]}.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Around {

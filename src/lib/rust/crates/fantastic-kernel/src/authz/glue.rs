@@ -6,8 +6,15 @@
 //!   agent being created needs nothing more: the create line writes its first `can`.
 //! - **Held = written lines only.** Position never counts when handing out lines:
 //!   every probe goes through [`Kernel::allowed_written`].
-//! - **`$parent`** resolves to the recipient's parent.
-//! - **`call` / `update`**: each verb or field must be held, a `*` as `*`.
+//! - **`$parent`** resolves to the recipient's parent. It names one node, so
+//!   the writer's written lines on that node hold it.
+//! - **`call` / `update` on a literal id** reach the target's whole tree, so
+//!   only a TREE-WIDE hold counts ([`Basis::Wide`]): not the writer's
+//!   `$parent` line, and a `create` line only with `who: *` and every bundle;
+//!   each capping ancestor's hold likewise. Each verb or field must be held, a
+//!   `*` as `*`.
+//! - **`update`** includes calling every verb, so an `update` line (an empty
+//!   field list included) also needs every verb held.
 //! - **`create`**: each bundle × `who` must be creatable; the fields and forced
 //!   values are compared with the CAPPED HOLD on the same target (the writer's
 //!   create lines whose target's tree holds it, and those of every capping
@@ -21,7 +28,7 @@
 //! The operator (origin `None`) is never checked: callers skip this module for it.
 
 use super::line::{parse_can, Level, Line, Target, What};
-use super::solver::{lines_of, Act, Slot};
+use super::solver::{lines_of, Act, Basis, Slot};
 use crate::agent::{Agent, AgentId};
 use crate::kernel::Kernel;
 use crate::lifecycle::{field_rule, matching_create_lines, what_selects, FieldRule};
@@ -144,13 +151,20 @@ fn hands_out(
             )
         })
     };
+    // a `$parent` line reaches one node; a line on a literal id its whole tree
+    let basis = match line.target {
+        Target::Parent => Basis::Written,
+        Target::Id(_) => Basis::Wide,
+    };
+    let holds = |act: Act| kernel.capped_on(writer, &act, &ta, basis);
+    let holds_all = |slot: Slot| kernel.allowed_all(writer, slot, &ta, basis);
     match &line.level {
         Level::Call(verbs) => {
             for v in verbs {
                 let held = if v == "*" {
-                    kernel.allowed_all(writer, Slot::Verb, &ta, true)
+                    holds_all(Slot::Verb)
                 } else {
-                    kernel.allowed_written(writer, &Act::Call(v.clone()), &ta)
+                    holds(Act::Call(v.clone()))
                 };
                 if !held {
                     return Err(lacks(format!("call {}", repr(v))));
@@ -158,11 +172,17 @@ fn hands_out(
             }
         }
         Level::Update(fields) => {
+            // `update` includes `call` on every verb: held in writing too
+            if !holds_all(Slot::Verb) {
+                return Err(lacks(
+                    "call '*' (an update line calls every verb)".to_string(),
+                ));
+            }
             for f in fields {
                 let held = if f == "*" {
-                    kernel.allowed_all(writer, Slot::Field, &ta, true)
+                    holds_all(Slot::Field)
                 } else {
-                    kernel.allowed_written(writer, &Act::Update(f.clone()), &ta)
+                    holds(Act::Update(f.clone()))
                 };
                 if !held {
                     return Err(lacks(format!("update {}", repr(f))));
@@ -208,8 +228,18 @@ fn hands_out(
                         crate::refusal::with(&mut r, "arg", json!("can"));
                         r
                     })?;
+                    // A forced `$parent` resolves to whichever node of ta's tree the
+                    // child is made under (the create line reaches that whole tree),
+                    // so it is checked as a line on ta: held tree-wide there.
                     for l in &lines {
-                        hands_out(kernel, writer, Recipient::Pending { parent: &ta.id }, l)?;
+                        let l = match l.target {
+                            Target::Parent => Line {
+                                target: Target::Id(ta.id.0.clone()),
+                                level: l.level.clone(),
+                            },
+                            Target::Id(_) => l.clone(),
+                        };
+                        hands_out(kernel, writer, Recipient::Pending { parent: &ta.id }, &l)?;
                     }
                 }
             }

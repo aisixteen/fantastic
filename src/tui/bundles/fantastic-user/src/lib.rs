@@ -5,14 +5,13 @@
 //!
 //! Its verbs are declared in [`verbs`] (`reflect` renders them), its record in
 //! [`record`]: `around` (the cells of a page view near a point, from the page records,
-//! judged by the CALLER's own page lines), `path` (the human's programs, scanned at
+//! shown to the shell only while page lines are parked), `path` (the human's programs, scanned at
 //! boot), `export_subtree` / `import_subtree` (a subtree as a blueprint folder and back,
 //! `export.rs` / `import.rs`), and the person's inquiries (the kernel's `inquiry` module). A
 //! page loader serves record verbs inside its caller's subtree; the canvas's loader sits
 //! under `user`.
 
 pub mod export;
-pub mod grants;
 pub mod import;
 pub mod path;
 pub mod record;
@@ -114,40 +113,17 @@ impl UserBundle {
         (result, o.body)
     }
 
-    /// The page tree as the loader holds it, and its guid.
-    async fn tree(kernel: &Arc<Kernel>, loader: &str) -> (Vec<Value>, String) {
+    /// The page tree as the loader holds it.
+    async fn tree(kernel: &Arc<Kernel>, loader: &str) -> Vec<Value> {
         let (r, _) = Self::send_as(
             kernel,
             Item::new(AgentId::from(loader), json!({"type": "load_tree"})),
         )
         .await;
-        let recs = r
-            .get("records")
+        r.get("records")
             .and_then(Value::as_array)
             .cloned()
-            .unwrap_or_default();
-        let guid = recs
-            .iter()
-            .find(|x| x.get("parent_id").and_then(Value::as_str) == Some(loader))
-            .and_then(|x| x.get("guid").and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string();
-        (recs, guid)
-    }
-
-    /// The ancestors of a record (nearest first), from its `parent`.
-    fn ancestors(recs: &[Value], loader: &str, parent: Option<&str>) -> Vec<String> {
-        let mut up = Vec::new();
-        let mut cur = parent.map(str::to_string);
-        while let Some(p) = cur.filter(|p| p != loader && !up.contains(p)) {
-            cur = recs
-                .iter()
-                .find(|r| r.get("id").and_then(Value::as_str) == Some(p.as_str()))
-                .and_then(|r| r.get("parent_id").and_then(Value::as_str))
-                .map(str::to_string);
-            up.push(p);
-        }
-        up
+            .unwrap_or_default()
     }
 
     /// `around {view?, x, y, radius}` from the page records.
@@ -170,10 +146,10 @@ impl UserBundle {
             },
         };
         let (x, y, radius) = (a.x, a.y, a.radius);
-        // whose page lines judge it: `None` = the shell, sees everything; any
-        // other caller by its own page lines
-        let judge = fantastic_kernel::current_origin();
-        let (recs, guid) = Self::tree(kernel, &loader).await;
+        // page lines are parked with the peers (grant model v9, Q5): only the
+        // shell (no agent origin) sees page agents; any agent caller sees none
+        let shell = fantastic_kernel::current_origin().is_none();
+        let recs = Self::tree(kernel, &loader).await;
         let view = a.view;
         if !recs
             .iter()
@@ -181,7 +157,6 @@ impl UserBundle {
         {
             return refuse("not_found", format!("user.around: no view {view:?} here"));
         }
-        let up = Self::ancestors(&recs, &loader, Some(&view));
         // a cell's rect is not on its record but in the view's layout
         // (`layout_canvas`, `rects: {<cell id>: {x, y, width, height}}`)
         let rects = recs
@@ -192,15 +167,6 @@ impl UserBundle {
             })
             .and_then(|r| r.get("rects").and_then(Value::as_object).cloned())
             .unwrap_or_default();
-        let sees = |id: &str| match &judge {
-            None => true,
-            Some(u) => grants::sees(&grants::page_verbs(
-                &grants::lines(kernel, u),
-                &guid,
-                id,
-                &up,
-            )),
-        };
         let mut members: Vec<(f64, Value)> = recs
             .iter()
             .filter(|r| r.get("parent_id").and_then(Value::as_str) == Some(view.as_str()))
@@ -210,7 +176,7 @@ impl UserBundle {
                 let rect = rects.get(id)?;
                 let n = |k: &str| rect.get(k).and_then(Value::as_f64);
                 let (rx, ry, w, h) = (n("x")?, n("y")?, n("width")?, n("height")?);
-                if !sees(id) {
+                if !shell {
                     return None;
                 }
                 // to the rect's nearest edge; 0 inside

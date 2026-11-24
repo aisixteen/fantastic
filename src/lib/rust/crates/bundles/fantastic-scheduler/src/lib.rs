@@ -292,18 +292,14 @@ fn meta_truthy(agent_id: &AgentId, kernel: &Kernel, key: &str) -> bool {
     meta_value(agent_id, kernel, key).and_then(|v| v.as_bool()) == Some(true)
 }
 
-/// The scheduler's own field, written with `update_agent` sent as itself (a
-/// bundle writes its own non-`can` fields): the `updated` state event names the
+/// The scheduler's own field, written with [`Kernel::write_own`], the one path for
+/// any own write (self-writes are uniform: its ordinary fields only): the `updated` state event names the
 /// changed key — which is what the root loader's writer turns into the persist,
 /// as for every other update.
 async fn update_meta(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str, value: Value) {
-    let mut payload = json!({"type": "update_agent", "id": agent_id.as_str()});
-    payload[key] = value;
-    let r = kernel
-        .send(vec![Item::new(AgentId::from("kernel"), payload)])
-        .await
-        .remove(0)
-        .result;
+    let mut patch = serde_json::Map::new();
+    patch.insert(key.to_string(), value);
+    let r = kernel.write_own(agent_id, patch).await;
     if fantastic_kernel::is_refused(&r) {
         eprintln!("  [scheduler] {agent_id}: {key} not written: {r}");
     }

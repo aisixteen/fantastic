@@ -562,15 +562,22 @@ fn read_folder(dir: &Path) -> Result<BTreeMap<String, String>, String> {
     Ok(out)
 }
 
+/// One kernel tree verb sent to the root for the asker of the running verb
+/// ([`Kernel::send_as_caller`]): checked as that asker, and refused for work that
+/// carries no origin at all.
+async fn as_asker(kernel: &Arc<Kernel>, payload: Value) -> Value {
+    kernel
+        .send_as_caller(vec![fantastic_kernel::Item::new(AgentId::from("kernel"), payload)])
+        .await
+        .remove(0)
+        .result
+}
+
 /// Delete what an import made (the top agent, cascading), as the asker: the
 /// asker's create line that made it covers its delete.
-async fn roll_back(kernel: &Arc<Kernel>, asker: Option<&AgentId>, top: Option<&str>) {
+async fn roll_back(kernel: &Arc<Kernel>, top: Option<&str>) {
     if let Some(top) = top {
-        let del = fantastic_kernel::declared::kernel::DeleteAgent {
-            id: top.to_string(),
-            keep_memory: None,
-        };
-        let _ = fantastic_kernel::lifecycle::delete_agent(kernel, asker, &del).await;
+        let _ = as_asker(kernel, json!({"type": "delete_agent", "id": top})).await;
     }
 }
 
@@ -647,25 +654,19 @@ pub async fn import_subtree(kernel: &Arc<Kernel>, args: crate::verbs::ImportSubt
     // APPROVED: depth first, AS THE ASKER — each create is checked as whoever asked
     // for the import. Only the new agents' own `can` is written (it rides in their
     // records); no line is written on any other agent.
-    let asker = fantastic_kernel::current_origin();
     let top = plan.agents.first().map(|a| a.new_id.clone());
     for a in &plan.agents {
-        // the declared arguments of `create_agent`; the rest of the record rides as its fields
-        let fields = a.meta.clone();
-        let r = fantastic_kernel::lifecycle::create_agent(
-            kernel,
-            asker.as_ref(),
-            fantastic_kernel::declared::kernel::CreateAgent {
-                handler_module: a.handler_module.clone(),
-                parent_id: a.parent.clone(),
-                id: Some(a.new_id.clone()),
-                fields,
-            },
-        )
-        .await;
+        // the record's fields first, then the declared arguments of `create_agent`:
+        // a field can never change the verb, the bundle, the parent or the id
+        let mut payload = a.meta.clone();
+        payload.insert("type".to_string(), json!("create_agent"));
+        payload.insert("handler_module".to_string(), json!(a.handler_module));
+        payload.insert("parent_id".to_string(), json!(a.parent));
+        payload.insert("id".to_string(), json!(a.new_id));
+        let r = as_asker(kernel, Value::Object(payload)).await;
         if let Some(e) = r.get("error") {
             let made = kernel.exists(top.as_deref().unwrap_or(""));
-            roll_back(kernel, asker.as_ref(), made.then_some(top.as_deref()).flatten()).await;
+            roll_back(kernel, made.then_some(top.as_deref()).flatten()).await;
             return refuse(
                 "failed",
                 format!(

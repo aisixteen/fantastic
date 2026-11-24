@@ -201,7 +201,7 @@ async fn a_store_view_s_reflect_does_not_come_back_as_appended() {
     k.flush_executions().await;
     let view = AgentId::from("_ws_store_view");
     let mut rx = k.ensure_inbox(&view);
-    assert!(k.watch(&AgentId::from("memory"), view.clone()).await.is_none());
+    assert!(fantastic_kernel::send::as_operator(k.watch(&AgentId::from("memory"), view.clone())).await.is_none());
     call(&k, "memory", json!({"type": "reflect"})).await;
     let out = k.flush_executions().await;
     assert!(out["flushed"].as_u64().unwrap() > 0, "{out}");

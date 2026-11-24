@@ -405,7 +405,7 @@ async fn tls_false_is_for_a_loopback_host_only() {
 async fn a_mark_and_a_sent_mail_are_published_on_the_agents_inbox() {
     let r = rig().await;
     let mut rx = r.kernel.ensure_inbox(&AgentId::from("mail_view"));
-    assert!(r.kernel.watch(&AgentId::from("mail"), AgentId::from("mail_view")).await.is_none());
+    assert!(fantastic_kernel::send::as_operator(r.kernel.watch(&AgentId::from("mail"), AgentId::from("mail_view"))).await.is_none());
     send(&r.kernel, json!({"type": "mark", "mailbox": "INBOX", "uid": 2, "seen": true})).await;
     send(&r.kernel, json!({"type": "mark", "mailbox": "INBOX", "uid": 2})).await;
     let no = json!({"type": "send", "to": ["friend@example.org"], "subject": "No", "text": "x"});

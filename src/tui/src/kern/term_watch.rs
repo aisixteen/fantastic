@@ -86,7 +86,8 @@ pub fn spawn(h: Arc<Host>) {
                     tracing::warn!("last_cmd on {agent}: {e}");
                     continue;
                 }
-                h.kernel.emit(&agent, json!({"type": "last_cmd", "cmd": cmd})).await;
+                // the shell is the in-process operator
+                fantastic_kernel::send::as_operator(h.kernel.emit(&agent, json!({"type": "last_cmd", "cmd": cmd}))).await;
             }
         }
     });

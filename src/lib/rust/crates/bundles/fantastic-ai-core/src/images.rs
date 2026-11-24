@@ -181,14 +181,10 @@ pub(crate) async fn refresh(agent_id: &AgentId, kernel: &Arc<Kernel>, state: &Ba
     };
     let new = json!({"provider": provider, "model": model, "capabilities": capabilities});
     if held != Some(&new) {
-        let mut payload = Map::new();
-        payload.insert("type".to_string(), json!("update_agent"));
-        payload.insert("id".to_string(), json!(agent_id.as_str()));
-        payload.insert(FIELD.to_string(), new);
+        let mut patch = Map::new();
+        patch.insert(FIELD.to_string(), new);
         // the chat's own field, written as itself
-        let _ = kernel
-            .send(vec![Item::new(AgentId::from("kernel"), Value::Object(payload))])
-            .await;
+        let _ = kernel.write_own(agent_id, patch).await;
     }
 }
 

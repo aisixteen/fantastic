@@ -113,11 +113,11 @@ async fn watch_then_emit_fans_payload_to_watcher() {
     let watcher = make_agent("watcher");
     kernel.register(Arc::clone(&watcher));
     let mut rx_watcher = kernel.ensure_inbox(&watcher.id);
-    kernel
-        .watch(&AgentId::from("src"), AgentId::from("watcher"))
+    crate::send::as_operator(kernel
+        .watch(&AgentId::from("src"), AgentId::from("watcher")))
         .await;
-    kernel
-        .emit(&AgentId::from("src"), json!({"type": "hello", "k": 1}))
+    crate::send::as_operator(kernel
+        .emit(&AgentId::from("src"), json!({"type": "hello", "k": 1})))
         .await;
     // Watcher receives the RAW emit payload (python parity — see
     // `Kernel::fanout`). A state subscriber gets the `kind:"emit"` event;
@@ -138,14 +138,14 @@ async fn unwatch_stops_fanout() {
     let watcher = make_agent("watcher");
     kernel.register(Arc::clone(&watcher));
     let mut rx_w = kernel.ensure_inbox(&watcher.id);
-    kernel
-        .watch(&AgentId::from("src"), AgentId::from("watcher"))
+    crate::send::as_operator(kernel
+        .watch(&AgentId::from("src"), AgentId::from("watcher")))
         .await;
     kernel
         .unwatch(&AgentId::from("src"), &AgentId::from("watcher"))
         .await;
-    kernel
-        .emit(&AgentId::from("src"), json!({"type": "after_unwatch"}))
+    crate::send::as_operator(kernel
+        .emit(&AgentId::from("src"), json!({"type": "after_unwatch"})))
         .await;
     // Nothing queued.
     assert!(
@@ -633,8 +633,8 @@ async fn an_operator_watch_stays_ungated() {
     // being a registered READER.
     kernel.register(make_agent("cli"));
     let _rx = kernel.ensure_inbox(&AgentId::from("cli"));
-    assert!(kernel
-        .watch(&AgentId::from("src"), AgentId::from("cli"))
+    assert!(crate::send::as_operator(kernel
+        .watch(&AgentId::from("src"), AgentId::from("cli")))
         .await
         .is_none());
     assert!(src.watcher_ids.read().await.contains(&AgentId::from("cli")));
@@ -680,10 +680,49 @@ async fn watch_on_a_node_needs_a_watch_line() {
     .await;
     assert_eq!(gone, Some(crate::refusal::unknown_agent("nowhere")));
 
-    // An OPERATOR tap is ungated.
-    assert!(kernel
-        .authorize_state_watch(&AgentId::from("cli"), &node)
-        .is_none());
+    // An OPERATOR tap (the in-process shell's scope) is ungated.
+    let operator_tap = crate::send::as_operator(async {
+        kernel.authorize_state_watch(&AgentId::from("cli"), &node)
+    })
+    .await;
+    assert!(operator_tap.is_none(), "{operator_tap:?}");
+    // NO ORIGIN SCOPE (a bare `tokio::spawn`) is never the operator.
+    assert_eq!(
+        kernel.authorize_state_watch(&AgentId::from("cli"), &node),
+        Some(crate::refusal::unknown_agent("canvas_root"))
+    );
+}
+
+/// M2: work with NO ORIGIN SCOPE (a bare `tokio::spawn`) is never the operator:
+/// its `watch` gets the unknown answer and registers nothing, and its `emit` is
+/// dropped. The same calls inside the shell's scope are the operator's.
+#[tokio::test]
+async fn no_origin_scope_neither_watches_nor_emits() {
+    let kernel = Arc::new(Kernel::new());
+    let src = make_agent("src");
+    kernel.register(Arc::clone(&src));
+    kernel.register(make_agent("cli"));
+    let mut rx = kernel.ensure_inbox(&AgentId::from("cli"));
+    let k = Arc::clone(&kernel);
+    let (watched, _) = tokio::spawn(async move {
+        let w = k.watch(&AgentId::from("src"), AgentId::from("cli")).await;
+        k.emit(&AgentId::from("cli"), json!({"type": "bare"})).await;
+        (w, ())
+    })
+    .await
+    .unwrap();
+    assert_eq!(watched, Some(crate::refusal::unknown_agent("src")));
+    assert!(!src.watcher_ids.read().await.contains(&AgentId::from("cli")));
+    assert!(rx.try_recv().is_none(), "an emit with no origin scope landed");
+    let k = Arc::clone(&kernel);
+    tokio::spawn(crate::send::as_operator(async move {
+        assert!(k.watch(&AgentId::from("src"), AgentId::from("cli")).await.is_none());
+        k.emit(&AgentId::from("cli"), json!({"type": "shell"})).await;
+    }))
+    .await
+    .unwrap();
+    assert!(src.watcher_ids.read().await.contains(&AgentId::from("cli")));
+    assert_eq!(rx.try_recv().expect("the shell's emit").payload["type"], "shell");
 }
 
 #[test]
@@ -1152,8 +1191,8 @@ async fn a_registered_agent_without_a_reader_cannot_be_a_watcher() {
     let kernel = Arc::new(Kernel::new());
     kernel.register(make_agent("src"));
     kernel.register(make_agent("ghost"));
-    let denial = kernel
-        .watch(&AgentId::from("src"), AgentId::from("ghost"))
+    let denial = crate::send::as_operator(kernel
+        .watch(&AgentId::from("src"), AgentId::from("ghost")))
         .await
         .expect("a bare registered agent is not a reader");
     assert_eq!(
@@ -1298,8 +1337,8 @@ async fn emit_to_a_non_agent_id_is_a_noop() {
     // A REGISTERED READER that is not an agent — the exact shape the WS proxy
     // holds for a browser tab.
     let mut rx = kernel.ensure_inbox(&AgentId::from("_ws_deadbeef"));
-    kernel
-        .emit(&AgentId::from("_ws_deadbeef"), json!({"type": "hi"}))
+    crate::send::as_operator(kernel
+        .emit(&AgentId::from("_ws_deadbeef"), json!({"type": "hi"})))
         .await;
     assert!(rx.try_recv().is_none(), "an emit to a non-agent id landed");
     assert!(
@@ -1484,8 +1523,8 @@ async fn a_watched_write_stream_reaches_the_watcher_with_its_body() {
     kernel.register(Arc::clone(&store));
     kernel.register(make_agent("tap"));
     let mut rx = kernel.ensure_inbox(&AgentId::from("tap"));
-    assert!(kernel
-        .watch(&store.id, AgentId::from("tap"))
+    assert!(crate::send::as_operator(kernel
+        .watch(&store.id, AgentId::from("tap")))
         .await
         .is_none());
 
@@ -1576,7 +1615,7 @@ async fn a_binary_body_rides_at_its_payload_path() {
     kernel.register(Arc::clone(&echo));
     kernel.register(make_agent("tap"));
     let mut rx = kernel.ensure_inbox(&AgentId::from("tap"));
-    assert!(kernel.watch(&echo.id, AgentId::from("tap")).await.is_none());
+    assert!(crate::send::as_operator(kernel.watch(&echo.id, AgentId::from("tap"))).await.is_none());
 
     // the caller names the slot (`data: null`) to keep python's key order
     let out = kernel
@@ -1715,7 +1754,7 @@ async fn a_literal_key_body_is_one_top_level_key() {
     kernel.register(Arc::clone(&echo));
     kernel.register(make_agent("tap"));
     let mut rx = kernel.ensure_inbox(&AgentId::from("tap"));
-    assert!(kernel.watch(&echo.id, AgentId::from("tap")).await.is_none());
+    assert!(crate::send::as_operator(kernel.watch(&echo.id, AgentId::from("tap"))).await.is_none());
 
     let out = kernel
         .operator_send(vec![Item::new(
@@ -1838,11 +1877,11 @@ async fn state_summary_is_python_json_dumps() {
     let _t = kernel.add_state_subscriber(Arc::new(move |ev: &Value, _b| {
         sink.lock().expect("sink poisoned").push(ev.clone());
     }));
-    kernel
+    crate::send::as_operator(kernel
         .emit(
             &AgentId::from("tgt"),
             json!({"type": "say", "text": "héllo"}),
-        )
+        ))
         .await;
     let events = seen.lock().expect("sink poisoned").clone();
     let emit = events

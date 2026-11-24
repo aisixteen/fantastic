@@ -256,11 +256,16 @@ async fn boot_the_rest(kernel: &Arc<Kernel>, done: &[String], web_port: Option<u
         if !declares_boot {
             continue;
         }
-        let reply = kernel
-            .operator_send(vec![Item::new(id.clone(), json!({"type": "boot"}))])
-            .await
-            .remove(0)
-            .result;
+        // A LOADED AGENT BOOTS AS ITSELF ([`Kernel::announce`]), never as the
+        // operator: its record names no creator, so what its boot does for its asker
+        // is checked as its own lines.
+        let Some(agent) = kernel.resolve_target(id.as_str()) else {
+            continue;
+        };
+        let Some(out) = kernel.announce(&agent, json!({"type": "boot"})).await else {
+            continue;
+        };
+        let reply = out.result;
         if let Some(err) = reply.get("error").and_then(Value::as_str) {
             notes.push(format!("{id}: boot failed: {err}"));
         }
@@ -425,11 +430,36 @@ impl Host {
     // ── acting ───────────────────────────────────────────────────────────
 
     /// THE OPERATOR'S SEND (the shell is the operator): ungated, through
-    /// `Kernel::operator_send`. Inside a bundle's handler the sender stays that agent.
+    /// `Kernel::operator_send`. For the shell's own code only: inside a bundle's handler
+    /// the sender stays that agent, so code there says whose send it makes with
+    /// [`Host::agent_send`] (the agent's own) or [`Host::asker_send`] (its asker's).
     pub async fn operator(&self, target: &str, payload: Value) -> Outcome {
         let k = Arc::clone(&self.kernel);
         let item = Item::new(AgentId::from(target), payload);
         k.operator_send(vec![item]).await.remove(0)
+    }
+
+    /// THE SEND OF THE AGENT WHOSE CODE RUNS HERE: inside a bundle's handler (or a task it
+    /// spawned with its identity) that agent's own send, checked against its own lines like
+    /// every send made there; in the shell's operator scope (origin none set explicitly, no
+    /// dispatch running) the operator's. With no origin scope at all (a bare spawn) it is
+    /// nobody's, and refused as [`Kernel::send`] refuses it: lost identity is never the operator.
+    pub async fn agent_send(&self, target: &str, payload: Value) -> Outcome {
+        let item = Item::new(AgentId::from(target), payload);
+        let operator = matches!(fantastic_kernel::send::origin_scope(), Some(None)) && fantastic_kernel::current_sender().is_none();
+        if operator {
+            self.kernel.operator_send(vec![item]).await.remove(0)
+        } else {
+            self.kernel.send(vec![item]).await.remove(0)
+        }
+    }
+
+    /// THE ASKER'S SEND, for a handler acting for whoever asked for the running verb
+    /// (`Kernel::send_as_caller`): checked as that asker (the operator when the asker is the
+    /// operator); refused with no origin at all.
+    pub async fn asker_send(&self, target: &str, payload: Value) -> Outcome {
+        let item = Item::new(AgentId::from(target), payload);
+        self.kernel.send_as_caller(vec![item]).await.remove(0)
     }
 
     /// [`Host::operator`] with SECRET MARKS (`secret`, paths into `payload`): the

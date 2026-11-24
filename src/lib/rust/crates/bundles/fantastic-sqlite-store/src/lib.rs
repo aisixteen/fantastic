@@ -413,9 +413,16 @@ fn caller(kernel: &Arc<Kernel>) -> Result<(String, String), Value> {
             "boot the kernel root first (it mints the guid)",
         ));
     };
-    match fantastic_kernel::current_origin() {
-        None => Ok((format!("{g}|{OPERATOR}"), OPERATOR.to_string())),
-        Some(origin) => Ok((format!("{g}|{}", origin.0), origin.0)),
+    // NO ORIGIN SCOPE (work spawned with a bare `tokio::spawn`) is nobody, never
+    // the operator: refused before any row is keyed.
+    match fantastic_kernel::send::origin_scope() {
+        None => Err(refusal_hint(
+            NOT_FOUND,
+            "sqlite_store: a call with no origin is refused — work that lost its identity is never the operator",
+            "spawn work with spawn_inherit or spawn_task so it keeps its identity",
+        )),
+        Some(None) => Ok((format!("{g}|{OPERATOR}"), OPERATOR.to_string())),
+        Some(Some(origin)) => Ok((format!("{g}|{}", origin.0), origin.0)),
     }
 }
 

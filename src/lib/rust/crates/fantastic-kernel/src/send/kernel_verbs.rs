@@ -231,15 +231,23 @@ fn forced_field(kernel: &Arc<Kernel>, target: &Agent, key: &str) -> bool {
     })
 }
 
+/// What an agent never writes on its OWN record. SELF-WRITES ARE UNIFORM (owner,
+/// 2026-11-24): once loaded a bundle is an agent like any other, so its code and
+/// an `update_agent` call it sends (a model's, a page's) meet this one rule. Its
+/// lines (never upward), its identity and its place; forced values are refused
+/// as well ([`forced_field`]). Every other own field is ordinary.
+const NEVER_OWN: [&str; 5] = ["can", "id", "parent", "parent_id", "handler_module"];
+
 /// `update_agent`, answered by the ROOT (`root`): the agent named by `id` is the
 /// operand. The CALLER is `current_origin()`: the operator (`None`) changes any
 /// field; an agent changes field K of agent X only when its lines (capped) allow
-/// `update K` on X, except that it writes every non-`can` field of its OWN record
-/// (a bundle's own fields). `can` on its own record stays refused (never upward),
-/// and a field a create line forces is the operator's alone. Any refused key
+/// `update K` on X. On its OWN record it changes its ordinary fields, every key
+/// but [`NEVER_OWN`], with no line (one rule for its code and its verb calls).
+/// A field a create line forces is the operator's alone. Any refused key
 /// answers the unknown answer for the target, as a missing id does. A `can` an
 /// agent writes holds only lines its own written lines hold (rule 7,
-/// [`crate::authz::glue::check_can_edit`]).
+/// [`crate::authz::glue::check_can_edit`]). The reply carries the record cut to
+/// what the caller holds on it (rule 9, the reflect cut).
 async fn update_agent(
     kernel: &Arc<Kernel>,
     root: &Arc<Agent>,
@@ -259,7 +267,7 @@ async fn update_agent(
         let own = *caller == target.id;
         let refused = patch.keys().any(|k| {
             let by_line = if own {
-                k != "can"
+                !NEVER_OWN.contains(&k.as_str())
             } else {
                 kernel.allowed(
                     caller,
@@ -298,18 +306,40 @@ async fn update_agent(
     // RULE 7: an agent hands out only what its own written lines hold, cap
     // included; only the lines added or widened against the stored `can` are
     // checked, so narrowing is always allowed.
-    if let (Some(caller), Some(new)) = (&origin, patch.get("can")) {
-        let old = current.get("can").cloned().unwrap_or(Value::Null);
-        if let Err(refused) =
-            crate::authz::glue::check_can_edit(kernel, caller, &target.id, &old, new)
-        {
-            return refused;
+    // The check reads other records with no lock held, so the write that follows
+    // is a compare-and-set on `can` (as `Kernel::edit_can`): it lands only when the
+    // stored `can` is still the one checked.
+    let checked_can = match (&origin, patch.get("can")) {
+        (Some(caller), Some(new)) => {
+            let old = current.get("can").cloned().unwrap_or(Value::Null);
+            if let Err(refused) =
+                crate::authz::glue::check_can_edit(kernel, caller, &target.id, &old, new)
+            {
+                return refused;
+            }
+            Some(old)
         }
-    }
-    let rec = target.update_meta(patch);
+        _ => None,
+    };
+    let rec = match checked_can {
+        Some(old) => match target.update_meta_if_can(patch, &old) {
+            Some(rec) => rec,
+            None => {
+                let mut r = crate::refusal::refusal(
+                    crate::refusal::INVALID_META,
+                    format!(
+                        "update_agent: the can of {} changed during the edit — edit it again",
+                        fantastic_bundle::py_repr(id.as_str())
+                    ),
+                );
+                crate::refusal::with(&mut r, "id", json!(id));
+                return r;
+            }
+        },
+        None => target.update_meta(patch),
+    };
     // NO INLINE PERSIST: the `updated` event published below is what the root
     // loader's `persist_writer` turns into the merge-write.
-    let rec_value = crate::jsonsafe::record_value(&rec);
     // Telemetry state event, python's shape: `{agent_id, kind:"updated",
     // changed}` — the CHANGED KEYS, nothing more. The full record rode along as
     // `agent` in the port; a state event is a notification that something moved,
@@ -320,28 +350,46 @@ async fn update_agent(
         "changed": changed.clone(),
     });
     kernel.publish_state(&event);
-    // Emit `agent_updated` on the root's inbox so watchers (canvas
-    // frame chrome, telemetry panels) refresh without polling. Mirrors
-    // Python's `await self.emit(self.id, {type:"agent_updated", ...})`.
+    // `agent_updated` on the root's inbox so watchers (canvas frame chrome,
+    // telemetry panels) refresh without polling. Kernel bookkeeping, fanned out
+    // like `agent_created`: EACH RECEIVER gets the updated record cut to what it
+    // holds on the target (rule 9, the reflect cut), a receiver that holds nothing
+    // on it no event, and a receiver the kernel cannot place (a watcher that is no
+    // agent, the state stream) the identity keys only.
+    let event = |shown: crate::agent::AgentRecord| {
+        crate::inbox::InboxItem::text(crate::jsonsafe::obj([
+            ("type", Value::from("agent_updated")),
+            ("id", Value::from(rec.id.clone())),
+            ("changed", Value::from(changed.clone())),
+            ("agent", crate::jsonsafe::record_value(&shown)),
+        ]))
+    };
     kernel
-        .emit(
-            &root.id,
-            crate::jsonsafe::obj([
-                ("type", Value::from("agent_updated")),
-                ("id", Value::from(rec.id.clone())),
-                ("changed", Value::from(changed)),
-                ("agent", rec_value.clone()),
-            ]),
+        .fanout_each(
+            root,
+            "emit",
+            |receiver| match receiver {
+                Some(r) => kernel
+                    .record_cut_for(Some(r), &target, rec.clone())
+                    .map(&event),
+                None => Some(event(Kernel::identity_record(rec.clone()))),
+            },
+            crate::send::current_sender().as_ref(),
         )
         .await;
     // PYTHON'S REPLY SHAPE. The bare record left a caller that branches on
     // `updated` — the field the kernel_verbs doc teaches — reading `undefined`
     // on this runtime for the call that succeeded, so a model read success as
-    // failure and retried.
+    // failure and retried. The record is CUT to what the caller holds on the
+    // target: a caller holding `update: [x]` reads its identity and `x`, never
+    // the rest (`can` included). The operator and the agent itself read it whole.
+    let shown = kernel
+        .record_cut_for(origin.as_ref(), &target, rec.clone())
+        .unwrap_or_else(|| Kernel::identity_record(rec.clone()));
     crate::jsonsafe::obj([
         ("updated", Value::from(true)),
         ("id", Value::from(rec.id)),
-        ("agent", rec_value),
+        ("agent", crate::jsonsafe::record_value(&shown)),
     ])
 }
 

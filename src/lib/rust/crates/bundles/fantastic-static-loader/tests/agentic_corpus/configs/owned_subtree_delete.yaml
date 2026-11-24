@@ -6,13 +6,6 @@ loaders:
     file: fantastic_a.yaml
     manifest:
       agents:
-        - id: a_head
-          handler_module: file_bridge.tools
-          allow: ['.']
-          ingress_rule: allow_all_ingress
-          can:
-            a_notes: {call: [write, read]}
-            a_leaf: {call: [list]}
         - id: a_notes
           handler_module: file_bridge.tools
           allow: ['.']
@@ -22,6 +15,13 @@ loaders:
           handler_module: file_bridge.tools
           allow: ['.']
           ingress_rule: allow_all_ingress
+        - id: a_head
+          handler_module: file_bridge.tools
+          allow: ['.']
+          ingress_rule: allow_all_ingress
+          can:
+            a_notes: {call: [write, read]}
+            a_leaf: {call: [list]}
 
   - id: l_b
     file: fantastic_b.yaml
@@ -32,16 +32,16 @@ loaders:
           allow: ['.']
           root: .fantastic
           ingress_rule: allow_all_ingress
+        - id: b_leaf
+          handler_module: file_bridge.tools
+          allow: ['.']
+          ingress_rule: allow_all_ingress
         - id: b_head
           handler_module: file_bridge.tools
           allow: ['.']
           ingress_rule: allow_all_ingress
           can:
             b_leaf: {call: [list]}
-        - id: b_leaf
-          handler_module: file_bridge.tools
-          allow: ['.']
-          ingress_rule: allow_all_ingress
         - id: b_vault
           handler_module: file_bridge.tools
           allow: ['.']

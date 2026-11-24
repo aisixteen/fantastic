@@ -30,7 +30,7 @@ async fn the_leg_emits_socket_open_and_socket_closed() {
     let kernel = stage_web_with_ws(&tmp, port, web_id).await;
     let watcher = AgentId::from("leg_watcher");
     let mut rx = kernel.ensure_inbox(&watcher);
-    kernel.watch(&leg, watcher.clone()).await;
+    fantastic_kernel::send::as_operator(kernel.watch(&leg, watcher.clone())).await;
 
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/{web_id}/ws"))
         .await

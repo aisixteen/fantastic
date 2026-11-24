@@ -862,8 +862,11 @@ pub async fn export_subtree(
     who: &str,
 ) -> Value {
     // the verb acts for its asker (gm rule 7, Q39): the read of `agent_id`'s
-    // subtree is the asker's, cut the way `reflect` cuts the tree
-    let asker = fantastic_kernel::current_origin();
+    // subtree is the asker's, cut the way `reflect` cuts the tree. No origin scope
+    // is nobody, never the operator.
+    let Some(asker) = fantastic_kernel::send::origin_scope() else {
+        return fantastic_kernel::refusal::unknown_agent(agent_id);
+    };
     if let Some(a) = asker.as_ref() {
         if !kernel.holds(Some(a), Held::Call, &AgentId::from(agent_id)) {
             return fantastic_kernel::refusal::unknown_agent(agent_id);

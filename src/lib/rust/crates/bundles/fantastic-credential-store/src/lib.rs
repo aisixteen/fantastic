@@ -661,7 +661,7 @@ impl CredentialStoreBundle {
         refs.insert(r.to_string(), Value::Object(entry));
         let mut patch = Map::new();
         patch.insert("refs".into(), Value::Object(refs));
-        let written = write_own(kernel, id, patch).await;
+        let written = kernel.write_own(id, patch).await;
         if fantastic_kernel::is_refused(&written) {
             return Ok(written);
         }
@@ -766,7 +766,7 @@ impl CredentialStoreBundle {
             refs.insert(r.to_string(), Value::Object(entry));
             let mut patch = Map::new();
             patch.insert("refs".into(), Value::Object(refs));
-            let written = write_own(kernel, id, patch).await;
+            let written = kernel.write_own(id, patch).await;
             if fantastic_kernel::is_refused(&written) {
                 return Ok(written);
             }
@@ -775,22 +775,6 @@ impl CredentialStoreBundle {
     }
 }
 
-/// Write the agent's OWN fields `patch` with `update_agent` sent as itself (a
-/// bundle writes its own non-`can` fields); the reply, a refusal included.
-async fn write_own(kernel: &Arc<Kernel>, id: &AgentId, patch: Map<String, Value>) -> Value {
-    let mut payload = Map::new();
-    payload.insert("type".to_string(), json!("update_agent"));
-    payload.insert("id".to_string(), json!(id.as_str()));
-    payload.extend(patch);
-    kernel
-        .send(vec![fantastic_kernel::Item::new(
-            AgentId::from("kernel"),
-            Value::Object(payload),
-        )])
-        .await
-        .remove(0)
-        .result
-}
 
 /// A reply that may carry a value in `fields`.
 #[derive(Deserialize)]

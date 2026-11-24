@@ -15,7 +15,7 @@
 //! makes it strictly redundant, which requires the verb to return WHOLE state
 //! rather than an answer to a question:
 //!
-//!   `reflect` · `list_agents` · `ps` · `keys` → whole-state. The newest reply IS
+//!   `reflect` · `ps` · `keys` → whole-state. The newest reply IS
 //!       the truth; older copies describe a state that no longer exists and can
 //!       only mislead. Safe to drop.
 //!   `read` · `list` · `status` · `get` → PARAMETERISED. Two `read`s on the same
@@ -25,12 +25,12 @@
 //! AUTOFOLD ([`autofold`], #556) then shows a thought, a cut answer and a large or
 //! recalled reply as a short anchor, at assembly time and never stored.
 
-use crate::constants::{AUTOFOLD_AT, CHARS_PER_TOKEN, KEEP_SUMMARY_MAX, REFERENCE_FOLD_AT};
+use crate::constants::{AUTOFOLD_AT, CHARS_PER_TOKEN, KEEP_SUMMARY_MAX};
 use serde_json::{json, Value};
 
 /// The verbs whose reply is WHOLE STATE, so a later reply strictly supersedes an
 /// earlier one. Python `_WHOLE_STATE_READS`.
-pub const WHOLE_STATE_READS: [&str; 4] = ["reflect", "list_agents", "ps", "keys"];
+pub const WHOLE_STATE_READS: [&str; 3] = ["reflect", "ps", "keys"];
 
 /// Python's `\S` — a char that is not whitespace.
 fn is_non_space(c: char) -> bool {
@@ -122,62 +122,11 @@ fn content_of(turn: &Value) -> &str {
     turn.get("content").and_then(Value::as_str).unwrap_or("")
 }
 
-/// A REAL verb of this docs body for the grep example: the first that is not
-/// `reflect`/`boot`, else the first. A placeholder example is copied verbatim —
-/// `<query>verb</query>` sent as written matches only the `<verbs>` lines, and the
-/// model concludes the held body is gone.
-/// `None` when the body lists no verbs (nothing to keep, so nothing is held).
-/// Python `example_verb`.
-#[must_use]
-pub fn example_verb(body: &str) -> Option<String> {
-    let mut lines = body.lines().skip_while(|l| *l != "<verbs>").skip(1);
-    let mut names: Vec<String> = Vec::new();
-    while let Some(line) = lines.next() {
-        if line.starts_with("</verbs>") {
-            break;
-        }
-        // A top-level entry `<name>…</name>` starts a line; its doc may run on
-        // over more lines, up to its own closer.
-        let Some(name) = line
-            .strip_prefix('<')
-            .and_then(|r| r.split_once('>'))
-            .map(|(n, _)| n)
-            .filter(|n| {
-                n.starts_with(|c: char| c == '_' || c.is_ascii_alphabetic())
-                    && n.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
-            })
-        else {
-            continue;
-        };
-        let closer = format!("</{name}>");
-        if !line[name.len() + 2..].contains(&closer) && !lines.any(|l| l.contains(&closer)) {
-            break;
-        }
-        names.push(name.to_string());
-    }
-    names
-        .iter()
-        .find(|n| !matches!(n.as_str(), "reflect" | "boot"))
-        .or_else(|| names.first())
-        .cloned()
-}
-
-/// The FIRST line of a docs body: it is erased after the next message, and how to
-/// keep what the model will need. Python `_DOCS_HEAD`.
-#[must_use]
-pub fn docs_head(pid: i64, verb: &str) -> String {
-    format!(
-        "[this reply is shortened to one line after your next message; to get lines back \
-         later, a grep with <ids><item>{pid}</item></ids> <query>{verb}</query> \
-         <width>1000</width> returns them]\n"
-    )
-}
-
 /// A refusal of the model's own call — a verb its target does not answer
 /// (`unhandled`, naming that verb), or an argument it did not send (`missing_arg`
-/// naming the `arg`) — names where the fix is, `docs`, when it carries no hint of
-/// its own. Decided on the machine `reason`, never on prose. Python
-/// `point_to_docs`.
+/// naming the `arg`) — names where the fix is, the target's `reflect` with a `tier`,
+/// when it carries no hint of its own. Decided on the machine `reason`, never on
+/// prose. Python `point_to_docs`.
 #[must_use]
 pub fn point_to_docs(target: &str, verb: &str, result: &Value) -> Option<Value> {
     let o = result.as_object()?;
@@ -187,10 +136,10 @@ pub fn point_to_docs(target: &str, verb: &str, result: &Value) -> Option<Value> 
     let reason = o.get("reason").and_then(Value::as_str);
     let hint = if reason == Some("unhandled") && o.get("verb").and_then(Value::as_str) == Some(verb)
     {
-        format!("the verbs {target} answers: send kernel {{type: docs, of: '{target}'}}")
+        format!("the verbs {target} answers: send {target} {{type: reflect, tier: oneliners}}")
     } else if reason == Some("missing_arg") && o.get("arg").is_some_and(Value::is_string) {
         format!(
-            "how to call it: send kernel {{type: docs, of: '{target}', verb: '{verb}', tier: detailed}}"
+            "how to call it: send {target} {{type: reflect, verb: '{verb}', tier: detailed}}"
         )
     } else {
         return None;
@@ -329,29 +278,19 @@ fn recalled_what(store: &[Value], tag_line: &str, agent: &str, nth: usize) -> St
     find().unwrap_or_default()
 }
 
-/// The token count over which a block of this `verb` folds once answered:
-/// `docs` replies fold sooner than any other body (#634); a `reflect` never folds.
-fn fold_limit(verb: &str) -> usize {
-    if matches!(verb, "reflect" | "docs") {
-        REFERENCE_FOLD_AT
-    } else {
-        AUTOFOLD_AT
-    }
-}
-
 /// Whether a user turn's content will fold once it is answered: it opens with a
-/// reply tag and carries a recall reply or a body over its verb's fold limit
-/// ([`AUTOFOLD_AT`] tokens; [`REFERENCE_FOLD_AT`] for `docs`; a `reflect` never folds).
+/// reply tag and carries a recall reply or a body over [`AUTOFOLD_AT`] tokens (a
+/// `reflect` never folds).
 #[must_use]
 pub fn will_fold(content: &str) -> bool {
     parse_reply_tag(content).is_some() && reply_blocks(content).into_iter().any(block_folds)
 }
 
-/// Whether one reply block folds once answered: a recall reply, or a body over its
-/// verb's fold limit.
+/// Whether one reply block folds once answered: a recall reply, or a body over
+/// [`AUTOFOLD_AT`] tokens that is not a `reflect`.
 fn block_folds(block: &str) -> bool {
     let verb = parse_reply_tag(block).map_or("", |(_, v)| v);
-    verb == "recall" || (verb != "reflect" && body_tokens(body_of(block)) > fold_limit(verb))
+    verb == "recall" || (verb != "reflect" && body_tokens(body_of(block)) > AUTOFOLD_AT)
 }
 
 /// The pid a reply block names (`[reply to <pid> · …]`), when it is a number.
@@ -500,19 +439,11 @@ pub fn autofold(
                             ),
                             kept_summary(row, reply_pid(b)),
                         )
-                    } else if verb != "reflect" && x > fold_limit(verb) {
+                    } else if verb != "reflect" && x > AUTOFOLD_AT {
                         changed = true;
                         let head = cap120(body.split('\n').next().unwrap_or("").trim());
                         let summary = kept_summary(row, reply_pid(b));
-                        if matches!(verb, "reflect" | "docs") {
-                            // re-called, never recalled: no `get:` pointer
-                            with_kept(
-                                format!(
-                                    "[folded · {verb} reply from {agent} · ~{x} tokens · {verb} again for the current state]"
-                                ),
-                                summary,
-                            )
-                        } else if summary.is_some() {
+                        if summary.is_some() {
                             // the summary stands where the head line would
                             with_kept(
                                 format!(
@@ -778,11 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn docs_replies_fold_over_the_reference_limit_and_a_reflect_never_folds() {
-        use crate::constants::REFERENCE_FOLD_AT;
-        let over = "x".repeat(REFERENCE_FOLD_AT * 4 + 4);
-        let at = "x".repeat(REFERENCE_FOLD_AT * 4);
-        // a reflect stays whole at any size, answered or not
+    fn a_reflect_reply_never_folds_at_any_size() {
         let big = format!(
             "[reply to 3 \u{b7} ai reflect]\nhead line\n{}",
             "x".repeat(AUTOFOLD_AT * 8)
@@ -790,38 +717,6 @@ mod tests {
         assert!(!will_fold(&big));
         let kept = [row(7, "user", &big), row(8, "assistant", "ok")];
         assert_eq!(autofold(&kept, 0, &kept[0], None).1, "whole");
-        {
-            let verb = "docs";
-            let tag = format!("[reply to 3 \u{b7} ai {verb}]\n");
-            assert!(will_fold(&format!("{tag}{over}")), "{verb}");
-            assert!(!will_fold(&format!("{tag}{at}")), "{verb}");
-            let store = [
-                row(7, "user", &format!("{tag}head line\n{over}")),
-                row(8, "assistant", "ok"),
-            ];
-            let (out, form) = autofold(&store, 0, &store[0], None);
-            assert_eq!(form, "anchor");
-            assert_eq!(
-                out["content"].as_str().unwrap(),
-                format!(
-                    "[folded \u{b7} {verb} reply from ai \u{b7} ~{} tokens \u{b7} {verb} again for the current state]",
-                    REFERENCE_FOLD_AT + 4
-                )
-            );
-            // one under the limit stays inline; so does an unanswered one
-            let small = [
-                row(7, "user", &format!("{tag}{at}")),
-                row(8, "assistant", "ok"),
-            ];
-            assert_eq!(autofold(&small, 0, &small[0], None).1, "whole");
-            assert_eq!(autofold(&store[..1], 0, &store[0], None).1, "whole");
-        }
-        // any other verb keeps the large-body limit
-        let other = format!(
-            "[reply to 3 \u{b7} ai read]\n{}",
-            "x".repeat(REFERENCE_FOLD_AT * 4 + 4)
-        );
-        assert!(!will_fold(&other));
     }
 
     #[test]

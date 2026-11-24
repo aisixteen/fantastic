@@ -321,7 +321,7 @@ async fn set_identity_reply(
         patch.insert("exposes".into(), json!(exposes));
     }
     if !patch.is_empty() {
-        let written = write_own(kernel, agent_id, patch).await;
+        let written = kernel.write_own(agent_id, patch).await;
         if fantastic_kernel::is_refused(&written) {
             return written;
         }
@@ -849,7 +849,7 @@ async fn build_relay_transport(
             // by the root loader's writer off the `updated` event.
             let mut patch = serde_json::Map::new();
             patch.insert("guid".to_string(), Value::String(g.clone()));
-            let written = write_own(kernel, agent_id, patch).await;
+            let written = kernel.write_own(agent_id, patch).await;
             if fantastic_kernel::is_refused(&written) {
                 return Err(format!("relay_connector: guid not written: {written}"));
             }
@@ -1685,19 +1685,6 @@ fn injected_for(kind: &str, agent_id: &AgentId) -> Option<Result<Arc<dyn BridgeT
     None
 }
 
-/// Write the agent's OWN fields `patch` with `update_agent` sent as itself (a
-/// bundle writes its own non-`can` fields); the reply, a refusal included.
-pub(crate) async fn write_own(kernel: &Arc<Kernel>, id: &AgentId, patch: Map<String, Value>) -> Value {
-    let mut payload = Map::new();
-    payload.insert("type".to_string(), json!("update_agent"));
-    payload.insert("id".to_string(), json!(id.as_str()));
-    payload.extend(patch);
-    kernel
-        .send(vec![Item::new(AgentId::from("kernel"), Value::Object(payload))])
-        .await
-        .remove(0)
-        .result
-}
 
 #[cfg(test)]
 mod tests;

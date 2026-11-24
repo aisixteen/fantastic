@@ -15,7 +15,6 @@ use std::sync::{Arc, Mutex};
 use fantastic_bundle::py_repr;
 use fantastic_kernel::inbox::{InboxItem, InboxReceiver};
 use fantastic_kernel::declared::kernel::CreateAgent;
-use fantastic_kernel::lifecycle::create_agent;
 use fantastic_kernel::refusal as rf;
 use fantastic_kernel::{Agent, AgentId, DynVerb, Item, Kernel, Verb};
 use serde_json::{json, Map, Value};
@@ -218,7 +217,7 @@ fn find_view(kernel: &Arc<Kernel>, bridge: &str, kind: &str, path: &str) -> Opti
 }
 
 /// python `open_view`: reuse the view of `path` on this bridge, or make it — as the
-/// asker (`current_origin()`), under the bridge. The new view's `can` is its one edge,
+/// asker ([`Kernel::send_as_caller`]), under the bridge. The new view's `can` is its one edge,
 /// `$parent: {call: GRANTS}`: the asker hands it out, so it must hold those verbs on
 /// the bridge by a line of its own.
 ///
@@ -277,13 +276,18 @@ pub(crate) async fn open_view(
     if let Some(chosen) = chosen {
         payload["id"] = json!(chosen);
     }
-    let made = match serde_json::from_value::<CreateAgent>(payload) {
-        Ok(args) => {
-            let asker = fantastic_kernel::current_origin();
-            create_agent(kernel, asker.as_ref(), args).await
-        }
-        Err(e) => return rf::bad("open_view", "id", &e.to_string()),
-    };
+    // The arguments are judged here first, so a bad chosen id is open_view's own
+    // refusal; the create itself is sent for the asker ([`Kernel::send_as_caller`])
+    // and checked as it — refused for work that carries no origin at all.
+    if let Err(e) = serde_json::from_value::<CreateAgent>(payload.clone()) {
+        return rf::bad("open_view", "id", &e.to_string());
+    }
+    payload["type"] = json!("create_agent");
+    let made = kernel
+        .send_as_caller(vec![Item::new(AgentId::from("kernel"), payload)])
+        .await
+        .remove(0)
+        .result;
     if made.get("error").is_some() {
         return made;
     }

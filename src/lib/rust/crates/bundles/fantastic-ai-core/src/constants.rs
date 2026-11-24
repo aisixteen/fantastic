@@ -154,10 +154,6 @@ pub const FOLD_AT: f64 = 0.95;
 /// Tokens per body over which an answered reply folds to an anchor in the model's
 /// view (#556); start there and watch the behaviour.
 pub const AUTOFOLD_AT: usize = 16_000;
-/// Tokens per body over which an answered `reflect` or `docs` reply folds to an
-/// anchor (#634): reference text the model can re-read with `get`, much smaller
-/// than [`AUTOFOLD_AT`].
-pub const REFERENCE_FOLD_AT: usize = 1_500;
 /// Tokens a `keep` summary may take (#641): over it the summary is discarded and the
 /// folded block shows the plain anchor. Well under the blocks that fold.
 pub const KEEP_SUMMARY_MAX: usize = 300;

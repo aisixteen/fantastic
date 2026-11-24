@@ -262,8 +262,8 @@ async fn a_job_round_trips_a_literal_key_through_the_kernel() {
     }
     let tap = AgentId::from("tap_binpath");
     let mut tap_rx = kernel.ensure_inbox(&tap);
-    assert!(kernel
-        .watch(&AgentId::from("echo"), tap.clone())
+    assert!(fantastic_kernel::send::as_operator(kernel
+        .watch(&AgentId::from("echo"), tap.clone()))
         .await
         .is_none());
     let mut rx = inbox(&kernel, &a);

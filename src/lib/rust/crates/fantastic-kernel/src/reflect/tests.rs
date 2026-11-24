@@ -571,7 +571,11 @@ async fn distilled_tree_reflect_echoes_to_node_watchers() {
     kernel.register(Arc::clone(&watcher));
     root.add_child(Arc::clone(&watcher));
     let mut rx = kernel.ensure_inbox(&watcher.id);
-    assert!(kernel.watch(&node.id, watcher.id.clone()).await.is_none());
+    assert!(
+        crate::send::as_operator(kernel.watch(&node.id, watcher.id.clone()))
+            .await
+            .is_none()
+    );
 
     let out = kernel_reflect(&kernel, json!({"type": "reflect"})).await;
     assert_eq!(

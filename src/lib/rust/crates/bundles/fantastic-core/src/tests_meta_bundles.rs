@@ -149,7 +149,7 @@ async fn a_record_loaded_from_disk_inherits_like_a_create() {
     };
     let child = json!({"id": "n9", "handler_module": "notes", "parent_id": root.id, "root": "mine"});
     kernel
-        .load_records(vec![root_map, child.as_object().unwrap().clone()])
+        .load_json(&json!({"agents": [root_map, child]}).to_string())
         .unwrap();
     let m = meta(&kernel, "n9");
     assert_eq!(m["root"], json!("mine"), "the record's own field wins");

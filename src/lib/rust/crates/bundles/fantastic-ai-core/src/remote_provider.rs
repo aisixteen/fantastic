@@ -556,13 +556,16 @@ impl Drop for Unwatch {
 #[path = "tests_remote_provider.rs"]
 mod tests_remote_provider;
 
-/// TESTS AND TOOLS: an `ai_chat` agent completing through `provider` — `<provider>_ai`,
+/// TESTS: an `ai_chat` agent completing through `provider` — `<provider>_ai`,
 /// under the same parent, on the provider's memory store (its `memory_store_id`),
 /// made by the operator. Its `can` is one line, `{<provider>: {call: [complete, watch,
 /// capabilities]}}`: the provider's own lines (its key line among them) are never copied
 /// into the chat; the chat's other lines come from its bundle's defaults. The chat
 /// holds the conversation; the provider keeps answering `complete`. Returns the
-/// chat's id. A provider's own tests drive a whole turn through it.
+/// chat's id. A provider's own tests drive a whole turn through it. Test support
+/// only (feature `test-support`): nothing shipped creates as the operator here.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub async fn pair_chat(kernel: &Arc<Kernel>, provider: &AgentId) -> AgentId {
     let chat = AgentId::from(format!("{}_ai", provider.as_str()));
     if kernel.exists(chat.as_str()) {

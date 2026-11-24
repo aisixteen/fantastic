@@ -696,11 +696,11 @@ async fn sealed_leg_denies_the_call_and_leaks_no_telemetry() {
     assert!(reply["data"]["tree"].is_null(), "the reflect must NOT run");
 
     // NO AUTO-WATCH: an event on the host reaches nobody.
-    kernel
+    fantastic_kernel::send::as_operator(kernel
         .emit(
             &AgentId::from(web_id),
             json!({"type": "output", "data": "x"}),
-        )
+        ))
         .await;
     let (t, b) = drain_frames(&mut ws, 400).await;
     assert!(
@@ -759,11 +759,11 @@ async fn open_leg_autowatches_and_calls_run_as_the_leg() {
         .expect("ws connect");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    kernel
+    fantastic_kernel::send::as_operator(kernel
         .emit(
             &AgentId::from(web_id),
             json!({"type": "output", "data": "hi"}),
-        )
+        ))
         .await;
     let (t, _) = drain_frames(&mut ws, 600).await;
     assert!(
