@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import E2E_TARGET, SRC, Rig, build_lock, oslayer, verdict  # noqa: E402
+from _lib.canvas_live import E2E_TARGET, FOLDER, SRC, Rig, build_lock, oslayer, verdict  # noqa: E402
 from _lib.export_live import check_folder, team_agents  # noqa: E402
 
 #: the team sits under `user` in the TUI's own tree
@@ -83,7 +83,7 @@ def main() -> bool:
     r["0 the TUI boots over the project"] = "boot" in first and (rig.proj / ".fantastic" / "agents" / "user").is_dir()
     for parent, rec in team_agents(parent_name=None):
         # the team's own folder is `lead`'s: `team_agents` places it for the canvas; here it sits under `user`
-        rel = parent.replace("agents/user/agents/web/agents/canvas_page/agents/canvas_root", PARENT)
+        rel = parent.replace(FOLDER, PARENT, 1)
         rig.seed_host_agent(rel, rec)
     tree = play(rig, shot, "tree", "until 30000 lead\nshot tree\n")
     rows = left_rows(tree.get("tree", ""))

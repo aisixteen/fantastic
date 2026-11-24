@@ -2,9 +2,12 @@
 the dead letter and is withdrawn from the busy target. NO MODEL.
 
 Two local OpenAI-compatible servers (`e2e/mocks/vllm.py`) play the model of a LEAD and
-a WORKER; the kernel's own `vllm_backend` agents (ai_core) run on the PACKAGED host of
-`RUNTIME` (python | rust), every call from the test through `web_rest`. The root
-record carries `send_timeout: 3`.
+a WORKER; the kernel's own `vllm_backend` agents (ai_core) run on the PACKAGED rust
+host, every call from the test through `web_rest`. The root record carries
+`send_timeout: 3`, written into the state folder before boot (an operator's hand
+edit: no agent may update the root). Each chat holds its own lines — the store, its
+provider, and the lead `send` on the worker; the worker holds none on the lead, so
+a send from it is the unknown answer.
 
   1. the WORKER is busy: its scripted answer is slow (`SLOW` s);
   2. `status` on the busy worker answers at once (never queued behind the turn);
@@ -47,6 +50,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.lines import ALL, PROVIDER, call as line_call, is_unknown
 from helpers.verdict import verdict
 from mocks.vllm import VllmMock
 
@@ -106,19 +110,20 @@ def main() -> int:
     lead_m = VllmMock(model="mock-lead").start()
     work_m = SlowVllm(model="mock-worker").start()
     work = Path(tempfile.mkdtemp(prefix="e2e-deadletter-deadline-"))
-    hk = HostKernel(spec, work, reach=[LEAD, WORKER, f"{LEAD}_prov", f"{WORKER}_prov", "memory"]).boot()
+    # every agent here is under `rest` (position)
+    hk = HostKernel(spec, work)
     root = hk.root_id
+    # THE DEADLINE ON THE ROOT, before boot: `rest` holds no `update` there
+    (work / ".fantastic").mkdir(parents=True, exist_ok=True)
+    (work / ".fantastic" / "agent.yaml").write_text(yaml.safe_dump(
+        {"id": root, "handler_module": "kernel_state.tools", "send_timeout": 3}, sort_keys=False))
+    hk.boot()
     bad: list[str] = []
 
     def need(cond: bool, what: str) -> None:
         print(f"  {'ok ' if cond else 'BAD'} {what}", flush=True)
         if not cond:
             bad.append(what)
-
-    def callable_by(aid: str) -> dict:
-        r = hk.send("kernel", {"type": "list_agents"})
-        rec = next(a for a in r.get("agents") or [] if a.get("id") == aid)
-        return dict(rec.get("callable_by") or {})
 
     def turns_at_least(m: VllmMock, n: int, bound: float = 60) -> list[dict]:
         end = time.monotonic() + bound
@@ -160,36 +165,38 @@ def main() -> int:
         return None  # the queue: `done`
 
     try:
-        r = hk.send(root, {"type": "update_agent", "id": root, "send_timeout": 3,
-                           "callable_by": {**callable_by(root), LEAD: ["ack_deadletter", "ledger"]}})
-        need(r.get("updated") is True, f"the root carries send_timeout 3 and admits the lead's ack: {str(r)[:200]}")
-        r = hk.send(root, {"type": "update_agent", "id": "memory",
-                           "callable_by": {**callable_by("memory"), LEAD: "*", WORKER: "*",
-                                           f"{LEAD}_prov": "*", f"{WORKER}_prov": "*"}})
-        need(r.get("updated") is True, f"memory accepts the AIs: {str(r)[:200]}")
+        need(yaml.safe_load((work / ".fantastic" / "agent.yaml").read_text()).get("send_timeout") == 3,
+             "the root record carries send_timeout 3")
 
-        def make_ai(aid: str, mock: VllmMock, can_call: dict, cb: dict) -> None:
+        def make_ai(aid: str, mock: VllmMock, can: dict) -> None:
             common = dict(context_window=262144, memory_store_id="memory")
             # a provider (the vllm_backend) and the chat naming it
             prov = f"{aid}_prov"
             rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=prov,
                             endpoint=mock.url, model=mock.model, kv_slots=4,
-                            kv_overflow="evict", **common,
-                            can_call={"$self": "*", "memory": "*"},
-                            callable_by={"$self": "*", "$parent": "*", aid: "*"})
+                            kv_overflow="evict", **common, can={"memory": ALL})
             need(rec.get("id") == prov, f"create {prov}: {str(rec)[:200]}")
             rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
                             provider_id=prov, model=mock.model, max_tokens=8192, **common,
-                            can_call={**can_call, prov: ["complete", "watch", "reflect"]}, callable_by=cb)
+                            can={**can, "memory": ALL, prov: PROVIDER})
             need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")
 
-        make_ai(WORKER, work_m, {"$self": "*", "memory": "*"},
-                {"$self": "*", "$parent": "*", "rest": "*", LEAD: "*"})
-        make_ai(LEAD, lead_m, {"$self": "*", "memory": "*", root: ["ack_deadletter", "ledger"], WORKER: "*"},
-                {"$self": "*", "$parent": "*", "rest": "*"})
-        r = hk.send(root, {"type": "update_agent", "id": WORKER,
-                           "callable_by": {**callable_by(WORKER), LEAD: "*"}})
-        need(r.get("updated") is True, f"the worker admits the lead: {str(r)[:200]}")
+        # `ledger` and `ack_deadletter` need no line: each answers the caller's own
+        make_ai(WORKER, work_m, {})
+        # the lead's line on the worker names an id that exists now
+        make_ai(LEAD, lead_m, {WORKER: line_call("send")})
+        # NO LINE, NO SEND: a hand holding the worker's exact lines sends to the lead
+        # — the unknown answer (the lead holds a line on the worker, never the reverse)
+        wcan = (hk.send(WORKER, {"type": "reflect"}) or {}).get("can") or {}
+        hand = hk.create(parent_id="rest", handler_module="user_probe.tools", id="worker_hand",
+                         answer="no", can=wcan)
+        need(hand.get("id") == "worker_hand", f"create worker_hand: {str(hand)[:200]}")
+        r = hk.send("worker_hand", {"type": "send", "target": LEAD,
+                                    "payload": {"type": "send", "text": "x"}})
+        need("sent" in r and is_unknown(r.get("result") or {}, LEAD),
+             f"worker → lead send is the unknown answer: {str(r)[:200]}")
+        r = hk.send(root, {"type": "delete_agent", "id": "worker_hand"})
+        need(not r.get("error"), f"delete worker_hand: {str(r)[:200]}")
 
         # 1 · the worker is busy on a slow answer
         work_m.reply(f'{SLOW_MARK}busy\n<call name="done"></call>')

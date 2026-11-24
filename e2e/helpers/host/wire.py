@@ -32,12 +32,6 @@ class WireRoot:
 
     #: The REST leg the driver arrives as. Seeded by `HostKernel.seed`.
     leg_id = "rest"
-    #: The agents a `watch` frame may be dispatched AS — each needs the target's
-    #: ingress like anyone. Every runtime dispatches a ws frame as the WS LEG
-    #: (`web_ws`'s own id, the record its ingress rule hangs on). `web` stays in the tuple because the host is still the sender for the
-    #: connect-time auto-watch on `/<id>/ws`, and granting an id that never calls
-    #: costs a map entry.
-    watch_ids = ("ws", "web")
 
     def __init__(self, k: Any):
         self.k = k
@@ -84,6 +78,15 @@ class WireRoot:
         if getattr(self, "_ctx", None) is None:
             self._ctx = WireCtx(self.k)
         return self._ctx
+
+    def record(self, aid: str) -> dict:
+        """`aid`'s record as `rest` sees it (`reflect`): whole for agents in
+        `rest`'s tree. `{}` when the kernel answers the unknown answer."""
+        return self.ctx.record(aid)
+
+    def agent_ids(self) -> list[str]:
+        """Every id `rest` sees (`reflect tree=ids` on the root, paged)."""
+        return self.ctx.agent_ids()
 
     def watch(self, *_a, **_kw) -> None:
         """No-op. Status-event spying needs an inbox subscription this face does
@@ -248,12 +251,34 @@ class WireCtx:
         )
         return [{**x, "agent": aid} for x in rows]
 
+    def record(self, aid: str) -> dict:
+        """`aid`'s record from `reflect` (whole inside `rest`'s tree); `{}` on the
+        unknown answer."""
+        from helpers.lines import is_unknown
+
+        r = self.k.send(aid, {"type": "reflect"}, timeout=30)
+        if not isinstance(r, dict) or is_unknown(r, aid):
+            return {}
+        return r
+
     def agent_ids(self) -> list[str]:
-        r = self._kernel({"type": "list_agents"})
-        agents = r.get("agents")
-        if not isinstance(agents, list):
-            return []
-        return [a.get("id") for a in agents if isinstance(a, dict) and a.get("id")]
+        """Every id of the root's `reflect tree=ids`, following `next`. `rest`
+        holds `reflect` on the root, which covers every agent at `call`."""
+        ids: list[str] = []
+        after: str | None = None
+        while True:
+            payload = {"type": "reflect", "tree": "ids"}
+            if after:
+                payload["after"] = after
+            r = self._kernel(payload)
+            tree = r.get("tree")
+            if not isinstance(tree, list):
+                return ids
+            ids += [x if isinstance(x, str) else x.get("id") for x in tree
+                    if isinstance(x, str) or (isinstance(x, dict) and x.get("id"))]
+            after = r.get("next")
+            if not after:
+                return ids
 
     @property
     def tasks(self) -> list:
@@ -275,31 +300,22 @@ class WireCtx:
     @property
     def next_id(self) -> int:
         """At least the id the kernel mints NEXT: the root record's reserved bound
-        (`next_id`, written by `kernel_start`) — the counter's durable half."""
-        r = self._kernel({"type": "list_agents"})
-        for a in r.get("agents") or []:
-            if a.get("parent_id") is None:
-                return int(a.get("next_id") or 1)
-        return 1
+        (`next_id`, written by `kernel_start`) — the counter's durable half. Root
+        fields are operator only, so it is read from the state folder (harness-
+        owned, the trust root), not from a `reflect`."""
+        import yaml
+
+        path = self.k.workdir / ".fantastic" / "agent.yaml"
+        return int((yaml.safe_load(path.read_text()) or {}).get("next_id") or 1)
 
     async def shutdown(self) -> dict:
         """The kernel's TEARDOWN — the wire twin of the in-process
-        `Kernel.shutdown()`. Over the wire the kernel is a process, so this is
-        `kernel_stop` (the root-only verb that stops it) followed by waiting
-        for that process to be gone. The agent half (`shutdown_agents`) is the
-        probe's own call, made before this exactly as it is in process."""
+        `Kernel.shutdown()`. Process verbs are operator only, so over REST they
+        are refused; the stop is the operator's signal instead (SIGTERM, a
+        graceful shutdown), which must end the process with exit 0."""
         import asyncio
 
-        ack = await asyncio.to_thread(
-            self.k.send, "kernel", {"type": "kernel_stop"}, 30)
-        if isinstance(ack, dict) and ack.get("error"):
-            raise AssertionError(f"kernel_stop refused: {ack}")
-        proc = getattr(self.k, "proc", None)
-        if proc is not None:
-            for _ in range(300):  # the verb defers its exit ~100ms; wait on the PROCESS
-                if proc.poll() is not None:
-                    break
-                await asyncio.sleep(0.1)
-            else:
-                raise AssertionError("kernel_stop acked but the kernel process is still alive")
-        return ack if isinstance(ack, dict) else {"ok": ack}
+        rc = await asyncio.to_thread(self.k.stop)
+        if rc != 0:
+            raise AssertionError(f"kernel stop: exit {rc}, not 0")
+        return {"exit": rc}

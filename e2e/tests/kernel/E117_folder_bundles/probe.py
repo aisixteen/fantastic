@@ -1,12 +1,14 @@
 """kernel/folder_bundles — a folder under `.fantastic/bundles/` as an agent kind. NO MODEL.
 
 Folder bundles (`bundle.yaml`, `base: py_agent`, a stdlib program importing the
-reference helper `fantastic_agent.py`) on the PACKAGED host of `RUNTIME`
-(python | rust), every call through `web_rest`:
+reference helper `fantastic_agent.py`) on the PACKAGED rust host, every call
+through `web_rest`:
 
   1. COLD LOAD: folders written BEFORE boot are read by the root loader (rust
      through the fs clamp); a seeded instance record resolves and answers;
-  2. CATALOG + DOCS: `reflect bundles=all` lists the folder; `docs` reads bundle.yaml;
+  2. CATALOG + DOCS: `reflect rest bundles=all` (own tree, the whole catalog) lists
+     the folder (its one row by `bundle_names`); `reflect <instance> part=docs` reads bundle.yaml;
+     a caller holding only `call` on the root sees no catalog; `of` is refused;
   3. CREATE: an instance of the folder answers its verbs; reflect names its base
      and a running program; delete kills the program; py_agent itself is a base;
   4. HOT LOAD: a folder added after boot loads on `reload_bundle`; an edited
@@ -35,6 +37,7 @@ sys.path.insert(0, str(E2E))
 import yaml
 from helpers import oslayer
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.lines import ROOT, call
 from helpers.verdict import verdict
 
 REPO = E2E.parent
@@ -131,19 +134,19 @@ def main() -> int:
     seeded = work / ".fantastic/agents/web/agents/rest/agents/cold1"
     seeded.mkdir(parents=True)
     (seeded / "agent.yaml").write_text(yaml.safe_dump(
-        {"id": "cold1", "handler_module": "cold", "parent_id": "rest",
-         "callable_by": {"$self": "*", "$parent": "*"}}, sort_keys=False))
+        {"id": "cold1", "handler_module": "cold", "parent_id": "rest"}, sort_keys=False))
 
-    hk = HostKernel(spec, work, reach=["cold1", "c2", "h1", "s1", "x_broken", "p0"]).boot()
+    # Every instance lives under `rest` (position). `reload_bundle` is the ROOT
+    # loader's verb, so `rest` (and `web`, which caps it) holds it on the root.
+    hk = HostKernel(spec, work, root_verbs=["reload_bundle"]).boot()
     root = hk.root_id
-    cb = {"$self": "*", "$parent": "*"}
 
     def send(target: str, payload: dict) -> dict:
         r = hk.send(target, payload, timeout=CALL_S)
         return r if isinstance(r, dict) else {"_reply": r}
 
     def catalog() -> dict:
-        r = send("kernel", {"type": "reflect", "tree": "none", "bundles": "all"})
+        r = send("rest", {"type": "reflect", "tree": "none", "bundles": "all"})
         return {b.get("name"): b for b in r.get("bundles") or [] if "folder" in b}
 
     try:
@@ -160,23 +163,40 @@ def main() -> int:
         need(row.get("base") == "py_agent" and row.get("handler_module") == "cold"
              and row.get("sentence") == "The cold test agent." and "error" not in row
              and str(row.get("folder", "")).endswith("bundles/cold"),
-             f"reflect bundles=all lists the folder: {short(row)}")
-        ids = send("kernel", {"type": "reflect", "tree": "none", "bundles": "ids"})
+             f"reflect rest bundles=all lists the folder: {short(row)}")
+        ids = send("rest", {"type": "reflect", "tree": "none", "bundles": "ids"})
         need("cold" in (ids.get("bundles") or []),
-             f"reflect bundles=ids names it: {short(ids.get('bundles'))}")
-        d = send("kernel", {"type": "docs", "of": "cold"})
-        need((d.get("verbs") or {}).get("echo") == ECHO_LINE,
-             f"docs of=<bundle>: bundle.yaml's signature: {short(d)}")
-        dd = send("kernel", {"type": "docs", "of": "cold", "tier": "detailed"})
+             f"reflect rest bundles=ids names it: {short(ids.get('bundles'))}")
+        one = send("rest", {"type": "reflect", "tree": "none", "bundles": "all",
+                            "bundle_names": ["cold"]})
+        rows = [b for b in one.get("bundles") or [] if b.get("name") == "cold"]
+        # a folder bundle declares no record schema (bundle.yaml has none), so its
+        # row carries none; `bundle_names` narrows the catalog to that one row
+        need(len(rows) == 1 and len(one.get("bundles") or []) == 1
+             and rows[0].get("handler_module") == "cold",
+             f"bundle_names=[cold] gives the bundle's one catalog row: {short(one.get('bundles'))}")
+        di = send("cold1", {"type": "reflect", "part": "docs"})
+        need((di.get("verbs") or {}).get("echo") == ECHO_LINE,
+             f"reflect <instance> part=docs: bundle.yaml's signature: {short(di)}")
+        dd = send("cold1", {"type": "reflect", "part": "docs", "tier": "detailed"})
         need(str((dd.get("verbs") or {}).get("echo", "")).startswith(ECHO_DOC)
              and "text:string (req)" in str((dd.get("verbs") or {}).get("echo", "")),
-             f"docs detailed: the full doc + the declared arguments: {short(dd)}")
-        di = send("kernel", {"type": "docs", "of": "cold1"})
-        need((di.get("verbs") or {}).get("echo") == ECHO_LINE,
-             f"docs of=<instance>: the same table: {short(di)}")
+             f"part=docs tier=detailed: the full doc + the declared arguments: {short(dd)}")
+        of = send("kernel", {"type": "reflect", "of": "cold"})
+        need(of.get("reason") == "bad_arg" and of.get("arg") == "of",
+             f"reflect of=<bundle> is refused bad_arg of: {short(of)}")
+        # a caller holding only `call` on the root sees no catalog there
+        rec = hk.create(parent_id="rest", handler_module="user_probe.tools", id="nob",
+                        can={ROOT: call("reflect")})
+        need(rec.get("id") == "nob", f"create nob (reflect on the root only): {short(rec)}")
+        nb = send("nob", {"type": "send", "target": "kernel",
+                          "payload": {"type": "reflect", "tree": "none", "bundles": "all"}})
+        nbr = nb.get("result") or {}
+        need(nbr.get("id") == root and "bundles" not in nbr,
+             f"nob's reflect of the root at call level carries no bundles key: {short(nbr)}")
 
         # 3 · create an instance; reflect it; delete kills its program
-        rec = hk.create(parent_id="rest", handler_module="cold", id="c2", callable_by=cb)
+        rec = hk.create(parent_id="rest", handler_module="cold", id="c2")
         need(rec.get("id") == "c2", f"create_agent handler_module=cold: {short(rec)}")
         e2 = send("c2", {"type": "echo", "text": "b"})
         need(e2.get("echo") == "v1:b" and e2.get("pid") not in (None, pids["cold1"]),
@@ -191,7 +211,7 @@ def main() -> int:
         need(not dl.get("error"), f"delete_agent c2: {short(dl)}")
         need(gone(e2.get("pid")), f"delete kills the program (pid {e2.get('pid')})")
         base = send(root, {"type": "create_agent", "parent_id": "rest",
-                           "handler_module": "py_agent.tools", "id": "p0", "callable_by": cb})
+                           "handler_module": "py_agent.tools", "id": "p0"})
         need(base.get("reason") == "invalid_meta" and "base" in str(base.get("error")),
              f"py_agent itself is a base, not an agent: {short(base)}")
 
@@ -202,7 +222,7 @@ def main() -> int:
              f"reload_bundle loads a folder added after boot: {short(hr)}")
         need((catalog().get("hot") or {}).get("base") == "py_agent",
              "the hot folder is listed")
-        rec = hk.create(parent_id="rest", handler_module="hot", id="h1", callable_by=cb)
+        rec = hk.create(parent_id="rest", handler_module="hot", id="h1")
         h = send("h1", {"type": "echo", "text": "c"})
         need(rec.get("id") == "h1" and h.get("echo") == "v1:c",
              f"an instance of the hot folder answers: {short(h)}")
@@ -235,7 +255,8 @@ def main() -> int:
         ns = cat.get("nosentence") or {}
         need("sentence: required" in str(ns.get("error")),
              f"a bundle.yaml without sentence is listed with its error: {short(ns)}")
-        xb = hk.create(parent_id="rest", handler_module="broken", id="x_broken", callable_by=cb)
+        xb = send(root, {"type": "create_agent", "parent_id": "rest",
+                         "handler_module": "broken", "id": "x_broken"})
         xr = send("x_broken", {"type": "echo", "text": "x"})
         need(xb.get("reason") == "bad_arg" and xr.get("reason") == "unknown_agent",
              f"an instance of a refused folder is not created: create={short(xb)} call={short(xr)}")
@@ -247,7 +268,7 @@ def main() -> int:
         sv = cat.get("sysverb") or {}
         need(sv.get("base") == "py_agent" and "error" not in sv,
              f"a bundle declaring the kernel verb `ps` loads: {short(sv)}")
-        rec = hk.create(parent_id="rest", handler_module="sysverb", id="s1", callable_by=cb)
+        rec = hk.create(parent_id="rest", handler_module="sysverb", id="s1")
         s = send("s1", {"type": "echo", "text": "s"})
         need(s.get("echo") == "v1:s", f"its declared verb answers: {short(s)}")
         p = send("s1", {"type": "ps"})

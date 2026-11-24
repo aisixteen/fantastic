@@ -38,7 +38,7 @@ roster:
     id: cli
 
 grants:
-  ai_can_call: [cli, yaml_store, compute, "$root:docs"]
+  ai_can: [cli, yaml_store, compute, "$root:reflect"]
 
 # FALSIFIABLE against a value minted at test time. `$DIGEST` is the first 12
 # chars of sha256($NONCE), computed by the runner — never by the model.

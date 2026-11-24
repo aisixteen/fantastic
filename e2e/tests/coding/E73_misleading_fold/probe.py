@@ -43,11 +43,11 @@ N = 8
 
 
 async def main():
-    root, core, close = await open_kernel(prefix="coding_mis_", reach=[FB, "notes", "ai_recency", "ai_fold", "cli", "user"])
+    root, core, close = await open_kernel(prefix="coding_mis_", reach=[FB, "notes", "ai_recency", "ai_fold", "user"])
     try:
         real = secrets.token_hex(4); wrong = secrets.token_hex(4)
         plant_fillers(N, extra={1: f">> checksum: {real}"})
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         aid, strategy, extra = FOLD_ARMS[1]
         first = (f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN. Then {DONE}.")
         rows = planted_reads(root.ctx.mint_id, first, file_reads([f"filler_{i}.txt" for i in range(N)]),

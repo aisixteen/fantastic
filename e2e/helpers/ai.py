@@ -1,9 +1,8 @@
 """THE AI CONNECTOR — create the agent, wire it, drive it, stop it.
 
 This is the other half of what every probe duplicated. Creating a live AI agent
-is never one call: it is a record with a backend-shaped meta, a reciprocal
-ingress grant so its stream can reach `cli`, an api key for the backends that
-need one, a provider wrapped in the proxy reader, and a drive loop that knows
+is never one call: it is a record with a backend-shaped meta, its own `can`
+lines (the one grant table), an api key for the backends that need one, a provider wrapped in the proxy reader, and a drive loop that knows
 when a chain has ended — once, instead of a copy per probe.
 
 The failure modes it handles:
@@ -20,9 +19,10 @@ The failure modes it handles:
     a probe can hit a turn cap mid-work it finishes solo. The cap counts turns
     since the last NEW call instead.
 
-Deny-all is the substrate's posture, so `can_call` is a REQUIRED argument here:
-there is no "sensible default toolset" to fall back to, and a silent default is
-exactly how a probe would stop measuring what it claims to measure.
+`can` is a REQUIRED argument (deny-all posture: a new agent holds no lines and
+reaches only its own tree): there is no "sensible default toolset" to fall back
+to, and a silent default is exactly how a probe would stop measuring what it
+claims to measure.
 """
 
 from __future__ import annotations
@@ -34,11 +34,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from helpers.kernel import home
-from helpers import creds, memory
+from helpers import creds, lines, memory
 from helpers.stream import StreamJunction
 from helpers.proxy import Limits, distinct_calls
-
-BASELINE = {"$self": "*", "$parent": "*", "$subtree": "*"}
 
 
 @dataclass
@@ -79,14 +77,14 @@ class Connected:
 
 # THE CHAT/PROVIDER SPLIT (#615, #632). An AI is TWO agents: the PROVIDER (`<id>_prov`, the
 # backend record: endpoint, model, key, KV slots — its identity) completes turns and holds no
-# conversation; the CHAT (`ai_chat.tools`) holds the conversation, every grant and the request
+# conversation; the CHAT (`ai_chat.tools`) holds the conversation, every line and the request
 # knobs it sends with each request (sampling, max_tokens), and completes through the provider
-# its `provider_id` names (`complete`, `watch`). Both sides of that gate are opened here.
+# its `provider_id` names, by its own line on it (`complete`, `watch`, `capabilities`).
 # `make_chat` is the ONE place the suite builds an AI: a new pair, or a chat on a provider
 # that is already there (`provider_id`): `connect` uses it, and so does every probe that
 # wires its own AI.
 CHAT_MODULE = "ai_chat.tools"
-PROVIDER_CALLS = ["complete", "watch", "reflect"]
+PROVIDER_CALLS = lines.PROVIDER
 #: record fields the CHAT takes too (it sizes its own context)
 CHAT_SHARED = ("model", "context_window", "caching")
 #: the request knobs: the CHAT's alone, wherever a backend record or a probe puts them (#632)
@@ -127,8 +125,8 @@ def split_record(backend_record: dict, extra: dict | None = None) -> tuple[dict,
 def chat_pair(backend, chat: dict, *, role: str | None = None,
               provider_id: str | None = None, parent: str) -> tuple[dict, dict]:
     """The two create_agent payloads (provider, chat) for one AI. `chat` is the payload a
-    probe would write for ONE agent (id, parent_id, can_call, callable_by, memory, and any
-    record fields); backend fields in it go to the provider, the request knobs to the chat.
+    probe would write for ONE agent (id, parent_id, can, memory, and any record fields);
+    the chat's `can` gets its line on the provider; backend fields in it go to the provider, the request knobs to the chat.
     Pure: a sync runner (the host runner) sends them through its own wire; `make_chat` sends
     them through a root."""
     chat = dict(chat)
@@ -137,20 +135,20 @@ def chat_pair(backend, chat: dict, *, role: str | None = None,
     pid = provider_id or f"{cid}_prov"
     prov_fields, chat_fields = split_record(backend.record(role=role), chat)
     prov_fields.pop("id", None)
-    for k in ("can_call", "callable_by", "parent_id", "memory_store_id", "description"):
+    for k in ("can", "parent_id", "memory_store_id", "description"):
         prov_fields.pop(k, None)
     prov = {
         "type": "create_agent", "parent_id": chat.get("parent_id") or parent, "id": pid,
         **prov_fields,
         "memory_store_id": memory.MEMORY,
-        "can_call": {"$self": "*", memory.MEMORY: "*",
-                     **({creds.CREDS: creds.GET} if backend.key_ref else {})},
-        "callable_by": {"$self": "*", "$parent": "*", cid: PROVIDER_CALLS},
+        # only agents holding a line on `pid` reach it (the chat, below)
+        "can": {memory.MEMORY: lines.ALL,
+                **({creds.CREDS: lines.GET} if backend.key_ref else {})},
     }
-    chat_fields["can_call"] = {**(chat_fields.get("can_call") or {}), pid: PROVIDER_CALLS}
+    chat_fields["can"] = {**(chat_fields.get("can") or {}), pid: PROVIDER_CALLS}
     # the KEY is the provider's: the chat names no credentials and reads no `creds`
     chat_fields.pop("credentials", None)
-    chat_fields["can_call"].pop(creds.CREDS, None)
+    chat_fields["can"].pop(creds.CREDS, None)
     return prov, {"type": "create_agent", **chat_fields, "handler_module": CHAT_MODULE,
                   "provider_id": pid}
 
@@ -158,35 +156,23 @@ def chat_pair(backend, chat: dict, *, role: str | None = None,
 async def make_chat(root, backend, chat: dict, *, role: str | None = None,
                     provider_id: str | None = None) -> tuple[str, str]:
     """Create the chat, and the provider it names. THE CALLER NAMES THE PROVIDER (#632):
-    `provider_id` is a provider that is already there — the chat is made on it, and the
-    creator (`root`) admits the chat to it (`update_agent` of its `callable_by`); none
-    given, a new provider is made from the plug (`chat_pair`) and its store halves opened.
+    `provider_id` is a provider that is already there — the chat is made on it, its own
+    `can` carrying the line on it; none given, a new provider is made from the plug
+    (`chat_pair`) first, so the chat's line names an id that exists.
     Returns (chat_id, provider_id)."""
     prov, payload = chat_pair(backend, chat, role=role, provider_id=provider_id,
                               parent=home(root))
     pid = prov["id"]
     # A REBOOTED kernel hydrates the pair from its state folder: what is already
     # there is that same pair, so only a missing half is created.
-    listed = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]
-    agents = (listed.get("result") or {}).get("agents") or []
-    live = {a.get("id") for a in agents}
+    live = set(root.agent_ids())
     if provider_id is not None:
         if pid not in live:
             raise SystemExit(f"make_chat: the provider {pid} it names is not there")
-        cb = dict(next(a for a in agents if a.get("id") == pid).get("callable_by") or {})
-        if cb.get(payload["id"]) != PROVIDER_CALLS:
-            cb[payload["id"]] = PROVIDER_CALLS
-            r = (await root.send([{"target": root.id, "payload": {
-                "type": "update_agent", "id": pid, "callable_by": cb}}]))[0]["result"]
-            if isinstance(r, dict) and r.get("error"):
-                raise SystemExit(f"make_chat: admitting {payload['id']} to {pid} refused: {r}")
     elif pid not in live:
         made = (await root.send([{"target": root.id, "payload": prov}]))[0]["result"]
         if isinstance(made, dict) and made.get("error"):
             raise SystemExit(f"create_agent({pid}) refused: {made}")
-    await memory.open_ingress(root, memory.MEMORY, pid)
-    if backend.key_ref:
-        await memory.open_ingress(root, creds.CREDS, pid)
     if payload["id"] in live:
         return payload["id"], pid
     made = (await root.send([{"target": root.id, "payload": payload}]))[0]["result"]
@@ -200,23 +186,25 @@ async def connect(
     core,
     backend,
     *,
-    can_call: dict,
-    callable_by: dict | None = None,
+    can: dict,
     agent_id: str = "ai",
     limits: Limits | None = None,
     stream_to: str = "cli",
     record: dict | None = None,
     watch=None,
 ) -> Connected:
-    """Create the AI agent, wire both sides of the gate, install the reader."""
+    """Create the AI agent with its own `can` lines, install the reader.
+
+    `rest` (the leg) reaches the AI by position, `ws` by its seeded `rest` line;
+    nothing is written on any target.
+    """
     L = limits or Limits.from_env(os.environ)
-    # `docs` IS A GRANT: no verb is exempt by name, so every AI
-    # the suite connects reads docs by a `docs` grant on the root — merged into
-    # whatever the fixture already grants the root; the ingress half opens below
-    # with the rest of the AI's `can_call`.
-    have = can_call.get(root.id)
-    if have != "*" and not (isinstance(have, list) and ("docs" in have or "*" in have)):
-        can_call = {**can_call, root.id: [*(have or []), "docs"]}
+    # `docs` IS `reflect` on the root (`tier`, `verb`, `part`): every AI the suite
+    # connects reads docs by a `reflect` line on the root, merged into whatever
+    # the fixture already gives the root. A higher level already includes `call`.
+    have = can.get(lines.ROOT) or {}
+    if not ({"update", "create"} & set(have)):
+        can = {**can, lines.ROOT: {"call": sorted({*have.get("call", []), "reflect"})}}
     meta = {
         "type": "create_agent",
         "parent_id": home(root),
@@ -224,88 +212,12 @@ async def connect(
         "context_window": L.ctx,
         "num_ctx": L.ctx,
         # ITS MEMORY — the conversation lives in the kernel's `memory` store, named
-        # on the record and reachable by an explicit egress (ingress opened below).
-        **memory.ai_memory_meta(can_call),
-        # THE INGRESS HALF. A peer granted `can_call: {ai: [...]}` still cannot
-        # reach the AI: the gate is two-sided and a sibling has no baseline edge.
-        # A fixture that opens only the egress half builds a wire that carries
-        # nothing in the direction it was drawn — a probe whose push-back never
-        # arrives would score a model failure that never happened.
-        # THE DRIVER'S OWN INGRESS, on the wire only. In process the probe is
-        # the OPERATOR and its sends are ungated; across REST it arrives as the
-        # `rest` leg — an agent, gated like any other — so the AI must accept it
-        # or the very first `send` is refused at ingress. Granted at CREATE
-        # time, from above, because the leg may not raise its own authority.
-        **(
-            {
-                "callable_by": {
-                    **(callable_by or {}),
-                    getattr(root, "leg_id", "rest"): "*",
-                    # ...and the EVENT face, which dispatches a `watch`
-                    # as itself. The gate is two-sided: without this the
-                    # subscription is refused at ingress and the stream
-                    # reads as an agent that simply never emits.
-                    **{i: "*" for i in getattr(root, "watch_ids", ())},
-                }
-            }
-            if getattr(root, "leg_id", None)
-            else ({"callable_by": callable_by} if callable_by else {})
-        ),
+        # on the record and reached by the AI's own line on it.
+        **memory.ai_memory_meta(can),
         **(record or {}),
     }
     # THE PAIR: the provider from the backend record, the chat from the rest (make_chat).
     aid, _ = await make_chat(root, backend, meta)
-    # THE STORE'S HALF of the memory wire: its `callable_by` names the agent.
-    await memory.open_ingress(root, meta.get("memory_store_id") or memory.MEMORY, aid)
-    # EVERY EGRESS THE FIXTURE NAMED, BOTH HALVES. The gate is two-sided with no
-    # stamped baseline — the root included: a kernel verb (`list_agents`,
-    # `create_agent`) needs the ROOT's `callable_by` to accept the AI as well. So each
-    # literal id in the AI's `can_call` (`kernel` = the root) opens its ingress.
-    listed = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]
-    live = {a.get("id") for a in ((listed.get("result") or {}).get("agents") or [])}
-    for key in can_call:
-        if key.startswith("$") or "|" in key:
-            continue
-        target = root.id if key == "kernel" else key
-        # an id the fixture names but nothing created yet opens when it is created
-        if target in (memory.MEMORY, creds.CREDS) or target not in live:
-            continue
-        await memory.open_ingress(root, target, aid)
-
-    # TWO-SIDED DENY-ALL. The AI streams its turn to `cli`; cli's baseline
-    # `callable_by` accepts only its own subtree and creator, so without this the
-    # egress grant above is half a wire and the stream is refused at ingress.
-    if stream_to:
-        # `{}` and `None` are DIFFERENT answers: an ephemeral agent like `cli`
-        # carries an empty meta, and collapsing the two skipped opening its
-        # ingress — the AI's stream was then refused and the chain died after
-        # one turn.
-        # IN-PROCESS ONLY. A spawned kernel is reached over REST, which has no
-        # handle on the live agent objects; there the render sink is whatever
-        # the roster wired, and its ingress was opened when it was created.
-        # LIVE AGENT OBJECTS, which only the in-process kernel has — the wire
-        # ctx answers rows and tasks, never `agents`. Ask for the capability;
-        # the attribute's mere presence no longer means in-process.
-        agents = getattr(getattr(root, "ctx", None), "agents", None)
-        _peer = agents.get(stream_to) if agents is not None else None
-        peer = dict(_peer._meta) if _peer is not None else None
-        if peer is not None:
-            # READ, add one key, write back — never replace. Clobbering the map
-            # would silently drop grants the fixture already placed on `cli`.
-            cb = dict(peer.get("callable_by") or {})
-            cb[aid] = "*"
-            await root.send(
-                [
-                    {
-                        "target": root.id,
-                        "payload": {
-                            "type": "update_agent",
-                            "id": stream_to,
-                            "callable_by": cb,
-                        },
-                    }
-                ]
-            )
 
     # NOTHING TO DELIVER. The record names `credentials` (the plug's ref in the
     # kernel's `creds` store, `helpers/creds.py`); the backend reads the key from
@@ -445,6 +357,23 @@ async def _live_tasks(root, aid) -> list[dict]:
 HUMAN_ANSWER = "do your best judgement"
 
 
+async def add_lines(root, aid: str, add: dict) -> dict:
+    """Merge `add` into `aid`'s own `can` and write it back (`update_agent`
+    replaces the whole field), as `rest`: every target `add` names must exist.
+    Returns the `can` written."""
+    import asyncio
+
+    rec = await asyncio.to_thread(root.record, aid)
+    if not rec:
+        raise SystemExit(f"add_lines: {aid} is not reachable from {home(root)}")
+    can = {**(rec.get("can") or {}), **add}
+    r = (await root.send([{"target": root.id, "payload": {
+        "type": "update_agent", "id": aid, "can": can}}]))[0]["result"]
+    if not isinstance(r, dict) or r.get("updated") is not True:
+        raise SystemExit(f"add_lines: update_agent {aid}.can={can} refused: {r}")
+    return can
+
+
 async def human(
     root,
     *,
@@ -453,18 +382,19 @@ async def human(
     answer: str = HUMAN_ANSWER,
     **meta,
 ) -> dict:
-    """Create THE HUMAN as an ordinary agent, both gate halves wired.
+    """Create THE HUMAN as an ordinary agent, with its line on each AI.
 
     ONE definition. Sixteen probes each writing their own `create_agent` for the
     person is sixteen copies to drift, and the wiring is the part that is easy to
-    get wrong: the AI and the human are SIBLINGS, so there is no baseline edge
-    between them and BOTH halves must be granted or the first task is refused at
-    ingress and the chain never starts (zero turns, a clean cap, nothing to
-    read).
+    get wrong: the AI and the human are SIBLINGS, so neither reaches the other by
+    position and siblings need a line each way, or the first task is refused and
+    the chain never starts (zero turns, a clean cap, nothing to read).
 
-    The probe still grants its AI `can_call: {"user": "*"}` and passes
-    `callable_by={"user": "*"}` to `connect` — that half belongs to the AI's own
-    record, which this helper does not own.
+    The AI's `user` line comes from `connect(can=…)` — it belongs to the AI's own
+    record, which this helper does not own. Every AI named here must already exist
+    (an agent writing a line on a missing id is refused): a probe whose AI names the
+    human makes the human first (`ai=[]`) and adds its line once the AI exists
+    (`human_line`).
     """
     # EVERY AI IT MAY TASK, not just one. A probe with a second session (a cold
     # agent, a reviewer) names its own ids; granting only `ai` would leave the
@@ -477,8 +407,7 @@ async def human(
         "id": agent_id,
         "answer": answer,
         "description": "The human this kernel belongs to.",
-        "can_call": {a: "*" for a in ais},
-        "callable_by": {**{a: "*" for a in ais}, "rest": "*", "web": "*"},
+        "can": {a: lines.ALL for a in ais},
         **meta,
     }
     r = (await root.send([{"target": root.id, "payload": payload}]))[0]["result"]

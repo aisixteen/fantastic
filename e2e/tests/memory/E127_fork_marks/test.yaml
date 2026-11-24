@@ -5,5 +5,6 @@ title: "mark and fork on a live agent (Python runtime): two forks of one mark bo
 runner: probe.py
 runtimes: [python]
 costs: free
+muted: "#170: the Python product keeps the old grant model; this probe drives it"
 limits:
   idle_seconds: 60

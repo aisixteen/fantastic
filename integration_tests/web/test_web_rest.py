@@ -55,6 +55,7 @@ async def _rest_roundtrip(binary, kernel_factory, parity_tmp, free_port, tag: st
         assert isinstance(r2.json(), dict), f"_reflect/web did not return a dict: {r2.text!r}"
 
 
+@pytest.mark.skip(reason="#170: Python product keeps the old grant model")
 @pytest.mark.asyncio
 async def test_web_rest_python(python_binary, python_kernel, parity_tmp, free_port):
     await _rest_roundtrip(python_binary, python_kernel, parity_tmp, free_port, "py")

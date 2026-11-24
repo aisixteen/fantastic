@@ -21,6 +21,6 @@ What it proves (details in `probe.py`'s docstring):
 
 ```sh
 cd src/lib/python
-uv run python ../../../e2e/run.py --only-free --id exec_jobs --lanes 3   # all three
+uv run python ../../../e2e/run.py --only-free --id exec_jobs --lanes 3
 RUNTIME=rust uv run python ../../../e2e/tests/kernel/E115_exec_jobs/probe.py
 ```

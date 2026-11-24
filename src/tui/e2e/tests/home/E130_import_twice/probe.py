@@ -1,12 +1,13 @@
 """E130 import_twice — a blueprint imported twice (#269).
 
-a) a hand-written blueprint `bp/` (squad > lead, scout; `lead` reaches `@memory`) and a
-   second store `memory2` to bind;
+a) a hand-written blueprint `bp/` (squad > scout, lead; `lead` holds lines on `scout`
+   and `@memory`) and a second store `memory2` to bind, both under `canvas_root`;
 b) `import_subtree` WITHOUT `approve` under `team_home`, `@memory` bound to `memory2`:
    `approval_required`, 3 agents, fresh `*_1` ids, `reaches` and `ports` named, and the
    agent count UNCHANGED (a preview creates nothing);
 c) the same call with `approve: true`: 3 imported, `*_1` ids, the parents right on disk,
-   the grants re-wired to the new ids, and `memory2` is `callable_by` the new `lead_1`;
+   the new lead holds lines on scout_1 and memory2; no target's record changes
+   (scout_1 holds no line, memory2's reflect is byte-equal);
 d) imported again under the same parent: `*_2` ids, copy 1 untouched; a field edited on
    copy 1 leaves copy 2 as it was (two independent copies);
 e) with `bind` omitted the call is refused `unbound_ports`, naming `@memory (memory)` and
@@ -20,10 +21,21 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.blueprint import PARENT, STORE, agent_ids, importing, record, send, world, write_team  # noqa: E402
+from _lib.blueprint import PARENT, STORE, agent_ids, exists, importing, record, send, world, write_team  # noqa: E402
 from _lib.canvas_live import Rig, verdict  # noqa: E402
 
 BIND = {"@memory": STORE}
+#: lead's lines as the blueprint writes them, on the new ids
+LEAD_LINES = {"call": ["*"]}, {"call": ["append", "read"]}
+
+
+def lines_of(scout: str) -> dict:
+    return {scout: LEAD_LINES[0], STORE: LEAD_LINES[1]}
+
+
+def snap(rig) -> str:
+    """`memory2`'s reflect, as bytes to compare."""
+    return json.dumps(send(rig, STORE, {"type": "reflect"}), sort_keys=True)
 
 
 def main() -> bool:
@@ -37,7 +49,8 @@ def main() -> bool:
         world(rig)
         write_team(rig, "bp")
         before = agent_ids(rig)
-        r["a0 the parent and the store to bind exist"] = PARENT in before and STORE in before
+        r["a0 the parent and the store to bind exist"] = PARENT in before and exists(rig, STORE)
+        store_0 = snap(rig)
 
         # b) the preview
         pre = importing(rig, "bp", PARENT, BIND)
@@ -46,7 +59,7 @@ def main() -> bool:
         r["b2 it plans three agents with fresh _1 ids"] = pre.get("agents") == 3 and pre.get("new_ids") == {"squad": "squad_1", "lead": "lead_1", "scout": "scout_1"}
         reaches = {x.get("id"): x for x in pre.get("reaches", [])}
         r["b3 it names what lead reaches and the port"] = (
-            sorted(reaches.get("lead_1", {}).get("can_call", [])) == [STORE, "scout_1"] and pre.get("ports") == BIND)
+            reaches.get("lead_1", {}).get("can") == [STORE, "scout_1"] and pre.get("ports") == BIND)
         r["b4 it created nothing"] = agent_ids(rig) == before
 
         # c) approved
@@ -58,10 +71,13 @@ def main() -> bool:
         info["parents_1"] = parents
         r["c3 parents are right on disk"] = parents == {"squad_1": PARENT, "lead_1": "squad_1", "scout_1": "squad_1"}
         lead = record(rig, "lead_1")
-        r["c4 lead's grants and store point at the new ids and the bound store"] = (
-            set(lead.get("can_call", {})) >= {"scout_1", STORE} and lead.get("memory_store_id") == STORE and "@memory" not in json.dumps(lead))
-        r["c5 scout is callable by the new lead"] = "lead_1" in record(rig, "scout_1").get("callable_by", {})
-        r["c6 the bound store gained the new lead"] = "lead_1" in send(rig, STORE, {"type": "reflect"}).get("callable_by", {})
+        info["lead_1"] = lead
+        r["c4 lead's lines and store point at the new ids and the bound store"] = (
+            lead.get("can") == lines_of("scout_1") and not any(k.startswith("@") for k in lead.get("can") or {})
+            and lead.get("memory_store_id") == STORE and "@memory" not in json.dumps(lead))
+        scout = record(rig, "scout_1")
+        r["c5 scout holds no line and nothing names lead_1"] = bool(scout) and not scout.get("can") and "lead_1" not in json.dumps(scout)
+        r["c6 the bound store's record is unchanged"] = snap(rig) == store_0
 
         # d) twice: two independent copies
         again = importing(rig, "bp", PARENT, BIND, approve=True)
@@ -69,8 +85,8 @@ def main() -> bool:
         r["d1 the second import has _2 ids"] = again.get("imported") == 3 and set(again.get("ids", {}).values()) == {"squad_2", "lead_2", "scout_2"}
         r["d2 the first copy is still there"] = {"squad_1", "lead_1", "scout_1"} <= set(agent_ids(rig))
         r["d3 the second copy is under the same parent"] = record(rig, "squad_2").get("parent_id") == PARENT
-        r["d4 the second copy has its own grants"] = (
-            set(record(rig, "lead_2").get("can_call", {})) >= {"scout_2", STORE} and "lead_2" in send(rig, STORE, {"type": "reflect"}).get("callable_by", {}))
+        r["d4 the second copy holds its own lines; the bound store is still unchanged"] = (
+            record(rig, "lead_2").get("can") == lines_of("scout_2") and snap(rig) == store_0)
         edit = send(rig, "kernel_state", {"type": "update_agent", "id": "lead_1", "description": "edited"})
         info["edit"] = edit
         end = time.time() + 10

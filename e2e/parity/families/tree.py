@@ -24,7 +24,7 @@ import re
 import sys
 import time
 
-from families import MEMORY, OPEN, ROOT_ID, VLLM, ai, ai_pair, call, save_kernel_log, vllm
+from families import ALL, MEMORY, OPEN, ROOT_ID, VLLM, ai, ai_pair, call, line_call, save_kernel_log, vllm
 from spec import CTX_RESERVE, CTX_WINDOW
 from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub
 
@@ -46,12 +46,15 @@ SCRIPT = [
 ]
 
 
-def roster(stub_url: str, cb: dict, interp: str) -> list:
+def roster(stub_url: str, interp: str) -> list:
+    """Every agent, created in order under `rest`: the AI pair LAST, so each line it
+    holds names an id that already exists. Nothing keeps a list of callers: the
+    legs reach the roster by position (`rest`) or by the `ws` line on `rest`."""
     return [
         ("runner", "exec_bridge.tools", dict(cwd=".", allowed=[rf"{re.escape(interp)} \S+"])),
         ("readings", "file_bridge.tools",
          dict(allow=["."], root="readings", description="Sensor readings — one integer per file.")),
-        ("kernel_store", "file_bridge.tools", dict(allow=["."], root=".", callable_by=cb)),
+        ("kernel_store", "file_bridge.tools", dict(allow=["."], root=".")),
         ("totals", "file_bridge.tools", dict(allow=["."], root=".")),
         # The same bundle with a FALSY argument — a different branch everywhere.
         ("totals2", "file_bridge.tools", dict(allow=["."], root=".", description="")),
@@ -72,8 +75,8 @@ def roster(stub_url: str, cb: dict, interp: str) -> list:
         *ai_pair("ai", VLLM,
                  ai(**vllm(stub_url, context_window=CTX_WINDOW), sampling={"x": 1, "y": None},
               output_reserve=CTX_RESERVE,
-              can_call={"readings": "*", "totals": "*", "runner": "*",
-                        "kernel_store": "*", ROOT_ID: "*"})),
+              can={"readings": ALL, "totals": ALL, "runner": ALL,
+                   "kernel_store": ALL, ROOT_ID: line_call("reflect")})),
     ]
 
 
@@ -86,16 +89,15 @@ def run(ctx) -> None:
     stub.start(OpenAIHandler)
     stub.set_chain("tree", SCRIPT)
 
-    cb = {"rest": "*", "web": "*", "ws": "*", "ai": "*"}
-    agents = roster(stub.base_url(), cb, sys.executable)
-    ids = [a[0] for a in agents] + ["ghost", "web", "rest", "ws"]
-    k = ctx.boot(reach=ids, port=ports.take("main"))
+    agents = roster(stub.base_url(), sys.executable)
+    # ids OUTSIDE `rest`'s tree the legs call; the roster lives under `rest`
+    k = ctx.boot(reach=["ghost", "web", "rest", "ws"], port=ports.take("main"))
     try:
         rec.json("root_boot_reflect_full",
                  call(k, k.root_id, {"type": "reflect", "detail": "full"}))
         for aid, hm, meta in agents:
             m = {"parent_id": k.home, "handler_module": hm, "id": aid,
-                 **OPEN, "callable_by": cb, **meta}
+                 **OPEN, **meta}
             rec.json(f"create_{aid}", k.create(**m))
         time.sleep(1.5)
 
@@ -136,7 +138,8 @@ def run(ctx) -> None:
             rec.json(f"root_readme_{key.replace('/', '__')}",
                      call(k, k.root_id, {"type": "reflect", "readme": key, "tree": "none"}))
 
-        for verb in ("list_agents", "ps", "ledger"):
+        rec.json("kernel_reflect_tree", call(k, "kernel", {"type": "reflect", "tree": "all"}))
+        for verb in ("ps", "ledger"):
             rec.json(f"kernel_{verb}", call(k, "kernel", {"type": verb}))
 
         # ── the scripted chain ──

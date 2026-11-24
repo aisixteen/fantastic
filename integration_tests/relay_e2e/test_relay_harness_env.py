@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.skip(reason="#763: cross-kernel peers parked")
+
 import relay_harness as rh
 
 

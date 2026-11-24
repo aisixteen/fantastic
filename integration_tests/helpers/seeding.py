@@ -2,16 +2,19 @@
 
 Every host runtime's CLI runs `fantastic_kernel <id> <verb> [k=v ...]` as a
 one-shot OPERATOR call against the workdir (no daemon up; the operator is
-ungated). We use that to create agents and write their grants, so the on-disk
+ungated). We use that to create agents and write their lines (`can`), so the on-disk
 format is whatever the runtime itself writes (`.fantastic/agent.yaml` for the
 root, nested `agents/<id>/agents/<child>/agent.yaml` below it). This avoids
 hand-rolling records that might diverge from the canonical shape, and it runs
 inside the container under `FANTASTIC_TARGET=container` (records owned by the
 container's uid).
 
-The kernel is DENY-ALL: every agent is stamped `{$self: "*"}` on both
-`can_call` and `callable_by`, and every other edge is an explicit grant on both
-ends. The seeds below grant exactly the edges the harness drives.
+Sealed by default: a fresh agent holds no line (`can` absent or `{}`) and
+reaches only its own tree; an agent with no line covering a target gets the
+unknown answer (`no agent '<id>'`), the same bytes as a missing id. The caller's
+`can` alone decides, capped by every ancestor whose tree does not hold the
+target; the target keeps no list. The seeds below write exactly the lines the
+harness drives, on the caller and on the cap.
 
 The trade-off: each seed step is a subprocess invocation (~50-200 ms
 overhead per call). For tests with a handful of agents that's fine.
@@ -165,15 +168,18 @@ def _render(v: Any) -> str:
     return str(v)
 
 
-#: The baseline every agent is stamped with, on BOTH `can_call` (egress) and
-#: `callable_by` (ingress): itself, nothing else. Every other edge is an explicit
-#: grant, written on both ends (the sender's `can_call` AND the target's
-#: `callable_by`) — the deny-all call gate.
-BASE: dict[str, Any] = {"$self": "*"}
+#: Every verb of a target: the line an old `"*"` grant became.
+ALL: dict[str, Any] = {"call": ["*"]}
+
+
+def call(*verbs: str) -> dict[str, Any]:
+    """A `call` line naming `verbs`."""
+    return {"call": list(verbs)}
+
 
 #: The WS leg every `KernelProc.call` rides (`seed_web_ws`). One leg is one
-#: principal: every frame the harness sends is performed AS this agent, so it is
-#: the id each target's `callable_by` must name.
+#: principal: every frame the harness sends is performed AS this agent, so its
+#: own `can` (and `web`'s, the cap) must cover each target it drives.
 DRIVER = "web_ws"
 
 #: The kernel's memory store (`seed_memory`), named by the root's `memory_store_id`.
@@ -211,7 +217,7 @@ def seed_update(
 ) -> dict[str, Any]:
     """One-shot `fantastic kernel update_agent id=<agent_id> k=v ...` — an
     OPERATOR write (ungated). Every named field is REPLACED, a dict field whole
-    (`seed_grant` merges one edge into a grant map). Raises on a refusal."""
+    (`seed_grant` merges one line into `can`). Raises on a refusal."""
     args = ["kernel", "update_agent", f"id={agent_id}"]
     args += [f"{k}={_render(v)}" for k, v in meta.items()]
     reply = _oneshot(binary, workdir, args, timeout)
@@ -220,25 +226,36 @@ def seed_update(
     return reply
 
 
+def seed_reflect(
+    binary: Launcher | Path, workdir: Path, agent_id: str = "kernel", *, timeout: float = 15.0, **args: Any
+) -> dict[str, Any]:
+    """One-shot `fantastic <agent_id> reflect k=v ...` — an OPERATOR read (no
+    daemon up): the whole reply, `can` and every field included."""
+    reply = _oneshot(binary, workdir, [agent_id, "reflect", *(f"{k}={_render(v)}" for k, v in args.items())], timeout)
+    if not isinstance(reply, dict):
+        raise RuntimeError(f"reflect {agent_id}: not an object: {reply!r}")
+    return reply
+
+
 def seed_grant(
     binary: Launcher | Path,
     workdir: Path,
     holder: str,
-    field: str,
-    grants: dict[str, Any],
+    line_target: str,
+    line: dict[str, Any],
     *,
     timeout: float = 15.0,
 ) -> None:
-    """Add `grants` (`{key: "*" | [verbs]}`) to `holder`'s grant map `field`
-    (`can_call` or `callable_by`): read the record (`list_agents`), merge, write the
-    map back WHOLE — `update_agent` replaces a dict field, so this is how one edge
-    is added without dropping the others."""
-    listed = _oneshot(binary, workdir, ["kernel", "list_agents"], timeout)
-    rec = next((a for a in listed.get("agents") or [] if a.get("id") == holder), None)
-    if rec is None:
-        raise RuntimeError(f"seed_grant: no agent {holder!r} in {listed}")
-    merged = {**(rec.get(field) or {}), **grants}
-    seed_update(binary, workdir, holder, timeout=timeout, **{field: merged})
+    """Give `holder` the line `line` (`{call: [...]}`, `{update: [...]}` or
+    `{create: {who, what}}`) on `line_target`: read the record (operator
+    `reflect`), set `can[line_target]`, write `can` back WHOLE — `update_agent`
+    replaces a dict field, so this is how one line is added without dropping the
+    others. The operator may name an id that does not exist yet."""
+    rec = seed_reflect(binary, workdir, holder, timeout=timeout)
+    if rec.get("id") != holder:
+        raise RuntimeError(f"seed_grant: no agent {holder!r}: {rec}")
+    merged = {**(rec.get("can") or {}), line_target: line}
+    seed_update(binary, workdir, holder, timeout=timeout, can=merged)
 
 
 def seed_store(binary: Path, workdir: Path) -> None:
@@ -289,8 +306,10 @@ def seed_web(binary: Path, workdir: Path, port: int) -> None:
     (`seed_memory`) FIRST: the seeded tree must reach disk for the spawned daemon
     to load, and the daemon will not start without a memory store.
 
-    `web` mounts its legs' routes by calling their `get_routes` AS ITSELF at boot,
-    so it reaches its own subtree (`$subtree`); each leg accepts its `$parent`."""
+    `web` holds no line: it mounts its legs' routes by calling their
+    `get_routes` AS ITSELF at boot, and its legs are in its own tree (position).
+    A line `web` needs on an agent outside its tree (the cap on a leg's line, a
+    proxied agent) is added with `seed_grant`."""
     seed_store(binary, workdir)
     seed_memory(binary, workdir)
     reply = seed_create(
@@ -299,10 +318,17 @@ def seed_web(binary: Path, workdir: Path, port: int) -> None:
         handler_module="web.tools",
         agent_id="web",
         port=port,
-        can_call={**BASE, "$subtree": "*"},
     )
     if "error" in reply:
         raise RuntimeError(f"web seed failed: {reply}")
+
+
+def _leg_lines(binary: Launcher | Path, workdir: Path, reach: dict[str, Any] | None) -> None:
+    """The cap on a leg's lines: `web` (the leg's parent) gets the same line on
+    every target of `reach` outside its own tree. `web` itself is in its tree."""
+    for target, line in (reach or {}).items():
+        if target != "web":
+            seed_grant(binary, workdir, "web", target, line)
 
 
 def seed_web_ws(binary: Path, workdir: Path, *, reach: dict[str, Any] | None = None) -> None:
@@ -315,12 +341,10 @@ def seed_web_ws(binary: Path, workdir: Path, *, reach: dict[str, Any] | None = N
     open it consciously; a test exercising a sealed leg sets the rule on the agent
     it cares about.
 
-    The leg performs every frame AS ITSELF, so it is granted, both halves: it
-    reaches the root (`*` — the kernel verbs `create_agent`/`update_agent`, reflect,
-    the connect-time watch) and every id in `reach` (`{id: "*" | [verbs]}`); the
-    root accepts it. A target in `reach` must name `DRIVER` in its own
-    `callable_by` (set where that target is created)."""
-    root = root_id(binary, workdir)
+    The leg performs every frame AS ITSELF and holds exactly the lines of `reach`
+    (`{id: line}`, e.g. `{"js_kernel": ALL}`); `web` gets the same lines (the cap:
+    those targets are outside web's tree). Nothing is written on the root or on
+    any target. With no `reach` the leg reaches only its own tree."""
     reply = seed_create(
         binary,
         workdir,
@@ -328,23 +352,24 @@ def seed_web_ws(binary: Path, workdir: Path, *, reach: dict[str, Any] | None = N
         agent_id=DRIVER,
         parent_id="web",
         ingress_rule="allow_all_ingress",
-        can_call={**BASE, root: "*", **(reach or {})},
-        callable_by={**BASE, "$parent": "*"},
+        **({"can": dict(reach)} if reach else {}),
     )
     if "error" in reply:
         raise RuntimeError(f"web_ws seed failed: {reply}")
-    seed_grant(binary, workdir, root, "callable_by", {DRIVER: "*"})
+    _leg_lines(binary, workdir, reach)
 
 
-def seed_web_rest(binary: Path, workdir: Path, agent_id: str = "rest") -> str:
+def seed_web_rest(
+    binary: Path, workdir: Path, agent_id: str = "rest", *, reach: dict[str, Any] | None = None
+) -> str:
     """Persist a `web_rest` agent as a child of `web`. Contributes
     `POST /<self>/<target>` (verb in body) + `GET /<self>/_reflect`
     routes the host mounts at boot. Returns the agent id.
 
     Seeded EXPLICITLY OPEN (`ingress_rule=allow_all_ingress`) — a bare `web_rest`
     is sealed and answers every harness POST `403 {reason:"unauthorized"}`. Like
-    `web_ws` it acts AS ITSELF: it reaches the root and the root accepts it."""
-    root = root_id(binary, workdir)
+    `web_ws` it acts AS ITSELF and holds exactly the lines of `reach`; `web` gets
+    the same lines (the cap)."""
     reply = seed_create(
         binary,
         workdir,
@@ -352,12 +377,11 @@ def seed_web_rest(binary: Path, workdir: Path, agent_id: str = "rest") -> str:
         agent_id=agent_id,
         parent_id="web",
         ingress_rule="allow_all_ingress",
-        can_call={**BASE, root: "*"},
-        callable_by={**BASE, "$parent": "*"},
+        **({"can": dict(reach)} if reach else {}),
     )
     if "error" in reply:
         raise RuntimeError(f"web_rest seed failed: {reply}")
-    seed_grant(binary, workdir, root, "callable_by", {agent_id: "*"})
+    _leg_lines(binary, workdir, reach)
     return reply.get("id", agent_id)
 
 

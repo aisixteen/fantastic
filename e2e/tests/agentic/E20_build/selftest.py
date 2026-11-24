@@ -51,6 +51,7 @@ from pathlib import Path
 # file into a folder can never silently break its imports again.
 sys.path.insert(0, str(next(d for d in Path(__file__).resolve().parents
                             if (d / ".e2e-root").exists())))
+from helpers import lines  # noqa: E402
 from helpers.kernel import home
 from helpers import verdict
 
@@ -175,8 +176,8 @@ async def scenario(name: str, own: bool) -> bool:
             "id": "totals",
             "root": ".",
             "ingress_rule": "allow_all_ingress",
-            # accept the running program's writes, from EITHER leg they might arrive on
-            "callable_by": {EXECUTOR_LEG: "*", OWN_LEG: "*"},
+            # the running program's writes arrive from EITHER leg: each holds its own
+            # line on `totals` (`wire_executor_leg`, and OWN_LEG below)
         }}]))[0]["result"]
     # The operator's half: the command runner. Wired in BOTH scenarios — in `own` it
     # sits there idle exactly as it does in the live runs this reproduces.
@@ -184,7 +185,7 @@ async def scenario(name: str, own: bool) -> bool:
 
     if own:
         # THE MODEL'S HALF, as a live model actually builds it: its own exec worker,
-        # its own ingress, its own command gate. The probe's picker must find THIS one
+        # its own lines, its own command gate. The probe's picker must find THIS one
         # even though the operator's leg exists and is perfectly usable.
         execution_id = (await root.send([{"target": root.id, "payload": {
                 "type": "create_agent",
@@ -194,10 +195,9 @@ async def scenario(name: str, own: bool) -> bool:
                 "cwd": os.getcwd(),
                 "inherit_env": ["PATH", "HOME"],
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
                 # the SHELL-JOINED line: a path that needs quoting (Windows') is quoted
                 "allowed": [rf"{re.escape(shlex.quote(sys.executable))} \S+"],
-                "can_call": {"totals": "*"},
+                "can": {"totals": lines.call("write", "read")},
             }}]))[0]["result"]["id"]
     else:
         execution_id = EXECUTOR_LEG

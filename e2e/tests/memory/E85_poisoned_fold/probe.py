@@ -36,7 +36,7 @@ async def main():
     try:
         real, wrong = secrets.token_hex(4), secrets.token_hex(4)
         plant_fillers(N, extra={1: f">> checksum: {real}"}, pad_to=3000)
-        await M.files(root, ["ai"])
+        await M.files(root)
         conn = await M.agent(root, core, BK, "ai")
         await drive(conn, f"Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN. Then {DONE}",
                     client_id="ai", via="user")

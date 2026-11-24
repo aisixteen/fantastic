@@ -3,5 +3,6 @@ group: memory
 title: "a SEEDED memory store (conversation with folds and a clear-fold, grants, the kernel's rows incl. a dead letter) comes back whole on kernel_start"
 runner: probe.py
 costs: free
+muted: "#170: the Python product keeps the old grant model; this probe drives it"
 limits:
   idle_seconds: 60

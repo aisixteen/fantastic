@@ -6,8 +6,10 @@ exec_bridge — E43's runner trio) with the kernel verbs every AI has, and delet
 its task is checked.
 
 THE HARNESS CREATES NO GROUPS. It builds the queue (`queue`, a file agent over the
-copied exercises), opens the memory and key doors for the worker ids the master may
-use, creates the master with its recipe as `pre_system_prompt`
+copied exercises), creates the master with its recipe as `pre_system_prompt` and its
+`create` line on itself (`who` the group prefix; a worker's `can` forced to the
+memory store, the queue and the key store, so the master hands a worker no line it
+does not hold)
 (`helpers.groups.master_prompt`), says "begin", and then only watches: it samples the
 live agent ids on a timer into a `GroupLedger`.
 
@@ -40,7 +42,8 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend  # noqa: E402
-from helpers import Limits, connect, creds, memory, verdict  # noqa: E402
+from helpers import Limits, add_lines, connect, creds, lines, memory, probe_agent, relay, verdict  # noqa: E402
+from helpers.lines import is_unknown  # noqa: E402
 from helpers.ai import IDLE_END, QuietWatch  # noqa: E402
 from helpers.groups import PRACTICE, GroupLedger, group_of, make_queue, master_prompt, wall_seconds  # noqa: E402
 from helpers.kernel import home, open_kernel  # noqa: E402
@@ -101,11 +104,31 @@ def worker_ids() -> list[str]:
 
 def worker_record() -> dict:
     """The fields every worker gets verbatim: the plug's (model aside — the master
-    sets the worker's model), the memory store and the window, and the doors the
-    worker needs whatever its group (memory, the key store)."""
+    sets the worker's model), the memory store and the window. Its `can` is not
+    among them: the master's `create` line forces it (`worker_can`)."""
     rec = {k: v for k, v in BK.record(role="worker").items() if k != "model"}
-    base = {"$parent": "*", **({creds.CREDS: creds.GET} if BK.key_ref else {})}
-    return {**rec, "context_window": CTX, **memory.ai_memory_meta(base)}
+    return {**rec, "context_window": CTX, "memory_store_id": memory.MEMORY}
+
+
+def worker_can() -> dict:
+    """The `can` every worker carries, forced by the master's `create` line: the
+    memory store its conversation lives in, the queue it reports into, and the key
+    (`creds.creator_line`) when the plug has one. No line on the master (O14): one
+    level per target, and the master's own target is its `create` line."""
+    key = creds.creator_line(BK.record(role="worker").get("handler_module"))["can"] if BK.key_ref else {}
+    return {memory.MEMORY: lines.ALL, QUEUE: lines.ALL, **key}
+
+
+def master_lines() -> dict:
+    """The master's `create` line on ITSELF: `g*` ids, of the three bundles a group is,
+    with exactly the fields the recipe sets (every field a create carries must be
+    named by the line)."""
+    worker = BK.record(role="worker").get("handler_module")
+    return {MASTER: lines.create(
+        who=(f"{PREFIX}*",),
+        what={worker: {"*": "*", "can": worker_can()},
+              "file_bridge.tools": {"root": "*", "allow": "*"},
+              "exec_bridge.tools": {"cwd": "*", "inherit_env": "*", "allowed": "*"}})}
 
 
 def run_suite(cwd: str) -> tuple[bool, str]:
@@ -119,8 +142,7 @@ def run_suite(cwd: str) -> tuple[bool, str]:
 
 
 async def live_ids(root) -> set[str]:
-    r = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]["result"]
-    return {a["id"] for a in (r or {}).get("agents") or []}
+    return set(await asyncio.to_thread(root.agent_ids))
 
 
 async def rows(root, aid) -> list[dict]:
@@ -165,7 +187,7 @@ async def main() -> None:
     for role, model in BK.roles_used().items():
         print(f"    role {role:<8} -> {model}")
     print("=" * (W + 4))
-    root, core, close = await open_kernel("groups_", reach=[QUEUE, MASTER, "cli"])
+    root, core, close = await open_kernel("groups_", reach=[QUEUE, MASTER])
     try:
         workroot = Path(os.getcwd())
         tasks = make_queue(TASKS, workroot)
@@ -175,26 +197,35 @@ async def main() -> None:
             "type": "create_agent", "parent_id": home(root), "id": QUEUE,
             "handler_module": "file_bridge.tools", "allow": ["."], "root": queue_dir,
             "ingress_rule": "allow_all_ingress",
-            "callable_by": {MASTER: "*", "rest": "*", "web": "*"},
             "description": "The task queue: one folder per task, README.task.md in each.",
         }}]))[0]["result"]
         assert not (made or {}).get("error"), made
-        # THE DOORS for the workers the master may create — the stores' halves only
-        # (each worker's own `can_call` is the master's to write, from its prompt).
-        for wid in worker_ids():
-            await memory.open_ingress(root, memory.MEMORY, wid)
-            if BK.key_ref:
-                await creds.open_store(root, wid)
-
         prompt = master_prompt(MAX_GROUPS, wmodel, queue_dir, PREFIX,
                                worker_record=worker_record(), test_command=TEST_CMD)
         extra = {"caching": "provider_cache"} if BK.name == "anthropic" else {}
         conn = await connect(
             root, core, BK,
-            can_call={"kernel": ["create_agent", "delete_agent"], QUEUE: "*", "cli": "*"},
+            # its `create` line names ITSELF, so it is written once it exists
+            can={QUEUE: lines.ALL},
             record=BK.record(role="master", pre_system_prompt=prompt, **extra),
             limits=Limits.from_env(os.environ),
         )
+        await add_lines(root, conn.id, master_lines())
+        # THE PREFIX IS THE BOUND OF ITS RIGHT (harness, before the model): a hand
+        # holding the master's lines creates a `g…` agent under the master, and an
+        # id outside `g*` is the unknown answer.
+        await probe_agent(root, "master_hand", can=(await asyncio.to_thread(root.record, conn.id)).get("can") or {})
+        bad = await relay(root, "master_hand", "kernel", {
+            "type": "create_agent", "parent_id": conn.id, "id": "x1_editor",
+            "handler_module": "file_bridge.tools", "root": queue_dir, "allow": ["."]})
+        assert is_unknown(bad, conn.id), f"a create outside `{PREFIX}*` under the master: {bad}"
+        good = await relay(root, "master_hand", "kernel", {
+            "type": "create_agent", "parent_id": conn.id, "id": f"{PREFIX}0_editor",
+            "handler_module": "file_bridge.tools", "root": queue_dir, "allow": ["."]})
+        assert not good.get("error") and not good.get("relay"), f"a `{PREFIX}*` create under the master: {good}"
+        for gone_id in (f"{PREFIX}0_editor", "master_hand"):
+            gone = (await root.send([{"target": root.id, "payload": {"type": "delete_agent", "id": gone_id}}]))[0]["result"]
+            assert not gone.get("error"), f"delete {gone_id}: {gone}"
         ledger = GroupLedger(PREFIX)
         t0 = time.monotonic()
 

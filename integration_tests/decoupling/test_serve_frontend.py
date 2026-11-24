@@ -29,7 +29,9 @@ from helpers.seeding import (
     expected_bundle_sha,
     frontend_zip,
     pull_member_from_zip,
+    ALL,
     seed_create,
+    seed_grant,
     seed_web,
 )
 
@@ -66,6 +68,9 @@ async def _serves_frontend_bundle_via_file_bridge(
         root="servedir",
         ingress_rule="allow_all_ingress",
     )
+    # `web` serves `/js_kernel/file/...` by calling `js_kernel` AS ITSELF; the
+    # file agent sits at root level, outside web's tree, so web holds a line on it.
+    seed_grant(binary, workdir, "web", "js_kernel", ALL)
     await spawn(workdir, port)
 
     url = f"http://127.0.0.1:{port}/js_kernel/file/bundle.min.js"
@@ -84,6 +89,7 @@ async def _serves_frontend_bundle_via_file_bridge(
     )
 
 
+@pytest.mark.skip(reason="#170: Python product keeps the old grant model")
 @pytest.mark.asyncio
 async def test_python_serves_frontend_bundle(
     python_binary, python_kernel, parity_tmp, free_port

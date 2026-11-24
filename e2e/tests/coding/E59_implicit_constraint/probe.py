@@ -58,7 +58,7 @@ TASK = (
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_impl_", reach=[FB, "notes", "ai_recency", "ai_fold", "cli", "user"]
+        prefix="coding_impl_", reach=[FB, "notes", "ai_recency", "ai_fold", "user"]
     )
     try:
         code = f"PRJ-{secrets.token_hex(3).upper()}"
@@ -82,7 +82,7 @@ async def main():
                         f"nightly sync; latency nominal.\n{FILLER[h:]}")
             Path(f"filler_{i}.txt").write_text(body + "\n")
         assert code not in TASK and host not in TASK
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         recency, facts = await both_arms(root, core, BK, FB, TASK, "report.md", arms=FOLD_ARMS)
 
         def score(a):

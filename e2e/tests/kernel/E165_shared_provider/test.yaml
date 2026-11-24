@@ -3,7 +3,7 @@
 # over web_rest.
 id: shared_provider
 group: kernel
-title: "two chats on one provider (#632): each chat's request carries its own knobs (temperature, max_tokens, top_k), the creator admits both on the provider's callable_by, the provider's KV table sees both conversations; the provider stays when its chats go, and a change to it reaches its chat's next request"
+title: "two chats on one provider (#632): each chat's request carries its own knobs (temperature, max_tokens, top_k), each chat holds its own line on the provider (the provider's record unchanged, a writer cannot hand out a line it does not hold), the provider's KV table sees both conversations; the provider stays when its chats go, and a change to it reaches its chat's next request"
 runner: probe.py
 runtimes: [rust]
 costs: free

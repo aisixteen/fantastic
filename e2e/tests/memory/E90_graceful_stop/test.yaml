@@ -4,5 +4,6 @@ group: memory
 title: "a call in flight at kernel_stop settles cancelled, lands in the store, and waits in the dead letters until acked"
 runner: probe.py
 costs: free
+muted: "#170: the Python product keeps the old grant model; this probe drives it"
 limits:
   idle_seconds: 60

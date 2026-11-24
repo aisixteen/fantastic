@@ -21,7 +21,7 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, human, verdict
+from helpers import Limits, connect, drive, human, human_line, lines, verdict
 from helpers.facts_arm import store_rows
 from helpers.kernel import open_kernel, home
 
@@ -36,7 +36,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_fanout_", reach=[FB, "notes", "ai", "cli", "user"]
+        prefix="coding_fanout_", reach=[FB, "notes", "ai", "user"]
     )
     try:
         words = [secrets.token_hex(2) for _ in range(5)]
@@ -49,13 +49,11 @@ async def main():
                 "type": "create_agent", "parent_id": home(root), "id": FB,
                 "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent", "parent_id": home(root), "id": "notes",
                 "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
         ):
             r = await _call(root, root.id, payload)
@@ -70,12 +68,12 @@ async def main():
             f"When it is written, {DONE}."
         )
         # THE HUMAN who wants the work done — the task comes FROM here.
-        await human(root)
+        await human(root, ai=[])
         conn = await connect(
-            root, core, BK, can_call={FB: "*", "notes": "*", "cli": "*", "user": "*"},
-            callable_by={"user": "*"},
+            root, core, BK, can={FB: lines.ALL, "notes": lines.ALL, "user": lines.ALL},
             limits=Limits.from_env(os.environ), record={"file_bridge_id": FB},
         )
+        await human_line(root, conn.id)
         await drive(conn, task, client_id="fan", via="user")
         await conn.close()
         # the batch tag lives in the DELIVERED reply turn — read the kernel's

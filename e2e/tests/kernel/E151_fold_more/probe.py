@@ -57,6 +57,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers import oslayer
+from helpers.lines import ALL, GET, PROVIDER
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
 from helpers.verdict import verdict
 from mocks.anthropic import AnthropicMock
@@ -153,8 +154,7 @@ def main() -> int:
     for n in range(MANY_N):
         (work / "files" / MANY / (f"n{n:04d}-" + "a" * 124)).write_text("")
     os.environ[KEY_VAR] = KEY  # the creds store reads it at boot (env backend)
-    hk = HostKernel(spec, work, reach=[*AIS, FILES, EXEC, "memory", "creds"]
-                    + [f"prov_{a}" for a in AIS]).boot()
+    hk = HostKernel(spec, work).boot()
     root = hk.root_id
     # AI_T is the marked chat: it runs on the anthropic wire, where a cache mark shows
     mocks = {a: (AnthropicMock if a == AI_T else ThinkingVllmMock)(model=MODEL).start() for a in AIS}
@@ -165,11 +165,6 @@ def main() -> int:
         print(f"  {'ok ' if cond else 'BAD'} {what}", flush=True)
         if not cond:
             bad.append(what)
-
-    def callable_by(aid: str) -> dict:
-        r = hk.send("kernel", {"type": "list_agents"})
-        rec = next(a for a in r.get("agents") or [] if a.get("id") == aid)
-        return dict(rec.get("callable_by") or {})
 
     def turns_at_least(m, n: int, bound: float = 90) -> list[dict]:
         end = time.monotonic() + bound
@@ -224,23 +219,15 @@ def main() -> int:
     allt: list[dict] = []
     try:
         # ── wiring ────────────────────────────────────────────────────────────
-        r = hk.send(root, {"type": "update_agent", "id": "memory",
-                           "callable_by": {**callable_by("memory"),
-                                           **{a: "*" for a in AIS},
-                                           **{f"prov_{a}": "*" for a in AIS}}})
-        need(r.get("updated") is True, f"memory accepts the chats: {str(r)[:200]}")
-        users = {a: "*" for a in AIS}
+        # every line is the caller's own: the chats', and each provider's
         rec = hk.create(parent_id="rest", handler_module="file_bridge.tools", id=FILES,
-                        root="files", allow=["."], ingress_rule="allow_all_ingress",
-                        callable_by={"$self": "*", "$parent": "*", **users})
+                        root="files", allow=["."], ingress_rule="allow_all_ingress")
         need(rec.get("id") == FILES, f"create {FILES}: {str(rec)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="exec_bridge.tools", id=EXEC,
                         ingress_rule="allow_all_ingress", cwd=str(work / "run"),
-                        env=oslayer.child_env(), allowed=ALLOWED,
-                        callable_by={"$self": "*", "$parent": "*", **users})
+                        env=oslayer.child_env(), allowed=ALLOWED)
         need(rec.get("id") == EXEC, f"create {EXEC}: {str(rec)[:200]}")
-        can = {"$self": "*", "memory": "*", FILES: "*", EXEC: "*"}
-        by = {"$self": "*", "$parent": "*", "rest": "*"}
+        can = {"memory": ALL, FILES: ALL, EXEC: ALL}
         for aid, caching in ((AI_T, "provider_cache"), (AI_V, None),
                              (AI_N, "none"), (AI_U, None)):
             prov = f"prov_{aid}"
@@ -249,29 +236,26 @@ def main() -> int:
             if aid == AI_T:
                 r = hk.send(root, {"type": "update_agent", "id": "creds",
                                    "refs": {"anthropic": {"host": mocks[aid].host,
-                                                          "env": {"api_key": KEY_VAR}}},
-                                   "callable_by": {**callable_by("creds"), prov: ["get"]}})
+                                                          "env": {"api_key": KEY_VAR}}}})
                 need(r.get("updated") is True, f"creds: the ref: {str(r)[:200]}")
                 rec = hk.create(parent_id="rest", handler_module="anthropic_backend.tools", id=prov,
                                 endpoint=mocks[aid].url,
                                 credentials={"store": "creds", "ref": "anthropic"},
                                 model=MODEL, context_window=262144,
                                 memory_store_id="memory",
-                                can_call={"$self": "*", "memory": "*", "creds": ["get"]},
-                                callable_by={"$self": "*", "$parent": "*", aid: "*"})
+                                can={"memory": ALL, "creds": GET})
             else:
                 rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=prov,
                                 endpoint=mocks[aid].url, model=MODEL,
                                 context_window=262144, kv_slots=4, kv_overflow="evict",
                                 memory_store_id="memory",
-                                can_call={"$self": "*", "memory": "*"},
-                                callable_by={"$self": "*", "$parent": "*", aid: "*"})
+                                can={"memory": ALL})
             need(rec.get("id") == prov, f"create {prov}: {str(rec)[:200]}")
             extra = {"caching": caching} if caching else {}
             rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
                             provider_id=prov, model=MODEL, max_tokens=8192,
                             context_window=262144, memory_store_id="memory", **extra,
-                            can_call={**can, prov: ["complete", "watch"]}, callable_by=by)
+                            can={**can, prov: PROVIDER})
             need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")
 
         # ══ T · provider_cache, a thinking model: a thought by id ═════════════

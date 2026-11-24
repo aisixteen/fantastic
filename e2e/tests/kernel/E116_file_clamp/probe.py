@@ -1,7 +1,8 @@
 """kernel/file_clamp — file_bridge's clamp and allow list over REST. NO MODEL.
 
-The kernel's own `file_bridge` on the PACKAGED host of `RUNTIME` (python |
-rust), every call through `web_rest`, its `changed` events over the `ws` face. The
+The kernel's own `file_bridge` on the PACKAGED rust host, every call through
+`web_rest`, its `changed` events over the `ws` face (`ws` reaches `fb` by its
+seeded `rest` line). The
 bridge serves `box/` (root) and exposes `pub` and `bin` (allow):
 
   1. escapes refused, nothing leaked: `..` out of the root, `..` to an unexposed
@@ -43,7 +44,6 @@ from helpers.verdict import verdict
 
 REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
-GRANTS = {"$self": "*", "$parent": "*", "ws": "*"}
 SECRET = "secret-in-root-not-exposed"
 OUTSIDE = "outside-the-root-but-in-the-running-dir"
 FOREIGN = "foreign-file-outside-the-running-dir"
@@ -93,7 +93,7 @@ def main() -> int:
     os.symlink(foreign, box / "pub/out_link")  # out of the root (and the running dir)
     os.symlink("../secret.txt", box / "pub/in_link")  # inside the root, unexposed
     os.symlink("a.txt", box / "pub/ok_link")  # stays inside the exposed area
-    hk = HostKernel(spec, work, reach=["fb"]).boot()
+    hk = HostKernel(spec, work).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -117,7 +117,7 @@ def main() -> int:
     try:
         rec = hk.create(parent_id="rest", handler_module="file_bridge.tools", id="fb",
                         root="box", allow=["pub", "bin"],
-                        ingress_rule="allow_all_ingress", callable_by=GRANTS)
+                        ingress_rule="allow_all_ingress")
         need(rec.get("id") == "fb", f"create fb: {str(rec)[:200]}")
         r = fb({"type": "read", "path": "pub/a.txt"})
         need([x.get("text") for x in r.get("lines") or []] == ["alpha", "beta"],

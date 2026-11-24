@@ -46,11 +46,11 @@ def task(i):
 
 
 async def main():
-    root, core, close = await open_kernel(prefix="coding_paging_", reach=[FB, "notes", "ai_recency", "ai_fold", "cli", "user"])
+    root, core, close = await open_kernel(prefix="coding_paging_", reach=[FB, "notes", "ai_recency", "ai_fold", "user"])
     try:
         toks = {i: secrets.token_hex(4) for i in range(N)}
         plant_fillers(N, extra={i: f">> checksum: {toks[i]}" for i in range(N)}, pad_to=2500)
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         ask = 3
         final = (f"FINAL: what was the checksum in TASK {ask}'s file? Write `final.md` through `notes` with the "
                  f"single line `checksum: <value>`. Then {DONE}.")

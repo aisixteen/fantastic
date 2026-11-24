@@ -65,11 +65,11 @@ def planted_reads(mint) -> list[dict]:
 
 
 async def main():
-    root, core, close = await open_kernel(prefix="coding_nest_", reach=[FB, "notes", "ai_recency", "ai_fold", "cli", "user"])
+    root, core, close = await open_kernel(prefix="coding_nest_", reach=[FB, "notes", "ai_recency", "ai_fold", "user"])
     try:
         marker = secrets.token_hex(4)
         plant_fillers(N, marker_in=2, marker=marker, pad_to=4000)
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         # THE PAST, PLANTED — each arm gets its own copy, under its own id.
         for aid, _strategy, _extra in FOLD_ARMS:
             await plant_store(core, root, aid, planted_reads(root.ctx.mint_id), band=FIT_MANY)

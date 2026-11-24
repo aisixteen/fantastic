@@ -13,8 +13,11 @@ three.
 THE ONE REMAINING LIMIT, stated rather than worked around:
 
   * NO SENDER IMPERSONATION. `web_rest` carries no "act as", so every send is
-    from the surface agent (`rest`) — an AGENT, gated, needing each target
-    granted explicitly. There is no wildcard target token, by decision.
+    from the surface agent (`rest`) — an AGENT, gated like any other. `rest` is
+    the test's operator BY ITS SEEDED LINES: it reaches its own tree by position
+    and holds a written `create` line on itself, so everything a probe creates
+    under it is its to create, update, delete and hand lines out on. A target is
+    never a wildcard.
 
 Fixtures are NOT bespoke: `memory` is the shipped `file_bridge` and `compute`
 the shipped `exec_bridge` on every runtime. The three stateful roles come from
@@ -40,12 +43,7 @@ import urllib.request
 from pathlib import Path
 
 from . import artifacts
-from helpers import creds, memory, oslayer
-
-#: The only stamped edge is `$self` — every other edge is an explicit grant.
-BASE = {"$self": "*"}
-#: `*` covers every verb (there is no privileged list).
-ROOT_VERBS = "*"
+from helpers import creds, lines, memory, oslayer
 
 #: The HTTP header carrying a caller-chosen execution id. The credential
 #: already rides `X-Fantastic-Auth`; dispatch metadata belongs on the carrier
@@ -159,16 +157,23 @@ def _dump(rec: dict) -> str:
 class HostKernel:
     """A spawned kernel, reachable over REST."""
 
-    def __init__(self, spec: dict, workdir: Path, reach: list[str] | None = None):
-        """`reach` — every agent id the driver will need to call.
+    def __init__(self, spec: dict, workdir: Path, reach: list[str] | None = None,
+                 root_verbs: list[str] | None = None, watch_root: bool = False):
+        """`reach` — the ids OUTSIDE `rest`'s tree that the legs call.
 
-        Granted ON THE TREE, before the daemon starts, which is the only way an
-        HTTP driver can hold authority: it arrives as the `rest` agent, and an
-        agent may not raise its own (POSTing `update_agent` on `rest` would be a
-        SELF-GRANT, which every runtime refuses).
+        `watch_root` — `ws` (and `web`, its cap) also hold `watch` on the root, so
+        a state stream subscribed on the root shows the root's own events (a
+        kernel verb such as `update_agent` is the root's), not only `rest`'s tree.
 
-        The ids are all known up front — the scenario names its roster — so
-        declaring them costs nothing and keeps authority flowing downward.
+        `root_verbs` — root BUNDLE verbs (`kernel_state.tools`, e.g.
+        `reload_bundle`) `rest` calls on the root, added to the `reflect` line
+        `rest` and `web` (which caps it) hold there. Kernel verbs need no line.
+
+        Written into the legs' own `can` by the seed, before the daemon starts:
+        that is the only way an HTTP driver can hold a line there. It arrives as
+        the `rest` agent, and nothing changes its own `can` (never upward).
+        Agents under `rest` need no entry: `rest` reaches its own tree by
+        position, and `ws` by its seeded `rest` line.
         """
         self.cmd = spec["cmd"]
         self.root_id = spec["root_id"]
@@ -178,6 +183,8 @@ class HostKernel:
         self.env = {**os.environ, **(spec.get("env") or {})}
         self.workdir = workdir
         self.reach = list(reach or [])
+        self.root_verbs = list(root_verbs or [])
+        self.watch_root = watch_root
         self.port: int | None = None
         self.proc: subprocess.Popen | None = None
         #: The kernel's own stdout+stderr, on DISK — and NOT under `workdir`.
@@ -199,10 +206,10 @@ class HostKernel:
     def seed(self) -> int:
         """Write the faces the driver needs, before the daemon starts.
 
-        The root must name the driver on its INGRESS side explicitly: `rest` is
-        a GRANDCHILD (root → web → rest), and the root grants nothing beyond
-        `$self` — a create_agent succeeded while a reflect was refused until this
-        was added.
+        The seed is the operator: it may write lines naming ids that do not
+        exist yet. No record carries `callable_by`, `can_call`, `$self` or
+        `$subtree` (a record with either legacy field is refused at load). The
+        root carries no line: the root never caps.
         """
         port = free_port()
         # THE ROOT RECORD is written here: a lockless invocation (`reflect`)
@@ -216,70 +223,59 @@ class HostKernel:
 
         rest_dir = w / "agents/web/agents/rest"
         rest_dir.mkdir(parents=True, exist_ok=True)
-        # A REOPEN (`reopen_kernel`) boots on a tree a kernel already ran: the root
-        # and the stores carry the grants the probe wrote at runtime (an AI's
-        # ingress on `memory`), so only the FIRST seed writes them.
+        # A REOPEN (`reopen_kernel`) boots on a tree a kernel already ran: the
+        # stores carry what the probe wrote at runtime, so only the FIRST seed
+        # writes them.
         if not (rest_dir / "agents" / memory.MEMORY / "agent.yaml").exists():
             root = yaml.safe_load((w / "agent.yaml").read_text())
-            # THE `rest` LEG IS THE TEST'S OPERATOR.
-            # Every REST call is the leg, and a mutation must come from the
-            # operand's direct parent — so every agent a probe creates is the leg's
-            # child, and the leg writes their records (grants included). The root
-            # accepts the legs' kernel verbs and the web host's reads; nothing is
-            # stamped. The root is nobody's child, so only this seed can open it:
-            # the legs, the web host, and every declared id (an AI's kernel verbs
-            # need it too).
-            root["callable_by"] = {
-                **BASE, "rest": "*", "ws": "*", "web": "*",
-                **{t: "*" for t in self.reach if t != self.root_id},
-            }
             root["memory_store_id"] = memory.MEMORY
             (w / "agent.yaml").write_text(_dump(root))
             # THE KERNEL'S MEMORY STORE and THE CREDENTIAL STORE live UNDER THE
-            # LEG: an AI agent the leg creates is wired to them by the leg, which
-            # may write its own children's `callable_by`. The kernel writes its own
-            # rows as bookkeeping.
+            # LEG: `rest` reaches them by position, and hands an AI it creates
+            # the lines on them (its `create` line on itself is tree-wide). The
+            # kernel writes its own rows as bookkeeping.
             (rest_dir / "agents" / memory.MEMORY).mkdir(parents=True, exist_ok=True)
             (rest_dir / "agents" / memory.MEMORY / "agent.yaml").write_text(_dump(
-                memory.store_record("rest", callable_by={**BASE, "$parent": "*", "ws": "*", "web": "*"})))
+                memory.store_record("rest")))
             # THE RECORD STORE — the root loader discovers it (a file_bridge
             # rooted at its own `.fantastic`) and persists every record through it.
             (w / "agents" / RECORDS).mkdir(parents=True, exist_ok=True)
             (w / "agents" / RECORDS / "agent.yaml").write_text(_dump(
                 {"id": RECORDS, "handler_module": "file_bridge.tools",
                  "parent_id": self.root_id, "root": ".fantastic", "allow": ["."],
-                 "ingress_rule": "allow_all_ingress",
-                 "callable_by": {**BASE, "$parent": "*"}}))
+                 "ingress_rule": "allow_all_ingress"}))
             (rest_dir / "agents" / creds.CREDS).mkdir(parents=True, exist_ok=True)
             (rest_dir / "agents" / creds.CREDS / "agent.yaml").write_text(_dump(
-                {**creds.store_record("rest", creds.env_refs()), "callable_by": {**BASE, "$parent": "*"}}))
-        reach = {t: "*" for t in self.reach if t != self.root_id}
-        # `web` reads its legs' routes and serves /file/ AS ITSELF: it reaches the
-        # root, its legs and the declared ids; its legs accept their parent.
+                creds.store_record("rest", creds.env_refs())))
+        reach = {t: lines.ALL for t in self.reach if t not in (self.root_id, "kernel")}
+        # `reflect` on the root: kernel verbs sent to the root need no line, but
+        # `reflect` does. `web` holds it because it caps both legs (the root is
+        # outside web's tree); `rest` holds it so it can hand `DOCS` to an AI.
+        watch = ["watch"] if self.watch_root else []
+        docs = {self.root_id: lines.call("reflect", *watch)}
+        root_line = {self.root_id: lines.call("reflect", *self.root_verbs)}
+        web_root = {self.root_id: lines.call("reflect", *self.root_verbs, *watch)}
+        # `web` reads its legs' routes and serves /file/ AS ITSELF: its legs and
+        # everything under `rest` are its own tree (position).
         (w / "agents/web/agent.yaml").write_text(_dump(
             {"id": "web", "handler_module": "web.tools",
              "parent_id": self.root_id, "port": port,
-             # the ws leg watches through its host (forensics, `watch`)
-             "callable_by": {**BASE, "ws": "*"},
-             "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
-                          "rest": "*", "ws": "*", memory.MEMORY: "*", **reach}}))
-        # The WS leg — the EVENT face. Every ws frame is the LEG: it names each
-        # target by literal id (the probe's declared reach, created under `rest`).
+             "can": {**reach, **web_root}}))
+        # The WS leg — the EVENT face. Every ws frame is the LEG: one line on
+        # `rest` reaches every probe agent and both stores (a line reaches the
+        # target's tree); `web` does not cap it, `rest` is in web's tree.
         (w / "agents/web/agents/ws").mkdir(parents=True, exist_ok=True)
         (w / "agents/web/agents/ws/agent.yaml").write_text(_dump(
             {"id": "ws", "handler_module": "web_ws.tools", "parent_id": "web",
              "ingress_rule": "allow_all_ingress",
-             "callable_by": {**BASE, "$parent": "*"},
-             "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*", "web": "*",
-                          memory.MEMORY: "*", **reach}}))
-        # The REST leg — the test's operator: the root's kernel verbs, every one of
-        # its own children (`$subtree`), the declared ids.
+             "can": {**reach, **docs, "rest": lines.ALL}}))
+        # The REST leg — the test's operator: a written `create` line on ITSELF
+        # (position gives `call` only, a `create` line covers only what is
+        # strictly under its target, and only written lines are handed out).
         (rest_dir / "agent.yaml").write_text(_dump(
             {"id": "rest", "handler_module": "web_rest.tools", "parent_id": "web",
              "ingress_rule": "allow_all_ingress",
-             "callable_by": {**BASE, "$parent": "*"},
-             "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
-                          "$subtree": "*", **reach}}))
+             "can": {**reach, **root_line, "rest": lines.create()}}))
         return port
 
     def boot(self) -> "HostKernel":
@@ -392,15 +388,28 @@ class HostKernel:
             return {"error": f"HTTP {e.code}", "body": e.read().decode()[:300]}
 
     def create(self, **meta) -> dict:
-        """Create an agent. Egress to it was granted at SEED time.
-
-        There is no wildcard target, so an id the driver did not declare in
-        `reach` is unreachable — correctly. It fails loudly here rather than
-        being silently widened after the fact.
-        """
+        """Create an agent under `rest` (its seeded `create` line). A create the
+        kernel refuses fails loudly here: nothing is widened after the fact."""
         rec = self.send(self.root_id, {"type": "create_agent", **meta})
-        if isinstance(rec, dict) and rec.get("id") and rec["id"] not in self.reach:
-            raise SystemExit(
-                f"created {rec['id']!r} but it is not in the driver's declared "
-                f"reach {self.reach} — add it, authority is not self-granted")
+        if isinstance(rec, dict) and rec.get("error"):
+            raise SystemExit(f"create_agent refused: {rec}")
         return rec
+
+    def stored(self, aid: str) -> dict:
+        """`aid`'s RECORD as the kernel keeps it: its `agent.yaml` in the state
+        folder (harness-owned, the trust root). A leg's `reflect` shows a bundle's
+        reply and only the fields the leg holds; the stored record is the whole
+        record, as the operator sees it. `{}` when there is none."""
+        hits = sorted((self.workdir / ".fantastic").glob(f"**/agents/{aid}/agent.yaml"))
+        return (yaml.safe_load(hits[0].read_text()) or {}) if hits else {}
+
+    def stop(self) -> int:
+        """The operator's stop: SIGTERM to the kernel's group (the daemon shuts
+        down gracefully), then wait. Returns the exit code; the kernel's output
+        is still dumped by `close`. Process verbs over REST are operator only."""
+        if self.proc is None:
+            raise AssertionError("stop: no kernel process")
+        if self.proc.poll() is None:
+            oslayer.stop_group(self.proc.pid)
+            self.proc.wait(timeout=30)
+        return int(self.proc.returncode)

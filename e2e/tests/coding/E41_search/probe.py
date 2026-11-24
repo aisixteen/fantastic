@@ -24,7 +24,7 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, human, verdict
+from helpers import Limits, connect, drive, human, human_line, lines, verdict
 from helpers.kernel import open_kernel, home
 
 BK = _resolve_backend()
@@ -33,8 +33,8 @@ XID, ED = "searcher", "notes"
 TASK = (
     "Somewhere under the `src/` directory of this run's working dir, one file "
     "contains a line `SECRET_TOKEN=<value>`. You cannot read the tree "
-    "directly — the command runner `searcher` is your search organ: reflect it, "
-    "read its `allowed` commands, and use `grep` (start a job, then poll "
+    "directly — the command runner `searcher` is your search organ: reflect it "
+    "(its description names the commands it may run), and use `grep` (start a job, then poll "
     "{type:'status', job_id} until it ends, read its output with "
     "{type:'tail', job_id}) to find that line. Then, using "
     "the file agent `notes`, write a file `found.md` whose content is "
@@ -50,7 +50,7 @@ async def _call(root, target, payload):
 async def main():
     token = f"zx_{secrets.token_hex(4)}"  # minted NOW — unguessable
     root, core, close = await open_kernel(
-        prefix="coding_search_", reach=[XID, ED, "ai", "cli", "user"]
+        prefix="coding_search_", reach=[XID, ED, "ai", "user"]
     )
     try:
         os.makedirs("src/sub", exist_ok=True)
@@ -66,7 +66,6 @@ async def main():
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
                 "description": "This run's files.",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent",
@@ -77,7 +76,7 @@ async def main():
                 "inherit_env": ["PATH", "HOME"],
                 "ingress_rule": "allow_all_ingress",
                 "allowed": ["grep .*", "find .*"],
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
+                "description": lines.runs(["grep .*", "find .*"]),
             },
         ):
             r = await _call(root, root.id, payload)
@@ -85,17 +84,17 @@ async def main():
 
         # THE HUMAN who wants the work done — the task comes FROM here.
 
-        await human(root)
+        await human(root, ai=[])
 
         conn = await connect(
             root,
             core,
             BK,
-            can_call={XID: "*", ED: "*", "cli": "*", "user": "*"},
-            callable_by={"user": "*"},
+            can={XID: lines.ALL, ED: lines.ALL, "user": lines.ALL},
             limits=Limits.from_env(os.environ),
             record={"file_bridge_id": ED},
         )
+        await human_line(root, conn.id)
         await drive(conn, TASK, client_id="search", via="user")
         transcript = "".join(conn.proxy.transcript)
         await conn.close()

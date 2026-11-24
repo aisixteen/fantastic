@@ -21,7 +21,7 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, human, verdict
+from helpers import Limits, connect, drive, human, human_line, lines, verdict
 from helpers.kernel import open_kernel, home
 
 BK = _resolve_backend()
@@ -49,7 +49,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_mp_", reach=[FB, "editor", "ai", "cli", "user"]
+        prefix="coding_mp_", reach=[FB, "editor", "ai", "user"]
     )
     try:
         r = await _call(
@@ -62,7 +62,6 @@ async def main():
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
         )
         assert not r.get("error"), f"create {FB}: {r}"
@@ -76,7 +75,6 @@ async def main():
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
         )
         assert not r.get("error"), f"create editor: {r}"
@@ -85,17 +83,17 @@ async def main():
 
         # THE HUMAN who wants the work done — the task comes FROM here.
 
-        await human(root)
+        await human(root, ai=[])
 
         conn = await connect(
             root,
             core,
             BK,
-            can_call={FB: "*", "editor": "*", "cli": "*", "user": "*"},
-            callable_by={"user": "*"},
+            can={FB: lines.ALL, "editor": lines.ALL, "user": lines.ALL},
             limits=Limits.from_env(os.environ),
             record={"file_bridge_id": FB},
         )
+        await human_line(root, conn.id)
         await drive(conn, TASK, client_id="mp", via="user")
         transcript = "".join(conn.proxy.transcript)
         await conn.close()

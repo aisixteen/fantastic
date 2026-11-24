@@ -25,7 +25,7 @@ The byte surface is the `file_bridge` streams; the EDIT organ is the same bridge
 | `memory_distill` | memory as files on a `file_bridge` + the persist-on-notice howto | a fact distilled to `memory.md` is recovered by a COLD, history-less session |
 | `fanout` | batch send + `N of M` reply tags (codex tool_parallelism) | five independent reads in ONE turn's batch, not five turns |
 | `peer_review` | two AI agents + exec_bridge + editor (codex auto_review) | a reviewer agent reads the coder's `git diff` and REJECTS a planted flaw; roles `coder` / `reviewer` take `FANTASTIC_AI_MODEL_CODER` / `_REVIEWER` |
-| `gated_write` | two-sided gate + delegation (codex guardian) | denied on ingress, the writer's work is unblocked by a PEER agent that opens the gate |
+| `gated_write` | `can` lines + delegation (codex guardian) | the writer holds only `reflect` on the vault, so its write is the unknown answer; a PEER agent holding `update` on the writer's `can` and a line on the vault hands it `write`, and the retry lands |
 | `job_mail` | exec_bridge MAIL over the control fd (codex unified_exec) | the model steers a RUNNING job by mail mid-run; the job writes the mailed token |
 | `finding_survival` (E58) | context protocol (folds) | notice a finding, checkpoint it unprompted, and report it after its read is gone |
 | `implicit_constraint` (E59) | context protocol | honour constraints given in prose — one positive, one negative with the forbidden string planted as bait |

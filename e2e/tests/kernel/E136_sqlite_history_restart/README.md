@@ -2,7 +2,8 @@
 
 Free: no model. A local OpenAI-compatible server (`e2e/mocks/vllm.py`) answers from a
 fixed script; the agent is the kernel's own `vllm_backend` agent (ai_core) on the
-PACKAGED host of `RUNTIME` (python | rust), driven over `web_rest`.
+PACKAGED rust host, driven over `web_rest`. The chat and the provider reach the store
+by their own `can` lines; the store keeps no list.
 
 The agent's `memory_store_id` names a `sqlite_store` agent whose file is the record's
 `path` (`stores/hist.db`, config, never hardcoded). One scripted turn is run, the kernel
@@ -20,6 +21,5 @@ are listed in `probe.py`'s docstring.
 NOT part of any CI run: coded, run by hand.
 
 ```sh
-RUNTIME=python uv run python e2e/tests/kernel/E136_sqlite_history_restart/probe.py   # from src/lib/python
 RUNTIME=rust   uv run python e2e/tests/kernel/E136_sqlite_history_restart/probe.py
 ```

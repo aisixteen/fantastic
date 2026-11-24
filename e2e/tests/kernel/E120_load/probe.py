@@ -1,15 +1,17 @@
 """kernel/load — hydration and batch throughput at scale. NO MODEL.
 
-On the PACKAGED host of `RUNTIME` (python | rust), every call through
-`web_rest`:
+On the PACKAGED rust host, every call through `web_rest`:
 
-  1. BASELINE: the driver's seed alone boots (spawn → serving) in `t0`;
+  1. BASELINE: the driver's seed alone boots (spawn → serving) in `t0`; `rest`'s
+     root reflect carries no runtime frame (operator only), the operator's
+     one-shot `kernel reflect` after the stop names the runtime;
   2. HYDRATE: the same seed plus N=1000 agent records on disk (`ram_store`
-     children of the `rest` leg) boots in `t1`; every one of them is listed by
-     `list_agents` and indexed by `reflect tree=ids`; a sample answers `reflect`;
+     children of the `rest` leg, no grant field) boots in `t1`; every one of them
+     is listed by `rest`'s paged `reflect tree=ids` (its own tree) and indexed by
+     the root's; a sample answers `reflect`;
   3. REST: 500 `reflect` POSTs over 16 client threads, every one answered;
-  4. ONE BATCH: an AI agent (`vllm_backend` against a scripted local server)
-     answers one turn with 500 `<call>`s — ONE kernel batch of 500 items to 500
+  4. ONE BATCH: an AI agent (`vllm_backend` against a scripted local server),
+     holding one `reflect` line per target, answers one turn with 500 `<call>`s — ONE kernel batch of 500 items to 500
      hydrated agents; the next request carries all 500 replies as one turn
      (`N of 500 in batch …`). Timed from the `send` POST to that next request
      (the scripted answer's own stream is a few ms of it).
@@ -29,12 +31,15 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import subprocess
+
 import yaml
 
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.lines import ALL, PROVIDER, call
 from helpers.verdict import verdict
 from mocks.vllm import VllmMock
 
@@ -47,7 +52,7 @@ AI = "ai"
 PROV = f"{AI}_prov"  # the provider the chat completes through
 MODEL = "mock-load"
 #: Seconds. Generous on purpose: only a gross regression fails.
-BOUNDS = {"boot_1000": 90.0, "list_agents": 15.0, "rest_500": 60.0, "batch_500": 90.0}
+BOUNDS = {"boot_1000": 90.0, "reflect_ids": 15.0, "rest_500": 60.0, "batch_500": 90.0}
 
 
 def pool_id(i: int) -> str:
@@ -63,12 +68,31 @@ def seed_pool(work: Path) -> None:
         d.mkdir(parents=True, exist_ok=True)
         (d / "agent.yaml").write_text(yaml.safe_dump({
             "id": pool_id(i), "handler_module": "ram_store.tools", "parent_id": "rest",
-            "callable_by": {"$self": "*", "$parent": "*", AI: ["reflect"]},
         }, sort_keys=False))
 
 
-def timed_boot(spec: dict, work: Path, reach: list[str]) -> tuple[HostKernel, float]:
-    hk = HostKernel(spec, work, reach=reach)
+def ids_of(hk: HostKernel, target: str) -> tuple[list[str], int]:
+    """Every id of `target`'s `reflect tree=ids`, following `next`; (ids, pages)."""
+    out: list[str] = []
+    after = None
+    pages = 0
+    while True:
+        p = {"type": "reflect", "tree": "ids"}
+        if after:
+            p["after"] = after
+        r = hk.send(target, p, timeout=120)
+        pages += 1
+        tree = r.get("tree") if isinstance(r, dict) else None
+        if not isinstance(tree, list):
+            return out, pages
+        out += [x if isinstance(x, str) else x.get("id") for x in tree]
+        after = r.get("next")
+        if not after:
+            return out, pages
+
+
+def timed_boot(spec: dict, work: Path) -> tuple[HostKernel, float]:
+    hk = HostKernel(spec, work)
     t = time.monotonic()
     hk.boot()
     return hk, time.monotonic() - t
@@ -87,10 +111,23 @@ def main() -> int:
 
     # 1 · baseline
     w0 = Path(tempfile.mkdtemp(prefix="e2e-load-base-"))
-    hk0, nums["boot_seed"] = timed_boot(spec, w0, [])
+    hk0, nums["boot_seed"] = timed_boot(spec, w0)
     try:
         r = hk0.send(hk0.root_id, {"type": "reflect", "tree": "none"})
-        need(r.get("runtime") == name, f"baseline boots: {nums['boot_seed']:.2f}s")
+        need(r.get("id") == hk0.root_id and "runtime" not in r,
+             f"baseline boots: {nums['boot_seed']:.2f}s; rest's root reflect carries no runtime "
+             f"(operator only): {str(r)[:160]}")
+        hk0.close()
+        # the operator's one-shot, with no daemon up (it takes the lock)
+        one = subprocess.run([*hk0.cmd, "kernel", "reflect"], cwd=w0, env=hk0.env,
+                             capture_output=True, text=True, timeout=120, check=False)
+        try:
+            op = json.loads(one.stdout)
+        except ValueError:
+            op = {"raw": (one.stdout + one.stderr)[-300:]}
+        need(one.returncode == 0 and op.get("runtime") == name,
+             f"the operator's `kernel reflect` names the runtime {name}: exit {one.returncode}, "
+             f"{str(op)[:200]}")
     finally:
         hk0.close()
         shutil.rmtree(w0, ignore_errors=True)
@@ -100,7 +137,7 @@ def main() -> int:
     t = time.monotonic()
     seed_pool(work)
     print(f"     wrote {N_AGENTS} records in {time.monotonic() - t:.2f}s", flush=True)
-    hk, nums["boot_1000"] = timed_boot(spec, work, [AI, PROV])
+    hk, nums["boot_1000"] = timed_boot(spec, work)
     root = hk.root_id
     try:
         # 2 · hydration
@@ -108,17 +145,17 @@ def main() -> int:
              f"{N_AGENTS} agents hydrate and serve in {nums['boot_1000']:.2f}s "
              f"(baseline {nums['boot_seed']:.2f}s; bound {BOUNDS['boot_1000']:.0f}s)")
         t = time.monotonic()
-        la = hk.send("kernel", {"type": "list_agents"}, timeout=120)
-        nums["list_agents"] = time.monotonic() - t
-        listed = {a.get("id") for a in la.get("agents") or []}
+        listed_ids, pages = ids_of(hk, "rest")
+        nums["reflect_ids"] = time.monotonic() - t
+        listed = set(listed_ids)
         missing = [pool_id(i) for i in range(N_AGENTS) if pool_id(i) not in listed]
-        need(not missing and nums["list_agents"] <= BOUNDS["list_agents"],
-             f"list_agents lists all {N_AGENTS} ({len(listed)} records) in "
-             f"{nums['list_agents']:.2f}s; missing {len(missing)} {missing[:5]}")
-        ids = hk.send(root, {"type": "reflect", "tree": "ids"}, timeout=120)
-        flat = json.dumps(ids.get("tree"))
-        need(all(f'"{pool_id(i)}"' in flat for i in range(N_AGENTS)),
-             f"reflect tree=ids indexes all {N_AGENTS}")
+        need(not missing and nums["reflect_ids"] <= BOUNDS["reflect_ids"],
+             f"rest's reflect tree=ids lists all {N_AGENTS} ({len(listed)} ids, {pages} pages) in "
+             f"{nums['reflect_ids']:.2f}s; missing {len(missing)} {missing[:5]}")
+        root_ids, _ = ids_of(hk, "kernel")
+        flat = set(root_ids)
+        need(all(pool_id(i) in flat for i in range(N_AGENTS)),
+             f"the root's reflect tree=ids indexes all {N_AGENTS} ({len(flat)} ids)")
         sample = [pool_id(i) for i in (0, N_AGENTS // 2, N_AGENTS - 1)]
         refl = {p: hk.send(p, {"type": "reflect"}).get("id") for p in sample}
         need(all(refl[p] == p for p in sample), f"a hydrated sample answers reflect: {refl}")
@@ -136,24 +173,18 @@ def main() -> int:
              f"{N_REST / max(nums['rest_500'], 1e-9):.0f}/s; wrong {len(wrong)} {wrong[:3]}")
 
         # 4 · one batch of 500 from an AI turn
-        r = hk.send(root, {"type": "update_agent", "id": "memory", "callable_by": {
-            **next(a for a in la["agents"] if a.get("id") == "memory").get("callable_by", {}),
-            AI: "*", PROV: "*"}})
-        need(r.get("updated") is True, f"memory accepts the AI: {str(r)[:160]}")
         batch = [pool_id(i) for i in range(N_BATCH)]
         # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it
         rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
                         endpoint=m.url, model=MODEL,
                         context_window=262144, kv_slots=4, kv_overflow="evict",
-                        memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
-                        callable_by={"$self": "*", "$parent": "*", AI: "*"})
+                        memory_store_id="memory", can={"memory": ALL})
         need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:160]}")
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
                         provider_id=PROV, model=MODEL, max_tokens=8192,
                         context_window=262144, memory_store_id="memory",
-                        can_call={"$self": "*", "memory": "*", PROV: ["complete", "watch", "reflect"],
-                                  **{p: ["reflect"] for p in batch}},
-                        callable_by={"$self": "*", "$parent": "*", "rest": "*"})
+                        can={"memory": ALL, PROV: PROVIDER,
+                             **{p: call("reflect") for p in batch}})
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:160]}")
         calls = "\n".join(f'<call name="send"><routing><target_id>{p}</target_id></routing><payload><type>reflect</type>'
                           f'<tree>none</tree></payload></call>' for p in batch)

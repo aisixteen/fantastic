@@ -11,43 +11,44 @@ import os
 from typing import Any
 
 from helpers.kernel import home
-from helpers import Limits, connect, human
-from helpers.facts_arm import WINDOW, call
+from helpers import Limits, connect, human, lines
+from helpers.facts_arm import WINDOW, call, human_line
 
 DONE = 'end your run by calling done — emit <call name="done"></call>'
 
 
-async def files(root, ids: list[str]) -> None:
+async def files(root) -> None:
     """`work_fb` (the run dir, open) and `notes` (a second file agent over the same
-    dir — the one the model edits through), both reachable by `ids`."""
+    dir — the one the model edits through), then the human. They keep no list of
+    callers: each AI reaches them by its own lines (`agent`), and the human gets its
+    line on each AI once that AI exists."""
     for payload in (
         {"type": "create_agent", "parent_id": home(root), "id": "work_fb",
          "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-         "ingress_rule": "allow_all_ingress",
-         "callable_by": {"rest": "*", "web": "*", **{i: "*" for i in ids}}},
+         "ingress_rule": "allow_all_ingress"},
         {"type": "create_agent", "parent_id": home(root), "id": "notes",
          "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-         "ingress_rule": "allow_all_ingress",
-         "callable_by": {"rest": "*", "web": "*", **{i: "*" for i in ids}}},
+         "ingress_rule": "allow_all_ingress"},
     ):
         r = await call(root, root.id, payload)
         assert not r.get("error"), f"create {payload['id']}: {r}"
-    await human(root, ai=list(ids))
+    await human(root, ai=[])
 
 
 async def agent(root, core, bk, aid: str, *, strategy: str = "fold", window: int | None = None,
-                extra_can_call: dict | None = None, extra_callable_by: dict | None = None,
-                record: dict | None = None):
-    """One AI agent: notes + the human + itself, the given strategy and window."""
+                extra_can: dict | None = None, record: dict | None = None):
+    """One AI agent: lines on notes and the human (itself by position), the given
+    strategy and window; then the human's line on it."""
     w = window or WINDOW
-    return await connect(
+    conn = await connect(
         root, core, bk, agent_id=aid,
-        can_call={"notes": "*", "cli": "*", "user": "*", aid: "*", **(extra_can_call or {})},
-        callable_by={"user": "*", **(extra_callable_by or {})},
+        can={"notes": lines.ALL, "user": lines.ALL, **(extra_can or {})},
         limits=Limits.from_env(os.environ),
         record={"context_window": w, "num_ctx": w, "context_strategy": strategy,
                 "context_async": True, "context_titles": True, **(record or {})},
     )
+    await human_line(root, aid)
+    return conn
 
 
 async def ask(root, aid: str, text: str, *, timeout: float = 300.0) -> None:

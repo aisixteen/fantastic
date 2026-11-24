@@ -36,7 +36,7 @@ async def main():
         lines = [f"row {i + 1}: {secrets.token_hex(16)}" for i in range(180)]
         lines[136] = f"row 137: the vault code is {code}"
         Path("ledger.txt").write_text("\n".join(lines) + "\n")
-        await M.files(root, ["ai"])
+        await M.files(root)
         conn = await M.agent(root, core, BK, "ai")
         await drive(conn, f"Read `ledger.txt` through `notes`. Do NOT write anything down about "
                           f"row 137. Then {DONE}", client_id="ai", via="user")

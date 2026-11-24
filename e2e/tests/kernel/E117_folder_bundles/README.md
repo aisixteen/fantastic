@@ -1,15 +1,17 @@
 # `folder_bundles` (E117) — a folder under `.fantastic/bundles/` as an agent kind
 
 Free: no model. Folder bundles (`bundle.yaml` with `base: py_agent` + a stdlib
-program using `fantastic_agent.py`) on the packaged host of `RUNTIME`, every call
-over `web_rest`. It proves:
+program using `fantastic_agent.py`) on the packaged rust host, every call over
+`web_rest`; `rest` holds `reload_bundle` on the root (the root loader's verb). It proves:
 
 - **cold load**: folders written before boot are read by the root loader (through
   the fs clamp on rust); a seeded instance record of one resolves and its
   program answers right after boot;
-- **catalog**: `reflect bundles=all` lists the folder (`base`, `sentence`,
-  `handler_module`, `folder`); `docs of=<bundle>` / `of=<instance>` read
-  `bundle.yaml` (oneliner signature, detailed doc, `notes`);
+- **catalog**: `reflect rest bundles=all` (the leg's own tree: the whole catalog)
+  lists the folder (`base`, `sentence`, `handler_module`, `folder`; its one row
+  with `bundle_names`); `reflect <instance> part=docs` reads `bundle.yaml`
+  (oneliner signature, `tier: detailed` doc); `reflect of=…` is refused `bad_arg`;
+  an agent holding only `call: [reflect]` on the root gets no `bundles` key;
 - **create**: `create_agent handler_module=<folder>` works, the instance reflects
   `base: py_agent` and a running program, its verbs answer; `delete_agent` kills
   the program; `create_agent handler_module=py_agent.tools` is refused (a base);
@@ -26,6 +28,6 @@ over `web_rest`. It proves:
 
 ```sh
 cd src/lib/python
-uv run python ../../../e2e/run.py --only-free --id folder_bundles --lanes 3   # all three
+uv run python ../../../e2e/run.py --only-free --id folder_bundles --lanes 3
 RUNTIME=rust uv run python ../../../e2e/tests/kernel/E117_folder_bundles/probe.py
 ```

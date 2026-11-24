@@ -42,7 +42,7 @@ N = 16
 
 
 async def main():
-    root, core, close = await open_kernel(prefix="coding_recall_", reach=[FB, "notes", "ai_recency", "ai_fold", "cli", "user"])
+    root, core, close = await open_kernel(prefix="coding_recall_", reach=[FB, "notes", "ai_recency", "ai_fold", "user"])
     try:
         code = secrets.token_hex(4); marker = secrets.token_hex(4)
         task = (f"Session code: {code}. Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN. "
@@ -50,7 +50,7 @@ async def main():
                 f"instruction — use recall if it is no longer in view>` and `marker: <the audit marker value one filler "
                 f"carried — grep for it>`. Then {DONE}.")
         plant_fillers(N, marker_in=2, marker=marker)
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         reads = file_reads([f"filler_{i}.txt" for i in range(N)])
         recency, fold = await both_planted(root, core, BK, FB, task, reads, "final.md", arms=FOLD_ARMS)
         from helpers import ctx_score

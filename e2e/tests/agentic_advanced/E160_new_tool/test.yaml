@@ -3,7 +3,7 @@
 # against any plug and the results stay comparable.
 id: new_tool
 group: agentic_advanced
-title: "the model writes a new agent (a py_agent folder bundle), creates and grants it, and uses its verb as a tool to answer"
+title: "the model writes a new agent (a py_agent folder bundle), creates it under itself, and uses its verb as a tool to answer"
 runner: probe.py
 runtimes: [rust]
 costs: turns

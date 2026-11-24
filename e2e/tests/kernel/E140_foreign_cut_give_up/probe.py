@@ -4,7 +4,7 @@ SCRIPTED model. NO MODEL.
 A local OpenAI-compatible server plays the model (two: `m` for the AI, `mb` for the
 BOSS it hands its text to); the kernel's own AI agents (on both runtimes:
 `ai_chat.tools` chats naming a `vllm_backend` provider, #521) on the
-PACKAGED host of `RUNTIME` (python | rust) run the chains, driven through `web_rest`.
+PACKAGED rust host run the chains, driven through `web_rest`.
 
   A. the BOSS asks the AI (`inquiry`); the model writes a foreign call tag (`<invoke name="send">` followed by a loop of
      closers) turn after turn: each answer is CUT at the tag, the correction
@@ -32,6 +32,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.lines import ALL, PROVIDER, ROOT, call
 from helpers.verdict import verdict
 from mocks.vllm import ThinkingVllmMock
 
@@ -63,7 +64,7 @@ def main() -> int:
     m = ThinkingVllmMock(model=MODEL).start()
     mb = ThinkingVllmMock(model=MODEL).start()
     work = Path(tempfile.mkdtemp(prefix="e2e-foreign-cut-"))
-    hk = HostKernel(spec, work, reach=[AI, BOSS, *PROVS.values()]).boot()
+    hk = HostKernel(spec, work).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -71,11 +72,6 @@ def main() -> int:
         print(f"  {'ok ' if cond else 'BAD'} {what}", flush=True)
         if not cond:
             bad.append(what)
-
-    def callable_by(aid: str) -> dict:
-        r = hk.send("kernel", {"type": "list_agents"})
-        rec = next(a for a in r.get("agents") or [] if a.get("id") == aid)
-        return dict(rec.get("callable_by") or {})
 
     def turns_at_least(mock, n: int, bound: float = 90) -> list[dict]:
         end = time.monotonic() + bound
@@ -105,19 +101,12 @@ def main() -> int:
     reflect = (f'Looking around.\n<call name="send">\n<routing><target_id>{root}</target_id>'
                '</routing>\n<payload><type>reflect</type>\n<tree>none</tree></payload>\n</call>')
     try:
-        r = hk.send(root, {"type": "update_agent", "id": "memory",
-                           "callable_by": {**callable_by("memory"), AI: "*", BOSS: "*",
-                                           **{p: "*" for p in PROVS.values()}}})
-        need(r.get("updated") is True, f"memory accepts both agents: {str(r)[:200]}")
+        # AI first; its line on BOSS is written once BOSS exists
+        ai_can = {"memory": ALL, ROOT: call("reflect"), PROVS[AI]: PROVIDER}
         for aid, mock, can in (
-            (AI, m, {"$self": "*", "memory": "*", root: ["reflect"], BOSS: ["send"]}),
-            (BOSS, mb, {"$self": "*", "memory": "*", AI: ["inquiry"]}),
+            (AI, m, ai_can),
+            (BOSS, mb, {"memory": ALL, AI: call("inquiry")}),
         ):
-            by = {"$self": "*", "$parent": "*", "rest": "*"}
-            if aid == BOSS:
-                by[AI] = ["send"]
-            else:
-                by[BOSS] = ["inquiry"]
             fields = dict(endpoint=mock.url, model=MODEL,
                           context_window=262144, memory_store_id="memory")
             # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it:
@@ -125,15 +114,17 @@ def main() -> int:
             pv = PROVS[aid]
             rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=pv,
                             kv_slots=4, kv_overflow="evict",
-                            can_call={"$self": "*", "memory": "*"},
-                            callable_by={"$self": "*", "$parent": "*", aid: "*"},
+                            can={"memory": ALL},
                             **fields)
             need(rec.get("id") == pv, f"create {pv}: {str(rec)[:200]}")
             rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=aid,
                             provider_id=pv, model=MODEL, max_tokens=8192,
                             context_window=262144, memory_store_id="memory",
-                            can_call={**can, pv: ["complete", "watch", "reflect"]}, callable_by=by)
+                            can={**can, pv: PROVIDER})
             need(rec.get("id") == aid, f"create {aid}: {str(rec)[:200]}")
+        r = hk.send(root, {"type": "update_agent", "id": AI,
+                           "can": {**ai_can, BOSS: call("send")}})
+        need(r.get("updated") is True, f"AI's line on BOSS: {str(r)[:200]}")
 
         # ── A · nine cut turns in a row give up ───────────────────────────────
         m.reply(*[FOREIGN] * 12)

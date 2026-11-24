@@ -32,7 +32,8 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, verdict
+from helpers import Limits, add_lines, connect, drive, human_line, lines, probe_agent, relay, verdict
+from helpers.lines import is_unknown
 from helpers.facts_arm import store_rows
 from helpers.kernel import open_kernel, home
 
@@ -63,7 +64,7 @@ async def main():
     for role, model in BK.roles_used().items():
         print(f"    role {role:<8} -> {model}")
     root, core, close = await open_kernel(
-        prefix="coding_pr_", reach=[FB, RUNNER, "editor", "ai", "ai_rev", "cli", "user"]
+        prefix="coding_pr_", reach=[FB, RUNNER, "editor", "ai", "ai_rev", "user"]
     )
     try:
         Path("spec.md").write_text(SPEC)
@@ -74,42 +75,39 @@ async def main():
         for payload in (
             {"type": "create_agent", "parent_id": home(root), "id": FB,
              "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-             "ingress_rule": "allow_all_ingress",
-             "callable_by": {"ai": "*", "ai_rev": "*", "rest": "*", "web": "*"}},
+             "ingress_rule": "allow_all_ingress"},
             {"type": "create_agent", "parent_id": home(root), "id": "editor",
              "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-             "ingress_rule": "allow_all_ingress",
-             "callable_by": {"ai": "*", "ai_rev": "*", "rest": "*", "web": "*"}},
+             "ingress_rule": "allow_all_ingress"},
             {"type": "create_agent", "parent_id": home(root), "id": RUNNER,
              "handler_module": "exec_bridge.tools", "cwd": os.getcwd(), "inherit_env": ["PATH", "HOME"],
              "ingress_rule": "allow_all_ingress", "allowed": ["git .*"],
-             "callable_by": {"ai": "*", "ai_rev": "*", "rest": "*", "web": "*"}},
+             "description": lines.runs(["git .*"])},
         ):
             r = await _call(root, root.id, payload)
             assert not r.get("error"), f"create {payload['id']}: {r}"
 
         # THE HUMAN who wants the work done. The task originates here, so the
         # coder's first turn arrives as a gated `user -> ai` send with a ledger
-        # row rather than an operator injection from outside the kernel.
+        # row rather than an operator injection from outside the kernel. Its line
+        # on the coder is written once the coder exists (a line naming a missing
+        # id is refused).
         r = await _call(root, root.id, {
             "type": "create_agent", "parent_id": home(root), "id": "user",
             "handler_module": "user_probe.tools",
             "answer": "do your best judgement",
             "description": "The human this kernel belongs to.",
-            "can_call": {"ai": "*"},
-            "callable_by": {"ai": "*", "rest": "*", "web": "*"},
         })
         assert not r.get("error"), f"create user: {r}"
 
         # THE REVIEWER, wired to RECEIVE INQUIRIES. It needs the spec and the diff to
-        # answer, and the coder needs egress to it; the gate is two-sided and
-        # these are siblings, so both halves are written here.
-        # THE ANSWER IS THE REVIEWER'S OWN SEND (inquiries are fully async) — `ai_rev -> ai send`, both halves (the coder's below).
+        # answer, and the coder needs a line on it; these are siblings, so each
+        # holds its own line on the other.
+        # THE ANSWER IS THE REVIEWER'S OWN SEND (inquiries are fully async) — its
+        # `ai: call(send)` line, written once the coder exists (below).
         rv = await connect(root, core, BK, agent_id="ai_rev",
                            record=recs["reviewer"],
-                           can_call={FB: "*", "editor": "*", RUNNER: "*", "cli": "*",
-                                     "ai": ["send"]},
-                           callable_by={"ai": "*"},
+                           can={FB: lines.ALL, "editor": lines.ALL, RUNNER: lines.ALL},
                            limits=Limits.from_env(os.environ))
 
         coder_task = (
@@ -126,9 +124,17 @@ async def main():
         )
         c = await connect(root, core, BK, agent_id="ai",
                           record=recs["coder"],
-                          can_call={FB: "*", "editor": "*", "cli": "*", "ai_rev": "*"},
-                          callable_by={"user": "*", "ai_rev": ["send"]},
+                          can={FB: lines.ALL, "editor": lines.ALL, "ai_rev": lines.ALL},
                           limits=Limits.from_env(os.environ))
+        await human_line(root, c.id)
+        await add_lines(root, "ai_rev", {"ai": lines.call("send")})
+        # THE REVIEWER'S LINE IS `send` ONLY (harness, before the model): a hand
+        # holding exactly that line reads no other coder verb — the unknown answer.
+        await probe_agent(root, "rev_hand", can={"ai": lines.call("send")})
+        hist = await relay(root, "rev_hand", "ai", {"type": "history"})
+        assert is_unknown(hist, "ai"), f"a send-only line must not reach the coder's history: {hist}"
+        gone = await _call(root, root.id, {"type": "delete_agent", "id": "rev_hand"})
+        assert not gone.get("error"), f"delete rev_hand: {gone}"
         # THE TASK COMES FROM THE HUMAN — gated, ledgered, a real sender.
         await drive(c, coder_task, client_id="coder", via="user")
         tr_coder = "".join(c.proxy.transcript)

@@ -14,6 +14,12 @@ each got wrong are one module here.
 `stubs/`. `e2e/backends/connection.local.env` is not read anywhere in this
 directory, and no capture reaches a real provider. Run it at every landing point.
 
+**Grant model split (#170).** The families seed and create on the `can` model
+(grant model v9); the Python product keeps the old one. Until Python is updated
+or retired, parity runs as a Rust self-diff: capture rust twice (`--slot a`,
+`--slot b`), then `diff.py self --a … --b …`. Residual `R-G170-1` names the split
+for a port diff.
+
 ## Layout
 
 | path | what |

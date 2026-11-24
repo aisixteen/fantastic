@@ -3,7 +3,7 @@
 A local OpenAI-compatible server (`e2e/mocks/vllm.py`, extended here with vLLM's
 thought channel `reasoning_content`) plays the model; the kernel's own
 `ai_chat.tools` chat (ai_core), completing through a `vllm_backend` provider, on the
-PACKAGED host of `RUNTIME` (python | rust) runs the chain, every call from the test through `web_rest`. Tool calling
+PACKAGED rust host runs the chain, every call from the test through `web_rest`. Tool calling
 is the prompt-taught `<call name>` tag grammar — the request carries no `tools`.
 Every field the backend needs is SET (endpoint, model, context_window, kv_slots,
 kv_overflow on the provider; max_tokens on the chat, #632), so nothing is read from
@@ -13,7 +13,8 @@ The script, one model answer per request:
 
   1. `<call name="send">` → `reflect` on the root: dispatched; its result comes
      back as the NEXT request's last user turn, `[reply to <pid> · kernel_state
-     reflect]` carrying the root's guid;
+     reflect]` carrying the root's id and NOT its guid (the root's runtime frame
+     is the operator's; the AI holds `call: [reflect]` on the root);
   2. a `write` to a file_bridge, `bytes` verbatim: the file lands on disk with
      exactly those bytes; the next request carries the `write` reply;
   3. a call written WRONG — a `<tool_call><function=call name="send">` wrapper: the
@@ -48,7 +49,10 @@ from pathlib import Path
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 
+import yaml
+
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.lines import ALL, PROVIDER, ROOT, call
 from helpers.verdict import verdict
 from mocks.vllm import ThinkingVllmMock
 
@@ -74,7 +78,7 @@ def main() -> int:
     m = ThinkingVllmMock(model=MODEL).start()
     work = Path(tempfile.mkdtemp(prefix="e2e-scripted-ai-"))
     (work / "files").mkdir()
-    hk = HostKernel(spec, work, reach=[AI, FILES, PROV]).boot()
+    hk = HostKernel(spec, work).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -82,11 +86,6 @@ def main() -> int:
         print(f"  {'ok ' if cond else 'BAD'} {what}", flush=True)
         if not cond:
             bad.append(what)
-
-    def callable_by(aid: str) -> dict:
-        r = hk.send("kernel", {"type": "list_agents"})
-        rec = next(a for a in r.get("agents") or [] if a.get("id") == aid)
-        return dict(rec.get("callable_by") or {})
 
     def turns_at_least(n: int, bound: float = 60) -> list[dict]:
         """Poll (bounded) until the server has seen `n` turn requests."""
@@ -127,30 +126,25 @@ def main() -> int:
         # 5 · a plain answer, and the chain ends
         'All finished: the file is written.\n<call name="done"></call>',
     ]
+    req2 = ""
     try:
-        r = hk.send(root, {"type": "update_agent", "id": "memory",
-                           "callable_by": {**callable_by("memory"), AI: "*", PROV: "*"}})
-        need(r.get("updated") is True, f"memory accepts the AI: {str(r)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="file_bridge.tools", id=FILES,
-                        root="files", allow=["."], ingress_rule="allow_all_ingress",
-                        callable_by={"$self": "*", "$parent": "*", AI: "*"})
+                        root="files", allow=["."], ingress_rule="allow_all_ingress")
         need(rec.get("id") == FILES, f"create {FILES}: {str(rec)[:200]}")
-        can = {"$self": "*", "memory": "*", root: ["reflect"], FILES: "*"}
-        by = {"$self": "*", "$parent": "*", "rest": "*"}
+        # the AI's own lines; the root line is capped by `rest` and `web`, which hold it
+        can = {"memory": ALL, ROOT: call("reflect"), FILES: ALL}
         # a provider (the vllm_backend) and the chat (ai_chat.tools) naming it:
         # a `send` to a provider is refused (#521)
         rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=PROV,
                         endpoint=m.url, model=MODEL,
                         context_window=262144, kv_slots=4, kv_overflow="evict",
-                        memory_store_id="memory", can_call={"$self": "*", "memory": "*"},
-                        callable_by={"$self": "*", "$parent": "*", AI: "*"})
+                        memory_store_id="memory", can={"memory": ALL})
         need(rec.get("id") == PROV, f"create {PROV}: {str(rec)[:200]}")
         rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=AI,
                         provider_id=PROV, model=MODEL, max_tokens=8192,
                         context_window=262144, memory_store_id="memory",
-                        can_call={**can, PROV: ["complete", "watch", "reflect"]}, callable_by=by)
+                        can={**can, PROV: PROVIDER})
         need(rec.get("id") == AI, f"create {AI}: {str(rec)[:200]}")
-        guid = hk.send(root, {"type": "reflect", "tree": "none"}).get("guid")
 
         m.reply(*script)
         out = hk.send(AI, {"type": "send", "text": f"Write {TOKEN} to out.txt."})
@@ -166,9 +160,10 @@ def main() -> int:
              f"one request per scripted answer, none after `done`: {len(turns)} for {len(script)}")
         u = [last_user(t["body"]) for t in turns] + [""] * len(script)
 
-        # 1 → 2
-        need("[reply to " in u[1] and f"{root} reflect" in u[1] and bool(guid) and guid in u[1],
-             f"request 2 carries the reflect reply with the root guid {guid}")
+        # 1 → 2 (the guid half is checked once the kernel is down, from its state folder)
+        req2 = u[1]
+        need("[reply to " in u[1] and f"{root} reflect" in u[1] and f"<id>{root}</id>" in u[1],
+             f"request 2 carries the root's reflect reply (its id): {u[1][:200]!r}")
         # 2 → 3
         f = work / "files" / "out.txt"
         body = f.read_bytes() if f.exists() else None
@@ -210,7 +205,12 @@ def main() -> int:
     finally:
         hk.close()
         m.stop()
+        # the root's guid, from its state folder (root fields are operator only)
+        root_rec = yaml.safe_load((work / ".fantastic" / "agent.yaml").read_text()) or {}
+        guid = root_rec.get("guid")
         shutil.rmtree(work, ignore_errors=True)
+    need(isinstance(guid, str) and bool(guid) and guid not in req2,
+         f"request 2 carries no part of the root's guid {guid!r} (operator only)")
 
     verdict(not bad, f"{RUNTIME}: {len(bad)} failed" + (f" — first: {bad[0]}" if bad else ""))
     return 0 if not bad else 1

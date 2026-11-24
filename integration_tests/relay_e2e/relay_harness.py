@@ -35,7 +35,7 @@ import pytest
 
 from helpers.kernel_proc import KernelProc
 from helpers.launcher import CONTAINER_PEER_HOST, Launcher, as_launcher, resolve_engine
-from helpers.seeding import BASE, DRIVER, root_id, seed_create, seed_grant
+from helpers.seeding import DRIVER, root_id, seed_create, seed_grant
 
 _TARGET = os.environ.get("FANTASTIC_TARGET", "local").strip().lower()
 _RELAY_IMAGE = os.environ.get("RELAY_IMAGE", "relay:latest")
@@ -216,7 +216,7 @@ def seed_relay(binary: Launcher | Path, workdir: Path, relay: Relay) -> None:
         agent_id=CREDS,
         file=str(kernel_wd / "relay_creds.yaml"),
         refs={RELAY_REF: {"host": relay.host}},
-        callable_by={**BASE, LEG: ["get"], DRIVER: ["set"]},
+        callable_by={LEG: ["get"], DRIVER: ["set"]},
     )
     if "error" in reply:
         raise RuntimeError(f"relay creds seed failed: {reply}")
@@ -230,8 +230,8 @@ def leg_grants(reach: dict | None = None) -> dict:
     `reach` (`{id: "*" | [verbs]}` — e.g. a file_bridge the partner streams to);
     it accepts the driver."""
     return {
-        "can_call": {**BASE, CREDS: ["get"], ROOT: ["reflect"], **(reach or {})},
-        "callable_by": {**BASE, DRIVER: "*"},
+        "can_call": {CREDS: ["get"], ROOT: ["reflect"], **(reach or {})},
+        "callable_by": {DRIVER: "*"},
     }
 
 

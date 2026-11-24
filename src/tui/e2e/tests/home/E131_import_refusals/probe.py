@@ -11,7 +11,14 @@ b) handler `py_ab12.tools` with files `s/bundle.yaml` and `s/tools.py`: refused
 c) a built-in handler with a code file `x/tools.py`: refused the same way; with
    `allow_code: true, approve: true` it imports 1 (the refusal is the gate, not the folder);
 d) `approve: "true"` (a string) only previews; `allow_code: "true"` is still refused;
-e) a folder with no `blueprint.yaml`: `not_found`, naming the file."""
+e) a folder with no `blueprint.yaml`: `not_found`, naming the file;
+f) a lead holding a line on `credentials` (bound through a port), a line the `mcp`
+   leg does not hold: the create is refused naming the line `mcp` lacks
+   (`credentials` is under `user`, which the leg's `import_subtree` line shows it;
+   a writer hands out only what it holds), nothing is kept;
+g) an import aimed outside `canvas_root` (under `files`, beside it under `user`): the
+   leg's create line is on `canvas_root` only, and the import is checked as the leg
+   (Q39), so the create gets the unknown answer for `files` and nothing is kept."""
 
 from __future__ import annotations
 
@@ -20,13 +27,22 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.blueprint import PARENT, agent_ids, importing, world, write_blueprint  # noqa: E402
+from _lib.blueprint import PARENT, agent_ids, importing, record_ids, world, write_blueprint  # noqa: E402
 from _lib.canvas_live import Rig, verdict  # noqa: E402
 
 KEY = "sk-planted0123456789"
 SECRET = f"agents:\n  - id: a\n    handler_module: ram_store.tools\n    api_key: {KEY}\n"
 CODE = "agents:\n  - id: s\n    handler_module: py_ab12.tools\n"
 ONE = "agents:\n  - id: x\n    handler_module: ram_store.tools\n"
+#: a line outside what the importing leg holds: the leg's one line is `create` on `canvas_root`
+OUTSIDE_LINE = """\
+agents:
+  - id: lead
+    handler_module: ram_store.tools
+    can: {'@credentials': {call: [get]}}
+ports:
+  '@credentials': {kind: credentials, why: the key it reads, used_by: [lead]}
+"""
 
 
 def main() -> bool:
@@ -86,6 +102,31 @@ def main() -> bool:
         e2 = importing(rig, "nowhere", PARENT, approve=True)
         r["e2 a missing folder is not_found"] = e2.get("reason") == "not_found" and "blueprint.yaml" in str(e2.get("error"))
         r["e3 nothing was created"] = agent_ids(rig) == n
+
+        # f) a line the asker does not hold
+        write_blueprint(rig, "outside", OUTSIDE_LINE)
+        f = importing(rig, "outside", PARENT, {"@credentials": "credentials"}, approve=True)
+        info["outside_line"] = f
+        msg = str(f.get("error", ""))
+        r["f1 a line the leg does not hold is refused as the writer's, nothing kept"] = (
+            f.get("reason") == "failed" and "was not created" in msg
+            and "'mcp' holds no call 'get' on 'credentials'" in msg
+            and "a writer hands out only what its own can holds" in msg
+            and "nothing was kept" in msg and "imported" not in f)
+        r["f2 nothing was created"] = agent_ids(rig) == n
+
+        # g) an import aimed outside the user space
+        saved = record_ids(rig)
+        g = importing(rig, "withfile", "files", approve=True, allow_code=True)
+        info["outside_canvas_root"] = g
+        msg = str(g.get("error", ""))
+        r["g1 an import outside canvas_root is refused with the unknown answer, nothing kept"] = (
+            g.get("reason") == "failed" and "was not created" in msg and "no agent 'files'" in msg
+            and "nothing was kept" in msg and "imported" not in g)
+        # the leg cannot see `files`: the saved records on disk are the whole tree
+        # (`x_1`, the import of c, shows the disk listing sees an import)
+        r["g2 nothing was created, under team_home or anywhere in the saved tree"] = (
+            agent_ids(rig) == n and "x_1" in saved and record_ids(rig) == saved)
     finally:
         rig.stop()
     rig.summary["checks"], rig.summary["info"] = r, info

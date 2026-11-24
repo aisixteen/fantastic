@@ -22,7 +22,7 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, human, verdict
+from helpers import Limits, connect, drive, human, human_line, lines, verdict
 from helpers.kernel import open_kernel, home
 
 BK = _resolve_backend()
@@ -87,7 +87,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_mail_", reach=[RUNNER, FB, "ai", "cli", "user"]
+        prefix="coding_mail_", reach=[RUNNER, FB, "ai", "user"]
     )
     try:
         Path("worker.py").write_text(WORKER)
@@ -97,7 +97,6 @@ async def main():
             "type": "create_agent", "parent_id": home(root), "id": FB,
             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
             "ingress_rule": "allow_all_ingress",
-            "callable_by": {"ai": "*", "rest": "*", "web": "*"},
         })
         assert not r.get("error"), f"create {FB}: {r}"
         r = await _call(root, root.id, {
@@ -105,7 +104,7 @@ async def main():
             "handler_module": "exec_bridge.tools", "cwd": os.getcwd(), "inherit_env": ["PATH", "HOME"],
             "ingress_rule": "allow_all_ingress",
             "allowed": [re.escape(INTERP) + r" worker\.py"],
-            "callable_by": {"ai": "*", "rest": "*", "web": "*"},
+            "description": lines.runs([re.escape(INTERP) + r" worker\.py"]),
         })
         assert not r.get("error"), f"create {RUNNER}: {r}"
 
@@ -113,20 +112,20 @@ async def main():
         task = (
             f"The runner `{RUNNER}` runs a worker that, once started, BLOCKS "
             "waiting for one piece of mail, then acts on it. Do two things: "
-            f"(1) start the worker — reflect `{RUNNER}` for the exact allowed "
-            "command, then {type:'start', command, args}. (2) Steer it: send "
+            f"(1) start the worker — reflect `{RUNNER}`: its description names the "
+            "exact allowed command, then {type:'start', command, args}. (2) Steer it: send "
             f"`{RUNNER}` the message {{\"type\":\"steer\",\"token\":\"{token}\"}} "
             "— the running worker declares the verb `steer` itself, so the call is "
             "delivered to it as MAIL. The worker writes the token and exits. "
             f"When you have sent the steer, {DONE}."
         )
         # THE HUMAN who wants the work done — the task comes FROM here.
-        await human(root)
+        await human(root, ai=[])
         conn = await connect(
-            root, core, BK, can_call={RUNNER: "*", "cli": "*", "user": "*"},
-            callable_by={"user": "*"},
+            root, core, BK, can={RUNNER: lines.ALL, "user": lines.ALL},
             limits=Limits.from_env(os.environ),
         )
+        await human_line(root, conn.id)
         await drive(conn, task, client_id="mail", via="user")
         transcript = "".join(conn.proxy.transcript)
         await conn.close()

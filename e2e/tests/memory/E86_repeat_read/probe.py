@@ -28,7 +28,7 @@ async def main():
     try:
         body = "\n".join(f"line {i}: {secrets.token_hex(8)}" for i in range(60))
         Path("big.md").write_text(body + "\n")
-        await M.files(root, ["ai"])
+        await M.files(root)
         conn = await M.agent(root, core, BK, "ai", record={"context_async": False})
         await drive(conn, f"Read `big.md` through `notes` THREE times, one read per turn (it is a test of the "
                           f"reader). Then {DONE}", client_id="ai", via="user")

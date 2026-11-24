@@ -131,8 +131,8 @@ def private_write(p: Path, text: str) -> None:
     oslayer.make_private(p)
 
 
-# the root view's backend folder on the host: a cell's backend lives here
-FOLDER = "agents/user/agents/web/agents/canvas_page/agents/canvas_root"
+# the main canvas's folder on the host (`canvas_root`, under `user`): a cell's backend lives here
+FOLDER = "agents/user/agents/canvas_root"
 
 #: The interpreter a test PROGRAM runs under: this one, by absolute path, so no
 #: program needs a `python3` on some PATH (Windows has none).

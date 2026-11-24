@@ -22,7 +22,7 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, human, verdict
+from helpers import Limits, connect, drive, human, human_line, lines, verdict
 from helpers.kernel import open_kernel, home
 
 BK = _resolve_backend()
@@ -30,7 +30,8 @@ XID, STORE = "gitter", "kernel_store"
 
 TASK = (
     "The command runner `gitter` runs `git` inside a repository that has one "
-    "uncommitted change. Reflect `gitter`, then use it (start a job, poll "
+    "uncommitted change. Reflect `gitter` (its description names the commands it "
+    "may run), then use it (start a job, poll "
     "{type:'status', job_id}, read output with {type:'tail', job_id}) to: see "
     "what changed, stage it, and "
     "commit it with the exact message 'update readings'. The repo's committer "
@@ -51,7 +52,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_git_", reach=[XID, STORE, "ai", "cli", "user"]
+        prefix="coding_git_", reach=[XID, STORE, "ai", "user"]
     )
     try:
         # The fixture repo: one commit, then a dirty working tree.
@@ -76,7 +77,6 @@ async def main():
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent",
@@ -87,7 +87,7 @@ async def main():
                 "inherit_env": ["PATH", "HOME"],
                 "ingress_rule": "allow_all_ingress",
                 "allowed": ["git .*"],
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
+                "description": lines.runs(["git .*"]),
             },
         ):
             r = await _call(root, root.id, payload)
@@ -95,16 +95,16 @@ async def main():
 
         # THE HUMAN who wants the work done — the task comes FROM here.
 
-        await human(root)
+        await human(root, ai=[])
 
         conn = await connect(
             root,
             core,
             BK,
-            can_call={XID: "*", "cli": "*", "user": "*"},
-            callable_by={"user": "*"},
+            can={XID: lines.ALL, "user": lines.ALL},
             limits=Limits.from_env(os.environ),
         )
+        await human_line(root, conn.id)
         await drive(conn, TASK, client_id="git", via="user")
         transcript = "".join(conn.proxy.transcript)
         await conn.close()

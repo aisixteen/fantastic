@@ -3,8 +3,10 @@ key-free host agents seeded under the root view's backend folder, the checks eve
 export folder must pass, and the record comparison a round trip needs.
 
 The team is `lead` > `mid` > `leaf` (exec bridges: they load without a model):
-  - `lead` can call `mid` and, OUTSIDE the subtree, `files` (it must become a port);
-  - `mid` can call `leaf` (an inside grant: it must stay an id);
+  - `lead` holds one line, OUTSIDE the subtree, on `files` (it must become a port);
+  - `mid` holds no line (it reaches `leaf` by position);
+  - `leaf` holds a line on `lead` (outside `leaf`'s own tree, inside the team: it
+    must stay an id);
   - every record carries something that must NOT reach the folder: a key value, a
     runtime field, row text and (when asked) an absolute path."""
 
@@ -35,7 +37,7 @@ def _exec(agent_id: str, **extra: Any) -> dict:
     """A real exec bridge record: loads with no model and no key."""
     return {
         "id": agent_id, "handler_module": "exec_bridge.tools", "cwd": ".", "inherit_env": ["*"], "shell": "login",
-        "ingress_rule": "allow_all_ingress", "allowed": ["^echo e2e$"], "can_call": {}, "callable_by": {},
+        "ingress_rule": "allow_all_ingress", "allowed": ["^echo e2e$"],
         "api_key": SECRET, "guid": "guid-" + agent_id, "started_at": "2026-01-01T00:00:00Z",
         "history": [ROW], "rows": [{"text": ROW}], **extra,
     }
@@ -44,9 +46,9 @@ def _exec(agent_id: str, **extra: Any) -> dict:
 def team_records(abs_path: str | None = None, extra: dict[str, dict] | None = None) -> dict[str, dict]:
     """The three records. `abs_path`: an absolute path put on `lead` (it must become a port)."""
     extra = extra or {}
-    lead = _exec("lead", display_name="lead", can_call={"mid": "*", OUTSIDE: ["list"]}, **({"workdir": abs_path} if abs_path else {}), **extra.get("lead", {}))
-    mid = _exec("mid", display_name="mid", can_call={"leaf": "*"}, callable_by={"lead": "*"}, **extra.get("mid", {}))
-    leaf = _exec("leaf", display_name="leaf", callable_by={"mid": "*"}, description="the bottom of the team", **extra.get("leaf", {}))
+    lead = _exec("lead", display_name="lead", can={OUTSIDE: {"call": ["list"]}}, **({"workdir": abs_path} if abs_path else {}), **extra.get("lead", {}))
+    mid = _exec("mid", display_name="mid", **extra.get("mid", {}))
+    leaf = _exec("leaf", display_name="leaf", can={"lead": {"call": ["run"]}}, description="the bottom of the team", **extra.get("leaf", {}))
     return {"lead": lead, "mid": mid, "leaf": leaf}
 
 
@@ -98,13 +100,12 @@ def check_folder(folder: Path, proj: Path, ids: tuple[str, ...] = TEAM, outside:
     r["nested three levels deep, in order"] = [by_id.get(i, ({}, -1))[1] for i in ids] == list(range(len(ids)))
     r["no parent_id anywhere"] = all("parent_id" not in e for e, _ in entries)
     ports = doc.get("ports") or {}
-    mid_id = ids[1]
-    lead = by_id.get(ids[0], ({}, 0))[0]
-    cc = lead.get("can_call") or {}
-    r["the inside grant is by id"] = mid_id in cc
-    # the host adds its own baseline grants (`user`, `canvas_root`…) at boot: they are ports too (`@connector:<id>`)
-    r["the outside grant is a declared port @<id>, not the id"] = outside not in cc and f"@{outside}" in cc and f"@{outside}" in ports
-    r["every other port is a declared connector"] = all(k in ports and k.startswith("@connector:") for k in cc if k.startswith("@") and k != f"@{outside}")
+    lead_id = ids[0]
+    lead = by_id.get(lead_id, ({}, 0))[0]
+    leaf = by_id.get(ids[2], ({}, 0))[0]
+    r["the inside line is by id (leaf's line on lead)"] = lead_id in (leaf.get("can") or {})
+    # no boot code writes lines: lead's one line is exactly the outside port
+    r["the outside line is a declared port @<id>, the only key of lead's can"] = set(lead.get("can") or {}) == {f"@{outside}"} and f"@{outside}" in ports
     r["no runtime field in a record"] = all(not re.search(r"^(guid|history|rows)$|_at$", k) for e, _ in entries for k in e)
     blob = "\n".join(p.read_text(errors="replace") for p in every_file(folder))
     r["no key value in any file"] = SECRET not in blob and "api_key" not in blob

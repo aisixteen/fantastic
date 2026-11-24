@@ -22,6 +22,6 @@ signal is a message of `type: report` from a named agent to the lead (what #424'
 
 ```sh
 cd src/lib/python
-uv run python ../../../e2e/run.py --only-free --id await_set --lanes 3          # all three
+uv run python ../../../e2e/run.py --only-free --id await_set --lanes 3
 RUNTIME=rust uv run python ../../../e2e/tests/kernel/E128_await_set/probe.py
 ```

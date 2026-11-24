@@ -34,7 +34,6 @@ fn initial_tree() -> BTreeMap<String, (Option<String>, Value)> {
         ("static_files", Some("files"), json!({"$parent": {"call": ["list", "watch_path", "unwatch_path"]}})),
         ("exec", Some("user"), none.clone()),
         ("home", Some("user"), none.clone()),
-        ("term", Some("user"), none.clone()),
         (
             "web",
             Some("user"),
@@ -42,6 +41,7 @@ fn initial_tree() -> BTreeMap<String, (Option<String>, Value)> {
                 "canvas_root": star.clone(),
                 "files": {"call": ["read", "list", "write"]},
                 "static_files": {"call": ["read", "list"]},
+                "user": {"call": ["import_subtree"]},
             }),
         ),
         (
@@ -50,7 +50,7 @@ fn initial_tree() -> BTreeMap<String, (Option<String>, Value)> {
             json!({"canvas_root": star.clone(), "files": {"call": ["read", "list", "write"]}}),
         ),
         ("canvas_page", Some("web"), json!({"static_files": {"call": ["read", "list"]}})),
-        ("mcp", Some("web"), json!({"canvas_root": star.clone()})),
+        ("mcp", Some("web"), json!({"canvas_root": star.clone(), "user": {"call": ["import_subtree"]}})),
         ("mcp_config", Some("mcp"), none.clone()),
         (
             "canvas_root",

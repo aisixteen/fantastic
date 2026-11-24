@@ -52,7 +52,7 @@ TASK = (
 
 
 async def main():
-    root, core, close = await open_kernel(prefix="coding_foldlong_", reach=[FB, "notes", "ai_recency", "ai_fold", "cli", "user"])
+    root, core, close = await open_kernel(prefix="coding_foldlong_", reach=[FB, "notes", "ai_recency", "ai_fold", "user"])
     try:
         tok = {k: secrets.token_hex(4) for k in (*KEYS, "first", "last")}
         rules = rules_for(tok, KEYS)
@@ -61,7 +61,7 @@ async def main():
                                             + "\n".join(f"- {d}:\n\n      {ln}\n" for d, ln in chunk))
         plant_fillers(N)
         assert not any(v in TASK for v in tok.values())
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         # the sequence the instruction names: each rules file, then its six fillers
         order = [p for f, lo in zip("abcd", (0, 6, 12, 18))
                  for p in (f"rules_{f}.md", *(f"filler_{i}.txt" for i in range(lo, lo + 6)))]

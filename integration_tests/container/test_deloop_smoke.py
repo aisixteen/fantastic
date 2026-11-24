@@ -25,10 +25,13 @@ import pytest
 from helpers.kernel_proc import KernelProc
 from helpers.seeding import seed_create, seed_web, seed_web_ws
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("FANTASTIC_TARGET", "local").strip().lower() != "container",
-    reason="container smoke; set FANTASTIC_TARGET=container + build the image to run",
-)
+pytestmark = [
+    pytest.mark.skip(reason="#170: Python product keeps the old grant model"),
+    pytest.mark.skipif(
+        os.environ.get("FANTASTIC_TARGET", "local").strip().lower() != "container",
+        reason="container smoke; set FANTASTIC_TARGET=container + build the image to run",
+    ),
+]
 
 # A durable authored agent: on each `ping` inbox turn it echoes back. Proves the
 # exec_bridge durable-agent + addressable-inbox path loads and boots in-image.

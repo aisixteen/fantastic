@@ -1,10 +1,10 @@
 """kernel/file_agents — the file and folder AGENTS over a file_bridge. NO MODEL.
 
 The kernel's own `file_bridge` (root `box/`, `allow: [docs, top.txt]`) on the packaged
-host of `RUNTIME` (python | rust), every call over `web_rest`, the live events
-over the `ws` face. A file or a folder is a VIEW AGENT of the bridge (`open_view`), one
-agent per path. The harness picks the view ids and declares them in `reach` at boot, so
-the ws leg may watch them:
+rust host, every call over `web_rest`, the live events over the `ws` face. A file or a
+folder is a VIEW AGENT of the bridge (`open_view`), one agent per path, under the ids the
+harness chooses; the views live under `fb`, in `rest`'s tree, so the ws leg watches them
+by its seeded `rest` line:
 
   1. `open_view` makes a file view and a folder view under the ids the harness chose,
      and a second open of the same path is the same agent (`created: false`); a path the
@@ -43,10 +43,9 @@ from helpers.verdict import verdict
 
 REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
-GRANTS = {"$self": "*", "$parent": "*", "ws": "*"}
 SECRET = "secret-in-root-not-exposed"
 TOP = "top-level-content-not-exposed"
-#: The view ids the harness chooses and declares at boot (so the ws leg may watch them).
+#: The view ids the harness chooses (under `fb`: the ws leg's `rest` line reaches them).
 FILE_VIEW = "e123-file"
 FOLDER_VIEW = "e123-folder"
 
@@ -143,7 +142,7 @@ def main() -> int:
     (box / "docs/sub/b.txt").write_text("bee\n")
     (box / "top.txt").write_text(TOP)
     (box / "secret.txt").write_text(SECRET)
-    hk = HostKernel(spec, work, reach=["fb", FILE_VIEW, FOLDER_VIEW]).boot()
+    hk = HostKernel(spec, work).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -164,7 +163,7 @@ def main() -> int:
     try:
         rec = hk.create(parent_id="rest", handler_module="file_bridge.tools", id="fb",
                         root="box", allow=["docs", "top.txt"],
-                        ingress_rule="allow_all_ingress", callable_by=GRANTS)
+                        ingress_rule="allow_all_ingress")
         need(rec.get("id") == "fb", f"create fb: {str(rec)[:200]}")
 
         # 1 · open: one agent per path, under the chosen ids

@@ -52,7 +52,7 @@ TASK = (
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_find_", reach=[FB, "notes", "ai_recency", "ai_fold", "cli", "user"]
+        prefix="coding_find_", reach=[FB, "notes", "ai_recency", "ai_fold", "user"]
     )
     try:
         token = secrets.token_hex(4)
@@ -65,7 +65,7 @@ async def main():
                         f"{LOREM[half:]}")
             Path(f"filler_{i}.txt").write_text(body + "\n")
         assert token not in TASK
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         recency, facts = await both_arms(root, core, BK, FB, TASK, "report.md", arms=FOLD_ARMS)
 
         want = f"marker: filler_{hit}.txt {token}"

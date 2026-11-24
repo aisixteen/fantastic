@@ -24,7 +24,7 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, human, verdict
+from helpers import Limits, connect, drive, human, human_line, lines, verdict
 from helpers.kernel import open_kernel, home
 
 BK = _resolve_backend()
@@ -35,7 +35,7 @@ TASK = (
     "Somewhere under this run's working tree, configuration files (`*.cfg`) "
     "hide a line containing the marker `SECRET_MARKER`. The SAME marker also "
     "appears in files of OTHER types — those are decoys; only a `*.cfg` hit "
-    "counts. The searcher `searcher` runs commands (reflect it for what is "
+    "counts. The searcher `searcher` runs commands (reflect it: its description names what is "
     "allowed — `grep` supports `-rn` and `--include`; `find` exists too; "
     "start a job with {type:'start', command, args}, poll {type:'status', "
     "job_id}, read its output with {type:'tail', job_id}). Find the one real "
@@ -72,7 +72,7 @@ def _plant() -> tuple[str, int]:
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_gg_", reach=[XID, FB, "notes", "ai", "cli", "user"]
+        prefix="coding_gg_", reach=[XID, FB, "notes", "ai", "user"]
     )
     try:
         real_path, line_no = _plant()
@@ -84,7 +84,6 @@ async def main():
                 "handler_module": "file_bridge.tools", "allow": ["."],
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent",
@@ -92,7 +91,6 @@ async def main():
                 "id": "notes",
                 "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent",
@@ -103,7 +101,7 @@ async def main():
                 "inherit_env": ["PATH", "HOME"],
                 "ingress_rule": "allow_all_ingress",
                 "allowed": ["grep .*", "find .*"],
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
+                "description": lines.runs(["grep .*", "find .*"]),
             },
         ):
             r = await _call(root, root.id, payload)
@@ -111,17 +109,17 @@ async def main():
 
         # THE HUMAN who wants the work done — the task comes FROM here.
 
-        await human(root)
+        await human(root, ai=[])
 
         conn = await connect(
             root,
             core,
             BK,
-            can_call={XID: "*", "notes": "*", "cli": "*", "user": "*"},
-            callable_by={"user": "*"},
+            can={XID: lines.ALL, "notes": lines.ALL, "user": lines.ALL},
             limits=Limits.from_env(os.environ),
             record={"file_bridge_id": FB},
         )
+        await human_line(root, conn.id)
         await drive(conn, TASK, client_id="gg", via="user")
         transcript = "".join(conn.proxy.transcript)
         await conn.close()

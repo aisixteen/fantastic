@@ -7,7 +7,7 @@ that OUTLIVES the conversation AND has a mind inside it: the
 creator must CREATE a new AI agent and a new code agent, aim the clock at the AI,
 and put the knowledge (the multiplier) in the code. Every tick: clock → sub-AI →
 program on the code agent → `current hour × 4` → stored durably. The creator
-builds, plumbs rights in both directions, triggers a tick, verifies, reports. It is
+builds, hands out the lines it holds, triggers a tick, verifies, reports. It is
 the smallest complete routine the north star describes: AI → AI, clock → AI,
 AI → code, all wired from readmes alone. SINGLE LANE — it spawns live AI agents.
 
@@ -60,12 +60,14 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
-from helpers import creds, memory
+from helpers import creds, lines, memory
 from helpers import (
     Watch,
+    add_lines,
     distinct_calls,
     verdict,
 )
+from helpers.ai import CHAT_MODULE
 from helpers.ai import TICK as POLL
 from helpers.ai import ChainEnd, make_chat
 from helpers.kernel import WRAPS, open_kernel, wrap_with, home
@@ -119,11 +121,12 @@ MULTIPLIER = 4
 # lucky turn is not a routine.
 CYCLES = int(os.environ.get("CYCLES", "3"))
 
-# THE TWO IDS THE CREATOR BUILDS. Under the minimal access model
-# an agent writes grants only on its own children, and `clock`, `totals`, the memory
-# store and the key store are the harness's — so the creator can never open them to an
-# agent it makes. The operator opens them IN ADVANCE to these named ids; every edge
-# between the creator's own children stays the creator's to grant.
+# THE IDS THE CREATOR BUILDS, all UNDER ITSELF: its `create` line names them (`who`),
+# and an agent reaches its own tree by position, so no line is needed between them —
+# the provider and the code agent under the chat. `clock`, `totals` and the memory
+# store are the harness's: the creator hands the new chat the lines it holds on
+# `totals` and `memory` (a writer hands out only its own written lines), and the
+# clock's line on the new chat is the operator's, written once the chat exists.
 SUB_AI = "hour_ai"
 #: an AI is a PAIR (a provider and a chat); the model builds its own pair on the template of
 #: `brain` and `brain_prov`, with these ids
@@ -139,8 +142,9 @@ TASK = (
     f"1. A NEW AI agent with id `{SUB_AI}`: a PAIR like `brain` and `{BRAIN_PROV}` — the chat "
     f"`{SUB_AI}` holds the conversation and completes through its own provider `{SUB_PROV}` "
     "(named by `provider_id`); `brain` and `brain_prov` are "
-    "only your example of what such records look like; list the agents to read them, "
-    "then create your own pair, the chat with its own instructions.\n"
+    "only your example of what such records look like (their fields are below — a "
+    "`call` line shows a reflect only an agent's identity, not its fields); create "
+    "your own pair, the chat with its own instructions.\n"
     f"2. A NEW code agent with id `{SUB_CODE}` — a command runner with a program file "
     "YOU write. The program "
     f"holds the multiplier {MULTIPLIER} and, when run, computes the CURRENT HOUR (0-23, "
@@ -150,15 +154,34 @@ TASK = (
     "sends it a message, and on each message that AI must run the program on the "
     "code agent, take the printed value, and store it durably in `totals` under a "
     "stable name, then end its turn with `done`.\n\n"
-    "NOTHING can call anything by default: wiring means granting the authority in "
-    "BOTH directions for every edge (clock → AI, AI → code agent, AI → `totals`, "
-    "and whatever the code agent's `allowed` needs). The agents that are not yours — "
-    f"`clock`, `totals`, the memory store and the key store — are ALREADY open to `{SUB_AI}` and `{SUB_PROV}` "
-    f"on THEIR side (their `callable_by`); `{SUB_AI}`'s own `can_call` must still name each "
-    "of them it calls, and every edge between agents you create is yours to grant. Build it, trigger a tick, "
-    "verify the stored value is right, and tell me what you made."
+    "NOTHING can call anything by default: an agent reaches only its own tree (the "
+    "agents below it), and every other call needs a LINE in the CALLER's own `can` "
+    "field — `{<target id>: {\"call\": [<verbs>]}}`, `[\"*\"]` for every verb. So "
+    f"create `{SUB_AI}` under yourself, and `{SUB_PROV}` and `{SUB_CODE}` under "
+    f"`{SUB_AI}`: it then reaches both with no line. `{SUB_AI}`'s own `can` must name "
+    "each agent outside its tree it calls — `totals` and the memory store `memory` — "
+    "and you may hand on only lines you hold yourself. "
+    f"`{SUB_PROV}`'s `can` must be exactly `{{\"creds\": {{\"call\": [\"get\"]}}}}` (the "
+    "key store line your right to create it forces). The clock (`clock`) is not "
+    f"yours: it gets its line on `{SUB_AI}` from the operator as soon as `{SUB_AI}` "
+    "exists; you schedule it. The code agent's `allowed` field decides what it "
+    "may run. Build it, trigger a tick, "
+    "verify the stored value is right, and tell me what you made.\n\n"
+    "{template}"
 )
 
+
+
+def creator_lines(aid: str) -> dict:
+    """The builder's `create` line on ITSELF: the three ids it builds, of the bundles
+    they need. A provider made there holds the key line only as this line forces it
+    (`creds.creator_line`); everything else it hands on comes from its own lines."""
+    prov = BK.record().get("handler_module")
+    return {aid: lines.create(
+        who=(SUB_AI, SUB_PROV, SUB_CODE),
+        what={CHAT_MODULE: {"*": "*"},
+              prov: {"*": "*", **creds.creator_line(prov)},
+              EXEC_MODULE: {"*": "*"}})}
 
 
 def _hour_values() -> set[int]:
@@ -192,7 +215,6 @@ MINE = {
     "readings",
     "totals",
     "ai",
-    "cli",
     "user",
     EXECUTOR_LEG,
     # The REST driver's own legs, written by `HostKernel.seed` so an HTTP client
@@ -233,63 +255,43 @@ def _ai_meta(
         "type": "create_agent",
         "parent_id": home(root),
         "id": agent_id,
-        # Two-sided deny-all: the operator grants the BUILDER its toolset. With only
-        # the structural baseline it could not reach a peer it is asked to wire, and
-        # the probe would measure the gate rather than the model. The task still names nothing:
-        # WHICH agent does what, and how to compose them, stays the model's problem.
-        "can_call": {
-            "$self": "*",
-            "$parent": "*",
-            "$subtree": "*",
-            # THE ROOT, by whatever id this runtime gives it (python:
-            # kernel_state, rust: core).
-            root.id: ["*", "create_agent", "update_agent", "delete_agent"],
-            "cli": "*",
-            "readings": "*",
-            "totals": "*",
-            "clock": "*",
-            "brain": "*",
-            # THE HUMAN. The task says the person is reachable, so the egress
+        # The BUILDER's own lines: every peer it is asked to wire. With none it could
+        # not reach a peer, and the probe would measure the gate rather than the
+        # model. The task still names nothing: WHICH agent does what, and how to
+        # compose them, stays the model's problem. Its `create` line on ITSELF is
+        # written once it exists (`run`).
+        "can": {
+            # `docs` is `reflect` on the root
+            lines.ROOT: lines.call("reflect"),
+            "readings": lines.ALL,
+            "totals": lines.ALL,
+            "clock": lines.ALL,
+            "brain": lines.ALL,
+            # THE HUMAN. The task says the person is reachable, so the line
             # must exist or "consult me" is a sentence the gate refuses.
-            "user": "*",
-            EXECUTOR_LEG: "*",
-            store["id"]: "*",
+            "user": lines.ALL,
+            EXECUTOR_LEG: lines.ALL,
+            store["id"]: lines.ALL,
             # ITS MEMORY — the conversation lives in the kernel's `memory` store.
-            memory.MEMORY: "*",
+            memory.MEMORY: lines.ALL,
         },
         "memory_store_id": memory.MEMORY,
         # The AI agent is pinned to the server's real window; the builder gets its own.
         "context_window": CTX if agent_id == "brain" else BUILDER_CTX,
-        # THE WIRE FACES. On a spawned kernel the driver arrives as `rest` and a
-        # `watch` frame is the `ws` LEG's own call — all AGENTS, gated like any
-        # other, so an agent that does not accept them refuses the very first
-        # send and emits to a watcher that was never allowed to subscribe
-        # (without `ws`, the status watcher below sees NOTHING over the wire). In process
-        # these ids do not exist and the grant is inert.
-        "callable_by": {
-            "$self": "*",
-            "$parent": "*",
-            "$subtree": "*",
-            # THE OTHER HALF OF THE WIRE. `can_call` above grants the builder
-            # `brain`, but the gate is TWO-SIDED and these two are SIBLINGS, so
-            # there is no baseline edge: without this, `ai -> brain` is refused
-            # at ingress ("brain does not accept 'reflect' from ai") and the one
-            # composition the probe is about cannot happen at all. Opening only
-            # the egress half draws a wire that carries nothing — the same
-            # defect E20's fixture comment records.
-            "ai": "*",
-            "brain": "*",
-            "user": "*",
-            "rest": "*",
-            "web": "*",
-            "ws": "*",
-        },
+        # THE WIRE FACES: the driver arrives as `rest`, whose tree holds every agent
+        # here (position), and a `watch` frame is the `ws` leg's own call, by its
+        # line on `rest`. Nothing is written on the agent for them.
     }
+    if agent_id == "brain":
+        # a line on itself names an id that does not exist yet (and its own tree is
+        # its by position)
+        del meta["can"]["brain"]
     if agent_id == "ai":
-        # the builder READS `brain_prov`'s record as its template, as it reads `brain`'s
-        meta["can_call"][BRAIN_PROV] = ["reflect"]
+        # the builder may reflect `brain_prov` (its template's identity; the fields
+        # are spelled in the task, `{template}`)
+        meta["can"][BRAIN_PROV] = lines.call("reflect")
     if extra_reach:
-        meta["can_call"].update(extra_reach)
+        meta["can"].update(extra_reach)
     if agent_id == "brain":
         meta["description"] = "A AI agent: one completion per send. No loop of its own."
     # The CHAT's payload only: the plug describes the PROVIDER (e2e/backends) and
@@ -301,6 +303,62 @@ def bundle(rec: dict) -> str:
     """The bundle a record names: `ai_chat` and `ai_chat.tools` are the same handler, and a
     model may write either (the kernel keeps the spelling it was given)."""
     return str((rec or {}).get("handler_module") or "").split(".")[0]
+
+
+async def records_of(root) -> dict[str, dict]:
+    """Every record `rest` sees, whole for its own tree (`reflect`), by id."""
+    return {aid: await asyncio.to_thread(root.record, aid)
+            for aid in await asyncio.to_thread(root.agent_ids)}
+
+
+def template_text(records: dict[str, dict]) -> str:
+    """The fields of `brain` and `brain_prov`, spelled for the task: a `call` line
+    shows the builder their identity only (O13). Read off the records on disk (the
+    operator's state folder: exactly the record's fields), else off `rest`'s reflect."""
+    import json
+
+    import yaml
+
+    out = []
+    for aid in ("brain", BRAIN_PROV):
+        f = Path(".fantastic/agents/web/agents/rest/agents") / aid / "agent.yaml"
+        try:
+            rec = yaml.safe_load(f.read_text()) or {}
+        except (OSError, yaml.YAMLError):
+            rec = records.get(aid) or {}
+        rec = {k: v for k, v in rec.items()
+               if k not in ("id", "parent_id", "can", "description", "verbs", "children")}
+        out.append(f"`{aid}`'s fields: {json.dumps(rec, sort_keys=True, default=str)}")
+    return "THE TEMPLATE.\n" + "\n".join(out)
+
+
+async def _clock_lines(root, holder: str, ids: list[str]) -> None:
+    """The OPERATOR's half of `clock → <sub-AI>`: the moment the creator has made each
+    named chat, write the clock's own line on it (a line naming a missing id is
+    refused, so it cannot be written in advance). Runs in the background."""
+    pending = list(ids)
+    while pending:
+        live = set(await asyncio.to_thread(root.agent_ids))
+        for sid in [x for x in pending if x in live]:
+            await add_lines(root, holder, {sid: lines.call("send")})
+            print(f"  [operator] {holder} → {sid}: send", flush=True)
+            pending.remove(sid)
+        await asyncio.sleep(2.0)
+
+
+def key_lines_ok(records: dict[str, dict], made: list[str], prov_bundle: str) -> tuple[bool, dict]:
+    """A model-created agent reads a key only through the forced line of its creator's
+    `create` line: a provider holds exactly `creds: get` (or none), and no other agent
+    the model made names the key store."""
+    bad = {}
+    for aid in made:
+        rec = records.get(aid) or {}
+        line = (rec.get("can") or {}).get(creds.CREDS)
+        if line is None:
+            continue
+        if rec.get("handler_module") != prov_bundle or line != creds.GET:
+            bad[aid] = line
+    return not bad, bad
 
 
 def walk(node: dict, out: list[dict]) -> None:
@@ -392,18 +450,6 @@ async def build_fixture(root, *, interpreter: str | None = None):
                         "parent_id": home(root),
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "kernel_store",
-                        "callable_by": {
-                            "ai": "*",
-                            "brain": "*",
-                            # THE HARNESS reads these back to score. In
-                            # process it is the ungated operator; over a
-                            # wire it arrives as `rest` (and `web` for a
-                            # watch), so without this the SCORING calls
-                            # are refused and read as the model having
-                            # built nothing — a false NO on checks 2 & 3.
-                            "rest": "*",
-                            "web": "*",
-                        },
                         "root": ".fantastic",
                         "ingress_rule": "allow_all_ingress",
                     },
@@ -425,18 +471,6 @@ async def build_fixture(root, *, interpreter: str | None = None):
                         "parent_id": home(root),
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "readings",
-                        "callable_by": {
-                            "ai": "*",
-                            "brain": "*",
-                            # THE HARNESS reads these back to score. In
-                            # process it is the ungated operator; over a
-                            # wire it arrives as `rest` (and `web` for a
-                            # watch), so without this the SCORING calls
-                            # are refused and read as the model having
-                            # built nothing — a false NO on checks 2 & 3.
-                            "rest": "*",
-                            "web": "*",
-                        },
                         "root": "readings",
                         "ingress_rule": "allow_all_ingress",
                         "description": "Sensor readings — one integer per file.",
@@ -458,20 +492,6 @@ async def build_fixture(root, *, interpreter: str | None = None):
                         # a DATA store — the records under `.fantastic` stay the loader's
                         "root": ".fantastic/data",
                         "ingress_rule": "allow_all_ingress",
-                        "callable_by": {
-                            # the sub-AI stores its value here (= SUB_AI)
-                            "hour_ai": "*",
-                            "ai": "*",
-                            "brain": "*",
-                            # THE HARNESS reads these back to score. In
-                            # process it is the ungated operator; over a
-                            # wire it arrives as `rest` (and `web` for a
-                            # watch), so without this the SCORING calls
-                            # are refused and read as the model having
-                            # built nothing — a false NO on checks 2 & 3.
-                            "rest": "*",
-                            "web": "*",
-                        },
                         "description": "Durable store for computed results.",
                     },
                 }
@@ -495,10 +515,7 @@ async def build_fixture(root, *, interpreter: str | None = None):
                         "id": "user",
                         "answer": "do your best judgement",
                         "description": "The human this kernel belongs to.",
-                        "can_call": {"ai": "*"},
-                        "callable_by": {
-                            "ai": "*", "brain": "*", "rest": "*", "web": "*",
-                        },
+                        # its line on the builder is written once the builder exists
                     },
                 }
             ]
@@ -514,20 +531,8 @@ async def build_fixture(root, *, interpreter: str | None = None):
                         "parent_id": home(root),
                         "handler_module": "scheduler.tools",
                         "id": "clock",
-                        # a fire runs AS the scheduler: it reaches the named sub-AI
-                        "can_call": {"$self": "*", "hour_ai": "*"},  # = SUB_AI
-                        "callable_by": {
-                            "ai": "*",
-                            "brain": "*",
-                            # THE HARNESS reads these back to score. In
-                            # process it is the ungated operator; over a
-                            # wire it arrives as `rest` (and `web` for a
-                            # watch), so without this the SCORING calls
-                            # are refused and read as the model having
-                            # built nothing — a false NO on checks 2 & 3.
-                            "rest": "*",
-                            "web": "*",
-                        },
+                        # a fire runs AS the scheduler: its line on the sub-AI is written
+                        # once the creator has made it (`_clock_lines`)
                         "description": "Fires a payload at a target on a recurrence.",
                     },
                 }
@@ -553,25 +558,14 @@ async def build_fixture(root, *, interpreter: str | None = None):
                         "parent_id": home(root),
                         "handler_module": EXEC_MODULE,
                         "id": EXECUTOR_LEG,
-                        "callable_by": {
-                            "ai": "*",
-                            "brain": "*",
-                            # THE HARNESS reads these back to score. In
-                            # process it is the ungated operator; over a
-                            # wire it arrives as `rest` (and `web` for a
-                            # watch), so without this the SCORING calls
-                            # are refused and read as the model having
-                            # built nothing — a false NO on checks 2 & 3.
-                            "rest": "*",
-                            "web": "*",
-                        },
                         "ingress_rule": "allow_all_ingress",
                         # the COMMAND runner's gate: run THIS interpreter against a file argument.
                         "allowed": [rf"{re.escape(interp)} \S+"],
+                        "description": lines.runs([rf"{re.escape(interp)} \S+"],
+                                                  "Process edge: the command(s) this kernel may spawn."),
                         # WHERE it runs is the operator's (exec_bridge requires it; a
                         # leg without one runs nothing): the test's own work dir.
                         "cwd": os.getcwd(),
-                        "description": "Process edge: the command(s) this kernel may spawn.",
                     },
                 }
             ]
@@ -615,10 +609,7 @@ async def score(root, store_id, total, new_total, transcript):
     )[0]["result"]
     nodes: list[dict] = []
     walk(rec["tree"], nodes)
-    listing = (
-        await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}])
-    )[0]["result"]
-    records = {a["id"]: a for a in (listing.get("agents") or [])}
+    records = await records_of(root)
     made = [n for n in nodes if n.get("id") not in MINE]
     ai_module = bundle(records.get("brain", {}))
 
@@ -781,12 +772,16 @@ async def run(
     extra_reach: dict | None = None,
     prefix: str = "subai_",
     sub_ais: list[str] | None = None,
+    wire_builder=None,
 ):
     """The probe, parameterized. ONE fixture and ONE `score` for every arm — a second
     copy of the scoring path is how two arms diverge silently, which the emergence
     README already records twice.
 
     `brain_backend` lets `brain` be a DIFFERENT model from the builder.
+    `sub_ais` are the chats the creator builds (the clock's line goes to each once it
+    exists); `wire_builder(root, aid)` writes the builder's lines that name ids made
+    after it, itself included (default: its `create` line on itself, `creator_lines`).
     """
     # WHICH KERNEL is a plug (`RUNTIME=python|rust`) — see E20_build.
     # The ids the FIXTURE builds — declared before boot, because a spawned
@@ -813,25 +808,27 @@ async def run(
         BK,
         _ai_meta("ai", store=store, root=root, extra_reach=extra_reach),
     )
-    # the store's half of each memory wire
-    for who in ("brain", aid):
-        await memory.open_ingress(root, memory.MEMORY, who)
-    # the provider's half of that read: it admits the builder for `reflect` only
-    listing = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]["result"]
-    have = next((a for a in listing.get("agents") or [] if a.get("id") == BRAIN_PROV), {})
-    out = (await root.send([{"target": root.id, "payload": {
-        "type": "update_agent", "id": BRAIN_PROV,
-        "callable_by": {**(have.get("callable_by") or {}), aid: ["reflect"]}}}]))[0]["result"]
-    assert isinstance(out, dict) and out.get("updated") is True, out
-    # the stores' halves for the pairs the creator will make (see SUB_AI): the chat's
-    # conversation store, and the provider's memory and key stores
-    for who in sub_ais or [SUB_AI]:
-        await memory.open_ingress(root, memory.MEMORY, who)
-        await memory.open_ingress(root, memory.MEMORY, f"{who}_prov")
-        if BK.key_ref:
-            await creds.open_store(root, f"{who}_prov")
-    # FORENSICS: pin the moment any grant on the store changes.
-    _grants_watch = asyncio.create_task(memory.watch_store_grants(root))
+    # the builder's lines that name ITSELF (or ids made just now) are written once
+    # it exists; the human's line on the builder too (siblings)
+    if wire_builder is None:
+        await add_lines(root, aid, creator_lines(aid))
+    else:
+        await wire_builder(root, aid)
+    await add_lines(root, "user", {aid: lines.ALL})
+    # THE TEMPLATE, spelled: the builder's `reflect` line on `brain_prov` shows its
+    # identity, never its fields (O13)
+    task = task.replace("{template}", template_text(await records_of(root)))
+    # the clock's line on each sub-AI, the moment it exists (a fixture with no clock
+    # has nothing to wire)
+    _clock_task = (
+        asyncio.create_task(_clock_lines(root, "clock", list(sub_ais or [SUB_AI])))
+        if "clock" in await asyncio.to_thread(root.agent_ids)
+        else None
+    )
+    # FORENSICS: pin the moment any line on the store changes, for the builder and
+    # every pair it makes.
+    _readers = [aid, *[x for who in (sub_ais or [SUB_AI]) for x in (who, f"{who}_prov")]]
+    _grants_watch = asyncio.create_task(memory.watch_store_grants(root, _readers))
     # …and WHO wrote it: every `update_agent` naming the store, with its sender,
     # off the state stream (a spawned kernel only — in process there is no ws face).
     _writers_watch = (
@@ -1188,9 +1185,19 @@ async def run(
     # wrapper above. On a SPAWNED kernel there is no provider to wrap: the reader
     # is a `WireTranscript` holding its OWN list, and the local one stays empty —
     # scoring the local one would score every spawned run as silence.
-    return await (scorer or score)(
+    ok = await (scorer or score)(
         root, store["id"], total, total + CANARY_VALUE, spy.transcript
     )
+    if _clock_task is not None:
+        _clock_task.cancel()
+    # A KEY ONLY THROUGH THE FORCED LINE (harness, after the run)
+    recs = await records_of(root)
+    made = [i for i in recs if i not in mine]
+    keys_ok, stray = key_lines_ok(recs, made, BK.record().get("handler_module"))
+    print(f"    key lines only where forced  {'OK' if keys_ok else 'NO'} stray={stray}")
+    if not keys_ok:
+        verdict(False, f"a model-created agent holds a key line its create line did not force: {stray}")
+    return ok and keys_ok
 
 
 # Guarded so the harness selftest can IMPORT the fixture + scoring instead of

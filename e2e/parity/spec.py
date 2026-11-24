@@ -33,9 +33,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "e2e"))
 
 from helpers.host.driver import (  # noqa: E402
-    BASE,
     EXEC_ID_HEADER,
-    ROOT_VERBS,
     HostKernel,
     _BYTES_FIELD_HEADER,
     _OCTET,
@@ -44,7 +42,7 @@ from helpers.host.driver import (  # noqa: E402
     _dump,
     free_port,
 )
-from helpers import creds, memory  # noqa: E402
+from helpers import creds, lines, memory  # noqa: E402
 
 import yaml  # noqa: E402
 
@@ -349,70 +347,56 @@ class CaptureKernel(HostKernel):
             raise SystemExit(f"{self.rt}: seeded agent.yaml carries no id: {root!r}")
         self.root_id = measured
 
-        # THE `rest` LEG IS THE TEST'S OPERATOR — the same seed
-        # as `helpers/host/driver.py`. The root is nobody's child, so only this seed
-        # opens it: the legs, the web host and every declared id.
-        root["callable_by"] = {
-            **BASE, "rest": "*", "ws": "*", "web": "*",
-            **{t: "*" for t in self.reach if t != self.root_id},
-        }
+        # THE `rest` LEG IS THE TEST'S OPERATOR — the same seed as
+        # `helpers/host/driver.py`: no record carries `callable_by`, `can_call`,
+        # `$self` or `$subtree` (refused at load); the root carries no line (the
+        # root never caps).
         # THE KERNEL'S MEMORY STORE — `kernel_start` refuses to run without one.
         # One ram_store for the kernel's own rows AND every AI agent's conversation;
-        # it and the credential store live UNDER THE LEG, which wires the agents it
-        # creates to them.
+        # it and the credential store live UNDER THE LEG, which hands the agents it
+        # creates their lines on them (its `create` line on itself is tree-wide).
         root["memory_store_id"] = memory.MEMORY
         write_rec(w / "agent.yaml", root)
         rest_dir = w / "agents/web/agents/rest"
-        # Every declared id may reach both stores — an AI agent a family creates
-        # reads its conversation from `memory` and its key from `creds` as itself.
-        declared = {t: "*" for t in self.reach
-                    if t not in (self.root_id, memory.MEMORY, creds.CREDS)}
         (rest_dir / "agents" / memory.MEMORY).mkdir(parents=True, exist_ok=True)
-        write_rec(rest_dir / "agents" / memory.MEMORY / "agent.yaml", memory.store_record(
-            "rest", callable_by={**BASE, "$parent": "*", "ws": "*", "web": "*", **declared}))
+        write_rec(rest_dir / "agents" / memory.MEMORY / "agent.yaml",
+                  memory.store_record("rest"))
         # THE CREDENTIAL STORE — env-backed (the scrubbed env carries the stub's
         # dummy key), one ref per keyed stub this boot talks to, bound to its URL.
         (rest_dir / "agents" / creds.CREDS).mkdir(parents=True, exist_ok=True)
-        write_rec(rest_dir / "agents" / creds.CREDS / "agent.yaml", {
-            **creds.store_record(
-                "rest", {ref: (creds.KEYED[ref][0], url) for ref, url in self.creds.items()}),
-            "callable_by": {**BASE, "$parent": "*", **declared},
-        })
+        write_rec(rest_dir / "agents" / creds.CREDS / "agent.yaml", creds.store_record(
+            "rest", {ref: (creds.KEYED[ref][0], url) for ref, url in self.creds.items()}))
 
-        reach = {t: "*" for t in self.reach if t != self.root_id}
+        # `reach` names ids OUTSIDE `rest`'s tree that the legs call.
+        reach = {t: lines.ALL for t in self.reach if t not in (self.root_id, "kernel")}
+        # `reflect` on the root needs a line; `web` caps both legs, so it holds it too.
+        docs = {self.root_id: lines.call("reflect")}
         legs = {
-            # `web` reads its legs' routes and serves /file/ AS ITSELF; the ws leg
-            # watches through it.
+            # `web` reads its legs' routes and serves /file/ AS ITSELF; its legs
+            # and everything under `rest` are its own tree.
             "agents/web": {
                 "id": "web",
                 "handler_module": "web.tools",
                 "parent_id": self.root_id,
                 "port": port,
-                "callable_by": {**BASE, "ws": "*"},
-                "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
-                             "rest": "*", "ws": "*", memory.MEMORY: "*", **reach},
+                "can": {**reach, **docs},
             },
-            # The WS leg — the EVENT face: every ws frame is the leg, naming each
-            # target by literal id.
+            # The WS leg — the EVENT face: one line on `rest` reaches every agent
+            # a family creates and both stores.
             "agents/web/agents/ws": {
                 "id": "ws",
                 "handler_module": "web_ws.tools",
                 "parent_id": "web",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {**BASE, "$parent": "*"},
-                "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*", "web": "*",
-                             memory.MEMORY: "*", **reach},
+                "can": {**reach, **docs, "rest": lines.ALL},
             },
-            # The REST leg — the test's operator: the root's kernel verbs, its own
-            # children, the declared ids.
+            # The REST leg — the test's operator: a written `create` line on itself.
             "agents/web/agents/rest": {
                 "id": "rest",
                 "handler_module": "web_rest.tools",
                 "parent_id": "web",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {**BASE, "$parent": "*"},
-                "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
-                             "$subtree": "*", **reach},
+                "can": {**reach, **docs, "rest": lines.create()},
             },
         }
         for rel, rec in legs.items():
@@ -494,11 +478,11 @@ class CaptureKernel(HostKernel):
         return out
 
     def create(self, **meta) -> dict:
-        """Create an agent WITHOUT the driver's reach assertion.
+        """Create an agent and return the reply WHOLE, refusal included.
 
-        `HostKernel.create` raises `SystemExit` when the created id is outside
-        the declared reach. A capture whose subject IS an id nobody granted
-        (`outsider`, `ghost`) must record the reply, not die on it.
+        `HostKernel.create` raises `SystemExit` on a refused create. A capture
+        whose subject IS a refused create (an id shape, a bad `can`, a parent the
+        leg holds no `create` line on) must record the reply, not die on it.
         """
         return self.send(self.root_id, {"type": "create_agent", **meta})
 

@@ -24,7 +24,7 @@ import re
 import threading
 import time
 
-from families import BASE, MEMORY, OPEN, ROOT_ID, VLLM, ai, ai_pair, call, save_kernel_log, vllm
+from families import ALL, MEMORY, OPEN, ROOT_ID, VLLM, ai, ai_pair, call, line_call, save_kernel_log, vllm
 from spec import CTX_RESERVE, CTX_WINDOW, CTX_WINDOW_TINY
 from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub, content_text
 
@@ -188,8 +188,8 @@ def run(ctx) -> None:  # noqa: C901
                 return round(time.time() - t0, 1)
         return None
 
-    cb = {**BASE, "rest": "*", "web": "*", "ws": "*"}
-    ids = ["store", "bigfiles", "docs", *[x for a in [*AIS, "ai_tiny"] for x in (a, f"{a}_provider")]]
+    # every agent lives under `rest`: no id outside its tree is declared
+    ids: list[str] = []
     k = ctx.boot(reach=ids, port=ports.take("main"))
     watchers: dict = {a: [] for a in [*AIS, "ai_tiny"]}
     ws_errors: dict = {}
@@ -232,24 +232,23 @@ def run(ctx) -> None:  # noqa: C901
         # measure a boot-time `context_recall`, and it needs rows on disk.
         rec.json("create_store", k.create(
             parent_id=k.home, handler_module="file_bridge.tools", allow=["."], id="store", **OPEN,
-            root=".fantastic",
-            callable_by={**BASE, "rest": "*", "web": "*", "ws": "*"}))
+            root=".fantastic"))
+        # the file agents first: each AI's line on `docs` names an id that exists
         roster = [
-            ("bigfiles", "file_bridge.tools", {"allow": ["."], "root": "big", "callable_by": cb}),
-            ("docs", "file_bridge.tools", {"allow": ["."], "root": "big",
-                                           "callable_by": {**cb, **{a: "*" for a in [*AIS, "ai_tiny"]}}}),
+            ("bigfiles", "file_bridge.tools", {"allow": ["."], "root": "big"}),
+            ("docs", "file_bridge.tools", {"allow": ["."], "root": "big"}),
         ]
         for a in AIS:
             roster.extend(ai_pair(a, VLLM, ai(**{
                 **vllm(stub.base_url()), "context_window": CTX_WINDOW,
                 "output_reserve": CTX_RESERVE, "context_strategy": a.split("_", 1)[1],
                 "context_async": True, "context_titles": True, "recent_n": 4,
-                "callable_by": cb, "can_call": {**BASE, "docs": "*", ROOT_ID: "*"}})))
+                "can": {"docs": ALL, ROOT_ID: line_call("reflect")}})))
         roster.extend(ai_pair("ai_tiny", VLLM, ai(**{
             **vllm(stub.base_url()), "context_window": CTX_WINDOW_TINY,
             "output_reserve": CTX_RESERVE, "context_strategy": "compact", "context_async": True,
-            "context_titles": True, "recent_n": 4, "callable_by": cb,
-            "can_call": {**BASE, "docs": "*", ROOT_ID: "*"}})))
+            "context_titles": True, "recent_n": 4,
+            "can": {"docs": ALL, ROOT_ID: line_call("reflect")}})))
         meta_all = {}
         for aid, hm, meta in roster:
             m = {"parent_id": k.home, "handler_module": hm, "id": aid, **OPEN, **meta}
@@ -330,7 +329,7 @@ def run(ctx) -> None:  # noqa: C901
         for a in [*AIS, "ai_tiny"]:
             rec.json(f"reboot/{a}_context_status", call(k2, a, {"type": "context_status"}))
             rec.json(f"reboot/{a}_rows_read", call(k2, MEMORY, {"type": "read", "owner": a}))
-        rec.json("reboot/kernel_list_agents", call(k2, "kernel", {"type": "list_agents"}))
+        rec.json("reboot/kernel_reflect_tree", call(k2, "kernel", {"type": "reflect", "tree": "all"}))
         rec.http("http", http_before + k2.http)
         k = k2
     finally:

@@ -10,7 +10,7 @@ after.
 
 Three sockets, three authorities, one kernel:
   * `web` (main port) — an OPEN ws leg with grants: the control socket;
-  * `web2/wsx` — an OPEN ws leg with NO target grants: the egress refusal;
+  * `web2/wsx` — an OPEN ws leg with NO lines: it reaches only its own tree;
   * `web3/wss` — a leg with NO ingress rule at all: SEALED, and every frame on it
     (call, emit, watch, state_subscribe, even a malformed one) has to be refused
     as the leg, which is what the web-edge change made true on every runtime.
@@ -27,7 +27,7 @@ import struct
 import sys
 import time
 
-from families import BASE, OPEN, ROOT_ID, VLLM, ai, call, save_kernel_log, vllm
+from families import ALL, OPEN, ROOT_ID, VLLM, ai, call, line_call, save_kernel_log, vllm
 from spec import CTX_RESERVE, CTX_WINDOW, wait_port
 from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub
 
@@ -49,13 +49,14 @@ BUSY_SCRIPT = [
 LEGS = ["rest", "web", "ws", "wsx", "wss", "rests", "web2", "web3"]
 
 
-def roster(stub_url: str, cb: dict, interp: str) -> list:
+def roster(stub_url: str, interp: str) -> list:
+    """Every agent created under `rest`, in order: each line names an id that
+    already exists. `private` is not here: it is seeded at the root (`seed_extra`)."""
     return [
         ("files", "file_bridge.tools", dict(allow=["."], root=".")),
-        ("private", "file_bridge.tools", dict(allow=["."], root=".", callable_by={"$self": "*", "$parent": "*"})),
         ("cli", "cli.tools", {}),
         ("runner", "exec_bridge.tools", dict(cwd=".", allowed=[rf"{re.escape(interp)} .*"])),
-        ("sched", "scheduler.tools", dict(can_call={**BASE, "cli": "*"})),
+        ("sched", "scheduler.tools", dict(can={"cli": ALL})),
         ("wsb", "ws_bridge.tools", dict(transport="ws", host="127.0.0.1", port=9,
                                         peer_id="nowhere")),
         ("relay", "relay_connector.tools", dict(url="ws://127.0.0.1:9/nowhere",
@@ -65,60 +66,48 @@ def roster(stub_url: str, cb: dict, interp: str) -> list:
         ("ai", VLLM,
          ai(**vllm(stub_url, context_window=CTX_WINDOW),
               output_reserve=CTX_RESERVE,
-              can_call={**BASE, "files": "*", "cli": "*", ROOT_ID: "*"})),
+              can={"files": ALL, "cli": ALL, ROOT_ID: line_call("reflect")})),
     ]
 
 
 def seed_extra(k, w, port):
-    """The extra authorities the wire family needs, written BEFORE the daemon.
+    """The extra agents the wire family needs, written BEFORE the daemon (the seed is
+    the operator, so a line may name an id that does not exist yet).
 
-    `"*"` covers every verb, `state_subscribe` included (minimal model): the root accepts `ws`/`web`/`wsx`, and the legs reach the root.
-    `outsider` is seeded under the ROOT, so no leg's grant names it — the leg
-    reaches its own children (`$subtree`), and a REST-created agent would be one.
+    `outsider` is seeded under the ROOT, outside every leg's tree: the legs reach it
+    only by their `{outsider: call *}` line (`reach`), and each leg's host caps it.
+    `private` is seeded under the ROOT with no line naming it anywhere: every leg
+    gets the unknown answer. `wsx` holds no lines: it reaches only its own tree.
+    A host reaches its own legs by position (`get_routes`).
     """
-    from helpers.host.driver import ROOT_VERBS
-    from spec import read_rec, write_rec
+    from spec import write_rec
 
-    root = read_rec(w / "agent.yaml")
-    root["callable_by"] = {**root["callable_by"], "ws": "*", "web": "*", "wsx": "*"}
-    write_rec(w / "agent.yaml", root)
-    for p in ("agents/web/agent.yaml", "agents/web/agents/ws/agent.yaml"):
-        rec = read_rec(w / p)
-        rec["can_call"][k.root_id] = ROOT_VERBS
-        write_rec(w / p, rec)
-    reach = {t: "*" for t in k.reach if t != k.root_id}
+    reach = {t: ALL for t in k.reach if t not in (k.root_id, "kernel")}
+    docs = {k.root_id: line_call("reflect")}
 
     def put(rel_path: str, rec: dict) -> None:
         d = w / rel_path
         d.mkdir(parents=True, exist_ok=True)
         write_rec(d / "agent.yaml", rec)
 
-    # A host mounts its legs' routes by calling `get_routes` on them: it reaches its
-    # children, and each leg accepts its parent.
     put("agents/web2", {"id": "web2", "handler_module": "web.tools", "parent_id": k.root_id,
-                        "port": k.port2,
-                        "can_call": {**BASE, k.root_id: "*", "$subtree": "*", **reach}})
-    # OPEN leg, NO target grants: the egress half alone.
+                        "port": k.port2, "can": {**reach, **docs}})
+    # OPEN leg, NO lines.
     put("agents/web2/agents/wsx", {"id": "wsx", "handler_module": "web_ws.tools",
-                                   "parent_id": "web2", "ingress_rule": "allow_all_ingress",
-                                   "callable_by": {**BASE, "$parent": "*"},
-                                   "can_call": dict(BASE)})
-    # NO ingress rule: SEALED, however well granted its egress is.
+                                   "parent_id": "web2", "ingress_rule": "allow_all_ingress"})
+    # NO ingress rule: SEALED, whatever lines it holds.
     put("agents/web2/agents/rests", {"id": "rests", "handler_module": "web_rest.tools",
-                                     "parent_id": "web2",
-                                     "callable_by": {**BASE, "$parent": "*"},
-                                     "can_call": {**BASE, k.root_id: "*", **reach}})
+                                     "parent_id": "web2", "can": {**reach, **docs}})
     put("agents/outsider", {"id": "outsider", "handler_module": "file_bridge.tools",
                             "parent_id": k.root_id, "allow": ["."], "root": ".",
-                            "ingress_rule": "allow_all_ingress",
-                            "callable_by": {**BASE, **{leg: "*" for leg in LEGS}}})
+                            "ingress_rule": "allow_all_ingress"})
+    put("agents/private", {"id": "private", "handler_module": "file_bridge.tools",
+                           "parent_id": k.root_id, "allow": ["."], "root": ".",
+                           "ingress_rule": "allow_all_ingress"})
     put("agents/web3", {"id": "web3", "handler_module": "web.tools", "parent_id": k.root_id,
-                        "port": k.port3,
-                        "can_call": {**BASE, k.root_id: "*", "$subtree": "*", **reach}})
+                        "port": k.port3, "can": {**reach, **docs}})
     put("agents/web3/agents/wss", {"id": "wss", "handler_module": "web_ws.tools",
-                                   "parent_id": "web3",
-                                   "callable_by": {**BASE, "$parent": "*"},
-                                   "can_call": {**BASE, k.root_id: "*", **reach}})
+                                   "parent_id": "web3", "can": {**reach, **docs}})
 
 
 class Recorder:
@@ -286,9 +275,9 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
     stub.start(OpenAIHandler)
     stub.set_chain("boot", CHAIN_SCRIPT)
 
-    cb = {**{leg: "*" for leg in LEGS}, "ai": "*", "sched": "*"}
-    agents = roster(stub.base_url(), cb, sys.executable)
-    reach = [a[0] for a in agents] + ["store", "ghost"]
+    agents = roster(stub.base_url(), sys.executable)
+    # ids OUTSIDE `rest`'s tree the legs call; the roster and the store live under `rest`
+    reach = ["outsider", "ghost"]
     port2, port3 = ports.take("web2"), ports.take("web3")
 
     def _seed(k, w, port):
@@ -396,7 +385,7 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
 
         W.mark("discover ws client id")
         ps = rest_probe("kernel_ps_after_ws_open", "kernel", {"type": "ps"})
-        la = rest_probe("kernel_list_agents_after_ws_open", "kernel", {"type": "list_agents"})
+        la = rest_probe("kernel_reflect_tree_after_ws_open", "kernel", {"type": "reflect", "tree": "all"})
         found = sorted(set(re.findall(r"_ws_[0-9a-zA-Z_]+", json.dumps([ps, la], default=str))))
         ctx.meta["ws_client_ids_discovered"] = found
 
@@ -500,7 +489,7 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
         W.mark("scheduler fire: create store")
         PROBES["store_create"] = {"harness": {"t": W.rel()}, "reply": k.create(
             parent_id=k.home, handler_module="file_bridge.tools", allow=["."], id="store", **OPEN,
-            root=".fantastic", callable_by=cb)}
+            root=".fantastic")}
         await asyncio.sleep(1.0)
         W.mark("scheduler fire")
         start = len(W.frames)
@@ -808,7 +797,7 @@ def run(ctx) -> None:  # noqa: C901 - one family, one shape; splitting it hides 
         for aid, hm, meta in agents:
             setup["creates"][aid] = k.create(
                 **{"parent_id": k.home, "handler_module": hm, "id": aid,
-                   **OPEN, "callable_by": cb, **meta})
+                   **OPEN, **meta})
         rec.json("setup", setup)
         time.sleep(1.5)
         asyncio.run(main())

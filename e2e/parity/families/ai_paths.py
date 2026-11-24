@@ -16,7 +16,7 @@ from __future__ import annotations
 import threading
 import time
 
-from families import BASE, MEMORY, OPEN, ROOT_ID, VLLM, ai, ai_split, call, quiesce, save_kernel_log, vllm
+from families import ALL, MEMORY, OPEN, ROOT_ID, VLLM, ai, ai_split, call, line_call, quiesce, save_kernel_log, vllm
 from spec import AI_FILL_CHARS, AI_RESERVE, AI_WINDOW
 from stubs.openai_chat import Handler as OpenAIHandler, OpenAIChatStub
 
@@ -137,28 +137,31 @@ def run(ctx) -> None:  # noqa: C901
     stub.set_cases(CASES)
     stub.start(OpenAIHandler)
 
-    cb = {**BASE, "rest": "*", "web": "*", "ws": "*", "ai": "*", "ai2": "*"}
-    reach = ["readings", "slow", "plant", "ai", "ai_provider", "ai2", "ai2_provider", "web", "rest", "ws"]
+    # ids OUTSIDE `rest`'s tree the legs call; every agent here lives under `rest`
+    reach = ["web", "rest", "ws"]
     k = ctx.boot(reach=reach, port=ports.take("main"))
     try:
         rec.json("setup/readings", k.create(parent_id=k.home, id="readings",
                                             handler_module="file_bridge.tools", allow=["."], root=".",
-                                            **OPEN, callable_by=cb))
+                                            **OPEN))
         rec.json("setup/slow", k.create(parent_id=k.home, id="slow",
-                                        handler_module="slow_probe.tools", **OPEN,
-                                        callable_by=cb))
+                                        handler_module="slow_probe.tools", **OPEN))
         rec.json("setup/plant", k.create(parent_id=k.home, id="plant",
-                                         handler_module="plant_probe.tools", **OPEN,
-                                         callable_by=cb))
+                                         handler_module="plant_probe.tools", **OPEN))
         ai_meta = vllm(stub.base_url(), context_window=AI_WINDOW,
                        output_reserve=AI_RESERVE, context_async=True)
-        # each AI is a provider (the backend) and a chat naming it
-        for aid, can in (("ai", {**BASE, "readings": "*", "slow": "*", "plant": "*", ROOT_ID: "*",
-                                 "ai2": "*"}),
-                         ("ai2", {**BASE, "readings": "*", ROOT_ID: "*", "ai": "*"})):
-            prov, chat = ai_split(aid, VLLM, {**ai(can_call=can, **ai_meta), "callable_by": cb})
+        # each AI is a provider (the backend) and a chat naming it. Siblings need a
+        # line each way, and a line names only an id that exists: `ai` is created
+        # first, `ai2` with its line on `ai`, then `ai`'s line on `ai2` is added.
+        root_line = {ROOT_ID: line_call("reflect")}
+        for aid, can in (("ai", {"readings": ALL, "slow": ALL, "plant": ALL, **root_line}),
+                         ("ai2", {"readings": ALL, **root_line, "ai": ALL})):
+            prov, chat = ai_split(aid, VLLM, ai(can=can, **ai_meta))
             rec.json(f"setup/{aid}_provider", k.create(parent_id=k.home, **OPEN, **prov))
             rec.json(f"setup/{aid}", k.create(parent_id=k.home, **OPEN, **chat))
+        ai_can = (call(k, "ai", {"type": "reflect"}) or {}).get("can") or {}
+        rec.json("setup/ai_line_on_ai2", call(k, k.root_id, {
+            "type": "update_agent", "id": "ai", "can": {**ai_can, "ai2": ALL}}))
         time.sleep(1.2)
 
         from helpers.host.ws import WSWatcher
@@ -288,8 +291,7 @@ def run(ctx) -> None:  # noqa: C901
         k2 = ctx.boot(reach=[*reach, "ai_to", "ai_to_provider"], port=k.port,
                       env_extra={"FANTASTIC_AI_SEND_TIMEOUT": "0.5"})
         try:
-            prov, chat = ai_split("ai_to", VLLM, {**ai(can_call={**BASE, "readings": "*"}, **ai_meta),
-                                                  "callable_by": cb})
+            prov, chat = ai_split("ai_to", VLLM, ai(can={"readings": ALL}, **ai_meta))
             rec.json("send_timeout/create_ai_provider", k2.create(parent_id=k2.home, **OPEN, **prov))
             rec.json("send_timeout/create_ai", k2.create(parent_id=k2.home, **OPEN, **chat))
             time.sleep(1.0)

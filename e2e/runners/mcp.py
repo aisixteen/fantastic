@@ -38,6 +38,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers import oslayer, verdict  # noqa: E402
+from helpers.lines import is_unknown  # noqa: E402
 
 # The binary's user-home template store (`user_home_store`) reads FANTASTIC_HOME,
 # else ~/.fantastic. A test must never read or write the owner's real
@@ -217,11 +218,27 @@ def check(step: dict, reply: dict, state: dict) -> list[str]:
             missing = [v for v in want if v not in verbs]
             if missing:
                 bad.append(f"verbs lack {missing}")
-        elif key == "capture_root":
-            if isinstance(body, dict) and body.get("id"):
-                state["root"] = body["id"]
-            else:
-                bad.append("no root id in the primer")
+        elif key == "body_keys_within":
+            # a reflect cut by level: every key it shows is one of `want`
+            extra = sorted(k for k in body) if isinstance(body, dict) else ["<not an object>"]
+            extra = [k for k in extra if k not in want]
+            if extra:
+                bad.append(f"body shows keys {extra} beyond {want}: {text[:160]}")
+        elif key == "body_verbs":
+            # the verbs a reflect lists, exactly (none listed counts as [])
+            verbs = (body or {}).get("verbs", {}) if isinstance(body, dict) else {}
+            got = sorted(verbs) if isinstance(verbs, (dict, list)) else [repr(verbs)]
+            if got != sorted(want):
+                bad.append(f"verbs {got} != {sorted(want)}: {text[:160]}")
+        elif key == "body_unknown":
+            # a reflect refused: the kernel's unknown answer for `want`, no side, no ids
+            if not is_unknown(body, want):
+                bad.append(f"reflect is not the unknown answer for {want!r}: {text[:160]}")
+        elif key == "item0_unknown":
+            item = body[0] if isinstance(body, list) and body else {}
+            res = item.get("result") if isinstance(item, dict) else None
+            if not is_unknown(res, want):
+                bad.append(f"item0 is not the unknown answer for {want!r}: {text[:160]}")
         elif key.startswith("item0."):
             item = body[0] if isinstance(body, list) and body else {}
             got = dig(item, key[len("item0."):])
@@ -345,6 +362,17 @@ def after(run: dict, cwd: Path, code: int, client: Client, state: dict) -> list[
                         miss = [x for x in fv if x not in m]
                         if miss:
                             bad.append(f"{rel}: {fk[:-4]} lacks {miss}")
+                    elif fk.endswith("_keys"):
+                        # exactly these keys (a `can`'s targets)
+                        got = sorted(rec.get(fk[: -len("_keys")]) or {})
+                        if got != sorted(fv):
+                            bad.append(f"{rel}: {fk[:-5]} keys {got} != {sorted(fv)}")
+                    elif fk.endswith("_lacks"):
+                        # none of these keys (no line naming them)
+                        m = rec.get(fk[: -len("_lacks")]) or {}
+                        held = [x for x in fv if x in m]
+                        if held:
+                            bad.append(f"{rel}: {fk[:-6]} names {held}")
                     elif rec.get(fk) != fv:
                         bad.append(f"{rel}: {fk} {rec.get(fk)!r} != {fv!r}")
         elif key == "rows_by":
@@ -368,10 +396,6 @@ def after(run: dict, cwd: Path, code: int, client: Client, state: dict) -> list[
                 bad.append(f"stderr lacks {want!r}: {client.stderr[-300:]}")
         elif key == "lock_held_by_host":
             pass  # checked while the host still runs
-        elif key == "blueprint_never_names":
-            bp = (TUI / "blueprint.yaml").read_text()
-            if f"id: {want}" in bp:
-                bad.append(f"blueprint.yaml names {want}")
         else:
             bad.append(f"unknown after_exit check {key!r}")
     state["rows"] = row_count(store)

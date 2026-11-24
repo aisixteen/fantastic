@@ -19,6 +19,8 @@ from typing import Callable
 
 import pytest
 
+pytestmark = pytest.mark.skip(reason="#763: cross-kernel peers parked")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from relay_harness import (  # noqa: E402
     LEG,

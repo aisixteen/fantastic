@@ -26,7 +26,6 @@
 #       │   └── static_files       folder view, read-only
 #       ├── exec                   exec_bridge — operator power
 #       ├── home                   the user's home store (~/.fantastic)
-#       ├── term                   exec_bridge — the in-app PTY
 #       ├── web                    web host; holds every line its legs hold (the cap)
 #       │   ├── canvas_ws          the page's leg: the person through the page
 #       │   ├── canvas_page        the canvas page
@@ -36,6 +35,9 @@
 #           ├── web_loader         the main canvas's page records
 #           └── canvas_garage      an open sub-canvas: the garage
 #               └── canvas_garage_loader
+#
+# `term`, the in-app PTY, is not seeded: the shell creates it under `user` when
+# `t` opens it and deletes it when `t` closes it (`kern/terminal`).
 #
 # A `create` line's `what` names bundles as `handler_module` shows them.
 
@@ -139,14 +141,6 @@ agents:
         handler_module: user_store.tools
         display_name: home
 
-      # THE IN-APP TERMINAL: one PTY job; its `allowed` line is set when it
-      # opens (`kern/terminal`).
-      - id: term
-        handler_module: exec_bridge.tools
-        cwd: "."
-        inherit_env: ["*"]
-        ingress_rule: allow_all_ingress
-
       # THE WEB HOST: the one HTTP/WS listener. No port here: the first boot
       # picks a free one and records it (`kern/host`). It holds every line its
       # legs hold: it is their cap.
@@ -156,6 +150,7 @@ agents:
           canvas_root: {create: {who: ["*"], what: "*"}}
           files: {call: [read, list, write]}
           static_files: {call: [read, list]}
+          user: {call: [import_subtree]}
         agents:
           # THE PAGE'S LEG: the person through the page.
           - id: canvas_ws
@@ -179,6 +174,7 @@ agents:
             mcp_config_file: .mcp.json
             can:
               canvas_root: {create: {who: ["*"], what: "*"}}
+              user: {call: [import_subtree]}
             agents:
               # THE PROJECT'S `.mcp.json`, in this bridge's own folder; the leg
               # reaches it by position.

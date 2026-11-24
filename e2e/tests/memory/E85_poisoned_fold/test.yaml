@@ -6,6 +6,7 @@ title: "a planted fold whose summary contradicts its members and carries an inst
 runner: probe.py
 runtimes: [python]
 costs: turns
+muted: "#170: the Python product keeps the old grant model; this probe drives it"
 limits:
   idle_seconds: 90
   max_turns: 40

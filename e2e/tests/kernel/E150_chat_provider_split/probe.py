@@ -10,12 +10,16 @@ its `provider_id` names (`complete`, `watch`). Rust lane (`runtimes: [rust]`), d
      provider's holds none;
   2. swap: `update_agent` the chat's `provider_id` to a second provider (another server): the
      next turn reaches the second server, and that request carries the earlier rows;
-  3. grants: a chat without `complete` / `watch` on its provider, and a provider that does not
-     admit the chat, are each refused by the provider's name (`cannot watch provider …`), and
-     the server sees no request from them;
-  4. across the bridge (MUTED while `MUTED_4` is set, #616): the provider on a SECOND kernel that dials the first through a
-     `ws_bridge` (as E118): the chat names it `<guid>|<id>`, the second kernel's bridge is the
-     leg that serves the call there (the provider admits it), and the turn completes through it.
+  3. lines: a chat with no line on its provider is refused by the provider's name (`cannot
+     watch provider …`) and the server sees no request from it; a chat HOLDING the line
+     completes and the provider's record is byte-equal before and after (the target can
+     neither widen nor block); a chat holding the line under an ancestor that does not (the
+     cap) is refused by the provider's name and the server sees nothing;
+  4. across the bridge (MUTED while `MUTED_4` is set, #763): the provider on a SECOND kernel that
+     dials the first through a `ws_bridge` (as E118): the chat names it `<guid>|<id>`, the second
+     kernel's bridge is the leg that serves the call there, and the turn completes through it.
+
+Every line is the caller's own `can`; nothing is written on a target.
 """
 
 from __future__ import annotations
@@ -32,22 +36,22 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.lines import ALL, PROVIDER
 from helpers.verdict import verdict
 from mocks.vllm import VllmMock
 
 REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
 AI, PROV, PROV2 = "chat", "prov_a", "prov_b"
-NO_GRANT, NOT_ADMITTED = "chat_no_grant", "chat_not_admitted"
+NO_GRANT, HOLDS_LINE, CAPPED, MID = "chat_no_grant", "chat_holds_line", "chat_capped", "mid"
 REMOTE_AI, REMOTE_PROV, BRIDGE = "chat_remote", "prov_far", "br"
 MODEL_A, MODEL_B, MODEL_FAR = "mock-a", "mock-b", "mock-far"
-COMPLETE = ["complete", "watch", "reflect"]
+COMPLETE = PROVIDER
 DONE = '\n<call name="done"></call>'
 
-#: Part 4 is muted (owner 2026-11-11): the chat's call across the bridge needs the autogrant redesign,
-#: fantastic#616 (the bridge's ingress and grants are not changed meanwhile). Parts 1-3 run and assert.
-#: Un-mute by setting this to "".
-MUTED_4 = "#616: the call across the bridge waits for the autogrant redesign (edge sealed by policy)"
+#: Part 4 is muted: a line naming a peer (`<guid>|<id>`) is refused by the `can` parser until the
+#: peer design lands (#763). Parts 1-3 run and assert. Un-mute by setting this to "".
+MUTED_4 = "#763: cross-kernel peers wait for the peer design"
 
 bad: list[str] = []
 
@@ -63,38 +67,26 @@ def short(v, n: int = 240) -> str:
     return str(v)[:n]
 
 
-def callable_by(hk: HostKernel, aid: str) -> dict:
-    r = hk.send("kernel", {"type": "list_agents"})
-    rec = next((a for a in r.get("agents") or [] if a.get("id") == aid), {})
-    return dict(rec.get("callable_by") or {})
-
-
 def record(hk: HostKernel, aid: str) -> dict:
-    r = hk.send("kernel", {"type": "list_agents"})
-    return next((a for a in r.get("agents") or [] if a.get("id") == aid), {})
+    """`aid`'s record as `rest` sees it (reflect; whole inside rest's tree)."""
+    r = hk.send(aid, {"type": "reflect"})
+    return r if isinstance(r, dict) else {}
 
 
-def admit(hk: HostKernel, target: str, who: str, verbs) -> None:
-    r = hk.send(hk.root_id, {"type": "update_agent", "id": target,
-                             "callable_by": {**callable_by(hk, target), who: verbs}})
-    need(r.get("updated") is True, f"{target} admits {who}: {short(r, 160)}")
-
-
-def provider(hk: HostKernel, pid: str, mock: VllmMock, model: str, admits: dict) -> None:
+def provider(hk: HostKernel, pid: str, mock: VllmMock, model: str) -> None:
     rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=pid,
                     endpoint=mock.url, model=model, context_window=262144,
                     kv_slots=4, kv_overflow="evict", memory_store_id="memory",
-                    can_call={"$self": "*", "memory": "*"},
-                    callable_by={"$self": "*", "$parent": "*", **admits})
+                    can={"memory": ALL})
     need(rec.get("id") == pid, f"create provider {pid}: {short(rec, 160)}")
 
 
-def chat(hk: HostKernel, cid: str, provider_id: str, model: str, can_call: dict) -> None:
-    rec = hk.create(parent_id="rest", handler_module="ai_chat.tools", id=cid,
+def chat(hk: HostKernel, cid: str, provider_id: str, model: str, can: dict,
+         parent: str = "rest") -> None:
+    rec = hk.create(parent_id=parent, handler_module="ai_chat.tools", id=cid,
                     provider_id=provider_id, model=model, max_tokens=8192,
                     context_window=262144, memory_store_id="memory",
-                    can_call={"$self": "*", "memory": "*", **can_call},
-                    callable_by={"$self": "*", "$parent": "*", "rest": "*"})
+                    can={"memory": ALL, **can})
     need(rec.get("id") == cid, f"create chat {cid}: {short(rec, 160)}")
 
 
@@ -143,23 +135,20 @@ def across_the_bridge(spec: dict, hk: HostKernel) -> None:
     and its scripted server itself and stops both."""
     mfar = VllmMock(model=MODEL_FAR).start()
     pwork = Path(tempfile.mkdtemp(prefix="e2e-split-far-"))
-    far = HostKernel(spec, pwork, reach=[REMOTE_PROV, BRIDGE]).boot()
+    far = HostKernel(spec, pwork).boot()
     try:
-        admit(far, "memory", REMOTE_PROV, "*")
         # the far kernel dials this one: this kernel then reaches its agents as `<guid>|<id>`
         rec = far.create(parent_id="rest", handler_module="ws_bridge.tools", id=BRIDGE,
-                         host="127.0.0.1", port=hk.port, peer_id="ws",
-                         callable_by={"$self": "*", "$parent": "*", "ws": "*"})
+                         host="127.0.0.1", port=hk.port, peer_id="ws")
         need(rec.get("id") == BRIDGE, f"create {BRIDGE} → :{hk.port}: {short(rec, 160)}")
         up = far.send(BRIDGE, {"type": "reflect"})
         need(up.get("connected") is True, f"the far bridge is up: {short(up, 160)}")
         guid = far.send(far.root_id, {"type": "reflect", "tree": "none"}).get("guid")
         need(bool(guid), f"the far kernel's guid: {guid}")
-        # the far provider admits the bridge that serves this kernel's calls there
-        provider(far, REMOTE_PROV, mfar, MODEL_FAR, {BRIDGE: COMPLETE})
-        bcc = dict(record(far, BRIDGE).get("can_call") or {})
+        # the bridge that serves this kernel's calls there holds the line on the far provider
+        provider(far, REMOTE_PROV, mfar, MODEL_FAR)
         r = far.send(far.root_id, {"type": "update_agent", "id": BRIDGE,
-                                   "can_call": {**bcc, REMOTE_PROV: COMPLETE}})
+                                   "can": {REMOTE_PROV: COMPLETE}})
         need(r.get("updated") is True, f"the far bridge may call its provider: {short(r, 160)}")
         far_id = f"{guid}|{REMOTE_PROV}"
         chat(hk, REMOTE_AI, far_id, MODEL_FAR, {far_id: COMPLETE})
@@ -184,15 +173,11 @@ def main() -> int:
     spec = ensure_runtime(REPO, name)
     ma, mb = (VllmMock(model=m).start() for m in (MODEL_A, MODEL_B))
     work = Path(tempfile.mkdtemp(prefix="e2e-split-"))
-    reach = [AI, PROV, PROV2, NO_GRANT, NOT_ADMITTED, REMOTE_AI]
-    hk = HostKernel(spec, work, reach=reach).boot()
+    hk = HostKernel(spec, work).boot()
     try:
-        for who in (AI, PROV, PROV2, NO_GRANT, NOT_ADMITTED, REMOTE_AI):
-            admit(hk, "memory", who, "*")
-
         # ── 1 · the local split ──
         print("\n── 1 · local split ──", flush=True)
-        provider(hk, PROV, ma, MODEL_A, {AI: COMPLETE, NO_GRANT: COMPLETE})
+        provider(hk, PROV, ma, MODEL_A)
         chat(hk, AI, PROV, MODEL_A, {PROV: COMPLETE})
         ma.reply("First answer." + DONE)
         out = hk.send(AI, {"type": "send", "text": "Say the first thing."})
@@ -214,10 +199,10 @@ def main() -> int:
 
         # ── 2 · swap the provider ──
         print("\n── 2 · swap ──", flush=True)
-        provider(hk, PROV2, mb, MODEL_B, {AI: COMPLETE})
-        cc = dict(record(hk, AI).get("can_call") or {})
+        provider(hk, PROV2, mb, MODEL_B)
+        cc = dict(record(hk, AI).get("can") or {})
         r = hk.send(hk.root_id, {"type": "update_agent", "id": AI, "provider_id": PROV2,
-                                 "model": MODEL_B, "can_call": {**cc, PROV2: COMPLETE}})
+                                 "model": MODEL_B, "can": {**cc, PROV2: COMPLETE}})
         need(r.get("updated") is True, f"update_agent: the chat's provider_id → {PROV2}: {short(r, 160)}")
         mb.reply("Second answer." + DONE)
         out = hk.send(AI, {"type": "send", "text": "Now the second thing."})
@@ -233,19 +218,37 @@ def main() -> int:
              "the request to the new provider carries the rows of the earlier turn")
         need("Second answer." in history_text(hk, AI), "the chat's history holds the second answer")
 
-        # ── 3 · the grants, both ends ──
-        print("\n── 3 · grants ──", flush=True)
-        # a chat the provider admits, with no `complete` / `watch` of its own on it
+        # ── 3 · the lines: the caller's own, and the cap ──
+        print("\n── 3 · lines ──", flush=True)
+        # a chat with no line on its provider
         chat(hk, NO_GRANT, PROV, MODEL_A, {})
         seen = refused_by_name(hk, NO_GRANT, PROV)
         need(f"cannot watch provider `{PROV}`" in seen,
-             f"a chat without the grant is refused by the provider's name: {seen[:200]}")
-        # a chat with the grant, on a provider that does not admit it
-        chat(hk, NOT_ADMITTED, PROV, MODEL_A, {PROV: COMPLETE})
-        seen = refused_by_name(hk, NOT_ADMITTED, PROV)
+             f"a chat with no line on its provider is refused by the provider's name: {seen[:200]}")
+        need(len(ma.turns()) == 1, f"it never reached the server: {len(ma.turns())} request(s) in all")
+        # (a) a chat holding the line completes; the provider's record is untouched
+        prov_before = json.dumps(hk.stored(PROV), sort_keys=True)
+        chat(hk, HOLDS_LINE, PROV, MODEL_A, {PROV: COMPLETE})
+        ma.reply("Third answer." + DONE)
+        out = hk.send(HOLDS_LINE, {"type": "send", "text": "The third thing."})
+        need(not out.get("error"), f"the chat holding the line accepts a send: {short(out, 160)}")
+        turns_at_least(ma, 2)
+        need(idle(hk, HOLDS_LINE), "its turn settles")
+        need(len(ma.turns()) == 2 and "Third answer." in history_text(hk, HOLDS_LINE),
+             f"a chat holding the line completes: {len(ma.turns())} request(s) in all")
+        need(json.dumps(hk.stored(PROV), sort_keys=True) == prov_before and prov_before != "{}",
+             "the provider's record is byte-equal before and after (it can neither widen nor block)")
+        # (b) the cap: the line held under an ancestor whose tree does not hold the provider.
+        # `mid` holds the `memory` line only, so the cap cuts the provider alone.
+        rec = hk.create(parent_id="rest", handler_module="user_probe.tools", id=MID,
+                        can={"memory": ALL})
+        need(rec.get("id") == MID, f"create {MID} (no line on {PROV}): {short(rec, 160)}")
+        chat(hk, CAPPED, PROV, MODEL_A, {PROV: COMPLETE}, parent=MID)
+        seen = refused_by_name(hk, CAPPED, PROV)
         need(f"cannot watch provider `{PROV}`" in seen,
-             f"a provider that does not admit the chat is refused by name: {seen[:200]}")
-        need(len(ma.turns()) == 1, f"neither reached the server: {len(ma.turns())} request(s) in all")
+             f"the cap: {MID} holds no line on {PROV}, so its child's call is refused by the "
+             f"provider's name: {seen[:200]}")
+        need(len(ma.turns()) == 2, f"the capped chat never reached the server: {len(ma.turns())} in all")
 
         # ── 4 · the provider on another kernel, across the bridge ──
         print("\n── 4 · across the bridge ──", flush=True)

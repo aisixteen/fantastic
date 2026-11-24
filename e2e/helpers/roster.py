@@ -39,19 +39,18 @@ def roster(path: str | pathlib.Path) -> list[dict]:
             continue
         ent = {f: _field(keys[f]) for f in
                ("id", "handler_module", "bundle", "parent_id") if f in keys}
-        for f in ("can_call", "callable_by"):
-            if f in keys:
-                ent[f] = _field(keys[f])
+        if "can" in keys:
+            ent["can"] = _field(keys["can"])
         out.append(ent)
 
     # The AI agent is created by `helpers.ai.connect`, not by the probe — but it
     # is still part of the tree the test builds, and its grants are the whole
-    # point of a deny-all substrate. Take them from the probe's CAN_CALL.
+    # point of a deny-all substrate. Take its lines from the probe's CAN.
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "CAN_CALL" for t in node.targets
+            isinstance(t, ast.Name) and t.id == "CAN" for t in node.targets
         ):
             out.append({"id": "ai", "created_by": "helpers.ai.connect",
-                        "can_call": _field(node.value)})
+                        "can": _field(node.value)})
             break
     return out

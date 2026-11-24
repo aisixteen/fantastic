@@ -14,13 +14,13 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-#: Baseline grant tokens. Keys in a grant map are literal ids or `$tokens`;
-#: `"*"` is a legal VALUE (every verb) and never a legal KEY (it matches no id).
-BASE = {"$self": "*", "$parent": "*", "$subtree": "*"}
+#: `can` lines (grant model v9): a target is a literal id or `$parent`, never
+#: `*`; one level per target. An agent reaches its own tree by position.
+from helpers.lines import ALL, PROVIDER, call as line_call, create as line_create, is_unknown  # noqa: E402,F401
+
 #: THE ROOT'S ID — what every runtime seeds (`kernel_state`; `Ctx.boot` checks
-#: the measured one against it). A grant names it: `kernel` is the reserved
-#: ADDRESS of the root, never a grant key — under the minimal model `can_call`
-#: keys are literal ids, so `{"kernel": "*"}` matches nothing.
+#: the measured one against it). A line names it: `kernel` is the reserved
+#: ADDRESS of the root, never a line target.
 ROOT_ID = "kernel_state"
 #: The ingress rule an agent needs before any leg may call it.
 OPEN = {"ingress_rule": "allow_all_ingress"}
@@ -52,14 +52,14 @@ def vllm(endpoint: str, **meta) -> dict:
 
 
 def ai(**meta) -> dict:
-    """An AI agent's record: its conversation store NAMED and GRANTED.
+    """An AI agent's record: its conversation store NAMED and its line on it.
 
     `memory_store_id` has no default — an AI agent without one fails its first
-    store call — and the store is reached like any agent, so its `can_call`
-    names it. The rest of the grant is the family's own (the kernel default,
-    `BASE`, when the family states none)."""
-    can = {**(meta.pop("can_call", None) or BASE), MEMORY: "*"}
-    return {**meta, "memory_store_id": MEMORY, "can_call": can}
+    store call — and the store is reached like any agent, so the AI's own `can`
+    names it. The rest of its lines are the family's own (none when the family
+    states none: its own tree it reaches by position)."""
+    can = {**(meta.pop("can", None) or {}), MEMORY: ALL}
+    return {**meta, "memory_store_id": MEMORY, "can": can}
 
 
 #: THE AI AGENT: a chat (`ai_chat.tools`) completing through a provider agent
@@ -70,25 +70,25 @@ CHAT_FIELDS = ("model", "context_window", "output_reserve", "context_strategy", 
                "context_titles", "recent_n", "caching", "cache_primer_until", "transport_retries",
                "misfire_limit", "system_prompt", "file_bridge_id", "system_prompt_file",
                "pre_system_prompt", "post_system_prompt", "line_summaries")
-#: What a chat may call on its provider, and the provider admits it for.
-COMPLETE = ["complete", "watch", "reflect"]
+#: A chat's line on its provider (the provider keeps no list of callers).
+COMPLETE = PROVIDER
 
 
 def ai_split(aid: str, kind: str, meta: dict) -> tuple[dict, dict]:
     """The provider's and the chat's record fields (`id`, `handler_module` and
-    the grants included) for the AI `aid` that `meta` (an `ai(...)` record of
+    the lines included) for the AI `aid` that `meta` (an `ai(...)` record of
     handler `kind`) describes as one agent: the provider `<aid>_provider` and the
-    chat `aid` naming it. The caller's `can_call` / `callable_by` are the chat's;
-    the provider is reached by the chat alone (and its parent)."""
+    chat `aid` naming it. The caller's `can` is the chat's, plus its line on the
+    provider; only agents holding a line on the provider reach it (and the legs,
+    by position or by the `ws` line)."""
     pid = f"{aid}_provider"
-    chat = {k: v for k, v in meta.items() if k in CHAT_FIELDS or k in ("memory_store_id", "callable_by")}
-    chat["can_call"] = {**meta.get("can_call", BASE), pid: COMPLETE}
+    chat = {k: v for k, v in meta.items() if k in CHAT_FIELDS or k == "memory_store_id"}
+    chat["can"] = {**meta.get("can", {}), pid: COMPLETE}
     provider = {k: v for k, v in meta.items()
-                if k not in CHAT_FIELDS[2:] and k not in ("can_call", "callable_by")}
-    provider["can_call"] = {"$self": "*", MEMORY: "*"}
+                if k not in CHAT_FIELDS[2:] and k != "can"}
+    provider["can"] = {MEMORY: ALL}
     if "credentials" in meta:
-        provider["can_call"][meta["credentials"]["store"]] = ["get"]
-    provider["callable_by"] = {"$self": "*", "$parent": "*", aid: COMPLETE}
+        provider["can"][meta["credentials"]["store"]] = line_call("get")
     return ({"id": pid, "handler_module": kind, **provider},
             {"id": aid, "handler_module": CHAT, "provider_id": pid, **chat})
 

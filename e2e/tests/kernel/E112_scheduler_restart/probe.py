@@ -1,9 +1,9 @@
 """kernel/scheduler_restart — the scheduler fires, bounds a fire, and keeps its
 schedules across a restart. NO MODEL.
 
-The PACKAGED host of `RUNTIME` (python | rust), every call over `web_rest`;
-the scheduler `sch` fires AS ITSELF at the `slow` probe agent `tgt` (the edge
-granted on both ends):
+The PACKAGED rust host, every call over `web_rest`; the scheduler `sch` fires
+AS ITSELF at the `slow` probe agent `tgt`, by one line on the caller (`sch`'s
+`can: {tgt: call(work, sleep)}`; `tgt` keeps no list):
 
   1. A FIRE: a 1 s schedule of `work` fires on its own — `history` records the
      target's reply, `list` counts the runs;
@@ -11,7 +11,8 @@ granted on both ends):
      returns within the bound with a `timed_out` error and no result; the same
      schedule firing on its own records `timed_out` in `history` while the 1 s
      schedule keeps firing beside it;
-  3. A SCHEDULE OF ANOTHER AGENT'S VERB IT IS NOT GRANTED is refused and recorded;
+  3. A SCHEDULE OF A VERB ITS LINE DOES NOT COVER is refused with the unknown
+     answer for the target and recorded;
   4. RESTART (SIGTERM, boot the same directory): every schedule comes back with
      its target, payload, interval, fire_timeout and paused flag, run counts never
      go backwards, the history from before is still there; a schedule created just
@@ -32,11 +33,13 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.lines import call
 from helpers.verdict import verdict
 
 REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
-REACH = ["sch", "tgt"]
+#: `sch`'s one line: two verbs on `tgt`. `started` is not among them.
+SCH_CAN = {"tgt": call("work", "sleep")}
 #: The fields of a schedule that must survive a restart unchanged.
 KEPT = ("id", "target", "payload", "interval_seconds", "paused", "fire_timeout")
 
@@ -63,7 +66,7 @@ def main() -> int:
             bad.append(what)
 
     def boot() -> HostKernel:
-        hk = HostKernel(spec, work, reach=REACH).boot()
+        hk = HostKernel(spec, work).boot()
         kernels.append(hk)
         return hk
 
@@ -82,13 +85,14 @@ def main() -> int:
 
     try:
         hk = boot()
-        r = hk.create(parent_id="rest", handler_module="slow_probe.tools", id="tgt",
-                      callable_by={"$self": "*", "$parent": "*", "sch": ["work", "sleep"]})
+        r = hk.create(parent_id="rest", handler_module="slow_probe.tools", id="tgt")
         need(r.get("id") == "tgt", f"create tgt: {str(r)[:200]}")
-        r = hk.create(parent_id="rest", handler_module="scheduler.tools", id="sch",
-                      can_call={"$self": "*", "tgt": "*"},
-                      callable_by={"$self": "*", "$parent": "*"})
+        # the line names `tgt`, so `sch` is created after it
+        r = hk.create(parent_id="rest", handler_module="scheduler.tools", id="sch", can=SCH_CAN)
         need(r.get("id") == "sch", f"create sch: {str(r)[:200]}")
+        trec = hk.send("tgt", {"type": "reflect"})
+        need(trec.get("id") == "tgt" and not trec.get("can"),
+             f"tgt holds no line and keeps no list of callers: can={trec.get('can')!r}")
 
         # 1 · a fire on its own
         every = schedule(hk, "every 1 s: work", target="tgt", payload={"type": "work"},
@@ -127,13 +131,16 @@ def main() -> int:
         r = hk.send("sch", {"type": "unschedule", "schedule_id": auto})
         need(r.get("removed") is True, f"unschedule the hung one: {r}")
 
-        # 3 · a verb the scheduler is not granted on its target
-        denied = schedule(hk, "a verb tgt does not accept from sch", target="tgt",
+        # 3 · a verb the scheduler's line does not cover
+        denied = schedule(hk, "a verb sch's line on tgt does not cover", target="tgt",
                           payload={"type": "started"}, interval_seconds=3600)
         d = hk.send("sch", {"type": "tick_now", "schedule_id": denied})
         need(d.get("result") is None and str(d.get("error") or "").startswith("failed")
-             and "does not accept 'started' from sch" in str(d.get("error")),
-             f"the gate refuses the fire, and tick_now says so: {str(d)[:200]}")
+             and "no agent 'tgt'" in str(d.get("error")),
+             f"the gate refuses the fire with the unknown answer, and tick_now says so: {str(d)[:200]}")
+        dh = history(hk, denied)
+        need(len(dh) == 1 and "no agent 'tgt'" in str(dh[0].get("error")),
+             f"history records the refused fire: {str(dh)[:200]}")
 
         # 4 · restart
         paused = schedule(hk, "paused, every 1 s", target="tgt", payload={"type": "work"},

@@ -47,11 +47,11 @@ def task(i, letter):
 
 
 async def main():
-    root, core, close = await open_kernel(prefix="coding_fxc_", reach=[FB, "notes", "ai_recency", "ai_fold", "cli", "user"])
+    root, core, close = await open_kernel(prefix="coding_fxc_", reach=[FB, "notes", "ai_recency", "ai_fold", "user"])
     try:
         token = secrets.token_hex(4)
         plant_fillers(16, marker_in=1, marker=token)  # in task A's files
-        await fixture(root, FB, arms=FOLD_ARMS)
+        await fixture(root, FB)
         final = (f"FINAL: which value was the audit marker in TASK A's files? Write `final.md` through `notes` "
                  f"with the single line `marker: <value>`. Then {DONE}.")
         results = []

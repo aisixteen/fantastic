@@ -25,7 +25,7 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, verdict
+from helpers import Limits, connect, drive, lines, verdict
 from helpers.kernel import open_kernel, home
 
 BK = _resolve_backend()
@@ -44,7 +44,7 @@ _CUT = ("NO_PROGRESS", "RUNAWAY", "MAX_TURNS")
 
 async def main():
     root, core, close_kernel = await open_kernel(
-        "selfdone_", reach=["notes", "kernel_store", "ai", "cli"]
+        "selfdone_", reach=["notes", "kernel_store", "ai"]
     )
     try:
         for payload in (
@@ -55,9 +55,6 @@ async def main():
                 "id": "kernel_store",
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                # Two-sided deny-all: the editor writes through this leg; the AI's
-                # chat sidecar rides it too; the wire surfaces read as rest/web.
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent",
@@ -67,7 +64,6 @@ async def main():
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
                 "description": "This run's files.",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
         ):
             r = (await root.send([{"target": root.id, "payload": payload}]))[0][
@@ -79,7 +75,7 @@ async def main():
             root,
             core,
             BK,
-            can_call={"notes": "*", "cli": "*", "kernel_store": "*"},
+            can={"notes": lines.ALL, "kernel_store": lines.ALL},
             limits=Limits.from_env(os.environ),
         )
         capped = await drive(conn, TASK, client_id="selfdone")

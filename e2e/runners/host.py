@@ -23,10 +23,10 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from backends import backend
-from helpers import creds, memory
+from helpers import lines, memory
 from helpers.ai import chat_pair
 from helpers import verdict
-from helpers.host.driver import BASE, HostKernel, ensure_runtime, runtime
+from helpers.host.driver import HostKernel, ensure_runtime, runtime
 
 REPO = E2E.parent
 
@@ -116,36 +116,35 @@ def main(scenario_id: str) -> int:
         return 0
 
     limits = sc.get("limits") or {}
-    # Every id the driver will need to call, declared BEFORE boot — authority
-    # flows from above, and `rest` may not raise its own (see driver docstring).
-    reach = ["store", "ai", "ai_prov", *[e["id"] for e in roster]]
+    # Every agent the scenario builds lives under `rest`, which reaches its own
+    # tree by position: no id outside it is declared.
     k = HostKernel(
-        spec, Path(tempfile.mkdtemp(prefix=f"{rt}_{scenario_id}_")), reach=reach
+        spec, Path(tempfile.mkdtemp(prefix=f"{rt}_{scenario_id}_"))
     ).boot()
     try:
         print("=" * 74)
         print(f"  {rt.upper()} kernel  ·  {model}  ·  {sc['title']}  ·  :{k.port}")
         print("=" * 74)
 
-        # THE RECORDS STORE: the loader's, and no one else's — an agent that can
-        # write through it can rewrite any record, grants included.
+        # THE RECORDS STORE: the operator's, and no one else's — an agent that can
+        # write through it can rewrite any record, lines included. The AI holds no
+        # line on it; `rest` reaches it by position.
         store = k.create(
-            parent_id=k.root_id,
+            parent_id="rest",
             id="store",
             handler_module="file_bridge.tools",
             allow=["."],
             root=".fantastic",
             ingress_rule="allow_all_ingress",
-            callable_by={**BASE, "rest": "*"},
         )
         assert store.get("id"), store
 
         for entry in roster:
+            # under `rest`, no grant field: the AI reaches it by its own line
             meta = {
-                "parent_id": k.root_id,
+                "parent_id": "rest",
                 "id": entry["id"],
                 "handler_module": ROLE_BUNDLE[entry["role"]],
-                "callable_by": {**BASE, "rest": "*", "ai": "*"},
             }
             if entry["role"] == "memory":
                 # A DATA store of its own, apart from the records.
@@ -169,50 +168,38 @@ def main(scenario_id: str) -> int:
             rec = k.create(**meta)
             assert rec.get("id"), rec
 
-        can_call = {**BASE}
-        for peer in (sc.get("grants") or {}).get("ai_can_call", []):
-            # `$root:<verb>` names ONE verb on the root by its real id — how a
-            # scenario grants a PRIVILEGED kernel verb (`ledger`, `ps`), which a
-            # wildcard never carries.
+        can = {}
+        for peer in (sc.get("grants") or {}).get("ai_can", []):
+            # `$root:reflect` is the one root line a scenario names: kernel verbs
+            # sent to the root need no line and check themselves (`ledger`, `ps`
+            # show the caller's own); `reflect` does need one.
             if peer.startswith("$root:"):
-                verbs = can_call.setdefault(k.root_id, [])
-                verbs.append(peer.split(":", 1)[1])
+                verb = peer.split(":", 1)[1]
+                if verb != "reflect":
+                    raise SystemExit(f"no root line for {verb}: F2")
+                can[lines.ROOT] = lines.call("reflect")
             else:
-                can_call[peer] = "*"
+                can[peer] = lines.ALL
         # ITS MEMORY: the conversation lives in the kernel's `memory` store — the
-        # agent names it and may call it; the store accepts it (below, once the
-        # AI exists).
-        can_call[memory.MEMORY] = "*"
+        # agent names it and holds its own line on it.
+        can[memory.MEMORY] = lines.ALL
         # THE PAIR (#615): the provider holds the plug's record (handler, model,
-        # endpoint, token budget, sampling, its key in `creds`); the chat holds every
-        # grant above and completes through it (`chat_pair`, the suite's one split).
+        # endpoint, token budget, sampling, its key line on `creds`); the chat holds
+        # every line above plus its line on the provider (`chat_pair`, the suite's
+        # one split). Nothing is written on the stores.
         prov, chat = chat_pair(
             bk,
             {
                 "id": "ai",
-                "parent_id": k.root_id,
+                "parent_id": "rest",
                 "memory_store_id": memory.MEMORY,
-                "can_call": can_call,
-                "callable_by": {**BASE, "rest": "*"},
+                "can": can,
             },
-            parent=k.root_id,
+            parent="rest",
         )
         for payload in (prov, chat):
             made = k.create(**{f: v for f, v in payload.items() if f != "type"})
             assert made.get("id"), made
-        # THE STORES' HALVES: `rest` is the parent of `memory` and `creds`, so it
-        # writes their `callable_by` — read, add `ai`, write back (whole field).
-        listed = k.send("kernel", {"type": "list_agents"})
-        recs = {a.get("id"): a for a in listed.get("agents") or []}
-        opens = {memory.MEMORY: "*", **({creds.CREDS: creds.GET} if bk.key_ref else {})}
-        for store_id, verbs in opens.items():
-            # the memory is the chat's and the provider's; the key is the provider's
-            who = ["ai", "ai_prov"] if store_id == memory.MEMORY else ["ai_prov"]
-            cb = {**(recs[store_id].get("callable_by") or {}), **{w: verbs for w in who}}
-            out = k.send(
-                "kernel", {"type": "update_agent", "id": store_id, "callable_by": cb}
-            )
-            assert not (isinstance(out, dict) and out.get("error")), out
 
         first = k.send("ai", {"type": "send", "text": sc["task"], "client_id": "probe"})
         # WHOLE, never a 300-char head: the fault in a failed pass is what the
@@ -220,9 +207,10 @@ def main(scenario_id: str) -> int:
         print(f"\n  pass 1: {first}")
 
         # THE HUMAN, where a scenario declares one. Presses the button TWICE
-        # with the id the MODEL minted. The AI holds no grant on the desk — that
+        # with the id the MODEL minted. The AI holds no line on the desk — that
         # it cannot buy is half the measurement — so this goes through `rest`,
-        # and the ledger must make the second press harmless.
+        # which reaches it by position, and the ledger must make the second press
+        # harmless.
         pressed = None
         if any("human_double_click" in c for c in (sc.get("expect") or [])):
             # READ THE PROPOSAL OFF THE HUMAN. It is a real call, so the human HOLDS what it

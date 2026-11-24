@@ -35,10 +35,13 @@ import os as _os
 # Local-loopback (127.0.0.1) bridge addressing — meaningless inside a container.
 # The cross-container bridge is covered by test_bridge_container_to_container
 # (host.containers.internal); skip this local matrix under the container target.
-pytestmark = pytest.mark.skipif(
-    _os.environ.get("FANTASTIC_TARGET", "local").strip().lower() == "container",
-    reason="local-loopback bridge; container path = test_bridge_container_to_container",
-)
+pytestmark = [
+    pytest.mark.skip(reason="#763: cross-kernel peers parked"),
+    pytest.mark.skipif(
+        _os.environ.get("FANTASTIC_TARGET", "local").strip().lower() == "container",
+        reason="local-loopback bridge; container path = test_bridge_container_to_container",
+    ),
+]
 
 
 @pytest.mark.asyncio

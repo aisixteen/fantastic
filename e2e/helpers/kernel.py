@@ -1,12 +1,12 @@
-"""Open a kernel for a probe — in-process for python, spawned for the rest.
+"""Open a kernel for a probe — spawned and driven over REST.
 
 ONE call, so a probe never encodes which runtime it is on:
 
     root, core, close = await open_kernel()      # RUNTIME= picks it
 
-`RUNTIME` unset means python, which is the runtime a probe is developed
-against; naming any other spawns that kernel and drives it over REST. The
-returned `root` speaks the same `.id` / `.send([...])` either way.
+`RUNTIME=rust` spawns that kernel. `RUNTIME=python` (the default) is refused:
+the Python product keeps the old grant model (#170), and the in-process branch
+is gone rather than serving two models.
 """
 
 from __future__ import annotations
@@ -78,8 +78,12 @@ def runtime_name() -> str:
     return rt
 
 
-async def open_kernel(prefix: str = "probe_", reach: list[str] | None = None):
+async def open_kernel(prefix: str = "probe_", reach: list[str] | None = None,
+                      root_verbs: list[str] | None = None):
     """`(root, core, close)` for the named runtime.
+
+    `root_verbs` — root BUNDLE verbs (`reload_bundle`) the legs' line on the root
+    names beside `reflect` (`HostKernel`), so `rest` can hand an AI that line.
 
     `core` is the in-process `ai_core.core` module when there is one and `None`
     otherwise — the connector wraps the provider (`WRAPS`) when it is there, and
@@ -87,48 +91,7 @@ async def open_kernel(prefix: str = "probe_", reach: list[str] | None = None):
     """
     rt = runtime_name()
     if rt == "python":
-        # TEST-ONLY BUNDLES, in process. A spawned kernel runs
-        # `probes/scenario_probes.py` (see `helpers/host/driver.py`); the
-        # in-process one is this process, so the same directory goes on
-        # `sys.path` and the probes are REGISTERED here — the kernel resolves a
-        # handler_module only from its catalog plus `register_unlisted`. Without
-        # it `handler_module: user_probe.tools` is unresolvable and the human
-        # loads as a record that answers nothing.
-        import sys
-
-        probes = str(e2e_root() / "probes")
-        if probes not in sys.path:
-            sys.path.insert(0, probes)
-        import scenario_probes
-
-        scenario_probes.register()
-        os.chdir(tempfile.mkdtemp(prefix=prefix))
-        from _testkit import boot_root
-        from ai_core import core
-
-        from cli import Cli
-
-        seat_providers(core)
-        root = boot_root()
-        Cli(root.ctx, parent=root)
-        # THE MEMORY STORE, then the start sequence — as the daemon does.
-        from helpers import creds, memory
-
-        await memory.wire_in_process(root)
-        # THE KEYS — a backend reads its key from the `creds` store, never the env.
-        creds.wire_in_process(root, creds.env_refs())
-        # THE ROOT accepts every declared id — kernel verbs (`list_agents`,
-        # `create_agent`) are gated on its `callable_by` like any other target, and
-        # nothing is stamped. The same seed the spawned-kernel driver writes.
-        if reach:
-            cb = dict(root._meta.get("callable_by") or {})
-            cb.update({t: "*" for t in reach if t not in (root.id, "kernel")})
-            root.ctx.update(root.id, callable_by=cb)
-
-        async def close() -> None:
-            return None
-
-        return root, core, close
+        raise SystemExit("RUNTIME=python: #170 (the Python product keeps the old grant model)")
 
     from helpers.host.driver import HostKernel, ensure_runtime
     from helpers.host.wire import WireRoot
@@ -137,11 +100,10 @@ async def open_kernel(prefix: str = "probe_", reach: list[str] | None = None):
     spec = ensure_runtime(repo, rt)
     wd = Path(tempfile.mkdtemp(prefix=f"{rt}_{prefix}"))
     os.chdir(wd)
-    # Every id the probe will touch must be DECLARED: authority flows from above
-    # and the REST leg may not raise its own (see the driver docstring). In
-    # process this is free — the probe is the operator — so only the wire needs
-    # it, and the probe passes the same list it already writes into `CAN_CALL`.
-    k = HostKernel(spec, wd, reach=list(reach or [])).boot()
+    # `reach` names the ids OUTSIDE `rest`'s tree that the legs call; the seed
+    # writes them into the legs' own `can` (nothing raises its own lines).
+    # Agents a probe creates under `rest` need no entry: position reaches them.
+    k = HostKernel(spec, wd, reach=list(reach or []), root_verbs=list(root_verbs or [])).boot()
     root = WireRoot(k)
     return root, None, root.close
 
@@ -169,55 +131,31 @@ async def reopen_kernel(root):
     from helpers.host.driver import HostKernel
 
     spec = {"cmd": k.cmd, "root_id": k.root_id, "env": {}}
-    k2 = HostKernel(spec, k.workdir, reach=list(k.reach)).boot()
+    k2 = HostKernel(spec, k.workdir, reach=list(k.reach),
+                    root_verbs=list(getattr(k, "root_verbs", []))).boot()
     return WireRoot(k2)
 
 
 async def restart(root, core):
     """STOP this kernel and START A NEW ONE on the same directory — the records on
     disk and the memory store's tables carried across. Returns `(root2, stop)`,
-    `stop` being the agent half's own report (`shutdown_agents`).
+    `stop` being the stop's own report (`{"exit": 0}`).
 
     A `ram_store` dies with its process, so the harness carries its tables the way a
-    durable store keeps them by itself: `dump` → new kernel → `inject`, BEFORE the new
-    kernel's first turn reads anything. The guid and the id counter come back with the
-    root record, so every carried row keeps its key and no id repeats.
+    durable store keeps them by itself: `dump` → stop → new kernel → `inject`, BEFORE
+    the new kernel's first turn reads anything. The guid and the id counter come back
+    with the root record, so every carried row keeps its key and no id repeats.
 
-    IN PROCESS the stop is `shutdown_agents` + `Kernel.shutdown()` (drain, every call
-    settled, the last rows flushed) and the dump is taken AFTER it, so it holds the
-    stop's own endings. OVER THE WIRE the kernel is a process and a draining kernel
-    refuses new work, so the dump is taken BEFORE the stop — what the stop itself
+    The stop is the operator's signal (SIGTERM, a graceful shutdown): process verbs
+    over REST are operator only. The dump is taken BEFORE it, so what the stop itself
     settles is not carried.
     """
     from helpers import memory
 
-    async def _k(r, payload):
-        return (await r.send([{"target": "kernel", "payload": payload}]))[0]["result"]
-
     if core is not None:
-        from _testkit import boot_root, persist
-        from cli import Cli
-
-        from kernel._kernel import shutdown_context
-
-        stop = await root.ctx.shutdown_agents()
-        await root.ctx.shutdown()
-        with shutdown_context():
-            tables = await memory.dump(root)
-        persist(root)
-        WRAPS.clear()
-        core._projection.clear()
-        core._compaction_mark.clear()
-        root2 = boot_root()
-        Cli(root2.ctx, parent=root2)
-        await memory.inject(root2, tables)
-        out = await root2.ctx.start(boot_all=True)
-        if not out.get("started"):
-            raise SystemExit(f"kernel_start refused after restart: {out}")
-        return root2, stop
+        raise SystemExit("restart in process: #170 (the Python product keeps the old grant model)")
     tables = await memory.dump(root)
-    stop = await _k(root, {"type": "shutdown_agents"})
-    await root.ctx.shutdown()
+    stop = await root.ctx.shutdown()
     root2 = await reopen_kernel(root)
     await memory.inject(root2, tables)
     return root2, stop

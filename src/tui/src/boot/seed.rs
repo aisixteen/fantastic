@@ -271,7 +271,7 @@ mod tests {
         inset.sort();
         assert_eq!(
             inset,
-            vec!["canvas_root", "credentials", "exec", "files", "home", "memory", "store", "term", "web"]
+            vec!["canvas_root", "credentials", "exec", "files", "home", "memory", "store", "web"]
         );
 
         assert!(
@@ -335,7 +335,6 @@ mod tests {
             ("static_files", Some("files"), json!({"$parent": {"call": ["list", "watch_path", "unwatch_path"]}})),
             ("exec", Some(USER), none.clone()),
             ("home", Some(USER), none.clone()),
-            ("term", Some(USER), none.clone()),
             (
                 "web",
                 Some(USER),
@@ -343,6 +342,7 @@ mod tests {
                     "canvas_root": star.clone(),
                     "files": {"call": ["read", "list", "write"]},
                     "static_files": {"call": ["read", "list"]},
+                    "user": {"call": ["import_subtree"]},
                 }),
             ),
             (
@@ -351,7 +351,7 @@ mod tests {
                 json!({"canvas_root": star.clone(), "files": {"call": ["read", "list", "write"]}}),
             ),
             ("canvas_page", Some("web"), json!({"static_files": {"call": ["read", "list"]}})),
-            ("mcp", Some("web"), json!({"canvas_root": star.clone()})),
+            ("mcp", Some("web"), json!({"canvas_root": star.clone(), "user": {"call": ["import_subtree"]}})),
             ("mcp_config", Some("mcp"), none.clone()),
             (
                 "canvas_root",

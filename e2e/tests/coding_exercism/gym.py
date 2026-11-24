@@ -40,7 +40,7 @@ from pathlib import Path
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 from backends import backend as _resolve_backend  # noqa: E402
-from helpers import Limits, connect, drive  # noqa: E402
+from helpers import Limits, connect, drive, lines  # noqa: E402
 
 # Generous budget: the polyglot set is the HARD subset; a from-scratch
 # parser/solver needs many fix-rerun cycles. Overridable via env as usual.
@@ -218,7 +218,7 @@ async def one(ex: Path, lang: str, runtime: str) -> dict:
     t0 = time.time()
 
     root, core, close = await open_kernel(
-        prefix=f"gym_{lang}_{ex.name}_", reach=[FB, RUNNER, "editor", "ai", "cli"])
+        prefix=f"gym_{lang}_{ex.name}_", reach=[FB, RUNNER, "editor", "ai"])
     # open_kernel chdir'd into a fresh mkdtemp — capture it so we can REAP it
     # (with the copied exercise + any build/node_modules) after the lane. The
     # pristine clone under tmp/repos is never touched; we only copy OUT of it.
@@ -245,16 +245,14 @@ async def one(ex: Path, lang: str, runtime: str) -> dict:
         for payload in (
             {"type": "create_agent", "parent_id": home(root), "id": FB,
              "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-             "ingress_rule": "allow_all_ingress",
-             "callable_by": {"ai": "*", "rest": "*", "web": "*"}},
+             "ingress_rule": "allow_all_ingress"},
             {"type": "create_agent", "parent_id": home(root), "id": "editor",
              "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",
-             "ingress_rule": "allow_all_ingress",
-             "callable_by": {"ai": "*", "rest": "*", "web": "*"}},
+             "ingress_rule": "allow_all_ingress"},
             {"type": "create_agent", "parent_id": home(root), "id": RUNNER,
              "handler_module": "exec_bridge.tools", "cwd": os.getcwd(), "inherit_env": ["PATH", "HOME"],
              "ingress_rule": "allow_all_ingress", "allowed": L.allow,
-             "callable_by": {"ai": "*", "rest": "*", "web": "*"}},
+             "description": lines.runs(list(L.allow))},
         ):
             r = await _call(root, root.id, payload)
             assert not r.get("error"), f"create {payload['id']}: {r}"
@@ -286,7 +284,7 @@ async def one(ex: Path, lang: str, runtime: str) -> dict:
         )
         conn = await connect(
             root, core, BK,
-            can_call={FB: "*", RUNNER: "*", "editor": "*", "cli": "*"},
+            can={FB: lines.ALL, RUNNER: lines.ALL, "editor": lines.ALL},
             limits=Limits.from_env(os.environ, **GYM_LIMITS))
         await drive(conn, task, client_id="gym")
         await conn.close()

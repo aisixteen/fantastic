@@ -95,7 +95,7 @@ async def main():
     try:
         code = f"KITE-{secrets.token_hex(3)}"
         Path("probe_code.txt").write_text(f"The code word is {code}.\n")
-        await M.files(root, AIS)
+        await M.files(root)
 
         # ── ai: stream, call, reply, answer, stripped thinking ─────────────────
         conn = await M.agent(root, core, BK, "ai")
