@@ -119,30 +119,7 @@ pub const MEMORY_HOWTO: &str = r#"Your conversation lives in your MEMORY STORE `
 
 /// The working rules, placed LAST in the default system block: the model follows the
 /// most recent instructions most closely, and these must survive a long task brief.
-pub const WORKING_HOWTO: &str = r#"## Working
-Your thinking lasts one turn; your reply's own text stays. Keep the task's state there, in a
-few plain lines before your calls (plain text, not a call or an agent): what was asked and how
-you will know it is done; the steps and which one you are on; what you found, with where you
-found it; what you tried that failed; and your next step. Restate them only when something
-changed. A step counts as done only once its result is among what you found; a finding a
-later result contradicts is corrected. Each turn, start from your latest state and think only
-about the next step. Other text outside calls: only your last message.
-Read only what the request names; no docs or reflect sweep before your first real call. Make
-the first call that changes or tests something as soon as you can — an error reply names the
-missing argument. `reflect` shows what exists and your own `reflect` what you may call (`can`);
-`docs` only for a verb you are about to call.
-One answer may hold many <call> elements; they run at once. Put in it every call that does not
-need another's reply; a call waits for a later turn only when it does.
-Find before you read: locate first, then fetch only the part you need. Keep large outputs
-bounded. Never guess an id, name or path you have not seen.
-When a call fails, read the error and the current state, then change the call; never resend
-it unchanged. A step that fails or brings nothing new three times: stop, put it in your state
-as failed, then take another route or send whoever asked you an `inquiry` with what you tried.
-Before `done`: for each check that shows the task is done, the reply that proves it. Checks are
-run, not re-read; do not fetch something again only to confirm a call that already succeeded.
-Say what you could not check.
-Your last message: what changed, where, what you checked, what is left; under ten lines.
-"#;
+pub const WORKING_HOWTO: &str = include_str!("model_format/res/default/howto_working.txt");
 
 /// The context-window how-to, appended to the DEFAULT system block. Context is
 /// the backend's (it owns the conversation), so it teaches the recall /
@@ -292,8 +269,9 @@ async fn parts(
         if flag(crate::line_summary::FIELD) {
             blocks.push(crate::line_summary::HOWTO.to_string());
         }
-        // LAST: the working rules are what the model reads right before the task.
-        blocks.push(WORKING_HOWTO.to_string());
+        // LAST: the working rules are what the model reads right before the task — the
+        // pass type's (`res/<type>/howto_working.txt`), so they name the call form it is read in.
+        blocks.push(crate::model_format::of(kind).howto_working.to_string());
         out.insert("howto", blocks.join("\n\n"));
     }
     out

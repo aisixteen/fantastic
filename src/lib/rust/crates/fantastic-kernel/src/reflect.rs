@@ -26,9 +26,10 @@
 //!
 //! VISIBLE = WHAT YOU CAN (grant model rule 9). One shape for every caller, cut
 //! to what the caller holds on the target (`Sight`): the operator and an agent
-//! reflecting its own tree see everything; `call` shows the identity keys and the
-//! verbs it holds; `update` adds the values of the fields it holds; `create` adds
-//! the bundles it may create. The tree, at every level, lists only the agents the
+//! reflecting its own tree see everything; a caller holding ANY line on the target
+//! sees every record key (seeing is not setting: writing a field needs an `update`
+//! line) and only the verbs it holds; `create` adds the bundles it may create; a
+//! caller holding nothing sees nothing (unknown). The tree, at every level, lists only the agents the
 //! caller covers.
 
 use crate::agent::Agent;
@@ -48,8 +49,7 @@ use std::sync::Arc;
 /// `sentence` (python `_PURPOSE_KEYS`).
 const PURPOSE_KEYS: [&str; 1] = ["mode"];
 
-/// The IDENTITY keys: shown to every caller that holds anything on the agent.
-/// Every other key a reflect carries is a field (a bundle's free keys too).
+/// The IDENTITY keys: all a receiver the kernel cannot place (no agent) may see.
 const IDENTITY_KEYS: [&str; 6] = [
     "id",
     "display_name",
@@ -92,16 +92,13 @@ impl Sight {
         self.held(&a.id) != Held::Nothing
     }
 
-    /// May the viewer, holding `held` on `a`, see its key `key`? An identity
-    /// key always; a field only when the viewer holds `update` on it.
-    fn shows_key(&self, a: &Agent, held: Held, key: &str) -> bool {
-        if held == Held::Own || IDENTITY_KEYS.contains(&key) {
-            return true;
-        }
-        let Some((c, _)) = &self.viewer else {
-            return true;
-        };
-        held >= Held::Update && self.kernel.allowed(c, &Act::Update(key.to_string()), a)
+    /// May the viewer, holding `held` on `a`, see its key `key`? Every key, to a viewer
+    /// that holds anything on `a` (owner 2026-11-26, "bring all back": seeing is not
+    /// setting — a field is SET only with an `update` line, but a caller sees how the
+    /// agent is configured, e.g. a bridge's `root`, a runner's `cwd`). A record holds a
+    /// key's `{store, ref}`, never its value.
+    fn shows_key(&self, _a: &Agent, held: Held, _key: &str) -> bool {
+        held != Held::Nothing
     }
 
     /// Cut a RECORD of `a` to what the viewer holds there, as a tree node is cut:
@@ -429,9 +426,9 @@ async fn roster_node(kernel: &Arc<Kernel>, a: &Arc<Agent>) -> Result<Map<String,
 ///
 /// CUT BY LEVEL. `caller` is the sender as the gate judged it (`None`: the
 /// operator). The operator, and an agent reflecting its own tree, get the whole
-/// reply. Any other caller gets what it holds on `target`: at `call` the
-/// identity keys and the verbs it may call; at `update` also the values of the
-/// fields it holds (`can` only when held); at `create` also the bundles it may
+/// reply. Any other caller gets what it holds on `target`: with any line, every
+/// record key and only the verbs it may call (seeing is not setting: a field is
+/// written only with an `update` line); at `create` also the bundles it may
 /// create (the `bundles` flag). The root's runtime frame is the operator's only.
 /// The tree, at every level, lists the agents the caller covers; a hidden node
 /// is omitted and its shown agents are lifted with their real `parent_id`. A
@@ -504,7 +501,7 @@ pub async fn apply_reflect_flags(
             obj.entry("view".to_string()).or_insert_with(|| v.clone());
         }
     }
-    // ONLY WHAT THE CALLER HOLDS: the identity keys, and the fields it may update.
+    // ONLY WHERE THE CALLER HOLDS ANYTHING: then every key (seeing is not setting).
     if !whole {
         obj.retain(|k, _| sight.shows_key(target, held, k));
     }

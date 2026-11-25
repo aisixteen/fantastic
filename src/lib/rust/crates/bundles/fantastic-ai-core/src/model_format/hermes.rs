@@ -50,6 +50,8 @@ use crate::tool_parse::{extract_tool_calls, render_call, BYTES_CLOSE, BYTES_OPEN
 pub(crate) const NAME: &str = "hermes";
 /// How to reach another agent, in this type's form, with the `<tools>` block (Q39).
 pub(crate) const HOWTO_SEND: &str = include_str!("res/hermes/howto_send.txt");
+/// The working rules in this type's call form (`<tool_call>` blocks).
+pub(crate) const HOWTO_WORKING: &str = include_str!("res/hermes/howto_working.txt");
 /// The call form, in one sentence: swapped for [`default::FORM`].
 pub(crate) const FORM: &str = include_str!("res/hermes/form.txt");
 /// The placeholder form of a call opener: swapped for [`default::FORM_OPEN`] (Q22).

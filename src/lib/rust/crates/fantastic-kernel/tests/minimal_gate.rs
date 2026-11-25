@@ -1071,11 +1071,10 @@ async fn self_writes_are_one_rule_for_code_and_verb() {
 }
 
 /// Review of #761, M4: the `update_agent` reply carries the record cut to what the
-/// caller holds on it (rule 9). A caller holding `update: [description]` reads the
-/// identity and `description`, never the other fields or `can`; the operator and
-/// the agent itself read it whole.
+/// caller holds on it (rule 9). A caller holding any line (here `update: [description]`)
+/// reads every key; the operator and the agent itself read it whole.
 #[tokio::test]
-async fn an_update_reply_carries_only_what_the_caller_holds() {
+async fn an_update_reply_carries_every_key_to_a_holder() {
     let (_t, k) = mk();
     create(
         &k,
@@ -1092,8 +1091,8 @@ async fn an_update_reply_carries_only_what_the_caller_holds() {
     let seen = r["agent"].as_object().unwrap();
     assert_eq!(seen["id"], "t", "{r}");
     assert_eq!(seen["description"], "d2", "{r}");
-    assert!(seen.get("note").is_none(), "{r}");
-    assert!(seen.get("can").is_none(), "{r}");
+    assert_eq!(seen["note"], "hidden", "{r}");
+    assert!(seen.get("can").is_some(), "{r}");
     // the operator reads it whole
     let r = op(&k, "kernel", upd("d3")).await;
     assert_eq!(r["agent"]["note"], "hidden", "{r}");
@@ -1115,11 +1114,11 @@ fn created_record(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Option<Val
 }
 
 /// Review of #761, M4: `agent_created` reaches each receiver cut to what it holds
-/// on the new agent (the reflect cut). The parent reads it whole; a watcher with
-/// `call: [watch]` on the parent its identity; one with `update: [note]` its
-/// identity and `note`; a watcher that is no agent the identity keys only.
+/// on the new agent (the reflect cut). A receiver holding any line on it (the parent,
+/// a watcher with `call: [watch]`, one with `update: [note]`) reads every key; a
+/// watcher that is no agent the identity keys only.
 #[tokio::test]
-async fn agent_created_carries_to_each_receiver_only_what_it_holds() {
+async fn agent_created_carries_every_key_to_each_holder() {
     let (_t, k) = mk();
     create(&k, "kernel_state", "p", json!({})).await;
     create(&k, "kernel_state", "w", json!({"can": {"p": {"call": ["watch"]}}})).await;
@@ -1144,10 +1143,10 @@ async fn agent_created_carries_to_each_receiver_only_what_it_holds() {
     assert_eq!((whole["note"].clone(), whole["secret"].clone()), (json!("n"), json!("s")), "{whole}");
     let w = created_record(&mut w_rx).expect("a watcher with a line gets it");
     assert_eq!((w["id"].clone(), w["description"].clone()), (json!("c"), json!("d")), "{w}");
-    assert!(w.get("note").is_none() && w.get("secret").is_none(), "{w}");
+    assert_eq!((w["note"].clone(), w["secret"].clone()), (json!("n"), json!("s")), "{w}");
     let u = created_record(&mut u_rx).expect("an update watcher gets it");
     assert_eq!(u["note"], "n", "{u}");
-    assert!(u.get("secret").is_none(), "{u}");
+    assert_eq!(u["secret"], "s", "{u}");
     let b = created_record(&mut b_rx).expect("a watcher that is no agent gets it");
     assert_eq!(b["description"], "d", "{b}");
     assert!(b.get("note").is_none() && b.get("secret").is_none(), "{b}");

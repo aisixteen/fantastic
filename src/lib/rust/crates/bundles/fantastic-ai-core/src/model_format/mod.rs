@@ -117,6 +117,9 @@ pub(crate) struct Entry {
     pub(crate) reader: &'static dyn Reader,
     /// The system block's section on reaching other agents, for this type.
     pub(crate) howto_send: &'static str,
+    /// The system block's working rules (`res/<type>/howto_working.txt`), naming this
+    /// type's call form.
+    pub(crate) howto_working: &'static str,
     /// The reason of the harness's `stop` (`res/<type>/stop_reason.txt`): `{n}` attempts.
     pub(crate) stop_reason: &'static str,
 }
@@ -128,6 +131,7 @@ pub(crate) const REGISTRY: &[Entry] = &[
         renderer: &default::Tags,
         reader: &default::Tags,
         howto_send: default::HOWTO_SEND,
+        howto_working: crate::assembly::WORKING_HOWTO,
         stop_reason: default::STOP_REASON,
     },
     Entry {
@@ -135,6 +139,7 @@ pub(crate) const REGISTRY: &[Entry] = &[
         renderer: &hermes::Hermes,
         reader: &hermes::Hermes,
         howto_send: hermes::HOWTO_SEND,
+        howto_working: hermes::HOWTO_WORKING,
         stop_reason: hermes::STOP_REASON,
     },
 ];

@@ -13,7 +13,7 @@
 
 use fantastic_ai_core::credentials::{key_reader, KeySource};
 use fantastic_ai_core::helpers;
-use fantastic_kernel::refusal::{refusal, with, BAD_ARG};
+use fantastic_kernel::refusal::{refusal, with};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
