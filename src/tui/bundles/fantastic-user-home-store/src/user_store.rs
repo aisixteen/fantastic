@@ -129,12 +129,6 @@ impl UserStore {
         Self { home, here, canvas: Mutex::new(None), setups }
     }
 
-    /// The same store, its saved set-ups judged by `check` ([`crate::SetupCheck`]).
-    pub fn with_setup_check(mut self, check: crate::SetupCheck) -> Self {
-        self.setups = self.setups.with_check(check);
-        self
-    }
-
     fn home(&self) -> Result<&Path, Value> {
         self.home.as_deref().map_err(|e| refusal(NOT_FOUND, format!("user_store: {e}")))
     }

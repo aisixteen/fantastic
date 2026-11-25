@@ -176,17 +176,10 @@ impl SetupBundle {
                     Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),
                 }
             }
-            Call::Forget(a) => {
-                let r = host
-                    .operator(crate::kern::saved::HOME_ID, json!({"type": "forget_record", "name": a.name}))
-                    .await
-                    .result;
-                if r.get("error").is_some() {
-                    r
-                } else {
-                    json!({"forgotten": a.name})
-                }
-            }
+            Call::Forget(a) => match crate::kern::saved::forget(host, &a.name).await {
+                Ok(()) => json!({"forgotten": a.name}),
+                Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::NOT_FOUND, e),
+            },
             Call::Prefer(a) => match crate::kern::saved::prefer(host, a.name.as_deref()).await {
                 Ok(pr) => json!({"preferred": pr}),
                 Err(e) => fantastic_kernel::refusal(fantastic_kernel::refusal::BAD_ARG, e),

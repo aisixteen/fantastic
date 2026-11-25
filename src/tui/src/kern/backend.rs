@@ -157,7 +157,7 @@ pub(crate) fn chat_part(spec: &Map<String, Value>) -> Map<String, Value> {
 /// ONE AI spec split onto the pair's two records (#632): the PROVIDER's share (every field
 /// the chat's record does not own) and the CHAT's ([`chat_part`]). The one split
 /// [`BackendBundle::pair_specs`] makes and a saved set-up is judged by
-/// (`kern::setup::check_set_up`).
+/// (`kern::saved::save`).
 pub(crate) fn split(spec: &Map<String, Value>) -> (Map<String, Value>, Map<String, Value>) {
     let provider = spec
         .iter()
