@@ -1429,3 +1429,16 @@ fn registered_with_its_howto() {
     // the how-to survives its own type's render
     assert_eq!(Hermes.render(HOWTO_SEND), HOWTO_SEND);
 }
+
+/// The WORKING RULES speak the pass type's call form: a hermes model is never taught the
+/// internal `<call>` form in them, and is told where its state lines go (before its
+/// first `<tool_call>`). The default type's rules are the internal ones, unchanged.
+#[test]
+fn the_working_rules_name_the_type_s_call_form() {
+    let h = super::of(super::hermes::NAME).howto_working;
+    assert!(!h.contains("<call"), "hermes working rules teach the internal form: {h}");
+    assert!(h.contains("<tool_call>"), "{h}");
+    assert!(h.contains("before your first `<tool_call>`"), "{h}");
+    assert_eq!(super::of(super::DEFAULT).howto_working, crate::assembly::WORKING_HOWTO);
+    assert_ne!(h, crate::assembly::WORKING_HOWTO);
+}

@@ -1382,7 +1382,7 @@ async fn reflect_with_nothing_held_is_byte_identical_to_an_unknown_agent() {
 }
 
 #[tokio::test]
-async fn reflect_at_call_level_shows_identity_view_and_held_verbs_only() {
+async fn reflect_at_call_level_shows_every_key_and_held_verbs_only() {
     // test k: chat_a holds `prov_1: {call: [complete]}`
     let kernel = v9_kernel();
     let view = json!({"kind": "html", "src": "p.html"});
@@ -1400,39 +1400,19 @@ async fn reflect_at_call_level_shows_identity_view_and_held_verbs_only() {
     assert_eq!(r["id"], "prov_1", "{r}");
     assert_eq!(r["handler_module"], "anthropic_backend");
     assert_eq!(r["view"], view);
+    // seeing is not setting: any held line shows every record key
+    assert_eq!(r["model"], "m1", "{r}");
+    assert_eq!(r["tone"], "dry", "{r}");
+    // only the held verb
     assert_eq!(keys_of(&r["verbs"]), ["complete"], "{r}");
-    for k in [
-        "sentence",
-        "model",
-        "tone",
-        "can",
-        "bundles",
-        "bundles_next",
-    ] {
+    // no create line: no bundle catalog
+    for k in ["bundles", "bundles_next"] {
         assert!(r.get(k).is_none(), "{k} shown at call level: {r}");
     }
-    let allowed = [
-        "id",
-        "display_name",
-        "parent_id",
-        "handler_module",
-        "description",
-        "view",
-        "verbs",
-        "tree",
-    ];
-    for k in keys_of(&r) {
-        assert!(
-            allowed.contains(&k.as_str()),
-            "{k} shown at call level: {r}"
-        );
-    }
-    // the tree node is cut the same way: no sentence
-    assert_eq!(keys_of(&r["tree"]), ["id", "children"], "{r}");
 }
 
 #[tokio::test]
-async fn reflect_at_update_level_adds_held_field_values_only() {
+async fn reflect_at_update_level_shows_every_key_and_all_verbs() {
     let kernel = v9_kernel();
     crate::test_support::grant(&kernel, "chat_b", "prov_1", json!({"update": ["model"]}));
     let payload = json!({"type": "reflect", "bundles": "all", "tree": "none"});
@@ -1440,9 +1420,8 @@ async fn reflect_at_update_level_adds_held_field_values_only() {
         .await
         .result;
     assert_eq!(r["model"], "m1", "{r}");
-    for k in ["tone", "sentence", "can", "bundles"] {
-        assert!(r.get(k).is_none(), "{k} shown without being held: {r}");
-    }
+    assert_eq!(r["tone"], "dry", "{r}");
+    assert!(r.get("bundles").is_none(), "{r}");
     // `update` includes `call` on every verb
     let verbs = keys_of(&r["verbs"]);
     assert!(verbs.iter().any(|v| v == "complete"), "{r}");
@@ -1458,7 +1437,7 @@ async fn reflect_at_update_level_adds_held_field_values_only() {
         .await
         .result;
     assert_eq!(r["can"], json!({"credentials": {"call": ["get"]}}), "{r}");
-    assert!(r.get("tone").is_none(), "{r}");
+    assert_eq!(r["tone"], "dry", "{r}");
 }
 
 #[tokio::test]
@@ -1485,10 +1464,8 @@ async fn reflect_at_create_level_adds_creatable_bundles_with_schemas() {
                 "schema": {"fields": [], "open": true}}]),
         "{r}"
     );
-    // a create line gives nothing on the target itself: no field, no verb
-    for k in ["can", "sentence", "model"] {
-        assert!(r.get(k).is_none(), "{k} shown at create level: {r}");
-    }
+    // a create line gives no verb on the target; every key still shows
+    assert!(r.get("sentence").is_some(), "{r}");
     assert_eq!(r["verbs"], json!({}), "{r}");
 }
 
@@ -1636,22 +1613,19 @@ async fn root_extras_show_to_the_operator_only() {
 }
 
 #[tokio::test]
-async fn a_bundles_free_reflect_keys_count_as_fields() {
+async fn a_bundles_free_reflect_keys_show_to_any_holder() {
     let kernel = v9_kernel();
     let payload = json!({"type": "reflect", "tree": "none"});
-    // at call level no free key shows
+    // at call level every free key shows
     let r = reflect_as(&kernel, "chat_a", "prov_1", payload.clone())
         .await
         .result;
-    assert!(r.get("model").is_none() && r.get("tone").is_none(), "{r}");
-    // a free key shows when its field is held, and only that one
-    crate::test_support::grant(&kernel, "chat_b", "prov_1", json!({"update": ["tone"]}));
+    assert!(r.get("model").is_some() && r.get("tone").is_some(), "{r}");
+    // a viewer with no line sees nothing
     let r = reflect_as(&kernel, "chat_b", "prov_1", payload)
         .await
         .result;
-    assert_eq!(r["tone"], "dry", "{r}");
-    assert!(r.get("model").is_none(), "{r}");
-    assert!(r.get("sentence").is_none(), "{r}");
+    assert_eq!(r, crate::refusal::unknown_agent("prov_1"), "{r}");
 }
 
 #[tokio::test]

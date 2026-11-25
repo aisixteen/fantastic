@@ -1147,10 +1147,10 @@ async fn root_export_subtree_refuses_the_root_id_and_unknown_id_and_bad_args() {
 }
 
 /// `export_subtree` acts for its asker (gm rule 7, Q39): an agent's export is cut the
-/// way `reflect` cuts the tree. Its `call` line on the root reaches the subtree at call
-/// level, so the records carry identity only, no field values.
+/// way `reflect` cuts the tree. Its `call` line on the root reaches the subtree, so the
+/// records carry every key (seeing is not setting).
 #[tokio::test]
-async fn root_export_subtree_is_cut_to_what_the_asker_holds() {
+async fn root_export_subtree_shows_every_key_to_a_holder() {
     let tmp = TempDir::new().unwrap();
     let kernel = booted(&tmp);
     let root = kernel.root().unwrap().id.0.clone();
@@ -1168,7 +1168,7 @@ async fn root_export_subtree_is_cut_to_what_the_asker_holds() {
         .result;
     assert_eq!(r["exported"], json!(2), "{r}");
     let text = std::fs::read_to_string(tmp.path().join("o/blueprint.yaml")).unwrap();
-    assert!(!text.contains("note"), "a call line shows no field values: {text}");
+    assert!(text.contains("note"), "a call line shows every key: {text}");
     // the operator's export carries the fields
     let r = root_reflect(
         &kernel,

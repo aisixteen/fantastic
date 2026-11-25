@@ -780,20 +780,19 @@ impl Caller<'_> {
     }
 }
 
-/// `messages` with the `send` how-to of type `from` in each system message swapped, by
-/// exact match, for type `to`'s (the assembly put the pass type's how-to there, Q16).
+/// `messages` with the `send` how-to and the working rules of type `from` in each system
+/// message swapped, by exact match, for type `to`'s (the assembly put the pass type's there, Q16).
 fn with_howto(messages: &[Value], from: &str, to: &str) -> Vec<Value> {
-    let (was, now) = (
-        crate::model_format::of(from).howto_send,
-        crate::model_format::of(to).howto_send,
-    );
+    let (was, now) = (crate::model_format::of(from), crate::model_format::of(to));
     messages
         .iter()
         .map(|m| {
             let mut m = m.clone();
             if m["role"] == json!("system") {
                 if let Some(text) = m.get("content").and_then(Value::as_str) {
-                    let swapped = text.replace(was, now);
+                    let swapped = text
+                        .replace(was.howto_send, now.howto_send)
+                        .replace(was.howto_working, now.howto_working);
                     m["content"] = Value::String(swapped);
                 }
             }
